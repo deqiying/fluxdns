@@ -1,0 +1,13 @@
+# macOS
+.DS_Store
+
+# Rust 构建产物
+/target/
+
+# 本地运行配置与运行时数据
+/config.yaml
+/work/
+/data/
+/rules/
+/resolvex.log
+/cache.db
