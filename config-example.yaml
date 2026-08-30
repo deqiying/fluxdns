@@ -1,0 +1,373 @@
+# 工作环境配置
+work:
+  # 工作目录，后续其他配置如果使用相对路径，则以该目录为工作目录作为参考,如果不存在则自动创建
+  path: ~/Project/Rust/FluxDNS/work
+  rules_path: ./rules
+
+# 数据库配置
+database:
+  # 目前只支持 sqlite ，后续可能扩展 pgsql
+  type: sqlite
+  path: ./data
+# 日志配置
+logs:
+  enable: true
+  level: debug
+  # 默认日志文件为 fluxdns.log
+  path: ./fluxdns.log
+# web UI 配置
+webui:
+  enable: true
+  port: 8080
+  # 鉴权信息
+  users:
+  - name: qiying
+    password: $2a$10$jkBqXYJuD.4MlWKNMGF7yOao.t5povZHMghW/IvFtU6aCVTak05sS
+# 全局 dns 配置
+dns:
+  cache:
+    cache_enabled: true
+    # 缓存最小过期时间，单位为秒，如果为0，则使用上游返回的TTL值
+    cache_ttl_min: 0
+    cache_ttl_max: 0
+    # 是否启用乐观缓存，如果为 true，则在缓存中存在过期的记录时，仍然返回该记录，并在后台异步刷新缓存
+    cache_optimistic: true
+    # 乐观缓存的 TTL 覆写，单位为秒
+    cache_optimistic_answer_ttl: 10s
+    # 乐观缓存的最大过期时间，单位为秒，如果缓存中的记录已经过期超过该时间，则不再返回该记录，而是直接去上游解析
+    cache_optimistic_max_age: 1d
+    # 持久化缓存文件，运行时缓存在内存中，定时异步写入缓存文件，服务启动时尝试在缓存文件中恢复内存级缓存
+    path: ./cache.db
+    # 缓存文件大小，单位：字节
+    cache_size: 8388608
+  # ECS配置，优先级 strategy > client > upstream > global，按优先级使用 edns_client_subnet 配置，例如 strategy 没有配置，但 client 配置了，则使用 client 的配置
+  edns_client_subnet:
+    # 是否启用ECS自定义IP，如果为false，则不向上游传输ECS信息，触发 upstream 单独的 ECS 解析逻辑
+    # 默认值为 true，即默认使用客户端传递的 ECS 配置或者使用客户端ip的/24，但是会被 clients、 strategy、upstream 中的 ECS 配置覆盖
+    enabled: true
+    custom_ip: 120.85.32.0/24
+    # 是否使用自定义IP，如果为false，则使用客户端传递的 ECS 配置或者使用客户端ip的/24
+    # 默认值 false
+    use_custom: true
+  # 解析日志配置
+  resolve_log:
+    # 请求解析记录，包括客户端IP、请求域名、使用的策略，策略路由中命中的规则，ECS，是否命中缓存，上游解析结果，耗时等信息，便于后续分析和调整路由策略
+    # 如果启用，则必须要要配置 database 数据库配置
+    enable: true
+    # 最大记录数，超过该数量时，最早的记录会被删除
+    max_records: 100000
+    # 最大记录保存时间，超过该时间的记录会被删除，单位为天，默认
+    max_record_age: 7
+
+# 查询入口
+listener:
+  - name: dns
+    type: udp
+    address: 0.0.0.0
+    port: 53
+    strategy: default
+  - name: dns-tcp
+    type: tcp
+    address: 0.0.0.0
+    port: 53
+    # hosts 表示该入口使用 hosts 进行解析，hosts中未包含的才使用 strategy 表示该入口使用的策略
+    hosts: host1
+    strategy: default
+  - name: doh-i
+    type: doh
+    address: 0.0.0.0
+    port: 443
+    # doh path，支持 {client_id} 占位符，表示客户端的唯一标识,/dns-quer/inner 及 /dns-quer/inner/{client_id} 这两个路径是保留的，不能被占用
+    path: /dns-quer/inner/{client_id}
+    strategy: inner
+  - name: doh-o
+    type: doh
+    address: 0.0.0.0
+    port: 443
+    # doh path，支持 {client_id} 占位符，表示客户端的唯一标识,/dns-quer/outside 及 /dns-quer/outside/{client_id} 这两个路径是保留的，不能被占用
+    path: /dns-quer/outside/{client_id}
+    strategy: outside
+
+# dns上游配置
+upstreams:
+  - name: host
+    type: hosts
+    # upstreams 中的 hosts 配置，仅支持 json 格式
+    hosts: |+
+      {
+        "*.aio.com": {
+          "A":"192.168.1.1",
+          "AAAA":["fe80::9a:ccdb:3548:b690%7","fe80::be24:11ff:fe80:f290%7"]
+        },
+        "aliyun-dns":{
+          "A":["223.5.5.5","223.6.6.6"]
+        },
+        "abc.com": {
+          "CNAME": "c.abc.com"
+        }
+      }
+  #  阿里云
+  - name: aliyun
+    type: doh
+    address: https://aliyun-dns.com/dns-query
+    # 使用制定的上游进行引导解析，避免首次解析时使用系统默认的 DNS 服务器
+    bootstrap: host
+    edns_client_subnet:
+      # 是否启用ECS配置，会被 strategy 中的 ECS 配置覆盖，如果为false，则使用 strategy 中的 ECS 配置或者移除客户端传递的 ECS 配置
+      enabled: true
+      custom_ip: 120.85.32.0/24
+      # 是否使用自定义IP，如果为true，则使用自定义IP覆盖，如果为false，则使用客户端传递的 ECS 配置或者使用客户端ip的/24
+      use_custom: true
+  # 腾讯云
+  - name: tencent
+    type: doh
+    address: https://doh.pub/dns-query
+    # 使用制定的上游进行引导解析，如果上游也是带域名的，则链路最终上游的bootstrap必须是可直接解析的
+    bootstrap: aliyun
+    edns_client_subnet:
+      enabled: true
+      custom_ip: 120.85.32.0/24
+      use_custom: true
+  #  Cloudflare
+  - name: cloudflare
+    type: doh
+    address: https://cloudflare-dns.com/dns-query
+    bootstrap: aliyun
+  # Google
+  - name: google
+    type: doh
+    address: https://dns.google/dns-query
+    # 直接制定上游服务的ip地址，避免首次解析时使用系统默认的 DNS 服务器
+    host: 8.8.8.8
+    # 使用代理出口，必须是 outbound 中定义的
+    proxy: sg
+
+  # 内部上游组，支持并发模式和回退
+  - name: inner-group
+    type: group
+    # 上游列表
+    upstreams:
+      # aliyun:1 其中 aliyun 表示上游名称，1 表示权重，权重越高，负载越多
+      - aliyun:1
+      - google:2
+    # upstream_mode 表示当上游有多个时的负载策略，比如 并发、轮询、负载均衡、故障切换等，fallback 表示当 upstreams 中所有的上游都失败时，使用 fallback_upstreams 中的上游进行回退
+    # 并发模式，parallel 表示并发请求所有上游，最快返回的结果作为最终结果，fallback 表示按顺序请求上游，直到有一个上游返回结果为止
+    # 轮询模式，round-robin 表示每一次客户端请求时，依次请求上游，直到有一个上游返回结果为止，例如客户端第一次请求是 aliyun，第二次请求是 google，第三次请求是 aliyun，第四次请求是 google，以此类推
+    # 负载均衡模式，load-balance 表示按权重请求上游，直到有一个上游返回结果为止
+    # 故障切换模式，按顺序请求上游，直到有一个上游返回结果为止，只有当前面的上游失败时，才会请求下一个上游
+    upstream_mode: parallel
+    # 快速失败超时时间，超过该时间未返回结果，则认为该上游失败，尝试下一个上游
+    fastest_timeout: 1s
+    # 总体超时时间，超过该时间未返回结果，则认为所有上游都失败，尝试 fallback_upstreams 中的上游
+    timeout: 3s
+    fallbacks:
+      - tencent
+    fallback_upstream_mode: parallel
+    fallback_timeout: 3s
+  # 内部上游组，支持并发模式和回退
+  - name: outside-group
+    type: group
+    # 上游列表
+    upstreams:
+      # aliyun:1 其中 aliyun 表示上游名称，1 表示权重，权重越高，负载越多
+      - aliyun:1
+      - google:2
+    upstream_mode: fallback
+    fastest_timeout: 1s
+    timeout: 3s
+    fallbacks:
+      - tencent
+    fallback_upstream_mode: parallel
+    fallback_timeout: 3s
+
+# 策略路由配置
+strategy:
+  - name: default
+    rules:
+    # 规则集，按顺序匹配，匹配到第一个规则集后，使用该规则集的 upstream 进行解析
+      - rule_set: cn-site
+        upstream: inner-group
+      # hosts 不需要 upstream ，因为 hosts 是本地解析，不需要上游解析
+      - hosts: host1
+      - rule_set: ai-!cn
+        upstream: google
+      - rule_set: steam
+        upstream: cloudflare
+        # ECS覆盖配置，优先级最高
+        edns_client_subnet:
+          enabled: true
+          custom_ip: 120.85.11.0/24
+          use_custom: true
+      - rule_set: proxy-sites
+        upstream: outside-group
+      - hosts: host2
+    # ECS配置，优先级仅次于 rules 中的 ECS 配置，优先级高于 clients 中的 ECS 配置
+    edns_client_subnet:
+      # 是否启用ECS自定义IP，如果为false，则不向上游传输ECS信息，并移除客户端传递的 ECS 配置，如果为true 则使用客户端传递的 ECS 配置或者使用客户端ip的/24
+      enabled: true
+      custom_ip: 120.85.32.0/24
+      use_custom: true
+    # 没有匹配到规则时，使用的默认上游，必须是 upstreams 中定义的，且是必填值
+    default_upstream: inner-group
+  - name: inner
+    rules:
+      # geosite:cn 表示使用 geosite 规则集中的 cn 规则，匹配到的域名使用 inner-group 上游进行解析必须是 dat 格式的规则集才可以这样写
+      - rule_set: geosite:cn
+        upstream: inner-group
+      - hosts: host1
+    default_upstream: inner-group
+    cache:
+      # 策略级缓存配置，优先级高于全局缓存配置，如果 cache_enabled = false，则当前策略不使用缓存(也不使用全局缓存配置)，如果 cache_enabled = true，则使用缓存配置覆盖全局配置
+      cache_enabled: true
+      cache_ttl_min: 0
+      cache_ttl_max: 0
+      cache_optimistic: true
+      cache_optimistic_answer_ttl: 10s
+      cache_optimistic_max_age: 1d
+  - name: outside
+    rules:
+      - rule_set: ai-!cn
+        upstream: google
+      - rule_set: steam
+        upstream: cloudflare
+        # ECS覆盖配置，优先级最高，但是如果没有 strategy 级的 ECS 配置，其他 rules 中的 ECS 配置会被 clients(或优先级更低) 的 ECS 配置覆盖
+        edns_client_subnet:
+          enabled: true
+          custom_ip: 120.85.32.0/24
+          use_custom: true
+      - hosts: host1
+    # 没有strategy 级的 ECS 配置，且具体的 rule 没有 ECS 配置，则 ECS 配置会被 clients(或优先级更低) 的 ECS 配置覆盖
+    default_upstream: outside-group
+
+# dns hosts 配置
+hosts:
+  - name: host1
+    type: const
+    format: json
+    hosts: |+
+        {
+          "*.aio.com": {
+            "enable": true,
+            "A":"192.168.1.1",
+            "AAAA":["fe80::9a:ccdb:3548:b690%7","fe80::be24:11ff:fe80:f290%7"]
+          },
+          "aliyun-dns":{
+            "enable": false,
+            "A":["223.5.5.5","223.6.6.6"]
+          },
+          "abc.com": {
+            "enable": true,
+            "CNAME": "c.abc.com"
+          }
+        }
+  - name: host2
+    type: const
+    format: hosts
+    hosts: |+
+        192.168.1.1 *.aio.com
+        223.5.5.5 aliyun-dns
+  - name: host3
+    type: file
+    format: hosts
+    path: ./rules/hosts.txt
+    auto_update: true
+    update_interval: 24h
+
+# 代理出口
+outbound:
+  - name: sg
+    type: socks5
+    proxy_url: "socks5h://socks-SG:password-sg@sing-box:34567"
+
+# 规则集中的所有规则集最终都会被转换成独立文件存到 rules_path 中，且命名为 <rule_set_name>.<format>,即便是 const 或者 file 类型的规则集，也会被转换成独立文件存到 rules_path 中，服务启动时加载
+rule_set:
+  # 域名规则集
+  - name: cn-site
+    type: const
+    format: json
+    rule: |+
+      {
+        "domain": [
+          "www.routerlogin.com",
+          "tplogin.cn",
+          "miwifi.com",
+          "www.miwifi.com",
+          "local.adguard.org"
+        ],
+        "domain_suffix": [
+          "internal",
+          "localdomain",
+          "example",
+          "invalid",
+          "localhost",
+          "test",
+          "local",
+          "lan",
+          "127.in-addr.arpa",
+          "10.in-addr.arpa",
+        ],
+        "domain_regex": "^[a-z]([a-z0-9-]{0,61}[a-z0-9])?$"
+      }
+
+  - name: ai-!cn
+    type: const
+    format: yaml
+    rule: |+
+      DOMAIN-SUFFIX,openai.com
+
+      # Add ai.com
+      DOMAIN-SUFFIX,ai.com
+      # Add stripe.com
+      DOMAIN-SUFFIX,invoice.stripe.com
+      DOMAIN-SUFFIX,stripe.com
+
+      # Add Bing and Bard
+      DOMAIN,bard.google.com
+      DOMAIN-SUFFIX,bing.com
+
+  - name: steam
+    type: file
+    format: yaml
+    path: ./rules/steam.yaml
+    auto_update: true
+    update_interval: 24h
+  - name: proxy-sites
+    type: remote
+    format: json
+    url: https://raw.githubusercontent.com/MetaCubeX/meta-rules-dat/blob/sing/geo/geosite/cn.json
+    proxy: sg
+    # 是否自动刷新，默认 false，如果为 true，则会定时刷新规则集，且会见新的规则加载并校验格式，成功后会覆盖原有规则集(rules_path中的文件)，并加载规则集内容到内存中，失败则保留原有规则集
+    auto_update: true
+    # 最小单位为 h，默认 24h，表示每隔多久刷新一次规则集，如果 auto_update = false，则该配置无效
+    update_interval: 24h
+  # 地理位置规则集
+  - name: geosite
+    type: remote
+    format: dat
+    url: https://github.com/Loyalsoldier/v2ray-rules-dat/releases/latest/download/geosite.dat
+    proxy: sg
+    auto_update: true
+    update_interval: 24h
+# 客户端配置
+clients:
+  - name: client1
+    # 客户端id，唯一标识一个客户端，必须是 str 类型，且不能包含特殊字符，建议使用 uuid ，不超过 64 个字符
+    id: 7a753d8a-a5c7-4e37-a207-9b0e15d9009f
+    # 该客户端使用的策略，必须是 strategy 中定义的,优先级最高
+    strategy: inner
+    ip: ["192.168.1.0/24","fe80::/10"]
+    cache:
+      # 客户端级缓存配置，优先级最高，如果 cache_enabled = false，则当前客户端不使用缓存(也不使用全局缓存配置)，如果 cache_enabled = true，则使用缓存配置覆盖全局配置
+      cache_enabled: true
+      cache_ttl_min: 0
+      cache_ttl_max: 0
+      cache_optimistic: true
+      cache_optimistic_answer_ttl: 10s
+      cache_optimistic_max_age: 1d
+    # 客户端级 ECS 覆盖配置，优先级高于 upstreams ECS 配置但低于 strategy ECS 配置
+    edns_client_subnet:
+      # 是否启用ECS自定义IP，如果为false，则不向上游传输ECS信息，触发 upstream 单独的 ECS 解析逻辑
+      enabled: true
+      # 是否使用自定义IP，如果为false，则使用客户端传递的 ECS 配置或者使用客户端ip的/24，即便为 true 也可能会被 strategy 中的 ECS 配置覆盖
+      use_custom: true
+      custom_ip: 120.85.32.0/24
