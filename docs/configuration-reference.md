@@ -21,6 +21,7 @@ listener
 - `routes` 在同一个 DoH listener 内共享；每条路由选择一个策略。
 - `clients` 按客户端标识或 IP 网段选择策略，并覆盖缓存、TTL 和 ECS 等设置。
 - `upstreams`、`hosts`、`rule_set` 和 `outbound` 是可复用的命名资源。
+- `webui` 保留为后续版本的配置命名空间；v1 不启动 WebUI 或管理 API。
 
 ## 2. 通用约定
 
@@ -100,6 +101,8 @@ clients[].ttl_override > strategy[].ttl_override > dns.ttl_override
 
 `ttl_override.enabled: false` 显式关闭当前层级的 TTL 覆写；它不等价于关闭缓存。`ttl_override.min` 或 `max` 为 `0s` 表示该边界不设限。
 
+缓存不是逐层查询的 fallback 链。每个请求只选择一个逻辑缓存池：客户端显式启用时选择“实际客户端身份 + 生效策略”池；否则策略显式启用时选择策略池；策略未配置 `cache` 时才选择全局池。策略或客户端显式 `enabled: false` 会终止选择，不再回退到全局池。详见 [`dns.cache`](#81-dnscache)。
+
 ## 3. 顶层字段
 
 | 字段 | 类型 | 说明 |
@@ -108,7 +111,7 @@ clients[].ttl_override > strategy[].ttl_override > dns.ttl_override
 | `work` | object | 工作目录和规则资源落盘目录。 |
 | `database` | object | 解析日志等持久化能力使用的数据库。 |
 | `logs` | object | 服务日志输出。 |
-| `webui` | object | Web 管理界面及登录用户。 |
+| `webui` | object | Web 管理界面的预留配置；v1 不实例化。 |
 | `dns` | object | 全局缓存、TTL、ECS 和解析日志默认值。 |
 | `listener` | array | UDP、TCP 和 DoH 请求入口。 |
 | `upstreams` | array | hosts 上游、DoH 上游和上游组。 |
@@ -146,33 +149,70 @@ clients[].ttl_override > strategy[].ttl_override > dns.ttl_override
 
 ## 7. `webui`
 
+`webui` 是后续版本的设计预留。v1 保留并严格解析该对象，但不启动 WebUI、管理 API、认证服务或监听 socket；`webui.enable` 必须为 `false`，设为 `true` 时以“不支持的功能”拒绝启动，不能按 no-op 静默成功。
+
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
-| `webui.enable` | boolean | 必填 | 是否启用 Web 管理界面。 |
-| `webui.address` | string | 必填 | Web UI 监听地址；模板默认绑定 `127.0.0.1`。 |
-| `webui.port` | integer | 必填 | Web UI 监听端口。 |
-| `webui.users` | array | `enable: true` 时至少一项 | 登录用户列表；当前版本没有匿名模式。 |
+| `webui.enable` | boolean | 必填 | v1 固定为 `false`；后续版本再赋予启用语义。 |
+| `webui.address` | string | 必填 | 预留监听地址；v1 只校验地址格式，不参与 bind 计划。 |
+| `webui.port` | integer | 必填 | 预留监听端口；v1 只校验端口范围。 |
+| `webui.users` | array | 必填 | 预留登录用户列表；v1 不执行认证。 |
 | `webui.users[].name` | string | 必填 | 用户名；列表内必须唯一。 |
 | `webui.users[].password_hash` | string | 必填 | 初始化时由一次性明文密码生成的单向 hash。 |
 
-配置中禁止出现 `webui.users[].password`。初始化流程只接收一次明文密码并写入 `password_hash`，运行时只执行密码校验；hash 不能直接反向还原密码，但弱密码仍可能被离线猜测。真实密码和 hash 不应提交到公开仓库。
+即使当前不实例化 WebUI，仍拒绝未知字段、重复用户名、非法 hash 和明文 `webui.users[].password`，避免预留配置在未来启用时产生不同解释。真实密码和 hash 不应提交到公开仓库。
 
 ## 8. `dns`
 
 ### 8.1 `dns.cache`
 
-`cache` 只描述缓存是否启用、乐观缓存和全局持久化；TTL 覆写不再嵌套在其中。
+`cache` 描述全局池开关、共享内存容量、短期失败 TTL、乐观缓存和持久化；TTL 覆写不再嵌套在其中。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `dns.cache.enabled` | boolean | 是否启用 DNS 缓存。 |
+| `dns.cache.enabled` | boolean | 是否启用全局缓存池；它不是策略池和客户端池的总开关。 |
+| `dns.cache.memory.max_size_bytes` | integer | 所有逻辑缓存池共享的内存计费容量上限，单位为字节。 |
+| `dns.cache.failure_ttl` | duration | `SERVFAIL`、上游截断响应等无自然可用 TTL 的短期缓存时间；必须在 `1s..=5m`。 |
 | `dns.cache.optimistic.enabled` | boolean | 是否允许返回已过期记录并在后台刷新。 |
 | `dns.cache.optimistic.answer_ttl` | duration | 乐观缓存应答使用的 TTL。 |
 | `dns.cache.optimistic.max_age` | duration | 记录过期后仍可乐观返回的最长时间。 |
 | `dns.cache.persistence.path` | string | 持久化缓存文件路径；相对路径以 `work.path` 为基准。 |
 | `dns.cache.persistence.max_size_bytes` | integer | 持久化缓存文件最大大小，单位为字节。 |
 
-策略级和客户端级 `cache` 只允许 `enabled` 与 `optimistic` 子对象，不包含 `persistence`。
+`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS；`persistence.max_size_bytes` 只限制持久化缓存主数据库的 page budget。SQLite 的临时 `-wal`/`-shm` 文件可能短时产生额外占用，超过预算时停止新的持久化写入并优先 checkpoint/淘汰，不能影响内存缓存或 DNS 解析。两者使用相同字段名，但作用域不同。
+
+策略级和客户端级 `cache` 只允许 `enabled` 与 `optimistic` 子对象，不包含 `memory`、`failure_ttl` 或 `persistence`。只要出现策略级或客户端级 `cache` 对象，`enabled` 就必须显式提供；整个对象缺失才表示继续向较低优先级选择。
+
+#### 逻辑缓存池选择
+
+v1 只有三类逻辑缓存池，并共享 `dns.cache.memory` 与 `dns.cache.persistence` 的容量预算和存储后端：
+
+1. 全局池：namespace 为 `global`；
+2. 策略池：namespace 包含生效的 `strategy.name`；
+3. 客户端 + 策略池：namespace 包含实际客户端身份和生效的 `strategy.name`。客户端身份优先使用请求的精确 `client_id`，没有时使用规范化源 IP；不能只使用匹配规则的 `clients[].name`。
+
+每个请求按以下顺序选择且只使用一个池，cache miss 时不跨池继续查找：
+
+```text
+clients[].cache.enabled == false  → 不使用缓存
+clients[].cache.enabled == true   → 客户端 + 策略池
+clients[].cache 整块缺失          → 继续检查策略
+
+strategy[].cache.enabled == false → 不使用缓存
+strategy[].cache.enabled == true  → 策略池
+strategy[].cache 整块缺失          → dns.cache.enabled 为 true 时使用全局池，否则不缓存
+```
+
+缓存 key 除 pool namespace 外，至少包含规范化的 QNAME、QTYPE、QCLASS、会改变答案的 DNS flags、生效 ECS、策略标识和资源 generation。资源快照替换后必须切换 generation，旧规则产生的条目不能泄漏到新快照。
+
+#### 响应缓存语义
+
+- 正常 `NOERROR` 响应按 RR TTL 缓存；`NOERROR/NODATA` 和 `NXDOMAIN` 按负缓存 TTL 缓存，优先使用 SOA TTL 与 SOA.MINIMUM 的较小值。为满足 v1“所有 NODATA/NXDOMAIN 均缓存”的产品语义，没有可用 SOA/负 TTL 时使用 `failure_ttl`；这是对 RFC 2308 “SHOULD NOT cache”建议的有意偏离。
+- `SERVFAIL` 和直接从上游收到的 `TC=1` 响应使用 `failure_ttl`；`REFUSED` 可作为上游组的终态响应返回，但 v1 不写缓存。上游 TC 条目额外包含当前入口 transport，只允许相同 transport 命中，不能把 UDP 场景的截断结果复用于 TCP/DoH。
+- malformed DNS、问题段不匹配、连接/TLS/HTTP 失败和超时不属于 DNS 响应，不写缓存。
+- 缓存保存不含客户端 DNS ID 和传输 envelope 的 canonical response。若本地 UDP 输出因本次客户端 advertised size 而截断，应保存完整 canonical response，并在每次发送时重新编码；只有上游本身返回的 `TC=1` 才保存截断条目。
+- 写入按响应质量做 compare-and-replace：完整 `NOERROR/TC=0` 可以提升并替换未过期的 NXDOMAIN/SERVFAIL/TC 条目，SERVFAIL/TC 不能覆盖未过期的完整回答；同质量条目在过期前不因后到竞态反复覆盖。
+- optimistic/stale 只适用于已经按上述规则准入的条目；缓存返回时按剩余 TTL 和当前请求重新生成响应。
 
 ### 8.2 `dns.ttl_override`
 
@@ -200,10 +240,13 @@ clients[].ttl_override > strategy[].ttl_override > dns.ttl_override
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `enable` | boolean | 是否记录解析请求、策略、规则、ECS、缓存、上游结果和耗时等信息。 |
-| `max_records` | integer | 最多保留的记录数量。 |
+| `eviction_threshold_records` | integer | 详细记录达到该软阈值后开始后台淘汰。 |
+| `max_records` | integer | 详细记录的硬上限；不能因并发写入而突破。 |
 | `max_record_age` | duration | 记录最长保留时间，例如 `7d`。 |
 
-启用解析日志依赖可用的 `database`。
+必须满足 `0 < eviction_threshold_records < max_records`。这两个字段都按详细记录条数计数，不是 SQLite 文件字节上限。单一有界 writer 串行提交详细记录；达到软阈值后先删除超过 `max_record_age` 的记录，再按时间删除最旧记录，直到回到软阈值以下。若队列已满、数据库忙或提交会突破硬上限，则丢弃新的详细记录，DNS 请求不得等待或失败。
+
+统计与详细记录分离：即使某条详细记录被丢弃，也要累计总请求数、`dropped_detail_records`、transport、strategy、upstream、RCODE 和 cache status 等有界维度的聚合计数。v1 将这些累计 counter 持久化到 SQLite；它们不是按小时/天保存的历史时间序列，因此不需要独立保留期限。不能使用域名、完整客户端 ID 或原始 IP 作为无界统计维度。数据库完全不可写时，至少继续维护进程内计数并报告降级。
 
 ## 9. `listener[]`
 
@@ -242,6 +285,15 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 模板示例使用 `/dns/inner/{client_id}` 和 `/dns/outside/{client_id}`。`/dns-quer/inner*` 与 `/dns-quer/outside*` 是服务保留路径，不能作为自定义路由；它们与示例中的 `/dns/...` 前缀不是同一组路径。
 
+每条路由固定同时支持 DoH GET 和 POST，不增加方法开关：
+
+- GET 使用唯一的 `dns` query 参数，值为不带 `=` padding 的 base64url DNS wire；
+- POST body 是原始 DNS wire，`Content-Type` 必须为 `application/dns-message`；
+- 解码后的 GET 消息与 POST body 最大均为 65,535 字节；对应的无 padding GET `dns` 参数最多 87,380 个字符，HTTP request-target 限制不得小于路由路径加该参数所需长度；超限分别由 HTTP 层返回适当的 `413`/`414`，不进入 DNS 核心；
+- 其他方法返回 `405` 并包含 `Allow: GET, POST`；不支持的媒体类型返回 `415`，非法 wire 返回 `400`；
+- 通过 DNS 协议校验后的 `NXDOMAIN`、`REFUSED`、`SERVFAIL` 等响应仍使用 HTTP `2xx`，失败状态由 DNS RCODE 表达；
+- 响应使用 `application/dns-message`。由于答案可能随客户端身份、策略和 ECS 变化，v1 固定发送 `Cache-Control: no-store`，只使用 FluxDNS 内部缓存。
+
 #### `listener[type=doh].endpoints[]`
 
 | 字段 | 类型 | 条件 | 说明 |
@@ -265,7 +317,7 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 | `certificate_file` | string | `terminate` 时必填 | 证书链文件路径，相对路径以 `work.path` 为基准。 |
 | `private_key_file` | string | `terminate` 时必填 | 私钥文件路径，相对路径以 `work.path` 为基准。 |
 
-`external` 模式不得配置 `certificate_file` 或 `private_key_file`。反向代理占用公网端口时，external endpoint 通常绑定本机或内网端口，例如模板中的 `127.0.0.1:8080`。
+`external` 模式不得配置 `certificate_file` 或 `private_key_file`。反向代理占用公网端口时，external endpoint 通常绑定本机或内网端口，例如模板中的 `127.0.0.1:8053`。
 
 #### `endpoints[].client_ip`
 
@@ -277,11 +329,13 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 | `on_missing` | enum | `forwarded_header` 时可选 | Header 缺失时 `reject` 或 `use_peer`。 |
 | `on_invalid` | enum | `forwarded_header` 时可选 | Header 非法时 `reject` 或 `use_peer`。 |
 
-`peer` 直接使用 TCP 对端地址。`forwarded_header` 只接受来自 `trusted_proxies` 的请求；转发链应从右到左解析，并且反向代理必须先清理客户端自带的伪造 Header。`proxy_protocol` 也必须配置 `trusted_proxies`，只信任代理对端发送的 PROXY 信息。
+`peer` 直接使用 TCP 对端地址。`forwarded_header` 只接受来自 `trusted_proxies` 的请求；转发链应从右到左解析，并且反向代理必须先清理客户端自带的伪造 Header。
+
+`proxy_protocol` 的自动识别只用于区分 PROXY v1 文本头和 v2 二进制头，不表示 header 可选。运行时先按 TCP peer 地址检查 `trusted_proxies`，再在 TLS handshake/HTTP 解析前读取前导头；不可信 peer、缺失头、非法长度、未知协议版本或不能提供 TCP4/TCP6 源地址的头均拒绝连接，不回退为 `peer`。v1 必须在前 107 字节内遇到 CRLF；v2 总前导长度上限固定为 536 字节。v2 中长度合法但未知的可选 TLV 可忽略，以兼容扩展；同一个 endpoint 不同时接收裸连接和 PROXY 连接，需要时应配置两个 endpoint。
 
 ### 9.3 绑定校验
 
-`listener[].addresses` 和 `listener[type=doh].endpoints[].addresses` 展开后不得产生相同协议、地址、端口的冲突。IPv4/IPv6 双栈是否共享 socket、以及 v6-only 行为必须在运行时明确。
+`listener[].addresses` 和 `listener[type=doh].endpoints[].addresses` 展开后不得产生相同协议、地址、端口的冲突。v1 的 WebUI 不实例化，因此预留的 `webui.address`/`port` 不进入 bind 计划；未来允许 `webui.enable: true` 时必须将它纳入同一全局 TCP 绑定校验。IPv4/IPv6 双栈是否共享 socket、以及 v6-only 行为必须在运行时明确。
 
 当前模板没有 `dot` listener 字段；DoT 应在协议、证书材料和握手校验契约确定后再加入。
 
@@ -315,7 +369,12 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 | `proxy` | string | 可选 | 代理出口名称，引用 `outbound[].name`。 |
 | `edns_client_subnet` | object | 可选 | 上游级 ECS 覆盖。 |
 
-`bootstrap` 和 `connect_ip` 解决的是连接建立路径：前者引用上游完成域名解析，后者直接指定连接 IP。二者都不表示修改远程服务的 HTTP Host 或 TLS SNI。
+`bootstrap` 和 `connect_ip` 解决的是连接建立路径：前者引用上游完成域名解析，后者直接指定连接 IP。二者互斥，均不改变远程服务的 HTTP `Host` 或 TLS SNI。
+
+未配置代理时，优先使用 `connect_ip`，其次使用 `bootstrap`，两者都没有时使用系统解析器。配置 `proxy` 时，先解析对应 SecretRef 的 URL scheme：
+
+- `socks5://`：主机名在 FluxDNS 本地解析；顺序仍为 `connect_ip` → `bootstrap` → 系统解析器，再把 IP 交给代理；
+- `socks5h://`：`connect_ip` 缺失时把原始主机名交给代理解析，因此禁止同时配置 `bootstrap`；若显式提供 `connect_ip`，代理接收该 IP，HTTP `Host`/TLS SNI 仍使用 URL 主机名。
 
 ### 10.4 `type: group`
 
@@ -324,13 +383,21 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 | `upstreams` | array[object] | 必填 | 主成员列表，每项为 `{name, weight}`。 |
 | `upstream_mode` | enum | 必填 | `parallel`、`round-robin`、`load-balance` 或 `failover`。 |
 | `timeout` | duration | 必填 | 主组总超时时间。 |
-| `fallbacks` | array[object] | 可选 | 主组全部失败后的回退成员，每项同样为 `{name, weight}`。 |
+| `fallbacks` | array[object] | 可选 | 主组在 timeout 内没有终态 DNS 响应时使用的回退成员，每项同样为 `{name, weight}`。 |
 | `fallback_upstream_mode` | enum | 有 `fallbacks` 时必填 | 回退成员选择模式。 |
 | `fallback_timeout` | duration | 有 `fallbacks` 时必填 | 回退组总超时时间。 |
 | `upstreams[].name` / `fallbacks[].name` | string | 必填 | 成员上游名称。 |
 | `upstreams[].weight` / `fallbacks[].weight` | positive integer | 必填 | 正整数权重。 |
 
-组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。`parallel` 表示并发尝试，`round-robin`、`load-balance` 和 `failover` 的精确轮询、权重和失败判定算法仍需在运行时定稿；`fallbacks` 只在主组失败后使用。
+组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。`round-robin`、`load-balance` 和 `failover` 的精确轮询、权重和失败判定算法仍需在运行时定稿。
+
+`parallel` 的 v1 语义固定如下：
+
+1. 同时向主组成员发起请求。第一个通过 DNS wire 校验、响应标志校验且问题段与请求匹配的 DNS 响应立即返回客户端；`NXDOMAIN`、`REFUSED`、`SERVFAIL` 和 `TC=1` 都属于终态成功。超时、连接/TLS/HTTP 失败、非法 wire 和问题段不匹配不属于成功。
+2. 若首个终态响应是完整的 `NOERROR/TC=0`，按缓存准入规则写入并取消其余请求；若首个响应是 `NXDOMAIN`、`REFUSED`、`SERVFAIL` 或 `TC=1`，已经发出的其他主组请求继续到各自完成或组 `timeout`，但不改变已经返回给当前客户端的响应，也不触发 fallback。
+3. 对上一条继续运行的后台窗口，收集到全部成员完成或 `timeout` 后再定稿缓存：先从完整的 `NOERROR/TC=0` 响应中按成员配置顺序选择；若没有，再从允许缓存的其他终态响应中按成员配置顺序选择。`REFUSED` 不缓存。这样迟到有效答案仍能写缓存，但缓存结果不由并发完成顺序决定。
+4. 主组只有在 `timeout` 内完全没有终态 DNS 响应时才进入 `fallbacks`；fallback 组使用同样的响应和缓存语义。
+5. `parallel` 不使用权重；该模式下所有成员的 `weight` 必须为 `1`，避免配置暗示不存在的优先级。
 
 ## 11. `strategy[]`
 
@@ -365,16 +432,16 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 ### 11.2 策略级 `cache`
 
-策略级缓存只允许以下字段，不包含全局持久化设置：
+策略级缓存只允许以下字段，不包含全局 `memory`、`failure_ttl` 或 `persistence`：
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `enabled` | boolean | 是否在该策略启用缓存。 |
+| `enabled` | boolean | `true` 选择策略逻辑池；`false` 对该策略请求完全禁用缓存。 |
 | `optimistic.enabled` | boolean | 是否允许过期记录先返回并异步刷新。 |
 | `optimistic.answer_ttl` | duration | 乐观缓存应答 TTL。 |
 | `optimistic.max_age` | duration | 过期记录可被乐观返回的最长时间。 |
 
-策略级 `ttl_override` 使用 [`dns.ttl_override`](#82-dnsttl_override) 的相同字段结构和继承语义。
+整个 `strategy[].cache` 缺失时才允许回退到全局池；对象存在时 `enabled` 必填。策略级 `ttl_override` 使用 [`dns.ttl_override`](#82-dnsttl_override) 的相同字段结构和继承语义。
 
 ## 12. `hosts[]`
 
@@ -399,10 +466,10 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
 | `name` | string | 必填 | 出口唯一名称。 |
-| `type` | enum | 必填 | 当前模板仅展示 `socks5`。 |
+| `type` | enum | 必填 | v1 固定为 `socks5`，表示 SOCKS5 协议族。 |
 | `proxy_url` | SecretRef object | 必填 | 通过 `env` 或 `file` 取得完整代理 URL，二选一。 |
 
-SecretRef 的实际值可能包含用户名、密码或令牌；不要将环境变量内容、文件内容或真实 URL 写入 Git 跟踪文件。其他代理类型尚未形成配置契约。
+SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前者在 FluxDNS 本地解析目标主机名，后者把主机名交给代理解析。实际值可能包含用户名、密码或令牌；不要将环境变量内容、文件内容或真实 URL 写入 Git 跟踪文件。其他代理类型尚未形成配置契约。
 
 ## 14. `rule_set[]`
 
@@ -420,7 +487,9 @@ SecretRef 的实际值可能包含用户名、密码或令牌；不要将环境�
 | `auto_update` | boolean | `type: file` 或 `remote` 时可选 | 是否定期刷新或重载资源。 |
 | `update_interval` | duration | `auto_update: true` 时必填 | 刷新/重载间隔。 |
 
-`format: clash` 表示 Clash 行格式，不是标准 YAML。远程资源在下载成功且格式校验通过后才能替换当前内容；失败时应保留旧资源并返回带字段路径的错误。模板暂未提供远程版本锁定或 checksum 字段，生产部署的固定版本策略需后续定稿。
+`format: clash` 表示 Clash 行格式，不是标准 YAML。监听器绑定前，所有已配置的 `const`、`file` 和 `remote` 资源都必须形成有效的首次内存快照；解析、读取、下载、代理或格式校验失败均拒绝启动。远程资源可先尝试加载 `work.rules_path` 中上一轮已成功校验并原子落盘的快照；没有有效快照且本次下载失败时必须拒绝启动。
+
+进程启动后的刷新只有在下载/读取、完整解析和内容校验都成功后才能原子替换当前快照；失败时保留上一份有效快照并记录带字段路径的错误。`auto_update` 只控制启动后的刷新，不降低首次快照要求。模板暂未提供远程版本锁定或 checksum 字段，生产部署的固定版本策略需后续定稿。
 
 `geosite:cn` 这类写法表示引用 `dat` 地理规则集中的命名子集；完整选择器语法、大小写规则和不存在时的失败语义仍需固定。
 
@@ -441,7 +510,7 @@ SecretRef 的实际值可能包含用户名、密码或令牌；不要将环境�
 
 匹配优先级固定为：先精确 `id`，再按 IP 的最长 CIDR 前缀。在同一优先级出现多个冲突规则时应在配置校验阶段报错，而不是依赖数组顺序。`match.ids` 和 `match.ips` 至少提供一个；`id`、`ip` 不再是顶层客户端字段。
 
-客户端级 `cache`、`ttl_override` 和 `edns_client_subnet` 分别遵循[覆盖和继承](#25-覆盖和继承)中的层级规则。
+客户端级 `cache.enabled: true` 选择“实际客户端身份 + 生效策略”逻辑池，`false` 完全禁用当前请求的缓存；只有整个客户端 `cache` 对象缺失时才继续选择策略池或全局池。客户端级 `ttl_override` 和 `edns_client_subnet` 分别遵循[覆盖和继承](#25-覆盖和继承)中的层级规则。
 
 ## 16. 配置校验清单
 
@@ -451,22 +520,34 @@ SecretRef 的实际值可能包含用户名、密码或令牌；不要将环境�
 2. 拒绝未知字段；每种 `type` 只允许自己的字段集合，条件字段满足 exactly-one-of/required-if 约束。
 3. 所有资源集合中的 `name` 唯一，所有引用存在、类型正确且无循环引用。
 4. `work.path` 是绝对路径；目录不存在时创建；启动配置不在该目录时复制为 `<work.path>/config.yaml`。
-5. `listener.addresses` 和 DoH endpoint 地址展开后不存在 bind 冲突，并明确 IPv6 v6-only 行为。
-6. `mode`、`format`、`type`、端口、CIDR、URL、duration、权重和内嵌内容格式合法。
-7. `ttl_override` 与 `cache` 平级，不能把 TTL 字段写入 `cache`；未配置字段按层级继承。
+5. `webui.enable` 在 v1 必须为 `false`；普通 listener 和 DoH endpoint 地址展开后不存在 TCP/UDP bind 冲突，并明确 IPv6 v6-only 行为。
+6. `mode`、`format`、`type`、端口、CIDR、URL、duration、权重和内嵌内容格式合法；`parallel` 成员权重固定为 `1`。
+7. `ttl_override` 与 `cache` 平级；策略/客户端 cache 对象存在时 `enabled` 必填，显式 `false` 不得回退到全局池。
 8. ECS 块未配置时继承，显式 `mode: disabled` 才停止继续传递。
 9. `webui.users[].password_hash` 必须是受支持算法生成的单向 hash，禁止明文 `password` 字段。
-10. DoH endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段。
-11. `forwarded_header`/`proxy_protocol` 必须配置 `trusted_proxies`，且可信范围只覆盖反代对端；Header 来源和失败动作合法。
-12. `dns.resolve_log.enable: true` 时数据库可用；远程资源加载或校验失败提供带字段路径的错误，并保留旧资源。
+10. `dns.cache.memory.max_size_bytes` 和 `persistence.max_size_bytes` 为正数，`failure_ttl` 在 `1s..=5m`。
+11. DoH endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段；GET/POST wire、Content-Type 和固定消息上限合法。
+12. `forwarded_header`/`proxy_protocol` 必须配置 `trusted_proxies`，且可信范围只覆盖反代对端；PROXY v1/v2 前导头缺失、未知或非法时拒绝。
+13. DoH 上游的 `bootstrap` 与 `connect_ip` 互斥；SecretRef 解析后的代理 scheme 合法，`socks5h://` 不得同时使用 `bootstrap`。
+14. `dns.resolve_log.enable: true` 时数据库可用，且 `0 < eviction_threshold_records < max_records`。
+15. 所有配置资源在 bind 前形成有效首次快照；任何首次读取、下载或校验失败都阻止启动，后续刷新失败才保留旧快照。
 
 ## 17. 实现前仍需定稿的语义
 
 以下项目没有在当前模板中形成完整契约，不应通过猜测扩展字段：
 
 1. `dot` listener 的字段、TLS 材料来源和协议特有校验。
-2. 日志级别、资源格式、代理类型等枚举的完整列表及未知值错误码。
+2. 日志级别、资源格式等枚举的完整列表及未知值错误码。
 3. 上游组 `round-robin`、`load-balance` 和 `failover` 的精确算法、权重计算和失败判定。
-4. 远程规则的版本锁定、checksum、首次下载失败和更新并发控制。
+4. 远程规则的版本锁定、checksum 和更新并发控制。
 5. 配置副本覆盖时的原子替换、文件权限和恢复策略。
 6. 配置热加载、数据库迁移和未来 schema 版本的兼容策略。
+7. WebUI 正式启用版本的管理 API、认证/session、CSRF、TLS/bind 及历史统计保留契约。
+
+## 18. 协议依据
+
+- [RFC 8484: DNS Queries over HTTPS](https://www.rfc-editor.org/rfc/rfc8484)
+- [RFC 1035: Domain Names - Implementation and Specification](https://www.rfc-editor.org/rfc/rfc1035)
+- [RFC 2308: Negative Caching of DNS Queries](https://www.rfc-editor.org/rfc/rfc2308)
+- [RFC 9520: Negative Caching of DNS Resolution Failures](https://www.rfc-editor.org/rfc/rfc9520)
+- [HAProxy PROXY protocol specification](https://www.haproxy.org/download/1.8/doc/proxy-protocol.txt)

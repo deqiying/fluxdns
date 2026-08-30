@@ -37,20 +37,19 @@ logs:
   # 日志文件路径，相对于 work.path。
   path: ./logs/fluxdns.log
 
-# Web 管理界面配置。
+# Web 管理界面预留配置。v1 仅保留 schema，不启动 WebUI、管理 API 或认证服务。
 webui:
-  # 是否启用 Web 管理界面。
-  enable: true
-  # Web 管理界面的监听地址；默认只绑定本机。
+  # v1 必须为 false；设为 true 时以“不支持的功能”拒绝启动，不能静默忽略。
+  enable: false
+  # 以下字段作为后续版本的设计预留，v1 仍进行类型和安全校验，但不参与绑定。
   address: 127.0.0.1
-  # Web 管理界面的监听端口。
   port: 8080
-  # 登录用户列表；enable=true 时至少需要一个用户，除非显式启用匿名模式（本版不提供）。
+  # 保留登录用户结构，便于后续版本兼容；真实 hash 不应提交到公开仓库。
   users:
     # 用户名必须唯一。
-    - name: admin
+    - name: example-admin
       # 初始化流程接收一次明文密码并只将单向 hash 写入此字段；运行时仅执行 verify。
-      # hash 不能直接反向还原密码，但弱密码仍可能被离线猜测。
+      # 这里只是不可作为默认凭据的格式 fixture，后续启用 WebUI 前必须替换。
       password_hash: "$2a$10$jkBqXYJuD.4MlWKNMGF7yOao.t5povZHMghW/IvFtU6aCVTak05sS"
 
 # DNS 全局配置。
@@ -58,8 +57,15 @@ dns:
   # DNS 全局默认配置。
   # DNS 缓存配置；TTL 覆写位于同级的 ttl_override。
   cache:
-    # 是否启用 DNS 缓存；该配置只控制缓存，不控制 TTL 覆写。
+    # 是否启用全局缓存池；策略或客户端可选择更具体的逻辑缓存池。
     enabled: true
+    # 三类逻辑缓存池共享同一个内存容量预算，不会按策略或客户端重复分配该上限。
+    memory:
+      # 内存缓存的计费容量上限，单位为字节；不是进程 RSS 的硬上限。
+      max_size_bytes: 67108864
+    # 无自然可用 TTL 的短期响应使用该 TTL，例如 SERVFAIL 和上游 TC=1 响应。
+    # v1 要求 1s <= failure_ttl <= 5m。
+    failure_ttl: 5s
     # 过期记录是否允许先返回并异步刷新。
     optimistic:
       # 是否允许返回已过期记录并在后台刷新。
@@ -98,7 +104,9 @@ dns:
   resolve_log:
     # 是否记录解析请求和策略决策信息。
     enable: true
-    # 最多保留的记录数量。
+    # 详细记录达到该软阈值后启动异步淘汰。
+    eviction_threshold_records: 90000
+    # 详细记录的硬上限；达到上限且无法及时淘汰时丢弃新的详细记录，但继续累计统计。
     max_records: 100000
     # 记录最长保留时间。
     max_record_age: 7d
@@ -143,11 +151,15 @@ listener:
   # endpoint.client_ip.source:
   # - peer：使用 TCP 对端地址（直连模式）；
   # - forwarded_header：仅从 trusted_proxies 发来的指定 HTTP header 读取客户端 IP；
-  # - proxy_protocol：从 PROXY protocol 读取客户端 IP，也必须限制 trusted_proxies。
+  # - proxy_protocol：从 PROXY protocol 读取客户端 IP，也必须限制 trusted_proxies；
+  #   v1 自动识别并支持 PROXY v1/v2，未知版本或缺失/非法前导头直接拒绝。
   # forwarded_header 的 header 可选 X-Forwarded-For、X-Real-IP 或 Forwarded；
   # on_missing/on_invalid 可选 reject 或 use_peer，生产配置建议使用 reject。
   - name: doh
     type: doh
+    # 每条 DoH 路由固定同时支持 GET 和 POST；不提供按路由关闭某一方法的配置。
+    # POST 使用 application/dns-message 原始 wire body，GET 使用无填充 base64url 的 dns 参数。
+    # 解码后的 DNS wire 与 POST body 上限固定为 65535 字节。
     # DoH 路由列表；所有 endpoint 共用这些路径和策略。
     routes:
       # HTTP 请求路径；允许使用 {client_id} 占位符。
@@ -183,7 +195,8 @@ listener:
         addresses:
           - 127.0.0.1
           - "::1"
-        port: 8080
+        # 使用独立于 WebUI 的内部端口，避免与 webui.address/webui.port 绑定冲突。
+        port: 8053
         # external 表示 TLS 已由 Nginx 终止，FluxDNS 接收内部 HTTP。
         tls:
           mode: external
@@ -217,7 +230,7 @@ upstreams:
           "A": "192.168.1.1",
           "AAAA": ["fd00::1"]
         },
-        "aliyun-dns": {
+        "dns.alidns.com": {
           "A": ["223.5.5.5", "223.6.6.6"]
         },
         "abc.com": {
@@ -230,7 +243,7 @@ upstreams:
     type: doh
     # DoH 服务 URL。
     address: https://dns.alidns.com/dns-query
-    # 引导解析该 URL 主机名时使用的上游名称。
+    # 引导解析该 URL 主机名时使用的上游名称；与 connect_ip 互斥。
     bootstrap: host
     # 上游级 ECS 覆盖；未配置时继承全局设置。
     edns_client_subnet:
@@ -260,13 +273,17 @@ upstreams:
     type: doh
     # DoH 服务 URL。
     address: https://dns.google/dns-query
-    # connect_ip 仅表示连接目标 IP，不表示 HTTP Host 或 TLS SNI。
+    # connect_ip 仅表示连接目标 IP，不表示 HTTP Host 或 TLS SNI；与 bootstrap 互斥。
     connect_ip: 8.8.8.8
     # 访问该远程上游所使用的 outbound 名称。
     proxy: sg
 
   # upstream_mode: parallel | round-robin | load-balance | failover
   # 组成员改为对象，避免 name:weight 字符串的解析歧义。
+  # parallel 会立即返回首个协议合法且问题匹配的 DNS 响应；NXDOMAIN、REFUSED、SERVFAIL 和 TC=1
+  # 都是可返回的终态响应。若首响应不是完整 NOERROR/TC=0，其余已发出的主组请求继续到完成
+  # 或 timeout，仅用于寻找可写缓存的 NOERROR/TC=0 响应；后台窗口结束后按成员配置顺序
+  # 确定缓存候选。parallel 不使用权重，因此成员 weight 必须为 1。
   - name: inner-group
     type: group
     # 主上游成员及其权重。
@@ -276,12 +293,12 @@ upstreams:
         # 权重必须为正整数。
         weight: 1
       - name: google
-        weight: 2
+        weight: 1
     # 主组的成员选择模式。
     upstream_mode: parallel
     # 主组总超时时间。
     timeout: 3s
-    # 主组全部失败后使用的回退成员。
+    # 只有主组在 timeout 内没有任何协议合法的 DNS 响应时才进入回退组。
     fallbacks:
       - name: tencent
         weight: 1
@@ -340,7 +357,8 @@ strategy:
         upstream: inner-group
       - hosts: host1
     default_upstream: inner-group
-    # 策略级缓存覆盖；不包含全局 persistence。
+    # enabled=true 时使用策略独立逻辑缓存池；不包含全局 memory/persistence。
+    # 整个 cache 块缺失时才回退到全局池，enabled=false 会直接停止缓存。
     cache:
       # 是否在该策略启用缓存。
       enabled: true
@@ -422,14 +440,16 @@ outbound:
   # 远程上游和规则集使用的代理出口。
   # 每个出口的 name 必须唯一。
   - name: sg
-    # 代理类型；当前示例为 socks5。
+    # 代理类型；当前示例为 SOCKS5 协议族。
     type: socks5
-    # 代理连接地址；SecretRef 通过 env 或 file 提供实际凭据。
+    # 代理连接地址；解析后的 URL 使用 socks5:// 表示本地解析，socks5h:// 表示由代理解析。
+    # SecretRef 通过 env 或 file 提供实际凭据。
     proxy_url:
       # 从环境变量读取完整代理 URL。
       env: FLUXDNS_OUTBOUND_SG_URL
 
-# 规则集资源配置。
+# 规则集资源配置。所有资源必须在监听器绑定前形成有效的首次快照，否则拒绝启动；
+# 运行后的刷新失败保留上一份有效快照。
 rule_set:
   # 可被 strategy 引用的规则资源列表。
   # 每个规则集的 name 必须唯一。
@@ -528,7 +548,8 @@ clients:
         - fe80::/10
     # 客户端命中的策略；省略时继承 listener/route 的策略。
     strategy: inner
-    # 客户端级缓存覆盖。
+    # enabled=true 时使用“实际客户端身份 + 生效策略”的独立逻辑缓存池。
+    # 整个 cache 块缺失时才继续选择策略池/全局池，enabled=false 会直接停止缓存。
     cache:
       # 是否在该客户端启用缓存。
       enabled: true
@@ -558,14 +579,18 @@ clients:
 # - work.path 必须是绝对路径；目录不存在时创建，启动配置不在该目录时复制为 config.yaml；
 # - 拒绝未知字段；每种 type 只允许自己的字段集合；
 # - 所有 name 唯一，且所有引用存在、类型正确；
-# - listener.addresses 或 listener.endpoints[].addresses 展开后不得存在 bind 冲突；
+# - webui 配置保留但 enable 必须为 false；v1 不实例化 WebUI，也不把它加入 bind 计划；
+# - 所有 listener endpoint 展开后不得存在 TCP/UDP bind 冲突；
 # - mode、format、type、端口、CIDR、URL、duration 和内嵌内容必须合法；
 # - ttl_override 与 cache 为平级配置，不得嵌套在 cache 内；未配置的 override 块按字段继承；
 # - 未配置的 edns_client_subnet 块继承下层，显式 disabled 才停止继承；
 # - webui.users[].password_hash 必须是受支持算法生成的单向 hash，禁止明文 password 字段；
 # - 同一个 doh listener 可以拥有多个 endpoint；每个 endpoint 的 tls.mode 独立校验，
 #   terminate 必须有证书和私钥，external 不得配置证书字段；
+# - DoH 固定支持 GET/POST、application/dns-message 和 65535 字节 DNS wire 上限；
 # - endpoint.client_ip.source=forwarded_header/proxy_protocol 必须配置 trusted_proxies，
 #   且只信任代理对端地址；
 #   forwarded header 链按从右到左解析，反向代理必须先清理客户端自带的伪造 header；
-# - 任何引用环、远程资源首次加载失败或内容校验失败都提供带路径的错误。
+# - bootstrap 与 connect_ip 互斥；socks5h:// 不得再配置 bootstrap；
+# - 0 < resolve_log.eviction_threshold_records < resolve_log.max_records；
+# - 任何引用环、资源首次加载失败或内容校验失败都提供带路径的错误并阻止启动。
