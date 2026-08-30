@@ -3,6 +3,7 @@
 > 状态：v1 配置模板草案
 > 依据：[config-example.yaml](../config-example.yaml)
 > 适用范围：本文与当前模板同步，描述配置契约和校验意图。运行时尚未实现时，本文没有定义的行为不应视为已支持。
+> 模块方案与进度：[backend-development-plan.md](backend-development-plan.md)
 
 ## 1. 配置模型概览
 
@@ -38,7 +39,7 @@ listener
 - 除明确写成绝对路径的字段外，其他相对路径均以 `work.path` 为基准。
 - `work.rules_path`、数据库、日志、缓存、TLS 证书和资源文件路径都遵循上述规则。
 
-配置副本的原子替换、权限和已有文件处理细节仍需在运行时实现时固定，但不得改变上述路径和文件名契约。
+配置副本按 [Config 模块方案](backend-modules/config.md) 原子创建：目标不存在时在同目录写临时文件并 rename，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
 
 ### 2.3 命名与引用
 
@@ -103,13 +104,31 @@ clients[].ttl_override > strategy[].ttl_override > dns.ttl_override
 
 缓存不是逐层查询的 fallback 链。每个请求只选择一个逻辑缓存池：客户端显式启用时选择“实际客户端身份 + 生效策略”池；否则策略显式启用时选择策略池；策略未配置 `cache` 时才选择全局池。策略或客户端显式 `enabled: false` 会终止选择，不再回退到全局池。详见 [`dns.cache`](#81-dnscache)。
 
+### 2.6 配置迁移与归一化
+
+配置加载不直接把 YAML DTO 当作运行时配置，而是经过显式版本迁移和归一化：
+
+```text
+RawConfigVn
+  → migrate 到当前 schema
+  → normalize 路径、SecretRef、默认值和继承
+  → semantic validate
+  → ResolvedConfig
+```
+
+- 只支持从已知旧版本向当前版本逐级迁移；未来版本直接拒绝，不能按旧字段猜测。
+- 迁移必须是可测试、可重放的纯转换，保留缺失、`null`、空数组和空对象的区别；数组替换/合并、cache/TTL/ECS 继承和来源信息在 `ResolvedConfig` 阶段一次性确定。任何有损删除都必须产生 warning 并显式确认，不能静默丢字段。
+- 原始配置文件不被自动覆盖。实现 `validate`/`migrate`/`print-normalized`/`diff`/`rollback` 命令时，输出应写到新文件或显式指定的目标，并保存输入/输出 hash、step IDs 和变更摘要。
+- 配置 schema 版本、SQLite schema 版本、资源 parser/compiler 版本和 cache key format 版本彼此独立；升级一个版本不能隐式宣称其他版本兼容。
+- 运行时升级沿用 `prepare candidate → preflight → atomic activate/keep old`：可热更新项替换 `RuntimeSnapshot`，需要重新绑定的项 drain 后切换，无法安全切换的项拒绝候选并保留旧运行时。
+
 ## 3. 顶层字段
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `version` | integer | 配置 schema 版本；当前必须为 `1`。 |
 | `work` | object | 工作目录和规则资源落盘目录。 |
-| `database` | object | 解析日志等持久化能力使用的数据库。 |
+| `database` | object | 默认开启的聚合统计、可选解析详情和其他持久化能力使用的数据库；始终必填。 |
 | `logs` | object | 服务日志输出。 |
 | `webui` | object | Web 管理界面的预留配置；v1 不实例化。 |
 | `dns` | object | 全局缓存、TTL、ECS 和解析日志默认值。 |
@@ -134,17 +153,17 @@ clients[].ttl_override > strategy[].ttl_override > dns.ttl_override
 
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
-| `database.type` | string | 必填 | 当前模板仅定义 `sqlite`。未知类型应拒绝。 |
-| `database.path` | string | 必填 | SQLite 数据库文件路径；相对路径以 `work.path` 为基准，父目录由程序创建。 |
+| `database.type` | string | 必填 | 当前模板仅定义 `sqlite`。未知类型应拒绝。聚合统计默认开启，因此不能省略。 |
+| `database.path` | string | 必填 | SQLite 数据库文件路径；相对路径以 `work.path` 为基准，父目录由程序创建。聚合统计和（启用时的）详情日志共用该数据库。 |
 
-当 `dns.resolve_log.enable` 为 `true` 时，数据库必须可用。`database.path` 表示文件，不表示目录。
+数据库在 prepare 阶段必须完成打开、schema migration 和基本写入检查；失败时拒绝启动。运行中数据库暂时不可写时，DNS 继续服务，由统计 writer 保留进程内补偿计数并重试；未恢复前进程退出可能造成 persistence gap，该状态必须可观测。`database.path` 表示文件，不表示目录。
 
 ## 6. `logs`
 
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
 | `logs.enable` | boolean | 必填 | 是否启用服务日志。 |
-| `logs.level` | string | 必填 | 日志级别；模板示例为 `info`，未知值应拒绝。 |
+| `logs.level` | string | 必填 | 日志级别；v1 接受 `trace`、`debug`、`info`、`warn`、`error`，大小写归一化，未知值拒绝。 |
 | `logs.path` | string | 必填 | 日志文件路径；相对路径以 `work.path` 为基准。 |
 
 ## 7. `webui`
@@ -203,16 +222,22 @@ strategy[].cache.enabled == true  → 策略池
 strategy[].cache 整块缺失          → dns.cache.enabled 为 true 时使用全局池，否则不缓存
 ```
 
-缓存 key 除 pool namespace 外，至少包含规范化的 QNAME、QTYPE、QCLASS、会改变答案的 DNS flags、生效 ECS、策略标识和资源 generation。资源快照替换后必须切换 generation，旧规则产生的条目不能泄漏到新快照。
+缓存 key 除 pool namespace 外，至少包含规范化的 QNAME、QTYPE、QCLASS、会改变答案的 DNS flags、生效 ECS、策略标识和 transport compatibility；不包含整个配置 revision 或资源 generation。每个 entry 仍记录产生答案时的 `producer_revision` 和资源版本指纹，供诊断、命中解释和迁移使用，但资源快照替换不会因此自动使所有缓存失效。
+
+规则或 hosts 的小范围变化默认不清空缓存。请求必须先按最新运行时 snapshot 重新计算客户端、策略、规则、ECS 和 cache namespace；`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache，只有产生 upstream target 的路径才执行 lookup。`upstreams[type=hosts]` 属于 upstream connector，其结果按普通上游响应处理。TTL 内的普通上游缓存命中可以继续返回旧答案，而 miss、过期或显式刷新一定按最新规则选择上游。启用 optimistic cache 时，后台刷新必须捕获刷新时刻的最新策略/规则资源并完整重跑匹配和上游选择，不能沿用旧 entry 的目标。后续 WebUI 的清除缓存功能属于显式 `namespace/key/predicate` 操作，不由普通资源刷新隐式触发。
+
+这表示 TTL 内的最终一致性，而不是立即策略撤销保证；需要立即停止旧答案时必须显式清理相应 namespace/key/predicate，不能把规则变化偷偷转换成全局 cache invalidation。
 
 #### 响应缓存语义
 
+- `hosts[]` 产生的本地回答不进入 response cache；它直接读取已编译内存 snapshot，并仍应用 TTL override 和统计。`upstreams[type=hosts]` 不属于此例外。
 - 正常 `NOERROR` 响应按 RR TTL 缓存；`NOERROR/NODATA` 和 `NXDOMAIN` 按负缓存 TTL 缓存，优先使用 SOA TTL 与 SOA.MINIMUM 的较小值。为满足 v1“所有 NODATA/NXDOMAIN 均缓存”的产品语义，没有可用 SOA/负 TTL 时使用 `failure_ttl`；这是对 RFC 2308 “SHOULD NOT cache”建议的有意偏离。
 - `SERVFAIL` 和直接从上游收到的 `TC=1` 响应使用 `failure_ttl`；`REFUSED` 可作为上游组的终态响应返回，但 v1 不写缓存。上游 TC 条目额外包含当前入口 transport，只允许相同 transport 命中，不能把 UDP 场景的截断结果复用于 TCP/DoH。
 - malformed DNS、问题段不匹配、连接/TLS/HTTP 失败和超时不属于 DNS 响应，不写缓存。
 - 缓存保存不含客户端 DNS ID 和传输 envelope 的 canonical response。若本地 UDP 输出因本次客户端 advertised size 而截断，应保存完整 canonical response，并在每次发送时重新编码；只有上游本身返回的 `TC=1` 才保存截断条目。
 - 写入按响应质量做 compare-and-replace：完整 `NOERROR/TC=0` 可以提升并替换未过期的 NXDOMAIN/SERVFAIL/TC 条目，SERVFAIL/TC 不能覆盖未过期的完整回答；同质量条目在过期前不因后到竞态反复覆盖。
 - optimistic/stale 只适用于已经按上述规则准入的条目；缓存返回时按剩余 TTL 和当前请求重新生成响应。
+- 同一 key 的并发 miss/optimistic refresh 应通过 single-flight 合并，避免规则刷新或上游慢时放大请求；合并任务的取消只影响对应 waiter，不得取消仍有其他 waiter 的 exchange。
 
 ### 8.2 `dns.ttl_override`
 
@@ -239,14 +264,16 @@ strategy[].cache 整块缺失          → dns.cache.enabled 为 true 时使用�
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `enable` | boolean | 是否记录解析请求、策略、规则、ECS、缓存、上游结果和耗时等信息。 |
+| `enable` | boolean | 是否记录每次解析请求的详情（请求、策略、规则、ECS、缓存、上游结果和耗时等）。关闭时不写详情表，但不关闭聚合统计。 |
 | `eviction_threshold_records` | integer | 详细记录达到该软阈值后开始后台淘汰。 |
 | `max_records` | integer | 详细记录的硬上限；不能因并发写入而突破。 |
 | `max_record_age` | duration | 记录最长保留时间，例如 `7d`。 |
 
-必须满足 `0 < eviction_threshold_records < max_records`。这两个字段都按详细记录条数计数，不是 SQLite 文件字节上限。单一有界 writer 串行提交详细记录；达到软阈值后先删除超过 `max_record_age` 的记录，再按时间删除最旧记录，直到回到软阈值以下。若队列已满、数据库忙或提交会突破硬上限，则丢弃新的详细记录，DNS 请求不得等待或失败。
+必须满足 `0 < eviction_threshold_records < max_records`。这两个字段都按详细记录条数计数，不是 SQLite 文件字节上限。详情由独立的有界 writer 串行提交；达到软阈值后先删除超过 `max_record_age` 的记录，再按时间删除最旧记录，直到回到软阈值以下。若队列已满、数据库忙或提交会突破硬上限，则丢弃新的详细记录，DNS 请求不得等待或失败。
 
-统计与详细记录分离：即使某条详细记录被丢弃，也要累计总请求数、`dropped_detail_records`、transport、strategy、upstream、RCODE 和 cache status 等有界维度的聚合计数。v1 将这些累计 counter 持久化到 SQLite；它们不是按小时/天保存的历史时间序列，因此不需要独立保留期限。不能使用域名、完整客户端 ID 或原始 IP 作为无界统计维度。数据库完全不可写时，至少继续维护进程内计数并报告降级。
+聚合统计默认开启且始终依赖 `database`：至少按 UTC 自然日记录总请求数，并按有界的 client bucket、transport class、strategy、source/upstream、RCODE 和 cache status 记录分项计数。未匹配客户端统一进入 `unknown` bucket；不能使用域名、完整客户端 ID 或原始 IP 作为无界维度。请求线程只更新进程内 sharded counters，独立 stats writer 周期性以带 `batch_id` 的 checkpoint 批量 upsert 到 SQLite，并用 batch ledger 幂等去重，因此详情队列溢出不会丢失聚合统计。一次请求只计一次 `total_requests`；cache/hosts 命中归入本地 source，parallel 的多个上游尝试不重复计请求。统计不能因为详情记录被丢弃或 `enable: false` 而停止。数据库运行中暂时不可写时继续维护进程内计数并报告 `degraded`/persistence gap；启动阶段数据库不可用则拒绝启动。
+
+“依赖数据库”表示统计/详情的权威持久化后端是 `database`；请求线程不同步等待数据库。`resolve_log` 的详情在当前有界 `max_records` 契约下允许 best-effort 丢弃并计数，若未来需要无损审计需另行定义 spool、背压和磁盘配额。
 
 ## 9. `listener[]`
 
@@ -337,7 +364,7 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 `listener[].addresses` 和 `listener[type=doh].endpoints[].addresses` 展开后不得产生相同协议、地址、端口的冲突。v1 的 WebUI 不实例化，因此预留的 `webui.address`/`port` 不进入 bind 计划；未来允许 `webui.enable: true` 时必须将它纳入同一全局 TCP 绑定校验。IPv4/IPv6 双栈是否共享 socket、以及 v6-only 行为必须在运行时明确。
 
-当前模板没有 `dot` listener 字段；DoT 应在协议、证书材料和握手校验契约确定后再加入。
+当前模板没有 `dot` 或 `doq` listener 字段；DoT/DoQ 应在协议、TLS/QUIC 材料和握手校验契约确定后再加入。
 
 ## 10. `upstreams[]`
 
@@ -389,7 +416,7 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 | `upstreams[].name` / `fallbacks[].name` | string | 必填 | 成员上游名称。 |
 | `upstreams[].weight` / `fallbacks[].weight` | positive integer | 必填 | 正整数权重。 |
 
-组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。`round-robin`、`load-balance` 和 `failover` 的精确轮询、权重和失败判定算法仍需在运行时定稿。
+组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。精确算法见 [Upstream 模块方案](backend-modules/upstream.md)：`round-robin` 使用 smooth weighted round-robin，`load-balance` 使用按 weight 归一化的 least-in-flight，`failover` 严格按配置顺序且 weight 必须为 1。三种模式都只在 transport failure 时尝试其他成员，任意终态 DNS 响应都会结束当前组；主组完全没有终态响应时才进入 fallback。
 
 `parallel` 的 v1 语义固定如下：
 
@@ -459,6 +486,8 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 文件型 hosts 的 `auto_update` 只表示本地文件重载，不表示远程同步。
 
+hosts 与 rule_set 使用相同的 per-resource snapshot 机制：本地文件变更只发布该 hosts 资源的新版本，保留其他资源版本；请求和 optimistic refresh 按最新资源重新进行 hosts/rule 匹配，但不因单资源变化全局清除缓存。
+
 ## 13. `outbound[]`
 
 `outbound` 定义访问远程上游或远程规则集时使用的代理出口。
@@ -473,7 +502,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 
 ## 14. `rule_set[]`
 
-规则集是策略匹配的数据源。资源可以内联、来自本地文件或从远程 URL 下载。
+规则集是策略匹配的数据源。资源可以内联、来自本地文件或从远程 URL 下载。运行时每个资源独立形成 `ResourceSnapshot`，拥有自己的 revision/epoch、content hash、来源 fingerprint 和 parser/compiler version；某个资源刷新不会要求其他资源同步刷新，也不会自动清空全局缓存。
 
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
@@ -489,9 +518,9 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 
 `format: clash` 表示 Clash 行格式，不是标准 YAML。监听器绑定前，所有已配置的 `const`、`file` 和 `remote` 资源都必须形成有效的首次内存快照；解析、读取、下载、代理或格式校验失败均拒绝启动。远程资源可先尝试加载 `work.rules_path` 中上一轮已成功校验并原子落盘的快照；没有有效快照且本次下载失败时必须拒绝启动。
 
-进程启动后的刷新只有在下载/读取、完整解析和内容校验都成功后才能原子替换当前快照；失败时保留上一份有效快照并记录带字段路径的错误。`auto_update` 只控制启动后的刷新，不降低首次快照要求。模板暂未提供远程版本锁定或 checksum 字段，生产部署的固定版本策略需后续定稿。
+进程启动后的刷新只有在下载/读取、完整解析和内容校验都成功后才能原子替换当前快照；失败时保留上一份有效快照并记录带字段路径的错误。`auto_update` 只控制启动后的刷新，不降低首次快照要求；重试采用指数退避并封顶 5 分钟，连续三次计划刷新失败或超过 `3 × update_interval` 未成功时标记资源 `stale`，但仍可使用上一份有效快照。没有旧快照的资源引用必须 fail-closed。模板暂未提供远程版本锁定或 expected checksum 字段，当前仅记录内部 content hash/source fingerprint，生产部署的固定版本策略需后续定稿。
 
-`geosite:cn` 这类写法表示引用 `dat` 地理规则集中的命名子集；完整选择器语法、大小写规则和不存在时的失败语义仍需固定。
+`geosite:cn` 这类写法表示引用 `dat` 地理规则集中的命名子集。解析时先尝试完整资源名；完整名不存在时再按第一个 `:` 拆分。资源名大小写敏感，selector 必须是非空 ASCII 标识并归一化为小写；格式不支持 selector 或 selector 不存在时在 prepare 阶段失败。
 
 ## 15. `clients[]`
 
@@ -521,7 +550,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 3. 所有资源集合中的 `name` 唯一，所有引用存在、类型正确且无循环引用。
 4. `work.path` 是绝对路径；目录不存在时创建；启动配置不在该目录时复制为 `<work.path>/config.yaml`。
 5. `webui.enable` 在 v1 必须为 `false`；普通 listener 和 DoH endpoint 地址展开后不存在 TCP/UDP bind 冲突，并明确 IPv6 v6-only 行为。
-6. `mode`、`format`、`type`、端口、CIDR、URL、duration、权重和内嵌内容格式合法；`parallel` 成员权重固定为 `1`。
+6. `mode`、`format`、`type`、端口、CIDR、URL、duration、权重和内嵌内容格式合法；`parallel` 和 `failover` 成员权重固定为 `1`。
 7. `ttl_override` 与 `cache` 平级；策略/客户端 cache 对象存在时 `enabled` 必填，显式 `false` 不得回退到全局池。
 8. ECS 块未配置时继承，显式 `mode: disabled` 才停止继续传递。
 9. `webui.users[].password_hash` 必须是受支持算法生成的单向 hash，禁止明文 `password` 字段。
@@ -529,20 +558,19 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 11. DoH endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段；GET/POST wire、Content-Type 和固定消息上限合法。
 12. `forwarded_header`/`proxy_protocol` 必须配置 `trusted_proxies`，且可信范围只覆盖反代对端；PROXY v1/v2 前导头缺失、未知或非法时拒绝。
 13. DoH 上游的 `bootstrap` 与 `connect_ip` 互斥；SecretRef 解析后的代理 scheme 合法，`socks5h://` 不得同时使用 `bootstrap`。
-14. `dns.resolve_log.enable: true` 时数据库可用，且 `0 < eviction_threshold_records < max_records`。
-15. 所有配置资源在 bind 前形成有效首次快照；任何首次读取、下载或校验失败都阻止启动，后续刷新失败才保留旧快照。
+14. `database.type`/`database.path` 始终存在且为受支持的 SQLite 配置；prepare 阶段数据库打开、migration 或基本写入检查失败必须阻止启动。
+15. 聚合统计默认开启，按日和有界 client/transport/strategy/upstream/RCODE/cache 维度持久化；`dns.resolve_log.enable` 只控制详情记录，且 `0 < eviction_threshold_records < max_records`。
+16. 所有配置资源在 bind 前形成有效首次 snapshot；任何首次读取、下载或校验失败都阻止启动，后续单资源刷新失败才保留该资源旧版本，不能触发全局 cache clear。
 
-## 17. 实现前仍需定稿的语义
+## 17. v1 范围外与版本化边界
 
-以下项目没有在当前模板中形成完整契约，不应通过猜测扩展字段：
+以下项目不在当前 v1 配置 schema 中，不应通过猜测扩展字段：
 
-1. `dot` listener 的字段、TLS 材料来源和协议特有校验。
-2. 日志级别、资源格式等枚举的完整列表及未知值错误码。
-3. 上游组 `round-robin`、`load-balance` 和 `failover` 的精确算法、权重计算和失败判定。
-4. 远程规则的版本锁定、checksum 和更新并发控制。
-5. 配置副本覆盖时的原子替换、文件权限和恢复策略。
-6. 配置热加载、数据库迁移和未来 schema 版本的兼容策略。
-7. WebUI 正式启用版本的管理 API、认证/session、CSRF、TLS/bind 及历史统计保留契约。
+1. `dot`/`doq` listener 的字段、TLS/QUIC 材料来源和协议特有校验。
+2. 主动上游健康检查、熔断器和持久健康分数配置。
+3. 远程规则的 expected checksum、版本锁定和签名验证字段；v1 只记录内部 content hash/source fingerprint。
+4. 未来配置版本、SQLite schema 的兼容窗口和实际 migration SQL；当前只固定迁移框架和 [Storage 模块](backend-modules/storage.md) 的逻辑表职责。
+5. WebUI 正式启用版本的管理 API、认证/session、CSRF、TLS/bind 及历史统计保留契约。
 
 ## 18. 协议依据
 

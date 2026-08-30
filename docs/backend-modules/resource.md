@@ -1,0 +1,201 @@
+# Resource 模块设计
+
+> 状态：v1 方案已完成，代码未实现
+>
+> 更新日期：2026-08-30
+>
+> 目标代码：`src/resource/*`
+>
+> 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
+>
+> 相关方案：[Policy](policy.md) · [Runtime](runtime.md) · [Upstream](upstream.md)
+
+## 1. 职责
+
+Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化、编译、落盘、刷新和 per-resource snapshot。
+
+内部结构：
+
+| 文件 | 职责 |
+| --- | --- |
+| `hosts.rs` | JSON/hosts 格式、本地 RR 索引 |
+| `rules.rs` | JSON/Clash/dat 规则解析和 matcher |
+| `loader.rs` | const/file/remote、大小限制、更新与原子落盘 |
+| `snapshot.rs` | metadata、revision、registry 和 publish input |
+
+查询热路径只读取编译后的不可变索引，不访问文件、网络或 parser。
+
+## 2. ResourceSnapshot
+
+每个资源独立记录：
+
+- typed resource ID/name；
+- monotonically increasing epoch/revision；
+- content hash；
+- source fingerprint：file metadata、ETag/Last-Modified 等；
+- parser/compiler version；
+- fetched/compiled time；
+- source kind 与脱敏位置；
+- 是否使用已落盘 fallback；
+- stale/degraded 状态；
+- immutable compiled index。
+
+顶层 ResourceRegistrySnapshot 是资源名到 `Arc<ResourceSnapshot>` 的不可变 map。
+
+## 3. 加载流水线
+
+```text
+bounded read/fetch
+  → content hash
+  → format parse
+  → canonical normalize
+  → semantic validation
+  → compile immutable index
+  → persist raw+manifest atomically when needed
+  → publish candidate with epoch
+```
+
+解析和编译必须全部成功后才能落盘为“有效 snapshot”。下载了一半或只通过语法解析的内容不能替换旧版本。
+
+## 4. Source
+
+### const
+
+直接读取 Config 已提供的字符串，仍执行大小、格式和语义校验。
+
+### file
+
+- 路径已由 Config 归一化；
+- 使用周期性 stat/content fingerprint，不依赖平台文件 watcher；
+- 文件变化后完整读取并编译；
+- 读取期间文件变化时丢弃并重试；
+- `auto_update=false` 只在 prepare 加载一次。
+
+### remote
+
+- 通过已绑定 ResourceFetcher/outbound 下载；
+- 使用 deadline、重定向上限、body 大小上限和 HTTPS 校验；
+- 可发送 `If-None-Match`/`If-Modified-Since`；
+- 304 只更新时间状态，不创建新 content revision；
+- response body 先写临时文件并计算 hash，再解析；
+- v1 没有 expected checksum 配置，不把内部 hash 宣称为来源真实性校验。
+
+## 5. Hosts 格式
+
+v1 本地回答支持 A、AAAA 和 CNAME：
+
+- JSON 可为单值或数组，并尊重显式 `enable=false`；
+- hosts 行格式接受 `IP name...`，同一 owner 的 A/AAAA 合并；
+- `*.example.com` 只匹配子域，不匹配 apex；
+- exact 优先于 wildcard，wildcard 取最长后缀；
+- 同一 owner 的 CNAME 不能与 A/AAAA 并存；
+- CNAME target 也按 canonical domain 校验；
+- 重复相同 RR 去重，冲突类型报错；
+- TTL 使用模块实现常量，最终仍受 Policy TTL override。
+
+`upstreams[type=hosts]` 可复用 parser/compiler，但产出 connector；顶层 `hosts[]` 产出本地回答 matcher，两个资源命名空间不混用。
+
+## 6. Rule 格式
+
+### JSON
+
+支持明确字段：
+
+- `domain`：exact；
+- `domain_suffix`：apex 与所有子域；
+- `domain_regex`：受限 regex 列表或单值。
+
+未知字段拒绝。regex 在加载时编译，并限制数量、长度和总 program size。
+
+### Clash
+
+v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽略；未知 rule type、缺列或多余不可解释字段报带行号错误。
+
+### dat
+
+解析为 selector → domain matcher map。selector 必须是非空 ASCII 标识，加载时统一转为小写；大小写归一化后重复的 selector 报错。`geosite:cn` 先解析大小写敏感的资源名 `geosite`，再查 canonical selector `cn`。selector 不存在时 prepare/refresh 失败，不返回空 matcher。
+
+## 7. Matcher
+
+编译索引：
+
+- exact hash set；
+- reversed-label suffix trie；
+- wildcard suffix trie；
+- 预编译 regex set；
+- dat selector map。
+
+匹配优先级由 Policy 固定。matcher 无内部 mutable cache，保证 snapshot 可跨线程共享。
+
+## 8. 首次启动与 fallback
+
+所有配置资源在 bind 前必须有有效 snapshot：
+
+1. const/file 直接加载；
+2. remote 先检查兼容且已校验的落盘 snapshot；
+3. 尝试本次远程获取；
+4. 获取成功使用新内容；
+5. 获取失败但旧 snapshot 有效时使用旧内容并标记 fallback/degraded；
+6. 两者都不可用则 prepare 失败。
+
+落盘 manifest 包含 hash、parser version、source fingerprint 和成功时间；版本不兼容时不使用。
+
+## 9. 刷新与发布
+
+每个资源 single-flight：
+
+- scheduler 分配新 epoch；
+- 下载/读取可并发；
+- 编译成功后提交 `PublishResource(resource, epoch, snapshot)`；
+- epoch 旧于当前时丢弃 stale result；
+- Runtime coordinator 基于最新 ActiveRuntime 合并并 CAS；
+- 成功发布只替换该资源；
+- 不触发全局 cache clear。
+
+失败退避指数增长并封顶 5 分钟。连续三次计划刷新失败或超过 `3 × update_interval` 无成功时标记 stale，但继续使用旧 snapshot。
+
+## 10. 原子落盘
+
+remote 有效内容与 manifest：
+
+1. 写同目录临时文件；
+2. flush/fsync；
+3. 写 manifest 临时文件；
+4. 原子 rename 内容；
+5. 原子 rename manifest；
+6. fsync 目录；
+7. 清理旧临时文件。
+
+恢复时只有 content hash 与 manifest 一致的 pair 才可使用。
+
+## 11. 安全与观测
+
+- URL 只记录 scheme/host 的脱敏摘要，不记录 credential/query；
+- 资源内容、域名清单和 regex 原文不进入普通日志；
+- parser error 可记录行号、字段路径和短截断 token；
+- remote body、压缩解码和 selector 数量均有上限；
+- 不跟随非 HTTP(S) scheme，不把 file URL 当远程资源。
+
+## 12. 测试
+
+- hosts JSON/line、A/AAAA/CNAME、wildcard/exact；
+- JSON/Clash/dat rule 和 selector；
+- canonical domain、重复、冲突和 regex 限制；
+- const/file/remote 首次加载；
+- ETag/304、body limit、重定向、代理 failure；
+- fallback manifest/hash/version；
+- 单资源刷新失败保留旧版本；
+- epoch 乱序、并发不同资源 CAS 不丢更新；
+- 原子落盘中断恢复；
+- 刷新不触发全局 cache invalidation。
+
+## 13. 实现检查清单
+
+- [ ] 实现 hosts/rule parser；
+- [ ] 实现 canonical matcher/index；
+- [ ] 实现 const/file/remote loader；
+- [ ] 实现 snapshot manifest 与原子落盘；
+- [ ] 实现 refresh/single-flight/epoch publish；
+- [ ] 完成解析、安全、恢复和并发测试。
+
+当前实现进度：**0%**。
