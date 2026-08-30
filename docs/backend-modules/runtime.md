@@ -4,7 +4,7 @@
 >
 > 更新日期：2026-08-30
 >
-> 目标代码：`src/runtime/*`
+> 目标代码：`backend/src/runtime/*`
 >
 > 上位设计：[后端架构](../backend-architecture.md) · [开发计划](../backend-development-plan.md)
 

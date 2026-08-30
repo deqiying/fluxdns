@@ -1,10 +1,10 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，阶段 1 骨架已实现
 >
 > 更新日期：2026-08-30
 >
-> 目标代码：`src/main.rs`、`src/app.rs`
+> 目标代码：`backend/src/main.rs`、`backend/src/app.rs`
 >
 > 上位设计：[后端架构](../backend-architecture.md) · [开发计划](../backend-development-plan.md)
 
@@ -121,11 +121,14 @@ Application 将内部错误转换为：
 
 ## 8. 实现检查清单
 
-- [ ] 创建 `main.rs` 与 `app.rs`；
-- [ ] 建立进程级错误与退出码映射；
-- [ ] 接入 bootstrap/final telemetry 两阶段初始化；
+- [x] 创建 `main.rs` 与 `app.rs`；
+- [x] 建立进程级错误与退出码映射；
+- [x] 接入 bootstrap telemetry 初始化；
+- [ ] 接入读取配置后的 final telemetry；
 - [ ] 接入 Runtime prepare、activate、wait、shutdown；
 - [ ] 完成信号与退出测试；
-- [ ] 更新本模块实现进度。
+- [x] 记录阶段 1 验证证据并更新实现进度。
 
-当前实现进度：**0%**。
+阶段 1 证据：`app::tests::exit_codes_are_stable` 覆盖 `0/2/3/4/5` 稳定退出码，进程骨架可运行且不会加载配置或绑定端口；全量测试与 Clippy 门禁通过，具体命令和结果见开发计划阶段 1 验收证据。
+
+当前实现进度：**20%**。

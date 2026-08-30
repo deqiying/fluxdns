@@ -4,7 +4,7 @@
 >
 > 更新日期：2026-08-30
 >
-> 目标代码：`src/config/*`
+> 目标代码：`backend/src/config/*`
 >
 > 字段唯一契约：[配置字段参考](../configuration-reference.md)
 >

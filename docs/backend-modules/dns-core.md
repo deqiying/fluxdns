@@ -1,10 +1,10 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，阶段 1 核心契约已实现
 >
 > 更新日期：2026-08-30
 >
-> 目标代码：`src/dns/*`
+> 目标代码：`backend/src/dns/*`
 >
 > 上位设计：[后端架构](../backend-architecture.md) · [开发计划](../backend-development-plan.md)
 >
@@ -173,11 +173,14 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 
 ## 13. 实现检查清单
 
-- [ ] 定义 canonical query/response 与验证器；
-- [ ] 定义 RequestContext 和 resolution result；
+- [x] 定义 canonical query/response 与验证器；
+- [x] 定义 RequestContext、deadline 与 cancellation；
+- [ ] 定义完整 resolution result；
 - [ ] 实现 transport 无关 handler；
 - [ ] 接入 Policy、Cache、Upstream ports；
 - [ ] 实现 ECS、TTL 和错误映射；
 - [ ] 完成跨 transport contract tests。
 
-当前实现进度：**0%**。
+阶段 1 证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的上游响应 ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先以及 DNS/ECS Debug 脱敏。
+
+当前实现进度：**20%**。

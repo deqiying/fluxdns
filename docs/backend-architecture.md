@@ -1,6 +1,6 @@
 # FluxDNS Rust 后端架构设计
 
-> 状态：v1 技术方案（待实现）
+> 状态：v1 技术方案（实现中，阶段 1 已完成）
 >
 > 日期：2026-08-30
 >
@@ -23,7 +23,7 @@ v1 采用单进程、单 Rust binary、异步事件驱动架构：
 - DNS 核心只依赖 canonical message、request context 和协议无关的 port，不直接依赖 UDP/TCP/DoH、HTTP client、SQLite 或 Moka；
 - WebUI 配置和 Web 模块边界保留，但 v1 不实现管理 UI、管理 API 或认证服务。
 
-v1 不建立多 crate workspace。先使用一个 binary crate 和清晰模块边界，等出现可独立复用或需要独立发布的组件后再拆 crate。
+仓库固定 `backend/` 与 `frontend/` 两个相互独立的代码主目录；根目录只承载仓库级文档、配置示例和工具配置，不作为任一端的工程目录。`backend/` 当前使用一个 binary crate，`frontend/` 当前仅保留目录边界，尚未初始化具体技术栈。v1 后端不建立多 crate workspace；等出现可独立复用或需要独立发布的组件后再拆 crate。
 
 ## 2. 技术栈
 
@@ -45,7 +45,7 @@ v1 不建立多 crate workspace。先使用一个 binary crate 和清晰模块�
 
 直接依赖只启用需要的 feature；`reqwest` 必须禁用默认 feature，并在 `ClientBuilder` 中显式调用 `.no_proxy()`，避免 DNS 服务意外继承 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`。v1 不采用 `Figment` 作为主解析器：当前配置是单 YAML、严格 schema，层级继承和 SecretRef 需要显式业务语义；未来若增加环境或 profile 覆盖，应放在严格 DTO 之后的受控层。
 
-`mise.toml` 将 Rust `1.98.0` 作为工具链基线。下表只表示 2026-08-30 的兼容主版本检索基线，不把 docs.rs 的 latest 当作永久锁定；开始实现时应在 `Cargo.toml`/`Cargo.lock` 固定精确版本，并通过 `cargo check`、集成测试和 MSRV CI 重新验证。
+`mise.toml` 将 Rust `1.98.0` 作为工具链基线。下表只表示 2026-08-30 的兼容主版本检索基线，不把 docs.rs 的 latest 当作永久锁定；实现时在 `backend/Cargo.toml`/`backend/Cargo.lock` 固定精确版本，并通过带 `--manifest-path backend/Cargo.toml` 的 Cargo 检查、集成测试和 MSRV CI 重新验证。
 
 | 组件 | 检索基线 | 官方参考 |
 | --- | --- | --- |
@@ -61,7 +61,7 @@ v1 不建立多 crate workspace。先使用一个 binary crate 和清晰模块�
 ## 3. 模块边界
 
 ```text
-src/
+backend/src/
 ├── main.rs                 # 进程入口、退出码
 ├── app.rs                  # 启动编排、进程信号、错误和退出码
 ├── config/
@@ -123,7 +123,7 @@ src/
 
 各顶层模块的职责、内部流程、并发/失败语义和验收项见 [后端开发计划](backend-development-plan.md) 中的模块索引。`app.rs` 只负责进程级装配，task 监督、listener 生命周期和 drain 统一由 `runtime/*` 持有。
 
-业务 SQLite 的 SQLx migration 存放在仓库级 `migrations/*`，由 `storage/sqlite.rs` 在 prepare 阶段嵌入并执行；缓存持久化使用独立 schema，不复用该目录中的业务表。
+业务 SQLite 的 SQLx migration 存放在 `backend/migrations/*`，由 `backend/src/storage/sqlite.rs` 在 prepare 阶段嵌入并执行；缓存持久化使用独立 schema，不复用该目录中的业务表。
 
 ### 3.1 配置字段到运行时组件映射
 

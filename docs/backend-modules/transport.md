@@ -4,7 +4,7 @@
 >
 > 更新日期：2026-08-30
 >
-> 目标代码：`src/transport/*`
+> 目标代码：`backend/src/transport/*`
 >
 > 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
 >

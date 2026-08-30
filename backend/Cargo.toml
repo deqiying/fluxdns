@@ -1,0 +1,15 @@
+[package]
+name = "fluxdns"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.98"
+description = "A policy-driven DNS server"
+publish = false
+
+[dependencies]
+hickory-proto = { version = "=0.26.1", default-features = false, features = ["std"] }
+thiserror = "=2.0.20"
+tokio = { version = "=1.53.1", default-features = false, features = ["macros", "rt-multi-thread"] }
+tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
+tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt"] }

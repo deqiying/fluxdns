@@ -1,10 +1,10 @@
 # Ports 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，阶段 1 公共契约已实现
 >
 > 更新日期：2026-08-30
 >
-> 目标代码：`src/ports/*`
+> 目标代码：`backend/src/ports/*`
 >
 > 上位设计：[后端架构](../backend-architecture.md) · [开发计划](../backend-development-plan.md)
 
@@ -157,11 +157,13 @@ Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
 
 ## 11. 实现检查清单
 
-- [ ] 定义 canonical port types 与稳定错误分类；
-- [ ] 定义 inbound/response correlation 契约；
-- [ ] 定义 exchange、cache、storage、telemetry 和 effects port；
-- [ ] 建立 deadline/cancellation 统一辅助函数；
-- [ ] 建立 fake 和 contract test kit；
-- [ ] 检查公共接口未泄漏 adapter crate 类型。
+- [x] 定义 canonical port types 与稳定错误分类；
+- [x] 定义 inbound/response correlation 契约；
+- [x] 定义 exchange、cache、storage、telemetry 和 effects port；
+- [x] 建立 deadline/cancellation 统一辅助函数；
+- [x] 建立 fake 和 contract test kit；
+- [x] 检查公共接口未泄漏 adapter crate 类型。
 
-当前实现进度：**0%**。
+阶段 1 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。
+
+当前实现进度：**20%**。

@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，代码实现未开始
+> 状态：v1 模块方案已完成，阶段 1 已完成
 >
 > 更新日期：2026-08-30
 >
@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-当前仓库只有配置草案和设计文档，尚无 `Cargo.toml`、`src/`、`tests/` 或数据库 migration，因此必须把“方案完成”与“实现完成”分开统计。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约和 46 个单元测试，尚无配置运行时、真实 adapter、listener、数据库 migration 或可提供 DNS 服务的运行链路。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **0%** | 没有可编译源码、测试或运行证据 |
-| v1 交付总进度 | **10%** | 设计阶段固定占 10%，实现与验收占 90%；当前只完成设计阶段 |
+| 后端代码实现进度 | **5%** | Application、Ports、DNS Core、Observability 均达到 20% 骨架与公共契约里程碑 |
+| v1 交付总进度 | **14.5%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 5%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -55,23 +55,23 @@ v1 交付范围：
 
 | 模块 | 目标代码 | 方案文档 | 设计状态 | 实现状态 | 实现进度 | 权重 |
 | --- | --- | --- | --- | --- | ---: | ---: |
-| Application | `main.rs`、`app.rs` | [application.md](backend-modules/application.md) | 已完成 | 未开始 | 0% | 4% |
-| Ports | `ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 未开始 | 0% | 8% |
-| Config | `config/*` | [config.md](backend-modules/config.md) | 已完成 | 未开始 | 0% | 10% |
-| Runtime | `runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 未开始 | 0% | 12% |
-| Transport | `transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 未开始 | 0% | 11% |
-| DNS Core | `dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 未开始 | 0% | 10% |
-| Policy | `policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 未开始 | 0% | 8% |
-| Upstream | `upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 未开始 | 0% | 10% |
-| Cache | `cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 未开始 | 0% | 9% |
-| Resource | `resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 未开始 | 0% | 7% |
-| Storage | `storage/*`、`migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 未开始 | 0% | 8% |
-| Observability | `observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 未开始 | 0% | 3% |
+| Application | `backend/src/main.rs`、`backend/src/app.rs` | [application.md](backend-modules/application.md) | 已完成 | 实现中 | 20% | 4% |
+| Ports | `backend/src/ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 实现中 | 20% | 8% |
+| Config | `backend/src/config/*` | [config.md](backend-modules/config.md) | 已完成 | 未开始 | 0% | 10% |
+| Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 未开始 | 0% | 12% |
+| Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 未开始 | 0% | 11% |
+| DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 20% | 10% |
+| Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 未开始 | 0% | 8% |
+| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 未开始 | 0% | 10% |
+| Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 未开始 | 0% | 9% |
+| Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 未开始 | 0% | 7% |
+| Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 未开始 | 0% | 8% |
+| Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 20% | 3% |
 
 后端代码实现总进度：
 
 ```text
-Σ(模块权重 × 模块实现进度) = 0%
+4% × 20% + 8% × 20% + 10% × 20% + 3% × 20% = 5%
 ```
 
 ## 4. 进度判定规则
@@ -125,12 +125,19 @@ transport / upstream / storage / observability adapters
 
 ### 阶段 1：项目骨架与核心契约
 
+状态：**已完成**
+
 涉及：Application、Ports、DNS Core、Observability。
 
-- 创建 binary crate、锁定依赖和 feature；
+- 在 `backend/` 创建 binary crate、锁定依赖和 feature；
 - 定义 canonical DNS message、request context、deadline/cancellation；
 - 建立 port、错误分类、测试 fake 和最小日志初始化；
-- 验收：`cargo check`、`cargo test`、`cargo clippy -- -D warnings` 通过。
+- 验收证据：
+  - `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过；
+  - `cargo check --manifest-path backend/Cargo.toml --locked`：通过；
+  - `cargo test --manifest-path backend/Cargo.toml --locked`：46 passed，0 failed；
+  - `cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings`：通过；
+  - `cargo run --manifest-path backend/Cargo.toml --locked`：输出一条名为 `scaffold_ready` 的 bootstrap INFO 日志并正常退出，不加载配置、不绑定 listener。
 
 ### 阶段 2：配置系统
 
@@ -258,7 +265,7 @@ transport / upstream / storage / observability adapters
 5. 数据库、详情日志或缓存持久化故障不阻塞 DNS 数据面；启动必需数据库失败会拒绝启动。
 6. 日志和 metrics 不暴露 SecretRef、完整 client ID、原始 IP、query string 或 raw DNS wire。
 7. 缓存、上游组、资源刷新和统计具备确定性并发测试。
-8. `cargo fmt --check`、`cargo test`、`cargo clippy -- -D warnings` 和 `git diff --check` 通过。
+8. `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`、`cargo test --manifest-path backend/Cargo.toml --locked`、`cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings` 和 `git diff --check` 通过。
 
 ## 8. 计划维护方式
 

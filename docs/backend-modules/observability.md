@@ -1,10 +1,10 @@
 # Observability 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，阶段 1 观测契约已实现
 >
 > 更新日期：2026-08-30
 >
-> 目标代码：`src/observability.rs`
+> 目标代码：`backend/src/observability.rs`
 >
 > 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
 >
@@ -186,11 +186,14 @@ shutdown 在 deadline 内：
 
 ## 13. 实现检查清单
 
-- [ ] 定义 typed event/metric/health types；
-- [ ] 实现 bootstrap/final tracing；
-- [ ] 实现 redaction 和低基数校验；
+- [x] 定义 typed event/metric/health types；
+- [x] 实现 bootstrap tracing；
+- [ ] 实现读取配置后的 final tracing；
+- [x] 实现 redaction 和低基数校验；
 - [ ] 实现有界 writer/backpressure；
 - [ ] 实现 health registry 和 flush；
 - [ ] 完成 schema、安全和故障测试。
 
-当前实现进度：**0%**。
+阶段 1 证据：bootstrap subscriber、日志级别解析、`Sensitive<T>`、DNS/resource/resolve event Debug 脱敏、metric label 类型匹配/去重/数量上限与敏感字段拒绝测试均通过。
+
+当前实现进度：**20%**。
