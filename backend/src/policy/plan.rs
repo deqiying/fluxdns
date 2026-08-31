@@ -4,11 +4,15 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use crate::config::model::{HostsFormat, RuleSetFormat};
 use crate::config::resolve::{
-    ConfigId, ResolvedClient, ResolvedConfig, ResolvedEcs, ResolvedGlobalCache, ResolvedStrategy,
-    ResolvedTtlOverride,
+    ConfigId, ResolvedClient, ResolvedConfig, ResolvedEcs, ResolvedGlobalCache,
+    ResolvedHostsResource, ResolvedRuleSet, ResolvedStrategy, ResolvedTtlOverride,
 };
 use crate::ports::cache::{CacheNamespace, CacheStrategyId, ClientCacheDigest};
+use crate::resource::{
+    CanonicalDomain, HostsIndex, HostsParseError, RuleIndex, RuleMatch, RuleParseError,
+};
 
 use super::{
     ClientIndex, ClientMatch, ClientRuleBuildError, RouteBuildError, RouteIndex, RouteMatch,
@@ -19,7 +23,33 @@ pub enum PolicyBuildError {
     Client(ClientRuleBuildError),
     Routes(RouteBuildError),
     DuplicateClient(ConfigId),
+    DuplicateHostsResource(ConfigId),
+    DuplicateRuleSet(ConfigId),
+    HostsParse {
+        resource: ConfigId,
+        source: HostsParseError,
+    },
+    RuleSetParse {
+        resource: ConfigId,
+        source: RuleParseError,
+    },
+    UnsupportedHostsResource {
+        resource: ConfigId,
+        kind: &'static str,
+    },
+    UnsupportedRuleSet {
+        resource: ConfigId,
+        kind: &'static str,
+    },
+    UnsupportedRuleSetSelector {
+        resource: ConfigId,
+        selector: String,
+    },
 }
+type ResourceIndexes = (
+    BTreeMap<ConfigId, Arc<HostsIndex>>,
+    BTreeMap<ConfigId, Arc<RuleIndex>>,
+);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PolicyError {
@@ -32,6 +62,12 @@ pub enum PolicyError {
         strategy: ConfigId,
     },
     CacheStrategyIdInvalid(ConfigId),
+    HostsResourceNotFound(ConfigId),
+    RuleSetNotFound(ConfigId),
+    UnsupportedRuleSetSelector {
+        resource: ConfigId,
+        selector: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +77,28 @@ pub struct PolicyRequest<'a> {
     pub client_id: Option<&'a str>,
     pub client_addr: Option<IpAddr>,
     pub client_digest: Option<ClientCacheDigest>,
+    pub qname: Option<&'a CanonicalDomain>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MatchedRuleKind {
+    ListenerHosts {
+        resource: ConfigId,
+    },
+    Hosts {
+        resource: ConfigId,
+    },
+    RuleSet {
+        resource: ConfigId,
+        matcher: RuleMatch,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatchedRule {
+    pub strategy: ConfigId,
+    pub ordinal: usize,
+    pub kind: MatchedRuleKind,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -75,6 +133,8 @@ pub struct ResolutionPlan {
     pub cache: CacheDecision,
     pub ttl_override: ResolvedTtlOverride,
     pub edns_client_subnet: ResolvedEcs,
+    pub hosts: Option<ConfigId>,
+    pub matched_rule: Option<MatchedRule>,
 }
 
 #[derive(Clone, Debug)]
@@ -83,6 +143,8 @@ pub struct PolicyIndex {
     clients: ClientIndex,
     client_configs: BTreeMap<ConfigId, Arc<ResolvedClient>>,
     global_cache: ResolvedGlobalCache,
+    hosts: BTreeMap<ConfigId, Arc<HostsIndex>>,
+    rule_sets: BTreeMap<ConfigId, Arc<RuleIndex>>,
 }
 
 impl PolicyIndex {
@@ -91,6 +153,24 @@ impl PolicyIndex {
         strategies: impl IntoIterator<Item = ResolvedStrategy>,
         clients: impl IntoIterator<Item = ResolvedClient>,
         global_cache: ResolvedGlobalCache,
+    ) -> Result<Self, PolicyBuildError> {
+        Self::build_with_resources(
+            listeners,
+            strategies,
+            clients,
+            global_cache,
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+    }
+
+    fn build_with_resources(
+        listeners: impl IntoIterator<Item = crate::config::resolve::ResolvedListener>,
+        strategies: impl IntoIterator<Item = ResolvedStrategy>,
+        clients: impl IntoIterator<Item = ResolvedClient>,
+        global_cache: ResolvedGlobalCache,
+        hosts: BTreeMap<ConfigId, Arc<HostsIndex>>,
+        rule_sets: BTreeMap<ConfigId, Arc<RuleIndex>>,
     ) -> Result<Self, PolicyBuildError> {
         let routes = RouteIndex::build(listeners, strategies).map_err(PolicyBuildError::Routes)?;
         let clients = clients.into_iter().collect::<Vec<_>>();
@@ -111,15 +191,20 @@ impl PolicyIndex {
             clients,
             client_configs,
             global_cache,
+            hosts,
+            rule_sets,
         })
     }
 
     pub fn from_config(config: &ResolvedConfig) -> Result<Self, PolicyBuildError> {
-        Self::build(
+        let (hosts, rule_sets) = compile_resources(&config.hosts, &config.rule_sets)?;
+        Self::build_with_resources(
             config.listeners.clone(),
             config.strategies.clone(),
             config.clients.clone(),
             config.dns.cache.clone(),
+            hosts,
+            rule_sets,
         )
     }
 
@@ -159,7 +244,7 @@ impl PolicyIndex {
                 }
             })?
         } else {
-            routing.strategy
+            routing.strategy.clone()
         };
         let cache = self.select_cache(client_config, strategy.as_ref(), request.client_digest)?;
         let ttl_override = client_config
@@ -168,16 +253,121 @@ impl PolicyIndex {
         let edns_client_subnet = client_config
             .map(|client| client.edns_client_subnet.clone())
             .unwrap_or_else(|| strategy.edns_client_subnet.clone());
+        let (hosts, matched_rule, upstream, edns_client_subnet) = self.evaluate_rules(
+            &routing,
+            strategy.as_ref(),
+            request.qname,
+            edns_client_subnet,
+        )?;
         Ok(ResolutionPlan {
             listener_id: routing.listener_id,
             route: routing.route,
             client,
-            upstream: strategy.default_upstream.clone(),
+            upstream,
             strategy,
             cache,
             ttl_override,
             edns_client_subnet,
+            hosts,
+            matched_rule,
         })
+    }
+
+    fn evaluate_rules(
+        &self,
+        routing: &super::RouteSelection,
+        strategy: &ResolvedStrategy,
+        qname: Option<&CanonicalDomain>,
+        inherited_ecs: ResolvedEcs,
+    ) -> Result<(Option<ConfigId>, Option<MatchedRule>, ConfigId, ResolvedEcs), PolicyError> {
+        let default = || {
+            (
+                None,
+                None,
+                strategy.default_upstream.clone(),
+                inherited_ecs.clone(),
+            )
+        };
+        let Some(qname) = qname else {
+            return Ok(default());
+        };
+
+        if let Some(resource) = &routing.listener_hosts {
+            let index = self
+                .hosts
+                .get(resource)
+                .ok_or_else(|| PolicyError::HostsResourceNotFound(resource.clone()))?;
+            if index.lookup(qname).is_some() {
+                return Ok((
+                    Some(resource.clone()),
+                    Some(MatchedRule {
+                        strategy: strategy.id.clone(),
+                        ordinal: usize::MAX,
+                        kind: MatchedRuleKind::ListenerHosts {
+                            resource: resource.clone(),
+                        },
+                    }),
+                    strategy.default_upstream.clone(),
+                    inherited_ecs.clone(),
+                ));
+            }
+        }
+
+        for (ordinal, rule) in strategy.rules.iter().enumerate() {
+            if let Some(resource) = &rule.hosts {
+                let index = self
+                    .hosts
+                    .get(resource)
+                    .ok_or_else(|| PolicyError::HostsResourceNotFound(resource.clone()))?;
+                if index.lookup(qname).is_some() {
+                    return Ok((
+                        Some(resource.clone()),
+                        Some(MatchedRule {
+                            strategy: strategy.id.clone(),
+                            ordinal,
+                            kind: MatchedRuleKind::Hosts {
+                                resource: resource.clone(),
+                            },
+                        }),
+                        strategy.default_upstream.clone(),
+                        rule.edns_client_subnet.clone(),
+                    ));
+                }
+                continue;
+            }
+
+            let Some(rule_set) = &rule.rule_set else {
+                continue;
+            };
+            if let Some(selector) = &rule_set.selector {
+                return Err(PolicyError::UnsupportedRuleSetSelector {
+                    resource: rule_set.resource.clone(),
+                    selector: selector.clone(),
+                });
+            }
+            let index = self
+                .rule_sets
+                .get(&rule_set.resource)
+                .ok_or_else(|| PolicyError::RuleSetNotFound(rule_set.resource.clone()))?;
+            if let Some(matcher) = index.matches(qname) {
+                return Ok((
+                    None,
+                    Some(MatchedRule {
+                        strategy: strategy.id.clone(),
+                        ordinal,
+                        kind: MatchedRuleKind::RuleSet {
+                            resource: rule_set.resource.clone(),
+                            matcher,
+                        },
+                    }),
+                    rule.upstream
+                        .clone()
+                        .unwrap_or_else(|| strategy.default_upstream.clone()),
+                    rule.edns_client_subnet.clone(),
+                ));
+            }
+        }
+        Ok(default())
     }
 
     fn select_cache(
@@ -222,6 +412,69 @@ impl PolicyIndex {
     }
 }
 
+fn compile_resources(
+    hosts: &[ResolvedHostsResource],
+    rule_sets: &[ResolvedRuleSet],
+) -> Result<ResourceIndexes, PolicyBuildError> {
+    let mut host_indexes = BTreeMap::new();
+    for resource in hosts {
+        let (id, format, input) = match resource {
+            ResolvedHostsResource::Const { id, format, hosts } => (id, *format, hosts),
+            ResolvedHostsResource::File { id, .. } => {
+                return Err(PolicyBuildError::UnsupportedHostsResource {
+                    resource: id.clone(),
+                    kind: "file",
+                });
+            }
+        };
+        let index = match format {
+            HostsFormat::Hosts => HostsIndex::parse_hosts(input),
+            HostsFormat::Json => HostsIndex::parse_json(input),
+        }
+        .map_err(|source| PolicyBuildError::HostsParse {
+            resource: id.clone(),
+            source,
+        })?;
+        if host_indexes.insert(id.clone(), Arc::new(index)).is_some() {
+            return Err(PolicyBuildError::DuplicateHostsResource(id.clone()));
+        }
+    }
+
+    let mut rule_indexes = BTreeMap::new();
+    for resource in rule_sets {
+        let (id, format, input) = match resource {
+            ResolvedRuleSet::Const { id, format, rule } => (id, *format, rule),
+            ResolvedRuleSet::File { id, .. } => {
+                return Err(PolicyBuildError::UnsupportedRuleSet {
+                    resource: id.clone(),
+                    kind: "file",
+                });
+            }
+            ResolvedRuleSet::Remote { id, .. } => {
+                return Err(PolicyBuildError::UnsupportedRuleSet {
+                    resource: id.clone(),
+                    kind: "remote",
+                });
+            }
+        };
+        if format == RuleSetFormat::Dat {
+            return Err(PolicyBuildError::UnsupportedRuleSet {
+                resource: id.clone(),
+                kind: "dat",
+            });
+        }
+        let index =
+            RuleIndex::parse(input, format).map_err(|source| PolicyBuildError::RuleSetParse {
+                resource: id.clone(),
+                source,
+            })?;
+        if rule_indexes.insert(id.clone(), Arc::new(index)).is_some() {
+            return Err(PolicyBuildError::DuplicateRuleSet(id.clone()));
+        }
+    }
+    Ok((host_indexes, rule_indexes))
+}
+
 fn strategy_namespace(strategy: &ResolvedStrategy) -> Result<CacheStrategyId, PolicyError> {
     CacheStrategyId::from_validated_config_id(strategy.id.as_str())
         .map_err(|_| PolicyError::CacheStrategyIdInvalid(strategy.id.clone()))
@@ -231,18 +484,21 @@ fn strategy_namespace(strategy: &ResolvedStrategy) -> Result<CacheStrategyId, Po
 mod tests {
     use std::net::IpAddr;
     use std::path::PathBuf;
+    use std::sync::Arc;
     use std::time::Duration;
 
     use ipnet::IpNet;
 
-    use crate::config::model::EcsMode;
+    use crate::config::model::{EcsMode, HostsFormat};
     use crate::config::resolve::{
         ConfigId, ResolvedCacheOverride, ResolvedClient, ResolvedEcs, ResolvedGlobalCache,
-        ResolvedListener, ResolvedOptimistic, ResolvedStrategy, ResolvedTtlOverride, ValueSource,
+        ResolvedHostsResource, ResolvedListener, ResolvedOptimistic, ResolvedRuleSetRef,
+        ResolvedStrategy, ResolvedStrategyRule, ResolvedTtlOverride, ValueSource,
     };
     use crate::ports::cache::ClientCacheDigest;
+    use crate::resource::{CanonicalDomain, HostsIndex, RuleIndex};
 
-    use super::{CacheDecision, PolicyIndex, PolicyRequest};
+    use super::{CacheDecision, MatchedRuleKind, PolicyError, PolicyIndex, PolicyRequest};
 
     fn ecs() -> ResolvedEcs {
         ResolvedEcs {
@@ -310,6 +566,33 @@ mod tests {
         }
     }
 
+    fn strategy_with_rules(name: &str, rules: Vec<ResolvedStrategyRule>) -> ResolvedStrategy {
+        ResolvedStrategy {
+            id: ConfigId::new(name).unwrap(),
+            rules,
+            default_upstream: ConfigId::new("upstream").unwrap(),
+            cache: None,
+            ttl_override: ttl(),
+            edns_client_subnet: ecs(),
+        }
+    }
+
+    fn strategy_rule(
+        hosts: Option<&str>,
+        rule_set: Option<&str>,
+        upstream: Option<&str>,
+    ) -> ResolvedStrategyRule {
+        ResolvedStrategyRule {
+            hosts: hosts.map(|value| ConfigId::new(value).unwrap()),
+            rule_set: rule_set.map(|value| ResolvedRuleSetRef {
+                resource: ConfigId::new(value).unwrap(),
+                selector: None,
+            }),
+            upstream: upstream.map(|value| ConfigId::new(value).unwrap()),
+            edns_client_subnet: ecs(),
+        }
+    }
+
     fn global(enabled: bool) -> ResolvedGlobalCache {
         ResolvedGlobalCache {
             enabled,
@@ -342,6 +625,7 @@ mod tests {
                 client_id: Some("alice"),
                 client_addr: Some(IpAddr::from([192, 0, 2, 10])),
                 client_digest: Some(ClientCacheDigest::from_digest([0x11; 32])),
+                qname: None,
             })
             .unwrap();
         assert_eq!(plan.strategy.id.as_str(), "inner");
@@ -371,6 +655,7 @@ mod tests {
                 client_id: None,
                 client_addr: None,
                 client_digest: None,
+                qname: None,
             })
             .unwrap();
         assert_eq!(plan.cache, CacheDecision::Disabled);
@@ -393,8 +678,159 @@ mod tests {
                 client_id: Some("alice"),
                 client_addr: None,
                 client_digest: None,
+                qname: None,
             })
             .unwrap();
         assert_eq!(plan.cache, CacheDecision::Disabled);
+    }
+
+    #[test]
+    fn listener_hosts_precede_ordered_strategy_resource_rules() {
+        let listener_hosts = ConfigId::new("listener-hosts").unwrap();
+        let strategy_hosts = ConfigId::new("strategy-hosts").unwrap();
+        let rule_set = ConfigId::new("rules").unwrap();
+        let mut listener = listener();
+        if let ResolvedListener::Udp { hosts, .. } = &mut listener {
+            *hosts = Some(listener_hosts.clone());
+        }
+
+        let strategy = strategy_with_rules(
+            "default",
+            vec![
+                strategy_rule(Some(strategy_hosts.as_str()), None, None),
+                strategy_rule(None, Some(rule_set.as_str()), Some("blocked")),
+            ],
+        );
+        let mut hosts = std::collections::BTreeMap::new();
+        hosts.insert(
+            listener_hosts.clone(),
+            Arc::new(HostsIndex::parse_hosts("192.0.2.1 listener.example\n").unwrap()),
+        );
+        hosts.insert(
+            strategy_hosts.clone(),
+            Arc::new(HostsIndex::parse_hosts("192.0.2.2 shared.example\n").unwrap()),
+        );
+        let mut rule_sets = std::collections::BTreeMap::new();
+        rule_sets.insert(
+            rule_set.clone(),
+            Arc::new(
+                RuleIndex::parse_json(
+                    r#"{"domain":["listener.example","shared.example","rule.example"]}"#,
+                )
+                .unwrap(),
+            ),
+        );
+        let index = PolicyIndex::build_with_resources(
+            [listener],
+            [strategy],
+            [],
+            global(false),
+            hosts,
+            rule_sets,
+        )
+        .unwrap();
+        let listener_id = ConfigId::new("lan").unwrap();
+
+        let listener_name = CanonicalDomain::parse("listener.example").unwrap();
+        let listener_plan = index
+            .evaluate(PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: None,
+                client_digest: None,
+                qname: Some(&listener_name),
+            })
+            .unwrap();
+        assert_eq!(listener_plan.hosts, Some(listener_hosts.clone()));
+        assert_eq!(listener_plan.upstream.as_str(), "upstream");
+        assert!(matches!(
+            listener_plan.matched_rule.as_ref().map(|matched| &matched.kind),
+            Some(MatchedRuleKind::ListenerHosts { resource }) if resource == &listener_hosts
+        ));
+
+        let shared_name = CanonicalDomain::parse("shared.example").unwrap();
+        let shared_plan = index
+            .evaluate(PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: None,
+                client_digest: None,
+                qname: Some(&shared_name),
+            })
+            .unwrap();
+        assert_eq!(shared_plan.hosts, Some(strategy_hosts));
+        assert_eq!(shared_plan.matched_rule.as_ref().unwrap().ordinal, 0);
+
+        let rule_name = CanonicalDomain::parse("rule.example").unwrap();
+        let rule_plan = index
+            .evaluate(PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: None,
+                client_digest: None,
+                qname: Some(&rule_name),
+            })
+            .unwrap();
+        assert_eq!(rule_plan.upstream.as_str(), "blocked");
+        assert!(matches!(
+            rule_plan.matched_rule.as_ref().map(|matched| &matched.kind),
+            Some(MatchedRuleKind::RuleSet { resource, .. }) if resource == &rule_set
+        ));
+    }
+
+    #[test]
+    fn missing_resource_is_reported_at_evaluation_boundary() {
+        let missing = ConfigId::new("missing-rules").unwrap();
+        let strategy = strategy_with_rules(
+            "default",
+            vec![ResolvedStrategyRule {
+                rule_set: Some(ResolvedRuleSetRef {
+                    resource: missing.clone(),
+                    selector: None,
+                }),
+                hosts: None,
+                upstream: Some(ConfigId::new("blocked").unwrap()),
+                edns_client_subnet: ecs(),
+            }],
+        );
+        let index = PolicyIndex::build([listener()], [strategy], [], global(false)).unwrap();
+        let listener_id = ConfigId::new("lan").unwrap();
+        let qname = CanonicalDomain::parse("missing.example").unwrap();
+        let result = index.evaluate(PolicyRequest {
+            listener_id: &listener_id,
+            doh_path: None,
+            client_id: None,
+            client_addr: None,
+            client_digest: None,
+            qname: Some(&qname),
+        });
+
+        assert_eq!(result, Err(PolicyError::RuleSetNotFound(missing)));
+    }
+
+    #[test]
+    fn policy_rejects_unimplemented_file_resource_at_build_boundary() {
+        let resource = ConfigId::new("file-hosts").unwrap();
+        let result = super::compile_resources(
+            &[ResolvedHostsResource::File {
+                id: resource.clone(),
+                format: HostsFormat::Hosts,
+                path: PathBuf::from("hosts.txt"),
+                auto_update: false,
+                update_interval: None,
+            }],
+            &[],
+        );
+
+        assert_eq!(
+            result,
+            Err(super::PolicyBuildError::UnsupportedHostsResource {
+                resource,
+                kind: "file",
+            })
+        );
     }
 }
