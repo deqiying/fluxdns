@@ -7,6 +7,7 @@ description = "A policy-driven DNS server"
 publish = false
 
 [dependencies]
+arc-swap = "=1.9.1"
 hickory-proto = { version = "=0.26.1", default-features = false, features = ["std"] }
 ipnet = "=2.12.1"
 serde = { version = "=1.0.229", features = ["derive"] }

@@ -70,6 +70,13 @@ pub struct BoundCandidate {
 }
 
 impl BoundCandidate {
+    pub(crate) fn from_parts(prepared: PreparedRuntime, listeners: BoundListenerSet) -> Self {
+        Self {
+            prepared,
+            listeners,
+        }
+    }
+
     pub fn snapshot(&self) -> &RuntimeSnapshot {
         self.prepared.snapshot()
     }
@@ -200,6 +207,36 @@ fn socket_spec(entry: &BindEntry) -> SocketSpec {
         address: SocketAddr::new(entry.address, entry.port),
         reuse_port: false,
         v6_only: entry.v6_only,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_candidate(prepared: PreparedRuntime) -> BoundCandidate {
+    let entry = prepared
+        .bind_plan()
+        .entries
+        .first()
+        .cloned()
+        .expect("test candidate requires one bind entry");
+    let address = SocketAddr::new(entry.address, entry.port);
+    BoundCandidate::from_parts(
+        prepared,
+        BoundListenerSet::new(vec![BoundEndpoint {
+            entry,
+            socket: Box::new(TestActivatedSocket { address }),
+        }]),
+    )
+}
+
+#[cfg(test)]
+struct TestActivatedSocket {
+    address: SocketAddr,
+}
+
+#[cfg(test)]
+impl ActivatedSocket for TestActivatedSocket {
+    fn local_addr(&self) -> Result<SocketAddr, PortError> {
+        Ok(self.address)
     }
 }
 
