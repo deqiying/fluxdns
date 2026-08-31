@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn selects_hosts_core_from_supported_inline_resource() {
         let config = example_config();
-        let core = ConfiguredDnsCore::from_config(&config).unwrap();
+        let core = ConfiguredDnsCore::from_config(config.as_ref()).unwrap();
 
         assert!(core.has_local_hosts());
         assert_eq!(DEFAULT_LOCAL_TTL, 60);
@@ -111,7 +111,7 @@ mod tests {
             )
         });
 
-        let core = ConfiguredDnsCore::from_config(&config).unwrap();
+        let core = ConfiguredDnsCore::from_config(config).unwrap();
         assert!(!core.has_local_hosts());
     }
 }
