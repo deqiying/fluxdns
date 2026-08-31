@@ -2,8 +2,13 @@
 
 mod group;
 mod hosts;
+mod outcome;
 mod registry;
 
 pub use group::{GroupSelector, GroupSelectorError, SelectionLease};
 pub use hosts::{HostsExchange, HostsExchangeBuildError};
+pub use outcome::{
+    AttemptAssessment, AttemptClass, FallbackDecision, OutcomeError, UpstreamAttempt, aggregate,
+    assess, deduplicate_connector_order,
+};
 pub use registry::{RegistryError, UpstreamRegistry};
