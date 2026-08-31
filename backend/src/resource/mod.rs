@@ -2,6 +2,7 @@
 
 mod hosts;
 mod loader;
+mod rules;
 mod snapshot;
 
 pub use hosts::{
@@ -10,6 +11,7 @@ pub use hosts::{
 pub use loader::{
     FileFingerprint, LoadedHostsResource, ResourceLoadError, ResourceSource, load_hosts,
 };
+pub use rules::{RuleIndex, RuleLimits, RuleMatch, RuleParseError};
 pub use snapshot::{
     ResourcePublishError, ResourceRegistrySnapshot, ResourceSnapshot, ResourceSourceKind,
     ResourceStaleStatus, ResourceSummary, ResourceVersion,
