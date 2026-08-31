@@ -4,14 +4,15 @@ use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use crate::config::model::{HostsFormat, RuleSetFormat};
+use crate::config::model::RuleSetFormat;
 use crate::config::resolve::{
     ConfigId, ResolvedClient, ResolvedConfig, ResolvedEcs, ResolvedGlobalCache,
     ResolvedHostsResource, ResolvedRuleSet, ResolvedStrategy, ResolvedTtlOverride,
 };
 use crate::ports::cache::{CacheNamespace, CacheStrategyId, ClientCacheDigest};
 use crate::resource::{
-    CanonicalDomain, HostsIndex, HostsParseError, RuleIndex, RuleMatch, RuleParseError,
+    CanonicalDomain, HostsIndex, HostsLimits, HostsParseError, ResourceLoadError, RuleIndex,
+    RuleLimits, RuleMatch, RuleParseError, RuleResourceLoadError, load_hosts, load_rule_set,
 };
 
 use super::{
@@ -32,6 +33,14 @@ pub enum PolicyBuildError {
     RuleSetParse {
         resource: ConfigId,
         source: RuleParseError,
+    },
+    HostsLoad {
+        resource: ConfigId,
+        source: ResourceLoadError,
+    },
+    RuleSetLoad {
+        resource: ConfigId,
+        source: RuleResourceLoadError,
     },
     UnsupportedHostsResource {
         resource: ConfigId,
@@ -418,23 +427,21 @@ fn compile_resources(
 ) -> Result<ResourceIndexes, PolicyBuildError> {
     let mut host_indexes = BTreeMap::new();
     for resource in hosts {
-        let (id, format, input) = match resource {
-            ResolvedHostsResource::Const { id, format, hosts } => (id, *format, hosts),
-            ResolvedHostsResource::File { id, .. } => {
-                return Err(PolicyBuildError::UnsupportedHostsResource {
-                    resource: id.clone(),
-                    kind: "file",
-                });
-            }
+        let id = match resource {
+            ResolvedHostsResource::Const { id, .. } | ResolvedHostsResource::File { id, .. } => id,
         };
-        let index = match format {
-            HostsFormat::Hosts => HostsIndex::parse_hosts(input),
-            HostsFormat::Json => HostsIndex::parse_json(input),
-        }
-        .map_err(|source| PolicyBuildError::HostsParse {
-            resource: id.clone(),
-            source,
-        })?;
+        let index = load_hosts(resource, HostsLimits::default())
+            .map(|loaded| loaded.index().clone())
+            .map_err(|source| match source {
+                ResourceLoadError::Parse { source, .. } => PolicyBuildError::HostsParse {
+                    resource: id.clone(),
+                    source,
+                },
+                source => PolicyBuildError::HostsLoad {
+                    resource: id.clone(),
+                    source,
+                },
+            })?;
         if host_indexes.insert(id.clone(), Arc::new(index)).is_some() {
             return Err(PolicyBuildError::DuplicateHostsResource(id.clone()));
         }
@@ -442,20 +449,20 @@ fn compile_resources(
 
     let mut rule_indexes = BTreeMap::new();
     for resource in rule_sets {
-        let (id, format, input) = match resource {
-            ResolvedRuleSet::Const { id, format, rule } => (id, *format, rule),
-            ResolvedRuleSet::File { id, .. } => {
-                return Err(PolicyBuildError::UnsupportedRuleSet {
-                    resource: id.clone(),
-                    kind: "file",
-                });
-            }
-            ResolvedRuleSet::Remote { id, .. } => {
-                return Err(PolicyBuildError::UnsupportedRuleSet {
-                    resource: id.clone(),
-                    kind: "remote",
-                });
-            }
+        let id = match resource {
+            ResolvedRuleSet::Const { id, .. }
+            | ResolvedRuleSet::File { id, .. }
+            | ResolvedRuleSet::Remote { id, .. } => id,
+        };
+        if matches!(resource, ResolvedRuleSet::Remote { .. }) {
+            return Err(PolicyBuildError::UnsupportedRuleSet {
+                resource: id.clone(),
+                kind: "remote",
+            });
+        }
+        let format = match resource {
+            ResolvedRuleSet::Const { format, .. } | ResolvedRuleSet::File { format, .. } => *format,
+            ResolvedRuleSet::Remote { .. } => unreachable!("remote resources return above"),
         };
         if format == RuleSetFormat::Dat {
             return Err(PolicyBuildError::UnsupportedRuleSet {
@@ -464,11 +471,32 @@ fn compile_resources(
             });
         }
         let index =
-            RuleIndex::parse(input, format).map_err(|source| PolicyBuildError::RuleSetParse {
-                resource: id.clone(),
-                source,
+            load_rule_set(resource, RuleLimits::default()).map_err(|source| match source {
+                RuleResourceLoadError::Parse { source, .. } => PolicyBuildError::RuleSetParse {
+                    resource: id.clone(),
+                    source,
+                },
+                RuleResourceLoadError::UnsupportedFormat { .. } => {
+                    PolicyBuildError::UnsupportedRuleSet {
+                        resource: id.clone(),
+                        kind: "dat",
+                    }
+                }
+                RuleResourceLoadError::UnsupportedSource { kind, .. } => {
+                    PolicyBuildError::UnsupportedRuleSet {
+                        resource: id.clone(),
+                        kind,
+                    }
+                }
+                source => PolicyBuildError::RuleSetLoad {
+                    resource: id.clone(),
+                    source,
+                },
             })?;
-        if rule_indexes.insert(id.clone(), Arc::new(index)).is_some() {
+        if rule_indexes
+            .insert(id.clone(), Arc::new(index.index().clone()))
+            .is_some()
+        {
             return Err(PolicyBuildError::DuplicateRuleSet(id.clone()));
         }
     }
@@ -489,7 +517,7 @@ mod tests {
 
     use ipnet::IpNet;
 
-    use crate::config::model::{EcsMode, HostsFormat};
+    use crate::config::model::EcsMode;
     use crate::config::resolve::{
         ConfigId, ResolvedCacheOverride, ResolvedClient, ResolvedEcs, ResolvedGlobalCache,
         ResolvedHostsResource, ResolvedListener, ResolvedOptimistic, ResolvedRuleSetRef,
@@ -812,25 +840,36 @@ mod tests {
     }
 
     #[test]
-    fn policy_rejects_unimplemented_file_resource_at_build_boundary() {
-        let resource = ConfigId::new("file-hosts").unwrap();
+    fn policy_loads_const_and_file_resources_at_build_boundary() {
+        let hosts_id = ConfigId::new("file-hosts").unwrap();
+        let rules_id = ConfigId::new("file-rules").unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "fluxdns-policy-resource-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "192.0.2.9 file.example\n").unwrap();
         let result = super::compile_resources(
             &[ResolvedHostsResource::File {
-                id: resource.clone(),
-                format: HostsFormat::Hosts,
-                path: PathBuf::from("hosts.txt"),
+                id: hosts_id.clone(),
+                format: crate::config::model::HostsFormat::Hosts,
+                path: path.clone(),
                 auto_update: false,
                 update_interval: None,
             }],
-            &[],
-        );
+            &[crate::config::resolve::ResolvedRuleSet::Const {
+                id: rules_id.clone(),
+                format: crate::config::model::RuleSetFormat::Json,
+                rule: r#"{"domain":"rule.example"}"#.to_owned(),
+            }],
+        )
+        .unwrap();
 
-        assert_eq!(
-            result,
-            Err(super::PolicyBuildError::UnsupportedHostsResource {
-                resource,
-                kind: "file",
-            })
-        );
+        assert_eq!(result.0.get(&hosts_id).unwrap().record_count(), 1);
+        assert_eq!(result.1.get(&rules_id).unwrap().rule_count(), 1);
+        let _ = std::fs::remove_file(path);
     }
 }
