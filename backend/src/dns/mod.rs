@@ -1,6 +1,7 @@
 //! Transport 无关的 DNS 核心契约。
 
 mod context;
+mod handler;
 mod message;
 
 pub use context::{
@@ -8,6 +9,7 @@ pub use context::{
     Deadline, DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta, RouteId,
     RuntimeRevision, StreamId, TraceId, TransportCapabilities, TransportClass,
 };
+pub use handler::{CoreError, CoreOutcome, DnsCore, ServFailCore};
 pub use message::{
     CanonicalMessageError, CanonicalQuery, CanonicalQuestion, CanonicalResponse, DnsMessageId,
     ResponseClass, TtlMetadata,

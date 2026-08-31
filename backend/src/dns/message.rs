@@ -211,6 +211,19 @@ impl fmt::Debug for CanonicalResponse {
 }
 
 impl CanonicalResponse {
+    /// 构造不携带 transport envelope 的空错误响应。
+    pub(crate) fn empty_response(
+        query: &CanonicalQuery,
+        code: ResponseCode,
+    ) -> Result<Self, CanonicalMessageError> {
+        let mut message = Message::response(0, OpCode::Query);
+        message.metadata.recursion_desired = query.as_message().metadata.recursion_desired;
+        message.metadata.checking_disabled = query.as_message().metadata.checking_disabled;
+        message.metadata.response_code = code;
+        message.add_query(query.question().to_query());
+        Self::from_message(message, query, DnsMessageId::new(0))
+    }
+
     pub fn from_message(
         mut message: Message,
         expected_query: &CanonicalQuery,
@@ -474,6 +487,43 @@ mod tests {
             42
         );
         assert_eq!(expected.as_message().metadata.id, 0);
+    }
+
+    #[test]
+    fn empty_response_preserves_question_and_safe_flags() {
+        let mut request = query(42, "Example.COM");
+        request.metadata.checking_disabled = true;
+        let expected = CanonicalQuery::from_message(request).unwrap();
+
+        let response =
+            CanonicalResponse::empty_response(&expected, ResponseCode::ServFail).unwrap();
+
+        assert_eq!(response.as_message().metadata.id, 0);
+        assert_eq!(
+            response.as_message().metadata.message_type,
+            MessageType::Response
+        );
+        assert!(response.as_message().metadata.recursion_desired);
+        assert!(response.as_message().metadata.checking_disabled);
+        assert!(!response.as_message().metadata.recursion_available);
+        assert_eq!(response.as_message().queries, expected.as_message().queries);
+        assert!(response.as_message().edns.is_none());
+    }
+
+    #[test]
+    fn empty_response_is_classified_without_echoing_query_edns() {
+        let mut request = query(42, "example.com.");
+        let mut edns = Edns::new();
+        edns.options_mut()
+            .insert(EdnsOption::Subnet("198.51.100.0/24".parse().unwrap()));
+        request.set_edns(edns);
+        let expected = CanonicalQuery::from_message(request).unwrap();
+
+        let response =
+            CanonicalResponse::empty_response(&expected, ResponseCode::ServFail).unwrap();
+
+        assert_eq!(response.class(), ResponseClass::ServFail);
+        assert!(response.as_message().edns.is_none());
     }
 
     #[test]
