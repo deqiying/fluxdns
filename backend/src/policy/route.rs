@@ -182,6 +182,10 @@ impl RouteIndex {
         self.listeners.len()
     }
 
+    pub fn strategy(&self, id: &ConfigId) -> Option<Arc<ResolvedStrategy>> {
+        self.strategies.get(id)
+    }
+
     pub fn select_stream(&self, listener_id: &ConfigId) -> Result<RouteSelection, RouteBuildError> {
         let Some(ListenerRoutes::Stream { strategy, hosts }) = self.listeners.get(listener_id)
         else {
