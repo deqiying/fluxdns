@@ -1,19 +1,22 @@
-//! PolicyIndex 驱动的本地 DNS Core 首轮接线。
+//! PolicyIndex 驱动的 DNS Core 首轮接线。
 //!
-//! 该 core 只负责把已编译的 policy/resource 结果转换成本地 hosts 响应。
-//! 尚未接入的 upstream/cache 分支统一返回确定性的 SERVFAIL，不伪造网络结果。
+//! 本 core 先处理已编译的本地 hosts，再执行当前已支持的 hosts/group upstream。
+//! 尚未具备真实 connector 的分支保持确定性的 SERVFAIL，不伪造网络结果。
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
 
 use hickory_proto::op::ResponseCode;
 use thiserror::Error;
 
-use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource};
+use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedUpstream};
 use crate::policy::{PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
+use crate::ports::exchange::{DnsExchange, UpstreamOutcome};
 use crate::resource::{CanonicalDomain, HostsIndex, HostsLimits, ResourceLoadError, load_hosts};
+use crate::upstream::{GroupSelector, HostsExchange, UpstreamGroupExecutor};
 
 use super::handler::resource_answers;
 use super::{CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsRequest};
@@ -28,6 +31,8 @@ pub enum PolicyCoreBuildError {
         #[source]
         source: ResourceLoadError,
     },
+    #[error("upstream `{upstream}` could not be built: {reason}")]
+    Upstream { upstream: String, reason: String },
 }
 
 /// 使用同一份 resolved config 构建 policy/resource 本地回答 core。
@@ -35,12 +40,19 @@ pub enum PolicyCoreBuildError {
 pub struct PolicyDnsCore {
     policy: PolicyIndex,
     hosts: BTreeMap<ConfigId, Arc<HostsIndex>>,
+    upstreams: UpstreamRuntime,
     ttl: u32,
 }
 
 impl PolicyDnsCore {
     pub fn from_config(config: &ResolvedConfig, ttl: u32) -> Result<Self, PolicyCoreBuildError> {
         let policy = PolicyIndex::from_config(config).map_err(PolicyCoreBuildError::Policy)?;
+        let upstreams = UpstreamRuntime::from_config(&config.upstreams).map_err(|error| {
+            PolicyCoreBuildError::Upstream {
+                upstream: error.upstream,
+                reason: error.reason,
+            }
+        })?;
         let mut hosts = BTreeMap::new();
         for resource in &config.hosts {
             let id = match resource {
@@ -57,7 +69,12 @@ impl PolicyDnsCore {
                 hosts.insert(id.clone(), Arc::new(loaded.index().clone()));
             }
         }
-        Ok(Self { policy, hosts, ttl })
+        Ok(Self {
+            policy,
+            hosts,
+            upstreams,
+            ttl,
+        })
     }
 
     pub fn policy(&self) -> &PolicyIndex {
@@ -66,6 +83,10 @@ impl PolicyDnsCore {
 
     pub fn host_resource_count(&self) -> usize {
         self.hosts.len()
+    }
+
+    pub fn upstream_count(&self) -> usize {
+        self.upstreams.len()
     }
 }
 
@@ -105,32 +126,149 @@ impl DnsCore for PolicyDnsCore {
                 Err(_error) => return servfail(request),
             };
 
-            let Some(resource_id) = plan.hosts else {
+            if let Some(resource_id) = plan.hosts {
+                let Some(index) = self.hosts.get(&resource_id) else {
+                    return servfail(request);
+                };
+                let (answers, known_name) = resource_answers(
+                    std::slice::from_ref(index.as_ref()),
+                    request.query.question().name(),
+                    request.query.question().query_type(),
+                    self.ttl,
+                );
+                let code = if answers.is_empty() && !known_name {
+                    ResponseCode::NXDomain
+                } else {
+                    ResponseCode::NoError
+                };
+                let response = if code == ResponseCode::NoError && !answers.is_empty() {
+                    CanonicalResponse::response_with_answers(&request.query, answers)
+                } else {
+                    CanonicalResponse::response_with_code(&request.query, code, answers)
+                };
+                return response
+                    .map(CoreOutcome::Response)
+                    .map_err(CoreError::ResponseConstruction);
+            }
+
+            let Some(outcome) = self
+                .upstreams
+                .exchange(&plan.upstream, &request.query, &request.context)
+                .await
+            else {
                 return servfail(request);
             };
-            let Some(index) = self.hosts.get(&resource_id) else {
-                return servfail(request);
-            };
-            let (answers, known_name) = resource_answers(
-                std::slice::from_ref(index.as_ref()),
-                request.query.question().name(),
-                request.query.question().query_type(),
-                self.ttl,
-            );
-            let code = if answers.is_empty() && !known_name {
-                ResponseCode::NXDomain
-            } else {
-                ResponseCode::NoError
-            };
-            let response = if code == ResponseCode::NoError && !answers.is_empty() {
-                CanonicalResponse::response_with_answers(&request.query, answers)
-            } else {
-                CanonicalResponse::response_with_code(&request.query, code, answers)
-            };
-            response
-                .map(CoreOutcome::Response)
-                .map_err(CoreError::ResponseConstruction)
+            match outcome {
+                UpstreamOutcome::Response(response) if response.matches_query(&request.query) => {
+                    Ok(CoreOutcome::Response(response))
+                }
+                UpstreamOutcome::Cancelled(_) => Ok(CoreOutcome::NoResponse),
+                UpstreamOutcome::Response(_) | UpstreamOutcome::TransportFailure(_) => {
+                    servfail(request)
+                }
+            }
         })
+    }
+}
+
+#[derive(Clone)]
+struct UpstreamRuntime {
+    direct: BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
+    groups: BTreeMap<ConfigId, Arc<UpstreamGroupExecutor>>,
+}
+
+impl fmt::Debug for UpstreamRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("UpstreamRuntime")
+            .field("direct_count", &self.direct.len())
+            .field("group_count", &self.groups.len())
+            .finish()
+    }
+}
+
+struct UpstreamRuntimeBuildError {
+    upstream: String,
+    reason: String,
+}
+
+impl UpstreamRuntime {
+    fn from_config(upstreams: &[ResolvedUpstream]) -> Result<Self, UpstreamRuntimeBuildError> {
+        let mut direct = BTreeMap::new();
+        for upstream in upstreams {
+            let ResolvedUpstream::Hosts { id, .. } = upstream else {
+                continue;
+            };
+            let exchange = HostsExchange::from_resolved(upstream).map_err(|error| {
+                UpstreamRuntimeBuildError {
+                    upstream: id.as_str().to_owned(),
+                    reason: error.to_string(),
+                }
+            })?;
+            if direct
+                .insert(id.clone(), Arc::new(exchange) as Arc<dyn DnsExchange>)
+                .is_some()
+            {
+                return Err(UpstreamRuntimeBuildError {
+                    upstream: id.as_str().to_owned(),
+                    reason: "duplicate upstream id".to_owned(),
+                });
+            }
+        }
+
+        let mut groups = BTreeMap::new();
+        for upstream in upstreams {
+            let ResolvedUpstream::Group {
+                id,
+                upstreams: members,
+                upstream_mode,
+                fallbacks,
+                ..
+            } = upstream
+            else {
+                continue;
+            };
+            // Fallback members need a separate execution window; keep this slice
+            // fail-closed until that path is implemented rather than silently ignoring it.
+            if !fallbacks.is_empty() {
+                continue;
+            }
+            let Ok(selector) = GroupSelector::from_upstream_mode(*upstream_mode, members.clone())
+            else {
+                continue;
+            };
+            let Some(exchanges) = members
+                .iter()
+                .map(|member| direct.get(&member.name).cloned())
+                .collect::<Option<Vec<_>>>()
+            else {
+                continue;
+            };
+            if let Ok(executor) = UpstreamGroupExecutor::new(selector, exchanges) {
+                groups.insert(id.clone(), Arc::new(executor));
+            }
+        }
+
+        Ok(Self { direct, groups })
+    }
+
+    fn len(&self) -> usize {
+        self.direct.len() + self.groups.len()
+    }
+
+    async fn exchange(
+        &self,
+        upstream: &ConfigId,
+        query: &super::CanonicalQuery,
+        context: &super::RequestContext,
+    ) -> Option<UpstreamOutcome> {
+        if let Some(exchange) = self.direct.get(upstream) {
+            return Some(exchange.exchange(query, context).await);
+        }
+        if let Some(executor) = self.groups.get(upstream) {
+            return executor.execute(query, context).await.ok();
+        }
+        None
     }
 }
 
@@ -216,6 +354,67 @@ strategy:
             .resolved
     }
 
+    fn group_config() -> std::sync::Arc<crate::config::ResolvedConfig> {
+        ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(
+                r#"
+version: 1
+work:
+  path: /tmp/fluxdns-policy-group-test
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: 5301
+    strategy: default
+upstreams:
+  - type: hosts
+    name: first
+    format: hosts
+    hosts: "192.0.2.11 group.example"
+  - type: hosts
+    name: second
+    format: hosts
+    hosts: "192.0.2.12 group.example"
+  - type: group
+    name: group
+    upstreams:
+      - name: first
+        weight: 1
+      - name: second
+        weight: 1
+    upstream_mode: round-robin
+    timeout: 1s
+hosts:
+  - type: const
+    name: unused-hosts
+    format: hosts
+    hosts: "192.0.2.99 unused.example"
+strategy:
+  - name: default
+    rules:
+      - hosts: unused-hosts
+    default_upstream: group
+"#,
+            )
+            .expect("policy group fixture must be valid")
+            .resolved
+    }
+
     fn request(name: &str, record_type: RecordType) -> DnsRequest {
         let mut message = Message::new(7, MessageType::Query, OpCode::Query);
         message.add_query(Query::query(Name::from_str(name).unwrap(), record_type));
@@ -255,6 +454,7 @@ strategy:
     async fn policy_hosts_rule_produces_local_answer_and_nodata() {
         let core = PolicyDnsCore::from_config(config().as_ref(), 42).unwrap();
         assert_eq!(core.host_resource_count(), 1);
+        assert_eq!(core.upstream_count(), 1);
 
         let answer = core
             .resolve(&request("local.example.", RecordType::A))
@@ -277,15 +477,32 @@ strategy:
     }
 
     #[tokio::test]
-    async fn policy_without_local_match_returns_deterministic_servfail() {
+    async fn policy_without_local_match_uses_supported_upstream() {
         let core = PolicyDnsCore::from_config(config().as_ref(), 42).unwrap();
         let response = core
             .resolve(&request("remote.example.", RecordType::A))
             .await
             .unwrap();
         let CoreOutcome::Response(response) = response else {
-            panic!("expected servfail response");
+            panic!("expected upstream response");
         };
-        assert_eq!(response.class(), crate::dns::ResponseClass::ServFail);
+        assert_eq!(response.class(), crate::dns::ResponseClass::NxDomain);
+    }
+
+    #[tokio::test]
+    async fn policy_executes_group_with_supported_hosts_members() {
+        let core = PolicyDnsCore::from_config(group_config().as_ref(), 42).unwrap();
+        assert_eq!(core.host_resource_count(), 1);
+        assert_eq!(core.upstream_count(), 3);
+
+        let response = core
+            .resolve(&request("group.example.", RecordType::A))
+            .await
+            .unwrap();
+        let CoreOutcome::Response(response) = response else {
+            panic!("expected group response");
+        };
+        assert_eq!(response.class(), crate::dns::ResponseClass::Positive);
+        assert_eq!(response.ttl().min_ttl, Some(crate::dns::DEFAULT_LOCAL_TTL));
     }
 }
