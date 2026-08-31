@@ -5,6 +5,7 @@ pub mod cache;
 pub mod config;
 pub mod dns;
 pub mod observability;
+pub mod policy;
 pub mod ports;
 pub mod runtime;
 pub mod service;
