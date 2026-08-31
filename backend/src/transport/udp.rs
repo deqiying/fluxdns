@@ -17,7 +17,7 @@ use crate::ports::effects::{ActivatedSocketHandle, UdpSocketHandle};
 use crate::ports::inbound::{InboundAdapter, InboundRequest, ResponseEncoder};
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
-use super::wire::{MAX_DNS_WIRE_BYTES, WireError, decode_query, encode_response};
+use super::wire::{MAX_DNS_WIRE_BYTES, WireError, decode_query, encode_response_truncated};
 use crate::runtime::BoundEndpointHandle;
 
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -199,7 +199,8 @@ impl ResponseEncoder for UdpResponseEncoder {
                     PortError::new(PortErrorClass::ProtocolViolation, "transport.udp.encode")
                 })?;
             let max_bytes = request.query.as_message().max_payload().into();
-            let bytes = encode_response(&response, id, max_bytes).map_err(map_wire_error)?;
+            let bytes =
+                encode_response_truncated(&response, id, max_bytes).map_err(map_wire_error)?;
             self.socket
                 .send_to(
                     bytes,
@@ -231,11 +232,11 @@ mod tests {
     use std::time::Duration;
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RecordType};
+    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
 
     use crate::dns::{
-        CacheCompatibilityKey, Cancellation, RuntimeRevision, ServFailCore, TransportCapabilities,
-        TransportClass, dispatch_inbound,
+        CacheCompatibilityKey, Cancellation, CanonicalResponse, RuntimeRevision, ServFailCore,
+        TransportCapabilities, TransportClass, dispatch_inbound,
     };
     use crate::ports::effects::{UdpDatagram, UdpSocketHandle};
     use crate::ports::inbound::InboundAdapter;
@@ -375,6 +376,41 @@ mod tests {
         let response = Message::from_vec(&sent[0].0).unwrap();
         assert_eq!(response.metadata.id, 0x1234);
         assert_eq!(response.metadata.response_code, ResponseCode::ServFail);
+    }
+
+    #[tokio::test]
+    async fn truncates_large_response_at_client_udp_limit() {
+        let socket = Arc::new(FakeUdpSocket::default());
+        let peer = SocketAddr::from(([192, 0, 2, 12], 53002));
+        socket.push(Ok(UdpDatagram {
+            payload: wire_query(0x4321),
+            peer,
+        }));
+        let adapter = adapter(Arc::clone(&socket));
+        let inbound = adapter
+            .receive(&Cancellation::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let query = inbound.request().query.clone();
+        let answers = (1..=40_u8).map(|octet| {
+            Record::from_rdata(
+                query.question().name().clone(),
+                60,
+                RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, octet))),
+            )
+        });
+        let response = CanonicalResponse::response_with_answers(&query, answers).unwrap();
+
+        inbound.response().respond(response).await.unwrap();
+
+        let sent = socket.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(sent[0].0.len() <= 512);
+        let response = Message::from_vec(&sent[0].0).unwrap();
+        assert_eq!(response.metadata.id, 0x4321);
+        assert!(response.metadata.truncation);
+        assert!(response.answers.len() < 40);
     }
 
     #[tokio::test]

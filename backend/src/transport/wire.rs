@@ -1,4 +1,5 @@
 use hickory_proto::op::Message;
+use hickory_proto::serialize::binary::{BinEncodable, BinEncoder};
 use thiserror::Error;
 
 use crate::dns::{CanonicalMessageError, CanonicalQuery, CanonicalResponse, DnsMessageId};
@@ -45,8 +46,7 @@ pub fn encode_response(
     max_bytes: usize,
 ) -> Result<Vec<u8>, WireError> {
     let limit = max_bytes.min(MAX_DNS_WIRE_BYTES);
-    let mut message = response.as_message().clone();
-    message.metadata.id = id.value();
+    let message = response_message(response, id);
     let bytes = message.to_vec().map_err(|_| WireError::Encode)?;
     if bytes.len() > limit {
         return Err(WireError::TooLarge { limit });
@@ -54,16 +54,51 @@ pub fn encode_response(
     Ok(bytes)
 }
 
+/// 编码允许在资源记录边界截断的响应；hickory 会同步设置 DNS TC 标志。
+pub fn encode_response_truncated(
+    response: &CanonicalResponse,
+    id: DnsMessageId,
+    max_bytes: usize,
+) -> Result<Vec<u8>, WireError> {
+    let limit = max_bytes.min(MAX_DNS_WIRE_BYTES);
+    if limit == 0 {
+        return Err(WireError::TooLarge { limit });
+    }
+
+    let message = response_message(response, id);
+    let mut bytes = Vec::with_capacity(limit.min(512));
+    let mut encoder = BinEncoder::new(&mut bytes);
+    encoder.set_max_size(limit as u16);
+    message.emit(&mut encoder).map_err(|error| match error {
+        hickory_proto::ProtoError::MaxBufferSizeExceeded(_) => WireError::TooLarge { limit },
+        _ => WireError::Encode,
+    })?;
+    drop(encoder);
+
+    if bytes.len() > limit {
+        return Err(WireError::TooLarge { limit });
+    }
+    Ok(bytes)
+}
+
+fn response_message(response: &CanonicalResponse, id: DnsMessageId) -> Message {
+    let mut message = response.as_message().clone();
+    message.metadata.id = id.value();
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RecordType};
+    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
 
     use crate::dns::{CanonicalQuery, CanonicalResponse, DnsMessageId};
 
-    use super::{MAX_DNS_WIRE_BYTES, WireError, decode_query, encode_response};
+    use super::{
+        MAX_DNS_WIRE_BYTES, WireError, decode_query, encode_response, encode_response_truncated,
+    };
 
     fn query(id: u16) -> Message {
         let mut message = Message::new(id, MessageType::Query, OpCode::Query);
@@ -134,6 +169,33 @@ mod tests {
             encode_response(&response, DnsMessageId::new(1), 1),
             Err(WireError::TooLarge { limit: 1 })
         );
+    }
+
+    #[test]
+    fn truncated_encoding_stops_at_record_boundary_and_sets_tc() {
+        let query = CanonicalQuery::from_message(query(7)).unwrap();
+        let mut response_message = Message::new(0, MessageType::Response, OpCode::Query);
+        response_message.add_query(query.question().to_query_for_test());
+        for octet in 1..=40_u8 {
+            response_message.add_answer(Record::from_rdata(
+                Name::from_str("example.com.").unwrap(),
+                60,
+                RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, octet))),
+            ));
+        }
+        let response =
+            CanonicalResponse::from_message(response_message, &query, DnsMessageId::new(0))
+                .unwrap();
+
+        let bytes = encode_response_truncated(&response, DnsMessageId::new(0xbeef), 512).unwrap();
+        let encoded = Message::from_vec(&bytes).unwrap();
+
+        assert!(bytes.len() <= 512);
+        assert!(encoded.metadata.truncation);
+        assert!(encoded.answers.len() < 40);
+        assert_eq!(encoded.metadata.id, 0xbeef);
+        assert_eq!(response.as_message().answers.len(), 40);
+        assert!(!response.as_message().metadata.truncation);
     }
 
     trait QuestionForTest {
