@@ -9,7 +9,9 @@ pub use context::{
     Deadline, DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta, RouteId,
     RuntimeRevision, StreamId, TraceId, TransportCapabilities, TransportClass,
 };
-pub use handler::{CoreError, CoreOutcome, DnsCore, ServFailCore};
+pub use handler::{
+    CoreError, CoreOutcome, DispatchError, DispatchOutcome, DnsCore, ServFailCore, dispatch_inbound,
+};
 pub use message::{
     CanonicalMessageError, CanonicalQuery, CanonicalQuestion, CanonicalResponse, DnsMessageId,
     ResponseClass, TtlMetadata,

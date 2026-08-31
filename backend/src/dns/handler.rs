@@ -6,6 +6,7 @@ use hickory_proto::op::ResponseCode;
 use thiserror::Error;
 
 use crate::ports::PortFuture;
+use crate::ports::inbound::{EncodeErrorClass, InboundRequest};
 
 use super::{CanonicalMessageError, CanonicalResponse, DnsRequest};
 
@@ -21,6 +22,20 @@ pub enum CoreOutcome {
 pub enum CoreError {
     #[error("canonical response could not be constructed")]
     ResponseConstruction(#[source] CanonicalMessageError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchOutcome {
+    Responded,
+    NoResponse,
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum DispatchError {
+    #[error("DNS Core failed: {0}")]
+    Core(#[from] CoreError),
+    #[error("response encoder failed: {class:?}")]
+    Encode { class: EncodeErrorClass },
 }
 
 /// Transport 无关的 DNS 请求处理器。
@@ -53,6 +68,25 @@ impl DnsCore for ServFailCore {
     }
 }
 
+/// 将一条已规范化的入站请求交给 Core，并通过唯一 response handle 完成响应。
+pub async fn dispatch_inbound(
+    core: &dyn DnsCore,
+    inbound: InboundRequest,
+) -> Result<DispatchOutcome, DispatchError> {
+    let outcome = core.resolve(inbound.request()).await?;
+    match outcome {
+        CoreOutcome::Response(response) => inbound
+            .response()
+            .respond(response)
+            .await
+            .map(|_| DispatchOutcome::Responded)
+            .map_err(|error| DispatchError::Encode {
+                class: error.class(),
+            }),
+        CoreOutcome::NoResponse => Ok(DispatchOutcome::NoResponse),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
@@ -68,7 +102,10 @@ mod tests {
         TransportCapabilities, TransportClass,
     };
 
-    use super::{CoreOutcome, DnsCore, ServFailCore};
+    use crate::ports::inbound::InboundRequest;
+    use crate::ports::testing::FakeResponseEncoder;
+
+    use super::{CoreOutcome, DispatchOutcome, DnsCore, ServFailCore, dispatch_inbound};
 
     fn request(id: u16) -> DnsRequest {
         let mut message = Message::new(id, MessageType::Query, OpCode::Query);
@@ -152,5 +189,36 @@ mod tests {
             ServFailCore.resolve(&request).await.unwrap(),
             CoreOutcome::NoResponse
         );
+    }
+
+    #[tokio::test]
+    async fn dispatches_core_response_through_exactly_once_encoder() {
+        let request = request(7);
+        let encoder = std::sync::Arc::new(FakeResponseEncoder::default());
+        let inbound = InboundRequest::new(request, encoder.clone());
+
+        assert_eq!(
+            dispatch_inbound(&ServFailCore, inbound).await.unwrap(),
+            DispatchOutcome::Responded
+        );
+        assert_eq!(encoder.encoded_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn dispatch_preserves_no_response_when_request_is_cancelled() {
+        let request = request(7);
+        request
+            .context
+            .meta
+            .cancellation
+            .cancel(CancelReason::ClientDisconnected);
+        let encoder = std::sync::Arc::new(FakeResponseEncoder::default());
+        let inbound = InboundRequest::new(request, encoder.clone());
+
+        assert_eq!(
+            dispatch_inbound(&ServFailCore, inbound).await.unwrap(),
+            DispatchOutcome::NoResponse
+        );
+        assert_eq!(encoder.encoded_count(), 0);
     }
 }
