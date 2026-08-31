@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fmt,
     str::FromStr,
     sync::atomic::{AtomicI64, AtomicU64, Ordering},
@@ -188,6 +188,10 @@ pub enum MetricName {
     RetriesTotal,
     PersistenceGaps,
     ActiveRequests,
+    WriterQueueDepth,
+    WriterDropped,
+    WriterFlushed,
+    WriterFailed,
 }
 
 impl MetricName {
@@ -199,6 +203,10 @@ impl MetricName {
             Self::RetriesTotal => "retries_total",
             Self::PersistenceGaps => "persistence_gaps",
             Self::ActiveRequests => "active_requests",
+            Self::WriterQueueDepth => "writer_queue_depth",
+            Self::WriterDropped => "writer_dropped",
+            Self::WriterFlushed => "writer_flushed",
+            Self::WriterFailed => "writer_failed",
         }
     }
 }
@@ -558,6 +566,263 @@ impl Default for ObservabilityRegistry {
     }
 }
 
+/// writer 只保存事件的低基数元数据，不保存 `TypedEvent::message`。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BufferedEvent {
+    name: EventName,
+    component: Component,
+    result: EventResult,
+    occurred_at: Instant,
+}
+
+impl BufferedEvent {
+    pub const fn name(self) -> EventName {
+        self.name
+    }
+
+    pub const fn component(self) -> Component {
+        self.component
+    }
+
+    pub const fn result(self) -> EventResult {
+        self.result
+    }
+
+    pub const fn occurred_at(self) -> Instant {
+        self.occurred_at
+    }
+}
+
+/// sink 的最小契约。实现可以将元数据写入真实日志系统，但不得要求 writer 保存原始 message。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum EventSinkError {
+    #[error("event sink write failed")]
+    WriteFailed,
+}
+
+pub trait EventSink {
+    fn write(&mut self, event: BufferedEvent) -> Result<(), EventSinkError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmitResult {
+    Queued,
+    DroppedFull,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum EventWriterError {
+    #[error("event writer capacity must be greater than zero")]
+    ZeroCapacity,
+    #[error("event writer is closed")]
+    Closed,
+    #[error("event could not be recorded in observability registry: {0}")]
+    Registry(#[from] RegistryError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WriterSummary {
+    accepted: u64,
+    flushed: u64,
+    dropped: u64,
+    failed: u64,
+    discarded: u64,
+    pending: usize,
+    closed: bool,
+}
+
+impl WriterSummary {
+    pub const fn accepted(self) -> u64 {
+        self.accepted
+    }
+
+    pub const fn flushed(self) -> u64 {
+        self.flushed
+    }
+
+    pub const fn dropped(self) -> u64 {
+        self.dropped
+    }
+
+    pub const fn failed(self) -> u64 {
+        self.failed
+    }
+
+    pub const fn discarded(self) -> u64 {
+        self.discarded
+    }
+
+    pub const fn pending(self) -> usize {
+        self.pending
+    }
+
+    pub const fn closed(self) -> bool {
+        self.closed
+    }
+}
+
+struct QueuedEvent {
+    event: BufferedEvent,
+}
+
+struct WriterState {
+    queue: VecDeque<QueuedEvent>,
+    accepted: u64,
+    flushed: u64,
+    dropped: u64,
+    failed: u64,
+    discarded: u64,
+    closed: bool,
+}
+
+/// 进程内、非异步且有界的事件 writer buffer。
+pub struct EventWriter {
+    capacity: usize,
+    registry: Arc<ObservabilityRegistry>,
+    state: Mutex<WriterState>,
+}
+
+impl EventWriter {
+    pub fn new(
+        registry: Arc<ObservabilityRegistry>,
+        capacity: usize,
+    ) -> Result<Self, EventWriterError> {
+        if capacity == 0 {
+            return Err(EventWriterError::ZeroCapacity);
+        }
+
+        let queue_key = MetricKey::new(MetricName::WriterQueueDepth, Component::Observability);
+        registry.set_gauge(queue_key, 0)?;
+
+        Ok(Self {
+            capacity,
+            registry,
+            state: Mutex::new(WriterState {
+                queue: VecDeque::with_capacity(capacity),
+                accepted: 0,
+                flushed: 0,
+                dropped: 0,
+                failed: 0,
+                discarded: 0,
+                closed: false,
+            }),
+        })
+    }
+
+    pub fn emit(
+        &self,
+        event: TypedEvent,
+        occurred_at: Instant,
+    ) -> Result<EmitResult, EventWriterError> {
+        let mut state = lock_unpoisoned(&self.state);
+        if state.closed {
+            return Err(EventWriterError::Closed);
+        }
+        if state.queue.len() == self.capacity {
+            state.dropped = state.dropped.saturating_add(1);
+            self.record_writer_counter(MetricName::WriterDropped);
+            return Ok(EmitResult::DroppedFull);
+        }
+
+        self.registry.record_event(event, occurred_at)?;
+        state.queue.push_back(QueuedEvent {
+            event: BufferedEvent {
+                name: event.name,
+                component: event.component,
+                result: event.result,
+                occurred_at,
+            },
+        });
+        state.accepted = state.accepted.saturating_add(1);
+        self.update_queue_depth(state.queue.len());
+        Ok(EmitResult::Queued)
+    }
+
+    pub fn flush(&self) -> WriterSummary {
+        self.flush_with(&mut NoopSink)
+    }
+
+    pub fn flush_with<S: EventSink>(&self, sink: &mut S) -> WriterSummary {
+        let batch = {
+            let mut state = lock_unpoisoned(&self.state);
+            state.queue.drain(..).collect::<Vec<_>>()
+        };
+        let mut failed_events = Vec::new();
+
+        for queued in batch {
+            if sink.write(queued.event).is_ok() {
+                let mut state = lock_unpoisoned(&self.state);
+                state.flushed = state.flushed.saturating_add(1);
+                self.record_writer_counter(MetricName::WriterFlushed);
+            } else {
+                self.record_writer_counter(MetricName::WriterFailed);
+                failed_events.push(queued);
+            }
+        }
+
+        let mut state = lock_unpoisoned(&self.state);
+        if !failed_events.is_empty() {
+            state.failed = state.failed.saturating_add(failed_events.len() as u64);
+            for queued in failed_events.into_iter().rev() {
+                if state.closed || state.queue.len() == self.capacity {
+                    state.discarded = state.discarded.saturating_add(1);
+                } else {
+                    state.queue.push_front(queued);
+                }
+            }
+        }
+        self.update_queue_depth(state.queue.len());
+        self.make_summary(&state)
+    }
+
+    pub fn shutdown(&self) -> WriterSummary {
+        let mut state = lock_unpoisoned(&self.state);
+        state.closed = true;
+        state.discarded = state.discarded.saturating_add(state.queue.len() as u64);
+        state.queue.clear();
+        self.update_queue_depth(0);
+        self.make_summary(&state)
+    }
+
+    pub fn summary(&self) -> WriterSummary {
+        let state = lock_unpoisoned(&self.state);
+        self.make_summary(&state)
+    }
+
+    fn make_summary(&self, state: &WriterState) -> WriterSummary {
+        WriterSummary {
+            accepted: state.accepted,
+            flushed: state.flushed,
+            dropped: state.dropped,
+            failed: state.failed,
+            discarded: state.discarded,
+            pending: state.queue.len(),
+            closed: state.closed,
+        }
+    }
+
+    fn update_queue_depth(&self, depth: usize) {
+        let _ = self.registry.set_gauge(
+            MetricKey::new(MetricName::WriterQueueDepth, Component::Observability),
+            depth as i64,
+        );
+    }
+
+    fn record_writer_counter(&self, name: MetricName) {
+        let _ = self
+            .registry
+            .increment_counter(MetricKey::new(name, Component::Observability), 1);
+    }
+}
+
+struct NoopSink;
+
+impl EventSink for NoopSink {
+    fn write(&mut self, _event: BufferedEvent) -> Result<(), EventSinkError> {
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum MetricKind {
     Counter,
@@ -628,10 +893,26 @@ mod tests {
     };
 
     use super::{
-        Component, EventName, EventResult, HealthState, LogLevel, MetricKey, MetricName,
-        MetricValue, ObservabilityRegistry, RegistryError, Sensitive, TypedEvent,
-        bootstrap_subscriber,
+        BufferedEvent, Component, EmitResult, EventName, EventResult, EventSink, EventSinkError,
+        EventWriter, EventWriterError, HealthState, LogLevel, MetricKey, MetricName, MetricValue,
+        ObservabilityRegistry, RegistryError, Sensitive, TypedEvent, bootstrap_subscriber,
     };
+
+    #[derive(Debug)]
+    struct TestSink {
+        fail: bool,
+        writes: Vec<BufferedEvent>,
+    }
+
+    impl EventSink for TestSink {
+        fn write(&mut self, event: BufferedEvent) -> Result<(), EventSinkError> {
+            if self.fail {
+                return Err(EventSinkError::WriteFailed);
+            }
+            self.writes.push(event);
+            Ok(())
+        }
+    }
 
     #[test]
     fn bootstrap_subscriber_can_be_built() {
@@ -795,5 +1076,163 @@ mod tests {
             registry.read_metric(gauge).unwrap().value(),
             MetricValue::Gauge(i64::MAX)
         );
+    }
+
+    #[test]
+    fn writer_rejects_zero_capacity_and_drops_when_full() {
+        let registry = Arc::new(ObservabilityRegistry::new());
+        assert!(matches!(
+            EventWriter::new(Arc::clone(&registry), 0),
+            Err(EventWriterError::ZeroCapacity)
+        ));
+
+        let writer = EventWriter::new(Arc::clone(&registry), 1).unwrap();
+        let event = TypedEvent::new(
+            EventName::ComponentStateChange,
+            Component::Observability,
+            EventResult::Degraded,
+            "secret.example.invalid must never be buffered",
+        );
+        assert_eq!(
+            writer.emit(event, Instant::now()).unwrap(),
+            EmitResult::Queued
+        );
+        assert_eq!(
+            writer.emit(event, Instant::now()).unwrap(),
+            EmitResult::DroppedFull
+        );
+
+        let summary = writer.summary();
+        assert_eq!(summary.accepted(), 1);
+        assert_eq!(summary.dropped(), 1);
+        assert_eq!(summary.pending(), 1);
+        assert!(!format!("{summary:?}").contains("secret.example.invalid"));
+        assert_eq!(
+            registry
+                .read_metric(MetricKey::new(
+                    MetricName::WriterDropped,
+                    Component::Observability,
+                ))
+                .unwrap()
+                .value(),
+            MetricValue::Counter(1)
+        );
+        assert_eq!(
+            registry
+                .read_metric(MetricKey::new(
+                    MetricName::WriterQueueDepth,
+                    Component::Observability,
+                ))
+                .unwrap()
+                .value(),
+            MetricValue::Gauge(1)
+        );
+    }
+
+    #[test]
+    fn writer_flushes_metadata_without_retaining_message() {
+        let registry = Arc::new(ObservabilityRegistry::new());
+        let writer = EventWriter::new(Arc::clone(&registry), 2).unwrap();
+        let event = TypedEvent::new(
+            EventName::ScaffoldReady,
+            Component::Application,
+            EventResult::Success,
+            "secret.example.invalid must never reach a sink event",
+        );
+        writer.emit(event, Instant::now()).unwrap();
+
+        let mut sink = TestSink {
+            fail: false,
+            writes: Vec::new(),
+        };
+        let summary = writer.flush_with(&mut sink);
+        assert_eq!(summary.accepted(), 1);
+        assert_eq!(summary.flushed(), 1);
+        assert_eq!(summary.pending(), 0);
+        assert_eq!(sink.writes.len(), 1);
+        assert_eq!(sink.writes[0].name(), EventName::ScaffoldReady);
+        assert!(!format!("{sink:?}").contains("secret.example.invalid"));
+    }
+
+    #[test]
+    fn writer_requeues_failed_flush_and_reports_retryable_state() {
+        let registry = Arc::new(ObservabilityRegistry::new());
+        let writer = EventWriter::new(Arc::clone(&registry), 2).unwrap();
+        writer
+            .emit(
+                TypedEvent::new(
+                    EventName::ScaffoldReady,
+                    Component::Application,
+                    EventResult::Success,
+                    "not retained",
+                ),
+                Instant::now(),
+            )
+            .unwrap();
+
+        let mut failing_sink = TestSink {
+            fail: true,
+            writes: Vec::new(),
+        };
+        let failed = writer.flush_with(&mut failing_sink);
+        assert_eq!(failed.failed(), 1);
+        assert_eq!(failed.pending(), 1);
+        assert_eq!(failed.flushed(), 0);
+
+        let mut working_sink = TestSink {
+            fail: false,
+            writes: Vec::new(),
+        };
+        let recovered = writer.flush_with(&mut working_sink);
+        assert_eq!(recovered.failed(), 1);
+        assert_eq!(recovered.flushed(), 1);
+        assert_eq!(recovered.pending(), 0);
+        assert_eq!(
+            registry
+                .read_metric(MetricKey::new(
+                    MetricName::WriterFailed,
+                    Component::Observability,
+                ))
+                .unwrap()
+                .value(),
+            MetricValue::Counter(1)
+        );
+    }
+
+    #[test]
+    fn writer_shutdown_discards_pending_items_and_rejects_new_events() {
+        let registry = Arc::new(ObservabilityRegistry::new());
+        let writer = EventWriter::new(Arc::clone(&registry), 1).unwrap();
+        writer
+            .emit(
+                TypedEvent::new(
+                    EventName::ScaffoldReady,
+                    Component::Application,
+                    EventResult::Success,
+                    "not retained",
+                ),
+                Instant::now(),
+            )
+            .unwrap();
+
+        let summary = writer.shutdown();
+        assert!(summary.closed());
+        assert_eq!(summary.discarded(), 1);
+        assert_eq!(summary.pending(), 0);
+        assert_eq!(
+            writer
+                .emit(
+                    TypedEvent::new(
+                        EventName::ScaffoldReady,
+                        Component::Application,
+                        EventResult::Success,
+                        "not retained",
+                    ),
+                    Instant::now(),
+                )
+                .unwrap_err(),
+            EventWriterError::Closed
+        );
+        assert_eq!(writer.shutdown().discarded(), 1);
     }
 }
