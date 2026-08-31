@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 前五个小阶段已完成
+> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 前六个小阶段已完成
 >
 > 更新日期：2026-08-31
 >
@@ -10,7 +10,7 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统和 Runtime 候选骨架；阶段 2 记录起点为 69 个单元测试，当前工作树因增量测试已达到 88 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard 以及 Supervisor task tree 基础小阶段，但 App 仍是 scaffold，尚无真实 transport/upstream/storage adapter 或可提供 DNS 服务的启动闭环。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统和 Runtime 候选骨架；阶段 2 记录起点为 69 个单元测试，当前工作树因增量测试已达到 94 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础和系统 socket capability 小阶段，但 App 尚未接入真实 transport/upstream/storage adapter 或可提供 DNS 服务的启动闭环。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
@@ -172,6 +172,8 @@ transport / upstream / storage / observability adapters
 第四个小阶段（已完成）：新增 `Supervisor`、task ID/故障等级/重启策略元数据和 shutdown 回收报告；所有 task 由 `JoinSet` 持有，重复注册被拒绝，正常退出、失败、取消和 panic 均有明确分类。Runtime targeted tests：3 passed；有界重启、完整 drain/flush 顺序和 Application 启动接线留在阶段 3 后续小阶段。
 
 第五个小阶段（已完成）：扩展 `ports::effects` 的 UDP/TCP 不透明 socket capability，接入 `socket2`/Tokio `SystemSocketFactory`，并由 `BoundListenerSet::endpoint_handles` 以 `Arc` clone 方式交给后续 Transport；I/O 保留 deadline、cancellation 和安全错误分类，公共 API 不泄漏 Tokio 类型。新增 UDP/TCP activation tests；Transport framing、Application 接线和完整 shutdown 顺序留在阶段 3/4 后续小阶段。
+
+第六个小阶段（已完成）：Application 接入严格 CLI 解析、默认 `config.yaml`、`validate` 只读命令和配置错误/启动错误映射；`validate` 不创建配置快照、不读取 SecretRef 实际值，`run` 已完成 Config → Runtime preflight 后在服务 task 尚未装配时明确返回启动错误。新增 CLI 单测和真实 `cargo run validate --config config-example.yaml` 验证；监听任务、信号和完整服务启动留在后续小阶段。
 
 ### 阶段 4：DNS Core 与 UDP/TCP
 

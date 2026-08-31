@@ -1,6 +1,6 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，阶段 1 骨架已实现
+> 状态：v1 方案已完成，阶段 1 骨架和配置校验命令已实现
 >
 > 更新日期：2026-08-30
 >
@@ -124,11 +124,11 @@ Application 将内部错误转换为：
 - [x] 创建 `main.rs` 与 `app.rs`；
 - [x] 建立进程级错误与退出码映射；
 - [x] 接入 bootstrap telemetry 初始化；
-- [ ] 接入读取配置后的 final telemetry；
-- [ ] 接入 Runtime prepare、activate、wait、shutdown；
+- [x] 接入读取配置后的 Config load/resolve/preflight 边界；
+- [ ] 接入 Runtime bind、activate、wait、shutdown；
 - [ ] 完成信号与退出测试；
 - [x] 记录阶段 1 验证证据并更新实现进度。
 
-阶段 1 证据：`app::tests::exit_codes_are_stable` 覆盖 `0/2/3/4/5` 稳定退出码，进程骨架可运行且不会加载配置或绑定端口；全量测试与 Clippy 门禁通过，具体命令和结果见开发计划阶段 1 验收证据。
+阶段 1 证据：`app::tests::exit_codes_are_stable` 覆盖 `0/2/3/4/5` 稳定退出码，进程骨架可运行且不会加载配置或绑定端口；后续 Application 小阶段增加 CLI 参数边界、`validate` 只读加载和 Config → Runtime preflight 映射。真实服务 task、final telemetry、信号和 shutdown 仍未完成。
 
 当前实现进度：**20%**。

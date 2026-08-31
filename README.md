@@ -32,7 +32,7 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 字段语义见 [docs/configuration-reference.md](docs/configuration-reference.md)，Rust 后端总体方案见 [docs/backend-architecture.md](docs/backend-architecture.md)，模块方案、阶段安排和当前进度见 [docs/backend-development-plan.md](docs/backend-development-plan.md)。
 
-Config 阶段 2 记录起点为 69 tests；当前工作树已增量至 90 tests，串行测试为 90 passed、0 failed，`clippy` 和 `fmt --check` 均已通过。测试数量可能随后续阶段增量。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
+Config 阶段 2 记录起点为 69 tests；当前工作树已增量至 94 tests，串行测试为 94 passed、0 failed，`clippy` 和 `fmt --check` 均已通过。测试数量可能随后续阶段增量。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
 
 配置中的示例地址、账号、密码和客户端标识仅用于说明格式，部署前必须替换为实际且受保护的配置。
 
