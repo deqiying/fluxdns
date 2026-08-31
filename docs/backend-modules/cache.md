@@ -1,6 +1,6 @@
 # Cache 模块设计
 
-> 状态：v1 方案已完成，已实现内存 CacheStore 与响应准入/TTL 首轮切片；Facade、key builder、Moka/SQLite persistence 尚未实现
+> 状态：v1 方案已完成，已实现内存 CacheStore、响应准入/TTL、稳定 key builder 与 CacheFacade 首轮切片；Moka/SQLite persistence 尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -18,10 +18,10 @@ Cache 模块实现逻辑缓存池、entry 生命周期、single-flight、optimis
 
 | 文件 | 职责 |
 | --- | --- |
-| `key.rs` | namespace、query/strategy/ECS/transport compatibility key |
+| `key.rs` | namespace、query/strategy/ECS/transport compatibility key 的稳定编码 |
 | `memory.rs` | 当前为无外部依赖的 HashMap/Mutex `CacheStore` adapter；Moka 接入待后续切片 |
 | `persistence.rs` | 独立 SQLite `PersistentCacheStore` |
-| `service.rs` | `CacheFacade`、single-flight、TTL、CAS、invalidations |
+| `service.rs` | `CacheFacade`、single-flight、TTL、CAS、invalidations 的 typed 编排 |
 
 缓存 SQLite 与业务统计 SQLite 是不同文件、不同 schema、不同 writer 和不同故障边界。
 
@@ -162,6 +162,12 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - REFUSED、未知响应类、缺失 TTL 和零 TTL 明确拒绝写入；
 - 可选生成 optimistic stale 窗口，并为 canonical wire 计算稳定 checksum。
 
+当前已实现的 key/facade 首轮切片：
+
+- `CacheKey` 使用固定 format version、长度前缀和 opaque namespace/compatibility 组件编码 canonical query，不包含 DNS ID、runtime revision 或原始 client 地址；
+- `CacheFacade` 将 disabled、miss、fresh、stale 和 store unavailable 分层，并用一次性 refresh permit 防止重复刷新许可；
+- write request 经过准入 helper 后再进入 typed CAS，adapter 错误保持为可降级的 store unavailable，不把具体存储类型泄漏到 DNS Core。
+
 ## 10. Persistence
 
 独立 SQLite cache DB 至少包含：
@@ -216,13 +222,13 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 
 ## 14. 实现检查清单
 
-- [ ] 定义 namespace/key/entry format；（基础 typed contract 已在 `ports/cache.rs`，生产 key builder 待实现）
-- [ ] 实现 CacheFacade；（响应准入/TTL 纯 helper 已完成）
-- [ ] 实现 namespace/key builder；
+- [x] 定义 namespace/key/entry format；（基础 typed contract 与 `cache/key.rs` 稳定编码已完成）
+- [x] 实现 CacheFacade 首轮切片；（完整 DNS Core 接线仍待后续）
+- [x] 实现 namespace/key builder；
 - [x] 实现 single-flight/CAS/显式失效的内存 adapter 首轮切片；
 - [ ] 实现 Moka adapter；
 - [ ] 实现独立 SQLite persistence；
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [ ] 完成跨 adapter 一致性、恢复和故障测试。
 
-当前实现进度：**35%**（内存 adapter、响应准入/TTL helper 和 single-flight 首轮切片；namespace/key builder、CacheFacade、容量淘汰、optimistic refresh 和 SQLite persistence 未实现）。
+当前实现进度：**35%**（内存 adapter、响应准入/TTL、namespace/key builder、CacheFacade 和 single-flight 首轮切片；容量淘汰、optimistic refresh 和 SQLite persistence 未实现）。

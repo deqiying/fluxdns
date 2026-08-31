@@ -1,6 +1,6 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client ID/CIDR 与 strategy immutable index 首轮切片；rule/route/override 管线尚未实现
+> 状态：v1 方案已完成，已实现 client/strategy immutable index、listener/DoH route index 与请求级 ResolutionPlan 首轮组合；rule/resource matcher 和 snapshot 接线尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -31,7 +31,8 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 | --- | --- |
 | `client.rs` | client ID map、CIDR trie 和冲突检测结果 |
 | `strategy.rs` | strategy、覆盖值和默认 upstream |
-| `route.rs` | listener/DoH route 到基础策略的映射和规则执行 |
+| `route.rs` | listener/DoH route 到基础策略的映射 |
+| `plan.rs` | client override、cache/TTL/ECS 生效值与请求级 ResolutionPlan 组合 |
 
 规则数据结构由 Resource 模块编译，Policy 只持有不可变 matcher handle。
 
@@ -54,7 +55,9 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 
 - `ClientIndex`：exact client ID 优先，未命中时按 IPv4/IPv6 最长 CIDR 前缀匹配，最后进入 `Unknown`；重复 ID/CIDR 和空规则在构建时拒绝；
 - `StrategyIndex`：将已解析策略编译为不可变 `BTreeMap<ConfigId, Arc<ResolvedStrategy>>`，重复策略 ID 在构建时拒绝；
-- 两个索引都只持有已解析 typed 值，不在请求路径读取 YAML 或执行网络 I/O。
+- `RouteIndex`：编译 stream listener 与 DoH route，校验 `{client_id}` segment 模板并保留 typed listener/route 选择结果；
+- `PolicyIndex::evaluate`：组合 client strategy override、cache tri-state、TTL/ECS effective value 和 upstream target，输出不可变 `ResolutionPlan`；
+- 这些索引只持有已解析 typed 值，不在请求路径读取 YAML 或执行网络 I/O。
 
 ## 4. 域名规范化
 
@@ -179,10 +182,10 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 
 - [x] 实现 client ID/CIDR 索引；
 - [x] 建立 strategy immutable lookup index；
-- [ ] 实现 strategy/route 编译；
+- [x] 实现 strategy/route 编译；
 - [ ] 实现 rule/hosts/resource matcher 编排；
-- [ ] 实现覆盖矩阵与 ResolutionPlan；
+- [x] 实现覆盖矩阵与 ResolutionPlan（首轮 cache/TTL/ECS/client override）；
 - [ ] 接入 snapshot 原子发布；
 - [ ] 完成冲突、优先级和并发一致性测试。
 
-当前实现进度：**20%**（client ID/CIDR 与 strategy lookup 首轮切片；rule/route matcher、覆盖矩阵、ECS/TTL/cache decision 和 snapshot 接线未实现）。
+当前实现进度：**35%**（client/strategy/route immutable index 与请求级 plan 首轮组合；rule/resource matcher、完整覆盖优先级、snapshot 接线和跨 transport contract tests 未完成）。
