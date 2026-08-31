@@ -5,10 +5,28 @@
 //! a bounded HTTP/1.x request and returns a canonical DNS query payload.
 
 use std::fmt;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime};
 
 use thiserror::Error;
+use tokio::sync::Mutex;
 
-use crate::dns::ClientId;
+use crate::config::model::{ClientIpSource, TlsMode};
+use crate::config::resolve::ResolvedListener;
+use crate::config::{BindProtocol, BindTransport, DohBindingRef, ResolvedConfig};
+use crate::dns::{
+    CancelReason, Cancellation, ClientId, ClientIdentity, ConnectionId, Deadline, DnsRequest,
+    ListenerId, RequestContext, RequestId, RequestMeta, RouteId, RuntimeRevision, StreamId,
+    TransportCapabilities, TransportClass,
+};
+use crate::ports::effects::{
+    ActivatedSocketHandle, TcpConnectionHandle, TcpListenerHandle, TcpReadChunkResult,
+};
+use crate::ports::inbound::{InboundRequest, ResponseEncoder};
+use crate::ports::{PortError, PortErrorClass, PortFuture};
+use crate::runtime::BoundEndpointHandle;
 
 use super::wire::{MAX_DNS_WIRE_BYTES, ParsedQuery, WireError, decode_query};
 
@@ -18,6 +36,8 @@ pub const MAX_DOH_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_DOH_REQUEST_TARGET_BYTES: usize = 131_072;
 
 const MAX_HEADER_COUNT: usize = 64;
+const DOH_READ_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_DOH_BUFFER_BYTES: usize = MAX_DOH_HEADER_BYTES + MAX_DOH_POST_BODY_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DohHttpMethod {
@@ -151,6 +171,424 @@ impl DohRoutePattern {
             client_id,
         })
     }
+}
+
+#[derive(Debug, Error)]
+pub enum DohAdapterError {
+    #[error("DoH adapter requires a positive request timeout")]
+    InvalidTimeout,
+    #[error("DoH endpoint and activated socket protocol do not match")]
+    ProtocolMismatch,
+    #[error("DoH adapter requires multiplexed transport capabilities")]
+    InvalidTransportClass,
+    #[error("DoH bind entry is missing typed endpoint metadata")]
+    MissingBinding,
+    #[error("DoH listener `{listener}` was not found in resolved configuration")]
+    ListenerNotFound { listener: String },
+    #[error("DoH endpoint `{endpoint}` was not found in resolved configuration")]
+    EndpointNotFound { endpoint: String },
+    #[error("DoH TLS terminate mode is not implemented")]
+    UnsupportedTlsMode,
+    #[error("DoH client IP source is not supported by the plain HTTP adapter")]
+    UnsupportedClientIpSource,
+    #[error("DoH route is invalid: {0}")]
+    InvalidRoute(#[from] DohRouteError),
+}
+
+/// HTTP-level outcome produced by one DoH session read.
+pub enum DohSessionEvent {
+    Request(InboundRequest),
+    HttpError { error: DohHttpError, close: bool },
+    CleanEof,
+}
+
+/// DoH listener adapter. The underlying socket remains a TCP capability;
+/// `BindTransport::Doh` selects this application protocol.
+pub struct DohAdapter {
+    listener: Arc<dyn TcpListenerHandle>,
+    binding: DohBindingRef,
+    routes: Arc<Vec<DohRoutePattern>>,
+    runtime_revision: RuntimeRevision,
+    transport: TransportCapabilities,
+    request_ids: Arc<AtomicU64>,
+    connection_ids: AtomicU64,
+    request_timeout: Duration,
+}
+
+/// One ordered HTTP/1.x connection. Requests are processed serially in v1;
+/// the connection may stay open for another request after a valid response.
+pub struct DohSession {
+    connection: Arc<Mutex<Box<dyn TcpConnectionHandle>>>,
+    peer: SocketAddr,
+    connection_id: ConnectionId,
+    next_stream_id: u64,
+    request_ids: Arc<AtomicU64>,
+    binding: DohBindingRef,
+    listener_id: ListenerId,
+    routes: Arc<Vec<DohRoutePattern>>,
+    runtime_revision: RuntimeRevision,
+    transport: TransportCapabilities,
+    request_timeout: Duration,
+    read_buffer: Vec<u8>,
+    pending_close: bool,
+}
+
+impl fmt::Debug for DohAdapter {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("DohAdapter")
+            .field("binding", &self.binding)
+            .field("route_count", &self.routes.len())
+            .field("runtime_revision", &self.runtime_revision)
+            .field("transport", &self.transport)
+            .field("request_timeout", &self.request_timeout)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DohAdapter {
+    pub fn from_endpoint(
+        endpoint: BoundEndpointHandle,
+        config: &ResolvedConfig,
+        runtime_revision: RuntimeRevision,
+        transport: TransportCapabilities,
+        request_timeout: Duration,
+    ) -> Result<Self, DohAdapterError> {
+        if endpoint.entry.protocol != BindProtocol::Tcp
+            || endpoint.entry.transport != BindTransport::Doh
+        {
+            return Err(DohAdapterError::ProtocolMismatch);
+        }
+        let binding = endpoint
+            .entry
+            .doh_binding
+            .clone()
+            .ok_or(DohAdapterError::MissingBinding)?;
+        let ActivatedSocketHandle::Tcp(listener) = endpoint.socket else {
+            return Err(DohAdapterError::ProtocolMismatch);
+        };
+
+        let Some(ResolvedListener::Doh {
+            id: _,
+            routes,
+            endpoints,
+        }) = config
+            .listeners
+            .iter()
+            .find(|listener| matches!(listener, ResolvedListener::Doh { id, .. } if id.as_str() == binding.listener_id))
+        else {
+            return Err(DohAdapterError::ListenerNotFound {
+                listener: binding.listener_id,
+            });
+        };
+        let endpoint_config = endpoints
+            .iter()
+            .find(|candidate| {
+                candidate.binding == binding
+                    && candidate.port == endpoint.entry.port
+                    && candidate.addresses.contains(&endpoint.entry.address)
+            })
+            .ok_or_else(|| DohAdapterError::EndpointNotFound {
+                endpoint: binding.endpoint_id.clone(),
+            })?;
+        if endpoint_config.tls_mode != TlsMode::External {
+            return Err(DohAdapterError::UnsupportedTlsMode);
+        }
+        if endpoint_config.client_ip.source != ClientIpSource::Peer {
+            return Err(DohAdapterError::UnsupportedClientIpSource);
+        }
+
+        let route_patterns = routes
+            .iter()
+            .map(|route| DohRoutePattern::new(route.path.clone(), route.strategy.as_str()))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::new(
+            listener,
+            binding,
+            route_patterns,
+            runtime_revision,
+            transport,
+            request_timeout,
+        )
+    }
+
+    pub fn new(
+        listener: Arc<dyn TcpListenerHandle>,
+        binding: DohBindingRef,
+        routes: Vec<DohRoutePattern>,
+        runtime_revision: RuntimeRevision,
+        transport: TransportCapabilities,
+        request_timeout: Duration,
+    ) -> Result<Self, DohAdapterError> {
+        if request_timeout.is_zero() {
+            return Err(DohAdapterError::InvalidTimeout);
+        }
+        if transport.class != TransportClass::Multiplexed {
+            return Err(DohAdapterError::InvalidTransportClass);
+        }
+        if routes.is_empty() {
+            return Err(DohAdapterError::InvalidRoute(DohRouteError::InvalidPath));
+        }
+        Ok(Self {
+            listener,
+            binding,
+            routes: Arc::new(routes),
+            runtime_revision,
+            transport,
+            request_ids: Arc::new(AtomicU64::new(0)),
+            connection_ids: AtomicU64::new(0),
+            request_timeout,
+        })
+    }
+
+    pub fn binding(&self) -> &DohBindingRef {
+        &self.binding
+    }
+
+    pub fn accept_session<'a>(
+        &'a self,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Option<DohSession>, PortError>> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            let deadline = Deadline::new(Instant::now() + self.request_timeout);
+            let Some(connection) = self.listener.accept(deadline, cancellation).await? else {
+                return Ok(None);
+            };
+            let connection = Arc::new(Mutex::new(connection));
+            let peer = {
+                let connection = connection.lock().await;
+                connection.peer_addr()?
+            };
+            let connection_id = ConnectionId::from(
+                self.connection_ids
+                    .fetch_add(1, Ordering::AcqRel)
+                    .wrapping_add(1),
+            );
+            Ok(Some(DohSession {
+                connection,
+                peer,
+                connection_id,
+                next_stream_id: 0,
+                request_ids: Arc::clone(&self.request_ids),
+                binding: self.binding.clone(),
+                listener_id: ListenerId::from(self.binding.listener_id.clone()),
+                routes: Arc::clone(&self.routes),
+                runtime_revision: self.runtime_revision,
+                transport: self.transport,
+                request_timeout: self.request_timeout,
+                read_buffer: Vec::new(),
+                pending_close: false,
+            }))
+        })
+    }
+}
+
+impl DohSession {
+    pub fn connection_id(&self) -> ConnectionId {
+        self.connection_id
+    }
+
+    pub fn peer(&self) -> SocketAddr {
+        self.peer
+    }
+
+    pub fn binding(&self) -> &DohBindingRef {
+        &self.binding
+    }
+
+    pub fn response_should_close(&self) -> bool {
+        self.pending_close
+    }
+
+    pub fn receive<'a>(
+        &'a mut self,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<DohSessionEvent, PortError>> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Err(cancelled_error("transport.doh.receive"));
+            }
+            let received_at = Instant::now();
+            let deadline = Deadline::new(received_at + self.request_timeout);
+            loop {
+                match try_parse_request(&self.read_buffer) {
+                    Ok(Some(parsed)) => {
+                        self.read_buffer.drain(..parsed.consumed_bytes);
+                        let route = self
+                            .routes
+                            .iter()
+                            .find_map(|route| route.matches(&parsed.path));
+                        let Some(route) = route else {
+                            self.pending_close = parsed.connection_close;
+                            return Ok(DohSessionEvent::HttpError {
+                                error: DohHttpError::NotFound,
+                                close: parsed.connection_close,
+                            });
+                        };
+                        self.pending_close = parsed.connection_close;
+                        self.next_stream_id = self.next_stream_id.wrapping_add(1).max(1);
+                        let request_id = RequestId::from(
+                            self.request_ids
+                                .fetch_add(1, Ordering::AcqRel)
+                                .wrapping_add(1) as u128,
+                        );
+                        let request_cancellation = Cancellation::new();
+                        let context = RequestContext {
+                            meta: RequestMeta {
+                                request_id,
+                                trace_id: None,
+                                received_at,
+                                received_at_utc: SystemTime::now(),
+                                deadline,
+                                cancellation: request_cancellation,
+                                connection_id: Some(self.connection_id),
+                                stream_id: Some(StreamId::from(self.next_stream_id)),
+                                listener_id: self.listener_id.clone(),
+                                route_id: Some(RouteId::from(route.template.clone())),
+                                original_dns_id: Some(parsed.query.id.value()),
+                            },
+                            client: ClientIdentity {
+                                peer_addr: Some(self.peer),
+                                client_addr: Some(self.peer.ip()),
+                                client_id: route.client_id,
+                            },
+                            transport: self.transport,
+                            runtime_revision: self.runtime_revision,
+                        };
+                        let encoder = Arc::new(DohResponseEncoder {
+                            connection: Arc::clone(&self.connection),
+                            close: parsed.connection_close,
+                        });
+                        return Ok(DohSessionEvent::Request(InboundRequest::new(
+                            DnsRequest {
+                                query: parsed.query.query,
+                                context,
+                            },
+                            encoder,
+                        )));
+                    }
+                    Ok(None) => {
+                        if self.read_buffer.len() >= MAX_DOH_BUFFER_BYTES {
+                            self.read_buffer.clear();
+                            self.pending_close = true;
+                            return Ok(DohSessionEvent::HttpError {
+                                error: DohHttpError::PayloadTooLarge,
+                                close: true,
+                            });
+                        }
+                        let result = {
+                            let mut connection = self.connection.lock().await;
+                            connection
+                                .read_chunk(DOH_READ_CHUNK_BYTES, deadline, cancellation)
+                                .await?
+                        };
+                        match result {
+                            TcpReadChunkResult::Data(bytes) => {
+                                if bytes.is_empty()
+                                    || bytes.len() > DOH_READ_CHUNK_BYTES
+                                    || self.read_buffer.len() + bytes.len() > MAX_DOH_BUFFER_BYTES
+                                {
+                                    self.read_buffer.clear();
+                                    self.pending_close = true;
+                                    return Ok(DohSessionEvent::HttpError {
+                                        error: DohHttpError::PayloadTooLarge,
+                                        close: true,
+                                    });
+                                }
+                                self.read_buffer.extend_from_slice(&bytes);
+                            }
+                            TcpReadChunkResult::CleanEof => {
+                                if self.read_buffer.is_empty() {
+                                    return Ok(DohSessionEvent::CleanEof);
+                                }
+                                return Err(PortError::new(
+                                    PortErrorClass::ProtocolViolation,
+                                    "transport.doh.eof",
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        self.read_buffer.clear();
+                        self.pending_close = true;
+                        return Ok(DohSessionEvent::HttpError { error, close: true });
+                    }
+                }
+            }
+        })
+    }
+
+    pub fn write_http_error<'a>(
+        &'a self,
+        error: DohHttpError,
+        close: bool,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<(), PortError>> {
+        let payload = encode_http_error_with_close(error, close || error.should_close());
+        let deadline = Deadline::new(Instant::now() + self.request_timeout);
+        Box::pin(async move {
+            let mut connection = self.connection.lock().await;
+            connection.write_all(payload, deadline, cancellation).await
+        })
+    }
+
+    pub async fn close(&mut self) {
+        let mut connection = self.connection.lock().await;
+        let _ = connection.shutdown().await;
+    }
+}
+
+struct DohResponseEncoder {
+    connection: Arc<Mutex<Box<dyn TcpConnectionHandle>>>,
+    close: bool,
+}
+
+impl ResponseEncoder for DohResponseEncoder {
+    fn encode<'a>(
+        &'a self,
+        request: &'a DnsRequest,
+        response: crate::dns::CanonicalResponse,
+    ) -> PortFuture<'a, Result<(), PortError>> {
+        Box::pin(async move {
+            let id = request
+                .context
+                .meta
+                .original_dns_id
+                .map(crate::dns::DnsMessageId::new)
+                .ok_or_else(|| {
+                    PortError::new(PortErrorClass::ProtocolViolation, "transport.doh.encode")
+                })?;
+            let dns = super::wire::encode_response(&response, id, MAX_DNS_WIRE_BYTES)
+                .map_err(map_doh_wire_error)?;
+            let payload = encode_dns_response(&dns, self.close);
+            let mut connection = self.connection.lock().await;
+            connection
+                .write_all(
+                    payload,
+                    request.context.meta.deadline,
+                    &request.context.meta.cancellation,
+                )
+                .await
+        })
+    }
+}
+
+fn map_doh_wire_error(error: super::wire::WireError) -> PortError {
+    let class = match error {
+        super::wire::WireError::TooLarge { .. } => PortErrorClass::ResourceExhausted,
+        super::wire::WireError::Empty
+        | super::wire::WireError::Decode
+        | super::wire::WireError::InvalidQuery(_) => PortErrorClass::ProtocolViolation,
+        super::wire::WireError::Encode => PortErrorClass::Internal,
+    };
+    PortError::new(class, "transport.doh.encode")
+}
+
+fn cancelled_error(operation: &'static str) -> PortError {
+    PortError::new(PortErrorClass::Cancelled(CancelReason::Shutdown), operation)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -413,8 +851,12 @@ pub fn encode_http_response(
 }
 
 pub fn encode_http_error(error: DohHttpError) -> Vec<u8> {
+    encode_http_error_with_close(error, error.should_close())
+}
+
+pub fn encode_http_error_with_close(error: DohHttpError, close: bool) -> Vec<u8> {
     let allow = (error == DohHttpError::MethodNotAllowed).then_some("GET, POST");
-    encode_http_response_with_allow(error.status(), &[], None, error.should_close(), allow)
+    encode_http_response_with_allow(error.status(), &[], None, close, allow)
 }
 
 pub fn encode_dns_response(body: &[u8], close: bool) -> Vec<u8> {
@@ -575,10 +1017,23 @@ fn hex_value(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
+    use std::net::SocketAddr;
     use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query};
     use hickory_proto::rr::{Name, RecordType};
+
+    use crate::dns::{
+        CacheCompatibilityKey, Cancellation, RuntimeRevision, ServFailCore, TransportCapabilities,
+        TransportClass, dispatch_inbound,
+    };
+    use crate::ports::effects::{
+        TcpConnectionHandle, TcpListenerHandle, TcpReadChunkResult, TcpReadResult,
+    };
+    use crate::ports::{PortError, PortErrorClass, PortFuture};
 
     use super::*;
 
@@ -763,5 +1218,212 @@ mod tests {
             DohRoutePattern::new("/dns/pre{client_id}", "default"),
             Err(DohRouteError::InvalidPlaceholder)
         );
+    }
+
+    #[derive(Default)]
+    struct FakeDohListener {
+        connections: Mutex<VecDeque<Box<dyn TcpConnectionHandle>>>,
+    }
+
+    impl TcpListenerHandle for FakeDohListener {
+        fn local_addr(&self) -> Result<SocketAddr, PortError> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 8355)))
+        }
+
+        fn accept<'a>(
+            &'a self,
+            _deadline: crate::dns::Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<Option<Box<dyn TcpConnectionHandle>>, PortError>> {
+            let connection = self.connections.lock().unwrap().pop_front();
+            Box::pin(async move { Ok(connection) })
+        }
+    }
+
+    struct FakeDohConnection {
+        peer: SocketAddr,
+        chunks: Mutex<VecDeque<Result<TcpReadChunkResult, PortError>>>,
+        writes: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl TcpConnectionHandle for FakeDohConnection {
+        fn peer_addr(&self) -> Result<SocketAddr, PortError> {
+            Ok(self.peer)
+        }
+
+        fn read_exact<'a>(
+            &'a mut self,
+            _length: usize,
+            _deadline: crate::dns::Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<TcpReadResult, PortError>> {
+            Box::pin(async {
+                Err(PortError::new(
+                    PortErrorClass::Internal,
+                    "test.doh.read_exact",
+                ))
+            })
+        }
+
+        fn read_chunk<'a>(
+            &'a mut self,
+            _max_bytes: usize,
+            _deadline: crate::dns::Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<TcpReadChunkResult, PortError>> {
+            let result = self
+                .chunks
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(TcpReadChunkResult::CleanEof));
+            Box::pin(async move { result })
+        }
+
+        fn write_all<'a>(
+            &'a mut self,
+            payload: Vec<u8>,
+            _deadline: crate::dns::Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<(), PortError>> {
+            self.writes.lock().unwrap().push(payload);
+            Box::pin(async { Ok(()) })
+        }
+
+        fn shutdown(&mut self) -> PortFuture<'_, Result<(), PortError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn doh_capabilities() -> TransportCapabilities {
+        TransportCapabilities {
+            class: TransportClass::Multiplexed,
+            cache_compatibility: CacheCompatibilityKey(1),
+        }
+    }
+
+    #[tokio::test]
+    async fn session_maps_http_request_to_core_and_writes_dns_response() {
+        let wire = wire();
+        let request = request(
+            "POST",
+            "/dns/client",
+            &format!(
+                "Content-Type: application/dns-message\r\nContent-Length: {}\r\n",
+                wire.len()
+            ),
+            &wire,
+        );
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let connection = FakeDohConnection {
+            peer: SocketAddr::from(([127, 0, 0, 1], 40000)),
+            chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(request))])),
+            writes: Arc::clone(&writes),
+        };
+        let listener = Arc::new(FakeDohListener::default());
+        listener
+            .connections
+            .lock()
+            .unwrap()
+            .push_back(Box::new(connection));
+        let adapter = DohAdapter::new(
+            listener,
+            DohBindingRef {
+                listener_id: "doh".to_owned(),
+                endpoint_id: "plain".to_owned(),
+            },
+            vec![DohRoutePattern::new("/dns/{client_id}", "default").unwrap()],
+            RuntimeRevision(1),
+            doh_capabilities(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let cancellation = Cancellation::new();
+        let mut session = adapter
+            .accept_session(&cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let event = session.receive(&cancellation).await.unwrap();
+        let DohSessionEvent::Request(inbound) = event else {
+            panic!("expected a valid DoH request");
+        };
+        assert_eq!(
+            inbound.request().context.meta.connection_id,
+            Some(ConnectionId(1))
+        );
+        assert_eq!(
+            inbound
+                .request()
+                .context
+                .client
+                .client_id
+                .as_ref()
+                .unwrap()
+                .as_str(),
+            "client"
+        );
+        assert_eq!(
+            dispatch_inbound(&ServFailCore, inbound).await.unwrap(),
+            crate::dns::DispatchOutcome::Responded
+        );
+
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        let response = String::from_utf8_lossy(&writes[0]);
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.contains("Content-Type: application/dns-message\r\n"));
+        assert!(response.contains("Cache-Control: no-store\r\n"));
+        let body_start = writes[0]
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("HTTP response headers")
+            + 4;
+        let dns_response = Message::from_vec(&writes[0][body_start..]).unwrap();
+        assert_eq!(dns_response.metadata.id, 0x1234);
+    }
+
+    #[tokio::test]
+    async fn session_reports_route_error_without_confusing_it_with_dns_failure() {
+        let wire = wire();
+        let encoded = base64url(&wire);
+        let request = request("GET", &format!("/unknown?dns={encoded}"), "", &[]);
+        let listener = Arc::new(FakeDohListener::default());
+        listener
+            .connections
+            .lock()
+            .unwrap()
+            .push_back(Box::new(FakeDohConnection {
+                peer: SocketAddr::from(([127, 0, 0, 1], 40000)),
+                chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(request))])),
+                writes: Arc::new(Mutex::new(Vec::new())),
+            }));
+        let adapter = DohAdapter::new(
+            listener,
+            DohBindingRef {
+                listener_id: "doh".to_owned(),
+                endpoint_id: "plain".to_owned(),
+            },
+            vec![DohRoutePattern::new("/dns", "default").unwrap()],
+            RuntimeRevision(1),
+            doh_capabilities(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let cancellation = Cancellation::new();
+        let mut session = adapter
+            .accept_session(&cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+        let event = session.receive(&cancellation).await.unwrap();
+        assert!(matches!(
+            event,
+            DohSessionEvent::HttpError {
+                error: DohHttpError::NotFound,
+                close: false
+            }
+        ));
     }
 }
