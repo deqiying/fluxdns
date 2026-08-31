@@ -287,10 +287,10 @@ impl<T> ResourceRegistrySnapshot<T> {
     ) -> Result<Self, ResourcePublishError> {
         let current = self.resources.get(&resource_id);
         let actual = current.map(|snapshot| snapshot.version());
-        if let Some(expected) = expected {
-            if expected != actual {
-                return Err(ResourcePublishError::CompareAndSwapFailed { expected, actual });
-            }
+        if let Some(expected) = expected
+            && expected != actual
+        {
+            return Err(ResourcePublishError::CompareAndSwapFailed { expected, actual });
         }
 
         if let Some(current) = current {
