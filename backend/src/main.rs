@@ -1,6 +1,7 @@
 use std::process::ExitCode;
 
 pub mod app;
+pub mod cache;
 pub mod config;
 pub mod dns;
 pub mod observability;
