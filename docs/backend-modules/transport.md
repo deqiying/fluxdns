@@ -1,6 +1,6 @@
 # Transport 模块设计
 
-> 状态：v1 方案已完成，已实现共享 DNS wire codec；UDP/TCP/DoH adapter 尚未接线
+> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter 和 TCP 持久 session；DoH/TLS/PROXY 尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -38,6 +38,14 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 - 将 decode、canonical validation、encode 和尺寸失败归入稳定的 `WireError`，不暴露底层库错误文本。
 
 该 codec 只处理 DNS message 本身，不负责 UDP/TCP framing、策略、上游或 socket 生命周期。
+
+### 3.2 当前已实现：UDP/TCP 入站
+
+- UDP adapter 从 opaque socket 接收 datagram，构造统一 `RequestContext`，响应时恢复 DNS ID；完整响应超出客户端尺寸时按 RR 边界截断并设置 `TC`。
+- TCP adapter 使用两字节网络序 length framing；`TcpSession` 为每个 accepted connection 固定 `ConnectionId`，连续 frame 递增 `StreamId`，连接内按读取顺序完成 Core 和 response write。
+- clean EOF、半帧 EOF、零长度 frame、decode 错误和 response write 错误只关闭当前连接；listener task 继续接收其他连接。
+- TCP listener 的 connection tasks 由内部 `JoinSet` 持有，未使用 detached `tokio::spawn`。
+- `BindTransport` 将 DoH endpoint 与 raw TCP 明确区分；DoH HTTP adapter 未完成前，service 装配显式返回启动错误。
 
 forwarded header 解析可放在 `doh.rs` 的独立子模块，不能复用未经验证的任意 header 字符串。
 
@@ -107,7 +115,9 @@ TCP adapter：
 
 ## 7. DoH
 
-每条 route 同时支持 GET/POST：
+当前尚未实现。DoH endpoint 只在 bind plan 中保留独立 transport 类型，不能被当作 raw DNS/TCP 服务；HTTP adapter 完成前配置该 endpoint 会在 service 装配阶段失败。
+
+目标契约（尚未实现）每条 route 同时支持 GET/POST：
 
 - GET：唯一 `dns` 参数、无 padding base64url；
 - POST：`application/dns-message` raw body；
@@ -205,11 +215,12 @@ encoder 由 request correlation 持有并只能调用一次：
 ## 13. 实现检查清单
 
 - [ ] 实现 profile/capabilities 映射；
-- [ ] 实现 UDP、TCP adapter；
+- [x] 实现 UDP、TCP adapter；
 - [ ] 实现 DoH GET/POST；
 - [ ] 实现 TLS 与 client IP 恢复；
-- [ ] 实现 response correlation/encoder；
+- [x] 实现 UDP/TCP response correlation/encoder；
 - [x] 建立共享 DNS wire decode/encode boundary 和尺寸/错误分类测试；
-- [ ] 完成资源限制、安全和协议测试。
+- [x] 完成 UDP/TCP framing、尺寸、EOF、取消和顺序响应测试；
+- [ ] 完成 DoH/TLS/代理资源限制、安全和协议测试。
 
-当前实现进度：**5%**。
+当前实现进度：**35%**。

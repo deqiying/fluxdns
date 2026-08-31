@@ -1,8 +1,8 @@
 # Ports 模块设计
 
-> 状态：v1 方案已完成，阶段 1 公共契约和阶段 3 socket capability 已实现
+> 状态：v1 方案已完成，公共契约、UDP/TCP socket capability 和 TCP EOF/session 语义已实现
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/ports/*`
 >
@@ -43,6 +43,8 @@ Ports 不包含具体 adapter，也不成为“所有类型都抽象成 trait”
 - 只读的 response correlation handle。
 
 `ResponseEncoder` 负责把 canonical response 变回 UDP/TCP/HTTP envelope，包括 DNS ID 恢复、UDP 截断、TCP length prefix 和 HTTP headers。Core 不直接调用 socket 或构建 HTTP response。
+
+`effects.rs` 中的 `TcpReadResult` 将完整 frame 与 clean EOF 分开：没有开始新 frame 的 EOF 是连接正常结束，已读入前缀或 payload 后的 EOF 归为协议错误。TCP session 由 transport 持有连接级 correlation，Ports 不暴露 Tokio stream 类型。
 
 关联 handle 的状态机：
 
@@ -165,8 +167,8 @@ Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
 - [x] 建立 deadline/cancellation 统一辅助函数；
 - [x] 建立 fake 和 contract test kit；
 - [x] 检查公共接口未泄漏 adapter crate 类型。
-- [x] 定义 UDP/TCP 不透明 socket capability，统一传递 deadline/cancellation 并保留安全错误分类。
+- [x] 定义 UDP/TCP 不透明 socket capability，统一传递 deadline/cancellation 并保留安全错误分类；TCP exact-read 明确 clean EOF/partial EOF。
 
 阶段 1 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。
 
-当前实现进度：**20%**。
+当前实现进度：**25%**。

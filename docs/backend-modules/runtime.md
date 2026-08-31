@@ -1,6 +1,6 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 前六个小阶段已实现
+> 状态：v1 方案已完成，阶段 3 基础服务编排已实现，完整资源/flush 生命周期仍在后续阶段
 >
 > 更新日期：2026-08-31
 >
@@ -87,7 +87,7 @@ prepare 按依赖顺序执行：
 `BindPlan` 是经过 Config 校验后的显式 endpoint 列表，记录：
 
 - listener/endpoint ID；
-- UDP/TCP 类型和 bind address；
+- 底层 UDP/TCP socket 协议、应用层 transport 类型和 bind address；
 - IPv6 v6-only 选择；
 - transport profile；
 - TLS/client IP profile 的引用；
@@ -123,7 +123,7 @@ supervisor 持有完整 task tree：
 Supervisor
   ├─ listener groups
   │   ├─ UDP receive loops
-  │   ├─ TCP accept/connections
+  │   ├─ TCP accept task（内部持有 connection JoinSet）
   │   └─ DoH accept/connections
   ├─ resource refresh workers
   ├─ stats writer
@@ -171,16 +171,13 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱�
 
 顺序固定：
 
-1. 标记 runtime draining；
-2. 停止 accept/receive 新请求；
-3. 取消资源刷新和非必要后台任务；
-4. 等待存量请求到 grace deadline；
-5. flush stats；
-6. flush resolve log；
-7. flush cache persistence；
-8. checkpoint/关闭 SQLite；
-9. flush telemetry；
-10. supervisor 确认 task tree 清空。
+1. `DnsService::shutdown` 标记 runtime draining；
+2. supervisor cancellation 停止 accept/receive 新请求；
+3. TCP listener 取消并 join 内部 connection `JoinSet`；
+4. 在 grace deadline 内等待存量请求；
+5. supervisor 确认当前 task tree 清空。
+
+stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 尚未接线。
 
 每一步有独立 deadline 和结果，最终报告不能只返回模糊的“shutdown failed”。
 
@@ -204,11 +201,12 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱�
 - [x] 实现 `ArcSwap` ActiveRuntime coordinator/CAS、旧实例 draining 和请求 guard；
 - [x] 实现 `Supervisor` task tree 基础、退出分类和受控 shutdown 回收报告；
 - [x] 实现 UDP/TCP 不透明 socket capability、`SystemSocketFactory` 和 `BoundListenerSet` 句柄交接；
+- [x] 接入真实 UDP/TCP service task、TCP session `JoinSet` 和基础 drain/shutdown；
 - [ ] 定义状态类型与所有权转换；
 - [ ] 完成跨模块资源装配版 PreparedRuntime/preflight；
-- [ ] 完成真实服务任务版 ActiveRuntime coordinator/CAS；
-- [ ] 实现 supervisor task tree 和故障等级；
-- [ ] 实现 drain/shutdown；
+- [ ] 完成真实服务任务版 ActiveRuntime coordinator/CAS 与 reload；
+- [ ] 完成 supervisor 故障升级、重启和分项 shutdown 报告；
+- [ ] 完成完整 drain/shutdown（flush、checkpoint、超时分项报告）；
 - [ ] 完成并发、故障和时间控制测试。
 
-当前实现进度：**20%**。
+当前实现进度：**35%**。

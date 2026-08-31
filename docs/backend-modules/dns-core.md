@@ -1,8 +1,8 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，阶段 1 核心契约已实现
+> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts 和基础 dispatch
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/dns/*`
 >
@@ -14,7 +14,7 @@
 
 DNS Core 是 transport 无关的请求编排器。输入是 canonical query 和 request context，输出是 canonical response 或明确的“无需再响应”结果。
 
-Core 不读取配置文件，不持有 socket/HTTP client/SQLite/Moka，也不根据具体 UDP/TCP/DoH 类型分支。transport 差异通过 capability 和 response encoder 处理。
+Core 不读取配置文件，不持有 socket/HTTP client/SQLite/Moka，也不根据具体 UDP/TCP/DoH 类型分支。当前 `ConfiguredDnsCore` 在已解析配置中选择内联 hosts；未形成完整 Policy/Upstream 链路时使用确定性的 `ServFailCore` fallback。transport 差异通过 capability 和 response encoder 处理。
 
 ## 2. 内部结构
 
@@ -82,7 +82,7 @@ Policy 返回完整 `ResolutionPlan`，至少包含：
 
 Core 不再次计算继承，也不把 rule 文本写入日志。
 
-本地 hosts 已经是内存编译 snapshot，命中后直接生成响应并绕过 response cache；这样资源更新在下一请求立即可见，也避免重复缓存静态索引。仍应用客户端可见 TTL override，并记录 `source=hosts`。
+当前 `HostsCore` 使用不可变 `HostsTable` snapshot；命中后直接生成本地响应，未命中时按 NXDOMAIN/NODATA 语义返回。`ConfiguredDnsCore` 负责从 resolved config 选择支持的 inline hosts，否则回退 `ServFailCore`。完整 Policy、Cache、Upstream 和 TTL override 管线仍未接入。
 
 ## 6. Cache 交互
 
@@ -176,11 +176,11 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 定义 canonical query/response 与验证器；
 - [x] 定义 RequestContext、deadline 与 cancellation；
 - [ ] 定义完整 resolution result；
-- [ ] 实现 transport 无关 handler；
+- [x] 实现固定响应的 transport 无关 handler；
 - [ ] 接入 Policy、Cache、Upstream ports；
 - [ ] 实现 ECS、TTL 和错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段 1 证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的上游响应 ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先以及 DNS/ECS Debug 脱敏。
+阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA 和 ConfiguredDnsCore fallback。
 
-当前实现进度：**20%**。
+当前实现进度：**35%**。

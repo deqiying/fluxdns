@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 前六个小阶段和阶段 4 首个小阶段已完成
+> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 基础服务编排和阶段 4 UDP/TCP 基础链路已实现
 >
 > 更新日期：2026-08-31
 >
@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统和 Runtime 候选骨架；阶段 2 记录起点为 69 个单元测试，当前工作树因增量测试已达到 99 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability 和 Application CLI/校验接线小阶段；Transport 已完成共享 DNS wire decode/encode 边界，但 App 尚未接入真实 UDP/TCP service task、upstream/storage adapter 或可提供 DNS 服务的启动闭环。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 135 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断和 TCP 持久 session。DoH HTTP/TLS、upstream、cache、resource、storage 和完整 observability 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **18.0%** | Config 达到 100% 模块验收口径；Application、Ports、Runtime、DNS Core、Observability 达到 20% 骨架与公共契约里程碑，Transport 完成共享 wire codec 首个可核验里程碑 |
-| v1 交付总进度 | **26.2%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 18.0%` |
+| 后端代码实现进度 | **25.8%** | Config 达到 100% 模块验收口径；Application、Ports、Runtime、Transport、DNS Core 已完成可运行基础链路，但仍缺少 DoH、上游、缓存、资源、存储和完整故障验收 |
+| v1 交付总进度 | **33.2%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 25.8%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -55,12 +55,12 @@ v1 交付范围：
 
 | 模块 | 目标代码 | 方案文档 | 设计状态 | 实现状态 | 实现进度 | 权重 |
 | --- | --- | --- | --- | --- | ---: | ---: |
-| Application | `backend/src/main.rs`、`backend/src/app.rs` | [application.md](backend-modules/application.md) | 已完成 | 实现中 | 20% | 4% |
-| Ports | `backend/src/ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 实现中 | 20% | 8% |
+| Application | `backend/src/main.rs`、`backend/src/app.rs` | [application.md](backend-modules/application.md) | 已完成 | 实现中 | 40% | 4% |
+| Ports | `backend/src/ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 实现中 | 25% | 8% |
 | Config | `backend/src/config/*` | [config.md](backend-modules/config.md) | 已完成 | 已验证 | 100% | 10% |
-| Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 20% | 12% |
-| Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 5% | 11% |
-| DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 20% | 10% |
+| Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 35% | 12% |
+| Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 35% | 11% |
+| DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 35% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 未开始 | 0% | 8% |
 | Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 未开始 | 0% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 未开始 | 0% | 9% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 20% + 8% × 20% + 10% × 100% + 12% × 20% + 11% × 5% + 10% × 20% + 3% × 20% = 18.0%
+4% × 40% + 8% × 25% + 10% × 100% + 12% × 35% + 11% × 35% + 10% × 35% + 3% × 20% = 25.8%
 ```
 
 ## 4. 进度判定规则
@@ -152,7 +152,7 @@ transport / upstream / storage / observability adapters
 - 已生成不可变 `ResolvedConfig` 与 redacted view；
 - 已完成安全配置快照的 no-op、冲突拒绝、并发发布、symlink 防护、临时文件 fsync 和 Unix owner-only 权限路径；
 - 已完成配置示例的离线 strict load golden test。阶段 2 只验证配置与 prepare 输入，不执行资源网络首次 snapshot，也不接线 Runtime/App 启动闭环；
-- 当前基线验证：阶段 2 记录起点为 69 tests；当前工作树已增量至 99 tests，`cargo test --manifest-path backend/Cargo.toml --locked -- --test-threads=1` 为 99 passed、0 failed；`cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings` 和 `cargo fmt --manifest-path backend/Cargo.toml --all -- --check` 均通过。
+- 阶段 2 记录起点为 69 tests；当前后端全量测试为 135 passed、0 failed；`cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings` 和 `cargo fmt --manifest-path backend/Cargo.toml --all -- --check` 均通过。配置示例的 strict load 仍不访问远程资源，也不执行资源首次 snapshot。
 
 ### 阶段 3：Runtime 与启动闭环
 
@@ -173,17 +173,37 @@ transport / upstream / storage / observability adapters
 
 第五个小阶段（已完成）：扩展 `ports::effects` 的 UDP/TCP 不透明 socket capability，接入 `socket2`/Tokio `SystemSocketFactory`，并由 `BoundListenerSet::endpoint_handles` 以 `Arc` clone 方式交给后续 Transport；I/O 保留 deadline、cancellation 和安全错误分类，公共 API 不泄漏 Tokio 类型。新增 UDP/TCP activation tests；Transport framing、Application 接线和完整 shutdown 顺序留在阶段 3/4 后续小阶段。
 
-第六个小阶段（已完成）：Application 接入严格 CLI 解析、默认 `config.yaml`、`validate` 只读命令和配置错误/启动错误映射；`validate` 不创建配置快照、不读取 SecretRef 实际值，`run` 已完成 Config → Runtime preflight 后在服务 task 尚未装配时明确返回启动错误。新增 CLI 单测和真实 `cargo run validate --config config-example.yaml` 验证；监听任务、信号和完整服务启动留在后续小阶段。
+第六个小阶段（已完成）：Application 接入严格 CLI 解析、默认 `config.yaml`、`validate` 只读命令和配置错误/启动错误映射；`validate` 不创建配置快照、不读取 SecretRef 实际值，`run` 完成 Config → Runtime preflight → bind → service 装配，并等待 Ctrl-C 后执行有界 shutdown。
+
+第七个小阶段（已完成）：为 UDP/TCP service 接入真实 `InboundAdapter`、固定 Core 和 response encoder；最小配置可在非特权端口启动并返回内联 hosts 答案。`DnsService::shutdown` 先调用 `ActiveRuntime::begin_drain`，再取消 supervisor task。
+
+第八个小阶段（已完成）：TCP adapter 拆分 listener/session，连接 task 由 listener 内部 `JoinSet` 持有；同一连接按读取顺序处理连续 frame，clean EOF、半帧和 admission 拒绝都限制在连接级，不终止其他连接。DoH endpoint 额外保留 `BindTransport::Doh`，在 HTTP adapter 完成前由 service 装配显式拒绝。
 
 ### 阶段 4：DNS Core 与 UDP/TCP
 
 涉及：DNS Core、Transport、Policy 的最小默认策略。
 
-第一个小阶段（已完成）：新增共享 `transport::wire` codec，固定原始 DNS ID 与 canonical query/response 分离，decode/encode 的 65,535 字节绝对上限和安全错误分类；响应编码只在副本上恢复请求 ID，不修改 canonical response。新增 5 个 wire codec 单测；UDP/TCP framing、DNS Core handler、EDNS 截断和 Application service task 接线留在后续小阶段。
+第一个小阶段（已完成）：新增共享 `transport::wire` codec，固定原始 DNS ID 与 canonical query/response 分离，decode/encode 的 65,535 字节绝对上限和安全错误分类；响应编码只在副本上恢复请求 ID，不修改 canonical response。新增 wire codec 单测。
+
+第二个小阶段（已完成）：新增固定 `SERVFAIL` Core、`dispatch_inbound` 和内联 hosts 解析器，并由 `ConfiguredDnsCore` 按已解析配置选择 hosts 或安全 fallback。Core 不读取 transport envelope，响应关联仍由 `ResponseHandle` exactly-once 管理。
+
+第三个小阶段（已完成）：接入 UDP datagram adapter 和 TCP 两字节 length framing，完成 request context、原始 DNS ID 恢复、peer identity、deadline/cancellation 传递和 response encoder。UDP 响应使用 RR-boundary truncation 并在需要时设置 `TC`。
+
+第四个小阶段（已完成）：补齐 TCP exact-read 的 clean EOF/partial EOF 分类、持久 session、连续 frame 的 `ConnectionId`/`StreamId` 语义和连接级顺序响应；新增同连接双 frame、半帧和 clean EOF 测试。
 
 - 打通 UDP/TCP framing → canonical request → core → response encoder；
 - 完成 DNS ID、EDNS、截断、deadline 和错误响应语义；
 - 验收：UDP/TCP 一致性、并发、畸形报文和取消测试通过。
+
+当前边界：DoH GET/POST、TLS、PROXY protocol 和 HTTP/DNS 错误分层尚未实现；DoH endpoint 不会退化为 raw DNS/TCP。
+
+阶段 3/4 当前验收证据：
+
+- `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过；
+- `cargo check --manifest-path backend/Cargo.toml --locked`：通过；
+- `cargo test --manifest-path backend/Cargo.toml --locked`：135 passed，0 failed；
+- `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings`：通过；
+- 本机 smoke：临时配置在 UDP `127.0.0.1:8353`、TCP `127.0.0.1:8354` 启动成功，内联 hosts 查询返回 `127.0.0.1`；同一 TCP 连接连续发送 DNS ID `0x1111`/`0x2222`，按序收到对应响应；发送 `SIGINT` 后 `service_shutdown` 日志出现且进程以 0 退出。
 
 ### 阶段 5：上游解析
 

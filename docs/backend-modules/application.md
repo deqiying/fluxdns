@@ -1,8 +1,8 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，阶段 1 骨架和配置校验命令已实现
+> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP service 启动和基础 graceful shutdown
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/main.rs`、`backend/src/app.rs`
 >
@@ -70,21 +70,20 @@ bootstrap telemetry
   → graceful shutdown
 ```
 
-正式日志初始化需要 `ResolvedConfig.logs`，因此配置加载早期错误使用 bootstrap stderr；正式 subscriber 就绪后，后续事件进入配置的日志目的地。
+当前实现仍使用进程级 bootstrap stderr subscriber；正式日志目的地、stats/detail/cache flush 尚未接入。配置加载早期错误和服务生命周期事件均保持结构化、脱敏输出。
 
 依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
 
 ## 5. 信号与退出
 
-Unix 至少处理 `SIGINT` 和 `SIGTERM`，其他平台映射为等价的控制台终止事件。收到第一个信号时：
+当前实现处理 `SIGINT`：
 
-1. 触发全局 `CancellationToken`；
-2. 请求 Runtime 停止接收新连接；
-3. 等待 grace deadline；
-4. flush stats、resolve log、cache persistence 和日志；
-5. 返回成功或 shutdown timeout 错误。
+1. 通过 `Supervisor` cancellation 停止 accept/receive；
+2. 先把 `ActiveRuntime` 标记为 draining，拒绝新请求 admission；
+3. 在固定 5 秒 grace deadline 内回收 UDP loop、TCP listener 和连接 session；
+4. 返回成功或 shutdown timeout 错误。
 
-第二个终止信号可缩短等待并进入强制退出，但仍应尝试输出一次结构化原因。
+第二个终止信号快速退出、stats/resolve-log/cache flush 和 `SIGTERM` 专用处理仍未实现。
 
 建议退出码分类：
 
@@ -125,10 +124,10 @@ Application 将内部错误转换为：
 - [x] 建立进程级错误与退出码映射；
 - [x] 接入 bootstrap telemetry 初始化；
 - [x] 接入读取配置后的 Config load/resolve/preflight 边界；
-- [ ] 接入 Runtime bind、activate、wait、shutdown；
+- [x] 接入 Runtime bind、activate、wait、shutdown；
 - [ ] 完成信号与退出测试；
 - [x] 记录阶段 1 验证证据并更新实现进度。
 
-阶段 1 证据：`app::tests::exit_codes_are_stable` 覆盖 `0/2/3/4/5` 稳定退出码，进程骨架可运行且不会加载配置或绑定端口；后续 Application 小阶段增加 CLI 参数边界、`validate` 只读加载和 Config → Runtime preflight 映射。真实服务 task、final telemetry、信号和 shutdown 仍未完成。
+阶段证据：`app::tests::exit_codes_are_stable`、CLI 参数和 `validate` 只读测试通过；真实 smoke 使用临时配置在 UDP `8353`、TCP `8354` 启动，hosts 查询返回 `127.0.0.1`，同连接双 TCP frame 维持 ID 顺序，`SIGINT` 后输出 `service_shutdown` 并以 0 退出。DoH endpoint 在 HTTP adapter 完成前会显式返回启动错误。
 
-当前实现进度：**20%**。
+当前实现进度：**40%**。
