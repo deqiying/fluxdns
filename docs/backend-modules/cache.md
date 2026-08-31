@@ -1,6 +1,6 @@
 # Cache 模块设计
 
-> 状态：v1 方案已完成，已实现内存 CacheStore 首轮切片；Facade、TTL、Moka/SQLite persistence 尚未实现
+> 状态：v1 方案已完成，已实现内存 CacheStore 与响应准入/TTL 首轮切片；Facade、key builder、Moka/SQLite persistence 尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -155,6 +155,13 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - shutdown 会清理记录、唤醒 waiter，并拒绝后续读写；
 - `weighted_size` 仅作为内部计费统计，不宣称等于进程 RSS；当前尚未实现容量淘汰和 eviction listener。
 
+当前已实现的纯逻辑准入 helper：
+
+- 将 `CanonicalResponse` 映射为 `NoError/NoData/NxDomain/ServFail/Truncated` cache class 和质量等级；
+- 正常响应使用 origin TTL，负响应优先使用 SOA 负 TTL，无值时回退 `failure_ttl`；SERVFAIL/TC 使用 `failure_ttl`；
+- REFUSED、未知响应类、缺失 TTL 和零 TTL 明确拒绝写入；
+- 可选生成 optimistic stale 窗口，并为 canonical wire 计算稳定 checksum。
+
 ## 10. Persistence
 
 独立 SQLite cache DB 至少包含：
@@ -210,11 +217,12 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 ## 14. 实现检查清单
 
 - [ ] 定义 namespace/key/entry format；（基础 typed contract 已在 `ports/cache.rs`，生产 key builder 待实现）
-- [ ] 实现 CacheFacade 和准入/TTL；
+- [ ] 实现 CacheFacade；（响应准入/TTL 纯 helper 已完成）
+- [ ] 实现 namespace/key builder；
 - [x] 实现 single-flight/CAS/显式失效的内存 adapter 首轮切片；
 - [ ] 实现 Moka adapter；
 - [ ] 实现独立 SQLite persistence；
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [ ] 完成跨 adapter 一致性、恢复和故障测试。
 
-当前实现进度：**20%**（内存 adapter 首轮切片；容量淘汰、Facade/TTL、optimistic refresh 和 SQLite persistence 未实现）。
+当前实现进度：**35%**（内存 adapter、响应准入/TTL helper 和 single-flight 首轮切片；namespace/key builder、CacheFacade、容量淘汰、optimistic refresh 和 SQLite persistence 未实现）。
