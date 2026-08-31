@@ -179,6 +179,14 @@ pub trait UdpSocketHandle: Send + Sync {
 }
 
 /// 已接受 TCP 连接的协议无关操作。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TcpReadResult {
+    /// Requested bytes were read in full.
+    Complete(Vec<u8>),
+    /// The peer closed the connection before a new frame started.
+    CleanEof,
+}
+
 pub trait TcpConnectionHandle: Send {
     fn peer_addr(&self) -> Result<SocketAddr, PortError>;
 
@@ -187,7 +195,7 @@ pub trait TcpConnectionHandle: Send {
         length: usize,
         deadline: Deadline,
         cancellation: &'a Cancellation,
-    ) -> PortFuture<'a, Result<Vec<u8>, PortError>>;
+    ) -> PortFuture<'a, Result<TcpReadResult, PortError>>;
 
     fn write_all<'a>(
         &'a mut self,

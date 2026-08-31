@@ -14,7 +14,9 @@ use crate::dns::{
     RequestContext, RequestId, RequestMeta, RuntimeRevision, StreamId, TransportCapabilities,
     TransportClass,
 };
-use crate::ports::effects::{ActivatedSocketHandle, TcpConnectionHandle, TcpListenerHandle};
+use crate::ports::effects::{
+    ActivatedSocketHandle, TcpConnectionHandle, TcpListenerHandle, TcpReadResult,
+};
 use crate::ports::inbound::{InboundAdapter, InboundRequest, ResponseEncoder};
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 use crate::runtime::BoundEndpointHandle;
@@ -117,83 +119,126 @@ impl InboundAdapter for TcpAdapter {
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<Option<InboundRequest>, PortError>> {
         Box::pin(async move {
-            if cancellation.is_cancelled() {
-                return Ok(None);
+            loop {
+                if cancellation.is_cancelled() {
+                    return Ok(None);
+                }
+
+                let accept_deadline = Deadline::new(Instant::now() + self.request_timeout);
+                let Some(mut connection) =
+                    self.listener.accept(accept_deadline, cancellation).await?
+                else {
+                    return Ok(None);
+                };
+                let peer = match connection.peer_addr() {
+                    Ok(peer) => peer,
+                    Err(_) => {
+                        close_connection(&mut connection).await;
+                        continue;
+                    }
+                };
+                let connection_id = ConnectionId::from(
+                    self.connection_ids
+                        .fetch_add(1, Ordering::AcqRel)
+                        .wrapping_add(1),
+                );
+
+                let received_at = Instant::now();
+                let deadline = Deadline::new(received_at + self.request_timeout);
+                let prefix = match connection
+                    .read_exact(TCP_FRAME_PREFIX_BYTES, deadline, cancellation)
+                    .await
+                {
+                    Ok(TcpReadResult::Complete(prefix)) => prefix,
+                    Ok(TcpReadResult::CleanEof) => {
+                        close_connection(&mut connection).await;
+                        continue;
+                    }
+                    Err(_) if cancellation.is_cancelled() => return Ok(None),
+                    Err(_) => {
+                        close_connection(&mut connection).await;
+                        continue;
+                    }
+                };
+                let prefix: [u8; TCP_FRAME_PREFIX_BYTES] = prefix.try_into().map_err(|_| {
+                    PortError::new(
+                        PortErrorClass::ProtocolViolation,
+                        "transport.tcp.read_prefix",
+                    )
+                })?;
+                let frame_length = match decode_frame_length(prefix) {
+                    Ok(length) => length,
+                    Err(_) => {
+                        close_connection(&mut connection).await;
+                        continue;
+                    }
+                };
+                let payload = match connection
+                    .read_exact(frame_length, deadline, cancellation)
+                    .await
+                {
+                    Ok(TcpReadResult::Complete(payload)) => payload,
+                    Ok(TcpReadResult::CleanEof) => {
+                        close_connection(&mut connection).await;
+                        continue;
+                    }
+                    Err(_) if cancellation.is_cancelled() => return Ok(None),
+                    Err(_) => {
+                        close_connection(&mut connection).await;
+                        continue;
+                    }
+                };
+                let parsed = match super::wire::decode_query(&payload, MAX_DNS_WIRE_BYTES) {
+                    Ok(parsed) => parsed,
+                    Err(_) => {
+                        close_connection(&mut connection).await;
+                        continue;
+                    }
+                };
+
+                let request_id = RequestId::from(
+                    self.request_ids
+                        .fetch_add(1, Ordering::AcqRel)
+                        .wrapping_add(1) as u128,
+                );
+                let context = RequestContext {
+                    meta: RequestMeta {
+                        request_id,
+                        trace_id: None,
+                        received_at,
+                        received_at_utc: SystemTime::now(),
+                        deadline,
+                        cancellation: Cancellation::new(),
+                        connection_id: Some(connection_id),
+                        stream_id: Some(StreamId::from(1)),
+                        listener_id: self.listener_id.clone(),
+                        route_id: None,
+                        original_dns_id: Some(parsed.id.value()),
+                    },
+                    client: ClientIdentity {
+                        peer_addr: Some(peer),
+                        client_addr: Some(peer.ip()),
+                        client_id: None,
+                    },
+                    transport: self.transport,
+                    runtime_revision: self.runtime_revision,
+                };
+                let connection = Arc::new(Mutex::new(connection));
+                let encoder = Arc::new(TcpResponseEncoder { connection });
+                return Ok(Some(InboundRequest::new(
+                    DnsRequest {
+                        query: parsed.query,
+                        context,
+                    },
+                    encoder,
+                )));
             }
-
-            let received_at = Instant::now();
-            let deadline = Deadline::new(received_at + self.request_timeout);
-            let Some(mut connection) = self.listener.accept(deadline, cancellation).await? else {
-                return Ok(None);
-            };
-            let peer = connection.peer_addr()?;
-
-            let prefix = connection
-                .read_exact(TCP_FRAME_PREFIX_BYTES, deadline, cancellation)
-                .await?;
-            let prefix: [u8; TCP_FRAME_PREFIX_BYTES] = prefix.try_into().map_err(|_| {
-                PortError::new(
-                    PortErrorClass::ProtocolViolation,
-                    "transport.tcp.read_prefix",
-                )
-            })?;
-            let frame_length = decode_frame_length(prefix).map_err(map_frame_error)?;
-            if frame_length > MAX_DNS_WIRE_BYTES {
-                return Err(PortError::new(
-                    PortErrorClass::ResourceExhausted,
-                    "transport.tcp.read_frame",
-                ));
-            }
-            let payload = connection
-                .read_exact(frame_length, deadline, cancellation)
-                .await?;
-            let parsed = super::wire::decode_query(&payload, MAX_DNS_WIRE_BYTES).map_err(|_| {
-                PortError::new(PortErrorClass::ProtocolViolation, "transport.tcp.decode")
-            })?;
-
-            let connection_id = ConnectionId::from(
-                self.connection_ids
-                    .fetch_add(1, Ordering::AcqRel)
-                    .wrapping_add(1),
-            );
-            let request_id = RequestId::from(
-                self.request_ids
-                    .fetch_add(1, Ordering::AcqRel)
-                    .wrapping_add(1) as u128,
-            );
-            let context = RequestContext {
-                meta: RequestMeta {
-                    request_id,
-                    trace_id: None,
-                    received_at,
-                    received_at_utc: SystemTime::now(),
-                    deadline,
-                    cancellation: Cancellation::new(),
-                    connection_id: Some(connection_id),
-                    stream_id: Some(StreamId::from(1)),
-                    listener_id: self.listener_id.clone(),
-                    route_id: None,
-                    original_dns_id: Some(parsed.id.value()),
-                },
-                client: ClientIdentity {
-                    peer_addr: Some(peer),
-                    client_addr: Some(peer.ip()),
-                    client_id: None,
-                },
-                transport: self.transport,
-                runtime_revision: self.runtime_revision,
-            };
-            let connection = Arc::new(Mutex::new(connection));
-            let encoder = Arc::new(TcpResponseEncoder { connection });
-            Ok(Some(InboundRequest::new(
-                DnsRequest {
-                    query: parsed.query,
-                    context,
-                },
-                encoder,
-            )))
         })
     }
+}
+
+async fn close_connection(connection: &mut Box<dyn TcpConnectionHandle>) {
+    let _ = connection.shutdown().await;
 }
 
 struct TcpResponseEncoder {
@@ -288,7 +333,7 @@ mod tests {
         CacheCompatibilityKey, Cancellation, RuntimeRevision, ServFailCore, TransportCapabilities,
         TransportClass, dispatch_inbound,
     };
-    use crate::ports::effects::{TcpConnectionHandle, TcpListenerHandle};
+    use crate::ports::effects::{TcpConnectionHandle, TcpListenerHandle, TcpReadResult};
     use crate::ports::inbound::InboundAdapter;
     use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -320,16 +365,18 @@ mod tests {
             length: usize,
             _deadline: crate::dns::Deadline,
             _cancellation: &'a Cancellation,
-        ) -> PortFuture<'a, Result<Vec<u8>, PortError>> {
+        ) -> PortFuture<'a, Result<TcpReadResult, PortError>> {
             let result = {
                 let mut buffer = self.read_buffer.lock().unwrap();
-                if buffer.len() < length {
+                if buffer.is_empty() {
+                    Ok(TcpReadResult::CleanEof)
+                } else if buffer.len() < length {
                     Err(PortError::new(
                         PortErrorClass::ProtocolViolation,
                         "test.tcp.read_exact",
                     ))
                 } else {
-                    Ok(buffer.drain(..length).collect())
+                    Ok(TcpReadResult::Complete(buffer.drain(..length).collect()))
                 }
             };
             Box::pin(async move { result })
@@ -482,12 +529,70 @@ mod tests {
             Arc::new(Mutex::new(Vec::new())),
             SocketAddr::from(([192, 0, 2, 13], 53003)),
         )));
-        let error = adapter(listener)
+        let result = adapter(listener)
             .receive(&Cancellation::new())
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(matches!(error.class(), PortErrorClass::ProtocolViolation));
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn skips_clean_eof_and_accepts_the_next_connection() {
+        let listener = Arc::new(FakeTcpListener {
+            connections: Mutex::new(VecDeque::new()),
+        });
+        listener.push(Box::new(FakeTcpConnection::new(
+            Vec::new(),
+            Arc::new(Mutex::new(Vec::new())),
+            SocketAddr::from(([192, 0, 2, 14], 53004)),
+        )));
+        listener.push(Box::new(FakeTcpConnection::new(
+            encode_frame(&wire_query(0x1357), MAX_DNS_WIRE_BYTES).unwrap(),
+            Arc::new(Mutex::new(Vec::new())),
+            SocketAddr::from(([192, 0, 2, 15], 53005)),
+        )));
+
+        let inbound = adapter(listener)
+            .receive(&Cancellation::new())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(inbound.request().context.meta.original_dns_id, Some(0x1357));
+        assert_eq!(
+            inbound.request().context.meta.connection_id,
+            Some(crate::dns::ConnectionId(2))
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_partial_frame_and_accepts_the_next_connection() {
+        let listener = Arc::new(FakeTcpListener {
+            connections: Mutex::new(VecDeque::new()),
+        });
+        listener.push(Box::new(FakeTcpConnection::new(
+            vec![0, 3, 1],
+            Arc::new(Mutex::new(Vec::new())),
+            SocketAddr::from(([192, 0, 2, 16], 53006)),
+        )));
+        listener.push(Box::new(FakeTcpConnection::new(
+            encode_frame(&wire_query(0x2468), MAX_DNS_WIRE_BYTES).unwrap(),
+            Arc::new(Mutex::new(Vec::new())),
+            SocketAddr::from(([192, 0, 2, 17], 53007)),
+        )));
+
+        let inbound = adapter(listener)
+            .receive(&Cancellation::new())
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(inbound.request().context.meta.original_dns_id, Some(0x2468));
+        assert_eq!(
+            inbound.request().context.meta.connection_id,
+            Some(crate::dns::ConnectionId(2))
+        );
     }
 
     #[tokio::test]

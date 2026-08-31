@@ -15,7 +15,7 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::effects::{
     ActivatedSocket, ActivatedSocketHandle, PreparedSocket, SocketFactory, SocketKind, SocketSpec,
-    TcpConnectionHandle, TcpListenerHandle, UdpDatagram, UdpSocketHandle,
+    TcpConnectionHandle, TcpListenerHandle, TcpReadResult, UdpDatagram, UdpSocketHandle,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -229,7 +229,7 @@ impl TcpConnectionHandle for TokioTcpConnection {
         length: usize,
         deadline: Deadline,
         cancellation: &'a Cancellation,
-    ) -> PortFuture<'a, Result<Vec<u8>, PortError>> {
+    ) -> PortFuture<'a, Result<TcpReadResult, PortError>> {
         Box::pin(async move {
             if length > u16::MAX as usize {
                 return Err(PortError::new(
@@ -238,14 +238,27 @@ impl TcpConnectionHandle for TokioTcpConnection {
                 ));
             }
             let mut buffer = vec![0_u8; length];
-            await_io(
-                self.stream.read_exact(&mut buffer),
-                deadline,
-                cancellation,
-                "system_socket.tcp_read_exact",
-            )
-            .await?;
-            Ok(buffer)
+            let mut offset = 0;
+            while offset < length {
+                let count = await_io(
+                    self.stream.read(&mut buffer[offset..]),
+                    deadline,
+                    cancellation,
+                    "system_socket.tcp_read_exact",
+                )
+                .await?;
+                if count == 0 {
+                    if offset == 0 {
+                        return Ok(TcpReadResult::CleanEof);
+                    }
+                    return Err(PortError::new(
+                        PortErrorClass::ProtocolViolation,
+                        "system_socket.tcp_read_exact",
+                    ));
+                }
+                offset += count;
+            }
+            Ok(TcpReadResult::Complete(buffer))
         })
     }
 
