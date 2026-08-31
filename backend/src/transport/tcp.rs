@@ -1,6 +1,7 @@
 //! TCP DNS framing 边界。
 
 use std::fmt;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -43,14 +44,27 @@ pub enum TcpAdapterError {
     InvalidTransportClass,
 }
 
-/// TCP 入站 adapter；当前每个 accept 只处理一个 DNS frame，响应后关闭连接。
+/// TCP 入站 listener adapter。
 pub struct TcpAdapter {
     listener: Arc<dyn TcpListenerHandle>,
     listener_id: ListenerId,
     runtime_revision: RuntimeRevision,
     transport: TransportCapabilities,
-    request_ids: AtomicU64,
+    request_ids: Arc<AtomicU64>,
     connection_ids: AtomicU64,
+    request_timeout: Duration,
+}
+
+/// 由一个 TCP accept 产生的顺序请求 session。
+pub struct TcpSession {
+    connection: Arc<Mutex<Box<dyn TcpConnectionHandle>>>,
+    peer: SocketAddr,
+    connection_id: ConnectionId,
+    next_stream_id: u64,
+    request_ids: Arc<AtomicU64>,
+    listener_id: ListenerId,
+    runtime_revision: RuntimeRevision,
+    transport: TransportCapabilities,
     request_timeout: Duration,
 }
 
@@ -106,9 +120,51 @@ impl TcpAdapter {
             listener_id,
             runtime_revision,
             transport,
-            request_ids: AtomicU64::new(0),
+            request_ids: Arc::new(AtomicU64::new(0)),
             connection_ids: AtomicU64::new(0),
             request_timeout,
+        })
+    }
+
+    /// 接受一个连接并建立独立 session；连接级错误不会泄漏给其他 session。
+    pub fn accept_session<'a>(
+        &'a self,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Option<TcpSession>, PortError>> {
+        Box::pin(async move {
+            loop {
+                if cancellation.is_cancelled() {
+                    return Ok(None);
+                }
+                let deadline = Deadline::new(Instant::now() + self.request_timeout);
+                let Some(connection) = self.listener.accept(deadline, cancellation).await? else {
+                    return Ok(None);
+                };
+                let connection = Arc::new(Mutex::new(connection));
+                let peer = match peer_addr(&connection).await {
+                    Ok(peer) => peer,
+                    Err(_) => {
+                        close_shared_connection(&connection).await;
+                        continue;
+                    }
+                };
+                let connection_id = ConnectionId::from(
+                    self.connection_ids
+                        .fetch_add(1, Ordering::AcqRel)
+                        .wrapping_add(1),
+                );
+                return Ok(Some(TcpSession {
+                    connection,
+                    peer,
+                    connection_id,
+                    next_stream_id: 0,
+                    request_ids: Arc::clone(&self.request_ids),
+                    listener_id: self.listener_id.clone(),
+                    runtime_revision: self.runtime_revision,
+                    transport: self.transport,
+                    request_timeout: self.request_timeout,
+                }));
+            }
         })
     }
 }
@@ -123,121 +179,154 @@ impl InboundAdapter for TcpAdapter {
                 if cancellation.is_cancelled() {
                     return Ok(None);
                 }
-
-                let accept_deadline = Deadline::new(Instant::now() + self.request_timeout);
-                let Some(mut connection) =
-                    self.listener.accept(accept_deadline, cancellation).await?
-                else {
-                    return Ok(None);
-                };
-                let peer = match connection.peer_addr() {
-                    Ok(peer) => peer,
-                    Err(_) => {
-                        close_connection(&mut connection).await;
-                        continue;
+                let mut session = match self.accept_session(cancellation).await {
+                    Ok(Some(session)) => session,
+                    Ok(None) => return Ok(None),
+                    Err(error)
+                        if cancellation.is_cancelled()
+                            || matches!(error.class(), PortErrorClass::Cancelled(_)) =>
+                    {
+                        return Ok(None);
                     }
-                };
-                let connection_id = ConnectionId::from(
-                    self.connection_ids
-                        .fetch_add(1, Ordering::AcqRel)
-                        .wrapping_add(1),
-                );
-
-                let received_at = Instant::now();
-                let deadline = Deadline::new(received_at + self.request_timeout);
-                let prefix = match connection
-                    .read_exact(TCP_FRAME_PREFIX_BYTES, deadline, cancellation)
-                    .await
-                {
-                    Ok(TcpReadResult::Complete(prefix)) => prefix,
-                    Ok(TcpReadResult::CleanEof) => {
-                        close_connection(&mut connection).await;
-                        continue;
-                    }
-                    Err(_) if cancellation.is_cancelled() => return Ok(None),
-                    Err(_) => {
-                        close_connection(&mut connection).await;
-                        continue;
-                    }
-                };
-                let prefix: [u8; TCP_FRAME_PREFIX_BYTES] = prefix.try_into().map_err(|_| {
-                    PortError::new(
-                        PortErrorClass::ProtocolViolation,
-                        "transport.tcp.read_prefix",
-                    )
-                })?;
-                let frame_length = match decode_frame_length(prefix) {
-                    Ok(length) => length,
-                    Err(_) => {
-                        close_connection(&mut connection).await;
-                        continue;
-                    }
-                };
-                let payload = match connection
-                    .read_exact(frame_length, deadline, cancellation)
-                    .await
-                {
-                    Ok(TcpReadResult::Complete(payload)) => payload,
-                    Ok(TcpReadResult::CleanEof) => {
-                        close_connection(&mut connection).await;
-                        continue;
-                    }
-                    Err(_) if cancellation.is_cancelled() => return Ok(None),
-                    Err(_) => {
-                        close_connection(&mut connection).await;
-                        continue;
-                    }
-                };
-                let parsed = match super::wire::decode_query(&payload, MAX_DNS_WIRE_BYTES) {
-                    Ok(parsed) => parsed,
-                    Err(_) => {
-                        close_connection(&mut connection).await;
-                        continue;
-                    }
+                    Err(error) => return Err(error),
                 };
 
-                let request_id = RequestId::from(
-                    self.request_ids
-                        .fetch_add(1, Ordering::AcqRel)
-                        .wrapping_add(1) as u128,
-                );
-                let context = RequestContext {
-                    meta: RequestMeta {
-                        request_id,
-                        trace_id: None,
-                        received_at,
-                        received_at_utc: SystemTime::now(),
-                        deadline,
-                        cancellation: Cancellation::new(),
-                        connection_id: Some(connection_id),
-                        stream_id: Some(StreamId::from(1)),
-                        listener_id: self.listener_id.clone(),
-                        route_id: None,
-                        original_dns_id: Some(parsed.id.value()),
-                    },
-                    client: ClientIdentity {
-                        peer_addr: Some(peer),
-                        client_addr: Some(peer.ip()),
-                        client_id: None,
-                    },
-                    transport: self.transport,
-                    runtime_revision: self.runtime_revision,
-                };
-                let connection = Arc::new(Mutex::new(connection));
-                let encoder = Arc::new(TcpResponseEncoder { connection });
-                return Ok(Some(InboundRequest::new(
-                    DnsRequest {
-                        query: parsed.query,
-                        context,
-                    },
-                    encoder,
-                )));
+                match session.receive(cancellation).await {
+                    Ok(Some(inbound)) => return Ok(Some(inbound)),
+                    Ok(None) => {
+                        session.close().await;
+                    }
+                    Err(error) => {
+                        session.close().await;
+                        if cancellation.is_cancelled()
+                            || matches!(error.class(), PortErrorClass::Cancelled(_))
+                        {
+                            return Ok(None);
+                        }
+                    }
+                }
             }
         })
     }
 }
 
-async fn close_connection(connection: &mut Box<dyn TcpConnectionHandle>) {
+impl TcpSession {
+    pub fn connection_id(&self) -> ConnectionId {
+        self.connection_id
+    }
+
+    pub fn peer(&self) -> SocketAddr {
+        self.peer
+    }
+
+    /// 顺序读取一个 DNS frame；clean EOF 表示 session 正常结束。
+    pub fn receive<'a>(
+        &'a mut self,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Option<InboundRequest>, PortError>> {
+        Box::pin(async move {
+            if cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            let received_at = Instant::now();
+            let deadline = Deadline::new(received_at + self.request_timeout);
+            let Some(payload) = read_frame(&self.connection, deadline, cancellation).await? else {
+                return Ok(None);
+            };
+            let parsed = super::wire::decode_query(&payload, MAX_DNS_WIRE_BYTES).map_err(|_| {
+                PortError::new(PortErrorClass::ProtocolViolation, "transport.tcp.decode")
+            })?;
+
+            self.next_stream_id = self.next_stream_id.wrapping_add(1).max(1);
+            let request_id = RequestId::from(
+                self.request_ids
+                    .fetch_add(1, Ordering::AcqRel)
+                    .wrapping_add(1) as u128,
+            );
+            let context = RequestContext {
+                meta: RequestMeta {
+                    request_id,
+                    trace_id: None,
+                    received_at,
+                    received_at_utc: SystemTime::now(),
+                    deadline,
+                    cancellation: Cancellation::new(),
+                    connection_id: Some(self.connection_id),
+                    stream_id: Some(StreamId::from(self.next_stream_id)),
+                    listener_id: self.listener_id.clone(),
+                    route_id: None,
+                    original_dns_id: Some(parsed.id.value()),
+                },
+                client: ClientIdentity {
+                    peer_addr: Some(self.peer),
+                    client_addr: Some(self.peer.ip()),
+                    client_id: None,
+                },
+                transport: self.transport,
+                runtime_revision: self.runtime_revision,
+            };
+            let encoder = Arc::new(TcpResponseEncoder {
+                connection: Arc::clone(&self.connection),
+            });
+            Ok(Some(InboundRequest::new(
+                DnsRequest {
+                    query: parsed.query,
+                    context,
+                },
+                encoder,
+            )))
+        })
+    }
+
+    pub async fn close(&mut self) {
+        close_shared_connection(&self.connection).await;
+    }
+}
+
+async fn read_frame(
+    connection: &Arc<Mutex<Box<dyn TcpConnectionHandle>>>,
+    deadline: Deadline,
+    cancellation: &Cancellation,
+) -> Result<Option<Vec<u8>>, PortError> {
+    let mut connection = connection.lock().await;
+    let prefix = match connection
+        .read_exact(TCP_FRAME_PREFIX_BYTES, deadline, cancellation)
+        .await?
+    {
+        TcpReadResult::Complete(prefix) => prefix,
+        TcpReadResult::CleanEof => return Ok(None),
+    };
+    let prefix: [u8; TCP_FRAME_PREFIX_BYTES] = prefix.try_into().map_err(|_| {
+        PortError::new(
+            PortErrorClass::ProtocolViolation,
+            "transport.tcp.read_prefix",
+        )
+    })?;
+    let frame_length = decode_frame_length(prefix).map_err(map_frame_error)?;
+    let payload = match connection
+        .read_exact(frame_length, deadline, cancellation)
+        .await?
+    {
+        TcpReadResult::Complete(payload) => payload,
+        TcpReadResult::CleanEof => {
+            return Err(PortError::new(
+                PortErrorClass::ProtocolViolation,
+                "transport.tcp.read_frame",
+            ));
+        }
+    };
+    Ok(Some(payload))
+}
+
+async fn peer_addr(
+    connection: &Arc<Mutex<Box<dyn TcpConnectionHandle>>>,
+) -> Result<SocketAddr, PortError> {
+    let connection = connection.lock().await;
+    connection.peer_addr()
+}
+
+async fn close_shared_connection(connection: &Arc<Mutex<Box<dyn TcpConnectionHandle>>>) {
+    let mut connection = connection.lock().await;
     let _ = connection.shutdown().await;
 }
 
@@ -330,8 +419,8 @@ mod tests {
     use std::time::Duration;
 
     use crate::dns::{
-        CacheCompatibilityKey, Cancellation, RuntimeRevision, ServFailCore, TransportCapabilities,
-        TransportClass, dispatch_inbound,
+        CacheCompatibilityKey, Cancellation, ConnectionId, RuntimeRevision, ServFailCore, StreamId,
+        TransportCapabilities, TransportClass, dispatch_inbound,
     };
     use crate::ports::effects::{TcpConnectionHandle, TcpListenerHandle, TcpReadResult};
     use crate::ports::inbound::InboundAdapter;
@@ -517,6 +606,87 @@ mod tests {
             response.metadata.response_code,
             hickory_proto::op::ResponseCode::ServFail
         );
+    }
+
+    #[tokio::test]
+    async fn session_reuses_connection_and_orders_multiple_frames() {
+        let listener = Arc::new(FakeTcpListener {
+            connections: Mutex::new(VecDeque::new()),
+        });
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let peer = SocketAddr::from(([192, 0, 2, 18], 53008));
+        let mut frames = encode_frame(&wire_query(0x1111), MAX_DNS_WIRE_BYTES).unwrap();
+        frames.extend_from_slice(&encode_frame(&wire_query(0x2222), MAX_DNS_WIRE_BYTES).unwrap());
+        listener.push(Box::new(FakeTcpConnection::new(
+            frames,
+            Arc::clone(&writes),
+            peer,
+        )));
+        let adapter = adapter(listener);
+        let cancellation = Cancellation::new();
+        let mut session = adapter
+            .accept_session(&cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(session.connection_id(), ConnectionId(1));
+
+        let first = session.receive(&cancellation).await.unwrap().unwrap();
+        assert_eq!(
+            first.request().context.meta.connection_id,
+            Some(ConnectionId(1))
+        );
+        assert_eq!(
+            first.request().context.meta.stream_id,
+            Some(StreamId::from(1))
+        );
+        assert_eq!(first.request().context.meta.original_dns_id, Some(0x1111));
+        dispatch_inbound(&ServFailCore, first).await.unwrap();
+
+        let second = session.receive(&cancellation).await.unwrap().unwrap();
+        assert_eq!(
+            second.request().context.meta.connection_id,
+            Some(ConnectionId(1))
+        );
+        assert_eq!(
+            second.request().context.meta.stream_id,
+            Some(StreamId::from(2))
+        );
+        assert_eq!(second.request().context.meta.original_dns_id, Some(0x2222));
+        dispatch_inbound(&ServFailCore, second).await.unwrap();
+
+        assert!(session.receive(&cancellation).await.unwrap().is_none());
+
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 2);
+        let first_response = hickory_proto::op::Message::from_vec(&writes[0][2..]).unwrap();
+        let second_response = hickory_proto::op::Message::from_vec(&writes[1][2..]).unwrap();
+        assert_eq!(first_response.metadata.id, 0x1111);
+        assert_eq!(second_response.metadata.id, 0x2222);
+    }
+
+    #[tokio::test]
+    async fn session_rejects_partial_frame_as_protocol_error() {
+        let listener = Arc::new(FakeTcpListener {
+            connections: Mutex::new(VecDeque::new()),
+        });
+        listener.push(Box::new(FakeTcpConnection::new(
+            vec![0, 3, 1],
+            Arc::new(Mutex::new(Vec::new())),
+            SocketAddr::from(([192, 0, 2, 19], 53009)),
+        )));
+        let adapter = adapter(listener);
+        let cancellation = Cancellation::new();
+        let mut session = adapter
+            .accept_session(&cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let error = session.receive(&cancellation).await.unwrap_err();
+        assert!(matches!(error.class(), PortErrorClass::ProtocolViolation));
+        session.close().await;
     }
 
     #[tokio::test]
