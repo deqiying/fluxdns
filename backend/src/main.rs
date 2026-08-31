@@ -10,6 +10,7 @@ pub mod ports;
 pub mod resource;
 pub mod runtime;
 pub mod service;
+pub mod storage;
 pub mod transport;
 pub mod upstream;
 
