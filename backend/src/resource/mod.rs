@@ -9,7 +9,8 @@ pub use hosts::{
     CanonicalDomain, HostsIndex, HostsLimits, HostsLookup, HostsParseError, HostsRecord,
 };
 pub use loader::{
-    FileFingerprint, LoadedHostsResource, ResourceLoadError, ResourceSource, load_hosts,
+    FileFingerprint, LoadedHostsResource, LoadedRuleSetResource, ResourceLoadError, ResourceSource,
+    RuleResourceLoadError, load_hosts, load_rule_set,
 };
 pub use rules::{RuleIndex, RuleLimits, RuleMatch, RuleParseError};
 pub use snapshot::{
