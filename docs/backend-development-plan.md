@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 162 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路；Upstream 已完成内联 hosts exchange、hosts registry 和纯 group member selection，但尚未接入 DNS Core。DoH TLS/PROXY/forwarded、DoH 出站、bootstrap、cache、resource、storage 和完整 observability 仍未实现。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 169 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路；Upstream 已完成内联 hosts exchange、hosts registry 和纯 group member selection，但尚未接入 DNS Core；Cache 已完成无外部依赖的内存 `CacheStore` 首轮切片。DoH TLS/PROXY/forwarded、DoH 出站、bootstrap/连接执行、CacheFacade/TTL/Moka/SQLite persistence、resource、storage 和完整 observability 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **31.9%** | Config 达到 100% 模块验收口径；DoH 已完成 plain HTTP happy path，Upstream 已完成 hosts connector 与纯选择器，但仍缺少 TLS、代理信任、DoH 出站、bootstrap、缓存、资源、存储和完整故障验收 |
-| v1 交付总进度 | **38.7%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 31.9%` |
+| 后端代码实现进度 | **33.7%** | Config 达到 100% 模块验收口径；DoH 已完成 plain HTTP happy path，Upstream 已完成 hosts connector 与纯选择器，Cache 已完成内存 adapter 首轮切片，但仍缺少 TLS、代理信任、DoH 出站、bootstrap、CacheFacade/TTL、Moka/SQLite persistence、资源、存储和完整故障验收 |
+| v1 交付总进度 | **40.3%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 33.7%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -63,7 +63,7 @@ v1 交付范围：
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 35% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 未开始 | 0% | 8% |
 | Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 35% | 10% |
-| Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 未开始 | 0% | 9% |
+| Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 20% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 未开始 | 0% | 7% |
 | Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 未开始 | 0% | 8% |
 | Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 20% | 3% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 35% + 10% × 35% + 3% × 20% = 31.9%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 35% + 9% × 20% + 10% × 35% + 3% × 20% = 33.7%
 ```
 
 ## 4. 进度判定规则
@@ -227,6 +227,8 @@ transport / upstream / storage / observability adapters
 - 实现 namespace、key、TTL、single-flight、optimistic refresh 和 CAS；
 - 接入 Moka 与独立 SQLite cache store；
 - 验收：缓存准入、质量替换、恢复降级和资源变化不全局失效测试通过。
+
+首个小阶段（已完成）：新增无外部依赖的内存 `CacheStore` adapter，覆盖 fresh/stale/expiry lookup、质量感知 CAS、显式失效、single-flight leader/follower、独立 waiter cancellation、leader abandon/drop 和 shutdown 生命周期；定向测试 7 项通过。当前 adapter 使用 `HashMap + Mutex`，尚未接入 CacheFacade/TTL、容量淘汰、optimistic refresh 或 SQLite persistence。
 
 ### 阶段 7：完整策略与资源
 

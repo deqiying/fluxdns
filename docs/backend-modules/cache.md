@@ -1,8 +1,8 @@
 # Cache 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，已实现内存 CacheStore 首轮切片；Facade、TTL、Moka/SQLite persistence 尚未实现
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/cache/*`
 >
@@ -19,7 +19,7 @@ Cache 模块实现逻辑缓存池、entry 生命周期、single-flight、optimis
 | 文件 | 职责 |
 | --- | --- |
 | `key.rs` | namespace、query/strategy/ECS/transport compatibility key |
-| `memory.rs` | Moka `CacheStore` adapter |
+| `memory.rs` | 当前为无外部依赖的 HashMap/Mutex `CacheStore` adapter；Moka 接入待后续切片 |
 | `persistence.rs` | 独立 SQLite `PersistentCacheStore` |
 | `service.rs` | `CacheFacade`、single-flight、TTL、CAS、invalidations |
 
@@ -136,7 +136,7 @@ refresh 捕获启动时最新 RuntimeSnapshot，完整重跑 client/policy/resou
 
 ## 9. Memory store
 
-Moka store：
+目标 Moka store：
 
 - 全部 namespace 共享一个容量预算；
 - weigher 计入 key、canonical wire、TTL metadata 和索引开销；
@@ -145,6 +145,15 @@ Moka store：
 - eviction listener 只发送低成本统计，不执行阻塞 I/O。
 
 Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
+
+当前已实现的首轮内存 adapter 使用 `HashMap + Mutex` 保持无外部依赖和确定性：
+
+- lookup 区分 fresh、stale 和已过期 entry；已过期且超出 stale 窗口的 entry 会被移除；
+- CAS 检查 `Absent/Version` 条件，并拒绝较低质量覆盖仍 fresh 的高质量 entry；
+- 支持 exact、namespace、typed predicate 和 all 失效；
+- single-flight 保证每个 key 只有一个 leader，follower 可独立取消，leader abandon/drop 会广播稳定失败；
+- shutdown 会清理记录、唤醒 waiter，并拒绝后续读写；
+- `weighted_size` 仅作为内部计费统计，不宣称等于进程 RSS；当前尚未实现容量淘汰和 eviction listener。
 
 ## 10. Persistence
 
@@ -200,11 +209,12 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 
 ## 14. 实现检查清单
 
-- [ ] 定义 namespace/key/entry format；
+- [ ] 定义 namespace/key/entry format；（基础 typed contract 已在 `ports/cache.rs`，生产 key builder 待实现）
 - [ ] 实现 CacheFacade 和准入/TTL；
-- [ ] 实现 single-flight/optimistic/CAS；
+- [x] 实现 single-flight/CAS/显式失效的内存 adapter 首轮切片；
 - [ ] 实现 Moka adapter；
 - [ ] 实现独立 SQLite persistence；
-- [ ] 完成一致性、恢复和故障测试。
+- [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
+- [ ] 完成跨 adapter 一致性、恢复和故障测试。
 
-当前实现进度：**0%**。
+当前实现进度：**20%**（内存 adapter 首轮切片；容量淘汰、Facade/TTL、optimistic refresh 和 SQLite persistence 未实现）。
