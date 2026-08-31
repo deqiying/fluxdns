@@ -95,6 +95,18 @@ impl HostsTable {
         self.entries.is_empty()
     }
 
+    pub fn merge(&mut self, other: Self) {
+        for (name, addresses) in other.entries {
+            let target = self.entries.entry(name).or_default();
+            for address in addresses {
+                if !target.contains(&address) {
+                    target.push(address);
+                    self.entry_count += 1;
+                }
+            }
+        }
+    }
+
     pub fn name_count(&self) -> usize {
         self.entries.len()
     }

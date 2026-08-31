@@ -1,10 +1,12 @@
 //! Transport 无关的 DNS 核心契约。
 
+mod configured;
 mod context;
 mod handler;
 mod hosts;
 mod message;
 
+pub use configured::{ConfiguredDnsCore, CoreBuildError, DEFAULT_LOCAL_TTL};
 pub use context::{
     CacheCompatibilityKey, CancelReason, Cancellation, ClientId, ClientIdentity, ConnectionId,
     Deadline, DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta, RouteId,
