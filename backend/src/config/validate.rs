@@ -173,10 +173,21 @@ pub enum BindTransport {
     Doh,
 }
 
+/// Stable identity of a DoH endpoint in the resolved listener configuration.
+///
+/// This is carried by bind entries so runtime consumers do not need to parse
+/// the human-readable `owner` label.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct DohBindingRef {
+    pub listener_id: String,
+    pub endpoint_id: String,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BindEntry {
     pub protocol: BindProtocol,
     pub transport: BindTransport,
+    pub doh_binding: Option<DohBindingRef>,
     pub address: IpAddr,
     pub port: u16,
     pub owner: String,
@@ -1541,6 +1552,7 @@ pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport
                     &mut plan,
                     BindProtocol::Udp,
                     BindTransport::Udp,
+                    None,
                     name,
                     addresses,
                     *port,
@@ -1556,6 +1568,7 @@ pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport
                     &mut plan,
                     BindProtocol::Tcp,
                     BindTransport::Tcp,
+                    None,
                     name,
                     addresses,
                     *port,
@@ -1565,10 +1578,15 @@ pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport
                 name, endpoints, ..
             } => {
                 for endpoint in endpoints {
+                    let doh_binding = DohBindingRef {
+                        listener_id: name.clone(),
+                        endpoint_id: endpoint.name.clone(),
+                    };
                     push_bind_entries(
                         &mut plan,
                         BindProtocol::Tcp,
                         BindTransport::Doh,
+                        Some(doh_binding),
                         &format!("listener[{index}].{}.{}", name, endpoint.name),
                         &endpoint.addresses,
                         endpoint.port,
@@ -1606,6 +1624,7 @@ fn push_bind_entries(
     plan: &mut BindPlan,
     protocol: BindProtocol,
     transport: BindTransport,
+    doh_binding: Option<DohBindingRef>,
     owner: &str,
     addresses: &[IpAddr],
     port: u16,
@@ -1614,6 +1633,7 @@ fn push_bind_entries(
         plan.entries.push(BindEntry {
             protocol,
             transport,
+            doh_binding: doh_binding.clone(),
             address: *address,
             port,
             owner: owner.to_owned(),
@@ -1742,7 +1762,7 @@ mod tests {
 
     use crate::config::{ConfigLoader, LoadOptions};
 
-    use super::{BindProtocol, BindTransport, ConfigErrorKind, addresses_overlap};
+    use super::{BindProtocol, BindTransport, ConfigErrorKind, DohBindingRef, addresses_overlap};
 
     #[test]
     fn wildcard_overlap_is_family_local() {
@@ -1777,6 +1797,23 @@ mod tests {
                 .iter()
                 .any(|entry| entry.transport == BindTransport::Doh
                     && entry.protocol == BindProtocol::Tcp)
+        );
+        assert!(output.resolved.bind_plan.entries.iter().any(|entry| {
+            entry.doh_binding
+                == Some(DohBindingRef {
+                    listener_id: "doh".to_owned(),
+                    endpoint_id: "direct".to_owned(),
+                })
+        }));
+        assert!(
+            output.resolved.bind_plan.entries.iter().all(|entry| {
+                entry.transport == BindTransport::Doh || entry.doh_binding.is_none()
+            })
+        );
+        assert!(
+            output.resolved.bind_plan.entries.iter().all(|entry| {
+                entry.transport != BindTransport::Doh || entry.doh_binding.is_some()
+            })
         );
         assert!(
             output

@@ -707,6 +707,7 @@ mod tests {
             entry: BindEntry {
                 protocol: BindProtocol::Tcp,
                 transport: BindTransport::Doh,
+                doh_binding: None,
                 address: [127, 0, 0, 1].into(),
                 port: 8353,
                 owner: "doh.direct".to_owned(),

@@ -761,6 +761,8 @@ mod tests {
             super::super::model::ClientIpSource::ForwardedHeader
         );
         assert_eq!(doh[1].client_ip.trusted_proxies.as_ref().unwrap().len(), 2);
+        assert_eq!(doh[0].binding.listener_id, "doh");
+        assert_eq!(doh[0].binding.endpoint_id, doh[0].id.as_str());
     }
 
     #[test]

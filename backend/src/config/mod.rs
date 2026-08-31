@@ -18,5 +18,5 @@ pub use resolve::{
 };
 pub use validate::{
     BindEntry, BindPlan, BindProtocol, BindTransport, ConfigError, ConfigErrorKind,
-    ConfigErrorReport,
+    ConfigErrorReport, DohBindingRef,
 };

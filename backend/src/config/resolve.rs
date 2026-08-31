@@ -17,7 +17,8 @@ use super::model::{
     LogLevelDto, OptimisticDto, OutboundDto, RuleSetDto, StrategyDto, TlsMode, UpstreamDto,
 };
 use super::validate::{
-    BindPlan, ConfigError, ConfigErrorKind, ConfigErrorReport, build_bind_plan, validate_config,
+    BindPlan, ConfigError, ConfigErrorKind, ConfigErrorReport, DohBindingRef, build_bind_plan,
+    validate_config,
 };
 
 struct SafeUrl<'a>(&'a Url);
@@ -218,6 +219,7 @@ pub struct ResolvedDohRoute {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedDohEndpoint {
     pub id: ConfigId,
+    pub binding: DohBindingRef,
     pub addresses: Vec<std::net::IpAddr>,
     pub port: u16,
     pub tls_mode: TlsMode,
@@ -1139,6 +1141,10 @@ fn resolve_listener(listener: &ListenerDto, work_path: &Path) -> ResolvedListene
                 .iter()
                 .map(|endpoint| ResolvedDohEndpoint {
                     id: ConfigId::new(endpoint.name.clone()).expect("validated endpoint id"),
+                    binding: DohBindingRef {
+                        listener_id: name.clone(),
+                        endpoint_id: endpoint.name.clone(),
+                    },
                     addresses: endpoint.addresses.clone(),
                     port: endpoint.port,
                     tls_mode: endpoint.tls.mode,
