@@ -5,6 +5,7 @@ mod context;
 mod handler;
 mod hosts;
 mod message;
+mod policy;
 
 pub use configured::{ConfiguredDnsCore, CoreBuildError, DEFAULT_LOCAL_TTL};
 pub use context::{
@@ -21,3 +22,4 @@ pub use message::{
     CanonicalMessageError, CanonicalQuery, CanonicalQuestion, CanonicalResponse, DnsMessageId,
     ResponseClass, TtlMetadata,
 };
+pub use policy::{PolicyCoreBuildError, PolicyDnsCore};

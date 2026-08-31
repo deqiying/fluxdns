@@ -156,7 +156,7 @@ impl DnsCore for HostsCore {
     }
 }
 
-fn resource_answers(
+pub(super) fn resource_answers(
     indexes: &[HostsIndex],
     name: &Name,
     query_type: RecordType,
