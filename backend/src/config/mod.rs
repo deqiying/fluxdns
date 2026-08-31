@@ -17,5 +17,6 @@ pub use resolve::{
     ValidatedConfig,
 };
 pub use validate::{
-    BindEntry, BindPlan, BindProtocol, ConfigError, ConfigErrorKind, ConfigErrorReport,
+    BindEntry, BindPlan, BindProtocol, BindTransport, ConfigError, ConfigErrorKind,
+    ConfigErrorReport,
 };

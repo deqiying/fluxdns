@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::task::JoinSet;
 
+use crate::config::BindTransport;
 use crate::dns::{
     CacheCompatibilityKey, CancelReason, Cancellation, DispatchError, DnsCore,
     TransportCapabilities, TransportClass, dispatch_inbound,
@@ -68,6 +69,13 @@ impl DnsService {
         let transport_cancellation = supervisor.cancellation();
 
         for (index, endpoint) in endpoints.into_iter().enumerate() {
+            if endpoint.entry.transport == BindTransport::Doh {
+                return Err(ServiceStartError::Endpoint {
+                    index,
+                    kind: "DoH",
+                    reason: "DoH HTTP adapter is not implemented".to_owned(),
+                });
+            }
             match endpoint.socket {
                 ActivatedSocketHandle::Udp(socket) => {
                     let adapter = UdpAdapter::from_endpoint(

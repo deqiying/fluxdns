@@ -158,16 +158,25 @@ impl fmt::Display for ConfigErrorReport {
     }
 }
 
-/// Protocol used by the bind planner. DoH endpoints are TCP listeners.
+/// Underlying socket protocol used by the bind planner.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum BindProtocol {
     Udp,
     Tcp,
 }
 
+/// Application-level transport retained alongside the underlying socket protocol.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum BindTransport {
+    Udp,
+    Tcp,
+    Doh,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BindEntry {
     pub protocol: BindProtocol,
+    pub transport: BindTransport,
     pub address: IpAddr,
     pub port: u16,
     pub owner: String,
@@ -184,6 +193,7 @@ impl BindPlan {
         self.entries.sort_by(|left, right| {
             left.protocol
                 .cmp(&right.protocol)
+                .then_with(|| left.transport.cmp(&right.transport))
                 .then_with(|| left.port.cmp(&right.port))
                 .then_with(|| left.address.to_string().cmp(&right.address.to_string()))
                 .then_with(|| left.owner.cmp(&right.owner))
@@ -1527,7 +1537,14 @@ pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport
                 port,
                 ..
             } => {
-                push_bind_entries(&mut plan, BindProtocol::Udp, name, addresses, *port);
+                push_bind_entries(
+                    &mut plan,
+                    BindProtocol::Udp,
+                    BindTransport::Udp,
+                    name,
+                    addresses,
+                    *port,
+                );
             }
             ListenerDto::Tcp {
                 name,
@@ -1535,7 +1552,14 @@ pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport
                 port,
                 ..
             } => {
-                push_bind_entries(&mut plan, BindProtocol::Tcp, name, addresses, *port);
+                push_bind_entries(
+                    &mut plan,
+                    BindProtocol::Tcp,
+                    BindTransport::Tcp,
+                    name,
+                    addresses,
+                    *port,
+                );
             }
             ListenerDto::Doh {
                 name, endpoints, ..
@@ -1544,6 +1568,7 @@ pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport
                     push_bind_entries(
                         &mut plan,
                         BindProtocol::Tcp,
+                        BindTransport::Doh,
                         &format!("listener[{index}].{}.{}", name, endpoint.name),
                         &endpoint.addresses,
                         endpoint.port,
@@ -1580,6 +1605,7 @@ pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport
 fn push_bind_entries(
     plan: &mut BindPlan,
     protocol: BindProtocol,
+    transport: BindTransport,
     owner: &str,
     addresses: &[IpAddr],
     port: u16,
@@ -1587,6 +1613,7 @@ fn push_bind_entries(
     for address in addresses {
         plan.entries.push(BindEntry {
             protocol,
+            transport,
             address: *address,
             port,
             owner: owner.to_owned(),
@@ -1713,7 +1740,9 @@ fn rule_set_name(value: &RuleSetDto) -> &str {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use super::{BindProtocol, ConfigErrorKind, addresses_overlap};
+    use crate::config::{ConfigLoader, LoadOptions};
+
+    use super::{BindProtocol, BindTransport, ConfigErrorKind, addresses_overlap};
 
     #[test]
     fn wildcard_overlap_is_family_local() {
@@ -1731,5 +1760,32 @@ mod tests {
     fn error_categories_are_stable_strings() {
         assert_eq!(ConfigErrorKind::BindConflict.as_str(), "bind_conflict");
         assert_eq!(BindProtocol::Tcp, BindProtocol::Tcp);
+        assert_eq!(BindTransport::Doh, BindTransport::Doh);
+    }
+
+    #[test]
+    fn bind_plan_retains_doh_transport_without_confusing_tcp() {
+        let output = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(include_str!("../../../config-example.yaml"))
+            .expect("repository example must remain a valid configuration");
+
+        assert!(
+            output
+                .resolved
+                .bind_plan
+                .entries
+                .iter()
+                .any(|entry| entry.transport == BindTransport::Doh
+                    && entry.protocol == BindProtocol::Tcp)
+        );
+        assert!(
+            output
+                .resolved
+                .bind_plan
+                .entries
+                .iter()
+                .any(|entry| entry.transport == BindTransport::Udp
+                    && entry.protocol == BindProtocol::Udp)
+        );
     }
 }

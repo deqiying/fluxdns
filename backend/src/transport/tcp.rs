@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::config::BindProtocol;
+use crate::config::{BindProtocol, BindTransport};
 use crate::dns::{
     Cancellation, ClientIdentity, ConnectionId, Deadline, DnsMessageId, DnsRequest, ListenerId,
     RequestContext, RequestId, RequestMeta, RuntimeRevision, StreamId, TransportCapabilities,
@@ -87,7 +87,9 @@ impl TcpAdapter {
         transport: TransportCapabilities,
         request_timeout: Duration,
     ) -> Result<Self, TcpAdapterError> {
-        if endpoint.entry.protocol != BindProtocol::Tcp {
+        if endpoint.entry.protocol != BindProtocol::Tcp
+            || endpoint.entry.transport != BindTransport::Tcp
+        {
             return Err(TcpAdapterError::ProtocolMismatch);
         }
         let ActivatedSocketHandle::Tcp(listener) = endpoint.socket else {
@@ -418,15 +420,22 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
+    use crate::config::{BindEntry, BindProtocol, BindTransport};
     use crate::dns::{
         CacheCompatibilityKey, Cancellation, ConnectionId, RuntimeRevision, ServFailCore, StreamId,
         TransportCapabilities, TransportClass, dispatch_inbound,
     };
-    use crate::ports::effects::{TcpConnectionHandle, TcpListenerHandle, TcpReadResult};
+    use crate::ports::effects::{
+        ActivatedSocketHandle, TcpConnectionHandle, TcpListenerHandle, TcpReadResult,
+    };
     use crate::ports::inbound::InboundAdapter;
     use crate::ports::{PortError, PortErrorClass, PortFuture};
+    use crate::runtime::BoundEndpointHandle;
 
-    use super::{MAX_DNS_WIRE_BYTES, TcpAdapter, TcpFrameError, decode_frame_length, encode_frame};
+    use super::{
+        MAX_DNS_WIRE_BYTES, TcpAdapter, TcpAdapterError, TcpFrameError, decode_frame_length,
+        encode_frame,
+    };
 
     struct FakeTcpConnection {
         read_buffer: Mutex<Vec<u8>>,
@@ -687,6 +696,37 @@ mod tests {
         let error = session.receive(&cancellation).await.unwrap_err();
         assert!(matches!(error.class(), PortErrorClass::ProtocolViolation));
         session.close().await;
+    }
+
+    #[test]
+    fn rejects_doh_bind_entry_as_dns_tcp_adapter() {
+        let listener = Arc::new(FakeTcpListener {
+            connections: Mutex::new(VecDeque::new()),
+        });
+        let endpoint = BoundEndpointHandle {
+            entry: BindEntry {
+                protocol: BindProtocol::Tcp,
+                transport: BindTransport::Doh,
+                address: [127, 0, 0, 1].into(),
+                port: 8353,
+                owner: "doh.direct".to_owned(),
+                v6_only: false,
+            },
+            socket: ActivatedSocketHandle::Tcp(listener),
+        };
+
+        assert!(matches!(
+            TcpAdapter::from_endpoint(
+                endpoint,
+                RuntimeRevision(1),
+                TransportCapabilities {
+                    class: TransportClass::Stream,
+                    cache_compatibility: CacheCompatibilityKey(1),
+                },
+                Duration::from_secs(5),
+            ),
+            Err(TcpAdapterError::ProtocolMismatch)
+        ));
     }
 
     #[tokio::test]

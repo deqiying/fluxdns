@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use thiserror::Error;
 
-use crate::config::BindProtocol;
+use crate::config::{BindProtocol, BindTransport};
 use crate::dns::{
     Cancellation, ClientIdentity, Deadline, DnsMessageId, DnsRequest, ListenerId, RequestContext,
     RequestId, RequestMeta, RuntimeRevision, TransportCapabilities, TransportClass,
@@ -61,7 +61,9 @@ impl UdpAdapter {
         transport: TransportCapabilities,
         request_timeout: Duration,
     ) -> Result<Self, UdpAdapterError> {
-        if endpoint.entry.protocol != BindProtocol::Udp {
+        if endpoint.entry.protocol != BindProtocol::Udp
+            || endpoint.entry.transport != BindTransport::Udp
+        {
             return Err(UdpAdapterError::ProtocolMismatch);
         }
         let ActivatedSocketHandle::Udp(socket) = endpoint.socket else {
