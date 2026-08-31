@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 基础服务编排、阶段 4 UDP/TCP 基础链路和阶段 8 DoH plain HTTP 首轮接入已实现
+> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 基础服务编排、阶段 4 UDP/TCP 基础链路、阶段 5 upstream 首轮小阶段和阶段 8 DoH plain HTTP 首轮接入已实现
 >
 > 更新日期：2026-08-31
 >
@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 149 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路。DoH TLS/PROXY/forwarded、upstream、cache、resource、storage 和完整 observability 仍未实现。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 162 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路；Upstream 已完成内联 hosts exchange、hosts registry 和纯 group member selection，但尚未接入 DNS Core。DoH TLS/PROXY/forwarded、DoH 出站、bootstrap、cache、resource、storage 和完整 observability 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **28.4%** | Config 达到 100% 模块验收口径；DoH 已完成 plain HTTP happy path，但仍缺少 TLS、代理信任、上游、缓存、资源、存储和完整故障验收 |
-| v1 交付总进度 | **35.6%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 28.4%` |
+| 后端代码实现进度 | **31.9%** | Config 达到 100% 模块验收口径；DoH 已完成 plain HTTP happy path，Upstream 已完成 hosts connector 与纯选择器，但仍缺少 TLS、代理信任、DoH 出站、bootstrap、缓存、资源、存储和完整故障验收 |
+| v1 交付总进度 | **38.7%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 31.9%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -62,7 +62,7 @@ v1 交付范围：
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 35% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 未开始 | 0% | 8% |
-| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 未开始 | 0% | 10% |
+| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 35% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 未开始 | 0% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 未开始 | 0% | 7% |
 | Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 未开始 | 0% | 8% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 35% + 3% × 20% = 28.4%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 35% + 10% × 35% + 3% × 20% = 31.9%
 ```
 
 ## 4. 进度判定规则
@@ -213,6 +213,12 @@ transport / upstream / storage / observability adapters
 - 实现内联 hosts、单 DoH connector、bootstrap、connect_ip；
 - 实现 `parallel`、`round-robin`、`load-balance`、`failover` 和 fallback；
 - 验收：Host/SNI、HTTP/DNS 错误分层、超时与确定性选择测试通过。
+
+首个小阶段（已完成）：修正 `ConfiguredDnsCore` 的 hosts 所有权，只加载顶层本地 hosts；新增内联 hosts `DnsExchange`、JSON/hosts 格式边界、DNS positive/NODATA/NXDOMAIN、取消/超时 outcome 和 typed `UpstreamRegistry`。Registry 当前只构造 hosts connector，对未实现的 DoH/Group 在构建边界显式返回 `UnsupportedUpstream`。
+
+第二个小阶段（已完成）：新增无网络副作用的 `GroupSelector`，固定 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；该阶段尚未接入真实 exchange、fallback aggregator 或 DNS Core。
+
+当前阶段 5 边界：DoH 出站 connector、bootstrap/connect_ip、SOCKS5/SOCKS5H、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
 
 ### 阶段 6：缓存
 

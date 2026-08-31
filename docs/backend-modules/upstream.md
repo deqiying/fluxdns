@@ -1,8 +1,8 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、hosts registry 和纯 group member selection；DoH 出站、bootstrap/outbound 和 fallback 执行尚未实现
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/upstream/*`
 >
@@ -27,7 +27,7 @@ Upstream 模块把 typed upstream 配置编译为 `UpstreamRegistry` 和可复�
 
 ## 2. Registry 与 connector
 
-prepare 阶段为每个 upstream 生成 typed ID 和 connector handle。Registry 只包含已验证对象：
+prepare 阶段为每个 upstream 生成 typed ID 和 connector handle。当前 registry 首轮只构造已验证的 hosts connector：
 
 - hosts connector；
 - DoH connector；
@@ -35,6 +35,8 @@ prepare 阶段为每个 upstream 生成 typed ID 和 connector handle。Registry
 - outbound profile；
 - bootstrap dependency；
 - 安全的观测标签。
+
+`UpstreamRegistry::from_resolved` 对尚未实现的 DoH/Group 返回显式 `UnsupportedUpstream`，不会静默丢弃配置；`ConfigId` 到 `ConnectorId` 的不兼容字符也在构建边界返回稳定错误。
 
 connector 构建 key 至少包含 upstream、outbound、bootstrap/connect_ip 和 TLS/HTTP profile。相同 key 复用 client 和连接池。
 
@@ -173,6 +175,8 @@ TransportFailure 分类至少包括 connect、DNS bootstrap、proxy、TLS、HTTP
 
 v1 不实现主动健康检查、熔断器或持久健康分数。load-balance 只使用实时 in-flight，不应在文档或指标中称为 health。
 
+当前已实现：`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；真实 exchange、fallback aggregator 和 late cache finalizer 尚未接入。
+
 ## 10. 测试
 
 - DoH Host/SNI、connect_ip、bootstrap 和 system resolver；
@@ -188,11 +192,14 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 
 ## 11. 实现检查清单
 
-- [ ] 实现 Registry/connector factory；
-- [ ] 实现 hosts 和 DoH connector；
+- [x] 实现 hosts connector 与首轮 Registry factory；
+- [ ] 实现 DoH connector；
 - [ ] 实现 bootstrap/connect_ip/outbound；
-- [ ] 实现四种 group 模式与 fallback；
+- [x] 固化四种 group 模式的纯 member selection；
+- [ ] 接入 group exchange、fallback 与 late cache finalizer；
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-当前实现进度：**0%**。
+阶段证据：hosts/group 定向测试 12 项通过，覆盖 hosts/JSON 解析、positive/NODATA/NXDOMAIN、取消/超时、registry duplicate/missing/unsupported、smooth weighted round-robin、least-in-flight 和并发 lease。当前实现未接入 Runtime/DNS Core，也未执行出站网络 I/O。
+
+当前实现进度：**35%**。
