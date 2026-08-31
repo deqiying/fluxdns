@@ -18,6 +18,7 @@ use crate::runtime::{
     ActiveRuntime, AdmissionError, BoundEndpointHandle, FaultLevel, RestartPolicy, ShutdownReport,
     Supervisor, SupervisorError, SystemClock, TaskError, TaskSpec,
 };
+use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
     DEFAULT_REQUEST_TIMEOUT, TcpAdapter, TcpAdapterError, TcpSession, UdpAdapter, UdpAdapterError,
 };
@@ -69,18 +70,35 @@ impl DnsService {
         let transport_cancellation = supervisor.cancellation();
 
         for (index, endpoint) in endpoints.into_iter().enumerate() {
-            if endpoint.entry.transport == BindTransport::Doh {
-                return Err(ServiceStartError::Endpoint {
+            let BoundEndpointHandle { entry, socket } = endpoint;
+            if entry.transport == BindTransport::Doh {
+                let adapter = DohAdapter::from_endpoint(
+                    BoundEndpointHandle { entry, socket },
+                    runtime.snapshot().config(),
+                    runtime.revision(),
+                    capabilities(TransportClass::Multiplexed),
+                    request_timeout,
+                )
+                .map_err(|reason| ServiceStartError::Endpoint {
                     index,
                     kind: "DoH",
-                    reason: "DoH HTTP adapter is not implemented".to_owned(),
-                });
+                    reason: reason.to_string(),
+                })?;
+                let task_id = format!("transport.doh.{index}");
+                let task = doh_listener_task(
+                    adapter,
+                    Arc::clone(&core),
+                    Arc::clone(&runtime),
+                    transport_cancellation.clone(),
+                );
+                spawn_task(&mut supervisor, task_id, "doh", task)?;
+                continue;
             }
-            match endpoint.socket {
+            match socket {
                 ActivatedSocketHandle::Udp(socket) => {
                     let adapter = UdpAdapter::from_endpoint(
                         BoundEndpointHandle {
-                            entry: endpoint.entry,
+                            entry,
                             socket: ActivatedSocketHandle::Udp(socket),
                         },
                         runtime.revision(),
@@ -104,7 +122,7 @@ impl DnsService {
                 ActivatedSocketHandle::Tcp(listener) => {
                     let adapter = TcpAdapter::from_endpoint(
                         BoundEndpointHandle {
-                            entry: endpoint.entry,
+                            entry,
                             socket: ActivatedSocketHandle::Tcp(listener),
                         },
                         runtime.revision(),
@@ -226,6 +244,15 @@ fn tcp_listener_task(
     Box::pin(async move { run_tcp_listener_loop(adapter, core, runtime, cancellation).await })
 }
 
+fn doh_listener_task(
+    adapter: DohAdapter,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    cancellation: Cancellation,
+) -> crate::runtime::TaskFuture {
+    Box::pin(async move { run_doh_listener_loop(adapter, core, runtime, cancellation).await })
+}
+
 async fn run_tcp_listener_loop(
     adapter: TcpAdapter,
     core: Arc<dyn DnsCore>,
@@ -297,6 +324,77 @@ async fn run_tcp_listener_loop(
     Err(TaskError::Cancelled)
 }
 
+async fn run_doh_listener_loop(
+    adapter: DohAdapter,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    let mut sessions = JoinSet::new();
+    let session_cancellation = Cancellation::new();
+    let mut listener_failure = None;
+
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                session_cancellation.cancel(CancelReason::Shutdown);
+                break;
+            }
+            joined = sessions.join_next(), if !sessions.is_empty() => {
+                observe_doh_session(joined);
+            }
+            accepted = adapter.accept_session(&cancellation), if !cancellation.is_cancelled() => {
+                match accepted {
+                    Ok(Some(session)) => {
+                        let session_core = Arc::clone(&core);
+                        let session_runtime = Arc::clone(&runtime);
+                        let session_cancellation = session_cancellation.clone();
+                        sessions.spawn(async move {
+                            run_doh_connection(
+                                session,
+                                session_core,
+                                session_runtime,
+                                session_cancellation,
+                            )
+                            .await
+                        });
+                    }
+                    Ok(None) => {
+                        listener_failure = (!cancellation.is_cancelled()).then_some(TaskError::Transient);
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                    Err(error) if is_cancelled_error(&error, &cancellation) => {
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            event = "doh_listener_failed",
+                            component = "service",
+                            class = error.class().as_str(),
+                            operation = error.operation(),
+                        );
+                        listener_failure = Some(TaskError::Transient);
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    session_cancellation.cancel(CancelReason::Shutdown);
+    while let Some(joined) = sessions.join_next().await {
+        observe_doh_session(Some(joined));
+    }
+
+    if let Some(error) = listener_failure {
+        return Err(error);
+    }
+    Err(TaskError::Cancelled)
+}
+
 fn observe_tcp_session(joined: Option<Result<Result<(), TaskError>, tokio::task::JoinError>>) {
     match joined {
         Some(Ok(Ok(()))) | None => {}
@@ -311,6 +409,27 @@ fn observe_tcp_session(joined: Option<Result<Result<(), TaskError>, tokio::task:
         Some(Err(error)) => {
             tracing::error!(
                 event = "tcp_session_panicked",
+                component = "service",
+                panicked = error.is_panic(),
+            );
+        }
+    }
+}
+
+fn observe_doh_session(joined: Option<Result<Result<(), TaskError>, tokio::task::JoinError>>) {
+    match joined {
+        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Err(TaskError::Cancelled))) => {}
+        Some(Ok(Err(error))) => {
+            tracing::debug!(
+                event = "doh_session_failed",
+                component = "service",
+                error = %error,
+            );
+        }
+        Some(Err(error)) => {
+            tracing::error!(
+                event = "doh_session_panicked",
                 component = "service",
                 panicked = error.is_panic(),
             );
@@ -387,6 +506,113 @@ async fn run_tcp_connection(
             } else {
                 Ok(())
             };
+        }
+    }
+}
+
+async fn run_doh_connection(
+    mut session: DohSession,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    loop {
+        let event = match session.receive(&cancellation).await {
+            Ok(event) => event,
+            Err(error) => {
+                let cancelled = is_cancelled_error(&error, &cancellation);
+                if !cancelled {
+                    tracing::debug!(
+                        event = "doh_session_closed",
+                        component = "service",
+                        class = error.class().as_str(),
+                        operation = error.operation(),
+                    );
+                }
+                session.close().await;
+                return if cancelled {
+                    Err(TaskError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+        };
+
+        match event {
+            DohSessionEvent::CleanEof => {
+                session.close().await;
+                return if cancellation.is_cancelled() {
+                    Err(TaskError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+            DohSessionEvent::HttpError { error, close } => {
+                if let Err(write_error) =
+                    session.write_http_error(error, close, &cancellation).await
+                {
+                    let cancelled = is_cancelled_error(&write_error, &cancellation);
+                    if !cancelled {
+                        tracing::debug!(
+                            event = "doh_http_error_write_failed",
+                            component = "service",
+                            class = write_error.class().as_str(),
+                            operation = write_error.operation(),
+                        );
+                    }
+                    session.close().await;
+                    return if cancelled {
+                        Err(TaskError::Cancelled)
+                    } else {
+                        Ok(())
+                    };
+                }
+                if close {
+                    session.close().await;
+                    return Ok(());
+                }
+            }
+            DohSessionEvent::Request(inbound) => {
+                let close_after_response = session.response_should_close();
+                let guard = match runtime.try_acquire() {
+                    Ok(guard) => guard,
+                    Err(AdmissionError::Draining) => {
+                        let _ = inbound.response().cancel(CancelReason::Shutdown);
+                        session.close().await;
+                        return Ok(());
+                    }
+                    Err(AdmissionError::Capacity) => {
+                        let _ = inbound.response().cancel(CancelReason::GroupPolicy);
+                        session.close().await;
+                        return Ok(());
+                    }
+                };
+                let response_handle = inbound.response().clone();
+                let result = tokio::select! {
+                    result = dispatch_inbound(core.as_ref(), inbound) => result,
+                    _ = cancellation.cancelled() => {
+                        let _ = response_handle.cancel(CancelReason::Shutdown);
+                        drop(guard);
+                        session.close().await;
+                        return Err(TaskError::Cancelled);
+                    }
+                };
+                drop(guard);
+
+                if let Err(error) = result {
+                    handle_dispatch_error(error);
+                    session.close().await;
+                    return if cancellation.is_cancelled() {
+                        Err(TaskError::Cancelled)
+                    } else {
+                        Ok(())
+                    };
+                }
+                if close_after_response {
+                    session.close().await;
+                    return Ok(());
+                }
+            }
         }
     }
 }
@@ -473,6 +699,16 @@ impl From<TcpAdapterError> for ServiceStartError {
     }
 }
 
+impl From<DohAdapterError> for ServiceStartError {
+    fn from(error: DohAdapterError) -> Self {
+        Self::Endpoint {
+            index: 0,
+            kind: "DoH",
+            reason: error.to_string(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::capabilities;
@@ -491,6 +727,13 @@ mod tests {
             capabilities(TransportClass::Stream),
             crate::dns::TransportCapabilities {
                 class: TransportClass::Stream,
+                cache_compatibility: CacheCompatibilityKey(1),
+            }
+        );
+        assert_eq!(
+            capabilities(TransportClass::Multiplexed),
+            crate::dns::TransportCapabilities {
+                class: TransportClass::Multiplexed,
                 cache_compatibility: CacheCompatibilityKey(1),
             }
         );
