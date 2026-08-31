@@ -5,7 +5,9 @@ use thiserror::Error;
 
 use crate::config::{BindEntry, BindProtocol};
 use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision};
-use crate::ports::effects::{ActivatedSocket, SocketFactory, SocketKind, SocketSpec};
+use crate::ports::effects::{
+    ActivatedSocket, ActivatedSocketHandle, SocketFactory, SocketKind, SocketSpec,
+};
 use crate::ports::{PortError, PortErrorClass};
 
 use super::prepared::PreparedRuntime;
@@ -39,6 +41,25 @@ impl BoundListenerSet {
             .map(|endpoint| endpoint.socket.local_addr())
             .collect()
     }
+
+    /// 以 `Arc` clone 的方式向 Transport 交出已激活句柄，同时保留 Runtime 所有权。
+    pub fn endpoint_handles(&self) -> Result<Vec<BoundEndpointHandle>, PortError> {
+        self.endpoints
+            .iter()
+            .map(|endpoint| {
+                Ok(BoundEndpointHandle {
+                    entry: endpoint.entry.clone(),
+                    socket: endpoint.socket.socket_handle()?,
+                })
+            })
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BoundEndpointHandle {
+    pub entry: BindEntry,
+    pub socket: ActivatedSocketHandle,
 }
 
 impl fmt::Debug for BoundListenerSet {
@@ -238,6 +259,17 @@ impl ActivatedSocket for TestActivatedSocket {
     fn local_addr(&self) -> Result<SocketAddr, PortError> {
         Ok(self.address)
     }
+
+    fn kind(&self) -> SocketKind {
+        SocketKind::Udp
+    }
+
+    fn socket_handle(&self) -> Result<ActivatedSocketHandle, PortError> {
+        Err(PortError::new(
+            PortErrorClass::Unavailable,
+            "test_socket.handle",
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -249,7 +281,7 @@ mod tests {
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision};
     use crate::ports::effects::{
-        ActivatedSocket, PreparedSocket, SocketFactory, SocketKind, SocketSpec,
+        ActivatedSocket, PreparedSocket, SocketFactory, SocketHandle, SocketKind, SocketSpec,
     };
     use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -316,6 +348,7 @@ mod tests {
     struct FakeActivatedSocket {
         state: FakeSocketState,
         address: SocketAddr,
+        kind: SocketKind,
     }
 
     impl Drop for FakeActivatedSocket {
@@ -344,6 +377,7 @@ mod tests {
             Ok(Box::new(FakeActivatedSocket {
                 state: self.state.clone(),
                 address: self.spec.address,
+                kind: self.spec.kind,
             }))
         }
     }
@@ -351,6 +385,17 @@ mod tests {
     impl ActivatedSocket for FakeActivatedSocket {
         fn local_addr(&self) -> Result<SocketAddr, PortError> {
             Ok(self.address)
+        }
+
+        fn kind(&self) -> SocketKind {
+            self.kind
+        }
+
+        fn socket_handle(&self) -> Result<SocketHandle, PortError> {
+            Err(PortError::new(
+                PortErrorClass::Unavailable,
+                "fake_socket.handle",
+            ))
         }
     }
 

@@ -151,6 +151,88 @@ pub struct SocketSpec {
     pub v6_only: bool,
 }
 
+/// UDP 收到的数据报；payload 由 adapter 拥有，避免把 buffer lifetime 暴露给核心层。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UdpDatagram {
+    pub payload: Vec<u8>,
+    pub peer: SocketAddr,
+}
+
+/// 已激活 UDP socket 的协议无关操作；具体 Tokio/std 类型只存在于 adapter 内部。
+pub trait UdpSocketHandle: Send + Sync {
+    fn local_addr(&self) -> Result<SocketAddr, PortError>;
+
+    fn recv_from<'a>(
+        &'a self,
+        max_bytes: usize,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<UdpDatagram, PortError>>;
+
+    fn send_to<'a>(
+        &'a self,
+        payload: Vec<u8>,
+        target: SocketAddr,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<(), PortError>>;
+}
+
+/// 已接受 TCP 连接的协议无关操作。
+pub trait TcpConnectionHandle: Send {
+    fn peer_addr(&self) -> Result<SocketAddr, PortError>;
+
+    fn read_exact<'a>(
+        &'a mut self,
+        length: usize,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Vec<u8>, PortError>>;
+
+    fn write_all<'a>(
+        &'a mut self,
+        payload: Vec<u8>,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<(), PortError>>;
+
+    fn shutdown(&mut self) -> PortFuture<'_, Result<(), PortError>>;
+}
+
+/// 已激活 TCP listener 的协议无关操作。
+pub trait TcpListenerHandle: Send + Sync {
+    fn local_addr(&self) -> Result<SocketAddr, PortError>;
+
+    fn accept<'a>(
+        &'a self,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Option<Box<dyn TcpConnectionHandle>>, PortError>>;
+}
+
+/// Runtime 交给 Transport 的不透明 socket 句柄。
+#[derive(Clone)]
+pub enum ActivatedSocketHandle {
+    Udp(Arc<dyn UdpSocketHandle>),
+    Tcp(Arc<dyn TcpListenerHandle>),
+}
+
+impl fmt::Debug for ActivatedSocketHandle {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self {
+            Self::Udp(_) => "udp",
+            Self::Tcp(_) => "tcp",
+        };
+        formatter
+            .debug_tuple("ActivatedSocketHandle")
+            .field(&kind)
+            .finish()
+    }
+}
+
+/// 兼容早期 Runtime 测试命名；生产接口使用 `ActivatedSocketHandle`。
+pub type SocketHandle = ActivatedSocketHandle;
+
 /// Runtime `BindPlan` 提交前的未激活 socket，不暴露 socket2/Tokio 类型。
 pub trait PreparedSocket: Send {
     fn local_addr(&self) -> Result<SocketAddr, PortError>;
@@ -160,6 +242,10 @@ pub trait PreparedSocket: Send {
 
 pub trait ActivatedSocket: Send + Sync {
     fn local_addr(&self) -> Result<SocketAddr, PortError>;
+
+    fn kind(&self) -> SocketKind;
+
+    fn socket_handle(&self) -> Result<ActivatedSocketHandle, PortError>;
 }
 
 pub trait SocketFactory: Send + Sync {

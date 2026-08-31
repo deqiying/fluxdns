@@ -1,6 +1,6 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 前四个小阶段已实现
+> 状态：v1 方案已完成，阶段 3 前五个小阶段已实现
 >
 > 更新日期：2026-08-30
 >
@@ -21,6 +21,7 @@ Runtime 模块拥有可服务状态、listener 生命周期、后台任务监督
 | `coordinator.rs` | `ActiveRuntime` 原子切换、CAS 合并、drain |
 | `bind.rs` | `BindPlan`、socket 预创建、提交或回滚 |
 | `supervisor.rs` | task tree、故障等级、重试与 shutdown |
+| `system_socket.rs` | `socket2`/Tokio 系统 socket adapter 与不透明 I/O capability |
 
 ## 2. 状态模型
 
@@ -202,9 +203,10 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱�
 - [x] 实现基于 `SocketFactory` 的 BindPlan 全成/全退和 `v6_only` 规格传递；
 - [x] 实现 `ArcSwap` ActiveRuntime coordinator/CAS、旧实例 draining 和请求 guard；
 - [x] 实现 `Supervisor` task tree 基础、退出分类和受控 shutdown 回收报告；
+- [x] 实现 UDP/TCP 不透明 socket capability、`SystemSocketFactory` 和 `BoundListenerSet` 句柄交接；
 - [ ] 定义状态类型与所有权转换；
-- [ ] 实现 PreparedRuntime/preflight；
-- [ ] 实现 ActiveRuntime coordinator/CAS；
+- [ ] 完成跨模块资源装配版 PreparedRuntime/preflight；
+- [ ] 完成真实服务任务版 ActiveRuntime coordinator/CAS；
 - [ ] 实现 supervisor task tree 和故障等级；
 - [ ] 实现 drain/shutdown；
 - [ ] 完成并发、故障和时间控制测试。

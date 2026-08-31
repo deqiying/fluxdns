@@ -6,9 +6,9 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 ## 项目状态
 
-后端总体架构和 12 个模块方案已经完成，阶段 1“项目骨架与核心契约”和阶段 2“配置系统”已经实现。Config 已完成 strict DTO/YAML bounded loader、v1 空迁移 registry、路径和 SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照与不可变 `ResolvedConfig`。当前后端实现进度为 13%，包含设计阶段的 v1 交付总进度为 21.7%。
+后端总体架构和 12 个模块方案已经完成，阶段 1“项目骨架与核心契约”和阶段 2“配置系统”已经实现。阶段 3 已完成 Runtime snapshot/preflight、监听绑定全成/全退、原子激活、Supervisor 基础和 UDP/TCP 不透明 socket capability 五个小阶段。Config 已完成 strict DTO/YAML bounded loader、v1 空迁移 registry、路径和 SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照与不可变 `ResolvedConfig`。当前后端实现进度为 17.4%，包含设计阶段的 v1 交付总进度为 25.7%。
 
-当前 App 仍是阶段 1 scaffold；Runtime、真实 transport/upstream/storage adapter、资源网络首次 snapshot、listener 绑定和 DNS 服务启动闭环尚未接线。SecretRef 实际值不会由普通 YAML load 读取，仅由后续 adapter 通过显式 accessor 请求。
+当前 App 仍是阶段 1 scaffold；真实 transport framing、upstream/storage adapter、资源网络首次 snapshot、Application 启动接线和 DNS 服务闭环尚未完成。Runtime 已具备真实系统 socket prepare/activate capability，但尚未启动 DNS 请求任务。SecretRef 实际值不会由普通 YAML load 读取，仅由后续 adapter 通过显式 accessor 请求。
 
 ## 仓库布局
 
@@ -32,7 +32,7 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 字段语义见 [docs/configuration-reference.md](docs/configuration-reference.md)，Rust 后端总体方案见 [docs/backend-architecture.md](docs/backend-architecture.md)，模块方案、阶段安排和当前进度见 [docs/backend-development-plan.md](docs/backend-development-plan.md)。
 
-Config 阶段 2 记录起点为 69 tests；当前工作树已增量至 72 tests，串行离线测试为 72 passed、0 failed，离线 `clippy` 和 `fmt --check` 均已通过。测试数量可能随后续阶段增量。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
+Config 阶段 2 记录起点为 69 tests；当前工作树已增量至 90 tests，串行测试为 90 passed、0 failed，`clippy` 和 `fmt --check` 均已通过。测试数量可能随后续阶段增量。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
 
 配置中的示例地址、账号、密码和客户端标识仅用于说明格式，部署前必须替换为实际且受保护的配置。
 

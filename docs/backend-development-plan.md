@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 前四个小阶段已完成
+> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 前五个小阶段已完成
 >
 > 更新日期：2026-08-31
 >
@@ -170,6 +170,8 @@ transport / upstream / storage / observability adapters
 第三个小阶段（已完成）：引入 `ArcSwap` `RuntimeCoordinator`，实现 ActiveRuntime 的原子激活、revision CAS、旧实例 draining 和请求 guard/lease；CAS 失败会返还候选供调用方重试。Runtime targeted tests：13 passed；真实 Tokio/socket2 adapter、supervisor 和 Application 启动接线留在阶段 3 后续小阶段。
 
 第四个小阶段（已完成）：新增 `Supervisor`、task ID/故障等级/重启策略元数据和 shutdown 回收报告；所有 task 由 `JoinSet` 持有，重复注册被拒绝，正常退出、失败、取消和 panic 均有明确分类。Runtime targeted tests：3 passed；有界重启、完整 drain/flush 顺序和 Application 启动接线留在阶段 3 后续小阶段。
+
+第五个小阶段（已完成）：扩展 `ports::effects` 的 UDP/TCP 不透明 socket capability，接入 `socket2`/Tokio `SystemSocketFactory`，并由 `BoundListenerSet::endpoint_handles` 以 `Arc` clone 方式交给后续 Transport；I/O 保留 deadline、cancellation 和安全错误分类，公共 API 不泄漏 Tokio 类型。新增 UDP/TCP activation tests；Transport framing、Application 接线和完整 shutdown 顺序留在阶段 3/4 后续小阶段。
 
 ### 阶段 4：DNS Core 与 UDP/TCP
 
