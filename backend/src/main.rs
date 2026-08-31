@@ -8,6 +8,7 @@ pub mod ports;
 pub mod runtime;
 pub mod service;
 pub mod transport;
+pub mod upstream;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
