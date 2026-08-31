@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
+use tokio::task::JoinSet;
 
 use crate::dns::{
     CacheCompatibilityKey, CancelReason, Cancellation, DispatchError, DnsCore,
@@ -17,7 +18,7 @@ use crate::runtime::{
     Supervisor, SupervisorError, SystemClock, TaskError, TaskSpec,
 };
 use crate::transport::{
-    DEFAULT_REQUEST_TIMEOUT, TcpAdapter, TcpAdapterError, UdpAdapter, UdpAdapterError,
+    DEFAULT_REQUEST_TIMEOUT, TcpAdapter, TcpAdapterError, TcpSession, UdpAdapter, UdpAdapterError,
 };
 
 #[derive(Debug, Error)]
@@ -108,7 +109,7 @@ impl DnsService {
                         reason: reason.to_string(),
                     })?;
                     let task_id = format!("transport.tcp.{index}");
-                    let task = service_task(
+                    let task = tcp_listener_task(
                         adapter,
                         Arc::clone(&core),
                         Arc::clone(&runtime),
@@ -145,6 +146,7 @@ impl DnsService {
         clock: &dyn Clock,
         deadline: crate::dns::Deadline,
     ) -> ShutdownReport {
+        self.runtime.begin_drain();
         self.supervisor.shutdown(clock, deadline).await
     }
 
@@ -205,6 +207,184 @@ where
     A: InboundAdapter + 'static,
 {
     Box::pin(async move { run_adapter_loop(adapter, core, runtime, cancellation).await })
+}
+
+fn tcp_listener_task(
+    adapter: TcpAdapter,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    cancellation: Cancellation,
+) -> crate::runtime::TaskFuture {
+    Box::pin(async move { run_tcp_listener_loop(adapter, core, runtime, cancellation).await })
+}
+
+async fn run_tcp_listener_loop(
+    adapter: TcpAdapter,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    let mut sessions = JoinSet::new();
+    let session_cancellation = Cancellation::new();
+    let mut listener_failure = None;
+
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                session_cancellation.cancel(CancelReason::Shutdown);
+                break;
+            }
+            joined = sessions.join_next(), if !sessions.is_empty() => {
+                observe_tcp_session(joined);
+            }
+            accepted = adapter.accept_session(&cancellation), if !cancellation.is_cancelled() => {
+                match accepted {
+                    Ok(Some(session)) => {
+                        let session_core = Arc::clone(&core);
+                        let session_runtime = Arc::clone(&runtime);
+                        let session_cancellation = session_cancellation.clone();
+                        sessions.spawn(async move {
+                            run_tcp_connection(
+                                session,
+                                session_core,
+                                session_runtime,
+                                session_cancellation,
+                            )
+                            .await
+                        });
+                    }
+                    Ok(None) => {
+                        listener_failure = (!cancellation.is_cancelled()).then_some(TaskError::Transient);
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                    Err(error) if is_cancelled_error(&error, &cancellation) => {
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            event = "tcp_listener_failed",
+                            component = "service",
+                            class = error.class().as_str(),
+                            operation = error.operation(),
+                        );
+                        listener_failure = Some(TaskError::Transient);
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    session_cancellation.cancel(CancelReason::Shutdown);
+    while let Some(joined) = sessions.join_next().await {
+        observe_tcp_session(Some(joined));
+    }
+
+    if let Some(error) = listener_failure {
+        return Err(error);
+    }
+    Err(TaskError::Cancelled)
+}
+
+fn observe_tcp_session(joined: Option<Result<Result<(), TaskError>, tokio::task::JoinError>>) {
+    match joined {
+        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Err(TaskError::Cancelled))) => {}
+        Some(Ok(Err(error))) => {
+            tracing::debug!(
+                event = "tcp_session_failed",
+                component = "service",
+                error = %error,
+            );
+        }
+        Some(Err(error)) => {
+            tracing::error!(
+                event = "tcp_session_panicked",
+                component = "service",
+                panicked = error.is_panic(),
+            );
+        }
+    }
+}
+
+async fn run_tcp_connection(
+    mut session: TcpSession,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    loop {
+        let inbound = match session.receive(&cancellation).await {
+            Ok(Some(inbound)) => inbound,
+            Ok(None) => {
+                session.close().await;
+                return if cancellation.is_cancelled() {
+                    Err(TaskError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+            Err(error) => {
+                let cancelled = is_cancelled_error(&error, &cancellation);
+                if !cancelled {
+                    tracing::debug!(
+                        event = "tcp_session_closed",
+                        component = "service",
+                        class = error.class().as_str(),
+                        operation = error.operation(),
+                    );
+                }
+                session.close().await;
+                return if cancelled {
+                    Err(TaskError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+        };
+
+        let guard = match runtime.try_acquire() {
+            Ok(guard) => guard,
+            Err(AdmissionError::Draining) => {
+                let _ = inbound.response().cancel(CancelReason::Shutdown);
+                session.close().await;
+                return Ok(());
+            }
+            Err(AdmissionError::Capacity) => {
+                let _ = inbound.response().cancel(CancelReason::GroupPolicy);
+                session.close().await;
+                return Ok(());
+            }
+        };
+        let response_handle = inbound.response().clone();
+        let result = tokio::select! {
+            result = dispatch_inbound(core.as_ref(), inbound) => result,
+            _ = cancellation.cancelled() => {
+                let _ = response_handle.cancel(CancelReason::Shutdown);
+                drop(guard);
+                session.close().await;
+                return Err(TaskError::Cancelled);
+            }
+        };
+        drop(guard);
+
+        if let Err(error) = result {
+            handle_dispatch_error(error);
+            session.close().await;
+            return if cancellation.is_cancelled() {
+                Err(TaskError::Cancelled)
+            } else {
+                Ok(())
+            };
+        }
+    }
+}
+
+fn is_cancelled_error(error: &crate::ports::PortError, cancellation: &Cancellation) -> bool {
+    cancellation.is_cancelled() || matches!(error.class(), PortErrorClass::Cancelled(_))
 }
 
 async fn run_adapter_loop<A>(
