@@ -2,6 +2,7 @@
 
 mod context;
 mod handler;
+mod hosts;
 mod message;
 
 pub use context::{
@@ -12,6 +13,7 @@ pub use context::{
 pub use handler::{
     CoreError, CoreOutcome, DispatchError, DispatchOutcome, DnsCore, ServFailCore, dispatch_inbound,
 };
+pub use hosts::{HostsParseError, HostsTable};
 pub use message::{
     CanonicalMessageError, CanonicalQuery, CanonicalQuestion, CanonicalResponse, DnsMessageId,
     ResponseClass, TtlMetadata,
