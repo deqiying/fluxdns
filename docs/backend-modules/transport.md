@@ -1,6 +1,6 @@
 # Transport 模块设计
 
-> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter 和 TCP 持久 session；DoH/TLS/PROXY 尚未实现
+> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session 和 DoH plain HTTP adapter；TLS/PROXY/forwarded 尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -24,7 +24,7 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 | --- | --- |
 | `udp.rs` | datagram receive/send、EDNS 尺寸和截断 |
 | `tcp.rs` | accept、两字节 length framing、连接内请求 |
-| `doh.rs` | Axum route、GET/POST、HTTP/DNS 错误分层 |
+| `doh.rs` | plain HTTP route、GET/POST、HTTP/DNS 错误分层和 session |
 | `tls.rs` | Rustls 配置加载和 TLS accept |
 | `proxy_protocol.rs` | PROXY v1/v2 分片解析、长度与 trust 检查 |
 
@@ -45,7 +45,7 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 - TCP adapter 使用两字节网络序 length framing；`TcpSession` 为每个 accepted connection 固定 `ConnectionId`，连续 frame 递增 `StreamId`，连接内按读取顺序完成 Core 和 response write。
 - clean EOF、半帧 EOF、零长度 frame、decode 错误和 response write 错误只关闭当前连接；listener task 继续接收其他连接。
 - TCP listener 的 connection tasks 由内部 `JoinSet` 持有，未使用 detached `tokio::spawn`。
-- `BindTransport` 将 DoH endpoint 与 raw TCP 明确区分；DoH HTTP adapter 未完成前，service 装配显式返回启动错误。
+- `BindTransport` 将 DoH endpoint 与 raw TCP 明确区分；service 根据 typed binding 构造独立的 DoH listener/session，不把 HTTP 请求误交给 raw DNS/TCP adapter。
 
 forwarded header 解析可放在 `doh.rs` 的独立子模块，不能复用未经验证的任意 header 字符串。
 
@@ -115,9 +115,9 @@ TCP adapter：
 
 ## 7. DoH
 
-当前尚未实现。DoH endpoint 只在 bind plan 中保留独立 transport 类型，不能被当作 raw DNS/TCP 服务；HTTP adapter 完成前配置该 endpoint 会在 service 装配阶段失败。
+当前已实现 plain HTTP 首轮链路。DoH endpoint 只复用底层 TCP socket，不会被当作 raw DNS/TCP 服务；service 根据 `BindTransport::Doh` 构造独立 listener/session task，并由内部 `JoinSet` 管理连接。
 
-目标契约（尚未实现）每条 route 同时支持 GET/POST：
+每条 route 同时支持 GET/POST：
 
 - GET：唯一 `dns` 参数、无 padding base64url；
 - POST：`application/dns-message` raw body；
@@ -129,6 +129,8 @@ TCP adapter：
 - base64 或 DNS wire 非法返回 400；
 - 已形成 DNS transaction 后，NXDOMAIN/REFUSED/SERVFAIL 等使用 HTTP 2xx；
 - 成功响应 Content-Type 为 `application/dns-message`，Cache-Control 固定 `no-store`。
+
+首轮实现边界：只接受 `tls.mode=external` 和 `client_ip.source=peer`。`tls.mode=terminate`、`forwarded_header`、`proxy_protocol` 会在 service 装配阶段明确拒绝；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2、TLS handshake 和代理身份恢复。
 
 route template 负责提取可选 `client_id`，但日志不记录实际路径参数或 query string。
 
@@ -216,11 +218,13 @@ encoder 由 request correlation 持有并只能调用一次：
 
 - [ ] 实现 profile/capabilities 映射；
 - [x] 实现 UDP、TCP adapter；
-- [ ] 实现 DoH GET/POST；
+- [x] 实现 DoH plain HTTP GET/POST；
 - [ ] 实现 TLS 与 client IP 恢复；
 - [x] 实现 UDP/TCP response correlation/encoder；
 - [x] 建立共享 DNS wire decode/encode boundary 和尺寸/错误分类测试；
 - [x] 完成 UDP/TCP framing、尺寸、EOF、取消和顺序响应测试；
-- [ ] 完成 DoH/TLS/代理资源限制、安全和协议测试。
+- [ ] 完成 DoH/TLS/代理/forwarded 资源限制、安全和协议测试。
 
-当前实现进度：**35%**。
+阶段证据：DoH codec/session 定向测试 9 项通过；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、TLS 证书或特权端口。
+
+当前实现进度：**50%**。

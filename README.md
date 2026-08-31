@@ -6,9 +6,9 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 ## 项目状态
 
-后端总体架构和 12 个模块方案已经完成，阶段 1“项目骨架与核心契约”和阶段 2“配置系统”已经实现。阶段 3 已完成 Runtime snapshot/preflight、监听绑定全成/全退、原子激活、Supervisor 基础、UDP/TCP 不透明 socket capability、Application CLI/校验接线和基础服务编排；阶段 4 已完成共享 DNS wire codec、固定 Core、UDP/TCP framing、UDP 截断和 TCP 持久 session 小阶段。Config 已完成 strict DTO/YAML bounded loader、v1 空迁移 registry、路径和 SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照与不可变 `ResolvedConfig`。当前后端代码实现进度为 25.8%，包含设计阶段的 v1 交付总进度为 33.2%。
+后端总体架构和 12 个模块方案已经完成，阶段 1“项目骨架与核心契约”和阶段 2“配置系统”已经实现。阶段 3 已完成 Runtime snapshot/preflight、监听绑定全成/全退、原子激活、Supervisor 基础、UDP/TCP 不透明 socket capability、Application CLI/校验接线和基础服务编排；阶段 4 已完成共享 DNS wire codec、固定 Core、UDP/TCP framing、UDP 截断和 TCP 持久 session 小阶段；阶段 8 已完成 DoH plain HTTP GET/POST、路由匹配和 direct HTTP service 接线。Config 已完成 strict DTO/YAML bounded loader、v1 空迁移 registry、路径和 SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照与不可变 `ResolvedConfig`。当前后端代码实现进度为 28.4%，包含设计阶段的 v1 交付总进度为 35.6%。
 
-当前 `run` 已能通过真实系统 socket 启动 UDP/TCP DNS 服务，支持内联 hosts 响应、同一 TCP 连接连续 frame 和 Ctrl-C 优雅停机；DoH endpoint 已保留独立 transport 类型，HTTP adapter 尚未实现，配置包含 DoH 时会在服务装配阶段显式拒绝，不会误接到 raw DNS/TCP。upstream、cache、resource、storage、TLS 和 PROXY protocol 仍未完成。SecretRef 实际值不会由普通 YAML load 读取，仅由后续 adapter 通过显式 accessor 请求。
+当前 `run` 已能通过真实系统 socket 启动 UDP/TCP/DoH plain HTTP 服务，支持内联 hosts 响应、同一 TCP 连接连续 frame、DoH GET/POST 和 Ctrl-C 优雅停机。DoH 首轮只接受 `tls.mode: external` 与 `client_ip.source: peer`，TLS terminate、forwarded header、PROXY protocol 会在 service 装配阶段明确拒绝，不会误接到 raw DNS/TCP。upstream、cache、resource、storage 仍未完成。SecretRef 实际值不会由普通 YAML load 读取，仅由后续 adapter 通过显式 accessor 请求。
 
 ## 仓库布局
 
@@ -32,7 +32,7 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 字段语义见 [docs/configuration-reference.md](docs/configuration-reference.md)，Rust 后端总体方案见 [docs/backend-architecture.md](docs/backend-architecture.md)，模块方案、阶段安排和当前进度见 [docs/backend-development-plan.md](docs/backend-development-plan.md)。
 
-Config 阶段 2 记录起点为 69 tests；当前后端全量测试为 135 passed、0 failed，`clippy --all-targets -- -D warnings` 和 `fmt --check` 均已通过。真实 smoke 使用临时配置在 UDP `127.0.0.1:8353`、TCP `127.0.0.1:8354` 验证 hosts 响应、同连接双 frame 和 `SIGINT` 停机；端口仅用于本机验证，不改变配置契约。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
+Config 阶段 2 记录起点为 69 tests；当前后端全量测试为 149 passed、0 failed，`clippy --all-targets -- -D warnings` 和 `fmt --check` 均已通过。真实 smoke 使用临时配置在 UDP `127.0.0.1:8353`、TCP `127.0.0.1:8354` 和 DoH `127.0.0.1:8355` 验证 hosts 响应、同连接双 frame、DoH GET/POST 的 DNS ID/RCODE 和 `SIGINT` 停机；端口仅用于本机验证，不改变配置契约。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
 
 配置中的示例地址、账号、密码和客户端标识仅用于说明格式，部署前必须替换为实际且受保护的配置。
 

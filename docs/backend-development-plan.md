@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 基础服务编排和阶段 4 UDP/TCP 基础链路已实现
+> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 基础服务编排、阶段 4 UDP/TCP 基础链路和阶段 8 DoH plain HTTP 首轮接入已实现
 >
 > 更新日期：2026-08-31
 >
@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 135 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断和 TCP 持久 session。DoH HTTP/TLS、upstream、cache、resource、storage 和完整 observability 仍未实现。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 149 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路。DoH TLS/PROXY/forwarded、upstream、cache、resource、storage 和完整 observability 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **25.8%** | Config 达到 100% 模块验收口径；Application、Ports、Runtime、Transport、DNS Core 已完成可运行基础链路，但仍缺少 DoH、上游、缓存、资源、存储和完整故障验收 |
-| v1 交付总进度 | **33.2%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 25.8%` |
+| 后端代码实现进度 | **28.4%** | Config 达到 100% 模块验收口径；DoH 已完成 plain HTTP happy path，但仍缺少 TLS、代理信任、上游、缓存、资源、存储和完整故障验收 |
+| v1 交付总进度 | **35.6%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 28.4%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -55,11 +55,11 @@ v1 交付范围：
 
 | 模块 | 目标代码 | 方案文档 | 设计状态 | 实现状态 | 实现进度 | 权重 |
 | --- | --- | --- | --- | --- | ---: | ---: |
-| Application | `backend/src/main.rs`、`backend/src/app.rs` | [application.md](backend-modules/application.md) | 已完成 | 实现中 | 40% | 4% |
-| Ports | `backend/src/ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 实现中 | 25% | 8% |
+| Application | `backend/src/main.rs`、`backend/src/app.rs` | [application.md](backend-modules/application.md) | 已完成 | 实现中 | 45% | 4% |
+| Ports | `backend/src/ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 实现中 | 35% | 8% |
 | Config | `backend/src/config/*` | [config.md](backend-modules/config.md) | 已完成 | 已验证 | 100% | 10% |
 | Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 35% | 12% |
-| Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 35% | 11% |
+| Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 35% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 未开始 | 0% | 8% |
 | Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 未开始 | 0% | 10% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 40% + 8% × 25% + 10% × 100% + 12% × 35% + 11% × 35% + 10% × 35% + 3% × 20% = 25.8%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 35% + 3% × 20% = 28.4%
 ```
 
 ## 4. 进度判定规则
@@ -195,15 +195,16 @@ transport / upstream / storage / observability adapters
 - 完成 DNS ID、EDNS、截断、deadline 和错误响应语义；
 - 验收：UDP/TCP 一致性、并发、畸形报文和取消测试通过。
 
-当前边界：DoH GET/POST、TLS、PROXY protocol 和 HTTP/DNS 错误分层尚未实现；DoH endpoint 不会退化为 raw DNS/TCP。
+当前边界：DoH plain HTTP GET/POST 与基本 HTTP/DNS 错误分层已实现；TLS terminate、PROXY protocol、forwarded header 和完整跨 transport 错误验收尚未实现。DoH endpoint 不会退化为 raw DNS/TCP。
 
 阶段 3/4 当前验收证据：
 
 - `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过；
 - `cargo check --manifest-path backend/Cargo.toml --locked`：通过；
-- `cargo test --manifest-path backend/Cargo.toml --locked`：135 passed，0 failed；
+- `cargo test --manifest-path backend/Cargo.toml --locked`：149 passed，0 failed；
 - `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings`：通过；
 - 本机 smoke：临时配置在 UDP `127.0.0.1:8353`、TCP `127.0.0.1:8354` 启动成功，内联 hosts 查询返回 `127.0.0.1`；同一 TCP 连接连续发送 DNS ID `0x1111`/`0x2222`，按序收到对应响应；发送 `SIGINT` 后 `service_shutdown` 日志出现且进程以 0 退出。
+- 本机 DoH smoke：临时 plain HTTP 配置在 `127.0.0.1:8355` 启动成功，直接 HTTP POST/GET 均返回 `200`、DNS ID `0x1234`、RCODE `0`；发送 `SIGINT` 后 `service_shutdown` 日志出现且进程以 0 退出。未测试 nginx、TLS 证书或特权端口。
 
 ### 阶段 5：上游解析
 
@@ -236,6 +237,10 @@ transport / upstream / storage / observability adapters
 - 实现 DoH GET/POST、TLS terminate/external、forwarded header；
 - 实现 PROXY v1/v2、SOCKS5/SOCKS5H 和 SecretRef 防泄漏；
 - 验收：协议边界、可信代理、Host/SNI 和大消息限制测试通过。
+
+首个小阶段（已完成）：为 DoH bind plan 增加 typed endpoint binding，补充 opaque TCP byte-stream capability，实现 plain HTTP/1.x GET/POST codec、无填充 base64url、路由 `{client_id}` 匹配、固定 HTTP 错误状态和 DNS `application/dns-message` 响应；service 以受监督 listener/session task 接入。当前只接受 `tls.mode: external` 与 `client_ip.source: peer`，`terminate`、`forwarded_header`、`proxy_protocol` 会在装配阶段明确拒绝。定向 codec/session 测试 9 项，真实 smoke 使用 `127.0.0.1:8355` 直接 HTTP POST/GET。
+
+当前边界：HTTP/1.x 仍按读取顺序处理，未实现 TLS terminate/external 握手、PROXY v1/v2、forwarded header 信任链、HTTP/2、上游 DoH connector 和完整资源/故障注入验收。
 
 ### 阶段 9：统计、详情日志与观测
 
