@@ -81,7 +81,7 @@ impl LoadedHostsResource {
     }
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum ResourceLoadError {
     #[error("resource `{resource}` uses unsupported hosts format")]
     UnsupportedFormat { resource: String },
@@ -105,7 +105,7 @@ pub enum ResourceLoadError {
     },
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum RuleResourceLoadError {
     #[error("rule resource `{resource}` uses unsupported format")]
     UnsupportedFormat { resource: String },
