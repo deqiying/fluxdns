@@ -15,7 +15,8 @@ use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::effects::{
     ActivatedSocket, ActivatedSocketHandle, PreparedSocket, SocketFactory, SocketKind, SocketSpec,
-    TcpConnectionHandle, TcpListenerHandle, TcpReadResult, UdpDatagram, UdpSocketHandle,
+    TcpConnectionHandle, TcpListenerHandle, TcpReadChunkResult, TcpReadResult, UdpDatagram,
+    UdpSocketHandle,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -262,6 +263,35 @@ impl TcpConnectionHandle for TokioTcpConnection {
         })
     }
 
+    fn read_chunk<'a>(
+        &'a mut self,
+        max_bytes: usize,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<TcpReadChunkResult, PortError>> {
+        Box::pin(async move {
+            if max_bytes == 0 {
+                return Err(PortError::new(
+                    PortErrorClass::InvalidInput,
+                    "system_socket.tcp_read_chunk",
+                ));
+            }
+            let mut buffer = vec![0_u8; max_bytes];
+            let count = await_io(
+                self.stream.read(&mut buffer),
+                deadline,
+                cancellation,
+                "system_socket.tcp_read_chunk",
+            )
+            .await?;
+            if count == 0 {
+                return Ok(TcpReadChunkResult::CleanEof);
+            }
+            buffer.truncate(count);
+            Ok(TcpReadChunkResult::Data(buffer))
+        })
+    }
+
     fn write_all<'a>(
         &'a mut self,
         payload: Vec<u8>,
@@ -392,8 +422,13 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::{Duration, Instant};
 
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+
     use crate::dns::{Cancellation, Deadline};
-    use crate::ports::effects::{ActivatedSocketHandle, SocketFactory, SocketKind};
+    use crate::ports::effects::{
+        ActivatedSocketHandle, SocketFactory, SocketKind, TcpReadChunkResult,
+    };
 
     use super::SystemSocketFactory;
 
@@ -449,5 +484,200 @@ mod tests {
             unreachable!();
         };
         assert_eq!(listener.local_addr().unwrap(), local);
+    }
+
+    #[tokio::test]
+    async fn tcp_read_chunk_is_bounded_and_preserves_bytes() {
+        let factory = SystemSocketFactory::new();
+        let cancellation = Cancellation::new();
+        let prepared = factory
+            .prepare(
+                crate::ports::effects::SocketSpec {
+                    kind: SocketKind::Tcp,
+                    address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    reuse_port: false,
+                    v6_only: false,
+                },
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        let activated = prepared.activate().unwrap();
+        let ActivatedSocketHandle::Tcp(listener) = activated.socket_handle().unwrap() else {
+            unreachable!();
+        };
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        client.write_all(b"GET /dns-query").await.unwrap();
+        let mut connection = listener
+            .accept(
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = connection
+            .read_chunk(
+                4,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, TcpReadChunkResult::Data(b"GET ".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn tcp_read_chunk_reports_clean_eof() {
+        let factory = SystemSocketFactory::new();
+        let cancellation = Cancellation::new();
+        let prepared = factory
+            .prepare(
+                crate::ports::effects::SocketSpec {
+                    kind: SocketKind::Tcp,
+                    address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    reuse_port: false,
+                    v6_only: false,
+                },
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        let activated = prepared.activate().unwrap();
+        let ActivatedSocketHandle::Tcp(listener) = activated.socket_handle().unwrap() else {
+            unreachable!();
+        };
+        let client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let mut connection = listener
+            .accept(
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        drop(client);
+
+        let result = connection
+            .read_chunk(
+                8,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, TcpReadChunkResult::CleanEof);
+    }
+
+    #[tokio::test]
+    async fn tcp_read_chunk_observes_cancellation() {
+        let factory = SystemSocketFactory::new();
+        let cancellation = Cancellation::new();
+        let prepared = factory
+            .prepare(
+                crate::ports::effects::SocketSpec {
+                    kind: SocketKind::Tcp,
+                    address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    reuse_port: false,
+                    v6_only: false,
+                },
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        let activated = prepared.activate().unwrap();
+        let ActivatedSocketHandle::Tcp(listener) = activated.socket_handle().unwrap() else {
+            unreachable!();
+        };
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let mut connection = listener
+            .accept(
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let read = connection.read_chunk(
+            8,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+            &cancellation,
+        );
+        cancellation.cancel(crate::dns::CancelReason::Shutdown);
+        let error = read.await.unwrap_err();
+        assert!(matches!(
+            error.class(),
+            crate::ports::PortErrorClass::Cancelled(crate::dns::CancelReason::Shutdown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn tcp_read_chunk_rejects_zero_limit_and_observes_deadline() {
+        let factory = SystemSocketFactory::new();
+        let cancellation = Cancellation::new();
+        let prepared = factory
+            .prepare(
+                crate::ports::effects::SocketSpec {
+                    kind: SocketKind::Tcp,
+                    address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    reuse_port: false,
+                    v6_only: false,
+                },
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        let activated = prepared.activate().unwrap();
+        let ActivatedSocketHandle::Tcp(listener) = activated.socket_handle().unwrap() else {
+            unreachable!();
+        };
+        let _client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let mut connection = listener
+            .accept(
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+
+        let invalid = connection
+            .read_chunk(
+                0,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            invalid.class(),
+            crate::ports::PortErrorClass::InvalidInput
+        ));
+
+        let timeout = connection
+            .read_chunk(
+                8,
+                Deadline::new(Instant::now() + Duration::from_millis(20)),
+                &cancellation,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            timeout.class(),
+            crate::ports::PortErrorClass::Timeout
+        ));
     }
 }

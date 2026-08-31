@@ -187,6 +187,15 @@ pub enum TcpReadResult {
     CleanEof,
 }
 
+/// Opaque TCP byte-stream read result for protocols without message framing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum TcpReadChunkResult {
+    /// Up to the requested number of bytes were read.
+    Data(Vec<u8>),
+    /// The peer closed the connection before any more bytes were available.
+    CleanEof,
+}
+
 pub trait TcpConnectionHandle: Send {
     fn peer_addr(&self) -> Result<SocketAddr, PortError>;
 
@@ -196,6 +205,23 @@ pub trait TcpConnectionHandle: Send {
         deadline: Deadline,
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<TcpReadResult, PortError>>;
+
+    /// Read one bounded byte-stream chunk. Implementations that only support
+    /// DNS framing keep the compatibility default until they opt into this API.
+    fn read_chunk<'a>(
+        &'a mut self,
+        max_bytes: usize,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<TcpReadChunkResult, PortError>> {
+        let _ = (max_bytes, deadline, cancellation);
+        Box::pin(async {
+            Err(PortError::new(
+                super::PortErrorClass::Internal,
+                "tcp.read_chunk.unsupported",
+            ))
+        })
+    }
 
     fn write_all<'a>(
         &'a mut self,
