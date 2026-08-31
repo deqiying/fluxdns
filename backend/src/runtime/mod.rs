@@ -4,6 +4,7 @@ mod bind;
 mod coordinator;
 mod prepared;
 mod snapshot;
+mod supervisor;
 
 pub use bind::{BindError, BoundCandidate, BoundListenerSet, bind_prepared};
 pub use coordinator::{
@@ -11,3 +12,7 @@ pub use coordinator::{
 };
 pub use prepared::{PreflightReport, PrepareError, PreparedRuntime};
 pub use snapshot::{RuntimeSnapshot, RuntimeSnapshotSummary};
+pub use supervisor::{
+    FaultLevel, RestartPolicy, ShutdownReport, Supervisor, SupervisorError, TaskCompletion,
+    TaskError, TaskErrorKind, TaskExit, TaskFuture, TaskId, TaskIdError, TaskSpec,
+};

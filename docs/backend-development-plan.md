@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 前三个小阶段已完成
+> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 前四个小阶段已完成
 >
 > 更新日期：2026-08-31
 >
@@ -10,7 +10,7 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统和 Runtime 候选骨架；阶段 2 记录起点为 69 个单元测试，当前工作树因增量测试已达到 85 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退，以及 `ArcSwap` ActiveRuntime coordinator/CAS 与请求 guard 小阶段，但 App 仍是 scaffold，尚无真实 transport/upstream/storage adapter 或可提供 DNS 服务的启动闭环。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统和 Runtime 候选骨架；阶段 2 记录起点为 69 个单元测试，当前工作树因增量测试已达到 88 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard 以及 Supervisor task tree 基础小阶段，但 App 仍是 scaffold，尚无真实 transport/upstream/storage adapter 或可提供 DNS 服务的启动闭环。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
@@ -168,6 +168,8 @@ transport / upstream / storage / observability adapters
 第二个小阶段（已完成）：新增 `BoundCandidate`/`BoundListenerSet` 和 `bind_prepared`；`SocketSpec` 显式传递 IPv6 `v6_only`，先准备全部 socket，再统一激活，准备或激活任一步失败都回滚本轮对象。
 
 第三个小阶段（已完成）：引入 `ArcSwap` `RuntimeCoordinator`，实现 ActiveRuntime 的原子激活、revision CAS、旧实例 draining 和请求 guard/lease；CAS 失败会返还候选供调用方重试。Runtime targeted tests：13 passed；真实 Tokio/socket2 adapter、supervisor 和 Application 启动接线留在阶段 3 后续小阶段。
+
+第四个小阶段（已完成）：新增 `Supervisor`、task ID/故障等级/重启策略元数据和 shutdown 回收报告；所有 task 由 `JoinSet` 持有，重复注册被拒绝，正常退出、失败、取消和 panic 均有明确分类。Runtime targeted tests：3 passed；有界重启、完整 drain/flush 顺序和 Application 启动接线留在阶段 3 后续小阶段。
 
 ### 阶段 4：DNS Core 与 UDP/TCP
 
