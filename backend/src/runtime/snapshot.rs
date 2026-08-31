@@ -1,0 +1,138 @@
+use std::fmt;
+use std::sync::Arc;
+
+use crate::config::ResolvedConfig;
+use crate::dns::RuntimeRevision;
+
+/// 请求热路径使用的不可变运行时输入。
+///
+/// 阶段 3 的首个切片先承载已经归一化的配置；策略、资源、上游和缓存
+/// registry 会在对应模块实现后以同样的不可变句柄加入，而不会重新解析 YAML。
+pub struct RuntimeSnapshot {
+    revision: RuntimeRevision,
+    config: Arc<ResolvedConfig>,
+}
+
+impl RuntimeSnapshot {
+    pub(crate) fn new(revision: RuntimeRevision, config: Arc<ResolvedConfig>) -> Self {
+        Self { revision, config }
+    }
+
+    pub fn revision(&self) -> RuntimeRevision {
+        self.revision
+    }
+
+    pub fn config(&self) -> &ResolvedConfig {
+        &self.config
+    }
+
+    pub fn config_arc(&self) -> Arc<ResolvedConfig> {
+        Arc::clone(&self.config)
+    }
+
+    pub fn summary(&self) -> RuntimeSnapshotSummary {
+        RuntimeSnapshotSummary {
+            revision: self.revision,
+            normalized_hash: self.config.normalized_hash.clone(),
+            listener_count: self.config.listeners.len(),
+            bind_entry_count: self.config.bind_plan.entries.len(),
+        }
+    }
+}
+
+impl fmt::Debug for RuntimeSnapshot {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeSnapshot")
+            .field("revision", &self.revision)
+            .field("config", &self.config)
+            .finish()
+    }
+}
+
+/// 可安全用于日志和测试断言的 snapshot 摘要。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeSnapshotSummary {
+    pub revision: RuntimeRevision,
+    pub normalized_hash: String,
+    pub listener_count: usize,
+    pub bind_entry_count: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::dns::RuntimeRevision;
+
+    use super::RuntimeSnapshot;
+
+    fn config() -> Arc<crate::config::ResolvedConfig> {
+        ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(
+                r#"
+version: 1
+work:
+  path: /tmp/fluxdns-runtime-test
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: 5300
+    strategy: default
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+hosts:
+  - type: const
+    name: local-hosts
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+"#,
+            )
+            .expect("runtime fixture must be valid")
+            .resolved
+    }
+
+    #[test]
+    fn snapshot_keeps_one_revision_and_redacted_config_handle() {
+        let config = config();
+        let expected_hash = config.normalized_hash.clone();
+        let snapshot = RuntimeSnapshot::new(RuntimeRevision(7), Arc::clone(&config));
+
+        assert_eq!(snapshot.revision(), RuntimeRevision(7));
+        assert!(Arc::ptr_eq(&snapshot.config_arc(), &config));
+        assert_eq!(
+            snapshot.summary(),
+            super::RuntimeSnapshotSummary {
+                revision: RuntimeRevision(7),
+                normalized_hash: expected_hash,
+                listener_count: 1,
+                bind_entry_count: 1,
+            }
+        );
+        assert!(format!("{snapshot:?}").contains("RuntimeSnapshot"));
+    }
+}

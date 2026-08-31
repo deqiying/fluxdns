@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成
+> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 首个小阶段已完成
 >
 > 更新日期：2026-08-31
 >
@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统；阶段 2 记录起点为 69 个单元测试，当前工作树因增量测试已达到 72 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；App 仍是阶段 1 scaffold，尚无 Runtime、真实 transport/upstream/storage adapter 或可提供 DNS 服务的启动闭环。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统和 Runtime 候选骨架；阶段 2 记录起点为 69 个单元测试，当前工作树因增量测试已达到 76 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime` 和无 socket preflight 的首个小阶段，但 App 仍是 scaffold，尚无真实 transport/upstream/storage adapter 或可提供 DNS 服务的启动闭环。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **13%** | Config 达到 100% 模块验收口径；Application、Ports、DNS Core、Observability 达到 20% 骨架与公共契约里程碑 |
-| v1 交付总进度 | **21.7%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 13%` |
+| 后端代码实现进度 | **17.4%** | Config 达到 100% 模块验收口径；Application、Ports、Runtime、DNS Core、Observability 达到 20% 骨架与公共契约里程碑 |
+| v1 交付总进度 | **25.7%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 17.4%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -58,7 +58,7 @@ v1 交付范围：
 | Application | `backend/src/main.rs`、`backend/src/app.rs` | [application.md](backend-modules/application.md) | 已完成 | 实现中 | 20% | 4% |
 | Ports | `backend/src/ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 实现中 | 20% | 8% |
 | Config | `backend/src/config/*` | [config.md](backend-modules/config.md) | 已完成 | 已验证 | 100% | 10% |
-| Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 未开始 | 0% | 12% |
+| Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 20% | 12% |
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 未开始 | 0% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 20% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 未开始 | 0% | 8% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 20% + 8% × 20% + 10% × 100% + 3% × 20% = 13%
+4% × 20% + 8% × 20% + 10% × 100% + 12% × 20% + 10% × 20% + 3% × 20% = 17.4%
 ```
 
 ## 4. 进度判定规则
@@ -162,6 +162,8 @@ transport / upstream / storage / observability adapters
 - 实现 task supervisor、故障等级和优雅停机；
 - 候选 prepare/bind 失败不得发布半成品；
 - 验收：原子切换、失败保留旧 runtime、shutdown deadline 测试通过。
+
+首个小阶段（已完成）：新增 `RuntimeSnapshot`、`PreparedRuntime` 和无 socket preflight；只消费 `Arc<ResolvedConfig>`，校验 revision、bind plan 端点和重复项，不绑定 listener。`runtime::` targeted tests：4 passed；完整 BindPlan all-or-nothing、ActiveRuntime、supervisor 和 Application 启动接线留在阶段 3 后续小阶段。
 
 ### 阶段 4：DNS Core 与 UDP/TCP
 

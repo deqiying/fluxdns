@@ -5,6 +5,7 @@ pub mod config;
 pub mod dns;
 pub mod observability;
 pub mod ports;
+pub mod runtime;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
