@@ -103,6 +103,10 @@ impl HostsTable {
         self.entry_count
     }
 
+    pub fn contains_name(&self, name: &Name) -> bool {
+        normalize_name(&name.to_ascii()).is_some_and(|key| self.entries.contains_key(&key))
+    }
+
     pub fn lookup(&self, name: &Name, record_type: RecordType) -> Option<Vec<IpAddr>> {
         if !matches!(record_type, RecordType::A | RecordType::AAAA) {
             return None;

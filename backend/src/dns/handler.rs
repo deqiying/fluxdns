@@ -3,12 +3,13 @@
 use std::time::Instant;
 
 use hickory_proto::op::ResponseCode;
+use hickory_proto::rr::{RData, Record, RecordType, rdata::A, rdata::AAAA};
 use thiserror::Error;
 
 use crate::ports::PortFuture;
 use crate::ports::inbound::{EncodeErrorClass, InboundRequest};
 
-use super::{CanonicalMessageError, CanonicalResponse, DnsRequest};
+use super::{CanonicalMessageError, CanonicalResponse, DnsRequest, HostsTable};
 
 /// Core 对一个入站请求的终态结果。
 #[derive(Debug, Eq, PartialEq)]
@@ -68,6 +69,74 @@ impl DnsCore for ServFailCore {
     }
 }
 
+/// 基于不可变 hosts snapshot 的最小本地解析器。
+#[derive(Clone, Debug)]
+pub struct HostsCore {
+    table: std::sync::Arc<HostsTable>,
+    ttl: u32,
+}
+
+impl HostsCore {
+    pub fn new(table: HostsTable, ttl: u32) -> Self {
+        Self {
+            table: std::sync::Arc::new(table),
+            ttl,
+        }
+    }
+
+    pub fn table(&self) -> &HostsTable {
+        &self.table
+    }
+}
+
+impl DnsCore for HostsCore {
+    fn resolve<'a>(
+        &'a self,
+        request: &'a DnsRequest,
+    ) -> PortFuture<'a, Result<CoreOutcome, CoreError>> {
+        Box::pin(async move {
+            let meta = &request.context.meta;
+            if meta.cancellation.is_cancelled() || meta.deadline.is_expired(Instant::now()) {
+                return Ok(CoreOutcome::NoResponse);
+            }
+
+            let question = request.query.question();
+            let answers = self
+                .table
+                .lookup(question.name(), question.query_type())
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|address| match (question.query_type(), address) {
+                    (RecordType::A, std::net::IpAddr::V4(address)) => Some(Record::from_rdata(
+                        question.name().clone(),
+                        self.ttl,
+                        RData::A(A(address)),
+                    )),
+                    (RecordType::AAAA, std::net::IpAddr::V6(address)) => Some(Record::from_rdata(
+                        question.name().clone(),
+                        self.ttl,
+                        RData::AAAA(AAAA(address)),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let code = if answers.is_empty() && !self.table.contains_name(question.name()) {
+                ResponseCode::NXDomain
+            } else {
+                ResponseCode::NoError
+            };
+            let response = if code == ResponseCode::NoError && !answers.is_empty() {
+                CanonicalResponse::response_with_answers(&request.query, answers)
+            } else {
+                CanonicalResponse::response_with_code(&request.query, code, answers)
+            };
+            response
+                .map(CoreOutcome::Response)
+                .map_err(CoreError::ResponseConstruction)
+        })
+    }
+}
+
 /// 将一条已规范化的入站请求交给 Core，并通过唯一 response handle 完成响应。
 pub async fn dispatch_inbound(
     core: &dyn DnsCore,
@@ -98,14 +167,14 @@ mod tests {
 
     use crate::dns::{
         CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, Deadline, DnsMessageId,
-        DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta, RuntimeRevision,
-        TransportCapabilities, TransportClass,
+        DnsRequest, HostsTable, ListenerId, RequestContext, RequestId, RequestMeta,
+        RuntimeRevision, TransportCapabilities, TransportClass,
     };
 
     use crate::ports::inbound::InboundRequest;
     use crate::ports::testing::FakeResponseEncoder;
 
-    use super::{CoreOutcome, DispatchOutcome, DnsCore, ServFailCore, dispatch_inbound};
+    use super::{CoreOutcome, DispatchOutcome, DnsCore, HostsCore, ServFailCore, dispatch_inbound};
 
     fn request(id: u16) -> DnsRequest {
         let mut message = Message::new(id, MessageType::Query, OpCode::Query);
@@ -220,5 +289,65 @@ mod tests {
             DispatchOutcome::NoResponse
         );
         assert_eq!(encoder.encoded_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn hosts_core_returns_local_answers_and_nxdomain() {
+        let table = HostsTable::parse("192.0.2.1 example.com\n").unwrap();
+        let core = HostsCore::new(table, 60);
+
+        let answer = core.resolve(&request(7)).await.unwrap();
+        let CoreOutcome::Response(answer) = answer else {
+            panic!("expected local answer");
+        };
+        assert_eq!(answer.class(), crate::dns::ResponseClass::Positive);
+        assert_eq!(answer.ttl().min_ttl, Some(60));
+        assert_eq!(answer.as_message().answers.len(), 1);
+
+        let mut unknown = request(8);
+        unknown.query = crate::dns::CanonicalQuery::from_message({
+            let mut message = hickory_proto::op::Message::new(
+                8,
+                hickory_proto::op::MessageType::Query,
+                hickory_proto::op::OpCode::Query,
+            );
+            message.add_query(hickory_proto::op::Query::query(
+                hickory_proto::rr::Name::from_ascii("missing.example.").unwrap(),
+                hickory_proto::rr::RecordType::A,
+            ));
+            message
+        })
+        .unwrap();
+        let unknown = core.resolve(&unknown).await.unwrap();
+        let CoreOutcome::Response(unknown) = unknown else {
+            panic!("expected nxdomain");
+        };
+        assert_eq!(unknown.class(), crate::dns::ResponseClass::NxDomain);
+    }
+
+    #[tokio::test]
+    async fn hosts_core_returns_nodata_for_known_name_without_requested_family() {
+        let table = HostsTable::parse("192.0.2.1 example.com\n").unwrap();
+        let core = HostsCore::new(table, 60);
+        let mut request = request(7);
+        request.query = crate::dns::CanonicalQuery::from_message({
+            let mut message = hickory_proto::op::Message::new(
+                7,
+                hickory_proto::op::MessageType::Query,
+                hickory_proto::op::OpCode::Query,
+            );
+            message.add_query(hickory_proto::op::Query::query(
+                hickory_proto::rr::Name::from_ascii("example.com.").unwrap(),
+                hickory_proto::rr::RecordType::AAAA,
+            ));
+            message
+        })
+        .unwrap();
+
+        let response = core.resolve(&request).await.unwrap();
+        let CoreOutcome::Response(response) = response else {
+            panic!("expected nodata");
+        };
+        assert_eq!(response.class(), crate::dns::ResponseClass::NoData);
     }
 }

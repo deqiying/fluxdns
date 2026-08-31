@@ -2,7 +2,7 @@ use std::fmt;
 
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{DNSClass, Name, RData, RecordType},
+    rr::{DNSClass, Name, RData, Record, RecordType},
 };
 use thiserror::Error;
 
@@ -211,17 +211,34 @@ impl fmt::Debug for CanonicalResponse {
 }
 
 impl CanonicalResponse {
-    /// 构造不携带 transport envelope 的空错误响应。
-    pub(crate) fn empty_response(
+    pub(crate) fn response_with_code(
         query: &CanonicalQuery,
         code: ResponseCode,
+        answers: impl IntoIterator<Item = Record>,
     ) -> Result<Self, CanonicalMessageError> {
         let mut message = Message::response(0, OpCode::Query);
         message.metadata.recursion_desired = query.as_message().metadata.recursion_desired;
         message.metadata.checking_disabled = query.as_message().metadata.checking_disabled;
         message.metadata.response_code = code;
         message.add_query(query.question().to_query());
+        message.add_answers(answers);
         Self::from_message(message, query, DnsMessageId::new(0))
+    }
+
+    /// 构造带 answer records 的 canonical 成功响应。
+    pub(crate) fn response_with_answers(
+        query: &CanonicalQuery,
+        answers: impl IntoIterator<Item = Record>,
+    ) -> Result<Self, CanonicalMessageError> {
+        Self::response_with_code(query, ResponseCode::NoError, answers)
+    }
+
+    /// 构造不携带 transport envelope 的空错误响应。
+    pub(crate) fn empty_response(
+        query: &CanonicalQuery,
+        code: ResponseCode,
+    ) -> Result<Self, CanonicalMessageError> {
+        Self::response_with_code(query, code, std::iter::empty())
     }
 
     pub fn from_message(
@@ -524,6 +541,24 @@ mod tests {
 
         assert_eq!(response.class(), ResponseClass::ServFail);
         assert!(response.as_message().edns.is_none());
+    }
+
+    #[test]
+    fn response_with_answers_keeps_canonical_id_and_ttl_metadata() {
+        let expected = CanonicalQuery::from_message(query(42, "example.com.")).unwrap();
+        let answer = Record::from_rdata(
+            Name::from_str("example.com.").unwrap(),
+            120,
+            RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
+        );
+
+        let response = CanonicalResponse::response_with_answers(&expected, [answer]).unwrap();
+
+        assert_eq!(response.as_message().metadata.id, 0);
+        assert_eq!(response.class(), ResponseClass::Positive);
+        assert_eq!(response.ttl().min_ttl, Some(120));
+        assert_eq!(response.as_message().answers.len(), 1);
+        assert_eq!(response.as_message().edns, None);
     }
 
     #[test]
