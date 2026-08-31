@@ -16,10 +16,13 @@ use super::{PortError, PortFuture};
 pub struct CacheStrategyId(Arc<str>);
 
 impl CacheStrategyId {
-    /// 测试夹具：阶段 2 再由真实配置边界提供生产构造入口。
-    #[cfg(test)]
-    fn from_validated_config_id(value: &str) -> Result<Self, CacheNamespaceIdError> {
+    /// 由已通过 Config 校验的稳定标识构造 namespace 组件。
+    pub fn from_validated_config_id(value: &str) -> Result<Self, CacheNamespaceIdError> {
         validate_namespace_id(value, 1, 64).map(|()| Self(Arc::from(value)))
+    }
+
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
     }
 }
 
@@ -36,10 +39,13 @@ impl fmt::Debug for CacheStrategyId {
 pub struct ClientCacheDigest([u8; 32]);
 
 impl ClientCacheDigest {
-    /// 测试夹具：阶段 6 再由带域分隔的真实摘要函数提供生产构造入口。
-    #[cfg(test)]
-    const fn from_digest(digest: [u8; 32]) -> Self {
+    /// 由上层带域分隔的摘要函数提供 opaque digest。
+    pub const fn from_digest(digest: [u8; 32]) -> Self {
         Self(digest)
+    }
+
+    pub(crate) const fn as_bytes(self) -> [u8; 32] {
+        self.0
     }
 }
 
@@ -50,16 +56,14 @@ impl fmt::Debug for ClientCacheDigest {
 }
 
 /// cache namespace 标识格式错误。
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CacheNamespaceIdError {
+pub enum CacheNamespaceIdError {
     Empty,
     TooShort,
     TooLong,
     InvalidCharacter,
 }
 
-#[cfg(test)]
 fn validate_namespace_id(
     value: &str,
     minimum_len: usize,

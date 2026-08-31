@@ -29,6 +29,12 @@ numeric_id!(StreamId, u64);
 numeric_id!(RuntimeRevision, u64);
 numeric_id!(CacheCompatibilityKey, u64);
 
+impl CacheCompatibilityKey {
+    pub const fn value(self) -> u64 {
+        self.0
+    }
+}
+
 macro_rules! named_id {
     ($name:ident) => {
         #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
