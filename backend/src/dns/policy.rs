@@ -15,8 +15,8 @@ use crate::policy::{PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
 use crate::resource::{CanonicalDomain, HostsIndex, HostsLimits, ResourceLoadError, load_hosts};
 
-use super::{CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsRequest};
 use super::handler::resource_answers;
+use super::{CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsRequest};
 
 #[derive(Debug, Error)]
 pub enum PolicyCoreBuildError {
@@ -161,8 +161,8 @@ mod tests {
 
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
-        CacheCompatibilityKey, Cancellation, CanonicalQuery, Deadline, DnsRequest, ListenerId,
-        CoreOutcome, DnsCore, RequestContext, RequestId, RequestMeta, RuntimeRevision,
+        CacheCompatibilityKey, Cancellation, CanonicalQuery, CoreOutcome, Deadline, DnsCore,
+        DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta, RuntimeRevision,
         TransportCapabilities, TransportClass,
     };
 
