@@ -148,6 +148,7 @@ pub struct SocketSpec {
     pub kind: SocketKind,
     pub address: SocketAddr,
     pub reuse_port: bool,
+    pub v6_only: bool,
 }
 
 /// Runtime `BindPlan` 提交前的未激活 socket，不暴露 socket2/Tokio 类型。

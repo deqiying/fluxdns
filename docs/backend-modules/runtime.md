@@ -1,6 +1,6 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 首个小阶段已实现
+> 状态：v1 方案已完成，阶段 3 前两个小阶段已实现
 >
 > 更新日期：2026-08-30
 >
@@ -199,9 +199,9 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱�
 
 - [x] 定义 `RuntimeSnapshot`、`PreparedRuntime` 和无 socket preflight；
 - [x] 以 `Arc<ResolvedConfig>` 作为 Config → Runtime 输入，拒绝空/重复 bind endpoint；
+- [x] 实现基于 `SocketFactory` 的 BindPlan 全成/全退和 `v6_only` 规格传递；
 - [ ] 定义状态类型与所有权转换；
 - [ ] 实现 PreparedRuntime/preflight；
-- [ ] 实现 BindPlan 全成或全退；
 - [ ] 实现 ActiveRuntime coordinator/CAS；
 - [ ] 实现 supervisor task tree 和故障等级；
 - [ ] 实现 drain/shutdown；

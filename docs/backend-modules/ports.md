@@ -105,6 +105,8 @@ DNS RCODE 不是 transport failure。`NXDOMAIN`、`REFUSED`、`SERVFAIL` 和 `TC
 - `SecretProvider`：按 env/file 读取 secret，返回不可 Debug/Serialize 的包装类型；
 - `SocketFactory`：创建未激活 socket，供 BindPlan 统一提交。
 
+`SocketSpec` 同时携带 `kind`、目标地址、`reuse_port` 和 IPv6 `v6_only` 选择；Runtime 在 bind 阶段只通过该契约传递平台相关选项，不向 DNS Core 泄漏 socket 类型。
+
 文件系统和网络 I/O 不通过“万能 effects trait”合并，避免接口失去约束。
 
 v1 adapter 所有权固定为：
