@@ -32,7 +32,7 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 字段语义见 [docs/configuration-reference.md](docs/configuration-reference.md)，Rust 后端总体方案见 [docs/backend-architecture.md](docs/backend-architecture.md)，模块方案、阶段安排和当前进度见 [docs/backend-development-plan.md](docs/backend-development-plan.md)。
 
-Config 阶段 2 记录起点为 69 tests；当前后端全量测试为 187 passed、0 failed，`clippy --all-targets -- -D warnings` 和 `fmt --check` 均已通过。真实 smoke 使用临时配置在 UDP `127.0.0.1:8353`、TCP `127.0.0.1:8354` 和 DoH `127.0.0.1:8355` 验证 hosts 响应、同连接双 frame、DoH GET/POST 的 DNS ID/RCODE 和 `SIGINT` 停机；端口仅用于本机验证，不改变配置契约。阶段 5 的 hosts/group 定向测试覆盖格式解析、DNS outcome、取消/超时、registry fail-closed 和选择器并发 lease；阶段 6 的内存 cache 定向测试覆盖 fresh/stale/expiry、质量 CAS、显式失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口和 checksum，key/facade 定向测试覆盖稳定编码和 lookup/write 状态；阶段 7 的 Policy 定向测试覆盖 exact ID 优先、IPv4/IPv6 longest-prefix、unknown、重复 matcher 拒绝、strategy/route lookup 和请求级 cache/TTL/ECS 组合。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
+Config 阶段 2 记录起点为 69 tests；当前后端全量测试为 189 passed、0 failed，`clippy --all-targets -- -D warnings` 和 `fmt --check` 均已通过。真实 smoke 使用临时配置在 UDP `127.0.0.1:8353`、TCP `127.0.0.1:8354` 和 DoH `127.0.0.1:8355` 验证 hosts 响应、同连接双 frame、DoH GET/POST 的 DNS ID/RCODE 和 `SIGINT` 停机；端口仅用于本机验证，不改变配置契约。阶段 5 的 hosts/group 定向测试覆盖格式解析、DNS outcome、取消/超时、registry fail-closed 和选择器并发 lease；阶段 6 的内存 cache 定向测试覆盖 fresh/stale/expiry、质量 CAS、显式失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口和 checksum，key/facade 定向测试覆盖稳定编码和 lookup/write 状态；阶段 7 的 Policy 定向测试覆盖 exact ID 优先、IPv4/IPv6 longest-prefix、unknown、重复 matcher 拒绝、strategy/route lookup 和请求级 cache/TTL/ECS 组合。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
 
 配置中的示例地址、账号、密码和客户端标识仅用于说明格式，部署前必须替换为实际且受保护的配置。
 
