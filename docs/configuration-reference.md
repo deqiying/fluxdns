@@ -39,7 +39,7 @@ listener
 - 除明确写成绝对路径的字段外，其他相对路径均以 `work.path` 为基准。
 - `work.rules_path`、数据库、日志、缓存、TLS 证书和资源文件路径都遵循上述规则。
 
-配置副本按 [Config 模块方案](backend-modules/config.md) 原子创建：目标不存在时在同目录写临时文件并 rename，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
+配置副本按 [Config 模块方案](backend-modules/config.md) 原子创建：目标不存在时在同目录写临时文件并以 no-replace 方式发布，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
 
 ### 2.3 命名与引用
 
