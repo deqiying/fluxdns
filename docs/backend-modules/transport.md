@@ -1,8 +1,8 @@
 # Transport 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，已实现共享 DNS wire codec；UDP/TCP/DoH adapter 尚未接线
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/transport/*`
 >
@@ -27,6 +27,17 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 | `doh.rs` | Axum route、GET/POST、HTTP/DNS 错误分层 |
 | `tls.rs` | Rustls 配置加载和 TLS accept |
 | `proxy_protocol.rs` | PROXY v1/v2 分片解析、长度与 trust 检查 |
+
+### 3.1 当前已实现：共享 DNS wire codec
+
+`wire.rs` 提供 transport 共用的 DNS message 边界：
+
+- 空报文、超过调用方限制或超过绝对 65,535 字节上限时拒绝；
+- 从原始 wire message 提取 DNS ID，再生成不携带 envelope ID 的 `CanonicalQuery`；
+- 编码 `CanonicalResponse` 时只修改副本并恢复请求 ID，不污染 canonical response；
+- 将 decode、canonical validation、encode 和尺寸失败归入稳定的 `WireError`，不暴露底层库错误文本。
+
+该 codec 只处理 DNS message 本身，不负责 UDP/TCP framing、策略、上游或 socket 生命周期。
 
 forwarded header 解析可放在 `doh.rs` 的独立子模块，不能复用未经验证的任意 header 字符串。
 
@@ -188,6 +199,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - forwarded header 信任链、伪造 header、missing/invalid policy；
 - PROXY v1/v2 分片、未知 TLV、非法长度、不可信 peer；
 - admission control、client disconnect、shutdown cancellation；
+- wire codec 的 DNS ID 分离/恢复、canonicalization、输入输出尺寸上限和安全错误分类；
 - 所有 adapter 通过 Ports contract suite。
 
 ## 13. 实现检查清单
@@ -197,6 +209,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - [ ] 实现 DoH GET/POST；
 - [ ] 实现 TLS 与 client IP 恢复；
 - [ ] 实现 response correlation/encoder；
+- [x] 建立共享 DNS wire decode/encode boundary 和尺寸/错误分类测试；
 - [ ] 完成资源限制、安全和协议测试。
 
-当前实现进度：**0%**。
+当前实现进度：**5%**。

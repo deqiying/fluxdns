@@ -170,8 +170,8 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 
 阶段 2 当前基线验证（测试数量可能随后续阶段增量）：
 
-- 阶段 2 记录起点为 69 tests；当前工作树已增量至 72 tests，`CARGO_HOME="$PWD/.cargo-home" cargo test --manifest-path backend/Cargo.toml --locked --offline --no-fail-fast -- --test-threads=1`：72 passed、0 failed；
-- `CARGO_HOME="$PWD/.cargo-home" cargo clippy --manifest-path backend/Cargo.toml --locked --offline -- -D warnings`：通过；
+- 阶段 2 记录起点为 69 tests；当前工作树已增量至 99 tests，`cargo test --manifest-path backend/Cargo.toml --locked -- --test-threads=1`：99 passed、0 failed；
+- `cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings`：通过；
 - `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过。
 
 ## 12. 实现检查清单
