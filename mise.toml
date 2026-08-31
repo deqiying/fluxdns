@@ -2,3 +2,6 @@ min_version = "2026.7.7"
 
 [tools]
 rust = "1.98.0"
+
+[env]
+CARGO_HOME = "{{config_root}}/backend/.cargo-home"

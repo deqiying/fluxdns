@@ -9,6 +9,7 @@
 # Rust 构建产物
 /target/
 /backend/target/
+/backend/.cargo-home/
 
 # 本地运行配置与运行时数据
 /config.yaml
