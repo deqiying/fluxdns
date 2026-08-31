@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex, MutexGuard, Weak};
 use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
+use thiserror::Error;
 use tokio::select;
 
 use crate::dns::{CancelReason, Cancellation, Deadline};
@@ -24,6 +25,7 @@ pub struct MemoryCacheStore {
     state: Arc<Mutex<MemoryState>>,
     next_version: Arc<AtomicU64>,
     next_generation: Arc<AtomicU64>,
+    max_weight: Option<u64>,
 }
 
 #[derive(Default)]
@@ -32,6 +34,12 @@ struct MemoryState {
     loads: HashMap<CacheKey, MemoryLoad>,
     stats: CacheStoreStats,
     shutting_down: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum MemoryCacheStoreBuildError {
+    #[error("memory cache max weight must be greater than zero")]
+    ZeroMaxWeight,
 }
 
 struct MemoryLoad {
@@ -43,11 +51,32 @@ struct MemoryLoad {
 
 impl Default for MemoryCacheStore {
     fn default() -> Self {
+        Self::with_limit(None)
+    }
+}
+
+impl MemoryCacheStore {
+    fn with_limit(max_weight: Option<u64>) -> Self {
         Self {
             state: Arc::new(Mutex::new(MemoryState::default())),
             next_version: Arc::new(AtomicU64::new(0)),
             next_generation: Arc::new(AtomicU64::new(0)),
+            max_weight,
         }
+    }
+
+    /// 创建带总计费权重上限的内存 store。
+    ///
+    /// 计费权重只用于确定性淘汰，不等同于进程 RSS。
+    pub fn with_max_weight(max_weight: u64) -> Result<Self, MemoryCacheStoreBuildError> {
+        if max_weight == 0 {
+            return Err(MemoryCacheStoreBuildError::ZeroMaxWeight);
+        }
+        Ok(Self::with_limit(Some(max_weight)))
+    }
+
+    pub const fn max_weight(&self) -> Option<u64> {
+        self.max_weight
     }
 }
 
@@ -61,6 +90,7 @@ impl fmt::Debug for MemoryCacheStore {
             .field("hits", &stats.hits)
             .field("misses", &stats.misses)
             .field("conflicts", &stats.conflicts)
+            .field("evictions", &stats.evictions)
             .finish()
     }
 }
@@ -135,6 +165,41 @@ fn refresh_stats(state: &mut MemoryState) {
         .iter()
         .map(|(key, record)| weighted_size(key, record))
         .fold(0, u64::saturating_add);
+}
+
+fn enforce_capacity(state: &mut MemoryState, max_weight: Option<u64>) {
+    let Some(max_weight) = max_weight else {
+        refresh_stats(state);
+        return;
+    };
+    loop {
+        let current = state
+            .records
+            .iter()
+            .map(|(key, record)| weighted_size(key, record))
+            .fold(0, u64::saturating_add);
+        if current <= max_weight {
+            break;
+        }
+        let Some(victim) = state
+            .records
+            .iter()
+            .min_by(|(left_key, left_record), (right_key, right_record)| {
+                left_record
+                    .entry
+                    .inserted_at
+                    .cmp(&right_record.entry.inserted_at)
+                    .then_with(|| left_record.version.0.cmp(&right_record.version.0))
+                    .then_with(|| left_key.encoded.as_ref().cmp(right_key.encoded.as_ref()))
+            })
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        state.records.remove(&victim);
+        state.stats.evictions = state.stats.evictions.saturating_add(1);
+    }
+    refresh_stats(state);
 }
 
 fn is_visible(record: &CacheRecord, now: Instant) -> bool {
@@ -334,6 +399,21 @@ impl CacheStore for MemoryCacheStore {
                 return Ok(CacheWriteOutcome::RejectedQuality);
             }
 
+            if self.max_weight.is_some_and(|limit| {
+                weighted_size(
+                    &key,
+                    &CacheRecord {
+                        version: CacheVersion(0),
+                        entry: Arc::clone(&entry),
+                    },
+                ) > limit
+            }) {
+                return Err(PortError::new(
+                    PortErrorClass::ResourceExhausted,
+                    "memory_cache.compare_and_swap",
+                ));
+            }
+
             let version = CacheVersion(self.next_version.fetch_add(1, Ordering::AcqRel) + 1);
             let outcome = if current.is_some() {
                 CacheWriteOutcome::Replaced(version)
@@ -341,7 +421,7 @@ impl CacheStore for MemoryCacheStore {
                 CacheWriteOutcome::Inserted(version)
             };
             state.records.insert(key, CacheRecord { version, entry });
-            refresh_stats(&mut state);
+            enforce_capacity(&mut state, self.max_weight);
             Ok(outcome)
         })
     }
@@ -522,7 +602,7 @@ mod tests {
         CacheStore, CacheVersion,
     };
 
-    use super::MemoryCacheStore;
+    use super::{MemoryCacheStore, MemoryCacheStoreBuildError};
 
     fn deadline() -> Deadline {
         Deadline::new(std::time::Instant::now() + Duration::from_secs(30))
@@ -960,5 +1040,134 @@ mod tests {
             PortErrorClass::Unavailable
         ));
         drop(leader);
+    }
+
+    #[test]
+    fn rejects_zero_capacity_and_exposes_the_configured_limit() {
+        assert_eq!(
+            MemoryCacheStore::with_max_weight(0).unwrap_err(),
+            MemoryCacheStoreBuildError::ZeroMaxWeight
+        );
+        let store = MemoryCacheStore::with_max_weight(256).unwrap();
+        assert_eq!(store.max_weight(), Some(256));
+    }
+
+    #[tokio::test]
+    async fn evicts_oldest_entries_until_weight_is_within_the_shared_budget() {
+        let first = key("first");
+        let second = key("second");
+        let probe = MemoryCacheStore::default();
+        probe
+            .compare_and_swap(
+                first.clone(),
+                CacheCondition::Absent,
+                record(
+                    1,
+                    CacheQuality::Complete,
+                    std::time::Instant::now() + Duration::from_secs(30),
+                    None,
+                )
+                .entry,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let one_weight = probe.stats().weighted_size;
+        probe
+            .compare_and_swap(
+                second.clone(),
+                CacheCondition::Absent,
+                record(
+                    2,
+                    CacheQuality::Complete,
+                    std::time::Instant::now() + Duration::from_secs(30),
+                    None,
+                )
+                .entry,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let second_weight = probe.stats().weighted_size - one_weight;
+        let budget = one_weight.max(second_weight);
+        let store = MemoryCacheStore::with_max_weight(budget).unwrap();
+
+        store
+            .compare_and_swap(
+                first.clone(),
+                CacheCondition::Absent,
+                record(
+                    1,
+                    CacheQuality::Complete,
+                    std::time::Instant::now() + Duration::from_secs(30),
+                    None,
+                )
+                .entry,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        store
+            .compare_and_swap(
+                second.clone(),
+                CacheCondition::Absent,
+                record(
+                    2,
+                    CacheQuality::Complete,
+                    std::time::Instant::now() + Duration::from_secs(30),
+                    None,
+                )
+                .entry,
+                deadline(),
+            )
+            .await
+            .unwrap();
+
+        assert!(store.get(&first, deadline()).await.unwrap().is_none());
+        assert!(store.get(&second, deadline()).await.unwrap().is_some());
+        assert_eq!(store.stats().entries, 1);
+        assert_eq!(store.stats().evictions, 1);
+        assert!(store.stats().weighted_size <= budget);
+    }
+
+    #[tokio::test]
+    async fn rejects_an_entry_that_cannot_fit_without_mutating_the_store() {
+        let cache_key = key("too-large");
+        let probe = MemoryCacheStore::default();
+        probe
+            .compare_and_swap(
+                cache_key.clone(),
+                CacheCondition::Absent,
+                record(
+                    1,
+                    CacheQuality::Complete,
+                    std::time::Instant::now() + Duration::from_secs(30),
+                    None,
+                )
+                .entry,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let weight = probe.stats().weighted_size;
+        let store = MemoryCacheStore::with_max_weight(weight.saturating_sub(1)).unwrap();
+        let error = store
+            .compare_and_swap(
+                cache_key.clone(),
+                CacheCondition::Absent,
+                record(
+                    1,
+                    CacheQuality::Complete,
+                    std::time::Instant::now() + Duration::from_secs(30),
+                    None,
+                )
+                .entry,
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error.class(), PortErrorClass::ResourceExhausted));
+        assert!(store.get(&cache_key, deadline()).await.unwrap().is_none());
+        assert_eq!(store.stats().evictions, 0);
     }
 }

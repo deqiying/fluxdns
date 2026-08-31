@@ -248,6 +248,7 @@ pub struct CacheStoreStats {
     pub hits: u64,
     pub misses: u64,
     pub conflicts: u64,
+    pub evictions: u64,
 }
 
 /// per-key single-flight 的 leader / follower 分工。
