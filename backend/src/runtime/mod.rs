@@ -5,6 +5,7 @@ mod coordinator;
 mod prepared;
 mod snapshot;
 mod supervisor;
+mod system_clock;
 mod system_socket;
 
 pub use bind::{BindError, BoundCandidate, BoundEndpointHandle, BoundListenerSet, bind_prepared};
@@ -17,4 +18,5 @@ pub use supervisor::{
     FaultLevel, RestartPolicy, ShutdownReport, Supervisor, SupervisorError, TaskCompletion,
     TaskError, TaskErrorKind, TaskExit, TaskFuture, TaskId, TaskIdError, TaskSpec,
 };
+pub use system_clock::SystemClock;
 pub use system_socket::SystemSocketFactory;
