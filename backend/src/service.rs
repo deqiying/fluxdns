@@ -1,0 +1,310 @@
+//! Application 使用的 DNS service task 编排。
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use thiserror::Error;
+
+use crate::dns::{
+    CacheCompatibilityKey, CancelReason, Cancellation, DispatchError, DnsCore,
+    TransportCapabilities, TransportClass, dispatch_inbound,
+};
+use crate::ports::PortErrorClass;
+use crate::ports::effects::{ActivatedSocketHandle, Clock};
+use crate::ports::inbound::InboundAdapter;
+use crate::runtime::{
+    ActiveRuntime, AdmissionError, BoundEndpointHandle, FaultLevel, RestartPolicy, ShutdownReport,
+    Supervisor, SupervisorError, SystemClock, TaskError, TaskSpec,
+};
+use crate::transport::{
+    DEFAULT_REQUEST_TIMEOUT, TcpAdapter, TcpAdapterError, UdpAdapter, UdpAdapterError,
+};
+
+#[derive(Debug, Error)]
+pub enum ServiceStartError {
+    #[error("could not obtain active listener handles: {class} ({operation})")]
+    ListenerHandles {
+        class: &'static str,
+        operation: &'static str,
+    },
+    #[error("endpoint {index} could not create {kind} adapter: {reason}")]
+    Endpoint {
+        index: usize,
+        kind: &'static str,
+        reason: String,
+    },
+    #[error("could not register service task: {0}")]
+    Task(#[source] SupervisorError),
+}
+
+#[derive(Debug, Error)]
+pub enum ServiceError {
+    #[error("shutdown signal could not be installed")]
+    Signal,
+    #[error("service shutdown deadline expired")]
+    ShutdownDeadline,
+}
+
+/// 已绑定 listener 的 DNS service；所有 receive loop 都由同一个 Supervisor 持有。
+pub struct DnsService {
+    runtime: Arc<ActiveRuntime>,
+    supervisor: Supervisor,
+}
+
+impl DnsService {
+    pub fn start(
+        runtime: Arc<ActiveRuntime>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+    ) -> Result<Self, ServiceStartError> {
+        let endpoints = runtime.listeners().endpoint_handles().map_err(|error| {
+            ServiceStartError::ListenerHandles {
+                class: error.class().as_str(),
+                operation: error.operation(),
+            }
+        })?;
+        let mut supervisor = Supervisor::new();
+        let transport_cancellation = supervisor.cancellation();
+
+        for (index, endpoint) in endpoints.into_iter().enumerate() {
+            match endpoint.socket {
+                ActivatedSocketHandle::Udp(socket) => {
+                    let adapter = UdpAdapter::from_endpoint(
+                        BoundEndpointHandle {
+                            entry: endpoint.entry,
+                            socket: ActivatedSocketHandle::Udp(socket),
+                        },
+                        runtime.revision(),
+                        capabilities(TransportClass::Datagram),
+                        request_timeout,
+                    )
+                    .map_err(|reason| ServiceStartError::Endpoint {
+                        index,
+                        kind: "UDP",
+                        reason: reason.to_string(),
+                    })?;
+                    let task_id = format!("transport.udp.{index}");
+                    let task = service_task(
+                        adapter,
+                        Arc::clone(&core),
+                        Arc::clone(&runtime),
+                        transport_cancellation.clone(),
+                    );
+                    spawn_task(&mut supervisor, task_id, "udp", task)?;
+                }
+                ActivatedSocketHandle::Tcp(listener) => {
+                    let adapter = TcpAdapter::from_endpoint(
+                        BoundEndpointHandle {
+                            entry: endpoint.entry,
+                            socket: ActivatedSocketHandle::Tcp(listener),
+                        },
+                        runtime.revision(),
+                        capabilities(TransportClass::Stream),
+                        request_timeout,
+                    )
+                    .map_err(|reason| ServiceStartError::Endpoint {
+                        index,
+                        kind: "TCP",
+                        reason: reason.to_string(),
+                    })?;
+                    let task_id = format!("transport.tcp.{index}");
+                    let task = service_task(
+                        adapter,
+                        Arc::clone(&core),
+                        Arc::clone(&runtime),
+                        transport_cancellation.clone(),
+                    );
+                    spawn_task(&mut supervisor, task_id, "tcp", task)?;
+                }
+            }
+        }
+
+        Ok(Self {
+            runtime,
+            supervisor,
+        })
+    }
+
+    pub fn with_default_timeout(
+        runtime: Arc<ActiveRuntime>,
+        core: Arc<dyn DnsCore>,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start(runtime, core, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub fn runtime(&self) -> &Arc<ActiveRuntime> {
+        &self.runtime
+    }
+
+    pub fn task_count(&self) -> usize {
+        self.supervisor.task_count()
+    }
+
+    pub async fn shutdown(
+        &mut self,
+        clock: &dyn Clock,
+        deadline: crate::dns::Deadline,
+    ) -> ShutdownReport {
+        self.supervisor.shutdown(clock, deadline).await
+    }
+
+    /// 等待 Ctrl-C 后执行有界 graceful shutdown。
+    pub async fn wait_for_ctrl_c(
+        &mut self,
+        grace_period: Duration,
+    ) -> Result<ShutdownReport, ServiceError> {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|_| ServiceError::Signal)?;
+        let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
+        let report = self.shutdown(&SystemClock::new(), deadline).await;
+        if report.deadline_expired {
+            Err(ServiceError::ShutdownDeadline)
+        } else {
+            Ok(report)
+        }
+    }
+}
+
+fn capabilities(class: TransportClass) -> TransportCapabilities {
+    TransportCapabilities {
+        class,
+        cache_compatibility: CacheCompatibilityKey(1),
+    }
+}
+
+fn spawn_task(
+    supervisor: &mut Supervisor,
+    task_id: String,
+    component: &'static str,
+    task: crate::runtime::TaskFuture,
+) -> Result<(), ServiceStartError> {
+    let spec = TaskSpec::new(
+        task_id,
+        component,
+        FaultLevel::FatalEndpoint,
+        RestartPolicy::Never,
+    )
+    .map_err(|error| ServiceStartError::Endpoint {
+        index: 0,
+        kind: component,
+        reason: error.to_string(),
+    })?;
+    supervisor
+        .spawn(spec, task)
+        .map_err(ServiceStartError::Task)
+}
+
+fn service_task<A>(
+    adapter: A,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    cancellation: Cancellation,
+) -> crate::runtime::TaskFuture
+where
+    A: InboundAdapter + 'static,
+{
+    Box::pin(async move { run_adapter_loop(adapter, core, runtime, cancellation).await })
+}
+
+async fn run_adapter_loop<A>(
+    adapter: A,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError>
+where
+    A: InboundAdapter + 'static,
+{
+    loop {
+        let inbound = match adapter.receive(&cancellation).await {
+            Ok(Some(inbound)) => inbound,
+            Ok(None) => return Err(TaskError::Cancelled),
+            Err(error) => {
+                if cancellation.is_cancelled()
+                    || matches!(error.class(), PortErrorClass::Cancelled(_))
+                {
+                    return Err(TaskError::Cancelled);
+                }
+                return Err(TaskError::Transient);
+            }
+        };
+
+        let guard = match runtime.try_acquire() {
+            Ok(guard) => guard,
+            Err(AdmissionError::Draining) => {
+                let _ = inbound.response().cancel(CancelReason::Shutdown);
+                continue;
+            }
+            Err(AdmissionError::Capacity) => {
+                let _ = inbound.response().cancel(CancelReason::GroupPolicy);
+                continue;
+            }
+        };
+        let response_handle = inbound.response().clone();
+        let result = tokio::select! {
+            result = dispatch_inbound(core.as_ref(), inbound) => result,
+            _ = cancellation.cancelled() => {
+                let _ = response_handle.cancel(CancelReason::Shutdown);
+                return Err(TaskError::Cancelled);
+            }
+        };
+        drop(guard);
+
+        if let Err(error) = result {
+            handle_dispatch_error(error);
+        }
+    }
+}
+
+fn handle_dispatch_error(error: DispatchError) {
+    match error {
+        DispatchError::Core(_) | DispatchError::Encode { .. } => {
+            tracing::debug!(event = "request_not_responded", component = "service");
+        }
+    }
+}
+
+impl From<UdpAdapterError> for ServiceStartError {
+    fn from(error: UdpAdapterError) -> Self {
+        Self::Endpoint {
+            index: 0,
+            kind: "UDP",
+            reason: error.to_string(),
+        }
+    }
+}
+
+impl From<TcpAdapterError> for ServiceStartError {
+    fn from(error: TcpAdapterError) -> Self {
+        Self::Endpoint {
+            index: 0,
+            kind: "TCP",
+            reason: error.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::capabilities;
+    use crate::dns::{CacheCompatibilityKey, TransportClass};
+
+    #[test]
+    fn service_capabilities_are_transport_specific_and_stable() {
+        assert_eq!(
+            capabilities(TransportClass::Datagram),
+            crate::dns::TransportCapabilities {
+                class: TransportClass::Datagram,
+                cache_compatibility: CacheCompatibilityKey(1),
+            }
+        );
+        assert_eq!(
+            capabilities(TransportClass::Stream),
+            crate::dns::TransportCapabilities {
+                class: TransportClass::Stream,
+                cache_compatibility: CacheCompatibilityKey(1),
+            }
+        );
+    }
+}

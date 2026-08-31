@@ -6,6 +6,7 @@ pub mod dns;
 pub mod observability;
 pub mod ports;
 pub mod runtime;
+pub mod service;
 pub mod transport;
 
 #[tokio::main(flavor = "multi_thread")]
