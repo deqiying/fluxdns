@@ -1,8 +1,8 @@
 # Storage 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，已实现纯内存统计 epoch 与 batch ledger；SQLite、详情 writer 和 flush 尚未实现
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/storage/*`、`backend/migrations/*`
 >
@@ -207,10 +207,14 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 ## 13. 实现检查清单
 
 - [ ] 建立 SQLx pool/migration；
-- [ ] 实现 stats schema/counters/checkpoint/ledger；
+- [x] 实现内存 stats counters/checkpoint/epoch/ledger 领域边界；
+- [ ] 实现 stats SQLite schema/upsert/checkpoint writer；
 - [ ] 实现独立 resolve-log writer；
 - [ ] 实现淘汰与硬上限；
 - [ ] 实现 degraded/recovery/flush；
+- [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
 - [ ] 完成 migration、压力和故障测试。
 
-当前实现进度：**0%**。
+阶段证据：Storage focused tests 8 项通过，覆盖 UTC day、sharded accumulator、epoch swap、dimension 校验、monotonic batch ID、幂等 commit 和 gap 状态；当前 backend 全量测试为 238 passed、0 failed。
+
+当前实现进度：**20%**。

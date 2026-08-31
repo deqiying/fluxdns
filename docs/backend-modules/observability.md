@@ -1,8 +1,8 @@
 # Observability 模块设计
 
-> 状态：v1 方案已完成，阶段 1 观测契约已实现
+> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数和 typed event 脱敏；正式 writer/flush 尚未实现
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/observability.rs`
 >
@@ -191,9 +191,11 @@ shutdown 在 deadline 内：
 - [ ] 实现读取配置后的 final tracing；
 - [x] 实现 redaction 和低基数校验；
 - [ ] 实现有界 writer/backpressure；
-- [ ] 实现 health registry 和 flush；
-- [ ] 完成 schema、安全和故障测试。
+- [x] 实现有界 health registry、状态恢复、retry/gap 计数和 typed event 更新；
+- [ ] 实现 final writer/backpressure 和 flush；
+- [x] 完成当前 schema、安全、低基数和状态测试；
+- [ ] 完成 writer 故障注入和 flush 测试。
 
-阶段 1 证据：bootstrap subscriber、日志级别解析、`Sensitive<T>`、DNS/resource/resolve event Debug 脱敏、metric label 类型匹配/去重/数量上限与敏感字段拒绝测试均通过。
+阶段 1 证据：bootstrap subscriber、日志级别解析、`Sensitive<T>`、DNS/resource/resolve event Debug 脱敏、metric label 类型匹配/去重/数量上限与敏感字段拒绝测试，以及 registry health/retry/gap focused tests 均通过；当前 backend 全量测试为 238 passed、0 failed。
 
-当前实现进度：**20%**。
+当前实现进度：**30%**。

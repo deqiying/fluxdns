@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成，阶段 3 基础服务编排、阶段 4 UDP/TCP 基础链路、阶段 5 upstream 首轮小阶段和阶段 8 DoH plain HTTP 首轮接入已实现
+> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成；阶段 3 基础服务编排、阶段 4 UDP/TCP 基础链路、阶段 5 upstream 首轮小阶段、阶段 6 cache 首轮切片、阶段 7 resource/policy/DNS Core 首轮接线、阶段 8 DoH plain HTTP 首轮接入和阶段 9 统计/观测纯领域切片已实现
 >
 > 更新日期：2026-08-31
 >
@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 189 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路；Upstream 已完成内联 hosts exchange、hosts registry 和纯 group member selection，但尚未接入 DNS Core；Cache 已完成无外部依赖的内存 `CacheStore`、响应准入/TTL、稳定 key builder、`CacheFacade` 和 single-flight 首轮切片；Policy 已完成 client/strategy immutable index、listener/DoH route index 与请求级 `ResolutionPlan` 首轮组合。DoH TLS/PROXY/forwarded、DoH 出站、bootstrap/连接执行、Moka/SQLite persistence、完整 rule/resource、storage 和完整 observability 仍未实现。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 238 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、hosts registry、group member selection 和结果聚合/fallback 判定，但尚未接入真实 DNS exchange；Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade` 和 single-flight 首轮切片；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS；Storage 已完成纯内存统计 epoch 与 batch ledger；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、DoH 出站、bootstrap/连接执行、Moka/SQLite persistence、remote resource refresh、完整 DNS Core→Policy→Cache→Upstream 管线、Storage writer 和完整 telemetry writer 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **37.9%** | Config 达到 100% 模块验收口径；DoH 已完成 plain HTTP happy path，Upstream 已完成 hosts connector 与纯选择器，Cache 已完成内存 adapter、响应准入/TTL、key builder、Facade 和 single-flight 首轮切片，Policy 已完成 client/strategy/route 索引和请求级 plan 首轮组合，但仍缺少 TLS、代理信任、DoH 出站、bootstrap、完整 rule/resource、Moka/SQLite persistence、资源、存储和完整故障验收 |
-| v1 交付总进度 | **44.1%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 37.9%` |
+| 后端代码实现进度 | **46.9%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰，Upstream 已增加结果聚合，Storage/Observability 已具备纯内存领域边界；仍缺少 TLS、代理信任、DoH 出站、bootstrap、Runtime snapshot 资源接线、Moka/SQLite persistence、remote refresh、真实 upstream exchange 和完整故障验收 |
+| v1 交付总进度 | **52.2%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 46.9%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -60,18 +60,18 @@ v1 交付范围：
 | Config | `backend/src/config/*` | [config.md](backend-modules/config.md) | 已完成 | 已验证 | 100% | 10% |
 | Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 35% | 12% |
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
-| DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 35% | 10% |
-| Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 35% | 8% |
-| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 35% | 10% |
-| Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 35% | 9% |
-| Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 未开始 | 0% | 7% |
-| Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 未开始 | 0% | 8% |
-| Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 20% | 3% |
+| DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 50% | 10% |
+| Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 50% | 8% |
+| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 40% | 10% |
+| Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 40% | 9% |
+| Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 50% | 7% |
+| Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 20% | 8% |
+| Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 30% | 3% |
 
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 35% + 8% × 35% + 9% × 35% + 10% × 35% + 3% × 20% ≈ 37.9%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 50% + 10% × 40% + 9% × 40% + 7% × 50% + 8% × 20% + 3% × 30% ≈ 46.9%
 ```
 
 ## 4. 进度判定规则
@@ -218,6 +218,8 @@ transport / upstream / storage / observability adapters
 
 第二个小阶段（已完成）：新增无网络副作用的 `GroupSelector`，固定 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；该阶段尚未接入真实 exchange、fallback aggregator 或 DNS Core。
 
+第三个小阶段（已完成）：新增按 attempt index 聚合的 outcome/fallback 判定，固定 terminal response、retryable transport failure、SERVFAIL/TC、取消优先级和 fallback connector 去重；定向 outcome 测试 7 项通过。真实 exchange、bootstrap/connect_ip 和 DNS Core 接线仍未实现。
+
 当前阶段 5 边界：DoH 出站 connector、bootstrap/connect_ip、SOCKS5/SOCKS5H、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
 
 ### 阶段 6：缓存
@@ -228,11 +230,13 @@ transport / upstream / storage / observability adapters
 - 接入 Moka 与独立 SQLite cache store；
 - 验收：缓存准入、质量替换、恢复降级和资源变化不全局失效测试通过。
 
-首个小阶段（已完成）：新增无外部依赖的内存 `CacheStore` adapter，覆盖 fresh/stale/expiry lookup、质量感知 CAS、显式失效、single-flight leader/follower、独立 waiter cancellation、leader abandon/drop 和 shutdown 生命周期；定向测试 7 项通过。当前 adapter 使用 `HashMap + Mutex`，尚未接入容量淘汰、optimistic refresh 或 SQLite persistence。
+首个小阶段（已完成）：新增无外部依赖的内存 `CacheStore` adapter，覆盖 fresh/stale/expiry lookup、质量感知 CAS、显式失效、single-flight leader/follower、独立 waiter cancellation、leader abandon/drop 和 shutdown 生命周期；定向测试 7 项通过。当前 adapter 使用 `HashMap + Mutex`，后续容量淘汰仍独立于 persistence。
 
 第二个小阶段（已完成）：新增纯逻辑响应准入 helper，按 canonical response class 计算 cache quality、origin/failure/negative TTL、optimistic stale 窗口和稳定 checksum，明确拒绝 REFUSED、未知类、缺失 TTL 和零 TTL；定向测试 4 项通过。该 helper 尚未接入 DNS Core 的请求管线。
 
 第三个小阶段（已完成）：新增稳定 `CacheKey` 编码与 `CacheFacade` 首轮编排，固定 namespace、canonical query、strategy/client/ECS 维度、transport compatibility 和 format version；Facade 将 disabled/miss/fresh/stale/store-unavailable 分层，并以一次性 refresh permit 与 typed write request 暴露 adapter 边界；定向 key/facade 测试通过。Moka 容量淘汰、optimistic 后台刷新和 SQLite persistence 仍未实现。
+
+第四个小阶段（已完成）：为内存 adapter 增加共享 weight 上限、确定性 oldest eviction、oversized entry 拒绝和 eviction 计数；定向测试 3 项通过。Moka adapter、optimistic 后台刷新和 SQLite persistence 仍未实现。
 
 ### 阶段 7：完整策略与资源
 
@@ -246,7 +250,15 @@ transport / upstream / storage / observability adapters
 
 第二个小阶段（已完成）：新增 listener/stream 与 DoH route 编译索引，固定 route template 校验、`{client_id}` segment 提取、基础 strategy 引用和 listener hosts 元数据；定向 route 测试通过。规则资源 matcher 尚未接入。
 
-第三个小阶段（已完成）：新增 `PolicyIndex::evaluate` 与不可变 `ResolutionPlan` 首轮组合，覆盖 client strategy override、cache tri-state、client digest namespace、strategy/global fallback、TTL/ECS effective value 和 upstream target；定向 plan 测试 3 项通过。完整 rule/hosts/resource matcher、snapshot 原子发布和 DNS Core 接线仍未实现。
+第三个小阶段（已完成）：新增 `PolicyIndex::evaluate` 与不可变 `ResolutionPlan` 首轮组合，覆盖 client strategy override、cache tri-state、client digest namespace、strategy/global fallback、TTL/ECS effective value 和 upstream target；定向 plan 测试 3 项通过。后续第四至第七个小阶段已补齐 rule/hosts/resource matcher、loader 和 DNS Core/Policy 首轮接线；Runtime snapshot 原子发布仍未实现。
+
+第四个小阶段（已完成）：实现 hosts/rule 资源 parser 与 immutable matcher，支持 A/AAAA/CNAME、wildcard、JSON/hosts/Clash、exact/suffix/regex 优先级、输入和 program size 限制；定向 Resource 测试通过。
+
+第五个小阶段（已完成）：实现 const/file hosts 与 rule-set loader、稳定文件 fingerprint、UTF-8/大小/symlink/稳定读取边界，以及 `ResourceSnapshot`/registry 的版本 CAS 发布；资源 loader、snapshot 定向测试通过。remote fetch、原子落盘和 refresh scheduler 仍未实现。
+
+第六个小阶段（已完成）：`ConfiguredDnsCore` 接入 Resource hosts index，支持 const/file、JSON、CNAME、wildcard 和 exact/NODATA/NXDOMAIN 语义；DNS Core focused tests 14 项通过。
+
+第七个小阶段（已完成）：`PolicyIndex` 接入 const/file hosts/rule-set loader，按 listener hosts → strategy rule 顺序生成安全的 `ResolutionPlan` matched-rule 摘要，并对 remote/dat/selector/缺失资源返回显式错误；Policy focused tests 6 项通过。Runtime snapshot 原子接线和完整 upstream/cache 管线仍未实现。
 
 ### 阶段 8：DoH 接入与代理安全边界
 
@@ -267,6 +279,8 @@ transport / upstream / storage / observability adapters
 - 完成 SQLite migration、daily stats、batch ledger 和独立详情 writer；
 - 完成 degraded 状态、persistence gap、低基数 metrics 和脱敏日志；
 - 验收：跨午夜、幂等重试、队列溢出、数据库 busy/磁盘故障测试通过。
+
+当前已完成的纯领域小阶段：Storage 建立 UTC day、sharded stats accumulator、epoch snapshot、persistence gap 和 batch ledger；Observability 建立有界 metric registry、原子 counter/gauge、health 状态、retry/gap 计数和 typed event 脱敏。SQLite migration、详情 writer、最终 tracing writer、flush/backpressure 和故障注入仍未实现。
 
 ### 阶段 10：刷新、故障注入和 v1 验收
 

@@ -1,6 +1,6 @@
 # Cache 模块设计
 
-> 状态：v1 方案已完成，已实现内存 CacheStore、响应准入/TTL、稳定 key builder 与 CacheFacade 首轮切片；Moka/SQLite persistence 尚未实现
+> 状态：v1 方案已完成，已实现内存 CacheStore、共享容量淘汰、响应准入/TTL、稳定 key builder 与 CacheFacade 首轮切片；Moka/SQLite persistence 尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -153,7 +153,7 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - 支持 exact、namespace、typed predicate 和 all 失效；
 - single-flight 保证每个 key 只有一个 leader，follower 可独立取消，leader abandon/drop 会广播稳定失败；
 - shutdown 会清理记录、唤醒 waiter，并拒绝后续读写；
-- `weighted_size` 仅作为内部计费统计，不宣称等于进程 RSS；当前尚未实现容量淘汰和 eviction listener。
+- `weighted_size` 仅作为内部计费统计，不宣称等于进程 RSS；当前已支持共享 weight 上限、确定性 oldest eviction、oversized entry 拒绝和 eviction 计数，尚未实现 Moka eviction listener。
 
 当前已实现的纯逻辑准入 helper：
 
@@ -226,9 +226,12 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - [x] 实现 CacheFacade 首轮切片；（完整 DNS Core 接线仍待后续）
 - [x] 实现 namespace/key builder；
 - [x] 实现 single-flight/CAS/显式失效的内存 adapter 首轮切片；
+- [x] 实现共享容量淘汰和 oversized entry 边界；
 - [ ] 实现 Moka adapter；
 - [ ] 实现独立 SQLite persistence；
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [ ] 完成跨 adapter 一致性、恢复和故障测试。
 
-当前实现进度：**35%**（内存 adapter、响应准入/TTL、namespace/key builder、CacheFacade 和 single-flight 首轮切片；容量淘汰、optimistic refresh 和 SQLite persistence 未实现）。
+阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态和容量淘汰；当前 backend 全量测试为 238 passed、0 failed。
+
+当前实现进度：**40%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade 和 single-flight 首轮切片；optimistic refresh 和 SQLite persistence 未实现）。

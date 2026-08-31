@@ -1,6 +1,6 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client/strategy immutable index、listener/DoH route index 与请求级 ResolutionPlan 首轮组合；rule/resource matcher 和 snapshot 接线尚未实现
+> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线和请求级 rule/hosts ResolutionPlan 首轮组合；Runtime snapshot 原子接线尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -57,6 +57,8 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 - `StrategyIndex`：将已解析策略编译为不可变 `BTreeMap<ConfigId, Arc<ResolvedStrategy>>`，重复策略 ID 在构建时拒绝；
 - `RouteIndex`：编译 stream listener 与 DoH route，校验 `{client_id}` segment 模板并保留 typed listener/route 选择结果；
 - `PolicyIndex::evaluate`：组合 client strategy override、cache tri-state、TTL/ECS effective value 和 upstream target，输出不可变 `ResolutionPlan`；
+- `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash rule-set；remote/dat/selector/缺失资源在边界返回显式错误；
+- rule/hosts 执行：固定 listener hosts → strategy rule 顺序，输出不含原文的 matched-rule 摘要，并覆盖 local hosts、rule-set upstream 与 rule ECS；
 - 这些索引只持有已解析 typed 值，不在请求路径读取 YAML 或执行网络 I/O。
 
 ## 4. 域名规范化
@@ -183,9 +185,12 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 实现 client ID/CIDR 索引；
 - [x] 建立 strategy immutable lookup index；
 - [x] 实现 strategy/route 编译；
-- [ ] 实现 rule/hosts/resource matcher 编排；
+- [x] 实现 rule/hosts/resource matcher 编排；
 - [x] 实现覆盖矩阵与 ResolutionPlan（首轮 cache/TTL/ECS/client override）；
-- [ ] 接入 snapshot 原子发布；
-- [ ] 完成冲突、优先级和并发一致性测试。
+- [ ] 接入 Runtime snapshot 原子发布；
+- [x] 完成冲突、优先级、未知资源和 file loader 测试；
+- [ ] 完成资源 swap、跨 transport contract 和完整覆盖矩阵测试。
 
-当前实现进度：**35%**（client/strategy/route immutable index 与请求级 plan 首轮组合；rule/resource matcher、完整覆盖优先级、snapshot 接线和跨 transport contract tests 未完成）。
+阶段证据：Policy focused tests 6 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源和 const/file loader；当前 backend 全量测试为 238 passed、0 failed。当前仍未接入 Runtime ResourceRegistrySnapshot，也未执行完整 DNS Core→Policy→Cache→Upstream 请求管线。
+
+当前实现进度：**50%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排和请求级 plan 首轮组合；snapshot 原子接线、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。

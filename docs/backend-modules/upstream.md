@@ -1,6 +1,6 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，已实现内联 hosts exchange、hosts registry 和纯 group member selection；DoH 出站、bootstrap/outbound 和 fallback 执行尚未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、hosts registry、纯 group member selection 和 outcome/fallback 判定；真实 exchange、DoH 出站、bootstrap/outbound 尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -175,7 +175,7 @@ TransportFailure 分类至少包括 connect、DNS bootstrap、proxy、TLS、HTTP
 
 v1 不实现主动健康检查、熔断器或持久健康分数。load-balance 只使用实时 in-flight，不应在文档或指标中称为 health。
 
-当前已实现：`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；真实 exchange、fallback aggregator 和 late cache finalizer 尚未接入。
+当前已实现：`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；`outcome` 提供按 attempt index 的 terminal/retryable/cancelled 聚合和 fallback 判定。真实 exchange、late cache finalizer 和 Runtime/DNS Core 接线尚未接入。
 
 ## 10. 测试
 
@@ -196,10 +196,11 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [ ] 实现 DoH connector；
 - [ ] 实现 bootstrap/connect_ip/outbound；
 - [x] 固化四种 group 模式的纯 member selection；
-- [ ] 接入 group exchange、fallback 与 late cache finalizer；
+- [x] 实现 outcome/fallback 判定边界；
+- [ ] 接入 group exchange、fallback 执行与 late cache finalizer；
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-阶段证据：hosts/group 定向测试 12 项通过，覆盖 hosts/JSON 解析、positive/NODATA/NXDOMAIN、取消/超时、registry duplicate/missing/unsupported、smooth weighted round-robin、least-in-flight 和并发 lease。当前实现未接入 Runtime/DNS Core，也未执行出站网络 I/O。
+阶段证据：hosts/group/outcome 定向测试 19 项通过，覆盖 hosts/JSON 解析、positive/NODATA/NXDOMAIN、取消/超时、registry duplicate/missing/unsupported、smooth weighted round-robin、least-in-flight、并发 lease、terminal/fallback/cancellation 聚合和 connector 去重。当前实现未接入 Runtime/DNS Core，也未执行出站网络 I/O。
 
-当前实现进度：**35%**。
+当前实现进度：**40%**。

@@ -1,8 +1,8 @@
 # Resource 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader 与资源版本 CAS；remote refresh、原子落盘和 scheduler 尚未实现
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/resource/*`
 >
@@ -20,7 +20,7 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 | --- | --- |
 | `hosts.rs` | JSON/hosts 格式、本地 RR 索引 |
 | `rules.rs` | JSON/Clash/dat 规则解析和 matcher |
-| `loader.rs` | const/file/remote、大小限制、更新与原子落盘 |
+| `loader.rs` | const/file、大小限制、稳定读取与 parser 边界；remote/原子落盘待后续 |
 | `snapshot.rs` | metadata、revision、registry 和 publish input |
 
 查询热路径只读取编译后的不可变索引，不访问文件、网络或 parser。
@@ -96,6 +96,8 @@ v1 本地回答支持 A、AAAA 和 CNAME：
 `upstreams[type=hosts]` 可复用 parser/compiler，但产出 connector；顶层 `hosts[]` 产出本地回答 matcher，两个资源命名空间不混用。
 
 ## 6. Rule 格式
+
+当前实现覆盖 JSON 与 Clash 的 exact/suffix/受限 regex matcher；`dat` selector map 仍保留为后续边界。
 
 ### JSON
 
@@ -191,11 +193,15 @@ remote 有效内容与 manifest：
 
 ## 13. 实现检查清单
 
-- [ ] 实现 hosts/rule parser；
-- [ ] 实现 canonical matcher/index；
-- [ ] 实现 const/file/remote loader；
-- [ ] 实现 snapshot manifest 与原子落盘；
-- [ ] 实现 refresh/single-flight/epoch publish；
-- [ ] 完成解析、安全、恢复和并发测试。
+- [x] 实现 hosts/rule parser；
+- [x] 实现 canonical matcher/index；
+- [x] 实现 const/file loader；
+- [x] 实现资源版本 snapshot/CAS publish；
+- [ ] 实现 remote loader、snapshot manifest 与原子落盘；
+- [ ] 实现 refresh/single-flight scheduler/stale policy；
+- [x] 完成当前解析、安全边界、文件稳定读取和并发 CAS 测试；
+- [ ] 完成 remote 恢复、原子落盘和长期刷新测试。
 
-当前实现进度：**0%**。
+阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests 和 DNS/Policy 资源接线 tests 均通过；当前 backend 全量测试为 238 passed、0 failed。
+
+当前实现进度：**50%**。
