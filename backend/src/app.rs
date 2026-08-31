@@ -1,10 +1,13 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::config::{ConfigLoadError, ConfigLoader, LoadOptions};
-use crate::dns::RuntimeRevision;
-use crate::runtime::PreparedRuntime;
+use crate::dns::{ConfiguredDnsCore, Deadline, RuntimeRevision};
+use crate::runtime::SystemSocketFactory;
+use crate::service::{DnsService, ServiceError, ServiceStartError};
 
 /// 进程退出码的大类，详细原因应由安全错误消息表达。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -197,7 +200,10 @@ where
     Ok((CliAction::Command, options))
 }
 
-/// 根据当前命令加载并执行配置边界；`run` 在服务任务接线完成前明确返回启动错误。
+const BIND_TIMEOUT: Duration = Duration::from_secs(10);
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
+
+/// 根据当前命令加载并执行配置边界。
 pub async fn run() -> Result<(), AppError> {
     run_with_args(std::env::args_os().skip(1)).await
 }
@@ -252,8 +258,11 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             Ok(())
         }
         AppCommand::Run => {
-            let prepared = PreparedRuntime::prepare(output.resolved, RuntimeRevision(1))
-                .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+            let prepared =
+                crate::runtime::PreparedRuntime::prepare(output.resolved, RuntimeRevision(1))
+                    .map_err(|error| {
+                        AppError::new(AppErrorKind::Prepare, bounded_message(error))
+                    })?;
             tracing::info!(
                 event = "runtime_prepared",
                 component = "application",
@@ -262,12 +271,58 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 endpoint_count = prepared.preflight().endpoint_count,
                 "runtime_prepared"
             );
-            Err(AppError::new(
-                AppErrorKind::BindOrStartup,
-                "DNS 服务任务尚未接线；请使用 `validate` 进行只读配置校验",
-            ))
+            let bind_cancellation = crate::dns::Cancellation::new();
+            let candidate = crate::runtime::bind_prepared(
+                prepared,
+                &SystemSocketFactory::new(),
+                Deadline::new(Instant::now() + BIND_TIMEOUT),
+                &bind_cancellation,
+            )
+            .await
+            .map_err(map_bind_error)?;
+            let coordinator = crate::runtime::RuntimeCoordinator::new(candidate);
+            let active = coordinator.load();
+            let core = ConfiguredDnsCore::from_config(active.snapshot().config())
+                .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+            let mut service = DnsService::with_default_timeout(active, Arc::new(core))
+                .map_err(map_service_start_error)?;
+            tracing::info!(
+                event = "service_ready",
+                component = "application",
+                result = "success",
+                listener_count = service.runtime().listeners().len(),
+                task_count = service.task_count(),
+                "service_ready"
+            );
+            service
+                .wait_for_ctrl_c(SHUTDOWN_GRACE_PERIOD)
+                .await
+                .map_err(map_service_error)?;
+            tracing::info!(
+                event = "service_shutdown",
+                component = "application",
+                result = "success",
+                "service_shutdown"
+            );
+            Ok(())
         }
     }
+}
+
+fn map_bind_error(error: crate::runtime::BindError) -> AppError {
+    AppError::new(AppErrorKind::BindOrStartup, bounded_message(error))
+}
+
+fn map_service_start_error(error: ServiceStartError) -> AppError {
+    AppError::new(AppErrorKind::BindOrStartup, bounded_message(error))
+}
+
+fn map_service_error(error: ServiceError) -> AppError {
+    let kind = match &error {
+        ServiceError::Signal => AppErrorKind::RuntimeFatal,
+        ServiceError::ShutdownDeadline => AppErrorKind::ShutdownTimeout,
+    };
+    AppError::new(kind, bounded_message(error))
 }
 
 fn map_config_error(error: ConfigLoadError) -> AppError {
@@ -297,7 +352,7 @@ fn bounded_message(error: impl fmt::Display) -> String {
 
 fn print_help() {
     println!(
-        "用法：fluxdns [run|validate] [--config PATH]\n\n命令：\n  run       加载并准备服务配置（服务任务接线中）\n  validate  只读加载并校验配置，不创建配置快照或监听端口\n\n选项：\n  -c, --config PATH  配置文件路径（默认：config.yaml）\n  -h, --help         显示帮助\n  -V, --version      显示版本"
+        "用法：fluxdns [run|validate] [--config PATH]\n\n命令：\n  run       加载配置、绑定 listener 并运行 DNS 服务，直到收到 Ctrl-C\n  validate  只读加载并校验配置，不创建配置快照或监听端口\n\n选项：\n  -c, --config PATH  配置文件路径（默认：config.yaml）\n  -h, --help         显示帮助\n  -V, --version      显示版本"
     );
 }
 
