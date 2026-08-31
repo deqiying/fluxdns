@@ -6,7 +6,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::config::{BindPlan, ResolvedConfig};
-use crate::dns::RuntimeRevision;
+use crate::dns::{DEFAULT_LOCAL_TTL, PolicyDnsCore, RuntimeRevision};
 
 use super::RuntimeSnapshot;
 
@@ -22,12 +22,31 @@ impl PreparedRuntime {
         config: Arc<ResolvedConfig>,
         revision: RuntimeRevision,
     ) -> Result<Self, PrepareError> {
-        if revision.0 == 0 {
-            return Err(PrepareError::InvalidRevision);
-        }
-
-        let bind_plan = validate_bind_plan(&config.bind_plan)?;
+        let bind_plan = prepare_bind_plan(&config, revision)?;
         let snapshot = Arc::new(RuntimeSnapshot::new(revision, config));
+        Ok(Self {
+            snapshot,
+            bind_plan: Arc::new(bind_plan),
+        })
+    }
+
+    /// 在 socket bind 前完成 Policy/Resource 本地 Core 构建，并把 handle 固定进 snapshot。
+    pub fn prepare_with_policy_core(
+        config: Arc<ResolvedConfig>,
+        revision: RuntimeRevision,
+    ) -> Result<Self, PrepareError> {
+        let bind_plan = prepare_bind_plan(&config, revision)?;
+        let policy_core =
+            PolicyDnsCore::from_config(&config, DEFAULT_LOCAL_TTL).map_err(|error| {
+                PrepareError::PolicyCore {
+                    reason: error.to_string(),
+                }
+            })?;
+        let snapshot = Arc::new(RuntimeSnapshot::with_policy_core(
+            revision,
+            config,
+            policy_core,
+        ));
         Ok(Self {
             snapshot,
             bind_plan: Arc::new(bind_plan),
@@ -47,6 +66,7 @@ impl PreparedRuntime {
             revision: self.snapshot.revision(),
             endpoint_count: self.bind_plan.entries.len(),
             normalized_hash: self.snapshot.config().normalized_hash.clone(),
+            has_policy_core: self.snapshot.policy_core().is_some(),
         }
     }
 }
@@ -74,6 +94,8 @@ pub enum PrepareError {
     EmptyOwner { index: usize },
     #[error("runtime bind entry {index} duplicates another endpoint")]
     DuplicateEndpoint { index: usize },
+    #[error("runtime policy DNS core could not be built: {reason}")]
+    PolicyCore { reason: String },
 }
 
 /// prepare 成功后可用于观测和验收的最小摘要。
@@ -82,6 +104,17 @@ pub struct PreflightReport {
     pub revision: RuntimeRevision,
     pub endpoint_count: usize,
     pub normalized_hash: String,
+    pub has_policy_core: bool,
+}
+
+fn prepare_bind_plan(
+    config: &ResolvedConfig,
+    revision: RuntimeRevision,
+) -> Result<BindPlan, PrepareError> {
+    if revision.0 == 0 {
+        return Err(PrepareError::InvalidRevision);
+    }
+    validate_bind_plan(&config.bind_plan)
 }
 
 fn validate_bind_plan(plan: &BindPlan) -> Result<BindPlan, PrepareError> {
@@ -171,6 +204,18 @@ strategy:
         assert_eq!(candidate.snapshot().revision(), RuntimeRevision(1));
         assert_eq!(candidate.bind_plan().entries.len(), 1);
         assert!(Arc::ptr_eq(&candidate.snapshot().config_arc(), &config));
+        assert!(!candidate.preflight().has_policy_core);
+        assert!(candidate.snapshot().dns_core().is_none());
+    }
+
+    #[test]
+    fn prepare_with_policy_core_captures_one_immutable_core() {
+        let candidate =
+            PreparedRuntime::prepare_with_policy_core(config(), RuntimeRevision(2)).unwrap();
+
+        assert!(candidate.preflight().has_policy_core);
+        assert!(candidate.snapshot().policy_core().is_some());
+        assert!(candidate.snapshot().dns_core().is_some());
     }
 
     #[test]

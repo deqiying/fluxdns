@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::config::ResolvedConfig;
-use crate::dns::RuntimeRevision;
+use crate::dns::{DnsCore, PolicyDnsCore, RuntimeRevision};
 
 /// 请求热路径使用的不可变运行时输入。
 ///
@@ -11,11 +11,28 @@ use crate::dns::RuntimeRevision;
 pub struct RuntimeSnapshot {
     revision: RuntimeRevision,
     config: Arc<ResolvedConfig>,
+    policy_core: Option<Arc<PolicyDnsCore>>,
 }
 
 impl RuntimeSnapshot {
     pub(crate) fn new(revision: RuntimeRevision, config: Arc<ResolvedConfig>) -> Self {
-        Self { revision, config }
+        Self {
+            revision,
+            config,
+            policy_core: None,
+        }
+    }
+
+    pub(crate) fn with_policy_core(
+        revision: RuntimeRevision,
+        config: Arc<ResolvedConfig>,
+        policy_core: PolicyDnsCore,
+    ) -> Self {
+        Self {
+            revision,
+            config,
+            policy_core: Some(Arc::new(policy_core)),
+        }
     }
 
     pub fn revision(&self) -> RuntimeRevision {
@@ -30,12 +47,24 @@ impl RuntimeSnapshot {
         Arc::clone(&self.config)
     }
 
+    pub fn policy_core(&self) -> Option<&PolicyDnsCore> {
+        self.policy_core.as_deref()
+    }
+
+    /// 克隆与本 snapshot 同 revision 的不可变 DNS Core handle。
+    pub fn dns_core(&self) -> Option<Arc<dyn DnsCore>> {
+        self.policy_core
+            .as_ref()
+            .map(|core| Arc::clone(core) as Arc<dyn DnsCore>)
+    }
+
     pub fn summary(&self) -> RuntimeSnapshotSummary {
         RuntimeSnapshotSummary {
             revision: self.revision,
             normalized_hash: self.config.normalized_hash.clone(),
             listener_count: self.config.listeners.len(),
             bind_entry_count: self.config.bind_plan.entries.len(),
+            has_policy_core: self.policy_core.is_some(),
         }
     }
 }
@@ -46,6 +75,7 @@ impl fmt::Debug for RuntimeSnapshot {
             .debug_struct("RuntimeSnapshot")
             .field("revision", &self.revision)
             .field("config", &self.config)
+            .field("has_policy_core", &self.policy_core.is_some())
             .finish()
     }
 }
@@ -57,6 +87,7 @@ pub struct RuntimeSnapshotSummary {
     pub normalized_hash: String,
     pub listener_count: usize,
     pub bind_entry_count: usize,
+    pub has_policy_core: bool,
 }
 
 #[cfg(test)]
@@ -131,8 +162,10 @@ strategy:
                 normalized_hash: expected_hash,
                 listener_count: 1,
                 bind_entry_count: 1,
+                has_policy_core: false,
             }
         );
+        assert!(snapshot.dns_core().is_none());
         assert!(format!("{snapshot:?}").contains("RuntimeSnapshot"));
     }
 }

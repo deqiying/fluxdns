@@ -1,11 +1,10 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::{ConfigLoadError, ConfigLoader, LoadOptions};
-use crate::dns::{ConfiguredDnsCore, Deadline, RuntimeRevision};
+use crate::dns::{Deadline, RuntimeRevision};
 use crate::runtime::SystemSocketFactory;
 use crate::service::{DnsService, ServiceError, ServiceStartError};
 
@@ -258,17 +257,18 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             Ok(())
         }
         AppCommand::Run => {
-            let prepared =
-                crate::runtime::PreparedRuntime::prepare(output.resolved, RuntimeRevision(1))
-                    .map_err(|error| {
-                        AppError::new(AppErrorKind::Prepare, bounded_message(error))
-                    })?;
+            let prepared = crate::runtime::PreparedRuntime::prepare_with_policy_core(
+                output.resolved,
+                RuntimeRevision(1),
+            )
+            .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
             tracing::info!(
                 event = "runtime_prepared",
                 component = "application",
                 result = "success",
                 revision = prepared.preflight().revision.0,
                 endpoint_count = prepared.preflight().endpoint_count,
+                policy_core = prepared.preflight().has_policy_core,
                 "runtime_prepared"
             );
             let bind_cancellation = crate::dns::Cancellation::new();
@@ -282,10 +282,14 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .map_err(map_bind_error)?;
             let coordinator = crate::runtime::RuntimeCoordinator::new(candidate);
             let active = coordinator.load();
-            let core = ConfiguredDnsCore::from_config(active.snapshot().config())
-                .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
-            let mut service = DnsService::with_default_timeout(active, Arc::new(core))
-                .map_err(map_service_start_error)?;
+            let core = active.snapshot().dns_core().ok_or_else(|| {
+                AppError::new(
+                    AppErrorKind::Prepare,
+                    "active runtime snapshot is missing its DNS core",
+                )
+            })?;
+            let mut service =
+                DnsService::with_default_timeout(active, core).map_err(map_service_start_error)?;
             tracing::info!(
                 event = "service_ready",
                 component = "application",
