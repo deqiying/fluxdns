@@ -3,7 +3,7 @@
 use thiserror::Error;
 
 use crate::config::model::HostsFormat;
-use crate::config::resolve::{ResolvedConfig, ResolvedHostsResource, ResolvedUpstream};
+use crate::config::resolve::{ResolvedConfig, ResolvedHostsResource};
 use crate::ports::PortFuture;
 
 use super::{CoreError, CoreOutcome, DnsCore, DnsRequest, HostsCore, HostsTable, ServFailCore};
@@ -38,19 +38,6 @@ impl ConfiguredDnsCore {
             })?;
             table.merge(parsed);
         }
-        for upstream in &config.upstreams {
-            let ResolvedUpstream::Hosts { id, format, hosts } = upstream else {
-                continue;
-            };
-            if !format.eq_ignore_ascii_case("hosts") {
-                continue;
-            }
-            let parsed = HostsTable::parse(hosts).map_err(|_| CoreBuildError::InvalidHosts {
-                resource: id.as_str().to_owned(),
-            })?;
-            table.merge(parsed);
-        }
-
         if table.is_empty() {
             Ok(Self::ServFail(ServFailCore))
         } else {
@@ -113,5 +100,23 @@ mod tests {
 
         let core = ConfiguredDnsCore::from_config(config).unwrap();
         assert!(!core.has_local_hosts());
+    }
+
+    #[test]
+    fn upstream_hosts_do_not_become_local_hosts() {
+        let mut config = example_config();
+        let config = Arc::get_mut(&mut config).expect("config fixture must be uniquely owned");
+        config.hosts.clear();
+
+        assert!(config.upstreams.iter().any(|upstream| {
+            matches!(
+                upstream,
+                crate::config::resolve::ResolvedUpstream::Hosts { .. }
+            )
+        }));
+
+        let core = ConfiguredDnsCore::from_config(config).unwrap();
+        assert!(!core.has_local_hosts());
+        assert!(matches!(core, ConfiguredDnsCore::ServFail(_)));
     }
 }
