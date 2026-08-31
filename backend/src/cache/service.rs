@@ -2,7 +2,7 @@
 
 use std::fmt;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
 use crate::dns::{CanonicalResponse, RuntimeRevision};
@@ -24,6 +24,11 @@ pub struct CacheFacadeOptions {
     pub admission: CacheAdmissionPolicy,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheFacadeBuildError {
+    ZeroRefreshCapacity,
+}
+
 impl Default for CacheFacadeOptions {
     fn default() -> Self {
         Self {
@@ -38,6 +43,64 @@ impl Default for CacheFacadeOptions {
 pub struct CacheFacade {
     store: Arc<dyn CacheStore>,
     options: CacheFacadeOptions,
+    refresh_admission: Arc<RefreshAdmission>,
+}
+
+struct RefreshAdmission {
+    max_concurrency: usize,
+    in_flight: AtomicUsize,
+}
+
+impl RefreshAdmission {
+    const UNBOUNDED: usize = usize::MAX;
+
+    fn new(max_concurrency: Option<usize>) -> Result<Self, CacheFacadeBuildError> {
+        let max_concurrency = match max_concurrency {
+            Some(0) => return Err(CacheFacadeBuildError::ZeroRefreshCapacity),
+            Some(value) => value,
+            None => Self::UNBOUNDED,
+        };
+        Ok(Self {
+            max_concurrency,
+            in_flight: AtomicUsize::new(0),
+        })
+    }
+
+    fn try_acquire(self: &Arc<Self>) -> Option<Arc<RefreshLease>> {
+        let mut current = self.in_flight.load(Ordering::Acquire);
+        loop {
+            if current >= self.max_concurrency || current == usize::MAX {
+                return None;
+            }
+            match self.in_flight.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    return Some(Arc::new(RefreshLease {
+                        admission: Arc::clone(self),
+                    }));
+                }
+                Err(observed) => current = observed,
+            }
+        }
+    }
+
+    fn max_concurrency(&self) -> Option<usize> {
+        (self.max_concurrency != Self::UNBOUNDED).then_some(self.max_concurrency)
+    }
+}
+
+struct RefreshLease {
+    admission: Arc<RefreshAdmission>,
+}
+
+impl Drop for RefreshLease {
+    fn drop(&mut self) {
+        self.admission.in_flight.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 impl fmt::Debug for CacheFacade {
@@ -47,6 +110,10 @@ impl fmt::Debug for CacheFacade {
             .field("enabled", &self.options.enabled)
             .field("optimistic_enabled", &self.options.optimistic_enabled)
             .field("admission", &self.options.admission)
+            .field(
+                "refresh_capacity",
+                &self.refresh_admission.max_concurrency(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -78,6 +145,7 @@ pub struct CacheRefreshPermit {
     key: CacheKey,
     version: crate::ports::cache::CacheVersion,
     consumed: Arc<AtomicBool>,
+    lease: Option<Arc<RefreshLease>>,
 }
 
 impl fmt::Debug for CacheRefreshPermit {
@@ -86,6 +154,7 @@ impl fmt::Debug for CacheRefreshPermit {
             .debug_struct("CacheRefreshPermit")
             .field("key", &self.key)
             .field("version", &self.version)
+            .field("admitted", &self.is_admitted())
             .field("consumed", &self.consumed.load(Ordering::Acquire))
             .finish()
     }
@@ -100,11 +169,18 @@ impl CacheRefreshPermit {
         self.version
     }
 
-    /// 同一 stale entry 只允许一个 refresh caller 获得执行权。
+    /// 当前 stale lookup 是否获得了 refresh admission slot。
+    pub fn is_admitted(&self) -> bool {
+        self.lease.is_some()
+    }
+
+    /// 同一个 permit 只允许一个 refresh caller 获得执行权。
     pub fn try_consume(&self) -> bool {
-        self.consumed
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+        self.is_admitted()
+            && self
+                .consumed
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
     }
 }
 
@@ -128,7 +204,26 @@ impl From<CacheAdmissionError> for CacheFacadeError {
 
 impl CacheFacade {
     pub fn new(store: Arc<dyn CacheStore>, options: CacheFacadeOptions) -> Self {
-        Self { store, options }
+        Self {
+            store,
+            options,
+            refresh_admission: Arc::new(
+                RefreshAdmission::new(None)
+                    .expect("unbounded refresh admission must always be valid"),
+            ),
+        }
+    }
+
+    pub fn try_new_with_refresh_capacity(
+        store: Arc<dyn CacheStore>,
+        options: CacheFacadeOptions,
+        max_concurrency: usize,
+    ) -> Result<Self, CacheFacadeBuildError> {
+        Ok(Self {
+            store,
+            options,
+            refresh_admission: Arc::new(RefreshAdmission::new(Some(max_concurrency))?),
+        })
     }
 
     pub fn options(&self) -> CacheFacadeOptions {
@@ -139,10 +234,23 @@ impl CacheFacade {
         &self.store
     }
 
+    pub fn refresh_capacity(&self) -> Option<usize> {
+        self.refresh_admission.max_concurrency()
+    }
+
     pub async fn lookup(
         &self,
         key: &CacheKey,
         deadline: crate::dns::Deadline,
+    ) -> Result<CacheLookup, CacheFacadeError> {
+        self.lookup_at(key, deadline, Instant::now()).await
+    }
+
+    pub async fn lookup_at(
+        &self,
+        key: &CacheKey,
+        deadline: crate::dns::Deadline,
+        now: Instant,
     ) -> Result<CacheLookup, CacheFacadeError> {
         if !self.options.enabled {
             return Ok(CacheLookup::Disabled);
@@ -155,7 +263,6 @@ impl CacheFacade {
             }
             Err(error) => return Err(CacheFacadeError::Store(error)),
         };
-        let now = Instant::now();
         if now < record.entry.expires_at {
             return Ok(CacheLookup::Fresh(record));
         }
@@ -170,6 +277,7 @@ impl CacheFacade {
                     key: key.clone(),
                     version: record.version,
                     consumed: Arc::new(AtomicBool::new(false)),
+                    lease: self.refresh_admission.try_acquire(),
                 },
                 record,
             });
@@ -279,8 +387,8 @@ mod tests {
     use hickory_proto::rr::{Name, RecordType};
 
     use crate::cache::{
-        CacheAdmissionPolicy, CacheFacade, CacheFacadeOptions, CacheLookup, CacheWriteRequest,
-        CacheWriteResult, MemoryCacheStore,
+        CacheAdmissionPolicy, CacheFacade, CacheFacadeBuildError, CacheFacadeOptions, CacheLookup,
+        CacheWriteRequest, CacheWriteResult, MemoryCacheStore,
     };
     use crate::dns::{CanonicalQuery, CanonicalResponse, Deadline, RuntimeRevision};
     use crate::ports::cache::{CacheCondition, CacheKey, CacheNamespace, CacheStore};
@@ -379,6 +487,78 @@ mod tests {
         };
         assert!(refresh.try_consume());
         assert!(!refresh.try_consume());
+    }
+
+    #[tokio::test]
+    async fn refresh_capacity_is_bounded_and_released_when_permit_drops() {
+        let store = Arc::new(MemoryCacheStore::default());
+        let facade = CacheFacade::try_new_with_refresh_capacity(
+            store,
+            CacheFacadeOptions {
+                optimistic_enabled: true,
+                admission: CacheAdmissionPolicy::new(
+                    Duration::from_secs(5),
+                    Some(Duration::from_secs(30)),
+                ),
+                ..CacheFacadeOptions::default()
+            },
+            1,
+        )
+        .unwrap();
+        let now = Instant::now();
+        facade
+            .store()
+            .compare_and_swap(
+                key(),
+                CacheCondition::Absent,
+                Arc::new(crate::ports::cache::CacheEntry {
+                    response: Arc::new(response(ResponseCode::NXDomain)),
+                    inserted_at: now - Duration::from_secs(10),
+                    expires_at: now - Duration::from_secs(1),
+                    stale_until: Some(now + Duration::from_secs(10)),
+                    response_class: crate::ports::cache::CacheResponseClass::NxDomain,
+                    producer_revision: RuntimeRevision(1),
+                    quality: crate::ports::cache::CacheQuality::Negative,
+                    checksum: 1,
+                    format_version: 1,
+                }),
+                deadline(),
+            )
+            .await
+            .unwrap();
+
+        let first = match facade.lookup_at(&key(), deadline(), now).await.unwrap() {
+            CacheLookup::Stale { refresh, .. } => refresh,
+            other => panic!("expected stale lookup, got {other:?}"),
+        };
+        assert!(first.is_admitted());
+        assert!(first.try_consume());
+
+        let second = match facade.lookup_at(&key(), deadline(), now).await.unwrap() {
+            CacheLookup::Stale { refresh, .. } => refresh,
+            other => panic!("expected stale lookup, got {other:?}"),
+        };
+        assert!(!second.is_admitted());
+        assert!(!second.try_consume());
+
+        drop(first);
+        let third = match facade.lookup_at(&key(), deadline(), now).await.unwrap() {
+            CacheLookup::Stale { refresh, .. } => refresh,
+            other => panic!("expected stale lookup, got {other:?}"),
+        };
+        assert!(third.is_admitted());
+        assert!(third.try_consume());
+    }
+
+    #[test]
+    fn zero_refresh_capacity_is_rejected() {
+        let error = CacheFacade::try_new_with_refresh_capacity(
+            Arc::new(MemoryCacheStore::default()),
+            CacheFacadeOptions::default(),
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(error, CacheFacadeBuildError::ZeroRefreshCapacity);
     }
 
     #[tokio::test]

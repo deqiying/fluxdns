@@ -14,6 +14,6 @@ pub use key::{
 };
 pub use memory::{MemoryCacheStore, MemoryCacheStoreBuildError};
 pub use service::{
-    CacheFacade, CacheFacadeError, CacheFacadeOptions, CacheLookup, CacheRefreshPermit,
-    CacheWriteRequest, CacheWriteResult,
+    CacheFacade, CacheFacadeBuildError, CacheFacadeError, CacheFacadeOptions, CacheLookup,
+    CacheRefreshPermit, CacheWriteRequest, CacheWriteResult,
 };
