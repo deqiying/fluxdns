@@ -1,13 +1,15 @@
 //! Transport 无关的最小 DNS Core handler。
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use hickory_proto::op::ResponseCode;
-use hickory_proto::rr::{RData, Record, RecordType, rdata::A, rdata::AAAA};
+use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A, rdata::AAAA, rdata::CNAME};
 use thiserror::Error;
 
 use crate::ports::PortFuture;
 use crate::ports::inbound::{EncodeErrorClass, InboundRequest};
+use crate::resource::{CanonicalDomain, HostsIndex, HostsLookup, HostsRecord};
 
 use super::{CanonicalMessageError, CanonicalResponse, DnsRequest, HostsTable};
 
@@ -72,14 +74,24 @@ impl DnsCore for ServFailCore {
 /// 基于不可变 hosts snapshot 的最小本地解析器。
 #[derive(Clone, Debug)]
 pub struct HostsCore {
-    table: std::sync::Arc<HostsTable>,
+    table: Arc<HostsTable>,
+    resource_indexes: Option<Arc<Vec<HostsIndex>>>,
     ttl: u32,
 }
 
 impl HostsCore {
     pub fn new(table: HostsTable, ttl: u32) -> Self {
         Self {
-            table: std::sync::Arc::new(table),
+            table: Arc::new(table),
+            resource_indexes: None,
+            ttl,
+        }
+    }
+
+    pub(crate) fn from_resource_indexes(indexes: Vec<HostsIndex>, ttl: u32) -> Self {
+        Self {
+            table: Arc::new(HostsTable::parse("").expect("empty hosts table is valid")),
+            resource_indexes: Some(Arc::new(indexes)),
             ttl,
         }
     }
@@ -101,26 +113,33 @@ impl DnsCore for HostsCore {
             }
 
             let question = request.query.question();
-            let answers = self
-                .table
-                .lookup(question.name(), question.query_type())
-                .unwrap_or_default()
-                .into_iter()
-                .filter_map(|address| match (question.query_type(), address) {
-                    (RecordType::A, std::net::IpAddr::V4(address)) => Some(Record::from_rdata(
-                        question.name().clone(),
-                        self.ttl,
-                        RData::A(A(address)),
-                    )),
-                    (RecordType::AAAA, std::net::IpAddr::V6(address)) => Some(Record::from_rdata(
-                        question.name().clone(),
-                        self.ttl,
-                        RData::AAAA(AAAA(address)),
-                    )),
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            let code = if answers.is_empty() && !self.table.contains_name(question.name()) {
+            let (answers, known_name) = if let Some(indexes) = &self.resource_indexes {
+                resource_answers(indexes, question.name(), question.query_type(), self.ttl)
+            } else {
+                let answers = self
+                    .table
+                    .lookup(question.name(), question.query_type())
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|address| match (question.query_type(), address) {
+                        (RecordType::A, std::net::IpAddr::V4(address)) => Some(Record::from_rdata(
+                            question.name().clone(),
+                            self.ttl,
+                            RData::A(A(address)),
+                        )),
+                        (RecordType::AAAA, std::net::IpAddr::V6(address)) => {
+                            Some(Record::from_rdata(
+                                question.name().clone(),
+                                self.ttl,
+                                RData::AAAA(AAAA(address)),
+                            ))
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                (answers, self.table.contains_name(question.name()))
+            };
+            let code = if answers.is_empty() && !known_name {
                 ResponseCode::NXDomain
             } else {
                 ResponseCode::NoError
@@ -135,6 +154,66 @@ impl DnsCore for HostsCore {
                 .map_err(CoreError::ResponseConstruction)
         })
     }
+}
+
+fn resource_answers(
+    indexes: &[HostsIndex],
+    name: &Name,
+    query_type: RecordType,
+    ttl: u32,
+) -> (Vec<Record>, bool) {
+    let Ok(domain) = CanonicalDomain::parse(&name.to_ascii()) else {
+        return (Vec::new(), false);
+    };
+    let has_exact = indexes.iter().any(|index| index.records(&domain).is_some());
+    let mut known_name = false;
+    let mut answers = Vec::new();
+
+    for index in indexes {
+        let lookup = if has_exact {
+            index.records(&domain).map(HostsLookup::Records)
+        } else {
+            index.lookup(&domain)
+        };
+        let Some(HostsLookup::Records(records)) = lookup else {
+            continue;
+        };
+        known_name = true;
+        for record in records {
+            let answer = match (query_type, record) {
+                (RecordType::A, HostsRecord::Address(address)) if address.is_ipv4() => {
+                    Some(Record::from_rdata(
+                        name.clone(),
+                        ttl,
+                        RData::A(A(match address {
+                            std::net::IpAddr::V4(address) => *address,
+                            std::net::IpAddr::V6(_) => unreachable!("IPv4 address checked"),
+                        })),
+                    ))
+                }
+                (RecordType::AAAA, HostsRecord::Address(address)) if address.is_ipv6() => {
+                    Some(Record::from_rdata(
+                        name.clone(),
+                        ttl,
+                        RData::AAAA(AAAA(match address {
+                            std::net::IpAddr::V6(address) => *address,
+                            std::net::IpAddr::V4(_) => unreachable!("IPv6 address checked"),
+                        })),
+                    ))
+                }
+                (RecordType::CNAME, HostsRecord::Cname(target)) => {
+                    Name::from_ascii(target.as_str()).ok().map(|target| {
+                        Record::from_rdata(name.clone(), ttl, RData::CNAME(CNAME(target)))
+                    })
+                }
+                _ => None,
+            };
+            if let Some(answer) = answer {
+                answers.push(answer);
+            }
+        }
+    }
+    (answers, known_name)
 }
 
 /// 将一条已规范化的入站请求交给 Core，并通过唯一 response handle 完成响应。
@@ -170,6 +249,7 @@ mod tests {
         DnsRequest, HostsTable, ListenerId, RequestContext, RequestId, RequestMeta,
         RuntimeRevision, TransportCapabilities, TransportClass,
     };
+    use crate::resource::HostsIndex;
 
     use crate::ports::inbound::InboundRequest;
     use crate::ports::testing::FakeResponseEncoder;
@@ -211,6 +291,14 @@ mod tests {
                 runtime_revision: RuntimeRevision(1),
             },
         }
+    }
+
+    fn request_for(id: u16, name: &str, record_type: RecordType) -> DnsRequest {
+        let mut request = request(id);
+        let mut message = Message::new(id, MessageType::Query, OpCode::Query);
+        message.add_query(Query::query(Name::from_ascii(name).unwrap(), record_type));
+        request.query = CanonicalQuery::from_message(message).unwrap();
+        request
     }
 
     #[tokio::test]
@@ -349,5 +437,69 @@ mod tests {
             panic!("expected nodata");
         };
         assert_eq!(response.class(), crate::dns::ResponseClass::NoData);
+    }
+
+    #[tokio::test]
+    async fn resource_hosts_core_returns_cname_and_wildcard_answers() {
+        let index = HostsIndex::parse_json(
+            r#"{
+                "alias.example": {"CNAME": "target.example"},
+                "*.wild.example": {"A": "192.0.2.7"}
+            }"#,
+        )
+        .unwrap();
+        let core = HostsCore::from_resource_indexes(vec![index], 60);
+
+        let cname = core
+            .resolve(&request_for(7, "alias.example.", RecordType::CNAME))
+            .await
+            .unwrap();
+        let CoreOutcome::Response(cname) = cname else {
+            panic!("expected CNAME response");
+        };
+        assert_eq!(cname.class(), crate::dns::ResponseClass::Positive);
+        assert_eq!(cname.as_message().answers.len(), 1);
+        assert_eq!(
+            cname.as_message().answers[0].record_type(),
+            RecordType::CNAME
+        );
+
+        let wildcard = core
+            .resolve(&request_for(8, "child.wild.example.", RecordType::A))
+            .await
+            .unwrap();
+        let CoreOutcome::Response(wildcard) = wildcard else {
+            panic!("expected wildcard response");
+        };
+        assert_eq!(wildcard.class(), crate::dns::ResponseClass::Positive);
+        assert_eq!(wildcard.as_message().answers.len(), 1);
+        assert_eq!(
+            wildcard.as_message().answers[0].record_type(),
+            RecordType::A
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_hosts_core_preserves_nodata_and_nxdomain_semantics() {
+        let index = HostsIndex::parse_hosts("192.0.2.1 known.example\n").unwrap();
+        let core = HostsCore::from_resource_indexes(vec![index], 60);
+
+        let nodata = core
+            .resolve(&request_for(7, "known.example.", RecordType::AAAA))
+            .await
+            .unwrap();
+        let CoreOutcome::Response(nodata) = nodata else {
+            panic!("expected NODATA response");
+        };
+        assert_eq!(nodata.class(), crate::dns::ResponseClass::NoData);
+
+        let nxdomain = core
+            .resolve(&request_for(8, "missing.example.", RecordType::A))
+            .await
+            .unwrap();
+        let CoreOutcome::Response(nxdomain) = nxdomain else {
+            panic!("expected NXDOMAIN response");
+        };
+        assert_eq!(nxdomain.class(), crate::dns::ResponseClass::NxDomain);
     }
 }
