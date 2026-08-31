@@ -1,8 +1,8 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，代码未实现
+> 状态：v1 方案已完成，已实现 client ID/CIDR 与 strategy immutable index 首轮切片；rule/route/override 管线尚未实现
 >
-> 更新日期：2026-08-30
+> 更新日期：2026-08-31
 >
 > 目标代码：`backend/src/policy/*`
 >
@@ -49,6 +49,12 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 - 用于观测的稳定、低基数 ID。
 
 编译发生在 prepare/resource update，不在请求时解析字符串引用。
+
+当前首轮实现已经提供：
+
+- `ClientIndex`：exact client ID 优先，未命中时按 IPv4/IPv6 最长 CIDR 前缀匹配，最后进入 `Unknown`；重复 ID/CIDR 和空规则在构建时拒绝；
+- `StrategyIndex`：将已解析策略编译为不可变 `BTreeMap<ConfigId, Arc<ResolvedStrategy>>`，重复策略 ID 在构建时拒绝；
+- 两个索引都只持有已解析 typed 值，不在请求路径读取 YAML 或执行网络 I/O。
 
 ## 4. 域名规范化
 
@@ -171,11 +177,12 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 
 ## 13. 实现检查清单
 
-- [ ] 实现 client ID/CIDR 索引；
+- [x] 实现 client ID/CIDR 索引；
+- [x] 建立 strategy immutable lookup index；
 - [ ] 实现 strategy/route 编译；
 - [ ] 实现 rule/hosts/resource matcher 编排；
 - [ ] 实现覆盖矩阵与 ResolutionPlan；
 - [ ] 接入 snapshot 原子发布；
 - [ ] 完成冲突、优先级和并发一致性测试。
 
-当前实现进度：**0%**。
+当前实现进度：**20%**（client ID/CIDR 与 strategy lookup 首轮切片；rule/route matcher、覆盖矩阵、ECS/TTL/cache decision 和 snapshot 接线未实现）。

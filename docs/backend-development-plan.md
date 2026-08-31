@@ -15,8 +15,8 @@
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **35.1%** | Config 达到 100% 模块验收口径；DoH 已完成 plain HTTP happy path，Upstream 已完成 hosts connector 与纯选择器，Cache 已完成内存 adapter、响应准入/TTL 和 single-flight 首轮切片，但仍缺少 TLS、代理信任、DoH 出站、bootstrap、CacheFacade/key builder、Moka/SQLite persistence、资源、存储和完整故障验收 |
-| v1 交付总进度 | **41.5%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 35.1%` |
+| 后端代码实现进度 | **36.7%** | Config 达到 100% 模块验收口径；DoH 已完成 plain HTTP happy path，Upstream 已完成 hosts connector 与纯选择器，Cache 已完成内存 adapter、响应准入/TTL、key builder、Facade 和 single-flight 首轮切片，Policy 已完成 client/strategy 索引首轮切片，但仍缺少 TLS、代理信任、DoH 出站、bootstrap、完整 rule/route/override、Moka/SQLite persistence、资源、存储和完整故障验收 |
+| v1 交付总进度 | **43.0%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 36.7%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -61,7 +61,7 @@ v1 交付范围：
 | Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 35% | 12% |
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 35% | 10% |
-| Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 未开始 | 0% | 8% |
+| Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 20% | 8% |
 | Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 35% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 35% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 未开始 | 0% | 7% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 35% + 9% × 35% + 10% × 35% + 3% × 20% ≈ 35.1%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 35% + 8% × 20% + 9% × 35% + 10% × 35% + 3% × 20% ≈ 36.7%
 ```
 
 ## 4. 进度判定规则
@@ -239,6 +239,8 @@ transport / upstream / storage / observability adapters
 - 实现 client、strategy、hosts、rule_set 编译索引；
 - 完成本地/远程资源首次快照、每资源 revision 和原子发布；
 - 验收：匹配优先级、资源解析、首次失败和乱序刷新测试通过。
+
+首个小阶段（已完成）：新增 `ClientIndex` 和 `StrategyIndex`，覆盖 exact ID 优先、IPv4/IPv6 longest-prefix、unknown、重复匹配拒绝和 immutable strategy lookup；定向测试 5 项通过。当前尚未实现 rule/route matcher、client/strategy override、ECS/TTL/cache decision 或 Resource snapshot 接线。
 
 ### 阶段 8：DoH 接入与代理安全边界
 
