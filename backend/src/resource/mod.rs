@@ -3,6 +3,7 @@
 mod hosts;
 mod loader;
 mod refresh;
+mod remote;
 mod rules;
 mod snapshot;
 
@@ -16,6 +17,10 @@ pub use loader::{
 pub use refresh::{
     RefreshBackoff, RefreshBeginError, RefreshFailure, RefreshPermit, RefreshPublishError,
     ResourceRefreshCoordinator, ResourceRefreshPhase, ResourceRefreshStatus,
+};
+pub use remote::{
+    LoadedRemoteRuleSet, RemoteResourceError, RemoteResourceManifest, RemoteResourceOptions,
+    fetch_remote_rule_set,
 };
 pub use rules::{RuleIndex, RuleLimits, RuleMatch, RuleParseError};
 pub use snapshot::{
