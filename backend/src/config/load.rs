@@ -861,6 +861,13 @@ mod tests {
         let debug = format!("{:?}", output.config);
         assert!(!debug.contains("jkBqXYJuD.4MlWKN"));
         assert!(!debug.contains("FLUXDNS_OUTBOUND_SG_URL"));
+        assert!(!debug.contains("7a753d8a-a5c7-4e37-a207-9b0e15d9009f"));
+        assert!(!debug.contains("192.168.1.0/24"));
+        assert!(!debug.contains("/dns-query"));
+
+        let resolved_client_debug = format!("{:?}", output.resolved.clients[0]);
+        assert!(!resolved_client_debug.contains("7a753d8a-a5c7-4e37-a207-9b0e15d9009f"));
+        assert!(!resolved_client_debug.contains("192.168.1.0/24"));
 
         let changed_source =
             source.replace("FLUXDNS_OUTBOUND_SG_URL", "FLUXDNS_OUTBOUND_OTHER_URL");

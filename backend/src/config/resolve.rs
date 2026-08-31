@@ -27,6 +27,7 @@ impl fmt::Debug for SafeUrl<'_> {
         let mut url = self.0.clone();
         let _ = url.set_username("");
         let _ = url.set_password(None);
+        url.set_path("");
         url.set_query(None);
         url.set_fragment(None);
         formatter.debug_tuple("Url").field(&url.as_str()).finish()
@@ -581,7 +582,7 @@ impl fmt::Debug for ResolvedRuleSet {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 pub struct ResolvedClient {
     pub id: ConfigId,
     pub ids: Vec<String>,
@@ -590,6 +591,21 @@ pub struct ResolvedClient {
     pub cache: Option<ResolvedCacheOverride>,
     pub ttl_override: ResolvedTtlOverride,
     pub edns_client_subnet: ResolvedEcs,
+}
+
+impl fmt::Debug for ResolvedClient {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedClient")
+            .field("id", &self.id)
+            .field("id_count", &self.ids.len())
+            .field("ip_count", &self.ips.len())
+            .field("strategy", &self.strategy)
+            .field("cache", &self.cache)
+            .field("ttl_override", &self.ttl_override)
+            .field("edns_client_subnet", &self.edns_client_subnet)
+            .finish()
+    }
 }
 
 /// Immutable configuration consumed by later runtime phases.

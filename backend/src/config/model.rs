@@ -48,6 +48,7 @@ impl fmt::Debug for SafeUrl<'_> {
         let mut url = self.0.clone();
         let _ = url.set_username("");
         let _ = url.set_password(None);
+        url.set_path("");
         url.set_query(None);
         url.set_fragment(None);
         formatter.debug_tuple("Url").field(&url.as_str()).finish()
@@ -824,7 +825,7 @@ pub enum RuleSetFormat {
     Dat,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientDto {
     pub name: String,
@@ -839,13 +840,37 @@ pub struct ClientDto {
     pub edns_client_subnet: Option<EcsDto>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+impl fmt::Debug for ClientDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientDto")
+            .field("name", &self.name)
+            .field("match", &self.r#match)
+            .field("strategy", &self.strategy)
+            .field("cache", &self.cache)
+            .field("ttl_override", &self.ttl_override)
+            .field("edns_client_subnet", &self.edns_client_subnet)
+            .finish()
+    }
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientMatchDto {
     #[serde(default)]
     pub ids: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_cidr_vec")]
     pub ips: Vec<IpNet>,
+}
+
+impl fmt::Debug for ClientMatchDto {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientMatchDto")
+            .field("id_count", &self.ids.len())
+            .field("ip_count", &self.ips.len())
+            .finish()
+    }
 }
 
 /// A secret source. Its debug representation intentionally omits source details and value.
