@@ -3,7 +3,7 @@
 //! 本 core 先处理已编译的本地 hosts，再执行当前已支持的 hosts/group upstream。
 //! 尚未具备真实 connector 的分支保持确定性的 SERVFAIL，不伪造网络结果。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Instant;
@@ -14,7 +14,9 @@ use thiserror::Error;
 use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedUpstream};
 use crate::policy::{PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
-use crate::ports::exchange::{DnsExchange, UpstreamOutcome};
+use crate::ports::exchange::{
+    ConnectorId, DnsExchange, TransportFailure, TransportFailureClass, UpstreamOutcome,
+};
 use crate::resource::{CanonicalDomain, HostsIndex, HostsLimits, ResourceLoadError, load_hosts};
 use crate::upstream::{GroupSelector, RegistryError, UpstreamGroupExecutor, UpstreamRegistry};
 
@@ -202,6 +204,7 @@ impl DnsCore for PolicyDnsCore {
 struct UpstreamRuntime {
     direct: BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
     groups: BTreeMap<ConfigId, Arc<UpstreamGroupExecutor>>,
+    all: BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
 }
 
 impl fmt::Debug for UpstreamRuntime {
@@ -225,6 +228,14 @@ impl UpstreamRuntime {
         upstreams: &[ResolvedUpstream],
         registry: UpstreamRegistry,
     ) -> Result<Self, UpstreamRuntimeBuildError> {
+        let mut definitions = BTreeMap::new();
+        for upstream in upstreams {
+            let id = upstream_id(upstream).clone();
+            if definitions.insert(id.clone(), upstream).is_some() {
+                return Err(group_build_error(&id, "duplicate upstream id".to_owned()));
+            }
+        }
+
         let mut direct = BTreeMap::new();
         for upstream in upstreams.iter().filter(|upstream| {
             matches!(
@@ -244,56 +255,20 @@ impl UpstreamRuntime {
             }
         }
 
+        let mut all = direct.clone();
         let mut groups = BTreeMap::new();
-        for upstream in upstreams {
-            let ResolvedUpstream::Group {
-                id,
-                upstreams: members,
-                upstream_mode,
-                timeout,
-                fallbacks,
-                fallback_upstream_mode,
-                fallback_timeout,
-                ..
-            } = upstream
-            else {
-                continue;
-            };
-            let selector = GroupSelector::from_upstream_mode(*upstream_mode, members.clone())
-                .map_err(|error| group_build_error(id, error.to_string()))?;
-            let exchanges = group_member_exchanges(&direct, id, members, "primary")?;
-            let executor = if fallbacks.is_empty() {
-                UpstreamGroupExecutor::new_with_timeout(selector, exchanges, *timeout)
-            } else {
-                let fallback_mode = (*fallback_upstream_mode)
-                    .ok_or_else(|| group_build_error(id, "fallback mode is missing".to_owned()))?;
-                let fallback_timeout = fallback_timeout.ok_or_else(|| {
-                    group_build_error(id, "fallback timeout is missing".to_owned())
-                })?;
-                let fallback_selector =
-                    GroupSelector::from_upstream_mode(fallback_mode, fallbacks.clone())
-                        .map_err(|error| group_build_error(id, error.to_string()))?;
-                let fallback_exchanges =
-                    group_member_exchanges(&direct, id, fallbacks, "fallback")?;
-                UpstreamGroupExecutor::new_with_fallback(
-                    selector,
-                    exchanges,
-                    *timeout,
-                    fallback_selector,
-                    fallback_exchanges,
-                    fallback_timeout,
-                )
-            }
-            .map_err(|error| group_build_error(id, error.to_string()))?;
-            if groups.insert(id.clone(), Arc::new(executor)).is_some() {
-                return Err(group_build_error(
-                    id,
-                    "duplicate upstream group id".to_owned(),
-                ));
+        let mut building = HashSet::new();
+        for (id, upstream) in &definitions {
+            if matches!(upstream, ResolvedUpstream::Group { .. }) {
+                build_group_executor(id, &definitions, &mut all, &mut groups, &mut building)?;
             }
         }
 
-        Ok(Self { direct, groups })
+        Ok(Self {
+            direct,
+            groups,
+            all,
+        })
     }
 
     fn len(&self) -> usize {
@@ -312,12 +287,126 @@ impl UpstreamRuntime {
         if let Some(executor) = self.groups.get(upstream) {
             return executor.execute(query, context).await.ok();
         }
+        if let Some(exchange) = self.all.get(upstream) {
+            return Some(exchange.exchange(query, context).await);
+        }
         None
     }
 }
 
+struct GroupExchange {
+    connector: ConnectorId,
+    executor: Arc<UpstreamGroupExecutor>,
+}
+
+impl DnsExchange for GroupExchange {
+    fn connector_id(&self) -> &ConnectorId {
+        &self.connector
+    }
+
+    fn exchange<'a>(
+        &'a self,
+        query: &'a super::CanonicalQuery,
+        context: &'a super::RequestContext,
+    ) -> PortFuture<'a, UpstreamOutcome> {
+        Box::pin(async move {
+            match self.executor.execute(query, context).await {
+                Ok(outcome) => outcome,
+                Err(_) => UpstreamOutcome::TransportFailure(TransportFailure {
+                    connector: self.connector.clone(),
+                    class: TransportFailureClass::Internal,
+                    retryable: false,
+                    safe_context: Some("nested group execution failed"),
+                }),
+            }
+        })
+    }
+}
+
+fn build_group_executor(
+    id: &ConfigId,
+    definitions: &BTreeMap<ConfigId, &ResolvedUpstream>,
+    all: &mut BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
+    groups: &mut BTreeMap<ConfigId, Arc<UpstreamGroupExecutor>>,
+    building: &mut HashSet<ConfigId>,
+) -> Result<Arc<UpstreamGroupExecutor>, UpstreamRuntimeBuildError> {
+    if let Some(executor) = groups.get(id) {
+        return Ok(Arc::clone(executor));
+    }
+    if !building.insert(id.clone()) {
+        return Err(group_build_error(id, "nested group cycle".to_owned()));
+    }
+    let result = (|| {
+        let Some(ResolvedUpstream::Group {
+            upstreams: members,
+            upstream_mode,
+            timeout,
+            fallbacks,
+            fallback_upstream_mode,
+            fallback_timeout,
+            ..
+        }) = definitions.get(id).copied()
+        else {
+            return Err(group_build_error(
+                id,
+                "group definition is missing".to_owned(),
+            ));
+        };
+        let selector = GroupSelector::from_upstream_mode(*upstream_mode, members.clone())
+            .map_err(|error| group_build_error(id, error.to_string()))?;
+        let exchanges =
+            group_member_exchanges(definitions, all, groups, building, id, members, "primary")?;
+        let executor = if fallbacks.is_empty() {
+            UpstreamGroupExecutor::new_with_timeout(selector, exchanges, *timeout)
+        } else {
+            let fallback_mode = (*fallback_upstream_mode)
+                .ok_or_else(|| group_build_error(id, "fallback mode is missing".to_owned()))?;
+            let fallback_timeout = fallback_timeout
+                .ok_or_else(|| group_build_error(id, "fallback timeout is missing".to_owned()))?;
+            let fallback_selector =
+                GroupSelector::from_upstream_mode(fallback_mode, fallbacks.clone())
+                    .map_err(|error| group_build_error(id, error.to_string()))?;
+            let fallback_exchanges = group_member_exchanges(
+                definitions,
+                all,
+                groups,
+                building,
+                id,
+                fallbacks,
+                "fallback",
+            )?;
+            UpstreamGroupExecutor::new_with_fallback(
+                selector,
+                exchanges,
+                *timeout,
+                fallback_selector,
+                fallback_exchanges,
+                fallback_timeout,
+            )
+        }
+        .map_err(|error| group_build_error(id, error.to_string()))?;
+        let executor = Arc::new(executor);
+        let connector = ConnectorId::new(id.as_str().to_owned())
+            .map_err(|_| group_build_error(id, "invalid group connector id".to_owned()))?;
+        all.insert(
+            id.clone(),
+            Arc::new(GroupExchange {
+                connector,
+                executor: Arc::clone(&executor),
+            }),
+        );
+        groups.insert(id.clone(), Arc::clone(&executor));
+        Ok(executor)
+    })();
+    building.remove(id);
+    result
+}
+
 fn group_member_exchanges(
-    direct: &BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
+    definitions: &BTreeMap<ConfigId, &ResolvedUpstream>,
+    all: &mut BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
+    groups: &mut BTreeMap<ConfigId, Arc<UpstreamGroupExecutor>>,
+    building: &mut HashSet<ConfigId>,
     group: &ConfigId,
     members: &[crate::config::resolve::ResolvedUpstreamMember],
     role: &str,
@@ -325,15 +414,25 @@ fn group_member_exchanges(
     members
         .iter()
         .map(|member| {
-            direct.get(&member.name).cloned().ok_or_else(|| {
-                group_build_error(
-                    group,
-                    format!(
-                        "{role} member `{}` is not a direct connector",
-                        member.name.as_str()
-                    ),
-                )
-            })
+            if let Some(exchange) = all.get(&member.name) {
+                return Ok(Arc::clone(exchange));
+            }
+            if matches!(
+                definitions.get(&member.name),
+                Some(ResolvedUpstream::Group { .. })
+            ) {
+                build_group_executor(&member.name, definitions, all, groups, building)?;
+                return all.get(&member.name).cloned().ok_or_else(|| {
+                    group_build_error(group, "nested group connector is missing".to_owned())
+                });
+            }
+            Err(group_build_error(
+                group,
+                format!(
+                    "{role} member `{}` is not a direct connector",
+                    member.name.as_str()
+                ),
+            ))
         })
         .collect()
 }
@@ -416,7 +515,8 @@ mod tests {
 
     use crate::config::model::EcsMode;
     use crate::config::resolve::{
-        ConfigId, ResolvedEcs, ResolvedOutbound, ResolvedSecretRef, ResolvedUpstream, ValueSource,
+        ConfigId, ResolvedEcs, ResolvedOutbound, ResolvedSecretRef, ResolvedUpstream,
+        ResolvedUpstreamMember, ValueSource,
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
@@ -424,6 +524,7 @@ mod tests {
         DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta, RuntimeRevision,
         TransportCapabilities, TransportClass,
     };
+    use crate::ports::exchange::UpstreamOutcome;
     use crate::ports::{PortError, PortFuture};
     use crate::upstream::{DohHttpRequest, DohHttpResponseOwned, DohHttpTransport};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -921,6 +1022,90 @@ strategy:
         };
         assert_eq!(response.class(), crate::dns::ResponseClass::Positive);
         assert_eq!(response.ttl().min_ttl, Some(crate::dns::DEFAULT_LOCAL_TTL));
+    }
+
+    #[tokio::test]
+    async fn upstream_runtime_executes_nested_groups() {
+        let local = ResolvedUpstream::Hosts {
+            id: ConfigId::new("local").unwrap(),
+            format: "hosts".to_owned(),
+            hosts: "192.0.2.11 nested.example\n".to_owned(),
+        };
+        let inner = ResolvedUpstream::Group {
+            id: ConfigId::new("inner").unwrap(),
+            upstreams: vec![ResolvedUpstreamMember {
+                name: ConfigId::new("local").unwrap(),
+                weight: 1,
+            }],
+            upstream_mode: crate::config::model::UpstreamMode::Failover,
+            timeout: Duration::from_secs(1),
+            fallbacks: Vec::new(),
+            fallback_upstream_mode: None,
+            fallback_timeout: None,
+        };
+        let outer = ResolvedUpstream::Group {
+            id: ConfigId::new("outer").unwrap(),
+            upstreams: vec![ResolvedUpstreamMember {
+                name: ConfigId::new("inner").unwrap(),
+                weight: 1,
+            }],
+            upstream_mode: crate::config::model::UpstreamMode::Failover,
+            timeout: Duration::from_secs(1),
+            fallbacks: Vec::new(),
+            fallback_upstream_mode: None,
+            fallback_timeout: None,
+        };
+        let registry = UpstreamRegistry::from_resolved(std::slice::from_ref(&local)).unwrap();
+        let runtime = UpstreamRuntime::from_registry(&[local, inner, outer], registry).unwrap();
+        let request = request("nested.example.", RecordType::A);
+        let outcome = runtime
+            .exchange(
+                &ConfigId::new("outer").unwrap(),
+                &request.query,
+                &request.context,
+            )
+            .await
+            .expect("nested group must resolve");
+        assert!(matches!(
+            outcome,
+            UpstreamOutcome::Response(response)
+                if response.class() == crate::dns::ResponseClass::Positive
+        ));
+    }
+
+    #[test]
+    fn upstream_runtime_rejects_nested_group_cycle() {
+        let group_a = ResolvedUpstream::Group {
+            id: ConfigId::new("group-a").unwrap(),
+            upstreams: vec![ResolvedUpstreamMember {
+                name: ConfigId::new("group-b").unwrap(),
+                weight: 1,
+            }],
+            upstream_mode: crate::config::model::UpstreamMode::Failover,
+            timeout: Duration::from_secs(1),
+            fallbacks: Vec::new(),
+            fallback_upstream_mode: None,
+            fallback_timeout: None,
+        };
+        let group_b = ResolvedUpstream::Group {
+            id: ConfigId::new("group-b").unwrap(),
+            upstreams: vec![ResolvedUpstreamMember {
+                name: ConfigId::new("group-a").unwrap(),
+                weight: 1,
+            }],
+            upstream_mode: crate::config::model::UpstreamMode::Failover,
+            timeout: Duration::from_secs(1),
+            fallbacks: Vec::new(),
+            fallback_upstream_mode: None,
+            fallback_timeout: None,
+        };
+        let error = UpstreamRuntime::from_registry(
+            &[group_a, group_b],
+            UpstreamRegistry::from_resolved(&[]).unwrap(),
+        )
+        .unwrap_err();
+        assert_eq!(error.upstream, "group-a");
+        assert_eq!(error.reason, "nested group cycle");
     }
 
     #[tokio::test]
