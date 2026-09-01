@@ -1,8 +1,14 @@
 use std::fmt;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crate::config::ResolvedConfig;
+use crate::config::resolve::{ResolvedHostsResource, ResolvedRuleSet};
 use crate::dns::{DnsCore, PolicyDnsCore, RuntimeRevision};
+use crate::resource::{
+    ResourcePublishError, ResourceRegistrySnapshot, ResourceSnapshot, ResourceSourceKind,
+    ResourceStaleStatus,
+};
 
 /// 请求热路径使用的不可变运行时输入。
 ///
@@ -12,12 +18,14 @@ pub struct RuntimeSnapshot {
     revision: RuntimeRevision,
     config: Arc<ResolvedConfig>,
     policy_core: Option<Arc<PolicyDnsCore>>,
+    resources: Arc<ResourceRegistrySnapshot<()>>,
 }
 
 impl RuntimeSnapshot {
     pub(crate) fn new(revision: RuntimeRevision, config: Arc<ResolvedConfig>) -> Self {
         Self {
             revision,
+            resources: Arc::new(resource_snapshot(revision, &config)),
             config,
             policy_core: None,
         }
@@ -30,6 +38,7 @@ impl RuntimeSnapshot {
     ) -> Self {
         Self {
             revision,
+            resources: Arc::new(resource_snapshot(revision, &config)),
             config,
             policy_core: Some(Arc::new(policy_core)),
         }
@@ -58,12 +67,17 @@ impl RuntimeSnapshot {
             .map(|core| Arc::clone(core) as Arc<dyn DnsCore>)
     }
 
+    pub fn resources(&self) -> &ResourceRegistrySnapshot<()> {
+        &self.resources
+    }
+
     pub fn summary(&self) -> RuntimeSnapshotSummary {
         RuntimeSnapshotSummary {
             revision: self.revision,
             normalized_hash: self.config.normalized_hash.clone(),
             listener_count: self.config.listeners.len(),
             bind_entry_count: self.config.bind_plan.entries.len(),
+            resource_count: self.resources.len(),
             has_policy_core: self.policy_core.is_some(),
         }
     }
@@ -87,7 +101,69 @@ pub struct RuntimeSnapshotSummary {
     pub normalized_hash: String,
     pub listener_count: usize,
     pub bind_entry_count: usize,
+    pub resource_count: usize,
     pub has_policy_core: bool,
+}
+
+fn resource_snapshot(
+    revision: RuntimeRevision,
+    config: &ResolvedConfig,
+) -> ResourceRegistrySnapshot<()> {
+    let mut registry = ResourceRegistrySnapshot::new();
+    for resource in &config.hosts {
+        let (id, source_kind) = match resource {
+            ResolvedHostsResource::Const { id, .. } => (id, ResourceSourceKind::Const),
+            ResolvedHostsResource::File { id, .. } => (id, ResourceSourceKind::File),
+        };
+        registry = publish_resource_entry(
+            registry,
+            resource_entry(id, source_kind, revision, &config.normalized_hash),
+        );
+    }
+    for resource in &config.rule_sets {
+        let (id, source_kind) = match resource {
+            ResolvedRuleSet::Const { id, .. } => (id, ResourceSourceKind::Const),
+            ResolvedRuleSet::File { id, .. } => (id, ResourceSourceKind::File),
+            ResolvedRuleSet::Remote { id, .. } => (id, ResourceSourceKind::Remote),
+        };
+        registry = publish_resource_entry(
+            registry,
+            resource_entry(id, source_kind, revision, &config.normalized_hash),
+        );
+    }
+    registry
+}
+
+fn publish_resource_entry(
+    registry: ResourceRegistrySnapshot<()>,
+    candidate: ResourceSnapshot<()>,
+) -> ResourceRegistrySnapshot<()> {
+    match registry.publish(candidate) {
+        Ok(next) => next,
+        Err(ResourcePublishError::StaleEpoch { .. }) => registry,
+        Err(ResourcePublishError::CompareAndSwapFailed { .. }) => registry,
+    }
+}
+
+fn resource_entry(
+    id: &crate::config::resolve::ConfigId,
+    source_kind: ResourceSourceKind,
+    revision: RuntimeRevision,
+    normalized_hash: &str,
+) -> ResourceSnapshot<()> {
+    ResourceSnapshot::new(
+        id.clone(),
+        revision.0,
+        1,
+        normalized_hash,
+        "config",
+        "config-v1",
+        SystemTime::now(),
+        source_kind,
+        false,
+        ResourceStaleStatus::Fresh,
+        (),
+    )
 }
 
 #[cfg(test)]
@@ -162,6 +238,7 @@ strategy:
                 normalized_hash: expected_hash,
                 listener_count: 1,
                 bind_entry_count: 1,
+                resource_count: 1,
                 has_policy_core: false,
             }
         );

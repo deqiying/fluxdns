@@ -282,14 +282,8 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .map_err(map_bind_error)?;
             let coordinator = crate::runtime::RuntimeCoordinator::new(candidate);
             let active = coordinator.load();
-            let core = active.snapshot().dns_core().ok_or_else(|| {
-                AppError::new(
-                    AppErrorKind::Prepare,
-                    "active runtime snapshot is missing its DNS core",
-                )
-            })?;
-            let mut service =
-                DnsService::with_default_timeout(active, core).map_err(map_service_start_error)?;
+            let mut service = DnsService::with_default_timeout_from_runtime(active)
+                .map_err(map_service_start_error)?;
             tracing::info!(
                 event = "service_ready",
                 component = "application",

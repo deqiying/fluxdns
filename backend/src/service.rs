@@ -25,6 +25,8 @@ use crate::transport::{
 
 #[derive(Debug, Error)]
 pub enum ServiceStartError {
+    #[error("active runtime snapshot is missing its DNS core")]
+    MissingDnsCore,
     #[error("could not obtain active listener handles: {class} ({operation})")]
     ListenerHandles {
         class: &'static str,
@@ -157,6 +159,16 @@ impl DnsService {
         core: Arc<dyn DnsCore>,
     ) -> Result<Self, ServiceStartError> {
         Self::start(runtime, core, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub fn with_default_timeout_from_runtime(
+        runtime: Arc<ActiveRuntime>,
+    ) -> Result<Self, ServiceStartError> {
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::with_default_timeout(runtime, core)
     }
 
     pub fn runtime(&self) -> &Arc<ActiveRuntime> {

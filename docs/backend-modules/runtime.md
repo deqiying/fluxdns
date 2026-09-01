@@ -1,8 +1,8 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 基础服务编排已实现，完整资源/flush 生命周期仍在后续阶段
+> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现，完整资源/flush 生命周期仍在后续阶段
 >
-> 更新日期：2026-08-31
+> 更新日期：2026-09-01
 >
 > 目标代码：`backend/src/runtime/*`
 >
@@ -36,7 +36,7 @@ ResolvedConfig
   → Closed
 ```
 
-- `RuntimeSnapshot`：请求热路径读取的不可变配置、策略、资源、上游和 cache semantics；
+- `RuntimeSnapshot`：请求热路径读取的不可变配置、策略、资源摘要、上游和 cache semantics；
 - `PreparedRuntime`：已完成所有非 bind 准备，但不对外可见；
 - `BoundCandidate`：全部目标 socket 已成功创建，尚未接收请求；
 - `ActiveRuntime`：唯一对外服务实例；
@@ -50,7 +50,7 @@ snapshot 只持有请求所需的不可变 handle：
 
 - revision 与 normalized config hash；
 - policy index；
-- per-resource registry snapshot；
+- per-resource registry snapshot（当前 Runtime-facing 版本为按配置生成的元数据摘要，compiled payload 仍由 `PolicyDnsCore` 持有）；
 - upstream connector registry；
 - cache semantics；
 - transport capabilities registry。
@@ -63,6 +63,8 @@ snapshot 不包含：
 - Moka store；
 - writer channel 的发送端实现细节；
 - mutable retry/backoff state。
+
+`DnsService::with_default_timeout_from_runtime` 从 active snapshot 取得 `DnsCore` handle，确保 service task 与请求入口使用同一 `RuntimeRevision`。当前尚未把资源 refresh worker、资源级 CAS reload、resource-only runtime swap 或 flush task 接入该 snapshot。
 
 每个请求在 ingress 后只捕获一次 `Arc<RuntimeSnapshot>`。同一请求不能在策略、缓存和上游阶段分别读取不同 revision。
 
@@ -202,6 +204,7 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [x] 实现 `Supervisor` task tree 基础、退出分类和受控 shutdown 回收报告；
 - [x] 实现 UDP/TCP 不透明 socket capability、`SystemSocketFactory` 和 `BoundListenerSet` 句柄交接；
 - [x] 接入真实 UDP/TCP service task、TCP session `JoinSet` 和基础 drain/shutdown；
+- [x] 接入按配置生成的 immutable resource snapshot 摘要，并让 service 从 active snapshot 捕获同 revision `DnsCore`；
 - [ ] 定义状态类型与所有权转换；
 - [ ] 完成跨模块资源装配版 PreparedRuntime/preflight；
 - [ ] 完成真实服务任务版 ActiveRuntime coordinator/CAS 与 reload；
@@ -209,4 +212,4 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [ ] 完成完整 drain/shutdown（flush、checkpoint、超时分项报告）；
 - [ ] 完成并发、故障和时间控制测试。
 
-当前实现进度：**35%**。
+当前实现进度：**35%**。已验证 Runtime snapshot 资源摘要与 service core 构造入口；完整资源 worker、reload/CAS 合并、flush 和故障注入仍未接线。

@@ -1,6 +1,6 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Runtime snapshot 原子接线尚未实现
+> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Runtime 已保存资源摘要并由 service 捕获同 revision core，资源原子 reload 尚未实现
 >
 > 更新日期：2026-09-01
 >

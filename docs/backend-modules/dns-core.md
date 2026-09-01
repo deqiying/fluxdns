@@ -1,8 +1,8 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path 和基础 Cache fresh/miss/single-flight/CAS 接线；完整 optimistic/Runtime snapshot 管线尚未接入
+> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path 和基础 Cache fresh/miss/single-flight/CAS 接线；Runtime 已持有资源摘要并由 service 捕获同 revision core，完整 optimistic/resource reload 管线尚未接入
 >
-> 更新日期：2026-08-31
+> 更新日期：2026-09-01
 >
 > 目标代码：`backend/src/dns/*`
 >
