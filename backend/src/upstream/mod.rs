@@ -45,4 +45,4 @@ pub use socks5::{
     encode_connect_request, encode_method_request, encode_userpass_request, parse_connect_response,
     parse_method_response, parse_userpass_response, perform_handshake,
 };
-pub use tokio_outbound::TokioOutboundDialer;
+pub use tokio_outbound::{TokioOutboundAddressResolver, TokioOutboundDialer};

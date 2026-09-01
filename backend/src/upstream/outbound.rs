@@ -15,7 +15,7 @@ use crate::config::resolve::{
     ConfigId, ProxyScheme, ResolvedOutbound, ResolvedSecretValue, SecretResolveError,
 };
 use crate::dns::{Cancellation, Deadline};
-use crate::ports::effects::{OutboundDialer, OutboundStream};
+use crate::ports::effects::{OutboundAddressResolver, OutboundDialer, OutboundStream};
 use crate::ports::{PortError, PortFuture};
 
 use super::socks5::{
@@ -282,6 +282,47 @@ impl<D: OutboundDialer> Socks5Connector<D> {
             cancellation,
         )
     }
+
+    pub fn connect_profile_with_resolver<'a>(
+        &'a self,
+        profile: &'a OutboundProfile,
+        resolver: &'a dyn OutboundAddressResolver,
+        target: &'a OutboundTarget,
+        resolved_ip: Option<IpAddr>,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Box<dyn OutboundStream>, Socks5ConnectError>> {
+        Box::pin(async move {
+            let proxy_address = if let Ok(address) = profile.proxy_host().parse::<IpAddr>() {
+                SocketAddr::new(address, profile.proxy_port())
+            } else {
+                let addresses = resolver
+                    .resolve(
+                        profile.proxy_host(),
+                        profile.proxy_port(),
+                        deadline,
+                        cancellation,
+                    )
+                    .await
+                    .map_err(Socks5ConnectError::ProxyResolve)?;
+                addresses.into_iter().next().ok_or_else(|| {
+                    Socks5ConnectError::ProxyResolve(PortError::new(
+                        crate::ports::PortErrorClass::Unavailable,
+                        "outbound.proxy_resolve",
+                    ))
+                })?
+            };
+            self.connect_profile(
+                profile,
+                proxy_address,
+                target,
+                resolved_ip,
+                deadline,
+                cancellation,
+            )
+            .await
+        })
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -397,6 +438,8 @@ pub enum Socks5ConnectError {
     Target(#[source] Socks5TargetError),
     #[error("SOCKS5 proxy dial failed: {0}")]
     Dial(#[source] PortError),
+    #[error("SOCKS5 proxy address resolution failed: {0}")]
+    ProxyResolve(#[source] PortError),
     #[error("SOCKS5 handshake failed: {0}")]
     Handshake(#[source] Socks5HandshakeError),
 }
@@ -404,17 +447,37 @@ pub enum Socks5ConnectError {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::config::resolve::{ConfigId, ResolvedOutbound, ResolvedSecretRef};
     use crate::dns::{Cancellation, Deadline};
+    use crate::ports::effects::OutboundAddressResolver;
+    use crate::ports::{PortError, PortFuture};
     use crate::upstream::{OutboundProfileError, Socks5Connector, TokioOutboundDialer};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     use super::{NameResolution, OutboundProfile, OutboundTargetError};
+
+    struct FakeResolver {
+        address: SocketAddr,
+    }
+
+    impl OutboundAddressResolver for FakeResolver {
+        fn resolve<'a>(
+            &'a self,
+            _host: &'a str,
+            _port: u16,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>> {
+            let address = self.address;
+            Box::pin(async move { Ok(vec![address]) })
+        }
+    }
 
     fn outbound(path: std::path::PathBuf) -> ResolvedOutbound {
         ResolvedOutbound {
@@ -630,6 +693,56 @@ mod tests {
             .connect_profile(
                 &profile,
                 proxy_address,
+                &target,
+                None,
+                Deadline::new(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+        server.await.unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_profile_resolves_proxy_hostname_before_dial() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            stream.write_all(&[5, 0]).await.unwrap();
+            let mut request = [0; 10];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, [5, 1, 0, 1, 192, 0, 2, 10, 1, 187]);
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                .await
+                .unwrap();
+        });
+
+        let (root, path) = secret_file(b"socks5://proxy.test");
+        let profile = OutboundProfile::from_resolved(&outbound(path), 1024).unwrap();
+        let target = profile
+            .target(
+                "dns.example",
+                443,
+                Some("192.0.2.10".parse().unwrap()),
+                None,
+            )
+            .unwrap();
+        let resolver = FakeResolver {
+            address: proxy_address,
+        };
+        let connector = Socks5Connector::new(Arc::new(TokioOutboundDialer::new()));
+        let cancellation = Cancellation::new();
+        let mut stream = connector
+            .connect_profile_with_resolver(
+                &profile,
+                &resolver,
                 &target,
                 None,
                 Deadline::new(std::time::Instant::now() + std::time::Duration::from_secs(1)),

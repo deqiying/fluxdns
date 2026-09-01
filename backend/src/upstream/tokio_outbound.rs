@@ -8,11 +8,15 @@ use std::net::SocketAddr;
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, lookup_host};
 
 use crate::dns::{CancelReason, Cancellation, Deadline};
-use crate::ports::effects::{OutboundDialer, OutboundStream, TcpReadResult};
+use crate::ports::effects::{
+    OutboundAddressResolver, OutboundDialer, OutboundStream, TcpReadResult,
+};
 use crate::ports::{PortError, PortErrorClass, PortFuture};
+
+const MAX_PROXY_ADDRESSES: usize = 16;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TokioOutboundDialer;
@@ -39,6 +43,61 @@ impl OutboundDialer for TokioOutboundDialer {
             )
             .await?;
             Ok(Box::new(TokioOutboundStream { stream }) as Box<dyn OutboundStream>)
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct TokioOutboundAddressResolver;
+
+impl TokioOutboundAddressResolver {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl OutboundAddressResolver for TokioOutboundAddressResolver {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>> {
+        Box::pin(async move {
+            if host.is_empty() || host.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
+                return Err(PortError::new(
+                    PortErrorClass::InvalidInput,
+                    "outbound.proxy_resolve",
+                ));
+            }
+            if port == 0 {
+                return Err(PortError::new(
+                    PortErrorClass::InvalidInput,
+                    "outbound.proxy_resolve",
+                ));
+            }
+            let mut addresses = await_io(
+                lookup_host((host, port)),
+                deadline,
+                cancellation,
+                "outbound.proxy_resolve",
+            )
+            .await?;
+            let addresses: Vec<_> = addresses.by_ref().take(MAX_PROXY_ADDRESSES + 1).collect();
+            if addresses.len() > MAX_PROXY_ADDRESSES {
+                return Err(PortError::new(
+                    PortErrorClass::ResourceExhausted,
+                    "outbound.proxy_resolve",
+                ));
+            }
+            if addresses.is_empty() {
+                return Err(PortError::new(
+                    PortErrorClass::Unavailable,
+                    "outbound.proxy_resolve",
+                ));
+            }
+            Ok(addresses)
         })
     }
 }

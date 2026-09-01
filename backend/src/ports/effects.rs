@@ -265,6 +265,17 @@ pub trait OutboundDialer: Send + Sync {
     ) -> PortFuture<'a, Result<Box<dyn OutboundStream>, PortError>>;
 }
 
+/// 解析 outbound proxy endpoint 的协议无关 port。
+pub trait OutboundAddressResolver: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>>;
+}
+
 /// 已激活 TCP listener 的协议无关操作。
 pub trait TcpListenerHandle: Send + Sync {
     fn local_addr(&self) -> Result<SocketAddr, PortError>;
