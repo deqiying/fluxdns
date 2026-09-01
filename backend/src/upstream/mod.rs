@@ -10,6 +10,7 @@ mod outbound;
 mod outcome;
 mod registry;
 mod socks5;
+mod tokio_outbound;
 
 pub(crate) use bootstrap::BootstrapConnectorRegistry;
 pub use bootstrap::{
@@ -31,6 +32,7 @@ pub use http::{
 };
 pub use outbound::{
     NameResolution, OutboundProfile, OutboundProfileError, OutboundTarget, OutboundTargetError,
+    Socks5ConnectError, Socks5Connector,
 };
 pub use outcome::{
     AttemptAssessment, AttemptClass, FallbackDecision, OutcomeError, UpstreamAttempt, aggregate,
@@ -43,3 +45,4 @@ pub use socks5::{
     encode_connect_request, encode_method_request, encode_userpass_request, parse_connect_response,
     parse_method_response, parse_userpass_response, perform_handshake,
 };
+pub use tokio_outbound::TokioOutboundDialer;

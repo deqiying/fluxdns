@@ -255,6 +255,16 @@ pub trait OutboundStream: Send {
     fn shutdown(&mut self) -> PortFuture<'_, Result<(), PortError>>;
 }
 
+/// 创建 outbound TCP stream 的协议无关 port。
+pub trait OutboundDialer: Send + Sync {
+    fn connect<'a>(
+        &'a self,
+        target: SocketAddr,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Box<dyn OutboundStream>, PortError>>;
+}
+
 /// 已激活 TCP listener 的协议无关操作。
 pub trait TcpListenerHandle: Send + Sync {
     fn local_addr(&self) -> Result<SocketAddr, PortError>;

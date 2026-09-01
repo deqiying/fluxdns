@@ -5,7 +5,7 @@
 //! outbound adapter 完成。
 
 use std::fmt;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use thiserror::Error;
@@ -13,6 +13,14 @@ use url::Url;
 
 use crate::config::resolve::{
     ConfigId, ProxyScheme, ResolvedOutbound, ResolvedSecretValue, SecretResolveError,
+};
+use crate::dns::{Cancellation, Deadline};
+use crate::ports::effects::{OutboundDialer, OutboundStream};
+use crate::ports::{PortError, PortFuture};
+
+use super::socks5::{
+    Socks5Credentials, Socks5HandshakeError, Socks5TargetError, address_for_target,
+    perform_handshake,
 };
 
 /// 已解析且可交给 outbound adapter 的代理 profile。
@@ -198,6 +206,56 @@ impl OutboundTarget {
     }
 }
 
+/// 使用调用方提供的 proxy 地址和 dialer 建立 SOCKS5 outbound stream。
+pub struct Socks5Connector<D> {
+    dialer: Arc<D>,
+}
+
+impl<D> Clone for Socks5Connector<D> {
+    fn clone(&self) -> Self {
+        Self {
+            dialer: Arc::clone(&self.dialer),
+        }
+    }
+}
+
+impl<D: OutboundDialer> Socks5Connector<D> {
+    pub fn new(dialer: Arc<D>) -> Self {
+        Self { dialer }
+    }
+
+    pub fn connect<'a>(
+        &'a self,
+        proxy_address: SocketAddr,
+        target: &'a OutboundTarget,
+        resolved_ip: Option<IpAddr>,
+        credentials: Option<Socks5Credentials<'a>>,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Box<dyn OutboundStream>, Socks5ConnectError>> {
+        Box::pin(async move {
+            let address =
+                address_for_target(target, resolved_ip).map_err(Socks5ConnectError::Target)?;
+            let mut stream = self
+                .dialer
+                .connect(proxy_address, deadline, cancellation)
+                .await
+                .map_err(Socks5ConnectError::Dial)?;
+            perform_handshake(
+                &mut *stream,
+                &address,
+                target.port(),
+                credentials,
+                deadline,
+                cancellation,
+            )
+            .await
+            .map_err(Socks5ConnectError::Handshake)?;
+            Ok(stream)
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NameResolution {
     Local,
@@ -226,12 +284,28 @@ pub enum OutboundTargetError {
     BootstrapForbidden,
 }
 
+#[derive(Debug, Error)]
+pub enum Socks5ConnectError {
+    #[error("SOCKS5 target preparation failed: {0}")]
+    Target(#[source] Socks5TargetError),
+    #[error("SOCKS5 proxy dial failed: {0}")]
+    Dial(#[source] PortError),
+    #[error("SOCKS5 handshake failed: {0}")]
+    Handshake(#[source] Socks5HandshakeError),
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use crate::config::resolve::{ConfigId, ResolvedOutbound, ResolvedSecretRef};
+    use crate::dns::{Cancellation, Deadline};
+    use crate::upstream::{Socks5Connector, TokioOutboundDialer};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use super::{NameResolution, OutboundProfile, OutboundTargetError};
 
@@ -247,11 +321,16 @@ mod tests {
     }
 
     fn secret_file(contents: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("fluxdns-outbound-{suffix}"));
+        let unique = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-outbound-{}-{suffix}-{unique}",
+            std::process::id()
+        ));
         fs::create_dir_all(&root).unwrap();
         let path = root.join("proxy-url");
         fs::write(&path, contents).unwrap();
@@ -331,6 +410,54 @@ mod tests {
             profile.target("dns.example", 0, None, None),
             Err(OutboundTargetError::InvalidPort)
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tokio_socks5_connector_dials_loopback_proxy() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            stream.write_all(&[5, 0]).await.unwrap();
+
+            let mut request = [0; 10];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, [5, 1, 0, 1, 192, 0, 2, 10, 1, 187]);
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                .await
+                .unwrap();
+        });
+
+        let (root, path) = secret_file(b"socks5://proxy.example");
+        let profile = OutboundProfile::from_resolved(&outbound(path), 1024).unwrap();
+        let target = profile
+            .target(
+                "dns.example",
+                443,
+                Some("192.0.2.10".parse().unwrap()),
+                None,
+            )
+            .unwrap();
+        let connector = Socks5Connector::new(Arc::new(TokioOutboundDialer::new()));
+        let cancellation = Cancellation::new();
+        let mut stream = connector
+            .connect(
+                proxy_address,
+                &target,
+                None,
+                None,
+                Deadline::new(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+        server.await.unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 }
