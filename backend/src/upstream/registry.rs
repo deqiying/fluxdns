@@ -11,7 +11,8 @@ use crate::config::resolve::ResolvedUpstream;
 use crate::ports::exchange::{ConnectorId, DnsExchange};
 
 use super::{
-    DohExchange, DohHttpTransport, HostsExchange, HostsExchangeBuildError, TokioDohHttpTransport,
+    BootstrapConnectorRegistry, DohExchange, DohHttpTransport, HostsExchange,
+    HostsExchangeBuildError, TokioDohAddressResolver, TokioDohHttpTransport,
 };
 
 pub struct UpstreamRegistry {
@@ -48,12 +49,36 @@ impl fmt::Debug for UpstreamRegistry {
 
 impl UpstreamRegistry {
     pub fn from_resolved(upstreams: &[ResolvedUpstream]) -> Result<Self, RegistryError> {
-        Self::from_resolved_with_doh_transport(upstreams, Arc::new(TokioDohHttpTransport::new()))
+        let bootstrap_registry = Arc::new(BootstrapConnectorRegistry::default());
+        let resolver = Arc::new(TokioDohAddressResolver::with_bootstrap_registry(
+            bootstrap_registry.clone(),
+        ));
+        let transport = Arc::new(TokioDohHttpTransport::with_resolver(resolver));
+        Self::from_resolved_with_doh_transport_and_bootstrap_registry(
+            upstreams,
+            transport,
+            Some(bootstrap_registry),
+        )
     }
 
     pub fn from_resolved_with_doh_transport<T>(
         upstreams: &[ResolvedUpstream],
         doh_transport: Arc<T>,
+    ) -> Result<Self, RegistryError>
+    where
+        T: DohHttpTransport + 'static,
+    {
+        Self::from_resolved_with_doh_transport_and_bootstrap_registry(
+            upstreams,
+            doh_transport,
+            None,
+        )
+    }
+
+    fn from_resolved_with_doh_transport_and_bootstrap_registry<T>(
+        upstreams: &[ResolvedUpstream],
+        doh_transport: Arc<T>,
+        bootstrap_registry: Option<Arc<BootstrapConnectorRegistry>>,
     ) -> Result<Self, RegistryError>
     where
         T: DohHttpTransport + 'static,
@@ -103,12 +128,6 @@ impl UpstreamRegistry {
                             kind: "doh_proxy",
                         });
                     }
-                    if bootstrap.is_some() {
-                        return Err(RegistryError::UnsupportedUpstream {
-                            upstream: id.as_str().to_owned(),
-                            kind: "doh_bootstrap",
-                        });
-                    }
                     if edns_client_subnet
                         .as_ref()
                         .is_some_and(|ecs| !matches!(ecs.mode, EcsMode::Disabled))
@@ -129,10 +148,11 @@ impl UpstreamRegistry {
                             upstream: id.as_str().to_owned(),
                         });
                     }
-                    let exchange = DohExchange::new(
+                    let exchange = DohExchange::new_with_bootstrap(
                         connector.clone(),
                         address.clone(),
                         *connect_ip,
+                        bootstrap.clone(),
                         doh_transport.clone(),
                     )
                     .map_err(|_| RegistryError::InvalidDoh {
@@ -147,6 +167,9 @@ impl UpstreamRegistry {
                     });
                 }
             };
+            if let Some(bootstrap_registry) = bootstrap_registry.as_ref() {
+                bootstrap_registry.insert(id.clone(), exchange.clone());
+            }
             connectors.insert(connector, exchange);
         }
         Ok(Self { connectors })
@@ -180,8 +203,22 @@ impl UpstreamRegistry {
 
 #[cfg(test)]
 mod tests {
+    use std::str::FromStr;
+    use std::time::{Duration, Instant, SystemTime};
+
+    use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+    use hickory_proto::rr::{Name, RecordType};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use crate::config::model::EcsMode;
     use crate::config::resolve::{ConfigId, ResolvedEcs, ResolvedUpstream, ValueSource};
+    use crate::dns::{
+        CacheCompatibilityKey, Cancellation, CanonicalQuery, ClientIdentity, Deadline, ListenerId,
+        RequestContext, RequestId, RequestMeta, RuntimeRevision, TransportCapabilities,
+        TransportClass,
+    };
+    use crate::ports::exchange::UpstreamOutcome;
 
     use super::{RegistryError, UpstreamRegistry};
 
@@ -191,6 +228,68 @@ mod tests {
             format: "hosts".to_owned(),
             hosts: "192.0.2.1 example.test\n".to_owned(),
         }
+    }
+
+    fn context() -> RequestContext {
+        let now = Instant::now();
+        RequestContext {
+            meta: RequestMeta {
+                request_id: RequestId(1),
+                trace_id: None,
+                received_at: now,
+                received_at_utc: SystemTime::now(),
+                deadline: Deadline::new(now + Duration::from_secs(5)),
+                cancellation: Cancellation::new(),
+                connection_id: None,
+                stream_id: None,
+                listener_id: ListenerId::from("registry-test"),
+                route_id: None,
+                original_dns_id: Some(7),
+            },
+            client: ClientIdentity::default(),
+            transport: TransportCapabilities {
+                class: TransportClass::Datagram,
+                cache_compatibility: CacheCompatibilityKey(1),
+            },
+            runtime_revision: RuntimeRevision(1),
+        }
+    }
+
+    fn query() -> CanonicalQuery {
+        let mut message = Message::new(7, MessageType::Query, OpCode::Query);
+        message.add_query(Query::query(
+            Name::from_str("service.example.").unwrap(),
+            RecordType::A,
+        ));
+        CanonicalQuery::from_message(message).unwrap()
+    }
+
+    async fn read_http_body(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 1024];
+        let header_end = loop {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0);
+            bytes.extend_from_slice(&chunk[..count]);
+            if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break end + 4;
+            }
+        };
+        let headers = std::str::from_utf8(&bytes[..header_end - 4]).unwrap();
+        let content_length = headers
+            .split("\r\n")
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap();
+        while bytes.len() < header_end + content_length {
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert!(count > 0);
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+        bytes[header_end..header_end + content_length].to_vec()
     }
 
     #[test]
@@ -244,20 +343,6 @@ mod tests {
             UpstreamRegistry::from_resolved(&[https]),
             Err(RegistryError::UnsupportedUpstream { upstream, kind })
                 if upstream == "remote" && kind == "doh_https"
-        ));
-
-        let bootstrap = ResolvedUpstream::Doh {
-            id: ConfigId::new("bootstrap").unwrap(),
-            address: "http://dns.example.test/dns-query".parse().unwrap(),
-            bootstrap: Some(ConfigId::new("local").unwrap()),
-            connect_ip: None,
-            proxy: None,
-            edns_client_subnet: None,
-        };
-        assert!(matches!(
-            UpstreamRegistry::from_resolved(&[bootstrap]),
-            Err(RegistryError::UnsupportedUpstream { upstream, kind })
-                if upstream == "bootstrap" && kind == "doh_bootstrap"
         ));
 
         let proxy = ResolvedUpstream::Doh {
@@ -314,5 +399,56 @@ mod tests {
                 .as_str(),
             "remote"
         );
+    }
+
+    #[tokio::test]
+    async fn default_registry_executes_doh_bootstrap_through_hosts_connector() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let body = read_http_body(&mut stream).await;
+            let request = Message::from_vec(&body).unwrap();
+            let mut response =
+                Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+            response.metadata.response_code = ResponseCode::NoError;
+            response.add_query(request.queries[0].clone());
+            let response_body = response.to_vec().unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&response_body).await.unwrap();
+        });
+
+        let upstreams = vec![
+            ResolvedUpstream::Hosts {
+                id: ConfigId::new("bootstrap").unwrap(),
+                format: "hosts".to_owned(),
+                hosts: "127.0.0.1 resolver.example.test\n".to_owned(),
+            },
+            ResolvedUpstream::Doh {
+                id: ConfigId::new("remote").unwrap(),
+                address: format!("http://resolver.example.test:{port}/dns-query")
+                    .parse()
+                    .unwrap(),
+                bootstrap: Some(ConfigId::new("bootstrap").unwrap()),
+                connect_ip: None,
+                proxy: None,
+                edns_client_subnet: None,
+            },
+        ];
+        let registry = UpstreamRegistry::from_resolved(&upstreams).unwrap();
+        let connector = registry.get_by_name("remote").unwrap();
+
+        assert!(matches!(
+            connector.exchange(&query(), &context()).await,
+            UpstreamOutcome::Response(response)
+                if response.class() == crate::dns::ResponseClass::NoData
+        ));
+        server.await.unwrap();
     }
 }

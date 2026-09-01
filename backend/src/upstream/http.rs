@@ -16,7 +16,10 @@ use crate::config::resolve::ConfigId;
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
-use super::{DOH_MEDIA_TYPE, DohHttpRequest, DohHttpResponseOwned, DohHttpTransport};
+use super::{
+    BootstrapConnectorRegistry, BootstrapResolver, BootstrapResolverError, DOH_MEDIA_TYPE,
+    DohHttpRequest, DohHttpResponseOwned, DohHttpTransport,
+};
 
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const READ_CHUNK_BYTES: usize = 8 * 1024;
@@ -75,8 +78,37 @@ pub trait DohAddressResolver: Send + Sync {
     ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub struct TokioDohAddressResolver;
+#[derive(Clone)]
+pub struct TokioDohAddressResolver {
+    bootstrap: Option<Arc<BootstrapConnectorRegistry>>,
+}
+
+impl std::fmt::Debug for TokioDohAddressResolver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokioDohAddressResolver")
+            .field("has_bootstrap_registry", &self.bootstrap.is_some())
+            .finish()
+    }
+}
+
+impl Default for TokioDohAddressResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TokioDohAddressResolver {
+    pub fn new() -> Self {
+        Self { bootstrap: None }
+    }
+
+    pub(crate) fn with_bootstrap_registry(bootstrap: Arc<BootstrapConnectorRegistry>) -> Self {
+        Self {
+            bootstrap: Some(bootstrap),
+        }
+    }
+}
 
 impl DohAddressResolver for TokioDohAddressResolver {
     fn resolve<'a>(
@@ -86,12 +118,31 @@ impl DohAddressResolver for TokioDohAddressResolver {
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>> {
         Box::pin(async move {
-            if request.bootstrap().is_some() {
-                return Err(PortError::new(
-                    PortErrorClass::Unavailable,
-                    "doh_http_transport.resolve",
-                )
-                .with_safe_context("bootstrap resolver is not configured"));
+            if let Some(bootstrap_id) = request.bootstrap() {
+                let Some(registry) = self.bootstrap.as_ref() else {
+                    return Err(PortError::new(
+                        PortErrorClass::Unavailable,
+                        "doh_http_transport.resolve",
+                    )
+                    .with_safe_context("bootstrap resolver is not configured"));
+                };
+                let Some(connector) = registry.get(bootstrap_id) else {
+                    return Err(PortError::new(
+                        PortErrorClass::Unavailable,
+                        "doh_http_transport.resolve",
+                    )
+                    .with_safe_context("bootstrap connector is not registered"));
+                };
+                let answer = BootstrapResolver::new(connector)
+                    .resolve_with_budget(request.host(), deadline, cancellation)
+                    .await
+                    .map_err(map_bootstrap_error)?;
+                return Ok(answer
+                    .addresses()
+                    .iter()
+                    .copied()
+                    .map(|address| SocketAddr::new(address, request.port()))
+                    .collect());
             }
             let mut addresses = await_io(
                 lookup_host((request.host(), request.port())),
@@ -112,6 +163,37 @@ impl DohAddressResolver for TokioDohAddressResolver {
     }
 }
 
+fn map_bootstrap_error(error: BootstrapResolverError) -> PortError {
+    match error {
+        BootstrapResolverError::InvalidName | BootstrapResolverError::QueryBuild => {
+            PortError::new(PortErrorClass::InvalidInput, "doh_http_transport.resolve")
+                .with_safe_context("bootstrap resolver query was invalid")
+        }
+        BootstrapResolverError::Cancelled { reason, .. } => PortError::new(
+            PortErrorClass::Cancelled(reason),
+            "doh_http_transport.resolve",
+        ),
+        BootstrapResolverError::Transport { class, .. } => {
+            let port_class = match class {
+                crate::ports::exchange::TransportFailureClass::Timeout => PortErrorClass::Timeout,
+                crate::ports::exchange::TransportFailureClass::ResourceExhausted => {
+                    PortErrorClass::ResourceExhausted
+                }
+                crate::ports::exchange::TransportFailureClass::ProtocolViolation => {
+                    PortErrorClass::ProtocolViolation
+                }
+                _ => PortErrorClass::Unavailable,
+            };
+            PortError::new(port_class, "doh_http_transport.resolve")
+                .with_safe_context("bootstrap resolver exchange failed")
+        }
+        BootstrapResolverError::NoAddress { .. } => {
+            PortError::new(PortErrorClass::Unavailable, "doh_http_transport.resolve")
+                .with_safe_context("bootstrap resolver returned no address")
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TokioDohHttpTransport {
     resolver: Arc<dyn DohAddressResolver>,
@@ -128,7 +210,7 @@ impl std::fmt::Debug for TokioDohHttpTransport {
 
 impl TokioDohHttpTransport {
     pub fn new() -> Self {
-        Self::with_resolver(Arc::new(TokioDohAddressResolver))
+        Self::with_resolver(Arc::new(TokioDohAddressResolver::new()))
     }
 
     pub fn with_resolver<T>(resolver: Arc<T>) -> Self
@@ -679,6 +761,38 @@ mod tests {
             format!("{error}"),
             "doh_http_transport.resolve failed: unavailable (bootstrap resolver is not configured)"
         );
+    }
+
+    #[tokio::test]
+    async fn bootstrap_resolver_uses_registered_connector_and_request_port() {
+        let registry = Arc::new(crate::upstream::BootstrapConnectorRegistry::default());
+        let connector: Arc<dyn crate::ports::exchange::DnsExchange> = Arc::new(
+            crate::upstream::HostsExchange::from_resolved(
+                &crate::config::resolve::ResolvedUpstream::Hosts {
+                    id: crate::config::resolve::ConfigId::new("bootstrap").unwrap(),
+                    format: "hosts".to_owned(),
+                    hosts: "127.0.0.1 resolver.example.test\n".to_owned(),
+                },
+            )
+            .unwrap(),
+        );
+        registry.insert(
+            crate::config::resolve::ConfigId::new("bootstrap").unwrap(),
+            connector.clone(),
+        );
+        let resolver = TokioDohAddressResolver::with_bootstrap_registry(registry);
+        let request = DohAddressRequest::new(
+            "resolver.example.test",
+            8443,
+            Some(crate::config::resolve::ConfigId::new("bootstrap").unwrap()),
+        );
+
+        let addresses = resolver
+            .resolve(request, deadline(), &Cancellation::new())
+            .await
+            .unwrap();
+
+        assert_eq!(addresses, vec!["127.0.0.1:8443".parse().unwrap()]);
     }
 
     #[tokio::test]

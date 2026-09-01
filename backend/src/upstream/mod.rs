@@ -9,6 +9,7 @@ mod http;
 mod outcome;
 mod registry;
 
+pub(crate) use bootstrap::BootstrapConnectorRegistry;
 pub use bootstrap::{
     AddressCachePolicy, AddressResolutionError, AddressResolutionRequest, AddressResolutionState,
     AddressSource, AnswerError, BootstrapAnswer, BootstrapResolution, BootstrapResolver,

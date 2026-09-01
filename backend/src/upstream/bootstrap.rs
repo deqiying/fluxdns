@@ -4,12 +4,12 @@
 //! 不会偷偷调用 system resolver；`AddressResolutionState` 负责 connect_ip、
 //! bootstrap 缓存和 system resolver 之间的显式优先级。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::net::IpAddr;
 use std::str::FromStr;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, RwLock, Weak};
+use std::time::{Duration, Instant, SystemTime};
 
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query},
@@ -19,9 +19,11 @@ use thiserror::Error;
 
 use crate::config::resolve::{ConfigId, ResolvedUpstream};
 use crate::dns::{
-    CancelReason, CanonicalQuery, CanonicalResponse, RequestContext, ResponseClass, TtlMetadata,
+    CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, CanonicalResponse,
+    ClientIdentity, Deadline, ListenerId, RequestContext, RequestId, RequestMeta, ResponseClass,
+    RuntimeRevision, TransportCapabilities, TransportClass, TtlMetadata,
 };
-use crate::ports::exchange::{DnsExchange, TransportFailureClass, UpstreamOutcome};
+use crate::ports::exchange::{ConnectorId, DnsExchange, TransportFailureClass, UpstreamOutcome};
 
 /// Bootstrap TTL 的默认实现边界。
 pub const DEFAULT_BOOTSTRAP_MIN_TTL: Duration = Duration::from_secs(5);
@@ -151,6 +153,43 @@ pub enum BootstrapResponseError {
     Answer(AnswerError),
 }
 
+/// 构造阶段填充、请求阶段只读的 bootstrap connector registry。
+#[derive(Clone, Default)]
+pub(crate) struct BootstrapConnectorRegistry {
+    connectors: Arc<RwLock<HashMap<ConfigId, Weak<dyn DnsExchange>>>>,
+}
+
+impl fmt::Debug for BootstrapConnectorRegistry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let connector_count = self
+            .connectors
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        formatter
+            .debug_struct("BootstrapConnectorRegistry")
+            .field("connector_count", &connector_count)
+            .finish()
+    }
+}
+
+impl BootstrapConnectorRegistry {
+    pub(crate) fn insert(&self, id: ConfigId, connector: Arc<dyn DnsExchange>) {
+        self.connectors
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(id, Arc::downgrade(&connector));
+    }
+
+    pub(crate) fn get(&self, id: &ConfigId) -> Option<Arc<dyn DnsExchange>> {
+        self.connectors
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .and_then(Weak::upgrade)
+    }
+}
+
 /// 通过指定 connector 执行 bootstrap A/AAAA 查询的 resolver。
 ///
 /// resolver 不负责选择 bootstrap connector，也不接入 `PolicyCore`，避免把
@@ -174,8 +213,39 @@ impl BootstrapResolver {
         Self { connector }
     }
 
-    pub fn connector_id(&self) -> &crate::ports::exchange::ConnectorId {
+    pub fn connector_id(&self) -> &ConnectorId {
         self.connector.connector_id()
+    }
+
+    pub(crate) async fn resolve_with_budget(
+        &self,
+        host: &str,
+        deadline: Deadline,
+        cancellation: &Cancellation,
+    ) -> Result<BootstrapAnswer, BootstrapResolverError> {
+        let now = Instant::now();
+        let context = RequestContext {
+            meta: RequestMeta {
+                request_id: RequestId(0),
+                trace_id: None,
+                received_at: now,
+                received_at_utc: SystemTime::now(),
+                deadline,
+                cancellation: cancellation.clone(),
+                connection_id: None,
+                stream_id: None,
+                listener_id: ListenerId::from("bootstrap"),
+                route_id: None,
+                original_dns_id: None,
+            },
+            client: ClientIdentity::default(),
+            transport: TransportCapabilities {
+                class: TransportClass::Datagram,
+                cache_compatibility: CacheCompatibilityKey(0),
+            },
+            runtime_revision: RuntimeRevision(0),
+        };
+        self.resolve(host, &context).await
     }
 
     /// 顺序查询 A、AAAA，并合并所有合法地址；取消会立即终止本次解析。
