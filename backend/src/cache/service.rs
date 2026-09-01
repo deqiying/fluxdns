@@ -12,6 +12,7 @@ use crate::ports::cache::{
     CacheLoadReservation, CacheLoadWaiter, CacheRecord, CacheStore, CacheWriteOutcome,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
+use tokio::task::JoinSet;
 
 use super::admission::{
     CacheAdmissionError, CacheAdmissionOutcome, CacheAdmissionPolicy, CacheAdmissionRejection,
@@ -73,6 +74,19 @@ struct LateCacheFinalizerState {
     cancellation: Cancellation,
     active: AtomicUsize,
     idle: tokio::sync::Notify,
+    tasks: std::sync::Mutex<JoinSet<()>>,
+}
+
+struct FinalizerTaskGuard {
+    state: Arc<LateCacheFinalizerState>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for FinalizerTaskGuard {
+    fn drop(&mut self) {
+        self.state.active.fetch_sub(1, Ordering::AcqRel);
+        self.state.idle.notify_waiters();
+    }
 }
 
 impl fmt::Debug for LateCacheFinalizer {
@@ -97,6 +111,7 @@ impl LateCacheFinalizer {
                 cancellation: Cancellation::new(),
                 active: AtomicUsize::new(0),
                 idle: tokio::sync::Notify::new(),
+                tasks: std::sync::Mutex::new(JoinSet::new()),
             }),
         })
     }
@@ -127,6 +142,11 @@ impl LateCacheFinalizer {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        let mut tasks = self
+            .state
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.is_shutdown() {
             return Err(LateCacheFinalizerSubmitError::Shutdown);
         }
@@ -138,24 +158,61 @@ impl LateCacheFinalizer {
             .map_err(|_| LateCacheFinalizerSubmitError::Capacity)?;
         self.state.active.fetch_add(1, Ordering::AcqRel);
         let state = Arc::clone(&self.state);
-        tokio::spawn(async move {
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(async move {
+            let _task_guard = FinalizerTaskGuard {
+                state: Arc::clone(&state),
+                _permit: permit,
+            };
             tokio::select! {
                 biased;
                 _ = state.cancellation.cancelled() => {}
                 _ = task => {}
             }
-            drop(permit);
-            state.active.fetch_sub(1, Ordering::AcqRel);
-            state.idle.notify_waiters();
         });
         Ok(())
     }
 
     pub async fn shutdown(&self) {
-        self.state.cancellation.cancel(CancelReason::Shutdown);
-        while self.active_tasks() != 0 {
-            self.state.idle.notified().await;
+        let mut tasks = self.take_tasks_for_shutdown();
+        while tasks.join_next().await.is_some() {}
+    }
+
+    /// 触发 shutdown，并在 deadline 内等待所有已提交任务回收。
+    /// 超时后 abort 剩余 task，并返回 false；调用方可将其并入 Runtime shutdown report。
+    pub async fn shutdown_until(&self, deadline: crate::dns::Deadline) -> bool {
+        let mut tasks = self.take_tasks_for_shutdown();
+        loop {
+            if tasks.is_empty() {
+                return true;
+            }
+            let remaining = deadline.remaining(Instant::now());
+            if remaining.is_zero() {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                return false;
+            }
+            match tokio::time::timeout(remaining, tasks.join_next()).await {
+                Ok(Some(_)) => {}
+                Ok(None) => return true,
+                Err(_) => {
+                    tasks.abort_all();
+                    while tasks.join_next().await.is_some() {}
+                    return false;
+                }
+            }
         }
+    }
+
+    fn take_tasks_for_shutdown(&self) -> JoinSet<()> {
+        self.state.cancellation.cancel(CancelReason::Shutdown);
+        self.state.permits.close();
+        let mut guard = self
+            .state
+            .tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::mem::replace(&mut *guard, JoinSet::new())
     }
 }
 
@@ -728,6 +785,25 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(error, LateCacheFinalizerSubmitError::Shutdown);
+    }
+
+    #[tokio::test]
+    async fn shutdown_until_cancels_registered_tasks_before_deadline() {
+        let finalizer = LateCacheFinalizer::new(1).unwrap();
+        finalizer
+            .submit_task(async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            })
+            .unwrap();
+        assert!(
+            finalizer
+                .shutdown_until(crate::dns::Deadline::new(
+                    Instant::now() + std::time::Duration::from_secs(1),
+                ))
+                .await
+        );
+        assert!(finalizer.is_shutdown());
+        assert_eq!(finalizer.active_tasks(), 0);
     }
 
     #[tokio::test]

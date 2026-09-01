@@ -185,7 +185,13 @@ impl DnsService {
         deadline: crate::dns::Deadline,
     ) -> ShutdownReport {
         self.runtime.begin_drain();
-        self.supervisor.shutdown(clock, deadline).await
+        let mut report = self.supervisor.shutdown(clock, deadline).await;
+        if let Some(core) = self.runtime.snapshot().policy_core()
+            && !core.shutdown_until(deadline).await
+        {
+            report.deadline_expired = true;
+        }
+        report
     }
 
     /// 等待 Ctrl-C 后执行有界 graceful shutdown。

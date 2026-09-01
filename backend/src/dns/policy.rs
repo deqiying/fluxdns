@@ -138,6 +138,10 @@ impl PolicyDnsCore {
     pub fn cache(&self) -> &Arc<CacheFacade> {
         &self.cache
     }
+
+    pub(crate) async fn shutdown_until(&self, deadline: Deadline) -> bool {
+        self.late_cache_finalizer.shutdown_until(deadline).await
+    }
 }
 
 struct PolicyLateResultSink {

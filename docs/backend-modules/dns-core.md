@@ -181,6 +181,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [ ] 实现 ECS、TTL 和错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA、Resource CNAME/wildcard、ConfiguredDnsCore const/file loader/fallback，以及 PolicyDnsCore 的 upstream/cache 命中和 snapshot-local optimistic refresh 路径；当前 backend 全量测试为 372 passed、0 failed。
+阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA、Resource CNAME/wildcard、ConfiguredDnsCore const/file loader/fallback，以及 PolicyDnsCore 的 upstream/cache 命中和 snapshot-local optimistic refresh 路径；当前 backend 全量测试为 373 passed、0 failed。
 
 当前实现进度：**50%**。

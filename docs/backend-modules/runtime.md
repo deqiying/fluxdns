@@ -178,6 +178,7 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱�
 3. TCP listener 取消并 join 内部 connection `JoinSet`；
 4. 在 grace deadline 内等待存量请求；
 5. supervisor 确认当前 task tree 清空。
+6. 由当前 runtime snapshot 的 `PolicyDnsCore` owner 在同一 grace deadline 内关闭 `LateCacheFinalizer`。
 
 stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 尚未接线。
 
@@ -205,6 +206,7 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [x] 实现 UDP/TCP 不透明 socket capability、`SystemSocketFactory` 和 `BoundListenerSet` 句柄交接；
 - [x] 接入真实 UDP/TCP service task、TCP session `JoinSet` 和基础 drain/shutdown；
 - [x] 接入按配置生成的 immutable resource snapshot 摘要，并让 service 从 active snapshot 捕获同 revision `DnsCore`；
+- [x] 接入当前 snapshot `PolicyDnsCore` finalizer owner，并在 service shutdown 中执行 deadline-aware close；共享 Runtime 后台 owner 仍待完成；
 - [ ] 定义状态类型与所有权转换；
 - [ ] 完成跨模块资源装配版 PreparedRuntime/preflight；
 - [ ] 完成真实服务任务版 ActiveRuntime coordinator/CAS 与 reload；
@@ -212,4 +214,4 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [ ] 完成完整 drain/shutdown（flush、checkpoint、超时分项报告）；
 - [ ] 完成并发、故障和时间控制测试。
 
-当前实现进度：**35%**。已验证 Runtime snapshot 资源摘要与 service core 构造入口；完整资源 worker、reload/CAS 合并、flush 和故障注入仍未接线。
+当前实现进度：**35%**。已验证 Runtime snapshot 资源摘要、service core 构造入口和当前 Policy finalizer owner；完整资源 worker、reload/CAS 合并、flush 和故障注入仍未接线。
