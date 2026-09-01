@@ -31,6 +31,7 @@ pub struct OutboundProfile {
     proxy_host: Arc<str>,
     proxy_port: u16,
     proxy_url: ResolvedSecretValue,
+    credentials: Option<OutboundCredentials>,
 }
 
 impl fmt::Debug for OutboundProfile {
@@ -90,12 +91,17 @@ impl OutboundProfile {
                 outbound: outbound.id.as_str().to_owned(),
             });
         }
+        let credentials =
+            parse_credentials(&url).map_err(|_| OutboundProfileError::InvalidCredentials {
+                outbound: outbound.id.as_str().to_owned(),
+            })?;
         Ok(Self {
             id: outbound.id.clone(),
             scheme,
             proxy_host: Arc::from(host),
             proxy_port: port,
             proxy_url,
+            credentials,
         })
     }
 
@@ -120,12 +126,11 @@ impl OutboundProfile {
     }
 
     pub fn has_credentials(&self) -> bool {
-        let Ok(text) = std::str::from_utf8(self.proxy_url.expose()) else {
-            return false;
-        };
-        Url::parse(text)
-            .map(|url| !url.username().is_empty() || url.password().is_some())
-            .unwrap_or(false)
+        self.credentials.is_some()
+    }
+
+    pub fn credentials(&self) -> Option<&OutboundCredentials> {
+        self.credentials.as_ref()
     }
 
     pub fn target(
@@ -254,6 +259,106 @@ impl<D: OutboundDialer> Socks5Connector<D> {
             Ok(stream)
         })
     }
+
+    pub fn connect_profile<'a>(
+        &'a self,
+        profile: &'a OutboundProfile,
+        proxy_address: SocketAddr,
+        target: &'a OutboundTarget,
+        resolved_ip: Option<IpAddr>,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Box<dyn OutboundStream>, Socks5ConnectError>> {
+        let credentials = profile.credentials().map(|credentials| Socks5Credentials {
+            username: credentials.username(),
+            password: credentials.password(),
+        });
+        self.connect(
+            proxy_address,
+            target,
+            resolved_ip,
+            credentials,
+            deadline,
+            cancellation,
+        )
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub struct OutboundCredentials {
+    username: Arc<[u8]>,
+    password: Arc<[u8]>,
+}
+
+impl fmt::Debug for OutboundCredentials {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OutboundCredentials")
+            .field("username_len", &self.username.len())
+            .field("password_len", &self.password.len())
+            .finish()
+    }
+}
+
+impl OutboundCredentials {
+    pub fn username(&self) -> &[u8] {
+        &self.username
+    }
+
+    pub fn password(&self) -> &[u8] {
+        &self.password
+    }
+}
+
+fn parse_credentials(url: &Url) -> Result<Option<OutboundCredentials>, ()> {
+    let username = url.username();
+    let Some(password) = url.password() else {
+        return if username.is_empty() {
+            Ok(None)
+        } else {
+            Err(())
+        };
+    };
+    let username = percent_decode_userinfo(username)?;
+    let password = percent_decode_userinfo(password)?;
+    if username.is_empty()
+        || password.is_empty()
+        || username.len() > u8::MAX as usize
+        || password.len() > u8::MAX as usize
+    {
+        return Err(());
+    }
+    Ok(Some(OutboundCredentials {
+        username: Arc::from(username.into_boxed_slice()),
+        password: Arc::from(password.into_boxed_slice()),
+    }))
+}
+
+fn percent_decode_userinfo(value: &str) -> Result<Vec<u8>, ()> {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = bytes.get(index + 1).copied().ok_or(())?;
+            let low = bytes.get(index + 2).copied().ok_or(())?;
+            decoded.push((hex_value(high)? << 4) | hex_value(low)?);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    Ok(decoded)
+}
+
+fn hex_value(value: u8) -> Result<u8, ()> {
+    match value {
+        b'0'..=b'9' => Ok(value - b'0'),
+        b'a'..=b'f' => Ok(value - b'a' + 10),
+        b'A'..=b'F' => Ok(value - b'A' + 10),
+        _ => Err(()),
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -272,6 +377,8 @@ pub enum OutboundProfileError {
     },
     #[error("outbound `{outbound}` proxy URL has an unsupported shape")]
     InvalidProxyUrl { outbound: String },
+    #[error("outbound `{outbound}` proxy credentials are invalid")]
+    InvalidCredentials { outbound: String },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
@@ -303,7 +410,7 @@ mod tests {
 
     use crate::config::resolve::{ConfigId, ResolvedOutbound, ResolvedSecretRef};
     use crate::dns::{Cancellation, Deadline};
-    use crate::upstream::{Socks5Connector, TokioOutboundDialer};
+    use crate::upstream::{OutboundProfileError, Socks5Connector, TokioOutboundDialer};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -350,6 +457,24 @@ mod tests {
             profile.proxy_url().expose(),
             b"socks5://user:password@proxy.example:1081"
         );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn profile_decodes_bounded_credentials_without_exposing_them() {
+        let (root, path) = secret_file(b"socks5://us%65r:p%40ss@proxy.example");
+        let profile = OutboundProfile::from_resolved(&outbound(path), 1024).unwrap();
+        let credentials = profile.credentials().unwrap();
+        assert_eq!(credentials.username(), b"user");
+        assert_eq!(credentials.password(), b"p@ss");
+        assert!(!format!("{credentials:?}").contains("p@ss"));
+        fs::remove_dir_all(root).unwrap();
+
+        let (root, path) = secret_file(b"socks5://user-only@proxy.example");
+        assert!(matches!(
+            OutboundProfile::from_resolved(&outbound(path), 1024),
+            Err(OutboundProfileError::InvalidCredentials { .. })
+        ));
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -450,6 +575,62 @@ mod tests {
                 proxy_address,
                 &target,
                 None,
+                None,
+                Deadline::new(std::time::Instant::now() + std::time::Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        stream.shutdown().await.unwrap();
+        server.await.unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_profile_wires_username_password_credentials() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let proxy_address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 4];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 2, 0, 2]);
+            stream.write_all(&[5, 2]).await.unwrap();
+
+            let mut credentials = [0; 11];
+            stream.read_exact(&mut credentials).await.unwrap();
+            assert_eq!(
+                credentials,
+                [1, 4, b'u', b's', b'e', b'r', 4, b'p', b'@', b's', b's']
+            );
+            stream.write_all(&[1, 0]).await.unwrap();
+
+            let mut request = [0; 10];
+            stream.read_exact(&mut request).await.unwrap();
+            assert_eq!(request, [5, 1, 0, 1, 192, 0, 2, 10, 1, 187]);
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                .await
+                .unwrap();
+        });
+
+        let (root, path) = secret_file(b"socks5://user:p%40ss@proxy.example");
+        let profile = OutboundProfile::from_resolved(&outbound(path), 1024).unwrap();
+        let target = profile
+            .target(
+                "dns.example",
+                443,
+                Some("192.0.2.10".parse().unwrap()),
+                None,
+            )
+            .unwrap();
+        let connector = Socks5Connector::new(Arc::new(TokioOutboundDialer::new()));
+        let cancellation = Cancellation::new();
+        let mut stream = connector
+            .connect_profile(
+                &profile,
+                proxy_address,
+                &target,
                 None,
                 Deadline::new(std::time::Instant::now() + std::time::Duration::from_secs(1)),
                 &cancellation,

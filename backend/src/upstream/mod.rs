@@ -31,8 +31,8 @@ pub use http::{
     DohAddressRequest, DohAddressResolver, TokioDohAddressResolver, TokioDohHttpTransport,
 };
 pub use outbound::{
-    NameResolution, OutboundProfile, OutboundProfileError, OutboundTarget, OutboundTargetError,
-    Socks5ConnectError, Socks5Connector,
+    NameResolution, OutboundCredentials, OutboundProfile, OutboundProfileError, OutboundTarget,
+    OutboundTargetError, Socks5ConnectError, Socks5Connector,
 };
 pub use outcome::{
     AttemptAssessment, AttemptClass, FallbackDecision, OutcomeError, UpstreamAttempt, aggregate,

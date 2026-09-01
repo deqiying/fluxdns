@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 339 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、协议无关 outbound stream port 与握手认证编排、Tokio TCP dial adapter 与最小 SOCKS connector 闭环、hosts/plain HTTP DoH registry、PolicyCore direct request path、group member selection 和结果聚合/fallback 判定，但自定义 transport 的 bootstrap resolver、代理主机名解析、credentials 到 profile 的完整接线、HTTPS/TLS、proxy 和 Runtime snapshot 接线仍未完成；Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、direct hosts/plain HTTP DoH registry wiring、注入式 DoH request path、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验，以及 scheduler/coordinator 的 Runtime-facing 纯逻辑编排；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、bootstrap/连接执行的完整接线、Moka/SQLite persistence、真实 resource fetch/parse/persist worker、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 341 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、协议无关 outbound stream port 与握手认证编排、Tokio TCP dial adapter、profile credential 装配与最小 SOCKS connector 闭环、hosts/plain HTTP DoH registry、PolicyCore direct request path、group member selection 和结果聚合/fallback 判定，但自定义 transport 的 bootstrap resolver、代理主机名解析、HTTPS/TLS、proxy 和 Runtime snapshot 接线仍未完成；Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、direct hosts/plain HTTP DoH registry wiring、注入式 DoH request path、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验，以及 scheduler/coordinator 的 Runtime-facing 纯逻辑编排；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、bootstrap/连接执行的完整接线、Moka/SQLite persistence、真实 resource fetch/parse/persist worker、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **55.0%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合、可注入 DoH exchange、plain HTTP transport、地址解析 port、bootstrap 引用透传、响应地址提取、注入 connector 的 A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、outbound stream port、握手认证编排与 Tokio TCP dial adapter，registry wiring 和注入式 PolicyCore request path，Storage 已增加业务 schema 与 writer contract，Resource 已增加 scheduler/coordinator 的 Runtime-facing 编排边界；仍缺少 TLS、代理信任、HTTPS 出站、代理主机名解析、credentials 到 profile 的完整接线、自定义 transport 的 bootstrap resolver、Runtime snapshot 资源接线、Moka/SQLite persistence、真实 resource worker、完整 upstream/Core 管线和完整故障验收 |
-| v1 交付总进度 | **59.5%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 55.0%` |
+| 后端代码实现进度 | **55.3%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合、可注入 DoH exchange、plain HTTP transport、地址解析 port、bootstrap 引用透传、响应地址提取、注入 connector 的 A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、outbound stream port、握手认证编排、Tokio TCP dial adapter 与 profile credential 装配，registry wiring 和注入式 PolicyCore request path，Storage 已增加业务 schema 与 writer contract，Resource 已增加 scheduler/coordinator 的 Runtime-facing 编排边界；仍缺少 TLS、代理信任、HTTPS 出站、代理主机名解析、自定义 transport 的 bootstrap resolver、Runtime snapshot 资源接线、Moka/SQLite persistence、真实 resource worker、完整 upstream/Core 管线和完整故障验收 |
+| v1 交付总进度 | **59.8%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 55.3%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -62,7 +62,7 @@ v1 交付范围：
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 50% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 55% | 8% |
-| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 85% | 10% |
+| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 88% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 50% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 65% | 7% |
 | Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 35% | 8% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 55% + 10% × 85% + 9% × 50% + 7% × 65% + 8% × 35% + 3% × 30% ≈ 55.0%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 55% + 10% × 88% + 9% × 50% + 7% × 65% + 8% × 35% + 3% × 30% ≈ 55.3%
 ```
 
 ## 4. 进度判定规则
@@ -248,7 +248,9 @@ transport / upstream / storage / observability adapters
 
 第十七个小阶段（已完成）：增加 `OutboundDialer` port 和 `TokioOutboundDialer`，以 bounded read/write、deadline/cancellation 和脱敏 `PortError` 包装 Tokio TCP stream；`Socks5Connector` 在调用方提供已解析 proxy `SocketAddr` 后完成 dial → handshake → CONNECT 最小闭环，并以 loopback SOCKS server 验证真实 socket path。该阶段不负责 proxy hostname 解析、SecretRef credential 到 connector 的完整装配、连接池、HTTPS/TLS 或 Runtime 接线。
 
-当前阶段 5 边界：自定义 transport 的 bootstrap resolver 注入、HTTPS/TLS DoH adapter、proxy hostname/credential 的完整 outbound 装配、连接池、真实 fallback/重试链路、Cache 接线和 Runtime snapshot 接线仍未实现。
+第十八个小阶段（已完成）：`OutboundProfile` 在 prepare 边界解析 URL userinfo，百分号解码并保存长度受限的 `OutboundCredentials`；`Socks5Connector::connect_profile` 自动把脱敏 credential material 传递给握手，拒绝缺失 password、空值、非法百分号和超过 255 字节的字段；新增 profile credential 与 loopback username/password tests。该阶段不负责 proxy hostname 解析、连接池、HTTPS/TLS 或 Runtime 接线。
+
+当前阶段 5 边界：自定义 transport 的 bootstrap resolver 注入、HTTPS/TLS DoH adapter、proxy hostname 解析、连接池、真实 fallback/重试链路、Cache 接线和 Runtime snapshot 接线仍未实现。
 
 ### 阶段 6：缓存
 
