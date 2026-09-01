@@ -10,12 +10,13 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use url::Url;
 
+use crate::config::migrate::deterministic_hash;
 use crate::config::model::RuleSetFormat;
 use crate::config::resolve::{ConfigId, ResolvedRuleSet};
 use crate::dns::{CancelReason, Cancellation, Deadline};
@@ -28,6 +29,7 @@ use super::{ResourceSnapshot, ResourceSourceKind, ResourceStaleStatus, RuleIndex
 
 const MANIFEST_VERSION: u32 = 1;
 const PARSER_VERSION: &str = "rule-index-v1";
+const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// 远程资源本次拉取的边界和持久化目标。
@@ -105,6 +107,7 @@ pub struct RemoteResourceManifest {
     format: RuleSetFormat,
     byte_len: usize,
     checksum: u64,
+    content_hash: Arc<str>,
     modified_at_unix_nanos: Option<u128>,
     parser_version: &'static str,
 }
@@ -130,6 +133,10 @@ impl RemoteResourceManifest {
         self.checksum
     }
 
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
+
     pub const fn modified_at_unix_nanos(&self) -> Option<u128> {
         self.modified_at_unix_nanos
     }
@@ -148,6 +155,7 @@ impl fmt::Debug for RemoteResourceManifest {
             .field("format", &self.format)
             .field("byte_len", &self.byte_len)
             .field("checksum", &self.checksum)
+            .field("content_hash", &"[REDACTED]")
             .field("modified_at_unix_nanos", &self.modified_at_unix_nanos)
             .field("parser_version", &self.parser_version)
             .finish()
@@ -190,6 +198,23 @@ pub enum RemoteResourceError {
     },
     #[error("remote resource manifest serialization failed")]
     ManifestSerialization,
+    #[error("remote resource manifest is invalid")]
+    ManifestInvalid,
+    #[error("remote resource manifest does not match its content")]
+    ManifestMismatch,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PersistedManifest {
+    manifest_version: u32,
+    resource_id: String,
+    format: String,
+    byte_len: usize,
+    checksum: u64,
+    content_hash: String,
+    modified_at_unix_nanos: Option<u128>,
+    parser_version: String,
 }
 
 /// 拉取一个 remote rule-set，完成有界解析后分别原子发布 content 与 manifest。
@@ -253,6 +278,7 @@ pub async fn fetch_remote_rule_set(
         format,
         byte_len: result.body.len(),
         checksum: result.checksum,
+        content_hash: Arc::from(deterministic_hash(&result.body)),
         modified_at_unix_nanos: result.modified_at.and_then(unix_nanos),
         parser_version: PARSER_VERSION,
     };
@@ -264,12 +290,103 @@ pub async fn fetch_remote_rule_set(
         id.clone(),
         0,
         0,
-        result.checksum.to_string(),
+        manifest.content_hash.clone(),
         source_fingerprint,
         PARSER_VERSION,
         result.modified_at.unwrap_or_else(SystemTime::now),
         ResourceSourceKind::Remote,
         false,
+        ResourceStaleStatus::Fresh,
+        index,
+    );
+    Ok(LoadedRemoteRuleSet {
+        id: id.clone(),
+        manifest,
+        snapshot,
+    })
+}
+
+/// 从上一轮成功原子落盘的 content/manifest pair 恢复 remote rule-set。
+///
+/// 恢复路径只接受当前配置声明的 remote 资源，并同时校验 manifest schema、资源
+/// 身份、格式、parser 版本、字节长度和内容 hash。任一校验失败都不会产生可用
+/// snapshot，调用方可以继续执行本次 fetch 或将启动失败分类为不可恢复。
+pub fn restore_remote_rule_set(
+    resource: &ResolvedRuleSet,
+    options: RemoteResourceOptions,
+) -> Result<LoadedRemoteRuleSet, RemoteResourceError> {
+    let (id, format) = match resource {
+        ResolvedRuleSet::Remote {
+            id, format, url, ..
+        } => {
+            validate_url(url)?;
+            (id, *format)
+        }
+        ResolvedRuleSet::Const { .. } => {
+            return Err(RemoteResourceError::UnsupportedSource { kind: "const" });
+        }
+        ResolvedRuleSet::File { .. } => {
+            return Err(RemoteResourceError::UnsupportedSource { kind: "file" });
+        }
+    };
+    validate_options(&options)?;
+    check_boundary(&options)?;
+
+    let manifest_bytes =
+        read_persisted_file(&options.manifest_path, MAX_MANIFEST_BYTES, "manifest_read")?;
+    let persisted: PersistedManifest = yaml_serde::from_slice(&manifest_bytes)
+        .map_err(|_| RemoteResourceError::ManifestInvalid)?;
+    let content = read_persisted_file(&options.content_path, options.max_bytes, "content_read")?;
+    check_boundary(&options)?;
+
+    if persisted.manifest_version != MANIFEST_VERSION
+        || persisted.resource_id != id.as_str()
+        || persisted.byte_len != content.len()
+        || persisted.parser_version != PARSER_VERSION
+        || persisted.format != format_name(format)
+        || persisted.content_hash != deterministic_hash(&content)
+    {
+        return Err(RemoteResourceError::ManifestMismatch);
+    }
+    let modified_at = persisted
+        .modified_at_unix_nanos
+        .map(|nanos| {
+            u64::try_from(nanos)
+                .ok()
+                .and_then(|nanos| UNIX_EPOCH.checked_add(Duration::from_nanos(nanos)))
+                .ok_or(RemoteResourceError::ManifestInvalid)
+        })
+        .transpose()?;
+
+    let text = std::str::from_utf8(&content).map_err(|_| RemoteResourceError::InvalidUtf8)?;
+    let index = match format {
+        RuleSetFormat::Dat => return Err(RemoteResourceError::UnsupportedFormat),
+        RuleSetFormat::Json | RuleSetFormat::Clash => {
+            RuleIndex::parse_with_limits(text, format, options.rule_limits)
+                .map_err(RemoteResourceError::Parse)?
+        }
+    };
+    let content_hash: Arc<str> = Arc::from(persisted.content_hash);
+    let manifest = RemoteResourceManifest {
+        manifest_version: persisted.manifest_version,
+        resource_id: id.clone(),
+        format,
+        byte_len: persisted.byte_len,
+        checksum: persisted.checksum,
+        content_hash: Arc::clone(&content_hash),
+        modified_at_unix_nanos: persisted.modified_at_unix_nanos,
+        parser_version: PARSER_VERSION,
+    };
+    let snapshot = ResourceSnapshot::new(
+        id.clone(),
+        0,
+        0,
+        content_hash,
+        format!("remote:{}:{}", manifest.checksum, manifest.byte_len),
+        PARSER_VERSION,
+        modified_at.unwrap_or_else(SystemTime::now),
+        ResourceSourceKind::Remote,
+        true,
         ResourceStaleStatus::Fresh,
         index,
     );
@@ -342,29 +459,44 @@ fn persist_manifest(
     path: &Path,
     manifest: &RemoteResourceManifest,
 ) -> Result<(), RemoteResourceError> {
-    #[derive(Serialize)]
-    struct PersistedManifest<'a> {
-        manifest_version: u32,
-        resource_id: &'a str,
-        format: &'static str,
-        byte_len: usize,
-        checksum: u64,
-        modified_at_unix_nanos: Option<u128>,
-        parser_version: &'static str,
-    }
-
     let persisted = PersistedManifest {
         manifest_version: manifest.manifest_version,
-        resource_id: manifest.resource_id.as_str(),
-        format: format_name(manifest.format),
+        resource_id: manifest.resource_id.as_str().to_owned(),
+        format: format_name(manifest.format).to_owned(),
         byte_len: manifest.byte_len,
         checksum: manifest.checksum,
+        content_hash: manifest.content_hash.to_string(),
         modified_at_unix_nanos: manifest.modified_at_unix_nanos,
-        parser_version: manifest.parser_version,
+        parser_version: manifest.parser_version.to_owned(),
     };
     let text = yaml_serde::to_string(&persisted)
         .map_err(|_| RemoteResourceError::ManifestSerialization)?;
     atomic_write(path, text.as_bytes(), "manifest")
+}
+
+fn read_persisted_file(
+    path: &Path,
+    max_bytes: usize,
+    operation: &'static str,
+) -> Result<Vec<u8>, RemoteResourceError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|source| RemoteResourceError::Persistence { operation, source })?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(RemoteResourceError::ManifestInvalid);
+    }
+    let byte_len = usize::try_from(metadata.len()).unwrap_or(usize::MAX);
+    if byte_len > max_bytes {
+        return Err(RemoteResourceError::TooLarge {
+            actual: byte_len,
+            max: max_bytes,
+        });
+    }
+    let bytes =
+        fs::read(path).map_err(|source| RemoteResourceError::Persistence { operation, source })?;
+    if bytes.len() != byte_len {
+        return Err(RemoteResourceError::ManifestInvalid);
+    }
+    Ok(bytes)
 }
 
 const fn format_name(format: RuleSetFormat) -> &'static str {
@@ -486,8 +618,73 @@ mod tests {
         assert_eq!(fs::read(root.join("rules.txt")).unwrap().len(), 27);
         let manifest = fs::read_to_string(root.join("rules.manifest")).unwrap();
         assert!(manifest.contains("manifest_version: 1"));
+        assert!(manifest.contains("content_hash:"));
         assert!(!manifest.contains("rules.example.test"));
         assert!(!format!("{loaded:?}").contains("example.test"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn restores_a_valid_persisted_pair_as_a_fallback_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-remote-restore-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let fetcher = FakeFetcher {
+            body: Arc::from(&b"DOMAIN-SUFFIX,example.test\n"[..]),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let loaded = fetch_remote_rule_set(
+            &fetcher,
+            &remote(RuleSetFormat::Clash, "https://rules.example.test/private"),
+            options(&root),
+        )
+        .await
+        .unwrap();
+        let restored = restore_remote_rule_set(
+            &remote(RuleSetFormat::Clash, "https://rules.example.test/private"),
+            options(&root),
+        )
+        .unwrap();
+
+        assert_eq!(restored.id(), loaded.id());
+        assert_eq!(
+            restored.manifest().content_hash(),
+            loaded.manifest().content_hash()
+        );
+        assert!(restored.snapshot().used_fallback());
+        assert_eq!(restored.index().suffix_count(), 1);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn rejects_tampered_or_mismatched_persisted_pairs() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-remote-restore-reject-{}-{}",
+            std::process::id(),
+            TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let fetcher = FakeFetcher {
+            body: Arc::from(&b"DOMAIN-SUFFIX,example.test\n"[..]),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        fetch_remote_rule_set(
+            &fetcher,
+            &remote(RuleSetFormat::Clash, "https://rules.example.test/private"),
+            options(&root),
+        )
+        .await
+        .unwrap();
+
+        fs::write(root.join("rules.txt"), b"DOMAIN-SUFFIX,changed.test\n").unwrap();
+        assert!(matches!(
+            restore_remote_rule_set(
+                &remote(RuleSetFormat::Clash, "https://rules.example.test/private"),
+                options(&root),
+            ),
+            Err(RemoteResourceError::ManifestMismatch)
+        ));
         let _ = fs::remove_dir_all(root);
     }
 

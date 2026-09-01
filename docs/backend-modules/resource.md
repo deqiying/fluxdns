@@ -1,6 +1,6 @@
 # Resource 模块设计
 
-> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader 与资源版本 CAS；remote refresh、原子落盘和 scheduler 尚未实现
+> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复及资源版本 CAS；refresh scheduler 尚未接入 Runtime
 >
 > 更新日期：2026-08-31
 >
@@ -20,8 +20,9 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 | --- | --- |
 | `hosts.rs` | JSON/hosts 格式、本地 RR 索引 |
 | `rules.rs` | JSON/Clash/dat 规则解析和 matcher |
-| `loader.rs` | const/file、大小限制、稳定读取与 parser 边界；remote/原子落盘待后续 |
+| `loader.rs` | const/file、大小限制、稳定读取与 parser 边界；remote 内容加载由 `remote.rs` 编排 |
 | `snapshot.rs` | metadata、revision、registry 和 publish input |
+| `remote.rs` | remote fetch、manifest/content 原子落盘与恢复校验 |
 
 查询热路径只读取编译后的不可变索引，不访问文件、网络或 parser。
 
@@ -134,10 +135,10 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 所有配置资源在 bind 前必须有有效 snapshot：
 
 1. const/file 直接加载；
-2. remote 先检查兼容且已校验的落盘 snapshot；
-3. 尝试本次远程获取；
-4. 获取成功使用新内容；
-5. 获取失败但旧 snapshot 有效时使用旧内容并标记 fallback/degraded；
+2. remote 先读取 content/manifest pair，并校验 manifest schema、资源身份、格式、parser 版本、字节长度和内容 hash；
+3. 已校验的落盘 snapshot 可作为 fallback，并标记 `used_fallback`；
+4. 没有可用 fallback 时再尝试本次远程获取；
+5. 获取成功使用新内容；
 6. 两者都不可用则 prepare 失败。
 
 落盘 manifest 包含 hash、parser version、source fingerprint 和成功时间；版本不兼容时不使用。
@@ -168,7 +169,7 @@ remote 有效内容与 manifest：
 6. fsync 目录；
 7. 清理旧临时文件。
 
-恢复时只有 content hash 与 manifest 一致的 pair 才可使用。
+恢复时只有 resource id、format、parser version、byte length 和 content hash 均一致的 pair 才可使用；校验失败不会产生 fallback snapshot。
 
 ## 11. 安全与观测
 
@@ -197,11 +198,11 @@ remote 有效内容与 manifest：
 - [x] 实现 canonical matcher/index；
 - [x] 实现 const/file loader；
 - [x] 实现资源版本 snapshot/CAS publish；
-- [ ] 实现 remote loader、snapshot manifest 与原子落盘；
+- [x] 实现 remote loader、snapshot manifest、原子落盘与 content/manifest 恢复校验；
 - [ ] 实现 refresh/single-flight scheduler/stale policy；
 - [x] 完成当前解析、安全边界、文件稳定读取和并发 CAS 测试；
 - [ ] 完成 remote 恢复、原子落盘和长期刷新测试。
 
-阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests 和 DNS/Policy 资源接线 tests 均通过；当前 backend 全量测试为 238 passed、0 failed。
+阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；本切片新增 `resource::remote::tests` 6 项通过。refresh scheduler 的 Runtime 接线、资源跨 Runtime 发布和长期故障验收仍未完成。
 
-当前实现进度：**50%**。
+当前实现进度：**60%**。

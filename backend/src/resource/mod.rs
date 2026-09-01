@@ -21,7 +21,7 @@ pub use refresh::{
 };
 pub use remote::{
     LoadedRemoteRuleSet, RemoteResourceError, RemoteResourceManifest, RemoteResourceOptions,
-    fetch_remote_rule_set,
+    fetch_remote_rule_set, restore_remote_rule_set,
 };
 pub use rules::{RuleIndex, RuleLimits, RuleMatch, RuleParseError};
 pub use scheduler::{
