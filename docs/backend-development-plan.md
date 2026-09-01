@@ -240,6 +240,8 @@ transport / upstream / storage / observability adapters
 
 第四个小阶段（已完成）：为内存 adapter 增加共享 weight 上限、确定性 oldest eviction、oversized entry 拒绝和 eviction 计数；定向测试 3 项通过。Moka adapter、optimistic 后台刷新和 SQLite persistence 仍未实现。
 
+第五个小阶段（已完成）：新增无外部依赖的 `FilePersistentCacheStore`，固定 `FDCP` 版本化快照格式、canonical wire/checksum/response class 校验、wall-clock expiry 恢复、record 级损坏隔离、文件预算和 oldest eviction；`cache::persistence::tests` 6 项通过。Moka/SQLite persistence、last-access bucket、WAL/SHM 观测和 degraded recovery 仍未实现。
+
 ### 阶段 7：完整策略与资源
 
 涉及：Policy、Resource、DNS Core。
