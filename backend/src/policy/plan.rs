@@ -218,12 +218,17 @@ impl PolicyIndex {
         )
     }
 
-    pub(crate) fn from_config_with_rule_indexes(
+    pub(crate) fn from_config_with_resource_indexes(
         config: &ResolvedConfig,
-        remote_rule_indexes: &BTreeMap<ConfigId, Arc<RuleIndex>>,
+        supplied_hosts: &BTreeMap<ConfigId, Arc<HostsIndex>>,
+        supplied_rule_indexes: &BTreeMap<ConfigId, Arc<RuleIndex>>,
     ) -> Result<Self, PolicyBuildError> {
-        let (hosts, rule_sets) =
-            compile_resources(&config.hosts, &config.rule_sets, remote_rule_indexes)?;
+        let (hosts, rule_sets) = compile_resources_with_supplied(
+            &config.hosts,
+            &config.rule_sets,
+            supplied_hosts,
+            supplied_rule_indexes,
+        )?;
         Self::build_with_resources(
             config.listeners.clone(),
             config.strategies.clone(),
@@ -477,23 +482,36 @@ fn compile_resources(
     rule_sets: &[ResolvedRuleSet],
     remote_rule_indexes: &BTreeMap<ConfigId, Arc<RuleIndex>>,
 ) -> Result<ResourceIndexes, PolicyBuildError> {
+    compile_resources_with_supplied(hosts, rule_sets, &BTreeMap::new(), remote_rule_indexes)
+}
+
+fn compile_resources_with_supplied(
+    hosts: &[ResolvedHostsResource],
+    rule_sets: &[ResolvedRuleSet],
+    supplied_hosts: &BTreeMap<ConfigId, Arc<HostsIndex>>,
+    supplied_rule_indexes: &BTreeMap<ConfigId, Arc<RuleIndex>>,
+) -> Result<ResourceIndexes, PolicyBuildError> {
     let mut host_indexes = BTreeMap::new();
     for resource in hosts {
         let id = match resource {
             ResolvedHostsResource::Const { id, .. } | ResolvedHostsResource::File { id, .. } => id,
         };
-        let index = load_hosts(resource, HostsLimits::default())
-            .map(|loaded| loaded.index().clone())
-            .map_err(|source| match source {
-                ResourceLoadError::Parse { source, .. } => PolicyBuildError::HostsParse {
-                    resource: id.clone(),
-                    source,
-                },
-                source => PolicyBuildError::HostsLoad {
-                    resource: id.clone(),
-                    source,
-                },
-            })?;
+        let index = if let Some(index) = supplied_hosts.get(id) {
+            index.as_ref().clone()
+        } else {
+            load_hosts(resource, HostsLimits::default())
+                .map(|loaded| loaded.index().clone())
+                .map_err(|source| match source {
+                    ResourceLoadError::Parse { source, .. } => PolicyBuildError::HostsParse {
+                        resource: id.clone(),
+                        source,
+                    },
+                    source => PolicyBuildError::HostsLoad {
+                        resource: id.clone(),
+                        source,
+                    },
+                })?
+        };
         if host_indexes.insert(id.clone(), Arc::new(index)).is_some() {
             return Err(PolicyBuildError::DuplicateHostsResource(id.clone()));
         }
@@ -506,51 +524,53 @@ fn compile_resources(
             | ResolvedRuleSet::File { id, .. }
             | ResolvedRuleSet::Remote { id, .. } => id,
         };
-        let index = match resource {
-            ResolvedRuleSet::Remote { .. } => {
-                remote_rule_indexes.get(id).cloned().ok_or_else(|| {
-                    PolicyBuildError::UnsupportedRuleSet {
-                        resource: id.clone(),
-                        kind: "remote",
-                    }
-                })?
-            }
-            ResolvedRuleSet::Const { format, .. } | ResolvedRuleSet::File { format, .. } => {
-                if *format == RuleSetFormat::Dat {
+        let index = if let Some(index) = supplied_rule_indexes.get(id) {
+            index.clone()
+        } else {
+            match resource {
+                ResolvedRuleSet::Remote { .. } => {
                     return Err(PolicyBuildError::UnsupportedRuleSet {
                         resource: id.clone(),
-                        kind: "dat",
+                        kind: "remote",
                     });
                 }
-                Arc::new(
-                    load_rule_set(resource, RuleLimits::default())
-                        .map_err(|source| match source {
-                            RuleResourceLoadError::Parse { source, .. } => {
-                                PolicyBuildError::RuleSetParse {
+                ResolvedRuleSet::Const { format, .. } | ResolvedRuleSet::File { format, .. } => {
+                    if *format == RuleSetFormat::Dat {
+                        return Err(PolicyBuildError::UnsupportedRuleSet {
+                            resource: id.clone(),
+                            kind: "dat",
+                        });
+                    }
+                    Arc::new(
+                        load_rule_set(resource, RuleLimits::default())
+                            .map_err(|source| match source {
+                                RuleResourceLoadError::Parse { source, .. } => {
+                                    PolicyBuildError::RuleSetParse {
+                                        resource: id.clone(),
+                                        source,
+                                    }
+                                }
+                                RuleResourceLoadError::UnsupportedFormat { .. } => {
+                                    PolicyBuildError::UnsupportedRuleSet {
+                                        resource: id.clone(),
+                                        kind: "dat",
+                                    }
+                                }
+                                RuleResourceLoadError::UnsupportedSource { kind, .. } => {
+                                    PolicyBuildError::UnsupportedRuleSet {
+                                        resource: id.clone(),
+                                        kind,
+                                    }
+                                }
+                                source => PolicyBuildError::RuleSetLoad {
                                     resource: id.clone(),
                                     source,
-                                }
-                            }
-                            RuleResourceLoadError::UnsupportedFormat { .. } => {
-                                PolicyBuildError::UnsupportedRuleSet {
-                                    resource: id.clone(),
-                                    kind: "dat",
-                                }
-                            }
-                            RuleResourceLoadError::UnsupportedSource { kind, .. } => {
-                                PolicyBuildError::UnsupportedRuleSet {
-                                    resource: id.clone(),
-                                    kind,
-                                }
-                            }
-                            source => PolicyBuildError::RuleSetLoad {
-                                resource: id.clone(),
-                                source,
-                            },
-                        })?
-                        .index()
-                        .clone(),
-                )
+                                },
+                            })?
+                            .index()
+                            .clone(),
+                    )
+                }
             }
         };
         if rule_indexes.insert(id.clone(), index).is_some() {

@@ -1,6 +1,6 @@
 # Resource 模块设计
 
-> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取；async `PreparedRuntime` 已在 bind 前完成 remote rule-set 的 restore-or-fetch、解析和原子持久化；`auto_update=true` 的 remote rule-set 已由 service Supervisor 持有长期 refresh task，并在同一 ActiveRuntime 内完成 Policy live publish；跨 Runtime snapshot 发布和 file/hosts refresh 尚未接入
+> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取；async `PreparedRuntime` 已在 bind 前完成 remote rule-set restore-or-fetch、file hosts/rule-set snapshot 加载和 typed Policy 构造；`auto_update=true` 的 remote、file rule-set、file hosts 均由 service Supervisor 持有长期 refresh task，并在同一 ActiveRuntime 内完成 Policy live publish 与 Runtime 资源摘要原子更新；真正跨 Runtime 配置候选发布和独立 listener 生命周期仍未接入
 >
 > 更新日期：2026-09-01
 >
@@ -158,7 +158,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 
 失败退避指数增长并封顶 5 分钟。连续三次计划刷新失败或超过 `3 × update_interval` 无成功时标记 stale，但继续使用旧 snapshot。
 
-当前已实现 `ResourceRefreshRuntime`：它为 registry 中的资源建立 schedule，将 due 检查与 `ResourceRefreshCoordinator` 的 per-resource single-flight、epoch reservation、CAS publish、failure backoff、cancel 和 shutdown 组合起来。该 facade 不执行网络、磁盘或 parser I/O；`ResourceRefreshWorker` 现在在 reservation 生命周期内调用 `ResourceFetcher`，完成 bounded remote rule-set fetch/parse/persist、epoch 重绑定和 CAS publish。生产 `ReqwestResourceFetcher` 在 prepare 边界装配 direct HTTP/HTTPS 与配置驱动 SOCKS5/SOCKS5H client，固定 `no_proxy`、禁止重定向、响应体上限、deadline/cancellation 和安全 URL 边界。async `PreparedRuntime` 首次构造会为每个 remote rule-set 先恢复已校验的 content/manifest pair，恢复失败后才执行本次 fetch，并把编译后的 `ResourceSnapshot<RuleIndex>` 交给 Policy 初始索引；service 再为 `auto_update=true` 的 remote 资源注册受 Supervisor 持有的长期 task，按 due/backoff 触发 worker，并把成功候选提交到同一 ActiveRuntime 的 Policy CAS。跨 Runtime owner 发布、file/hosts 长期刷新和 resource-only listener/service 生命周期仍由后续 Runtime 接入。
+当前已实现 `ResourceRefreshRuntime`：它为 registry 中的资源建立 schedule，将 due 检查与 `ResourceRefreshCoordinator` 的 per-resource single-flight、epoch reservation、CAS publish、failure backoff、cancel 和 shutdown 组合起来。该 facade 不执行网络、磁盘或 parser I/O；remote `ResourceRefreshWorker` 在 reservation 生命周期内调用 `ResourceFetcher`，完成 bounded fetch/parse/persist、epoch 重绑定和 CAS publish；file hosts/rule-set worker 复用同一 reservation 边界执行稳定读取、hash、解析和 CAS publish。生产 `ReqwestResourceFetcher` 在 prepare 边界装配 direct HTTP/HTTPS 与配置驱动 SOCKS5/SOCKS5H client，固定 `no_proxy`、禁止重定向、响应体上限、deadline/cancellation 和安全 URL 边界。async `PreparedRuntime` 首次构造会为 file 资源加载 typed snapshot，为 remote rule-set 恢复已校验的 content/manifest pair，恢复失败后才执行本次 fetch，并把 compiled snapshot 交给 Policy 初始索引；service 为三类 `auto_update=true` 资源注册受 Supervisor 持有的长期 task，按 due/backoff 触发 worker，并把成功候选提交到同一 ActiveRuntime 的 Policy CAS 和 Runtime 元数据 CAS。真正跨 Runtime owner 发布、独立 listener set 生命周期和长期压力验收仍由后续 Runtime 接入。
 
 ## 10. 原子落盘
 
@@ -207,10 +207,11 @@ remote 有效内容与 manifest：
 - [x] 接入生产 `ReqwestResourceFetcher`，验证 direct HTTP、HTTPS TLS、SOCKS5H、body limit、取消和安全错误边界；
 - [x] 在 async `PreparedRuntime` 中接入 remote rule-set 首次 restore-or-fetch、解析和原子持久化，并在 bind 前构造 compiled Policy snapshot；
 - [x] 接入 Runtime supervisor 的长期 remote 调度和资源 I/O task；
-- [ ] 接入跨 Runtime snapshot 发布、file/hosts 长期刷新和 resource-only listener/service 生命周期；
+- [x] 接入当前 ActiveRuntime 的 file/hosts 长期刷新、Policy live publish 和 Runtime 元数据 CAS；
+- [ ] 接入跨 Runtime snapshot 发布和独立 listener/service 生命周期；
 - [x] 完成当前解析、安全边界、文件稳定读取和并发 CAS 测试；
 - [ ] 完成 remote 恢复、原子落盘和长期刷新测试。
 
-阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；`resource::fetcher::tests` 7 项通过，覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy、SecretRef 脱敏和 prepare 错误；async PreparedRuntime restore/fetch 测试验证 bind 前首次远程资源准备，ResourceRefreshWorker focused tests 验证 due/reservation、CAS publish、backoff、cancel 和 shutdown；service 已注册长期 remote refresh task，成功候选经 Policy CAS 发布。跨 Runtime snapshot 发布、file/hosts 长期刷新和长期故障验收仍未完成。
+阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；`resource::fetcher::tests` 7 项通过，覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy、SecretRef 脱敏和 prepare 错误；async PreparedRuntime restore/fetch 与 file snapshot 测试验证 bind 前资源准备，ResourceRefreshWorker focused tests 验证 remote/file worker 的 due/reservation、CAS publish、backoff、cancel 和 shutdown；service 已为 remote/file rule-set/hosts 注册长期 refresh task，成功候选经 Policy CAS 和 Runtime metadata CAS 发布。真正跨 Runtime snapshot 发布、独立 listener 生命周期和长期故障验收仍未完成。
 
-当前实现进度：**70%**。
+当前实现进度：**90%**。

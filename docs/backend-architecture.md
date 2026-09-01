@@ -267,7 +267,7 @@ RawConfigVn
   → AppState
 ```
 
-`PreparedRuntime` 在 bind 前完成路径、引用图、策略索引、上游 connector、adapter-owned transport profile、核心可见 capabilities、资源句柄和数据库/日志能力的预构建，并在同一 prepare 边界装配生产 `ResourceFetcher`。正式 async prepare 对 remote rule-set 先校验落盘 content/manifest fallback，恢复失败后才执行 bounded fetch、解析和原子持久化，再把 compiled snapshot 交给 Policy 构造；任一步失败都不会进入 bind。对 `auto_update=true` 的 remote rule-set，ActiveRuntime 还会把独立 refresh worker 纳入 service Supervisor，成功候选在同一 Policy core 内做版本化 live publish。`RuntimeSnapshot` 是请求读取的不可变对象；未来配置热加载时，先完整 prepare 新 revision，再原子切换，不在请求中重新解释 YAML 或继承规则。
+`PreparedRuntime` 在 bind 前完成路径、引用图、策略索引、上游 connector、adapter-owned transport profile、核心可见 capabilities、资源句柄和数据库/日志能力的预构建，并在同一 prepare 边界装配生产 `ResourceFetcher`。正式 async prepare 对 remote rule-set 先校验落盘 content/manifest fallback，恢复失败后才执行 bounded fetch、解析和原子持久化；对 file hosts/rule-set 则执行稳定读取、hash、解析和编译，再把 typed snapshot 交给 Policy 构造；任一步失败都不会进入 bind。对 `auto_update=true` 的 remote、file rule-set 和 file hosts，ActiveRuntime 会把独立 refresh worker 纳入 service Supervisor，成功候选在同一 Policy core 内做版本化 live publish，并原子更新当前 Runtime 的资源元数据。`RuntimeSnapshot` 是请求读取的不可变配置句柄；未来配置热加载时，先完整 prepare 新 revision，再原子切换，不在请求中重新解释 YAML 或继承规则。
 
 ```rust
 struct RuntimeSnapshot {
@@ -275,7 +275,7 @@ struct RuntimeSnapshot {
     config: Arc<ResolvedConfig>,
     cache_semantics: Arc<CacheSemantics>,
     policy: Arc<PolicyIndex>,
-    resources: Arc<ResourceRegistrySnapshot>,
+    resources: Arc<ArcSwap<ResourceRegistrySnapshot>>,
     upstreams: Arc<UpstreamRegistry>,
     transport_capabilities: Arc<TransportCapabilitiesRegistry>,
 }
@@ -305,7 +305,7 @@ struct AppState {
 }
 ```
 
-`RuntimeSnapshot` 只放请求热路径需要的不可变状态，不包含 socket、HTTP connection、数据库连接或 cache implementation；`cache_semantics` 是已解析的 key/TTL/namespace 规则，不是具体 cache backend。`PreparedRuntime` 是无 socket 的候选运行时，完成配置迁移、引用图、策略索引、上游 connector、transport capabilities、资源句柄、首次 remote resource snapshot、生产 `ResourceFetcher` 和 auto-update worker 准备；`ActiveRuntime` 继续持有这些 shared adapter/worker，但它们不进入请求 snapshot。绑定成功后才形成 `ActiveRuntime`。这样“prepare 失败不影响现有服务”和“bind/rebind 后原子切换”有明确的所有权边界。
+`RuntimeSnapshot` 只放请求热路径需要的不可变状态，不包含 socket、HTTP connection、数据库连接或 cache implementation；`cache_semantics` 是已解析的 key/TTL/namespace 规则，不是具体 cache backend。`PreparedRuntime` 是无 socket 的候选运行时，完成配置迁移、引用图、策略索引、上游 connector、transport capabilities、资源句柄、首次 remote/file resource snapshot、生产 `ResourceFetcher` 和 auto-update worker 准备；`ActiveRuntime` 继续持有这些 shared adapter/worker，但它们不进入请求 snapshot。资源-only 刷新在当前 ActiveRuntime 内通过 Policy CAS 与 Runtime 元数据 ArcSwap 生效并复用已绑定 listener；配置候选仍需完整 bind 后再切换 `ActiveRuntime`。绑定成功后才形成 `ActiveRuntime`。这样“prepare 失败不影响现有服务”和“bind/rebind 后原子切换”有明确的所有权边界。
 
 每个请求从 `active.load()` 得到同一 `ActiveRuntime`，再捕获其中的 `RuntimeSnapshot` 一次。资源仍可按资源粒度刷新，但 coordinator 必须基于最新 active revision 做顶层 CAS/串行重试，避免 hosts 与 rule_set 并发刷新时后发布者覆盖前一份资源更新。资源-only 更新复用现有 bound endpoints 和 shared services；需要 rebind 的候选则先绑定新 endpoints，成功后原子替换 `ActiveRuntime`，旧实例进入 drain。
 
@@ -537,7 +537,7 @@ ResourceRegistrySnapshot
 
 首次启动必须为所有已配置资源产生有效 snapshot。远程下载失败时可使用上一轮已校验并落盘且版本兼容的 snapshot；两者都不可用则启动失败。运行中的刷新失败只记录错误并保留该资源旧 snapshot，其他资源继续更新。对启用 `auto_update` 的资源，重试采用指数退避并封顶 5 分钟；连续三次计划刷新失败或距上次成功超过 `3 × update_interval` 后标记 `stale`，仍可继续使用旧 snapshot。没有旧 snapshot 的资源引用必须 fail-closed，而不是使用未完成编译的内容。
 
-资源成功更新只替换 `ResourceRegistrySnapshot` 中对应资源，并生成新的顶层 `RuntimeSnapshot.revision`/资源版本摘要；它**不**触发全局 cache clear，也不要求所有资源一起重新加载。请求在下一次进入 policy/rule matcher 时读取最新资源；optimistic refresh 同样必须读取刷新时刻的最新 registry，并重新匹配规则后再发起上游请求。
+当前 ActiveRuntime 的资源成功更新只替换 `ResourceRegistrySnapshot` 中对应资源，并通过同一 `PolicyDnsCore` 的 per-resource CAS 和 `RuntimeSnapshot` 的 metadata ArcSwap 发布；它复用已绑定 listener、**不**触发全局 cache clear，也不要求所有资源一起重新加载。真正需要配置候选或 listener 变化时，仍生成新的顶层 `RuntimeSnapshot.revision` 并走完整 `PreparedRuntime → bind → ActiveRuntime` CAS。请求在下一次进入 policy/rule matcher 时读取最新资源；optimistic refresh 同样必须读取刷新时刻的最新 registry，并重新匹配规则后再发起上游请求。
 
 domain exact、suffix、regex、CIDR 等匹配结构在加载时编译，查询热路径不读取文件、不解析 YAML/JSON/Clash/dat，也不持有更新锁。
 

@@ -5,14 +5,16 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::config::resolve::{ConfigId, ResolvedHostsResource, ResolvedRuleSet};
 use crate::config::{BindPlan, ResolvedConfig};
 use crate::dns::{Cancellation, DEFAULT_LOCAL_TTL, Deadline, PolicyDnsCore, RuntimeRevision};
 use crate::ports::effects::ResourceFetcher;
 use crate::resource::{
-    RefreshBackoff, RemoteResourceOptions, ReqwestResourceFetcher, ResourceRefreshRuntime,
-    ResourceRefreshWorker, ResourceRegistrySnapshot, ResourceScheduleDecision,
-    ResourceSchedulePolicy, ResourceSnapshot, RuleIndex, fetch_remote_rule_set,
-    restore_remote_rule_set,
+    FileHostsRefreshWorker, FileRuleSetRefreshWorker, HostsIndex, HostsLimits, RefreshBackoff,
+    RemoteResourceOptions, ReqwestResourceFetcher, ResourceRefreshRuntime, ResourceRefreshWorker,
+    ResourceRegistrySnapshot, ResourceScheduleDecision, ResourceSchedulePolicy, ResourceSnapshot,
+    ResourceSource, ResourceSourceKind, ResourceStaleStatus, RuleIndex, RuleLimits,
+    fetch_remote_rule_set, load_hosts, load_rule_set, restore_remote_rule_set,
 };
 
 use super::RuntimeSnapshot;
@@ -22,8 +24,50 @@ pub struct PreparedRuntime {
     pub(crate) snapshot: Arc<RuntimeSnapshot>,
     pub(crate) bind_plan: Arc<BindPlan>,
     resource_fetcher: Option<Arc<dyn ResourceFetcher>>,
-    resource_snapshots: BTreeMap<crate::config::resolve::ConfigId, ResourceSnapshot<RuleIndex>>,
-    resource_workers: BTreeMap<crate::config::resolve::ConfigId, ResourceRefreshWorker>,
+    resource_snapshots: BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
+    host_resource_snapshots: BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>>,
+    resource_workers: BTreeMap<ConfigId, PreparedResourceWorker>,
+}
+
+#[derive(Clone)]
+enum PreparedResourceWorker {
+    RemoteRule(ResourceRefreshWorker),
+    FileRule(FileRuleSetRefreshWorker),
+    FileHosts(FileHostsRefreshWorker),
+}
+
+type InitialFileSnapshots = (
+    BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>>,
+    BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
+);
+
+#[derive(Clone, Debug)]
+pub enum RefreshedResourceSnapshot {
+    Hosts(ResourceSnapshot<HostsIndex>),
+    RuleSet(ResourceSnapshot<RuleIndex>),
+}
+
+impl RefreshedResourceSnapshot {
+    pub fn resource_id(&self) -> &ConfigId {
+        match self {
+            Self::Hosts(snapshot) => snapshot.resource_id(),
+            Self::RuleSet(snapshot) => snapshot.resource_id(),
+        }
+    }
+
+    pub const fn epoch(&self) -> u64 {
+        match self {
+            Self::Hosts(snapshot) => snapshot.epoch(),
+            Self::RuleSet(snapshot) => snapshot.epoch(),
+        }
+    }
+
+    pub const fn revision(&self) -> u64 {
+        match self {
+            Self::Hosts(snapshot) => snapshot.revision(),
+            Self::RuleSet(snapshot) => snapshot.revision(),
+        }
+    }
 }
 
 impl PreparedRuntime {
@@ -39,6 +83,7 @@ impl PreparedRuntime {
             bind_plan: Arc::new(bind_plan),
             resource_fetcher: None,
             resource_snapshots: BTreeMap::new(),
+            host_resource_snapshots: BTreeMap::new(),
             resource_workers: BTreeMap::new(),
         })
     }
@@ -69,6 +114,7 @@ impl PreparedRuntime {
             bind_plan: Arc::new(bind_plan),
             resource_fetcher: Some(Arc::new(resource_fetcher)),
             resource_snapshots: BTreeMap::new(),
+            host_resource_snapshots: BTreeMap::new(),
             resource_workers: BTreeMap::new(),
         })
     }
@@ -91,7 +137,7 @@ impl PreparedRuntime {
                 },
             )?,
         );
-        let mut remote_snapshots = BTreeMap::new();
+        let (host_snapshots, mut rule_snapshots) = load_initial_file_snapshots(&config)?;
         for resource in &config.rule_sets {
             let crate::config::resolve::ResolvedRuleSet::Remote { id, .. } = resource else {
                 continue;
@@ -110,18 +156,23 @@ impl PreparedRuntime {
                         })?
                 }
             };
-            remote_snapshots.insert(id.clone(), loaded.snapshot().clone());
+            rule_snapshots.insert(id.clone(), loaded.snapshot().clone());
         }
-        let policy_core = PolicyDnsCore::from_config_with_rule_snapshots(
+        let policy_core = PolicyDnsCore::from_config_with_resource_snapshots(
             &config,
             DEFAULT_LOCAL_TTL,
-            &remote_snapshots,
+            &host_snapshots,
+            &rule_snapshots,
         )
         .map_err(|error| PrepareError::PolicyCore {
             reason: error.to_string(),
         })?;
-        let resource_workers =
-            build_resource_workers(&config, Arc::clone(&resource_fetcher), &remote_snapshots)?;
+        let resource_workers = build_resource_workers(
+            &config,
+            Arc::clone(&resource_fetcher),
+            &host_snapshots,
+            &rule_snapshots,
+        )?;
         let snapshot = Arc::new(RuntimeSnapshot::with_policy_core(
             revision,
             config,
@@ -131,7 +182,8 @@ impl PreparedRuntime {
             snapshot,
             bind_plan: Arc::new(bind_plan),
             resource_fetcher: Some(resource_fetcher),
-            resource_snapshots: remote_snapshots,
+            resource_snapshots: rule_snapshots,
+            host_resource_snapshots: host_snapshots,
             resource_workers,
         })
     }
@@ -148,77 +200,160 @@ impl PreparedRuntime {
         self.resource_fetcher.as_ref().map(Arc::clone)
     }
 
-    pub fn resource_snapshots(
-        &self,
-    ) -> &BTreeMap<crate::config::resolve::ConfigId, ResourceSnapshot<RuleIndex>> {
+    pub fn resource_snapshots(&self) -> &BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>> {
         &self.resource_snapshots
     }
 
-    pub fn resource_worker_ids(&self) -> Vec<crate::config::resolve::ConfigId> {
+    pub fn host_resource_snapshots(&self) -> &BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>> {
+        &self.host_resource_snapshots
+    }
+
+    pub fn resource_worker_ids(&self) -> Vec<ConfigId> {
         self.resource_workers.keys().cloned().collect()
     }
 
     pub fn resource_refresh_decision(
         &self,
-        resource: &crate::config::resolve::ConfigId,
+        resource: &ConfigId,
         now: u64,
     ) -> Option<ResourceScheduleDecision> {
         self.resource_workers
             .get(resource)
-            .and_then(|worker| worker.runtime().decision(resource, now))
+            .and_then(|worker| match worker {
+                PreparedResourceWorker::RemoteRule(worker) => {
+                    worker.runtime().decision(resource, now)
+                }
+                PreparedResourceWorker::FileRule(worker) => {
+                    worker.runtime().decision(resource, now)
+                }
+                PreparedResourceWorker::FileHosts(worker) => {
+                    worker.runtime().decision(resource, now)
+                }
+            })
     }
 
-    pub async fn refresh_remote_rule_set(
+    pub async fn refresh_resource(
         &self,
-        resource: &crate::config::resolve::ConfigId,
+        resource: &ConfigId,
         now: u64,
         deadline: Deadline,
         cancellation: Cancellation,
-    ) -> Result<ResourceSnapshot<RuleIndex>, ResourceRefreshError> {
-        let rule_set = self
-            .snapshot
-            .config()
-            .rule_sets
-            .iter()
-            .find(|candidate| resolved_rule_set_id(candidate) == resource)
+    ) -> Result<RefreshedResourceSnapshot, ResourceRefreshError> {
+        let worker = self
+            .resource_workers
+            .get(resource)
+            .cloned()
             .ok_or_else(|| ResourceRefreshError::NotConfigured {
                 resource: resource.as_str().to_owned(),
             })?;
-        let worker = self.resource_workers.get(resource).ok_or_else(|| {
-            ResourceRefreshError::NotConfigured {
-                resource: resource.as_str().to_owned(),
+        let refreshed = match worker {
+            PreparedResourceWorker::RemoteRule(worker) => {
+                let rule_set = self
+                    .snapshot
+                    .config()
+                    .rule_sets
+                    .iter()
+                    .find(|candidate| resolved_rule_set_id(candidate) == resource)
+                    .ok_or_else(|| ResourceRefreshError::NotConfigured {
+                        resource: resource.as_str().to_owned(),
+                    })?;
+                let options = remote_resource_options(
+                    self.snapshot.config_arc().as_ref(),
+                    resource,
+                    deadline,
+                    cancellation,
+                );
+                let loaded = worker
+                    .refresh_remote_rule_set(rule_set, options, now)
+                    .await
+                    .map_err(|error| ResourceRefreshError::Worker {
+                        resource: resource.as_str().to_owned(),
+                        reason: error.to_string(),
+                    })?;
+                RefreshedResourceSnapshot::RuleSet(loaded.snapshot().clone())
             }
-        })?;
-        let options = remote_resource_options(
-            self.snapshot.config_arc().as_ref(),
-            resource,
-            deadline,
-            cancellation,
-        );
-        let loaded = worker
-            .refresh_remote_rule_set(rule_set, options, now)
-            .await
-            .map_err(|error| ResourceRefreshError::Worker {
-                resource: resource.as_str().to_owned(),
-                reason: error.to_string(),
-            })?;
-        let snapshot = loaded.snapshot().clone();
+            PreparedResourceWorker::FileRule(worker) => worker
+                .refresh(now)
+                .map(RefreshedResourceSnapshot::RuleSet)
+                .map_err(|error| ResourceRefreshError::Worker {
+                    resource: resource.as_str().to_owned(),
+                    reason: error.to_string(),
+                })?,
+            PreparedResourceWorker::FileHosts(worker) => worker
+                .refresh(now)
+                .map(RefreshedResourceSnapshot::Hosts)
+                .map_err(|error| ResourceRefreshError::Worker {
+                    resource: resource.as_str().to_owned(),
+                    reason: error.to_string(),
+                })?,
+        };
         let policy = self
             .snapshot
             .policy_core()
             .ok_or(ResourceRefreshError::MissingPolicyCore)?;
-        policy
-            .publish_rule_set_resource(snapshot.clone())
-            .map_err(|error| ResourceRefreshError::Policy {
+        match &refreshed {
+            RefreshedResourceSnapshot::Hosts(snapshot) => policy
+                .publish_hosts_resource(snapshot.clone())
+                .map_err(|error| ResourceRefreshError::Policy {
+                    resource: resource.as_str().to_owned(),
+                    reason: error.to_string(),
+                })?,
+            RefreshedResourceSnapshot::RuleSet(snapshot) => policy
+                .publish_rule_set_resource(snapshot.clone())
+                .map_err(|error| ResourceRefreshError::Policy {
+                    resource: resource.as_str().to_owned(),
+                    reason: error.to_string(),
+                })?,
+        }
+        let metadata_result = match &refreshed {
+            RefreshedResourceSnapshot::Hosts(snapshot) => self.snapshot.publish_resource(snapshot),
+            RefreshedResourceSnapshot::RuleSet(snapshot) => {
+                self.snapshot.publish_resource(snapshot)
+            }
+        };
+        metadata_result.map_err(|error| ResourceRefreshError::Snapshot {
+            resource: resource.as_str().to_owned(),
+            reason: format!("{error:?}"),
+        })?;
+        Ok(refreshed)
+    }
+
+    pub async fn refresh_remote_rule_set(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+        deadline: Deadline,
+        cancellation: Cancellation,
+    ) -> Result<ResourceSnapshot<RuleIndex>, ResourceRefreshError> {
+        if !self
+            .snapshot
+            .config()
+            .rule_sets
+            .iter()
+            .any(|candidate| resolved_rule_set_id(candidate) == resource)
+        {
+            return Err(ResourceRefreshError::NotConfigured {
                 resource: resource.as_str().to_owned(),
-                reason: error.to_string(),
-            })?;
-        Ok(snapshot)
+            });
+        }
+        match self
+            .refresh_resource(resource, now, deadline, cancellation)
+            .await?
+        {
+            RefreshedResourceSnapshot::RuleSet(snapshot) => Ok(snapshot),
+            RefreshedResourceSnapshot::Hosts(_) => Err(ResourceRefreshError::NotConfigured {
+                resource: resource.as_str().to_owned(),
+            }),
+        }
     }
 
     pub fn shutdown_resource_refresh(&self) {
         for worker in self.resource_workers.values() {
-            worker.runtime().shutdown();
+            match worker {
+                PreparedResourceWorker::RemoteRule(worker) => worker.runtime().shutdown(),
+                PreparedResourceWorker::FileRule(worker) => worker.runtime().shutdown(),
+                PreparedResourceWorker::FileHosts(worker) => worker.runtime().shutdown(),
+            }
         }
     }
 
@@ -229,7 +364,8 @@ impl PreparedRuntime {
             normalized_hash: self.snapshot.config().normalized_hash.clone(),
             has_policy_core: self.snapshot.policy_core().is_some(),
             has_resource_fetcher: self.resource_fetcher.is_some(),
-            resource_snapshot_count: self.resource_snapshots.len(),
+            resource_snapshot_count: self.resource_snapshots.len()
+                + self.host_resource_snapshots.len(),
             resource_worker_count: self.resource_workers.len(),
         }
     }
@@ -242,7 +378,10 @@ impl fmt::Debug for PreparedRuntime {
             .field("snapshot", &self.snapshot)
             .field("bind_entry_count", &self.bind_plan.entries.len())
             .field("has_resource_fetcher", &self.resource_fetcher.is_some())
-            .field("resource_snapshot_count", &self.resource_snapshots.len())
+            .field(
+                "resource_snapshot_count",
+                &(self.resource_snapshots.len() + self.host_resource_snapshots.len()),
+            )
             .field("resource_worker_count", &self.resource_workers.len())
             .finish()
     }
@@ -267,6 +406,12 @@ pub enum PrepareError {
     ResourceFetcher { reason: String },
     #[error("remote resource `{resource}` could not be prepared: {reason}")]
     RemoteResource { resource: String, reason: String },
+    #[error("resource `{resource}` refresh worker could not be prepared: {reason}")]
+    ResourceRefresh { resource: String, reason: String },
+    #[error("file hosts resource `{resource}` could not be prepared: {reason}")]
+    FileHostsResource { resource: String, reason: String },
+    #[error("file rule-set resource `{resource}` could not be prepared: {reason}")]
+    FileRuleSetResource { resource: String, reason: String },
 }
 
 #[derive(Debug, Error)]
@@ -279,6 +424,8 @@ pub enum ResourceRefreshError {
     MissingPolicyCore,
     #[error("runtime resource `{resource}` could not be published to policy: {reason}")]
     Policy { resource: String, reason: String },
+    #[error("runtime resource `{resource}` metadata could not be published: {reason}")]
+    Snapshot { resource: String, reason: String },
 }
 
 /// prepare 成功后可用于观测和验收的最小摘要。
@@ -296,12 +443,33 @@ pub struct PreflightReport {
 fn build_resource_workers(
     config: &ResolvedConfig,
     fetcher: Arc<dyn ResourceFetcher>,
-    snapshots: &BTreeMap<crate::config::resolve::ConfigId, ResourceSnapshot<RuleIndex>>,
-) -> Result<BTreeMap<crate::config::resolve::ConfigId, ResourceRefreshWorker>, PrepareError> {
+    host_snapshots: &BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>>,
+    rule_snapshots: &BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
+) -> Result<BTreeMap<ConfigId, PreparedResourceWorker>, PrepareError> {
     let initial_due = unix_seconds();
     let mut workers = BTreeMap::new();
-    for resource in &config.rule_sets {
-        let crate::config::resolve::ResolvedRuleSet::Remote {
+    let refresh_policy = |id: &ConfigId, interval: Option<std::time::Duration>| {
+        let interval = interval.map_or(0, |value| value.as_secs().max(1));
+        if interval == 0 {
+            return Err(PrepareError::ResourceRefresh {
+                resource: id.as_str().to_owned(),
+                reason: "auto_update requires a positive update interval".to_owned(),
+            });
+        }
+        Ok((
+            interval,
+            ResourceSchedulePolicy::new(
+                interval,
+                3,
+                3,
+                RefreshBackoff::new(1, 300).expect("static refresh backoff is valid"),
+            )
+            .expect("validated refresh policy is non-zero"),
+        ))
+    };
+
+    for resource in &config.hosts {
+        let ResolvedHostsResource::File {
             id,
             auto_update,
             update_interval,
@@ -313,40 +481,156 @@ fn build_resource_workers(
         if !auto_update {
             continue;
         }
-        let interval = update_interval.map_or(0, |value| value.as_secs().max(1));
-        if interval == 0 {
-            return Err(PrepareError::RemoteResource {
-                resource: id.as_str().to_owned(),
-                reason: "auto_update requires a positive update interval".to_owned(),
-            });
-        }
-        let snapshot = snapshots
+        let (interval, policy) = refresh_policy(id, *update_interval)?;
+        let snapshot = host_snapshots
             .get(id)
-            .ok_or_else(|| PrepareError::RemoteResource {
+            .ok_or_else(|| PrepareError::FileHostsResource {
                 resource: id.as_str().to_owned(),
-                reason: "compiled remote snapshot is missing".to_owned(),
+                reason: "compiled file hosts snapshot is missing".to_owned(),
             })?;
         let registry = ResourceRegistrySnapshot::new()
             .publish(snapshot.clone())
-            .map_err(|error| PrepareError::RemoteResource {
+            .map_err(|error| PrepareError::FileHostsResource {
                 resource: id.as_str().to_owned(),
                 reason: format!("refresh registry could not be initialized: {error:?}"),
             })?;
-        let policy = ResourceSchedulePolicy::new(
-            interval,
-            3,
-            3,
-            RefreshBackoff::new(1, 300).expect("static refresh backoff is valid"),
-        )
-        .expect("validated remote refresh policy is non-zero");
         let runtime =
             ResourceRefreshRuntime::new(registry, policy, initial_due.saturating_add(interval));
         workers.insert(
             id.clone(),
-            ResourceRefreshWorker::new(runtime, Arc::clone(&fetcher)),
+            PreparedResourceWorker::FileHosts(FileHostsRefreshWorker::new(
+                runtime,
+                resource.clone(),
+            )),
         );
     }
+
+    for resource in &config.rule_sets {
+        let (id, auto_update, update_interval) = match resource {
+            ResolvedRuleSet::File {
+                id,
+                auto_update,
+                update_interval,
+                ..
+            }
+            | ResolvedRuleSet::Remote {
+                id,
+                auto_update,
+                update_interval,
+                ..
+            } => (id, *auto_update, *update_interval),
+            ResolvedRuleSet::Const { .. } => continue,
+        };
+        if !auto_update {
+            continue;
+        }
+        let (interval, policy) = refresh_policy(id, update_interval)?;
+        let snapshot = rule_snapshots
+            .get(id)
+            .ok_or_else(|| PrepareError::FileRuleSetResource {
+                resource: id.as_str().to_owned(),
+                reason: "compiled file or remote rule-set snapshot is missing".to_owned(),
+            })?;
+        let registry = ResourceRegistrySnapshot::new()
+            .publish(snapshot.clone())
+            .map_err(|error| PrepareError::FileRuleSetResource {
+                resource: id.as_str().to_owned(),
+                reason: format!("refresh registry could not be initialized: {error:?}"),
+            })?;
+        let runtime =
+            ResourceRefreshRuntime::new(registry, policy, initial_due.saturating_add(interval));
+        let worker = match resource {
+            ResolvedRuleSet::File { .. } => PreparedResourceWorker::FileRule(
+                FileRuleSetRefreshWorker::new(runtime, resource.clone()),
+            ),
+            ResolvedRuleSet::Remote { .. } => PreparedResourceWorker::RemoteRule(
+                ResourceRefreshWorker::new(runtime, Arc::clone(&fetcher)),
+            ),
+            ResolvedRuleSet::Const { .. } => unreachable!("const rule-set was skipped"),
+        };
+        workers.insert(id.clone(), worker);
+    }
     Ok(workers)
+}
+
+fn load_initial_file_snapshots(
+    config: &ResolvedConfig,
+) -> Result<InitialFileSnapshots, PrepareError> {
+    let mut hosts = BTreeMap::new();
+    for resource in &config.hosts {
+        let ResolvedHostsResource::File { id, .. } = resource else {
+            continue;
+        };
+        let loaded = load_hosts(resource, HostsLimits::default()).map_err(|error| {
+            PrepareError::FileHostsResource {
+                resource: id.as_str().to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        hosts.insert(id.clone(), local_hosts_snapshot(&loaded));
+    }
+
+    let mut rule_sets = BTreeMap::new();
+    for resource in &config.rule_sets {
+        let ResolvedRuleSet::File { id, .. } = resource else {
+            continue;
+        };
+        let loaded = load_rule_set(resource, RuleLimits::default()).map_err(|error| {
+            PrepareError::FileRuleSetResource {
+                resource: id.as_str().to_owned(),
+                reason: error.to_string(),
+            }
+        })?;
+        rule_sets.insert(id.clone(), local_rule_snapshot(&loaded));
+    }
+    Ok((hosts, rule_sets))
+}
+
+fn local_hosts_snapshot(
+    loaded: &crate::resource::LoadedHostsResource,
+) -> ResourceSnapshot<HostsIndex> {
+    ResourceSnapshot::new(
+        loaded.id().clone(),
+        1,
+        1,
+        loaded.content_hash().to_owned(),
+        local_source_fingerprint(loaded.source()),
+        loaded.parser_version(),
+        loaded.fetched_at(),
+        ResourceSourceKind::File,
+        false,
+        ResourceStaleStatus::Fresh,
+        loaded.index().clone(),
+    )
+}
+
+fn local_rule_snapshot(
+    loaded: &crate::resource::LoadedRuleSetResource,
+) -> ResourceSnapshot<RuleIndex> {
+    ResourceSnapshot::new(
+        loaded.id().clone(),
+        1,
+        1,
+        loaded.content_hash().to_owned(),
+        local_source_fingerprint(loaded.source()),
+        loaded.parser_version(),
+        loaded.fetched_at(),
+        ResourceSourceKind::File,
+        false,
+        ResourceStaleStatus::Fresh,
+        loaded.index().clone(),
+    )
+}
+
+fn local_source_fingerprint(source: &ResourceSource) -> String {
+    match source {
+        ResourceSource::Const => "const".to_owned(),
+        ResourceSource::File { fingerprint, .. } => format!(
+            "file:{}:{}",
+            fingerprint.byte_len(),
+            fingerprint.modified_unix_nanos().unwrap_or_default()
+        ),
+    }
 }
 
 fn unix_seconds() -> u64 {
@@ -425,7 +709,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use crate::config::resolve::{ConfigId, ResolvedUpstream};
+    use crate::config::resolve::{ConfigId, ResolvedHostsResource, ResolvedUpstream};
     use crate::config::{BindPlan, ConfigLoader, LoadOptions};
     use crate::dns::{Cancellation, Deadline, RuntimeRevision};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -657,6 +941,80 @@ clients: []
             restored.resource_snapshots()[&ConfigId::new("remote-rules").unwrap()].used_fallback()
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn async_prepare_builds_file_worker_and_publishes_runtime_metadata() {
+        let path = std::env::temp_dir().join(format!(
+            "fluxdns-runtime-file-{}-{}.hosts",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "192.0.2.10 old.example\n").unwrap();
+
+        let mut config = config();
+        Arc::get_mut(&mut config).unwrap().hosts = vec![ResolvedHostsResource::File {
+            id: ConfigId::new("local-hosts").unwrap(),
+            format: crate::config::model::HostsFormat::Hosts,
+            path: path.clone(),
+            auto_update: true,
+            update_interval: Some(Duration::from_secs(1)),
+        }];
+        let candidate = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            Arc::clone(&config),
+            RuntimeRevision(6),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(candidate.preflight().resource_snapshot_count, 1);
+        assert_eq!(candidate.preflight().resource_worker_count, 1);
+        assert_eq!(candidate.host_resource_snapshots().len(), 1);
+
+        std::fs::write(&path, "192.0.2.11 new.example\n").unwrap();
+        let refreshed = candidate
+            .refresh_resource(
+                &ConfigId::new("local-hosts").unwrap(),
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed.epoch(), 2);
+        assert_eq!(
+            candidate
+                .snapshot()
+                .resources()
+                .lookup(&ConfigId::new("local-hosts").unwrap())
+                .unwrap()
+                .version(),
+            crate::resource::ResourceVersion::new(2, 0)
+        );
+
+        std::fs::remove_file(&path).unwrap();
+        let error = candidate
+            .refresh_resource(
+                &ConfigId::new("local-hosts").unwrap(),
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, super::ResourceRefreshError::Worker { .. }));
+        assert_eq!(
+            candidate
+                .resource_refresh_decision(&ConfigId::new("local-hosts").unwrap(), u64::MAX)
+                .unwrap()
+                .consecutive_failures(),
+            1
+        );
     }
 
     #[test]

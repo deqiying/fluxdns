@@ -12,7 +12,9 @@ pub use bind::{BindError, BoundCandidate, BoundEndpointHandle, BoundListenerSet,
 pub use coordinator::{
     ActivationError, ActiveRuntime, AdmissionError, RequestGuard, RuntimeCoordinator, RuntimeLease,
 };
-pub use prepared::{PreflightReport, PrepareError, PreparedRuntime, ResourceRefreshError};
+pub use prepared::{
+    PreflightReport, PrepareError, PreparedRuntime, RefreshedResourceSnapshot, ResourceRefreshError,
+};
 pub use snapshot::{RuntimeSnapshot, RuntimeSnapshotSummary};
 pub use supervisor::{
     FaultLevel, RestartPolicy, ShutdownReport, Supervisor, SupervisorError, TaskCompletion,

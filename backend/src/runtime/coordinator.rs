@@ -12,7 +12,7 @@ use crate::ports::effects::ResourceFetcher;
 use crate::resource::{ResourceScheduleDecision, ResourceSnapshot, RuleIndex};
 
 use super::bind::{BoundCandidate, BoundListenerSet};
-use super::prepared::{PreparedRuntime, ResourceRefreshError};
+use super::prepared::{PreparedRuntime, RefreshedResourceSnapshot, ResourceRefreshError};
 use super::snapshot::RuntimeSnapshot;
 
 /// 已发布、可接收请求的运行时实例。
@@ -69,6 +69,18 @@ impl ActiveRuntime {
     ) -> Result<ResourceSnapshot<RuleIndex>, ResourceRefreshError> {
         self.prepared
             .refresh_remote_rule_set(resource, now, deadline, cancellation)
+            .await
+    }
+
+    pub async fn refresh_resource(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+        deadline: crate::dns::Deadline,
+        cancellation: crate::dns::Cancellation,
+    ) -> Result<RefreshedResourceSnapshot, ResourceRefreshError> {
+        self.prepared
+            .refresh_resource(resource, now, deadline, cancellation)
             .await
     }
 
@@ -265,7 +277,7 @@ impl RuntimeCoordinator {
             return Err(ActivationError {
                 expected,
                 actual: current.revision(),
-                candidate,
+                candidate: Box::new(candidate),
             });
         }
 
@@ -283,7 +295,7 @@ impl RuntimeCoordinator {
         Err(ActivationError {
             expected,
             actual,
-            candidate,
+            candidate: Box::new(candidate),
         })
     }
 }
@@ -293,7 +305,7 @@ impl RuntimeCoordinator {
 pub struct ActivationError {
     expected: RuntimeRevision,
     actual: RuntimeRevision,
-    candidate: BoundCandidate,
+    candidate: Box<BoundCandidate>,
 }
 
 impl ActivationError {
@@ -306,7 +318,7 @@ impl ActivationError {
     }
 
     pub fn into_candidate(self) -> BoundCandidate {
-        self.candidate
+        *self.candidate
     }
 }
 

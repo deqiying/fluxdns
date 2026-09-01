@@ -7,12 +7,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
+use crate::config::migrate::deterministic_hash;
 use crate::config::model::HostsFormat;
 use crate::config::resolve::{ConfigId, ResolvedHostsResource, ResolvedRuleSet};
 
 use super::{HostsIndex, HostsLimits, HostsParseError, RuleIndex, RuleLimits, RuleParseError};
 
 const MAX_STABLE_READ_ATTEMPTS: usize = 2;
+const HOSTS_PARSER_VERSION: &str = "hosts-index-v1";
+const RULE_PARSER_VERSION: &str = "rule-index-v1";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileFingerprint {
@@ -43,6 +46,8 @@ pub enum ResourceSource {
 pub struct LoadedHostsResource {
     id: ConfigId,
     source: ResourceSource,
+    content_hash: String,
+    fetched_at: SystemTime,
     index: HostsIndex,
 }
 
@@ -50,6 +55,8 @@ pub struct LoadedHostsResource {
 pub struct LoadedRuleSetResource {
     id: ConfigId,
     source: ResourceSource,
+    content_hash: String,
+    fetched_at: SystemTime,
     index: RuleIndex,
 }
 
@@ -65,6 +72,18 @@ impl LoadedRuleSetResource {
     pub fn index(&self) -> &RuleIndex {
         &self.index
     }
+
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
+
+    pub const fn fetched_at(&self) -> SystemTime {
+        self.fetched_at
+    }
+
+    pub const fn parser_version(&self) -> &'static str {
+        RULE_PARSER_VERSION
+    }
 }
 
 impl LoadedHostsResource {
@@ -78,6 +97,18 @@ impl LoadedHostsResource {
 
     pub fn index(&self) -> &HostsIndex {
         &self.index
+    }
+
+    pub fn content_hash(&self) -> &str {
+        &self.content_hash
+    }
+
+    pub const fn fetched_at(&self) -> SystemTime {
+        self.fetched_at
+    }
+
+    pub const fn parser_version(&self) -> &'static str {
+        HOSTS_PARSER_VERSION
     }
 }
 
@@ -170,6 +201,8 @@ pub fn load_hosts(
             )
         }
     };
+    let content_hash = deterministic_hash(&bytes);
+    let fetched_at = SystemTime::now();
 
     if bytes.len() > limits.max_input_bytes {
         return Err(ResourceLoadError::TooLarge {
@@ -191,6 +224,8 @@ pub fn load_hosts(
     Ok(LoadedHostsResource {
         id: id.clone(),
         source,
+        content_hash,
+        fetched_at,
         index,
     })
 }
@@ -225,6 +260,8 @@ pub fn load_rule_set(
             });
         }
     };
+    let content_hash = deterministic_hash(&bytes);
+    let fetched_at = SystemTime::now();
 
     if bytes.len() > limits.max_input_bytes {
         return Err(RuleResourceLoadError::TooLarge {
@@ -249,6 +286,8 @@ pub fn load_rule_set(
     Ok(LoadedRuleSetResource {
         id: id.clone(),
         source,
+        content_hash,
+        fetched_at,
         index,
     })
 }

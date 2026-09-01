@@ -8,15 +8,16 @@ use std::sync::{Arc, Mutex};
 
 use thiserror::Error;
 
-use crate::config::resolve::ConfigId;
-use crate::config::resolve::ResolvedRuleSet;
+use crate::config::resolve::{ConfigId, ResolvedHostsResource, ResolvedRuleSet};
 use crate::ports::effects::ResourceFetcher;
 
 use super::{
+    FileFingerprint, HostsIndex, HostsLimits, LoadedHostsResource, LoadedRuleSetResource,
     RefreshBeginError, RefreshFailure, RefreshPermit, RefreshPublishError, RemoteResourceError,
     RemoteResourceOptions, ResourceRefreshCoordinator, ResourceRefreshPhase, ResourceRefreshStatus,
     ResourceRegistrySnapshot, ResourceSchedule, ResourceScheduleDecision, ResourceSchedulePolicy,
-    ResourceSnapshot, RuleIndex, fetch_remote_rule_set,
+    ResourceSnapshot, ResourceSource, ResourceSourceKind, ResourceStaleStatus, RuleIndex,
+    RuleLimits, fetch_remote_rule_set, load_hosts, load_rule_set,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -213,6 +214,22 @@ pub enum ResourceRefreshWorkerError {
     Release(RefreshPublishError),
 }
 
+#[derive(Debug, Error)]
+pub enum LocalResourceRefreshWorkerError {
+    #[error("resource `{resource}` is not a file resource")]
+    UnsupportedSource { resource: String },
+    #[error("resource refresh could not begin: {0:?}")]
+    Begin(ResourceRefreshRuntimeBeginError),
+    #[error("hosts resource reload failed: {0}")]
+    HostsLoad(#[source] super::ResourceLoadError),
+    #[error("rule-set reload failed: {0}")]
+    RuleSetLoad(#[source] super::RuleResourceLoadError),
+    #[error("resource refresh candidate could not be published: {0:?}")]
+    Publish(RefreshPublishError),
+    #[error("resource refresh reservation could not be released: {0:?}")]
+    Release(RefreshPublishError),
+}
+
 /// 将真实 remote rule-set fetch/parse/persist 接入 refresh reservation 的一次性 worker。
 ///
 /// 该 worker 不创建 timer 或 supervisor task；调用方负责按 schedule 触发它，并把实际
@@ -294,6 +311,163 @@ impl ResourceRefreshWorker {
     }
 }
 
+/// 受监督的 file hosts refresh worker。文件读取和解析仍由 Resource loader 所有，
+/// worker 只负责把 bounded reload 绑定到 reservation 与 schedule 生命周期。
+#[derive(Clone)]
+pub struct FileHostsRefreshWorker {
+    runtime: ResourceRefreshRuntime<HostsIndex>,
+    resource: ResolvedHostsResource,
+}
+
+impl FileHostsRefreshWorker {
+    pub fn new(
+        runtime: ResourceRefreshRuntime<HostsIndex>,
+        resource: ResolvedHostsResource,
+    ) -> Self {
+        Self { runtime, resource }
+    }
+
+    pub fn runtime(&self) -> &ResourceRefreshRuntime<HostsIndex> {
+        &self.runtime
+    }
+
+    pub fn refresh(
+        &self,
+        now: u64,
+    ) -> Result<ResourceSnapshot<HostsIndex>, LocalResourceRefreshWorkerError> {
+        let resource_id = match &self.resource {
+            ResolvedHostsResource::File { id, .. } => id,
+            ResolvedHostsResource::Const { id, .. } => {
+                return Err(LocalResourceRefreshWorkerError::UnsupportedSource {
+                    resource: id.as_str().to_owned(),
+                });
+            }
+        };
+        let permit = self
+            .runtime
+            .begin_due(resource_id, now)
+            .map_err(LocalResourceRefreshWorkerError::Begin)?;
+        let cleanup = permit.clone();
+        let loaded = match load_hosts(&self.resource, HostsLimits::default()) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                if let Err(release) = self.runtime.fail(cleanup, now) {
+                    return Err(LocalResourceRefreshWorkerError::Release(release));
+                }
+                return Err(LocalResourceRefreshWorkerError::HostsLoad(error));
+            }
+        };
+        let candidate = hosts_snapshot(&loaded, permit.epoch());
+        if let Err(error) = self.runtime.publish(permit, candidate.clone(), now) {
+            if !self.runtime.abandon(cleanup) {
+                return Err(LocalResourceRefreshWorkerError::Release(error));
+            }
+            return Err(LocalResourceRefreshWorkerError::Publish(error));
+        }
+        Ok(candidate)
+    }
+}
+
+/// 受监督的 file rule-set refresh worker。
+#[derive(Clone)]
+pub struct FileRuleSetRefreshWorker {
+    runtime: ResourceRefreshRuntime<RuleIndex>,
+    resource: ResolvedRuleSet,
+}
+
+impl FileRuleSetRefreshWorker {
+    pub fn new(runtime: ResourceRefreshRuntime<RuleIndex>, resource: ResolvedRuleSet) -> Self {
+        Self { runtime, resource }
+    }
+
+    pub fn runtime(&self) -> &ResourceRefreshRuntime<RuleIndex> {
+        &self.runtime
+    }
+
+    pub fn refresh(
+        &self,
+        now: u64,
+    ) -> Result<ResourceSnapshot<RuleIndex>, LocalResourceRefreshWorkerError> {
+        let resource_id = match &self.resource {
+            ResolvedRuleSet::File { id, .. } => id,
+            ResolvedRuleSet::Const { id, .. } | ResolvedRuleSet::Remote { id, .. } => {
+                return Err(LocalResourceRefreshWorkerError::UnsupportedSource {
+                    resource: id.as_str().to_owned(),
+                });
+            }
+        };
+        let permit = self
+            .runtime
+            .begin_due(resource_id, now)
+            .map_err(LocalResourceRefreshWorkerError::Begin)?;
+        let cleanup = permit.clone();
+        let loaded = match load_rule_set(&self.resource, RuleLimits::default()) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                if let Err(release) = self.runtime.fail(cleanup, now) {
+                    return Err(LocalResourceRefreshWorkerError::Release(release));
+                }
+                return Err(LocalResourceRefreshWorkerError::RuleSetLoad(error));
+            }
+        };
+        let candidate = rule_set_snapshot(&loaded, permit.epoch());
+        if let Err(error) = self.runtime.publish(permit, candidate.clone(), now) {
+            if !self.runtime.abandon(cleanup) {
+                return Err(LocalResourceRefreshWorkerError::Release(error));
+            }
+            return Err(LocalResourceRefreshWorkerError::Publish(error));
+        }
+        Ok(candidate)
+    }
+}
+
+fn hosts_snapshot(loaded: &LoadedHostsResource, epoch: u64) -> ResourceSnapshot<HostsIndex> {
+    ResourceSnapshot::new(
+        loaded.id().clone(),
+        epoch,
+        0,
+        loaded.content_hash().to_owned(),
+        source_fingerprint(loaded.source()),
+        loaded.parser_version(),
+        loaded.fetched_at(),
+        ResourceSourceKind::File,
+        false,
+        ResourceStaleStatus::Fresh,
+        loaded.index().clone(),
+    )
+}
+
+fn rule_set_snapshot(loaded: &LoadedRuleSetResource, epoch: u64) -> ResourceSnapshot<RuleIndex> {
+    ResourceSnapshot::new(
+        loaded.id().clone(),
+        epoch,
+        0,
+        loaded.content_hash().to_owned(),
+        source_fingerprint(loaded.source()),
+        loaded.parser_version(),
+        loaded.fetched_at(),
+        ResourceSourceKind::File,
+        false,
+        ResourceStaleStatus::Fresh,
+        loaded.index().clone(),
+    )
+}
+
+fn source_fingerprint(source: &ResourceSource) -> String {
+    match source {
+        ResourceSource::Const => "const".to_owned(),
+        ResourceSource::File { fingerprint, .. } => file_fingerprint(fingerprint),
+    }
+}
+
+fn file_fingerprint(fingerprint: &FileFingerprint) -> String {
+    format!(
+        "file:{}:{}",
+        fingerprint.byte_len(),
+        fingerprint.modified_unix_nanos().unwrap_or_default()
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -307,7 +481,8 @@ mod tests {
     use crate::ports::effects::{ResourceFetchRequest, ResourceFetchResult};
     use crate::ports::{PortError, PortFuture};
     use crate::resource::{
-        RefreshBackoff, ResourceScheduleStopReason, ResourceSourceKind, ResourceStaleStatus,
+        CanonicalDomain, RefreshBackoff, ResourceScheduleStopReason, ResourceSourceKind,
+        ResourceStaleStatus,
     };
 
     fn id(value: &str) -> ConfigId {
@@ -465,6 +640,130 @@ mod tests {
             }
         );
         assert!(worker.runtime().begin_due(&id("remote-rules"), 1).is_err());
+    }
+
+    #[test]
+    fn file_hosts_worker_reloads_and_publishes_new_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "fluxdns-file-worker-{}-{}.hosts",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "192.0.2.10 old.example\n").unwrap();
+        let resource = ResolvedHostsResource::File {
+            id: id("file-hosts"),
+            format: crate::config::model::HostsFormat::Hosts,
+            path: path.clone(),
+            auto_update: true,
+            update_interval: Some(Duration::from_secs(10)),
+        };
+        let initial = load_hosts(&resource, HostsLimits::default()).unwrap();
+        let initial_snapshot = ResourceSnapshot::new(
+            initial.id().clone(),
+            1,
+            1,
+            initial.content_hash().to_owned(),
+            source_fingerprint(initial.source()),
+            initial.parser_version(),
+            initial.fetched_at(),
+            ResourceSourceKind::File,
+            false,
+            ResourceStaleStatus::Fresh,
+            initial.index().clone(),
+        );
+        let runtime = ResourceRefreshRuntime::new(
+            ResourceRegistrySnapshot::new()
+                .publish(initial_snapshot)
+                .unwrap(),
+            policy(),
+            0,
+        );
+        let worker = FileHostsRefreshWorker::new(runtime, resource);
+
+        std::fs::write(&path, "192.0.2.11 new.example\n").unwrap();
+        let refreshed = worker.refresh(0).unwrap();
+        assert_eq!(refreshed.epoch(), 2);
+        assert_eq!(
+            refreshed
+                .compiled()
+                .records(&CanonicalDomain::parse("new.example").unwrap())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            worker
+                .runtime()
+                .current()
+                .lookup(&id("file-hosts"))
+                .unwrap()
+                .source_kind(),
+            ResourceSourceKind::File
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_rule_set_worker_reloads_and_publishes_new_snapshot() {
+        let path = std::env::temp_dir().join(format!(
+            "fluxdns-file-rule-worker-{}-{}.rules",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, "DOMAIN-SUFFIX,old.example\n").unwrap();
+        let resource = ResolvedRuleSet::File {
+            id: id("file-rules"),
+            format: RuleSetFormat::Clash,
+            path: path.clone(),
+            auto_update: true,
+            update_interval: Some(Duration::from_secs(10)),
+        };
+        let initial = load_rule_set(&resource, RuleLimits::default()).unwrap();
+        let initial_snapshot = ResourceSnapshot::new(
+            initial.id().clone(),
+            1,
+            1,
+            initial.content_hash().to_owned(),
+            source_fingerprint(initial.source()),
+            initial.parser_version(),
+            initial.fetched_at(),
+            ResourceSourceKind::File,
+            false,
+            ResourceStaleStatus::Fresh,
+            initial.index().clone(),
+        );
+        let runtime = ResourceRefreshRuntime::new(
+            ResourceRegistrySnapshot::new()
+                .publish(initial_snapshot)
+                .unwrap(),
+            policy(),
+            0,
+        );
+        let worker = FileRuleSetRefreshWorker::new(runtime, resource);
+
+        std::fs::write(&path, "DOMAIN-SUFFIX,new.example\n").unwrap();
+        let refreshed = worker.refresh(0).unwrap();
+        assert_eq!(refreshed.epoch(), 2);
+        assert!(
+            refreshed
+                .compiled()
+                .matches(&CanonicalDomain::parse("new.example").unwrap())
+                .is_some()
+        );
+        assert!(
+            worker
+                .runtime()
+                .current()
+                .lookup(&id("file-rules"))
+                .is_some()
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

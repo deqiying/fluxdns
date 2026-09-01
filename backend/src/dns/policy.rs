@@ -127,10 +127,11 @@ impl PolicyDnsCore {
         Self::from_config_with_upstream_runtime(config, ttl, upstreams)
     }
 
-    pub(crate) fn from_config_with_rule_snapshots(
+    pub(crate) fn from_config_with_resource_snapshots(
         config: &ResolvedConfig,
         ttl: u32,
-        snapshots: &BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
+        host_snapshots: &BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>>,
+        rule_snapshots: &BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
     ) -> Result<Self, PolicyCoreBuildError> {
         let direct_upstreams = direct_upstreams(&config.upstreams);
         let registry =
@@ -149,8 +150,12 @@ impl PolicyDnsCore {
                     reason: error.reason,
                 }
             })?;
-        Self::from_config_with_upstream_runtime_and_rule_snapshots(
-            config, ttl, upstreams, snapshots,
+        Self::from_config_with_upstream_runtime_and_resource_snapshots(
+            config,
+            ttl,
+            upstreams,
+            host_snapshots,
+            rule_snapshots,
         )
     }
 
@@ -173,17 +178,38 @@ impl PolicyDnsCore {
         upstreams: UpstreamRuntime,
         snapshots: &BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
     ) -> Result<Self, PolicyCoreBuildError> {
-        let remote_rule_indexes = snapshots
+        Self::from_config_with_upstream_runtime_and_resource_snapshots(
+            config,
+            ttl,
+            upstreams,
+            &BTreeMap::new(),
+            snapshots,
+        )
+    }
+
+    fn from_config_with_upstream_runtime_and_resource_snapshots(
+        config: &ResolvedConfig,
+        ttl: u32,
+        upstreams: UpstreamRuntime,
+        host_snapshots: &BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>>,
+        rule_snapshots: &BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
+    ) -> Result<Self, PolicyCoreBuildError> {
+        let host_indexes = host_snapshots
             .iter()
             .map(|(id, snapshot)| (id.clone(), snapshot.compiled_arc()))
             .collect::<BTreeMap<_, _>>();
-        let policy = PolicyIndex::from_config_with_rule_indexes(config, &remote_rule_indexes)
-            .map_err(PolicyCoreBuildError::Policy)?;
+        let rule_indexes = rule_snapshots
+            .iter()
+            .map(|(id, snapshot)| (id.clone(), snapshot.compiled_arc()))
+            .collect::<BTreeMap<_, _>>();
+        let policy =
+            PolicyIndex::from_config_with_resource_indexes(config, &host_indexes, &rule_indexes)
+                .map_err(PolicyCoreBuildError::Policy)?;
         let (cache, late_cache_finalizer) = build_cache_facade(config)?;
         let policy_state = PolicyState {
             index: policy,
             host_versions: resource_versions(&config.hosts),
-            rule_set_versions: rule_set_versions(&config.rule_sets, snapshots),
+            rule_set_versions: rule_set_versions(&config.rule_sets, rule_snapshots),
         };
         Ok(Self {
             policy: Arc::new(ArcSwap::from_pointee(policy_state)),

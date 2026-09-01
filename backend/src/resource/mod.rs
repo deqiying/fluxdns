@@ -19,6 +19,7 @@ pub use loader::{
     RuleResourceLoadError, load_hosts, load_rule_set,
 };
 pub use orchestrator::{
+    FileHostsRefreshWorker, FileRuleSetRefreshWorker, LocalResourceRefreshWorkerError,
     ResourceRefreshRuntime, ResourceRefreshRuntimeBeginError, ResourceRefreshRuntimePermit,
     ResourceRefreshWorker, ResourceRefreshWorkerError,
 };

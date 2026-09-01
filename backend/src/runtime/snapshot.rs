@@ -2,6 +2,8 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use arc_swap::ArcSwap;
+
 use crate::config::ResolvedConfig;
 use crate::config::resolve::{ResolvedHostsResource, ResolvedRuleSet};
 use crate::dns::{DnsCore, PolicyDnsCore, RuntimeRevision};
@@ -18,14 +20,14 @@ pub struct RuntimeSnapshot {
     revision: RuntimeRevision,
     config: Arc<ResolvedConfig>,
     policy_core: Option<Arc<PolicyDnsCore>>,
-    resources: Arc<ResourceRegistrySnapshot<()>>,
+    resources: Arc<ArcSwap<ResourceRegistrySnapshot<()>>>,
 }
 
 impl RuntimeSnapshot {
     pub(crate) fn new(revision: RuntimeRevision, config: Arc<ResolvedConfig>) -> Self {
         Self {
             revision,
-            resources: Arc::new(resource_snapshot(revision, &config)),
+            resources: Arc::new(ArcSwap::from_pointee(resource_snapshot(revision, &config))),
             config,
             policy_core: None,
         }
@@ -38,7 +40,7 @@ impl RuntimeSnapshot {
     ) -> Self {
         Self {
             revision,
-            resources: Arc::new(resource_snapshot(revision, &config)),
+            resources: Arc::new(ArcSwap::from_pointee(resource_snapshot(revision, &config))),
             config,
             policy_core: Some(Arc::new(policy_core)),
         }
@@ -67,8 +69,43 @@ impl RuntimeSnapshot {
             .map(|core| Arc::clone(core) as Arc<dyn DnsCore>)
     }
 
-    pub fn resources(&self) -> &ResourceRegistrySnapshot<()> {
-        &self.resources
+    pub fn resources(&self) -> Arc<ResourceRegistrySnapshot<()>> {
+        self.resources.load_full()
+    }
+
+    pub(crate) fn publish_resource<T>(
+        &self,
+        snapshot: &ResourceSnapshot<T>,
+    ) -> Result<(), ResourcePublishError> {
+        let candidate = ResourceSnapshot::new(
+            snapshot.resource_id().clone(),
+            snapshot.epoch(),
+            snapshot.revision(),
+            snapshot.content_hash().to_owned(),
+            snapshot.source_fingerprint().to_owned(),
+            snapshot.parser_version().to_owned(),
+            snapshot.fetched_at(),
+            snapshot.source_kind(),
+            snapshot.used_fallback(),
+            snapshot.stale_status(),
+            (),
+        );
+        loop {
+            let current = self.resources.load_full();
+            if let Some(existing) = current.lookup(candidate.resource_id())
+                && existing.version() >= candidate.version()
+            {
+                return Ok(());
+            }
+            let expected = current
+                .lookup(candidate.resource_id())
+                .map(|existing| existing.version());
+            let next = current.compare_and_publish(expected, candidate.clone())?;
+            let observed = self.resources.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&*observed, &current) {
+                return Ok(());
+            }
+        }
     }
 
     pub fn summary(&self) -> RuntimeSnapshotSummary {
@@ -77,7 +114,7 @@ impl RuntimeSnapshot {
             normalized_hash: self.config.normalized_hash.clone(),
             listener_count: self.config.listeners.len(),
             bind_entry_count: self.config.bind_plan.entries.len(),
-            resource_count: self.resources.len(),
+            resource_count: self.resources.load().len(),
             has_policy_core: self.policy_core.is_some(),
         }
     }
@@ -148,12 +185,12 @@ fn publish_resource_entry(
 fn resource_entry(
     id: &crate::config::resolve::ConfigId,
     source_kind: ResourceSourceKind,
-    revision: RuntimeRevision,
+    _revision: RuntimeRevision,
     normalized_hash: &str,
 ) -> ResourceSnapshot<()> {
     ResourceSnapshot::new(
         id.clone(),
-        revision.0,
+        0,
         1,
         normalized_hash,
         "config",

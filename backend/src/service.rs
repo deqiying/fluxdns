@@ -16,8 +16,8 @@ use crate::ports::PortErrorClass;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
 use crate::runtime::{
-    ActiveRuntime, AdmissionError, BoundEndpointHandle, FaultLevel, RestartPolicy, ShutdownReport,
-    Supervisor, SupervisorError, SystemClock, TaskError, TaskSpec,
+    ActiveRuntime, AdmissionError, BoundEndpointHandle, FaultLevel, RefreshedResourceSnapshot,
+    RestartPolicy, ShutdownReport, Supervisor, SupervisorError, SystemClock, TaskError, TaskSpec,
 };
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
@@ -300,7 +300,7 @@ async fn run_resource_refresh_loop(
         if decision.is_due() {
             let deadline = Deadline::new(Instant::now() + RESOURCE_REFRESH_TIMEOUT);
             match runtime
-                .refresh_remote_rule_set(&resource, now, deadline, cancellation.clone())
+                .refresh_resource(&resource, now, deadline, cancellation.clone())
                 .await
             {
                 Ok(snapshot) => tracing::info!(
@@ -309,6 +309,10 @@ async fn run_resource_refresh_loop(
                     resource = %resource.as_str(),
                     epoch = snapshot.epoch(),
                     revision = snapshot.revision(),
+                    kind = match snapshot {
+                        RefreshedResourceSnapshot::Hosts(_) => "hosts",
+                        RefreshedResourceSnapshot::RuleSet(_) => "rule_set",
+                    },
                     "resource_refresh_published"
                 ),
                 Err(_error) if cancellation.is_cancelled() => {
