@@ -1,6 +1,6 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Policy 可消费 async PreparedRuntime 提供的 compiled remote snapshot，并已支持版本化 atomic live swap，Runtime snapshot 原子 reload 尚未实现
+> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Policy 可消费 async PreparedRuntime 提供的 compiled remote snapshot，并已由 ActiveRuntime remote refresh worker 驱动版本化 atomic live swap，Runtime snapshot 原子 reload 尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -194,6 +194,6 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 完成冲突、优先级、未知资源和 file loader 测试；
 - [x] 完成 Policy compiled resource snapshot 的版本化 atomic swap，并支持 supplied compiled remote snapshot 的初始构造；跨 transport contract 和完整覆盖矩阵测试仍待完成。
 
-阶段证据：Policy focused tests 14 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path、基础 Cache/Core 命中、snapshot-local optimistic refresh 和 unsupported feature propagation；当前 backend 全量测试为 385 passed、0 failed。新增 supplied compiled remote snapshot 的初始构造，并由 async PreparedRuntime restore/fetch 测试验证；Runtime 已提供资源摘要并由 service 捕获同 revision core，当前 Policy finalizer 可由 DnsService 在 drain 后关闭，但仍未接入 Runtime ResourceRegistrySnapshot 的原子 reload、最新 snapshot refresh 和完整 late-window/nested sink 传播，Policy compiled resource live swap/stale version 已验证；也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
+阶段证据：Policy focused tests 14 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path、基础 Cache/Core 命中、snapshot-local optimistic refresh 和 unsupported feature propagation；当前 backend 全量测试为 385 passed、0 failed。新增 supplied compiled remote snapshot 的初始构造，并由 async PreparedRuntime restore/fetch 与 ActiveRuntime refresh worker 路径验证；Runtime 已提供资源摘要并由 service 捕获同 revision core，当前 Policy finalizer 可由 DnsService 在 drain 后关闭，但仍未接入跨 Runtime ResourceRegistrySnapshot 原子 reload、最新 Runtime snapshot refresh 和完整 late-window/nested sink 传播；Policy compiled resource live swap/stale version 已验证，也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
 
 当前实现进度：**60%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan 首轮组合、注入式 direct DoH request path、基础 Cache/Core request path 和当前 snapshot-local optimistic refresh；Runtime snapshot 原子 reload、最新 snapshot refresh、fast-positive late sink、Policy/DnsService current-snapshot finalizer owner、完整 late-window/nested sink 传播、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。

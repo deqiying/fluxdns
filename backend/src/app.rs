@@ -275,6 +275,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 endpoint_count = prepared.preflight().endpoint_count,
                 policy_core = prepared.preflight().has_policy_core,
                 resource_snapshot_count = prepared.preflight().resource_snapshot_count,
+                resource_worker_count = prepared.preflight().resource_worker_count,
                 "runtime_prepared"
             );
             let bind_cancellation = crate::dns::Cancellation::new();

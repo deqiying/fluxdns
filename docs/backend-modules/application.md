@@ -1,6 +1,6 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch
+> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，service Supervisor 负责长期 remote refresh task
 >
 > 更新日期：2026-08-31
 >
@@ -72,7 +72,7 @@ bootstrap telemetry
 
 当前实现仍使用进程级 bootstrap stderr subscriber；正式日志目的地、stats/detail/cache flush 尚未接入。配置加载早期错误和服务生命周期事件均保持结构化、脱敏输出。DoH 首轮只装配 plain HTTP，并在边界处拒绝未实现的 TLS terminate、forwarded header 和 PROXY protocol。
 
-依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch；测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
+依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch，再由 service Supervisor 持有自动刷新 task；测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
 
 ## 5. 信号与退出
 
@@ -128,6 +128,6 @@ Application 将内部错误转换为：
 - [ ] 完成信号与退出测试；
 - [x] 记录阶段 1 验证证据并更新实现进度。
 
-阶段证据：`app::tests::exit_codes_are_stable`、CLI 参数和 `validate` 只读测试通过；正式 `run` 已切换到 async remote prepare，`runtime::prepared::tests` 验证首次 fetch 与第二次 fallback restore。真实 smoke 使用临时配置在 UDP `8353`、TCP `8354`、DoH `8355` 启动，hosts 查询返回 `127.0.0.1`，同连接双 TCP frame 维持 ID 顺序，DoH GET/POST 保留 DNS ID/RCODE，`SIGINT` 后输出 `service_shutdown` 并以 0 退出。未测试 nginx、TLS 证书或特权端口。
+阶段证据：`app::tests::exit_codes_are_stable`、CLI 参数和 `validate` 只读测试通过；正式 `run` 已切换到 async remote prepare，`runtime::prepared::tests` 验证首次 fetch、第二次 fallback restore 以及 refresh worker 的 Policy live publish。真实 smoke 使用临时配置在 UDP `8353`、TCP `8354`、DoH `8355` 启动，hosts 查询返回 `127.0.0.1`，同连接双 TCP frame 维持 ID 顺序，DoH GET/POST 保留 DNS ID/RCODE，`SIGINT` 后输出 `service_shutdown` 并以 0 退出。未测试 nginx、TLS 证书或特权端口。
 
 当前实现进度：**45%**。

@@ -6,11 +6,13 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use arc_swap::ArcSwap;
 use thiserror::Error;
 
+use crate::config::resolve::ConfigId;
 use crate::dns::RuntimeRevision;
 use crate::ports::effects::ResourceFetcher;
+use crate::resource::{ResourceScheduleDecision, ResourceSnapshot, RuleIndex};
 
 use super::bind::{BoundCandidate, BoundListenerSet};
-use super::prepared::PreparedRuntime;
+use super::prepared::{PreparedRuntime, ResourceRefreshError};
 use super::snapshot::RuntimeSnapshot;
 
 /// 已发布、可接收请求的运行时实例。
@@ -44,6 +46,34 @@ impl ActiveRuntime {
 
     pub fn resource_fetcher(&self) -> Option<Arc<dyn ResourceFetcher>> {
         self.prepared.resource_fetcher()
+    }
+
+    pub fn resource_worker_ids(&self) -> Vec<ConfigId> {
+        self.prepared.resource_worker_ids()
+    }
+
+    pub fn resource_refresh_decision(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+    ) -> Option<ResourceScheduleDecision> {
+        self.prepared.resource_refresh_decision(resource, now)
+    }
+
+    pub async fn refresh_remote_rule_set(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+        deadline: crate::dns::Deadline,
+        cancellation: crate::dns::Cancellation,
+    ) -> Result<ResourceSnapshot<RuleIndex>, ResourceRefreshError> {
+        self.prepared
+            .refresh_remote_rule_set(resource, now, deadline, cancellation)
+            .await
+    }
+
+    pub fn shutdown_resource_refresh(&self) {
+        self.prepared.shutdown_resource_refresh();
     }
 
     /// 尝试为一个请求建立 guard；drain 开始后不再接收新请求。

@@ -267,7 +267,7 @@ RawConfigVn
   → AppState
 ```
 
-`PreparedRuntime` 在 bind 前完成路径、引用图、策略索引、上游 connector、adapter-owned transport profile、核心可见 capabilities、资源句柄和数据库/日志能力的预构建，并在同一 prepare 边界装配生产 `ResourceFetcher`。正式 async prepare 对 remote rule-set 先校验落盘 content/manifest fallback，恢复失败后才执行 bounded fetch、解析和原子持久化，再把 compiled snapshot 交给 Policy 构造；任一步失败都不会进入 bind。`RuntimeSnapshot` 是请求读取的不可变对象；未来配置热加载时，先完整 prepare 新 revision，再原子切换，不在请求中重新解释 YAML 或继承规则。
+`PreparedRuntime` 在 bind 前完成路径、引用图、策略索引、上游 connector、adapter-owned transport profile、核心可见 capabilities、资源句柄和数据库/日志能力的预构建，并在同一 prepare 边界装配生产 `ResourceFetcher`。正式 async prepare 对 remote rule-set 先校验落盘 content/manifest fallback，恢复失败后才执行 bounded fetch、解析和原子持久化，再把 compiled snapshot 交给 Policy 构造；任一步失败都不会进入 bind。对 `auto_update=true` 的 remote rule-set，ActiveRuntime 还会把独立 refresh worker 纳入 service Supervisor，成功候选在同一 Policy core 内做版本化 live publish。`RuntimeSnapshot` 是请求读取的不可变对象；未来配置热加载时，先完整 prepare 新 revision，再原子切换，不在请求中重新解释 YAML 或继承规则。
 
 ```rust
 struct RuntimeSnapshot {
@@ -305,7 +305,7 @@ struct AppState {
 }
 ```
 
-`RuntimeSnapshot` 只放请求热路径需要的不可变状态，不包含 socket、HTTP connection、数据库连接或 cache implementation；`cache_semantics` 是已解析的 key/TTL/namespace 规则，不是具体 cache backend。`PreparedRuntime` 是无 socket 的候选运行时，完成配置迁移、引用图、策略索引、上游 connector、transport capabilities、资源句柄、首次 remote resource snapshot 和生产 `ResourceFetcher` 准备；`ActiveRuntime` 继续持有该 shared adapter，但它不进入请求 snapshot。绑定成功后才形成 `ActiveRuntime`。这样“prepare 失败不影响现有服务”和“bind/rebind 后原子切换”有明确的所有权边界。
+`RuntimeSnapshot` 只放请求热路径需要的不可变状态，不包含 socket、HTTP connection、数据库连接或 cache implementation；`cache_semantics` 是已解析的 key/TTL/namespace 规则，不是具体 cache backend。`PreparedRuntime` 是无 socket 的候选运行时，完成配置迁移、引用图、策略索引、上游 connector、transport capabilities、资源句柄、首次 remote resource snapshot、生产 `ResourceFetcher` 和 auto-update worker 准备；`ActiveRuntime` 继续持有这些 shared adapter/worker，但它们不进入请求 snapshot。绑定成功后才形成 `ActiveRuntime`。这样“prepare 失败不影响现有服务”和“bind/rebind 后原子切换”有明确的所有权边界。
 
 每个请求从 `active.load()` 得到同一 `ActiveRuntime`，再捕获其中的 `RuntimeSnapshot` 一次。资源仍可按资源粒度刷新，但 coordinator 必须基于最新 active revision 做顶层 CAS/串行重试，避免 hosts 与 rule_set 并发刷新时后发布者覆盖前一份资源更新。资源-only 更新复用现有 bound endpoints 和 shared services；需要 rebind 的候选则先绑定新 endpoints，成功后原子替换 `ActiveRuntime`，旧实例进入 drain。
 

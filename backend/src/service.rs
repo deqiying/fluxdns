@@ -1,14 +1,15 @@
 //! Application 使用的 DNS service task 编排。
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 use tokio::task::JoinSet;
 
 use crate::config::BindTransport;
+use crate::config::resolve::ConfigId;
 use crate::dns::{
-    CacheCompatibilityKey, CancelReason, Cancellation, DispatchError, DnsCore,
+    CacheCompatibilityKey, CancelReason, Cancellation, Deadline, DispatchError, DnsCore,
     TransportCapabilities, TransportClass, dispatch_inbound,
 };
 use crate::ports::PortErrorClass;
@@ -49,6 +50,8 @@ pub enum ServiceError {
     #[error("service shutdown deadline expired")]
     ShutdownDeadline,
 }
+
+const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// 已绑定 listener 的 DNS service；所有 receive loop 都由同一个 Supervisor 持有。
 pub struct DnsService {
@@ -148,6 +151,16 @@ impl DnsService {
             }
         }
 
+        for (index, resource) in runtime.resource_worker_ids().into_iter().enumerate() {
+            let task_id = format!("resource.refresh.{index}");
+            let task = resource_refresh_task(
+                Arc::clone(&runtime),
+                resource,
+                transport_cancellation.clone(),
+            );
+            spawn_resource_task(&mut supervisor, task_id, task)?;
+        }
+
         Ok(Self {
             runtime,
             supervisor,
@@ -239,6 +252,100 @@ fn spawn_task(
     supervisor
         .spawn(spec, task)
         .map_err(ServiceStartError::Task)
+}
+
+fn spawn_resource_task(
+    supervisor: &mut Supervisor,
+    task_id: String,
+    task: crate::runtime::TaskFuture,
+) -> Result<(), ServiceStartError> {
+    let spec = TaskSpec::new(
+        task_id,
+        "resource",
+        FaultLevel::Degraded,
+        RestartPolicy::Never,
+    )
+    .map_err(|error| ServiceStartError::Endpoint {
+        index: 0,
+        kind: "resource",
+        reason: error.to_string(),
+    })?;
+    supervisor
+        .spawn(spec, task)
+        .map_err(ServiceStartError::Task)
+}
+
+fn resource_refresh_task(
+    runtime: Arc<ActiveRuntime>,
+    resource: ConfigId,
+    cancellation: Cancellation,
+) -> crate::runtime::TaskFuture {
+    Box::pin(async move { run_resource_refresh_loop(runtime, resource, cancellation).await })
+}
+
+async fn run_resource_refresh_loop(
+    runtime: Arc<ActiveRuntime>,
+    resource: ConfigId,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    loop {
+        if cancellation.is_cancelled() {
+            runtime.shutdown_resource_refresh();
+            return Err(TaskError::Cancelled);
+        }
+        let now = unix_seconds();
+        let decision = runtime
+            .resource_refresh_decision(&resource, now)
+            .ok_or(TaskError::Fatal)?;
+        if decision.is_due() {
+            let deadline = Deadline::new(Instant::now() + RESOURCE_REFRESH_TIMEOUT);
+            match runtime
+                .refresh_remote_rule_set(&resource, now, deadline, cancellation.clone())
+                .await
+            {
+                Ok(snapshot) => tracing::info!(
+                    event = "resource_refresh_published",
+                    component = "resource",
+                    resource = %resource.as_str(),
+                    epoch = snapshot.epoch(),
+                    revision = snapshot.revision(),
+                    "resource_refresh_published"
+                ),
+                Err(_error) if cancellation.is_cancelled() => {
+                    runtime.shutdown_resource_refresh();
+                    return Err(TaskError::Cancelled);
+                }
+                Err(error) => tracing::warn!(
+                    event = "resource_refresh_failed",
+                    component = "resource",
+                    resource = %resource.as_str(),
+                    error = %error,
+                    "resource_refresh_failed"
+                ),
+            }
+            continue;
+        }
+
+        let Some(next_due) = decision.next_due() else {
+            runtime.shutdown_resource_refresh();
+            return Err(TaskError::Cancelled);
+        };
+        let wait = Duration::from_secs(next_due.saturating_sub(now).max(1));
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                runtime.shutdown_resource_refresh();
+                return Err(TaskError::Cancelled);
+            }
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn service_task<A>(
