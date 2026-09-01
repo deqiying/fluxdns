@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 348 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、协议无关 outbound stream port 与握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver、最小 SOCKS connector 闭环、standalone plain HTTP SOCKS5/SOCKS5H DoH transport adapter、配置驱动的 proxy Registry/Policy/Runtime prepare 接线、hosts/plain HTTP DoH registry、PolicyCore direct request path、group member selection 和结果聚合/fallback 判定；HTTPS/TLS、连接池、group/fallback 实际执行和 Runtime live resource/service snapshot 接线仍未完成。Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、direct hosts/plain HTTP DoH registry wiring、配置驱动 proxy DoH request path、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验，以及 scheduler/coordinator 的 Runtime-facing 纯逻辑编排；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、bootstrap/连接执行的完整接线、Moka/SQLite persistence、真实 resource fetch/parse/persist worker、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 354 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、协议无关 outbound stream port 与握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver、最小 SOCKS connector 闭环、standalone plain HTTP SOCKS5/SOCKS5H DoH transport adapter、配置驱动的 proxy Registry/Policy/Runtime prepare 接线、hosts/plain HTTP DoH registry、PolicyCore direct request path、direct group primary/fallback exchange 与 group timeout、group member selection 和结果聚合/fallback 判定；HTTPS/TLS、连接池、nested group、parallel late window、late cache finalizer 和 Runtime live resource/service snapshot 接线仍未完成。Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、direct hosts/plain HTTP DoH registry wiring、配置驱动 proxy DoH 与 group fallback request path、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验，以及 scheduler/coordinator 的 Runtime-facing 纯逻辑编排；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、bootstrap/连接执行的完整接线、Moka/SQLite persistence、真实 resource fetch/parse/persist worker、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **56.0%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合、可注入 DoH exchange、plain HTTP transport、地址解析 port、bootstrap 引用透传、响应地址提取、注入 connector 的 A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、outbound stream port、握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver、standalone plain HTTP SOCKS5/SOCKS5H transport adapter 和配置驱动的 proxy Registry/Policy/Runtime prepare 接线，Storage 已增加业务 schema 与 writer contract，Resource 已增加 scheduler/coordinator 的 Runtime-facing 编排边界；仍缺少 TLS、代理信任、HTTPS 出站、连接池、group/fallback 实际执行、Runtime live resource/service snapshot 接线、Moka/SQLite persistence、真实 resource worker、完整 upstream/Core 管线和完整故障验收 |
-| v1 交付总进度 | **60.4%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 56.0%` |
+| 后端代码实现进度 | **56.2%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合、可注入 DoH exchange、plain HTTP transport、地址解析 port、bootstrap 引用透传、响应地址提取、注入 connector 的 A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、outbound stream port、握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver、standalone plain HTTP SOCKS5/SOCKS5H transport adapter、配置驱动的 proxy Registry/Policy/Runtime prepare 接线和 direct group primary/fallback exchange/timeout 接线，Storage 已增加业务 schema 与 writer contract，Resource 已增加 scheduler/coordinator 的 Runtime-facing 编排边界；仍缺少 TLS、代理信任、HTTPS 出站、连接池、nested group、parallel late window、late cache finalizer、Runtime live resource/service snapshot 接线、Moka/SQLite persistence、真实 resource worker、完整 upstream/Core 管线和完整故障验收 |
+| v1 交付总进度 | **60.6%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 56.2%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -62,7 +62,7 @@ v1 交付范围：
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 50% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 55% | 8% |
-| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 95% | 10% |
+| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 97% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 50% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 65% | 7% |
 | Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 35% | 8% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 55% + 10% × 95% + 9% × 50% + 7% × 65% + 8% × 35% + 3% × 30% ≈ 56.0%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 55% + 10% × 97% + 9% × 50% + 7% × 65% + 8% × 35% + 3% × 30% ≈ 56.2%
 ```
 
 ## 4. 进度判定规则
@@ -256,7 +256,9 @@ transport / upstream / storage / observability adapters
 
 第二十一个小阶段（已完成）：增加 `UpstreamRegistry::from_resolved_with_outbounds` 和配置驱动的 `ConfiguredDohTransport`，从 `ResolvedConfig.outbounds` 解析 proxy profile，按 DoH upstream 选择 direct 或 SOCKS5/SOCKS5H transport；`PolicyDnsCore::from_config` 和 `PreparedRuntime::prepare_with_policy_core` 使用同一 Registry 路径。新增 Registry 的 SOCKS5+bootstrap loopback、missing/invalid outbound 与 `socks5h + bootstrap` fail-fast 测试，PolicyCore 的配置驱动 proxy DoH loopback 交换，以及 Runtime prepare 的错误传播测试。该阶段不引入新依赖，不实现 HTTPS/TLS、连接池、group/fallback 实际执行或 Runtime live resource/service snapshot 接线。
 
-当前阶段 5 边界：HTTPS/TLS DoH adapter、连接池、真实 fallback/重试链路、group exchange、Cache 接线和 Runtime live resource/service snapshot 接线仍未实现。
+第二十二个小阶段（已完成）：将 direct hosts/DoH group 的 primary/fallback exchange 接入 `UpstreamGroupExecutor`，消费 `timeout`/`fallback_timeout` 并为每个 phase 收紧请求 deadline；主组仅在全部尝试为 SERVFAIL/TC 或可重试 transport failure 时进入独立 fallback window。Policy prepare 现在绑定 primary/fallback direct connector，缺失成员、非法 selector 或 timeout 在 prepare 边界返回错误，不再静默跳过。新增 executor fallback/terminal/timeout 测试和 PolicyCore DoH SERVFAIL→hosts fallback loopback 测试。nested group、parallel late window、late cache finalizer、HTTPS/TLS 与连接池仍未实现。
+
+当前阶段 5 边界：HTTPS/TLS DoH adapter、连接池、nested group、parallel late window、late cache finalizer、Cache 接线和 Runtime live resource/service snapshot 接线仍未实现。
 
 ### 阶段 6：缓存
 

@@ -250,30 +250,46 @@ impl UpstreamRuntime {
                 id,
                 upstreams: members,
                 upstream_mode,
+                timeout,
                 fallbacks,
+                fallback_upstream_mode,
+                fallback_timeout,
                 ..
             } = upstream
             else {
                 continue;
             };
-            // Fallback members need a separate execution window; keep this slice
-            // fail-closed until that path is implemented rather than silently ignoring it.
-            if !fallbacks.is_empty() {
-                continue;
+            let selector = GroupSelector::from_upstream_mode(*upstream_mode, members.clone())
+                .map_err(|error| group_build_error(id, error.to_string()))?;
+            let exchanges = group_member_exchanges(&direct, id, members, "primary")?;
+            let executor = if fallbacks.is_empty() {
+                UpstreamGroupExecutor::new_with_timeout(selector, exchanges, *timeout)
+            } else {
+                let fallback_mode = (*fallback_upstream_mode)
+                    .ok_or_else(|| group_build_error(id, "fallback mode is missing".to_owned()))?;
+                let fallback_timeout = fallback_timeout.ok_or_else(|| {
+                    group_build_error(id, "fallback timeout is missing".to_owned())
+                })?;
+                let fallback_selector =
+                    GroupSelector::from_upstream_mode(fallback_mode, fallbacks.clone())
+                        .map_err(|error| group_build_error(id, error.to_string()))?;
+                let fallback_exchanges =
+                    group_member_exchanges(&direct, id, fallbacks, "fallback")?;
+                UpstreamGroupExecutor::new_with_fallback(
+                    selector,
+                    exchanges,
+                    *timeout,
+                    fallback_selector,
+                    fallback_exchanges,
+                    fallback_timeout,
+                )
             }
-            let Ok(selector) = GroupSelector::from_upstream_mode(*upstream_mode, members.clone())
-            else {
-                continue;
-            };
-            let Some(exchanges) = members
-                .iter()
-                .map(|member| direct.get(&member.name).cloned())
-                .collect::<Option<Vec<_>>>()
-            else {
-                continue;
-            };
-            if let Ok(executor) = UpstreamGroupExecutor::new(selector, exchanges) {
-                groups.insert(id.clone(), Arc::new(executor));
+            .map_err(|error| group_build_error(id, error.to_string()))?;
+            if groups.insert(id.clone(), Arc::new(executor)).is_some() {
+                return Err(group_build_error(
+                    id,
+                    "duplicate upstream group id".to_owned(),
+                ));
             }
         }
 
@@ -297,6 +313,35 @@ impl UpstreamRuntime {
             return executor.execute(query, context).await.ok();
         }
         None
+    }
+}
+
+fn group_member_exchanges(
+    direct: &BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
+    group: &ConfigId,
+    members: &[crate::config::resolve::ResolvedUpstreamMember],
+    role: &str,
+) -> Result<Vec<Arc<dyn DnsExchange>>, UpstreamRuntimeBuildError> {
+    members
+        .iter()
+        .map(|member| {
+            direct.get(&member.name).cloned().ok_or_else(|| {
+                group_build_error(
+                    group,
+                    format!(
+                        "{role} member `{}` is not a direct connector",
+                        member.name.as_str()
+                    ),
+                )
+            })
+        })
+        .collect()
+}
+
+fn group_build_error(group: &ConfigId, reason: String) -> UpstreamRuntimeBuildError {
+    UpstreamRuntimeBuildError {
+        upstream: group.as_str().to_owned(),
+        reason,
     }
 }
 
@@ -389,6 +434,30 @@ mod tests {
     struct FakeDohTransport {
         request: Mutex<Option<DohHttpRequest>>,
         response: Vec<u8>,
+    }
+
+    struct ServFailDohTransport;
+
+    impl DohHttpTransport for ServFailDohTransport {
+        fn post<'a>(
+            &'a self,
+            request: DohHttpRequest,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
+            Box::pin(async move {
+                let query = Message::from_vec(request.body()).unwrap();
+                let mut response =
+                    Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+                response.metadata.response_code = ResponseCode::ServFail;
+                response.add_query(query.queries[0].clone());
+                Ok(DohHttpResponseOwned {
+                    status: 200,
+                    content_type: Some("application/dns-message".to_owned()),
+                    body: response.to_vec().unwrap(),
+                })
+            })
+        }
     }
 
     impl FakeDohTransport {
@@ -852,6 +921,88 @@ strategy:
             .unwrap();
         let CoreOutcome::Response(response) = response else {
             panic!("expected group response");
+        };
+        assert_eq!(response.class(), crate::dns::ResponseClass::Positive);
+        assert_eq!(response.ttl().min_ttl, Some(crate::dns::DEFAULT_LOCAL_TTL));
+    }
+
+    #[tokio::test]
+    async fn policy_executes_fallback_after_primary_servfail() {
+        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(
+                r#"
+version: 1
+work:
+  path: /tmp/fluxdns-policy-fallback-test
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: 5302
+    strategy: default
+upstreams:
+  - type: doh
+    name: primary
+    address: http://dns.example.test/dns-query
+    connect_ip: 192.0.2.44
+  - type: hosts
+    name: fallback
+    format: hosts
+    hosts: "192.0.2.12 fallback.example"
+  - type: group
+    name: group
+    upstreams:
+      - name: primary
+        weight: 1
+    upstream_mode: failover
+    timeout: 1s
+    fallbacks:
+      - name: fallback
+        weight: 1
+    fallback_upstream_mode: failover
+    fallback_timeout: 1s
+hosts:
+  - type: const
+    name: unused-hosts
+    format: hosts
+    hosts: "192.0.2.99 unused.example"
+strategy:
+  - name: default
+    rules:
+      - hosts: unused-hosts
+    default_upstream: group
+"#,
+            )
+            .expect("policy fallback fixture must be valid")
+            .resolved;
+        let direct = super::direct_upstreams(&config.upstreams);
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &direct,
+            Arc::new(ServFailDohTransport),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(&config, 42, registry).unwrap();
+
+        let CoreOutcome::Response(response) = core
+            .resolve(&request("fallback.example.", RecordType::A))
+            .await
+            .unwrap()
+        else {
+            panic!("expected fallback response");
         };
         assert_eq!(response.class(), crate::dns::ResponseClass::Positive);
         assert_eq!(response.ttl().min_ttl, Some(crate::dns::DEFAULT_LOCAL_TTL));

@@ -89,6 +89,21 @@ pub fn assess(outcome: &UpstreamOutcome) -> AttemptAssessment {
     }
 }
 
+/// 判断一批已完成的 primary attempts 是否允许进入独立 fallback window。
+///
+/// 只有所有 attempt 都是可继续的 SERVFAIL/TC 或可重试 transport failure
+/// 时才允许 fallback；terminal DNS response、不可重试 failure 和 cancellation
+/// 都会阻止 fallback。
+pub fn should_enter_fallback(attempts: &[UpstreamAttempt]) -> bool {
+    !attempts.is_empty()
+        && attempts.iter().all(|attempt| {
+            matches!(
+                assess(&attempt.outcome).fallback,
+                FallbackDecision::Continue
+            )
+        })
+}
+
 /// 按配置顺序合并 primary 和 fallback，并删除重复 connector。
 pub fn deduplicate_connector_order(
     primary: impl IntoIterator<Item = ConnectorId>,
@@ -202,7 +217,7 @@ mod tests {
 
     use super::{
         AttemptClass, FallbackDecision, UpstreamAttempt, aggregate, assess,
-        deduplicate_connector_order,
+        deduplicate_connector_order, should_enter_fallback,
     };
 
     fn query() -> CanonicalQuery {
@@ -428,5 +443,34 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.to_string(), "upstream attempt index 0 is duplicated");
+    }
+
+    #[test]
+    fn fallback_requires_only_retryable_or_continuable_attempts() {
+        let retryable = attempt(
+            0,
+            "one",
+            crate::ports::exchange::UpstreamOutcome::TransportFailure(failure("one", true)),
+        );
+        let servfail = attempt(
+            1,
+            "two",
+            crate::ports::exchange::UpstreamOutcome::Response(response(ResponseCode::ServFail)),
+        );
+        assert!(should_enter_fallback(&[retryable, servfail]));
+
+        let terminal = attempt(
+            0,
+            "one",
+            crate::ports::exchange::UpstreamOutcome::Response(response(ResponseCode::NoError)),
+        );
+        assert!(!should_enter_fallback(&[terminal]));
+
+        let non_retryable = attempt(
+            0,
+            "one",
+            crate::ports::exchange::UpstreamOutcome::TransportFailure(failure("one", false)),
+        );
+        assert!(!should_enter_fallback(&[non_retryable]));
     }
 }
