@@ -83,6 +83,10 @@ impl LoadedRemoteRuleSet {
         &self.snapshot
     }
 
+    pub(crate) fn with_snapshot(self, snapshot: ResourceSnapshot<RuleIndex>) -> Self {
+        Self { snapshot, ..self }
+    }
+
     pub fn index(&self) -> &RuleIndex {
         self.snapshot.compiled()
     }

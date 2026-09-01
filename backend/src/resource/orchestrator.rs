@@ -1,18 +1,22 @@
 //! Resource refresh scheduler 与 coordinator 的 Runtime-facing 纯逻辑边界。
 //!
-//! 该模块只编排 due、single-flight、backoff、CAS publish 和 stop 状态；实际
-//! fetch、parse、persist 与 Runtime task 生命周期由后续 adapter/worker 提供。
+//! 该模块编排 due、single-flight、backoff、CAS publish 和 stop 状态，并提供一次性的
+//! remote fetch/parse/persist worker；timer 与 Runtime task 生命周期仍由调用方负责。
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+use thiserror::Error;
+
 use crate::config::resolve::ConfigId;
+use crate::config::resolve::ResolvedRuleSet;
+use crate::ports::effects::ResourceFetcher;
 
 use super::{
-    RefreshBeginError, RefreshFailure, RefreshPermit, RefreshPublishError,
-    ResourceRefreshCoordinator, ResourceRefreshPhase, ResourceRefreshStatus,
+    RefreshBeginError, RefreshFailure, RefreshPermit, RefreshPublishError, RemoteResourceError,
+    RemoteResourceOptions, ResourceRefreshCoordinator, ResourceRefreshPhase, ResourceRefreshStatus,
     ResourceRegistrySnapshot, ResourceSchedule, ResourceScheduleDecision, ResourceSchedulePolicy,
-    ResourceSnapshot,
+    ResourceSnapshot, RuleIndex, fetch_remote_rule_set,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -31,6 +35,7 @@ pub struct ResourceRefreshRuntime<T> {
 }
 
 /// 绑定 schedule 的一次刷新 reservation。
+#[derive(Clone)]
 pub struct ResourceRefreshRuntimePermit {
     resource_id: ConfigId,
     permit: RefreshPermit,
@@ -116,6 +121,11 @@ impl<T> ResourceRefreshRuntime<T> {
         })
     }
 
+    /// 释放一次刷新 reservation，但保留 schedule，供取消或 publish 失败路径复用。
+    pub fn abandon(&self, permit: ResourceRefreshRuntimePermit) -> bool {
+        self.coordinator.cancel(&permit.resource_id, &permit.permit)
+    }
+
     pub fn publish(
         &self,
         permit: ResourceRefreshRuntimePermit,
@@ -189,11 +199,113 @@ impl<T> ResourceRefreshRuntime<T> {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum ResourceRefreshWorkerError {
+    #[error("resource `{resource}` is not a remote rule-set")]
+    UnsupportedSource { resource: String },
+    #[error("resource refresh could not begin: {0:?}")]
+    Begin(ResourceRefreshRuntimeBeginError),
+    #[error("remote resource fetch failed: {0}")]
+    Fetch(#[source] RemoteResourceError),
+    #[error("resource refresh candidate could not be published: {0:?}")]
+    Publish(RefreshPublishError),
+    #[error("resource refresh reservation could not be released: {0:?}")]
+    Release(RefreshPublishError),
+}
+
+/// 将真实 remote rule-set fetch/parse/persist 接入 refresh reservation 的一次性 worker。
+///
+/// 该 worker 不创建 timer 或 supervisor task；调用方负责按 schedule 触发它，并把实际
+/// worker 生命周期纳入 Runtime supervisor。
+#[derive(Clone)]
+pub struct ResourceRefreshWorker {
+    runtime: ResourceRefreshRuntime<RuleIndex>,
+    fetcher: Arc<dyn ResourceFetcher>,
+}
+
+impl ResourceRefreshWorker {
+    pub fn new(
+        runtime: ResourceRefreshRuntime<RuleIndex>,
+        fetcher: Arc<dyn ResourceFetcher>,
+    ) -> Self {
+        Self { runtime, fetcher }
+    }
+
+    pub fn runtime(&self) -> &ResourceRefreshRuntime<RuleIndex> {
+        &self.runtime
+    }
+
+    pub async fn refresh_remote_rule_set(
+        &self,
+        resource: &ResolvedRuleSet,
+        options: RemoteResourceOptions,
+        now: u64,
+    ) -> Result<super::LoadedRemoteRuleSet, ResourceRefreshWorkerError> {
+        let resource_id = match resource {
+            ResolvedRuleSet::Remote { id, .. } => id,
+            ResolvedRuleSet::Const { id, .. } | ResolvedRuleSet::File { id, .. } => {
+                return Err(ResourceRefreshWorkerError::UnsupportedSource {
+                    resource: id.as_str().to_owned(),
+                });
+            }
+        };
+        let permit = self
+            .runtime
+            .begin_due(resource_id, now)
+            .map_err(ResourceRefreshWorkerError::Begin)?;
+        let cleanup = permit.clone();
+        let loaded = match fetch_remote_rule_set(self.fetcher.as_ref(), resource, options).await {
+            Ok(loaded) => loaded,
+            Err(
+                error @ (RemoteResourceError::Cancelled { .. }
+                | RemoteResourceError::DeadlineExceeded),
+            ) => {
+                let _ = self.runtime.abandon(cleanup);
+                return Err(ResourceRefreshWorkerError::Fetch(error));
+            }
+            Err(error) => {
+                let _ = self.runtime.fail(cleanup, now);
+                return Err(ResourceRefreshWorkerError::Fetch(error));
+            }
+        };
+        let cleanup = permit.clone();
+        let snapshot = loaded.snapshot();
+        let candidate = ResourceSnapshot::new(
+            snapshot.resource_id().clone(),
+            permit.epoch(),
+            snapshot.revision(),
+            snapshot.content_hash().to_owned(),
+            snapshot.source_fingerprint().to_owned(),
+            snapshot.parser_version().to_owned(),
+            snapshot.fetched_at(),
+            snapshot.source_kind(),
+            snapshot.used_fallback(),
+            snapshot.stale_status(),
+            snapshot.compiled().clone(),
+        );
+        let published = loaded.with_snapshot(candidate.clone());
+        if let Err(error) = self.runtime.publish(permit, candidate, now) {
+            if !self.runtime.abandon(cleanup) {
+                return Err(ResourceRefreshWorkerError::Release(error));
+            }
+            return Err(ResourceRefreshWorkerError::Publish(error));
+        }
+        Ok(published)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::UNIX_EPOCH;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use super::*;
+    use crate::config::model::RuleSetFormat;
+    use crate::config::resolve::ResolvedRuleSet;
+    use crate::dns::{Cancellation, Deadline};
+    use crate::ports::effects::{ResourceFetchRequest, ResourceFetchResult};
+    use crate::ports::{PortError, PortFuture};
     use crate::resource::{
         RefreshBackoff, ResourceScheduleStopReason, ResourceSourceKind, ResourceStaleStatus,
     };
@@ -228,6 +340,131 @@ mod tests {
             .publish(snapshot("hosts", 1, "old"))
             .unwrap();
         ResourceRefreshRuntime::new(registry, policy(), 0)
+    }
+
+    fn rule_runtime() -> ResourceRefreshRuntime<RuleIndex> {
+        let index = RuleIndex::parse("DOMAIN-SUFFIX,old.test\n", RuleSetFormat::Clash).unwrap();
+        let snapshot = ResourceSnapshot::new(
+            id("remote-rules"),
+            1,
+            1,
+            "old-hash",
+            "old-fingerprint",
+            "rule-index-v1",
+            UNIX_EPOCH,
+            ResourceSourceKind::Remote,
+            false,
+            ResourceStaleStatus::Fresh,
+            index,
+        );
+        ResourceRefreshRuntime::new(
+            ResourceRegistrySnapshot::new().publish(snapshot).unwrap(),
+            policy(),
+            0,
+        )
+    }
+
+    struct FakeResourceFetcher {
+        body: Arc<[u8]>,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl ResourceFetcher for FakeResourceFetcher {
+        fn fetch(
+            &self,
+            _request: ResourceFetchRequest,
+        ) -> PortFuture<'_, Result<ResourceFetchResult, PortError>> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let body = Arc::clone(&self.body);
+            Box::pin(async move {
+                Ok(ResourceFetchResult {
+                    body,
+                    checksum: 42,
+                    modified_at: Some(SystemTime::UNIX_EPOCH),
+                })
+            })
+        }
+    }
+
+    fn remote_rule_set() -> ResolvedRuleSet {
+        ResolvedRuleSet::Remote {
+            id: id("remote-rules"),
+            format: RuleSetFormat::Clash,
+            url: url::Url::parse("https://rules.example.test/list").unwrap(),
+            proxy: None,
+            auto_update: true,
+            update_interval: Some(Duration::from_secs(60)),
+        }
+    }
+
+    fn remote_options() -> RemoteResourceOptions {
+        let root = std::env::temp_dir().join(format!("fluxdns-worker-{}", std::process::id()));
+        RemoteResourceOptions::new(
+            1024,
+            root.join("rules.txt"),
+            root.join("rules.manifest"),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+    }
+
+    #[tokio::test]
+    async fn worker_fetches_parses_persists_and_publishes_remote_rule_set() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let worker = ResourceRefreshWorker::new(
+            rule_runtime(),
+            Arc::new(FakeResourceFetcher {
+                body: Arc::from(&b"DOMAIN-SUFFIX,new.test\n"[..]),
+                calls: Arc::clone(&calls),
+            }),
+        );
+        let loaded = worker
+            .refresh_remote_rule_set(&remote_rule_set(), remote_options(), 0)
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(loaded.snapshot().epoch(), 2);
+        assert_eq!(
+            worker
+                .runtime()
+                .current()
+                .lookup(&id("remote-rules"))
+                .unwrap()
+                .compiled()
+                .suffix_count(),
+            1
+        );
+        assert_eq!(
+            worker.runtime().phase(&id("remote-rules")),
+            ResourceRefreshPhase::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_records_parse_failure_and_releases_reservation() {
+        let worker = ResourceRefreshWorker::new(
+            rule_runtime(),
+            Arc::new(FakeResourceFetcher {
+                body: Arc::from(&b"not-a-valid-rule\n"[..]),
+                calls: Arc::new(AtomicUsize::new(0)),
+            }),
+        );
+        let error = worker
+            .refresh_remote_rule_set(&remote_rule_set(), remote_options(), 0)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            ResourceRefreshWorkerError::Fetch(RemoteResourceError::Parse(_))
+        ));
+        assert_eq!(
+            worker.runtime().phase(&id("remote-rules")),
+            ResourceRefreshPhase::Backoff {
+                retry_not_before: 2,
+                consecutive_failures: 1,
+            }
+        );
+        assert!(worker.runtime().begin_due(&id("remote-rules"), 1).is_err());
     }
 
     #[test]

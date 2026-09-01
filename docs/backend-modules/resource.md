@@ -1,6 +1,6 @@
 # Resource 模块设计
 
-> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；真实 fetch/parse/persist task 尚未接入 Runtime
+> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，真实 Runtime supervisor task 尚未接入
 >
 > 更新日期：2026-09-01
 >
@@ -158,7 +158,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 
 失败退避指数增长并封顶 5 分钟。连续三次计划刷新失败或超过 `3 × update_interval` 无成功时标记 stale，但继续使用旧 snapshot。
 
-当前已实现 `ResourceRefreshRuntime`：它为 registry 中的资源建立 schedule，将 due 检查与 `ResourceRefreshCoordinator` 的 per-resource single-flight、epoch reservation、CAS publish、failure backoff、cancel 和 shutdown 组合起来。该 facade 不执行网络、磁盘或 parser I/O，后续 Runtime supervisor 只需在 reservation 生命周期内接入对应 adapter。
+当前已实现 `ResourceRefreshRuntime`：它为 registry 中的资源建立 schedule，将 due 检查与 `ResourceRefreshCoordinator` 的 per-resource single-flight、epoch reservation、CAS publish、failure backoff、cancel 和 shutdown 组合起来。该 facade 不执行网络、磁盘或 parser I/O；`ResourceRefreshWorker` 现在在 reservation 生命周期内调用 `ResourceFetcher`，完成 bounded remote rule-set fetch/parse/persist、epoch 重绑定和 CAS publish，但 timer、长期 task 监督与 Policy live swap 仍由后续 Runtime 接入。
 
 ## 10. 原子落盘
 
@@ -203,10 +203,11 @@ remote 有效内容与 manifest：
 - [x] 实现资源版本 snapshot/CAS publish；
 - [x] 实现 remote loader、snapshot manifest、原子落盘与 content/manifest 恢复校验；
 - [x] 实现纯逻辑 refresh/single-flight scheduler/stale policy 与 Runtime-facing 编排边界；
-- [ ] 接入 Runtime supervisor、真实 fetch/parse/persist worker；
+- [x] 接入一次性 `ResourceRefreshWorker`，完成 remote fetch/parse/persist、epoch 绑定和 CAS publish；
+- [ ] 接入 Runtime supervisor 的长期调度、资源 I/O task 和跨 Runtime snapshot 发布；
 - [x] 完成当前解析、安全边界、文件稳定读取和并发 CAS 测试；
 - [ ] 完成 remote 恢复、原子落盘和长期刷新测试。
 
-阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；本切片新增 `resource::remote::tests` 6 项与 `resource::orchestrator::tests` 4 项通过，覆盖 due/reservation、CAS publish、backoff、cancel 和 shutdown。真实 Runtime supervisor、fetch/parse/persist worker、资源跨 Runtime 发布和长期故障验收仍未完成。
+阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；本切片新增 `resource::remote::tests` 6 项与 `resource::orchestrator::tests` 6 项通过，覆盖 due/reservation、CAS publish、backoff、cancel 和 shutdown。真实 Runtime supervisor 长期 task、资源跨 Runtime 发布、Policy live swap 和长期故障验收仍未完成。
 
 当前实现进度：**65%**。

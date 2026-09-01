@@ -18,6 +18,7 @@ pub use loader::{
 };
 pub use orchestrator::{
     ResourceRefreshRuntime, ResourceRefreshRuntimeBeginError, ResourceRefreshRuntimePermit,
+    ResourceRefreshWorker, ResourceRefreshWorkerError,
 };
 pub use refresh::{
     RefreshBackoff, RefreshBeginError, RefreshFailure, RefreshPermit, RefreshPublishError,
