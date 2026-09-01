@@ -8,10 +8,10 @@ use thiserror::Error;
 
 use crate::config::resolve::ConfigId;
 use crate::dns::RuntimeRevision;
-use crate::ports::effects::ResourceFetcher;
+use crate::ports::effects::{ResourceFetcher, SocketFactory};
 use crate::resource::{ResourceScheduleDecision, ResourceSnapshot, RuleIndex};
 
-use super::bind::{BoundCandidate, BoundListenerSet};
+use super::bind::{BindError, BoundCandidate, BoundListenerSet, bind_prepared};
 use super::prepared::{PreparedRuntime, RefreshedResourceSnapshot, ResourceRefreshError};
 use super::snapshot::RuntimeSnapshot;
 
@@ -292,6 +292,22 @@ impl RuntimeCoordinator {
         self.load().shutdown_resource_refresh();
     }
 
+    pub async fn bind_and_activate(
+        &self,
+        expected: RuntimeRevision,
+        prepared: PreparedRuntime,
+        factory: &dyn SocketFactory,
+        deadline: crate::dns::Deadline,
+        cancellation: &crate::dns::Cancellation,
+    ) -> Result<Arc<ActiveRuntime>, RuntimeReloadError> {
+        let candidate = bind_prepared(prepared, factory, deadline, cancellation)
+            .await
+            .map_err(RuntimeReloadError::Bind)?;
+        self.compare_and_activate(expected, candidate)
+            .map_err(RuntimeReloadError::Activation)?;
+        Ok(self.load())
+    }
+
     /// 无条件发布候选，并把旧实例标记为 draining。
     pub fn activate(&self, candidate: BoundCandidate) -> Arc<ActiveRuntime> {
         let next = Arc::new(ActiveRuntime::from_candidate(candidate));
@@ -356,16 +372,39 @@ impl ActivationError {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum RuntimeReloadError {
+    #[error("runtime candidate bind failed: {0}")]
+    Bind(#[source] BindError),
+    #[error("runtime candidate activation failed: {0}")]
+    Activation(#[source] ActivationError),
+}
+
+impl RuntimeReloadError {
+    pub fn into_candidate(self) -> Option<BoundCandidate> {
+        match self {
+            Self::Bind(_) => None,
+            Self::Activation(error) => Some(error.into_candidate()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use crate::config::resolve::ConfigId;
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{Cancellation, Deadline, RuntimeRevision};
+    use crate::ports::effects::{
+        ActivatedSocket, ActivatedSocketHandle, PreparedSocket, SocketFactory, SocketKind,
+        SocketSpec,
+    };
+    use crate::ports::{PortError, PortErrorClass, PortFuture};
 
-    use super::{AdmissionError, RuntimeCoordinator};
+    use super::{AdmissionError, RuntimeCoordinator, RuntimeReloadError};
     use crate::runtime::PreparedRuntime;
 
     fn candidate(revision: u64) -> crate::runtime::BoundCandidate {
@@ -375,6 +414,57 @@ mod tests {
             .resolved;
         let prepared = PreparedRuntime::prepare(config, RuntimeRevision(revision)).unwrap();
         super::super::bind::test_candidate(prepared)
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestSocketFactory;
+
+    struct TestPreparedSocket {
+        spec: SocketSpec,
+    }
+
+    struct TestActivatedSocket {
+        spec: SocketSpec,
+    }
+
+    impl SocketFactory for TestSocketFactory {
+        fn prepare<'a>(
+            &'a self,
+            spec: SocketSpec,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<Box<dyn PreparedSocket>, PortError>> {
+            Box::pin(
+                async move { Ok(Box::new(TestPreparedSocket { spec }) as Box<dyn PreparedSocket>) },
+            )
+        }
+    }
+
+    impl PreparedSocket for TestPreparedSocket {
+        fn local_addr(&self) -> Result<SocketAddr, PortError> {
+            Ok(self.spec.address)
+        }
+
+        fn activate(self: Box<Self>) -> Result<Box<dyn ActivatedSocket>, PortError> {
+            Ok(Box::new(TestActivatedSocket { spec: self.spec }))
+        }
+    }
+
+    impl ActivatedSocket for TestActivatedSocket {
+        fn local_addr(&self) -> Result<SocketAddr, PortError> {
+            Ok(self.spec.address)
+        }
+
+        fn kind(&self) -> SocketKind {
+            self.spec.kind
+        }
+
+        fn socket_handle(&self) -> Result<ActivatedSocketHandle, PortError> {
+            Err(PortError::new(
+                PortErrorClass::Unavailable,
+                "test_socket.handle",
+            ))
+        }
     }
 
     #[test]
@@ -551,5 +641,56 @@ outbound: []
             crate::resource::ResourceVersion::new(2, 0)
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn bind_and_activate_publishes_a_prepared_candidate_after_binding() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(include_str!("../../../config-example.yaml"))
+            .unwrap()
+            .resolved;
+        let prepared = PreparedRuntime::prepare(config, RuntimeRevision(2)).unwrap();
+        let active = coordinator
+            .bind_and_activate(
+                RuntimeRevision(1),
+                prepared,
+                &TestSocketFactory,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+    }
+
+    #[tokio::test]
+    async fn bind_and_activate_returns_bound_candidate_when_activation_cas_loses() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(include_str!("../../../config-example.yaml"))
+            .unwrap()
+            .resolved;
+        let prepared = PreparedRuntime::prepare(config, RuntimeRevision(2)).unwrap();
+        let error = coordinator
+            .bind_and_activate(
+                RuntimeRevision(99),
+                prepared,
+                &TestSocketFactory,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap_err();
+
+        let RuntimeReloadError::Activation(activation) = error else {
+            panic!("expected activation CAS error");
+        };
+        assert_eq!(activation.expected(), RuntimeRevision(99));
+        assert_eq!(activation.actual(), RuntimeRevision(1));
+        assert_eq!(activation.into_candidate().revision(), RuntimeRevision(2));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
     }
 }
