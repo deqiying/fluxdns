@@ -9,6 +9,7 @@ mod http;
 mod outbound;
 mod outcome;
 mod registry;
+mod reqwest_http;
 mod socks5;
 mod tokio_outbound;
 
@@ -40,6 +41,7 @@ pub use outcome::{
     assess, deduplicate_connector_order, should_enter_fallback,
 };
 pub use registry::{RegistryError, UpstreamRegistry};
+pub use reqwest_http::{ReqwestDohHttpTransport, ReqwestDohHttpTransportBuildError};
 pub use socks5::{
     Socks5Address, Socks5AuthMethod, Socks5ConnectResponse, Socks5Credentials,
     Socks5HandshakeError, Socks5ProtocolError, Socks5Reply, Socks5TargetError, address_for_target,

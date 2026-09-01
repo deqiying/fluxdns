@@ -371,6 +371,7 @@ fn registry_build_error(error: RegistryError) -> UpstreamRuntimeBuildError {
         RegistryError::InvalidConnectorId { upstream }
         | RegistryError::InvalidHosts { upstream }
         | RegistryError::InvalidDoh { upstream }
+        | RegistryError::InvalidDohTransport { upstream }
         | RegistryError::UnsupportedUpstream { upstream, .. } => upstream.clone(),
         RegistryError::InvalidOutbound { outbound, .. }
         | RegistryError::DuplicateOutbound { outbound } => outbound.clone(),
@@ -524,17 +525,13 @@ mod tests {
     }
 
     #[test]
-    fn upstream_runtime_propagates_unsupported_doh_features() {
-        let error = PolicyDnsCore::from_config(
+    fn upstream_runtime_accepts_direct_https_doh() {
+        let core = PolicyDnsCore::from_config(
             doh_config_with_address("https://dns.example.test/dns-query").as_ref(),
             42,
         )
-        .unwrap_err();
-        let super::PolicyCoreBuildError::Upstream { upstream, reason } = error else {
-            panic!("expected upstream build error");
-        };
-        assert_eq!(upstream, "remote");
-        assert!(reason.contains("doh_https"));
+        .unwrap();
+        assert_eq!(core.upstream_count(), 1);
     }
 
     #[tokio::test]

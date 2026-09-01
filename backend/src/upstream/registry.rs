@@ -15,8 +15,9 @@ use crate::ports::{PortError, PortFuture};
 use super::{
     BootstrapConnectorRegistry, DohExchange, DohHttpRequest, DohHttpResponseOwned,
     DohHttpTransport, HostsExchange, HostsExchangeBuildError, OutboundProfile,
-    TokioDohAddressResolver, TokioDohHttpTransport, TokioOutboundAddressResolver,
-    TokioOutboundDialer, TokioSocks5DohHttpTransport,
+    ReqwestDohHttpTransport, ReqwestDohHttpTransportBuildError, TokioDohAddressResolver,
+    TokioDohHttpTransport, TokioOutboundAddressResolver, TokioOutboundDialer,
+    TokioSocks5DohHttpTransport,
 };
 
 pub struct UpstreamRegistry {
@@ -25,6 +26,7 @@ pub struct UpstreamRegistry {
 
 enum ConfiguredDohTransport {
     Direct(TokioDohHttpTransport),
+    Reqwest(ReqwestDohHttpTransport),
     Socks5(TokioSocks5DohHttpTransport<TokioOutboundDialer>),
 }
 
@@ -37,6 +39,7 @@ impl DohHttpTransport for ConfiguredDohTransport {
     ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
         match self {
             Self::Direct(transport) => transport.post(request, deadline, cancellation),
+            Self::Reqwest(transport) => transport.post(request, deadline, cancellation),
             Self::Socks5(transport) => transport.post(request, deadline, cancellation),
         }
     }
@@ -54,6 +57,8 @@ pub enum RegistryError {
     InvalidHosts { upstream: String },
     #[error("upstream `{upstream}` could not build a DoH connector")]
     InvalidDoh { upstream: String },
+    #[error("upstream `{upstream}` could not build its HTTP transport")]
+    InvalidDohTransport { upstream: String },
     #[error("outbound `{outbound}` could not build a proxy profile: {source}")]
     InvalidOutbound {
         outbound: String,
@@ -126,6 +131,7 @@ impl UpstreamRegistry {
             |upstream: &ResolvedUpstream, _id: &crate::config::resolve::ConfigId| {
                 let ResolvedUpstream::Doh {
                     id,
+                    address,
                     proxy,
                     bootstrap,
                     ..
@@ -135,6 +141,25 @@ impl UpstreamRegistry {
                         TokioDohHttpTransport::with_resolver(target_resolver.clone()),
                     )));
                 };
+                if address.scheme() == "https" {
+                    if proxy.is_some() {
+                        return Err(RegistryError::UnsupportedUpstream {
+                            upstream: id.as_str().to_owned(),
+                            kind: "doh_https_proxy",
+                        });
+                    }
+                    let transport =
+                        ReqwestDohHttpTransport::new(target_resolver.clone()).map_err(|error| {
+                            match error {
+                                ReqwestDohHttpTransportBuildError::Client => {
+                                    RegistryError::InvalidDohTransport {
+                                        upstream: id.as_str().to_owned(),
+                                    }
+                                }
+                            }
+                        })?;
+                    return Ok(Arc::new(ConfiguredDohTransport::Reqwest(transport)));
+                }
                 let Some(proxy_id) = proxy else {
                     return Ok(Arc::new(ConfiguredDohTransport::Direct(
                         TokioDohHttpTransport::with_resolver(target_resolver.clone()),
@@ -192,6 +217,13 @@ impl UpstreamRegistry {
                 return Err(RegistryError::UnsupportedUpstream {
                     upstream: id.as_str().to_owned(),
                     kind: "doh_proxy",
+                });
+            }
+            if matches!(upstream, ResolvedUpstream::Doh { address, .. } if address.scheme() == "https")
+            {
+                return Err(RegistryError::UnsupportedUpstream {
+                    upstream: id.as_str().to_owned(),
+                    kind: "doh_https",
                 });
             }
             Ok(doh_transport.clone())
@@ -257,13 +289,7 @@ impl UpstreamRegistry {
                             kind: "doh_edns_client_subnet",
                         });
                     }
-                    if address.scheme() == "https" {
-                        return Err(RegistryError::UnsupportedUpstream {
-                            upstream: id.as_str().to_owned(),
-                            kind: "doh_https",
-                        });
-                    }
-                    if address.scheme() != "http" {
+                    if !matches!(address.scheme(), "http" | "https") {
                         return Err(RegistryError::InvalidDoh {
                             upstream: id.as_str().to_owned(),
                         });
@@ -546,6 +572,29 @@ mod tests {
                 .connector_id()
                 .as_str(),
             "remote"
+        );
+    }
+
+    #[test]
+    fn config_aware_registry_builds_https_doh_connector() {
+        let doh = ResolvedUpstream::Doh {
+            id: ConfigId::new("secure").unwrap(),
+            address: "https://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: None,
+            connect_ip: None,
+            proxy: None,
+            edns_client_subnet: None,
+        };
+
+        let registry = UpstreamRegistry::from_resolved_with_outbounds(&[doh], &[]).unwrap();
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry
+                .get_by_name("secure")
+                .unwrap()
+                .connector_id()
+                .as_str(),
+            "secure"
         );
     }
 
