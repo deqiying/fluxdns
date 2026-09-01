@@ -1,6 +1,6 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、hosts/plain HTTP DoH registry、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；自定义 transport 的 bootstrap resolver 仍由调用方提供，HTTPS/TLS、outbound 尚未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、hosts/plain HTTP DoH registry、Outbound profile/target 规划、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；自定义 transport 的 bootstrap resolver、SOCKS5/SOCKS5H 握手与实际 outbound 仍未实现
 >
 > 更新日期：2026-09-01
 >
@@ -96,6 +96,8 @@ bootstrap：
 
 ## 5. Outbound
 
+`OutboundProfile` 在显式 prepare 边界解析 SecretRef 的代理 URL，保存 scheme、代理端点和受保护的 credential material；`OutboundTarget` 固化目标 host/port、connect_ip、bootstrap 和本地/远程/旁路 hostname resolution 模式。它不执行 DNS、SOCKS 握手或 socket dial。
+
 `socks5://`：
 
 - 目标主机在本地按 connect_ip → bootstrap → system resolver 解析；
@@ -182,7 +184,7 @@ TransportFailure 分类至少包括 connect、DNS bootstrap、proxy、TLS、HTTP
 
 v1 不实现主动健康检查、熔断器或持久健康分数。load-balance 只使用实时 in-flight，不应在文档或指标中称为 health。
 
-当前已实现：`DohExchange` 固定 POST `application/dns-message` 请求，自动分配内部 DNS ID，保留 URL host 作为 Host/SNI，并将显式 `connect_ip`、bootstrap 引用、deadline、cancellation 和 HTTP/协议错误映射到 `UpstreamOutcome`；`TokioDohHttpTransport` 提供 plain HTTP/1.1 loopback-capable adapter，并在默认 Registry 路径接入共享 bootstrap resolver；`BootstrapResolver` 通过注入 connector 执行 A/AAAA 查询并合并地址；`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；`outcome` 提供按 attempt index 的 terminal/retryable/cancelled 聚合和 fallback 判定。自定义 transport 的 bootstrap resolver 注入、HTTPS/TLS、proxy、late cache finalizer 和 Runtime/DNS Core 接线尚未接入。
+当前已实现：`DohExchange` 固定 POST `application/dns-message` 请求，自动分配内部 DNS ID，保留 URL host 作为 Host/SNI，并将显式 `connect_ip`、bootstrap 引用、deadline、cancellation 和 HTTP/协议错误映射到 `UpstreamOutcome`；`TokioDohHttpTransport` 提供 plain HTTP/1.1 loopback-capable adapter，并在默认 Registry 路径接入共享 bootstrap resolver；`BootstrapResolver` 通过注入 connector 执行 A/AAAA 查询并合并地址；`OutboundProfile`/`OutboundTarget` 固化 SecretRef 脱敏、代理 scheme 和目标解析模式；`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；`outcome` 提供按 attempt index 的 terminal/retryable/cancelled 聚合和 fallback 判定。自定义 transport 的 bootstrap resolver 注入、SOCKS5/SOCKS5H 握手与 socket dial、HTTPS/TLS、late cache finalizer 和 Runtime/DNS Core 接线尚未接入。
 
 ## 10. 测试
 
@@ -209,13 +211,15 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [x] 从已校验 DNS response 提取 bootstrap A/AAAA 与最低 TTL，并拒绝非正向响应；
 - [x] 通过注入式 `DnsExchange` 执行 bootstrap A/AAAA 查询、地址合并和 transport/cancel/no-address 分类；
 - [x] 将 bootstrap resolver 接入默认 DoH address resolver、Registry 和 plain HTTP 实际路径；
+- [x] 解析 outbound SecretRef，固化 socks5/socks5h profile 与本地/远程目标规划；
 - [ ] 为自定义 transport、HTTPS/TLS 和 outbound 提供完整 bootstrap 执行；
+- [ ] 实现 SOCKS5/SOCKS5H 握手、认证和 socket dial；
 - [x] 固化四种 group 模式的纯 member selection；
 - [x] 实现 outcome/fallback 判定边界；
 - [ ] 接入 group exchange、fallback 执行与 late cache finalizer；
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 5 项通过，`upstream::doh` 7 项通过，`upstream::bootstrap::tests` 14 项通过，`upstream::http::tests` 7 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造、默认 Registry bootstrap loopback 路径与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、bootstrap 引用透传与默认路径 fail-closed、bootstrap response 的 owner/TTL 提取、注入 connector 的 A/AAAA 查询与地址合并、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了默认 Registry 的 plain HTTP bootstrap 路径、无真实网络的 PolicyCore direct path 与注入式 bootstrap connector path；自定义 transport resolver、RuntimeSnapshot、真实 outbound 和 TLS/proxy 仍未实现。
+阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 5 项通过，`upstream::doh` 7 项通过，`upstream::bootstrap::tests` 14 项通过，`upstream::http::tests` 7 项通过，`upstream::outbound::tests` 4 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造、默认 Registry bootstrap loopback 路径与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、bootstrap 引用透传与默认路径 fail-closed、bootstrap response 的 owner/TTL 提取、注入 connector 的 A/AAAA 查询与地址合并、SecretRef 解析和 credential Debug 脱敏、socks5/socks5h 目标解析模式、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了默认 Registry 的 plain HTTP bootstrap 路径、无真实网络的 PolicyCore direct path 与注入式 bootstrap connector path；SOCKS5/SOCKS5H 握手、socket dial、自定义 transport resolver、RuntimeSnapshot、真实 outbound 和 TLS/proxy 仍未实现。
 
-当前实现进度：**74%**。
+当前实现进度：**76%**。

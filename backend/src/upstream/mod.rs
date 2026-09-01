@@ -6,6 +6,7 @@ mod executor;
 mod group;
 mod hosts;
 mod http;
+mod outbound;
 mod outcome;
 mod registry;
 
@@ -26,6 +27,9 @@ pub use group::{GroupSelector, GroupSelectorError, SelectionLease};
 pub use hosts::{HostsExchange, HostsExchangeBuildError};
 pub use http::{
     DohAddressRequest, DohAddressResolver, TokioDohAddressResolver, TokioDohHttpTransport,
+};
+pub use outbound::{
+    NameResolution, OutboundProfile, OutboundProfileError, OutboundTarget, OutboundTargetError,
 };
 pub use outcome::{
     AttemptAssessment, AttemptClass, FallbackDecision, OutcomeError, UpstreamAttempt, aggregate,
