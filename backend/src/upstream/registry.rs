@@ -142,22 +142,32 @@ impl UpstreamRegistry {
                     )));
                 };
                 if address.scheme() == "https" {
-                    if proxy.is_some() {
-                        return Err(RegistryError::UnsupportedUpstream {
-                            upstream: id.as_str().to_owned(),
-                            kind: "doh_https_proxy",
-                        });
+                    let transport = if let Some(proxy_id) = proxy {
+                        let Some(profile) = profiles.get(proxy_id) else {
+                            return Err(RegistryError::MissingOutbound {
+                                upstream: id.as_str().to_owned(),
+                                outbound: proxy_id.as_str().to_owned(),
+                            });
+                        };
+                        if matches!(profile.scheme(), ProxyScheme::Socks5h) && bootstrap.is_some() {
+                            return Err(RegistryError::InvalidOutboundCombination {
+                                upstream: id.as_str().to_owned(),
+                                outbound: proxy_id.as_str().to_owned(),
+                            });
+                        }
+                        ReqwestDohHttpTransport::with_proxy(
+                            target_resolver.clone(),
+                            proxy_resolver.clone(),
+                            profile.clone(),
+                        )
+                    } else {
+                        ReqwestDohHttpTransport::new(target_resolver.clone())
                     }
-                    let transport =
-                        ReqwestDohHttpTransport::new(target_resolver.clone()).map_err(|error| {
-                            match error {
-                                ReqwestDohHttpTransportBuildError::Client => {
-                                    RegistryError::InvalidDohTransport {
-                                        upstream: id.as_str().to_owned(),
-                                    }
-                                }
-                            }
-                        })?;
+                    .map_err(|_error: ReqwestDohHttpTransportBuildError| {
+                        RegistryError::InvalidDohTransport {
+                            upstream: id.as_str().to_owned(),
+                        }
+                    })?;
                     return Ok(Arc::new(ConfiguredDohTransport::Reqwest(transport)));
                 }
                 let Some(proxy_id) = proxy else {
@@ -596,6 +606,51 @@ mod tests {
                 .as_str(),
             "secure"
         );
+    }
+
+    #[test]
+    fn config_aware_registry_builds_https_doh_connector_with_socks_proxy() {
+        let (outbound, root) = outbound("socks5://127.0.0.1:1080");
+        let doh = ResolvedUpstream::Doh {
+            id: ConfigId::new("secure-proxy").unwrap(),
+            address: "https://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: None,
+            connect_ip: None,
+            proxy: Some(ConfigId::new("socks").unwrap()),
+            edns_client_subnet: None,
+        };
+
+        let registry = UpstreamRegistry::from_resolved_with_outbounds(&[doh], &[outbound]).unwrap();
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry
+                .get_by_name("secure-proxy")
+                .unwrap()
+                .connector_id()
+                .as_str(),
+            "secure-proxy"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn config_aware_registry_rejects_https_socks5h_bootstrap_combination() {
+        let (outbound, root) = outbound("socks5h://127.0.0.1:1080");
+        let doh = ResolvedUpstream::Doh {
+            id: ConfigId::new("secure-bootstrap").unwrap(),
+            address: "https://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: Some(ConfigId::new("bootstrap").unwrap()),
+            connect_ip: None,
+            proxy: Some(ConfigId::new("socks").unwrap()),
+            edns_client_subnet: None,
+        };
+
+        assert!(matches!(
+            UpstreamRegistry::from_resolved_with_outbounds(&[doh], &[outbound]),
+            Err(RegistryError::InvalidOutboundCombination { upstream, outbound })
+                if upstream == "secure-bootstrap" && outbound == "socks"
+        ));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
