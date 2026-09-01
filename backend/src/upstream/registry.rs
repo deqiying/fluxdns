@@ -9,7 +9,9 @@ use thiserror::Error;
 use crate::config::resolve::ResolvedUpstream;
 use crate::ports::exchange::{ConnectorId, DnsExchange};
 
-use super::{HostsExchange, HostsExchangeBuildError};
+use super::{
+    DohExchange, DohHttpTransport, HostsExchange, HostsExchangeBuildError, TokioDohHttpTransport,
+};
 
 pub struct UpstreamRegistry {
     connectors: HashMap<ConnectorId, Arc<dyn DnsExchange>>,
@@ -25,6 +27,8 @@ pub enum RegistryError {
     MissingConnector { connector: String },
     #[error("upstream `{upstream}` could not build a hosts connector")]
     InvalidHosts { upstream: String },
+    #[error("upstream `{upstream}` could not build a DoH connector")]
+    InvalidDoh { upstream: String },
     #[error("upstream `{upstream}` has unsupported connector type `{kind}`")]
     UnsupportedUpstream {
         upstream: String,
@@ -43,18 +47,22 @@ impl fmt::Debug for UpstreamRegistry {
 
 impl UpstreamRegistry {
     pub fn from_resolved(upstreams: &[ResolvedUpstream]) -> Result<Self, RegistryError> {
+        Self::from_resolved_with_doh_transport(upstreams, Arc::new(TokioDohHttpTransport::new()))
+    }
+
+    pub fn from_resolved_with_doh_transport<T>(
+        upstreams: &[ResolvedUpstream],
+        doh_transport: Arc<T>,
+    ) -> Result<Self, RegistryError>
+    where
+        T: DohHttpTransport + 'static,
+    {
         let mut connectors = HashMap::new();
         for upstream in upstreams {
-            let ResolvedUpstream::Hosts { id, .. } = upstream else {
-                let (id, kind) = match upstream {
-                    ResolvedUpstream::Doh { id, .. } => (id, "doh"),
-                    ResolvedUpstream::Group { id, .. } => (id, "group"),
-                    ResolvedUpstream::Hosts { .. } => unreachable!("hosts matched above"),
-                };
-                return Err(RegistryError::UnsupportedUpstream {
-                    upstream: id.as_str().to_owned(),
-                    kind,
-                });
+            let id = match upstream {
+                ResolvedUpstream::Hosts { id, .. }
+                | ResolvedUpstream::Doh { id, .. }
+                | ResolvedUpstream::Group { id, .. } => id,
             };
             let connector = ConnectorId::new(id.as_str().to_owned()).map_err(|_| {
                 RegistryError::InvalidConnectorId {
@@ -66,17 +74,76 @@ impl UpstreamRegistry {
                     connector: connector.as_str().to_owned(),
                 });
             }
-            let exchange = HostsExchange::from_resolved(upstream).map_err(|error| {
-                let upstream = match error {
-                    HostsExchangeBuildError::NotHosts { upstream }
-                    | HostsExchangeBuildError::UnsupportedFormat { upstream, .. }
-                    | HostsExchangeBuildError::InvalidData { upstream }
-                    | HostsExchangeBuildError::UnsupportedRecordType { upstream, .. }
-                    | HostsExchangeBuildError::EmptyAddressList { upstream } => upstream,
-                };
-                RegistryError::InvalidHosts { upstream }
-            })?;
-            connectors.insert(connector, Arc::new(exchange) as Arc<dyn DnsExchange>);
+            let exchange: Arc<dyn DnsExchange> = match upstream {
+                ResolvedUpstream::Hosts { .. } => {
+                    let exchange = HostsExchange::from_resolved(upstream).map_err(|error| {
+                        let upstream = match error {
+                            HostsExchangeBuildError::NotHosts { upstream }
+                            | HostsExchangeBuildError::UnsupportedFormat { upstream, .. }
+                            | HostsExchangeBuildError::InvalidData { upstream }
+                            | HostsExchangeBuildError::UnsupportedRecordType { upstream, .. }
+                            | HostsExchangeBuildError::EmptyAddressList { upstream } => upstream,
+                        };
+                        RegistryError::InvalidHosts { upstream }
+                    })?;
+                    Arc::new(exchange)
+                }
+                ResolvedUpstream::Doh {
+                    address,
+                    bootstrap,
+                    connect_ip,
+                    proxy,
+                    edns_client_subnet,
+                    ..
+                } => {
+                    if proxy.is_some() {
+                        return Err(RegistryError::UnsupportedUpstream {
+                            upstream: id.as_str().to_owned(),
+                            kind: "doh_proxy",
+                        });
+                    }
+                    if bootstrap.is_some() {
+                        return Err(RegistryError::UnsupportedUpstream {
+                            upstream: id.as_str().to_owned(),
+                            kind: "doh_bootstrap",
+                        });
+                    }
+                    if edns_client_subnet.is_some() {
+                        return Err(RegistryError::UnsupportedUpstream {
+                            upstream: id.as_str().to_owned(),
+                            kind: "doh_edns_client_subnet",
+                        });
+                    }
+                    if address.scheme() == "https" {
+                        return Err(RegistryError::UnsupportedUpstream {
+                            upstream: id.as_str().to_owned(),
+                            kind: "doh_https",
+                        });
+                    }
+                    if address.scheme() != "http" {
+                        return Err(RegistryError::InvalidDoh {
+                            upstream: id.as_str().to_owned(),
+                        });
+                    }
+                    let exchange = DohExchange::new(
+                        connector.clone(),
+                        address.clone(),
+                        *connect_ip,
+                        doh_transport.clone(),
+                    )
+                    .map_err(|_| RegistryError::InvalidDoh {
+                        upstream: id.as_str().to_owned(),
+                    })?;
+                    Arc::new(exchange)
+                }
+                ResolvedUpstream::Group { .. } => {
+                    return Err(RegistryError::UnsupportedUpstream {
+                        upstream: id.as_str().to_owned(),
+                        kind: "group",
+                    });
+                }
+            };
+            connectors.insert(connector, exchange);
         }
         Ok(Self { connectors })
     }
@@ -109,7 +176,8 @@ impl UpstreamRegistry {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::resolve::{ConfigId, ResolvedUpstream};
+    use crate::config::model::EcsMode;
+    use crate::config::resolve::{ConfigId, ResolvedEcs, ResolvedUpstream, ValueSource};
 
     use super::{RegistryError, UpstreamRegistry};
 
@@ -159,7 +227,7 @@ mod tests {
 
     #[test]
     fn rejects_unimplemented_connector_types_at_build_boundary() {
-        let doh = ResolvedUpstream::Doh {
+        let https = ResolvedUpstream::Doh {
             id: ConfigId::new("remote").unwrap(),
             address: "https://dns.example.test/dns-query".parse().unwrap(),
             bootstrap: None,
@@ -169,9 +237,78 @@ mod tests {
         };
 
         assert!(matches!(
-            UpstreamRegistry::from_resolved(&[doh]),
+            UpstreamRegistry::from_resolved(&[https]),
             Err(RegistryError::UnsupportedUpstream { upstream, kind })
-                if upstream == "remote" && kind == "doh"
+                if upstream == "remote" && kind == "doh_https"
         ));
+
+        let bootstrap = ResolvedUpstream::Doh {
+            id: ConfigId::new("bootstrap").unwrap(),
+            address: "http://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: Some(ConfigId::new("local").unwrap()),
+            connect_ip: None,
+            proxy: None,
+            edns_client_subnet: None,
+        };
+        assert!(matches!(
+            UpstreamRegistry::from_resolved(&[bootstrap]),
+            Err(RegistryError::UnsupportedUpstream { upstream, kind })
+                if upstream == "bootstrap" && kind == "doh_bootstrap"
+        ));
+
+        let proxy = ResolvedUpstream::Doh {
+            id: ConfigId::new("proxy").unwrap(),
+            address: "http://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: None,
+            connect_ip: None,
+            proxy: Some(ConfigId::new("socks").unwrap()),
+            edns_client_subnet: None,
+        };
+        assert!(matches!(
+            UpstreamRegistry::from_resolved(&[proxy]),
+            Err(RegistryError::UnsupportedUpstream { upstream, kind })
+                if upstream == "proxy" && kind == "doh_proxy"
+        ));
+
+        let ecs = ResolvedUpstream::Doh {
+            id: ConfigId::new("ecs").unwrap(),
+            address: "http://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: None,
+            connect_ip: None,
+            proxy: None,
+            edns_client_subnet: Some(ResolvedEcs {
+                mode: EcsMode::Disabled,
+                custom_ip: None,
+                source: ValueSource::Upstream,
+            }),
+        };
+        assert!(matches!(
+            UpstreamRegistry::from_resolved(&[ecs]),
+            Err(RegistryError::UnsupportedUpstream { upstream, kind })
+                if upstream == "ecs" && kind == "doh_edns_client_subnet"
+        ));
+    }
+
+    #[test]
+    fn builds_plain_http_doh_connector() {
+        let doh = ResolvedUpstream::Doh {
+            id: ConfigId::new("remote").unwrap(),
+            address: "http://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: None,
+            connect_ip: Some("192.0.2.44".parse().unwrap()),
+            proxy: None,
+            edns_client_subnet: None,
+        };
+
+        let registry = UpstreamRegistry::from_resolved(&[doh]).unwrap();
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry
+                .get_by_name("remote")
+                .unwrap()
+                .connector_id()
+                .as_str(),
+            "remote"
+        );
     }
 }
