@@ -385,6 +385,41 @@ impl<T> ResourceRefreshCoordinator<T> {
             consecutive_failures: resource.consecutive_failures,
         })
     }
+
+    /// 取消一个仍在执行的 reservation，不修改当前 immutable registry。
+    pub fn cancel(&self, resource_id: &ConfigId, permit: &RefreshPermit) -> bool {
+        if permit.resource_id != *resource_id {
+            return false;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(resource) = state.resources.get_mut(resource_id) else {
+            return false;
+        };
+        if resource
+            .in_flight
+            .is_some_and(|attempt| attempt.token == permit.token)
+        {
+            resource.in_flight = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// 清理资源当前 reservation，供 Runtime shutdown 取消尚未完成的刷新。
+    pub fn cancel_resource(&self, resource_id: &ConfigId) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(resource) = state.resources.get_mut(resource_id) else {
+            return false;
+        };
+        resource.in_flight.take().is_some()
+    }
 }
 
 impl<T> fmt::Debug for ResourceRefreshCoordinator<T> {

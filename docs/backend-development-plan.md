@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 302 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、hosts registry、group member selection 和结果聚合/fallback 判定，但尚未接入真实 HTTP/TLS/socket 出站 adapter；Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS，以及远程 manifest/content 原子落盘和恢复校验；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、真实 DoH 出站、bootstrap/连接执行、Moka/SQLite persistence、remote resource refresh scheduler、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 306 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、hosts registry、group member selection 和结果聚合/fallback 判定，但尚未接入真实 HTTP/TLS/socket 出站 adapter；Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验，以及 scheduler/coordinator 的 Runtime-facing 纯逻辑编排；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、真实 DoH 出站、bootstrap/连接执行、Moka/SQLite persistence、真实 resource fetch/parse/persist worker、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **50.0%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合和可注入 DoH exchange，Storage 已增加业务 schema 与 writer contract；仍缺少 TLS、代理信任、真实 DoH 出站、bootstrap、Runtime snapshot 资源接线、Moka/SQLite persistence、remote refresh、完整 upstream/Core 管线和完整故障验收 |
-| v1 交付总进度 | **55.0%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 50.0%` |
+| 后端代码实现进度 | **51.1%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合和可注入 DoH exchange，Storage 已增加业务 schema 与 writer contract，Resource 已增加 scheduler/coordinator 的 Runtime-facing 编排边界；仍缺少 TLS、代理信任、真实 DoH 出站、bootstrap、Runtime snapshot 资源接线、Moka/SQLite persistence、真实 resource worker、完整 upstream/Core 管线和完整故障验收 |
+| v1 交付总进度 | **55.9%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 51.1%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -64,14 +64,14 @@ v1 交付范围：
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 50% | 8% |
 | Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 50% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 50% | 9% |
-| Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 50% | 7% |
+| Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 65% | 7% |
 | Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 35% | 8% |
 | Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 30% | 3% |
 
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 50% + 10% × 50% + 9% × 50% + 7% × 50% + 8% × 35% + 3% × 30% = 50.0%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 50% + 10% × 50% + 9% × 50% + 7% × 65% + 8% × 35% + 3% × 30% ≈ 51.1%
 ```
 
 ## 4. 进度判定规则
@@ -258,7 +258,9 @@ transport / upstream / storage / observability adapters
 
 第四个小阶段（已完成）：实现 hosts/rule 资源 parser 与 immutable matcher，支持 A/AAAA/CNAME、wildcard、JSON/hosts/Clash、exact/suffix/regex 优先级、输入和 program size 限制；定向 Resource 测试通过。
 
-第五个小阶段（已完成）：实现 const/file hosts 与 rule-set loader、稳定文件 fingerprint、UTF-8/大小/symlink/稳定读取边界，以及 `ResourceSnapshot`/registry 的版本 CAS 发布；资源 loader、snapshot 定向测试通过。remote fetch、manifest/content 原子落盘与恢复校验已补齐，refresh scheduler 仍未接入 Runtime。
+第五个小阶段（已完成）：实现 const/file hosts 与 rule-set loader、稳定文件 fingerprint、UTF-8/大小/symlink/稳定读取边界，以及 `ResourceSnapshot`/registry 的版本 CAS 发布；资源 loader、snapshot 定向测试通过。remote fetch、manifest/content 原子落盘与恢复校验已补齐，scheduler/coordinator 的 Runtime-facing 纯逻辑编排也已完成，真实 fetch/parse/persist worker 仍未接入 Runtime。
+
+第八个小阶段（已完成）：新增 `ResourceRefreshRuntime`，将 per-resource schedule、single-flight reservation、CAS publish、failure backoff、cancel 和 shutdown 组合为 Runtime-facing facade；`resource::orchestrator::tests` 4 项通过。真实 Runtime supervisor、资源 I/O worker 和跨 Runtime snapshot 发布仍未实现。
 
 第六个小阶段（已完成）：`ConfiguredDnsCore` 接入 Resource hosts index，支持 const/file、JSON、CNAME、wildcard 和 exact/NODATA/NXDOMAIN 语义；DNS Core focused tests 14 项通过。
 

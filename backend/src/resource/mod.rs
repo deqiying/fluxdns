@@ -2,6 +2,7 @@
 
 mod hosts;
 mod loader;
+mod orchestrator;
 mod refresh;
 mod remote;
 mod rules;
@@ -14,6 +15,9 @@ pub use hosts::{
 pub use loader::{
     FileFingerprint, LoadedHostsResource, LoadedRuleSetResource, ResourceLoadError, ResourceSource,
     RuleResourceLoadError, load_hosts, load_rule_set,
+};
+pub use orchestrator::{
+    ResourceRefreshRuntime, ResourceRefreshRuntimeBeginError, ResourceRefreshRuntimePermit,
 };
 pub use refresh::{
     RefreshBackoff, RefreshBeginError, RefreshFailure, RefreshPermit, RefreshPublishError,
