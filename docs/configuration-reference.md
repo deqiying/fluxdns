@@ -32,12 +32,23 @@ listener
 
 ### 2.2 路径和工作目录
 
-`work.path` 是独立的工作目录，v1 要求它是绝对路径，不能相对于配置文件目录解释。
+配置路径采用两级基准解析，不能直接把所有相对路径都拼到进程当前工作目录：
 
-- 启动时若配置文件所在目录不是 `work.path`，程序将配置复制到 `<work.path>/config.yaml`，固定文件名为 `config.yaml`。
-- 该文件是工作目录中的配置快照；启动流程负责创建工作目录和所需父目录。
-- 除明确写成绝对路径的字段外，其他相对路径均以 `work.path` 为基准。
-- `work.rules_path`、数据库、日志、缓存、TLS 证书和资源文件路径都遵循上述规则。
+1. 先确定启动配置文件的绝对路径。命令行传入的配置文件路径若为相对路径，仅在这一步相对于进程启动时的当前工作目录解析；其父目录记为 `config_dir`。
+2. 解析 `work.path`：绝对值直接使用；相对值按 `config_dir.join(work.path)` 解析。结果经词法归一化后形成绝对的 `resolved_work_path`。
+3. 解析项目路径字段：绝对值直接使用；相对值统一按 `resolved_work_path.join(field_path)` 解析并做词法归一化，不能再回到 `config_dir` 或进程当前工作目录。
+4. `work.rules_path`、`database.path`、`logs.path`、`dns.cache.persistence.path`、TLS 证书和私钥、SecretRef 文件、本地 hosts 与规则文件路径都遵循第 3 步。
+
+词法归一化应消除 `.` 和可消解的 `..`，但不依赖目标文件或目录已经存在。通过 bytes/string 加载且没有配置文件来源路径时，不存在 `config_dir`；此时相对 `work.path` 必须报错，调用方需要提供来源路径或改用绝对 `work.path`，不得隐式回退到进程当前工作目录。
+
+| 启动配置文件 | 配置值 | 解析结果 |
+| --- | --- | --- |
+| `/opt/_fluxdns/config.yaml` | `work.path: ./` | `resolved_work_path = /opt/_fluxdns` |
+| `/opt/_fluxdns/config.yaml` | `work.path: ./`、`database.path: ./data/fluxdns.sqlite3` | `database.path = /opt/_fluxdns/data/fluxdns.sqlite3` |
+| `/etc/fluxdns/bootstrap/config.yaml` | `work.path: ../runtime`、`logs.path: ./logs/fluxdns.log` | `logs.path = /etc/fluxdns/runtime/logs/fluxdns.log` |
+| `/etc/fluxdns/config.yaml` | `work.path: /var/lib/fluxdns`、`database.path: /srv/fluxdns.sqlite3` | 两个绝对路径均不与其他基准拼接 |
+
+启动时若配置文件所在目录不是 `resolved_work_path`，程序将配置复制到 `<resolved_work_path>/config.yaml`，固定文件名为 `config.yaml`。该文件是工作目录中的配置快照；启动流程负责创建工作目录和所需父目录。
 
 配置副本按 [Config 模块方案](backend-modules/config.md) 原子创建：目标不存在时在同目录写临时文件并以 no-replace 方式发布，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
 
@@ -144,10 +155,10 @@ RawConfigVn
 
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
-| `work.path` | string | 必填 | 必须是绝对路径；不随启动配置文件位置变化。 |
+| `work.path` | string | 必填 | 工作目录；绝对路径直接使用，相对路径以启动配置文件所在目录为基准。 |
 | `work.rules_path` | string | 必填 | 规则资源落盘目录；相对路径以 `work.path` 为基准。 |
 
-启动时，如果配置文件不在 `work.path` 目录中，应先确保工作目录存在，再将其复制为 `<work.path>/config.yaml`。数据库、日志、缓存和证书等其他相对路径仍以 `work.path` 为基准。
+启动时，应先得到绝对的 `resolved_work_path` 并确保目录存在；如果配置文件不在该目录中，再将其复制为 `<resolved_work_path>/config.yaml`。数据库、日志、缓存和证书等其他相对路径均以 `resolved_work_path` 为基准。
 
 ## 5. `database`
 
@@ -548,7 +559,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 1. `version` 存在且为 `1`；未知版本拒绝加载。
 2. 拒绝未知字段；每种 `type` 只允许自己的字段集合，条件字段满足 exactly-one-of/required-if 约束。
 3. 所有资源集合中的 `name` 唯一，所有引用存在、类型正确且无循环引用。
-4. `work.path` 是绝对路径；目录不存在时创建；启动配置不在该目录时复制为 `<work.path>/config.yaml`。
+4. `work.path` 非空；相对值可基于启动配置文件目录解析为绝对的 `resolved_work_path`，缺少来源目录时拒绝；目录不存在时创建，启动配置不在该目录时复制为 `<resolved_work_path>/config.yaml`。
 5. `webui.enable` 在 v1 必须为 `false`；普通 listener 和 DoH endpoint 地址展开后不存在 TCP/UDP bind 冲突，并明确 IPv6 v6-only 行为。
 6. `mode`、`format`、`type`、端口、CIDR、URL、duration、权重和内嵌内容格式合法；`parallel` 和 `failover` 成员权重固定为 `1`。
 7. `ttl_override` 与 `cache` 平级；策略/客户端 cache 对象存在时 `enabled` 必填，显式 `false` 不得回退到全局池。

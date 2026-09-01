@@ -1,8 +1,8 @@
 # Config 模块设计
 
-> 状态：v1 方案和阶段 2 实现已完成并验证
+> 状态：v1 方案和阶段 2 既有实现已完成并验证；相对 `work.path` 解析契约已补充，待同步实现
 >
-> 更新日期：2026-08-31
+> 更新日期：2026-09-01
 >
 > 目标代码：`backend/src/config/*`
 >
@@ -44,7 +44,8 @@ read bounded UTF-8 bytes
   → parse minimal version header
   → run ordered migration chain
   → deserialize current strict DTO
-  → normalize paths, SecretRef sources and inheritance
+  → resolve config_dir and work.path
+  → normalize project paths, SecretRef sources and inheritance
   → semantic validation passes
   → build immutable ResolvedConfig + reports
   → optionally create a safe work-directory config snapshot
@@ -80,7 +81,8 @@ MigrationStep {
 
 `resolve.rs` 一次性完成：
 
-- 相对路径基于 `work.path` 规范化为绝对路径；
+- 先以启动配置文件所在目录解析相对 `work.path`，得到绝对的 `resolved_work_path`；
+- 再以 `resolved_work_path` 为唯一基准，将其他相对项目路径规范化为绝对路径；
 - duration、URL、CIDR 和枚举转换为强类型；
 - cache、TTL、ECS 的缺失/显式禁用/字段继承；
 - client、strategy、route、resource 和 upstream 名称转换为 typed ID；
@@ -119,7 +121,17 @@ MigrationStep {
 
 ## 8. 工作目录与配置快照
 
-当启动配置不位于 `work.path` 时，按契约复制为 `<work.path>/config.yaml`。为避免覆盖用户已有配置，v1 采用：
+路径解析必须显式携带配置来源，顺序固定如下：
+
+1. `load_from_path(path)` 先把启动配置路径转换为词法归一化的绝对路径，并取其父目录作为 `config_dir`；只有启动配置路径本身允许在这一步使用进程启动时的当前工作目录。
+2. `work.path` 为绝对路径时直接词法归一化；为相对路径时按 `config_dir.join(work.path)` 解析，结果记为 `resolved_work_path`。
+3. 其余项目路径为绝对路径时直接词法归一化；为相对路径时按 `resolved_work_path.join(value)` 解析。实现不得将这些路径直接拼到原始 `work.path`、`config_dir` 或当时的进程当前工作目录。
+4. `load_from_bytes`/`load_from_str` 没有物理配置来源。若 DTO 中的 `work.path` 是相对路径，应返回缺少配置基准的稳定错误；需要支持该场景的调用方必须显式传入来源路径/目录，或使用绝对 `work.path`。
+5. 解析使用词法归一化，使尚未创建的工作目录也能参与计算；目录创建、symlink/special-file 拒绝和权限检查仍放在有文件系统副作用的 prepare/快照边界执行。
+
+例如启动文件为 `/opt/_fluxdns/config.yaml`、`work.path: ./` 时，`resolved_work_path` 是 `/opt/_fluxdns`；随后 `database.path: ./data/fluxdns.sqlite3` 解析为 `/opt/_fluxdns/data/fluxdns.sqlite3`，而不是相对于进程当前工作目录或再次相对于配置文件路径拼接。
+
+当启动配置不位于 `resolved_work_path` 时，按契约复制为 `<resolved_work_path>/config.yaml`。快照逻辑只能接收已经解析完成的绝对工作目录，不能再次解释原始 `work.path`。为避免覆盖用户已有配置，v1 采用：
 
 1. 创建工作目录和父目录；
 2. 对输入字节计算 hash；
@@ -167,6 +179,7 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - SecretRef env/file、缺失、空值、非法 scheme 和脱敏；
 - migration golden test、空链幂等和有损 warning 边界；
 - 配置快照创建、相同内容 no-op、不同内容拒绝覆盖、并发 no-replace、symlink 防护、目录同步和临时文件不污染目标。
+- 路径解析矩阵：配置文件参数为绝对/相对路径，`work.path` 为绝对/`.`/含 `..` 的相对路径，项目路径为绝对/相对路径，以及无来源 bytes/string 加载时的错误边界。
 
 阶段 2 当前基线验证（测试数量可能随后续阶段增量）：
 
@@ -183,5 +196,6 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - [x] 完成安全配置快照；
 - [x] 建立 strict example、migration、SecretRef、snapshot、继承和 bind matrix tests；property tests 与最终全量复核仍可在后续验证中补充；
 - [x] 生成独立 `ValidatedConfig`/`ResolvedConfig` 和 prepare 输入边界；Runtime 实际消费与 App 启动接线属于阶段 3。
+- [ ] 将配置来源目录传入归一化流程，按两级基准支持相对 `work.path`，并补齐快照与路径矩阵测试。
 
-当前实现进度：**100%**（Config 模块边界已完成；资源网络首次 snapshot、Runtime/App 启动闭环不计入本阶段）。
+当前既有阶段 2 实现进度：**100%**；2026-09-01 新增的相对 `work.path` 契约尚待实现与验证。资源网络首次 snapshot、Runtime/App 启动闭环不计入本阶段。

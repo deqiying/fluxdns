@@ -12,12 +12,12 @@
 # 配置 schema 版本；字段重命名和迁移以此版本为边界。
 version: 1
 
-# work.path 是独立的工作目录配置，v1 模板要求使用绝对路径，不按配置文件目录解析。
-# 启动时如果配置文件所在目录不是 work.path，程序将其复制到 <work.path>/config.yaml；
+# work.path 是独立的工作目录配置；绝对路径直接使用，相对路径以启动配置文件所在目录为基准。
+# 启动时如果配置文件所在目录不是解析后的 work.path，程序将其复制到 <work.path>/config.yaml；
 # 该副本是工作目录中的配置快照，固定命名为 config.yaml。
 work:
   # 工作目录；规则、数据、日志和缓存等相对路径都以此目录为基准。
-  path: /var/lib/fluxdns # 示例路径；部署时替换为实际绝对路径。
+  path: /etc/fluxdns # 示例路径；部署时替换为实际绝对路径。
   # 规则资源的落盘目录，相对于 work.path。
   rules_path: ./rules
 
@@ -578,7 +578,7 @@ clients:
       custom_ip: 120.85.32.0/24
 
 # v1 启动前必须执行的校验：
-# - work.path 必须是绝对路径；目录不存在时创建，启动配置不在该目录时复制为 config.yaml；
+# - work.path 非空；相对值以启动配置文件目录解析，目录不存在时创建，启动配置不在该目录时复制为 config.yaml；
 # - 拒绝未知字段；每种 type 只允许自己的字段集合；
 # - 所有 name 唯一，且所有引用存在、类型正确；
 # - webui 配置保留但 enable 必须为 false；v1 不实例化 WebUI，也不把它加入 bind 计划；
