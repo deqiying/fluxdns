@@ -11,9 +11,10 @@ mod registry;
 
 pub use bootstrap::{
     AddressCachePolicy, AddressResolutionError, AddressResolutionRequest, AddressResolutionState,
-    AddressSource, AnswerError, BootstrapAnswer, BootstrapResolution, CachePolicyError,
-    DEFAULT_BOOTSTRAP_MAX_TTL, DEFAULT_BOOTSTRAP_MIN_TTL, NoAddressReason, ResolvedAddresses,
-    SystemResolverAnswer, SystemResolverResolution,
+    AddressSource, AnswerError, BootstrapAnswer, BootstrapResolution, BootstrapResponseError,
+    CachePolicyError, DEFAULT_BOOTSTRAP_MAX_TTL, DEFAULT_BOOTSTRAP_MIN_TTL, NoAddressReason,
+    ResolvedAddresses, SystemResolverAnswer, SystemResolverResolution,
+    bootstrap_answer_from_response,
 };
 pub use doh::{
     DOH_MEDIA_TYPE, DohEndpointError, DohExchange, DohHttpRequest, DohHttpResponse,

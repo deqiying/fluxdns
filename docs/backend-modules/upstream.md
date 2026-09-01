@@ -1,6 +1,6 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、hosts/plain HTTP DoH registry、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；HTTPS/TLS、bootstrap/outbound 尚未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、hosts/plain HTTP DoH registry、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；HTTPS/TLS、bootstrap/outbound 尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -84,6 +84,7 @@ bootstrap：
 
 - 通过引用 connector 查询 A/AAAA；
 - 只接受完整、合法地址答案；
+- `bootstrap_answer_from_response` 只提取与 question owner 匹配的 A/AAAA，并按地址记录的最低 TTL 建立答案；
 - 地址按 DNS TTL 缓存，并设置实现级最小/最大 refresh 边界；
 - 刷新失败时可在未过期窗口内继续使用旧地址并标记 degraded；
 - 无可用地址时本次 exchange 失败；
@@ -203,6 +204,7 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [x] 通过注入式 Registry 验证 PolicyCore direct DoH request path；
 - [x] 抽出 DoH 地址解析 port，并验证 resolver 注入与 `connect_ip` 旁路；
 - [x] 在 DoH request envelope 中透传 bootstrap 引用，并对未配置 bootstrap resolver 的默认路径 fail-closed；
+- [x] 从已校验 DNS response 提取 bootstrap A/AAAA 与最低 TTL，并拒绝非正向响应；
 - [ ] 实现 bootstrap/connect_ip/outbound 的实际执行；
 - [x] 固化四种 group 模式的纯 member selection；
 - [x] 实现 outcome/fallback 判定边界；
@@ -210,6 +212,6 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 4 项通过，`upstream::doh` 7 项通过，`upstream::http::tests` 6 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、bootstrap 引用透传与默认路径 fail-closed、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了无真实网络的 PolicyCore direct path，RuntimeSnapshot、bootstrap 查询、真实 outbound 和 TLS/proxy 仍未实现。
+阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 4 项通过，`upstream::doh` 7 项通过，`upstream::bootstrap::tests` 10 项通过，`upstream::http::tests` 6 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、bootstrap 引用透传与默认路径 fail-closed、bootstrap response 的 owner/TTL 提取、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了无真实网络的 PolicyCore direct path，RuntimeSnapshot、bootstrap 查询、真实 outbound 和 TLS/proxy 仍未实现。
 
-当前实现进度：**68%**。
+当前实现进度：**69%**。

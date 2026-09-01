@@ -11,10 +11,11 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use hickory_proto::rr::RData;
 use thiserror::Error;
 
 use crate::config::resolve::{ConfigId, ResolvedUpstream};
-use crate::dns::TtlMetadata;
+use crate::dns::{CanonicalResponse, ResponseClass, TtlMetadata};
 
 /// Bootstrap TTL 的默认实现边界。
 pub const DEFAULT_BOOTSTRAP_MIN_TTL: Duration = Duration::from_secs(5);
@@ -97,6 +98,51 @@ impl BootstrapAnswer {
     pub const fn ttl(&self) -> Duration {
         self.ttl
     }
+}
+
+/// 从已完成 wire/question 校验的 DNS 响应提取 bootstrap A/AAAA 答案。
+///
+/// 这里只消费 canonical response，不执行查询，也不会把 system resolver
+/// 当作 bootstrap 失败后的隐式回退。
+pub fn bootstrap_answer_from_response(
+    response: &CanonicalResponse,
+) -> Result<BootstrapAnswer, BootstrapResponseError> {
+    if !matches!(response.class(), ResponseClass::Positive) {
+        return Err(BootstrapResponseError::NonPositive {
+            class: response.class(),
+        });
+    }
+    let question_name = &response.as_message().queries[0].name;
+    let address_records: Vec<(std::net::IpAddr, u32)> = response
+        .as_message()
+        .answers
+        .iter()
+        .filter(|record| record.name == *question_name)
+        .filter_map(|record| match &record.data {
+            RData::A(address) => Some((std::net::IpAddr::V4(address.0), record.ttl)),
+            RData::AAAA(address) => Some((std::net::IpAddr::V6(address.0), record.ttl)),
+            _ => None,
+        })
+        .collect();
+    let ttl = address_records
+        .iter()
+        .map(|(_, ttl)| *ttl)
+        .min()
+        .ok_or(BootstrapResponseError::Answer(AnswerError::Empty))?;
+    let addresses = address_records
+        .into_iter()
+        .map(|(address, _)| address)
+        .collect();
+    BootstrapAnswer::new(addresses, Duration::from_secs(u64::from(ttl)))
+        .map_err(BootstrapResponseError::Answer)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum BootstrapResponseError {
+    #[error("bootstrap response is not a positive DNS answer: {class:?}")]
+    NonPositive { class: ResponseClass },
+    #[error("bootstrap response contains no usable A or AAAA address: {0}")]
+    Answer(AnswerError),
 }
 
 /// system resolver 的纯结果占位；真正的 resolver 属于 adapter/port 层。
@@ -456,16 +502,21 @@ fn upstream_id(upstream: &ResolvedUpstream) -> String {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::str::FromStr;
     use std::time::{Duration, Instant};
 
+    use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A, rdata::AAAA};
     use url::Url;
 
     use crate::config::resolve::{ConfigId, ResolvedUpstream};
+    use crate::dns::{CanonicalQuery, DnsMessageId};
 
     use super::{
         AddressCachePolicy, AddressResolutionError, AddressResolutionRequest,
         AddressResolutionState, AddressSource, BootstrapAnswer, BootstrapResolution,
-        NoAddressReason, ResolvedAddresses, SystemResolverAnswer, SystemResolverResolution,
+        BootstrapResponseError, NoAddressReason, ResolvedAddresses, SystemResolverAnswer,
+        SystemResolverResolution, bootstrap_answer_from_response,
     };
 
     fn id(value: &str) -> ConfigId {
@@ -495,6 +546,71 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    fn response(records: Vec<Record>, record_type: RecordType) -> crate::dns::CanonicalResponse {
+        let name = Name::from_str("resolver.example.").unwrap();
+        let mut query_message = Message::new(1, MessageType::Query, OpCode::Query);
+        query_message.add_query(Query::query(name.clone(), record_type));
+        let query = CanonicalQuery::from_message(query_message).unwrap();
+
+        let mut response_message = Message::new(2, MessageType::Response, OpCode::Query);
+        response_message.metadata.response_code = ResponseCode::NoError;
+        response_message.add_query(Query::query(name, record_type));
+        response_message.add_answers(records);
+        crate::dns::CanonicalResponse::from_message(response_message, &query, DnsMessageId::new(2))
+            .unwrap()
+    }
+
+    fn empty_response(code: ResponseCode) -> crate::dns::CanonicalResponse {
+        let name = Name::from_str("resolver.example.").unwrap();
+        let mut query_message = Message::new(1, MessageType::Query, OpCode::Query);
+        query_message.add_query(Query::query(name.clone(), RecordType::A));
+        let query = CanonicalQuery::from_message(query_message).unwrap();
+
+        let mut response_message = Message::new(2, MessageType::Response, OpCode::Query);
+        response_message.metadata.response_code = code;
+        response_message.add_query(Query::query(name, RecordType::A));
+        crate::dns::CanonicalResponse::from_message(response_message, &query, DnsMessageId::new(2))
+            .unwrap()
+    }
+
+    #[test]
+    fn extracts_a_aaaa_addresses_and_lowest_ttl_from_positive_response() {
+        let name = Name::from_str("resolver.example.").unwrap();
+        let response = response(
+            vec![
+                Record::from_rdata(name.clone(), 45, RData::A(A(Ipv4Addr::new(192, 0, 2, 10)))),
+                Record::from_rdata(name, 30, RData::AAAA(AAAA("2001:db8::10".parse().unwrap()))),
+                Record::from_rdata(
+                    Name::from_str("other.example.").unwrap(),
+                    1,
+                    RData::A(A(Ipv4Addr::new(192, 0, 2, 99))),
+                ),
+            ],
+            RecordType::A,
+        );
+
+        let answer = bootstrap_answer_from_response(&response).unwrap();
+        assert_eq!(
+            answer.addresses(),
+            &[
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                IpAddr::V6("2001:db8::10".parse().unwrap()),
+            ]
+        );
+        assert_eq!(answer.ttl(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn rejects_nonpositive_response_as_bootstrap_answer() {
+        let response = empty_response(ResponseCode::ServFail);
+        assert!(matches!(
+            bootstrap_answer_from_response(&response),
+            Err(BootstrapResponseError::NonPositive {
+                class: crate::dns::ResponseClass::ServFail
+            })
+        ));
     }
 
     #[test]
