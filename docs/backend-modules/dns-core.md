@@ -1,6 +1,6 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线和当前 snapshot-local optimistic refresh；Runtime 已持有资源摘要并由 service 捕获同 revision core，完整 latest-snapshot/resource reload 管线尚未接入
+> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线和当前 snapshot-local optimistic refresh；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 已接入，但完整 latest-snapshot/resource reload 管线尚未接入
 >
 > 更新日期：2026-09-01
 >
@@ -181,6 +181,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [ ] 实现 ECS、TTL 和错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA、Resource CNAME/wildcard、ConfiguredDnsCore const/file loader/fallback，以及 PolicyDnsCore 的 upstream/cache 命中和 snapshot-local optimistic refresh 路径；当前 backend 全量测试为 373 passed、0 failed。
+阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA、Resource CNAME/wildcard、ConfiguredDnsCore const/file loader/fallback，以及 PolicyDnsCore 的 upstream/cache 命中、snapshot-local optimistic refresh 和 compiled resource live swap 路径；当前 backend 全量测试为 377 passed、0 failed。
 
-当前实现进度：**50%**。
+当前实现进度：**55%**。

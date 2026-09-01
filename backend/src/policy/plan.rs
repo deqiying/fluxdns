@@ -217,6 +217,40 @@ impl PolicyIndex {
         )
     }
 
+    pub(crate) fn host_resource_count(&self) -> usize {
+        self.hosts.len()
+    }
+
+    pub(crate) fn hosts_index(&self, resource: &ConfigId) -> Option<Arc<HostsIndex>> {
+        self.hosts.get(resource).cloned()
+    }
+
+    pub(crate) fn replace_hosts_resource(
+        &self,
+        resource: &ConfigId,
+        index: HostsIndex,
+    ) -> Result<Self, PolicyError> {
+        if !self.hosts.contains_key(resource) {
+            return Err(PolicyError::HostsResourceNotFound(resource.clone()));
+        }
+        let mut next = self.clone();
+        next.hosts.insert(resource.clone(), Arc::new(index));
+        Ok(next)
+    }
+
+    pub(crate) fn replace_rule_set_resource(
+        &self,
+        resource: &ConfigId,
+        index: RuleIndex,
+    ) -> Result<Self, PolicyError> {
+        if !self.rule_sets.contains_key(resource) {
+            return Err(PolicyError::RuleSetNotFound(resource.clone()));
+        }
+        let mut next = self.clone();
+        next.rule_sets.insert(resource.clone(), Arc::new(index));
+        Ok(next)
+    }
+
     pub fn evaluate(&self, request: PolicyRequest<'_>) -> Result<ResolutionPlan, PolicyError> {
         let routing = if let Some(path) = request.doh_path {
             self.routes

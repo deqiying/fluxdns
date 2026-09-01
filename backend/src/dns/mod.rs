@@ -22,4 +22,4 @@ pub use message::{
     CanonicalMessageError, CanonicalQuery, CanonicalQuestion, CanonicalResponse, DnsMessageId,
     ResponseClass, TtlMetadata,
 };
-pub use policy::{PolicyCoreBuildError, PolicyDnsCore};
+pub use policy::{PolicyCoreBuildError, PolicyDnsCore, PolicyResourcePublishError};

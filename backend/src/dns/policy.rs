@@ -8,6 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use arc_swap::ArcSwap;
 use hickory_proto::op::ResponseCode;
 use thiserror::Error;
 
@@ -24,7 +25,9 @@ use crate::ports::cache::{CacheLoadCompletion, CacheLoadFailure, CacheLoadReserv
 use crate::ports::exchange::{
     ConnectorId, DnsExchange, TransportFailure, TransportFailureClass, UpstreamOutcome,
 };
-use crate::resource::{CanonicalDomain, HostsIndex, HostsLimits, ResourceLoadError, load_hosts};
+use crate::resource::{
+    CanonicalDomain, HostsIndex, ResourceLoadError, ResourceSnapshot, ResourceVersion, RuleIndex,
+};
 use crate::upstream::{
     GroupSelector, LateResultSink, RegistryError, UpstreamAttempt, UpstreamGroupExecutor,
     UpstreamRegistry,
@@ -50,14 +53,48 @@ pub enum PolicyCoreBuildError {
 }
 
 /// 使用同一份 resolved config 构建 policy/resource 本地回答 core。
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PolicyDnsCore {
-    policy: PolicyIndex,
-    hosts: BTreeMap<ConfigId, Arc<HostsIndex>>,
+    policy: Arc<ArcSwap<PolicyState>>,
     upstreams: UpstreamRuntime,
     cache: Arc<CacheFacade>,
     late_cache_finalizer: Arc<LateCacheFinalizer>,
     ttl: u32,
+}
+
+#[derive(Clone, Debug)]
+struct PolicyState {
+    index: PolicyIndex,
+    host_versions: BTreeMap<ConfigId, ResourceVersion>,
+    rule_set_versions: BTreeMap<ConfigId, ResourceVersion>,
+}
+
+#[derive(Clone, Debug, Eq, Error, PartialEq)]
+pub enum PolicyResourcePublishError {
+    #[error("resource {resource} is not registered in the policy index")]
+    UnknownResource { resource: String },
+    #[error(
+        "resource {resource} candidate version {candidate:?} is not newer than current {current:?}"
+    )]
+    StaleVersion {
+        resource: String,
+        current: ResourceVersion,
+        candidate: ResourceVersion,
+    },
+}
+
+impl fmt::Debug for PolicyDnsCore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let state = self.policy.load();
+        formatter
+            .debug_struct("PolicyDnsCore")
+            .field("policy", &state.index)
+            .field("upstreams", &self.upstreams)
+            .field("cache", &self.cache)
+            .field("late_cache_finalizer", &self.late_cache_finalizer)
+            .field("ttl", &self.ttl)
+            .finish()
+    }
 }
 
 impl PolicyDnsCore {
@@ -97,25 +134,13 @@ impl PolicyDnsCore {
     ) -> Result<Self, PolicyCoreBuildError> {
         let policy = PolicyIndex::from_config(config).map_err(PolicyCoreBuildError::Policy)?;
         let (cache, late_cache_finalizer) = build_cache_facade(config)?;
-        let mut hosts = BTreeMap::new();
-        for resource in &config.hosts {
-            let id = match resource {
-                ResolvedHostsResource::Const { id, .. }
-                | ResolvedHostsResource::File { id, .. } => id,
-            };
-            let loaded = load_hosts(resource, HostsLimits::default()).map_err(|source| {
-                PolicyCoreBuildError::HostsLoad {
-                    resource: id.as_str().to_owned(),
-                    source,
-                }
-            })?;
-            if !loaded.index().is_empty() {
-                hosts.insert(id.clone(), Arc::new(loaded.index().clone()));
-            }
-        }
+        let policy_state = PolicyState {
+            index: policy,
+            host_versions: resource_versions(&config.hosts),
+            rule_set_versions: rule_set_versions(&config.rule_sets),
+        };
         Ok(Self {
-            policy,
-            hosts,
+            policy: Arc::new(ArcSwap::from_pointee(policy_state)),
             upstreams,
             cache,
             late_cache_finalizer,
@@ -123,12 +148,12 @@ impl PolicyDnsCore {
         })
     }
 
-    pub fn policy(&self) -> &PolicyIndex {
-        &self.policy
+    pub fn policy(&self) -> Arc<PolicyIndex> {
+        Arc::new(self.policy.load().index.clone())
     }
 
     pub fn host_resource_count(&self) -> usize {
-        self.hosts.len()
+        self.policy.load().index.host_resource_count()
     }
 
     pub fn upstream_count(&self) -> usize {
@@ -142,6 +167,117 @@ impl PolicyDnsCore {
     pub(crate) async fn shutdown_until(&self, deadline: Deadline) -> bool {
         self.late_cache_finalizer.shutdown_until(deadline).await
     }
+
+    pub fn publish_hosts_resource(
+        &self,
+        snapshot: ResourceSnapshot<HostsIndex>,
+    ) -> Result<(), PolicyResourcePublishError> {
+        let resource = snapshot.resource_id().clone();
+        let candidate = snapshot.version();
+        let index = snapshot.compiled().clone();
+        loop {
+            let current = self.policy.load_full();
+            let Some(current_version) = current.host_versions.get(&resource).copied() else {
+                return Err(PolicyResourcePublishError::UnknownResource {
+                    resource: resource.as_str().to_owned(),
+                });
+            };
+            if candidate <= current_version {
+                return Err(PolicyResourcePublishError::StaleVersion {
+                    resource: resource.as_str().to_owned(),
+                    current: current_version,
+                    candidate,
+                });
+            }
+            let index = current
+                .index
+                .replace_hosts_resource(&resource, index.clone())
+                .map_err(|_| PolicyResourcePublishError::UnknownResource {
+                    resource: resource.as_str().to_owned(),
+                })?;
+            let mut host_versions = current.host_versions.clone();
+            host_versions.insert(resource.clone(), candidate);
+            let next = Arc::new(PolicyState {
+                index,
+                host_versions,
+                rule_set_versions: current.rule_set_versions.clone(),
+            });
+            let observed = self.policy.compare_and_swap(&current, next);
+            if Arc::ptr_eq(&*observed, &current) {
+                return Ok(());
+            }
+        }
+    }
+
+    pub fn publish_rule_set_resource(
+        &self,
+        snapshot: ResourceSnapshot<RuleIndex>,
+    ) -> Result<(), PolicyResourcePublishError> {
+        let resource = snapshot.resource_id().clone();
+        let candidate = snapshot.version();
+        let index = snapshot.compiled().clone();
+        loop {
+            let current = self.policy.load_full();
+            let Some(current_version) = current.rule_set_versions.get(&resource).copied() else {
+                return Err(PolicyResourcePublishError::UnknownResource {
+                    resource: resource.as_str().to_owned(),
+                });
+            };
+            if candidate <= current_version {
+                return Err(PolicyResourcePublishError::StaleVersion {
+                    resource: resource.as_str().to_owned(),
+                    current: current_version,
+                    candidate,
+                });
+            }
+            let index = current
+                .index
+                .replace_rule_set_resource(&resource, index.clone())
+                .map_err(|_| PolicyResourcePublishError::UnknownResource {
+                    resource: resource.as_str().to_owned(),
+                })?;
+            let mut rule_set_versions = current.rule_set_versions.clone();
+            rule_set_versions.insert(resource.clone(), candidate);
+            let next = Arc::new(PolicyState {
+                index,
+                host_versions: current.host_versions.clone(),
+                rule_set_versions,
+            });
+            let observed = self.policy.compare_and_swap(&current, next);
+            if Arc::ptr_eq(&*observed, &current) {
+                return Ok(());
+            }
+        }
+    }
+}
+
+fn resource_versions(resources: &[ResolvedHostsResource]) -> BTreeMap<ConfigId, ResourceVersion> {
+    resources
+        .iter()
+        .map(|resource| {
+            let id = match resource {
+                ResolvedHostsResource::Const { id, .. }
+                | ResolvedHostsResource::File { id, .. } => id,
+            };
+            (id.clone(), ResourceVersion::new(1, 1))
+        })
+        .collect()
+}
+
+fn rule_set_versions(
+    resources: &[crate::config::resolve::ResolvedRuleSet],
+) -> BTreeMap<ConfigId, ResourceVersion> {
+    resources
+        .iter()
+        .map(|resource| {
+            let id = match resource {
+                crate::config::resolve::ResolvedRuleSet::Const { id, .. }
+                | crate::config::resolve::ResolvedRuleSet::File { id, .. }
+                | crate::config::resolve::ResolvedRuleSet::Remote { id, .. } => id,
+            };
+            (id.clone(), ResourceVersion::new(1, 1))
+        })
+        .collect()
 }
 
 struct PolicyLateResultSink {
@@ -199,8 +335,9 @@ impl DnsCore for PolicyDnsCore {
                 Ok(qname) => qname,
                 Err(_) => return servfail(request),
             };
+            let policy = self.policy.load();
             let doh_path = reconstructed_doh_path(request);
-            let plan = match self.policy.evaluate(PolicyRequest {
+            let plan = match policy.index.evaluate(PolicyRequest {
                 listener_id: &listener_id,
                 doh_path: doh_path.as_deref(),
                 client_id: request
@@ -218,7 +355,7 @@ impl DnsCore for PolicyDnsCore {
             };
 
             if let Some(resource_id) = plan.hosts {
-                let Some(index) = self.hosts.get(&resource_id) else {
+                let Some(index) = policy.index.hosts_index(&resource_id) else {
                     return servfail(request);
                 };
                 let (answers, known_name) = resource_answers(
@@ -862,10 +999,11 @@ mod tests {
     use hickory_proto::rr::{Name, RecordType};
 
     use crate::cache::CacheLookup;
-    use crate::config::model::EcsMode;
+    use crate::config::model::{EcsMode, RuleSetFormat};
     use crate::config::resolve::{
-        ConfigId, ResolvedEcs, ResolvedOutbound, ResolvedSecretRef, ResolvedUpstream,
-        ResolvedUpstreamMember, ValueSource,
+        ConfigId, ResolvedEcs, ResolvedOutbound, ResolvedRuleSet, ResolvedRuleSetRef,
+        ResolvedSecretRef, ResolvedStrategyRule, ResolvedUpstream, ResolvedUpstreamMember,
+        ValueSource,
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
@@ -875,7 +1013,9 @@ mod tests {
     };
     use crate::ports::exchange::{ConnectorId, UpstreamOutcome};
     use crate::ports::{PortError, PortFuture};
-    use crate::resource::CanonicalDomain;
+    use crate::resource::{
+        CanonicalDomain, ResourceSnapshot, ResourceSourceKind, ResourceStaleStatus, RuleIndex,
+    };
     use crate::upstream::{
         DohHttpRequest, DohHttpResponseOwned, DohHttpTransport, UpstreamAttempt,
     };
@@ -1064,7 +1204,7 @@ mod tests {
             CanonicalDomain::parse(&first_request.query.question().name().to_ascii()).unwrap();
         let listener_id = ConfigId::new("dns").unwrap();
         let plan = core
-            .policy
+            .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &listener_id,
                 doh_path: None,
@@ -1148,7 +1288,7 @@ mod tests {
         let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).unwrap();
         let listener_id = ConfigId::new("dns").unwrap();
         let plan = core
-            .policy
+            .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &listener_id,
                 doh_path: None,
@@ -1236,6 +1376,33 @@ strategy:
             )
             .expect("policy core fixture must be valid")
             .resolved
+    }
+
+    fn rule_config() -> std::sync::Arc<crate::config::ResolvedConfig> {
+        let mut config = Arc::try_unwrap(config()).expect("policy fixture must be unique");
+        let resource = ConfigId::new("dynamic-rules").unwrap();
+        config.rule_sets.push(ResolvedRuleSet::Const {
+            id: resource.clone(),
+            format: RuleSetFormat::Clash,
+            rule: "DOMAIN-SUFFIX,old.example\n".to_owned(),
+        });
+        config.strategies[0].rules.insert(
+            0,
+            ResolvedStrategyRule {
+                rule_set: Some(ResolvedRuleSetRef {
+                    resource,
+                    selector: None,
+                }),
+                hosts: None,
+                upstream: Some(ConfigId::new("local").unwrap()),
+                edns_client_subnet: ResolvedEcs {
+                    mode: EcsMode::Disabled,
+                    custom_ip: None,
+                    source: ValueSource::Default,
+                },
+            },
+        );
+        Arc::new(config)
     }
 
     fn doh_config() -> std::sync::Arc<crate::config::ResolvedConfig> {
@@ -1518,6 +1685,106 @@ strategy:
             panic!("expected nodata response");
         };
         assert_eq!(nodata.class(), crate::dns::ResponseClass::NoData);
+    }
+
+    #[test]
+    fn policy_core_publishes_new_rule_set_snapshot_and_rejects_stale_version() {
+        let core = PolicyDnsCore::from_config(rule_config().as_ref(), 42).unwrap();
+        let evaluate = |name: &str| {
+            let request = request(name, RecordType::A);
+            let qname =
+                CanonicalDomain::parse(&request.query.question().name().to_ascii()).unwrap();
+            core.policy()
+                .evaluate(crate::policy::PolicyRequest {
+                    listener_id: &ConfigId::new("dns").unwrap(),
+                    doh_path: None,
+                    client_id: None,
+                    client_addr: request.context.client.client_addr,
+                    client_digest: None,
+                    qname: Some(&qname),
+                })
+                .unwrap()
+        };
+
+        assert!(evaluate("new.example.").matched_rule.is_none());
+        assert!(evaluate("old.example.").matched_rule.is_some());
+
+        let resource = ConfigId::new("dynamic-rules").unwrap();
+        let index = RuleIndex::parse("DOMAIN-SUFFIX,new.example\n", RuleSetFormat::Clash).unwrap();
+        let snapshot = ResourceSnapshot::new(
+            resource.clone(),
+            2,
+            1,
+            "hash-new",
+            "fingerprint-new",
+            "rule-index-v1",
+            SystemTime::UNIX_EPOCH,
+            ResourceSourceKind::Remote,
+            false,
+            ResourceStaleStatus::Fresh,
+            index.clone(),
+        );
+        core.publish_rule_set_resource(snapshot).unwrap();
+
+        assert!(evaluate("new.example.").matched_rule.is_some());
+        assert!(evaluate("old.example.").matched_rule.is_none());
+
+        let stale = ResourceSnapshot::new(
+            resource,
+            1,
+            1,
+            "hash-old",
+            "fingerprint-old",
+            "rule-index-v1",
+            SystemTime::UNIX_EPOCH,
+            ResourceSourceKind::Remote,
+            false,
+            ResourceStaleStatus::Fresh,
+            index,
+        );
+        assert!(matches!(
+            core.publish_rule_set_resource(stale),
+            Err(super::PolicyResourcePublishError::StaleVersion { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn policy_core_publishes_new_hosts_snapshot() {
+        let core = PolicyDnsCore::from_config(config().as_ref(), 42).unwrap();
+        let index =
+            crate::resource::HostsIndex::parse_hosts("192.0.2.20 updated.example\n").unwrap();
+        let snapshot = ResourceSnapshot::new(
+            ConfigId::new("local-hosts").unwrap(),
+            2,
+            1,
+            "hash-updated",
+            "fingerprint-updated",
+            "hosts-index-v1",
+            SystemTime::UNIX_EPOCH,
+            ResourceSourceKind::File,
+            false,
+            ResourceStaleStatus::Fresh,
+            index,
+        );
+        core.publish_hosts_resource(snapshot).unwrap();
+
+        let CoreOutcome::Response(updated) = core
+            .resolve(&request("updated.example.", RecordType::A))
+            .await
+            .unwrap()
+        else {
+            panic!("expected updated hosts response");
+        };
+        assert_eq!(updated.class(), crate::dns::ResponseClass::Positive);
+
+        let CoreOutcome::Response(previous) = core
+            .resolve(&request("local.example.", RecordType::A))
+            .await
+            .unwrap()
+        else {
+            panic!("expected previous hosts response");
+        };
+        assert_eq!(previous.class(), crate::dns::ResponseClass::NxDomain);
     }
 
     #[tokio::test]
