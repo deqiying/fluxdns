@@ -1,6 +1,6 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Runtime 已保存资源摘要并由 service 捕获同 revision core，Policy compiled resource snapshot 已支持版本化 atomic live swap，Runtime snapshot 原子 reload 尚未实现
+> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Policy 可消费 async PreparedRuntime 提供的 compiled remote snapshot，并已支持版本化 atomic live swap，Runtime snapshot 原子 reload 尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -57,7 +57,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 - `StrategyIndex`：将已解析策略编译为不可变 `BTreeMap<ConfigId, Arc<ResolvedStrategy>>`，重复策略 ID 在构建时拒绝；
 - `RouteIndex`：编译 stream listener 与 DoH route，校验 `{client_id}` segment 模板并保留 typed listener/route 选择结果；
 - `PolicyIndex::evaluate`：组合 client strategy override、cache tri-state、TTL/ECS effective value 和 upstream target，输出不可变 `ResolutionPlan`；
-- `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash rule-set；remote/dat/selector/缺失资源在边界返回显式错误；
+- `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash rule-set；remote/dat/selector/缺失资源在普通同步构造边界返回显式错误；`from_config_with_rule_indexes` 可消费 prepare 阶段已编译的 remote snapshot；
 - rule/hosts 执行：固定 listener hosts → strategy rule 顺序，输出不含原文的 matched-rule 摘要，并覆盖 local hosts、rule-set upstream 与 rule ECS；
 - `PolicyDnsCore::UpstreamRuntime`：direct hosts/plain HTTP DoH connector 统一由 `UpstreamRegistry` 构造，Unsupported DoH 能力在 prepare 边界向上游构建错误传播；
 - 这些索引只持有已解析 typed 值，不在请求路径读取 YAML 或执行网络 I/O。
@@ -192,8 +192,8 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 提供 protocol-neutral registry 注入入口并验证 DoH request path；
 - [ ] 接入 Runtime snapshot 原子发布；
 - [x] 完成冲突、优先级、未知资源和 file loader 测试；
-- [x] 完成 Policy compiled resource snapshot 的版本化 atomic swap；跨 transport contract 和完整覆盖矩阵测试仍待完成。
+- [x] 完成 Policy compiled resource snapshot 的版本化 atomic swap，并支持 supplied compiled remote snapshot 的初始构造；跨 transport contract 和完整覆盖矩阵测试仍待完成。
 
-阶段证据：Policy focused tests 14 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path、基础 Cache/Core 命中、snapshot-local optimistic refresh 和 unsupported feature propagation；当前 backend 全量测试为 377 passed、0 failed。Runtime 已提供资源摘要并由 service 捕获同 revision core，当前 Policy finalizer 可由 DnsService 在 drain 后关闭，但仍未接入 Runtime ResourceRegistrySnapshot 的原子 reload、最新 snapshot refresh 和完整 late-window/nested sink 传播，Policy compiled resource snapshot live swap/stale version 已验证；也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
+阶段证据：Policy focused tests 14 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path、基础 Cache/Core 命中、snapshot-local optimistic refresh 和 unsupported feature propagation；当前 backend 全量测试为 385 passed、0 failed。新增 supplied compiled remote snapshot 的初始构造，并由 async PreparedRuntime restore/fetch 测试验证；Runtime 已提供资源摘要并由 service 捕获同 revision core，当前 Policy finalizer 可由 DnsService 在 drain 后关闭，但仍未接入 Runtime ResourceRegistrySnapshot 的原子 reload、最新 snapshot refresh 和完整 late-window/nested sink 传播，Policy compiled resource live swap/stale version 已验证；也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
 
 当前实现进度：**60%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan 首轮组合、注入式 direct DoH request path、基础 Cache/Core request path 和当前 snapshot-local optimistic refresh；Runtime snapshot 原子 reload、最新 snapshot refresh、fast-positive late sink、Policy/DnsService current-snapshot finalizer owner、完整 late-window/nested sink 传播、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。

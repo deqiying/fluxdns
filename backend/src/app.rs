@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use crate::config::{ConfigLoadError, ConfigLoader, LoadOptions};
-use crate::dns::{Deadline, RuntimeRevision};
+use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::runtime::SystemSocketFactory;
 use crate::service::{DnsService, ServiceError, ServiceStartError};
 
@@ -200,6 +200,7 @@ where
 }
 
 const BIND_TIMEOUT: Duration = Duration::from_secs(10);
+const PREPARE_TIMEOUT: Duration = Duration::from_secs(30);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
 
 /// 根据当前命令加载并执行配置边界。
@@ -257,11 +258,15 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             Ok(())
         }
         AppCommand::Run => {
-            let prepared = crate::runtime::PreparedRuntime::prepare_with_policy_core(
-                output.resolved,
-                RuntimeRevision(1),
-            )
-            .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+            let prepared =
+                crate::runtime::PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                    output.resolved,
+                    RuntimeRevision(1),
+                    Deadline::new(Instant::now() + PREPARE_TIMEOUT),
+                    Cancellation::new(),
+                )
+                .await
+                .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
             tracing::info!(
                 event = "runtime_prepared",
                 component = "application",
@@ -269,6 +274,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 revision = prepared.preflight().revision.0,
                 endpoint_count = prepared.preflight().endpoint_count,
                 policy_core = prepared.preflight().has_policy_core,
+                resource_snapshot_count = prepared.preflight().resource_snapshot_count,
                 "runtime_prepared"
             );
             let bind_cancellation = crate::dns::Cancellation::new();
