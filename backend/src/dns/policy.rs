@@ -6,7 +6,7 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hickory_proto::op::ResponseCode;
 use thiserror::Error;
@@ -25,7 +25,10 @@ use crate::ports::exchange::{
     ConnectorId, DnsExchange, TransportFailure, TransportFailureClass, UpstreamOutcome,
 };
 use crate::resource::{CanonicalDomain, HostsIndex, HostsLimits, ResourceLoadError, load_hosts};
-use crate::upstream::{GroupSelector, RegistryError, UpstreamGroupExecutor, UpstreamRegistry};
+use crate::upstream::{
+    GroupSelector, LateResultSink, RegistryError, UpstreamAttempt, UpstreamGroupExecutor,
+    UpstreamRegistry,
+};
 
 use super::handler::resource_answers;
 use super::{CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsRequest};
@@ -137,6 +140,43 @@ impl PolicyDnsCore {
     }
 }
 
+struct PolicyLateResultSink {
+    cache: Arc<CacheFacade>,
+    finalizer: Arc<LateCacheFinalizer>,
+    key: crate::ports::cache::CacheKey,
+    producer_revision: crate::dns::RuntimeRevision,
+    format_version: u16,
+    deadline: Deadline,
+}
+
+impl LateResultSink for PolicyLateResultSink {
+    fn submit(
+        &self,
+        query: crate::dns::CanonicalQuery,
+        _context: crate::dns::RequestContext,
+        attempt: UpstreamAttempt,
+    ) {
+        let crate::ports::exchange::UpstreamOutcome::Response(response) = attempt.outcome else {
+            return;
+        };
+        if !response.matches_query(&query) {
+            return;
+        }
+        let _ = self.finalizer.submit(
+            Arc::clone(&self.cache),
+            CacheWriteRequest {
+                key: self.key.clone(),
+                condition: crate::ports::cache::CacheCondition::Absent,
+                response: Arc::new(response),
+                now: Instant::now(),
+                producer_revision: self.producer_revision,
+                format_version: self.format_version,
+                deadline: self.deadline,
+            },
+        );
+    }
+}
+
 impl DnsCore for PolicyDnsCore {
     fn resolve<'a>(
         &'a self,
@@ -223,9 +263,10 @@ impl PolicyDnsCore {
         let Some(key) = cache_key(plan, request) else {
             return self
                 .upstreams
-                .exchange(&plan.upstream, &request.query, &request.context)
+                .exchange(&plan.upstream, &request.query, &request.context, None)
                 .await;
         };
+        let late_sink = self.late_result_sink(&key, request);
         let deadline = request.context.meta.deadline;
         match self.cache.lookup(&key, deadline).await {
             Ok(CacheLookup::Fresh(record)) => {
@@ -258,7 +299,12 @@ impl PolicyDnsCore {
             Err(_) => {
                 return self
                     .upstreams
-                    .exchange(&plan.upstream, &request.query, &request.context)
+                    .exchange(
+                        &plan.upstream,
+                        &request.query,
+                        &request.context,
+                        Some(Arc::clone(&late_sink)),
+                    )
                     .await;
             }
         };
@@ -277,7 +323,12 @@ impl PolicyDnsCore {
                     }
                     Ok(CacheLoadCompletion::Miss) | Ok(CacheLoadCompletion::Failed(_)) | Err(_) => {
                         self.upstreams
-                            .exchange(&plan.upstream, &request.query, &request.context)
+                            .exchange(
+                                &plan.upstream,
+                                &request.query,
+                                &request.context,
+                                Some(Arc::clone(&late_sink)),
+                            )
                             .await
                     }
                 }
@@ -285,7 +336,12 @@ impl PolicyDnsCore {
             CacheLoadReservation::Leader(lease) => {
                 let Some(outcome) = self
                     .upstreams
-                    .exchange(&plan.upstream, &request.query, &request.context)
+                    .exchange(
+                        &plan.upstream,
+                        &request.query,
+                        &request.context,
+                        Some(Arc::clone(&late_sink)),
+                    )
                     .await
                 else {
                     let _ = self
@@ -366,7 +422,7 @@ impl PolicyDnsCore {
         let deadline = context.meta.deadline;
         let _ = self.late_cache_finalizer.submit_task(async move {
             let Some(UpstreamOutcome::Response(response)) =
-                upstreams.exchange(&upstream, &query, &context).await
+                upstreams.exchange(&upstream, &query, &context, None).await
             else {
                 return;
             };
@@ -385,6 +441,23 @@ impl PolicyDnsCore {
                 })
                 .await;
         });
+    }
+
+    fn late_result_sink(
+        &self,
+        key: &crate::ports::cache::CacheKey,
+        request: &DnsRequest,
+    ) -> Arc<dyn LateResultSink> {
+        Arc::new(PolicyLateResultSink {
+            cache: Arc::clone(&self.cache),
+            finalizer: Arc::clone(&self.late_cache_finalizer),
+            key: key.clone(),
+            producer_revision: request.context.runtime_revision,
+            format_version: key.format_version,
+            deadline: Deadline::new(
+                Instant::now() + Duration::from_secs(OPTIMISTIC_REFRESH_TIMEOUT_SECS),
+            ),
+        })
     }
 }
 
@@ -544,12 +617,19 @@ impl UpstreamRuntime {
         upstream: &ConfigId,
         query: &super::CanonicalQuery,
         context: &super::RequestContext,
+        late_sink: Option<Arc<dyn LateResultSink>>,
     ) -> Option<UpstreamOutcome> {
         if let Some(exchange) = self.direct.get(upstream) {
             return Some(exchange.exchange(query, context).await);
         }
         if let Some(executor) = self.groups.get(upstream) {
-            return executor.execute(query, context).await.ok();
+            return match late_sink {
+                Some(sink) => executor
+                    .execute_with_late_sink(query, context, sink)
+                    .await
+                    .ok(),
+                None => executor.execute(query, context).await.ok(),
+            };
         }
         if let Some(exchange) = self.all.get(upstream) {
             return Some(exchange.exchange(query, context).await);
@@ -785,14 +865,16 @@ mod tests {
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
-        CacheCompatibilityKey, Cancellation, CanonicalQuery, CoreOutcome, Deadline, DnsCore,
-        DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta, RuntimeRevision,
-        TransportCapabilities, TransportClass,
+        CacheCompatibilityKey, Cancellation, CanonicalQuery, CanonicalResponse, CoreOutcome,
+        Deadline, DnsCore, DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta,
+        RuntimeRevision, TransportCapabilities, TransportClass,
     };
-    use crate::ports::exchange::UpstreamOutcome;
+    use crate::ports::exchange::{ConnectorId, UpstreamOutcome};
     use crate::ports::{PortError, PortFuture};
     use crate::resource::CanonicalDomain;
-    use crate::upstream::{DohHttpRequest, DohHttpResponseOwned, DohHttpTransport};
+    use crate::upstream::{
+        DohHttpRequest, DohHttpResponseOwned, DohHttpTransport, UpstreamAttempt,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -1050,6 +1132,58 @@ mod tests {
         }
         assert!(refreshed, "stale lookup must complete a bounded refresh");
         assert_eq!(transport.calls.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn policy_late_result_sink_publishes_absent_cache_entry() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        let config = Arc::new(config);
+        let core = PolicyDnsCore::from_config(config.as_ref(), 42).unwrap();
+        let request = request("late.example.", RecordType::A);
+        let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).unwrap();
+        let listener_id = ConfigId::new("dns").unwrap();
+        let plan = core
+            .policy
+            .evaluate(crate::policy::PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: request.context.client.client_addr,
+                client_digest: None,
+                qname: Some(&qname),
+            })
+            .unwrap();
+        let key = cache_key(&plan, &request).expect("cache must be enabled");
+        let response =
+            CanonicalResponse::empty_response(&request.query, ResponseCode::NoError).unwrap();
+        let sink = core.late_result_sink(&key, &request);
+        sink.submit(
+            request.query.clone(),
+            request.context.clone(),
+            UpstreamAttempt {
+                attempt_index: 1,
+                connector: ConnectorId::new("late").unwrap(),
+                outcome: UpstreamOutcome::Response(response),
+            },
+        );
+
+        let deadline = Deadline::new(Instant::now() + Duration::from_secs(1));
+        let mut stored = false;
+        for _ in 0..100 {
+            if matches!(
+                core.cache().lookup(&key, deadline).await.unwrap(),
+                CacheLookup::Fresh(_)
+            ) {
+                stored = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            stored,
+            "late response should be published through the finalizer"
+        );
     }
 
     fn config() -> std::sync::Arc<crate::config::ResolvedConfig> {
@@ -1451,6 +1585,7 @@ strategy:
                 &ConfigId::new("outer").unwrap(),
                 &request.query,
                 &request.context,
+                None,
             )
             .await
             .expect("nested group must resolve");

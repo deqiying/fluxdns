@@ -25,7 +25,7 @@ pub use doh::{
     DOH_MEDIA_TYPE, DohEndpointError, DohExchange, DohHttpRequest, DohHttpResponse,
     DohHttpResponseOwned, DohHttpTransport, MAX_DOH_RESPONSE_BODY_BYTES, validate_response,
 };
-pub use executor::{ExecutorBuildError, ExecutorError, UpstreamGroupExecutor};
+pub use executor::{ExecutorBuildError, ExecutorError, LateResultSink, UpstreamGroupExecutor};
 pub use group::{GroupSelector, GroupSelectorError, SelectionLease};
 pub use hosts::{HostsExchange, HostsExchangeBuildError};
 pub use http::{

@@ -75,6 +75,13 @@ impl From<super::OutcomeError> for ExecutorError {
     }
 }
 
+/// 接收 parallel 快速终态之后完成的 late attempt。
+///
+/// sink 只拥有后台结果，不拥有客户端响应；实现方应自行提供容量和关闭语义。
+pub trait LateResultSink: Send + Sync {
+    fn submit(&self, query: CanonicalQuery, context: RequestContext, attempt: UpstreamAttempt);
+}
+
 /// 执行一个已经解析的 upstream group。
 pub struct UpstreamGroupExecutor {
     primary: ExecutionPhase,
@@ -152,7 +159,27 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
     ) -> Result<UpstreamOutcome, ExecutorError> {
-        let primary = self.execute_phase(&self.primary, query, context).await?;
+        self.execute_inner(query, context, None).await
+    }
+
+    pub async fn execute_with_late_sink(
+        &self,
+        query: &CanonicalQuery,
+        context: &RequestContext,
+        sink: Arc<dyn LateResultSink>,
+    ) -> Result<UpstreamOutcome, ExecutorError> {
+        self.execute_inner(query, context, Some(sink)).await
+    }
+
+    async fn execute_inner(
+        &self,
+        query: &CanonicalQuery,
+        context: &RequestContext,
+        late_sink: Option<Arc<dyn LateResultSink>>,
+    ) -> Result<UpstreamOutcome, ExecutorError> {
+        let primary = self
+            .execute_phase(&self.primary, query, context, late_sink.clone())
+            .await?;
         if !primary.enter_fallback
             || self.fallback.is_none()
             || context.meta.cancellation.is_cancelled()
@@ -165,6 +192,7 @@ impl UpstreamGroupExecutor {
                 self.fallback.as_ref().expect("checked above"),
                 query,
                 context,
+                late_sink,
             )
             .await?
             .outcome)
@@ -175,10 +203,12 @@ impl UpstreamGroupExecutor {
         phase: &ExecutionPhase,
         query: &CanonicalQuery,
         context: &RequestContext,
+        late_sink: Option<Arc<dyn LateResultSink>>,
     ) -> Result<PhaseResult, ExecutorError> {
         let phase_context = phase_context(context, phase.timeout);
         let attempts = if phase.selector.mode() == SelectionPolicy::Parallel {
-            self.execute_parallel(phase, query, &phase_context).await?
+            self.execute_parallel(phase, query, &phase_context, late_sink)
+                .await?
         } else {
             self.execute_ordered(phase, query, &phase_context).await?
         };
@@ -247,6 +277,7 @@ impl UpstreamGroupExecutor {
         phase: &ExecutionPhase,
         query: &CanonicalQuery,
         context: &RequestContext,
+        late_sink: Option<Arc<dyn LateResultSink>>,
     ) -> Result<Vec<UpstreamAttempt>, ExecutorError> {
         let mut tasks = tokio::task::JoinSet::new();
         for index in phase.selector.parallel_order() {
@@ -298,12 +329,43 @@ impl UpstreamGroupExecutor {
                 outcome,
             });
             if complete_response {
-                tasks.abort_all();
+                if let Some(sink) = late_sink {
+                    spawn_late_attempt_drain(tasks, query.clone(), context.clone(), sink);
+                } else {
+                    tasks.abort_all();
+                }
                 break;
             }
         }
         Ok(attempts)
     }
+}
+
+fn spawn_late_attempt_drain(
+    mut tasks: tokio::task::JoinSet<(usize, ConnectorId, UpstreamOutcome)>,
+    query: CanonicalQuery,
+    context: RequestContext,
+    sink: Arc<dyn LateResultSink>,
+) {
+    tokio::spawn(async move {
+        while let Some(joined) = tasks.join_next().await {
+            let Ok((attempt_index, connector, outcome)) = joined else {
+                break;
+            };
+            if !matches!(outcome, UpstreamOutcome::Response(_)) {
+                continue;
+            }
+            sink.submit(
+                query.clone(),
+                context.clone(),
+                UpstreamAttempt {
+                    attempt_index,
+                    connector,
+                    outcome,
+                },
+            );
+        }
+    });
 }
 
 impl ExecutionPhase {
@@ -419,12 +481,12 @@ mod tests {
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
 
-    use super::{ExecutorBuildError, UpstreamGroupExecutor};
+    use super::{ExecutorBuildError, LateResultSink, UpstreamGroupExecutor};
     use crate::config::resolve::{ConfigId, ResolvedUpstreamMember};
     use crate::dns::{
         CacheCompatibilityKey, Cancellation, CanonicalQuery, CanonicalResponse, ClientIdentity,
-        Deadline, ListenerId, RequestContext, RequestId, RequestMeta, RuntimeRevision,
-        TransportCapabilities, TransportClass,
+        Deadline, ListenerId, RequestContext, RequestId, RequestMeta, ResponseClass,
+        RuntimeRevision, TransportCapabilities, TransportClass,
     };
     use crate::ports::PortFuture;
     use crate::ports::exchange::{
@@ -529,6 +591,38 @@ mod tests {
         connector: ConnectorId,
         delay: Duration,
         outcome: Mutex<Option<UpstreamOutcome>>,
+    }
+
+    #[derive(Default)]
+    struct LateCollector {
+        results: Mutex<Vec<(usize, String, ResponseClass)>>,
+    }
+
+    impl LateCollector {
+        fn results(&self) -> Vec<(usize, String, ResponseClass)> {
+            self.results.lock().unwrap().clone()
+        }
+    }
+
+    impl LateResultSink for LateCollector {
+        fn submit(
+            &self,
+            query: CanonicalQuery,
+            _context: RequestContext,
+            attempt: super::super::UpstreamAttempt,
+        ) {
+            let UpstreamOutcome::Response(response) = attempt.outcome else {
+                return;
+            };
+            if !response.matches_query(&query) {
+                return;
+            }
+            self.results.lock().unwrap().push((
+                attempt.attempt_index,
+                attempt.connector.as_str().to_owned(),
+                response.class(),
+            ));
+        }
     }
 
     impl DelayedExchange {
@@ -681,6 +775,46 @@ mod tests {
             result,
             UpstreamOutcome::Response(response) if response.class() == crate::dns::ResponseClass::Positive
         ));
+    }
+
+    #[tokio::test]
+    async fn parallel_sends_late_attempt_to_sink_without_delaying_response() {
+        let query = query();
+        let fast = exchange("fast");
+        fast.push(positive_response(&query)).unwrap();
+        let slow = Arc::new(DelayedExchange::new(
+            ConnectorId::new("slow").unwrap(),
+            Duration::from_millis(25),
+            response(&query, ResponseCode::NoError),
+        ));
+        let selector = crate::upstream::GroupSelector::new(
+            SelectionPolicy::Parallel,
+            vec![member("fast"), member("slow")],
+        )
+        .unwrap();
+        let executor = UpstreamGroupExecutor::new(selector, vec![fast, slow]).unwrap();
+        let sink = Arc::new(LateCollector::default());
+        let started = Instant::now();
+        let result = executor
+            .execute_with_late_sink(&query, &context(), sink.clone())
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(matches!(
+            result,
+            UpstreamOutcome::Response(response) if response.class() == ResponseClass::Positive
+        ));
+
+        for _ in 0..100 {
+            if !sink.results().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(
+            sink.results(),
+            vec![(1, "slow".to_owned(), ResponseClass::NoData)]
+        );
     }
 
     #[tokio::test]
