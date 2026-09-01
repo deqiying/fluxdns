@@ -62,8 +62,10 @@ mise exec -- cargo test --manifest-path backend/Cargo.toml
 执行 DoH 测试前先检查工具是否已存在（例如 `Get-Command ddoge`、`Get-Command curl.exe` 或对应系统的 `where` 命令）。
 
 - DoH 测试可以使用已有的 `ddoge`、`curl` 及其他系统常见工具；具体参数以本机工具的 `--help` 和版本为准，不在本规范中假定未验证的参数。
-- 禁止未经允许通过 `cargo install`、`npm install -g`、`pip install`、Scoop、WinGet、Chocolatey 或其他包管理器擅自安装测试工具。
-- 只有项目 `mise.toml` 明确声明且 `mise` 支持管理的工具，才可以使用 `mise install` 安装或切换版本；未声明的工具缺失时应记录为环境阻塞并请求授权，不要自行替代安装。
+- 禁止未经批准安装额外工具。
+- 项目当前确实需要且本机缺失的工具（例如检查 SQLite 数据库所需的 SQLite CLI）可以自行安装，但必须确认当前 `mise` 支持管理该工具，并通过 `mise` 安装或切换版本；是否已写入 `mise.toml` 不改变这条安装边界。
+- `mise` 不支持的工具、与当前项目任务无关的工具以及其他依赖工具，安装前必须获得明确批准。未经批准不得通过 `cargo install`、`npm install -g`、`pip install`、Scoop、WinGet、Chocolatey 或其他包管理器绕过该规则。
+- 如果工具版本需要成为项目共享基线，应同步更新 `mise.toml`；个人临时工具不写入仓库配置。
 - 测试脚本应记录实际使用的工具及版本，避免把个人环境中的隐式依赖当成项目要求。
 
 ## 4. DoH 本地 smoke test
