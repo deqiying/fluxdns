@@ -1,6 +1,6 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、hosts registry、纯 group member selection 和 outcome/fallback 判定；真实 HTTP/TLS adapter、bootstrap/outbound 尚未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、hosts registry、纯 group member selection 和 outcome/fallback 判定；HTTPS/TLS、bootstrap/outbound 尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -19,6 +19,7 @@ Upstream 模块把 typed upstream 配置编译为 `UpstreamRegistry` 和可复�
 | 文件 | 职责 |
 | --- | --- |
 | `doh.rs` | DoH connector、HTTP/TLS/DNS response validation |
+| `http.rs` | Tokio plain HTTP/1.1 DoH request/response adapter；TLS、proxy 和 connection pool 待后续接入 |
 | `group.rs` | parallel、round-robin、load-balance、failover、fallback |
 | `bootstrap.rs` | 上游主机名解析与地址 override |
 | `outbound.rs` | direct、SOCKS5、SOCKS5H profile 和 SecretRef |
@@ -43,6 +44,8 @@ connector 构建 key 至少包含 upstream、outbound、bootstrap/connect_ip 和
 DNS Core 只持有 typed connector/group handle，不读取 URL 或 proxy 配置。
 
 ## 3. DoH connector
+
+当前已实现 `TokioDohHttpTransport` 的 plain HTTP/1.1 一次交换：使用 URL host 生成 Host header，使用显式 `connect_ip` 只替换 TCP 连接目标，固定 POST `application/dns-message`，要求 bounded header、`Content-Length` 和 DNS wire body，并将 deadline/cancellation 传递到解析、连接、写入和读取。该 adapter 不支持 `https://`，HTTPS/TLS、proxy、HTTP/2 和连接池仍由后续 adapter 负责。
 
 Reqwest client：
 
@@ -175,7 +178,7 @@ TransportFailure 分类至少包括 connect、DNS bootstrap、proxy、TLS、HTTP
 
 v1 不实现主动健康检查、熔断器或持久健康分数。load-balance 只使用实时 in-flight，不应在文档或指标中称为 health。
 
-当前已实现：`DohExchange` 固定 POST `application/dns-message` 请求，自动分配内部 DNS ID，保留 URL host 作为 Host/SNI，并将显式 `connect_ip`、deadline、cancellation 和 HTTP/协议错误映射到 `UpstreamOutcome`；`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；`outcome` 提供按 attempt index 的 terminal/retryable/cancelled 聚合和 fallback 判定。真实 HTTP/TLS/socket adapter、bootstrap、late cache finalizer 和 Runtime/DNS Core 接线尚未接入。
+当前已实现：`DohExchange` 固定 POST `application/dns-message` 请求，自动分配内部 DNS ID，保留 URL host 作为 Host/SNI，并将显式 `connect_ip`、deadline、cancellation 和 HTTP/协议错误映射到 `UpstreamOutcome`；`TokioDohHttpTransport` 提供 plain HTTP/1.1 loopback-capable adapter；`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；`outcome` 提供按 attempt index 的 terminal/retryable/cancelled 聚合和 fallback 判定。HTTPS/TLS、bootstrap、proxy、late cache finalizer 和 Runtime/DNS Core 接线尚未接入。
 
 ## 10. 测试
 
@@ -194,6 +197,7 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 
 - [x] 实现 hosts connector 与首轮 Registry factory；
 - [x] 实现 DoH connector 的协议无关 exchange 与响应校验边界；
+- [x] 实现 plain HTTP/1.1 DoH transport adapter；
 - [ ] 实现 bootstrap/connect_ip/outbound；
 - [x] 固化四种 group 模式的纯 member selection；
 - [x] 实现 outcome/fallback 判定边界；
@@ -201,6 +205,6 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-阶段证据：hosts/group/outcome 定向测试 19 项通过，另有 `upstream::doh` 7 项通过，覆盖 DoH request envelope、Host/SNI/connect_ip、HTTP/协议响应校验、timeout 映射和 URL 安全边界。当前实现未接入 Runtime/DNS Core，也未执行真实出站网络 I/O。
+阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::doh` 7 项通过，新增 `upstream::http::tests` 3 项通过，覆盖 DoH request envelope、Host/SNI/connect_ip、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前实现未接入 Runtime/DNS Core，TLS/proxy 仍未实现。
 
-当前实现进度：**50%**。
+当前实现进度：**55%**。

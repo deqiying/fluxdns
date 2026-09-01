@@ -52,7 +52,7 @@ impl fmt::Debug for DohHttpRequest {
 }
 
 impl DohHttpRequest {
-    fn new(endpoint: Url, connect_ip: Option<IpAddr>, body: Vec<u8>) -> Self {
+    pub(crate) fn new(endpoint: Url, connect_ip: Option<IpAddr>, body: Vec<u8>) -> Self {
         let host = Arc::<str>::from(endpoint.host_str().expect("validated DoH endpoint"));
         Self {
             endpoint,

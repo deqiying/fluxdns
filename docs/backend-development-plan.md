@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 306 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、hosts registry、group member selection 和结果聚合/fallback 判定，但尚未接入真实 HTTP/TLS/socket 出站 adapter；Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验，以及 scheduler/coordinator 的 Runtime-facing 纯逻辑编排；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、真实 DoH 出站、bootstrap/连接执行、Moka/SQLite persistence、真实 resource fetch/parse/persist worker、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 309 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、hosts registry、group member selection 和结果聚合/fallback 判定，但 HTTPS/TLS、bootstrap/proxy 和 Runtime/DNS Core 接线仍未完成；Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验，以及 scheduler/coordinator 的 Runtime-facing 纯逻辑编排；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、bootstrap/连接执行、Moka/SQLite persistence、真实 resource fetch/parse/persist worker、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **51.1%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合和可注入 DoH exchange，Storage 已增加业务 schema 与 writer contract，Resource 已增加 scheduler/coordinator 的 Runtime-facing 编排边界；仍缺少 TLS、代理信任、真实 DoH 出站、bootstrap、Runtime snapshot 资源接线、Moka/SQLite persistence、真实 resource worker、完整 upstream/Core 管线和完整故障验收 |
-| v1 交付总进度 | **55.9%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 51.1%` |
+| 后端代码实现进度 | **51.6%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合、可注入 DoH exchange 和 plain HTTP transport，Storage 已增加业务 schema 与 writer contract，Resource 已增加 scheduler/coordinator 的 Runtime-facing 编排边界；仍缺少 TLS、代理信任、HTTPS 出站、bootstrap、Runtime snapshot 资源接线、Moka/SQLite persistence、真实 resource worker、完整 upstream/Core 管线和完整故障验收 |
+| v1 交付总进度 | **56.4%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 51.6%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -62,7 +62,7 @@ v1 交付范围：
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 50% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 50% | 8% |
-| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 50% | 10% |
+| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 55% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 50% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 65% | 7% |
 | Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 35% | 8% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 50% + 10% × 50% + 9% × 50% + 7% × 65% + 8% × 35% + 3% × 30% ≈ 51.1%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 50% + 10% × 55% + 9% × 50% + 7% × 65% + 8% × 35% + 3% × 30% ≈ 51.6%
 ```
 
 ## 4. 进度判定规则
@@ -222,7 +222,9 @@ transport / upstream / storage / observability adapters
 
 第四个小阶段（已完成）：新增可注入 `DohHttpTransport` 与 `DohExchange`，固定 DoH POST、Host/SNI/connect_ip、内部 DNS ID、deadline/cancellation 和稳定错误映射；`upstream::doh` 定向测试 7 项通过。真实 HTTP/TLS/socket adapter、bootstrap/connect_ip、SOCKS5/SOCKS5H、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
 
-当前阶段 5 边界：真实 DoH 出站 adapter、bootstrap/connect_ip、SOCKS5/SOCKS5H、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
+第五个小阶段（已完成）：新增 `TokioDohHttpTransport` plain HTTP/1.1 adapter，固定 Host/path、Content-Length、bounded header/body、deadline/cancellation 和 chunked 拒绝；`upstream::http::tests` 3 项通过。HTTPS/TLS、proxy、连接池、bootstrap、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
+
+当前阶段 5 边界：HTTPS/TLS DoH adapter、bootstrap/connect_ip、SOCKS5/SOCKS5H、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
 
 ### 阶段 6：缓存
 
@@ -276,7 +278,7 @@ transport / upstream / storage / observability adapters
 
 首个小阶段（已完成）：为 DoH bind plan 增加 typed endpoint binding，补充 opaque TCP byte-stream capability，实现 plain HTTP/1.x GET/POST codec、无填充 base64url、路由 `{client_id}` 匹配、固定 HTTP 错误状态和 DNS `application/dns-message` 响应；service 以受监督 listener/session task 接入。当前只接受 `tls.mode: external` 与 `client_ip.source: peer`，`terminate`、`forwarded_header`、`proxy_protocol` 会在装配阶段明确拒绝。定向 codec/session 测试 9 项，真实 smoke 使用 `127.0.0.1:8355` 直接 HTTP POST/GET。
 
-当前边界：HTTP/1.x 仍按读取顺序处理，未实现 TLS terminate/external 握手、PROXY v1/v2、forwarded header 信任链、HTTP/2、真实上游 DoH HTTP/TLS adapter 和完整资源/故障注入验收。
+当前边界：HTTP/1.x 仍按读取顺序处理，未实现 TLS terminate/external 握手、PROXY v1/v2、forwarded header 信任链、HTTP/2、上游 DoH HTTPS/TLS adapter 和完整资源/故障注入验收。
 
 ### 阶段 9：统计、详情日志与观测
 
