@@ -142,6 +142,7 @@ fn validate_bind_plan(plan: &BindPlan) -> Result<BindPlan, PrepareError> {
 mod tests {
     use std::sync::Arc;
 
+    use crate::config::resolve::{ConfigId, ResolvedUpstream};
     use crate::config::{BindPlan, ConfigLoader, LoadOptions};
     use crate::dns::RuntimeRevision;
 
@@ -216,6 +217,26 @@ strategy:
         assert!(candidate.preflight().has_policy_core);
         assert!(candidate.snapshot().policy_core().is_some());
         assert!(candidate.snapshot().dns_core().is_some());
+    }
+
+    #[test]
+    fn prepare_with_policy_core_propagates_missing_proxy_profile() {
+        let mut config = Arc::try_unwrap(config()).ok().unwrap();
+        config.upstreams.push(ResolvedUpstream::Doh {
+            id: ConfigId::new("remote").unwrap(),
+            address: "http://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: None,
+            connect_ip: Some("192.0.2.44".parse().unwrap()),
+            proxy: Some(ConfigId::new("missing-proxy").unwrap()),
+            edns_client_subnet: None,
+        });
+
+        let error = PreparedRuntime::prepare_with_policy_core(Arc::new(config), RuntimeRevision(3))
+            .unwrap_err();
+        let PrepareError::PolicyCore { reason } = error else {
+            panic!("expected policy core preparation error");
+        };
+        assert!(reason.contains("missing outbound `missing-proxy`"));
     }
 
     #[test]

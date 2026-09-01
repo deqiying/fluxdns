@@ -47,13 +47,15 @@ pub struct PolicyDnsCore {
 impl PolicyDnsCore {
     pub fn from_config(config: &ResolvedConfig, ttl: u32) -> Result<Self, PolicyCoreBuildError> {
         let direct_upstreams = direct_upstreams(&config.upstreams);
-        let registry = UpstreamRegistry::from_resolved(&direct_upstreams).map_err(|error| {
-            let error = registry_build_error(error);
-            PolicyCoreBuildError::Upstream {
-                upstream: error.upstream,
-                reason: error.reason,
-            }
-        })?;
+        let registry =
+            UpstreamRegistry::from_resolved_with_outbounds(&direct_upstreams, &config.outbounds)
+                .map_err(|error| {
+                    let error = registry_build_error(error);
+                    PolicyCoreBuildError::Upstream {
+                        upstream: error.upstream,
+                        reason: error.reason,
+                    }
+                })?;
         Self::from_config_with_registry(config, ttl, registry)
     }
 
@@ -325,6 +327,10 @@ fn registry_build_error(error: RegistryError) -> UpstreamRuntimeBuildError {
         | RegistryError::InvalidHosts { upstream }
         | RegistryError::InvalidDoh { upstream }
         | RegistryError::UnsupportedUpstream { upstream, .. } => upstream.clone(),
+        RegistryError::InvalidOutbound { outbound, .. }
+        | RegistryError::DuplicateOutbound { outbound } => outbound.clone(),
+        RegistryError::MissingOutbound { upstream, .. }
+        | RegistryError::InvalidOutboundCombination { upstream, .. } => upstream.clone(),
         RegistryError::DuplicateConnector { connector }
         | RegistryError::MissingConnector { connector } => connector.clone(),
     };
@@ -352,8 +358,10 @@ fn servfail(request: &DnsRequest) -> Result<CoreOutcome, CoreError> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::net::{IpAddr, SocketAddr};
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime};
 
@@ -361,7 +369,9 @@ mod tests {
     use hickory_proto::rr::{Name, RecordType};
 
     use crate::config::model::EcsMode;
-    use crate::config::resolve::{ConfigId, ResolvedEcs, ResolvedUpstream, ValueSource};
+    use crate::config::resolve::{
+        ConfigId, ResolvedEcs, ResolvedOutbound, ResolvedSecretRef, ResolvedUpstream, ValueSource,
+    };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, Cancellation, CanonicalQuery, CoreOutcome, Deadline, DnsCore,
@@ -370,6 +380,8 @@ mod tests {
     };
     use crate::ports::{PortError, PortFuture};
     use crate::upstream::{DohHttpRequest, DohHttpResponseOwned, DohHttpTransport};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     use super::{PolicyDnsCore, UpstreamRuntime};
     use crate::upstream::UpstreamRegistry;
@@ -589,6 +601,108 @@ hosts:
     fn policy_core_accepts_configured_plain_http_doh_with_disabled_ecs() {
         let core = PolicyDnsCore::from_config(doh_config().as_ref(), 42).unwrap();
         assert_eq!(core.upstream_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn policy_core_from_config_executes_proxy_doh_upstream() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let proxy_port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0_u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            stream.write_all(&[5, 0]).await.unwrap();
+
+            let mut connect = [0_u8; 10];
+            stream.read_exact(&mut connect).await.unwrap();
+            assert_eq!(connect, [5, 1, 0, 1, 192, 0, 2, 44, 0, 80]);
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                .await
+                .unwrap();
+
+            let mut bytes = Vec::new();
+            let header_end;
+            let body_end;
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                bytes.extend_from_slice(&chunk[..count]);
+                let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+                    continue;
+                };
+                let header_end_candidate = end + 4;
+                let headers = std::str::from_utf8(&bytes[..end]).unwrap();
+                let content_length = headers
+                    .split("\r\n")
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                if bytes.len() >= header_end_candidate + content_length {
+                    header_end = header_end_candidate;
+                    body_end = header_end_candidate + content_length;
+                    assert!(headers.starts_with("POST /dns-query HTTP/1.1\r\n"));
+                    assert!(headers.contains("Host: dns.example.test\r\n"));
+                    break;
+                }
+            }
+
+            let request = Message::from_vec(&bytes[header_end..body_end]).unwrap();
+            let mut response =
+                Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+            response.metadata.response_code = ResponseCode::NoError;
+            response.add_query(request.queries[0].clone());
+            let response_body = response.to_vec().unwrap();
+            let headers = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len()
+            );
+            stream.write_all(headers.as_bytes()).await.unwrap();
+            stream.write_all(&response_body).await.unwrap();
+        });
+
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-policy-proxy-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let secret_path = root.join("proxy-url");
+        fs::write(&secret_path, format!("socks5://127.0.0.1:{proxy_port}")).unwrap();
+
+        let mut config = Arc::try_unwrap(doh_config()).ok().unwrap();
+        config.outbounds.push(ResolvedOutbound {
+            id: ConfigId::new("socks").unwrap(),
+            kind: crate::config::model::OutboundType::Socks5,
+            proxy_url: ResolvedSecretRef {
+                env: None,
+                file: Some(secret_path),
+            },
+        });
+        let ResolvedUpstream::Doh { proxy, .. } = &mut config.upstreams[0] else {
+            panic!("expected DoH upstream");
+        };
+        *proxy = Some(ConfigId::new("socks").unwrap());
+
+        let core = PolicyDnsCore::from_config(&config, 42).unwrap();
+        let CoreOutcome::Response(response) = core
+            .resolve(&request("remote.example.", RecordType::A))
+            .await
+            .unwrap()
+        else {
+            panic!("expected proxied upstream response");
+        };
+        assert_eq!(response.class(), crate::dns::ResponseClass::NoData);
+        server.await.unwrap();
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn group_config() -> std::sync::Arc<crate::config::ResolvedConfig> {
