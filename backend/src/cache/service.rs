@@ -1,6 +1,7 @@
 //! CacheFacade：把 lookup、准入和底层 CacheStore 组合成稳定的缓存边界。
 
 use std::fmt;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -113,6 +114,19 @@ impl LateCacheFinalizer {
         facade: Arc<CacheFacade>,
         request: CacheWriteRequest,
     ) -> Result<(), LateCacheFinalizerSubmitError> {
+        self.submit_task(async move {
+            let _ = facade.write_response(request).await;
+        })
+    }
+
+    /// 在同一个有界 finalizer 中运行不阻塞客户端响应的后台任务。
+    ///
+    /// `submit` 继续覆盖普通 cache write；该入口供 optimistic refresh 或
+    /// parallel late result 在获得最终写请求前复用同一容量和 shutdown 边界。
+    pub fn submit_task<F>(&self, task: F) -> Result<(), LateCacheFinalizerSubmitError>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
         if self.is_shutdown() {
             return Err(LateCacheFinalizerSubmitError::Shutdown);
         }
@@ -128,7 +142,7 @@ impl LateCacheFinalizer {
             tokio::select! {
                 biased;
                 _ = state.cancellation.cancelled() => {}
-                _ = facade.write_response(request) => {}
+                _ = task => {}
             }
             drop(permit);
             state.active.fetch_sub(1, Ordering::AcqRel);

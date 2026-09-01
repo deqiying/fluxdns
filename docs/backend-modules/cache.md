@@ -1,6 +1,6 @@
 # Cache 模块设计
 
-> 状态：v1 方案已完成，已实现内存 CacheStore、共享容量淘汰、响应准入/TTL、稳定 key builder、CacheFacade 首轮切片、可取消有界 LateCacheFinalizer 和版本化文件快照 persistence 边界；Moka/SQLite persistence 尚未实现
+> 状态：v1 方案已完成，已实现内存 CacheStore、共享容量淘汰、响应准入/TTL、稳定 key builder、CacheFacade 首轮切片、可取消有界 LateCacheFinalizer、PolicyDnsCore 当前 snapshot-local optimistic refresh 和版本化文件快照 persistence 边界；Moka/SQLite persistence 尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -130,7 +130,7 @@ stale entry 仅在：
 
 时先返回。
 
-refresh 捕获启动时最新 RuntimeSnapshot，完整重跑 client/policy/resource/upstream 流程。它不能复用旧 entry 保存的 connector 或 rule pointer。
+完整设计中的 refresh 应捕获启动时最新 RuntimeSnapshot，完整重跑 client/policy/resource/upstream 流程，不能复用旧 entry 保存的 connector 或 rule pointer。当前实现先限定在已构建的 immutable `PolicyDnsCore`：stale 响应立即返回，按一次性 refresh permit 通过有界 `LateCacheFinalizer::submit_task` 在独立 deadline/cancellation 下重新执行当前 upstream，并以 `CacheCondition::Version` 尝试写回；Runtime 最新 snapshot 捕获仍待后续生命周期接线。
 
 写回以 key + quality + producer revision 做 CAS；旧 producer 不覆盖新完整答案。
 
@@ -167,7 +167,8 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - `CacheKey` 使用固定 format version、长度前缀和 opaque namespace/compatibility 组件编码 canonical query，不包含 DNS ID、runtime revision 或原始 client 地址；
 - `CacheFacade` 将 disabled、miss、fresh、stale 和 store unavailable 分层，并用一次性 refresh permit 防止重复刷新许可；
 - write request 经过准入 helper 后再进入 typed CAS，adapter 错误保持为可降级的 store unavailable，不把具体存储类型泄漏到 DNS Core。
-- `LateCacheFinalizer` 使用有界 semaphore 接收客户端响应完成后的 typed write request；提交容量不足时拒绝，shutdown 取消并等待已提交任务退出，不影响客户端 response。
+- `LateCacheFinalizer` 使用有界 semaphore 接收客户端响应完成后的 typed write request；`submit_task` 也可承载 optimistic refresh 等后台任务。提交容量不足时拒绝，shutdown 取消并等待已提交任务退出，不影响客户端 response。
+- `PolicyDnsCore` 已消费 stale lookup 的一次性 refresh permit：先返回 stale response，再通过当前 immutable core 的 upstream exchange 和 `CacheCondition::Version` 完成后台写回；后台 exchange、question mismatch 或 CAS/store 失败只放弃刷新，不改变已返回的客户端响应。
 
 ## 10. Persistence
 
@@ -224,7 +225,7 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - REFUSED 和 transport failure 不准入；
 - quality CAS 和并发乱序；
 - single-flight 多 waiter 与取消；
-- optimistic 使用最新 snapshot；
+- optimistic 使用最新 Runtime snapshot；（当前已完成同一 immutable `PolicyDnsCore` 内的 snapshot-local refresh，Runtime 级最新 snapshot 捕获待后续接线）
 - resource update 不全局失效；
 - Moka weight/expiry；
 - persistence format/checksum/recovery/page budget；
@@ -239,12 +240,12 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - [x] 实现 single-flight/CAS/显式失效的内存 adapter 首轮切片；
 - [x] 实现共享容量淘汰和 oversized entry 边界；
 - [x] 实现可替换 `PersistentCacheStore` port 的文件快照 adapter；
-- [x] 实现可取消、有界的 `LateCacheFinalizer`；（parallel group 消费接线仍待完整 Cache-Core 管线）
+- [x] 实现可取消、有界的 `LateCacheFinalizer`；（当前已接入 PolicyDnsCore snapshot-local optimistic refresh，parallel group 消费与 Runtime shutdown owner 仍待完整 Cache-Core/Runtime 管线）
 - [ ] 实现 Moka adapter；
 - [ ] 实现独立 SQLite persistence；
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [ ] 完成跨 adapter 一致性、恢复和故障测试。
 
-阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；PolicyCore 新增配置启用缓存后的 upstream 命中测试；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝。当前全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 368 passed、0 failed。真实 Moka/SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
+阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；PolicyCore 新增配置启用缓存后的 upstream 命中和 snapshot-local optimistic stale refresh 测试；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝。当前全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 369 passed、0 failed。真实 Runtime 最新 snapshot 捕获、parallel group late-result sink、Runtime shutdown owner、Moka/SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
 
-当前实现进度：**50%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight、可取消有界 LateCacheFinalizer、基础 Cache-Core fresh/miss/CAS 接线和文件快照 persistence 边界；optimistic refresh、Moka、SQLite persistence 与完整 Runtime snapshot 接线未实现）。
+当前实现进度：**50%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight、可取消有界 LateCacheFinalizer、基础 Cache-Core fresh/miss/CAS 接线、当前 PolicyDnsCore snapshot-local optimistic refresh 和文件快照 persistence 边界；最新 Runtime snapshot/完整生命周期、Moka、SQLite persistence 与跨 adapter 故障测试未实现）。

@@ -13,9 +13,11 @@ use thiserror::Error;
 
 use crate::cache::{
     CacheAdmissionPolicy, CacheFacade, CacheFacadeOptions, CacheFingerprint, CacheKeyDimensions,
-    CacheLookup, CacheWriteRequest, CacheWriteResult, MemoryCacheStore, build_cache_key,
+    CacheLookup, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer, MemoryCacheStore,
+    build_cache_key,
 };
 use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedUpstream};
+use crate::dns::{Cancellation, Deadline};
 use crate::policy::{PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
 use crate::ports::cache::{CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation};
@@ -51,6 +53,7 @@ pub struct PolicyDnsCore {
     hosts: BTreeMap<ConfigId, Arc<HostsIndex>>,
     upstreams: UpstreamRuntime,
     cache: Arc<CacheFacade>,
+    late_cache_finalizer: Arc<LateCacheFinalizer>,
     ttl: u32,
 }
 
@@ -90,7 +93,7 @@ impl PolicyDnsCore {
         upstreams: UpstreamRuntime,
     ) -> Result<Self, PolicyCoreBuildError> {
         let policy = PolicyIndex::from_config(config).map_err(PolicyCoreBuildError::Policy)?;
-        let cache = build_cache_facade(config)?;
+        let (cache, late_cache_finalizer) = build_cache_facade(config)?;
         let mut hosts = BTreeMap::new();
         for resource in &config.hosts {
             let id = match resource {
@@ -112,6 +115,7 @@ impl PolicyDnsCore {
             hosts,
             upstreams,
             cache,
+            late_cache_finalizer,
             ttl,
         })
     }
@@ -236,8 +240,11 @@ impl PolicyDnsCore {
                     }
                 ) =>
             {
-                drop(refresh);
-                return Some(UpstreamOutcome::Response((*record.entry.response).clone()));
+                let stale_response = Arc::clone(&record.entry.response);
+                if refresh.try_consume() {
+                    self.schedule_optimistic_refresh(key.clone(), refresh.version(), request, plan);
+                }
+                return Some(UpstreamOutcome::Response((*stale_response).clone()));
             }
             Ok(CacheLookup::Disabled)
             | Ok(CacheLookup::Miss)
@@ -341,9 +348,52 @@ impl PolicyDnsCore {
             }
         }
     }
+
+    fn schedule_optimistic_refresh(
+        &self,
+        key: crate::ports::cache::CacheKey,
+        stale_version: crate::ports::cache::CacheVersion,
+        request: &DnsRequest,
+        plan: &crate::policy::ResolutionPlan,
+    ) {
+        let query = request.query.clone();
+        let context = optimistic_refresh_context(&request.context);
+        let upstream = plan.upstream.clone();
+        let upstreams = self.upstreams.clone();
+        let cache = Arc::clone(&self.cache);
+        let producer_revision = request.context.runtime_revision;
+        let format_version = key.format_version;
+        let deadline = context.meta.deadline;
+        let _ = self.late_cache_finalizer.submit_task(async move {
+            let Some(UpstreamOutcome::Response(response)) =
+                upstreams.exchange(&upstream, &query, &context).await
+            else {
+                return;
+            };
+            if !response.matches_query(&query) {
+                return;
+            }
+            let _ = cache
+                .write_response(CacheWriteRequest {
+                    key,
+                    condition: crate::ports::cache::CacheCondition::Version(stale_version),
+                    response: Arc::new(response),
+                    now: Instant::now(),
+                    producer_revision,
+                    format_version,
+                    deadline,
+                })
+                .await;
+        });
+    }
 }
 
-fn build_cache_facade(config: &ResolvedConfig) -> Result<Arc<CacheFacade>, PolicyCoreBuildError> {
+const DEFAULT_LATE_CACHE_FINALIZER_CAPACITY: usize = 64;
+const OPTIMISTIC_REFRESH_TIMEOUT_SECS: u64 = 2;
+
+fn build_cache_facade(
+    config: &ResolvedConfig,
+) -> Result<(Arc<CacheFacade>, Arc<LateCacheFinalizer>), PolicyCoreBuildError> {
     let store = MemoryCacheStore::with_max_weight(config.dns.cache.memory_max_size_bytes).map_err(
         |error| PolicyCoreBuildError::Cache {
             reason: error.to_string(),
@@ -357,7 +407,25 @@ fn build_cache_facade(config: &ResolvedConfig) -> Result<Arc<CacheFacade>, Polic
             Some(config.dns.cache.optimistic.max_age),
         ),
     };
-    Ok(Arc::new(CacheFacade::new(Arc::new(store), options)))
+    let finalizer =
+        LateCacheFinalizer::new(DEFAULT_LATE_CACHE_FINALIZER_CAPACITY).map_err(|error| {
+            PolicyCoreBuildError::Cache {
+                reason: format!("{error:?}"),
+            }
+        })?;
+    Ok((
+        Arc::new(CacheFacade::new(Arc::new(store), options)),
+        Arc::new(finalizer),
+    ))
+}
+
+fn optimistic_refresh_context(context: &crate::dns::RequestContext) -> crate::dns::RequestContext {
+    let mut refresh = context.clone();
+    refresh.meta.deadline = Deadline::new(
+        Instant::now() + std::time::Duration::from_secs(OPTIMISTIC_REFRESH_TIMEOUT_SECS),
+    );
+    refresh.meta.cancellation = Cancellation::new();
+    refresh
 }
 
 fn cache_key(
@@ -709,6 +777,7 @@ mod tests {
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RecordType};
 
+    use crate::cache::CacheLookup;
     use crate::config::model::EcsMode;
     use crate::config::resolve::{
         ConfigId, ResolvedEcs, ResolvedOutbound, ResolvedSecretRef, ResolvedUpstream,
@@ -722,16 +791,16 @@ mod tests {
     };
     use crate::ports::exchange::UpstreamOutcome;
     use crate::ports::{PortError, PortFuture};
+    use crate::resource::CanonicalDomain;
     use crate::upstream::{DohHttpRequest, DohHttpResponseOwned, DohHttpTransport};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{PolicyDnsCore, UpstreamRuntime};
+    use super::{PolicyDnsCore, UpstreamRuntime, cache_key};
     use crate::upstream::UpstreamRegistry;
 
     struct FakeDohTransport {
         request: Mutex<Option<DohHttpRequest>>,
-        response: Vec<u8>,
         calls: AtomicUsize,
     }
 
@@ -760,20 +829,9 @@ mod tests {
     }
 
     impl FakeDohTransport {
-        fn response() -> Vec<u8> {
-            let mut message = Message::new(1, MessageType::Response, OpCode::Query);
-            message.metadata.response_code = ResponseCode::NoError;
-            message.add_query(Query::query(
-                Name::from_str("remote.example.").unwrap(),
-                RecordType::A,
-            ));
-            message.to_vec().unwrap()
-        }
-
         fn new() -> Self {
             Self {
                 request: Mutex::new(None),
-                response: Self::response(),
                 calls: AtomicUsize::new(0),
             }
         }
@@ -787,8 +845,14 @@ mod tests {
             _cancellation: &'a Cancellation,
         ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
             self.calls.fetch_add(1, Ordering::AcqRel);
+            let request_body = request.body().to_vec();
             *self.request.lock().unwrap() = Some(request);
-            let body = self.response.clone();
+            let query = Message::from_vec(&request_body).unwrap();
+            let mut response =
+                Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
+            response.metadata.response_code = ResponseCode::NoError;
+            response.add_query(query.queries[0].clone());
+            let body = response.to_vec().unwrap();
             Box::pin(async move {
                 Ok(DohHttpResponseOwned {
                     status: 200,
@@ -892,6 +956,100 @@ mod tests {
         );
         assert_eq!(transport.calls.load(Ordering::Acquire), 1);
         assert_eq!(core.cache().store().stats().hits, 2);
+    }
+
+    #[tokio::test]
+    async fn optimistic_stale_lookup_refreshes_through_late_finalizer() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        config.dns.cache.optimistic.enabled = true;
+        config.dns.cache.failure_ttl = Duration::from_millis(20);
+        let config = Arc::new(config);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, registry).unwrap();
+
+        let first_request = request("remote.example.", RecordType::A);
+        let qname =
+            CanonicalDomain::parse(&first_request.query.question().name().to_ascii()).unwrap();
+        let listener_id = ConfigId::new("dns").unwrap();
+        let plan = core
+            .policy
+            .evaluate(crate::policy::PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: first_request.context.client.client_addr,
+                client_digest: None,
+                qname: Some(&qname),
+            })
+            .unwrap();
+        let key = cache_key(&plan, &first_request).unwrap();
+        let first = core.resolve(&first_request).await.unwrap();
+        assert!(
+            matches!(first, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::NoData)
+        );
+
+        let record = match core
+            .cache()
+            .lookup(&key, Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .await
+            .unwrap()
+        {
+            CacheLookup::Fresh(record) => record,
+            other => panic!("expected a fresh cache record, got {other:?}"),
+        };
+        let now = Instant::now();
+        let stale_entry = crate::ports::cache::CacheEntry {
+            response: Arc::clone(&record.entry.response),
+            inserted_at: now - Duration::from_secs(1),
+            expires_at: now - Duration::from_millis(1),
+            stale_until: Some(now + Duration::from_secs(5)),
+            response_class: record.entry.response_class,
+            producer_revision: record.entry.producer_revision,
+            quality: record.entry.quality,
+            checksum: record.entry.checksum,
+            format_version: record.entry.format_version,
+        };
+        core.cache()
+            .store()
+            .compare_and_swap(
+                key.clone(),
+                crate::ports::cache::CacheCondition::Version(record.version),
+                Arc::new(stale_entry),
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+            )
+            .await
+            .unwrap();
+
+        let stale_request = request("remote.example.", RecordType::A);
+        let stale = core.resolve(&stale_request).await.unwrap();
+        assert!(
+            matches!(stale, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::NoData)
+        );
+
+        let mut refreshed = false;
+        for _ in 0..100 {
+            if transport.calls.load(Ordering::Acquire) >= 2
+                && matches!(
+                    core.cache()
+                        .lookup(&key, Deadline::new(Instant::now() + Duration::from_secs(1)))
+                        .await
+                        .unwrap(),
+                    CacheLookup::Fresh(_)
+                )
+            {
+                refreshed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(refreshed, "stale lookup must complete a bounded refresh");
+        assert_eq!(transport.calls.load(Ordering::Acquire), 2);
     }
 
     fn config() -> std::sync::Arc<crate::config::ResolvedConfig> {
