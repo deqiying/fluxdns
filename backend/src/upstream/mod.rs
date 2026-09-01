@@ -29,6 +29,7 @@ pub use group::{GroupSelector, GroupSelectorError, SelectionLease};
 pub use hosts::{HostsExchange, HostsExchangeBuildError};
 pub use http::{
     DohAddressRequest, DohAddressResolver, TokioDohAddressResolver, TokioDohHttpTransport,
+    TokioSocks5DohHttpTransport,
 };
 pub use outbound::{
     NameResolution, OutboundCredentials, OutboundProfile, OutboundProfileError, OutboundTarget,

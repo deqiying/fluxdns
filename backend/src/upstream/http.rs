@@ -14,11 +14,15 @@ use url::Url;
 
 use crate::config::resolve::ConfigId;
 use crate::dns::{CancelReason, Cancellation, Deadline};
+use crate::ports::effects::{
+    OutboundAddressResolver, OutboundDialer, OutboundStream, TcpReadChunkResult,
+};
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 use super::{
     BootstrapConnectorRegistry, BootstrapResolver, BootstrapResolverError, DOH_MEDIA_TYPE,
-    DohHttpRequest, DohHttpResponseOwned, DohHttpTransport,
+    DohHttpRequest, DohHttpResponseOwned, DohHttpTransport, MAX_DOH_RESPONSE_BODY_BYTES,
+    NameResolution, OutboundProfile, Socks5ConnectError, Socks5Connector, Socks5HandshakeError,
 };
 
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
@@ -44,7 +48,7 @@ impl std::fmt::Debug for DohAddressRequest {
 }
 
 impl DohAddressRequest {
-    fn new(host: &str, port: u16, bootstrap: Option<ConfigId>) -> Self {
+    pub(crate) fn new(host: &str, port: u16, bootstrap: Option<ConfigId>) -> Self {
         Self {
             host: Arc::from(host),
             port,
@@ -236,6 +240,275 @@ impl DohHttpTransport for TokioDohHttpTransport {
     ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
         Box::pin(async move { post_http(request, &*self.resolver, deadline, cancellation).await })
     }
+}
+
+#[derive(Clone)]
+pub struct TokioSocks5DohHttpTransport<D> {
+    proxy: OutboundProfile,
+    connector: Arc<Socks5Connector<D>>,
+    proxy_resolver: Arc<dyn OutboundAddressResolver>,
+    target_resolver: Arc<dyn DohAddressResolver>,
+}
+
+impl<D> std::fmt::Debug for TokioSocks5DohHttpTransport<D> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokioSocks5DohHttpTransport")
+            .field("proxy", &self.proxy)
+            .field("has_proxy_resolver", &true)
+            .field("has_target_resolver", &true)
+            .finish()
+    }
+}
+
+impl<D: OutboundDialer> TokioSocks5DohHttpTransport<D> {
+    pub fn new(
+        proxy: OutboundProfile,
+        dialer: Arc<D>,
+        proxy_resolver: Arc<dyn OutboundAddressResolver>,
+        target_resolver: Arc<dyn DohAddressResolver>,
+    ) -> Self {
+        Self {
+            proxy,
+            connector: Arc::new(Socks5Connector::new(dialer)),
+            proxy_resolver,
+            target_resolver,
+        }
+    }
+}
+
+impl<D: OutboundDialer + 'static> DohHttpTransport for TokioSocks5DohHttpTransport<D> {
+    fn post<'a>(
+        &'a self,
+        request: DohHttpRequest,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
+        Box::pin(async move {
+            post_http_via_socks(
+                request,
+                &self.proxy,
+                &self.connector,
+                &*self.proxy_resolver,
+                &*self.target_resolver,
+                deadline,
+                cancellation,
+            )
+            .await
+        })
+    }
+}
+
+async fn post_http_via_socks<D>(
+    request: DohHttpRequest,
+    proxy: &OutboundProfile,
+    connector: &Socks5Connector<D>,
+    proxy_resolver: &dyn OutboundAddressResolver,
+    target_resolver: &dyn DohAddressResolver,
+    deadline: Deadline,
+    cancellation: &Cancellation,
+) -> Result<DohHttpResponseOwned, PortError>
+where
+    D: OutboundDialer,
+{
+    let endpoint = request.endpoint();
+    if endpoint.scheme() != "http" {
+        return Err(
+            PortError::new(PortErrorClass::Unavailable, "doh_http_transport.post")
+                .with_safe_context("https requires a TLS adapter"),
+        );
+    }
+    let host = request.host();
+    if host.is_empty() || host.bytes().any(|byte| matches!(byte, b'\r' | b'\n')) {
+        return Err(PortError::new(
+            PortErrorClass::InvalidInput,
+            "doh_http_transport.post",
+        ));
+    }
+    check_budget(deadline, cancellation, "doh_http_transport.post")?;
+    let port = endpoint.port().unwrap_or(80);
+    let target = proxy
+        .target(
+            host,
+            port,
+            request.connect_ip(),
+            request.bootstrap().cloned(),
+        )
+        .map_err(|_| {
+            PortError::new(
+                PortErrorClass::InvalidInput,
+                "doh_http_transport.proxy_target",
+            )
+        })?;
+    let resolved_ip = if matches!(target.name_resolution(), NameResolution::Local) {
+        let address = target_resolver
+            .resolve(
+                DohAddressRequest::new(host, port, request.bootstrap().cloned()),
+                deadline,
+                cancellation,
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                PortError::new(
+                    PortErrorClass::Unavailable,
+                    "doh_http_transport.target_resolve",
+                )
+            })?;
+        Some(address.ip())
+    } else {
+        None
+    };
+    let mut stream = connector
+        .connect_profile_with_resolver(
+            proxy,
+            proxy_resolver,
+            &target,
+            resolved_ip,
+            deadline,
+            cancellation,
+        )
+        .await
+        .map_err(map_socks5_connect_error)?;
+
+    let path = request_path(endpoint);
+    let host_header = host_header(endpoint, host);
+    let body = request.body();
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host_header}\r\nContent-Type: {DOH_MEDIA_TYPE}\r\nAccept: {DOH_MEDIA_TYPE}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    );
+    stream
+        .write_all(head.into_bytes(), deadline, cancellation)
+        .await?;
+    stream
+        .write_all(body.to_vec(), deadline, cancellation)
+        .await?;
+    stream.shutdown().await?;
+    read_response_stream(&mut *stream, deadline, cancellation).await
+}
+
+fn map_socks5_connect_error(error: Socks5ConnectError) -> PortError {
+    match error {
+        Socks5ConnectError::Target(_) => PortError::new(
+            PortErrorClass::InvalidInput,
+            "doh_http_transport.proxy_target",
+        ),
+        Socks5ConnectError::ProxyResolve(error) | Socks5ConnectError::Dial(error) => {
+            remap_port_error(error, "doh_http_transport.proxy")
+        }
+        Socks5ConnectError::Handshake(error) => match error {
+            Socks5HandshakeError::Transport(error) => {
+                remap_port_error(error, "doh_http_transport.proxy")
+            }
+            Socks5HandshakeError::Protocol(_) => PortError::new(
+                PortErrorClass::ProtocolViolation,
+                "doh_http_transport.proxy",
+            ),
+            Socks5HandshakeError::CredentialsRequired => {
+                PortError::new(PortErrorClass::InvalidInput, "doh_http_transport.proxy")
+            }
+            Socks5HandshakeError::ProxyRejected(_) => {
+                PortError::new(PortErrorClass::Unavailable, "doh_http_transport.proxy")
+            }
+        },
+    }
+}
+
+fn remap_port_error(error: PortError, operation: &'static str) -> PortError {
+    let class = match error.class() {
+        PortErrorClass::InvalidInput => PortErrorClass::InvalidInput,
+        PortErrorClass::Timeout => PortErrorClass::Timeout,
+        PortErrorClass::Cancelled(reason) => PortErrorClass::Cancelled(*reason),
+        PortErrorClass::Unavailable => PortErrorClass::Unavailable,
+        PortErrorClass::PermissionDenied => PortErrorClass::PermissionDenied,
+        PortErrorClass::ResourceExhausted => PortErrorClass::ResourceExhausted,
+        PortErrorClass::ProtocolViolation => PortErrorClass::ProtocolViolation,
+        PortErrorClass::CorruptData => PortErrorClass::CorruptData,
+        PortErrorClass::Internal => PortErrorClass::Internal,
+    };
+    PortError::new(class, operation)
+}
+
+async fn read_response_stream(
+    stream: &mut dyn OutboundStream,
+    deadline: Deadline,
+    cancellation: &Cancellation,
+) -> Result<DohHttpResponseOwned, PortError> {
+    let mut bytes = Vec::with_capacity(1024);
+    let (header_end, content_length) = loop {
+        if bytes.len() > MAX_HTTP_HEADER_BYTES {
+            return Err(PortError::new(
+                PortErrorClass::ResourceExhausted,
+                "doh_http_transport.read",
+            )
+            .with_safe_context("HTTP headers exceeded the limit"));
+        }
+        let chunk = stream
+            .read_chunk(READ_CHUNK_BYTES, deadline, cancellation)
+            .await?;
+        let data = match chunk {
+            TcpReadChunkResult::Data(data) => data,
+            TcpReadChunkResult::CleanEof => {
+                return Err(PortError::new(
+                    PortErrorClass::ProtocolViolation,
+                    "doh_http_transport.read",
+                )
+                .with_safe_context("HTTP response ended before headers"));
+            }
+        };
+        bytes.extend_from_slice(&data);
+        let Some(header_end) = find_header_end(&bytes) else {
+            continue;
+        };
+        let content_length = parse_headers(&bytes[..header_end])?;
+        break (header_end + 4, content_length);
+    };
+    if content_length > MAX_DOH_RESPONSE_BODY_BYTES {
+        return Err(PortError::new(
+            PortErrorClass::ResourceExhausted,
+            "doh_http_transport.read",
+        ));
+    }
+    let total = header_end.checked_add(content_length).ok_or_else(|| {
+        PortError::new(PortErrorClass::ResourceExhausted, "doh_http_transport.read")
+    })?;
+    if bytes.len() > total {
+        return Err(
+            PortError::new(PortErrorClass::ProtocolViolation, "doh_http_transport.read")
+                .with_safe_context("HTTP response contained trailing bytes"),
+        );
+    }
+    while bytes.len() < total {
+        let chunk = stream
+            .read_chunk(READ_CHUNK_BYTES, deadline, cancellation)
+            .await?;
+        let data = match chunk {
+            TcpReadChunkResult::Data(data) => data,
+            TcpReadChunkResult::CleanEof => {
+                return Err(PortError::new(
+                    PortErrorClass::ProtocolViolation,
+                    "doh_http_transport.read",
+                )
+                .with_safe_context("HTTP response ended before Content-Length"));
+            }
+        };
+        if bytes.len().saturating_add(data.len()) > total {
+            return Err(PortError::new(
+                PortErrorClass::ProtocolViolation,
+                "doh_http_transport.read",
+            )
+            .with_safe_context("HTTP response contained trailing bytes"));
+        }
+        bytes.extend_from_slice(&data);
+    }
+    let (status, content_type) = parse_status_and_content_type(&bytes[..header_end - 4])?;
+    Ok(DohHttpResponseOwned {
+        status,
+        content_type,
+        body: bytes[header_end..total].to_vec(),
+    })
 }
 
 async fn post_http(
@@ -571,9 +844,15 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    use crate::config::model::OutboundType;
+    use crate::config::resolve::{ConfigId, ResolvedOutbound, ResolvedSecretRef};
+    use crate::ports::effects::OutboundAddressResolver;
+    use crate::upstream::TokioOutboundDialer;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
 
@@ -637,6 +916,173 @@ mod tests {
             let target = self.target;
             Box::pin(async move { Ok(vec![target]) })
         }
+    }
+
+    struct FakeOutboundResolver {
+        target: SocketAddr,
+    }
+
+    impl OutboundAddressResolver for FakeOutboundResolver {
+        fn resolve<'a>(
+            &'a self,
+            _host: &'a str,
+            _port: u16,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>> {
+            let target = self.target;
+            Box::pin(async move { Ok(vec![target]) })
+        }
+    }
+
+    fn proxy_profile(url: &str) -> OutboundProfile {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let suffix = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-http-proxy-{}-{timestamp}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("proxy-url");
+        fs::write(&path, url).unwrap();
+        let outbound = ResolvedOutbound {
+            id: ConfigId::new("proxy").unwrap(),
+            kind: OutboundType::Socks5,
+            proxy_url: ResolvedSecretRef {
+                env: None,
+                file: Some(path),
+            },
+        };
+        let profile = OutboundProfile::from_resolved(&outbound, 1024).unwrap();
+        fs::remove_dir_all(root).unwrap();
+        profile
+    }
+
+    async fn serve_socks_http(
+        expected_connect: Vec<u8>,
+    ) -> (SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0_u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            assert_eq!(greeting, [5, 1, 0]);
+            stream.write_all(&[5, 0]).await.unwrap();
+
+            let mut connect = vec![0_u8; expected_connect.len()];
+            stream.read_exact(&mut connect).await.unwrap();
+            assert_eq!(connect, expected_connect);
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                .await
+                .unwrap();
+
+            let mut request = Vec::new();
+            let header_end;
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let count = stream.read(&mut chunk).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&chunk[..count]);
+                let Some(end) = find_header_end(&request) else {
+                    continue;
+                };
+                if request.len() >= end + 5 {
+                    header_end = end + 4;
+                    break;
+                }
+            }
+            let request_text = String::from_utf8(request[..header_end].to_vec()).unwrap();
+            assert!(request_text.starts_with("POST /dns-query?x=1 HTTP/1.1\r\n"));
+            assert!(request_text.contains("Host: dns.example\r\n"));
+            assert!(request_text.contains("Content-Length: 5\r\n"));
+            assert_eq!(&request[header_end..], b"query");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                )
+                .await
+                .unwrap();
+        });
+        (address, server)
+    }
+
+    fn proxy_request() -> DohHttpRequest {
+        DohHttpRequest::new(
+            Url::parse("http://dns.example:80/dns-query?x=1").unwrap(),
+            Some(IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 10))),
+            b"query".to_vec(),
+        )
+    }
+
+    fn proxy_request_without_connect_ip() -> DohHttpRequest {
+        DohHttpRequest::new(
+            Url::parse("http://dns.example/dns-query?x=1").unwrap(),
+            None,
+            b"query".to_vec(),
+        )
+    }
+
+    #[tokio::test]
+    async fn socks5_http_transport_connects_with_resolved_ip_and_posts_http() {
+        let expected_connect = vec![5, 1, 0, 1, 192, 0, 2, 10, 0, 80];
+        let (proxy_address, server) = serve_socks_http(expected_connect).await;
+        let profile = proxy_profile("socks5://proxy.example");
+        let transport = TokioSocks5DohHttpTransport::new(
+            profile,
+            Arc::new(TokioOutboundDialer::new()),
+            Arc::new(FakeOutboundResolver {
+                target: proxy_address,
+            }),
+            Arc::new(TokioDohAddressResolver::new()),
+        );
+
+        let response = transport
+            .post(proxy_request(), deadline(), &Cancellation::new())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type.as_deref(), Some(DOH_MEDIA_TYPE));
+        assert_eq!(response.body, b"OK");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn socks5h_http_transport_connects_with_target_domain() {
+        let expected_connect = vec![
+            5, 1, 0, 3, 11, b'd', b'n', b's', b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0, 80,
+        ];
+        let (proxy_address, server) = serve_socks_http(expected_connect).await;
+        let profile = proxy_profile("socks5h://proxy.example");
+        let transport = TokioSocks5DohHttpTransport::new(
+            profile,
+            Arc::new(TokioOutboundDialer::new()),
+            Arc::new(FakeOutboundResolver {
+                target: proxy_address,
+            }),
+            Arc::new(TokioDohAddressResolver::new()),
+        );
+
+        let response = transport
+            .post(
+                proxy_request_without_connect_ip(),
+                deadline(),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"OK");
+        server.await.unwrap();
     }
 
     #[tokio::test]

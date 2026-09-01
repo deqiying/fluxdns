@@ -245,6 +245,21 @@ pub trait OutboundStream: Send {
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<TcpReadResult, PortError>>;
 
+    fn read_chunk<'a>(
+        &'a mut self,
+        max_bytes: usize,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<TcpReadChunkResult, PortError>> {
+        let _ = (max_bytes, deadline, cancellation);
+        Box::pin(async {
+            Err(PortError::new(
+                super::PortErrorClass::Internal,
+                "outbound.read_chunk.unsupported",
+            ))
+        })
+    }
+
     fn write_all<'a>(
         &'a mut self,
         payload: Vec<u8>,

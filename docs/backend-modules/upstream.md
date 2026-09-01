@@ -1,6 +1,6 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、hosts/plain HTTP DoH registry、Outbound profile/target 规划、协议无关 SOCKS5/SOCKS5H codec、OutboundStream port 与握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver 与最小 SOCKS connector 闭环、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；自定义 transport 的 bootstrap resolver、HTTPS/TLS、proxy/连接池与 Runtime 接线仍未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、hosts/plain HTTP DoH registry、Outbound profile/target 规划、协议无关 SOCKS5/SOCKS5H codec、OutboundStream port 与握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver、最小 SOCKS connector 闭环、standalone plain HTTP SOCKS5/SOCKS5H DoH transport adapter、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；HTTPS/TLS、proxy adapter 的 Registry/Runtime 接线与连接池仍未实现
 >
 > 更新日期：2026-09-01
 >
@@ -19,7 +19,7 @@ Upstream 模块把 typed upstream 配置编译为 `UpstreamRegistry` 和可复�
 | 文件 | 职责 |
 | --- | --- |
 | `doh.rs` | DoH connector、HTTP/TLS/DNS response validation |
-| `http.rs` | Tokio plain HTTP/1.1 DoH request/response adapter；TLS、proxy 和 connection pool 待后续接入 |
+| `http.rs` | Tokio plain HTTP/1.1 DoH request/response adapter，以及 standalone SOCKS5/SOCKS5H DoH adapter；TLS、Registry/Runtime proxy wiring 和 connection pool 待后续接入 |
 | `group.rs` | parallel、round-robin、load-balance、failover、fallback |
 | `bootstrap.rs` | 上游主机名解析与地址 override |
 | `outbound.rs` | direct、SOCKS5、SOCKS5H profile 和 SecretRef |
@@ -38,7 +38,7 @@ prepare 阶段为每个 upstream 生成 typed ID 和 connector handle。当前 r
 - bootstrap dependency；
 - 安全的观测标签。
 
-`UpstreamRegistry::from_resolved` 默认创建共享 bootstrap connector registry，并使用带该 registry 的 `TokioDohHttpTransport` 构造 `http://` DoH；hosts/DoH direct connector 会在构造阶段登记，运行时由 `TokioDohAddressResolver` 按引用查找。HTTPS、proxy、启用的 ECS 覆盖和 Group 在构建边界返回带稳定 kind 的 `UnsupportedUpstream`，不会静默丢弃配置；bootstrap 不再被 registry 静默拒绝，但自定义 DoH transport 的 resolver 能力仍由调用方显式提供。归一化后的 `EcsMode::Disabled` 不会阻止 connector 构造。`ConfigId` 到 `ConnectorId` 的不兼容字符也在构建边界返回稳定错误。
+`UpstreamRegistry::from_resolved` 默认创建共享 bootstrap connector registry，并使用带该 registry 的 `TokioDohHttpTransport` 构造 `http://` DoH；hosts/DoH direct connector 会在构造阶段登记，运行时由 `TokioDohAddressResolver` 按引用查找。HTTPS、proxy、启用的 ECS 覆盖和 Group 在构建边界返回带稳定 kind 的 `UnsupportedUpstream`，不会静默丢弃配置；bootstrap 不再被 registry 静默拒绝，standalone `TokioSocks5DohHttpTransport` 的 proxy/target resolver 能力由调用方显式提供。归一化后的 `EcsMode::Disabled` 不会阻止 connector 构造。`ConfigId` 到 `ConnectorId` 的不兼容字符也在构建边界返回稳定错误。
 
 connector 构建 key 至少包含 upstream、outbound、bootstrap/connect_ip 和 TLS/HTTP profile。相同 key 复用 client 和连接池。
 
@@ -46,7 +46,7 @@ DNS Core 只持有 typed connector/group handle，不读取 URL 或 proxy 配置
 
 ## 3. DoH connector
 
-当前已实现 `TokioDohHttpTransport` 的 plain HTTP/1.1 一次交换：使用 URL host 生成 Host header，使用显式 `connect_ip` 只替换 TCP 连接目标，固定 POST `application/dns-message`，要求 bounded header、`Content-Length` 和 DNS wire body，并将 deadline/cancellation 传递到解析、连接、写入和读取。地址解析通过 `DohAddressResolver` port 注入；默认实现无 bootstrap 时使用 Tokio `lookup_host`，配置 bootstrap 时通过共享 registry 调用 `BootstrapResolver`，显式 `connect_ip` 已验证不会触发 resolver。DoH request envelope 会保留可选的 bootstrap 引用，未配置或未登记 bootstrap adapter 时 fail-closed，不偷偷回退 system resolver。该 adapter 不支持 `https://`，HTTPS/TLS、proxy、HTTP/2 和连接池仍由后续 adapter 负责。
+当前已实现 `TokioDohHttpTransport` 的 plain HTTP/1.1 一次交换：使用 URL host 生成 Host header，使用显式 `connect_ip` 只替换 TCP 连接目标，固定 POST `application/dns-message`，要求 bounded header、`Content-Length` 和 DNS wire body，并将 deadline/cancellation 传递到解析、连接、写入和读取。地址解析通过 `DohAddressResolver` port 注入；默认实现无 bootstrap 时使用 Tokio `lookup_host`，配置 bootstrap 时通过共享 registry 调用 `BootstrapResolver`，显式 `connect_ip` 已验证不会触发 resolver。DoH request envelope 会保留可选的 bootstrap 引用，未配置或未登记 bootstrap adapter 时 fail-closed，不偷偷回退 system resolver。另有 standalone `TokioSocks5DohHttpTransport`，通过注入 proxy `OutboundAddressResolver` 和 target `DohAddressResolver` 复用 profile、SOCKS5/SOCKS5H handshake 与 bounded HTTP/1.1 response path；该 adapter 仍只支持 `http://`，HTTPS/TLS、HTTP/2 和连接池由后续 adapter 负责。
 
 Reqwest client：
 
@@ -96,7 +96,7 @@ bootstrap：
 
 ## 5. Outbound
 
-`OutboundProfile` 在显式 prepare 边界解析 SecretRef 的代理 URL，保存 scheme、代理端点和受保护的 credential material；profile 同时把 URL userinfo 百分号解码为长度受限的 `OutboundCredentials`，但 Debug 只显示长度。`OutboundTarget` 固化目标 host/port、connect_ip、bootstrap 和本地/远程/旁路 hostname resolution 模式。`socks5` codec 构造和解析 method negotiation、username/password、CONNECT 及 reply 帧，`perform_handshake` 通过独立 `OutboundStream` port 编排这些帧并传递 deadline/cancellation；`OutboundDialer`/`TokioOutboundDialer` 负责连接调用方提供的 proxy `SocketAddr`，`Socks5Connector::connect_profile` 组合 profile credential、dial 与 handshake，`connect_profile_with_resolver` 复用 `OutboundAddressResolver` 完成 proxy hostname 解析。连接池和 DoH/Runtime 接线仍由后续 adapter 负责。
+`OutboundProfile` 在显式 prepare 边界解析 SecretRef 的代理 URL，保存 scheme、代理端点和受保护的 credential material；profile 同时把 URL userinfo 百分号解码为长度受限的 `OutboundCredentials`，但 Debug 只显示长度。`OutboundTarget` 固化目标 host/port、connect_ip、bootstrap 和本地/远程/旁路 hostname resolution 模式。`socks5` codec 构造和解析 method negotiation、username/password、CONNECT 及 reply 帧，`perform_handshake` 通过独立 `OutboundStream` port 编排这些帧并传递 deadline/cancellation；`OutboundDialer`/`TokioOutboundDialer` 负责连接调用方提供的 proxy `SocketAddr`，`Socks5Connector::connect_profile` 组合 profile credential、dial 与 handshake，`connect_profile_with_resolver` 复用 `OutboundAddressResolver` 完成 proxy hostname 解析。`TokioSocks5DohHttpTransport` 在此基础上把 proxy resolver、target resolver、SOCKS handshake 和 plain HTTP/1.1 DoH 交换组合成一次性 transport；连接池和 DoH/Runtime 接线仍由后续 adapter 负责。
 
 `socks5://`：
 
@@ -196,7 +196,7 @@ TransportFailure 分类至少包括 connect、DNS bootstrap、proxy、TLS、HTTP
 
 v1 不实现主动健康检查、熔断器或持久健康分数。load-balance 只使用实时 in-flight，不应在文档或指标中称为 health。
 
-当前已实现：`DohExchange` 固定 POST `application/dns-message` 请求，自动分配内部 DNS ID，保留 URL host 作为 Host/SNI，并将显式 `connect_ip`、bootstrap 引用、deadline、cancellation 和 HTTP/协议错误映射到 `UpstreamOutcome`；`TokioDohHttpTransport` 提供 plain HTTP/1.1 loopback-capable adapter，并在默认 Registry 路径接入共享 bootstrap resolver；`BootstrapResolver` 通过注入 connector 执行 A/AAAA 查询并合并地址；`OutboundProfile`/`OutboundTarget` 固化 SecretRef 脱敏、代理 scheme 和目标解析模式；`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；`outcome` 提供按 attempt index 的 terminal/retryable/cancelled 聚合和 fallback 判定。自定义 transport 的 bootstrap resolver 注入、SOCKS5/SOCKS5H 握手与 socket dial、HTTPS/TLS、late cache finalizer 和 Runtime/DNS Core 接线尚未接入。
+当前已实现：`DohExchange` 固定 POST `application/dns-message` 请求，自动分配内部 DNS ID，保留 URL host 作为 Host/SNI，并将显式 `connect_ip`、bootstrap 引用、deadline、cancellation 和 HTTP/协议错误映射到 `UpstreamOutcome`；`TokioDohHttpTransport` 提供 plain HTTP/1.1 loopback-capable adapter，并在默认 Registry 路径接入共享 bootstrap resolver；`BootstrapResolver` 通过注入 connector 执行 A/AAAA 查询并合并地址；`OutboundProfile`/`OutboundTarget` 固化 SecretRef 脱敏、代理 scheme 和目标解析模式；`TokioSocks5DohHttpTransport` 提供 standalone plain HTTP proxy path，并通过注入 resolver 支持本地/远程目标解析；`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；`outcome` 提供按 attempt index 的 terminal/retryable/cancelled 聚合和 fallback 判定。HTTPS/TLS、连接池、late cache finalizer 和 Runtime/DNS Core proxy 接线尚未接入。
 
 ## 10. 测试
 
@@ -229,7 +229,8 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [x] 增加 `OutboundDialer`/`TokioOutboundDialer` 与最小 `Socks5Connector`，验证 loopback socket dial → handshake → CONNECT；
 - [x] 将 profile userinfo 百分号解码为脱敏 `OutboundCredentials`，并接入 `connect_profile` username/password path；
 - [x] 增加 `OutboundAddressResolver`/`TokioOutboundAddressResolver`，将 proxy hostname 解析接入 `connect_profile_with_resolver`；
-- [ ] 为自定义 transport、HTTPS/TLS 和 outbound 提供完整 bootstrap 执行；
+- [x] 增加 `TokioSocks5DohHttpTransport`，注入 proxy/target resolver，完成 plain HTTP DoH 的 SOCKS5/SOCKS5H dial → handshake → HTTP exchange；
+- [ ] 为 HTTPS/TLS adapter 和 Registry 接线提供完整 bootstrap 执行；
 - [ ] 接入连接池、HTTPS/TLS 和 DoH/Runtime proxy 接线；
 - [x] 固化四种 group 模式的纯 member selection；
 - [x] 实现 outcome/fallback 判定边界；
@@ -237,6 +238,6 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 5 项通过，`upstream::doh` 7 项通过，`upstream::bootstrap::tests` 14 项通过，`upstream::http::tests` 7 项通过，`upstream::outbound::tests` 8 项通过，`upstream::socks5::tests` 9 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造、默认 Registry bootstrap loopback 路径与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、bootstrap 引用透传与默认路径 fail-closed、bootstrap response 的 owner/TTL 提取、注入 connector 的 A/AAAA 查询与地址合并、SecretRef 解析和 credential Debug 脱敏、profile userinfo 百分号解码和长度约束、proxy hostname resolver、socks5/socks5h 目标解析模式、SOCKS5 method/auth/CONNECT codec、reply parser、OutboundStream handshake 编排与代理拒绝、Tokio TCP dial 与 loopback SOCKS connector、connect_profile username/password/hostname path、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了默认 Registry 的 plain HTTP bootstrap 路径、无真实网络的 PolicyCore direct path 与注入式 bootstrap connector path；连接池、自定义 transport resolver、RuntimeSnapshot、完整 outbound 和 TLS/proxy 仍未实现。
+阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 5 项通过，`upstream::doh` 7 项通过，`upstream::bootstrap::tests` 14 项通过，`upstream::http::tests` 9 项通过，`upstream::outbound::tests` 8 项通过，`upstream::socks5::tests` 9 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造、默认 Registry bootstrap loopback 路径与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、bootstrap 引用透传与默认路径 fail-closed、bootstrap response 的 owner/TTL 提取、注入 connector 的 A/AAAA 查询与地址合并、SecretRef 解析和 credential Debug 脱敏、profile userinfo 百分号解码和长度约束、proxy hostname resolver、socks5/socks5h 目标解析模式、SOCKS5 method/auth/CONNECT codec、reply parser、OutboundStream handshake 编排与代理拒绝、Tokio TCP dial 与 loopback SOCKS connector、connect_profile username/password/hostname path、plain HTTP/1.1 headers/body、SOCKS5/SOCKS5H DoH adapter 的 IP/domain CONNECT 与 HTTP exchange、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了默认 Registry 的 plain HTTP bootstrap 路径、无真实网络的 PolicyCore direct path、注入式 bootstrap connector path 和 standalone proxy transport loopback；连接池、RuntimeSnapshot、Registry/Runtime proxy wiring 和 TLS 仍未实现。
 
-当前实现进度：**90%**。
+当前实现进度：**93%**。

@@ -12,7 +12,7 @@ use tokio::net::{TcpStream, lookup_host};
 
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::effects::{
-    OutboundAddressResolver, OutboundDialer, OutboundStream, TcpReadResult,
+    OutboundAddressResolver, OutboundDialer, OutboundStream, TcpReadChunkResult, TcpReadResult,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -133,6 +133,35 @@ impl OutboundStream for TokioOutboundStream {
                 offset += count;
             }
             Ok(TcpReadResult::Complete(bytes))
+        })
+    }
+
+    fn read_chunk<'a>(
+        &'a mut self,
+        max_bytes: usize,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<TcpReadChunkResult, PortError>> {
+        Box::pin(async move {
+            if max_bytes == 0 {
+                return Err(PortError::new(
+                    PortErrorClass::InvalidInput,
+                    "outbound.tcp_read_chunk",
+                ));
+            }
+            let mut bytes = vec![0; max_bytes];
+            let count = await_io(
+                self.stream.read(&mut bytes),
+                deadline,
+                cancellation,
+                "outbound.tcp_read_chunk",
+            )
+            .await?;
+            if count == 0 {
+                return Ok(TcpReadChunkResult::CleanEof);
+            }
+            bytes.truncate(count);
+            Ok(TcpReadChunkResult::Data(bytes))
         })
     }
 
