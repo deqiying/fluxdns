@@ -6,6 +6,7 @@
 mod ledger;
 mod resolve_log;
 mod statistics;
+mod writer;
 
 pub use ledger::{BatchDecision, BatchLedger, BatchLedgerError, BatchReceipt, PendingStatsBatch};
 pub use resolve_log::{
@@ -16,3 +17,4 @@ pub use statistics::{
     DimensionCount, PersistenceGapState, StatsAccumulator, StatsAccumulatorError, StatsSnapshot,
     day_utc,
 };
+pub use writer::{InMemoryStorageBackend, STORAGE_SCHEMA_VERSION};

@@ -1,6 +1,6 @@
 # Storage 模块设计
 
-> 状态：v1 方案已完成，已实现纯内存统计 epoch 与 batch ledger；SQLite、详情 writer 和 flush 尚未实现
+> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema 与可替换 stats writer 边界；真实 SQLite pool、详情 writer 和 flush 尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -25,9 +25,10 @@ Storage 模块实现业务 SQLite：
 
 | 文件 | 职责 |
 | --- | --- |
-| `sqlite.rs` | pool、PRAGMA、migration、transaction、health |
+| `sqlite.rs` | pool、PRAGMA、migration、transaction、health（待接入） |
 | `statistics.rs` | sharded counters、checkpoint、batch ledger |
 | `resolve_log.rs` | 有界详情队列、批量写入和淘汰 |
+| `writer.rs` | 无外部依赖的事务/幂等 writer contract 实现与 focused tests |
 
 ## 2. SQLite 初始化
 
@@ -191,6 +192,8 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 - migration 失败保留原库并阻止启动；
 - backup/rollback CLI 属于后续独立契约。
 
+当前已新增 `backend/migrations/0001_storage.sql`，固定 `storage_meta`、按日统计、批次 ledger 和 `resolve_log` 表，以及有限统计维度约束。该 SQL 作为后续 SQLx adapter 的 schema 基线；当前 `InMemoryStorageBackend` 只验证同一事务中的 upsert、幂等重试、冲突拒绝和失败回滚，不声称已经执行 SQLite migration。
+
 ## 12. 测试
 
 - 新库、旧版本库、重复启动 migration；
@@ -207,6 +210,7 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 ## 13. 实现检查清单
 
 - [ ] 建立 SQLx pool/migration；
+- [x] 建立业务 migration schema 与可替换 stats writer contract；
 - [x] 实现内存 stats counters/checkpoint/epoch/ledger 领域边界；
 - [ ] 实现 stats SQLite schema/upsert/checkpoint writer；
 - [ ] 实现独立 resolve-log writer；
@@ -215,6 +219,6 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 - [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
 - [ ] 完成 migration、压力和故障测试。
 
-阶段证据：Storage focused tests 8 项通过，覆盖 UTC day、sharded accumulator、epoch swap、dimension 校验、monotonic batch ID、幂等 commit 和 gap 状态；当前 backend 全量测试为 238 passed、0 failed。
+阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred。真实 SQLx pool、PRAGMA、数据库故障恢复与详情持久化仍未完成。
 
-当前实现进度：**20%**。
+当前实现进度：**35%**。

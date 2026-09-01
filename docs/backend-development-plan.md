@@ -282,7 +282,7 @@ transport / upstream / storage / observability adapters
 - 完成 degraded 状态、persistence gap、低基数 metrics 和脱敏日志；
 - 验收：跨午夜、幂等重试、队列溢出、数据库 busy/磁盘故障测试通过。
 
-当前已完成的纯领域小阶段：Storage 建立 UTC day、sharded stats accumulator、epoch snapshot、persistence gap 和 batch ledger；Observability 建立有界 metric registry、原子 counter/gauge、health 状态、retry/gap 计数和 typed event 脱敏。SQLite migration、详情 writer、最终 tracing writer、flush/backpressure 和故障注入仍未实现。
+当前已完成的纯领域小阶段：Storage 建立 UTC day、sharded stats accumulator、epoch snapshot、persistence gap、batch ledger、业务 migration schema 与可替换 stats writer contract；Observability 建立有界 metric registry、原子 counter/gauge、health 状态、retry/gap 计数和 typed event 脱敏。真实 SQLite pool/migration 执行、详情 writer、最终 tracing writer、flush/backpressure 和故障注入仍未实现。
 
 ### 阶段 10：刷新、故障注入和 v1 验收
 
