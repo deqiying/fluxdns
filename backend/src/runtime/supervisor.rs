@@ -2,6 +2,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
 use thiserror::Error;
 use tokio::task::JoinSet;
@@ -126,6 +128,18 @@ impl From<TaskError> for TaskExit {
 pub struct TaskCompletion {
     pub spec: TaskSpec,
     pub exit: TaskExit,
+    pub restart_count: u32,
+}
+
+impl TaskCompletion {
+    pub fn restart_exhausted(&self) -> bool {
+        matches!(self.exit, TaskExit::Failed(TaskErrorKind::Transient))
+            && matches!(
+                self.spec.restart_policy,
+                RestartPolicy::Transient { max_restarts }
+                    if self.restart_count >= max_restarts
+            )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -135,6 +149,7 @@ pub struct ShutdownReport {
     pub failed: u32,
     pub panicked: u32,
     pub aborted: u32,
+    pub restarted: u32,
     pub deadline_expired: bool,
 }
 
@@ -193,6 +208,51 @@ impl Supervisor {
             TaskCompletion {
                 spec: spec_for_completion,
                 exit,
+                restart_count: 0,
+            }
+        });
+        Ok(())
+    }
+
+    /// 注册一个可重建的 task；仅瞬时失败会按策略有界重试。
+    pub fn spawn_with_factory<F>(
+        &mut self,
+        spec: TaskSpec,
+        factory: F,
+    ) -> Result<(), SupervisorError>
+    where
+        F: Fn() -> TaskFuture + Send + Sync + 'static,
+    {
+        if !self.registered.insert(spec.id.clone()) {
+            return Err(SupervisorError::DuplicateTask(spec.id));
+        }
+        let cancellation = self.cancellation.clone();
+        let factory: Arc<dyn Fn() -> TaskFuture + Send + Sync> = Arc::new(factory);
+        self.tasks.spawn(async move {
+            let mut restart_count = 0;
+            let exit = loop {
+                let result = tokio::select! {
+                    result = (factory)() => result,
+                    _ = cancellation.cancelled() => Err(TaskError::Cancelled),
+                };
+                let exit = match result {
+                    Ok(()) => TaskExit::Completed,
+                    Err(error) => error.into(),
+                };
+                if !should_restart(&spec, &exit, restart_count, &cancellation) {
+                    break exit;
+                }
+                restart_count += 1;
+                let delay = restart_backoff(restart_count);
+                tokio::select! {
+                    _ = cancellation.cancelled() => break TaskExit::Cancelled,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            };
+            TaskCompletion {
+                spec,
+                exit,
+                restart_count,
             }
         });
         Ok(())
@@ -228,6 +288,7 @@ impl Supervisor {
                     } else {
                         TaskExit::Cancelled
                     },
+                    restart_count: 0,
                 })
             }
         }
@@ -242,6 +303,7 @@ impl Supervisor {
             tokio::select! {
                 completion = self.join_next() => {
                     if let Some(completion) = completion {
+                        report.restarted += completion.restart_count;
                         record_exit(&mut report, completion.exit);
                     }
                 }
@@ -278,8 +340,31 @@ fn record_exit(report: &mut ShutdownReport, exit: TaskExit) {
     }
 }
 
+fn should_restart(
+    spec: &TaskSpec,
+    exit: &TaskExit,
+    restart_count: u32,
+    cancellation: &Cancellation,
+) -> bool {
+    !cancellation.is_cancelled()
+        && matches!(exit, TaskExit::Failed(TaskErrorKind::Transient))
+        && matches!(
+            spec.restart_policy,
+            RestartPolicy::Transient { max_restarts } if restart_count < max_restarts
+        )
+}
+
+fn restart_backoff(restart_count: u32) -> Duration {
+    let exponent = restart_count.saturating_sub(1).min(10);
+    Duration::from_millis(1_u64 << exponent)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
     use std::time::{Duration, Instant, SystemTime};
 
     use crate::dns::{CancelReason, Cancellation, Deadline};
@@ -367,6 +452,119 @@ mod tests {
             }
         );
         assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn factory_restarts_transient_failures_within_the_configured_bound() {
+        let mut supervisor = Supervisor::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        supervisor
+            .spawn_with_factory(
+                TaskSpec::new(
+                    "restartable",
+                    "test",
+                    FaultLevel::Degraded,
+                    RestartPolicy::Transient { max_restarts: 2 },
+                )
+                .unwrap(),
+                move || -> super::TaskFuture {
+                    let attempt = factory_attempts.fetch_add(1, Ordering::AcqRel);
+                    Box::pin(async move {
+                        if attempt < 2 {
+                            Err(TaskError::Transient)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                },
+            )
+            .unwrap();
+
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.exit, TaskExit::Completed);
+        assert_eq!(completion.restart_count, 2);
+        assert_eq!(attempts.load(Ordering::Acquire), 3);
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn factory_reports_transient_failure_after_restart_bound_is_exhausted() {
+        let mut supervisor = Supervisor::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        supervisor
+            .spawn_with_factory(
+                TaskSpec::new(
+                    "bounded",
+                    "test",
+                    FaultLevel::FatalEndpoint,
+                    RestartPolicy::Transient { max_restarts: 1 },
+                )
+                .unwrap(),
+                move || -> super::TaskFuture {
+                    factory_attempts.fetch_add(1, Ordering::AcqRel);
+                    Box::pin(async { Err(TaskError::Transient) })
+                },
+            )
+            .unwrap();
+
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.exit, TaskExit::Failed(TaskErrorKind::Transient));
+        assert_eq!(completion.restart_count, 1);
+        assert!(completion.restart_exhausted());
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn shutdown_report_counts_restarts_before_cooperative_cancellation() {
+        let mut supervisor = Supervisor::new();
+        let cancellation = supervisor.cancellation();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        supervisor
+            .spawn_with_factory(
+                TaskSpec::new(
+                    "restart-then-stop",
+                    "test",
+                    FaultLevel::Degraded,
+                    RestartPolicy::Transient { max_restarts: 2 },
+                )
+                .unwrap(),
+                move || -> super::TaskFuture {
+                    let attempt = factory_attempts.fetch_add(1, Ordering::AcqRel);
+                    if attempt < 2 {
+                        Box::pin(async { Err(TaskError::Transient) })
+                    } else {
+                        let cancellation = cancellation.clone();
+                        Box::pin(async move {
+                            cancellation.cancelled().await;
+                            Err(TaskError::Cancelled)
+                        })
+                    }
+                },
+            )
+            .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while attempts.load(Ordering::Acquire) < 3 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let clock = FakeClock::new(Instant::now(), SystemTime::UNIX_EPOCH);
+        let report = supervisor
+            .shutdown(
+                &clock,
+                Deadline::new(clock.monotonic_now() + Duration::from_secs(1)),
+            )
+            .await;
+
+        assert_eq!(report.restarted, 2);
+        assert_eq!(report.cancelled, 1);
+        assert_eq!(attempts.load(Ordering::Acquire), 3);
     }
 
     async fn cooperative_task(cancellation: Cancellation) -> Result<(), TaskError> {

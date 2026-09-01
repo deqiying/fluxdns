@@ -143,6 +143,8 @@ Supervisor
 - 最近启动、失败和重试时间；
 - shutdown hook。
 
+`Supervisor::spawn` 继续接收一次性 `TaskFuture`，用于已经由上层持有重建逻辑的 task。需要 supervisor 自己重建的 task 使用 `spawn_with_factory`：factory 每次尝试生成一个新 future，只有 `TaskError::Transient` 且未收到 shutdown cancellation 时才按 `RestartPolicy::Transient { max_restarts }` 有界重试，并在重试间使用可取消的指数退避。最终 `TaskCompletion` 携带 `restart_count`，达到上限的瞬时失败可由 `restart_exhausted()` 明确识别；`ShutdownReport` 聚合已发生的重试次数。当前 service 的 listener/resource task 仍使用 `RestartPolicy::Never` 或内部自带 backoff，真正按 endpoint 故障矩阵接入 factory 和分项升级仍留在后续阶段。
+
 ## 8. 故障处理
 
 故障等级：
@@ -211,6 +213,7 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [x] async prepare 在 bind 前完成 remote rule-set restore-or-fetch，并把 compiled snapshot 交给 Policy 初始构造；
 - [x] 为 `auto_update=true` 的 remote/file rule-set 与 file hosts 注册 Supervisor refresh task，并在当前 ActiveRuntime 内执行 Policy/Runtime metadata live publish；
 - [x] 由 `Application` 与 `DnsService` 共享持有 `RuntimeCoordinator`，资源 refresh task 通过 coordinator 读取当前活动 runtime；监听器 task 仍固定在启动时实例；
+- [x] `Supervisor::spawn_with_factory` 实现瞬时失败的可取消指数退避、有界重试、重试次数和上限耗尽识别；当前 service task 的具体故障策略接入仍待完成；
 - [ ] 定义状态类型与所有权转换；
 - [ ] 完成跨模块资源装配版 PreparedRuntime/preflight；
 - [ ] 完成真实服务任务版 ActiveRuntime coordinator/CAS 与 reload；
@@ -218,6 +221,6 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [ ] 完成完整 drain/shutdown（flush、checkpoint、超时分项报告）；
 - [ ] 完成并发、故障和时间控制测试。
 
-阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter，并验证 async prepare 可在 bind 前完成 remote restore/fetch、file snapshot load、持久化、refresh worker 构造和第二次 fallback 恢复；`runtime::coordinator::tests::coordinator_refreshes_resource_on_current_active_runtime` 验证 coordinator 级资源刷新代理发布当前活动实例的资源 metadata；service 将 remote/file refresh task 注册进 Supervisor，成功候选通过 ActiveRuntime 的 Policy CAS 和 Runtime metadata CAS 发布，缺失 file 进入失败 backoff。`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS TLS、SOCKS5H、取消和 body limit。真正跨 Runtime snapshot 发布、独立 listener swap 和 flush 生命周期仍未完成。
+阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter，并验证 async prepare 可在 bind 前完成 remote restore/fetch、file snapshot load、持久化、refresh worker 构造和第二次 fallback 恢复；`runtime::coordinator::tests::coordinator_refreshes_resource_on_current_active_runtime` 验证 coordinator 级资源刷新代理发布当前活动实例的资源 metadata；`runtime::supervisor::tests` 验证 factory task 的瞬时失败重试、重试上限耗尽识别和 shutdown report 重试计数；service 将 remote/file refresh task 注册进 Supervisor，成功候选通过 ActiveRuntime 的 Policy CAS 和 Runtime metadata CAS 发布，缺失 file 进入失败 backoff。`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS、SOCKS5H、取消和 body limit。真正跨 Runtime snapshot 发布、独立 listener swap 和 flush 生命周期仍未完成。
 
 当前实现进度：**60%**。已验证 Runtime snapshot 资源摘要、原子资源 metadata publish、service core 构造入口、生产 ResourceFetcher ownership、当前 Policy finalizer owner 和同一 ActiveRuntime 内的 remote/file refresh worker/CAS publish；真正跨 Runtime reload、独立 listener swap、flush 和完整服务级故障矩阵仍未接线。
