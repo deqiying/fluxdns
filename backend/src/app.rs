@@ -423,10 +423,8 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let work = root.join("work");
         let path = root.join("input.yaml");
-        let source = include_str!("../../config-example.yaml").replace(
-            "path: /var/lib/fluxdns",
-            &format!("path: {}", work.display()),
-        );
+        let source = include_str!("../../config-example.yaml")
+            .replace("path: /etc/fluxdns", &format!("path: {}", work.display()));
         std::fs::write(&path, source).unwrap();
 
         let result = super::run_with_args([

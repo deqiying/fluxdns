@@ -239,13 +239,6 @@ fn validate_basic(config: &ConfigDto, report: &mut ConfigErrorReport) {
         ));
     }
 
-    if !config.work.path.is_absolute() {
-        report.push(ConfigError::new(
-            ConfigErrorKind::InvalidValue,
-            "work.path",
-            "work.path must be absolute",
-        ));
-    }
     if !is_non_empty_path(&config.work.path) {
         report.push(ConfigError::new(
             ConfigErrorKind::MissingField,

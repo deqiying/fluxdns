@@ -757,9 +757,21 @@ pub fn resolve_config(
     config: &ConfigDto,
     input_hash: impl Into<String>,
 ) -> Result<ValidatedConfig, ConfigErrorReport> {
+    resolve_config_with_base_dir(config, input_hash, None)
+}
+
+/// Normalize, validate and compile a DTO with an optional configuration-file base directory.
+///
+/// A relative `work.path` is only valid when `config_dir` is present and absolute. Keeping the
+/// no-base wrapper above preserves callers that provide an already-absolute work path.
+pub(crate) fn resolve_config_with_base_dir(
+    config: &ConfigDto,
+    input_hash: impl Into<String>,
+    config_dir: Option<&Path>,
+) -> Result<ValidatedConfig, ConfigErrorReport> {
     validate_config(config)?;
+    let work_path = resolve_work_path(&config.work.path, config_dir)?;
     let bind_plan = build_bind_plan(config)?;
-    let work_path = lexical_normalize(&config.work.path);
     let work = ResolvedWork {
         rules_path: resolve_path(&work_path, &config.work.rules_path),
         snapshot_path: work_path.join("config.yaml"),
@@ -895,6 +907,35 @@ pub fn resolve_config(
             normalized_hash,
         }),
     })
+}
+
+fn resolve_work_path(
+    value: &Path,
+    config_dir: Option<&Path>,
+) -> Result<PathBuf, ConfigErrorReport> {
+    if value.is_absolute() {
+        return Ok(lexical_normalize(value));
+    }
+
+    let Some(config_dir) = config_dir else {
+        let mut report = ConfigErrorReport::default();
+        report.push(ConfigError::new(
+            ConfigErrorKind::InvalidValue,
+            "work.path",
+            "relative work.path requires a configuration file base directory",
+        ));
+        return Err(report);
+    };
+    if !config_dir.is_absolute() {
+        let mut report = ConfigErrorReport::default();
+        report.push(ConfigError::new(
+            ConfigErrorKind::InvalidValue,
+            "work.path",
+            "configuration file base directory must be absolute",
+        ));
+        return Err(report);
+    }
+    Ok(lexical_normalize(&config_dir.join(value)))
 }
 
 fn resolve_dns(

@@ -108,12 +108,12 @@ impl ConfigLoader {
     }
 
     pub fn load_path<P: AsRef<Path>>(&self, path: P) -> Result<ConfigLoadOutput, ConfigLoadError> {
-        let source_path = path.as_ref().to_path_buf();
+        let source_path = absolute_config_path(path.as_ref())?;
         let bytes = read_bounded_file(&source_path, self.options.max_bytes)?;
         let mut output = self.load_bytes_inner(&bytes, Some(source_path.clone()))?;
         if self.options.create_snapshot {
             output.snapshot = create_snapshot(
-                &output.config.work.path,
+                &output.resolved.work.path,
                 &source_path,
                 &bytes,
                 self.options.max_bytes,
@@ -155,9 +155,14 @@ impl ConfigLoader {
                 actual: config.version,
             });
         }
-        let resolved = resolve::resolve_config(&config, migration.report.input_hash.clone())
-            .map_err(ConfigLoadError::Validation)?
-            .resolved;
+        let config_dir = source_path.as_deref().and_then(Path::parent);
+        let resolved = resolve::resolve_config_with_base_dir(
+            &config,
+            migration.report.input_hash.clone(),
+            config_dir,
+        )
+        .map_err(ConfigLoadError::Validation)?
+        .resolved;
         Ok(ConfigLoadOutput {
             config,
             resolved,
@@ -241,6 +246,12 @@ pub enum ConfigLoadError {
         #[source]
         source: io::Error,
     },
+    #[error("resolving configuration path {path} failed: {source}")]
+    ResolvePath {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
     #[error("reading configuration {path} failed: {source}")]
     ReadIo {
         path: PathBuf,
@@ -256,6 +267,19 @@ fn format_location(line: Option<usize>, column: Option<usize>) -> String {
         (None, Some(column)) => format!(" at column {column}"),
         (None, None) => String::new(),
     }
+}
+
+fn absolute_config_path(path: &Path) -> Result<PathBuf, ConfigLoadError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        let current = std::env::current_dir().map_err(|source| ConfigLoadError::ResolvePath {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        current.join(path)
+    };
+    Ok(resolve::lexical_normalize(&absolute))
 }
 
 fn bounded_bytes(bytes: &[u8], limit: usize) -> Result<&[u8], ConfigLoadError> {
@@ -735,7 +759,7 @@ mod tests {
         assert!(!output.resolved.normalized_hash.is_empty());
         assert_eq!(
             output.resolved.work.rules_path,
-            std::path::Path::new("/var/lib/fluxdns/rules")
+            std::path::Path::new("/etc/fluxdns/rules")
         );
         let inner = output
             .resolved
@@ -888,5 +912,80 @@ mod tests {
             output.resolved.normalized_hash,
             equivalent.resolved.normalized_hash
         );
+    }
+
+    #[test]
+    fn load_path_resolves_relative_work_and_project_paths_from_config_directory() {
+        let root = temp_dir();
+        let config_dir = root.join("bootstrap");
+        let config_path = config_dir.join("config.yaml");
+        fs::create_dir_all(&config_dir).unwrap();
+        let source = include_str!("../../../config-example.yaml")
+            .replace("path: /etc/fluxdns", "path: ../runtime")
+            .replace("rules_path: ./rules", "rules_path: ./rules/../rules")
+            .replace(
+                "path: ./data/fluxdns.sqlite3",
+                "path: ./data/./fluxdns.sqlite3",
+            );
+        fs::write(&config_path, source).unwrap();
+
+        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let output = loader.load_from_path(&config_path).unwrap();
+        let work = root.join("runtime");
+        assert_eq!(output.resolved.work.path, work);
+        assert_eq!(output.resolved.work.rules_path, work.join("rules"));
+        assert_eq!(
+            output.resolved.database.path,
+            work.join("data/fluxdns.sqlite3")
+        );
+        assert_eq!(output.resolved.logs.path, work.join("logs/fluxdns.log"));
+        assert_eq!(
+            output.resolved.dns.cache.persistence_path,
+            work.join("cache.db")
+        );
+        assert_eq!(output.source_path, Some(config_path));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_path_uses_resolved_work_path_for_snapshot() {
+        let root = temp_dir();
+        let config_dir = root.join("bootstrap");
+        let config_path = config_dir.join("input.yaml");
+        fs::create_dir_all(&config_dir).unwrap();
+        let source = include_str!("../../../config-example.yaml")
+            .replace("path: /etc/fluxdns", "path: ../runtime");
+        fs::write(&config_path, source.as_bytes()).unwrap();
+
+        let output = super::ConfigLoader::default()
+            .load_from_path(&config_path)
+            .unwrap();
+        let snapshot = root.join("runtime/config.yaml");
+        assert_eq!(output.resolved.work.snapshot_path, snapshot);
+        assert!(matches!(
+            output.snapshot,
+            SnapshotStatus::Created { ref path } if path == &snapshot
+        ));
+        assert_eq!(fs::read(&snapshot).unwrap(), source.as_bytes());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn load_without_source_rejects_relative_work_path() {
+        let source =
+            include_str!("../../../config-example.yaml").replace("path: /etc/fluxdns", "path: ./");
+        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let error = loader.load_str(&source).unwrap_err();
+        match error {
+            ConfigLoadError::Validation(report) => {
+                assert_eq!(report.errors.len(), 1);
+                assert_eq!(report.errors[0].path, "work.path");
+                assert_eq!(
+                    report.errors[0].message,
+                    "relative work.path requires a configuration file base directory"
+                );
+            }
+            other => panic!("expected missing config base error, got {other:?}"),
+        }
     }
 }

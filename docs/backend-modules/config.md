@@ -1,6 +1,6 @@
 # Config 模块设计
 
-> 状态：v1 方案和阶段 2 既有实现已完成并验证；相对 `work.path` 解析契约已补充，待同步实现
+> 状态：v1 方案和阶段 2 实现已完成；既有基线已验证，相对 `work.path` 增量待 Rust 1.98 环境复验
 >
 > 更新日期：2026-09-01
 >
@@ -183,7 +183,7 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 
 阶段 2 当前基线验证（测试数量可能随后续阶段增量）：
 
-- 阶段 2 记录起点为 69 tests；当前工作树已增量至 99 tests，`cargo test --manifest-path backend/Cargo.toml --locked -- --test-threads=1`：99 passed、0 failed；
+- 阶段 2 记录起点为 69 tests；既有工作树基线为 99 tests。2026-09-01 新增路径解析测试后，需在可用 Rust 1.98 toolchain 下重新运行 `cargo test --manifest-path backend/Cargo.toml --locked -- --test-threads=1`；
 - `cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings`：通过；
 - `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过。
 
@@ -196,6 +196,6 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - [x] 完成安全配置快照；
 - [x] 建立 strict example、migration、SecretRef、snapshot、继承和 bind matrix tests；property tests 与最终全量复核仍可在后续验证中补充；
 - [x] 生成独立 `ValidatedConfig`/`ResolvedConfig` 和 prepare 输入边界；Runtime 实际消费与 App 启动接线属于阶段 3。
-- [ ] 将配置来源目录传入归一化流程，按两级基准支持相对 `work.path`，并补齐快照与路径矩阵测试。
+- [x] 将配置来源目录传入归一化流程，按两级基准支持相对 `work.path`，并补齐快照与路径矩阵测试。
 
-当前既有阶段 2 实现进度：**100%**；2026-09-01 新增的相对 `work.path` 契约尚待实现与验证。资源网络首次 snapshot、Runtime/App 启动闭环不计入本阶段。
+当前阶段 2 Config 实现进度：**100%**；相对 `work.path` 契约已纳入加载、归一化、快照和路径矩阵测试，新增测试尚待 Rust 1.98 环境复验。资源网络首次 snapshot、Runtime/App 启动闭环不计入本阶段。
