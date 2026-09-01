@@ -59,11 +59,13 @@ mise exec -- cargo fmt --manifest-path backend/Cargo.toml -- --check
 mise exec -- cargo test --manifest-path backend/Cargo.toml
 ```
 
-执行 DoH 测试前先检查工具是否已存在（例如 `Get-Command ddoge`、`Get-Command curl.exe` 或对应系统的 `where` 命令）。
+执行 DoH 测试前先检查工具是否已存在（例如 `Get-Command doggo`、`Get-Command curl.exe` 或对应系统的 `where` 命令）。
 
-- DoH 测试可以使用已有的 `ddoge`、`curl` 及其他系统常见工具；具体参数以本机工具的 `--help` 和版本为准，不在本规范中假定未验证的参数。
-- 禁止未经允许通过 `cargo install`、`npm install -g`、`pip install`、Scoop、WinGet、Chocolatey 或其他包管理器擅自安装测试工具。
-- 只有项目 `mise.toml` 明确声明且 `mise` 支持管理的工具，才可以使用 `mise install` 安装或切换版本；未声明的工具缺失时应记录为环境阻塞并请求授权，不要自行替代安装。
+- DoH 测试可以使用已有的 `doggo`、`curl` 及其他系统常见工具；具体参数以本机工具的 `--help` 和版本为准，不在本规范中假定未验证的参数。
+- 禁止未经批准安装额外工具。
+- 项目当前确实需要且本机缺失的工具（例如检查 SQLite 数据库所需的 SQLite CLI）可以自行安装，但必须确认当前 `mise` 支持管理该工具，并通过 `mise` 安装或切换版本；是否已写入 `mise.toml` 不改变这条安装边界。
+- `mise` 不支持的工具、与当前项目任务无关的工具以及其他依赖工具，安装前必须获得明确批准。未经批准不得通过 `cargo install`、`npm install -g`、`pip install`、Scoop、WinGet、Chocolatey 或其他包管理器绕过该规则。
+- 如果工具版本需要成为项目共享基线，应同步更新 `mise.toml`；个人临时工具不写入仓库配置。
 - 测试脚本应记录实际使用的工具及版本，避免把个人环境中的隐式依赖当成项目要求。
 
 ## 4. DoH 本地 smoke test
@@ -71,11 +73,17 @@ mise exec -- cargo test --manifest-path backend/Cargo.toml
 DoH smoke test 只验证本地启动实例和本次改动涉及的行为，不以远程服务可用性代替本地验证。建议流程如下：
 
 1. 使用 `_fluxdns/config.yaml` 启动 `validate` 或 `run`；端口、证书和资源路径使用本地测试值，避免占用生产端口或写入仓库外的共享数据。
-2. 确认 DoH listener 已成功绑定，再使用已有的 `ddoge` 或 `curl` 发送 DoH GET/POST 请求。工具缺失时停止该项测试并报告，不临时安装替代工具。
+2. 确认 DoH listener 已成功绑定，再使用已有的 `doggo` 或 `curl` 发送 DoH GET/POST 请求。工具缺失时停止该项测试并报告，不临时安装替代工具。
 3. 对每个请求记录请求方式、URL 路径、HTTP 状态、`Content-Type`、DNS 响应 ID/RCODE 以及失败原因；必要的查询数据放在 `_fluxdns/` 下的临时文件中。
 4. 验证结束后停止服务，检查日志和数据库是否写入预期位置，并确认 `git status --short` 没有出现未忽略的运行时文件。
 
 DoH 测试至少覆盖当前实现支持的 GET 和 POST 入口；HTTP 层错误与 DNS 层错误要分别记录，不能只看到 HTTP 2xx 就判定 DNS 响应正确。测试输出不得包含 SecretRef 实际值、完整认证信息或不必要的原始 DNS wire；共享日志中也不要写入敏感查询参数。
+
+### external 模式边界
+
+- 不得为了测试 DoH `external` 模式而安装 Nginx、Caddy、Traefik 或其他反向代理工具；反向代理不属于本地 DoH 测试的默认依赖。
+- 如果现有的 `doggo`、`curl` 或其他已获准工具无法完成 `external` 模式验证，可以跳过该模式，不得为了补齐测试而自行安装反向代理。
+- 跳过 `external` 模式时，必须在测试结果中记录未执行的模式、实际尝试过的工具、具体限制和后续需要的环境条件；不得将跳过描述为通过。
 
 ## 5. 结果记录
 
