@@ -233,6 +233,28 @@ pub trait TcpConnectionHandle: Send {
     fn shutdown(&mut self) -> PortFuture<'_, Result<(), PortError>>;
 }
 
+/// 已连接 outbound byte stream 的协议无关操作。
+///
+/// 该 trait 与入站 `TcpConnectionHandle` 分离，避免把连接建立方向和
+/// 生命周期混入 listener/session 所有权；具体 dial 仍由后续 adapter 提供。
+pub trait OutboundStream: Send {
+    fn read_exact<'a>(
+        &'a mut self,
+        length: usize,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<TcpReadResult, PortError>>;
+
+    fn write_all<'a>(
+        &'a mut self,
+        payload: Vec<u8>,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<(), PortError>>;
+
+    fn shutdown(&mut self) -> PortFuture<'_, Result<(), PortError>>;
+}
+
 /// 已激活 TCP listener 的协议无关操作。
 pub trait TcpListenerHandle: Send + Sync {
     fn local_addr(&self) -> Result<SocketAddr, PortError>;

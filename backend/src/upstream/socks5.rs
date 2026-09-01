@@ -9,6 +9,10 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::dns::{CancelReason, Cancellation, Deadline};
+use crate::ports::effects::{OutboundStream, TcpReadResult};
+use crate::ports::{PortError, PortErrorClass, PortFuture};
+
 use super::{NameResolution, OutboundTarget};
 
 pub const SOCKS5_VERSION: u8 = 0x05;
@@ -274,6 +278,160 @@ pub fn parse_connect_response(frame: &[u8]) -> Result<Socks5ConnectResponse, Soc
     })
 }
 
+#[derive(Clone, Copy)]
+pub struct Socks5Credentials<'a> {
+    pub username: &'a [u8],
+    pub password: &'a [u8],
+}
+
+impl fmt::Debug for Socks5Credentials<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Socks5Credentials")
+            .field("username_len", &self.username.len())
+            .field("password_len", &self.password.len())
+            .finish()
+    }
+}
+
+/// 在已连接的 outbound stream 上执行 SOCKS5 method、认证和 CONNECT。
+pub fn perform_handshake<'a>(
+    stream: &'a mut dyn OutboundStream,
+    address: &'a Socks5Address,
+    port: u16,
+    credentials: Option<Socks5Credentials<'a>>,
+    deadline: Deadline,
+    cancellation: &'a Cancellation,
+) -> PortFuture<'a, Result<(), Socks5HandshakeError>> {
+    Box::pin(async move {
+        if cancellation.is_cancelled() {
+            return Err(Socks5HandshakeError::Transport(PortError::new(
+                PortErrorClass::Cancelled(
+                    cancellation
+                        .reason()
+                        .unwrap_or(CancelReason::UpstreamCancelled),
+                ),
+                "socks5.handshake",
+            )));
+        }
+
+        write_frame(
+            stream,
+            encode_method_request(credentials.is_some()),
+            deadline,
+            cancellation,
+        )
+        .await?;
+        let method = parse_method_response(
+            &read_frame(stream, 2, deadline, cancellation, "socks5.method").await?,
+        )
+        .map_err(Socks5HandshakeError::Protocol)?;
+        if matches!(method, Socks5AuthMethod::UsernamePassword) {
+            let Some(credentials) = credentials else {
+                return Err(Socks5HandshakeError::CredentialsRequired);
+            };
+            write_frame(
+                stream,
+                encode_userpass_request(credentials.username, credentials.password)
+                    .map_err(Socks5HandshakeError::Protocol)?,
+                deadline,
+                cancellation,
+            )
+            .await?;
+            parse_userpass_response(
+                &read_frame(stream, 2, deadline, cancellation, "socks5.userpass").await?,
+            )
+            .map_err(Socks5HandshakeError::Protocol)?;
+        }
+
+        write_frame(
+            stream,
+            encode_connect_request(address, port).map_err(Socks5HandshakeError::Protocol)?,
+            deadline,
+            cancellation,
+        )
+        .await?;
+        let response =
+            parse_connect_response(&read_connect_response(stream, deadline, cancellation).await?)
+                .map_err(Socks5HandshakeError::Protocol)?;
+        if !response.reply().is_success() {
+            return Err(Socks5HandshakeError::ProxyRejected(response.reply()));
+        }
+        Ok(())
+    })
+}
+
+async fn write_frame(
+    stream: &mut dyn OutboundStream,
+    frame: Vec<u8>,
+    deadline: Deadline,
+    cancellation: &Cancellation,
+) -> Result<(), Socks5HandshakeError> {
+    stream
+        .write_all(frame, deadline, cancellation)
+        .await
+        .map_err(Socks5HandshakeError::Transport)
+}
+
+async fn read_frame(
+    stream: &mut dyn OutboundStream,
+    length: usize,
+    deadline: Deadline,
+    cancellation: &Cancellation,
+    operation: &'static str,
+) -> Result<Vec<u8>, Socks5HandshakeError> {
+    match stream
+        .read_exact(length, deadline, cancellation)
+        .await
+        .map_err(Socks5HandshakeError::Transport)?
+    {
+        TcpReadResult::Complete(frame) if frame.len() == length => Ok(frame),
+        TcpReadResult::Complete(_) => Err(Socks5HandshakeError::Transport(
+            PortError::new(PortErrorClass::ProtocolViolation, operation)
+                .with_safe_context("proxy returned an unexpected frame length"),
+        )),
+        TcpReadResult::CleanEof => Err(Socks5HandshakeError::Transport(
+            PortError::new(PortErrorClass::ProtocolViolation, operation)
+                .with_safe_context("proxy closed the stream during handshake"),
+        )),
+    }
+}
+
+async fn read_connect_response(
+    stream: &mut dyn OutboundStream,
+    deadline: Deadline,
+    cancellation: &Cancellation,
+) -> Result<Vec<u8>, Socks5HandshakeError> {
+    let header = read_frame(stream, 4, deadline, cancellation, "socks5.connect").await?;
+    let address_type = header[3];
+    let mut frame = header;
+    let remaining = match address_type {
+        0x01 => 6,
+        0x04 => 18,
+        0x03 => {
+            let length_frame =
+                read_frame(stream, 1, deadline, cancellation, "socks5.connect").await?;
+            let length = length_frame[0] as usize;
+            if length == 0 {
+                return Err(Socks5HandshakeError::Protocol(
+                    Socks5ProtocolError::InvalidDomain,
+                ));
+            }
+            frame.extend_from_slice(&length_frame);
+            length + 2
+        }
+        _ => {
+            return Err(Socks5HandshakeError::Protocol(
+                Socks5ProtocolError::UnsupportedAddressType,
+            ));
+        }
+    };
+    frame.extend_from_slice(
+        &read_frame(stream, remaining, deadline, cancellation, "socks5.connect").await?,
+    );
+    Ok(frame)
+}
+
 fn decode_address(
     frame: &[u8],
     offset: usize,
@@ -366,20 +524,78 @@ pub enum Socks5ProtocolError {
     UnsupportedAddressType,
 }
 
+#[derive(Debug, Error)]
+pub enum Socks5HandshakeError {
+    #[error("SOCKS5 protocol error: {0}")]
+    Protocol(#[source] Socks5ProtocolError),
+    #[error("SOCKS5 stream operation failed: {0}")]
+    Transport(#[source] PortError),
+    #[error("SOCKS5 proxy selected username/password without credentials")]
+    CredentialsRequired,
+    #[error("SOCKS5 proxy rejected CONNECT: {0:?}")]
+    ProxyRejected(Socks5Reply),
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Instant;
 
     use crate::config::resolve::{ConfigId, ResolvedOutbound, ResolvedSecretRef};
+    use crate::dns::{Cancellation, Deadline};
+    use crate::ports::effects::{OutboundStream, TcpReadResult};
+    use crate::ports::{PortError, PortFuture};
 
     use super::{
-        NameResolution, Socks5Address, Socks5AuthMethod, Socks5ProtocolError, Socks5Reply,
-        Socks5TargetError, address_for_target, encode_connect_request, encode_method_request,
-        encode_userpass_request, parse_connect_response, parse_method_response,
-        parse_userpass_response,
+        NameResolution, Socks5Address, Socks5AuthMethod, Socks5HandshakeError, Socks5ProtocolError,
+        Socks5Reply, Socks5TargetError, address_for_target, encode_connect_request,
+        encode_method_request, encode_userpass_request, parse_connect_response,
+        parse_method_response, parse_userpass_response, perform_handshake,
     };
     use crate::upstream::OutboundProfile;
+
+    struct FakeStream {
+        reads: VecDeque<TcpReadResult>,
+        writes: Vec<Vec<u8>>,
+    }
+
+    impl FakeStream {
+        fn new(reads: impl IntoIterator<Item = TcpReadResult>) -> Self {
+            Self {
+                reads: reads.into_iter().collect(),
+                writes: Vec::new(),
+            }
+        }
+    }
+
+    impl OutboundStream for FakeStream {
+        fn read_exact<'a>(
+            &'a mut self,
+            _length: usize,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<TcpReadResult, PortError>> {
+            Box::pin(async move { Ok(self.reads.pop_front().unwrap_or(TcpReadResult::CleanEof)) })
+        }
+
+        fn write_all<'a>(
+            &'a mut self,
+            payload: Vec<u8>,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<(), PortError>> {
+            Box::pin(async move {
+                self.writes.push(payload);
+                Ok(())
+            })
+        }
+
+        fn shutdown(&mut self) -> PortFuture<'_, Result<(), PortError>> {
+            Box::pin(async { Ok(()) })
+        }
+    }
 
     fn profile(url: &str) -> OutboundProfile {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -550,5 +766,103 @@ mod tests {
             parse_connect_response(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80, 0]),
             Err(Socks5ProtocolError::TrailingBytes)
         );
+    }
+
+    #[tokio::test]
+    async fn handshake_runs_no_auth_and_domain_connect() {
+        let target = profile("socks5h://proxy.example")
+            .target("dns.example", 443, None, None)
+            .unwrap();
+        let address = address_for_target(&target, None).unwrap();
+        let mut stream = FakeStream::new([
+            TcpReadResult::Complete(vec![5, 0]),
+            TcpReadResult::Complete(vec![5, 0, 0, 3]),
+            TcpReadResult::Complete(vec![11]),
+            TcpReadResult::Complete(vec![
+                b'd', b'n', b's', b'.', b'e', b'x', b'a', b'm', b'p', b'l', b'e', 0x01, 0xbb,
+            ]),
+        ]);
+        perform_handshake(
+            &mut stream,
+            &address,
+            target.port(),
+            None,
+            Deadline::new(Instant::now() + std::time::Duration::from_secs(1)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(stream.writes.len(), 2);
+        assert_eq!(stream.writes[0], vec![5, 1, 0]);
+        assert_eq!(&stream.writes[1][..5], &[5, 1, 0, 3, 11]);
+    }
+
+    #[tokio::test]
+    async fn handshake_runs_username_password_and_rejects_proxy_reply() {
+        let target = profile("socks5://proxy.example")
+            .target("dns.example", 443, None, None)
+            .unwrap();
+        let address = address_for_target(&target, Some(IpAddr::V4(Ipv4Addr::LOCALHOST))).unwrap();
+        let mut stream = FakeStream::new([
+            TcpReadResult::Complete(vec![5, 2]),
+            TcpReadResult::Complete(vec![1, 0]),
+            TcpReadResult::Complete(vec![5, 5, 0, 1]),
+            TcpReadResult::Complete(vec![127, 0, 0, 1, 0, 80]),
+        ]);
+        let error = perform_handshake(
+            &mut stream,
+            &address,
+            target.port(),
+            Some(super::Socks5Credentials {
+                username: b"user",
+                password: b"pass",
+            }),
+            Deadline::new(Instant::now() + std::time::Duration::from_secs(1)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            Socks5HandshakeError::ProxyRejected(Socks5Reply::ConnectionRefused)
+        ));
+        assert_eq!(stream.writes[0], vec![5, 2, 0, 2]);
+        assert_eq!(
+            stream.writes[1],
+            vec![1, 4, b'u', b's', b'e', b'r', 4, b'p', b'a', b's', b's']
+        );
+    }
+
+    #[tokio::test]
+    async fn handshake_maps_missing_credentials_and_clean_eof() {
+        let target = profile("socks5h://proxy.example")
+            .target("dns.example", 443, None, None)
+            .unwrap();
+        let address = address_for_target(&target, None).unwrap();
+        let mut stream = FakeStream::new([TcpReadResult::Complete(vec![5, 2])]);
+        let error = perform_handshake(
+            &mut stream,
+            &address,
+            target.port(),
+            None,
+            Deadline::new(Instant::now() + std::time::Duration::from_secs(1)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, Socks5HandshakeError::CredentialsRequired));
+
+        let mut stream = FakeStream::new([TcpReadResult::CleanEof]);
+        let error = perform_handshake(
+            &mut stream,
+            &address,
+            target.port(),
+            None,
+            Deadline::new(Instant::now() + std::time::Duration::from_secs(1)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, Socks5HandshakeError::Transport(_)));
     }
 }

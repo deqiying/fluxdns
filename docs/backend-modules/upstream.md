@@ -1,6 +1,6 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、hosts/plain HTTP DoH registry、Outbound profile/target 规划、协议无关 SOCKS5/SOCKS5H codec、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；自定义 transport 的 bootstrap resolver、SOCKS5/SOCKS5H 实际 stream handshake 与 outbound 仍未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、hosts/plain HTTP DoH registry、Outbound profile/target 规划、协议无关 SOCKS5/SOCKS5H codec、OutboundStream port 与握手认证编排、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；自定义 transport 的 bootstrap resolver、SOCKS5/SOCKS5H 实际 socket dial 与 outbound 仍未实现
 >
 > 更新日期：2026-09-01
 >
@@ -96,7 +96,7 @@ bootstrap：
 
 ## 5. Outbound
 
-`OutboundProfile` 在显式 prepare 边界解析 SecretRef 的代理 URL，保存 scheme、代理端点和受保护的 credential material；`OutboundTarget` 固化目标 host/port、connect_ip、bootstrap 和本地/远程/旁路 hostname resolution 模式。`socks5` codec 只构造和解析 method negotiation、username/password、CONNECT 及 reply 帧，不执行 DNS、stream I/O 或 socket dial。
+`OutboundProfile` 在显式 prepare 边界解析 SecretRef 的代理 URL，保存 scheme、代理端点和受保护的 credential material；`OutboundTarget` 固化目标 host/port、connect_ip、bootstrap 和本地/远程/旁路 hostname resolution 模式。`socks5` codec 构造和解析 method negotiation、username/password、CONNECT 及 reply 帧，`perform_handshake` 通过独立 `OutboundStream` port 编排这些帧并传递 deadline/cancellation；二者都不负责系统 DNS、socket dial 或连接池。
 
 `socks5://`：
 
@@ -118,6 +118,7 @@ Secret 变化在 v1 需要构建新 candidate，不对现有 client 原地修改
 - username/password 和 CONNECT 帧均限制单字段不超过 255 字节，拒绝空 credential、非法端口和超界 domain；
 - CONNECT 地址支持 IPv4、IPv6 和远程 domain；`socks5` 本地解析必须先提供已解析 IP，`socks5h` 无 `connect_ip` 时保留 domain；
 - response parser 验证 version、reserved、address type、完整长度并保留 reply/bound address；
+- `perform_handshake` 按 response address type 读取固定或可变长度 frame，区分 credentials 缺失、proxy reply、clean EOF 和底层 port 错误；
 - codec 不创建连接，也不记录 credential 或完整 domain 内容。
 
 ## 6. Group 总体语义
@@ -221,14 +222,15 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [x] 将 bootstrap resolver 接入默认 DoH address resolver、Registry 和 plain HTTP 实际路径；
 - [x] 解析 outbound SecretRef，固化 socks5/socks5h profile 与本地/远程目标规划；
 - [x] 实现无网络副作用的 SOCKS5/SOCKS5H method、认证、CONNECT codec 与 reply parser；
+- [x] 增加独立 `OutboundStream` port，并实现 deadline/cancellation 约束的 SOCKS5/SOCKS5H 握手认证编排；
 - [ ] 为自定义 transport、HTTPS/TLS 和 outbound 提供完整 bootstrap 执行；
-- [ ] 实现 SOCKS5/SOCKS5H stream 握手、认证 I/O 和 socket dial；
+- [ ] 实现 SOCKS5/SOCKS5H 系统 stream dial、连接池和 proxy 接线；
 - [x] 固化四种 group 模式的纯 member selection；
 - [x] 实现 outcome/fallback 判定边界；
 - [ ] 接入 group exchange、fallback 执行与 late cache finalizer；
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 5 项通过，`upstream::doh` 7 项通过，`upstream::bootstrap::tests` 14 项通过，`upstream::http::tests` 7 项通过，`upstream::outbound::tests` 4 项通过，`upstream::socks5::tests` 6 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造、默认 Registry bootstrap loopback 路径与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、bootstrap 引用透传与默认路径 fail-closed、bootstrap response 的 owner/TTL 提取、注入 connector 的 A/AAAA 查询与地址合并、SecretRef 解析和 credential Debug 脱敏、socks5/socks5h 目标解析模式、SOCKS5 method/auth/CONNECT codec 与 reply parser、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了默认 Registry 的 plain HTTP bootstrap 路径、无真实网络的 PolicyCore direct path 与注入式 bootstrap connector path；SOCKS5/SOCKS5H 实际 stream handshake、socket dial、自定义 transport resolver、RuntimeSnapshot、真实 outbound 和 TLS/proxy 仍未实现。
+阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 5 项通过，`upstream::doh` 7 项通过，`upstream::bootstrap::tests` 14 项通过，`upstream::http::tests` 7 项通过，`upstream::outbound::tests` 4 项通过，`upstream::socks5::tests` 9 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造、默认 Registry bootstrap loopback 路径与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、bootstrap 引用透传与默认路径 fail-closed、bootstrap response 的 owner/TTL 提取、注入 connector 的 A/AAAA 查询与地址合并、SecretRef 解析和 credential Debug 脱敏、socks5/socks5h 目标解析模式、SOCKS5 method/auth/CONNECT codec、reply parser、OutboundStream handshake 编排与代理拒绝、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了默认 Registry 的 plain HTTP bootstrap 路径、无真实网络的 PolicyCore direct path 与注入式 bootstrap connector path；SOCKS5/SOCKS5H 系统 socket dial、自定义 transport resolver、RuntimeSnapshot、真实 outbound 和 TLS/proxy 仍未实现。
 
-当前实现进度：**79%**。
+当前实现进度：**82%**。
