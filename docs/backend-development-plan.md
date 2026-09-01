@@ -10,13 +10,13 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 313 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、hosts/plain HTTP DoH registry、group member selection 和结果聚合/fallback 判定，但 HTTPS/TLS、bootstrap/proxy 和 Runtime/DNS Core 接线仍未完成；Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、direct hosts/plain HTTP DoH registry wiring、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验，以及 scheduler/coordinator 的 Runtime-facing 纯逻辑编排；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、bootstrap/连接执行、Moka/SQLite persistence、真实 resource fetch/parse/persist worker、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
+仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 314 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、系统 socket capability、Application CLI/校验接线和服务任务编排；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、hosts/plain HTTP DoH registry、PolicyCore direct request path、group member selection 和结果聚合/fallback 判定，但 HTTPS/TLS、bootstrap/proxy、真实 outbound 和 Runtime snapshot 接线仍未完成；Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、direct hosts/plain HTTP DoH registry wiring、注入式 DoH request path、请求级资源规则匹配和安全的 matched-rule 摘要；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验，以及 scheduler/coordinator 的 Runtime-facing 纯逻辑编排；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH TLS/PROXY/forwarded、bootstrap/连接执行、Moka/SQLite persistence、真实 resource fetch/parse/persist worker、完整 DNS Core→Policy→Cache→Upstream 管线、真实 SQLite/detail/telemetry writer 仍未实现。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **52.1%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合、可注入 DoH exchange、plain HTTP transport 和 registry wiring，Storage 已增加业务 schema 与 writer contract，Resource 已增加 scheduler/coordinator 的 Runtime-facing 编排边界；仍缺少 TLS、代理信任、HTTPS 出站、bootstrap、Runtime snapshot 资源接线、Moka/SQLite persistence、真实 resource worker、完整 upstream/Core 管线和完整故障验收 |
-| v1 交付总进度 | **56.9%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 52.1%` |
+| 后端代码实现进度 | **53.0%** | Config 达到 100% 模块验收口径；DNS Core/Policy/Resource 已具备资源 hosts/rule 的主 happy path 和 focused tests，Cache 已增加容量淘汰与文件快照边界，Upstream 已增加结果聚合、可注入 DoH exchange、plain HTTP transport、registry wiring 和注入式 PolicyCore request path，Storage 已增加业务 schema 与 writer contract，Resource 已增加 scheduler/coordinator 的 Runtime-facing 编排边界；仍缺少 TLS、代理信任、HTTPS 出站、bootstrap、Runtime snapshot 资源接线、Moka/SQLite persistence、真实 resource worker、完整 upstream/Core 管线和完整故障验收 |
+| v1 交付总进度 | **57.7%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 53.0%` |
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -61,8 +61,8 @@ v1 交付范围：
 | Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 35% | 12% |
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 50% | 10% |
-| Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 50% | 8% |
-| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 60% | 10% |
+| Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 55% | 8% |
+| Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 65% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 50% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 65% | 7% |
 | Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 35% | 8% |
@@ -71,7 +71,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 50% + 10% × 60% + 9% × 50% + 7% × 65% + 8% × 35% + 3% × 30% ≈ 52.1%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 35% + 11% × 50% + 10% × 50% + 8% × 55% + 10% × 65% + 9% × 50% + 7% × 65% + 8% × 35% + 3% × 30% ≈ 53.0%
 ```
 
 ## 4. 进度判定规则
@@ -228,7 +228,9 @@ transport / upstream / storage / observability adapters
 
 第七个小阶段（已完成）：将 `PolicyDnsCore::UpstreamRuntime` 的 direct connector 构造统一切换到 `UpstreamRegistry`，使 hosts/plain HTTP DoH 使用同一 typed registry 边界；新增 3 项 Policy focused tests，验证 ConfigLoader 生成的 disabled ECS、plain HTTP DoH 注册和 unsupported feature 错误传播。该阶段不实现 Cache、bootstrap、fallback 或 Runtime snapshot 接线。
 
-当前阶段 5 边界：HTTPS/TLS DoH adapter、bootstrap resolver/outbound 的实际执行、SOCKS5/SOCKS5H、fallback 执行、Cache 接线和 Runtime snapshot 接线仍未实现。
+第八个小阶段（已完成）：增加 protocol-neutral 的 `PolicyDnsCore::from_config_with_registry`，通过 fake DoH transport 验证策略选择、DoH request envelope、connect_ip、内部 DNS ID 和响应转换；新增 1 项 Policy focused test，整个请求路径不访问真实网络。该阶段不实现 RuntimeSnapshot、Cache、真实 outbound 或 bootstrap。
+
+当前阶段 5 边界：HTTPS/TLS DoH adapter、bootstrap resolver/outbound 的实际执行、SOCKS5/SOCKS5H、真实 fallback/重试链路、Cache 接线和 Runtime snapshot 接线仍未实现。
 
 ### 阶段 6：缓存
 

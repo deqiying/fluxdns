@@ -1,6 +1,6 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合和 hosts/plain HTTP DoH direct registry wiring；Runtime snapshot 原子接线尚未实现
+> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Runtime snapshot 原子接线尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -189,10 +189,11 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 实现 rule/hosts/resource matcher 编排；
 - [x] 实现覆盖矩阵与 ResolutionPlan（首轮 cache/TTL/ECS/client override）；
 - [x] 将 direct hosts/plain HTTP DoH connector 通过 `UpstreamRegistry` 接入 `PolicyDnsCore`；
+- [x] 提供 protocol-neutral registry 注入入口并验证 DoH request path；
 - [ ] 接入 Runtime snapshot 原子发布；
 - [x] 完成冲突、优先级、未知资源和 file loader 测试；
 - [ ] 完成资源 swap、跨 transport contract 和完整覆盖矩阵测试。
 
-阶段证据：Policy focused tests 9 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring 和 unsupported feature propagation；当前 backend 全量测试为 313 passed、0 failed。当前仍未接入 Runtime ResourceRegistrySnapshot、Cache，也未完成完整 DNS Core→Policy→Cache→Upstream 请求管线。
+阶段证据：Policy focused tests 11 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path 和 unsupported feature propagation；当前 backend 全量测试为 314 passed、0 failed。当前仍未接入 Runtime ResourceRegistrySnapshot、Cache，也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
 
-当前实现进度：**50%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排和请求级 plan 首轮组合；snapshot 原子接线、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。
+当前实现进度：**55%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan 首轮组合和注入式 direct DoH request path；snapshot 原子接线、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。

@@ -1,6 +1,6 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、hosts/plain HTTP DoH registry、纯 group member selection 和 outcome/fallback 判定；HTTPS/TLS、bootstrap/outbound 尚未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、hosts/plain HTTP DoH registry、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；HTTPS/TLS、bootstrap/outbound 尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -199,6 +199,7 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [x] 实现 DoH connector 的协议无关 exchange 与响应校验边界；
 - [x] 实现 plain HTTP/1.1 DoH transport adapter；
 - [x] 将 plain HTTP DoH connector 接入 Registry，并提供可注入 transport 构造入口；
+- [x] 通过注入式 Registry 验证 PolicyCore direct DoH request path；
 - [ ] 实现 bootstrap/connect_ip/outbound；
 - [x] 固化四种 group 模式的纯 member selection；
 - [x] 实现 outcome/fallback 判定边界；
@@ -206,6 +207,6 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 4 项通过，`upstream::doh` 7 项通过，新增 `upstream::http::tests` 3 项通过，覆盖 Registry 的 plain HTTP DoH 构造与不支持能力拒绝、DoH request envelope、Host/SNI/connect_ip、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前实现未接入 Runtime/DNS Core，TLS/proxy 仍未实现。
+阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 4 项通过，`upstream::doh` 7 项通过，`upstream::http::tests` 3 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了无真实网络的 PolicyCore direct path，RuntimeSnapshot、真实 outbound 和 TLS/proxy 仍未实现。
 
-当前实现进度：**60%**。
+当前实现进度：**65%**。

@@ -46,13 +46,38 @@ pub struct PolicyDnsCore {
 
 impl PolicyDnsCore {
     pub fn from_config(config: &ResolvedConfig, ttl: u32) -> Result<Self, PolicyCoreBuildError> {
-        let policy = PolicyIndex::from_config(config).map_err(PolicyCoreBuildError::Policy)?;
-        let upstreams = UpstreamRuntime::from_config(&config.upstreams).map_err(|error| {
+        let direct_upstreams = direct_upstreams(&config.upstreams);
+        let registry = UpstreamRegistry::from_resolved(&direct_upstreams).map_err(|error| {
+            let error = registry_build_error(error);
             PolicyCoreBuildError::Upstream {
                 upstream: error.upstream,
                 reason: error.reason,
             }
         })?;
+        Self::from_config_with_registry(config, ttl, registry)
+    }
+
+    pub(crate) fn from_config_with_registry(
+        config: &ResolvedConfig,
+        ttl: u32,
+        registry: UpstreamRegistry,
+    ) -> Result<Self, PolicyCoreBuildError> {
+        let upstreams =
+            UpstreamRuntime::from_registry(&config.upstreams, registry).map_err(|error| {
+                PolicyCoreBuildError::Upstream {
+                    upstream: error.upstream,
+                    reason: error.reason,
+                }
+            })?;
+        Self::from_config_with_upstream_runtime(config, ttl, upstreams)
+    }
+
+    fn from_config_with_upstream_runtime(
+        config: &ResolvedConfig,
+        ttl: u32,
+        upstreams: UpstreamRuntime,
+    ) -> Result<Self, PolicyCoreBuildError> {
+        let policy = PolicyIndex::from_config(config).map_err(PolicyCoreBuildError::Policy)?;
         let mut hosts = BTreeMap::new();
         for resource in &config.hosts {
             let id = match resource {
@@ -194,21 +219,17 @@ struct UpstreamRuntimeBuildError {
 }
 
 impl UpstreamRuntime {
-    fn from_config(upstreams: &[ResolvedUpstream]) -> Result<Self, UpstreamRuntimeBuildError> {
-        let direct_upstreams: Vec<_> = upstreams
-            .iter()
-            .filter(|upstream| {
-                matches!(
-                    upstream,
-                    ResolvedUpstream::Hosts { .. } | ResolvedUpstream::Doh { .. }
-                )
-            })
-            .cloned()
-            .collect();
-        let registry =
-            UpstreamRegistry::from_resolved(&direct_upstreams).map_err(registry_build_error)?;
+    fn from_registry(
+        upstreams: &[ResolvedUpstream],
+        registry: UpstreamRegistry,
+    ) -> Result<Self, UpstreamRuntimeBuildError> {
         let mut direct = BTreeMap::new();
-        for upstream in &direct_upstreams {
+        for upstream in upstreams.iter().filter(|upstream| {
+            matches!(
+                upstream,
+                ResolvedUpstream::Hosts { .. } | ResolvedUpstream::Doh { .. }
+            )
+        }) {
             let id = upstream_id(upstream);
             let exchange = registry
                 .get_by_name(id.as_str())
@@ -277,6 +298,19 @@ impl UpstreamRuntime {
     }
 }
 
+fn direct_upstreams(upstreams: &[ResolvedUpstream]) -> Vec<ResolvedUpstream> {
+    upstreams
+        .iter()
+        .filter(|upstream| {
+            matches!(
+                upstream,
+                ResolvedUpstream::Hosts { .. } | ResolvedUpstream::Doh { .. }
+            )
+        })
+        .cloned()
+        .collect()
+}
+
 fn upstream_id(upstream: &ResolvedUpstream) -> &ConfigId {
     match upstream {
         ResolvedUpstream::Hosts { id, .. }
@@ -320,9 +354,10 @@ fn servfail(request: &DnsRequest) -> Result<CoreOutcome, CoreError> {
 mod tests {
     use std::net::{IpAddr, SocketAddr};
     use std::str::FromStr;
+    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime};
 
-    use hickory_proto::op::{Message, MessageType, OpCode, Query};
+    use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RecordType};
 
     use crate::config::model::EcsMode;
@@ -333,8 +368,54 @@ mod tests {
         DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta, RuntimeRevision,
         TransportCapabilities, TransportClass,
     };
+    use crate::ports::{PortError, PortFuture};
+    use crate::upstream::{DohHttpRequest, DohHttpResponseOwned, DohHttpTransport};
 
     use super::{PolicyDnsCore, UpstreamRuntime};
+    use crate::upstream::UpstreamRegistry;
+
+    struct FakeDohTransport {
+        request: Mutex<Option<DohHttpRequest>>,
+        response: Vec<u8>,
+    }
+
+    impl FakeDohTransport {
+        fn response() -> Vec<u8> {
+            let mut message = Message::new(1, MessageType::Response, OpCode::Query);
+            message.metadata.response_code = ResponseCode::NoError;
+            message.add_query(Query::query(
+                Name::from_str("remote.example.").unwrap(),
+                RecordType::A,
+            ));
+            message.to_vec().unwrap()
+        }
+
+        fn new() -> Self {
+            Self {
+                request: Mutex::new(None),
+                response: Self::response(),
+            }
+        }
+    }
+
+    impl DohHttpTransport for FakeDohTransport {
+        fn post<'a>(
+            &'a self,
+            request: DohHttpRequest,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
+            *self.request.lock().unwrap() = Some(request);
+            let body = self.response.clone();
+            Box::pin(async move {
+                Ok(DohHttpResponseOwned {
+                    status: 200,
+                    content_type: Some("application/dns-message".to_owned()),
+                    body,
+                })
+            })
+        }
+    }
 
     #[test]
     fn upstream_runtime_registers_plain_http_doh_through_registry() {
@@ -351,7 +432,8 @@ mod tests {
             }),
         };
 
-        let runtime = UpstreamRuntime::from_config(&[doh]).unwrap();
+        let registry = UpstreamRegistry::from_resolved(std::slice::from_ref(&doh)).unwrap();
+        let runtime = UpstreamRuntime::from_registry(&[doh], registry).unwrap();
         let connector = runtime
             .direct
             .get(&ConfigId::new("remote").unwrap())
@@ -362,18 +444,45 @@ mod tests {
 
     #[test]
     fn upstream_runtime_propagates_unsupported_doh_features() {
-        let doh = ResolvedUpstream::Doh {
-            id: ConfigId::new("remote").unwrap(),
-            address: "https://dns.example.test/dns-query".parse().unwrap(),
-            bootstrap: None,
-            connect_ip: None,
-            proxy: None,
-            edns_client_subnet: None,
+        let error = PolicyDnsCore::from_config(
+            doh_config_with_address("https://dns.example.test/dns-query").as_ref(),
+            42,
+        )
+        .unwrap_err();
+        let super::PolicyCoreBuildError::Upstream { upstream, reason } = error else {
+            panic!("expected upstream build error");
         };
+        assert_eq!(upstream, "remote");
+        assert!(reason.contains("doh_https"));
+    }
 
-        let error = UpstreamRuntime::from_config(&[doh]).unwrap_err();
-        assert_eq!(error.upstream, "remote");
-        assert!(error.reason.contains("doh_https"));
+    #[tokio::test]
+    async fn policy_core_uses_injected_registry_for_doh_exchange() {
+        let config = doh_config();
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, registry).unwrap();
+
+        let outcome = core
+            .resolve(&request("remote.example.", RecordType::A))
+            .await
+            .unwrap();
+        let CoreOutcome::Response(response) = outcome else {
+            panic!("expected injected DoH response");
+        };
+        assert_eq!(response.class(), crate::dns::ResponseClass::NoData);
+
+        let request = transport.request.lock().unwrap().clone().unwrap();
+        assert_eq!(
+            request.endpoint().as_str(),
+            "http://dns.example.test/dns-query"
+        );
+        assert_eq!(request.connect_ip(), Some("192.0.2.44".parse().unwrap()));
+        assert_eq!(Message::from_vec(request.body()).unwrap().id, 1);
     }
 
     fn config() -> std::sync::Arc<crate::config::ResolvedConfig> {
@@ -425,9 +534,11 @@ strategy:
     }
 
     fn doh_config() -> std::sync::Arc<crate::config::ResolvedConfig> {
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(
-                r#"
+        doh_config_with_address("http://dns.example.test/dns-query")
+    }
+
+    fn doh_config_with_address(address: &str) -> std::sync::Arc<crate::config::ResolvedConfig> {
+        let source = r#"
 version: 1
 work:
   path: /tmp/fluxdns-policy-doh-test
@@ -454,7 +565,7 @@ listener:
 upstreams:
   - type: doh
     name: remote
-    address: http://dns.example.test/dns-query
+    address: __DOH_ADDRESS__
     connect_ip: 192.0.2.44
 strategy:
   - name: default
@@ -466,8 +577,10 @@ hosts:
     name: unused-hosts
     format: hosts
     hosts: "192.0.2.99 unused.example"
-"#,
-            )
+        "#
+        .replace("__DOH_ADDRESS__", address);
+        ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
             .expect("policy DoH fixture must be valid")
             .resolved
     }
