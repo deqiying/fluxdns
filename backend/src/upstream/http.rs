@@ -5,6 +5,7 @@
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 use std::time::Instant;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -19,12 +20,81 @@ use super::{DOH_MEDIA_TYPE, DohHttpRequest, DohHttpResponseOwned, DohHttpTranspo
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 
+/// DoH HTTP adapter 使用的地址解析 port。
+///
+/// `connect_ip` 由调用方显式提供时不会调用该 port；后续 bootstrap
+/// resolver 可以在不改变 HTTP/DNS 协议边界的情况下替换默认实现。
+pub trait DohAddressResolver: Send + Sync {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>>;
+}
+
 #[derive(Clone, Copy, Debug, Default)]
-pub struct TokioDohHttpTransport;
+pub struct TokioDohAddressResolver;
+
+impl DohAddressResolver for TokioDohAddressResolver {
+    fn resolve<'a>(
+        &'a self,
+        host: &'a str,
+        port: u16,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>> {
+        Box::pin(async move {
+            let mut addresses = await_io(
+                lookup_host((host, port)),
+                deadline,
+                cancellation,
+                "doh_http_transport.resolve",
+            )
+            .await?;
+            let addresses: Vec<_> = addresses.by_ref().collect();
+            if addresses.is_empty() {
+                return Err(PortError::new(
+                    PortErrorClass::Unavailable,
+                    "doh_http_transport.resolve",
+                ));
+            }
+            Ok(addresses)
+        })
+    }
+}
+
+#[derive(Clone)]
+pub struct TokioDohHttpTransport {
+    resolver: Arc<dyn DohAddressResolver>,
+}
+
+impl std::fmt::Debug for TokioDohHttpTransport {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("TokioDohHttpTransport")
+            .field("has_resolver", &true)
+            .finish()
+    }
+}
 
 impl TokioDohHttpTransport {
-    pub const fn new() -> Self {
-        Self
+    pub fn new() -> Self {
+        Self::with_resolver(Arc::new(TokioDohAddressResolver))
+    }
+
+    pub fn with_resolver<T>(resolver: Arc<T>) -> Self
+    where
+        T: DohAddressResolver + 'static,
+    {
+        Self { resolver }
+    }
+}
+
+impl Default for TokioDohHttpTransport {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -35,12 +105,13 @@ impl DohHttpTransport for TokioDohHttpTransport {
         deadline: Deadline,
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
-        Box::pin(async move { post_http(request, deadline, cancellation).await })
+        Box::pin(async move { post_http(request, &*self.resolver, deadline, cancellation).await })
     }
 }
 
 async fn post_http(
     request: DohHttpRequest,
+    resolver: &dyn DohAddressResolver,
     deadline: Deadline,
     cancellation: &Cancellation,
 ) -> Result<DohHttpResponseOwned, PortError> {
@@ -60,7 +131,15 @@ async fn post_http(
     }
     check_budget(deadline, cancellation, "doh_http_transport.post")?;
     let port = endpoint.port().unwrap_or(80);
-    let target = resolve_target(host, port, request.connect_ip(), deadline, cancellation).await?;
+    let target = resolve_target(
+        host,
+        port,
+        request.connect_ip(),
+        resolver,
+        deadline,
+        cancellation,
+    )
+    .await?;
     let mut stream = await_io(
         TcpStream::connect(target),
         deadline,
@@ -105,20 +184,17 @@ async fn resolve_target(
     host: &str,
     port: u16,
     connect_ip: Option<IpAddr>,
+    resolver: &dyn DohAddressResolver,
     deadline: Deadline,
     cancellation: &Cancellation,
 ) -> Result<SocketAddr, PortError> {
     if let Some(address) = connect_ip {
         return Ok(SocketAddr::new(address, port));
     }
-    let mut addresses = await_io(
-        lookup_host((host, port)),
-        deadline,
-        cancellation,
-        "doh_http_transport.resolve",
-    )
-    .await?;
-    addresses
+    resolver
+        .resolve(host, port, deadline, cancellation)
+        .await?
+        .into_iter()
         .next()
         .ok_or_else(|| PortError::new(PortErrorClass::Unavailable, "doh_http_transport.resolve"))
 }
@@ -360,10 +436,13 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+
+    use crate::ports::{PortError, PortFuture};
 
     use super::*;
 
@@ -379,8 +458,48 @@ mod tests {
         )
     }
 
+    fn request_without_connect_ip(address: SocketAddr, body: &[u8]) -> DohHttpRequest {
+        DohHttpRequest::new(
+            Url::parse(&format!(
+                "http://resolver.example.test:{}/dns-query",
+                address.port()
+            ))
+            .unwrap(),
+            None,
+            body.to_vec(),
+        )
+    }
+
     fn deadline() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(2))
+    }
+
+    struct FakeResolver {
+        target: SocketAddr,
+        calls: Mutex<Vec<(String, u16)>>,
+    }
+
+    impl FakeResolver {
+        fn new(target: SocketAddr) -> Self {
+            Self {
+                target,
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl DohAddressResolver for FakeResolver {
+        fn resolve<'a>(
+            &'a self,
+            host: &'a str,
+            port: u16,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>> {
+            self.calls.lock().unwrap().push((host.to_owned(), port));
+            let target = self.target;
+            Box::pin(async move { Ok(vec![target]) })
+        }
     }
 
     #[tokio::test]
@@ -415,6 +534,73 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.content_type.as_deref(), Some(DOH_MEDIA_TYPE));
         assert_eq!(response.body, b"OK");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn uses_injected_address_resolver_when_connect_ip_is_absent() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request_bytes = [0_u8; 512];
+            let _ = stream.read(&mut request_bytes).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                )
+                .await
+                .unwrap();
+        });
+
+        let resolver = Arc::new(FakeResolver::new(address));
+        let transport = TokioDohHttpTransport::with_resolver(resolver.clone());
+        let response = transport
+            .post(
+                request_without_connect_ip(address, b"abc"),
+                deadline(),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert_eq!(
+            resolver.calls.lock().unwrap().as_slice(),
+            &[("resolver.example.test".to_owned(), address.port())]
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn explicit_connect_ip_bypasses_injected_address_resolver() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request_bytes = [0_u8; 512];
+            let _ = stream.read(&mut request_bytes).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",
+                )
+                .await
+                .unwrap();
+        });
+
+        let resolver = Arc::new(FakeResolver::new("192.0.2.99:80".parse().unwrap()));
+        let transport = TokioDohHttpTransport::with_resolver(resolver.clone());
+        let response = transport
+            .post(request(address, b"abc"), deadline(), &Cancellation::new())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, 200);
+        assert!(resolver.calls.lock().unwrap().is_empty());
         server.await.unwrap();
     }
 
