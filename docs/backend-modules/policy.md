@@ -1,8 +1,8 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线和请求级 rule/hosts ResolutionPlan 首轮组合；Runtime snapshot 原子接线尚未实现
+> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合和 hosts/plain HTTP DoH direct registry wiring；Runtime snapshot 原子接线尚未实现
 >
-> 更新日期：2026-08-31
+> 更新日期：2026-09-01
 >
 > 目标代码：`backend/src/policy/*`
 >
@@ -59,6 +59,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 - `PolicyIndex::evaluate`：组合 client strategy override、cache tri-state、TTL/ECS effective value 和 upstream target，输出不可变 `ResolutionPlan`；
 - `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash rule-set；remote/dat/selector/缺失资源在边界返回显式错误；
 - rule/hosts 执行：固定 listener hosts → strategy rule 顺序，输出不含原文的 matched-rule 摘要，并覆盖 local hosts、rule-set upstream 与 rule ECS；
+- `PolicyDnsCore::UpstreamRuntime`：direct hosts/plain HTTP DoH connector 统一由 `UpstreamRegistry` 构造，Unsupported DoH 能力在 prepare 边界向上游构建错误传播；
 - 这些索引只持有已解析 typed 值，不在请求路径读取 YAML 或执行网络 I/O。
 
 ## 4. 域名规范化
@@ -187,10 +188,11 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 实现 strategy/route 编译；
 - [x] 实现 rule/hosts/resource matcher 编排；
 - [x] 实现覆盖矩阵与 ResolutionPlan（首轮 cache/TTL/ECS/client override）；
+- [x] 将 direct hosts/plain HTTP DoH connector 通过 `UpstreamRegistry` 接入 `PolicyDnsCore`；
 - [ ] 接入 Runtime snapshot 原子发布；
 - [x] 完成冲突、优先级、未知资源和 file loader 测试；
 - [ ] 完成资源 swap、跨 transport contract 和完整覆盖矩阵测试。
 
-阶段证据：Policy focused tests 6 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源和 const/file loader；当前 backend 全量测试为 238 passed、0 failed。当前仍未接入 Runtime ResourceRegistrySnapshot，也未执行完整 DNS Core→Policy→Cache→Upstream 请求管线。
+阶段证据：Policy focused tests 9 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring 和 unsupported feature propagation；当前 backend 全量测试为 313 passed、0 failed。当前仍未接入 Runtime ResourceRegistrySnapshot、Cache，也未完成完整 DNS Core→Policy→Cache→Upstream 请求管线。
 
 当前实现进度：**50%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排和请求级 plan 首轮组合；snapshot 原子接线、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。

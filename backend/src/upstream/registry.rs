@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
+use crate::config::model::EcsMode;
 use crate::config::resolve::ResolvedUpstream;
 use crate::ports::exchange::{ConnectorId, DnsExchange};
 
@@ -108,7 +109,10 @@ impl UpstreamRegistry {
                             kind: "doh_bootstrap",
                         });
                     }
-                    if edns_client_subnet.is_some() {
+                    if edns_client_subnet
+                        .as_ref()
+                        .is_some_and(|ecs| !matches!(ecs.mode, EcsMode::Disabled))
+                    {
                         return Err(RegistryError::UnsupportedUpstream {
                             upstream: id.as_str().to_owned(),
                             kind: "doh_edns_client_subnet",
@@ -277,7 +281,7 @@ mod tests {
             connect_ip: None,
             proxy: None,
             edns_client_subnet: Some(ResolvedEcs {
-                mode: EcsMode::Disabled,
+                mode: EcsMode::Client,
                 custom_ip: None,
                 source: ValueSource::Upstream,
             }),

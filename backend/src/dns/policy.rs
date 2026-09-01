@@ -16,7 +16,7 @@ use crate::policy::{PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
 use crate::ports::exchange::{DnsExchange, UpstreamOutcome};
 use crate::resource::{CanonicalDomain, HostsIndex, HostsLimits, ResourceLoadError, load_hosts};
-use crate::upstream::{GroupSelector, HostsExchange, UpstreamGroupExecutor};
+use crate::upstream::{GroupSelector, RegistryError, UpstreamGroupExecutor, UpstreamRegistry};
 
 use super::handler::resource_answers;
 use super::{CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsRequest};
@@ -187,6 +187,7 @@ impl fmt::Debug for UpstreamRuntime {
     }
 }
 
+#[derive(Debug)]
 struct UpstreamRuntimeBuildError {
     upstream: String,
     reason: String,
@@ -194,21 +195,25 @@ struct UpstreamRuntimeBuildError {
 
 impl UpstreamRuntime {
     fn from_config(upstreams: &[ResolvedUpstream]) -> Result<Self, UpstreamRuntimeBuildError> {
+        let direct_upstreams: Vec<_> = upstreams
+            .iter()
+            .filter(|upstream| {
+                matches!(
+                    upstream,
+                    ResolvedUpstream::Hosts { .. } | ResolvedUpstream::Doh { .. }
+                )
+            })
+            .cloned()
+            .collect();
+        let registry =
+            UpstreamRegistry::from_resolved(&direct_upstreams).map_err(registry_build_error)?;
         let mut direct = BTreeMap::new();
-        for upstream in upstreams {
-            let ResolvedUpstream::Hosts { id, .. } = upstream else {
-                continue;
-            };
-            let exchange = HostsExchange::from_resolved(upstream).map_err(|error| {
-                UpstreamRuntimeBuildError {
-                    upstream: id.as_str().to_owned(),
-                    reason: error.to_string(),
-                }
-            })?;
-            if direct
-                .insert(id.clone(), Arc::new(exchange) as Arc<dyn DnsExchange>)
-                .is_some()
-            {
+        for upstream in &direct_upstreams {
+            let id = upstream_id(upstream);
+            let exchange = registry
+                .get_by_name(id.as_str())
+                .map_err(registry_build_error)?;
+            if direct.insert(id.clone(), exchange).is_some() {
                 return Err(UpstreamRuntimeBuildError {
                     upstream: id.as_str().to_owned(),
                     reason: "duplicate upstream id".to_owned(),
@@ -272,6 +277,29 @@ impl UpstreamRuntime {
     }
 }
 
+fn upstream_id(upstream: &ResolvedUpstream) -> &ConfigId {
+    match upstream {
+        ResolvedUpstream::Hosts { id, .. }
+        | ResolvedUpstream::Doh { id, .. }
+        | ResolvedUpstream::Group { id, .. } => id,
+    }
+}
+
+fn registry_build_error(error: RegistryError) -> UpstreamRuntimeBuildError {
+    let upstream = match &error {
+        RegistryError::InvalidConnectorId { upstream }
+        | RegistryError::InvalidHosts { upstream }
+        | RegistryError::InvalidDoh { upstream }
+        | RegistryError::UnsupportedUpstream { upstream, .. } => upstream.clone(),
+        RegistryError::DuplicateConnector { connector }
+        | RegistryError::MissingConnector { connector } => connector.clone(),
+    };
+    UpstreamRuntimeBuildError {
+        upstream,
+        reason: error.to_string(),
+    }
+}
+
 fn reconstructed_doh_path(request: &DnsRequest) -> Option<String> {
     let route = request.context.meta.route_id.as_ref()?;
     let mut path = route.as_ref().to_owned();
@@ -297,6 +325,8 @@ mod tests {
     use hickory_proto::op::{Message, MessageType, OpCode, Query};
     use hickory_proto::rr::{Name, RecordType};
 
+    use crate::config::model::EcsMode;
+    use crate::config::resolve::{ConfigId, ResolvedEcs, ResolvedUpstream, ValueSource};
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, Cancellation, CanonicalQuery, CoreOutcome, Deadline, DnsCore,
@@ -304,7 +334,47 @@ mod tests {
         TransportCapabilities, TransportClass,
     };
 
-    use super::PolicyDnsCore;
+    use super::{PolicyDnsCore, UpstreamRuntime};
+
+    #[test]
+    fn upstream_runtime_registers_plain_http_doh_through_registry() {
+        let doh = ResolvedUpstream::Doh {
+            id: ConfigId::new("remote").unwrap(),
+            address: "http://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: None,
+            connect_ip: Some("192.0.2.44".parse().unwrap()),
+            proxy: None,
+            edns_client_subnet: Some(ResolvedEcs {
+                mode: EcsMode::Disabled,
+                custom_ip: None,
+                source: ValueSource::Upstream,
+            }),
+        };
+
+        let runtime = UpstreamRuntime::from_config(&[doh]).unwrap();
+        let connector = runtime
+            .direct
+            .get(&ConfigId::new("remote").unwrap())
+            .expect("plain HTTP DoH connector must be registered");
+        assert_eq!(connector.connector_id().as_str(), "remote");
+        assert_eq!(runtime.len(), 1);
+    }
+
+    #[test]
+    fn upstream_runtime_propagates_unsupported_doh_features() {
+        let doh = ResolvedUpstream::Doh {
+            id: ConfigId::new("remote").unwrap(),
+            address: "https://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: None,
+            connect_ip: None,
+            proxy: None,
+            edns_client_subnet: None,
+        };
+
+        let error = UpstreamRuntime::from_config(&[doh]).unwrap_err();
+        assert_eq!(error.upstream, "remote");
+        assert!(error.reason.contains("doh_https"));
+    }
 
     fn config() -> std::sync::Arc<crate::config::ResolvedConfig> {
         ConfigLoader::new(LoadOptions::default().without_snapshot())
@@ -352,6 +422,60 @@ strategy:
             )
             .expect("policy core fixture must be valid")
             .resolved
+    }
+
+    fn doh_config() -> std::sync::Arc<crate::config::ResolvedConfig> {
+        ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(
+                r#"
+version: 1
+work:
+  path: /tmp/fluxdns-policy-doh-test
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: 5302
+    strategy: default
+upstreams:
+  - type: doh
+    name: remote
+    address: http://dns.example.test/dns-query
+    connect_ip: 192.0.2.44
+strategy:
+  - name: default
+    rules:
+      - hosts: unused-hosts
+    default_upstream: remote
+hosts:
+  - type: const
+    name: unused-hosts
+    format: hosts
+    hosts: "192.0.2.99 unused.example"
+"#,
+            )
+            .expect("policy DoH fixture must be valid")
+            .resolved
+    }
+
+    #[test]
+    fn policy_core_accepts_configured_plain_http_doh_with_disabled_ecs() {
+        let core = PolicyDnsCore::from_config(doh_config().as_ref(), 42).unwrap();
+        assert_eq!(core.upstream_count(), 1);
     }
 
     fn group_config() -> std::sync::Arc<crate::config::ResolvedConfig> {

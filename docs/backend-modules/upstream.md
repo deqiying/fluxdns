@@ -28,7 +28,7 @@ Upstream 模块把 typed upstream 配置编译为 `UpstreamRegistry` 和可复�
 
 ## 2. Registry 与 connector
 
-prepare 阶段为每个 upstream 生成 typed ID 和 connector handle。当前 registry 可构造已验证的 hosts connector，以及不含 bootstrap、proxy 和 ECS 覆盖的 plain HTTP DoH connector；DoH transport 通过可注入 port 提供：
+prepare 阶段为每个 upstream 生成 typed ID 和 connector handle。当前 registry 可构造已验证的 hosts connector，以及不含 bootstrap、proxy 和启用 ECS 覆盖的 plain HTTP DoH connector；DoH transport 通过可注入 port 提供：
 
 - hosts connector；
 - DoH connector；
@@ -37,7 +37,7 @@ prepare 阶段为每个 upstream 生成 typed ID 和 connector handle。当前 r
 - bootstrap dependency；
 - 安全的观测标签。
 
-`UpstreamRegistry::from_resolved` 默认使用 `TokioDohHttpTransport` 构造 `http://` DoH；HTTPS、bootstrap、proxy、ECS 覆盖和 Group 在构建边界返回带稳定 kind 的 `UnsupportedUpstream`，不会静默丢弃配置。`ConfigId` 到 `ConnectorId` 的不兼容字符也在构建边界返回稳定错误。
+`UpstreamRegistry::from_resolved` 默认使用 `TokioDohHttpTransport` 构造 `http://` DoH；HTTPS、bootstrap、proxy、启用的 ECS 覆盖和 Group 在构建边界返回带稳定 kind 的 `UnsupportedUpstream`，不会静默丢弃配置。归一化后的 `EcsMode::Disabled` 不会阻止 connector 构造。`ConfigId` 到 `ConnectorId` 的不兼容字符也在构建边界返回稳定错误。
 
 connector 构建 key 至少包含 upstream、outbound、bootstrap/connect_ip 和 TLS/HTTP profile。相同 key 复用 client 和连接池。
 
