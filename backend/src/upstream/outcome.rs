@@ -138,7 +138,7 @@ pub fn aggregate(
     }
 
     let mut cancellation = None;
-    let mut selected_response = None;
+    let mut selected_response: Option<CanonicalResponse> = None;
     let mut fallback_blocked = false;
     for attempt in attempts {
         if fallback_blocked {
@@ -155,10 +155,14 @@ pub fn aggregate(
             }
             FallbackDecision::Stop => match attempt.outcome {
                 UpstreamOutcome::Response(candidate) => {
-                    if selected_response.is_some() {
-                        continue;
+                    let replace = selected_response.as_ref().is_none_or(|current| {
+                        _mode == SelectionPolicy::Parallel
+                            && response_preference(candidate.class())
+                                > response_preference(current.class())
+                    });
+                    if replace {
+                        selected_response = Some(candidate);
                     }
-                    selected_response = Some(candidate);
                 }
                 UpstreamOutcome::Cancelled(reason) => {
                     cancellation = Some(prefer_cancel(cancellation, reason));
@@ -183,6 +187,15 @@ pub fn aggregate(
         CanonicalResponse::empty_response(query, ResponseCode::ServFail)
             .expect("canonical SERVFAIL response construction is infallible"),
     ))
+}
+
+fn response_preference(class: ResponseClass) -> u8 {
+    match class {
+        ResponseClass::Positive => 3,
+        ResponseClass::NoData => 2,
+        ResponseClass::NxDomain | ResponseClass::Refused | ResponseClass::Other(_) => 1,
+        ResponseClass::ServFail | ResponseClass::Truncated => 0,
+    }
 }
 
 fn prefer_cancel(current: Option<CancelReason>, candidate: CancelReason) -> CancelReason {

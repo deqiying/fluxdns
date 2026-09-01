@@ -248,10 +248,10 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
     ) -> Result<Vec<UpstreamAttempt>, ExecutorError> {
-        let mut handles = Vec::with_capacity(phase.exchanges.len());
+        let mut tasks = tokio::task::JoinSet::new();
         for index in phase.selector.parallel_order() {
             if let Some(outcome) = cancelled_outcome(context) {
-                abort_all(handles);
+                tasks.abort_all();
                 return Ok(vec![UpstreamAttempt {
                     attempt_index: index,
                     connector: phase.exchanges[index].connector_id().clone(),
@@ -261,28 +261,46 @@ impl UpstreamGroupExecutor {
             let exchange = Arc::clone(&phase.exchanges[index]);
             let query = query.clone();
             let context = context.clone();
-            handles.push(tokio::spawn(async move {
+            tasks.spawn(async move {
                 let outcome = run_exchange(&exchange, &query, &context).await;
                 (index, exchange.connector_id().clone(), outcome)
-            }));
+            });
         }
-        let mut pending = handles.into_iter();
         let mut attempts = Vec::with_capacity(phase.exchanges.len());
-        while let Some(handle) = pending.next() {
-            let (index, connector, outcome) = match handle.await {
-                Ok(result) => result,
-                Err(_) => {
-                    for handle in pending {
-                        handle.abort();
-                    }
-                    return Err(ExecutorError::TaskFailed);
+        while !tasks.is_empty() {
+            let joined = tokio::select! {
+                biased;
+                _ = context.meta.cancellation.cancelled() => {
+                    tasks.abort_all();
+                    return Ok(vec![UpstreamAttempt {
+                        attempt_index: phase.exchanges.len(),
+                        connector: phase.exchanges[0].connector_id().clone(),
+                        outcome: cancelled_outcome(context).expect("cancellation branch is cancelled"),
+                    }]);
                 }
+                joined = tasks.join_next() => joined,
             };
+            let Some(joined) = joined else {
+                break;
+            };
+            let (index, connector, outcome) = match joined {
+                Ok(result) => result,
+                Err(_) => return Err(ExecutorError::TaskFailed),
+            };
+            let complete_response = matches!(
+                &outcome,
+                UpstreamOutcome::Response(response)
+                    if response.class() == crate::dns::ResponseClass::Positive
+            );
             attempts.push(UpstreamAttempt {
                 attempt_index: index,
                 connector,
                 outcome,
             });
+            if complete_response {
+                tasks.abort_all();
+                break;
+            }
         }
         Ok(attempts)
     }
@@ -392,12 +410,6 @@ fn cancelled_outcome(context: &RequestContext) -> Option<UpstreamOutcome> {
     })
 }
 
-fn abort_all<T>(handles: Vec<tokio::task::JoinHandle<T>>) {
-    for handle in handles {
-        handle.abort();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::str::FromStr;
@@ -405,7 +417,7 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RecordType};
+    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
 
     use super::{ExecutorBuildError, UpstreamGroupExecutor};
     use crate::config::resolve::{ConfigId, ResolvedUpstreamMember};
@@ -469,6 +481,21 @@ mod tests {
         UpstreamOutcome::Response(CanonicalResponse::empty_response(query, code).unwrap())
     }
 
+    fn positive_response(query: &CanonicalQuery) -> UpstreamOutcome {
+        UpstreamOutcome::Response(
+            CanonicalResponse::response_with_code(
+                query,
+                ResponseCode::NoError,
+                [Record::from_rdata(
+                    query.question().name().clone(),
+                    30,
+                    RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, 1))),
+                )],
+            )
+            .unwrap(),
+        )
+    }
+
     fn timeout(exchange: &FakeExchange, retryable: bool) -> UpstreamOutcome {
         UpstreamOutcome::TransportFailure(TransportFailure {
             connector: exchange.connector_id().clone(),
@@ -495,6 +522,41 @@ mod tests {
 
         fn deadline(&self) -> Option<Instant> {
             *self.deadline.lock().unwrap()
+        }
+    }
+
+    struct DelayedExchange {
+        connector: ConnectorId,
+        delay: Duration,
+        outcome: Mutex<Option<UpstreamOutcome>>,
+    }
+
+    impl DelayedExchange {
+        fn new(connector: ConnectorId, delay: Duration, outcome: UpstreamOutcome) -> Self {
+            Self {
+                connector,
+                delay,
+                outcome: Mutex::new(Some(outcome)),
+            }
+        }
+    }
+
+    impl DnsExchange for DelayedExchange {
+        fn connector_id(&self) -> &ConnectorId {
+            &self.connector
+        }
+
+        fn exchange<'a>(
+            &'a self,
+            _query: &'a CanonicalQuery,
+            _context: &'a RequestContext,
+        ) -> PortFuture<'a, UpstreamOutcome> {
+            let delay = self.delay;
+            let outcome = self.outcome.lock().unwrap().take();
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                outcome.expect("delayed exchange must be called once")
+            })
         }
     }
 
@@ -593,6 +655,54 @@ mod tests {
         assert!(matches!(
             result,
             UpstreamOutcome::Cancelled(crate::dns::CancelReason::Shutdown)
+        ));
+    }
+
+    #[tokio::test]
+    async fn parallel_returns_complete_response_without_waiting_for_late_attempt() {
+        let query = query();
+        let fast = exchange("fast");
+        fast.push(positive_response(&query)).unwrap();
+        let slow = Arc::new(DelayedExchange::new(
+            ConnectorId::new("slow").unwrap(),
+            Duration::from_millis(250),
+            response(&query, ResponseCode::NXDomain),
+        ));
+        let selector = crate::upstream::GroupSelector::new(
+            SelectionPolicy::Parallel,
+            vec![member("fast"), member("slow")],
+        )
+        .unwrap();
+        let executor = UpstreamGroupExecutor::new(selector, vec![fast, slow]).unwrap();
+        let started = Instant::now();
+        let result = executor.execute(&query, &context()).await.unwrap();
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(matches!(
+            result,
+            UpstreamOutcome::Response(response) if response.class() == crate::dns::ResponseClass::Positive
+        ));
+    }
+
+    #[tokio::test]
+    async fn parallel_late_window_prefers_positive_over_early_nodata() {
+        let query = query();
+        let early = exchange("early");
+        early.push(response(&query, ResponseCode::NoError)).unwrap();
+        let late = Arc::new(DelayedExchange::new(
+            ConnectorId::new("late").unwrap(),
+            Duration::from_millis(25),
+            positive_response(&query),
+        ));
+        let selector = crate::upstream::GroupSelector::new(
+            SelectionPolicy::Parallel,
+            vec![member("early"), member("late")],
+        )
+        .unwrap();
+        let executor = UpstreamGroupExecutor::new(selector, vec![early, late]).unwrap();
+        let result = executor.execute(&query, &context()).await.unwrap();
+        assert!(matches!(
+            result,
+            UpstreamOutcome::Response(response) if response.class() == crate::dns::ResponseClass::Positive
         ));
     }
 
