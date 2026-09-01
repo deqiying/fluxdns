@@ -288,6 +288,35 @@ impl RuntimeCoordinator {
             .await
     }
 
+    pub async fn refresh_resource_if_current(
+        &self,
+        expected: &Arc<ActiveRuntime>,
+        resource: &ConfigId,
+        now: u64,
+        deadline: crate::dns::Deadline,
+        cancellation: crate::dns::Cancellation,
+    ) -> Result<RefreshedResourceSnapshot, ResourceRefreshCoordinatorError> {
+        let current = self.load();
+        if !Arc::ptr_eq(&current, expected) {
+            return Err(ResourceRefreshCoordinatorError::Stale {
+                expected: expected.revision(),
+                actual: current.revision(),
+            });
+        }
+        let refreshed = expected
+            .refresh_resource(resource, now, deadline, cancellation)
+            .await
+            .map_err(ResourceRefreshCoordinatorError::Resource)?;
+        let current = self.load();
+        if !Arc::ptr_eq(&current, expected) {
+            return Err(ResourceRefreshCoordinatorError::Stale {
+                expected: expected.revision(),
+                actual: current.revision(),
+            });
+        }
+        Ok(refreshed)
+    }
+
     pub fn shutdown_resource_refresh(&self) {
         self.load().shutdown_resource_refresh();
     }
@@ -380,6 +409,19 @@ pub enum RuntimeReloadError {
     Activation(#[source] ActivationError),
 }
 
+#[derive(Debug, Error)]
+pub enum ResourceRefreshCoordinatorError {
+    #[error(
+        "resource refresh observed a different active runtime: expected {expected:?}, current {actual:?}"
+    )]
+    Stale {
+        expected: RuntimeRevision,
+        actual: RuntimeRevision,
+    },
+    #[error(transparent)]
+    Resource(#[from] ResourceRefreshError),
+}
+
 impl RuntimeReloadError {
     pub fn into_candidate(self) -> Option<BoundCandidate> {
         match self {
@@ -404,7 +446,9 @@ mod tests {
     };
     use crate::ports::{PortError, PortErrorClass, PortFuture};
 
-    use super::{AdmissionError, RuntimeCoordinator, RuntimeReloadError};
+    use super::{
+        AdmissionError, ResourceRefreshCoordinatorError, RuntimeCoordinator, RuntimeReloadError,
+    };
     use crate::runtime::PreparedRuntime;
 
     fn candidate(revision: u64) -> crate::runtime::BoundCandidate {
@@ -641,6 +685,32 @@ outbound: []
             crate::resource::ResourceVersion::new(2, 0)
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn coordinator_rejects_refresh_for_a_stale_active_runtime() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let expected = coordinator.load();
+        coordinator.activate(candidate(2));
+
+        let error = coordinator
+            .refresh_resource_if_current(
+                &expected,
+                &ConfigId::new("not-configured").unwrap(),
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResourceRefreshCoordinatorError::Stale {
+                expected: RuntimeRevision(1),
+                actual: RuntimeRevision(2),
+            }
+        ));
     }
 
     #[tokio::test]

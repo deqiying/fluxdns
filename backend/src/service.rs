@@ -17,8 +17,8 @@ use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
 use crate::runtime::{
     ActiveRuntime, AdmissionError, BoundEndpointHandle, FaultLevel, RefreshedResourceSnapshot,
-    RestartPolicy, RuntimeCoordinator, ShutdownReport, Supervisor, SupervisorError, SystemClock,
-    TaskError, TaskSpec,
+    ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator, ShutdownReport, Supervisor,
+    SupervisorError, SystemClock, TaskError, TaskSpec,
 };
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
@@ -322,13 +322,20 @@ async fn run_resource_refresh_loop(
             return Err(TaskError::Cancelled);
         }
         let now = unix_seconds();
-        let decision = coordinator
+        let runtime = coordinator.load();
+        let decision = runtime
             .resource_refresh_decision(&resource, now)
             .ok_or(TaskError::Fatal)?;
         if decision.is_due() {
             let deadline = Deadline::new(Instant::now() + RESOURCE_REFRESH_TIMEOUT);
             match coordinator
-                .refresh_resource(&resource, now, deadline, cancellation.clone())
+                .refresh_resource_if_current(
+                    &runtime,
+                    &resource,
+                    now,
+                    deadline,
+                    cancellation.clone(),
+                )
                 .await
             {
                 Ok(snapshot) => tracing::info!(
@@ -343,6 +350,7 @@ async fn run_resource_refresh_loop(
                     },
                     "resource_refresh_published"
                 ),
+                Err(ResourceRefreshCoordinatorError::Stale { .. }) => continue,
                 Err(_error) if cancellation.is_cancelled() => {
                     coordinator.shutdown_resource_refresh();
                     return Err(TaskError::Cancelled);
