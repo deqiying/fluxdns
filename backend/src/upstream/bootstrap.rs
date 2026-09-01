@@ -1,0 +1,698 @@
+//! 纯逻辑的 DoH 目标地址选择与 bootstrap TTL 状态。
+//!
+//! 本模块不执行 DNS 查询或 system resolver；调用方负责把外部解析结果包装为
+//! `BootstrapResolution`/`SystemResolverResolution` 后交给
+//! `AddressResolutionState`。这样 connect_ip、bootstrap 失败和 system resolver
+//! 之间的优先级可以在没有网络副作用的情况下测试和复用。
+
+use std::collections::BTreeMap;
+use std::fmt;
+use std::net::IpAddr;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use thiserror::Error;
+
+use crate::config::resolve::{ConfigId, ResolvedUpstream};
+use crate::dns::TtlMetadata;
+
+/// Bootstrap TTL 的默认实现边界。
+pub const DEFAULT_BOOTSTRAP_MIN_TTL: Duration = Duration::from_secs(5);
+pub const DEFAULT_BOOTSTRAP_MAX_TTL: Duration = Duration::from_secs(3_600);
+
+/// TTL 缓存的实现级边界。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AddressCachePolicy {
+    min_ttl: Duration,
+    max_ttl: Duration,
+}
+
+impl AddressCachePolicy {
+    pub fn new(min_ttl: Duration, max_ttl: Duration) -> Result<Self, CachePolicyError> {
+        if max_ttl.is_zero() || min_ttl > max_ttl {
+            return Err(CachePolicyError);
+        }
+        Ok(Self { min_ttl, max_ttl })
+    }
+
+    pub const fn defaults() -> Self {
+        Self {
+            min_ttl: DEFAULT_BOOTSTRAP_MIN_TTL,
+            max_ttl: DEFAULT_BOOTSTRAP_MAX_TTL,
+        }
+    }
+
+    pub const fn min_ttl(self) -> Duration {
+        self.min_ttl
+    }
+
+    pub const fn max_ttl(self) -> Duration {
+        self.max_ttl
+    }
+
+    fn bound(self, ttl: Duration) -> Duration {
+        ttl.max(self.min_ttl).min(self.max_ttl)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+#[error("bootstrap TTL cache policy is invalid")]
+pub struct CachePolicyError;
+
+/// 一次 bootstrap A/AAAA 答案的纯数据表示。
+#[derive(Clone, Eq, PartialEq)]
+pub struct BootstrapAnswer {
+    addresses: Arc<[IpAddr]>,
+    ttl: Duration,
+}
+
+impl fmt::Debug for BootstrapAnswer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BootstrapAnswer")
+            .field("address_count", &self.addresses.len())
+            .field("ttl", &self.ttl)
+            .finish()
+    }
+}
+
+impl BootstrapAnswer {
+    pub fn new(addresses: Vec<IpAddr>, ttl: Duration) -> Result<Self, AnswerError> {
+        let addresses = normalize_addresses(addresses)?;
+        Ok(Self { addresses, ttl })
+    }
+
+    pub fn from_ttl_metadata(
+        addresses: Vec<IpAddr>,
+        ttl: TtlMetadata,
+    ) -> Result<Self, AnswerError> {
+        let seconds = ttl.min_ttl.ok_or(AnswerError::MissingTtl)?;
+        Self::new(addresses, Duration::from_secs(u64::from(seconds)))
+    }
+
+    pub fn addresses(&self) -> &[IpAddr] {
+        &self.addresses
+    }
+
+    pub const fn ttl(&self) -> Duration {
+        self.ttl
+    }
+}
+
+/// system resolver 的纯结果占位；真正的 resolver 属于 adapter/port 层。
+#[derive(Clone, Eq, PartialEq)]
+pub struct SystemResolverAnswer {
+    addresses: Arc<[IpAddr]>,
+}
+
+impl fmt::Debug for SystemResolverAnswer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SystemResolverAnswer")
+            .field("address_count", &self.addresses.len())
+            .finish()
+    }
+}
+
+impl SystemResolverAnswer {
+    pub fn new(addresses: Vec<IpAddr>) -> Result<Self, AnswerError> {
+        Ok(Self {
+            addresses: normalize_addresses(addresses)?,
+        })
+    }
+
+    pub fn addresses(&self) -> &[IpAddr] {
+        &self.addresses
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum AnswerError {
+    #[error("address answer is empty")]
+    Empty,
+    #[error("address answer contains an unusable address")]
+    UnusableAddress,
+    #[error("address answer has no positive TTL")]
+    MissingTtl,
+}
+
+fn normalize_addresses(addresses: Vec<IpAddr>) -> Result<Arc<[IpAddr]>, AnswerError> {
+    let mut normalized = Vec::with_capacity(addresses.len());
+    for address in addresses {
+        if address.is_unspecified() {
+            return Err(AnswerError::UnusableAddress);
+        }
+        if !normalized.contains(&address) {
+            normalized.push(address);
+        }
+    }
+    if normalized.is_empty() {
+        return Err(AnswerError::Empty);
+    }
+    Ok(normalized.into())
+}
+
+/// bootstrap 查询的状态必须由调用方显式提供，避免失败后偷偷走 system resolver。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BootstrapResolution {
+    /// 本次没有发起 bootstrap 查询，可使用仍在 TTL 内的旧缓存。
+    NotAttempted,
+    /// 本次查询得到完整地址答案。
+    Answer(BootstrapAnswer),
+    /// 本次查询失败；仍可在 TTL 内复用旧地址，但结果会标记 degraded。
+    Failed,
+}
+
+/// system resolver 的结果占位，不包含任何实际 I/O 行为。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SystemResolverResolution {
+    Answer(SystemResolverAnswer),
+    Failed,
+}
+
+/// 从已解析配置抽取的、可供地址状态机消费的请求。
+#[derive(Clone, Eq, PartialEq)]
+pub struct AddressResolutionRequest {
+    upstream_id: ConfigId,
+    connect_ip: Option<IpAddr>,
+    bootstrap: Option<ConfigId>,
+}
+
+impl fmt::Debug for AddressResolutionRequest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AddressResolutionRequest")
+            .field("upstream_id", &self.upstream_id)
+            .field("has_connect_ip", &self.connect_ip.is_some())
+            .field("bootstrap", &self.bootstrap)
+            .finish()
+    }
+}
+
+impl AddressResolutionRequest {
+    pub fn from_resolved(upstream: &ResolvedUpstream) -> Result<Self, AddressResolutionError> {
+        let ResolvedUpstream::Doh {
+            id,
+            bootstrap,
+            connect_ip,
+            ..
+        } = upstream
+        else {
+            return Err(AddressResolutionError::NotDoh {
+                upstream: upstream_id(upstream),
+            });
+        };
+
+        Ok(Self {
+            upstream_id: id.clone(),
+            connect_ip: *connect_ip,
+            bootstrap: bootstrap.clone(),
+        })
+    }
+
+    pub fn upstream_id(&self) -> &ConfigId {
+        &self.upstream_id
+    }
+
+    pub fn connect_ip(&self) -> Option<IpAddr> {
+        self.connect_ip
+    }
+
+    pub fn bootstrap(&self) -> Option<&ConfigId> {
+        self.bootstrap.as_ref()
+    }
+}
+
+/// 地址来源；bootstrap 缓存命中与新答案使用同一来源，degraded 单独表达旧地址复用。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AddressSource {
+    ExplicitConnectIp,
+    Bootstrap(ConfigId),
+    SystemResolver,
+}
+
+/// 已选择的连接地址集合。
+#[derive(Clone, Eq, PartialEq)]
+pub struct ResolvedAddresses {
+    addresses: Arc<[IpAddr]>,
+    source: AddressSource,
+    expires_at: Option<Instant>,
+    degraded: bool,
+}
+
+impl fmt::Debug for ResolvedAddresses {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolvedAddresses")
+            .field("address_count", &self.addresses.len())
+            .field("source", &self.source)
+            .field("has_expiry", &self.expires_at.is_some())
+            .field("degraded", &self.degraded)
+            .finish()
+    }
+}
+
+impl ResolvedAddresses {
+    pub fn addresses(&self) -> &[IpAddr] {
+        &self.addresses
+    }
+
+    pub fn source(&self) -> &AddressSource {
+        &self.source
+    }
+
+    pub const fn expires_at(&self) -> Option<Instant> {
+        self.expires_at
+    }
+
+    pub const fn is_degraded(&self) -> bool {
+        self.degraded
+    }
+}
+
+#[derive(Clone)]
+struct CachedAddresses {
+    addresses: Arc<[IpAddr]>,
+    expires_at: Instant,
+}
+
+impl fmt::Debug for CachedAddresses {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CachedAddresses")
+            .field("address_count", &self.addresses.len())
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
+}
+
+/// bootstrap/connect_ip/system resolver 的地址优先级与 TTL 状态机。
+#[derive(Clone, Debug)]
+pub struct AddressResolutionState {
+    policy: AddressCachePolicy,
+    cache: BTreeMap<ConfigId, CachedAddresses>,
+}
+
+impl AddressResolutionState {
+    pub fn new(policy: AddressCachePolicy) -> Self {
+        Self {
+            policy,
+            cache: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_defaults() -> Self {
+        Self::new(AddressCachePolicy::defaults())
+    }
+
+    pub const fn policy(&self) -> AddressCachePolicy {
+        self.policy
+    }
+
+    pub fn cached_entry_count(&self) -> usize {
+        self.cache.len()
+    }
+
+    /// 选择地址的严格顺序为 connect_ip > bootstrap > system resolver。
+    pub fn resolve(
+        &mut self,
+        request: &AddressResolutionRequest,
+        bootstrap: BootstrapResolution,
+        system: SystemResolverResolution,
+        now: Instant,
+    ) -> Result<ResolvedAddresses, AddressResolutionError> {
+        if let Some(connect_ip) = request.connect_ip {
+            return Ok(ResolvedAddresses {
+                addresses: vec![connect_ip].into(),
+                source: AddressSource::ExplicitConnectIp,
+                expires_at: None,
+                degraded: false,
+            });
+        }
+
+        if let Some(bootstrap_id) = request.bootstrap.as_ref() {
+            return self.resolve_bootstrap(request, bootstrap_id, bootstrap, now);
+        }
+
+        match system {
+            SystemResolverResolution::Answer(answer) => Ok(ResolvedAddresses {
+                addresses: answer.addresses.clone(),
+                source: AddressSource::SystemResolver,
+                expires_at: None,
+                degraded: false,
+            }),
+            SystemResolverResolution::Failed => Err(AddressResolutionError::NoAddress {
+                upstream: request.upstream_id.as_str().to_owned(),
+                reason: NoAddressReason::SystemResolverUnavailable,
+            }),
+        }
+    }
+
+    pub fn clear(&mut self, upstream_id: &ConfigId) {
+        self.cache.remove(upstream_id);
+    }
+
+    pub fn purge_expired(&mut self, now: Instant) {
+        self.cache.retain(|_, entry| now < entry.expires_at);
+    }
+
+    fn resolve_bootstrap(
+        &mut self,
+        request: &AddressResolutionRequest,
+        bootstrap_id: &ConfigId,
+        resolution: BootstrapResolution,
+        now: Instant,
+    ) -> Result<ResolvedAddresses, AddressResolutionError> {
+        match resolution {
+            BootstrapResolution::Answer(answer) => {
+                let ttl = self.policy.bound(answer.ttl());
+                let expires_at = now.checked_add(ttl).unwrap_or(now);
+                self.cache.insert(
+                    request.upstream_id.clone(),
+                    CachedAddresses {
+                        addresses: answer.addresses.clone(),
+                        expires_at,
+                    },
+                );
+                Ok(ResolvedAddresses {
+                    addresses: answer.addresses,
+                    source: AddressSource::Bootstrap(bootstrap_id.clone()),
+                    expires_at: Some(expires_at),
+                    degraded: false,
+                })
+            }
+            BootstrapResolution::NotAttempted => {
+                self.cached_or_error(request, bootstrap_id, now, false)
+            }
+            BootstrapResolution::Failed => self.cached_or_error(request, bootstrap_id, now, true),
+        }
+    }
+
+    fn cached_or_error(
+        &mut self,
+        request: &AddressResolutionRequest,
+        bootstrap_id: &ConfigId,
+        now: Instant,
+        degraded: bool,
+    ) -> Result<ResolvedAddresses, AddressResolutionError> {
+        let Some(entry) = self.cache.get(&request.upstream_id).cloned() else {
+            return Err(AddressResolutionError::NoAddress {
+                upstream: request.upstream_id.as_str().to_owned(),
+                reason: NoAddressReason::BootstrapUnavailable,
+            });
+        };
+        if now >= entry.expires_at {
+            self.cache.remove(&request.upstream_id);
+            return Err(AddressResolutionError::NoAddress {
+                upstream: request.upstream_id.as_str().to_owned(),
+                reason: NoAddressReason::BootstrapExpired,
+            });
+        }
+        Ok(ResolvedAddresses {
+            addresses: entry.addresses,
+            source: AddressSource::Bootstrap(bootstrap_id.clone()),
+            expires_at: Some(entry.expires_at),
+            degraded,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Error)]
+pub enum AddressResolutionError {
+    #[error("upstream `{upstream}` is not a DoH upstream")]
+    NotDoh { upstream: String },
+    #[error("upstream `{upstream}` has no usable address: {reason}")]
+    NoAddress {
+        upstream: String,
+        reason: NoAddressReason,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NoAddressReason {
+    BootstrapUnavailable,
+    BootstrapExpired,
+    SystemResolverUnavailable,
+}
+
+impl fmt::Display for NoAddressReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::BootstrapUnavailable => "bootstrap unavailable",
+            Self::BootstrapExpired => "bootstrap cache expired",
+            Self::SystemResolverUnavailable => "system resolver unavailable",
+        })
+    }
+}
+
+fn upstream_id(upstream: &ResolvedUpstream) -> String {
+    match upstream {
+        ResolvedUpstream::Hosts { id, .. }
+        | ResolvedUpstream::Doh { id, .. }
+        | ResolvedUpstream::Group { id, .. } => id.as_str().to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::time::{Duration, Instant};
+
+    use url::Url;
+
+    use crate::config::resolve::{ConfigId, ResolvedUpstream};
+
+    use super::{
+        AddressCachePolicy, AddressResolutionError, AddressResolutionRequest,
+        AddressResolutionState, AddressSource, BootstrapAnswer, BootstrapResolution,
+        NoAddressReason, ResolvedAddresses, SystemResolverAnswer, SystemResolverResolution,
+    };
+
+    fn id(value: &str) -> ConfigId {
+        ConfigId::new(value).unwrap()
+    }
+
+    fn doh(name: &str, connect_ip: Option<IpAddr>, bootstrap: Option<&str>) -> ResolvedUpstream {
+        ResolvedUpstream::Doh {
+            id: id(name),
+            address: Url::parse("https://dns.example.test/dns-query").unwrap(),
+            bootstrap: bootstrap.map(id),
+            connect_ip,
+            proxy: None,
+            edns_client_subnet: None,
+        }
+    }
+
+    fn request(upstream: &ResolvedUpstream) -> AddressResolutionRequest {
+        AddressResolutionRequest::from_resolved(upstream).unwrap()
+    }
+
+    fn answer(address: [u8; 4], ttl: u64) -> BootstrapResolution {
+        BootstrapResolution::Answer(
+            BootstrapAnswer::new(
+                vec![IpAddr::V4(Ipv4Addr::from(address))],
+                Duration::from_secs(ttl),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn explicit_connect_ip_has_priority_over_failed_bootstrap_and_system() {
+        let upstream = doh(
+            "remote",
+            Some(IpAddr::V6(Ipv6Addr::LOCALHOST)),
+            Some("bootstrap"),
+        );
+        let mut state = AddressResolutionState::with_defaults();
+        let result = state
+            .resolve(
+                &request(&upstream),
+                BootstrapResolution::Failed,
+                SystemResolverResolution::Answer(
+                    SystemResolverAnswer::new(vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))])
+                        .unwrap(),
+                ),
+                Instant::now(),
+            )
+            .unwrap();
+
+        assert_eq!(result.source(), &AddressSource::ExplicitConnectIp);
+        assert_eq!(result.addresses(), &[IpAddr::V6(Ipv6Addr::LOCALHOST)]);
+        assert!(!result.is_degraded());
+    }
+
+    #[test]
+    fn bootstrap_answer_is_cached_with_bounded_ttl_and_expires() {
+        let upstream = doh("remote", None, Some("bootstrap"));
+        let now = Instant::now();
+        let policy =
+            AddressCachePolicy::new(Duration::from_secs(10), Duration::from_secs(60)).unwrap();
+        let mut state = AddressResolutionState::new(policy);
+        let req = request(&upstream);
+
+        let fresh = state
+            .resolve(
+                &req,
+                answer([192, 0, 2, 10], 1),
+                SystemResolverResolution::Failed,
+                now,
+            )
+            .unwrap();
+        assert_eq!(fresh.expires_at(), Some(now + Duration::from_secs(10)));
+
+        let cached = state
+            .resolve(
+                &req,
+                BootstrapResolution::NotAttempted,
+                SystemResolverResolution::Failed,
+                now + Duration::from_secs(9),
+            )
+            .unwrap();
+        assert_eq!(cached.addresses(), fresh.addresses());
+        assert!(!cached.is_degraded());
+
+        let expired = state.resolve(
+            &req,
+            BootstrapResolution::NotAttempted,
+            SystemResolverResolution::Answer(
+                SystemResolverAnswer::new(vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 99))]).unwrap(),
+            ),
+            now + Duration::from_secs(10),
+        );
+        assert!(matches!(
+            expired,
+            Err(AddressResolutionError::NoAddress {
+                reason: NoAddressReason::BootstrapExpired,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn failed_refresh_reuses_unexpired_address_as_degraded() {
+        let upstream = doh("remote", None, Some("bootstrap"));
+        let now = Instant::now();
+        let mut state = AddressResolutionState::new(
+            AddressCachePolicy::new(Duration::from_secs(1), Duration::from_secs(30)).unwrap(),
+        );
+        let req = request(&upstream);
+        state
+            .resolve(
+                &req,
+                answer([192, 0, 2, 10], 10),
+                SystemResolverResolution::Failed,
+                now,
+            )
+            .unwrap();
+
+        let degraded = state
+            .resolve(
+                &req,
+                BootstrapResolution::Failed,
+                SystemResolverResolution::Failed,
+                now + Duration::from_secs(5),
+            )
+            .unwrap();
+        assert_eq!(
+            degraded.addresses(),
+            &[IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10))]
+        );
+        assert!(degraded.is_degraded());
+    }
+
+    #[test]
+    fn configured_bootstrap_failure_does_not_fall_back_to_system_resolver() {
+        let upstream = doh("remote", None, Some("bootstrap"));
+        let mut state = AddressResolutionState::with_defaults();
+        let result = state.resolve(
+            &request(&upstream),
+            BootstrapResolution::Failed,
+            SystemResolverResolution::Answer(
+                SystemResolverAnswer::new(vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 20))]).unwrap(),
+            ),
+            Instant::now(),
+        );
+        assert!(matches!(
+            result,
+            Err(AddressResolutionError::NoAddress {
+                reason: NoAddressReason::BootstrapUnavailable,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn system_resolver_is_used_only_without_bootstrap() {
+        let upstream = doh("remote", None, None);
+        let mut state = AddressResolutionState::with_defaults();
+        let result = state
+            .resolve(
+                &request(&upstream),
+                BootstrapResolution::NotAttempted,
+                SystemResolverResolution::Answer(
+                    SystemResolverAnswer::new(vec![IpAddr::V4(Ipv4Addr::new(192, 0, 2, 30))])
+                        .unwrap(),
+                ),
+                Instant::now(),
+            )
+            .unwrap();
+        assert_eq!(result.source(), &AddressSource::SystemResolver);
+    }
+
+    #[test]
+    fn debug_output_redacts_address_values() {
+        let upstream = doh("remote", None, Some("bootstrap"));
+        let req = request(&upstream);
+        let answer = BootstrapAnswer::new(
+            vec![IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7))],
+            Duration::from_secs(30),
+        )
+        .unwrap();
+        let mut state = AddressResolutionState::with_defaults();
+        let result = state
+            .resolve(
+                &req,
+                BootstrapResolution::Answer(answer.clone()),
+                SystemResolverResolution::Failed,
+                Instant::now(),
+            )
+            .unwrap();
+
+        let answer_debug = format!("{answer:?}");
+        let request_debug = format!("{req:?}");
+        let state_debug = format!("{state:?}");
+        let result_debug = format!("{result:?}");
+        for debug in [answer_debug, request_debug, state_debug, result_debug] {
+            assert!(!debug.contains("203.0.113.7"));
+            assert!(!debug.contains("dns.example.test"));
+        }
+    }
+
+    #[test]
+    fn rejects_non_doh_upstream_at_request_boundary() {
+        let upstream = ResolvedUpstream::Hosts {
+            id: id("local"),
+            format: "hosts".to_owned(),
+            hosts: "192.0.2.1 example.test".to_owned(),
+        };
+        assert!(matches!(
+            AddressResolutionRequest::from_resolved(&upstream),
+            Err(AddressResolutionError::NotDoh { upstream }) if upstream == "local"
+        ));
+    }
+
+    #[test]
+    fn result_debug_is_address_count_only() {
+        let result = ResolvedAddresses {
+            addresses: vec![IpAddr::V4(Ipv4Addr::new(198, 51, 100, 9))].into(),
+            source: AddressSource::SystemResolver,
+            expires_at: None,
+            degraded: false,
+        };
+        assert_eq!(
+            format!("{result:?}"),
+            "ResolvedAddresses { address_count: 1, source: SystemResolver, has_expiry: false, degraded: false }"
+        );
+    }
+}
