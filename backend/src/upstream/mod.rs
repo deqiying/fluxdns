@@ -14,7 +14,10 @@ pub use bootstrap::{
     DEFAULT_BOOTSTRAP_MAX_TTL, DEFAULT_BOOTSTRAP_MIN_TTL, NoAddressReason, ResolvedAddresses,
     SystemResolverAnswer, SystemResolverResolution,
 };
-pub use doh::{DohHttpResponse, MAX_DOH_RESPONSE_BODY_BYTES, validate_response};
+pub use doh::{
+    DOH_MEDIA_TYPE, DohEndpointError, DohExchange, DohHttpRequest, DohHttpResponse,
+    DohHttpResponseOwned, DohHttpTransport, MAX_DOH_RESPONSE_BODY_BYTES, validate_response,
+};
 pub use executor::{ExecutorBuildError, ExecutorError, UpstreamGroupExecutor};
 pub use group::{GroupSelector, GroupSelectorError, SelectionLease};
 pub use hosts::{HostsExchange, HostsExchangeBuildError};

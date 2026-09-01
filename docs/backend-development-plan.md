@@ -218,9 +218,11 @@ transport / upstream / storage / observability adapters
 
 第二个小阶段（已完成）：新增无网络副作用的 `GroupSelector`，固定 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；该阶段尚未接入真实 exchange、fallback aggregator 或 DNS Core。
 
-第三个小阶段（已完成）：新增按 attempt index 聚合的 outcome/fallback 判定，固定 terminal response、retryable transport failure、SERVFAIL/TC、取消优先级和 fallback connector 去重；定向 outcome 测试 7 项通过。真实 exchange、bootstrap/connect_ip 和 DNS Core 接线仍未实现。
+第三个小阶段（已完成）：新增按 attempt index 聚合的 outcome/fallback 判定，固定 terminal response、retryable transport failure、SERVFAIL/TC、取消优先级和 fallback connector 去重；定向 outcome 测试 7 项通过。真实网络 exchange、bootstrap/connect_ip 和 DNS Core 接线仍未实现。
 
-当前阶段 5 边界：DoH 出站 connector、bootstrap/connect_ip、SOCKS5/SOCKS5H、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
+第四个小阶段（已完成）：新增可注入 `DohHttpTransport` 与 `DohExchange`，固定 DoH POST、Host/SNI/connect_ip、内部 DNS ID、deadline/cancellation 和稳定错误映射；`upstream::doh` 定向测试 7 项通过。真实 HTTP/TLS/socket adapter、bootstrap/connect_ip、SOCKS5/SOCKS5H、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
+
+当前阶段 5 边界：真实 DoH 出站 adapter、bootstrap/connect_ip、SOCKS5/SOCKS5H、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
 
 ### 阶段 6：缓存
 
@@ -270,7 +272,7 @@ transport / upstream / storage / observability adapters
 
 首个小阶段（已完成）：为 DoH bind plan 增加 typed endpoint binding，补充 opaque TCP byte-stream capability，实现 plain HTTP/1.x GET/POST codec、无填充 base64url、路由 `{client_id}` 匹配、固定 HTTP 错误状态和 DNS `application/dns-message` 响应；service 以受监督 listener/session task 接入。当前只接受 `tls.mode: external` 与 `client_ip.source: peer`，`terminate`、`forwarded_header`、`proxy_protocol` 会在装配阶段明确拒绝。定向 codec/session 测试 9 项，真实 smoke 使用 `127.0.0.1:8355` 直接 HTTP POST/GET。
 
-当前边界：HTTP/1.x 仍按读取顺序处理，未实现 TLS terminate/external 握手、PROXY v1/v2、forwarded header 信任链、HTTP/2、上游 DoH connector 和完整资源/故障注入验收。
+当前边界：HTTP/1.x 仍按读取顺序处理，未实现 TLS terminate/external 握手、PROXY v1/v2、forwarded header 信任链、HTTP/2、真实上游 DoH HTTP/TLS adapter 和完整资源/故障注入验收。
 
 ### 阶段 9：统计、详情日志与观测
 

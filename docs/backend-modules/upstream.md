@@ -1,6 +1,6 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，已实现内联 hosts exchange、hosts registry、纯 group member selection 和 outcome/fallback 判定；真实 exchange、DoH 出站、bootstrap/outbound 尚未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、hosts registry、纯 group member selection 和 outcome/fallback 判定；真实 HTTP/TLS adapter、bootstrap/outbound 尚未实现
 >
 > 更新日期：2026-08-31
 >
@@ -27,7 +27,7 @@ Upstream 模块把 typed upstream 配置编译为 `UpstreamRegistry` 和可复�
 
 ## 2. Registry 与 connector
 
-prepare 阶段为每个 upstream 生成 typed ID 和 connector handle。当前 registry 首轮只构造已验证的 hosts connector：
+prepare 阶段为每个 upstream 生成 typed ID 和 connector handle。当前 registry 首轮只构造已验证的 hosts connector；DoH connector 已独立提供可注入 transport 边界，尚未接入 registry：
 
 - hosts connector；
 - DoH connector；
@@ -175,7 +175,7 @@ TransportFailure 分类至少包括 connect、DNS bootstrap、proxy、TLS、HTTP
 
 v1 不实现主动健康检查、熔断器或持久健康分数。load-balance 只使用实时 in-flight，不应在文档或指标中称为 health。
 
-当前已实现：`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；`outcome` 提供按 attempt index 的 terminal/retryable/cancelled 聚合和 fallback 判定。真实 exchange、late cache finalizer 和 Runtime/DNS Core 接线尚未接入。
+当前已实现：`DohExchange` 固定 POST `application/dns-message` 请求，自动分配内部 DNS ID，保留 URL host 作为 Host/SNI，并将显式 `connect_ip`、deadline、cancellation 和 HTTP/协议错误映射到 `UpstreamOutcome`；`GroupSelector` 只负责无网络副作用的成员选择，提供 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；`outcome` 提供按 attempt index 的 terminal/retryable/cancelled 聚合和 fallback 判定。真实 HTTP/TLS/socket adapter、bootstrap、late cache finalizer 和 Runtime/DNS Core 接线尚未接入。
 
 ## 10. 测试
 
@@ -193,7 +193,7 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 ## 11. 实现检查清单
 
 - [x] 实现 hosts connector 与首轮 Registry factory；
-- [ ] 实现 DoH connector；
+- [x] 实现 DoH connector 的协议无关 exchange 与响应校验边界；
 - [ ] 实现 bootstrap/connect_ip/outbound；
 - [x] 固化四种 group 模式的纯 member selection；
 - [x] 实现 outcome/fallback 判定边界；
@@ -201,6 +201,6 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-阶段证据：hosts/group/outcome 定向测试 19 项通过，覆盖 hosts/JSON 解析、positive/NODATA/NXDOMAIN、取消/超时、registry duplicate/missing/unsupported、smooth weighted round-robin、least-in-flight、并发 lease、terminal/fallback/cancellation 聚合和 connector 去重。当前实现未接入 Runtime/DNS Core，也未执行出站网络 I/O。
+阶段证据：hosts/group/outcome 定向测试 19 项通过，另有 `upstream::doh` 7 项通过，覆盖 DoH request envelope、Host/SNI/connect_ip、HTTP/协议响应校验、timeout 映射和 URL 安全边界。当前实现未接入 Runtime/DNS Core，也未执行真实出站网络 I/O。
 
-当前实现进度：**40%**。
+当前实现进度：**50%**。
