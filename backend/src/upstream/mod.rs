@@ -9,6 +9,7 @@ mod http;
 mod outbound;
 mod outcome;
 mod registry;
+mod socks5;
 
 pub(crate) use bootstrap::BootstrapConnectorRegistry;
 pub use bootstrap::{
@@ -36,3 +37,9 @@ pub use outcome::{
     assess, deduplicate_connector_order,
 };
 pub use registry::{RegistryError, UpstreamRegistry};
+pub use socks5::{
+    Socks5Address, Socks5AuthMethod, Socks5ConnectResponse, Socks5ProtocolError, Socks5Reply,
+    Socks5TargetError, address_for_target, encode_connect_request, encode_method_request,
+    encode_userpass_request, parse_connect_response, parse_method_response,
+    parse_userpass_response,
+};
