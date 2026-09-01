@@ -1,5 +1,6 @@
 //! 可热替换的资源解析与不可变索引。
 
+mod fetcher;
 mod hosts;
 mod loader;
 mod orchestrator;
@@ -9,6 +10,7 @@ mod rules;
 mod scheduler;
 mod snapshot;
 
+pub use fetcher::{ReqwestResourceFetcher, ResourceFetcherBuildError};
 pub use hosts::{
     CanonicalDomain, HostsIndex, HostsLimits, HostsLookup, HostsParseError, HostsRecord,
 };

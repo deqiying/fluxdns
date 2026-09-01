@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use thiserror::Error;
 
 use crate::dns::RuntimeRevision;
+use crate::ports::effects::ResourceFetcher;
 
 use super::bind::{BoundCandidate, BoundListenerSet};
 use super::prepared::PreparedRuntime;
@@ -39,6 +40,10 @@ impl ActiveRuntime {
 
     pub fn listeners(&self) -> &BoundListenerSet {
         &self.listeners
+    }
+
+    pub fn resource_fetcher(&self) -> Option<Arc<dyn ResourceFetcher>> {
+        self.prepared.resource_fetcher()
     }
 
     /// 尝试为一个请求建立 guard；drain 开始后不再接收新请求。

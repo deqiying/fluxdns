@@ -7,6 +7,8 @@ use thiserror::Error;
 
 use crate::config::{BindPlan, ResolvedConfig};
 use crate::dns::{DEFAULT_LOCAL_TTL, PolicyDnsCore, RuntimeRevision};
+use crate::ports::effects::ResourceFetcher;
+use crate::resource::ReqwestResourceFetcher;
 
 use super::RuntimeSnapshot;
 
@@ -14,6 +16,7 @@ use super::RuntimeSnapshot;
 pub struct PreparedRuntime {
     pub(crate) snapshot: Arc<RuntimeSnapshot>,
     pub(crate) bind_plan: Arc<BindPlan>,
+    resource_fetcher: Option<Arc<dyn ResourceFetcher>>,
 }
 
 impl PreparedRuntime {
@@ -27,6 +30,7 @@ impl PreparedRuntime {
         Ok(Self {
             snapshot,
             bind_plan: Arc::new(bind_plan),
+            resource_fetcher: None,
         })
     }
 
@@ -36,6 +40,10 @@ impl PreparedRuntime {
         revision: RuntimeRevision,
     ) -> Result<Self, PrepareError> {
         let bind_plan = prepare_bind_plan(&config, revision)?;
+        let resource_fetcher = ReqwestResourceFetcher::from_resolved(&config.outbounds, 64 * 1024)
+            .map_err(|error| PrepareError::ResourceFetcher {
+                reason: error.to_string(),
+            })?;
         let policy_core =
             PolicyDnsCore::from_config(&config, DEFAULT_LOCAL_TTL).map_err(|error| {
                 PrepareError::PolicyCore {
@@ -50,6 +58,7 @@ impl PreparedRuntime {
         Ok(Self {
             snapshot,
             bind_plan: Arc::new(bind_plan),
+            resource_fetcher: Some(Arc::new(resource_fetcher)),
         })
     }
 
@@ -61,12 +70,17 @@ impl PreparedRuntime {
         &self.bind_plan
     }
 
+    pub fn resource_fetcher(&self) -> Option<Arc<dyn ResourceFetcher>> {
+        self.resource_fetcher.as_ref().map(Arc::clone)
+    }
+
     pub fn preflight(&self) -> PreflightReport {
         PreflightReport {
             revision: self.snapshot.revision(),
             endpoint_count: self.bind_plan.entries.len(),
             normalized_hash: self.snapshot.config().normalized_hash.clone(),
             has_policy_core: self.snapshot.policy_core().is_some(),
+            has_resource_fetcher: self.resource_fetcher.is_some(),
         }
     }
 }
@@ -77,6 +91,7 @@ impl fmt::Debug for PreparedRuntime {
             .debug_struct("PreparedRuntime")
             .field("snapshot", &self.snapshot)
             .field("bind_entry_count", &self.bind_plan.entries.len())
+            .field("has_resource_fetcher", &self.resource_fetcher.is_some())
             .finish()
     }
 }
@@ -96,6 +111,8 @@ pub enum PrepareError {
     DuplicateEndpoint { index: usize },
     #[error("runtime policy DNS core could not be built: {reason}")]
     PolicyCore { reason: String },
+    #[error("runtime resource fetcher could not be built: {reason}")]
+    ResourceFetcher { reason: String },
 }
 
 /// prepare 成功后可用于观测和验收的最小摘要。
@@ -105,6 +122,7 @@ pub struct PreflightReport {
     pub endpoint_count: usize,
     pub normalized_hash: String,
     pub has_policy_core: bool,
+    pub has_resource_fetcher: bool,
 }
 
 fn prepare_bind_plan(
@@ -206,6 +224,8 @@ strategy:
         assert_eq!(candidate.bind_plan().entries.len(), 1);
         assert!(Arc::ptr_eq(&candidate.snapshot().config_arc(), &config));
         assert!(!candidate.preflight().has_policy_core);
+        assert!(!candidate.preflight().has_resource_fetcher);
+        assert!(candidate.resource_fetcher().is_none());
         assert!(candidate.snapshot().dns_core().is_none());
     }
 
@@ -215,6 +235,8 @@ strategy:
             PreparedRuntime::prepare_with_policy_core(config(), RuntimeRevision(2)).unwrap();
 
         assert!(candidate.preflight().has_policy_core);
+        assert!(candidate.preflight().has_resource_fetcher);
+        assert!(candidate.resource_fetcher().is_some());
         assert!(candidate.snapshot().policy_core().is_some());
         assert!(candidate.snapshot().dns_core().is_some());
     }

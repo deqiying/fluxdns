@@ -1,6 +1,6 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现，完整资源/flush 生命周期仍在后续阶段
+> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，完整资源 worker/flush 生命周期仍在后续阶段
 >
 > 更新日期：2026-09-01
 >
@@ -64,7 +64,7 @@ snapshot 不包含：
 - writer channel 的发送端实现细节；
 - mutable retry/backoff state。
 
-`DnsService::with_default_timeout_from_runtime` 从 active snapshot 取得 `DnsCore` handle，确保 service task 与请求入口使用同一 `RuntimeRevision`。当前尚未把资源 refresh worker、资源级 CAS reload、resource-only runtime swap 或 flush task 接入该 snapshot。
+`DnsService::with_default_timeout_from_runtime` 从 active snapshot 取得 `DnsCore` handle，确保 service task 与请求入口使用同一 `RuntimeRevision`。`PreparedRuntime` 在候选构造阶段装配生产 `ReqwestResourceFetcher`，并由 `ActiveRuntime` 持有其 shared adapter；该 adapter 不进入请求 snapshot。当前尚未把资源 refresh worker、资源级 CAS reload、resource-only runtime swap 或 flush task 接入 service supervisor。
 
 每个请求在 ingress 后只捕获一次 `Arc<RuntimeSnapshot>`。同一请求不能在策略、缓存和上游阶段分别读取不同 revision。
 
@@ -207,6 +207,7 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [x] 接入真实 UDP/TCP service task、TCP session `JoinSet` 和基础 drain/shutdown；
 - [x] 接入按配置生成的 immutable resource snapshot 摘要，并让 service 从 active snapshot 捕获同 revision `DnsCore`；
 - [x] 接入当前 snapshot `PolicyDnsCore` finalizer owner，并在 service shutdown 中执行 deadline-aware close；共享 Runtime 后台 owner 仍待完成；
+- [x] 在 `PreparedRuntime`/`ActiveRuntime` 持有生产 `ResourceFetcher`，不把 HTTP client 放入请求 snapshot；
 - [ ] 定义状态类型与所有权转换；
 - [ ] 完成跨模块资源装配版 PreparedRuntime/preflight；
 - [ ] 完成真实服务任务版 ActiveRuntime coordinator/CAS 与 reload；
@@ -214,4 +215,6 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [ ] 完成完整 drain/shutdown（flush、checkpoint、超时分项报告）；
 - [ ] 完成并发、故障和时间控制测试。
 
-当前实现进度：**35%**。已验证 Runtime snapshot 资源摘要、service core 构造入口和当前 Policy finalizer owner；完整资源 worker、reload/CAS 合并、flush 和故障注入仍未接线。
+阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter；`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS TLS、SOCKS5H、取消和 body limit。资源长期 task、Runtime supervisor 接线、跨 Runtime snapshot 发布和 flush 生命周期仍未完成。
+
+当前实现进度：**40%**。已验证 Runtime snapshot 资源摘要、service core 构造入口、生产 ResourceFetcher ownership 和当前 Policy finalizer owner；完整资源 worker、reload/CAS 合并、flush 和故障注入仍未接线。

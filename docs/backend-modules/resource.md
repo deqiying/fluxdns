@@ -1,6 +1,6 @@
 # Resource 模块设计
 
-> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，Policy compiled resource live swap 已接入，但真实 Runtime supervisor task 尚未接入
+> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取，`PreparedRuntime` 已持有该 shared adapter；真实 Runtime supervisor task 尚未接入
 >
 > 更新日期：2026-09-01
 >
@@ -158,7 +158,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 
 失败退避指数增长并封顶 5 分钟。连续三次计划刷新失败或超过 `3 × update_interval` 无成功时标记 stale，但继续使用旧 snapshot。
 
-当前已实现 `ResourceRefreshRuntime`：它为 registry 中的资源建立 schedule，将 due 检查与 `ResourceRefreshCoordinator` 的 per-resource single-flight、epoch reservation、CAS publish、failure backoff、cancel 和 shutdown 组合起来。该 facade 不执行网络、磁盘或 parser I/O；`ResourceRefreshWorker` 现在在 reservation 生命周期内调用 `ResourceFetcher`，完成 bounded remote rule-set fetch/parse/persist、epoch 重绑定和 CAS publish，但 timer、长期 task 监督仍由后续 Runtime 接入；Policy compiled resource live swap 已由 PolicyDnsCore 提供版本化 CAS 入口。
+当前已实现 `ResourceRefreshRuntime`：它为 registry 中的资源建立 schedule，将 due 检查与 `ResourceRefreshCoordinator` 的 per-resource single-flight、epoch reservation、CAS publish、failure backoff、cancel 和 shutdown 组合起来。该 facade 不执行网络、磁盘或 parser I/O；`ResourceRefreshWorker` 现在在 reservation 生命周期内调用 `ResourceFetcher`，完成 bounded remote rule-set fetch/parse/persist、epoch 重绑定和 CAS publish。生产 `ReqwestResourceFetcher` 在 prepare 边界装配 direct HTTP/HTTPS 与配置驱动 SOCKS5/SOCKS5H client，固定 `no_proxy`、禁止重定向、响应体上限、deadline/cancellation 和安全 URL 边界；但 timer、长期 task 监督仍由后续 Runtime 接入，Policy compiled resource live swap 已由 PolicyDnsCore 提供版本化 CAS 入口。
 
 ## 10. 原子落盘
 
@@ -204,10 +204,11 @@ remote 有效内容与 manifest：
 - [x] 实现 remote loader、snapshot manifest、原子落盘与 content/manifest 恢复校验；
 - [x] 实现纯逻辑 refresh/single-flight scheduler/stale policy 与 Runtime-facing 编排边界；
 - [x] 接入一次性 `ResourceRefreshWorker`，完成 remote fetch/parse/persist、epoch 绑定和 CAS publish；
+- [x] 接入生产 `ReqwestResourceFetcher`，验证 direct HTTP、HTTPS TLS、SOCKS5H、body limit、取消和安全错误边界；
 - [ ] 接入 Runtime supervisor 的长期调度、资源 I/O task 和跨 Runtime snapshot 发布；
 - [x] 完成当前解析、安全边界、文件稳定读取和并发 CAS 测试；
 - [ ] 完成 remote 恢复、原子落盘和长期刷新测试。
 
-阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；本切片新增 `resource::remote::tests` 6 项与 `resource::orchestrator::tests` 6 项通过，覆盖 due/reservation、CAS publish、backoff、cancel 和 shutdown。真实 Runtime supervisor 长期 task、资源跨 Runtime 发布和长期故障验收仍未完成；Policy compiled resource live swap 已在 Policy focused test 中验证。
+阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；`resource::fetcher::tests` 7 项通过，覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy、SecretRef 脱敏和 prepare 错误；本切片新增 `resource::remote::tests` 6 项与 `resource::orchestrator::tests` 6 项通过，覆盖 due/reservation、CAS publish、backoff、cancel 和 shutdown。真实 Runtime supervisor 长期 task、资源跨 Runtime 发布和长期故障验收仍未完成；Policy compiled resource live swap 已在 Policy focused test 中验证。
 
-当前实现进度：**65%**。
+当前实现进度：**70%**。
