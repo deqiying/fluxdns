@@ -2,7 +2,7 @@
 
 > 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、hosts registry、纯 group member selection 和 outcome/fallback 判定；真实 HTTP/TLS adapter、bootstrap/outbound 尚未实现
 >
-> 更新日期：2026-08-31
+> 更新日期：2026-09-01
 >
 > 目标代码：`backend/src/upstream/*`
 >

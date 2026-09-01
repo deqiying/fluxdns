@@ -2,7 +2,7 @@
 
 > 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema 与可替换 stats writer 边界；真实 SQLite pool、详情 writer 和 flush 尚未实现
 >
-> 更新日期：2026-08-31
+> 更新日期：2026-09-01
 >
 > 目标代码：`backend/src/storage/*`、`backend/migrations/*`
 >
