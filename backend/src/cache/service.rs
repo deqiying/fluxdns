@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Instant;
 
-use crate::dns::{CanonicalResponse, RuntimeRevision};
+use crate::dns::{CancelReason, Cancellation, CanonicalResponse, RuntimeRevision};
 use crate::ports::cache::{
     CacheCondition, CacheKey, CacheLoadCompletion, CacheLoadFailure, CacheLoadLease,
     CacheLoadReservation, CacheLoadWaiter, CacheRecord, CacheStore, CacheWriteOutcome,
@@ -29,6 +29,17 @@ pub enum CacheFacadeBuildError {
     ZeroRefreshCapacity,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LateCacheFinalizerBuildError {
+    ZeroCapacity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LateCacheFinalizerSubmitError {
+    Shutdown,
+    Capacity,
+}
+
 impl Default for CacheFacadeOptions {
     fn default() -> Self {
         Self {
@@ -44,6 +55,94 @@ pub struct CacheFacade {
     store: Arc<dyn CacheStore>,
     options: CacheFacadeOptions,
     refresh_admission: Arc<RefreshAdmission>,
+}
+
+/// 在客户端响应已经完成后执行有界 cache write 的后台 finalizer。
+///
+/// finalizer 不拥有请求响应权；调用方只能提交一条 typed write request，任务会在
+/// shutdown 取消时停止，并等待所有已提交任务退出。容量不足时直接拒绝提交，避免
+/// late result 在高并发下无限堆积。
+#[derive(Clone)]
+pub struct LateCacheFinalizer {
+    state: Arc<LateCacheFinalizerState>,
+}
+
+struct LateCacheFinalizerState {
+    permits: Arc<tokio::sync::Semaphore>,
+    cancellation: Cancellation,
+    active: AtomicUsize,
+    idle: tokio::sync::Notify,
+}
+
+impl fmt::Debug for LateCacheFinalizer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LateCacheFinalizer")
+            .field("capacity", &self.state.permits.available_permits())
+            .field("active", &self.state.active.load(Ordering::Acquire))
+            .field("shutdown", &self.state.cancellation.is_cancelled())
+            .finish()
+    }
+}
+
+impl LateCacheFinalizer {
+    pub fn new(capacity: usize) -> Result<Self, LateCacheFinalizerBuildError> {
+        if capacity == 0 {
+            return Err(LateCacheFinalizerBuildError::ZeroCapacity);
+        }
+        Ok(Self {
+            state: Arc::new(LateCacheFinalizerState {
+                permits: Arc::new(tokio::sync::Semaphore::new(capacity)),
+                cancellation: Cancellation::new(),
+                active: AtomicUsize::new(0),
+                idle: tokio::sync::Notify::new(),
+            }),
+        })
+    }
+
+    pub fn active_tasks(&self) -> usize {
+        self.state.active.load(Ordering::Acquire)
+    }
+
+    pub fn is_shutdown(&self) -> bool {
+        self.state.cancellation.is_cancelled()
+    }
+
+    pub fn submit(
+        &self,
+        facade: Arc<CacheFacade>,
+        request: CacheWriteRequest,
+    ) -> Result<(), LateCacheFinalizerSubmitError> {
+        if self.is_shutdown() {
+            return Err(LateCacheFinalizerSubmitError::Shutdown);
+        }
+        let permit = self
+            .state
+            .permits
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| LateCacheFinalizerSubmitError::Capacity)?;
+        self.state.active.fetch_add(1, Ordering::AcqRel);
+        let state = Arc::clone(&self.state);
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = state.cancellation.cancelled() => {}
+                _ = facade.write_response(request) => {}
+            }
+            drop(permit);
+            state.active.fetch_sub(1, Ordering::AcqRel);
+            state.idle.notify_waiters();
+        });
+        Ok(())
+    }
+
+    pub async fn shutdown(&self) {
+        self.state.cancellation.cancel(CancelReason::Shutdown);
+        while self.active_tasks() != 0 {
+            self.state.idle.notified().await;
+        }
+    }
 }
 
 struct RefreshAdmission {
@@ -388,7 +487,8 @@ mod tests {
 
     use crate::cache::{
         CacheAdmissionPolicy, CacheFacade, CacheFacadeBuildError, CacheFacadeOptions, CacheLookup,
-        CacheWriteRequest, CacheWriteResult, MemoryCacheStore,
+        CacheWriteRequest, CacheWriteResult, LateCacheFinalizer, LateCacheFinalizerBuildError,
+        LateCacheFinalizerSubmitError, MemoryCacheStore,
     };
     use crate::dns::{CanonicalQuery, CanonicalResponse, Deadline, RuntimeRevision};
     use crate::ports::cache::{CacheCondition, CacheKey, CacheNamespace, CacheStore};
@@ -559,6 +659,61 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error, CacheFacadeBuildError::ZeroRefreshCapacity);
+    }
+
+    #[test]
+    fn zero_late_finalizer_capacity_is_rejected() {
+        assert_eq!(
+            LateCacheFinalizer::new(0).unwrap_err(),
+            LateCacheFinalizerBuildError::ZeroCapacity
+        );
+    }
+
+    #[tokio::test]
+    async fn late_finalizer_writes_without_blocking_and_waits_on_shutdown() {
+        let store = Arc::new(MemoryCacheStore::default());
+        let facade = Arc::new(CacheFacade::new(store, CacheFacadeOptions::default()));
+        let finalizer = LateCacheFinalizer::new(1).unwrap();
+        finalizer
+            .submit(
+                Arc::clone(&facade),
+                CacheWriteRequest {
+                    key: key(),
+                    condition: CacheCondition::Absent,
+                    response: Arc::new(response(ResponseCode::NXDomain)),
+                    now: Instant::now(),
+                    producer_revision: RuntimeRevision(7),
+                    format_version: 1,
+                    deadline: deadline(),
+                },
+            )
+            .unwrap();
+        while finalizer.active_tasks() != 0 {
+            tokio::task::yield_now().await;
+        }
+        assert!(matches!(
+            facade.lookup(&key(), deadline()).await.unwrap(),
+            CacheLookup::Fresh(_)
+        ));
+
+        finalizer.shutdown().await;
+        assert!(finalizer.is_shutdown());
+        assert_eq!(finalizer.active_tasks(), 0);
+        let error = finalizer
+            .submit(
+                facade,
+                CacheWriteRequest {
+                    key: key(),
+                    condition: CacheCondition::Absent,
+                    response: Arc::new(response(ResponseCode::NXDomain)),
+                    now: Instant::now(),
+                    producer_revision: RuntimeRevision(8),
+                    format_version: 1,
+                    deadline: deadline(),
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error, LateCacheFinalizerSubmitError::Shutdown);
     }
 
     #[tokio::test]

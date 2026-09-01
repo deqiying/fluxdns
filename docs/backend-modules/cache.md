@@ -1,6 +1,6 @@
 # Cache 模块设计
 
-> 状态：v1 方案已完成，已实现内存 CacheStore、共享容量淘汰、响应准入/TTL、稳定 key builder、CacheFacade 首轮切片和版本化文件快照 persistence 边界；Moka/SQLite persistence 尚未实现
+> 状态：v1 方案已完成，已实现内存 CacheStore、共享容量淘汰、响应准入/TTL、稳定 key builder、CacheFacade 首轮切片、可取消有界 LateCacheFinalizer 和版本化文件快照 persistence 边界；Moka/SQLite persistence 尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -21,7 +21,7 @@ Cache 模块实现逻辑缓存池、entry 生命周期、single-flight、optimis
 | `key.rs` | namespace、query/strategy/ECS/transport compatibility key 的稳定编码 |
 | `memory.rs` | 当前为无外部依赖的 HashMap/Mutex `CacheStore` adapter；Moka 接入待后续切片 |
 | `persistence.rs` | 无外部依赖的版本化文件快照 `PersistentCacheStore` adapter；SQLite 实现待后续接入 |
-| `service.rs` | `CacheFacade`、single-flight、TTL、CAS、invalidations 的 typed 编排 |
+| `service.rs` | `CacheFacade`、single-flight、TTL、CAS、invalidations 和 `LateCacheFinalizer` 的 typed 编排 |
 
 缓存 SQLite 与业务统计 SQLite 是不同文件、不同 schema、不同 writer 和不同故障边界。
 
@@ -162,11 +162,12 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - REFUSED、未知响应类、缺失 TTL 和零 TTL 明确拒绝写入；
 - 可选生成 optimistic stale 窗口，并为 canonical wire 计算稳定 checksum。
 
-当前已实现的 key/facade 首轮切片：
+当前已实现的 key/facade/finalizer 首轮切片：
 
 - `CacheKey` 使用固定 format version、长度前缀和 opaque namespace/compatibility 组件编码 canonical query，不包含 DNS ID、runtime revision 或原始 client 地址；
 - `CacheFacade` 将 disabled、miss、fresh、stale 和 store unavailable 分层，并用一次性 refresh permit 防止重复刷新许可；
 - write request 经过准入 helper 后再进入 typed CAS，adapter 错误保持为可降级的 store unavailable，不把具体存储类型泄漏到 DNS Core。
+- `LateCacheFinalizer` 使用有界 semaphore 接收客户端响应完成后的 typed write request；提交容量不足时拒绝，shutdown 取消并等待已提交任务退出，不影响客户端 response。
 
 ## 10. Persistence
 
@@ -238,11 +239,12 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - [x] 实现 single-flight/CAS/显式失效的内存 adapter 首轮切片；
 - [x] 实现共享容量淘汰和 oversized entry 边界；
 - [x] 实现可替换 `PersistentCacheStore` port 的文件快照 adapter；
+- [x] 实现可取消、有界的 `LateCacheFinalizer`；（parallel group 消费接线仍待完整 Cache-Core 管线）
 - [ ] 实现 Moka adapter；
 - [ ] 实现独立 SQLite persistence；
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [ ] 完成跨 adapter 一致性、恢复和故障测试。
 
-阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态和容量淘汰；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝。真实 Moka/SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
+阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝。当前全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 367 passed、0 failed。真实 Moka/SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
 
-当前实现进度：**50%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight 和文件快照 persistence 边界；optimistic refresh、Moka 和 SQLite persistence 未实现）。
+当前实现进度：**50%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight、可取消有界 LateCacheFinalizer 和文件快照 persistence 边界；optimistic refresh、Moka、SQLite persistence 与完整 Cache-Core 接线未实现）。

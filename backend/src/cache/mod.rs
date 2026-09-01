@@ -17,5 +17,6 @@ pub use memory::{MemoryCacheStore, MemoryCacheStoreBuildError};
 pub use persistence::{FilePersistentCacheStore, FilePersistentCacheStoreBuildError};
 pub use service::{
     CacheFacade, CacheFacadeBuildError, CacheFacadeError, CacheFacadeOptions, CacheLookup,
-    CacheRefreshPermit, CacheWriteRequest, CacheWriteResult,
+    CacheRefreshPermit, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer,
+    LateCacheFinalizerBuildError, LateCacheFinalizerSubmitError,
 };
