@@ -5,6 +5,7 @@ mod loader;
 mod refresh;
 mod remote;
 mod rules;
+mod scheduler;
 mod snapshot;
 
 pub use hosts::{
@@ -23,6 +24,9 @@ pub use remote::{
     fetch_remote_rule_set,
 };
 pub use rules::{RuleIndex, RuleLimits, RuleMatch, RuleParseError};
+pub use scheduler::{
+    ResourceSchedule, ResourceScheduleDecision, ResourceSchedulePolicy, ResourceScheduleStopReason,
+};
 pub use snapshot::{
     ResourcePublishError, ResourceRegistrySnapshot, ResourceSnapshot, ResourceSourceKind,
     ResourceStaleStatus, ResourceSummary, ResourceVersion,
