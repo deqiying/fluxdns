@@ -1,11 +1,13 @@
 //! 已解析 upstream 的 connector 实现。
 
+mod doh;
 mod executor;
 mod group;
 mod hosts;
 mod outcome;
 mod registry;
 
+pub use doh::{DohHttpResponse, MAX_DOH_RESPONSE_BODY_BYTES, validate_response};
 pub use executor::{ExecutorBuildError, ExecutorError, UpstreamGroupExecutor};
 pub use group::{GroupSelector, GroupSelectorError, SelectionLease};
 pub use hosts::{HostsExchange, HostsExchangeBuildError};
