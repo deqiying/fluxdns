@@ -38,6 +38,7 @@ pub struct ReqwestDohHttpTransport {
     resolver: Arc<dyn DohAddressResolver>,
     proxy: Option<OutboundProfile>,
     proxy_resolver: Option<Arc<dyn OutboundAddressResolver>>,
+    root_certificate: Option<reqwest::Certificate>,
 }
 
 impl std::fmt::Debug for ReqwestDohHttpTransport {
@@ -55,7 +56,7 @@ impl ReqwestDohHttpTransport {
     pub fn new(
         resolver: Arc<dyn DohAddressResolver>,
     ) -> Result<Self, ReqwestDohHttpTransportBuildError> {
-        Self::build(resolver, None, None)
+        Self::build(resolver, None, None, None)
     }
 
     pub fn with_proxy(
@@ -63,13 +64,14 @@ impl ReqwestDohHttpTransport {
         proxy_resolver: Arc<dyn OutboundAddressResolver>,
         profile: OutboundProfile,
     ) -> Result<Self, ReqwestDohHttpTransportBuildError> {
-        Self::build(resolver, Some(profile), Some(proxy_resolver))
+        Self::build(resolver, Some(profile), Some(proxy_resolver), None)
     }
 
     fn build(
         resolver: Arc<dyn DohAddressResolver>,
         proxy: Option<OutboundProfile>,
         proxy_resolver: Option<Arc<dyn OutboundAddressResolver>>,
+        root_certificate: Option<reqwest::Certificate>,
     ) -> Result<Self, ReqwestDohHttpTransportBuildError> {
         client_builder()
             .build()
@@ -84,7 +86,18 @@ impl ReqwestDohHttpTransport {
             resolver,
             proxy,
             proxy_resolver,
+            root_certificate,
         })
+    }
+
+    #[cfg(test)]
+    fn with_test_root_certificate(
+        resolver: Arc<dyn DohAddressResolver>,
+        der: &[u8],
+    ) -> Result<Self, ReqwestDohHttpTransportBuildError> {
+        let certificate = reqwest::Certificate::from_der(der)
+            .map_err(|_| ReqwestDohHttpTransportBuildError::Client)?;
+        Self::build(resolver, None, None, Some(certificate))
     }
 
     async fn client_for_request(
@@ -210,6 +223,9 @@ impl ReqwestDohHttpTransport {
                     .with_safe_context("reqwest proxy could not be configured")
             })?;
             builder = builder.proxy(proxy);
+        }
+        if let Some(certificate) = &self.root_certificate {
+            builder = builder.add_root_certificate(certificate.clone());
         }
         builder.build().map_err(|_| {
             PortError::new(PortErrorClass::Internal, "reqwest_doh_transport.client")
@@ -532,8 +548,11 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio_rustls::TlsAcceptor;
+    use tokio_rustls::rustls::ServerConfig;
+    use tokio_rustls::rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
     use url::Url;
 
     use super::*;
@@ -541,7 +560,10 @@ mod tests {
     use crate::config::resolve::{ResolvedOutbound, ResolvedSecretRef};
     use crate::upstream::TokioDohAddressResolver;
 
-    async fn read_request(stream: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+    async fn read_request<S>(stream: &mut S) -> (String, Vec<u8>)
+    where
+        S: AsyncRead + Unpin,
+    {
         let mut bytes = Vec::new();
         let header_end = loop {
             let mut chunk = [0_u8; 1024];
@@ -664,6 +686,71 @@ mod tests {
         let request = request(
             Url::parse(&format!(
                 "http://resolver.example.test:{}/dns-query",
+                address.port()
+            ))
+            .unwrap(),
+            Some(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            None,
+        );
+        let cancellation = Cancellation::new();
+        let response = transport
+            .post(
+                request,
+                Deadline::new(Instant::now() + Duration::from_secs(2)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.content_type.as_deref(), Some(DOH_MEDIA_TYPE));
+        assert_eq!(response.body, b"abc");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn performs_live_https_tls_handshake_with_verified_host() {
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["resolver.example.test".to_owned()]).unwrap();
+        let certificate_der = certified.cert.der().to_vec();
+        let private_key_der = certified.signing_key.serialize_der();
+        let mut server_config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(certificate_der.clone())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(private_key_der)),
+            )
+            .unwrap();
+        server_config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let acceptor = TlsAcceptor::from(Arc::new(server_config));
+
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut stream = acceptor.accept(stream).await.unwrap();
+            let (headers, body) = read_request(&mut stream).await;
+            let headers = headers.to_ascii_lowercase();
+            assert!(headers.contains("post /dns-query http/1.1"));
+            assert!(headers.contains(&format!("host: resolver.example.test:{}", address.port())));
+            assert_eq!(body, [1, 2, 3, 4]);
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc",
+                )
+                .await
+                .unwrap();
+        });
+
+        let transport = ReqwestDohHttpTransport::with_test_root_certificate(
+            Arc::new(TokioDohAddressResolver::new()),
+            &certificate_der,
+        )
+        .unwrap();
+        let request = request(
+            Url::parse(&format!(
+                "https://resolver.example.test:{}/dns-query",
                 address.port()
             ))
             .unwrap(),
