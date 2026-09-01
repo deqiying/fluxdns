@@ -17,7 +17,8 @@ use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
 use crate::runtime::{
     ActiveRuntime, AdmissionError, BoundEndpointHandle, FaultLevel, RefreshedResourceSnapshot,
-    RestartPolicy, ShutdownReport, Supervisor, SupervisorError, SystemClock, TaskError, TaskSpec,
+    RestartPolicy, RuntimeCoordinator, ShutdownReport, Supervisor, SupervisorError, SystemClock,
+    TaskError, TaskSpec,
 };
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
@@ -56,6 +57,7 @@ const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 /// 已绑定 listener 的 DNS service；所有 receive loop 都由同一个 Supervisor 持有。
 pub struct DnsService {
     runtime: Arc<ActiveRuntime>,
+    coordinator: Arc<RuntimeCoordinator>,
     supervisor: Supervisor,
 }
 
@@ -65,6 +67,16 @@ impl DnsService {
         core: Arc<dyn DnsCore>,
         request_timeout: Duration,
     ) -> Result<Self, ServiceStartError> {
+        let coordinator = Arc::new(RuntimeCoordinator::from_active(Arc::clone(&runtime)));
+        Self::start_with_coordinator(coordinator, core, request_timeout)
+    }
+
+    pub fn start_with_coordinator(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
         let endpoints = runtime.listeners().endpoint_handles().map_err(|error| {
             ServiceStartError::ListenerHandles {
                 class: error.class().as_str(),
@@ -151,10 +163,10 @@ impl DnsService {
             }
         }
 
-        for (index, resource) in runtime.resource_worker_ids().into_iter().enumerate() {
+        for (index, resource) in coordinator.resource_worker_ids().into_iter().enumerate() {
             let task_id = format!("resource.refresh.{index}");
             let task = resource_refresh_task(
-                Arc::clone(&runtime),
+                Arc::clone(&coordinator),
                 resource,
                 transport_cancellation.clone(),
             );
@@ -163,6 +175,7 @@ impl DnsService {
 
         Ok(Self {
             runtime,
+            coordinator,
             supervisor,
         })
     }
@@ -184,8 +197,23 @@ impl DnsService {
         Self::with_default_timeout(runtime, core)
     }
 
+    pub fn with_default_timeout_from_coordinator(
+        coordinator: Arc<RuntimeCoordinator>,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::start_with_coordinator(coordinator, core, DEFAULT_REQUEST_TIMEOUT)
+    }
+
     pub fn runtime(&self) -> &Arc<ActiveRuntime> {
         &self.runtime
+    }
+
+    pub fn coordinator(&self) -> &Arc<RuntimeCoordinator> {
+        &self.coordinator
     }
 
     pub fn task_count(&self) -> usize {
@@ -276,30 +304,30 @@ fn spawn_resource_task(
 }
 
 fn resource_refresh_task(
-    runtime: Arc<ActiveRuntime>,
+    coordinator: Arc<RuntimeCoordinator>,
     resource: ConfigId,
     cancellation: Cancellation,
 ) -> crate::runtime::TaskFuture {
-    Box::pin(async move { run_resource_refresh_loop(runtime, resource, cancellation).await })
+    Box::pin(async move { run_resource_refresh_loop(coordinator, resource, cancellation).await })
 }
 
 async fn run_resource_refresh_loop(
-    runtime: Arc<ActiveRuntime>,
+    coordinator: Arc<RuntimeCoordinator>,
     resource: ConfigId,
     cancellation: Cancellation,
 ) -> Result<(), TaskError> {
     loop {
         if cancellation.is_cancelled() {
-            runtime.shutdown_resource_refresh();
+            coordinator.shutdown_resource_refresh();
             return Err(TaskError::Cancelled);
         }
         let now = unix_seconds();
-        let decision = runtime
+        let decision = coordinator
             .resource_refresh_decision(&resource, now)
             .ok_or(TaskError::Fatal)?;
         if decision.is_due() {
             let deadline = Deadline::new(Instant::now() + RESOURCE_REFRESH_TIMEOUT);
-            match runtime
+            match coordinator
                 .refresh_resource(&resource, now, deadline, cancellation.clone())
                 .await
             {
@@ -316,7 +344,7 @@ async fn run_resource_refresh_loop(
                     "resource_refresh_published"
                 ),
                 Err(_error) if cancellation.is_cancelled() => {
-                    runtime.shutdown_resource_refresh();
+                    coordinator.shutdown_resource_refresh();
                     return Err(TaskError::Cancelled);
                 }
                 Err(error) => tracing::warn!(
@@ -331,13 +359,13 @@ async fn run_resource_refresh_loop(
         }
 
         let Some(next_due) = decision.next_due() else {
-            runtime.shutdown_resource_refresh();
+            coordinator.shutdown_resource_refresh();
             return Err(TaskError::Cancelled);
         };
         let wait = Duration::from_secs(next_due.saturating_sub(now).max(1));
         tokio::select! {
             _ = cancellation.cancelled() => {
-                runtime.shutdown_resource_refresh();
+                coordinator.shutdown_resource_refresh();
                 return Err(TaskError::Cancelled);
             }
             _ = tokio::time::sleep(wait) => {}

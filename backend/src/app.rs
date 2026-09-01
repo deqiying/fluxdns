@@ -1,6 +1,7 @@
 use std::ffi::OsString;
 use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::config::{ConfigLoadError, ConfigLoader, LoadOptions};
@@ -287,9 +288,8 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             )
             .await
             .map_err(map_bind_error)?;
-            let coordinator = crate::runtime::RuntimeCoordinator::new(candidate);
-            let active = coordinator.load();
-            let mut service = DnsService::with_default_timeout_from_runtime(active)
+            let coordinator = Arc::new(crate::runtime::RuntimeCoordinator::new(candidate));
+            let mut service = DnsService::with_default_timeout_from_coordinator(coordinator)
                 .map_err(map_service_start_error)?;
             tracing::info!(
                 event = "service_ready",

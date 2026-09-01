@@ -267,7 +267,7 @@ RawConfigVn
   → AppState
 ```
 
-`PreparedRuntime` 在 bind 前完成路径、引用图、策略索引、上游 connector、adapter-owned transport profile、核心可见 capabilities、资源句柄和数据库/日志能力的预构建，并在同一 prepare 边界装配生产 `ResourceFetcher`。正式 async prepare 对 remote rule-set 先校验落盘 content/manifest fallback，恢复失败后才执行 bounded fetch、解析和原子持久化；对 file hosts/rule-set 则执行稳定读取、hash、解析和编译，再把 typed snapshot 交给 Policy 构造；任一步失败都不会进入 bind。对 `auto_update=true` 的 remote、file rule-set 和 file hosts，ActiveRuntime 会把独立 refresh worker 纳入 service Supervisor，成功候选在同一 Policy core 内做版本化 live publish，并原子更新当前 Runtime 的资源元数据。`RuntimeSnapshot` 是请求读取的不可变配置句柄；未来配置热加载时，先完整 prepare 新 revision，再原子切换，不在请求中重新解释 YAML 或继承规则。
+`PreparedRuntime` 在 bind 前完成路径、引用图、策略索引、上游 connector、adapter-owned transport profile、核心可见 capabilities、资源句柄和数据库/日志能力的预构建，并在同一 prepare 边界装配生产 `ResourceFetcher`。正式 async prepare 对 remote rule-set 先校验落盘 content/manifest fallback，恢复失败后才执行 bounded fetch、解析和原子持久化；对 file hosts/rule-set 则执行稳定读取、hash、解析和编译，再把 typed snapshot 交给 Policy 构造；任一步失败都不会进入 bind。对 `auto_update=true` 的 remote、file rule-set 和 file hosts，ActiveRuntime 会把独立 refresh worker 纳入 service Supervisor，成功候选在同一 Policy core 内做版本化 live publish，并原子更新当前 Runtime 的资源元数据。正式 `run` 路径由 `Application` 创建 `RuntimeCoordinator` 并交给 `DnsService` 持有；资源 task 通过 coordinator 查询当前活动实例，但现阶段 transport task 仍固定启动时 runtime。`RuntimeSnapshot` 是请求读取的不可变配置句柄；未来配置热加载时，先完整 prepare 新 revision，再原子切换，不在请求中重新解释 YAML 或继承规则。
 
 ```rust
 struct RuntimeSnapshot {
@@ -307,7 +307,7 @@ struct AppState {
 
 `RuntimeSnapshot` 只放请求热路径需要的不可变状态，不包含 socket、HTTP connection、数据库连接或 cache implementation；`cache_semantics` 是已解析的 key/TTL/namespace 规则，不是具体 cache backend。`PreparedRuntime` 是无 socket 的候选运行时，完成配置迁移、引用图、策略索引、上游 connector、transport capabilities、资源句柄、首次 remote/file resource snapshot、生产 `ResourceFetcher` 和 auto-update worker 准备；`ActiveRuntime` 继续持有这些 shared adapter/worker，但它们不进入请求 snapshot。资源-only 刷新在当前 ActiveRuntime 内通过 Policy CAS 与 Runtime 元数据 ArcSwap 生效并复用已绑定 listener；配置候选仍需完整 bind 后再切换 `ActiveRuntime`。绑定成功后才形成 `ActiveRuntime`。这样“prepare 失败不影响现有服务”和“bind/rebind 后原子切换”有明确的所有权边界。
 
-每个请求从 `active.load()` 得到同一 `ActiveRuntime`，再捕获其中的 `RuntimeSnapshot` 一次。资源仍可按资源粒度刷新，但 coordinator 必须基于最新 active revision 做顶层 CAS/串行重试，避免 hosts 与 rule_set 并发刷新时后发布者覆盖前一份资源更新。资源-only 更新复用现有 bound endpoints 和 shared services；需要 rebind 的候选则先绑定新 endpoints，成功后原子替换 `ActiveRuntime`，旧实例进入 drain。
+每个请求从 `active.load()` 得到同一 `ActiveRuntime`，再捕获其中的 `RuntimeSnapshot` 一次。资源仍可按资源粒度刷新，当前 service 通过 coordinator 代理读取和刷新活动实例；跨配置候选的顶层 CAS/串行重试仍需在后续 reload 接线中完成，避免 hosts 与 rule_set 并发刷新时后发布者覆盖前一份资源更新。资源-only 更新复用现有 bound endpoints 和 shared services；需要 rebind 的候选则先绑定新 endpoints，成功后原子替换 `ActiveRuntime`，旧实例进入 drain。
 
 资源-only swap 时旧、新 `ActiveRuntime` 共享同一 `Arc<BoundListenerSet>`，由 coordinator 转移所有权；只有没有任何 active/request 引用后才关闭 endpoint。rebind swap 则新旧 listener set 独立存在，旧 set 在 grace deadline 后关闭。
 
@@ -371,7 +371,7 @@ struct RequestMeta {
 7. 初始化 `CacheFacade`、内存/持久化 cache store、transport capabilities/profiles 和策略索引；持久化 cache 初始化失败只标记 degraded 并回退内存，不改变数据库统计的必需性；
 8. 生成无 socket 的 `RuntimeSnapshot`/`PreparedRuntime` candidate 并完成 preflight；
 9. 创建全部 socket，任何 bind 失败都关闭已创建 socket 并退出；成功后组合成包含 `bound_endpoints` 的 `ActiveRuntime`，再原子发布首个 runtime；
-10. 由 supervisor 启动 UDP、TCP、DoH、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务。
+10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，由 supervisor 启动 UDP、TCP、DoH、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务；当前 transport task 仍绑定首个 active runtime。
 
 停止时先停止接收新请求，再取消后台 refresh/accept，等待正在处理的请求到 `grace deadline`；随后按顺序 flush 统计、详情日志和缓存队列，关闭 SQLite，最后退出。后台任务必须由 supervisor 持有，不能 detach 后丢失 panic 或错误。
 

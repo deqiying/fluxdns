@@ -1,8 +1,8 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，service Supervisor 负责长期 remote refresh task
+> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task
 >
-> 更新日期：2026-08-31
+> 更新日期：2026-09-01
 >
 > 目标代码：`backend/src/main.rs`、`backend/src/app.rs`
 >
@@ -72,7 +72,7 @@ bootstrap telemetry
 
 当前实现仍使用进程级 bootstrap stderr subscriber；正式日志目的地、stats/detail/cache flush 尚未接入。配置加载早期错误和服务生命周期事件均保持结构化、脱敏输出。DoH 首轮只装配 plain HTTP，并在边界处拒绝未实现的 TLS terminate、forwarded header 和 PROXY protocol。
 
-依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch，再由 service Supervisor 持有自动刷新 task；测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
+依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch，创建 `Arc<RuntimeCoordinator>` 并交给 `DnsService`；service Supervisor 持有自动刷新 task，资源 task 通过 coordinator 查询当前活动 runtime，transport task 在当前阶段仍绑定启动时 runtime。测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
 
 ## 5. 信号与退出
 

@@ -241,6 +241,12 @@ impl RuntimeCoordinator {
         }
     }
 
+    pub(crate) fn from_active(initial: Arc<ActiveRuntime>) -> Self {
+        Self {
+            active: ArcSwap::from(initial),
+        }
+    }
+
     pub fn load(&self) -> Arc<ActiveRuntime> {
         self.active.load_full()
     }
@@ -256,6 +262,34 @@ impl RuntimeCoordinator {
             runtime,
             _guard: guard,
         })
+    }
+
+    pub fn resource_worker_ids(&self) -> Vec<ConfigId> {
+        self.load().resource_worker_ids()
+    }
+
+    pub fn resource_refresh_decision(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+    ) -> Option<ResourceScheduleDecision> {
+        self.load().resource_refresh_decision(resource, now)
+    }
+
+    pub async fn refresh_resource(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+        deadline: crate::dns::Deadline,
+        cancellation: crate::dns::Cancellation,
+    ) -> Result<RefreshedResourceSnapshot, ResourceRefreshError> {
+        self.load()
+            .refresh_resource(resource, now, deadline, cancellation)
+            .await
+    }
+
+    pub fn shutdown_resource_refresh(&self) {
+        self.load().shutdown_resource_refresh();
     }
 
     /// 无条件发布候选，并把旧实例标记为 draining。
@@ -325,9 +359,11 @@ impl ActivationError {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    use crate::config::resolve::ConfigId;
     use crate::config::{ConfigLoader, LoadOptions};
-    use crate::dns::RuntimeRevision;
+    use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 
     use super::{AdmissionError, RuntimeCoordinator};
     use crate::runtime::PreparedRuntime;
@@ -414,5 +450,106 @@ mod tests {
         assert_eq!(lease.runtime().active_requests(), 1);
         drop(lease);
         assert_eq!(previous.active_requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn coordinator_refreshes_resource_on_current_active_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-coordinator-resource-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("hosts.txt");
+        std::fs::write(&path, "192.0.2.10 old.example\n").unwrap();
+        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&format!(
+                r#"
+version: 1
+work:
+  path: {root}
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: 5300
+    strategy: default
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "127.0.0.1 fallback.test"
+hosts:
+  - type: file
+    name: local-hosts
+    format: hosts
+    path: {path}
+    auto_update: true
+    update_interval: 1s
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+outbound: []
+"#,
+                root = root.display(),
+                path = path.display(),
+            ))
+            .unwrap()
+            .resolved;
+        let prepared = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            Arc::clone(&config),
+            RuntimeRevision(7),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = RuntimeCoordinator::new(super::super::bind::test_candidate(prepared));
+
+        std::fs::write(&path, "192.0.2.11 new.example\n").unwrap();
+        let resource = ConfigId::new("local-hosts").unwrap();
+        let refreshed = coordinator
+            .refresh_resource(
+                &resource,
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refreshed.epoch(), 2);
+        assert_eq!(
+            coordinator
+                .load()
+                .snapshot()
+                .resources()
+                .lookup(&resource)
+                .unwrap()
+                .version(),
+            crate::resource::ResourceVersion::new(2, 0)
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }
