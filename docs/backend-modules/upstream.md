@@ -1,6 +1,6 @@
 # Upstream 模块设计
 
-> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、hosts/plain HTTP DoH registry、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；HTTPS/TLS、bootstrap/outbound 尚未实现
+> 状态：v1 方案已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、可注入地址解析 port、bootstrap 引用元数据透传、hosts/plain HTTP DoH registry、PolicyCore direct request path、纯 group member selection 和 outcome/fallback 判定；HTTPS/TLS、bootstrap/outbound 尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -46,7 +46,7 @@ DNS Core 只持有 typed connector/group handle，不读取 URL 或 proxy 配置
 
 ## 3. DoH connector
 
-当前已实现 `TokioDohHttpTransport` 的 plain HTTP/1.1 一次交换：使用 URL host 生成 Host header，使用显式 `connect_ip` 只替换 TCP 连接目标，固定 POST `application/dns-message`，要求 bounded header、`Content-Length` 和 DNS wire body，并将 deadline/cancellation 传递到解析、连接、写入和读取。地址解析通过 `DohAddressResolver` port 注入，默认实现仍使用 Tokio `lookup_host`；显式 `connect_ip` 已验证不会触发 resolver。该 adapter 不支持 `https://`，HTTPS/TLS、proxy、HTTP/2 和连接池仍由后续 adapter 负责。
+当前已实现 `TokioDohHttpTransport` 的 plain HTTP/1.1 一次交换：使用 URL host 生成 Host header，使用显式 `connect_ip` 只替换 TCP 连接目标，固定 POST `application/dns-message`，要求 bounded header、`Content-Length` 和 DNS wire body，并将 deadline/cancellation 传递到解析、连接、写入和读取。地址解析通过 `DohAddressResolver` port 注入，默认实现仍使用 Tokio `lookup_host`；显式 `connect_ip` 已验证不会触发 resolver。DoH request envelope 会保留可选的 bootstrap 引用，默认 system resolver 在该引用尚无 adapter 时 fail-closed，不偷偷回退。该 adapter 不支持 `https://`，HTTPS/TLS、proxy、HTTP/2 和连接池仍由后续 adapter 负责。
 
 Reqwest client：
 
@@ -202,6 +202,7 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [x] 将 plain HTTP DoH connector 接入 Registry，并提供可注入 transport 构造入口；
 - [x] 通过注入式 Registry 验证 PolicyCore direct DoH request path；
 - [x] 抽出 DoH 地址解析 port，并验证 resolver 注入与 `connect_ip` 旁路；
+- [x] 在 DoH request envelope 中透传 bootstrap 引用，并对未配置 bootstrap resolver 的默认路径 fail-closed；
 - [ ] 实现 bootstrap/connect_ip/outbound 的实际执行；
 - [x] 固化四种 group 模式的纯 member selection；
 - [x] 实现 outcome/fallback 判定边界；
@@ -209,6 +210,6 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - [ ] 实现 late cache finalizer；
 - [ ] 完成代理、TLS、算法和并发测试。
 
-阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 4 项通过，`upstream::doh` 7 项通过，`upstream::http::tests` 5 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了无真实网络的 PolicyCore direct path，RuntimeSnapshot、bootstrap、真实 outbound 和 TLS/proxy 仍未实现。
+阶段证据：hosts/group/outcome 定向测试 19 项通过，`upstream::registry` 4 项通过，`upstream::doh` 7 项通过，`upstream::http::tests` 6 项通过，PolicyCore focused tests 11 项通过；覆盖 Registry 的 plain HTTP DoH 构造与不支持能力拒绝、注入式 PolicyCore DoH request path、DoH request envelope、Host/SNI/connect_ip、resolver 注入与 `connect_ip` 旁路、bootstrap 引用透传与默认路径 fail-closed、plain HTTP/1.1 headers/body、chunked 拒绝、HTTPS 未接入和 cancellation。当前只验证了无真实网络的 PolicyCore direct path，RuntimeSnapshot、bootstrap 查询、真实 outbound 和 TLS/proxy 仍未实现。
 
-当前实现进度：**67%**。
+当前实现进度：**68%**。

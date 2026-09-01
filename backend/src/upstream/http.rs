@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, lookup_host};
 use url::Url;
 
+use crate::config::resolve::ConfigId;
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -20,6 +21,47 @@ use super::{DOH_MEDIA_TYPE, DohHttpRequest, DohHttpResponseOwned, DohHttpTranspo
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const READ_CHUNK_BYTES: usize = 8 * 1024;
 
+/// DoH HTTP adapter 交给地址解析 port 的安全请求元数据。
+#[derive(Clone, Eq, PartialEq)]
+pub struct DohAddressRequest {
+    host: Arc<str>,
+    port: u16,
+    bootstrap: Option<ConfigId>,
+}
+
+impl std::fmt::Debug for DohAddressRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DohAddressRequest")
+            .field("has_host", &true)
+            .field("port", &self.port)
+            .field("has_bootstrap", &self.bootstrap.is_some())
+            .finish()
+    }
+}
+
+impl DohAddressRequest {
+    fn new(host: &str, port: u16, bootstrap: Option<ConfigId>) -> Self {
+        Self {
+            host: Arc::from(host),
+            port,
+            bootstrap,
+        }
+    }
+
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub const fn port(&self) -> u16 {
+        self.port
+    }
+
+    pub fn bootstrap(&self) -> Option<&ConfigId> {
+        self.bootstrap.as_ref()
+    }
+}
+
 /// DoH HTTP adapter 使用的地址解析 port。
 ///
 /// `connect_ip` 由调用方显式提供时不会调用该 port；后续 bootstrap
@@ -27,8 +69,7 @@ const READ_CHUNK_BYTES: usize = 8 * 1024;
 pub trait DohAddressResolver: Send + Sync {
     fn resolve<'a>(
         &'a self,
-        host: &'a str,
-        port: u16,
+        request: DohAddressRequest,
         deadline: Deadline,
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>>;
@@ -40,14 +81,20 @@ pub struct TokioDohAddressResolver;
 impl DohAddressResolver for TokioDohAddressResolver {
     fn resolve<'a>(
         &'a self,
-        host: &'a str,
-        port: u16,
+        request: DohAddressRequest,
         deadline: Deadline,
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>> {
         Box::pin(async move {
+            if request.bootstrap().is_some() {
+                return Err(PortError::new(
+                    PortErrorClass::Unavailable,
+                    "doh_http_transport.resolve",
+                )
+                .with_safe_context("bootstrap resolver is not configured"));
+            }
             let mut addresses = await_io(
-                lookup_host((host, port)),
+                lookup_host((request.host(), request.port())),
                 deadline,
                 cancellation,
                 "doh_http_transport.resolve",
@@ -135,6 +182,7 @@ async fn post_http(
         host,
         port,
         request.connect_ip(),
+        request.bootstrap(),
         resolver,
         deadline,
         cancellation,
@@ -184,6 +232,7 @@ async fn resolve_target(
     host: &str,
     port: u16,
     connect_ip: Option<IpAddr>,
+    bootstrap: Option<&ConfigId>,
     resolver: &dyn DohAddressResolver,
     deadline: Deadline,
     cancellation: &Cancellation,
@@ -192,7 +241,11 @@ async fn resolve_target(
         return Ok(SocketAddr::new(address, port));
     }
     resolver
-        .resolve(host, port, deadline, cancellation)
+        .resolve(
+            DohAddressRequest::new(host, port, bootstrap.cloned()),
+            deadline,
+            cancellation,
+        )
         .await?
         .into_iter()
         .next()
@@ -491,12 +544,14 @@ mod tests {
     impl DohAddressResolver for FakeResolver {
         fn resolve<'a>(
             &'a self,
-            host: &'a str,
-            port: u16,
+            request: DohAddressRequest,
             _deadline: Deadline,
             _cancellation: &'a Cancellation,
         ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>> {
-            self.calls.lock().unwrap().push((host.to_owned(), port));
+            self.calls
+                .lock()
+                .unwrap()
+                .push((request.host().to_owned(), request.port()));
             let target = self.target;
             Box::pin(async move { Ok(vec![target]) })
         }
@@ -602,6 +657,28 @@ mod tests {
         assert_eq!(response.status, 200);
         assert!(resolver.calls.lock().unwrap().is_empty());
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn default_resolver_rejects_unconfigured_bootstrap_without_system_fallback() {
+        let transport = TokioDohHttpTransport::new();
+        let request = DohHttpRequest::new_with_bootstrap(
+            Url::parse("http://resolver.example.test/dns-query").unwrap(),
+            None,
+            Some(crate::config::resolve::ConfigId::new("bootstrap").unwrap()),
+            vec![1],
+        );
+        let error = transport
+            .post(request, deadline(), &Cancellation::new())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error.class(), PortErrorClass::Unavailable));
+        assert_eq!(error.operation(), "doh_http_transport.resolve");
+        assert_eq!(
+            format!("{error}"),
+            "doh_http_transport.resolve failed: unavailable (bootstrap resolver is not configured)"
+        );
     }
 
     #[tokio::test]

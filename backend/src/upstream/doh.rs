@@ -12,6 +12,7 @@ use hickory_proto::op::Message;
 use thiserror::Error;
 use url::Url;
 
+use crate::config::resolve::ConfigId;
 use crate::dns::{
     CancelReason, Cancellation, CanonicalMessageError, CanonicalQuery, CanonicalResponse, Deadline,
     DnsMessageId, RequestContext,
@@ -35,6 +36,7 @@ pub struct DohHttpRequest {
     host: Arc<str>,
     sni: Arc<str>,
     connect_ip: Option<IpAddr>,
+    bootstrap: Option<ConfigId>,
     body: Arc<[u8]>,
 }
 
@@ -46,6 +48,7 @@ impl fmt::Debug for DohHttpRequest {
             .field("has_host", &true)
             .field("has_sni", &true)
             .field("connect_ip", &self.connect_ip)
+            .field("has_bootstrap", &self.bootstrap.is_some())
             .field("body_len", &self.body.len())
             .finish()
     }
@@ -53,12 +56,22 @@ impl fmt::Debug for DohHttpRequest {
 
 impl DohHttpRequest {
     pub(crate) fn new(endpoint: Url, connect_ip: Option<IpAddr>, body: Vec<u8>) -> Self {
+        Self::new_with_bootstrap(endpoint, connect_ip, None, body)
+    }
+
+    pub(crate) fn new_with_bootstrap(
+        endpoint: Url,
+        connect_ip: Option<IpAddr>,
+        bootstrap: Option<ConfigId>,
+        body: Vec<u8>,
+    ) -> Self {
         let host = Arc::<str>::from(endpoint.host_str().expect("validated DoH endpoint"));
         Self {
             endpoint,
             host: host.clone(),
             sni: host,
             connect_ip,
+            bootstrap,
             body: body.into(),
         }
     }
@@ -77,6 +90,10 @@ impl DohHttpRequest {
 
     pub const fn connect_ip(&self) -> Option<IpAddr> {
         self.connect_ip
+    }
+
+    pub fn bootstrap(&self) -> Option<&ConfigId> {
+        self.bootstrap.as_ref()
     }
 
     pub fn body(&self) -> &[u8] {
@@ -135,6 +152,7 @@ pub struct DohExchange<T> {
     connector: ConnectorId,
     endpoint: Url,
     connect_ip: Option<IpAddr>,
+    bootstrap: Option<ConfigId>,
     transport: Arc<T>,
     next_id: AtomicU16,
 }
@@ -146,6 +164,7 @@ impl<T> fmt::Debug for DohExchange<T> {
             .field("connector", &self.connector)
             .field("scheme", &self.endpoint.scheme())
             .field("has_connect_ip", &self.connect_ip.is_some())
+            .field("has_bootstrap", &self.bootstrap.is_some())
             .finish()
     }
 }
@@ -157,11 +176,22 @@ impl<T: DohHttpTransport> DohExchange<T> {
         connect_ip: Option<IpAddr>,
         transport: Arc<T>,
     ) -> Result<Self, DohEndpointError> {
+        Self::new_with_bootstrap(connector, endpoint, connect_ip, None, transport)
+    }
+
+    pub fn new_with_bootstrap(
+        connector: ConnectorId,
+        endpoint: Url,
+        connect_ip: Option<IpAddr>,
+        bootstrap: Option<ConfigId>,
+        transport: Arc<T>,
+    ) -> Result<Self, DohEndpointError> {
         validate_endpoint(&endpoint)?;
         Ok(Self {
             connector,
             endpoint,
             connect_ip,
+            bootstrap,
             transport,
             next_id: AtomicU16::new(1),
         })
@@ -219,7 +249,15 @@ impl<T: DohHttpTransport + 'static> crate::ports::exchange::DnsExchange for DohE
                 }
             };
 
-            let request = DohHttpRequest::new(self.endpoint.clone(), self.connect_ip, body);
+            let request = match &self.bootstrap {
+                Some(bootstrap) => DohHttpRequest::new_with_bootstrap(
+                    self.endpoint.clone(),
+                    self.connect_ip,
+                    Some(bootstrap.clone()),
+                    body,
+                ),
+                None => DohHttpRequest::new(self.endpoint.clone(), self.connect_ip, body),
+            };
             match self
                 .transport
                 .post(request, context.meta.deadline, &context.meta.cancellation)
