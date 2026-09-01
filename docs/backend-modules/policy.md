@@ -194,6 +194,6 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 完成冲突、优先级、未知资源和 file loader 测试；
 - [ ] 完成资源 swap、跨 transport contract 和完整覆盖矩阵测试。
 
-阶段证据：Policy focused tests 11 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path 和 unsupported feature propagation；当前 backend 全量测试为 314 passed、0 failed。当前仍未接入 Runtime ResourceRegistrySnapshot、Cache，也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
+阶段证据：Policy focused tests 12 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path、基础 Cache/Core 命中和 unsupported feature propagation；当前 backend 全量测试为 368 passed、0 failed。当前仍未接入 Runtime ResourceRegistrySnapshot、optimistic refresh，也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
 
-当前实现进度：**55%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan 首轮组合和注入式 direct DoH request path；snapshot 原子接线、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。
+当前实现进度：**55%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan 首轮组合、注入式 direct DoH request path 和基础 Cache/Core request path；snapshot 原子接线、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。

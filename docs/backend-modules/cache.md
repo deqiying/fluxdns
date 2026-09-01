@@ -234,7 +234,7 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 ## 14. 实现检查清单
 
 - [x] 定义 namespace/key/entry format；（基础 typed contract 与 `cache/key.rs` 稳定编码已完成）
-- [x] 实现 CacheFacade 首轮切片；（完整 DNS Core 接线仍待后续）
+- [x] 实现 CacheFacade 首轮切片；（基础 DNS Core fresh/miss/single-flight/CAS 接线已完成）
 - [x] 实现 namespace/key builder；
 - [x] 实现 single-flight/CAS/显式失效的内存 adapter 首轮切片；
 - [x] 实现共享容量淘汰和 oversized entry 边界；
@@ -245,6 +245,6 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [ ] 完成跨 adapter 一致性、恢复和故障测试。
 
-阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝。当前全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 367 passed、0 failed。真实 Moka/SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
+阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；PolicyCore 新增配置启用缓存后的 upstream 命中测试；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝。当前全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 368 passed、0 failed。真实 Moka/SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
 
-当前实现进度：**50%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight、可取消有界 LateCacheFinalizer 和文件快照 persistence 边界；optimistic refresh、Moka、SQLite persistence 与完整 Cache-Core 接线未实现）。
+当前实现进度：**50%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight、可取消有界 LateCacheFinalizer、基础 Cache-Core fresh/miss/CAS 接线和文件快照 persistence 边界；optimistic refresh、Moka、SQLite persistence 与完整 Runtime snapshot 接线未实现）。

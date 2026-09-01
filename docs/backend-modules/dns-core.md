@@ -1,6 +1,6 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index 和基础 dispatch；完整 Policy/Cache/Upstream 管线尚未接入
+> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path 和基础 Cache fresh/miss/single-flight/CAS 接线；完整 optimistic/Runtime snapshot 管线尚未接入
 >
 > 更新日期：2026-08-31
 >
@@ -82,7 +82,7 @@ Policy 返回完整 `ResolutionPlan`，至少包含：
 
 Core 不再次计算继承，也不把 rule 文本写入日志。
 
-当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`ConfiguredDnsCore` 通过统一 loader 支持 const/file hosts 资源，否则回退 `ServFailCore`。完整 Policy、Cache、Upstream 和 TTL override 管线仍未接入。
+当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，`hosts[]` 本地命中仍绕过 response cache；optimistic refresh、Runtime snapshot 和 TTL override 完整管线仍未接入。
 
 ## 6. Cache 交互
 
@@ -177,10 +177,10 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 定义 RequestContext、deadline 与 cancellation；
 - [ ] 定义完整 resolution result；
 - [x] 实现固定响应的 transport 无关 handler；
-- [ ] 接入 Policy、Cache、Upstream ports；（当前仅完成 Resource hosts 本地回答接线）
+- [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
 - [ ] 实现 ECS、TTL 和错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA、Resource CNAME/wildcard 和 ConfiguredDnsCore const/file loader/fallback；当前 backend 全量测试为 238 passed、0 failed。
+阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA、Resource CNAME/wildcard、ConfiguredDnsCore const/file loader/fallback，以及 PolicyDnsCore 的 upstream/cache 命中路径；当前 backend 全量测试为 368 passed、0 failed。
 
 当前实现进度：**50%**。

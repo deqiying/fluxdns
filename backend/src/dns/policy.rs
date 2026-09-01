@@ -11,9 +11,14 @@ use std::time::Instant;
 use hickory_proto::op::ResponseCode;
 use thiserror::Error;
 
+use crate::cache::{
+    CacheAdmissionPolicy, CacheFacade, CacheFacadeOptions, CacheFingerprint, CacheKeyDimensions,
+    CacheLookup, CacheWriteRequest, CacheWriteResult, MemoryCacheStore, build_cache_key,
+};
 use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedUpstream};
 use crate::policy::{PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
+use crate::ports::cache::{CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation};
 use crate::ports::exchange::{
     ConnectorId, DnsExchange, TransportFailure, TransportFailureClass, UpstreamOutcome,
 };
@@ -35,6 +40,8 @@ pub enum PolicyCoreBuildError {
     },
     #[error("upstream `{upstream}` could not be built: {reason}")]
     Upstream { upstream: String, reason: String },
+    #[error("cache could not be built: {reason}")]
+    Cache { reason: String },
 }
 
 /// 使用同一份 resolved config 构建 policy/resource 本地回答 core。
@@ -43,6 +50,7 @@ pub struct PolicyDnsCore {
     policy: PolicyIndex,
     hosts: BTreeMap<ConfigId, Arc<HostsIndex>>,
     upstreams: UpstreamRuntime,
+    cache: Arc<CacheFacade>,
     ttl: u32,
 }
 
@@ -82,6 +90,7 @@ impl PolicyDnsCore {
         upstreams: UpstreamRuntime,
     ) -> Result<Self, PolicyCoreBuildError> {
         let policy = PolicyIndex::from_config(config).map_err(PolicyCoreBuildError::Policy)?;
+        let cache = build_cache_facade(config)?;
         let mut hosts = BTreeMap::new();
         for resource in &config.hosts {
             let id = match resource {
@@ -102,6 +111,7 @@ impl PolicyDnsCore {
             policy,
             hosts,
             upstreams,
+            cache,
             ttl,
         })
     }
@@ -116,6 +126,10 @@ impl PolicyDnsCore {
 
     pub fn upstream_count(&self) -> usize {
         self.upstreams.len()
+    }
+
+    pub fn cache(&self) -> &Arc<CacheFacade> {
+        &self.cache
     }
 }
 
@@ -180,11 +194,7 @@ impl DnsCore for PolicyDnsCore {
                     .map_err(CoreError::ResponseConstruction);
             }
 
-            let Some(outcome) = self
-                .upstreams
-                .exchange(&plan.upstream, &request.query, &request.context)
-                .await
-            else {
+            let Some(outcome) = self.resolve_upstream(request, &plan).await else {
                 return servfail(request);
             };
             match outcome {
@@ -198,6 +208,192 @@ impl DnsCore for PolicyDnsCore {
             }
         })
     }
+}
+
+impl PolicyDnsCore {
+    async fn resolve_upstream(
+        &self,
+        request: &DnsRequest,
+        plan: &crate::policy::ResolutionPlan,
+    ) -> Option<UpstreamOutcome> {
+        let Some(key) = cache_key(plan, request) else {
+            return self
+                .upstreams
+                .exchange(&plan.upstream, &request.query, &request.context)
+                .await;
+        };
+        let deadline = request.context.meta.deadline;
+        match self.cache.lookup(&key, deadline).await {
+            Ok(CacheLookup::Fresh(record)) => {
+                return Some(UpstreamOutcome::Response((*record.entry.response).clone()));
+            }
+            Ok(CacheLookup::Stale { record, refresh })
+                if matches!(
+                    &plan.cache,
+                    crate::policy::CacheDecision::Pool {
+                        optimistic: true,
+                        ..
+                    }
+                ) =>
+            {
+                drop(refresh);
+                return Some(UpstreamOutcome::Response((*record.entry.response).clone()));
+            }
+            Ok(CacheLookup::Disabled)
+            | Ok(CacheLookup::Miss)
+            | Ok(CacheLookup::Stale { .. })
+            | Ok(CacheLookup::StoreUnavailable)
+            | Err(_) => {}
+        }
+
+        let reservation = match self.cache.reserve_load(key.clone(), deadline).await {
+            Ok(reservation) => reservation,
+            Err(_) => {
+                return self
+                    .upstreams
+                    .exchange(&plan.upstream, &request.query, &request.context)
+                    .await;
+            }
+        };
+        match reservation {
+            CacheLoadReservation::Follower(waiter) => {
+                match self
+                    .cache
+                    .wait_load(waiter, deadline, &request.context.meta.cancellation)
+                    .await
+                {
+                    Ok(CacheLoadCompletion::Ready(record)) => {
+                        Some(UpstreamOutcome::Response((*record.entry.response).clone()))
+                    }
+                    Ok(CacheLoadCompletion::Failed(CacheLoadFailure::Cancelled(reason))) => {
+                        Some(UpstreamOutcome::Cancelled(reason))
+                    }
+                    Ok(CacheLoadCompletion::Miss) | Ok(CacheLoadCompletion::Failed(_)) | Err(_) => {
+                        self.upstreams
+                            .exchange(&plan.upstream, &request.query, &request.context)
+                            .await
+                    }
+                }
+            }
+            CacheLoadReservation::Leader(lease) => {
+                let Some(outcome) = self
+                    .upstreams
+                    .exchange(&plan.upstream, &request.query, &request.context)
+                    .await
+                else {
+                    let _ = self
+                        .cache
+                        .abandon_load(lease, CacheLoadFailure::Internal, deadline)
+                        .await;
+                    return None;
+                };
+                match outcome {
+                    UpstreamOutcome::Response(response) => {
+                        if !response.matches_query(&request.query) {
+                            let _ = self
+                                .cache
+                                .publish_load(lease, CacheLoadCompletion::Miss, deadline)
+                                .await;
+                            return Some(UpstreamOutcome::Response(response));
+                        }
+                        let response_for_cache = Arc::new(response.clone());
+                        let write = self
+                            .cache
+                            .write_response(CacheWriteRequest {
+                                key: key.clone(),
+                                condition: crate::ports::cache::CacheCondition::Absent,
+                                response: response_for_cache,
+                                now: Instant::now(),
+                                producer_revision: request.context.runtime_revision,
+                                format_version: key.format_version,
+                                deadline,
+                            })
+                            .await;
+                        let completion = match write {
+                            Ok(CacheWriteResult::Stored(_)) => self
+                                .cache
+                                .store()
+                                .get(&key, deadline)
+                                .await
+                                .ok()
+                                .flatten()
+                                .map_or(CacheLoadCompletion::Miss, CacheLoadCompletion::Ready),
+                            Ok(CacheWriteResult::Rejected(_)) | Err(_) => CacheLoadCompletion::Miss,
+                        };
+                        let _ = self.cache.publish_load(lease, completion, deadline).await;
+                        Some(UpstreamOutcome::Response(response))
+                    }
+                    UpstreamOutcome::Cancelled(reason) => {
+                        let _ = self
+                            .cache
+                            .abandon_load(lease, CacheLoadFailure::Cancelled(reason), deadline)
+                            .await;
+                        Some(UpstreamOutcome::Cancelled(reason))
+                    }
+                    UpstreamOutcome::TransportFailure(failure) => {
+                        let _ = self
+                            .cache
+                            .abandon_load(lease, CacheLoadFailure::Unavailable, deadline)
+                            .await;
+                        Some(UpstreamOutcome::TransportFailure(failure))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn build_cache_facade(config: &ResolvedConfig) -> Result<Arc<CacheFacade>, PolicyCoreBuildError> {
+    let store = MemoryCacheStore::with_max_weight(config.dns.cache.memory_max_size_bytes).map_err(
+        |error| PolicyCoreBuildError::Cache {
+            reason: error.to_string(),
+        },
+    )?;
+    let options = CacheFacadeOptions {
+        enabled: true,
+        optimistic_enabled: true,
+        admission: CacheAdmissionPolicy::new(
+            config.dns.cache.failure_ttl,
+            Some(config.dns.cache.optimistic.max_age),
+        ),
+    };
+    Ok(Arc::new(CacheFacade::new(Arc::new(store), options)))
+}
+
+fn cache_key(
+    plan: &crate::policy::ResolutionPlan,
+    request: &DnsRequest,
+) -> Option<crate::ports::cache::CacheKey> {
+    let namespace = plan.cache.namespace()?.clone();
+    let ecs = format!(
+        "{:?}:{:?}",
+        plan.edns_client_subnet.mode, plan.edns_client_subnet.custom_ip
+    );
+    build_cache_key(
+        namespace,
+        &request.query,
+        request.context.transport.cache_compatibility,
+        CacheKeyDimensions {
+            policy: Some(cache_fingerprint(plan.strategy.id.as_str().as_bytes())),
+            target: Some(cache_fingerprint(plan.upstream.as_str().as_bytes())),
+            ecs: Some(cache_fingerprint(ecs.as_bytes())),
+        },
+    )
+    .ok()
+}
+
+fn cache_fingerprint(input: &[u8]) -> CacheFingerprint {
+    let mut digest = [0_u8; 32];
+    for index in 0..4 {
+        let mut hash = 0xcbf29ce484222325_u64 ^ (index as u64);
+        for byte in input {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3_u64);
+        }
+        let start = index * 8;
+        digest[start..start + 8].copy_from_slice(&hash.to_be_bytes());
+    }
+    CacheFingerprint::from_digest(digest)
 }
 
 #[derive(Clone)]
@@ -506,7 +702,7 @@ mod tests {
     use std::fs;
     use std::net::{IpAddr, SocketAddr};
     use std::str::FromStr;
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant, SystemTime};
 
@@ -536,6 +732,7 @@ mod tests {
     struct FakeDohTransport {
         request: Mutex<Option<DohHttpRequest>>,
         response: Vec<u8>,
+        calls: AtomicUsize,
     }
 
     struct ServFailDohTransport;
@@ -577,6 +774,7 @@ mod tests {
             Self {
                 request: Mutex::new(None),
                 response: Self::response(),
+                calls: AtomicUsize::new(0),
             }
         }
     }
@@ -588,6 +786,7 @@ mod tests {
             _deadline: Deadline,
             _cancellation: &'a Cancellation,
         ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
+            self.calls.fetch_add(1, Ordering::AcqRel);
             *self.request.lock().unwrap() = Some(request);
             let body = self.response.clone();
             Box::pin(async move {
@@ -662,6 +861,37 @@ mod tests {
         );
         assert_eq!(request.connect_ip(), Some("192.0.2.44".parse().unwrap()));
         assert_eq!(Message::from_vec(request.body()).unwrap().id, 1);
+    }
+
+    #[tokio::test]
+    async fn policy_core_caches_upstream_response_and_coalesces_lookup() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        let config = Arc::new(config);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, registry).unwrap();
+
+        let first = core
+            .resolve(&request("remote.example.", RecordType::A))
+            .await
+            .unwrap();
+        let second = core
+            .resolve(&request("remote.example.", RecordType::A))
+            .await
+            .unwrap();
+        assert!(
+            matches!(first, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::NoData)
+        );
+        assert!(
+            matches!(second, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::NoData)
+        );
+        assert_eq!(transport.calls.load(Ordering::Acquire), 1);
+        assert_eq!(core.cache().store().stats().hits, 2);
     }
 
     fn config() -> std::sync::Arc<crate::config::ResolvedConfig> {
