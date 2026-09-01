@@ -1,21 +1,27 @@
-//! 纯逻辑的 DoH 目标地址选择与 bootstrap TTL 状态。
+//! DoH 目标地址选择、bootstrap 查询与 TTL 状态。
 //!
-//! 本模块不执行 DNS 查询或 system resolver；调用方负责把外部解析结果包装为
-//! `BootstrapResolution`/`SystemResolverResolution` 后交给
-//! `AddressResolutionState`。这样 connect_ip、bootstrap 失败和 system resolver
-//! 之间的优先级可以在没有网络副作用的情况下测试和复用。
+//! `BootstrapResolver` 只通过调用方注入的 `DnsExchange` 执行 A/AAAA 查询，
+//! 不会偷偷调用 system resolver；`AddressResolutionState` 负责 connect_ip、
+//! bootstrap 缓存和 system resolver 之间的显式优先级。
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::net::IpAddr;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hickory_proto::rr::RData;
+use hickory_proto::{
+    op::{Message, MessageType, OpCode, Query},
+    rr::{Name, RData, RecordType},
+};
 use thiserror::Error;
 
 use crate::config::resolve::{ConfigId, ResolvedUpstream};
-use crate::dns::{CanonicalResponse, ResponseClass, TtlMetadata};
+use crate::dns::{
+    CancelReason, CanonicalQuery, CanonicalResponse, RequestContext, ResponseClass, TtlMetadata,
+};
+use crate::ports::exchange::{DnsExchange, TransportFailureClass, UpstreamOutcome};
 
 /// Bootstrap TTL 的默认实现边界。
 pub const DEFAULT_BOOTSTRAP_MIN_TTL: Duration = Duration::from_secs(5);
@@ -143,6 +149,120 @@ pub enum BootstrapResponseError {
     NonPositive { class: ResponseClass },
     #[error("bootstrap response contains no usable A or AAAA address: {0}")]
     Answer(AnswerError),
+}
+
+/// 通过指定 connector 执行 bootstrap A/AAAA 查询的 resolver。
+///
+/// resolver 不负责选择 bootstrap connector，也不接入 `PolicyCore`，避免把
+/// bootstrap 解析再次路由回依赖该 bootstrap 的 DoH upstream。
+#[derive(Clone)]
+pub struct BootstrapResolver {
+    connector: Arc<dyn DnsExchange>,
+}
+
+impl fmt::Debug for BootstrapResolver {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BootstrapResolver")
+            .field("connector", &self.connector.connector_id())
+            .finish()
+    }
+}
+
+impl BootstrapResolver {
+    pub fn new(connector: Arc<dyn DnsExchange>) -> Self {
+        Self { connector }
+    }
+
+    pub fn connector_id(&self) -> &crate::ports::exchange::ConnectorId {
+        self.connector.connector_id()
+    }
+
+    /// 顺序查询 A、AAAA，并合并所有合法地址；取消会立即终止本次解析。
+    pub async fn resolve(
+        &self,
+        host: &str,
+        context: &RequestContext,
+    ) -> Result<BootstrapAnswer, BootstrapResolverError> {
+        let queries = [
+            bootstrap_query(host, RecordType::A)?,
+            bootstrap_query(host, RecordType::AAAA)?,
+        ];
+        let connector = self.connector_id().as_str().to_owned();
+        let mut answers = Vec::new();
+        let mut transport_failure = None;
+
+        for query in &queries {
+            match self.connector.exchange(query, context).await {
+                UpstreamOutcome::Response(response) => {
+                    if let Ok(answer) = bootstrap_answer_from_response(&response) {
+                        answers.push(answer);
+                    }
+                }
+                UpstreamOutcome::TransportFailure(failure) => {
+                    if transport_failure.is_none() {
+                        transport_failure = Some(failure.class);
+                    }
+                }
+                UpstreamOutcome::Cancelled(reason) => {
+                    return Err(BootstrapResolverError::Cancelled { connector, reason });
+                }
+            }
+        }
+
+        if !answers.is_empty() {
+            let ttl = answers
+                .iter()
+                .map(BootstrapAnswer::ttl)
+                .min()
+                .expect("non-empty bootstrap answer list has a minimum TTL");
+            let addresses = answers
+                .iter()
+                .flat_map(|answer| answer.addresses().iter().copied())
+                .collect();
+            return BootstrapAnswer::new(addresses, ttl).map_err(|_| {
+                BootstrapResolverError::NoAddress {
+                    connector: connector.clone(),
+                }
+            });
+        }
+
+        if let Some(class) = transport_failure {
+            return Err(BootstrapResolverError::Transport { connector, class });
+        }
+        Err(BootstrapResolverError::NoAddress { connector })
+    }
+}
+
+fn bootstrap_query(
+    host: &str,
+    record_type: RecordType,
+) -> Result<CanonicalQuery, BootstrapResolverError> {
+    let name = Name::from_str(host).map_err(|_| BootstrapResolverError::InvalidName)?;
+    let mut message = Message::new(0, MessageType::Query, OpCode::Query);
+    message.metadata.recursion_desired = true;
+    message.add_query(Query::query(name, record_type));
+    CanonicalQuery::from_message(message).map_err(|_| BootstrapResolverError::QueryBuild)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Error)]
+pub enum BootstrapResolverError {
+    #[error("bootstrap resolver query name is invalid")]
+    InvalidName,
+    #[error("bootstrap resolver query could not be constructed")]
+    QueryBuild,
+    #[error("bootstrap resolver connector `{connector}` was cancelled: {reason:?}")]
+    Cancelled {
+        connector: String,
+        reason: CancelReason,
+    },
+    #[error("bootstrap resolver connector `{connector}` failed: {class:?}")]
+    Transport {
+        connector: String,
+        class: TransportFailureClass,
+    },
+    #[error("bootstrap resolver connector `{connector}` returned no usable address")]
+    NoAddress { connector: String },
 }
 
 /// system resolver 的纯结果占位；真正的 resolver 属于 adapter/port 层。
@@ -503,20 +623,31 @@ fn upstream_id(upstream: &ResolvedUpstream) -> String {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::str::FromStr;
-    use std::time::{Duration, Instant};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant, SystemTime};
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A, rdata::AAAA};
     use url::Url;
 
     use crate::config::resolve::{ConfigId, ResolvedUpstream};
-    use crate::dns::{CanonicalQuery, DnsMessageId};
+    use crate::dns::{
+        CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, ClientIdentity,
+        Deadline, DnsMessageId, ListenerId, RequestContext, RequestId, RequestMeta,
+        RuntimeRevision, TransportCapabilities, TransportClass,
+    };
+    use crate::ports::exchange::{
+        ConnectorId, DnsExchange, TransportFailure, TransportFailureClass, UpstreamOutcome,
+    };
+    use crate::ports::testing::FakeExchange;
+    use crate::upstream::HostsExchange;
 
     use super::{
         AddressCachePolicy, AddressResolutionError, AddressResolutionRequest,
         AddressResolutionState, AddressSource, BootstrapAnswer, BootstrapResolution,
-        BootstrapResponseError, NoAddressReason, ResolvedAddresses, SystemResolverAnswer,
-        SystemResolverResolution, bootstrap_answer_from_response,
+        BootstrapResolver, BootstrapResolverError, BootstrapResponseError, NoAddressReason,
+        ResolvedAddresses, SystemResolverAnswer, SystemResolverResolution,
+        bootstrap_answer_from_response,
     };
 
     fn id(value: &str) -> ConfigId {
@@ -536,6 +667,31 @@ mod tests {
 
     fn request(upstream: &ResolvedUpstream) -> AddressResolutionRequest {
         AddressResolutionRequest::from_resolved(upstream).unwrap()
+    }
+
+    fn context(cancellation: Cancellation) -> RequestContext {
+        let now = Instant::now();
+        RequestContext {
+            meta: RequestMeta {
+                request_id: RequestId(1),
+                trace_id: None,
+                received_at: now,
+                received_at_utc: SystemTime::now(),
+                deadline: Deadline::new(now + Duration::from_secs(30)),
+                cancellation,
+                connection_id: None,
+                stream_id: None,
+                listener_id: ListenerId::from("bootstrap-test"),
+                route_id: None,
+                original_dns_id: None,
+            },
+            client: ClientIdentity::default(),
+            transport: TransportCapabilities {
+                class: TransportClass::Datagram,
+                cache_compatibility: CacheCompatibilityKey(1),
+            },
+            runtime_revision: RuntimeRevision(1),
+        }
     }
 
     fn answer(address: [u8; 4], ttl: u64) -> BootstrapResolution {
@@ -573,6 +729,94 @@ mod tests {
         response_message.add_query(Query::query(name, RecordType::A));
         crate::dns::CanonicalResponse::from_message(response_message, &query, DnsMessageId::new(2))
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn resolver_queries_a_and_aaaa_and_merges_addresses() {
+        let connector = Arc::new(
+            HostsExchange::from_resolved(&ResolvedUpstream::Hosts {
+                id: id("bootstrap"),
+                format: "hosts".to_owned(),
+                hosts: "192.0.2.10 resolver.example.\n2001:db8::10 resolver.example.\n".to_owned(),
+            })
+            .unwrap(),
+        );
+        let resolver = BootstrapResolver::new(connector);
+
+        let answer = resolver
+            .resolve("resolver.example.", &context(Cancellation::new()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            answer.addresses(),
+            &[
+                IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10)),
+                IpAddr::V6("2001:db8::10".parse().unwrap()),
+            ]
+        );
+        assert_eq!(answer.ttl(), Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn resolver_returns_transport_failure_when_no_family_has_an_answer() {
+        let connector = Arc::new(FakeExchange::new(ConnectorId::new("bootstrap").unwrap()));
+        for _ in 0..2 {
+            connector
+                .push(UpstreamOutcome::TransportFailure(TransportFailure {
+                    connector: connector.connector_id().clone(),
+                    class: TransportFailureClass::Timeout,
+                    retryable: true,
+                    safe_context: Some("test"),
+                }))
+                .unwrap();
+        }
+        let resolver = BootstrapResolver::new(connector.clone());
+
+        assert_eq!(
+            resolver
+                .resolve("resolver.example.", &context(Cancellation::new()))
+                .await,
+            Err(BootstrapResolverError::Transport {
+                connector: "bootstrap".to_owned(),
+                class: TransportFailureClass::Timeout,
+            })
+        );
+        assert_eq!(connector.calls(), 2);
+    }
+
+    #[tokio::test]
+    async fn resolver_stops_on_cancellation_without_querying_aaaa() {
+        let connector = Arc::new(FakeExchange::new(ConnectorId::new("bootstrap").unwrap()));
+        connector
+            .push(UpstreamOutcome::Cancelled(CancelReason::Shutdown))
+            .unwrap();
+        let resolver = BootstrapResolver::new(connector.clone());
+
+        assert_eq!(
+            resolver
+                .resolve("resolver.example.", &context(Cancellation::new()))
+                .await,
+            Err(BootstrapResolverError::Cancelled {
+                connector: "bootstrap".to_owned(),
+                reason: CancelReason::Shutdown,
+            })
+        );
+        assert_eq!(connector.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn resolver_rejects_invalid_host_before_exchange() {
+        let connector = Arc::new(FakeExchange::new(ConnectorId::new("bootstrap").unwrap()));
+        let resolver = BootstrapResolver::new(connector.clone());
+
+        assert_eq!(
+            resolver
+                .resolve("not a dns name", &context(Cancellation::new()))
+                .await,
+            Err(BootstrapResolverError::InvalidName)
+        );
+        assert_eq!(connector.calls(), 0);
     }
 
     #[test]
