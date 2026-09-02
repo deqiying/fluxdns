@@ -2031,7 +2031,8 @@ mod tests {
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RData, RecordType};
-    use tokio::net::UdpSocket;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpStream, UdpSocket};
 
     use super::{
         ResolveDetailDropCounters, ServiceError, capabilities, publish_component_health,
@@ -2548,12 +2549,8 @@ clients: []
 
     async fn udp_query(address: SocketAddr, id: u16, name: &str) -> Message {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut query = Message::new(id, MessageType::Query, OpCode::Query);
-        query.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
-        socket
-            .send_to(&query.to_vec().unwrap(), address)
-            .await
-            .unwrap();
+        let query = query_wire(id, name);
+        socket.send_to(&query, address).await.unwrap();
         let mut response = [0_u8; 4096];
         let (size, _) =
             tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut response))
@@ -2561,6 +2558,191 @@ clients: []
                 .unwrap()
                 .unwrap();
         Message::from_vec(&response[..size]).unwrap()
+    }
+
+    /// 为真实 transport loopback 测试生成同一份 DNS query wire。
+    fn query_wire(id: u16, name: &str) -> Vec<u8> {
+        let mut query = Message::new(id, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
+        query.to_vec().unwrap()
+    }
+
+    /// 通过 DNS-over-TCP framing 发送查询并读取一条完整响应。
+    async fn tcp_query(address: SocketAddr, id: u16, name: &str) -> Message {
+        let query = query_wire(id, name);
+        let mut request = Vec::with_capacity(query.len() + 2);
+        request.extend_from_slice(&(query.len() as u16).to_be_bytes());
+        request.extend_from_slice(&query);
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(&request).await.unwrap();
+
+        let mut length = [0_u8; 2];
+        tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut length))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut response = vec![0_u8; u16::from_be_bytes(length) as usize];
+        tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        Message::from_vec(&response).unwrap()
+    }
+
+    /// 通过 plain HTTP/1.1 POST 发送 DoH 查询，并只解析响应中的 DNS body。
+    async fn doh_query(address: SocketAddr, id: u16, name: &str) -> Message {
+        let query = query_wire(id, name);
+        let mut request = format!(
+            "POST /dns HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            query.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&query);
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(&request).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("DoH response must contain a complete HTTP header");
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        Message::from_vec(&response[header_end + 4..]).unwrap()
+    }
+
+    /// 构造同时启用 UDP、TCP 和 plain DoH 的同策略 loopback 配置。
+    fn cross_transport_runtime_config(
+        udp_port: u16,
+        tcp_port: u16,
+        doh_port: u16,
+    ) -> Arc<crate::config::resolve::ResolvedConfig> {
+        let work_path = crate::config::test_support::absolute_path("service-cross-transport");
+        ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&format!(
+                r#"
+version: 1
+work:
+  path: {work_path}
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - name: dns-udp
+    type: udp
+    addresses: [127.0.0.1]
+    port: {udp_port}
+    strategy: default
+  - name: dns-tcp
+    type: tcp
+    addresses: [127.0.0.1]
+    port: {tcp_port}
+    strategy: default
+  - name: dns-doh
+    type: doh
+    routes:
+      - path: /dns
+        strategy: default
+    endpoints:
+      - name: plain
+        addresses: [127.0.0.1]
+        port: {doh_port}
+        tls:
+          mode: external
+        client_ip:
+          source: peer
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "192.0.2.25 transport.test"
+hosts:
+  - type: const
+    name: local-hosts
+    format: hosts
+    hosts: "192.0.2.25 transport.test"
+outbound: []
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+"#,
+            ))
+            .expect("cross-transport fixture must be valid")
+            .resolved
+    }
+
+    #[tokio::test]
+    async fn udp_tcp_and_plain_doh_return_the_same_policy_answer() {
+        let base_port = 47_000 + (std::process::id() as u16 % 500) * 3;
+        let config = cross_transport_runtime_config(base_port, base_port + 1, base_port + 2);
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(1)).unwrap();
+        let factory = SystemSocketFactory::new();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let udp = udp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)),
+            41,
+            "transport.test.",
+        )
+        .await;
+        let tcp = tcp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 1)),
+            41,
+            "transport.test.",
+        )
+        .await;
+        let doh = doh_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 2)),
+            41,
+            "transport.test.",
+        )
+        .await;
+
+        assert_eq!(udp.metadata.response_code, ResponseCode::NoError);
+        assert_eq!(udp.answers, tcp.answers);
+        assert_eq!(udp.answers, doh.answers);
+        assert!(udp.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(192, 0, 2, 25)
+        )));
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
     }
 
     #[tokio::test]

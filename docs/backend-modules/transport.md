@@ -224,8 +224,9 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 实现 UDP/TCP response correlation/encoder；
 - [x] 建立共享 DNS wire decode/encode boundary 和尺寸/错误分类测试；
 - [x] 完成 UDP/TCP framing、尺寸、EOF、取消和顺序响应测试；
+- [x] 完成 UDP/TCP/plain DoH 同策略 answer 的真实 loopback 一致性测试；
 - [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 16 项通过；system socket Rustls loopback 握手和 peer 保留定向测试 1 项通过；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
+阶段证据：DoH codec/session、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 16 项通过；system socket Rustls loopback 握手和 peer 保留定向测试 1 项通过；Service loopback 测试验证同一 hosts 策略经真实 UDP、DNS-over-TCP framing 和 plain DoH POST 返回一致 answer；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
 
-当前实现进度：**72%**。
+当前实现进度：**73%**。
