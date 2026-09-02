@@ -481,13 +481,15 @@ HTTP access log 和 tracing 不记录 query string、raw DNS wire、完整 `clie
 MAX_DNS_WIRE_BYTES       = 65_535
 MAX_DOH_POST_BODY_BYTES  = 65_535
 MAX_DOH_GET_DNS_CHARS    = 87_380
+MAX_DOH_HEADER_BYTES     = 16_384
+MAX_DOH_REQUEST_TARGET_BYTES = 131_072
 MAX_PROXY_V1_BYTES       = 107
 MAX_PROXY_V2_BYTES       = 536
 ```
 
 这些是 adapter 的硬安全上限，不是 DNS core 的业务配置。adapter-owned `TransportProfile` 负责 framing、最大响应尺寸、HTTP 状态码、UDP 截断和 response encoding；只向 core 暴露稳定的 `TransportCapabilities` 与 opaque `cache_compatibility`。因此 DoT/DoQ 后续只需增加 profile/adapter，不需要在核心请求模型中继续扩展 `Transport` 枚举分支。
 
-HTTP request-target 上限必须容纳路由路径、`?dns=` 和完整的 `MAX_DOH_GET_DNS_CHARS`，否则 GET 会在达到 DNS wire 上限前被框架提前拒绝。
+HTTP request-target 上限必须容纳路由路径、`?dns=` 和完整的 `MAX_DOH_GET_DNS_CHARS`，否则 GET 会在达到 DNS wire 上限前被提前拒绝。实现对 request-line、header fields 和 POST body 独立计费，session buffer 使用三者之和形成固定总上限。
 
 DoH endpoint 的 accept pipeline 为：
 

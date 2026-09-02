@@ -45,7 +45,10 @@ pub const MAX_PROXY_V2_BYTES: usize = 536;
 
 const MAX_HEADER_COUNT: usize = 64;
 const DOH_READ_CHUNK_BYTES: usize = 8 * 1024;
-const MAX_DOH_BUFFER_BYTES: usize = MAX_DOH_HEADER_BYTES + MAX_DOH_POST_BODY_BYTES;
+// request-line 与 header fields 分开计费，确保完整 GET wire 不会提前撞上 header 上限。
+const MAX_DOH_REQUEST_LINE_BYTES: usize = MAX_DOH_REQUEST_TARGET_BYTES + 32;
+const MAX_DOH_REQUEST_HEAD_BYTES: usize = MAX_DOH_REQUEST_LINE_BYTES + MAX_DOH_HEADER_BYTES;
+const MAX_DOH_BUFFER_BYTES: usize = MAX_DOH_REQUEST_HEAD_BYTES + MAX_DOH_POST_BODY_BYTES;
 const PROXY_V2_SIGNATURE: &[u8; 12] = b"\r\n\r\n\0\r\nQUIT\n";
 const PROXY_V1_PREFIX: &[u8; 6] = b"PROXY ";
 
@@ -1030,19 +1033,18 @@ impl DohHttpError {
     }
 }
 
-/// Parse one complete HTTP request from the front of `buffer`.
+/// 从 `buffer` 开头解析一条完整 HTTP 请求。
 ///
-/// `Ok(None)` means more bytes are needed.  Any returned error is terminal for
-/// the current connection; callers should write the corresponding HTTP status
-/// and close when `should_close()` is true.
+/// `Ok(None)` 表示仍需读取更多字节。返回错误时调用方写入对应 HTTP 状态；
+/// `should_close()` 为 true 时关闭当前连接。
 pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohHttpError> {
     let Some(header_end) = find_subslice(buffer, b"\r\n\r\n") else {
-        if buffer.len() > MAX_DOH_HEADER_BYTES {
+        if buffer.len() > MAX_DOH_REQUEST_HEAD_BYTES {
             return Err(DohHttpError::Malformed);
         }
         return Ok(None);
     };
-    if header_end > MAX_DOH_HEADER_BYTES {
+    if header_end > MAX_DOH_REQUEST_HEAD_BYTES {
         return Err(DohHttpError::Malformed);
     }
 
@@ -1053,6 +1055,13 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
     let header = std::str::from_utf8(header).map_err(|_| DohHttpError::Malformed)?;
     let mut lines = header.split("\r\n");
     let request_line = lines.next().ok_or(DohHttpError::Malformed)?;
+    let header_fields_bytes = header_end
+        .checked_sub(request_line.len())
+        .ok_or(DohHttpError::Malformed)?
+        .saturating_sub(2);
+    if header_fields_bytes > MAX_DOH_HEADER_BYTES {
+        return Err(DohHttpError::Malformed);
+    }
     let parts = request_line.split(' ').collect::<Vec<_>>();
     if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
         return Err(DohHttpError::Malformed);
@@ -1957,6 +1966,27 @@ mod tests {
             try_parse_request(&full[..header_end + wire.len() - 1]).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn request_target_and_header_fields_use_independent_limits() {
+        let encoded = base64url(&wire());
+        let suffix = format!("?dns={encoded}");
+        let path_bytes = MAX_DOH_REQUEST_TARGET_BYTES - suffix.len();
+        let target = format!("/{}{}", "a".repeat(path_bytes - 1), suffix);
+        assert_eq!(target.len(), MAX_DOH_REQUEST_TARGET_BYTES);
+
+        let parsed = try_parse_request(&request("GET", &target, "", &[]))
+            .unwrap()
+            .unwrap();
+        assert_eq!(parsed.path.len(), path_bytes);
+
+        let oversized = format!("{target}x");
+        assert_eq!(
+            try_parse_request(&request("GET", &oversized, "", &[])),
+            Err(DohHttpError::UriTooLong)
+        );
+        assert!(MAX_DOH_BUFFER_BYTES > MAX_DOH_REQUEST_HEAD_BYTES);
     }
 
     #[test]

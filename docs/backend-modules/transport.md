@@ -122,6 +122,7 @@ TCP adapter：
 - POST：`application/dns-message` raw body；
 - 解码后 DNS wire 和 POST body最大 65,535 字节；
 - GET `dns` 最多 87,380 字符；
+- request-target、header fields 和 POST body 独立计费；request-target 上限为 131,072 字节，header fields 上限为 16 KiB，session 总 buffer 仍为三者之和形成的固定上限；
 - method 错误返回 405 和 `Allow: GET, POST`；
 - 媒体类型错误返回 415；
 - request target/body 超限返回 414/413；
@@ -206,7 +207,7 @@ encoder 由 request correlation 持有并只能调用一次：
 
 - UDP/TCP canonical equivalence、ID 恢复和 UDP TC；
 - TCP length 分片、半包、EOF、idle timeout 和顺序响应；
-- DoH GET/POST、Host cardinality、媒体类型、方法、65,535/87,380 边界和 HTTP/DNS 分层；
+- DoH GET/POST、Host cardinality、媒体类型、方法、65,535/87,380 边界、最大 request-target 独立计费和 HTTP/DNS 分层；
 - TLS 证书/key 组合与 handshake timeout；
 - forwarded header 信任链、伪造 header、missing/invalid policy；
 - PROXY v1/v2 分片、未知 TLV、非法长度、不可信 peer；
@@ -220,6 +221,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 实现 UDP、TCP adapter；
 - [x] 实现 DoH plain HTTP GET/POST；
 - [x] 按 HTTP/1.1 契约拒绝缺失或重复 `Host`，并保留 HTTP/1.0 兼容路径；
+- [x] 分离 DoH request-target、header fields 和 POST body 上限，确保完整 GET wire 不被 header 预算提前拒绝；
 - [x] 实现 TLS terminate 首轮证书加载和握手；
 - [x] 实现 forwarded header 首轮 client IP 恢复；
 - [x] 实现 PROXY v1/v2 首轮 client IP 恢复；
@@ -229,6 +231,6 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 完成 UDP/TCP/plain DoH 的真实 loopback response contract，统一验证 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED、DNS ID 和 canonical response，并验证大响应下 UDP TC、TCP/DoH 完整响应；
 - [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、Host cardinality、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 17 项通过；system socket Rustls loopback 握手和 peer 保留定向测试 1 项通过；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility。真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
+阶段证据：DoH codec/session、Host cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 18 项通过；system socket Rustls loopback 握手和 peer 保留定向测试 1 项通过；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility。真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
 
-当前实现进度：**78%**。
+当前实现进度：**79%**。
