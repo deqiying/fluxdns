@@ -98,8 +98,14 @@ pub struct DnsService {
     coordinator: Arc<RuntimeCoordinator>,
     supervisor: Supervisor,
     transport_cancellations: Vec<Cancellation>,
-    resource_cancellations: Vec<Cancellation>,
+    resource_tasks: Vec<ResourceTask>,
     request_timeout: Duration,
+}
+
+#[derive(Clone)]
+struct ResourceTask {
+    resource: ConfigId,
+    cancellation: Cancellation,
 }
 
 impl DnsService {
@@ -132,7 +138,7 @@ impl DnsService {
             Arc::clone(&runtime),
         )?;
 
-        let resource_cancellations = spawn_resource_tasks(
+        let resource_tasks = spawn_resource_tasks(
             &mut supervisor,
             Arc::clone(&coordinator),
             runtime.revision(),
@@ -144,7 +150,7 @@ impl DnsService {
             coordinator,
             supervisor,
             transport_cancellations,
-            resource_cancellations,
+            resource_tasks,
             request_timeout,
         })
     }
@@ -200,13 +206,53 @@ impl DnsService {
     }
 
     pub fn resource_task_count(&self) -> usize {
-        self.resource_cancellations.len()
+        self.resource_tasks.len()
     }
 
     pub fn cancel_resource_tasks(&self) {
-        for cancellation in &self.resource_cancellations {
-            cancellation.cancel(CancelReason::Shutdown);
+        for task in &self.resource_tasks {
+            task.cancellation.cancel(CancelReason::Shutdown);
         }
+    }
+
+    fn reconcile_resource_tasks(
+        &mut self,
+        runtime: &Arc<ActiveRuntime>,
+    ) -> Result<Vec<ResourceTask>, ServiceStartError> {
+        let resources = runtime.resource_worker_ids();
+        let previous = self.resource_tasks.clone();
+        let mut next = Vec::with_capacity(resources.len());
+        let mut spawned = Vec::new();
+        for (index, resource) in resources.iter().cloned().enumerate() {
+            if let Some(existing) = previous.iter().find(|task| task.resource == resource) {
+                next.push(existing.clone());
+                continue;
+            }
+            match spawn_resource_task(
+                &mut self.supervisor,
+                Arc::clone(&self.coordinator),
+                runtime.revision(),
+                index,
+                resource,
+            ) {
+                Ok(task) => {
+                    spawned.push(task.clone());
+                    next.push(task);
+                }
+                Err(error) => {
+                    for task in spawned {
+                        task.cancellation.cancel(CancelReason::Shutdown);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        for task in &previous {
+            if !resources.contains(&task.resource) {
+                task.cancellation.cancel(CancelReason::Shutdown);
+            }
+        }
+        Ok(next)
     }
 
     /// 绑定并切换一个新 Runtime，同时重建 UDP/TCP/DoH listener task。
@@ -254,17 +300,12 @@ impl DnsService {
                 Arc::clone(&runtime),
             )
             .map_err(map_reload_spawn_error)?;
-            let resource_cancellations = spawn_resource_tasks(
-                &mut self.supervisor,
-                Arc::clone(&self.coordinator),
-                runtime.revision(),
-                runtime.resource_worker_ids(),
-            )
-            .map_err(map_reload_spawn_error)?;
+            let resource_tasks = self
+                .reconcile_resource_tasks(&runtime)
+                .map_err(map_reload_spawn_error)?;
             self.cancel_transport_tasks();
-            self.cancel_resource_tasks();
             self.transport_cancellations = transport_cancellations;
-            self.resource_cancellations = resource_cancellations;
+            self.resource_tasks = resource_tasks;
             self.runtime = Arc::clone(&runtime);
             return Ok(runtime);
         }
@@ -295,18 +336,13 @@ impl DnsService {
             Arc::clone(&runtime),
         )
         .map_err(map_reload_spawn_error)?;
-        let resource_cancellations = spawn_resource_tasks(
-            &mut self.supervisor,
-            Arc::clone(&self.coordinator),
-            runtime.revision(),
-            runtime.resource_worker_ids(),
-        )
-        .map_err(map_reload_spawn_error)?;
+        let resource_tasks = self
+            .reconcile_resource_tasks(&runtime)
+            .map_err(map_reload_spawn_error)?;
 
         self.cancel_transport_tasks();
-        self.cancel_resource_tasks();
         self.transport_cancellations = transport_cancellations;
-        self.resource_cancellations = resource_cancellations;
+        self.resource_tasks = resource_tasks;
         self.runtime = Arc::clone(&runtime);
         Ok(runtime)
     }
@@ -620,29 +656,49 @@ fn spawn_resource_tasks(
     coordinator: Arc<RuntimeCoordinator>,
     revision: RuntimeRevision,
     resources: Vec<ConfigId>,
-) -> Result<Vec<Cancellation>, ServiceStartError> {
+) -> Result<Vec<ResourceTask>, ServiceStartError> {
     let mut cancellations = Vec::with_capacity(resources.len());
     for (index, resource) in resources.into_iter().enumerate() {
-        let spec = TaskSpec::new(
-            format!("resource.refresh.{}.{index}", revision.0),
-            "resource",
-            FaultLevel::Degraded,
-            RestartPolicy::Never,
-        )
-        .map_err(|error| ServiceStartError::Endpoint {
+        cancellations.push(spawn_resource_task(
+            supervisor,
+            Arc::clone(&coordinator),
+            revision,
             index,
-            kind: "resource",
-            reason: error.to_string(),
-        })?;
-        let task_coordinator = Arc::clone(&coordinator);
-        let cancellation = supervisor
-            .spawn_scoped(spec, move |cancellation| {
-                resource_refresh_task(task_coordinator, resource, cancellation)
-            })
-            .map_err(ServiceStartError::Task)?;
-        cancellations.push(cancellation);
+            resource,
+        )?);
     }
     Ok(cancellations)
+}
+
+fn spawn_resource_task(
+    supervisor: &mut Supervisor,
+    coordinator: Arc<RuntimeCoordinator>,
+    revision: RuntimeRevision,
+    index: usize,
+    resource: ConfigId,
+) -> Result<ResourceTask, ServiceStartError> {
+    let spec = TaskSpec::new(
+        format!("resource.refresh.{}.{index}", revision.0),
+        "resource",
+        FaultLevel::Degraded,
+        RestartPolicy::Never,
+    )
+    .map_err(|error| ServiceStartError::Endpoint {
+        index,
+        kind: "resource",
+        reason: error.to_string(),
+    })?;
+    let task_coordinator = Arc::clone(&coordinator);
+    let task_resource = resource.clone();
+    let cancellation = supervisor
+        .spawn_scoped(spec, move |cancellation| {
+            resource_refresh_task(task_coordinator, task_resource, cancellation)
+        })
+        .map_err(ServiceStartError::Task)?;
+    Ok(ResourceTask {
+        resource,
+        cancellation,
+    })
 }
 
 fn resource_refresh_task(
@@ -1468,6 +1524,7 @@ clients: []
         root: &std::path::Path,
         resource_path: &std::path::Path,
         port: u16,
+        auto_update: bool,
     ) -> Arc<crate::config::resolve::ResolvedConfig> {
         ConfigLoader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
@@ -1505,7 +1562,7 @@ hosts:
     name: local-hosts
     format: hosts
     path: {resource_path}
-    auto_update: true
+    auto_update: {auto_update}
     update_interval: 60s
 outbound: []
 rule_set: []
@@ -1519,6 +1576,7 @@ clients: []
                 root = root.display(),
                 resource_path = resource_path.display(),
                 port = port,
+                auto_update = auto_update,
             ))
             .expect("resource service reload fixture must be valid")
             .resolved
@@ -1642,7 +1700,7 @@ clients: []
         let port = 42_500 + (std::process::id() as u16 % 500);
         let factory = crate::runtime::SystemSocketFactory::new();
         let initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
-            resource_runtime_config(&root, &resource_path, port),
+            resource_runtime_config(&root, &resource_path, port, true),
             RuntimeRevision(1),
             Deadline::new(Instant::now() + Duration::from_secs(5)),
             Cancellation::new(),
@@ -1673,7 +1731,7 @@ clients: []
         assert_eq!(refreshed.epoch(), 2);
 
         let prepared = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
-            resource_runtime_config(&root, &resource_path, port),
+            resource_runtime_config(&root, &resource_path, port, true),
             RuntimeRevision(2),
             Deadline::new(Instant::now() + Duration::from_secs(5)),
             Cancellation::new(),
@@ -1769,7 +1827,7 @@ clients: []
         let base_port = 41_000 + (std::process::id() as u16 % 1_000) * 2;
         let factory = crate::runtime::SystemSocketFactory::new();
         let initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
-            resource_runtime_config(&root, &resource_path, base_port),
+            resource_runtime_config(&root, &resource_path, base_port, true),
             RuntimeRevision(1),
             Deadline::new(Instant::now() + Duration::from_secs(5)),
             Cancellation::new(),
@@ -1789,10 +1847,10 @@ clients: []
             super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
                 .unwrap();
         assert_eq!(service.resource_task_count(), 1);
-        let old_token = service.resource_cancellations[0].clone();
+        let old_token = service.resource_tasks[0].cancellation.clone();
 
         let next = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
-            resource_runtime_config(&root, &resource_path, base_port + 1),
+            resource_runtime_config(&root, &resource_path, base_port + 1, true),
             RuntimeRevision(2),
             Deadline::new(Instant::now() + Duration::from_secs(5)),
             Cancellation::new(),
@@ -1809,9 +1867,29 @@ clients: []
             .await
             .unwrap();
 
-        assert!(old_token.is_cancelled());
+        assert!(!old_token.is_cancelled());
         assert_eq!(service.resource_task_count(), 1);
-        assert!(!service.resource_cancellations[0].is_cancelled());
+        assert!(!service.resource_tasks[0].cancellation.is_cancelled());
+
+        let next_without_resource = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            resource_runtime_config(&root, &resource_path, base_port + 2, false),
+            RuntimeRevision(3),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        service
+            .reload_prepared(
+                next_without_resource,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert!(old_token.is_cancelled());
+        assert_eq!(service.resource_task_count(), 0);
 
         let report = service
             .shutdown(
