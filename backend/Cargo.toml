@@ -16,6 +16,11 @@ reqwest = { version = "=0.13.4", default-features = false, features = [
     "rustls",
     "socks",
 ] }
+rustls = { version = "=0.23.43", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
 socket2 = "=0.6.5"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_path_to_error = "=0.1.20"
@@ -33,6 +38,10 @@ tokio = { version = "=1.53.1", default-features = false, features = [
     "sync",
     "time",
 ] }
+tokio-rustls = { version = "=0.26.4", default-features = false, features = [
+    "ring",
+    "tls12",
+] }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
 tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt"] }
@@ -41,5 +50,3 @@ yaml_serde = "=0.10.7"
 
 [dev-dependencies]
 rcgen = "=0.14.10"
-rustls = "=0.23.43"
-tokio-rustls = "=0.26.4"

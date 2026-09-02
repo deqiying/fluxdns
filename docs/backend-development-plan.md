@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前执行至阶段 87（接入 DoH PROXY v1/v2 首轮地址恢复），后续重点是按需补齐 v1 的 TLS、安全故障复现和完整观测链路。
+> 状态：MVP v0.1 已完成；当前执行至阶段 88（接入 DoH TLS terminate 首轮握手），后续重点是按需补齐 v1 的协议组合、安全故障复现和完整观测链路。
 >
 > 更新日期：2026-09-02
 >
@@ -14,17 +14,17 @@
 
 - 已完成主链路：Config 严格加载与校验、Runtime 候选/激活/受管 task、UDP/TCP/DoH plain HTTP、Upstream direct/group/proxy、Policy/Resource 首次快照与 live publish、Cache memory/Moka/SQLite 首轮 adapter。
 - Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder`、首轮 `StorageRuntime` 生产接线、pending 内存保护/fatal 边界、首轮 degraded/recovery 状态边界及 adapter-level Busy/DiskFull fault 注入恢复分类；Observability 已完成低基数 metrics/health 基础和稳定 telemetry ports 的有界 writer/flush 边界。
-- MVP 后置项：完整跨 Runtime 配置候选发布、DoH 入站 TLS、SQLite busy/disk-full recovery、完整 group member/资源详情元数据、final tracing subscriber、最终故障/压力/conformance 验收。
+- MVP 后置项：完整跨 Runtime 配置候选发布、DoH HTTP/2 与完整协议/故障矩阵、SQLite busy/disk-full recovery、完整 group member/资源详情元数据、final tracing subscriber、最终故障/压力/conformance 验收。
 
-> 注：阶段 87 后的当前数值以本节汇总表和“当前验证记录”为准；MVP 已完成不等于 v1 全部验收完成，后置项只在需要时推进。
+> 注：阶段 88 后的当前数值以本节汇总表和“当前验证记录”为准；MVP 已完成不等于 v1 全部验收完成，后置项只在需要时推进。
 
-阶段 87 已接入 DoH PROXY v1/v2 首轮地址恢复：仅接受可信 peer，支持分片读取、TCP4/TCP6、长度上限和未知 v2 TLV 跳过；未实现的入站 TLS、真实 OS 故障、全量详情元数据和 final subscriber 仍属 v1 后置项。阶段 86 已接入 DoH `forwarded_header` 首轮客户端地址恢复：仅接受可信 peer 的已配置 header，支持 `X-Forwarded-For`、`X-Real-IP`、`Forwarded` 和缺失/非法回退策略。阶段 85 已接入 selected upstream 首轮观测元数据：上游配置 ID 进入 stats 有界维度，resolve detail 仅记录存在性标记；生产请求和 MVP 范围不变。阶段 84 已修复 Rustls loopback 握手测试预算：两个 live HTTPS 用例在 10s 测试 deadline 下分别通过；生产 adapter timeout 未改变。
+阶段 88 已接入 DoH TLS terminate 首轮闭环：按 endpoint 加载 PEM/DER 证书链和私钥，system socket 使用显式 ring provider 完成 TLS 1.2/1.3 握手，并沿用 deadline/cancellation；PROXY 前导与 TLS 连接升级顺序已覆盖，HTTP/2、证书热加载和完整证书矩阵仍后置。阶段 87 已接入 DoH PROXY v1/v2 首轮地址恢复：仅接受可信 peer，支持分片读取、TCP4/TCP6、长度上限和未知 v2 TLV 跳过；真实 OS 故障、全量详情元数据和 final subscriber 仍属 v1 后置项。阶段 86 已接入 DoH `forwarded_header` 首轮客户端地址恢复：仅接受可信 peer 的已配置 header，支持 `X-Forwarded-For`、`X-Real-IP`、`Forwarded` 和缺失/非法回退策略。阶段 85 已接入 selected upstream 首轮观测元数据：上游配置 ID 进入 stats 有界维度，resolve detail 仅记录存在性标记；生产请求和 MVP 范围不变。阶段 84 已修复 Rustls loopback 握手测试预算：两个 live HTTPS 用例在 10s 测试 deadline 下分别通过；生产 adapter timeout 未改变。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **72.4%** | 主要请求、Runtime、策略、资源、缓存、Storage、client bucket/selected upstream 观测元数据、DoH forwarded header/PROXY 首轮身份恢复和 telemetry writer/真实输出/级别过滤首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站 TLS、SQLite busy/disk-full 故障注入与恢复验收、完整 group member/资源详情元数据、typed final subscriber/监督任务接线及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
-| v1 交付总进度 | **75.2%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 72.4%` |
+| 后端代码实现进度 | **73.7%** | 主要请求、Runtime、策略、资源、缓存、Storage、client bucket/selected upstream 观测元数据、DoH forwarded header/PROXY 首轮身份恢复、TLS terminate 首轮握手和 telemetry writer/真实输出/级别过滤首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH HTTP/2 与完整协议/故障矩阵、SQLite busy/disk-full 故障注入与恢复验收、完整 group member/资源详情元数据、typed final subscriber/监督任务接线及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
+| v1 交付总进度 | **76.3%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 73.7%` |
 | MVP v0.1 | **已完成** | 以当前可运行主链路和本地 loopback 证据为交付边界；后置项不阻塞 MVP 使用 |
 
 ### 当前验证记录
@@ -36,8 +36,9 @@
 - 阶段 85 增量验证：Policy selected upstream observation、resolve detail 脱敏存在性和 SQLite `upstream_id` 写入定向测试各 `1 passed、0 failed`；变更 Rust 文件已执行文件级 `rustfmt`，并通过 `cargo check`，未重复全量 `cargo fmt/test`。
 - 阶段 86 增量验证：DoH parser、forwarded trust chain、missing/invalid disposition 和 session `client_addr` 恢复共 `12 passed、0 failed`；变更 Rust 文件已执行文件级 `rustfmt`，并通过 `cargo check`，未重复全量 `cargo fmt/test`。
 - 阶段 87 增量验证：DoH PROXY v1/v2 parser、分片/长度边界、trusted peer 和 session `client_addr` 恢复共 `14 passed、0 failed`；变更 Rust 文件已执行文件级 `rustfmt`，并通过 `cargo clippy -D warnings` 与 `cargo check`，未重复全量 `cargo fmt/test`。
+- 阶段 88 增量验证：system socket TLS 证书握手、peer 保留 `1 passed、0 failed`；DoH TLS 材料加载/证书私钥匹配、PROXY 前导后 TLS 升级与协议定向测试 `16 passed、0 failed`；变更 Rust 文件已执行文件级 `rustfmt`，并通过 `cargo clippy --all-targets -D warnings`、`cargo check` 和 `git diff --check`，未重复全量 `cargo fmt/test`。
 - 小阶段只执行增量验证；完成大阶段时再执行全量后端测试。
-- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy，adapter-level Busy/DiskFull fault 已有确定性注入恢复分类；Policy Core 已通过可选 observation 接口向 Stats/resolve detail 传播 strategy/source/cache/client bucket/selected upstream 首轮元数据；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，`StructuredTelemetryOutput` 已能写入真实文件/stderr，`run` 已在配置校验后切换共享输出目标和级别过滤；DoH 已接入 forwarded header/PROXY 首轮客户端地址恢复，但尚未接入 typed final subscriber、degraded health 发布和监督任务；当前进度为后端 `72.4%`、v1 `75.2%`，OS/SQLite 真实故障和最终故障压力验收仍未完成。
+- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy，adapter-level Busy/DiskFull fault 已有确定性注入恢复分类；Policy Core 已通过可选 observation 接口向 Stats/resolve detail 传播 strategy/source/cache/client bucket/selected upstream 首轮元数据；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，`StructuredTelemetryOutput` 已能写入真实文件/stderr，`run` 已在配置校验后切换共享输出目标和级别过滤；DoH 已接入 forwarded header/PROXY 首轮地址恢复和 TLS terminate 首轮握手（包括 PROXY 前导后连接升级），但尚未接入 typed final subscriber、degraded health 发布和监督任务；当前进度为后端 `73.7%`、v1 `76.3%`，OS/SQLite 真实故障和最终故障压力验收仍未完成。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -77,10 +78,10 @@ v1 交付范围：
 | 模块 | 目标代码 | 方案文档 | 设计状态 | 实现状态 | 实现进度 | 权重 |
 | --- | --- | --- | --- | --- | ---: | ---: |
 | Application | `backend/src/main.rs`、`backend/src/app.rs` | [application.md](backend-modules/application.md) | 已完成 | 实现中 | 55% | 4% |
-| Ports | `backend/src/ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 实现中 | 35% | 8% |
+| Ports | `backend/src/ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 实现中 | 40% | 8% |
 | Config | `backend/src/config/*` | [config.md](backend-modules/config.md) | 已完成 | 已验证 | 100% | 10% |
 | Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 65% | 12% |
-| Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 64% | 11% |
+| Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 72% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 62% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 70% | 8% |
 | Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 99% | 10% |
@@ -92,7 +93,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 55% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 64% + 10% × 62% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 84% + 3% × 65% ≈ 72.4%
+4% × 55% + 8% × 40% + 10% × 100% + 12% × 65% + 11% × 72% + 10% × 62% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 84% + 3% × 65% ≈ 73.7%
 ```
 
 ## 4. 进度判定规则
@@ -138,7 +139,7 @@ transport / upstream / storage / observability adapters
 
 ### 后续开发路线（基于 2026-09-02 当前状态）
 
-当前后端代码实现进度为 72.4%，v1 交付进度为 75.2%，MVP v0.1 已完成。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker、统一生命周期 facade、首轮服务生产接线、pending 内存保护边界、首轮 degraded/recovery 状态转换及 policy source/cache/strategy/client bucket/selected upstream 首轮元数据落库；DoH 已接入 forwarded header/PROXY 首轮客户端地址恢复；Observability 已完成稳定 telemetry ports 的有界 writer/flush 边界。后续只按产品需要推进 v1 后置项，不为 MVP 追加完整 metadata 或安全扩展。
+当前后端代码实现进度为 73.7%，v1 交付进度为 76.3%，MVP v0.1 已完成。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker、统一生命周期 facade、首轮服务生产接线、pending 内存保护边界、首轮 degraded/recovery 状态转换及 policy source/cache/strategy/client bucket/selected upstream 首轮元数据落库；DoH 已接入 forwarded header/PROXY 首轮地址恢复和 TLS terminate 首轮握手；Observability 已完成稳定 telemetry ports 的有界 writer/flush 边界。后续只按产品需要推进 v1 后置项，不为 MVP 追加完整 metadata 或安全扩展。
 
 | 顺序 | 目标 | 主要范围 | 退出条件 |
 | --- | --- | --- | --- |
@@ -222,7 +223,7 @@ transport / upstream / storage / observability adapters
 - 完成 DNS ID、EDNS、截断、deadline 和错误响应语义；
 - 验收：UDP/TCP 一致性、并发、畸形报文和取消测试通过。
 
-当前边界：DoH plain HTTP GET/POST 与基本 HTTP/DNS 错误分层已实现，`forwarded_header` 首轮可信 peer/链解析也已接入；TLS terminate、PROXY protocol 和完整跨 transport 错误验收尚未实现。DoH endpoint 不会退化为 raw DNS/TCP。
+当前边界：DoH plain HTTP GET/POST、`forwarded_header` 首轮可信 peer/链解析、PROXY v1/v2 首轮恢复和 TLS terminate 首轮握手已实现；HTTP/2 和完整跨 transport 错误验收尚未完成。DoH endpoint 不会退化为 raw DNS/TCP。
 
 阶段 3/4 当前验收证据：
 
@@ -231,7 +232,7 @@ transport / upstream / storage / observability adapters
 - `cargo test --manifest-path backend/Cargo.toml --locked`：149 passed，0 failed；
 - `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings`：通过；
 - 本机 smoke：临时配置在 UDP `127.0.0.1:8353`、TCP `127.0.0.1:8354` 启动成功，内联 hosts 查询返回 `127.0.0.1`；同一 TCP 连接连续发送 DNS ID `0x1111`/`0x2222`，按序收到对应响应；发送 `SIGINT` 后 `service_shutdown` 日志出现且进程以 0 退出。
-- 本机 DoH smoke：临时 plain HTTP 配置在 `127.0.0.1:8355` 启动成功，直接 HTTP POST/GET 均返回 `200`、DNS ID `0x1234`、RCODE `0`；发送 `SIGINT` 后 `service_shutdown` 日志出现且进程以 0 退出。未测试 nginx、TLS 证书或特权端口。
+- 本机 DoH smoke：临时 plain HTTP 配置在 `127.0.0.1:8355` 启动成功，直接 HTTP POST/GET 均返回 `200`、DNS ID `0x1234`、RCODE `0`；发送 `SIGINT` 后 `service_shutdown` 日志出现且进程以 0 退出。未测试 nginx、特权端口或 HTTP/2；TLS 证书使用 loopback 定向握手测试覆盖。
 
 ### 阶段 5：上游解析
 
@@ -283,7 +284,7 @@ transport / upstream / storage / observability adapters
 
 小阶段索引 1（已完成）：接入 DoH plain HTTP/1.x GET/POST、typed endpoint、路由、HTTP/DNS 错误分层及受监督 listener/session；codec/session 定向测试和 `127.0.0.1:8355` smoke 通过。具体边界见 [transport.md](backend-modules/transport.md)。
 
-当前边界：HTTP/1.x 仍按读取顺序处理，已实现 `forwarded_header` 的可信 peer 校验、链解析和 missing/invalid 策略，以及 PROXY v1/v2 首轮前导解析和可信 peer 校验；未实现入站 TLS terminate/external 握手、HTTP/2 和完整资源/故障注入验收；上游 DoH HTTPS/TLS adapter 已完成 live handshake 验证。
+当前边界：HTTP/1.x 仍按读取顺序处理，已实现 `forwarded_header` 的可信 peer 校验、链解析和 missing/invalid 策略、PROXY v1/v2 首轮前导解析和可信 peer 校验，以及 TLS terminate 首轮证书加载与握手（含 PROXY 前导后升级）；HTTP/2 和完整资源/故障注入验收仍后置；上游 DoH HTTPS/TLS adapter 已完成 live handshake 验证。
 
 ### 阶段 9：统计、详情日志与观测
 
@@ -330,9 +331,11 @@ transport / upstream / storage / observability adapters
 
 小阶段索引 31（已完成）：将 selected upstream/group 配置 ID 从 Policy observation 传播到 stats 有界维度和 resolve detail；详情只写入 `<present>` 存在性标记，不记录原始请求数据或未校验标识。Policy、resolve-log、SQLite 定向测试通过，完整 group member 与 matched resource/rule 元数据仍后置。
 
-小阶段索引 32（已完成）：接入 DoH `forwarded_header` 首轮身份恢复；解析并有界保留三个受支持 header，先校验 TCP peer 是否命中 trusted proxy，再按配置从右向左选择客户端地址；缺失/非法值按 `reject` 或 `use_peer` 处理，`proxy_protocol` 仍明确拒绝。DoH 定向测试 `12 passed、0 failed`，未重复全量 `cargo fmt/test`。
+小阶段索引 32（已完成）：接入 DoH `forwarded_header` 首轮身份恢复；解析并有界保留三个受支持 header，先校验 TCP peer 是否命中 trusted proxy，再按配置从右向左选择客户端地址；缺失/非法值按 `reject` 或 `use_peer` 处理。DoH 定向测试 `12 passed、0 failed`，未重复全量 `cargo fmt/test`。
 
 小阶段索引 33（已完成）：接入 DoH `proxy_protocol` 首轮身份恢复；支持 trusted peer、PROXY v1/v2、TCP4/TCP6、分片读取、长度上限和未知 v2 TLV 跳过，恢复源地址进入 `ClientIdentity.client_addr`；DoH 定向测试 `14 passed、0 failed`，未重复全量 `cargo fmt/test`。
+
+小阶段索引 34（已完成）：接入 DoH `tls.mode=terminate` 首轮握手；endpoint 装配阶段加载 PEM/DER 证书链和私钥并校验匹配，system socket 显式使用 ring provider 完成 TLS 1.2/1.3 握手，并沿用 deadline/cancellation；PROXY 前导先消费后升级 TLS，支持该组合的首轮连接路径。TLS loopback 定向测试 `1 passed、0 failed`，DoH TLS 材料、PROXY 前导升级与协议定向测试 `16 passed、0 failed`，未重复全量 `cargo fmt/test`。
 
 ### 阶段 10：刷新、故障注入和 v1 验收
 

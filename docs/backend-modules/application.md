@@ -71,7 +71,7 @@ bootstrap telemetry
   → graceful shutdown
 ```
 
-当前实现以进程级 bootstrap subscriber 作为启动底座，并在严格配置/SecretRef 校验后切换正式日志文件、stderr 或关闭目标及 reloadable level filter；stats/detail flush 已接入 `DnsService` drain，cache persistence 与 telemetry flush 仍待统一生命周期接线。配置加载早期错误和服务生命周期事件均保持结构化、脱敏输出。DoH 首轮只装配 plain HTTP，支持 forwarded header 首轮客户端地址恢复，并在边界处拒绝未实现的 TLS terminate 和 PROXY protocol。
+当前实现以进程级 bootstrap subscriber 作为启动底座，并在严格配置/SecretRef 校验后切换正式日志文件、stderr 或关闭目标及 reloadable level filter；stats/detail flush 已接入 `DnsService` drain，cache persistence 与 telemetry flush 仍待统一生命周期接线。配置加载早期错误和服务生命周期事件均保持结构化、脱敏输出。DoH 首轮装配 plain HTTP 或 TLS terminate，支持 forwarded header/PROXY 首轮客户端地址恢复；PROXY 前导会在连接升级 TLS 前消费。HTTP/2、nginx 集成和特权端口仍未做端到端 smoke。
 
 依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch，创建 `Arc<RuntimeCoordinator>` 并交给 `DnsService`；service Supervisor 持有自动刷新 task，资源 task 通过 coordinator 查询当前活动 runtime，并以 scoped token 管理 reload 生命周期，transport task 在启动时绑定一份 runtime，显式 service reload 时切换到新 revision。测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
 
@@ -137,6 +137,6 @@ Application 将内部错误转换为：
 - [ ] 完成信号与退出测试；
 - [x] 记录阶段 1 验证证据并更新实现进度。
 
-阶段证据：`app::tests::exit_codes_are_stable`、CLI 参数、`validate` 只读和 `reload_runtime_from_path` 成功/失败测试通过；`service::tests::reload_prepared_rebinds_listener_tasks_to_the_new_runtime` 以及 `service::tests::reload_prepared_reconciles_resource_worker_tokens` 通过系统 loopback socket 验证新 revision 接管新端口、旧 listener/resource token 取消且 service runtime 更新；正式 `run` 已切换到 async remote prepare，`runtime::prepared::tests` 验证首次 fetch、第二次 fallback restore 以及 refresh worker 的 Policy live publish。真实 smoke 使用临时配置在 UDP `8353`、TCP `8354`、DoH `8355` 启动，hosts 查询返回 `127.0.0.1`，同连接双 TCP frame 维持 ID 顺序，DoH GET/POST 保留 DNS ID/RCODE，`SIGINT` 后输出 `service_shutdown` 并以 0 退出；正式日志目标/级别切换和 forwarded header 定向测试已通过。未测试 nginx、TLS 证书或特权端口。
+阶段证据：`app::tests::exit_codes_are_stable`、CLI 参数、`validate` 只读和 `reload_runtime_from_path` 成功/失败测试通过；`service::tests::reload_prepared_rebinds_listener_tasks_to_the_new_runtime` 以及 `service::tests::reload_prepared_reconciles_resource_worker_tokens` 通过系统 loopback socket 验证新 revision 接管新端口、旧 listener/resource token 取消且 service runtime 更新；正式 `run` 已切换到 async remote prepare，`runtime::prepared::tests` 验证首次 fetch、第二次 fallback restore 以及 refresh worker 的 Policy live publish。真实 smoke 使用临时配置在 UDP `8353`、TCP `8354`、DoH `8355` 启动，hosts 查询返回 `127.0.0.1`，同连接双 TCP frame 维持 ID 顺序，DoH GET/POST 保留 DNS ID/RCODE，`SIGINT` 后输出 `service_shutdown` 并以 0 退出；正式日志目标/级别切换、forwarded header 和 TLS loopback 定向测试已通过。未测试 nginx、HTTP/2 或特权端口。
 
 当前实现进度：**55%**。

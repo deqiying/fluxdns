@@ -1,6 +1,6 @@
 # Ports 模块设计
 
-> 状态：v1 方案已完成，公共契约、UDP/TCP socket capability、TCP EOF/session 和 bounded byte-stream 语义已实现
+> 状态：v1 方案已完成，公共契约、UDP/TCP socket capability、TCP EOF/session、bounded byte-stream 和首轮 TLS accept 语义已实现
 >
 > 更新日期：2026-08-31
 >
@@ -47,6 +47,8 @@ Ports 不包含具体 adapter，也不成为“所有类型都抽象成 trait”
 `effects.rs` 中的 `TcpReadResult` 将完整 frame 与 clean EOF 分开：没有开始新 frame 的 EOF 是连接正常结束，已读入前缀或 payload 后的 EOF 归为协议错误。TCP session 由 transport 持有连接级 correlation，Ports 不暴露 Tokio stream 类型。
 
 `TcpReadChunkResult`/`read_chunk` 为 HTTP 等可变长度协议提供 bounded byte-stream capability；`max_bytes`、deadline、cancellation 和 clean EOF 仍由 port contract 约束，系统实现不泄漏 Tokio 类型。
+
+`TlsServerMaterial` 只携带已加载的 DER 证书链和私钥字节，并提供脱敏 `Debug`；`TcpListenerHandle::accept_with_tls` 与 `TcpConnectionHandle::start_tls` 为不支持 TLS 的 fake/listener 保留明确的兼容错误。
 
 关联 handle 的状态机：
 
@@ -171,7 +173,8 @@ Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
 - [x] 检查公共接口未泄漏 adapter crate 类型。
 - [x] 定义 UDP/TCP 不透明 socket capability，统一传递 deadline/cancellation 并保留安全错误分类；TCP exact-read 明确 clean EOF/partial EOF。
 - [x] 增加 bounded TCP byte-stream capability，区分 data/clean EOF 并覆盖 deadline/cancellation。
+- [x] 增加脱敏 TLS server material、listener accept 和连接升级 capability，不向 Ports 泄漏 Rustls/Tokio 类型。
 
-阶段 1/3 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。系统 socket bounded byte-stream 定向测试 4 项通过。
+阶段 1/3 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。系统 socket bounded byte-stream 定向测试 4 项通过，TLS loopback 握手定向测试 1 项通过。
 
-当前实现进度：**35%**。
+当前实现进度：**40%**。

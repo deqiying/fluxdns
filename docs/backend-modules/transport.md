@@ -1,6 +1,6 @@
 # Transport 模块设计
 
-> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter、forwarded header 和 PROXY v1/v2 首轮客户端地址恢复；TLS 尚未实现
+> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter、forwarded header、PROXY v1/v2 首轮客户端地址恢复和 TLS terminate 首轮握手
 >
 > 更新日期：2026-09-02
 >
@@ -25,8 +25,7 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 | `udp.rs` | datagram receive/send、EDNS 尺寸和截断 |
 | `tcp.rs` | accept、两字节 length framing、连接内请求 |
 | `doh.rs` | plain HTTP route、GET/POST、HTTP/DNS 错误分层、forwarded header/PROXY 首轮恢复和 session |
-| `tls.rs` | Rustls 配置加载和 TLS accept |
-| `proxy_protocol.rs` | PROXY v1/v2 分片解析、长度与 trust 检查 |
+| `runtime/system_socket.rs` | 系统 TCP listener、Rustls `ServerConfig` 和 TLS accept |
 
 ### 3.1 当前已实现：共享 DNS wire codec
 
@@ -115,7 +114,7 @@ TCP adapter：
 
 ## 7. DoH
 
-当前已实现 plain HTTP 首轮链路和 forwarded header 首轮客户端地址恢复。DoH endpoint 只复用底层 TCP socket，不会被当作 raw DNS/TCP 服务；service 根据 `BindTransport::Doh` 构造独立 listener/session task，并由内部 `JoinSet` 管理连接。
+当前已实现 plain HTTP、TLS terminate 首轮握手和 forwarded header 首轮客户端地址恢复。DoH endpoint 只复用底层 TCP socket，不会被当作 raw DNS/TCP 服务；service 根据 `BindTransport::Doh` 构造独立 listener/session task，并由内部 `JoinSet` 管理连接。
 
 每条 route 同时支持 GET/POST：
 
@@ -130,22 +129,22 @@ TCP adapter：
 - 已形成 DNS transaction 后，NXDOMAIN/REFUSED/SERVFAIL 等使用 HTTP 2xx；
 - 成功响应 Content-Type 为 `application/dns-message`，Cache-Control 固定 `no-store`。
 
-首轮实现边界：只接受 `tls.mode=external`；`tls.mode=terminate` 会在 service 装配阶段明确拒绝。`client_ip.source=forwarded_header` 已支持三个配置 header、trusted proxy CIDR、右向左链解析及 missing/invalid 的 `reject`/`use_peer` 策略；`client_ip.source=proxy_protocol` 已支持可信 peer、PROXY v1/v2、TCP4/TCP6、分片读取和长度上限，未知 v2 TLV 在长度合法时跳过；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2 和 TLS handshake。
+首轮实现边界：`tls.mode=terminate` 在 endpoint 装配阶段加载 PEM/DER 证书链和私钥，system socket 显式使用 ring provider 完成 TLS 1.2/1.3 握手；`tls.mode=external` 不读取证书材料。启用 PROXY 时，DoH session 先以单字节有界读取消费可信前导，再升级同一连接到 TLS。`client_ip.source=forwarded_header` 已支持三个配置 header、trusted proxy CIDR、右向左链解析及 missing/invalid 的 `reject`/`use_peer` 策略；`client_ip.source=proxy_protocol` 已支持可信 peer、PROXY v1/v2、TCP4/TCP6、分片读取和长度上限，未知 v2 TLV 在长度合法时跳过；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2、证书热加载和完整握手/故障矩阵验收。
 
 route template 负责提取可选 `client_id`，但日志不记录实际路径参数或 query string。
 
 ## 8. TLS
 
-`tls.mode=terminate` 在 prepare 阶段：
+`tls.mode=terminate` 在 endpoint 装配阶段：
 
 - 读取证书链和私钥；
 - 拒绝空链、无匹配 key、加密但无法解密的 key 和不支持算法；
 - 显式安装 Rustls crypto provider；
-- 构造只读 `Arc<ServerConfig>`。
+- 将脱敏的 DER 材料交给 system socket，由其构造 `ServerConfig` 并完成 accept-time handshake。
 
 `tls.mode=external` 不读取证书材料。v1 不实现证书热加载；证书变化需要新 candidate/rebind。
 
-TLS handshake 受独立 timeout 和 cancellation 约束，失败不进入 HTTP router。
+TLS handshake 受 endpoint request timeout 和 cancellation 约束，失败不进入 HTTP router；v1 暂不实现独立 TLS timeout 或证书热加载。
 
 ## 9. Client IP 恢复
 
@@ -169,7 +168,7 @@ TLS handshake 受独立 timeout 和 cancellation 约束，失败不进入 HTTP r
 顺序为：
 
 ```text
-TCP accept → peer trust check → required PROXY header → optional TLS → HTTP
+TCP accept → peer trust check → required PROXY header → optional TLS upgrade → HTTP
 ```
 
 - v1 在前 107 字节内完成 PROXY v1；
@@ -219,7 +218,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - [ ] 实现 profile/capabilities 映射；
 - [x] 实现 UDP、TCP adapter；
 - [x] 实现 DoH plain HTTP GET/POST；
-- [ ] 实现 TLS；
+- [x] 实现 TLS terminate 首轮证书加载和握手；
 - [x] 实现 forwarded header 首轮 client IP 恢复；
 - [x] 实现 PROXY v1/v2 首轮 client IP 恢复；
 - [x] 实现 UDP/TCP response correlation/encoder；
@@ -227,6 +226,6 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 完成 UDP/TCP framing、尺寸、EOF、取消和顺序响应测试；
 - [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、forwarded trust chain、PROXY v1/v2 和客户端地址恢复定向测试 14 项通过；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、TLS 证书或特权端口。
+阶段证据：DoH codec/session、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 16 项通过；system socket Rustls loopback 握手和 peer 保留定向测试 1 项通过；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
 
-当前实现进度：**64%**。
+当前实现进度：**72%**。

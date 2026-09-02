@@ -196,8 +196,48 @@ pub enum TcpReadChunkResult {
     CleanEof,
 }
 
+/// 入站 TLS terminate 所需的 DER 材料。
+///
+/// 该结构只携带已加载到内存的证书和私钥字节，避免把 rustls 类型泄漏到
+/// ports；`Debug` 不输出私钥或证书内容。
+#[derive(Clone)]
+pub struct TlsServerMaterial {
+    pub certificate_chain: Vec<Vec<u8>>,
+    pub private_key: Vec<u8>,
+}
+
+impl fmt::Debug for TlsServerMaterial {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TlsServerMaterial")
+            .field("certificate_count", &self.certificate_chain.len())
+            .field(
+                "certificate_bytes",
+                &self.certificate_chain.iter().map(Vec::len).sum::<usize>(),
+            )
+            .field("private_key_bytes", &self.private_key.len())
+            .finish()
+    }
+}
+
 pub trait TcpConnectionHandle: Send {
     fn peer_addr(&self) -> Result<SocketAddr, PortError>;
+
+    /// 将已接受的 TCP 字节流升级为入站 TLS；不支持升级的实现返回兼容错误。
+    fn start_tls<'a>(
+        &'a mut self,
+        material: Arc<TlsServerMaterial>,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<(), PortError>> {
+        let _ = (material, deadline, cancellation);
+        Box::pin(async {
+            Err(PortError::new(
+                super::PortErrorClass::Unavailable,
+                "tcp.start_tls.unsupported",
+            ))
+        })
+    }
 
     fn read_exact<'a>(
         &'a mut self,
@@ -300,6 +340,22 @@ pub trait TcpListenerHandle: Send + Sync {
         deadline: Deadline,
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<Option<Box<dyn TcpConnectionHandle>>, PortError>>;
+
+    /// 接受并完成入站 TLS 握手；不支持 TLS 的 listener 保持兼容默认实现。
+    fn accept_with_tls<'a>(
+        &'a self,
+        material: Arc<TlsServerMaterial>,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Option<Box<dyn TcpConnectionHandle>>, PortError>> {
+        let _ = (material, deadline, cancellation);
+        Box::pin(async {
+            Err(PortError::new(
+                super::PortErrorClass::Unavailable,
+                "tcp.accept_with_tls.unsupported",
+            ))
+        })
+    }
 }
 
 /// Runtime 交给 Transport 的不透明 socket 句柄。

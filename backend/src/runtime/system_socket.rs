@@ -8,15 +8,18 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use rustls::ServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use socket2::{Domain, Protocol, Socket, Type};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, UdpSocket};
+use tokio_rustls::TlsAcceptor;
 
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::effects::{
     ActivatedSocket, ActivatedSocketHandle, PreparedSocket, SocketFactory, SocketKind, SocketSpec,
-    TcpConnectionHandle, TcpListenerHandle, TcpReadChunkResult, TcpReadResult, UdpDatagram,
-    UdpSocketHandle,
+    TcpConnectionHandle, TcpListenerHandle, TcpReadChunkResult, TcpReadResult, TlsServerMaterial,
+    UdpDatagram, UdpSocketHandle,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -50,8 +53,13 @@ struct TokioTcpListener {
     listener: TcpListener,
 }
 
+trait TokioByteStream: AsyncRead + AsyncWrite + Send + Unpin {}
+
+impl<T> TokioByteStream for T where T: AsyncRead + AsyncWrite + Send + Unpin {}
+
 struct TokioTcpConnection {
-    stream: TcpStream,
+    stream: Option<Box<dyn TokioByteStream>>,
+    peer: SocketAddr,
 }
 
 impl SocketFactory for SystemSocketFactory {
@@ -204,25 +212,81 @@ impl TcpListenerHandle for TokioTcpListener {
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<Option<Box<dyn TcpConnectionHandle>>, PortError>> {
         Box::pin(async move {
-            let (stream, _address) = await_io(
+            let (stream, address) = await_io(
                 self.listener.accept(),
                 deadline,
                 cancellation,
                 "system_socket.tcp_accept",
             )
             .await?;
-            Ok(Some(
-                Box::new(TokioTcpConnection { stream }) as Box<dyn TcpConnectionHandle>
-            ))
+            Ok(Some(Box::new(TokioTcpConnection {
+                stream: Some(Box::new(stream)),
+                peer: address,
+            }) as Box<dyn TcpConnectionHandle>))
+        })
+    }
+
+    fn accept_with_tls<'a>(
+        &'a self,
+        material: Arc<TlsServerMaterial>,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<Option<Box<dyn TcpConnectionHandle>>, PortError>> {
+        Box::pin(async move {
+            let (stream, peer) = await_io(
+                self.listener.accept(),
+                deadline,
+                cancellation,
+                "system_socket.tcp_accept",
+            )
+            .await?;
+            let config = tls_server_config(&material)?;
+            let stream = await_io(
+                TlsAcceptor::from(Arc::new(config)).accept(stream),
+                deadline,
+                cancellation,
+                "system_socket.tls_handshake",
+            )
+            .await?;
+            Ok(Some(Box::new(TokioTcpConnection {
+                stream: Some(Box::new(stream)),
+                peer,
+            }) as Box<dyn TcpConnectionHandle>))
         })
     }
 }
 
 impl TcpConnectionHandle for TokioTcpConnection {
     fn peer_addr(&self) -> Result<SocketAddr, PortError> {
-        self.stream
-            .peer_addr()
-            .map_err(|error| map_io(error, "system_socket.tcp_peer_addr"))
+        Ok(self.peer)
+    }
+
+    fn start_tls<'a>(
+        &'a mut self,
+        material: Arc<TlsServerMaterial>,
+        deadline: Deadline,
+        cancellation: &'a Cancellation,
+    ) -> PortFuture<'a, Result<(), PortError>> {
+        Box::pin(async move {
+            let stream = self.stream.take().ok_or_else(|| {
+                PortError::new(PortErrorClass::Internal, "system_socket.tls_handshake")
+            })?;
+            let config = tls_server_config(&material)?;
+            match await_io(
+                TlsAcceptor::from(Arc::new(config)).accept(stream),
+                deadline,
+                cancellation,
+                "system_socket.tls_handshake",
+            )
+            .await
+            {
+                Ok(stream) => {
+                    self.stream = Some(Box::new(stream));
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            }
+        })
     }
 
     fn read_exact<'a>(
@@ -241,8 +305,11 @@ impl TcpConnectionHandle for TokioTcpConnection {
             let mut buffer = vec![0_u8; length];
             let mut offset = 0;
             while offset < length {
+                let stream = self.stream.as_mut().ok_or_else(|| {
+                    PortError::new(PortErrorClass::Internal, "system_socket.tcp_read_exact")
+                })?;
                 let count = await_io(
-                    self.stream.read(&mut buffer[offset..]),
+                    stream.read(&mut buffer[offset..]),
                     deadline,
                     cancellation,
                     "system_socket.tcp_read_exact",
@@ -277,8 +344,11 @@ impl TcpConnectionHandle for TokioTcpConnection {
                 ));
             }
             let mut buffer = vec![0_u8; max_bytes];
+            let stream = self.stream.as_mut().ok_or_else(|| {
+                PortError::new(PortErrorClass::Internal, "system_socket.tcp_read_chunk")
+            })?;
             let count = await_io(
-                self.stream.read(&mut buffer),
+                stream.read(&mut buffer),
                 deadline,
                 cancellation,
                 "system_socket.tcp_read_chunk",
@@ -299,8 +369,11 @@ impl TcpConnectionHandle for TokioTcpConnection {
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<(), PortError>> {
         Box::pin(async move {
+            let stream = self.stream.as_mut().ok_or_else(|| {
+                PortError::new(PortErrorClass::Internal, "system_socket.tcp_write")
+            })?;
             await_io(
-                self.stream.write_all(&payload),
+                stream.write_all(&payload),
                 deadline,
                 cancellation,
                 "system_socket.tcp_write",
@@ -311,12 +384,39 @@ impl TcpConnectionHandle for TokioTcpConnection {
 
     fn shutdown(&mut self) -> PortFuture<'_, Result<(), PortError>> {
         Box::pin(async move {
-            self.stream
+            let stream = self.stream.as_mut().ok_or_else(|| {
+                PortError::new(PortErrorClass::Internal, "system_socket.tcp_shutdown")
+            })?;
+            stream
                 .shutdown()
                 .await
                 .map_err(|error| map_io(error, "system_socket.tcp_shutdown"))
         })
     }
+}
+
+fn tls_server_config(material: &TlsServerMaterial) -> Result<ServerConfig, PortError> {
+    if material.certificate_chain.is_empty() || material.private_key.is_empty() {
+        return Err(PortError::new(
+            PortErrorClass::InvalidInput,
+            "system_socket.tls_config",
+        ));
+    }
+    let certificates = material
+        .certificate_chain
+        .iter()
+        .cloned()
+        .map(CertificateDer::from)
+        .collect::<Vec<_>>();
+    let private_key = PrivateKeyDer::try_from(material.private_key.clone())
+        .map_err(|_| PortError::new(PortErrorClass::InvalidInput, "system_socket.tls_config"))?;
+    let provider = rustls::crypto::ring::default_provider();
+    ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|_| PortError::new(PortErrorClass::InvalidInput, "system_socket.tls_config"))?
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .map_err(|_| PortError::new(PortErrorClass::InvalidInput, "system_socket.tls_config"))
 }
 
 async fn await_io<'a, F, T>(
@@ -420,14 +520,18 @@ fn map_io(error: io::Error, operation: &'static str) -> PortError {
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use rustls::{ClientConfig, RootCertStore};
     use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
+    use tokio_rustls::TlsConnector;
 
     use crate::dns::{Cancellation, Deadline};
     use crate::ports::effects::{
-        ActivatedSocketHandle, SocketFactory, SocketKind, TcpReadChunkResult,
+        ActivatedSocketHandle, SocketFactory, SocketKind, TcpReadChunkResult, TlsServerMaterial,
     };
 
     use super::SystemSocketFactory;
@@ -679,5 +783,79 @@ mod tests {
             timeout.class(),
             crate::ports::PortErrorClass::Timeout
         ));
+    }
+
+    #[tokio::test]
+    async fn tcp_tls_acceptor_completes_handshake_and_preserves_peer() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_der = certified.cert.der().to_vec();
+        let material = Arc::new(TlsServerMaterial {
+            certificate_chain: vec![certificate_der.clone()],
+            private_key: certified.signing_key.serialize_der(),
+        });
+        let factory = SystemSocketFactory::new();
+        let cancellation = Cancellation::new();
+        let prepared = factory
+            .prepare(
+                crate::ports::effects::SocketSpec {
+                    kind: SocketKind::Tcp,
+                    address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    reuse_port: false,
+                    v6_only: false,
+                },
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        let activated = prepared.activate().unwrap();
+        let ActivatedSocketHandle::Tcp(listener) = activated.socket_handle().unwrap() else {
+            unreachable!();
+        };
+        let address = listener.local_addr().unwrap();
+        let server_cancellation = Cancellation::new();
+        let server_listener = Arc::clone(&listener);
+        let server_material = Arc::clone(&material);
+        let server = tokio::spawn(async move {
+            let mut connection = server_listener
+                .accept_with_tls(
+                    server_material,
+                    Deadline::new(Instant::now() + Duration::from_secs(2)),
+                    &server_cancellation,
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                connection.peer_addr().unwrap().ip(),
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            );
+            connection
+                .read_chunk(
+                    5,
+                    Deadline::new(Instant::now() + Duration::from_secs(2)),
+                    &server_cancellation,
+                )
+                .await
+                .unwrap()
+        });
+
+        let client = TcpStream::connect(address).await.unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(CertificateDer::from(certificate_der)).unwrap();
+        let client_config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let server_name = ServerName::try_from("localhost").unwrap();
+        let mut client = connector.connect(server_name, client).await.unwrap();
+        client.write_all(b"hello").await.unwrap();
+        assert_eq!(
+            server.await.unwrap(),
+            TcpReadChunkResult::Data(b"hello".to_vec())
+        );
     }
 }

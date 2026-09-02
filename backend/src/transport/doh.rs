@@ -1,15 +1,18 @@
-//! DoH plain HTTP request/response codec.
+//! DoH HTTP request/response codec and endpoint assembly.
 //!
-//! This module deliberately stops at the HTTP envelope.  TLS, PROXY protocol,
-//! and listener supervision are wired by later layers; the codec also restores
-//! a bounded forwarded client address before returning a canonical DNS query.
+//! The system socket port owns TLS byte-stream wrapping; this module owns the
+//! endpoint's TLS material selection, HTTP envelope, and client address policy.
 
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
+use rustls::ServerConfig;
+use rustls::pki_types::pem::PemObject;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
@@ -25,6 +28,7 @@ use crate::dns::{
 };
 use crate::ports::effects::{
     ActivatedSocketHandle, TcpConnectionHandle, TcpListenerHandle, TcpReadChunkResult,
+    TlsServerMaterial,
 };
 use crate::ports::inbound::{InboundRequest, ResponseEncoder};
 use crate::ports::{PortError, PortErrorClass, PortFuture};
@@ -303,10 +307,74 @@ pub enum DohAdapterError {
     ListenerNotFound { listener: String },
     #[error("DoH endpoint `{endpoint}` was not found in resolved configuration")]
     EndpointNotFound { endpoint: String },
-    #[error("DoH TLS terminate mode is not implemented")]
-    UnsupportedTlsMode,
+    #[error("DoH TLS certificate could not be loaded")]
+    TlsCertificateLoad,
+    #[error("DoH TLS private key could not be loaded")]
+    TlsPrivateKeyLoad,
+    #[error("DoH TLS material is invalid")]
+    TlsInvalidMaterial,
     #[error("DoH route is invalid: {0}")]
     InvalidRoute(#[from] DohRouteError),
+}
+
+fn load_tls_material(
+    certificate_file: Option<&Path>,
+    private_key_file: Option<&Path>,
+) -> Result<TlsServerMaterial, DohAdapterError> {
+    let certificate_file = certificate_file.ok_or(DohAdapterError::TlsInvalidMaterial)?;
+    let private_key_file = private_key_file.ok_or(DohAdapterError::TlsInvalidMaterial)?;
+    let certificate_bytes =
+        std::fs::read(certificate_file).map_err(|_| DohAdapterError::TlsCertificateLoad)?;
+    let mut certificate_chain = CertificateDer::pem_slice_iter(&certificate_bytes)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| DohAdapterError::TlsCertificateLoad)?
+        .into_iter()
+        .map(|certificate| certificate.as_ref().to_vec())
+        .collect::<Vec<_>>();
+    if certificate_chain.is_empty() && !certificate_bytes.is_empty() {
+        certificate_chain.push(certificate_bytes);
+    }
+    if certificate_chain.is_empty() {
+        return Err(DohAdapterError::TlsCertificateLoad);
+    }
+
+    let private_key_bytes =
+        std::fs::read(private_key_file).map_err(|_| DohAdapterError::TlsPrivateKeyLoad)?;
+    let private_key = match PrivateKeyDer::from_pem_slice(&private_key_bytes) {
+        Ok(key) => key.secret_der().to_vec(),
+        Err(_) => PrivateKeyDer::try_from(private_key_bytes)
+            .map_err(|_| DohAdapterError::TlsPrivateKeyLoad)?
+            .secret_der()
+            .to_vec(),
+    };
+    if private_key.is_empty() {
+        return Err(DohAdapterError::TlsPrivateKeyLoad);
+    }
+    let material = TlsServerMaterial {
+        certificate_chain,
+        private_key,
+    };
+    validate_tls_material(&material)?;
+    Ok(material)
+}
+
+fn validate_tls_material(material: &TlsServerMaterial) -> Result<(), DohAdapterError> {
+    let certificates = material
+        .certificate_chain
+        .iter()
+        .cloned()
+        .map(CertificateDer::from)
+        .collect::<Vec<_>>();
+    let private_key = PrivateKeyDer::try_from(material.private_key.clone())
+        .map_err(|_| DohAdapterError::TlsInvalidMaterial)?;
+    let provider = rustls::crypto::ring::default_provider();
+    ServerConfig::builder_with_provider(Arc::new(provider))
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+        .map_err(|_| DohAdapterError::TlsInvalidMaterial)?
+        .with_no_client_auth()
+        .with_single_cert(certificates, private_key)
+        .map_err(|_| DohAdapterError::TlsInvalidMaterial)?;
+    Ok(())
 }
 
 /// HTTP-level outcome produced by one DoH session read.
@@ -329,6 +397,7 @@ pub struct DohAdapter {
     connection_ids: Arc<AtomicU64>,
     request_timeout: Duration,
     client_ip: DohClientIpPolicy,
+    tls_material: Option<Arc<TlsServerMaterial>>,
 }
 
 /// One ordered HTTP/1.x connection. Requests are processed serially in v1;
@@ -346,6 +415,8 @@ pub struct DohSession {
     transport: TransportCapabilities,
     request_timeout: Duration,
     client_ip: DohClientIpPolicy,
+    tls_material: Option<Arc<TlsServerMaterial>>,
+    tls_started: bool,
     proxy_client: Option<IpAddr>,
     proxy_header_done: bool,
     read_buffer: Vec<u8>,
@@ -410,14 +481,18 @@ impl DohAdapter {
             .ok_or_else(|| DohAdapterError::EndpointNotFound {
                 endpoint: binding.endpoint_id.clone(),
             })?;
-        if endpoint_config.tls_mode != TlsMode::External {
-            return Err(DohAdapterError::UnsupportedTlsMode);
-        }
+        let tls_material = match endpoint_config.tls_mode {
+            TlsMode::External => None,
+            TlsMode::Terminate => Some(Arc::new(load_tls_material(
+                endpoint_config.certificate_file.as_deref(),
+                endpoint_config.private_key_file.as_deref(),
+            )?)),
+        };
         let route_patterns = routes
             .iter()
             .map(|route| DohRoutePattern::new(route.path.clone(), route.strategy.as_str()))
             .collect::<Result<Vec<_>, _>>()?;
-        Self::new_with_policy(
+        Self::new_with_tls(
             listener,
             binding,
             route_patterns,
@@ -425,6 +500,7 @@ impl DohAdapter {
             transport,
             request_timeout,
             DohClientIpPolicy::from_resolved(&endpoint_config.client_ip),
+            tls_material,
         )
     }
 
@@ -456,6 +532,29 @@ impl DohAdapter {
         request_timeout: Duration,
         client_ip: DohClientIpPolicy,
     ) -> Result<Self, DohAdapterError> {
+        Self::new_with_tls(
+            listener,
+            binding,
+            routes,
+            runtime_revision,
+            transport,
+            request_timeout,
+            client_ip,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_tls(
+        listener: Arc<dyn TcpListenerHandle>,
+        binding: DohBindingRef,
+        routes: Vec<DohRoutePattern>,
+        runtime_revision: RuntimeRevision,
+        transport: TransportCapabilities,
+        request_timeout: Duration,
+        client_ip: DohClientIpPolicy,
+        tls_material: Option<Arc<TlsServerMaterial>>,
+    ) -> Result<Self, DohAdapterError> {
         if request_timeout.is_zero() {
             return Err(DohAdapterError::InvalidTimeout);
         }
@@ -475,6 +574,7 @@ impl DohAdapter {
             connection_ids: Arc::new(AtomicU64::new(0)),
             request_timeout,
             client_ip,
+            tls_material,
         })
     }
 
@@ -491,7 +591,8 @@ impl DohAdapter {
                 return Ok(None);
             }
             let deadline = Deadline::new(Instant::now() + self.request_timeout);
-            let Some(connection) = self.listener.accept(deadline, cancellation).await? else {
+            let connection = self.listener.accept(deadline, cancellation).await?;
+            let Some(connection) = connection else {
                 return Ok(None);
             };
             let connection = Arc::new(Mutex::new(connection));
@@ -517,6 +618,8 @@ impl DohAdapter {
                 transport: self.transport,
                 request_timeout: self.request_timeout,
                 client_ip: self.client_ip.clone(),
+                tls_material: self.tls_material.clone(),
+                tls_started: false,
                 proxy_client: None,
                 proxy_header_done: self.client_ip.source != ClientIpSource::ProxyProtocol,
                 read_buffer: Vec::new(),
@@ -545,12 +648,13 @@ impl DohSession {
 
     async fn read_next_chunk(
         &self,
+        max_bytes: usize,
         deadline: Deadline,
         cancellation: &Cancellation,
     ) -> Result<TcpReadChunkResult, PortError> {
         let mut connection = self.connection.lock().await;
         connection
-            .read_chunk(DOH_READ_CHUNK_BYTES, deadline, cancellation)
+            .read_chunk(max_bytes, deadline, cancellation)
             .await
     }
 
@@ -573,6 +677,17 @@ impl DohSession {
                         close: true,
                     });
                 }
+                if !self.tls_started
+                    && self.proxy_header_done
+                    && let Some(material) = &self.tls_material
+                {
+                    let mut connection = self.connection.lock().await;
+                    connection
+                        .start_tls(Arc::clone(material), deadline, cancellation)
+                        .await?;
+                    self.tls_started = true;
+                    continue;
+                }
                 if !self.proxy_header_done {
                     match parse_proxy_header(&self.read_buffer) {
                         Ok(ProxyHeaderParse::Complete { consumed, client }) => {
@@ -590,7 +705,7 @@ impl DohSession {
                                     close: true,
                                 });
                             }
-                            match self.read_next_chunk(deadline, cancellation).await? {
+                            match self.read_next_chunk(1, deadline, cancellation).await? {
                                 TcpReadChunkResult::Data(bytes)
                                     if !bytes.is_empty()
                                         && bytes.len() <= DOH_READ_CHUNK_BYTES
@@ -701,7 +816,9 @@ impl DohSession {
                                 close: true,
                             });
                         }
-                        let result = self.read_next_chunk(deadline, cancellation).await?;
+                        let result = self
+                            .read_next_chunk(DOH_READ_CHUNK_BYTES, deadline, cancellation)
+                            .await?;
                         match result {
                             TcpReadChunkResult::Data(bytes) => {
                                 if bytes.is_empty()
@@ -1438,22 +1555,30 @@ fn hex_value(byte: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
+    use std::fs;
     use std::net::SocketAddr;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query};
     use hickory_proto::rr::{Name, RecordType};
+    use rustls::pki_types::{CertificateDer, ServerName};
+    use rustls::{ClientConfig, RootCertStore};
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpStream;
+    use tokio_rustls::TlsConnector;
 
     use crate::dns::{
         CacheCompatibilityKey, Cancellation, RuntimeRevision, ServFailCore, TransportCapabilities,
         TransportClass, dispatch_inbound,
     };
     use crate::ports::effects::{
-        TcpConnectionHandle, TcpListenerHandle, TcpReadChunkResult, TcpReadResult,
+        ActivatedSocketHandle, SocketFactory, SocketKind, SocketSpec, TcpConnectionHandle,
+        TcpListenerHandle, TcpReadChunkResult, TcpReadResult, TlsServerMaterial,
     };
     use crate::ports::{PortError, PortErrorClass, PortFuture};
+    use crate::runtime::SystemSocketFactory;
 
     use super::*;
 
@@ -1493,6 +1618,132 @@ mod tests {
         let mut bytes = format!("{method} {target} HTTP/1.1\r\n{headers}\r\n").into_bytes();
         bytes.extend_from_slice(body);
         bytes
+    }
+
+    #[test]
+    fn loads_pem_tls_material_and_rejects_mismatched_key() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let other = rcgen::generate_simple_self_signed(vec!["otherhost".to_owned()]).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-doh-tls-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let certificate_path = root.join("cert.pem");
+        let key_path = root.join("key.pem");
+        fs::write(&certificate_path, certified.cert.pem()).unwrap();
+        fs::write(&key_path, certified.signing_key.serialize_pem()).unwrap();
+        let material = load_tls_material(Some(&certificate_path), Some(&key_path)).unwrap();
+        assert_eq!(material.certificate_chain.len(), 1);
+        assert!(!material.private_key.is_empty());
+
+        fs::write(&key_path, other.signing_key.serialize_pem()).unwrap();
+        assert!(matches!(
+            load_tls_material(Some(&certificate_path), Some(&key_path)),
+            Err(DohAdapterError::TlsInvalidMaterial)
+        ));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn session_consumes_proxy_header_before_upgrading_tls() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_der = certified.cert.der().to_vec();
+        let material = Arc::new(TlsServerMaterial {
+            certificate_chain: vec![certificate_der.clone()],
+            private_key: certified.signing_key.serialize_der(),
+        });
+        let factory = SystemSocketFactory::new();
+        let cancellation = Cancellation::new();
+        let prepared = factory
+            .prepare(
+                SocketSpec {
+                    kind: SocketKind::Tcp,
+                    address: "127.0.0.1:0".parse().unwrap(),
+                    reuse_port: false,
+                    v6_only: false,
+                },
+                Deadline::new(std::time::Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        let activated = prepared.activate().unwrap();
+        let ActivatedSocketHandle::Tcp(listener) = activated.socket_handle().unwrap() else {
+            unreachable!();
+        };
+        let address = listener.local_addr().unwrap();
+        let adapter = DohAdapter::new_with_tls(
+            Arc::clone(&listener),
+            crate::config::DohBindingRef {
+                listener_id: "doh".to_owned(),
+                endpoint_id: "tls".to_owned(),
+            },
+            vec![DohRoutePattern::new("/dns", "default").unwrap()],
+            RuntimeRevision(1),
+            doh_capabilities(),
+            Duration::from_secs(3),
+            DohClientIpPolicy {
+                source: ClientIpSource::ProxyProtocol,
+                header: None,
+                trusted_proxies: vec!["127.0.0.0/8".parse().unwrap()],
+                on_missing: ForwardedDisposition::Reject,
+                on_invalid: ForwardedDisposition::Reject,
+            },
+            Some(material),
+        )
+        .unwrap();
+        let server = tokio::spawn(async move {
+            let cancellation = Cancellation::new();
+            let mut session = adapter
+                .accept_session(&cancellation)
+                .await
+                .unwrap()
+                .unwrap();
+            session.receive(&cancellation).await.unwrap()
+        });
+
+        let client = TcpStream::connect(address).await.unwrap();
+        let mut roots = RootCertStore::empty();
+        roots.add(CertificateDer::from(certificate_der)).unwrap();
+        let client_config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let mut client = client;
+        client
+            .write_all(b"PROXY TCP4 198.51.100.10 127.0.0.1 12345 443\r\n")
+            .await
+            .unwrap();
+        let mut client = connector
+            .connect(ServerName::try_from("localhost").unwrap(), client)
+            .await
+            .unwrap();
+        let wire = wire();
+        let request = request(
+            "POST",
+            "/dns",
+            &format!(
+                "Content-Type: application/dns-message\r\nContent-Length: {}\r\n",
+                wire.len()
+            ),
+            &wire,
+        );
+        client.write_all(&request).await.unwrap();
+        let DohSessionEvent::Request(inbound) = server.await.unwrap() else {
+            panic!("expected a valid DoH request");
+        };
+        assert_eq!(
+            inbound.request().context.client.client_addr,
+            Some("198.51.100.10".parse::<IpAddr>().unwrap())
+        );
     }
 
     #[test]
