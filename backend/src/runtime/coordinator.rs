@@ -18,13 +18,24 @@ use super::snapshot::RuntimeSnapshot;
 /// 已发布、可接收请求的运行时实例。
 pub struct ActiveRuntime {
     prepared: PreparedRuntime,
-    listeners: BoundListenerSet,
+    listeners: Arc<BoundListenerSet>,
     admission: Arc<AdmissionState>,
 }
 
 impl ActiveRuntime {
     fn from_candidate(candidate: BoundCandidate) -> Self {
         let (prepared, listeners) = candidate.into_parts();
+        Self {
+            prepared,
+            listeners: Arc::new(listeners),
+            admission: Arc::new(AdmissionState::default()),
+        }
+    }
+
+    fn from_prepared_and_listeners(
+        prepared: PreparedRuntime,
+        listeners: Arc<BoundListenerSet>,
+    ) -> Self {
         Self {
             prepared,
             listeners,
@@ -42,6 +53,10 @@ impl ActiveRuntime {
 
     pub fn listeners(&self) -> &BoundListenerSet {
         &self.listeners
+    }
+
+    pub fn bind_plan(&self) -> &crate::config::BindPlan {
+        self.prepared.bind_plan()
     }
 
     pub fn resource_fetcher(&self) -> Option<Arc<dyn ResourceFetcher>> {
@@ -137,7 +152,9 @@ impl ActiveRuntime {
     }
 
     fn into_candidate(self) -> BoundCandidate {
-        BoundCandidate::from_parts(self.prepared, self.listeners)
+        let listeners = Arc::try_unwrap(self.listeners)
+            .unwrap_or_else(|_| unreachable!("candidate listener set must be uniquely owned"));
+        BoundCandidate::from_parts(self.prepared, listeners)
     }
 }
 
@@ -353,6 +370,38 @@ impl RuntimeCoordinator {
         self.compare_and_activate(expected, candidate)
     }
 
+    /// 在 BindPlan 未变化时复用当前已激活 listener，只切换 prepared Runtime。
+    pub async fn activate_prepared_reusing_listeners(
+        &self,
+        expected: RuntimeRevision,
+        prepared: PreparedRuntime,
+    ) -> Result<Arc<ActiveRuntime>, RuntimeReuseError> {
+        let _mutation = self.mutation.lock().await;
+        let current = self.load();
+        if current.revision() != expected {
+            return Err(RuntimeReuseError::RevisionMismatch {
+                expected,
+                actual: current.revision(),
+            });
+        }
+        if current.bind_plan() != prepared.bind_plan() {
+            return Err(RuntimeReuseError::BindPlanChanged);
+        }
+        let next = Arc::new(ActiveRuntime::from_prepared_and_listeners(
+            prepared,
+            Arc::clone(&current.listeners),
+        ));
+        let observed = self.active.compare_and_swap(&current, Arc::clone(&next));
+        if Arc::ptr_eq(&*observed, &current) {
+            current.begin_drain();
+            return Ok(next);
+        }
+        Err(RuntimeReuseError::RevisionMismatch {
+            expected,
+            actual: observed.revision(),
+        })
+    }
+
     /// 无条件发布候选，并把旧实例标记为 draining。
     pub fn activate(&self, candidate: BoundCandidate) -> Arc<ActiveRuntime> {
         let next = Arc::new(ActiveRuntime::from_candidate(candidate));
@@ -426,6 +475,19 @@ pub enum RuntimeReloadError {
     Bind(#[source] BindError),
     #[error("runtime candidate activation failed: {0}")]
     Activation(#[source] ActivationError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RuntimeReuseError {
+    #[error("runtime reuse requires the same bind plan")]
+    BindPlanChanged,
+    #[error(
+        "runtime reuse observed a different active revision: expected {expected:?}, current {actual:?}"
+    )]
+    RevisionMismatch {
+        expected: RuntimeRevision,
+        actual: RuntimeRevision,
+    },
 }
 
 #[derive(Debug, Error)]

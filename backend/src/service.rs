@@ -21,9 +21,9 @@ use crate::ports::inbound::InboundAdapter;
 use crate::runtime::{
     ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
     BoundListenerSet, FaultLevel, PreparedRuntime, RefreshedResourceSnapshot,
-    ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator, ShutdownReport, Supervisor,
-    SupervisorError, SystemClock, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
-    bind_prepared,
+    ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator, RuntimeReuseError,
+    ShutdownReport, Supervisor, SupervisorError, SystemClock, TaskCompletion, TaskError,
+    TaskErrorKind, TaskExit, TaskSpec, bind_prepared,
 };
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
@@ -55,6 +55,8 @@ pub enum ServiceReloadError {
     Bind(#[source] BindError),
     #[error("runtime reload activation failed: {0}")]
     Activation(#[source] ActivationError),
+    #[error("runtime reload listener reuse failed: {0}")]
+    Reuse(#[source] RuntimeReuseError),
     #[error("active runtime snapshot is missing its DNS core")]
     MissingDnsCore,
     #[error(
@@ -227,6 +229,44 @@ impl DnsService {
             .ok_or(ServiceReloadError::InvalidRevision { expected, actual })?;
         if actual != expected_next {
             return Err(ServiceReloadError::InvalidRevision { expected, actual });
+        }
+        if self.runtime.bind_plan() == prepared.bind_plan() {
+            let transport_plans = prepare_transport_plans(
+                self.runtime.listeners(),
+                prepared.snapshot().config(),
+                actual,
+                self.request_timeout,
+            )
+            .map_err(ServiceReloadError::Endpoint)?;
+            let core = prepared
+                .snapshot()
+                .dns_core()
+                .ok_or(ServiceReloadError::MissingDnsCore)?;
+            let runtime = self
+                .coordinator
+                .activate_prepared_reusing_listeners(expected, prepared)
+                .await
+                .map_err(ServiceReloadError::Reuse)?;
+            let transport_cancellations = spawn_transport_plans(
+                &mut self.supervisor,
+                transport_plans,
+                core,
+                Arc::clone(&runtime),
+            )
+            .map_err(map_reload_spawn_error)?;
+            let resource_cancellations = spawn_resource_tasks(
+                &mut self.supervisor,
+                Arc::clone(&self.coordinator),
+                runtime.revision(),
+                runtime.resource_worker_ids(),
+            )
+            .map_err(map_reload_spawn_error)?;
+            self.cancel_transport_tasks();
+            self.cancel_resource_tasks();
+            self.transport_cancellations = transport_cancellations;
+            self.resource_cancellations = resource_cancellations;
+            self.runtime = Arc::clone(&runtime);
+            return Ok(runtime);
         }
         let candidate = bind_prepared(prepared, factory, deadline, &cancellation)
             .await
@@ -1531,6 +1571,53 @@ clients: []
             active.listeners().local_addrs().unwrap()[0].port(),
             base_port + 1
         );
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await;
+        assert!(!report.deadline_expired);
+    }
+
+    #[tokio::test]
+    async fn reload_prepared_reuses_unchanged_listener_without_rebinding() {
+        let port = 40_500 + (std::process::id() as u16 % 500);
+        let initial =
+            PreparedRuntime::prepare_with_policy_core(runtime_config(port), RuntimeRevision(1))
+                .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(runtime_config(port), RuntimeRevision(2))
+                .unwrap();
+        let active = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        assert_eq!(active.listeners().local_addrs().unwrap()[0].port(), port);
+        assert_eq!(service.transport_task_count(), 1);
+        assert_eq!(service.resource_task_count(), 0);
 
         let report = service
             .shutdown(

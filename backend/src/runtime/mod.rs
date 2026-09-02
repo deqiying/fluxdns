@@ -11,7 +11,7 @@ mod system_socket;
 pub use bind::{BindError, BoundCandidate, BoundEndpointHandle, BoundListenerSet, bind_prepared};
 pub use coordinator::{
     ActivationError, ActiveRuntime, AdmissionError, RequestGuard, ResourceRefreshCoordinatorError,
-    RuntimeCoordinator, RuntimeLease, RuntimeReloadError,
+    RuntimeCoordinator, RuntimeLease, RuntimeReloadError, RuntimeReuseError,
 };
 pub use prepared::{
     PreflightReport, PrepareError, PreparedRuntime, RefreshedResourceSnapshot, ResourceRefreshError,

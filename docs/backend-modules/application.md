@@ -75,7 +75,7 @@ bootstrap telemetry
 
 依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch，创建 `Arc<RuntimeCoordinator>` 并交给 `DnsService`；service Supervisor 持有自动刷新 task，资源 task 通过 coordinator 查询当前活动 runtime，并以 scoped token 管理 reload 生命周期，transport task 在启动时绑定一份 runtime，显式 service reload 时切换到新 revision。测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
 
-`reload_runtime_from_path` 复用同一 Config → async prepare → bind → revision CAS 边界，读取配置时关闭 snapshot 写入，SecretRef 校验和候选失败均不会改变当前 `ActiveRuntime`。`reload_service_from_path` 则在同一 prepare 边界后调用 `DnsService::reload_prepared`：候选激活后为新 revision 重建 UDP/TCP/DoH listener 和 resource refresh task，并取消旧 scoped token。`run` 以配置文件的 metadata fingerprint 做两次稳定轮询后触发该 service-aware 入口；成功才提交 fingerprint，坏配置或 bind 失败会记录并保留旧 Runtime，下一轮继续重试。
+`reload_runtime_from_path` 复用同一 Config → async prepare → bind → revision CAS 边界，读取配置时关闭 snapshot 写入，SecretRef 校验和候选失败均不会改变当前 `ActiveRuntime`。`reload_service_from_path` 则在同一 prepare 边界后调用 `DnsService::reload_prepared`：BindPlan 变化时为新 revision 绑定 listener，BindPlan 未变化时复用已激活 listener，再重建 UDP/TCP/DoH adapter 和 resource refresh task，并取消旧 scoped token。`run` 以配置文件的 metadata fingerprint 做两次稳定轮询后触发该 service-aware 入口；成功才提交 fingerprint，坏配置或 bind 失败会记录并保留旧 Runtime，下一轮继续重试。
 
 ## 5. 信号与退出
 
