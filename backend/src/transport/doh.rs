@@ -204,6 +204,7 @@ pub enum DohSessionEvent {
 
 /// DoH listener adapter. The underlying socket remains a TCP capability;
 /// `BindTransport::Doh` selects this application protocol.
+#[derive(Clone)]
 pub struct DohAdapter {
     listener: Arc<dyn TcpListenerHandle>,
     binding: DohBindingRef,
@@ -211,7 +212,7 @@ pub struct DohAdapter {
     runtime_revision: RuntimeRevision,
     transport: TransportCapabilities,
     request_ids: Arc<AtomicU64>,
-    connection_ids: AtomicU64,
+    connection_ids: Arc<AtomicU64>,
     request_timeout: Duration,
 }
 
@@ -336,7 +337,7 @@ impl DohAdapter {
             runtime_revision,
             transport,
             request_ids: Arc::new(AtomicU64::new(0)),
-            connection_ids: AtomicU64::new(0),
+            connection_ids: Arc::new(AtomicU64::new(0)),
             request_timeout,
         })
     }

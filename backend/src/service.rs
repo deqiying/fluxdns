@@ -84,6 +84,7 @@ pub enum ServiceError {
 }
 
 const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSPORT_RESTART_LIMIT: u32 = 3;
 
 /// 已绑定 listener 的 DNS service；所有 receive loop 都由同一个 Supervisor 持有。
 pub struct DnsService {
@@ -204,8 +205,8 @@ impl DnsService {
 
     /// 绑定并切换一个新 Runtime，同时重建 UDP/TCP/DoH listener task。
     ///
-    /// 资源 refresh task 仍由旧的 Supervisor 注册集合持有；资源 worker 集合重建
-    /// 需要后续阶段提供按资源粒度的 task 生命周期管理。
+    /// 资源 refresh task 会按新 Runtime 的 worker ID 集合重建，旧集合在新 task
+    /// 注册成功后通过 scoped cancellation 退出。
     pub async fn reload_prepared(
         &mut self,
         prepared: PreparedRuntime,
@@ -423,7 +424,12 @@ fn spawn_transport_plans(
                     format!("transport.udp.{revision}.{index}"),
                     "udp",
                     move |cancellation| {
-                        service_task(adapter, task_core, task_runtime, cancellation)
+                        service_task(
+                            adapter.clone(),
+                            Arc::clone(&task_core),
+                            Arc::clone(&task_runtime),
+                            cancellation,
+                        )
                     },
                 )?
             }
@@ -435,7 +441,12 @@ fn spawn_transport_plans(
                     format!("transport.tcp.{revision}.{index}"),
                     "tcp",
                     move |cancellation| {
-                        tcp_listener_task(adapter, task_core, task_runtime, cancellation)
+                        tcp_listener_task(
+                            adapter.clone(),
+                            Arc::clone(&task_core),
+                            Arc::clone(&task_runtime),
+                            cancellation,
+                        )
                     },
                 )?
             }
@@ -447,7 +458,12 @@ fn spawn_transport_plans(
                     format!("transport.doh.{revision}.{index}"),
                     "doh",
                     move |cancellation| {
-                        doh_listener_task(adapter, task_core, task_runtime, cancellation)
+                        doh_listener_task(
+                            adapter.clone(),
+                            Arc::clone(&task_core),
+                            Arc::clone(&task_runtime),
+                            cancellation,
+                        )
                     },
                 )?
             }
@@ -509,13 +525,15 @@ fn spawn_transport_task<F>(
     factory: F,
 ) -> Result<Cancellation, ServiceStartError>
 where
-    F: FnOnce(Cancellation) -> crate::runtime::TaskFuture + Send + 'static,
+    F: Fn(Cancellation) -> crate::runtime::TaskFuture + Send + Sync + 'static,
 {
     let spec = TaskSpec::new(
         task_id,
         component,
         FaultLevel::FatalEndpoint,
-        RestartPolicy::Never,
+        RestartPolicy::Transient {
+            max_restarts: TRANSPORT_RESTART_LIMIT,
+        },
     )
     .map_err(|error| ServiceStartError::Endpoint {
         index: 0,
@@ -523,7 +541,7 @@ where
         reason: error.to_string(),
     })?;
     supervisor
-        .spawn_scoped(spec, factory)
+        .spawn_scoped_with_factory(spec, factory)
         .map_err(ServiceStartError::Task)
 }
 
@@ -1133,7 +1151,10 @@ impl From<DohAdapterError> for ServiceStartError {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    };
     use std::time::{Duration, Instant};
 
     use super::{ServiceError, capabilities, spawn_transport_task, task_failure};
@@ -1277,6 +1298,45 @@ mod tests {
         let completion = supervisor.join_next().await.unwrap();
         assert_eq!(completion.spec.id.as_str(), "transport.test");
         assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn transport_task_retries_transient_failure_before_scoped_shutdown() {
+        let mut supervisor = Supervisor::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        let cancellation = spawn_transport_task(
+            &mut supervisor,
+            "transport.retry".to_owned(),
+            "test",
+            move |cancellation| {
+                let attempt = factory_attempts.fetch_add(1, Ordering::AcqRel);
+                if attempt == 0 {
+                    Box::pin(async { Err(TaskError::Transient) }) as crate::runtime::TaskFuture
+                } else {
+                    Box::pin(async move {
+                        cancellation.cancelled().await;
+                        Err(TaskError::Cancelled)
+                    })
+                }
+            },
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while attempts.load(Ordering::Acquire) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cancellation.cancel(CancelReason::Shutdown);
+
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.spec.id.as_str(), "transport.retry");
+        assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(completion.restart_count, 1);
         assert_eq!(supervisor.task_count(), 0);
     }
 

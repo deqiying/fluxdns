@@ -22,6 +22,8 @@
 
 截至 2026-09-02，阶段 46 已修正 Supervisor 对 JoinSet panic/abort 结果的 task ID 归因，避免按注册表顺序误删 sibling task；当前全量测试为 407 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
 
+截至 2026-09-02，阶段 47 已将 UDP/TCP/DoH transport task 接入带 scoped cancellation 的三次有界瞬时重试；该阶段只复用已绑定 socket，不实现自动 rebind，当前全量测试为 409 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
+
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
 ```text
@@ -384,6 +386,8 @@ transport / upstream / storage / observability adapters
 第四十五个小阶段（已完成）：将 resource refresh task 改为 `Supervisor::spawn_scoped` 注册并保存独立 cancellation；service reload 按新 Runtime 的 resource worker ID 集合重建任务，旧集合在新任务注册成功后取消，且取消清理作用于旧 task 捕获的 runtime，避免误停新 runtime scheduler。新增系统 loopback resource worker token reconciliation 测试；`run` 自动配置变更事件、完整跨 Runtime 候选发布、listener 故障自动重建和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 406 passed，0 failed。
 
 第四十六个小阶段（已完成）：为 Supervisor 记录 Tokio `JoinSet` task ID 到 FluxDNS `TaskId` 的映射，并改用 `join_next_with_id` 精确处理正常退出、panic 和 abort；JoinError 不再按注册表顺序猜测任务，补充 sibling 保持存活的 panic 归因回归测试。`run` 自动配置变更事件、完整跨 Runtime 候选发布、listener 故障自动重建和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 407 passed，0 failed。
+
+第四十七个小阶段（已完成）：新增 `Supervisor::spawn_scoped_with_factory`，让 task 同时具备 scoped cancellation 和 `TaskError::Transient` 有界重试；UDP/TCP/DoH transport task 改为三次重试上限，重试间复用同一已绑定 socket和共享请求/连接计数器，重试耗尽仍按 `FatalEndpoint` 升级。新增 scoped factory 与 service transport retry 测试；自动 listener rebind、`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 409 passed，0 failed。
 
 ## 6. 阶段提交规则
 

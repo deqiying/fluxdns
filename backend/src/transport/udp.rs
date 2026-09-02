@@ -33,12 +33,13 @@ pub enum UdpAdapterError {
 }
 
 /// 绑定到一个已激活 UDP capability 的入站 adapter。
+#[derive(Clone)]
 pub struct UdpAdapter {
     socket: Arc<dyn UdpSocketHandle>,
     listener_id: ListenerId,
     runtime_revision: RuntimeRevision,
     transport: TransportCapabilities,
-    request_ids: AtomicU64,
+    request_ids: Arc<AtomicU64>,
     request_timeout: Duration,
 }
 
@@ -96,7 +97,7 @@ impl UdpAdapter {
             listener_id,
             runtime_revision,
             transport,
-            request_ids: AtomicU64::new(0),
+            request_ids: Arc::new(AtomicU64::new(0)),
             request_timeout,
         })
     }

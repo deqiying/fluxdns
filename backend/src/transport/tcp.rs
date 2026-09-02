@@ -45,13 +45,14 @@ pub enum TcpAdapterError {
 }
 
 /// TCP 入站 listener adapter。
+#[derive(Clone)]
 pub struct TcpAdapter {
     listener: Arc<dyn TcpListenerHandle>,
     listener_id: ListenerId,
     runtime_revision: RuntimeRevision,
     transport: TransportCapabilities,
     request_ids: Arc<AtomicU64>,
-    connection_ids: AtomicU64,
+    connection_ids: Arc<AtomicU64>,
     request_timeout: Duration,
 }
 
@@ -123,7 +124,7 @@ impl TcpAdapter {
             runtime_revision,
             transport,
             request_ids: Arc::new(AtomicU64::new(0)),
-            connection_ids: AtomicU64::new(0),
+            connection_ids: Arc::new(AtomicU64::new(0)),
             request_timeout,
         })
     }

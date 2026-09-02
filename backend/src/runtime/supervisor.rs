@@ -263,6 +263,64 @@ impl Supervisor {
             .expect("scoped task cancellation must be registered"))
     }
 
+    /// 注册一个可以单独取消且支持瞬时失败有界重试的 task。
+    pub fn spawn_scoped_with_factory<F>(
+        &mut self,
+        spec: TaskSpec,
+        factory: F,
+    ) -> Result<Cancellation, SupervisorError>
+    where
+        F: Fn(Cancellation) -> TaskFuture + Send + Sync + 'static,
+    {
+        if !self.registered.insert(spec.id.clone()) {
+            return Err(SupervisorError::DuplicateTask(spec.id));
+        }
+        let task_id = spec.id.clone();
+        let task_cancellation = Cancellation::new();
+        let supervisor_cancellation = self.cancellation.clone();
+        let factory: Arc<dyn Fn(Cancellation) -> TaskFuture + Send + Sync> = Arc::new(factory);
+        self.scoped_cancellations
+            .insert(task_id.clone(), task_cancellation.clone());
+        let task_cancellation_for_task = task_cancellation.clone();
+        let task_handle = self.tasks.spawn(async move {
+            let mut restart_count = 0;
+            let exit = loop {
+                let result = tokio::select! {
+                    result = (factory)(task_cancellation_for_task.clone()) => result,
+                    _ = supervisor_cancellation.cancelled() => Err(TaskError::Cancelled),
+                    _ = task_cancellation_for_task.cancelled() => Err(TaskError::Cancelled),
+                };
+                let exit = match result {
+                    Ok(()) => TaskExit::Completed,
+                    Err(error) => error.into(),
+                };
+                if !should_restart_scoped(
+                    &spec,
+                    &exit,
+                    restart_count,
+                    &supervisor_cancellation,
+                    &task_cancellation_for_task,
+                ) {
+                    break exit;
+                }
+                restart_count += 1;
+                let delay = restart_backoff(restart_count);
+                tokio::select! {
+                    _ = supervisor_cancellation.cancelled() => break TaskExit::Cancelled,
+                    _ = task_cancellation_for_task.cancelled() => break TaskExit::Cancelled,
+                    _ = tokio::time::sleep(delay) => {}
+                }
+            };
+            TaskCompletion {
+                spec,
+                exit,
+                restart_count,
+            }
+        });
+        self.task_ids.insert(task_handle.id(), task_id.clone());
+        Ok(task_cancellation)
+    }
+
     /// 注册一个可重建的 task；仅瞬时失败会按策略有界重试。
     pub fn spawn_with_factory<F>(
         &mut self,
@@ -416,6 +474,22 @@ fn should_restart(
         )
 }
 
+fn should_restart_scoped(
+    spec: &TaskSpec,
+    exit: &TaskExit,
+    restart_count: u32,
+    supervisor_cancellation: &Cancellation,
+    task_cancellation: &Cancellation,
+) -> bool {
+    !supervisor_cancellation.is_cancelled()
+        && !task_cancellation.is_cancelled()
+        && matches!(exit, TaskExit::Failed(TaskErrorKind::Transient))
+        && matches!(
+            spec.restart_policy,
+            RestartPolicy::Transient { max_restarts } if restart_count < max_restarts
+        )
+}
+
 fn restart_backoff(restart_count: u32) -> Duration {
     let exponent = restart_count.saturating_sub(1).min(10);
     Duration::from_millis(1_u64 << exponent)
@@ -550,6 +624,41 @@ mod tests {
         let completion = supervisor.join_next().await.unwrap();
         assert_eq!(completion.spec.id.as_str(), "second");
         assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn scoped_factory_restarts_transient_failures_and_keeps_one_cancellation_scope() {
+        let mut supervisor = Supervisor::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        let cancellation = supervisor
+            .spawn_scoped_with_factory(
+                TaskSpec::new(
+                    "scoped-restartable",
+                    "test",
+                    FaultLevel::FatalEndpoint,
+                    RestartPolicy::Transient { max_restarts: 2 },
+                )
+                .unwrap(),
+                move |_cancellation| {
+                    let attempt = factory_attempts.fetch_add(1, Ordering::AcqRel);
+                    Box::pin(async move {
+                        if attempt < 2 {
+                            Err(TaskError::Transient)
+                        } else {
+                            Ok(())
+                        }
+                    })
+                },
+            )
+            .unwrap();
+
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.exit, TaskExit::Completed);
+        assert_eq!(completion.restart_count, 2);
+        assert_eq!(attempts.load(Ordering::Acquire), 3);
+        assert!(!cancellation.is_cancelled());
         assert_eq!(supervisor.task_count(), 0);
     }
 
