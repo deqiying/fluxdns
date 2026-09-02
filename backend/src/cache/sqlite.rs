@@ -10,6 +10,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 use thiserror::Error;
 
+use super::key::CACHE_KEY_FORMAT_VERSION;
 use super::persistence::{CodecError, decode_record, encode_record, prepare_snapshot};
 use crate::dns::Deadline;
 use crate::ports::cache::{
@@ -18,6 +19,8 @@ use crate::ports::cache::{
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
+const CACHE_SCHEMA_VERSION: u16 = 1;
+const CACHE_FORMAT_VERSION: u16 = 1;
 
 #[derive(Clone)]
 pub struct SqlitePersistentCacheStore {
@@ -106,6 +109,54 @@ impl SqlitePersistentCacheStore {
         .execute(&pool)
         .await
         .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS cache_meta (\
+                singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
+                schema_version INTEGER NOT NULL,\
+                cache_format_version INTEGER NOT NULL,\
+                key_format_version INTEGER NOT NULL\
+            )",
+        )
+        .execute(&pool)
+        .await
+        .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+        let metadata = sqlx::query(
+            "SELECT schema_version, cache_format_version, key_format_version \
+             FROM cache_meta WHERE singleton = 1",
+        )
+        .fetch_optional(&pool)
+        .await
+        .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+        if let Some(metadata) = metadata {
+            let schema_version = metadata
+                .try_get::<i64, _>("schema_version")
+                .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+            let cache_format_version = metadata
+                .try_get::<i64, _>("cache_format_version")
+                .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+            let key_format_version = metadata
+                .try_get::<i64, _>("key_format_version")
+                .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+            if schema_version != i64::from(CACHE_SCHEMA_VERSION)
+                || cache_format_version != i64::from(CACHE_FORMAT_VERSION)
+                || key_format_version != i64::from(CACHE_KEY_FORMAT_VERSION)
+            {
+                pool.close().await;
+                return Err(SqlitePersistentCacheStoreBuildError::Schema);
+            }
+        } else {
+            sqlx::query(
+                "INSERT INTO cache_meta \
+                 (singleton, schema_version, cache_format_version, key_format_version) \
+                 VALUES (1, ?, ?, ?)",
+            )
+            .bind(i64::from(CACHE_SCHEMA_VERSION))
+            .bind(i64::from(CACHE_FORMAT_VERSION))
+            .bind(i64::from(CACHE_KEY_FORMAT_VERSION))
+            .execute(&pool)
+            .await
+            .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+        }
         Ok(Self {
             pool,
             path: Arc::new(path),
@@ -381,8 +432,12 @@ mod tests {
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query};
     use hickory_proto::rr::{Name, RecordType};
+    use sqlx::Row;
 
-    use super::{InjectedSqliteFault, SqlitePersistentCacheStore};
+    use super::{
+        CACHE_FORMAT_VERSION, CACHE_KEY_FORMAT_VERSION, CACHE_SCHEMA_VERSION, InjectedSqliteFault,
+        SqlitePersistentCacheStore, SqlitePersistentCacheStoreBuildError,
+    };
     use crate::dns::{CanonicalQuery, CanonicalResponse, Deadline, DnsMessageId, RuntimeRevision};
     use crate::ports::cache::{
         CacheEntry, CacheKey, CacheNamespace, CacheQuality, CacheRecord, CacheResponseClass,
@@ -443,6 +498,22 @@ mod tests {
         let store = SqlitePersistentCacheStore::connect(&path, 16 * 1024)
             .await
             .unwrap();
+        let metadata = sqlx::query("SELECT schema_version, cache_format_version, key_format_version FROM cache_meta WHERE singleton = 1")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            metadata.get::<i64, _>("schema_version"),
+            i64::from(CACHE_SCHEMA_VERSION)
+        );
+        assert_eq!(
+            metadata.get::<i64, _>("cache_format_version"),
+            i64::from(CACHE_FORMAT_VERSION)
+        );
+        assert_eq!(
+            metadata.get::<i64, _>("key_format_version"),
+            i64::from(CACHE_KEY_FORMAT_VERSION)
+        );
         store
             .persist(
                 PersistentCacheBatch {
@@ -567,6 +638,29 @@ mod tests {
             );
         }
         store.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn metadata_version_mismatch_rejects_the_cache_adapter() {
+        let path = db_path();
+        let store = SqlitePersistentCacheStore::connect(&path, 16 * 1024)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE cache_meta SET key_format_version = key_format_version + 1 WHERE singleton = 1",
+        )
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        store.shutdown(deadline()).await.unwrap();
+
+        assert!(matches!(
+            SqlitePersistentCacheStore::connect(&path, 16 * 1024).await,
+            Err(SqlitePersistentCacheStoreBuildError::Schema)
+        ));
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
