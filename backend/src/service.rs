@@ -555,7 +555,7 @@ impl DnsService {
         Ok(report)
     }
 
-    /// 等待 Ctrl-C 后执行有界 graceful shutdown。
+    /// 等待进程终止信号后执行有界 graceful shutdown。
     pub async fn wait_for_ctrl_c(
         &mut self,
         grace_period: Duration,
@@ -566,7 +566,7 @@ impl DnsService {
         .await
     }
 
-    /// 等待 Ctrl-C、受管 task 故障或配置变更轮询回调。
+    /// 等待终止信号、受管 task 故障或配置变更轮询回调。
     ///
     /// 回调只负责决定是否执行一次 reload；配置错误应由调用方记录并吞掉，
     /// 不应因为一次坏配置把当前仍可用的 Runtime 变成故障。
@@ -582,20 +582,33 @@ impl DnsService {
         if poll_interval.is_zero() {
             return Err(ServiceError::Signal);
         }
-        let signal = tokio::signal::ctrl_c();
+        let signal = wait_for_termination_signal();
         tokio::pin!(signal);
         let mut poll = tokio::time::interval(poll_interval);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 result = &mut signal => {
-                    result.map_err(|_| ServiceError::Signal)?;
+                    result?;
                     let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
-                    let report = self.shutdown(&SystemClock::new(), deadline).await?;
-                    if report.deadline_expired {
-                        return Err(ServiceError::ShutdownDeadline);
+                    let clock = SystemClock::new();
+                    let shutdown = self.shutdown(&clock, deadline);
+                    tokio::pin!(shutdown);
+                    let second_signal = wait_for_termination_signal();
+                    tokio::pin!(second_signal);
+                    tokio::select! {
+                        result = &mut shutdown => {
+                            let report = result?;
+                            if report.deadline_expired {
+                                return Err(ServiceError::ShutdownDeadline);
+                            }
+                            return Ok(report);
+                        }
+                        result = &mut second_signal => {
+                            result?;
+                            return Err(ServiceError::Signal);
+                        }
                     }
-                    return Ok(report);
                 }
                 completion = self.supervisor.join_next() => {
                     let Some(completion) = completion else {
@@ -795,6 +808,26 @@ fn outcome_class(request: &DnsRequest, result: &Result<CoreOutcome, CoreError>) 
             }
         }
         Err(_) => OutcomeClass::Failure,
+    }
+}
+
+async fn wait_for_termination_signal() -> Result<(), ServiceError> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|_| ServiceError::Signal)?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.map_err(|_| ServiceError::Signal),
+            result = terminate.recv() => result.ok_or(ServiceError::Signal),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|_| ServiceError::Signal)
     }
 }
 
