@@ -1,8 +1,8 @@
 # Transport 模块设计
 
-> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session 和 DoH plain HTTP adapter；TLS/PROXY/forwarded 尚未实现
+> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter 和 forwarded header 首轮客户端地址恢复；TLS/PROXY 尚未实现
 >
-> 更新日期：2026-08-31
+> 更新日期：2026-09-02
 >
 > 目标代码：`backend/src/transport/*`
 >
@@ -115,7 +115,7 @@ TCP adapter：
 
 ## 7. DoH
 
-当前已实现 plain HTTP 首轮链路。DoH endpoint 只复用底层 TCP socket，不会被当作 raw DNS/TCP 服务；service 根据 `BindTransport::Doh` 构造独立 listener/session task，并由内部 `JoinSet` 管理连接。
+当前已实现 plain HTTP 首轮链路和 forwarded header 首轮客户端地址恢复。DoH endpoint 只复用底层 TCP socket，不会被当作 raw DNS/TCP 服务；service 根据 `BindTransport::Doh` 构造独立 listener/session task，并由内部 `JoinSet` 管理连接。
 
 每条 route 同时支持 GET/POST：
 
@@ -130,7 +130,7 @@ TCP adapter：
 - 已形成 DNS transaction 后，NXDOMAIN/REFUSED/SERVFAIL 等使用 HTTP 2xx；
 - 成功响应 Content-Type 为 `application/dns-message`，Cache-Control 固定 `no-store`。
 
-首轮实现边界：只接受 `tls.mode=external` 和 `client_ip.source=peer`。`tls.mode=terminate`、`forwarded_header`、`proxy_protocol` 会在 service 装配阶段明确拒绝；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2、TLS handshake 和代理身份恢复。
+首轮实现边界：只接受 `tls.mode=external`；`tls.mode=terminate` 和 `proxy_protocol` 会在 service 装配阶段明确拒绝。`client_ip.source=forwarded_header` 已支持三个配置 header、trusted proxy CIDR、右向左链解析及 missing/invalid 的 `reject`/`use_peer` 策略；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2、TLS handshake 和 PROXY 身份恢复。
 
 route template 负责提取可选 `client_id`，但日志不记录实际路径参数或 query string。
 
@@ -219,12 +219,13 @@ encoder 由 request correlation 持有并只能调用一次：
 - [ ] 实现 profile/capabilities 映射；
 - [x] 实现 UDP、TCP adapter；
 - [x] 实现 DoH plain HTTP GET/POST；
-- [ ] 实现 TLS 与 client IP 恢复；
+- [ ] 实现 TLS；
+- [x] 实现 forwarded header 首轮 client IP 恢复；
 - [x] 实现 UDP/TCP response correlation/encoder；
 - [x] 建立共享 DNS wire decode/encode boundary 和尺寸/错误分类测试；
 - [x] 完成 UDP/TCP framing、尺寸、EOF、取消和顺序响应测试；
-- [ ] 完成 DoH/TLS/代理/forwarded 资源限制、安全和协议测试。
+- [ ] 完成 DoH/TLS/PROXY 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session 定向测试 9 项通过；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、TLS 证书或特权端口。
+阶段证据：DoH codec/session、forwarded trust chain 和客户端地址恢复定向测试 12 项通过；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、TLS 证书或特权端口。
 
-当前实现进度：**50%**。
+当前实现进度：**56%**。

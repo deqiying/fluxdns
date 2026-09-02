@@ -1,11 +1,11 @@
 //! DoH plain HTTP request/response codec.
 //!
 //! This module deliberately stops at the HTTP envelope.  TLS, PROXY protocol,
-//! and listener supervision are wired by later layers; the codec only accepts
-//! a bounded HTTP/1.x request and returns a canonical DNS query payload.
+//! and listener supervision are wired by later layers; the codec also restores
+//! a bounded forwarded client address before returning a canonical DNS query.
 
 use std::fmt;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
@@ -13,7 +13,9 @@ use std::time::{Duration, Instant, SystemTime};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::config::model::{ClientIpSource, TlsMode};
+use ipnet::IpNet;
+
+use crate::config::model::{ClientIpSource, ForwardedDisposition, ForwardedHeader, TlsMode};
 use crate::config::resolve::ResolvedListener;
 use crate::config::{BindProtocol, BindTransport, DohBindingRef, ResolvedConfig};
 use crate::dns::{
@@ -53,6 +55,101 @@ pub struct ParsedDohRequest {
     pub wire: Vec<u8>,
     pub connection_close: bool,
     pub consumed_bytes: usize,
+    pub(crate) forwarded_headers: ParsedForwardedHeaders,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ParsedForwardedHeaders {
+    pub x_forwarded_for: Option<String>,
+    pub x_real_ip: Option<String>,
+    pub forwarded: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DohClientIpPolicy {
+    source: ClientIpSource,
+    header: Option<ForwardedHeader>,
+    trusted_proxies: Vec<IpNet>,
+    on_missing: ForwardedDisposition,
+    on_invalid: ForwardedDisposition,
+}
+
+impl Default for DohClientIpPolicy {
+    fn default() -> Self {
+        Self {
+            source: ClientIpSource::Peer,
+            header: None,
+            trusted_proxies: Vec::new(),
+            on_missing: ForwardedDisposition::Reject,
+            on_invalid: ForwardedDisposition::Reject,
+        }
+    }
+}
+
+impl DohClientIpPolicy {
+    fn from_resolved(client_ip: &crate::config::resolve::ResolvedClientIp) -> Self {
+        Self {
+            source: client_ip.source,
+            header: client_ip.header,
+            trusted_proxies: client_ip.trusted_proxies.clone().unwrap_or_default(),
+            on_missing: client_ip.on_missing.unwrap_or(ForwardedDisposition::Reject),
+            on_invalid: client_ip.on_invalid.unwrap_or(ForwardedDisposition::Reject),
+        }
+    }
+
+    fn resolve(
+        &self,
+        peer: SocketAddr,
+        headers: &ParsedForwardedHeaders,
+    ) -> Result<std::net::IpAddr, ClientIpResolutionError> {
+        if self.source == ClientIpSource::Peer {
+            return Ok(peer.ip());
+        }
+        if self.source == ClientIpSource::ProxyProtocol {
+            return Err(ClientIpResolutionError::Invalid);
+        }
+        if !self
+            .trusted_proxies
+            .iter()
+            .any(|network| network.contains(&peer.ip()))
+        {
+            return Err(ClientIpResolutionError::UntrustedPeer);
+        }
+        let Some(header) = self.header else {
+            return Err(ClientIpResolutionError::Missing);
+        };
+        let value = match header {
+            ForwardedHeader::XForwardedFor => headers.x_forwarded_for.as_deref(),
+            ForwardedHeader::XRealIp => headers.x_real_ip.as_deref(),
+            ForwardedHeader::Forwarded => headers.forwarded.as_deref(),
+        };
+        let Some(value) = value else {
+            return match self.on_missing {
+                ForwardedDisposition::Reject => Err(ClientIpResolutionError::Missing),
+                ForwardedDisposition::UsePeer => Ok(peer.ip()),
+            };
+        };
+        let chain = match header {
+            ForwardedHeader::XForwardedFor => parse_ip_chain(value),
+            ForwardedHeader::XRealIp => parse_single_ip(value).map(|ip| vec![ip]),
+            ForwardedHeader::Forwarded => parse_forwarded_chain(value),
+        };
+        let Ok(chain) = chain else {
+            return match self.on_invalid {
+                ForwardedDisposition::Reject => Err(ClientIpResolutionError::Invalid),
+                ForwardedDisposition::UsePeer => Ok(peer.ip()),
+            };
+        };
+        select_forwarded_client(&chain, &self.trusted_proxies)
+            .ok_or(ClientIpResolutionError::Invalid)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ClientIpResolutionError {
+    UntrustedPeer,
+    Missing,
+    Invalid,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -189,7 +286,7 @@ pub enum DohAdapterError {
     EndpointNotFound { endpoint: String },
     #[error("DoH TLS terminate mode is not implemented")]
     UnsupportedTlsMode,
-    #[error("DoH client IP source is not supported by the plain HTTP adapter")]
+    #[error("DoH proxy_protocol client IP source is not implemented")]
     UnsupportedClientIpSource,
     #[error("DoH route is invalid: {0}")]
     InvalidRoute(#[from] DohRouteError),
@@ -214,6 +311,7 @@ pub struct DohAdapter {
     request_ids: Arc<AtomicU64>,
     connection_ids: Arc<AtomicU64>,
     request_timeout: Duration,
+    client_ip: DohClientIpPolicy,
 }
 
 /// One ordered HTTP/1.x connection. Requests are processed serially in v1;
@@ -230,6 +328,7 @@ pub struct DohSession {
     runtime_revision: RuntimeRevision,
     transport: TransportCapabilities,
     request_timeout: Duration,
+    client_ip: DohClientIpPolicy,
     read_buffer: Vec<u8>,
     pending_close: bool,
 }
@@ -295,7 +394,7 @@ impl DohAdapter {
         if endpoint_config.tls_mode != TlsMode::External {
             return Err(DohAdapterError::UnsupportedTlsMode);
         }
-        if endpoint_config.client_ip.source != ClientIpSource::Peer {
+        if endpoint_config.client_ip.source == ClientIpSource::ProxyProtocol {
             return Err(DohAdapterError::UnsupportedClientIpSource);
         }
 
@@ -303,13 +402,14 @@ impl DohAdapter {
             .iter()
             .map(|route| DohRoutePattern::new(route.path.clone(), route.strategy.as_str()))
             .collect::<Result<Vec<_>, _>>()?;
-        Self::new(
+        Self::new_with_policy(
             listener,
             binding,
             route_patterns,
             runtime_revision,
             transport,
             request_timeout,
+            DohClientIpPolicy::from_resolved(&endpoint_config.client_ip),
         )
     }
 
@@ -320,6 +420,26 @@ impl DohAdapter {
         runtime_revision: RuntimeRevision,
         transport: TransportCapabilities,
         request_timeout: Duration,
+    ) -> Result<Self, DohAdapterError> {
+        Self::new_with_policy(
+            listener,
+            binding,
+            routes,
+            runtime_revision,
+            transport,
+            request_timeout,
+            DohClientIpPolicy::default(),
+        )
+    }
+
+    fn new_with_policy(
+        listener: Arc<dyn TcpListenerHandle>,
+        binding: DohBindingRef,
+        routes: Vec<DohRoutePattern>,
+        runtime_revision: RuntimeRevision,
+        transport: TransportCapabilities,
+        request_timeout: Duration,
+        client_ip: DohClientIpPolicy,
     ) -> Result<Self, DohAdapterError> {
         if request_timeout.is_zero() {
             return Err(DohAdapterError::InvalidTimeout);
@@ -339,6 +459,7 @@ impl DohAdapter {
             request_ids: Arc::new(AtomicU64::new(0)),
             connection_ids: Arc::new(AtomicU64::new(0)),
             request_timeout,
+            client_ip,
         })
     }
 
@@ -380,6 +501,7 @@ impl DohAdapter {
                 runtime_revision: self.runtime_revision,
                 transport: self.transport,
                 request_timeout: self.request_timeout,
+                client_ip: self.client_ip.clone(),
                 read_buffer: Vec::new(),
                 pending_close: false,
             }))
@@ -429,6 +551,19 @@ impl DohSession {
                                 close: parsed.connection_close,
                             });
                         };
+                        let client_addr =
+                            match self.client_ip.resolve(self.peer, &parsed.forwarded_headers) {
+                                Ok(client_addr) => client_addr,
+                                Err(ClientIpResolutionError::UntrustedPeer)
+                                | Err(ClientIpResolutionError::Missing)
+                                | Err(ClientIpResolutionError::Invalid) => {
+                                    self.pending_close = true;
+                                    return Ok(DohSessionEvent::HttpError {
+                                        error: DohHttpError::Malformed,
+                                        close: true,
+                                    });
+                                }
+                            };
                         self.pending_close = parsed.connection_close;
                         self.next_stream_id = self.next_stream_id.wrapping_add(1).max(1);
                         let request_id = RequestId::from(
@@ -453,7 +588,7 @@ impl DohSession {
                             },
                             client: ClientIdentity {
                                 peer_addr: Some(self.peer),
-                                client_addr: Some(self.peer.ip()),
+                                client_addr: Some(client_addr),
                                 client_id: route.client_id,
                             },
                             transport: self.transport,
@@ -736,6 +871,7 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
     let mut content_length = None;
     let mut content_type = None;
     let mut connection_close = parts[2] == "HTTP/1.0";
+    let mut forwarded_headers = ParsedForwardedHeaders::default();
     let mut header_count = 0_usize;
     for line in lines {
         if line.is_empty() {
@@ -783,6 +919,33 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
             {
                 connection_close = true;
             }
+            "x-forwarded-for" => {
+                if forwarded_headers
+                    .x_forwarded_for
+                    .replace(value.to_owned())
+                    .is_some()
+                {
+                    return Err(DohHttpError::Malformed);
+                }
+            }
+            "x-real-ip" => {
+                if forwarded_headers
+                    .x_real_ip
+                    .replace(value.to_owned())
+                    .is_some()
+                {
+                    return Err(DohHttpError::Malformed);
+                }
+            }
+            "forwarded"
+                if forwarded_headers
+                    .forwarded
+                    .replace(value.to_owned())
+                    .is_some() =>
+            {
+                return Err(DohHttpError::Malformed);
+            }
+            "forwarded" => {}
             _ => {}
         }
     }
@@ -839,7 +1002,86 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
         wire,
         connection_close,
         consumed_bytes: body_end,
+        forwarded_headers,
     }))
+}
+
+fn parse_single_ip(value: &str) -> Result<IpAddr, ()> {
+    let value = value.trim();
+    if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return Err(());
+    }
+    value.parse().map_err(|_| ())
+}
+
+fn parse_ip_chain(value: &str) -> Result<Vec<IpAddr>, ()> {
+    let chain = value
+        .split(',')
+        .map(parse_single_ip)
+        .collect::<Result<Vec<_>, _>>()?;
+    if chain.is_empty() {
+        return Err(());
+    }
+    Ok(chain)
+}
+
+fn parse_forwarded_chain(value: &str) -> Result<Vec<IpAddr>, ()> {
+    let mut chain = Vec::new();
+    for element in value.split(',') {
+        let mut address = None;
+        for parameter in element.split(';') {
+            let (name, value) = parameter.trim().split_once('=').ok_or(())?;
+            if name.trim().eq_ignore_ascii_case("for") {
+                if address.is_some() {
+                    return Err(());
+                }
+                address = Some(parse_forwarded_ip(value.trim())?);
+            }
+        }
+        chain.push(address.ok_or(())?);
+    }
+    if chain.is_empty() {
+        return Err(());
+    }
+    Ok(chain)
+}
+
+fn parse_forwarded_ip(value: &str) -> Result<IpAddr, ()> {
+    let value = if value.starts_with('"') {
+        if !value.ends_with('"') || value.len() < 2 {
+            return Err(());
+        }
+        let value = &value[1..value.len() - 1];
+        if value.contains('"') || value.contains('\\') {
+            return Err(());
+        }
+        value
+    } else {
+        value
+    };
+    if let Some(value) = value.strip_prefix('[') {
+        let end = value.find(']').ok_or(())?;
+        let address = &value[..end];
+        let suffix = &value[end + 1..];
+        if !suffix.is_empty() && (!suffix.starts_with(':') || suffix[1..].parse::<u16>().is_err()) {
+            return Err(());
+        }
+        return address.parse().map_err(|_| ());
+    }
+    parse_single_ip(value)
+}
+
+fn select_forwarded_client(chain: &[IpAddr], trusted_proxies: &[IpNet]) -> Option<IpAddr> {
+    chain
+        .iter()
+        .rev()
+        .find(|address| {
+            !trusted_proxies
+                .iter()
+                .any(|network| network.contains(*address))
+        })
+        .copied()
+        .or_else(|| chain.first().copied())
 }
 
 pub fn encode_http_response(
@@ -1128,6 +1370,63 @@ mod tests {
     }
 
     #[test]
+    fn parses_forwarded_headers_and_selects_first_untrusted_address_from_right() {
+        let wire = wire();
+        let request_bytes = request(
+            "GET",
+            &format!("/dns?dns={}", base64url(&wire)),
+            "X-Forwarded-For: 198.51.100.10, 127.0.0.2\r\n",
+            &[],
+        );
+        let parsed = try_parse_request(&request_bytes).unwrap().unwrap();
+        assert_eq!(
+            parsed.forwarded_headers.x_forwarded_for.as_deref(),
+            Some("198.51.100.10, 127.0.0.2")
+        );
+        let policy = DohClientIpPolicy {
+            source: ClientIpSource::ForwardedHeader,
+            header: Some(ForwardedHeader::XForwardedFor),
+            trusted_proxies: vec!["127.0.0.0/8".parse().unwrap()],
+            on_missing: ForwardedDisposition::Reject,
+            on_invalid: ForwardedDisposition::Reject,
+        };
+        assert_eq!(
+            policy
+                .resolve(
+                    SocketAddr::from(([127, 0, 0, 1], 8053)),
+                    &parsed.forwarded_headers,
+                )
+                .unwrap(),
+            "198.51.100.10".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn forwarded_header_policy_rejects_untrusted_peer_and_can_fall_back_on_invalid() {
+        let policy = DohClientIpPolicy {
+            source: ClientIpSource::ForwardedHeader,
+            header: Some(ForwardedHeader::XRealIp),
+            trusted_proxies: vec!["127.0.0.0/8".parse().unwrap()],
+            on_missing: ForwardedDisposition::Reject,
+            on_invalid: ForwardedDisposition::UsePeer,
+        };
+        let headers = ParsedForwardedHeaders {
+            x_real_ip: Some("not-an-ip".to_owned()),
+            ..ParsedForwardedHeaders::default()
+        };
+        assert_eq!(
+            policy.resolve(SocketAddr::from(([192, 0, 2, 1], 8053)), &headers),
+            Err(ClientIpResolutionError::UntrustedPeer)
+        );
+        assert_eq!(
+            policy
+                .resolve(SocketAddr::from(([127, 0, 0, 1], 8053)), &headers)
+                .unwrap(),
+            "127.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
     fn maps_http_protocol_boundaries_to_stable_statuses() {
         assert_eq!(DohHttpError::MethodNotAllowed.status().code(), 405);
         assert_eq!(DohHttpError::UnsupportedMediaType.status().code(), 415);
@@ -1383,6 +1682,60 @@ mod tests {
             + 4;
         let dns_response = Message::from_vec(&writes[0][body_start..]).unwrap();
         assert_eq!(dns_response.metadata.id, 0x1234);
+    }
+
+    #[tokio::test]
+    async fn session_restores_forwarded_client_address_for_trusted_peer() {
+        let wire = wire();
+        let request = request(
+            "GET",
+            &format!("/dns?dns={}", base64url(&wire)),
+            "X-Forwarded-For: 198.51.100.10, 127.0.0.2\r\n",
+            &[],
+        );
+        let listener = Arc::new(FakeDohListener::default());
+        listener
+            .connections
+            .lock()
+            .unwrap()
+            .push_back(Box::new(FakeDohConnection {
+                peer: SocketAddr::from(([127, 0, 0, 1], 40000)),
+                chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(request))])),
+                writes: Arc::new(Mutex::new(Vec::new())),
+            }));
+        let adapter = DohAdapter::new_with_policy(
+            listener,
+            DohBindingRef {
+                listener_id: "doh".to_owned(),
+                endpoint_id: "forwarded".to_owned(),
+            },
+            vec![DohRoutePattern::new("/dns", "default").unwrap()],
+            RuntimeRevision(1),
+            doh_capabilities(),
+            Duration::from_secs(1),
+            DohClientIpPolicy {
+                source: ClientIpSource::ForwardedHeader,
+                header: Some(ForwardedHeader::XForwardedFor),
+                trusted_proxies: vec!["127.0.0.0/8".parse().unwrap()],
+                on_missing: ForwardedDisposition::Reject,
+                on_invalid: ForwardedDisposition::Reject,
+            },
+        )
+        .unwrap();
+        let cancellation = Cancellation::new();
+        let mut session = adapter
+            .accept_session(&cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+        let DohSessionEvent::Request(inbound) = session.receive(&cancellation).await.unwrap()
+        else {
+            panic!("expected a valid DoH request");
+        };
+        assert_eq!(
+            inbound.request().context.client.client_addr,
+            Some("198.51.100.10".parse::<IpAddr>().unwrap())
+        );
     }
 
     #[tokio::test]
