@@ -8,8 +8,9 @@ mod wire;
 pub use doh::{
     DohHttpError, DohHttpMethod, DohHttpStatus, DohRouteError, DohRouteMatch, DohRoutePattern,
     MAX_DOH_GET_DNS_CHARS, MAX_DOH_HEADER_BYTES, MAX_DOH_POST_BODY_BYTES,
-    MAX_DOH_REQUEST_TARGET_BYTES, ParsedDohRequest, encode_dns_response, encode_http_error,
-    encode_http_error_with_close, encode_http_response, try_parse_request,
+    MAX_DOH_REQUEST_TARGET_BYTES, MAX_PROXY_V1_BYTES, MAX_PROXY_V2_BYTES, ParsedDohRequest,
+    encode_dns_response, encode_http_error, encode_http_error_with_close, encode_http_response,
+    try_parse_request,
 };
 
 pub use tcp::{

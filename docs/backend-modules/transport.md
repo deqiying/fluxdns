@@ -1,6 +1,6 @@
 # Transport 模块设计
 
-> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter 和 forwarded header 首轮客户端地址恢复；TLS/PROXY 尚未实现
+> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter、forwarded header 和 PROXY v1/v2 首轮客户端地址恢复；TLS 尚未实现
 >
 > 更新日期：2026-09-02
 >
@@ -24,7 +24,7 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 | --- | --- |
 | `udp.rs` | datagram receive/send、EDNS 尺寸和截断 |
 | `tcp.rs` | accept、两字节 length framing、连接内请求 |
-| `doh.rs` | plain HTTP route、GET/POST、HTTP/DNS 错误分层和 session |
+| `doh.rs` | plain HTTP route、GET/POST、HTTP/DNS 错误分层、forwarded header/PROXY 首轮恢复和 session |
 | `tls.rs` | Rustls 配置加载和 TLS accept |
 | `proxy_protocol.rs` | PROXY v1/v2 分片解析、长度与 trust 检查 |
 
@@ -47,7 +47,7 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 - TCP listener 的 connection tasks 由内部 `JoinSet` 持有，未使用 detached `tokio::spawn`。
 - `BindTransport` 将 DoH endpoint 与 raw TCP 明确区分；service 根据 typed binding 构造独立的 DoH listener/session，不把 HTTP 请求误交给 raw DNS/TCP adapter。
 
-forwarded header 解析可放在 `doh.rs` 的独立子模块，不能复用未经验证的任意 header 字符串。
+forwarded header 和 PROXY 前导解析均限定在 `doh.rs` 的 typed 边界内，不能复用未经验证的任意 header 字符串。
 
 ## 3. TransportProfile
 
@@ -130,7 +130,7 @@ TCP adapter：
 - 已形成 DNS transaction 后，NXDOMAIN/REFUSED/SERVFAIL 等使用 HTTP 2xx；
 - 成功响应 Content-Type 为 `application/dns-message`，Cache-Control 固定 `no-store`。
 
-首轮实现边界：只接受 `tls.mode=external`；`tls.mode=terminate` 和 `proxy_protocol` 会在 service 装配阶段明确拒绝。`client_ip.source=forwarded_header` 已支持三个配置 header、trusted proxy CIDR、右向左链解析及 missing/invalid 的 `reject`/`use_peer` 策略；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2、TLS handshake 和 PROXY 身份恢复。
+首轮实现边界：只接受 `tls.mode=external`；`tls.mode=terminate` 会在 service 装配阶段明确拒绝。`client_ip.source=forwarded_header` 已支持三个配置 header、trusted proxy CIDR、右向左链解析及 missing/invalid 的 `reject`/`use_peer` 策略；`client_ip.source=proxy_protocol` 已支持可信 peer、PROXY v1/v2、TCP4/TCP6、分片读取和长度上限，未知 v2 TLV 在长度合法时跳过；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2 和 TLS handshake。
 
 route template 负责提取可选 `client_id`，但日志不记录实际路径参数或 query string。
 
@@ -221,11 +221,12 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 实现 DoH plain HTTP GET/POST；
 - [ ] 实现 TLS；
 - [x] 实现 forwarded header 首轮 client IP 恢复；
+- [x] 实现 PROXY v1/v2 首轮 client IP 恢复；
 - [x] 实现 UDP/TCP response correlation/encoder；
 - [x] 建立共享 DNS wire decode/encode boundary 和尺寸/错误分类测试；
 - [x] 完成 UDP/TCP framing、尺寸、EOF、取消和顺序响应测试；
-- [ ] 完成 DoH/TLS/PROXY 资源限制、安全和协议测试。
+- [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、forwarded trust chain 和客户端地址恢复定向测试 12 项通过；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、TLS 证书或特权端口。
+阶段证据：DoH codec/session、forwarded trust chain、PROXY v1/v2 和客户端地址恢复定向测试 14 项通过；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、TLS 证书或特权端口。
 
-当前实现进度：**56%**。
+当前实现进度：**64%**。

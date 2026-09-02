@@ -36,10 +36,14 @@ pub const MAX_DOH_POST_BODY_BYTES: usize = MAX_DNS_WIRE_BYTES;
 pub const MAX_DOH_GET_DNS_CHARS: usize = 87_380;
 pub const MAX_DOH_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_DOH_REQUEST_TARGET_BYTES: usize = 131_072;
+pub const MAX_PROXY_V1_BYTES: usize = 107;
+pub const MAX_PROXY_V2_BYTES: usize = 536;
 
 const MAX_HEADER_COUNT: usize = 64;
 const DOH_READ_CHUNK_BYTES: usize = 8 * 1024;
 const MAX_DOH_BUFFER_BYTES: usize = MAX_DOH_HEADER_BYTES + MAX_DOH_POST_BODY_BYTES;
+const PROXY_V2_SIGNATURE: &[u8; 12] = b"\r\n\r\n\0\r\nQUIT\n";
+const PROXY_V1_PREFIX: &[u8; 6] = b"PROXY ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DohHttpMethod {
@@ -101,12 +105,10 @@ impl DohClientIpPolicy {
         &self,
         peer: SocketAddr,
         headers: &ParsedForwardedHeaders,
+        proxy_client: Option<IpAddr>,
     ) -> Result<std::net::IpAddr, ClientIpResolutionError> {
         if self.source == ClientIpSource::Peer {
             return Ok(peer.ip());
-        }
-        if self.source == ClientIpSource::ProxyProtocol {
-            return Err(ClientIpResolutionError::Invalid);
         }
         if !self
             .trusted_proxies
@@ -114,6 +116,9 @@ impl DohClientIpPolicy {
             .any(|network| network.contains(&peer.ip()))
         {
             return Err(ClientIpResolutionError::UntrustedPeer);
+        }
+        if self.source == ClientIpSource::ProxyProtocol {
+            return proxy_client.ok_or(ClientIpResolutionError::Invalid);
         }
         let Some(header) = self.header else {
             return Err(ClientIpResolutionError::Missing);
@@ -143,6 +148,14 @@ impl DohClientIpPolicy {
         select_forwarded_client(&chain, &self.trusted_proxies)
             .ok_or(ClientIpResolutionError::Invalid)
     }
+
+    fn peer_is_trusted(&self, peer: IpAddr) -> bool {
+        self.source == ClientIpSource::Peer
+            || self
+                .trusted_proxies
+                .iter()
+                .any(|network| network.contains(&peer))
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -150,6 +163,12 @@ enum ClientIpResolutionError {
     UntrustedPeer,
     Missing,
     Invalid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProxyHeaderParse {
+    Incomplete,
+    Complete { consumed: usize, client: IpAddr },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -286,8 +305,6 @@ pub enum DohAdapterError {
     EndpointNotFound { endpoint: String },
     #[error("DoH TLS terminate mode is not implemented")]
     UnsupportedTlsMode,
-    #[error("DoH proxy_protocol client IP source is not implemented")]
-    UnsupportedClientIpSource,
     #[error("DoH route is invalid: {0}")]
     InvalidRoute(#[from] DohRouteError),
 }
@@ -329,6 +346,8 @@ pub struct DohSession {
     transport: TransportCapabilities,
     request_timeout: Duration,
     client_ip: DohClientIpPolicy,
+    proxy_client: Option<IpAddr>,
+    proxy_header_done: bool,
     read_buffer: Vec<u8>,
     pending_close: bool,
 }
@@ -394,10 +413,6 @@ impl DohAdapter {
         if endpoint_config.tls_mode != TlsMode::External {
             return Err(DohAdapterError::UnsupportedTlsMode);
         }
-        if endpoint_config.client_ip.source == ClientIpSource::ProxyProtocol {
-            return Err(DohAdapterError::UnsupportedClientIpSource);
-        }
-
         let route_patterns = routes
             .iter()
             .map(|route| DohRoutePattern::new(route.path.clone(), route.strategy.as_str()))
@@ -502,6 +517,8 @@ impl DohAdapter {
                 transport: self.transport,
                 request_timeout: self.request_timeout,
                 client_ip: self.client_ip.clone(),
+                proxy_client: None,
+                proxy_header_done: self.client_ip.source != ClientIpSource::ProxyProtocol,
                 read_buffer: Vec::new(),
                 pending_close: false,
             }))
@@ -526,6 +543,17 @@ impl DohSession {
         self.pending_close
     }
 
+    async fn read_next_chunk(
+        &self,
+        deadline: Deadline,
+        cancellation: &Cancellation,
+    ) -> Result<TcpReadChunkResult, PortError> {
+        let mut connection = self.connection.lock().await;
+        connection
+            .read_chunk(DOH_READ_CHUNK_BYTES, deadline, cancellation)
+            .await
+    }
+
     pub fn receive<'a>(
         &'a mut self,
         cancellation: &'a Cancellation,
@@ -537,6 +565,61 @@ impl DohSession {
             let received_at = Instant::now();
             let deadline = Deadline::new(received_at + self.request_timeout);
             loop {
+                if !self.client_ip.peer_is_trusted(self.peer.ip()) {
+                    self.read_buffer.clear();
+                    self.pending_close = true;
+                    return Ok(DohSessionEvent::HttpError {
+                        error: DohHttpError::Malformed,
+                        close: true,
+                    });
+                }
+                if !self.proxy_header_done {
+                    match parse_proxy_header(&self.read_buffer) {
+                        Ok(ProxyHeaderParse::Complete { consumed, client }) => {
+                            self.read_buffer.drain(..consumed);
+                            self.proxy_client = Some(client);
+                            self.proxy_header_done = true;
+                            continue;
+                        }
+                        Ok(ProxyHeaderParse::Incomplete) => {
+                            if self.read_buffer.len() >= MAX_PROXY_V2_BYTES {
+                                self.read_buffer.clear();
+                                self.pending_close = true;
+                                return Ok(DohSessionEvent::HttpError {
+                                    error: DohHttpError::Malformed,
+                                    close: true,
+                                });
+                            }
+                            match self.read_next_chunk(deadline, cancellation).await? {
+                                TcpReadChunkResult::Data(bytes)
+                                    if !bytes.is_empty()
+                                        && bytes.len() <= DOH_READ_CHUNK_BYTES
+                                        && self.read_buffer.len() + bytes.len()
+                                            <= MAX_PROXY_V2_BYTES =>
+                                {
+                                    self.read_buffer.extend_from_slice(&bytes);
+                                }
+                                TcpReadChunkResult::Data(_) | TcpReadChunkResult::CleanEof => {
+                                    self.read_buffer.clear();
+                                    self.pending_close = true;
+                                    return Ok(DohSessionEvent::HttpError {
+                                        error: DohHttpError::Malformed,
+                                        close: true,
+                                    });
+                                }
+                            }
+                            continue;
+                        }
+                        Err(()) => {
+                            self.read_buffer.clear();
+                            self.pending_close = true;
+                            return Ok(DohSessionEvent::HttpError {
+                                error: DohHttpError::Malformed,
+                                close: true,
+                            });
+                        }
+                    }
+                }
                 match try_parse_request(&self.read_buffer) {
                     Ok(Some(parsed)) => {
                         self.read_buffer.drain(..parsed.consumed_bytes);
@@ -551,19 +634,22 @@ impl DohSession {
                                 close: parsed.connection_close,
                             });
                         };
-                        let client_addr =
-                            match self.client_ip.resolve(self.peer, &parsed.forwarded_headers) {
-                                Ok(client_addr) => client_addr,
-                                Err(ClientIpResolutionError::UntrustedPeer)
-                                | Err(ClientIpResolutionError::Missing)
-                                | Err(ClientIpResolutionError::Invalid) => {
-                                    self.pending_close = true;
-                                    return Ok(DohSessionEvent::HttpError {
-                                        error: DohHttpError::Malformed,
-                                        close: true,
-                                    });
-                                }
-                            };
+                        let client_addr = match self.client_ip.resolve(
+                            self.peer,
+                            &parsed.forwarded_headers,
+                            self.proxy_client,
+                        ) {
+                            Ok(client_addr) => client_addr,
+                            Err(ClientIpResolutionError::UntrustedPeer)
+                            | Err(ClientIpResolutionError::Missing)
+                            | Err(ClientIpResolutionError::Invalid) => {
+                                self.pending_close = true;
+                                return Ok(DohSessionEvent::HttpError {
+                                    error: DohHttpError::Malformed,
+                                    close: true,
+                                });
+                            }
+                        };
                         self.pending_close = parsed.connection_close;
                         self.next_stream_id = self.next_stream_id.wrapping_add(1).max(1);
                         let request_id = RequestId::from(
@@ -615,12 +701,7 @@ impl DohSession {
                                 close: true,
                             });
                         }
-                        let result = {
-                            let mut connection = self.connection.lock().await;
-                            connection
-                                .read_chunk(DOH_READ_CHUNK_BYTES, deadline, cancellation)
-                                .await?
-                        };
+                        let result = self.read_next_chunk(deadline, cancellation).await?;
                         match result {
                             TcpReadChunkResult::Data(bytes) => {
                                 if bytes.is_empty()
@@ -1014,6 +1095,102 @@ fn parse_single_ip(value: &str) -> Result<IpAddr, ()> {
     value.parse().map_err(|_| ())
 }
 
+fn parse_proxy_header(buffer: &[u8]) -> Result<ProxyHeaderParse, ()> {
+    if PROXY_V1_PREFIX.starts_with(buffer) {
+        return Ok(ProxyHeaderParse::Incomplete);
+    }
+    if buffer.starts_with(PROXY_V1_PREFIX) {
+        let Some(line_end) = find_subslice(buffer, b"\r\n") else {
+            return if buffer.len() < MAX_PROXY_V1_BYTES {
+                Ok(ProxyHeaderParse::Incomplete)
+            } else {
+                Err(())
+            };
+        };
+        let consumed = line_end + 2;
+        if consumed > MAX_PROXY_V1_BYTES {
+            return Err(());
+        }
+        let line = std::str::from_utf8(&buffer[..line_end]).map_err(|_| ())?;
+        let mut parts = line.split_ascii_whitespace();
+        if parts.next() != Some("PROXY") {
+            return Err(());
+        }
+        let protocol = parts.next().ok_or(())?;
+        if !matches!(protocol, "TCP4" | "TCP6") || parts.clone().count() != 4 {
+            return Err(());
+        }
+        let source = parse_single_ip(parts.next().ok_or(())?)?;
+        let destination = parse_single_ip(parts.next().ok_or(())?)?;
+        let source_port = parse_proxy_port(parts.next().ok_or(())?)?;
+        let destination_port = parse_proxy_port(parts.next().ok_or(())?)?;
+        if (protocol == "TCP4" && (!source.is_ipv4() || !destination.is_ipv4()))
+            || (protocol == "TCP6" && (!source.is_ipv6() || !destination.is_ipv6()))
+            || source_port == 0
+            || destination_port == 0
+        {
+            return Err(());
+        }
+        return Ok(ProxyHeaderParse::Complete {
+            consumed,
+            client: source,
+        });
+    }
+
+    if PROXY_V2_SIGNATURE.starts_with(buffer) {
+        return Ok(ProxyHeaderParse::Incomplete);
+    }
+    if !buffer.starts_with(PROXY_V2_SIGNATURE) {
+        return Err(());
+    }
+    if buffer.len() < 16 {
+        return Ok(ProxyHeaderParse::Incomplete);
+    }
+    let version_command = buffer[12];
+    if version_command >> 4 != 0x2 || version_command & 0x0f != 0x1 {
+        return Err(());
+    }
+    let family_protocol = buffer[13];
+    let payload_length = u16::from_be_bytes([buffer[14], buffer[15]]) as usize;
+    let consumed = 16_usize.checked_add(payload_length).ok_or(())?;
+    if consumed > MAX_PROXY_V2_BYTES {
+        return Err(());
+    }
+    if buffer.len() < consumed {
+        return Ok(ProxyHeaderParse::Incomplete);
+    }
+    let (source, source_port, destination_port) = match family_protocol {
+        0x11 if payload_length >= 12 => {
+            let source = IpAddr::V4(std::net::Ipv4Addr::new(
+                buffer[16], buffer[17], buffer[18], buffer[19],
+            ));
+            let port = u16::from_be_bytes([buffer[24], buffer[25]]);
+            let destination_port = u16::from_be_bytes([buffer[26], buffer[27]]);
+            (source, port, destination_port)
+        }
+        0x21 if payload_length >= 36 => {
+            let mut octets = [0_u8; 16];
+            octets.copy_from_slice(&buffer[16..32]);
+            let source = IpAddr::V6(std::net::Ipv6Addr::from(octets));
+            let port = u16::from_be_bytes([buffer[48], buffer[49]]);
+            let destination_port = u16::from_be_bytes([buffer[50], buffer[51]]);
+            (source, port, destination_port)
+        }
+        _ => return Err(()),
+    };
+    if source_port == 0 || destination_port == 0 {
+        return Err(());
+    }
+    Ok(ProxyHeaderParse::Complete {
+        consumed,
+        client: source,
+    })
+}
+
+fn parse_proxy_port(value: &str) -> Result<u16, ()> {
+    value.parse::<u16>().map_err(|_| ())
+}
+
 fn parse_ip_chain(value: &str) -> Result<Vec<IpAddr>, ()> {
     let chain = value
         .split(',')
@@ -1395,6 +1572,7 @@ mod tests {
                 .resolve(
                     SocketAddr::from(([127, 0, 0, 1], 8053)),
                     &parsed.forwarded_headers,
+                    None,
                 )
                 .unwrap(),
             "198.51.100.10".parse::<IpAddr>().unwrap()
@@ -1415,12 +1593,12 @@ mod tests {
             ..ParsedForwardedHeaders::default()
         };
         assert_eq!(
-            policy.resolve(SocketAddr::from(([192, 0, 2, 1], 8053)), &headers),
+            policy.resolve(SocketAddr::from(([192, 0, 2, 1], 8053)), &headers, None),
             Err(ClientIpResolutionError::UntrustedPeer)
         );
         assert_eq!(
             policy
-                .resolve(SocketAddr::from(([127, 0, 0, 1], 8053)), &headers)
+                .resolve(SocketAddr::from(([127, 0, 0, 1], 8053)), &headers, None)
                 .unwrap(),
             "127.0.0.1".parse::<IpAddr>().unwrap()
         );
@@ -1716,6 +1894,99 @@ mod tests {
             DohClientIpPolicy {
                 source: ClientIpSource::ForwardedHeader,
                 header: Some(ForwardedHeader::XForwardedFor),
+                trusted_proxies: vec!["127.0.0.0/8".parse().unwrap()],
+                on_missing: ForwardedDisposition::Reject,
+                on_invalid: ForwardedDisposition::Reject,
+            },
+        )
+        .unwrap();
+        let cancellation = Cancellation::new();
+        let mut session = adapter
+            .accept_session(&cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+        let DohSessionEvent::Request(inbound) = session.receive(&cancellation).await.unwrap()
+        else {
+            panic!("expected a valid DoH request");
+        };
+        assert_eq!(
+            inbound.request().context.client.client_addr,
+            Some("198.51.100.10".parse::<IpAddr>().unwrap())
+        );
+    }
+
+    #[test]
+    fn parses_proxy_v1_and_v2_source_addresses_with_bounded_headers() {
+        let v1 = b"PROXY TCP4 198.51.100.10 127.0.0.1 12345 8053\r\n";
+        assert_eq!(
+            parse_proxy_header(&v1[..5]),
+            Ok(ProxyHeaderParse::Incomplete)
+        );
+        assert_eq!(
+            parse_proxy_header(v1),
+            Ok(ProxyHeaderParse::Complete {
+                consumed: v1.len(),
+                client: "198.51.100.10".parse().unwrap(),
+            })
+        );
+
+        let source = std::net::Ipv6Addr::LOCALHOST;
+        let destination = "2001:db8::2".parse::<std::net::Ipv6Addr>().unwrap();
+        let mut v2 = PROXY_V2_SIGNATURE.to_vec();
+        v2.extend_from_slice(&[0x21, 0x21, 0, 36]);
+        v2.extend_from_slice(&source.octets());
+        v2.extend_from_slice(&destination.octets());
+        v2.extend_from_slice(&12345_u16.to_be_bytes());
+        v2.extend_from_slice(&8053_u16.to_be_bytes());
+        assert_eq!(
+            parse_proxy_header(&v2[..16]),
+            Ok(ProxyHeaderParse::Incomplete)
+        );
+        assert_eq!(
+            parse_proxy_header(&v2),
+            Ok(ProxyHeaderParse::Complete {
+                consumed: v2.len(),
+                client: IpAddr::V6(source),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn session_restores_proxy_protocol_client_address_for_trusted_peer() {
+        let wire = wire();
+        let mut request_bytes = b"PROXY TCP4 198.51.100.10 127.0.0.1 12345 8053\r\n".to_vec();
+        request_bytes.extend_from_slice(&request(
+            "GET",
+            &format!("/dns?dns={}", base64url(&wire)),
+            "",
+            &[],
+        ));
+        let listener = Arc::new(FakeDohListener::default());
+        listener
+            .connections
+            .lock()
+            .unwrap()
+            .push_back(Box::new(FakeDohConnection {
+                peer: SocketAddr::from(([127, 0, 0, 1], 40000)),
+                chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(
+                    request_bytes,
+                ))])),
+                writes: Arc::new(Mutex::new(Vec::new())),
+            }));
+        let adapter = DohAdapter::new_with_policy(
+            listener,
+            DohBindingRef {
+                listener_id: "doh".to_owned(),
+                endpoint_id: "proxy".to_owned(),
+            },
+            vec![DohRoutePattern::new("/dns", "default").unwrap()],
+            RuntimeRevision(1),
+            doh_capabilities(),
+            Duration::from_secs(1),
+            DohClientIpPolicy {
+                source: ClientIpSource::ProxyProtocol,
+                header: None,
                 trusted_proxies: vec!["127.0.0.0/8".parse().unwrap()],
                 on_missing: ForwardedDisposition::Reject,
                 on_invalid: ForwardedDisposition::Reject,
