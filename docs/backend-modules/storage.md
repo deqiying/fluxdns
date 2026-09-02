@@ -1,6 +1,6 @@
 # Storage 模块设计
 
-> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema、SQLx SQLite storage 首轮 adapter、详情落库脱敏边界、bounded detail writer channel 与可替换 stats writer 边界；Supervisor 调度和完整 flush 尚未实现
+> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema、SQLx SQLite storage 首轮 adapter、详情落库脱敏边界、bounded detail writer channel、年龄/软阈值/硬上限策略与可替换 stats writer 边界；Supervisor 调度和完整 flush 尚未实现
 >
 > 更新日期：2026-09-02
 >
@@ -25,7 +25,7 @@ Storage 模块实现业务 SQLite：
 
 | 文件 | 职责 |
 | --- | --- |
-| `sqlite.rs` | SQLx pool、PRAGMA、migration、统计/详情 transaction、bounded detail writer、health/checkpoint/shutdown 首轮实现 |
+| `sqlite.rs` | SQLx pool、PRAGMA、migration、统计/详情 transaction、bounded detail writer、详情淘汰/硬上限、health/checkpoint/shutdown 首轮实现 |
 | `statistics.rs` | sharded counters、checkpoint、batch ledger |
 | `resolve_log.rs` | 有界详情队列、批量写入和淘汰 |
 | `writer.rs` | 无外部依赖的事务/幂等 writer contract 实现与 focused tests |
@@ -194,7 +194,7 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 
 当前已新增 `backend/migrations/0001_storage.sql`，固定 `storage_meta`、按日统计、批次 ledger 和 `resolve_log` 表，以及有限统计维度约束。`SqliteStorageBackend` 已在独立业务数据库执行该 migration，使用 WAL、`synchronous=NORMAL`、busy timeout 和单 operation lock；`InMemoryStorageBackend` 继续作为无外部依赖的 contract baseline。
 
-SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 resolve detail batch：stats 通过 `stats_batch_ledger` 的 payload hash 做幂等重试/冲突拒绝，详情写入先复用 `ResolveDetailRecord` 生成脱敏摘要，再使用绑定参数落库；`SqliteResolveDetailWriter` 通过 bounded `mpsc` 只做非阻塞入队，`SqliteResolveDetailWorker` 按上限批量取出并以独立事务提交，失败时保留 pending 记录。事务中任一 operation 失败都会整体回滚。数据库错误进入 degraded，health probe、WAL checkpoint 和 shutdown 均保留 typed `StorageBackend` 边界。worker 的 Supervisor 调度、详情淘汰/硬上限、busy/disk-full recovery 和最终 tracing flush 仍待后续切片。
+SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 resolve detail batch：stats 通过 `stats_batch_ledger` 的 payload hash 做幂等重试/冲突拒绝，详情写入先复用 `ResolveDetailRecord` 生成脱敏摘要，再使用绑定参数落库；`SqliteResolveDetailWriter` 通过 bounded `mpsc` 只做非阻塞入队，`SqliteResolveDetailWorker` 按上限批量取出并以独立事务提交，失败时保留 pending 记录。启用详情限制时，同一事务先按年龄和软阈值淘汰，再按 `max_records` 裁剪新批次，并返回 committed/evicted/dropped 摘要。事务中任一 operation 失败都会整体回滚。数据库错误进入 degraded，health probe、WAL checkpoint 和 shutdown 均保留 typed `StorageBackend` 边界。worker 的 Supervisor 调度、busy/disk-full recovery 和最终 tracing flush 仍待后续切片。
 
 ## 12. 测试
 
@@ -216,11 +216,11 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 - [x] 实现内存 stats counters/checkpoint/epoch/ledger 领域边界；
 - [x] 实现 stats SQLite schema/upsert/checkpoint writer 首轮 adapter；
 - [x] 实现独立 resolve-log writer channel 与 SQLite batch flush 首轮 adapter；
-- [ ] 实现淘汰与硬上限；
+- [x] 实现详情年龄淘汰、软阈值和硬上限首轮策略；
 - [ ] 实现 degraded/recovery/flush；
 - [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
 - [ ] 完成 migration、压力和故障测试。
 
-阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred；本阶段新增 `storage::sqlite::tests` 6 项通过，覆盖 SQLx migration、stats batch 幂等重试/reopen、详情 batch 写入及脱敏字段、bounded writer 分批 flush、队列容量校验、backend 失败保留 pending、事务回滚、health/shutdown。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段 SQLite storage 增量测试 6 passed、0 failed。Supervisor 调度、busy/disk-full recovery、详情淘汰硬上限和最终 flush 仍未完成。
+阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred；本阶段新增 `storage::sqlite::tests` 8 项通过，覆盖 SQLx migration、stats batch 幂等重试/reopen、详情 batch 写入及脱敏字段、bounded writer 分批 flush、队列容量校验、backend 失败保留 pending、年龄淘汰、软阈值/硬上限、事务回滚、health/shutdown。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段 SQLite storage 增量测试 8 passed、0 failed。Supervisor 调度、busy/disk-full recovery 和最终 flush 仍未完成。
 
-当前实现进度：**58%**（内存 stats/ledger、业务 migration schema、SQLx SQLite 首轮 stats/detail transaction、脱敏详情记录、bounded writer channel/batch flush、health/checkpoint/shutdown；Supervisor 调度、淘汰硬上限、busy/disk-full recovery、完整 flush 和故障测试仍未完成）。
+当前实现进度：**64%**（内存 stats/ledger、业务 migration schema、SQLx SQLite 首轮 stats/detail transaction、脱敏详情记录、bounded writer channel/batch flush、年龄/软阈值/硬上限首轮策略、health/checkpoint/shutdown；Supervisor 调度、busy/disk-full recovery、完整 flush 和故障测试仍未完成）。

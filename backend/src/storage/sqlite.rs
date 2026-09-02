@@ -30,6 +30,42 @@ pub enum SqliteResolveDetailWriterBuildError {
     ZeroCapacity,
     #[error("sqlite resolve detail batch size must be greater than zero")]
     ZeroBatchSize,
+    #[error("sqlite resolve detail eviction threshold must be less than max records")]
+    InvalidLimits,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SqliteResolveDetailLimits {
+    pub eviction_threshold_records: u64,
+    pub max_records: u64,
+    pub max_record_age: Duration,
+}
+
+impl SqliteResolveDetailLimits {
+    pub fn new(
+        eviction_threshold_records: u64,
+        max_records: u64,
+        max_record_age: Duration,
+    ) -> Result<Self, SqliteResolveDetailWriterBuildError> {
+        if eviction_threshold_records == 0
+            || eviction_threshold_records >= max_records
+            || max_record_age.is_zero()
+        {
+            return Err(SqliteResolveDetailWriterBuildError::InvalidLimits);
+        }
+        Ok(Self {
+            eviction_threshold_records,
+            max_records,
+            max_record_age,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SqliteResolveDetailFlushSummary {
+    pub committed: u64,
+    pub evicted: u64,
+    pub dropped: u64,
 }
 
 /// 将已脱敏的详情记录送入独立 SQLite writer channel。
@@ -43,6 +79,7 @@ pub struct SqliteResolveDetailWorker {
     receiver: mpsc::Receiver<ResolveDetailRecord>,
     pending: VecDeque<ResolveDetailRecord>,
     max_batch: usize,
+    limits: Option<SqliteResolveDetailLimits>,
 }
 
 impl SqliteResolveDetailWriter {
@@ -65,8 +102,25 @@ impl SqliteResolveDetailWriter {
                 receiver,
                 pending: VecDeque::new(),
                 max_batch,
+                limits: None,
             },
         ))
+    }
+
+    pub fn channel_with_limits(
+        backend: Arc<SqliteStorageBackend>,
+        capacity: usize,
+        max_batch: usize,
+        limits: SqliteResolveDetailLimits,
+    ) -> Result<(Self, SqliteResolveDetailWorker), SqliteResolveDetailWriterBuildError> {
+        SqliteResolveDetailLimits::new(
+            limits.eviction_threshold_records,
+            limits.max_records,
+            limits.max_record_age,
+        )?;
+        let (writer, mut worker) = Self::channel(backend, capacity, max_batch)?;
+        worker.limits = Some(limits);
+        Ok((writer, worker))
     }
 }
 
@@ -93,7 +147,10 @@ impl SqliteResolveDetailWorker {
         self.pending.len().saturating_add(self.receiver.len())
     }
 
-    pub async fn flush(&mut self, deadline: Deadline) -> Result<u64, PortError> {
+    pub async fn flush(
+        &mut self,
+        deadline: Deadline,
+    ) -> Result<SqliteResolveDetailFlushSummary, PortError> {
         while self.pending.len() < self.max_batch {
             match self.receiver.try_recv() {
                 Ok(record) => self.pending.push_back(record),
@@ -103,7 +160,7 @@ impl SqliteResolveDetailWorker {
             }
         }
         if self.pending.is_empty() {
-            return Ok(0);
+            return Ok(SqliteResolveDetailFlushSummary::default());
         }
         let records = self
             .pending
@@ -111,11 +168,14 @@ impl SqliteResolveDetailWorker {
             .take(self.max_batch)
             .cloned()
             .collect::<Vec<_>>();
-        let committed = self.backend.write_detail_records(records, deadline).await?;
-        for _ in 0..committed {
+        let summary = self
+            .backend
+            .write_detail_records(records, self.limits, deadline)
+            .await?;
+        for _ in 0..summary.committed.saturating_add(summary.dropped) {
             let _ = self.pending.pop_front();
         }
-        Ok(committed)
+        Ok(summary)
     }
 }
 
@@ -304,12 +364,13 @@ impl SqliteStorageBackend {
     async fn write_detail_records(
         &self,
         records: Vec<ResolveDetailRecord>,
+        limits: Option<SqliteResolveDetailLimits>,
         deadline: Deadline,
-    ) -> Result<u64, PortError> {
+    ) -> Result<SqliteResolveDetailFlushSummary, PortError> {
         check_deadline(deadline, "sqlite_storage.resolve_detail")?;
         self.available("sqlite_storage.resolve_detail")?;
         if records.is_empty() {
-            return Ok(0);
+            return Ok(SqliteResolveDetailFlushSummary::default());
         }
         let _guard = self.operation_lock.lock().await;
         let mut transaction = self
@@ -317,13 +378,13 @@ impl SqliteStorageBackend {
             .begin()
             .await
             .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
-        apply_resolve_records(&mut transaction, &records).await?;
+        let summary = apply_resolve_records_with_limits(&mut transaction, &records, limits).await?;
         check_deadline(deadline, "sqlite_storage.resolve_detail")?;
         transaction
             .commit()
             .await
             .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
-        Ok(records.len() as u64)
+        Ok(summary)
     }
 
     async fn checkpoint_now(&self, deadline: Deadline) -> Result<(), PortError> {
@@ -565,7 +626,69 @@ async fn apply_resolve_records(
     transaction: &mut sqlx::Transaction<'_, Sqlite>,
     records: &[ResolveDetailRecord],
 ) -> Result<(), PortError> {
-    for record in records {
+    let _ = apply_resolve_records_with_limits(transaction, records, None).await?;
+    Ok(())
+}
+
+async fn apply_resolve_records_with_limits(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    records: &[ResolveDetailRecord],
+    limits: Option<SqliteResolveDetailLimits>,
+) -> Result<SqliteResolveDetailFlushSummary, PortError> {
+    let (evicted, available) = if let Some(limits) = limits {
+        let cutoff = SystemTime::now()
+            .checked_sub(limits.max_record_age)
+            .unwrap_or(UNIX_EPOCH);
+        let age_result = sqlx::query("DELETE FROM resolve_log WHERE event_time_utc < ?")
+            .bind(system_time_millis(cutoff))
+            .execute(&mut **transaction)
+            .await
+            .map_err(|_| {
+                PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_detail")
+            })?;
+        let mut evicted = age_result.rows_affected();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|_| {
+                PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_detail")
+            })?;
+        if count >= i64::try_from(limits.eviction_threshold_records).unwrap_or(i64::MAX) {
+            let keep = limits.eviction_threshold_records.saturating_sub(1);
+            let delete_count = u64::try_from(count)
+                .unwrap_or(u64::MAX)
+                .saturating_sub(keep);
+            if delete_count > 0 {
+                let result = sqlx::query(
+                    "DELETE FROM resolve_log WHERE id IN (\
+                     SELECT id FROM resolve_log ORDER BY event_time_utc ASC, id ASC LIMIT ?)",
+                )
+                .bind(i64::try_from(delete_count).unwrap_or(i64::MAX))
+                .execute(&mut **transaction)
+                .await
+                .map_err(|_| {
+                    PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_detail")
+                })?;
+                evicted = evicted.saturating_add(result.rows_affected());
+            }
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&mut **transaction)
+            .await
+            .map_err(|_| {
+                PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_detail")
+            })?;
+        let available = limits
+            .max_records
+            .saturating_sub(u64::try_from(count).unwrap_or(u64::MAX));
+        (evicted, available)
+    } else {
+        (0, records.len() as u64)
+    };
+    let accepted_len = records
+        .len()
+        .min(usize::try_from(available).unwrap_or(usize::MAX));
+    for record in records.iter().take(accepted_len) {
         let duration_millis = i64::try_from(record.duration_millis()).unwrap_or(i64::MAX);
         let request_digest = if record.has_request_digest() {
             "<present>"
@@ -605,7 +728,11 @@ async fn apply_resolve_records(
         .await
         .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_batch"))?;
     }
-    Ok(())
+    Ok(SqliteResolveDetailFlushSummary {
+        committed: accepted_len as u64,
+        evicted,
+        dropped: records.len().saturating_sub(accepted_len) as u64,
+    })
 }
 
 fn stats_fingerprint(batch: &StatsBatch) -> u64 {
@@ -657,7 +784,8 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use super::{
-        SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError, SqliteStorageBackend,
+        SqliteResolveDetailLimits, SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError,
+        SqliteStorageBackend,
     };
     use crate::dns::{Deadline, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
@@ -861,9 +989,9 @@ mod tests {
         }
         assert_eq!(writer.flush().committed, 2);
         assert_eq!(worker.pending_len(), 2);
-        assert_eq!(worker.flush(deadline()).await.unwrap(), 1);
+        assert_eq!(worker.flush(deadline()).await.unwrap().committed, 1);
         assert_eq!(worker.pending_len(), 1);
-        assert_eq!(worker.flush(deadline()).await.unwrap(), 1);
+        assert_eq!(worker.flush(deadline()).await.unwrap().committed, 1);
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
             .fetch_one(&backend.pool)
             .await
@@ -922,6 +1050,125 @@ mod tests {
         backend.shutdown(deadline()).await.unwrap();
         assert!(worker.flush(deadline()).await.is_err());
         assert_eq!(worker.pending_len(), 1);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_detail_worker_enforces_hard_record_limits() {
+        let path = path();
+        let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
+        let limits = SqliteResolveDetailLimits::new(2, 3, Duration::from_secs(3_600)).unwrap();
+        let (sink, mut worker) =
+            SqliteResolveDetailWriter::channel_with_limits(Arc::clone(&backend), 4, 4, limits)
+                .unwrap();
+        let writer = ResolveLogWriter::new(true, 4, sink).unwrap();
+        for listener_id in ["listener-a", "listener-b", "listener-c", "listener-d"] {
+            writer
+                .try_record(ResolveEvent {
+                    occurred_at: SystemTime::now(),
+                    duration_started_at: Instant::now(),
+                    request_digest: Arc::from("digest"),
+                    listener_id: Arc::from(listener_id),
+                    route_id: None,
+                    client_bucket: None,
+                    strategy_id: None,
+                    transport: TransportClass::Datagram,
+                    qname: Arc::from("example.com."),
+                    qtype: 1,
+                    qclass: 1,
+                    outcome: OutcomeClass::Success,
+                    cache_status: CacheStatus::Miss,
+                    runtime_revision: RuntimeRevision(1),
+                })
+                .unwrap();
+        }
+        assert_eq!(writer.flush().committed, 4);
+        let first = worker.flush(deadline()).await.unwrap();
+        assert_eq!(first.committed, 3);
+        assert_eq!(first.dropped, 1);
+        assert_eq!(first.evicted, 0);
+
+        writer
+            .try_record(ResolveEvent {
+                occurred_at: SystemTime::now(),
+                duration_started_at: Instant::now(),
+                request_digest: Arc::from("digest"),
+                listener_id: Arc::from("listener-e"),
+                route_id: None,
+                client_bucket: None,
+                strategy_id: None,
+                transport: TransportClass::Datagram,
+                qname: Arc::from("example.com."),
+                qtype: 1,
+                qclass: 1,
+                outcome: OutcomeClass::Success,
+                cache_status: CacheStatus::Miss,
+                runtime_revision: RuntimeRevision(1),
+            })
+            .unwrap();
+        assert_eq!(writer.flush().committed, 1);
+        let second = worker.flush(deadline()).await.unwrap();
+        assert_eq!(second.committed, 1);
+        assert_eq!(second.dropped, 0);
+        assert_eq!(second.evicted, 2);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_detail_worker_evicts_records_older_than_max_age() {
+        let path = path();
+        let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
+        let limits = SqliteResolveDetailLimits::new(2, 3, Duration::from_secs(3_600)).unwrap();
+        let (sink, mut worker) =
+            SqliteResolveDetailWriter::channel_with_limits(Arc::clone(&backend), 2, 2, limits)
+                .unwrap();
+        let writer = ResolveLogWriter::new(true, 2, sink).unwrap();
+        for (listener_id, occurred_at) in [
+            ("listener-old", SystemTime::UNIX_EPOCH),
+            ("listener-new", SystemTime::now()),
+        ] {
+            writer
+                .try_record(ResolveEvent {
+                    occurred_at,
+                    duration_started_at: Instant::now(),
+                    request_digest: Arc::from("digest"),
+                    listener_id: Arc::from(listener_id),
+                    route_id: None,
+                    client_bucket: None,
+                    strategy_id: None,
+                    transport: TransportClass::Datagram,
+                    qname: Arc::from("example.com."),
+                    qtype: 1,
+                    qclass: 1,
+                    outcome: OutcomeClass::Success,
+                    cache_status: CacheStatus::Miss,
+                    runtime_revision: RuntimeRevision(1),
+                })
+                .unwrap();
+            assert_eq!(writer.flush().committed, 1);
+            let summary = worker.flush(deadline()).await.unwrap();
+            if occurred_at == SystemTime::UNIX_EPOCH {
+                assert_eq!(summary.evicted, 0);
+            } else {
+                assert_eq!(summary.evicted, 1);
+            }
+        }
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
