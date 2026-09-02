@@ -12,13 +12,26 @@ use std::{
 
 use crate::dns::Deadline;
 use crate::ports::telemetry::{
-    ComponentHealthEvent, HealthSink, LogEvent, LogLevel as TelemetryLogLevel, LogSink,
-    MetricEvent, MetricsSink, TelemetryFlushSummary,
+    Component as TelemetryComponent, ComponentHealthEvent, EventName as TelemetryEventName,
+    HealthSink, LogEvent, LogLevel as TelemetryLogLevel, LogSink, MetricEvent, MetricsSink,
+    OutcomeClass, TelemetryFlushSummary,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 use tracing::Subscriber;
+use tracing_subscriber::layer::{Context, Layer};
 
 static BOOTSTRAP_OUTPUT: OnceLock<Arc<Mutex<OutputTarget>>> = OnceLock::new();
+type FilteredRegistry = tracing_subscriber::layer::Layered<
+    tracing_subscriber::reload::Layer<
+        tracing_subscriber::filter::LevelFilter,
+        tracing_subscriber::Registry,
+    >,
+    tracing_subscriber::Registry,
+>;
+type ReloadableTracingLayer = Box<dyn Layer<FilteredRegistry> + Send + Sync + 'static>;
+static BOOTSTRAP_LAYER: OnceLock<
+    tracing_subscriber::reload::Handle<ReloadableTracingLayer, FilteredRegistry>,
+> = OnceLock::new();
 static BOOTSTRAP_FILTER: OnceLock<
     tracing_subscriber::reload::Handle<
         tracing_subscriber::filter::LevelFilter,
@@ -43,20 +56,22 @@ pub fn init_bootstrap() -> Result<(), tracing::subscriber::SetGlobalDefaultError
     let (filter, filter_handle) =
         tracing_subscriber::reload::Layer::new(tracing_subscriber::filter::LevelFilter::INFO);
     let _ = BOOTSTRAP_FILTER.set(filter_handle);
-    use tracing_subscriber::layer::SubscriberExt as _;
-    let subscriber = tracing_subscriber::registry().with(filter).with(
+    let (layer, layer_handle) = tracing_subscriber::reload::Layer::new(Box::new(
         tracing_subscriber::fmt::layer()
             .with_target(false)
             .with_writer(move || SharedOutputWriter(Arc::clone(&output))),
-    );
+    )
+        as ReloadableTracingLayer);
+    let _ = BOOTSTRAP_LAYER.set(layer_handle);
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let subscriber = tracing_subscriber::registry().with(filter).with(layer);
     tracing::subscriber::set_global_default(subscriber)
 }
 
 /// 在 bootstrap subscriber 已安装后切换到配置指定的真实输出。
 ///
-/// 级别过滤仍保持 bootstrap 的 INFO 上限；动态 filter 和 reload 时机属于后续
-/// final subscriber 切片。`enable=false` 时丢弃普通日志，Application 的 fatal
-/// 退出信息仍由进程边界直接写 stderr。
+/// 级别过滤由可 reload 的 bootstrap handle 控制；`enable=false` 时丢弃普通日志，
+/// Application 的 fatal 退出信息仍由进程边界直接写 stderr。
 pub fn configure_final_output(
     enable: bool,
     path: impl AsRef<Path>,
@@ -88,6 +103,18 @@ pub fn configure_final_output(
         })
         .map_err(|_| io::Error::other("bootstrap filter reload failed"))?;
     Ok(())
+}
+
+/// 将进程级 subscriber 的输出层切换为 typed telemetry layer。
+pub fn install_final_tracing(
+    writer: Arc<TelemetryWriter>,
+) -> Result<(), TelemetryRuntimeBuildError> {
+    let handle = BOOTSTRAP_LAYER
+        .get()
+        .ok_or(TelemetryRuntimeBuildError::BootstrapNotInitialized)?;
+    handle
+        .reload(Box::new(TypedTracingLayer { writer }) as ReloadableTracingLayer)
+        .map_err(|_| TelemetryRuntimeBuildError::FinalLayerReload)
 }
 
 enum OutputTarget {
@@ -709,7 +736,8 @@ impl TelemetryWriterStats {
 /// Telemetry writer 的同步输出边界。
 ///
 /// 输出端不得把原始 adapter 错误、query、header 或 secret 写回 `PortError`；writer
-/// 只负责有界排队和生命周期，具体 tracing/file/stderr 输出由后续 adapter 提供。
+/// 只负责有界排队和生命周期，具体 tracing/file/stderr 输出由 typed layer 和 output
+/// adapter 提供。
 pub trait TelemetryOutput: Send + Sync {
     fn write_log(&self, event: &LogEvent) -> Result<(), PortError>;
     fn write_metric(&self, event: &MetricEvent) -> Result<(), PortError>;
@@ -1068,6 +1096,8 @@ pub enum TelemetryRuntimeBuildError {
     BootstrapNotInitialized,
     #[error("telemetry writer could not be created: {0}")]
     Writer(#[from] TelemetryWriterBuildError),
+    #[error("final tracing layer could not be installed")]
+    FinalLayerReload,
 }
 
 /// 创建与进程级 tracing 共用输出目标的运行时 telemetry writer。
@@ -1080,6 +1110,118 @@ pub fn build_runtime_telemetry() -> Result<Arc<TelemetryWriter>, TelemetryRuntim
     TelemetryWriter::new(DEFAULT_TELEMETRY_QUEUE_CAPACITY, output)
         .map(Arc::new)
         .map_err(TelemetryRuntimeBuildError::Writer)
+}
+
+struct TypedTracingLayer {
+    writer: Arc<TelemetryWriter>,
+}
+
+impl<S> Layer<S> for TypedTracingLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _context: Context<'_, S>) {
+        let mut fields = TracingEventFields::default();
+        event.record(&mut fields);
+        let event_name = fields
+            .event_name
+            .as_deref()
+            .and_then(|value| TelemetryEventName::parse(value.to_owned()).ok())
+            .unwrap_or_else(|| {
+                TelemetryEventName::parse("tracing.event").expect("static event name")
+            });
+        let log = LogEvent {
+            occurred_at: std::time::SystemTime::now(),
+            level: telemetry_level(*event.metadata().level()),
+            name: event_name,
+            component: fields
+                .component
+                .as_deref()
+                .map(telemetry_component)
+                .unwrap_or(TelemetryComponent::Application),
+            request_digest: None,
+            configured_id: None,
+            outcome: fields
+                .outcome
+                .as_deref()
+                .map(telemetry_outcome)
+                .unwrap_or(OutcomeClass::Success),
+            runtime_revision: fields.runtime_revision.map(crate::dns::RuntimeRevision),
+            message: event.metadata().name(),
+        };
+        let _ = LogSink::emit(self.writer.as_ref(), log);
+    }
+}
+
+#[derive(Default)]
+struct TracingEventFields {
+    event_name: Option<String>,
+    component: Option<String>,
+    outcome: Option<String>,
+    runtime_revision: Option<u64>,
+}
+
+impl tracing::field::Visit for TracingEventFields {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        match field.name() {
+            "event" | "event_name" => self.event_name = Some(value.to_owned()),
+            "component" => self.component = Some(value.to_owned()),
+            "result" | "outcome" => self.outcome = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if matches!(field.name(), "revision" | "runtime_revision") {
+            self.runtime_revision = Some(value);
+        }
+    }
+
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        if value >= 0 && matches!(field.name(), "revision" | "runtime_revision") {
+            self.runtime_revision = Some(value as u64);
+        }
+    }
+
+    fn record_bool(&mut self, _field: &tracing::field::Field, _value: bool) {}
+
+    fn record_debug(&mut self, _field: &tracing::field::Field, _value: &dyn fmt::Debug) {}
+}
+
+fn telemetry_level(level: tracing::Level) -> TelemetryLogLevel {
+    match level {
+        tracing::Level::TRACE => TelemetryLogLevel::Trace,
+        tracing::Level::DEBUG => TelemetryLogLevel::Debug,
+        tracing::Level::INFO => TelemetryLogLevel::Info,
+        tracing::Level::WARN => TelemetryLogLevel::Warn,
+        tracing::Level::ERROR => TelemetryLogLevel::Error,
+    }
+}
+
+fn telemetry_component(value: &str) -> TelemetryComponent {
+    match value {
+        "runtime" => TelemetryComponent::Runtime,
+        "listener" => TelemetryComponent::Listener,
+        "dns" => TelemetryComponent::Dns,
+        "policy" => TelemetryComponent::Policy,
+        "upstream" => TelemetryComponent::Upstream,
+        "cache" => TelemetryComponent::Cache,
+        "resource" => TelemetryComponent::Resource,
+        "storage" => TelemetryComponent::Storage,
+        "telemetry" => TelemetryComponent::Telemetry,
+        _ => TelemetryComponent::Application,
+    }
+}
+
+fn telemetry_outcome(value: &str) -> OutcomeClass {
+    match value {
+        "failure" | "failed" => OutcomeClass::Failure,
+        "timeout" => OutcomeClass::Timeout,
+        "cancelled" | "canceled" => OutcomeClass::Cancelled,
+        "rejected" => OutcomeClass::Rejected,
+        "dropped" => OutcomeClass::Dropped,
+        _ => OutcomeClass::Success,
+    }
 }
 
 /// writer 只保存事件的低基数元数据，不保存 `TypedEvent::message`。
@@ -1417,12 +1559,13 @@ mod tests {
         LogLevel as TelemetryLogLevel, LogSink, MetricEvent as TelemetryMetricEvent,
         MetricName as TelemetryMetricName, MetricValue as TelemetryMetricValue, MetricsSink,
     };
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::{
         BufferedEvent, Component, EmitResult, EventName, EventResult, EventSink, EventSinkError,
         EventWriter, EventWriterError, HealthState, LogLevel, MetricKey, MetricName, MetricValue,
         ObservabilityRegistry, RegistryError, Sensitive, StructuredTelemetryOutput,
-        TelemetryOutput, TelemetryWriter, TelemetryWriterBuildError, TypedEvent,
+        TelemetryOutput, TelemetryWriter, TelemetryWriterBuildError, TypedEvent, TypedTracingLayer,
         bootstrap_subscriber,
     };
 
@@ -1446,6 +1589,31 @@ mod tests {
     fn bootstrap_subscriber_can_be_built() {
         let subscriber = bootstrap_subscriber();
         let _dispatch = tracing::Dispatch::new(subscriber);
+    }
+
+    #[test]
+    fn typed_tracing_layer_maps_safe_fields_into_telemetry_writer() {
+        let output = Arc::new(RecordingTelemetryOutput::default());
+        let writer = Arc::new(TelemetryWriter::new(4, output.clone()).unwrap());
+        let subscriber = tracing_subscriber::registry().with(TypedTracingLayer {
+            writer: Arc::clone(&writer),
+        });
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::info!(
+                event = "runtime_ready",
+                component = "runtime",
+                result = "success",
+                revision = 7_u64,
+                "runtime_ready"
+            );
+        });
+
+        writer
+            .flush_now(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .unwrap();
+        let logs = output.logs.lock().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0], "runtime_ready");
     }
 
     #[test]

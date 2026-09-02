@@ -444,6 +444,17 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             Ok(())
         }
         AppCommand::Run => {
+            let telemetry = if output.resolved.logs.enable {
+                let writer = observability::build_runtime_telemetry().map_err(|error| {
+                    AppError::new(AppErrorKind::Prepare, bounded_message(error))
+                })?;
+                observability::install_final_tracing(Arc::clone(&writer)).map_err(|error| {
+                    AppError::new(AppErrorKind::Prepare, bounded_message(error))
+                })?;
+                Some(writer)
+            } else {
+                None
+            };
             let prepared =
                 crate::runtime::PreparedRuntime::prepare_with_policy_core_and_remote_resources(
                     output.resolved,
@@ -472,13 +483,6 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             )
             .await
             .map_err(map_storage_prepare_error)?;
-            let telemetry = if prepared.snapshot().config().logs.enable {
-                Some(observability::build_runtime_telemetry().map_err(|error| {
-                    AppError::new(AppErrorKind::Prepare, bounded_message(error))
-                })?)
-            } else {
-                None
-            };
             let candidate = crate::runtime::bind_prepared(
                 prepared,
                 &socket_factory,
