@@ -929,8 +929,8 @@ fn build_cache_facade(
         },
     )?;
     let options = CacheFacadeOptions {
-        enabled: true,
-        optimistic_enabled: true,
+        enabled: config.dns.cache.enabled,
+        optimistic_enabled: config.dns.cache.optimistic.enabled,
         admission: CacheAdmissionPolicy::new(
             config.dns.cache.failure_ttl,
             Some(config.dns.cache.optimistic.max_age),
@@ -1446,6 +1446,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(core.upstream_count(), 1);
+    }
+
+    #[test]
+    fn cache_facade_follows_global_cache_configuration() {
+        let disabled = PolicyDnsCore::from_config(doh_config().as_ref(), 42).unwrap();
+        assert!(!disabled.cache().options().enabled);
+        assert!(!disabled.cache().options().optimistic_enabled);
+
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        config.dns.cache.optimistic.enabled = true;
+        let enabled = PolicyDnsCore::from_config(&config, 42).unwrap();
+        assert!(enabled.cache().options().enabled);
+        assert!(enabled.cache().options().optimistic_enabled);
     }
 
     #[tokio::test]
