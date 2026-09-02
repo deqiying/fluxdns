@@ -1,6 +1,6 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard，Application 提供配置文件 reload 触发 API，service 会观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障；Supervisor 已支持受管 task-scoped cancellation，监听器 task 仍绑定启动时实例，外部配置变更事件、独立 listener swap 和 flush 生命周期仍在后续阶段
+> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard，Application 提供配置文件 reload 触发 API，service 会观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障；Supervisor 已支持受管 task-scoped cancellation，DnsService 的 UDP/TCP/DoH listener task 已使用独立 scoped token，监听器 task 仍绑定启动时实例，外部配置变更事件、独立 listener swap 和 flush 生命周期仍在后续阶段
 >
 > 更新日期：2026-09-02
 >
@@ -215,7 +215,7 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [x] 由 `Application` 与 `DnsService` 共享持有 `RuntimeCoordinator`，资源 refresh task 通过 coordinator 读取当前活动 runtime；监听器 task 仍固定在启动时实例；
 - [x] `Supervisor::spawn_with_factory` 实现瞬时失败的可取消指数退避、有界重试、重试次数和上限耗尽识别；当前 service task 的具体故障策略接入仍待完成；
 - [x] `DnsService` 观察 Supervisor task completion，区分 Degraded 终止与 FatalEndpoint/Fatal、重试耗尽和 panic；listener factory 重建仍待完成；
-- [x] `Supervisor::spawn_scoped` 提供 task-scoped cancellation，且全局 shutdown 仍能回收 scoped task；listener swap 接入仍待完成；
+- [x] `Supervisor::spawn_scoped` 提供 task-scoped cancellation，且全局 shutdown 仍能回收 scoped task；DnsService 的 UDP/TCP/DoH listener 已使用独立 scoped token，listener swap 接入仍待完成；
 - [x] `RuntimeCoordinator::bind_and_activate` 接入候选 `PreparedRuntime → bind_prepared → revision CAS`，bind/CAS 失败保留旧 runtime 或返还可重试 candidate；Application 已提供显式配置文件 reload 触发 API，service listener 重建仍待完成；
 - [x] `RuntimeCoordinator::refresh_resource_if_current` 以 captured runtime 做前后活动实例校验，stale 时返回显式 coordinator error；service 重新读取当前 runtime 后再尝试；
 - [ ] 定义状态类型与所有权转换；

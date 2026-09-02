@@ -371,7 +371,7 @@ struct RequestMeta {
 7. 初始化 `CacheFacade`、内存/持久化 cache store、transport capabilities/profiles 和策略索引；持久化 cache 初始化失败只标记 degraded 并回退内存，不改变数据库统计的必需性；
 8. 生成无 socket 的 `RuntimeSnapshot`/`PreparedRuntime` candidate 并完成 preflight；
 9. 创建全部 socket，任何 bind 失败都关闭已创建 socket 并退出；成功后组合成包含 `bound_endpoints` 的 `ActiveRuntime`，再原子发布首个 runtime；
-10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，由 supervisor 启动 UDP、TCP、DoH、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务；`DnsService` 在等待退出信号时同时观察 task completion，当前 transport task 仍绑定首个 active runtime。
+10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，由 supervisor 启动 UDP、TCP、DoH、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务；`DnsService` 在等待退出信号时同时观察 task completion，UDP/TCP/DoH transport task 使用独立 scoped cancellation，但当前仍绑定首个 active runtime。
 
 停止时先停止接收新请求，再取消后台 refresh/accept，等待正在处理的请求到 `grace deadline`；随后按顺序 flush 统计、详情日志和缓存队列，关闭 SQLite，最后退出。后台任务必须由 supervisor 持有，不能 detach 后丢失 panic 或错误。
 

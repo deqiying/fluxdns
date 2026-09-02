@@ -66,6 +66,7 @@ pub struct DnsService {
     runtime: Arc<ActiveRuntime>,
     coordinator: Arc<RuntimeCoordinator>,
     supervisor: Supervisor,
+    transport_cancellations: Vec<Cancellation>,
 }
 
 impl DnsService {
@@ -91,7 +92,8 @@ impl DnsService {
             }
         })?;
         let mut supervisor = Supervisor::new();
-        let transport_cancellation = supervisor.cancellation();
+        let resource_cancellation = supervisor.cancellation();
+        let mut transport_cancellations = Vec::new();
 
         for (index, endpoint) in endpoints.into_iter().enumerate() {
             let BoundEndpointHandle { entry, socket } = endpoint;
@@ -109,13 +111,13 @@ impl DnsService {
                     reason: reason.to_string(),
                 })?;
                 let task_id = format!("transport.doh.{index}");
-                let task = doh_listener_task(
-                    adapter,
-                    Arc::clone(&core),
-                    Arc::clone(&runtime),
-                    transport_cancellation.clone(),
-                );
-                spawn_task(&mut supervisor, task_id, "doh", task)?;
+                let task_core = Arc::clone(&core);
+                let task_runtime = Arc::clone(&runtime);
+                let cancellation =
+                    spawn_transport_task(&mut supervisor, task_id, "doh", move |cancellation| {
+                        doh_listener_task(adapter, task_core, task_runtime, cancellation)
+                    })?;
+                transport_cancellations.push(cancellation);
                 continue;
             }
             match socket {
@@ -135,13 +137,17 @@ impl DnsService {
                         reason: reason.to_string(),
                     })?;
                     let task_id = format!("transport.udp.{index}");
-                    let task = service_task(
-                        adapter,
-                        Arc::clone(&core),
-                        Arc::clone(&runtime),
-                        transport_cancellation.clone(),
-                    );
-                    spawn_task(&mut supervisor, task_id, "udp", task)?;
+                    let task_core = Arc::clone(&core);
+                    let task_runtime = Arc::clone(&runtime);
+                    let cancellation = spawn_transport_task(
+                        &mut supervisor,
+                        task_id,
+                        "udp",
+                        move |cancellation| {
+                            service_task(adapter, task_core, task_runtime, cancellation)
+                        },
+                    )?;
+                    transport_cancellations.push(cancellation);
                 }
                 ActivatedSocketHandle::Tcp(listener) => {
                     let adapter = TcpAdapter::from_endpoint(
@@ -159,13 +165,17 @@ impl DnsService {
                         reason: reason.to_string(),
                     })?;
                     let task_id = format!("transport.tcp.{index}");
-                    let task = tcp_listener_task(
-                        adapter,
-                        Arc::clone(&core),
-                        Arc::clone(&runtime),
-                        transport_cancellation.clone(),
-                    );
-                    spawn_task(&mut supervisor, task_id, "tcp", task)?;
+                    let task_core = Arc::clone(&core);
+                    let task_runtime = Arc::clone(&runtime);
+                    let cancellation = spawn_transport_task(
+                        &mut supervisor,
+                        task_id,
+                        "tcp",
+                        move |cancellation| {
+                            tcp_listener_task(adapter, task_core, task_runtime, cancellation)
+                        },
+                    )?;
+                    transport_cancellations.push(cancellation);
                 }
             }
         }
@@ -175,7 +185,7 @@ impl DnsService {
             let task = resource_refresh_task(
                 Arc::clone(&coordinator),
                 resource,
-                transport_cancellation.clone(),
+                resource_cancellation.clone(),
             );
             spawn_resource_task(&mut supervisor, task_id, task)?;
         }
@@ -184,6 +194,7 @@ impl DnsService {
             runtime,
             coordinator,
             supervisor,
+            transport_cancellations,
         })
     }
 
@@ -227,12 +238,23 @@ impl DnsService {
         self.supervisor.task_count()
     }
 
+    pub fn transport_task_count(&self) -> usize {
+        self.transport_cancellations.len()
+    }
+
+    pub fn cancel_transport_tasks(&self) {
+        for cancellation in &self.transport_cancellations {
+            cancellation.cancel(CancelReason::Shutdown);
+        }
+    }
+
     pub async fn shutdown(
         &mut self,
         clock: &dyn Clock,
         deadline: crate::dns::Deadline,
     ) -> ShutdownReport {
         self.runtime.begin_drain();
+        self.cancel_transport_tasks();
         let mut report = self.supervisor.shutdown(clock, deadline).await;
         if let Some(core) = self.runtime.snapshot().policy_core()
             && !core.shutdown_until(deadline).await
@@ -324,12 +346,15 @@ fn capabilities(class: TransportClass) -> TransportCapabilities {
     }
 }
 
-fn spawn_task(
+fn spawn_transport_task<F>(
     supervisor: &mut Supervisor,
     task_id: String,
     component: &'static str,
-    task: crate::runtime::TaskFuture,
-) -> Result<(), ServiceStartError> {
+    factory: F,
+) -> Result<Cancellation, ServiceStartError>
+where
+    F: FnOnce(Cancellation) -> crate::runtime::TaskFuture + Send + 'static,
+{
     let spec = TaskSpec::new(
         task_id,
         component,
@@ -342,7 +367,7 @@ fn spawn_task(
         reason: error.to_string(),
     })?;
     supervisor
-        .spawn(spec, task)
+        .spawn_scoped(spec, factory)
         .map_err(ServiceStartError::Task)
 }
 
@@ -940,10 +965,11 @@ impl From<DohAdapterError> for ServiceStartError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServiceError, capabilities, task_failure};
-    use crate::dns::{CacheCompatibilityKey, TransportClass};
+    use super::{ServiceError, capabilities, spawn_transport_task, task_failure};
+    use crate::dns::{CacheCompatibilityKey, CancelReason, TransportClass};
     use crate::runtime::{
-        FaultLevel, RestartPolicy, TaskCompletion, TaskErrorKind, TaskExit, TaskSpec,
+        FaultLevel, RestartPolicy, Supervisor, TaskCompletion, TaskError, TaskErrorKind, TaskExit,
+        TaskSpec,
     };
 
     fn completion(
@@ -1054,5 +1080,28 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn transport_task_is_registered_with_a_scoped_cancellation() {
+        let mut supervisor = Supervisor::new();
+        let cancellation = spawn_transport_task(
+            &mut supervisor,
+            "transport.test".to_owned(),
+            "test",
+            |cancellation| {
+                Box::pin(async move {
+                    cancellation.cancelled().await;
+                    Err(TaskError::Cancelled)
+                })
+            },
+        )
+        .unwrap();
+
+        cancellation.cancel(CancelReason::Shutdown);
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.spec.id.as_str(), "transport.test");
+        assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(supervisor.task_count(), 0);
     }
 }
