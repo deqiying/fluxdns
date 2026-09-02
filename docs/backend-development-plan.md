@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 97（Cache persistence 跨 adapter contract）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 98（Cache SQLite 故障注入与重试）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
 >
 > 更新日期：2026-09-02
 >
@@ -35,8 +35,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **74.7%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **77.2%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **74.8%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **77.3%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -51,7 +51,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | DNS Core | 实现中 | 62% | 10% |
 | Policy | 实现中 | 70% | 8% |
 | Upstream | 已实现待验证 | 99% | 10% |
-| Cache | 实现中 | 68% | 9% |
+| Cache | 实现中 | 69% | 9% |
 | Resource | 已实现待验证 | 90% | 7% |
 | Storage | 已实现待验证 | 84% | 8% |
 | Observability | 实现中 | 90% | 3% |
@@ -60,8 +60,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ```text
 4%×55% + 8%×40% + 10%×100% + 12%×65% + 11%×72%
-+ 10%×62% + 8%×70% + 10%×99% + 9%×68% + 7%×90%
-+ 8%×84% + 3%×90% ≈ 74.7%
++ 10%×62% + 8%×70% + 10%×99% + 9%×69% + 7%×90%
++ 8%×84% + 3%×90% ≈ 74.8%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 97 |
+| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 98 |
 
 ### 最新增量记录
 
@@ -115,20 +115,19 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 阶段 95：统一监听 `SIGINT`/Unix `SIGTERM`，优雅停机期间再次收到终止信号立即返回运行期错误；service focused suite `29 passed、0 failed`，Windows 编译通过，Unix `SIGTERM` runtime smoke 尚未执行，未重复全量 `cargo fmt/test`。
 - 阶段 96：`TelemetryWriter` 对同一组件健康事件归一化 `first_seen/last_changed/last_success/retry_count/persistence_gap`，避免刷新和重试重置生命周期字段；Observability focused tests `20 passed、0 failed`，未重复全量 `cargo fmt/test`。
 - 阶段 97：新增文件快照与 SQLite cache persistence 的共享 contract test，覆盖 persist/recover 的 live/expired 隔离、记录字段一致性、容量维护和 shutdown 后拒绝操作；cache persistence contract `1 passed、0 failed`，文件 persistence `6 passed、0 failed`，SQLite persistence `3 passed、0 failed`，未重复全量 `cargo fmt/test`。
+- 阶段 98：为 SQLite cache persistence 增加 test-only Busy/DiskFull 一次性故障注入，验证失败批次不发布且后续写入可恢复；SQLite fault focused test `1 passed、0 failed`，未重复全量 `cargo fmt/test`，真实 OS/SQLite 故障仍未宣称通过。
 
-### 最近小阶段（97）验证命令
+### 最近小阶段（98）验证命令
 
 ```text
-backend/.cargo-home/bin/rustfmt --edition 2024 backend/src/cache/mod.rs
-cargo test --manifest-path backend/Cargo.toml --locked --offline cache::persistence_contract_tests::file_and_sqlite_adapters_follow_the_same_contract -- --nocapture
-cargo test --manifest-path backend/Cargo.toml --locked --offline cache::persistence::tests:: -- --nocapture
-cargo test --manifest-path backend/Cargo.toml --locked --offline cache::sqlite::tests:: -- --nocapture
+backend/.cargo-home/bin/rustfmt --edition 2024 backend/src/cache/sqlite.rs
+cargo test --manifest-path backend/Cargo.toml --locked --offline cache::sqlite::tests::injected_busy_and_disk_full_faults_are_retriable -- --nocapture
 cargo check --manifest-path backend/Cargo.toml --locked --offline
 cargo clippy --manifest-path backend/Cargo.toml --locked --offline --all-targets -- -D warnings
 git diff --check
 ```
 
-以上均通过；阶段 97 未重复全量 `cargo fmt/test`。阶段 96 的 health lifecycle focused test、阶段 95 的 SIGINT/SIGTERM 编译验证、阶段 94 的 Resource health focused test、阶段 93 的 fallback focused test、阶段 92 的 health publish focused test、阶段 91 的 typed tracing focused test、阶段 90 的 telemetry flush focused test、阶段 89 的 config watcher focused test及阶段 88 的 system socket/DoH focused tests 证据保留在对应提交中。
+以上均通过；阶段 98 未重复全量 `cargo fmt/test`。阶段 97 的 cache persistence contract、阶段 96 的 health lifecycle focused test、阶段 95 的 SIGINT/SIGTERM 编译验证、阶段 94 的 Resource health focused test、阶段 93 的 fallback focused test、阶段 92 的 health publish focused test、阶段 91 的 typed tracing focused test、阶段 90 的 telemetry flush focused test、阶段 89 的 config watcher focused test及阶段 88 的 system socket/DoH focused tests 证据保留在对应提交中。
 
 ## 5. v1 验收门槛
 

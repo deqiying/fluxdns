@@ -26,11 +26,30 @@ pub struct SqlitePersistentCacheStore {
     max_size_bytes: u64,
     state: Arc<Mutex<SqliteState>>,
     operation_lock: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    injected_fault: Arc<Mutex<Option<InjectedSqliteFault>>>,
 }
 
 #[derive(Default)]
 struct SqliteState {
     shutting_down: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum InjectedSqliteFault {
+    Busy,
+    DiskFull,
+}
+
+#[cfg(test)]
+impl InjectedSqliteFault {
+    const fn safe_context(self) -> &'static str {
+        match self {
+            Self::Busy => "injected busy",
+            Self::DiskFull => "injected disk full",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
@@ -93,6 +112,8 @@ impl SqlitePersistentCacheStore {
             max_size_bytes,
             state: Arc::new(Mutex::new(SqliteState::default())),
             operation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            injected_fault: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -102,6 +123,22 @@ impl SqlitePersistentCacheStore {
 
     pub const fn max_size_bytes(&self) -> u64 {
         self.max_size_bytes
+    }
+
+    #[cfg(test)]
+    fn inject_fault(&self, fault: InjectedSqliteFault) {
+        *self
+            .injected_fault
+            .lock()
+            .expect("sqlite cache injected fault lock must not be poisoned") = Some(fault);
+    }
+
+    #[cfg(test)]
+    fn take_injected_fault(&self) -> Option<InjectedSqliteFault> {
+        self.injected_fault
+            .lock()
+            .expect("sqlite cache injected fault lock must not be poisoned")
+            .take()
     }
 
     fn available(&self, operation: &'static str) -> Result<(), PortError> {
@@ -156,6 +193,11 @@ impl SqlitePersistentCacheStore {
         now: Instant,
         operation: &'static str,
     ) -> Result<(), PortError> {
+        #[cfg(test)]
+        if let Some(fault) = self.take_injected_fault() {
+            return Err(PortError::new(PortErrorClass::Unavailable, operation)
+                .with_safe_context(fault.safe_context()));
+        }
         let mut payloads = records
             .iter()
             .map(|(key, record)| encode_record(key, record, now))
@@ -338,7 +380,7 @@ mod tests {
     use hickory_proto::op::{Message, MessageType, OpCode, Query};
     use hickory_proto::rr::{Name, RecordType};
 
-    use super::SqlitePersistentCacheStore;
+    use super::{InjectedSqliteFault, SqlitePersistentCacheStore};
     use crate::dns::{CanonicalQuery, CanonicalResponse, Deadline, DnsMessageId, RuntimeRevision};
     use crate::ports::cache::{
         CacheEntry, CacheKey, CacheNamespace, CacheQuality, CacheRecord, CacheResponseClass,
@@ -468,6 +510,60 @@ mod tests {
             .unwrap();
         let recovered = store.recover(deadline()).await.unwrap();
         assert_eq!(recovered.1.corrupt, 1);
+        store.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn injected_busy_and_disk_full_faults_are_retriable() {
+        let path = db_path();
+        let store = SqlitePersistentCacheStore::connect(&path, 16 * 1024)
+            .await
+            .unwrap();
+        let mut expected_loaded = 0;
+        for (fault, version) in [
+            (InjectedSqliteFault::Busy, 10),
+            (InjectedSqliteFault::DiskFull, 11),
+        ] {
+            let item = (
+                key(format!("fault-{version}").as_bytes()),
+                record(Duration::from_secs(60)),
+            );
+            store.inject_fault(fault);
+            let error = store
+                .persist(
+                    PersistentCacheBatch {
+                        records: vec![item.clone()],
+                    },
+                    deadline(),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error.class(),
+                crate::ports::PortErrorClass::Unavailable
+            ));
+            assert_eq!(
+                store.recover(deadline()).await.unwrap().1.loaded,
+                expected_loaded
+            );
+            store
+                .persist(
+                    PersistentCacheBatch {
+                        records: vec![item],
+                    },
+                    deadline(),
+                )
+                .await
+                .unwrap();
+            expected_loaded += 1;
+            assert_eq!(
+                store.recover(deadline()).await.unwrap().1.loaded,
+                expected_loaded
+            );
+        }
         store.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
