@@ -3473,10 +3473,12 @@ clients: []
     }
 
     #[tokio::test]
-    async fn storage_runtime_is_supervised_and_shutdown_after_service_drain() {
+    async fn service_shutdown_flushes_storage_before_closing_telemetry() {
         let port = 40_250 + (std::process::id() as u16 % 500);
-        let config = runtime_config(port);
-        let work_path = config.work.path.clone();
+        let work_path =
+            crate::config::test_support::absolute_path("service-shutdown-storage-telemetry");
+        let config = runtime_config_at(&work_path, port);
+        let database_path = config.database.path.clone();
         let initial =
             PreparedRuntime::prepare_with_policy_core(Arc::clone(&config), RuntimeRevision(1))
                 .unwrap();
@@ -3496,13 +3498,25 @@ clients: []
         )
         .await
         .unwrap();
-        let mut service = super::DnsService::with_default_timeout_from_coordinator_and_storage(
-            Arc::clone(&coordinator),
-            storage,
-        )
-        .unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let telemetry = Arc::new(TelemetryWriter::new(16, output.clone()).unwrap());
+        let telemetry_probe = Arc::clone(&telemetry);
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                Arc::clone(&coordinator),
+                storage,
+                telemetry,
+            )
+            .unwrap();
 
-        assert_eq!(service.task_count(), 2);
+        assert_eq!(service.task_count(), 3);
+        let response = udp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            1,
+            "example.test.",
+        )
+        .await;
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
         let report = service
             .shutdown(
                 &SystemClock::new(),
@@ -3511,6 +3525,31 @@ clients: []
             .await
             .unwrap();
         assert!(!report.deadline_expired);
+        assert!(telemetry_probe.stats().closed());
+        let health_events = output.health_events.lock().unwrap();
+        assert!(health_events.iter().any(|event| {
+            event.component == TelemetryComponent::Storage
+                && event.state == ComponentHealthState::Stopping
+        }));
+        assert!(health_events.iter().any(|event| {
+            event.component == TelemetryComponent::Telemetry
+                && event.state == ComponentHealthState::Stopping
+        }));
+        drop(health_events);
+
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&database_path);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let total_requests: i64 =
+            sqlx::query_scalar("SELECT SUM(total_requests) FROM stats_daily_total")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(total_requests, 1);
+        pool.close().await;
         let _ = std::fs::remove_dir_all(work_path);
     }
 
