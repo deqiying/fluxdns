@@ -440,4 +440,37 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
+
+    #[tokio::test]
+    async fn capacity_trims_oldest_records_and_recovery_isolates_corruption() {
+        let path = db_path();
+        let store = SqlitePersistentCacheStore::connect(&path, 420)
+            .await
+            .unwrap();
+        let records = (0..6)
+            .map(|index| {
+                (
+                    key(format!("entry-{index}").as_bytes()),
+                    record(Duration::from_secs(60)),
+                )
+            })
+            .collect();
+        store
+            .persist(PersistentCacheBatch { records }, deadline())
+            .await
+            .unwrap();
+        let recovered = store.recover(deadline()).await.unwrap();
+        assert!(recovered.0.records.len() < 6);
+        sqlx::query("INSERT INTO cache_entries (payload) VALUES (?)")
+            .bind(vec![99_u8])
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        let recovered = store.recover(deadline()).await.unwrap();
+        assert_eq!(recovered.1.corrupt, 1);
+        store.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
 }
