@@ -1,8 +1,8 @@
 # Cache 模块设计
 
-> 状态：v1 方案已完成，已实现内存 CacheStore、共享容量淘汰、响应准入/TTL、稳定 key builder、CacheFacade 首轮切片、可取消有界 LateCacheFinalizer、RuntimeCoordinator 级历史/当前 owner、PolicyDnsCore 当前 snapshot-local optimistic refresh 和版本化文件快照 persistence 边界；Moka/SQLite persistence 尚未实现
+> 状态：v1 方案已完成，已实现内存 CacheStore、Moka CacheStore、共享容量淘汰、响应准入/TTL、稳定 key builder、CacheFacade 首轮切片、可取消有界 LateCacheFinalizer、RuntimeCoordinator 级历史/当前 owner、PolicyDnsCore 当前 snapshot-local optimistic refresh 和版本化文件快照 persistence 边界；SQLite persistence 尚未实现
 >
-> 更新日期：2026-09-01
+> 更新日期：2026-09-02
 >
 > 目标代码：`backend/src/cache/*`
 >
@@ -19,7 +19,8 @@ Cache 模块实现逻辑缓存池、entry 生命周期、single-flight、optimis
 | 文件 | 职责 |
 | --- | --- |
 | `key.rs` | namespace、query/strategy/ECS/transport compatibility key 的稳定编码 |
-| `memory.rs` | 当前为无外部依赖的 HashMap/Mutex `CacheStore` adapter；Moka 接入待后续切片 |
+| `memory.rs` | 无外部依赖的 HashMap/Mutex `CacheStore` adapter，提供确定性语义基线和 single-flight 实现 |
+| `moka.rs` | 基于 `moka::sync::Cache` 的并发 `CacheStore` adapter，复用同一 port 语义和 single-flight 边界 |
 | `persistence.rs` | 无外部依赖的版本化文件快照 `PersistentCacheStore` adapter；SQLite 实现待后续接入 |
 | `service.rs` | `CacheFacade`、single-flight、TTL、CAS、invalidations 和 `LateCacheFinalizer` 的 typed 编排 |
 
@@ -153,7 +154,14 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - 支持 exact、namespace、typed predicate 和 all 失效；
 - single-flight 保证每个 key 只有一个 leader，follower 可独立取消，leader abandon/drop 会广播稳定失败；
 - shutdown 会清理记录、唤醒 waiter，并拒绝后续读写；
-- `weighted_size` 仅作为内部计费统计，不宣称等于进程 RSS；当前已支持共享 weight 上限、确定性 oldest eviction、oversized entry 拒绝和 eviction 计数，尚未实现 Moka eviction listener。
+- `weighted_size` 仅作为内部计费统计，不宣称等于进程 RSS；当前已支持共享 weight 上限、确定性 oldest eviction、oversized entry 拒绝和 eviction 计数。
+
+Moka adapter 复用上述 `CacheStore` contract，但把实际 entry 存储和容量淘汰交给 `moka::sync::Cache`：
+
+- 所有 namespace 共享同一个 `max_capacity` weight 预算；weigher 计入稳定 key、canonical wire 和固定 entry 开销，过大的 entry 在 CAS 前返回 `resource-exhausted`；
+- `Expiry` 以 `expires_at` 和 `stale_until` 中较晚者作为物理移除边界，因此 stale entry 仍可被 `CacheFacade` 观察，超过 stale 窗口后才由 adapter 移除；
+- eviction listener 只统计 Moka 的 size eviction，不把显式失效、替换或 TTL 过期误计入容量淘汰；
+- single-flight reservation/wait/publish/abandon 复用已验证的 typed 实现，Moka 只负责 record 存储，不向 DNS Core 暴露 Moka 类型。
 
 当前已实现的纯逻辑准入 helper：
 
@@ -241,11 +249,11 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - [x] 实现共享容量淘汰和 oversized entry 边界；
 - [x] 实现可替换 `PersistentCacheStore` port 的文件快照 adapter；
 - [x] 实现可取消、有界的 `LateCacheFinalizer`；（当前已接入 PolicyDnsCore snapshot-local optimistic refresh，parallel 快速完整 Positive late sink 已消费；RuntimeCoordinator 已统一托管历史/当前 owner，完整 late-window/nested sink 传播仍待完整 Cache-Core 管线）
-- [ ] 实现 Moka adapter；
+- [x] 实现 Moka adapter；
 - [ ] 实现独立 SQLite persistence；
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [ ] 完成跨 adapter 一致性、恢复和故障测试。
 
-阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；PolicyCore 新增配置启用缓存后的 upstream 命中、snapshot-local optimistic stale refresh 和 fast-positive late sink 写入测试，另新增旧/最新 core optimistic refresh 路由测试；Runtime service 新增 previous/current Runtime finalizer owner 统一 shutdown 回收测试；upstream executor 新增 nested parallel group sink 传播测试；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段 upstream executor 增量测试 13 passed、0 failed。完整 late-window 候选语义、Moka/SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
+阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；PolicyCore 新增配置启用缓存后的 upstream 命中、snapshot-local optimistic stale refresh 和 fast-positive late sink 写入测试，另新增旧/最新 core optimistic refresh 路由测试；Runtime service 新增 previous/current Runtime finalizer owner 统一 shutdown 回收测试；upstream executor 新增 nested parallel group sink 传播测试；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝；本阶段新增 `cache::moka::tests` 3 项通过，覆盖 fresh/stale/expiry、质量 CAS、容量边界和 shutdown。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段 Moka adapter 增量测试 3 passed、0 failed。完整 late-window 候选语义、SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
 
-当前实现进度：**50%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight、可取消有界 LateCacheFinalizer、RuntimeCoordinator 历史/当前 owner 与 current-target 路由、nested group sink 传播、基础 Cache-Core fresh/miss/CAS 接线、PolicyDnsCore snapshot-local/最新 Runtime optimistic refresh、fast-positive late sink、Policy/DnsService snapshot owner 和文件快照 persistence 边界；完整 late-window 候选生命周期、Moka、SQLite persistence 与跨 adapter 故障测试未实现）。
+当前实现进度：**58%**（内存/Moka adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight、可取消有界 LateCacheFinalizer、RuntimeCoordinator 历史/当前 owner 与 current-target 路由、nested group sink 传播、基础 Cache-Core fresh/miss/CAS 接线、PolicyDnsCore snapshot-local/最新 Runtime optimistic refresh、fast-positive late sink、Policy/DnsService snapshot owner 和文件快照 persistence 边界；完整 late-window 候选生命周期、SQLite persistence 与跨 adapter 故障测试未实现）。

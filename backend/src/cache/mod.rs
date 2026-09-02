@@ -3,6 +3,7 @@
 mod admission;
 mod key;
 mod memory;
+mod moka;
 mod persistence;
 mod service;
 
@@ -14,6 +15,7 @@ pub use key::{
     CACHE_KEY_FORMAT_VERSION, CacheFingerprint, CacheKeyDimensions, CacheKeyError, build_cache_key,
 };
 pub use memory::{MemoryCacheStore, MemoryCacheStoreBuildError};
+pub use moka::{MokaCacheStore, MokaCacheStoreBuildError};
 pub use persistence::{FilePersistentCacheStore, FilePersistentCacheStoreBuildError};
 pub use service::{
     CacheFacade, CacheFacadeBuildError, CacheFacadeError, CacheFacadeOptions, CacheLookup,
