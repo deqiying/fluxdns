@@ -650,6 +650,15 @@ async fn storage_flush_task(
                 let deadline = Deadline::new(Instant::now() + DEFAULT_STORAGE_OPERATION_TIMEOUT);
                 let mut storage = storage.lock().await;
                 if let Err(error) = storage.flush(deadline).await {
+                    if error.is_fatal() {
+                        tracing::error!(
+                            event = "storage_pending_limit_exceeded",
+                            component = "storage",
+                            error = %error,
+                            "storage_pending_limit_exceeded"
+                        );
+                        return Err(TaskError::Fatal);
+                    }
                     tracing::warn!(
                         event = "storage_flush_failed",
                         component = "storage",
@@ -669,7 +678,7 @@ fn spawn_storage_task(
     let spec = TaskSpec::new(
         "storage.writer",
         "storage",
-        FaultLevel::Degraded,
+        FaultLevel::Fatal,
         RestartPolicy::Never,
     )
     .map_err(|error| ServiceStartError::Endpoint {
@@ -1620,6 +1629,25 @@ mod tests {
                 fault_level: FaultLevel::FatalEndpoint,
                 exit: TaskExit::Failed(TaskErrorKind::Transient),
             }) if task_id == "test.task"
+        ));
+    }
+
+    #[test]
+    fn storage_pending_limit_task_failure_is_promoted_to_service_error() {
+        let completion = completion(
+            FaultLevel::Fatal,
+            RestartPolicy::Never,
+            TaskExit::Failed(TaskErrorKind::Fatal),
+            0,
+        );
+
+        assert!(matches!(
+            task_failure(&completion),
+            Some(ServiceError::TaskFailure {
+                fault_level: FaultLevel::Fatal,
+                exit: TaskExit::Failed(TaskErrorKind::Fatal),
+                ..
+            })
         ));
     }
 

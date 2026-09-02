@@ -15,6 +15,11 @@ use super::{
     BatchLedger, BatchLedgerError, PersistenceGapState, StatsAccumulator, StatsAccumulatorError,
 };
 
+/// 统计 writer 在数据库持续不可用时允许保留的最大 pending batch 数。
+pub const MAX_PENDING_STATS_BATCHES: usize = 64;
+/// 统计 writer 在数据库持续不可用时允许保留的最大 pending event 数。
+pub const MAX_PENDING_STATS_EVENTS: u64 = 65_536;
+
 /// 统计 worker 一次 flush 的可观测摘要。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StatsPersistenceFlushSummary {
@@ -32,6 +37,17 @@ pub enum StatsPersistenceError {
     Ledger(#[source] BatchLedgerError),
     #[error("stats storage operation failed: {0}")]
     Backend(#[source] PortError),
+    #[error("stats pending memory protection limit exceeded: {0:?}")]
+    PendingLimitExceeded(Box<StatsPendingLimit>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StatsPendingLimit {
+    pub pending_batches: usize,
+    pub pending_events: u64,
+    pub active_events: u64,
+    pub max_pending_batches: usize,
+    pub max_pending_events: u64,
 }
 
 /// 将无 await 的 stats accumulator 接入可重试的 `StorageBackend`。
@@ -90,7 +106,35 @@ impl StatsPersistenceWorker {
         deadline: Deadline,
     ) -> Result<StatsPersistenceFlushSummary, StatsPersistenceError> {
         let _flush = self.flush_lock.lock().await;
-        let snapshot = self.accumulator.swap_epoch();
+        let (pending_batches, pending_events) = {
+            let ledger = self.ledger.lock().expect("stats ledger lock poisoned");
+            (ledger.pending_count(), ledger.pending_event_count())
+        };
+        if pending_batches >= MAX_PENDING_STATS_BATCHES
+            || pending_events >= MAX_PENDING_STATS_EVENTS
+        {
+            return Err(StatsPersistenceError::PendingLimitExceeded(Box::new(
+                StatsPendingLimit {
+                    pending_batches,
+                    pending_events,
+                    active_events: self.accumulator.active_event_count(),
+                    max_pending_batches: MAX_PENDING_STATS_BATCHES,
+                    max_pending_events: MAX_PENDING_STATS_EVENTS,
+                },
+            )));
+        }
+        let snapshot = self
+            .accumulator
+            .try_swap_epoch(MAX_PENDING_STATS_EVENTS.saturating_sub(pending_events))
+            .map_err(|active_events| {
+                StatsPersistenceError::PendingLimitExceeded(Box::new(StatsPendingLimit {
+                    pending_batches,
+                    pending_events,
+                    active_events,
+                    max_pending_batches: MAX_PENDING_STATS_BATCHES,
+                    max_pending_events: MAX_PENDING_STATS_EVENTS,
+                }))
+            })?;
         if snapshot.event_count() > 0 {
             self.ledger
                 .lock()
@@ -252,6 +296,45 @@ mod tests {
         assert!(matches!(
             worker.persistence_gap(),
             PersistenceGapState::PendingBatches { batch_count: 1, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn pending_batch_limit_is_fatal_without_dropping_active_epoch() {
+        let backend = std::sync::Arc::new(InMemoryStorageBackend::new());
+        backend
+            .migrate(STORAGE_SCHEMA_VERSION, deadline())
+            .await
+            .unwrap();
+        let worker = StatsPersistenceWorker::new(backend.clone());
+        backend.shutdown(deadline()).await.unwrap();
+
+        for _ in 0..super::MAX_PENDING_STATS_BATCHES {
+            worker.record_request(20_260_902, Vec::new()).unwrap();
+            assert!(matches!(
+                worker.flush(deadline()).await,
+                Err(StatsPersistenceError::Backend(_))
+            ));
+        }
+        assert_eq!(
+            worker.pending_batch_count(),
+            super::MAX_PENDING_STATS_BATCHES
+        );
+
+        worker.record_request(20_260_902, Vec::new()).unwrap();
+        assert!(matches!(
+            worker.flush(deadline()).await,
+            Err(StatsPersistenceError::PendingLimitExceeded(limit))
+                if limit.pending_batches == super::MAX_PENDING_STATS_BATCHES
+                    && limit.active_events == 1
+        ));
+        assert!(matches!(
+            worker.persistence_gap(),
+            PersistenceGapState::ActiveAndPending {
+                batch_count: super::MAX_PENDING_STATS_BATCHES,
+                active_event_count: 1,
+                ..
+            }
         ));
     }
 }

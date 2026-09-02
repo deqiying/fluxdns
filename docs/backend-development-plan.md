@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成；当前执行至阶段 73（StorageRuntime 与 DnsService/Supervisor 生产生命周期接线），后续重点是 SQLite 故障恢复、Observability writer 和 v1 验收。
+> 状态：v1 模块方案已完成；当前执行至阶段 74（统计 pending 内存保护与 fatal 边界），后续重点是 SQLite 故障恢复、Observability writer 和 v1 验收。
 >
 > 更新日期：2026-09-02
 >
@@ -13,25 +13,25 @@
 本节只保留当前决策所需的摘要；模块实现细节见对应 `docs/backend-modules/*.md`，完整阶段证据见本文“阶段实施记录”。
 
 - 已完成主链路：Config 严格加载与校验、Runtime 候选/激活/受管 task、UDP/TCP/DoH plain HTTP、Upstream direct/group/proxy、Policy/Resource 首次快照与 live publish、Cache memory/Moka/SQLite 首轮 adapter。
-- Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder` 及首轮 `StorageRuntime` 生产接线；Observability 已完成低基数 metrics/health 基础。
+- Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder`、首轮 `StorageRuntime` 生产接线及 pending 内存保护/fatal 边界；Observability 已完成低基数 metrics/health 基础。
 - 当前未完成：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite degraded recovery、完整 source/cache/strategy 详情元数据、正式 telemetry writer、最终故障/压力/conformance 验收。
 
-> 注：阶段 73 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
+> 注：阶段 74 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
 
-阶段 73 已完成 `StorageRuntime` 按配置打开 SQLite、组装 stats/detail writer，并纳入 `DnsService` 的 `Supervisor` flush task 与 drain 后 shutdown；请求数据面已接入首轮聚合统计和脱敏详情事件。最近一次大阶段全量测试为 417 passed、0 failed，本阶段增量测试为 storage 4 项、service 1 项通过。
+阶段 74 已完成固定 pending batch/event 上限、超限时保留活动 epoch，以及由 `Supervisor` 将该边界升级为 fatal；普通数据库写入失败仍保留 pending 并按 degraded 路径重试。最近一次大阶段全量测试为 417 passed、0 failed，本阶段增量测试为 stats 4 项、statistics accumulator 4 项、storage service 5 项、service failure classification 1 项通过。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **68.4%** | 主要请求、Runtime、策略、资源、缓存和 Storage 首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站安全边界、SQLite degraded recovery、完整详情元数据、正式 telemetry writer 及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
-| v1 交付总进度 | **71.6%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 68.4%` |
+| 后端代码实现进度 | **68.7%** | 主要请求、Runtime、策略、资源、缓存和 Storage 首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站安全边界、SQLite degraded recovery、完整详情元数据、正式 telemetry writer 及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
+| v1 交付总进度 | **71.8%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 68.7%` |
 
 ### 当前验证记录
 
 - 最近一次大阶段全量后端测试：`417 passed、0 failed`。
-- 当前阶段（阶段 73）增量测试：`storage::service::tests`，`4 passed、0 failed`；`service::tests::storage_runtime_is_supervised_and_shutdown_after_service_drain`，`1 passed、0 failed`。
+- 当前阶段（阶段 74）增量测试：`storage::stats::tests`，`4 passed、0 failed`；`storage::statistics::tests`，`4 passed、0 failed`；`storage::service::tests`，`5 passed、0 failed`；`service::tests::storage_pending_limit_task_failure_is_promoted_to_service_error`，`1 passed、0 failed`。
 - 小阶段只执行增量验证；完成大阶段时再执行全量后端测试。
-- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；当前进度更新为后端 `68.4%`、v1 `71.6%`。
+- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal；当前进度更新为后端 `68.7%`、v1 `71.8%`。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -80,13 +80,13 @@ v1 交付范围：
 | Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 99% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 66% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 90% | 7% |
-| Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 75% | 8% |
+| Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 78% | 8% |
 | Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 30% | 3% |
 
 后端代码实现总进度：
 
 ```text
-4% × 55% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 50% + 10% × 55% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 75% + 3% × 30% ≈ 68.4%
+4% × 55% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 50% + 10% × 55% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 78% + 3% × 30% ≈ 68.7%
 ```
 
 ## 4. 进度判定规则
@@ -132,7 +132,7 @@ transport / upstream / storage / observability adapters
 
 ### 后续开发路线（基于 2026-09-02 当前状态）
 
-当前后端代码实现进度为 68.4%，v1 交付进度为 71.6%。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker、统一生命周期 facade 及首轮服务生产接线。后续按“Runtime 生命周期 → Storage/Observability 完整性 → DoH 安全边界 → v1 验收”推进，不按文档完成度虚增进度。
+当前后端代码实现进度为 68.7%，v1 交付进度为 71.8%。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker、统一生命周期 facade、首轮服务生产接线及 pending 内存保护边界。后续按“Runtime 生命周期 → Storage/Observability 完整性 → DoH 安全边界 → v1 验收”推进，不按文档完成度虚增进度。
 
 | 顺序 | 目标 | 主要范围 | 退出条件 |
 | --- | --- | --- | --- |
@@ -293,7 +293,9 @@ transport / upstream / storage / observability adapters
 
 小阶段索引 21（已完成）：按 `ResolvedConfig` 组装 `StorageRuntime`，在 `Application` prepare 阶段打开并迁移业务 SQLite，在 `DnsService` 注册受监督的周期 flush task，shutdown 时先 drain writer 再关闭 backend；请求数据面接入首轮 transport/outcome 聚合和脱敏详情事件。增量测试为 `storage::service::tests` `4 passed、0 failed`，以及 service 生命周期测试 `1 passed、0 failed`。
 
-阶段 9 当前边界：pending 内存保护上限、busy/disk-full recovery、完整 source/cache/strategy 详情元数据、正式 telemetry writer、flush/backpressure 和故障注入仍未完成。
+小阶段索引 22（已完成）：为 stats ledger 增加固定 pending batch/event 内存保护，超限时不切换活动 epoch、不丢失新请求，并由 `StorageService`/`Supervisor` 将该错误分类为 fatal；普通 backend 失败仍保留 pending 供重试。增量测试为 `storage::stats::tests` `4 passed、0 failed`、`storage::statistics::tests` `4 passed、0 failed`、`storage::service::tests` `5 passed、0 failed`，以及 service failure classification `1 passed、0 failed`。
+
+阶段 9 当前边界：busy/disk-full recovery、完整 source/cache/strategy 详情元数据、正式 telemetry writer、flush/backpressure 和故障注入仍未完成。
 
 ### 阶段 10：刷新、故障注入和 v1 验收
 

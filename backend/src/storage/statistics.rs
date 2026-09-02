@@ -259,6 +259,24 @@ impl StatsAccumulator {
         snapshot_epoch(&previous)
     }
 
+    /// 仅在旧 epoch 不超过给定事件预算时执行原子切换。
+    ///
+    /// 写锁保证检查和切换之间不会有请求继续写入旧 epoch；失败时保留原 epoch，
+    /// 让调用方可以在持久化能力恢复后重试，而不会丢掉活动统计。
+    pub fn try_swap_epoch(&self, max_event_count: u64) -> Result<StatsSnapshot, u64> {
+        let mut active = self.active.write().expect("stats active lock poisoned");
+        let event_count = epoch_event_count(&active);
+        if event_count > max_event_count {
+            return Err(event_count);
+        }
+        let next_epoch = active.epoch.checked_add(1).expect("stats epoch exhausted");
+        let previous = std::mem::replace(
+            &mut *active,
+            Arc::new(EpochCounters::new(next_epoch, self.shard_count)),
+        );
+        Ok(snapshot_epoch(&previous))
+    }
+
     pub fn persistence_gap(&self, ledger: &BatchLedger) -> PersistenceGapState {
         let active = self.active.read().expect("stats active lock poisoned");
         let active_event_count = epoch_event_count(&active);
@@ -281,6 +299,11 @@ impl StatsAccumulator {
                 pending_event_count: pending_events,
             },
         }
+    }
+
+    pub fn active_event_count(&self) -> u64 {
+        let active = self.active.read().expect("stats active lock poisoned");
+        epoch_event_count(&active)
     }
 }
 
@@ -402,5 +425,15 @@ mod tests {
             .unwrap_err();
         assert!(matches!(error, StatsAccumulatorError::InvalidEvent(_)));
         assert_eq!(accumulator.swap_epoch().event_count(), 0);
+    }
+
+    #[test]
+    fn bounded_epoch_swap_keeps_events_when_budget_is_exceeded() {
+        let accumulator = StatsAccumulator::new(1).unwrap();
+        accumulator.record(20_260_831, Vec::new()).unwrap();
+
+        assert!(matches!(accumulator.try_swap_epoch(0), Err(1)));
+        assert_eq!(accumulator.active_event_count(), 1);
+        assert_eq!(accumulator.swap_epoch().event_count(), 1);
     }
 }

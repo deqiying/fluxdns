@@ -62,6 +62,27 @@ pub enum StorageServiceError {
     },
 }
 
+impl StorageServiceError {
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            Self::Stats(StatsPersistenceError::PendingLimitExceeded(_))
+                | Self::StatsAndDetail {
+                    stats: StatsPersistenceError::PendingLimitExceeded(_),
+                    ..
+                }
+                | Self::StatsAndBackend {
+                    stats: StatsPersistenceError::PendingLimitExceeded(_),
+                    ..
+                }
+                | Self::All {
+                    stats: StatsPersistenceError::PendingLimitExceeded(_),
+                    ..
+                }
+        )
+    }
+}
+
 /// 由已解析配置创建的业务存储运行时；持有数据面 sink 和 writer 生命周期。
 pub struct StorageRuntime {
     service: StorageService,
@@ -465,5 +486,28 @@ mod tests {
             "detail",
         ));
         assert!(error.to_string().contains("resolve detail worker"));
+    }
+
+    #[test]
+    fn pending_limit_error_is_classified_as_fatal() {
+        let error = StorageServiceError::Stats(
+            crate::storage::StatsPersistenceError::PendingLimitExceeded(Box::new(
+                crate::storage::StatsPendingLimit {
+                    pending_batches: 64,
+                    pending_events: 64,
+                    active_events: 1,
+                    max_pending_batches: 64,
+                    max_pending_events: 65_536,
+                },
+            )),
+        );
+        assert!(error.is_fatal());
+        assert!(
+            !StorageServiceError::Backend(crate::ports::PortError::new(
+                crate::ports::PortErrorClass::Unavailable,
+                "backend",
+            ))
+            .is_fatal()
+        );
     }
 }

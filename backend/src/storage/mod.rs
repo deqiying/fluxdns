@@ -29,5 +29,8 @@ pub use statistics::{
     DimensionCount, PersistenceGapState, StatsAccumulator, StatsAccumulatorError, StatsSnapshot,
     day_utc,
 };
-pub use stats::{StatsPersistenceError, StatsPersistenceFlushSummary, StatsPersistenceWorker};
+pub use stats::{
+    MAX_PENDING_STATS_BATCHES, MAX_PENDING_STATS_EVENTS, StatsPendingLimit, StatsPersistenceError,
+    StatsPersistenceFlushSummary, StatsPersistenceWorker,
+};
 pub use writer::{InMemoryStorageBackend, STORAGE_SCHEMA_VERSION};
