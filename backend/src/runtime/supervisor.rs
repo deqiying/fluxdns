@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -170,6 +170,7 @@ pub struct Supervisor {
     cancellation: Cancellation,
     tasks: JoinSet<TaskCompletion>,
     registered: BTreeSet<TaskId>,
+    scoped_cancellations: BTreeMap<TaskId, Cancellation>,
 }
 
 impl Default for Supervisor {
@@ -184,6 +185,7 @@ impl Supervisor {
             cancellation: Cancellation::new(),
             tasks: JoinSet::new(),
             registered: BTreeSet::new(),
+            scoped_cancellations: BTreeMap::new(),
         }
     }
 
@@ -212,6 +214,48 @@ impl Supervisor {
             }
         });
         Ok(())
+    }
+
+    /// 注册一个可以单独取消的 task；全局 shutdown 仍会取消它。
+    pub fn spawn_scoped<F>(
+        &mut self,
+        spec: TaskSpec,
+        factory: F,
+    ) -> Result<Cancellation, SupervisorError>
+    where
+        F: FnOnce(Cancellation) -> TaskFuture + Send + 'static,
+    {
+        if !self.registered.insert(spec.id.clone()) {
+            return Err(SupervisorError::DuplicateTask(spec.id));
+        }
+        let task_id = spec.id.clone();
+        let task_cancellation = Cancellation::new();
+        let future = factory(task_cancellation.clone());
+        let supervisor_cancellation = self.cancellation.clone();
+        self.scoped_cancellations
+            .insert(task_id.clone(), task_cancellation.clone());
+        self.tasks.spawn(async move {
+            let result = tokio::select! {
+                result = future => result,
+                _ = supervisor_cancellation.cancelled() => Err(TaskError::Cancelled),
+                _ = task_cancellation.cancelled() => Err(TaskError::Cancelled),
+            };
+            let spec_for_completion = spec.clone();
+            let exit = match result {
+                Ok(()) => TaskExit::Completed,
+                Err(error) => error.into(),
+            };
+            TaskCompletion {
+                spec: spec_for_completion,
+                exit,
+                restart_count: 0,
+            }
+        });
+        Ok(self
+            .scoped_cancellations
+            .get(&task_id)
+            .cloned()
+            .expect("scoped task cancellation must be registered"))
     }
 
     /// 注册一个可重建的 task；仅瞬时失败会按策略有界重试。
@@ -264,6 +308,7 @@ impl Supervisor {
         match result {
             Ok(completion) => {
                 self.registered.remove(&completion.spec.id);
+                self.scoped_cancellations.remove(&completion.spec.id);
                 Some(completion)
             }
             Err(error) => {
@@ -276,6 +321,7 @@ impl Supervisor {
                     .cloned()
                     .unwrap_or_else(|| TaskId::new("unknown").expect("static task id"));
                 self.registered.remove(&id);
+                self.scoped_cancellations.remove(&id);
                 Some(TaskCompletion {
                     spec: TaskSpec {
                         id,
@@ -292,6 +338,14 @@ impl Supervisor {
                 })
             }
         }
+    }
+
+    pub fn cancel_task(&self, id: &TaskId, reason: CancelReason) -> bool {
+        let Some(cancellation) = self.scoped_cancellations.get(id) else {
+            return false;
+        };
+        cancellation.cancel(reason);
+        true
     }
 
     /// 触发 shutdown 并在截止时间前回收全部 task；超时后 abort 剩余 task。
@@ -370,6 +424,7 @@ mod tests {
     use crate::dns::{CancelReason, Cancellation, Deadline};
     use crate::ports::effects::Clock;
     use crate::ports::testing::FakeClock;
+    use crate::runtime::SystemClock;
 
     use super::{
         FaultLevel, RestartPolicy, ShutdownReport, Supervisor, SupervisorError, TaskError,
@@ -423,6 +478,67 @@ mod tests {
         assert_eq!(supervisor.task_count(), 1);
         supervisor.join_next().await.unwrap();
         assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn scoped_task_cancellation_does_not_cancel_sibling_or_supervisor() {
+        let mut supervisor = Supervisor::new();
+        let first = supervisor
+            .spawn_scoped(spec("first"), |cancellation| {
+                Box::pin(async move {
+                    cancellation.cancelled().await;
+                    Err(TaskError::Cancelled)
+                })
+            })
+            .unwrap();
+        let _second = supervisor
+            .spawn_scoped(spec("second"), |cancellation| {
+                Box::pin(async move {
+                    cancellation.cancelled().await;
+                    Err(TaskError::Cancelled)
+                })
+            })
+            .unwrap();
+
+        first.cancel(CancelReason::Shutdown);
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.spec.id.as_str(), "first");
+        assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(supervisor.task_count(), 1);
+        assert!(!supervisor.cancellation().is_cancelled());
+        assert!(!supervisor.cancel_task(&completion.spec.id, CancelReason::Shutdown));
+
+        let second_id = TaskSpec::new("second", "test", FaultLevel::Degraded, RestartPolicy::Never)
+            .unwrap()
+            .id;
+        assert!(supervisor.cancel_task(&second_id, CancelReason::Shutdown));
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.spec.id.as_str(), "second");
+        assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn global_shutdown_cancels_scoped_tasks() {
+        let mut supervisor = Supervisor::new();
+        let _cancellation = supervisor
+            .spawn_scoped(spec("scoped"), |cancellation| {
+                Box::pin(async move {
+                    cancellation.cancelled().await;
+                    Err(TaskError::Cancelled)
+                })
+            })
+            .unwrap();
+
+        let report = supervisor
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+            )
+            .await;
+
+        assert_eq!(report.cancelled, 1);
+        assert!(!report.deadline_expired);
     }
 
     #[tokio::test]
