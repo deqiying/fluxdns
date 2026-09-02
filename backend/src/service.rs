@@ -2561,6 +2561,70 @@ clients: []
     }
 
     #[tokio::test]
+    async fn reload_bind_failure_keeps_previous_runtime_and_listener_available() {
+        let initial_port = 41_000 + (std::process::id() as u16 % 500);
+        let occupied = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let blocked_port = occupied.local_addr().unwrap().port();
+        let work_path = crate::config::test_support::absolute_path("service-reload-bind-failure");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, initial_port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let current = coordinator.load();
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+        let current_address = current.listeners().local_addrs().unwrap()[0];
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, blocked_port),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let error = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, super::ServiceReloadError::Bind(_)));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+        assert_eq!(service.runtime().revision(), RuntimeRevision(1));
+        assert!(!current.is_draining());
+        assert_eq!(service.transport_task_count(), 1);
+        let response = udp_query(current_address, 7, "example.test.").await;
+        assert_eq!(response.metadata.id, 7);
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+
+        drop(occupied);
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    #[tokio::test]
     async fn storage_runtime_is_supervised_and_shutdown_after_service_drain() {
         let port = 40_250 + (std::process::id() as u16 % 500);
         let config = runtime_config(port);
