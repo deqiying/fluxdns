@@ -26,7 +26,7 @@
 ## 构建与验证
 
 - 后端命令从仓库根目录执行，并通过 `--manifest-path backend/Cargo.toml` 指定 Rust manifest。
-- Rust toolchain 使用项目 `mise.toml` 声明的版本；本地测试、DoH 工具和安装边界遵循 `docs/standards/local-testing.md`。
+- Rust toolchain 使用项目 `mise.toml` 声明的版本；执行 `cargo`、`rustc`、`doggo` 等由 `mise` 管理的命令时，优先直接调用命令（例如 `cargo fmt --manifest-path backend/Cargo.toml -- --check`），仅当命令未找到、shim 不可用或未解析到项目工具链等无法直接执行的情况才使用 `mise exec --` 桥接，并记录回退原因；本地测试、DoH 工具和安装边界遵循 `docs/standards/local-testing.md`。
 - 构建物和依赖目录必须由 `.gitignore` 覆盖。提交前检查 `git status --short`，不要使用 `git add -f` 提交本地产物。
 - 文档或规则修改后至少检查 `git diff --check`，并按受影响范围执行最小充分验证；不要把未执行的测试描述为已通过。
 

@@ -52,12 +52,16 @@ Copy-Item config-example.yaml _fluxdns/config.yaml
 
 ## 3. 工具和安装边界
 
-优先使用当前环境已有的命令和项目声明的工具链。Rust 后端从仓库根目录执行时使用项目 `mise.toml` 声明的 Rust 1.98.0，例如：
+优先使用当前环境已有的命令和项目声明的工具链。Rust 后端从仓库根目录执行时使用项目 `mise.toml` 声明的 Rust 1.98.0。对于由 `mise` 管理的工具（如 `cargo`、`rustc`、`doggo`），先直接调用命令；只有命令未找到、shim 不可用或未解析到项目工具链等无法直接执行时，才使用 `mise exec --` 桥接，并记录具体回退原因。例如：
 
 ```powershell
-mise exec -- cargo fmt --manifest-path backend/Cargo.toml -- --check
-mise exec -- cargo test --manifest-path backend/Cargo.toml
+cargo fmt --manifest-path backend/Cargo.toml -- --check
+cargo test --manifest-path backend/Cargo.toml
 ```
+
+如直调失败且确认需要桥接，再使用对应的 `mise exec -- <command>` 形式，例如 `mise exec -- cargo test --manifest-path backend/Cargo.toml`。
+
+“无法直接执行”不包括 `cargo`、`doggo` 等命令自身返回的编译、测试或请求错误；这类错误应先按命令输出诊断。
 
 执行 DoH 测试前先检查工具是否已存在（例如 `Get-Command doggo`、`Get-Command curl.exe` 或对应系统的 `where` 命令）。
 
