@@ -102,6 +102,8 @@ strategy.rules[].edns_client_subnet
 - `client` 优先使用并规范化请求携带的合法 ECS；没有时按客户端地址推导 IPv4 `/24` 或 IPv6 `/56` 前缀，避免向上游传递完整客户端地址；
 - `custom` 使用 `custom_ip`，因此 `custom_ip` 必填。
 
+当策略目标是 group 时，rule/strategy/client 的显式 ECS 继续覆盖所有成员；否则每个 direct member 使用自身 `upstreams[].edns_client_subnet`，再回退到全局 ECS。成员在 cache lookup 后才由 group 选择，因此存在显式 member ECS 的 group 当前绕过内部缓存，避免不同成员的 ECS 响应共用同一 group key。
+
 #### 缓存和 TTL
 
 缓存和 TTL 覆写是两个独立配置：
@@ -233,7 +235,7 @@ strategy[].cache.enabled == true  → 策略池
 strategy[].cache 整块缺失          → dns.cache.enabled 为 true 时使用全局池，否则不缓存
 ```
 
-缓存 key 除 pool namespace 外，至少包含规范化的 QNAME、QTYPE、QCLASS、会改变答案的 DNS flags、生效 ECS、策略标识和 transport compatibility；不包含整个配置 revision 或资源 generation。每个 entry 仍记录产生答案时的 `producer_revision` 和资源版本指纹，供诊断、命中解释和迁移使用，但资源快照替换不会因此自动使所有缓存失效。
+缓存 key 除 pool namespace 外，至少包含规范化的 QNAME、QTYPE、QCLASS、会改变答案的 DNS flags、生效 ECS、策略标识和 transport compatibility；不包含整个配置 revision 或资源 generation。每个 entry 仍记录产生答案时的 `producer_revision` 和资源版本指纹，供诊断、命中解释和迁移使用，但资源快照替换不会因此自动使所有缓存失效。group member ECS 无法在成员选择前进入 key，因此该路径当前绕过缓存。
 
 规则或 hosts 的小范围变化默认不清空缓存。请求必须先按最新运行时 snapshot 重新计算客户端、策略、规则、ECS 和 cache namespace；`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache，只有产生 upstream target 的路径才执行 lookup。`upstreams[type=hosts]` 属于 upstream connector，其结果按普通上游响应处理。TTL 内的普通上游缓存命中可以继续返回旧答案，而 miss、过期或显式刷新一定按最新规则选择上游。启用 optimistic cache 时，后台刷新必须捕获刷新时刻的最新策略/规则资源并完整重跑匹配和上游选择，不能沿用旧 entry 的目标。后续 WebUI 的清除缓存功能属于显式 `namespace/key/predicate` 操作，不由普通资源刷新隐式触发。
 

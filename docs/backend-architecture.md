@@ -423,7 +423,7 @@ canonical response → adapter-owned ResponseEncoder
 
 UDP、TCP、DoH 只处理 framing 和传输限制；策略、缓存和上游逻辑只实现一次。TCP 使用两字节 DNS length framing。DoH 和 TCP 不受客户端 EDNS UDP payload size 限制；UDP 在发送时按当前请求重新编码并在必要时设置 TC。每个请求在进入 client matcher、策略和 cache lookup 之前只捕获一次当前 `RuntimeSnapshot`，避免同一个请求跨越多个不一致的资源组合。
 
-缓存命中不等于跳过策略计算：必须先按当前 snapshot 计算客户端身份、生效策略、ECS 和 cache namespace，再查找对应 entry。`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache；`upstreams[type=hosts]` 仍是 upstream connector，其结果按普通上游响应处理。普通上游缓存命中可以在 TTL 内继续返回旧答案；这属于显式接受的 TTL 内最终一致性，而不是使用旧策略重新匹配。
+缓存命中不等于跳过策略计算：必须先按当前 snapshot 计算客户端身份、生效策略、ECS 和 cache namespace，再查找对应 entry。`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache；`upstreams[type=hosts]` 仍是 upstream connector，其结果按普通上游响应处理。普通上游缓存命中可以在 TTL 内继续返回旧答案；这属于显式接受的 TTL 内最终一致性，而不是使用旧策略重新匹配。group member ECS 只有在成员选择后才能确定，当前直接绕过缓存，不能用 group ID key 混用不同成员响应。
 
 ## 7. 缓存实现
 
@@ -437,7 +437,7 @@ Moka 使用 `weigher` 计算 key、canonical wire、索引和元数据的计费�
 
 缓存 entry 不保存客户端 DNS ID、HTTP header 或本地 UDP 截断 envelope，保存 canonical response、写入时间、TTL metadata、response class、产生该答案时的 `producer_revision` 以及各引用资源的版本指纹。版本字段用于诊断、命中解释和迁移，不直接成为命中失效条件。上游 TC entry 额外携带入口 transport，只允许同 transport 命中。正向/负向 TTL、`failure_ttl` 和 optimistic max age 由 per-entry expiry 实现；compare-and-replace 禁止 SERVFAIL/TC 覆盖未过期的完整回答。
 
-缓存 key 不包含全局 config generation、资源 generation 或整个 `RuntimeSnapshot` revision。除 pool namespace 外，key 至少包含规范化的 QNAME、QTYPE、QCLASS、会改变答案的 DNS flags、生效 ECS、策略标识和 transport compatibility。任一小规则或 hosts 资源变化都不会自动清空全部 cache；entry 按自身 TTL、负缓存 TTL、`failure_ttl` 和 optimistic `max_age` 自然淘汰。
+缓存 key 不包含全局 config generation、资源 generation 或整个 `RuntimeSnapshot` revision。除 pool namespace 外，key 至少包含规范化的 QNAME、QTYPE、QCLASS、会改变答案的 DNS flags、生效 ECS、策略标识和 transport compatibility。任一小规则或 hosts 资源变化都不会自动清空全部 cache；entry 按自身 TTL、负缓存 TTL、`failure_ttl` 和 optimistic `max_age` 自然淘汰。无法在 lookup 前确定的 group member ECS 不进入该 key，相关请求在当前版本绕过缓存。
 
 每次请求仍必须先用最新 `RuntimeSnapshot` 完成 client matcher、策略/规则选择、hosts 判断、ECS 计算和 cache namespace 选择，然后才允许命中旧 entry。这样“规则变更不立即失效”和“后续上游请求必须使用最新策略”可以同时成立：普通 TTL 命中允许旧答案继续服务；miss、过期或明确刷新时一定重新按最新规则选择目标。
 

@@ -139,7 +139,7 @@ ECS：
 rule → strategy → client → upstream → global
 ```
 
-`disabled` 是明确结果，不继续继承。`custom` 必须已有合法 CIDR。
+`disabled` 是明确结果，不继续继承。`custom` 必须已有合法 CIDR。group 在 rule/strategy/client 未显式覆盖时，把 direct member 的 upstream ECS 应用到该成员 query；成员 ECS 优先于 global。由于成员选择发生在 cache lookup 之后，此类 group 当前直接绕过缓存，避免不同成员 ECS 共用错误响应。
 
 ## 9. ResolutionPlan
 
@@ -191,7 +191,7 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 实现覆盖矩阵与 ResolutionPlan（首轮 cache/TTL/ECS/client override）；
 - [x] 在 `CacheDecision` 中保留所选缓存池的 optimistic answer TTL/max-age，供 stale response 使用；
 - [x] 客户端未显式配置 TTL override 时继承实际选中的 strategy，并在 Policy Core 返回前应用；
-- [x] 按 rule/strategy/client/upstream/global 来源选择最终 ECS；未显式覆盖的 client 不再遮蔽所选 strategy，显式 direct upstream ECS 已接入真实 query；group member 级 ECS 仍待完成；
+- [x] 按 rule/strategy/client/upstream/global 来源选择最终 ECS；未显式覆盖的 client 不再遮蔽所选 strategy，显式 direct upstream 与 group member ECS 已接入真实 query；成员 ECS group 当前安全绕过缓存；
 - [x] 将 direct hosts/plain HTTP DoH connector 通过 `UpstreamRegistry` 接入 `PolicyDnsCore`；
 - [x] 提供 protocol-neutral registry 注入入口并验证 DoH request path；
 - [x] 接入 Runtime snapshot 原子发布；
@@ -200,6 +200,6 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 提供 client bucket/strategy/source/cache/selected upstream 低基数 observation；group 路径记录实际选中的成员，独立 group/member 字段和 matched resource/rule result 仍待完成。
 - [x] `PolicyLateResultSink` 按当前 `CacheEntry.quality` 使用 `CacheCondition::Version` 更新候选，允许更优 late Positive 替换早期 Negative，并拒绝同级 Negative/Positive 或更低 Failure 覆盖；跨 adapter/并发候选矩阵仍待完成。
 
-阶段证据：`policy::client::tests` 当前 4 项、`policy::plan::tests` 当前 8 项通过，覆盖实际命中身份的域分隔摘要、client pool namespace、TTL/ECS override 与 strategy 继承；`dns::policy::tests` 当前 32 项通过，覆盖 global pool 关闭时的 strategy/client cache、client identity 隔离、hosts/rule-set/group/DoH 路径、optimistic refresh/late sink、cache hit TTL、TTL override、global/client/direct upstream ECS 上游 query，以及跨 Policy Core 实例的 SQLite cache 恢复；group 定向测试验证普通与嵌套 group 均保留实际选中的成员 ID。最近一次大阶段 backend 全量测试为 515 passed、0 failed。
+阶段证据：`policy::client::tests` 当前 4 项、`policy::plan::tests` 当前 8 项通过，覆盖实际命中身份的域分隔摘要、client pool namespace、TTL/ECS override 与 strategy 继承；`dns::policy::tests` 当前 34 项通过，覆盖 global pool 关闭时的 strategy/client cache、client identity 隔离、hosts/rule-set/group/DoH 路径、optimistic refresh/late sink、cache hit TTL、TTL override、global/client/direct upstream/group member ECS 上游 query，以及跨 Policy Core 实例的 SQLite cache 恢复；新增用例验证 member ECS 覆盖 global、strategy 覆盖 member，并且成员 ECS group 不误用缓存；group 定向测试验证普通与嵌套 group 均保留实际选中的成员 ID。最近一次大阶段 backend 全量测试为 515 passed、0 failed。
 
-当前实现进度：**79%**（client/strategy/route immutable index、client identity cache digest、const/file resource loader、rule/hosts matcher 编排、请求级 plan、TTL/ECS 层级选择、显式 direct upstream ECS、group 实际成员 observation、per-pool optimistic answer TTL/max-age、supplied compiled file/remote snapshot、direct DoH、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、late sink、RuntimeCoordinator finalizer owner 和配置候选 reload 已接入；group member ECS、remote/dat selector、完整 metadata/覆盖矩阵和跨 transport contract tests 未完成）。
+当前实现进度：**80%**（client/strategy/route immutable index、client identity cache digest、const/file resource loader、rule/hosts matcher 编排、请求级 plan、TTL/ECS 层级选择、显式 direct upstream/group member ECS、group 实际成员 observation、per-pool optimistic answer TTL/max-age、supplied compiled file/remote snapshot、direct DoH、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、late sink、RuntimeCoordinator finalizer owner 和配置候选 reload 已接入；remote/dat selector、完整 metadata/覆盖矩阵和跨 transport contract tests 未完成）。

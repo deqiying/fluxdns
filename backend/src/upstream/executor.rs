@@ -136,19 +136,26 @@ impl GroupMember {
         query: &'a CanonicalQuery,
         context: &'a RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
+        member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
     ) -> PortFuture<'a, UpstreamOutcome> {
         match self {
-            Self::Direct(exchange) => exchange.exchange(query, context),
+            Self::Direct(exchange) => Box::pin(async move {
+                let query = member_queries
+                    .as_ref()
+                    .and_then(|queries| queries.get(exchange.connector_id()))
+                    .unwrap_or(query);
+                exchange.exchange(query, context).await
+            }),
             Self::Nested {
                 connector,
                 executor,
             } => {
                 let connector = connector.clone();
                 Box::pin(async move {
-                    let result = match late_sink {
-                        Some(sink) => executor.execute_with_late_sink(query, context, sink).await,
-                        None => executor.execute(query, context).await,
-                    };
+                    let result = executor
+                        .execute_inner(query, context, late_sink, member_queries)
+                        .await
+                        .map(|result| result.outcome);
                     result.unwrap_or(UpstreamOutcome::TransportFailure(
                         crate::ports::exchange::TransportFailure {
                             connector,
@@ -262,7 +269,10 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
     ) -> Result<UpstreamOutcome, ExecutorError> {
-        Ok(self.execute_inner(query, context, None).await?.outcome)
+        Ok(self
+            .execute_inner(query, context, None, None)
+            .await?
+            .outcome)
     }
 
     pub async fn execute_with_late_sink(
@@ -272,28 +282,36 @@ impl UpstreamGroupExecutor {
         sink: Arc<dyn LateResultSink>,
     ) -> Result<UpstreamOutcome, ExecutorError> {
         Ok(self
-            .execute_inner(query, context, Some(sink))
+            .execute_inner(query, context, Some(sink), None)
             .await?
             .outcome)
     }
 
     /// 执行 group 并返回实际选中的成员 ID。
+    ///
+    /// `member_queries` 只替换命中的 direct member query，并沿嵌套 group 继续传递。
     pub(crate) async fn execute_with_selection(
         &self,
         query: &CanonicalQuery,
         context: &RequestContext,
+        member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
     ) -> Result<GroupExecutionResult, ExecutorError> {
-        self.execute_inner(query, context, None).await
+        self.execute_inner(query, context, None, member_queries)
+            .await
     }
 
     /// 执行带 late sink 的 group，并返回实际选中的成员 ID。
+    ///
+    /// `member_queries` 只替换命中的 direct member query，并沿嵌套 group 继续传递。
     pub(crate) async fn execute_with_selection_and_late_sink(
         &self,
         query: &CanonicalQuery,
         context: &RequestContext,
         sink: Arc<dyn LateResultSink>,
+        member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
     ) -> Result<GroupExecutionResult, ExecutorError> {
-        self.execute_inner(query, context, Some(sink)).await
+        self.execute_inner(query, context, Some(sink), member_queries)
+            .await
     }
 
     async fn execute_inner(
@@ -301,9 +319,16 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
+        member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
     ) -> Result<GroupExecutionResult, ExecutorError> {
         let primary = self
-            .execute_phase(&self.primary, query, context, late_sink.clone())
+            .execute_phase(
+                &self.primary,
+                query,
+                context,
+                late_sink.clone(),
+                member_queries.clone(),
+            )
             .await?;
         if !primary.enter_fallback
             || self.fallback.is_none()
@@ -318,6 +343,7 @@ impl UpstreamGroupExecutor {
                 query,
                 context,
                 late_sink,
+                member_queries,
             )
             .await?
             .result)
@@ -329,13 +355,14 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
+        member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
     ) -> Result<PhaseResult, ExecutorError> {
         let phase_context = phase_context(context, phase.timeout);
         let attempts = if phase.selector.mode() == SelectionPolicy::Parallel {
-            self.execute_parallel(phase, query, &phase_context, late_sink)
+            self.execute_parallel(phase, query, &phase_context, late_sink, member_queries)
                 .await?
         } else {
-            self.execute_ordered(phase, query, &phase_context, late_sink)
+            self.execute_ordered(phase, query, &phase_context, late_sink, member_queries)
                 .await?
         };
         let enter_fallback = super::should_enter_fallback(&attempts);
@@ -355,12 +382,20 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
+        member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
     ) -> Result<Vec<UpstreamAttempt>, ExecutorError> {
         let primary = match phase.selector.mode() {
             SelectionPolicy::LoadBalance => {
                 let lease = phase.selector.acquire_primary()?;
                 let result = self
-                    .execute_ordered_members(phase, query, context, lease.member_index(), late_sink)
+                    .execute_ordered_members(
+                        phase,
+                        query,
+                        context,
+                        lease.member_index(),
+                        late_sink,
+                        member_queries,
+                    )
                     .await;
                 drop(lease);
                 return result;
@@ -370,7 +405,7 @@ impl UpstreamGroupExecutor {
             }
             SelectionPolicy::Sequential | SelectionPolicy::Parallel => unreachable!(),
         };
-        self.execute_ordered_members(phase, query, context, primary, late_sink)
+        self.execute_ordered_members(phase, query, context, primary, late_sink, member_queries)
             .await
     }
 
@@ -381,6 +416,7 @@ impl UpstreamGroupExecutor {
         context: &RequestContext,
         primary: usize,
         late_sink: Option<Arc<dyn LateResultSink>>,
+        member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
     ) -> Result<Vec<UpstreamAttempt>, ExecutorError> {
         let mut indices = Vec::with_capacity(phase.exchanges.len());
         indices.push(primary);
@@ -390,7 +426,16 @@ impl UpstreamGroupExecutor {
             let exchange = &phase.exchanges[index];
             let outcome = match cancelled_outcome(context) {
                 Some(outcome) => outcome,
-                None => run_exchange(exchange, query, context, late_sink.clone()).await,
+                None => {
+                    run_exchange(
+                        exchange,
+                        query,
+                        context,
+                        late_sink.clone(),
+                        member_queries.clone(),
+                    )
+                    .await
+                }
             };
             let should_stop = matches!(assess(&outcome).fallback, FallbackDecision::Stop);
             attempts.push(UpstreamAttempt {
@@ -411,6 +456,7 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
+        member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
     ) -> Result<Vec<UpstreamAttempt>, ExecutorError> {
         let mut tasks = tokio::task::JoinSet::new();
         for index in phase.selector.parallel_order() {
@@ -426,9 +472,11 @@ impl UpstreamGroupExecutor {
             let query = query.clone();
             let context = context.clone();
             let late_sink = late_sink.clone();
+            let member_queries = member_queries.clone();
             tasks.spawn(async move {
                 let connector = exchange.connector_id().clone();
-                let outcome = run_exchange(&exchange, &query, &context, late_sink).await;
+                let outcome =
+                    run_exchange(&exchange, &query, &context, late_sink, member_queries).await;
                 (index, connector, outcome)
             });
         }
@@ -604,6 +652,7 @@ async fn run_exchange(
     query: &CanonicalQuery,
     context: &RequestContext,
     late_sink: Option<Arc<dyn LateResultSink>>,
+    member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
 ) -> UpstreamOutcome {
     if let Some(outcome) = cancelled_outcome(context) {
         return outcome;
@@ -618,7 +667,7 @@ async fn run_exchange(
             context.meta.cancellation.reason().unwrap_or(CancelReason::UpstreamCancelled),
         ),
         _ = tokio::time::sleep(remaining) => timeout_failure(exchange),
-        outcome = exchange.exchange(query, context, late_sink) => outcome,
+        outcome = exchange.exchange(query, context, late_sink, member_queries) => outcome,
     }
 }
 

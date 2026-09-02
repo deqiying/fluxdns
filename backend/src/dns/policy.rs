@@ -3,7 +3,7 @@
 //! 本 core 先处理已编译的本地 hosts，再执行当前已支持的 hosts/group upstream。
 //! 尚未具备真实 connector 的分支保持确定性的 SERVFAIL，不伪造网络结果。
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::net::IpAddr;
@@ -24,7 +24,7 @@ use crate::cache::{
 use crate::config::model::EcsMode;
 use crate::config::resolve::{
     ConfigId, ResolvedConfig, ResolvedEcs, ResolvedHostsResource, ResolvedTtlOverride,
-    ResolvedUpstream,
+    ResolvedUpstream, ValueSource,
 };
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::policy::{ClientMatch, PolicyBuildError, PolicyIndex, PolicyRequest};
@@ -752,10 +752,27 @@ impl PolicyDnsCore {
         plan: &crate::policy::ResolutionPlan,
         query: &crate::dns::CanonicalQuery,
     ) -> Option<PolicyUpstreamResult> {
-        let Some(key) = cache_key_for_query(plan, request, query) else {
+        let member_queries = self.upstreams.member_queries(
+            &plan.upstream,
+            &request.query,
+            &plan.edns_client_subnet,
+            request.context.client.client_addr,
+        );
+        let key = if member_queries.is_some() {
+            None
+        } else {
+            cache_key_for_query(plan, request, query)
+        };
+        let Some(key) = key else {
             return self
                 .upstreams
-                .exchange(&plan.upstream, query, &request.context, None)
+                .exchange(
+                    &plan.upstream,
+                    query,
+                    &request.context,
+                    None,
+                    member_queries,
+                )
                 .await
                 .map(|outcome| PolicyUpstreamResult::upstream(outcome, CacheStatus::Disabled));
         };
@@ -805,6 +822,7 @@ impl PolicyDnsCore {
                         query,
                         &request.context,
                         Some(Arc::clone(&late_sink)),
+                        member_queries.clone(),
                     )
                     .await
                     .map(|outcome| {
@@ -837,6 +855,7 @@ impl PolicyDnsCore {
                                 query,
                                 &request.context,
                                 Some(Arc::clone(&late_sink)),
+                                member_queries.clone(),
                             )
                             .await
                             .map(|outcome| {
@@ -853,6 +872,7 @@ impl PolicyDnsCore {
                         query,
                         &request.context,
                         Some(Arc::clone(&late_sink)),
+                        member_queries,
                     )
                     .await
                 else {
@@ -974,13 +994,26 @@ impl PolicyDnsCore {
                 )
             },
         );
+        if upstreams
+            .member_queries(
+                &upstream,
+                &request.query,
+                &plan.edns_client_subnet,
+                request.context.client.client_addr,
+            )
+            .is_some()
+        {
+            return;
+        }
         let format_version = key.format_version;
         let deadline = context.meta.deadline;
         let _ = finalizer.submit_task(async move {
             let Some(UpstreamExecutionResult {
                 outcome: UpstreamOutcome::Response(response),
                 ..
-            }) = upstreams.exchange(&upstream, &query, &context, None).await
+            }) = upstreams
+                .exchange(&upstream, &query, &context, None, None)
+                .await
             else {
                 return;
             };
@@ -1250,6 +1283,7 @@ struct UpstreamRuntime {
     direct: BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
     groups: BTreeMap<ConfigId, Arc<UpstreamGroupExecutor>>,
     all: BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
+    group_member_ecs: BTreeMap<ConfigId, Arc<BTreeMap<ConfigId, ResolvedEcs>>>,
 }
 
 /// 一次上游执行的终态和实际选中的配置成员 ID。
@@ -1315,10 +1349,37 @@ impl UpstreamRuntime {
             }
         }
 
+        let explicit_member_ecs = upstreams
+            .iter()
+            .filter_map(|upstream| match upstream {
+                ResolvedUpstream::Doh {
+                    id,
+                    edns_client_subnet: Some(ecs),
+                    ..
+                } if ecs.source == ValueSource::Upstream => Some((id.clone(), ecs.clone())),
+                _ => None,
+            })
+            .collect::<BTreeMap<_, _>>();
+        let group_member_ecs = groups
+            .keys()
+            .map(|id| {
+                let mut members = BTreeMap::new();
+                collect_group_member_ecs(
+                    id,
+                    &definitions,
+                    &explicit_member_ecs,
+                    &mut HashSet::new(),
+                    &mut members,
+                );
+                (id.clone(), Arc::new(members))
+            })
+            .collect();
+
         Ok(Self {
             direct,
             groups,
             all,
+            group_member_ecs,
         })
     }
 
@@ -1326,12 +1387,49 @@ impl UpstreamRuntime {
         self.direct.len() + self.groups.len()
     }
 
+    /// 为 group 中显式配置 ECS 的 direct member 构造请求级 query。
+    ///
+    /// rule、strategy 或 client 已提供更高优先级 ECS 时返回 `None`，确保成员配置
+    /// 不会反向覆盖请求级决策。
+    fn member_queries(
+        &self,
+        upstream: &ConfigId,
+        original_query: &super::CanonicalQuery,
+        selected_ecs: &ResolvedEcs,
+        client_addr: Option<IpAddr>,
+    ) -> Option<Arc<HashMap<ConnectorId, super::CanonicalQuery>>> {
+        if !matches!(
+            selected_ecs.source,
+            ValueSource::Default | ValueSource::Global
+        ) {
+            return None;
+        }
+        let member_ecs = self.group_member_ecs.get(upstream)?;
+        if member_ecs.is_empty() {
+            return None;
+        }
+        let queries = member_ecs
+            .iter()
+            .map(|(member, ecs)| {
+                let connector = ConnectorId::new(member.as_str().to_owned())
+                    .expect("validated upstream ID must be a connector ID");
+                (
+                    connector,
+                    effective_upstream_query(original_query, ecs, client_addr),
+                )
+            })
+            .collect();
+        Some(Arc::new(queries))
+    }
+
+    /// 执行 direct upstream 或 group，并把成员级 query 交给 group executor。
     async fn exchange(
         &self,
         upstream: &ConfigId,
         query: &super::CanonicalQuery,
         context: &super::RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
+        member_queries: Option<Arc<HashMap<ConnectorId, super::CanonicalQuery>>>,
     ) -> Option<UpstreamExecutionResult> {
         if let Some(exchange) = self.direct.get(upstream) {
             return Some(UpstreamExecutionResult {
@@ -1342,10 +1440,13 @@ impl UpstreamRuntime {
         if let Some(executor) = self.groups.get(upstream) {
             let result = match late_sink {
                 Some(sink) => executor
-                    .execute_with_selection_and_late_sink(query, context, sink)
+                    .execute_with_selection_and_late_sink(query, context, sink, member_queries)
                     .await
                     .ok(),
-                None => executor.execute_with_selection(query, context).await.ok(),
+                None => executor
+                    .execute_with_selection(query, context, member_queries)
+                    .await
+                    .ok(),
             }?;
             let GroupExecutionResult { connector, outcome } = result;
             return Some(UpstreamExecutionResult {
@@ -1513,6 +1614,37 @@ fn group_member_exchanges(
             ))
         })
         .collect()
+}
+
+/// 收集一个 group（含嵌套和 fallback）可到达的显式 direct member ECS。
+fn collect_group_member_ecs(
+    group: &ConfigId,
+    definitions: &BTreeMap<ConfigId, &ResolvedUpstream>,
+    explicit: &BTreeMap<ConfigId, ResolvedEcs>,
+    visited: &mut HashSet<ConfigId>,
+    collected: &mut BTreeMap<ConfigId, ResolvedEcs>,
+) {
+    if !visited.insert(group.clone()) {
+        return;
+    }
+    let Some(ResolvedUpstream::Group {
+        upstreams,
+        fallbacks,
+        ..
+    }) = definitions.get(group).copied()
+    else {
+        return;
+    };
+    for member in upstreams.iter().chain(fallbacks) {
+        if let Some(ecs) = explicit.get(&member.name) {
+            collected.insert(member.name.clone(), ecs.clone());
+        } else if matches!(
+            definitions.get(&member.name).copied(),
+            Some(ResolvedUpstream::Group { .. })
+        ) {
+            collect_group_member_ecs(&member.name, definitions, explicit, visited, collected);
+        }
+    }
 }
 
 fn group_build_error(group: &ConfigId, reason: String) -> UpstreamRuntimeBuildError {
@@ -1983,6 +2115,105 @@ mod tests {
             option,
             Some(EdnsOption::Subnet(subnet))
                 if subnet.addr() == IpAddr::from([198, 51, 100, 0])
+                    && subnet.source_prefix() == 24
+        ));
+    }
+
+    #[tokio::test]
+    async fn group_member_ecs_overrides_global_ecs_and_disables_group_cache() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        let global_ecs = ResolvedEcs {
+            mode: EcsMode::Custom,
+            custom_ip: Some("203.0.113.0/24".parse().unwrap()),
+            source: ValueSource::Global,
+        };
+        config.dns.edns_client_subnet = global_ecs.clone();
+        config.strategies[0].edns_client_subnet = global_ecs;
+        config.dns.cache.enabled = true;
+        let ResolvedUpstream::Doh {
+            edns_client_subnet, ..
+        } = &mut config.upstreams[0]
+        else {
+            panic!("fixture must contain a DoH upstream");
+        };
+        *edns_client_subnet = Some(ResolvedEcs {
+            mode: EcsMode::Custom,
+            custom_ip: Some("198.51.100.0/24".parse().unwrap()),
+            source: ValueSource::Upstream,
+        });
+        route_doh_through_nested_single_member_group(&mut config);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &super::direct_upstreams(&config.upstreams),
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(&config, 42, registry).unwrap();
+
+        let (_, observation) = core
+            .resolve_with_observation(&request("group-member-ecs.example.", RecordType::A))
+            .await;
+        core.resolve(&request("group-member-ecs.example.", RecordType::A))
+            .await
+            .unwrap();
+
+        assert_eq!(transport.calls.load(Ordering::Acquire), 2);
+        assert_eq!(
+            observation.and_then(|value| value.upstream_id).as_deref(),
+            Some("inner")
+        );
+        let guard = transport.request.lock().unwrap();
+        let wire = Message::from_vec(guard.as_ref().unwrap().body()).unwrap();
+        assert!(matches!(
+            wire.edns
+                .as_ref()
+                .and_then(|edns| edns.option(EdnsCode::Subnet)),
+            Some(EdnsOption::Subnet(subnet))
+                if subnet.addr() == IpAddr::from([198, 51, 100, 0])
+                    && subnet.source_prefix() == 24
+        ));
+    }
+
+    #[tokio::test]
+    async fn strategy_ecs_overrides_group_member_ecs() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.strategies[0].edns_client_subnet = ResolvedEcs {
+            mode: EcsMode::Custom,
+            custom_ip: Some("203.0.113.0/24".parse().unwrap()),
+            source: ValueSource::Strategy,
+        };
+        let ResolvedUpstream::Doh {
+            edns_client_subnet, ..
+        } = &mut config.upstreams[0]
+        else {
+            panic!("fixture must contain a DoH upstream");
+        };
+        *edns_client_subnet = Some(ResolvedEcs {
+            mode: EcsMode::Custom,
+            custom_ip: Some("198.51.100.0/24".parse().unwrap()),
+            source: ValueSource::Upstream,
+        });
+        route_doh_through_nested_single_member_group(&mut config);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &super::direct_upstreams(&config.upstreams),
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(&config, 42, registry).unwrap();
+
+        core.resolve(&request("strategy-group-ecs.example.", RecordType::A))
+            .await
+            .unwrap();
+
+        let guard = transport.request.lock().unwrap();
+        let wire = Message::from_vec(guard.as_ref().unwrap().body()).unwrap();
+        assert!(matches!(
+            wire.edns
+                .as_ref()
+                .and_then(|edns| edns.option(EdnsCode::Subnet)),
+            Some(EdnsOption::Subnet(subnet))
+                if subnet.addr() == IpAddr::from([203, 0, 113, 0])
                     && subnet.source_prefix() == 24
         ));
     }
@@ -2874,6 +3105,35 @@ strategy:
         doh_config_with_address("http://dns.example.test/dns-query")
     }
 
+    /// 将 DoH fixture 的默认上游改为 outer → inner → remote 的嵌套 group。
+    fn route_doh_through_nested_single_member_group(config: &mut crate::config::ResolvedConfig) {
+        config.upstreams.push(ResolvedUpstream::Group {
+            id: ConfigId::new("inner").unwrap(),
+            upstreams: vec![ResolvedUpstreamMember {
+                name: ConfigId::new("remote").unwrap(),
+                weight: 1,
+            }],
+            upstream_mode: crate::config::model::UpstreamMode::Failover,
+            timeout: Duration::from_secs(1),
+            fallbacks: Vec::new(),
+            fallback_upstream_mode: None,
+            fallback_timeout: None,
+        });
+        config.upstreams.push(ResolvedUpstream::Group {
+            id: ConfigId::new("group").unwrap(),
+            upstreams: vec![ResolvedUpstreamMember {
+                name: ConfigId::new("inner").unwrap(),
+                weight: 1,
+            }],
+            upstream_mode: crate::config::model::UpstreamMode::Failover,
+            timeout: Duration::from_secs(1),
+            fallbacks: Vec::new(),
+            fallback_upstream_mode: None,
+            fallback_timeout: None,
+        });
+        config.strategies[0].default_upstream = ConfigId::new("group").unwrap();
+    }
+
     fn doh_config_with_address(address: &str) -> std::sync::Arc<crate::config::ResolvedConfig> {
         let work_path = crate::config::test_support::absolute_path("policy-doh");
         let source = format!(
@@ -3387,6 +3647,7 @@ strategy:
                 &ConfigId::new("outer").unwrap(),
                 &request.query,
                 &request.context,
+                None,
                 None,
             )
             .await
