@@ -1,6 +1,6 @@
 //! 业务 SQLite `StorageBackend` 首轮 adapter。
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, Sqlite, SqlitePool};
 use thiserror::Error;
+use tokio::sync::mpsc;
 
 use crate::dns::Deadline;
 use crate::ports::storage::{
@@ -19,9 +20,104 @@ use crate::ports::storage::{
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 use super::STORAGE_SCHEMA_VERSION;
-use super::resolve_log::ResolveDetailRecord;
+use super::resolve_log::{ResolveDetailRecord, ResolveDetailWriter};
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum SqliteResolveDetailWriterBuildError {
+    #[error("sqlite resolve detail queue capacity must be greater than zero")]
+    ZeroCapacity,
+    #[error("sqlite resolve detail batch size must be greater than zero")]
+    ZeroBatchSize,
+}
+
+/// 将已脱敏的详情记录送入独立 SQLite writer channel。
+pub struct SqliteResolveDetailWriter {
+    sender: mpsc::Sender<ResolveDetailRecord>,
+}
+
+/// SQLite 详情 writer 的受管 flush 端；不在 DNS 请求线程执行数据库 I/O。
+pub struct SqliteResolveDetailWorker {
+    backend: Arc<SqliteStorageBackend>,
+    receiver: mpsc::Receiver<ResolveDetailRecord>,
+    pending: VecDeque<ResolveDetailRecord>,
+    max_batch: usize,
+}
+
+impl SqliteResolveDetailWriter {
+    pub fn channel(
+        backend: Arc<SqliteStorageBackend>,
+        capacity: usize,
+        max_batch: usize,
+    ) -> Result<(Self, SqliteResolveDetailWorker), SqliteResolveDetailWriterBuildError> {
+        if capacity == 0 {
+            return Err(SqliteResolveDetailWriterBuildError::ZeroCapacity);
+        }
+        if max_batch == 0 {
+            return Err(SqliteResolveDetailWriterBuildError::ZeroBatchSize);
+        }
+        let (sender, receiver) = mpsc::channel(capacity);
+        Ok((
+            Self { sender },
+            SqliteResolveDetailWorker {
+                backend,
+                receiver,
+                pending: VecDeque::new(),
+                max_batch,
+            },
+        ))
+    }
+}
+
+impl ResolveDetailWriter for SqliteResolveDetailWriter {
+    fn append(&mut self, record: &ResolveDetailRecord) -> Result<(), PortError> {
+        self.sender
+            .try_send(record.clone())
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => PortError::new(
+                    PortErrorClass::ResourceExhausted,
+                    "sqlite_resolve_log.enqueue",
+                )
+                .with_safe_context("queue full"),
+                mpsc::error::TrySendError::Closed(_) => {
+                    PortError::new(PortErrorClass::Unavailable, "sqlite_resolve_log.enqueue")
+                        .with_safe_context("worker closed")
+                }
+            })
+    }
+}
+
+impl SqliteResolveDetailWorker {
+    pub fn pending_len(&self) -> usize {
+        self.pending.len().saturating_add(self.receiver.len())
+    }
+
+    pub async fn flush(&mut self, deadline: Deadline) -> Result<u64, PortError> {
+        while self.pending.len() < self.max_batch {
+            match self.receiver.try_recv() {
+                Ok(record) => self.pending.push_back(record),
+                Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => {
+                    break;
+                }
+            }
+        }
+        if self.pending.is_empty() {
+            return Ok(0);
+        }
+        let records = self
+            .pending
+            .iter()
+            .take(self.max_batch)
+            .cloned()
+            .collect::<Vec<_>>();
+        let committed = self.backend.write_detail_records(records, deadline).await?;
+        for _ in 0..committed {
+            let _ = self.pending.pop_front();
+        }
+        Ok(committed)
+    }
+}
 
 #[derive(Clone)]
 pub struct SqliteStorageBackend {
@@ -203,6 +299,31 @@ impl SqliteStorageBackend {
             .commit()
             .await
             .map_err(|error| self.database_error(error, "sqlite_storage.execute"))
+    }
+
+    async fn write_detail_records(
+        &self,
+        records: Vec<ResolveDetailRecord>,
+        deadline: Deadline,
+    ) -> Result<u64, PortError> {
+        check_deadline(deadline, "sqlite_storage.resolve_detail")?;
+        self.available("sqlite_storage.resolve_detail")?;
+        if records.is_empty() {
+            return Ok(0);
+        }
+        let _guard = self.operation_lock.lock().await;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
+        apply_resolve_records(&mut transaction, &records).await?;
+        check_deadline(deadline, "sqlite_storage.resolve_detail")?;
+        transaction
+            .commit()
+            .await
+            .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
+        Ok(records.len() as u64)
     }
 
     async fn checkpoint_now(&self, deadline: Deadline) -> Result<(), PortError> {
@@ -432,8 +553,19 @@ async fn apply_resolve_batch(
     transaction: &mut sqlx::Transaction<'_, Sqlite>,
     batch: &[crate::ports::storage::ResolveEvent],
 ) -> Result<(), PortError> {
-    for event in batch {
-        let record = ResolveDetailRecord::from_event(event.clone())?;
+    let records = batch
+        .iter()
+        .cloned()
+        .map(ResolveDetailRecord::from_event)
+        .collect::<Result<Vec<_>, _>>()?;
+    apply_resolve_records(transaction, &records).await
+}
+
+async fn apply_resolve_records(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    records: &[ResolveDetailRecord],
+) -> Result<(), PortError> {
+    for record in records {
         let duration_millis = i64::try_from(record.duration_millis()).unwrap_or(i64::MAX);
         let request_digest = if record.has_request_digest() {
             "<present>"
@@ -524,13 +656,16 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime};
 
-    use super::SqliteStorageBackend;
+    use super::{
+        SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError, SqliteStorageBackend,
+    };
     use crate::dns::{Deadline, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
-        ResolveEvent, SchemaVersion, StatsBatch, StatsEvent, StorageBackend, StorageOperation,
-        StorageTransaction,
+        ResolveEvent, ResolveEventSink, SchemaVersion, StatsBatch, StatsEvent, StorageBackend,
+        StorageOperation, StorageTransaction,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
+    use crate::storage::ResolveLogWriter;
     use sqlx::Row;
 
     static NEXT_TEST_DB: AtomicU64 = AtomicU64::new(0);
@@ -692,6 +827,101 @@ mod tests {
             "len:12"
         );
         backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn resolve_log_writer_flushes_through_bounded_sqlite_worker_batches() {
+        let path = path();
+        let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
+        let (sink, mut worker) =
+            SqliteResolveDetailWriter::channel(Arc::clone(&backend), 2, 1).unwrap();
+        let writer = ResolveLogWriter::new(true, 2, sink).unwrap();
+        for listener_id in ["listener-a", "listener-b"] {
+            writer
+                .try_record(ResolveEvent {
+                    occurred_at: SystemTime::now(),
+                    duration_started_at: Instant::now(),
+                    request_digest: Arc::from("digest"),
+                    listener_id: Arc::from(listener_id),
+                    route_id: None,
+                    client_bucket: None,
+                    strategy_id: None,
+                    transport: TransportClass::Datagram,
+                    qname: Arc::from("example.com."),
+                    qtype: 1,
+                    qclass: 1,
+                    outcome: OutcomeClass::Success,
+                    cache_status: CacheStatus::Miss,
+                    runtime_revision: RuntimeRevision(1),
+                })
+                .unwrap();
+        }
+        assert_eq!(writer.flush().committed, 2);
+        assert_eq!(worker.pending_len(), 2);
+        assert_eq!(worker.flush(deadline()).await.unwrap(), 1);
+        assert_eq!(worker.pending_len(), 1);
+        assert_eq!(worker.flush(deadline()).await.unwrap(), 1);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 2);
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_detail_writer_rejects_zero_queue_or_batch_capacity() {
+        let path = path();
+        let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
+        assert!(matches!(
+            SqliteResolveDetailWriter::channel(Arc::clone(&backend), 0, 1),
+            Err(SqliteResolveDetailWriterBuildError::ZeroCapacity)
+        ));
+        assert!(matches!(
+            SqliteResolveDetailWriter::channel(Arc::clone(&backend), 1, 0),
+            Err(SqliteResolveDetailWriterBuildError::ZeroBatchSize)
+        ));
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_detail_worker_retains_batch_when_backend_flush_fails() {
+        let path = path();
+        let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
+        let (sink, mut worker) =
+            SqliteResolveDetailWriter::channel(Arc::clone(&backend), 1, 1).unwrap();
+        let writer = ResolveLogWriter::new(true, 1, sink).unwrap();
+        writer
+            .try_record(ResolveEvent {
+                occurred_at: SystemTime::now(),
+                duration_started_at: Instant::now(),
+                request_digest: Arc::from("digest"),
+                listener_id: Arc::from("listener"),
+                route_id: None,
+                client_bucket: None,
+                strategy_id: None,
+                transport: TransportClass::Datagram,
+                qname: Arc::from("example.com."),
+                qtype: 1,
+                qclass: 1,
+                outcome: OutcomeClass::Success,
+                cache_status: CacheStatus::Miss,
+                runtime_revision: RuntimeRevision(1),
+            })
+            .unwrap();
+        assert_eq!(writer.flush().committed, 1);
+        backend.shutdown(deadline()).await.unwrap();
+        assert!(worker.flush(deadline()).await.is_err());
+        assert_eq!(worker.pending_len(), 1);
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));

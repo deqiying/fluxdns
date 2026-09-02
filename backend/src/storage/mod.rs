@@ -14,7 +14,10 @@ pub use resolve_log::{
     ResolveDetailRecord, ResolveDetailWriter, ResolveLogBuildError, ResolveLogFlushSummary,
     ResolveLogShutdownSummary, ResolveLogWriter,
 };
-pub use sqlite::{SqliteStorageBackend, SqliteStorageBackendBuildError};
+pub use sqlite::{
+    SqliteResolveDetailWorker, SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError,
+    SqliteStorageBackend, SqliteStorageBackendBuildError,
+};
 pub use statistics::{
     DimensionCount, PersistenceGapState, StatsAccumulator, StatsAccumulatorError, StatsSnapshot,
     day_utc,
