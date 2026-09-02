@@ -761,7 +761,8 @@ mod tests {
         let response = transport
             .post(
                 request,
-                Deadline::new(Instant::now() + Duration::from_secs(2)),
+                // Windows 本地 Rustls 冷启动可能超过 2s；该预算只用于握手测试，不改变生产配置。
+                Deadline::new(Instant::now() + Duration::from_secs(10)),
                 &cancellation,
             )
             .await

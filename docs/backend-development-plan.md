@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前执行至阶段 83（MVP 收敛验收），后续重点是按需补齐 v1 的安全扩展、真实故障复现和完整观测链路。
+> 状态：MVP v0.1 已完成；当前执行至阶段 84（修复 Rustls loopback 握手测试预算），后续重点是按需补齐 v1 的安全扩展、真实故障复现和完整观测链路。
 >
 > 更新日期：2026-09-02
 >
@@ -16,9 +16,9 @@
 - Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder`、首轮 `StorageRuntime` 生产接线、pending 内存保护/fatal 边界、首轮 degraded/recovery 状态边界及 adapter-level Busy/DiskFull fault 注入恢复分类；Observability 已完成低基数 metrics/health 基础和稳定 telemetry ports 的有界 writer/flush 边界。
 - MVP 后置项：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite busy/disk-full recovery、完整 upstream/group/资源详情元数据、final tracing subscriber、最终故障/压力/conformance 验收。
 
-> 注：阶段 83 后的当前数值以本节汇总表和“当前验证记录”为准；MVP 已完成不等于 v1 全部验收完成，后置项只在需要时推进。
+> 注：阶段 84 后的当前数值以本节汇总表和“当前验证记录”为准；MVP 已完成不等于 v1 全部验收完成，后置项只在需要时推进。
 
-阶段 83 已完成 MVP 收敛验收：保留配置严格校验、UDP/TCP/plain HTTP DoH、Policy/Cache/Upstream、SQLite stats/detail、受监督 task 和 graceful shutdown；完整 TLS/PROXY/forwarded、真实 OS 故障、全量详情元数据和 final subscriber 明确后置。MVP 验收执行全量 `cargo fmt --check`、`cargo clippy`，MVP 测试集 `455 passed、0 failed`（跳过 2 个非 MVP live HTTPS loopback 测试），并通过 `_fluxdns/mvp.yaml` 的 `validate`、UDP/TCP loopback 查询和 Ctrl-C 停机。完整测试仍观测到那 2 个 live HTTPS 测试在当前环境超时，未将其伪装为通过。
+阶段 84 已修复 Rustls loopback 握手测试预算：两个 live HTTPS 用例在 10s 测试 deadline 下分别通过；生产 adapter timeout 未改变。阶段 83 的 MVP 收敛范围仍有效：完整 TLS/PROXY/forwarded、真实 OS 故障、全量详情元数据和 final subscriber 属于 v1 后置项。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
@@ -32,6 +32,7 @@
 - 最近一次无排除的全量后端测试成功基线：`417 passed、0 failed`；阶段 83 的当前全量结果和 MVP 排除项见下一条。
 - 阶段 82 增量验证：对变更文件执行文件级 `rustfmt`，`dns::policy::tests::` `19 passed、0 failed`，并通过 `cargo check` 与 `cargo clippy`。
 - 阶段 83 MVP 验证：`cargo fmt --manifest-path backend/Cargo.toml --all -- --check` 通过；全量测试首次结果为 `455 passed、2 failed`，失败均为非 MVP live HTTPS loopback 测试超时；按 MVP 范围跳过这 2 项后为 `455 passed、0 failed`；`cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings` 通过。`cargo run --manifest-path backend/Cargo.toml -- validate --config _fluxdns/mvp.yaml` 通过；运行配置绑定 UDP `127.0.0.1:18353`、TCP `127.0.0.1:18354`，`doggo` 查询 `mvp.example.test` 均返回 `127.0.0.1`，Ctrl-C 后进程退出。既有 plain HTTP DoH `127.0.0.1:8355` GET/POST smoke 证据继续有效。
+- 阶段 84 增量验证：`upstream::reqwest_http::tests::performs_live_https_tls_handshake_with_verified_host` 与 `resource::fetcher::tests::performs_live_https_tls_handshake_with_verified_host` 各 `1 passed、0 failed`；仅调整测试 deadline 到 10s 并保留生产 timeout 不变，未重复全量 `cargo fmt/test`。
 - 小阶段只执行增量验证；完成大阶段时再执行全量后端测试。
 - `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy，adapter-level Busy/DiskFull fault 已有确定性注入恢复分类；Policy Core 已通过可选 observation 接口向 Stats/resolve detail 传播 strategy/source/cache/client bucket 首轮元数据；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，`StructuredTelemetryOutput` 已能写入真实文件/stderr，`run` 已在配置校验后切换共享输出目标和级别过滤，但尚未接入 typed final subscriber、degraded health 发布和监督任务；当前进度为后端 `70.9%`、v1 `73.8%`，OS/SQLite 真实故障和最终故障压力验收仍未完成。
 
@@ -319,8 +320,10 @@ transport / upstream / storage / observability adapters
 
 - MVP 必须项为严格配置校验、UDP/TCP/plain HTTP DoH、hosts/Policy/Cache/Upstream 主链路、SQLite stats/detail、受监督 task 和 graceful shutdown；
 - 本地 MVP 配置与运行数据仅位于 `_fluxdns/`，不进入 Git；
-- 全量测试中的 live HTTPS loopback 超时属于后置验证项，不阻塞 plain HTTP/本地 hosts MVP；
+- 阶段 83 首次全量测试中的 live HTTPS loopback 超时不阻塞 plain HTTP/本地 hosts MVP，阶段 84 已通过单独增量测试复验；
 - MVP 交付后，后续小阶段恢复“变更文件级 `rustfmt` + focused test/check”，只有新的大阶段结束才重复全量格式化和全量测试。
+
+小阶段索引 30（已完成）：将上游 DoH 与远程资源 Rustls loopback 测试 deadline 调整为适配当前 Windows 冷启动开销的 10s，仅影响测试预算，不改变生产 timeout。两个 live HTTPS handshake 定向测试均通过；完整 v1 压力与故障验收仍按后置路线推进。
 
 ### 阶段 10：刷新、故障注入和 v1 验收
 

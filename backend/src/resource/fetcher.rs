@@ -432,13 +432,10 @@ mod tests {
         let fetcher =
             ReqwestResourceFetcher::with_test_root_certificate(&[], 1024, &certificate_der)
                 .unwrap();
-        let result = fetcher
-            .fetch(request(
-                &format!("https://localhost:{}/rules", address.port()),
-                1024,
-            ))
-            .await
-            .unwrap();
+        let mut request = request(&format!("https://localhost:{}/rules", address.port()), 1024);
+        // Windows 本地 Rustls 冷启动可能超过 2s；该预算只用于握手测试，不改变生产配置。
+        request.deadline = Deadline::new(Instant::now() + Duration::from_secs(10));
+        let result = fetcher.fetch(request).await.unwrap();
         assert_eq!(&*result.body, b"tls-rule");
         task.await.unwrap();
     }
