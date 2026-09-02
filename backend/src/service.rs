@@ -3,6 +3,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -20,7 +21,9 @@ use crate::ports::PortErrorClass;
 use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
-use crate::ports::storage::{ResolveEvent, ResolveEventSink, StatsDimension};
+use crate::ports::storage::{
+    ResolveEvent, ResolveEventDisposition, ResolveEventSink, StatsDimension,
+};
 use crate::ports::telemetry::{
     CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
     ConfiguredIdKind, HealthSink, LogSink, OutcomeClass, configured_id_from_validated,
@@ -707,6 +710,7 @@ fn instrumented_core(
         inner: core,
         stats_worker,
         resolve_event_sink,
+        resolve_detail_drops: ResolveDetailDropCounters::default(),
     })
 }
 
@@ -714,6 +718,43 @@ struct ObservedDnsCore {
     inner: Arc<dyn DnsCore>,
     stats_worker: Option<Arc<StatsPersistenceWorker>>,
     resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
+    resolve_detail_drops: ResolveDetailDropCounters,
+}
+
+#[derive(Default)]
+struct ResolveDetailDropCounters {
+    queue_full: AtomicU64,
+    policy: AtomicU64,
+}
+
+impl ResolveDetailDropCounters {
+    /// 累计详情记录的明确丢弃，并按 2 的幂次输出限频状态事件。
+    fn record(&self, disposition: ResolveEventDisposition) {
+        let (reason, counter) = match disposition {
+            ResolveEventDisposition::DroppedQueueFull => ("queue_full", &self.queue_full),
+            ResolveEventDisposition::DroppedByPolicy => ("policy", &self.policy),
+            ResolveEventDisposition::Accepted | ResolveEventDisposition::Disabled => return,
+        };
+        let dropped_total = counter.fetch_add(1, Ordering::Relaxed).saturating_add(1);
+        if dropped_total.is_power_of_two() {
+            tracing::warn!(
+                event = "resolve_detail_record_dropped",
+                component = "storage",
+                reason,
+                dropped_total,
+                "resolve_detail_record_dropped"
+            );
+        }
+    }
+
+    #[cfg(test)]
+    fn load(&self, disposition: ResolveEventDisposition) -> u64 {
+        match disposition {
+            ResolveEventDisposition::DroppedQueueFull => self.queue_full.load(Ordering::Relaxed),
+            ResolveEventDisposition::DroppedByPolicy => self.policy.load(Ordering::Relaxed),
+            ResolveEventDisposition::Accepted | ResolveEventDisposition::Disabled => 0,
+        }
+    }
 }
 
 impl DnsCore for ObservedDnsCore {
@@ -823,14 +864,17 @@ impl ObservedDnsCore {
                 .unwrap_or(CacheStatus::Disabled),
             runtime_revision: request.context.runtime_revision,
         };
-        if let Err(error) = sink.try_record(event) {
-            tracing::warn!(
-                event = "resolve_detail_record_failed",
-                component = "storage",
-                class = error.class().as_str(),
-                operation = error.operation(),
-                "resolve_detail_record_failed"
-            );
+        match sink.try_record(event) {
+            Ok(disposition) => self.resolve_detail_drops.record(disposition),
+            Err(error) => {
+                tracing::warn!(
+                    event = "resolve_detail_record_failed",
+                    component = "storage",
+                    class = error.class().as_str(),
+                    operation = error.operation(),
+                    "resolve_detail_record_failed"
+                );
+            }
         }
     }
 }
@@ -1990,8 +2034,8 @@ mod tests {
     use tokio::net::UdpSocket;
 
     use super::{
-        ServiceError, capabilities, publish_component_health, spawn_telemetry_task,
-        spawn_transport_task, task_failure,
+        ResolveDetailDropCounters, ServiceError, capabilities, publish_component_health,
+        spawn_telemetry_task, spawn_transport_task, task_failure,
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
@@ -1999,6 +2043,7 @@ mod tests {
         TransportClass,
     };
     use crate::observability::{TelemetryOutput, TelemetryWriter};
+    use crate::ports::storage::ResolveEventDisposition;
     use crate::ports::telemetry::{
         Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState, LogEvent,
         LogLevel, MetricEvent,
@@ -2014,6 +2059,21 @@ mod tests {
         logs: AtomicUsize,
         metrics: AtomicUsize,
         health: AtomicUsize,
+    }
+
+    #[test]
+    fn resolve_detail_drops_are_counted_by_reason() {
+        let counters = ResolveDetailDropCounters::default();
+
+        counters.record(ResolveEventDisposition::Accepted);
+        counters.record(ResolveEventDisposition::Disabled);
+        counters.record(ResolveEventDisposition::DroppedQueueFull);
+        counters.record(ResolveEventDisposition::DroppedQueueFull);
+        counters.record(ResolveEventDisposition::DroppedByPolicy);
+
+        assert_eq!(counters.load(ResolveEventDisposition::DroppedQueueFull), 2);
+        assert_eq!(counters.load(ResolveEventDisposition::DroppedByPolicy), 1);
+        assert_eq!(counters.load(ResolveEventDisposition::Accepted), 0);
     }
 
     impl TelemetryOutput for CountingTelemetryOutput {
