@@ -2,7 +2,7 @@
 
 > 状态：MVP v0.1 已完成；当前已完成至阶段 117（Application service reload loopback 回归）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
 >
-> 更新日期：2026-09-02
+> 更新日期：2026-09-03
 >
 > 总体架构：[backend-architecture.md](backend-architecture.md) · 配置契约：[configuration-reference.md](configuration-reference.md)
 
@@ -98,45 +98,17 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
 | 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 117 |
 
-### 最新增量记录
+### 增量里程碑
 
-- 阶段 83：MVP 验收。全量首次结果为 `455 passed、2 failed`，失败为非 MVP live HTTPS loopback 超时；按 MVP 范围为 `455 passed、0 failed`。既有 plain DoH smoke 继续有效。
-- 阶段 84：两个 live HTTPS loopback 测试 deadline 调整为 10s，各 `1 passed、0 failed`；未改变生产 timeout。
-- 阶段 85：selected upstream/group ID 进入 stats 有界维度和 resolve detail 存在性标记；定向测试通过。
-- 阶段 86：DoH `forwarded_header` trusted peer、链解析、missing/invalid fallback；`12 passed、0 failed`。
-- 阶段 87：DoH PROXY v1/v2、分片、TCP4/TCP6、长度上限和 trusted peer；`14 passed、0 failed`。
-- 阶段 88：DoH TLS terminate 首轮。PEM/DER cert chain/private key 加载和匹配，显式 ring provider 的 TLS 1.2/1.3，PROXY 前导消费后 TLS upgrade；system socket `1 passed、0 failed`，DoH 定向测试 `16 passed、0 failed`。
-- 阶段 89：配置 watcher 增加内容 fingerprint，与 metadata 一起做两次稳定轮询；相同长度内容变更定向测试 `2 passed、0 failed`，未跨越模块进度档位。
-- 阶段 90：将 `TelemetryWriter` 接入 `DnsService` 的 Supervisor 周期 flush 和 shutdown；生产输出复用现有 tracing 目标，Telemetry flush task 定向测试 `1 passed、0 failed`，Observability focused tests `17 passed、0 failed`。
-- 阶段 91：增加可 reload 的 typed tracing layer；配置校验后替换 bootstrap `fmt` layer，安全提取 `event/component/result/revision` 字段并写入 `TelemetryWriter`，typed layer focused test `1 passed、0 failed`，Observability focused tests `18 passed、0 failed`。
-- 阶段 92：将 Storage/Telemetry/Supervisor 的状态转换发布为 `ComponentHealthEvent`，覆盖 healthy/degraded/failed/stopping；健康事件 bounded telemetry focused test `1 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 93：结构化文件/共享输出失败时尝试安全 stderr fallback，两个输出均失败才保留队列并报告错误；fallback focused test `1 passed、0 failed`，Observability focused tests `19 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 94：Resource refresh task 接入同一 health publish 路径，覆盖启动 healthy、刷新成功 healthy、刷新失败 degraded 和 worker 缺失 failed；service focused suite `29 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 95：统一监听 `SIGINT`/Unix `SIGTERM`，优雅停机期间再次收到终止信号立即返回运行期错误；service focused suite `29 passed、0 failed`，Windows 编译通过，Unix `SIGTERM` runtime smoke 尚未执行，未重复全量 `cargo fmt/test`。
-- 阶段 96：`TelemetryWriter` 对同一组件健康事件归一化 `first_seen/last_changed/last_success/retry_count/persistence_gap`，避免刷新和重试重置生命周期字段；Observability focused tests `20 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 97：新增文件快照与 SQLite cache persistence 的共享 contract test，覆盖 persist/recover 的 live/expired 隔离、记录字段一致性、容量维护和 shutdown 后拒绝操作；cache persistence contract `1 passed、0 failed`，文件 persistence `6 passed、0 failed`，SQLite persistence `3 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 98：为 SQLite cache persistence 增加 test-only Busy/DiskFull 一次性故障注入，验证失败批次不发布且后续写入可恢复；SQLite fault focused test `1 passed、0 failed`，未重复全量 `cargo fmt/test`，真实 OS/SQLite 故障仍未宣称通过。
-- 阶段 99：统一文件与 SQLite adapter 的 `maintain_capacity` 过期/损坏/不兼容记录移除计数，并由共享 contract 覆盖过期清理后恢复结果；cache persistence contract `1 passed、0 failed`，SQLite persistence `4 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 100：SQLite cache DB 新增并校验 `schema/cache/key format` metadata；重开遇到版本不匹配时拒绝 adapter；SQLite persistence `5 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 101：SQLite cache adapter 新增主库/WAL/SHM 磁盘占用观测 API，并验证总量计算与 shutdown 边界；SQLite persistence `5 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 102：`ActiveRuntime` 新增 deadline-aware `wait_for_drain`，由请求 guard 归零通知，并接入 `DnsService::shutdown`；Runtime drain focused `1 passed、0 failed`，service focused `29 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 103：`RuntimeCoordinator` 保留 reload 后的 draining Runtime owner，shutdown 统一等待当前与旧 Runtime 的 request guard，并在完成后清理 owner；Runtime coordinator focused `11 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 104：Runtime 激活时惰性清理已无请求的旧 draining owner，避免连续 reload 长期累积 Runtime；Runtime coordinator focused `12 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 105：parallel upstream 的 late-attempt drain 改由 `LateResultSink` 接管，生产路径复用有界 `LateCacheFinalizer`，避免 executor 直接创建 detached task；upstream executor focused `12 passed、0 failed`，Policy focused `19 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 106：parallel 在提供 `LateResultSink` 时对首个可停止 DNS 终态快速返回，并由 sink 继续 drain 慢速 attempt；新增快速 NoData/慢速 Positive 验证；upstream executor focused `13 passed、0 failed`，Policy focused `19 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 107：`RuntimeCoordinator` 统一标记当前及历史 Runtime 为 draining，`DnsService::shutdown` 不再依赖可能过期的 service runtime 句柄；Runtime coordinator focused `13 passed、0 failed`，service focused `29 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 108：Supervisor 运行期 fatal/panic 分支改由 `RuntimeCoordinator` 统一标记当前及历史 Runtime draining，避免外部切换后仅标记过期 service runtime；新增跨切换 fatal 回归，coordinator `13 passed、0 failed` 与 service `30 passed、0 failed` focused 证据，未重复全量 `cargo fmt/test`。
-- 阶段 109：保留独立的跨 Runtime fatal drain 回归测试，确认 coordinator 切换后旧/新 owner 均进入 draining 且错误仍按 `TaskFailure` 返回；service focused `30 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 110：`PolicyLateResultSink` 在 late 写入前读取当前 cache 记录，以 `ResponseClass` 偏好和 `CacheCondition::Version` 允许更优 Positive 替换早期 Negative，同时拒绝同等级覆盖；Policy focused `20 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 111：late sink 改用现有 `CacheEntry.quality` 作为当前记录权威，并补齐 Positive 提升、同级 Negative/Positive 保持和 Failure 不覆盖回归；Policy focused `21 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 112：补充旧 Runtime late sink 在 current-target 切换后写入最新 Runtime cache 的回归，并确认旧 cache 保持 miss；Policy focused `22 passed、0 failed`，仅增加跨 Runtime 证据，未跨越模块进度档位，未重复全量 `cargo fmt/test`。
-- 阶段 113：Runtime owner 淘汰时清理无活动 `LateCacheFinalizer` owner，仍有活动 late task 的 owner 保留；Runtime coordinator focused `14 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 114：补充活动 late task 的旧 `LateCacheFinalizer` owner 在多次 Runtime reload 后仍保留的回归；Runtime coordinator focused `15 passed、0 failed`，仅增加生命周期证据，未重复全量 `cargo fmt/test`。
-- 阶段 115：增加运行中 UDP service 对资源 refresh live publish 的端到端回归，确认同一 listener 在刷新后可立即返回新 hosts 记录；service focused suite `31 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 116：修正 `PolicyDnsCore` 缓存 facade 对 `dns.cache.enabled`/`optimistic.enabled` 的配置读取，并增加开关契约回归；Policy focused suite `23 passed、0 failed`，未重复全量 `cargo fmt/test`。
-- 阶段 117：增加 `reload_service_from_path` 的 UDP loopback 回归，确认配置 reload 后 revision、listener 端口和 Policy hosts 结果同步切换；Application focused suite `10 passed、0 failed`，Application 进度由 55% 调整为 60%，未重复全量 `cargo fmt/test`。
+| 阶段 | 合并结论 | 核心证据 |
+| --- | --- | --- |
+| 83 | MVP v0.1 验收 | MVP 范围 `455 passed、0 failed`；plain DoH smoke 有效 |
+| 84–96 | DoH TLS/PROXY/forwarded、配置 watcher、Telemetry/health、信号处理首轮 | transport、service、observability focused suites |
+| 97–101 | 文件/SQLite cache persistence contract、故障分类、metadata、WAL/SHM 占用观测 | persistence contract 与 SQLite focused suites |
+| 102–114 | 跨 Runtime drain/owner、受控 late-attempt、latest-target cache 写入和 finalizer 清理 | coordinator 15 项、Policy 22 项及 service focused suites |
+| 115–117 | 运行中资源 live publish、cache 开关契约、Application service reload | service 31 项、Policy 23 项、Application 10 项均通过 |
 
-### 最近小阶段（117）验证命令
+### 当前阶段验证
 
 ```text
 rustfmt --edition 2024 backend/src/app.rs
@@ -144,7 +116,7 @@ cargo test --manifest-path backend/Cargo.toml --locked --offline app::tests:: --
 git diff --check
 ```
 
-以上均通过；阶段 117 未重复全量 `cargo fmt/test`。阶段 116 的缓存开关配置、阶段 115 的运行中资源 live publish、阶段 114 的活动 finalizer owner 保留、阶段 113 的无活动 finalizer owner 清理、阶段 112 的跨 Runtime late sink、阶段 111 的 late cache 质量边界、阶段 110 的 late cache 候选首轮验证、阶段 109 的跨 Runtime fatal drain、阶段 108 的统一 Runtime fatal drain、阶段 107 的统一 shutdown drain、阶段 106 的 parallel terminal response、阶段 105 的受控 late-attempt drain、阶段 104 的 Runtime owner pruning、阶段 103 的跨 Runtime drain focused test、阶段 102 的当前 Runtime drain focused test、阶段 101 的 SQLite disk usage focused test、阶段 100 的 metadata schema contract、阶段 99 的容量维护 contract、阶段 98 的 SQLite fault focused test、阶段 97 的 cache persistence contract、阶段 96 的 health lifecycle focused test、阶段 95 的 SIGINT/SIGTERM 编译验证、阶段 94 的 Resource health focused test、阶段 93 的 fallback focused test、阶段 92 的 health publish focused test、阶段 91 的 typed tracing focused test、阶段 90 的 telemetry flush focused test、阶段 89 的 config watcher focused test及阶段 88 的 system socket/DoH focused tests 证据保留在对应提交中。
+以上均通过；阶段 117 未重复全量 `cargo fmt/test`。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 
