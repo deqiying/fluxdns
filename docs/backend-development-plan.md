@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成；当前执行至阶段 77（SQLite adapter fault 注入与 degraded/recovery 分类），后续重点是 SQLite 真实故障复现、真实 telemetry 输出接线和 v1 验收。
+> 状态：v1 模块方案已完成；当前执行至阶段 78（策略解析 source/cache/strategy 元数据传播），后续重点是 SQLite 真实故障复现、真实 telemetry 输出接线和 v1 验收。
 >
 > 更新日期：2026-09-02
 >
@@ -14,24 +14,24 @@
 
 - 已完成主链路：Config 严格加载与校验、Runtime 候选/激活/受管 task、UDP/TCP/DoH plain HTTP、Upstream direct/group/proxy、Policy/Resource 首次快照与 live publish、Cache memory/Moka/SQLite 首轮 adapter。
 - Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder`、首轮 `StorageRuntime` 生产接线、pending 内存保护/fatal 边界、首轮 degraded/recovery 状态边界及 adapter-level Busy/DiskFull fault 注入恢复分类；Observability 已完成低基数 metrics/health 基础和稳定 telemetry ports 的有界 writer/flush 边界。
-- 当前未完成：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite busy/disk-full recovery、完整 source/cache/strategy 详情元数据、final tracing subscriber/真实输出与 supervisor 接线、最终故障/压力/conformance 验收。
+- 当前未完成：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite busy/disk-full recovery、完整 upstream/group/资源详情元数据、final tracing subscriber/真实输出与 supervisor 接线、最终故障/压力/conformance 验收。
 
-> 注：阶段 77 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
+> 注：阶段 78 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
 
-阶段 77 已完成 SQLite adapter-level Busy/DiskFull fault 注入与恢复分类：execute/detail transaction 内部 `Unavailable` 会进入 `Degraded`，下一次成功的有限操作恢复 `Healthy`；OS/SQLite 真实故障仍单独追踪。最近一次大阶段全量测试为 417 passed、0 failed；本阶段增量测试为 `storage::sqlite::tests::injected_busy_and_disk_full` 1 项通过；阶段 76 的 telemetry writer 5 项增量证据保持不变。
+阶段 78 已完成策略 Core 到观测/存储的首轮元数据传播：同一份策略判定现在提供 strategy、answer source 和 cache status，Stats/resolve detail 不再从请求字段猜测；SQLite `resolve_log.source` 写入受控枚举值。最近一次大阶段全量测试为 417 passed、0 failed；本阶段增量测试为 policy observation 1 项、Policy focused 18 项、SQLite focused 13 项和 resolve-log focused 6 项，均通过；阶段 77 的 adapter fault 注入证据保持不变。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **69.4%** | 主要请求、Runtime、策略、资源、缓存、Storage 和 telemetry writer 首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站安全边界、SQLite busy/disk-full 故障注入与恢复验收、完整详情元数据、final tracing/真实输出接线及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
-| v1 交付总进度 | **72.5%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 69.4%` |
+| 后端代码实现进度 | **70.1%** | 主要请求、Runtime、策略、资源、缓存、Storage、观测元数据和 telemetry writer 首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站安全边界、SQLite busy/disk-full 故障注入与恢复验收、完整 upstream/group/资源详情元数据、final tracing/真实输出接线及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
+| v1 交付总进度 | **73.1%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 70.1%` |
 
 ### 当前验证记录
 
 - 最近一次大阶段全量后端测试：`417 passed、0 failed`。
-- 当前阶段（阶段 77）增量测试：`storage::sqlite::tests::injected_busy_and_disk_full`，`1 passed、0 failed`；阶段 76 的 `observability::tests::telemetry_writer` `5 passed、0 failed`、阶段 75 的 `storage::sqlite::tests` `12 passed、0 failed` 及此前阶段（阶段 74）的 stats/service 增量证据均保持通过。
+- 当前阶段（阶段 78）增量测试：`dns::policy::tests::` `18 passed、0 failed`、`storage::sqlite::tests::` `13 passed、0 failed`、`storage::resolve_log::tests::` `6 passed、0 failed`；阶段 77 的 `storage::sqlite::tests::injected_busy_and_disk_full` `1 passed、0 failed`、阶段 76 的 `observability::tests::telemetry_writer` `5 passed、0 failed` 及此前阶段的 stats/service 增量证据均保持通过。
 - 小阶段只执行增量验证；完成大阶段时再执行全量后端测试。
-- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy，adapter-level Busy/DiskFull fault 已有确定性注入恢复分类；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，但尚未接入 final subscriber/真实 output；当前进度保持后端 `69.4%`、v1 `72.5%`，OS/SQLite 真实故障和最终故障压力验收仍未完成。
+- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy，adapter-level Busy/DiskFull fault 已有确定性注入恢复分类；Policy Core 已通过可选 observation 接口向 Stats/resolve detail 传播 strategy/source/cache；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，但尚未接入 final subscriber/真实 output；当前进度为后端 `70.1%`、v1 `73.1%`，OS/SQLite 真实故障和最终故障压力验收仍未完成。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -75,18 +75,18 @@ v1 交付范围：
 | Config | `backend/src/config/*` | [config.md](backend-modules/config.md) | 已完成 | 已验证 | 100% | 10% |
 | Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 65% | 12% |
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
-| DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 55% | 10% |
+| DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 60% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 70% | 8% |
 | Upstream | `backend/src/upstream/*` | [upstream.md](backend-modules/upstream.md) | 已完成 | 实现中 | 99% | 10% |
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 66% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 90% | 7% |
-| Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 80% | 8% |
+| Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 82% | 8% |
 | Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 50% | 3% |
 
 后端代码实现总进度：
 
 ```text
-4% × 55% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 50% + 10% × 55% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 80% + 3% × 50% ≈ 69.4%
+4% × 55% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 50% + 10% × 60% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 82% + 3% × 50% ≈ 70.1%
 ```
 
 ## 4. 进度判定规则
@@ -132,7 +132,7 @@ transport / upstream / storage / observability adapters
 
 ### 后续开发路线（基于 2026-09-02 当前状态）
 
-当前后端代码实现进度为 69.4%，v1 交付进度为 72.5%。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker、统一生命周期 facade、首轮服务生产接线、pending 内存保护边界及首轮 degraded/recovery 状态转换；Observability 已完成稳定 telemetry ports 的有界 writer/flush 边界。后续按“Runtime 生命周期 → Storage/Observability 完整性 → DoH 安全边界 → v1 验收”推进，不按文档完成度虚增进度。
+当前后端代码实现进度为 70.1%，v1 交付进度为 73.1%。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker、统一生命周期 facade、首轮服务生产接线、pending 内存保护边界、首轮 degraded/recovery 状态转换及 policy source/cache/strategy 元数据落库；Observability 已完成稳定 telemetry ports 的有界 writer/flush 边界。后续按“Runtime 生命周期 → Storage/Observability 完整性 → DoH 安全边界 → v1 验收”推进，不按文档完成度虚增进度。
 
 | 顺序 | 目标 | 主要范围 | 退出条件 |
 | --- | --- | --- | --- |
@@ -301,7 +301,9 @@ transport / upstream / storage / observability adapters
 
 小阶段索引 25（已完成）：为 SQLite execute/detail transaction 增加受 `cfg(test)` 限定的 `InjectedSqliteFault::{Busy,DiskFull}`，修正内部 `Unavailable` 错误进入 `Degraded` 的状态转换，并验证下一次成功操作恢复 `Healthy`；`storage::sqlite::tests::injected_busy_and_disk_full` 增量测试 `1 passed、0 failed`。OS/SQLite 真实故障复现仍待后续验收。
 
-阶段 9 当前边界：OS/SQLite 真实 busy/disk-full 故障复现与恢复验收、完整 source/cache/strategy 详情元数据、final tracing subscriber/真实 telemetry output、degraded health 发布、supervisor 接线和最终故障注入仍未完成；adapter-level fault 注入已完成。
+小阶段索引 26（已完成）：为 `DnsCore` 增加可选 observation 接口，Policy Core 统一返回生效 strategy、answer source 和 cache status；`ObservedDnsCore` 将其写入 stats 维度与 resolve detail，SQLite `resolve_log.source` 使用受控枚举值。增量测试为 `dns::policy::tests::` `18 passed、0 failed`、`storage::sqlite::tests::` `13 passed、0 failed` 和 `storage::resolve_log::tests::` `6 passed、0 failed`。
+
+阶段 9 当前边界：OS/SQLite 真实 busy/disk-full 故障复现与恢复验收、完整 upstream/group/资源详情元数据、final tracing subscriber/真实 telemetry output、degraded health 发布、supervisor 接线和最终故障注入仍未完成；adapter-level fault 注入及 policy source/cache/strategy 首轮传播已完成。
 
 ### 阶段 10：刷新、故障注入和 v1 验收
 
@@ -314,7 +316,7 @@ transport / upstream / storage / observability adapters
 
 小阶段索引 36～58（均已完成）：完成 RuntimeCoordinator/Resource worker 生命周期、Supervisor 有界重试与 scoped cancellation、精确 task 归因、配置 fingerprint 自动 reload、listener 复用与 rebind、跨 Runtime 资源状态合并、LateCacheFinalizer owner、最新 Runtime 路由和 resource worker 增量协调。
 
-代表性验证：Runtime/Service/Application focused tests、loopback listener/resource reload 和并发快照测试均通过；最近一次大阶段全量基线为 `417 passed、0 failed`。当前仍未完成完整跨 Runtime candidate 生命周期、resource-only swap、listener 自动重建、Storage degraded recovery、telemetry flush 与最终故障矩阵；具体边界见 [runtime.md](backend-modules/runtime.md)、[application.md](backend-modules/application.md) 和 [cache.md](backend-modules/cache.md)。
+代表性验证：Runtime/Service/Application focused tests、loopback listener/resource reload 和并发快照测试均通过；最近一次大阶段全量基线为 `417 passed、0 failed`。当前仍未完成完整跨 Runtime candidate 生命周期、resource-only swap、listener 自动重建、SQLite 真实故障复现、final telemetry output 与最终故障矩阵；具体边界见 [runtime.md](backend-modules/runtime.md)、[application.md](backend-modules/application.md) 和 [cache.md](backend-modules/cache.md)。
 
 ## 6. 阶段提交规则
 

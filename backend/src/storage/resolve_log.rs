@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::dns::{RuntimeRevision, TransportClass};
+use crate::ports::storage::StatsSource;
 use crate::ports::storage::{ResolveEvent, ResolveEventDisposition, ResolveEventSink};
 use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 use crate::ports::{PortError, PortErrorClass};
@@ -28,6 +29,7 @@ pub struct ResolveDetailRecord {
     qtype: u16,
     qclass: u16,
     outcome: OutcomeClass,
+    source: StatsSource,
     cache_status: CacheStatus,
     runtime_revision: RuntimeRevision,
 }
@@ -52,6 +54,7 @@ impl ResolveDetailRecord {
             qtype: event.qtype,
             qclass: event.qclass,
             outcome: event.outcome,
+            source: event.source,
             cache_status: event.cache_status,
             runtime_revision: event.runtime_revision,
         })
@@ -105,6 +108,10 @@ impl ResolveDetailRecord {
         self.outcome
     }
 
+    pub const fn source(&self) -> StatsSource {
+        self.source
+    }
+
     pub const fn cache_status(&self) -> CacheStatus {
         self.cache_status
     }
@@ -130,6 +137,7 @@ impl fmt::Debug for ResolveDetailRecord {
             .field("qtype", &self.qtype)
             .field("qclass", &self.qclass)
             .field("outcome", &self.outcome)
+            .field("source", &self.source)
             .field("cache_status", &self.cache_status)
             .field("runtime_revision", &self.runtime_revision)
             .finish()
@@ -326,7 +334,9 @@ mod tests {
     use std::time::{Instant, SystemTime};
 
     use crate::dns::{RuntimeRevision, TransportClass};
-    use crate::ports::storage::{ResolveEvent, ResolveEventDisposition, ResolveEventSink};
+    use crate::ports::storage::{
+        ResolveEvent, ResolveEventDisposition, ResolveEventSink, StatsSource,
+    };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
     use crate::ports::{PortError, PortErrorClass};
 
@@ -387,6 +397,7 @@ mod tests {
             qtype: 1,
             qclass: 1,
             outcome: OutcomeClass::Success,
+            source: StatsSource::Upstream,
             cache_status: CacheStatus::Miss,
             runtime_revision: RuntimeRevision(7),
         }
@@ -409,6 +420,7 @@ mod tests {
         assert!(record.has_client_bucket());
         assert!(record.has_strategy());
         assert!(record.has_request_digest());
+        assert_eq!(record.source(), StatsSource::Upstream);
         let debug = format!("{record:?}");
         for sensitive in [
             "listener-public",

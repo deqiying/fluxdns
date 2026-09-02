@@ -355,6 +355,7 @@ pub struct ResolveEvent {
     pub qtype: u16,
     pub qclass: u16,
     pub outcome: OutcomeClass,
+    pub source: StatsSource,
     pub cache_status: CacheStatus,
     pub runtime_revision: RuntimeRevision,
 }
@@ -375,6 +376,7 @@ impl fmt::Debug for ResolveEvent {
             .field("qtype", &self.qtype)
             .field("qclass", &self.qclass)
             .field("outcome", &self.outcome)
+            .field("source", &self.source)
             .field("cache_status", &self.cache_status)
             .field("runtime_revision", &self.runtime_revision)
             .finish()
@@ -470,6 +472,7 @@ mod tests {
             qtype: 1,
             qclass: 1,
             outcome: OutcomeClass::Success,
+            source: StatsSource::Upstream,
             cache_status: CacheStatus::Miss,
             runtime_revision: RuntimeRevision(7),
         };

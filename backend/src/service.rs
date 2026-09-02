@@ -20,7 +20,9 @@ use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
 use crate::ports::storage::{ResolveEvent, ResolveEventSink, StatsDimension};
-use crate::ports::telemetry::{CacheStatus, OutcomeClass};
+use crate::ports::telemetry::{
+    CacheStatus, ConfiguredIdKind, OutcomeClass, configured_id_from_validated,
+};
 use crate::runtime::{
     ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
     BoundListenerSet, FaultLevel, PreparedRuntime, RefreshedResourceSnapshot,
@@ -532,23 +534,40 @@ impl DnsCore for ObservedDnsCore {
         request: &'a DnsRequest,
     ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
         Box::pin(async move {
-            let result = self.inner.resolve(request).await;
-            self.record(request, &result);
+            let (result, observation) = self.inner.resolve_with_observation(request).await;
+            self.record(request, &result, observation.as_ref());
             result
         })
     }
 }
 
 impl ObservedDnsCore {
-    fn record(&self, request: &DnsRequest, result: &Result<CoreOutcome, CoreError>) {
+    fn record(
+        &self,
+        request: &DnsRequest,
+        result: &Result<CoreOutcome, CoreError>,
+        observation: Option<&crate::dns::DnsResolutionObservation>,
+    ) {
         let outcome = outcome_class(request, result);
         if let Some(worker) = &self.stats_worker {
             match day_utc(request.context.meta.received_at_utc) {
                 Ok(day) => {
-                    let dimensions = vec![
+                    let mut dimensions = vec![
                         StatsDimension::transport(request.context.transport.class),
                         StatsDimension::attempt_outcome(outcome),
                     ];
+                    if let Some(observation) = observation {
+                        dimensions.push(StatsDimension::source(observation.source));
+                        dimensions.push(StatsDimension::cache_status(observation.cache_status));
+                        if let Some(strategy_id) =
+                            observation.strategy_id.as_deref().and_then(|id| {
+                                configured_id_from_validated(ConfiguredIdKind::Strategy, id)
+                            })
+                            && let Ok(dimension) = StatsDimension::strategy(strategy_id)
+                        {
+                            dimensions.push(dimension);
+                        }
+                    }
                     if let Err(_error) = worker.record_request(day, dimensions) {
                         tracing::warn!(
                             event = "stats_record_failed",
@@ -585,13 +604,18 @@ impl ObservedDnsCore {
                 .as_ref()
                 .map(|route| Arc::from(route.as_ref())),
             client_bucket: None,
-            strategy_id: None,
+            strategy_id: observation.and_then(|value| value.strategy_id.clone()),
             transport: request.context.transport.class,
             qname: Arc::from(question.name().to_ascii()),
             qtype: u16::from(question.query_type()),
             qclass: u16::from(question.query_class()),
             outcome,
-            cache_status: CacheStatus::Disabled,
+            source: observation
+                .map(|value| value.source)
+                .unwrap_or(crate::ports::storage::StatsSource::Upstream),
+            cache_status: observation
+                .map(|value| value.cache_status)
+                .unwrap_or(CacheStatus::Disabled),
             runtime_revision: request.context.runtime_revision,
         };
         if let Err(error) = sink.try_record(event) {

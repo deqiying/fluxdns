@@ -877,7 +877,7 @@ async fn apply_resolve_records_with_limits(
         .bind(canonical_qname)
         .bind(i64::from(record.qtype()))
         .bind(i64::from(record.qclass()))
-        .bind(Option::<&str>::None)
+        .bind(stats_source_name(record.source()))
         .bind(Option::<&str>::None)
         .bind(0_i64)
         .bind(cache_status_name(record.cache_status()))
@@ -920,6 +920,15 @@ fn cache_status_name(value: crate::ports::telemetry::CacheStatus) -> &'static st
     }
 }
 
+fn stats_source_name(value: crate::ports::storage::StatsSource) -> &'static str {
+    match value {
+        crate::ports::storage::StatsSource::Cache => "cache",
+        crate::ports::storage::StatsSource::Hosts => "hosts",
+        crate::ports::storage::StatsSource::RuleSet => "rule_set",
+        crate::ports::storage::StatsSource::Upstream => "upstream",
+    }
+}
+
 fn check_deadline(deadline: Deadline, operation: &'static str) -> Result<(), PortError> {
     if deadline.is_expired(Instant::now()) {
         Err(PortError::new(PortErrorClass::Timeout, operation))
@@ -950,8 +959,8 @@ mod tests {
     };
     use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
-        ResolveEvent, ResolveEventSink, SchemaVersion, StatsBatch, StatsEvent, StorageBackend,
-        StorageOperation, StorageTransaction,
+        ResolveEvent, ResolveEventSink, SchemaVersion, StatsBatch, StatsEvent, StatsSource,
+        StorageBackend, StorageOperation, StorageTransaction,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
     use crate::storage::ResolveLogWriter;
@@ -1184,6 +1193,7 @@ mod tests {
                 qtype: 1,
                 qclass: 1,
                 outcome: OutcomeClass::Success,
+                source: StatsSource::Upstream,
                 cache_status: CacheStatus::Miss,
                 runtime_revision: RuntimeRevision(3),
             }])],
@@ -1195,7 +1205,7 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         let row = sqlx::query(
-            "SELECT request_id_digest, route_id, client_bucket, strategy_id, canonical_qname \
+            "SELECT request_id_digest, route_id, client_bucket, strategy_id, canonical_qname, source \
              FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
@@ -1227,6 +1237,7 @@ mod tests {
             row.try_get::<String, _>("canonical_qname").unwrap(),
             "len:12"
         );
+        assert_eq!(row.try_get::<String, _>("source").unwrap(), "upstream");
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
@@ -1255,6 +1266,7 @@ mod tests {
                     qtype: 1,
                     qclass: 1,
                     outcome: OutcomeClass::Success,
+                    source: StatsSource::Upstream,
                     cache_status: CacheStatus::Miss,
                     runtime_revision: RuntimeRevision(1),
                 })
@@ -1315,6 +1327,7 @@ mod tests {
                 qtype: 1,
                 qclass: 1,
                 outcome: OutcomeClass::Success,
+                source: StatsSource::Upstream,
                 cache_status: CacheStatus::Miss,
                 runtime_revision: RuntimeRevision(1),
             })
@@ -1352,6 +1365,7 @@ mod tests {
                     qtype: 1,
                     qclass: 1,
                     outcome: OutcomeClass::Success,
+                    source: StatsSource::Upstream,
                     cache_status: CacheStatus::Miss,
                     runtime_revision: RuntimeRevision(1),
                 })
@@ -1377,6 +1391,7 @@ mod tests {
                 qtype: 1,
                 qclass: 1,
                 outcome: OutcomeClass::Success,
+                source: StatsSource::Upstream,
                 cache_status: CacheStatus::Miss,
                 runtime_revision: RuntimeRevision(1),
             })
@@ -1424,6 +1439,7 @@ mod tests {
                     qtype: 1,
                     qclass: 1,
                     outcome: OutcomeClass::Success,
+                    source: StatsSource::Upstream,
                     cache_status: CacheStatus::Miss,
                     runtime_revision: RuntimeRevision(1),
                 })
@@ -1469,6 +1485,7 @@ mod tests {
                     qtype: 1,
                     qclass: 1,
                     outcome: OutcomeClass::Success,
+                    source: StatsSource::Upstream,
                     cache_status: CacheStatus::Miss,
                     runtime_revision: RuntimeRevision(1),
                 })
@@ -1511,6 +1528,7 @@ mod tests {
                 qtype: 1,
                 qclass: 1,
                 outcome: OutcomeClass::Success,
+                source: StatsSource::Upstream,
                 cache_status: CacheStatus::Miss,
                 runtime_revision: RuntimeRevision(1),
             })

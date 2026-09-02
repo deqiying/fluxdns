@@ -9,6 +9,8 @@ use thiserror::Error;
 
 use crate::ports::PortFuture;
 use crate::ports::inbound::{EncodeErrorClass, InboundRequest};
+use crate::ports::storage::StatsSource;
+use crate::ports::telemetry::CacheStatus;
 use crate::resource::{CanonicalDomain, HostsIndex, HostsLookup, HostsRecord};
 
 use super::{CanonicalMessageError, CanonicalResponse, DnsRequest, HostsTable};
@@ -18,6 +20,17 @@ use super::{CanonicalMessageError, CanonicalResponse, DnsRequest, HostsTable};
 pub enum CoreOutcome {
     Response(CanonicalResponse),
     NoResponse,
+}
+
+/// Core 在完成请求后可选提供的低基数解析元数据。
+///
+/// 默认 Core 不需要实现该观察接口；策略 Core 会提供实际命中的 strategy、
+/// answer source 和 cache 状态，供详情日志与聚合统计复用同一份判定结果。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DnsResolutionObservation {
+    pub strategy_id: Option<Arc<str>>,
+    pub source: StatsSource,
+    pub cache_status: CacheStatus,
 }
 
 /// DNS Core 构造响应时的稳定错误分类。
@@ -47,6 +60,23 @@ pub trait DnsCore: Send + Sync {
         &'a self,
         request: &'a DnsRequest,
     ) -> PortFuture<'a, Result<CoreOutcome, CoreError>>;
+
+    /// 返回请求终态及可选低基数观察数据。
+    ///
+    /// 该默认实现保持既有 Core 的行为和对象安全性；需要观测的实现只需覆盖
+    /// 此方法，调用方不会再从请求字段推测 cache/source/strategy。
+    fn resolve_with_observation<'a>(
+        &'a self,
+        request: &'a DnsRequest,
+    ) -> PortFuture<
+        'a,
+        (
+            Result<CoreOutcome, CoreError>,
+            Option<DnsResolutionObservation>,
+        ),
+    > {
+        Box::pin(async move { (self.resolve(request).await, None) })
+    }
 }
 
 /// 在真实策略、hosts 和 upstream 接线前使用的确定性安全默认 handler。

@@ -14,8 +14,8 @@ pub use context::{
     RuntimeRevision, StreamId, TraceId, TransportCapabilities, TransportClass,
 };
 pub use handler::{
-    CoreError, CoreOutcome, DispatchError, DispatchOutcome, DnsCore, HostsCore, ServFailCore,
-    dispatch_inbound,
+    CoreError, CoreOutcome, DispatchError, DispatchOutcome, DnsCore, DnsResolutionObservation,
+    HostsCore, ServFailCore, dispatch_inbound,
 };
 pub use hosts::{HostsParseError, HostsTable};
 pub use message::{

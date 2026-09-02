@@ -99,6 +99,19 @@ impl ConfiguredId {
     }
 }
 
+/// 从已经通过配置边界校验的标识构造 telemetry 内部 token。
+///
+/// 生产调用方只能传入配置解析阶段产生的 bounded identifier；该入口保持 crate
+/// 可见，避免把任意请求字段提升为 metrics label。
+pub(crate) fn configured_id_from_validated(
+    kind: ConfiguredIdKind,
+    value: &str,
+) -> Option<ConfiguredId> {
+    validate_bounded_identifier(Arc::from(value))
+        .ok()
+        .map(|value| ConfiguredId { kind, value })
+}
+
 /// 配置项在 metrics、stats 中可出现的位置。
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum ConfiguredIdKind {

@@ -25,6 +25,8 @@ use crate::ports::cache::{CacheLoadCompletion, CacheLoadFailure, CacheLoadReserv
 use crate::ports::exchange::{
     ConnectorId, DnsExchange, TransportFailure, TransportFailureClass, UpstreamOutcome,
 };
+use crate::ports::storage::StatsSource;
+use crate::ports::telemetry::CacheStatus;
 use crate::resource::{
     CanonicalDomain, HostsIndex, ResourceLoadError, ResourceSnapshot, ResourceVersion, RuleIndex,
 };
@@ -34,7 +36,9 @@ use crate::upstream::{
 };
 
 use super::handler::resource_answers;
-use super::{CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsRequest};
+use super::{
+    CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsRequest, DnsResolutionObservation,
+};
 
 #[derive(Debug, Error)]
 pub enum PolicyCoreBuildError {
@@ -458,96 +462,169 @@ impl DnsCore for PolicyDnsCore {
         &'a self,
         request: &'a DnsRequest,
     ) -> PortFuture<'a, Result<CoreOutcome, CoreError>> {
-        Box::pin(async move {
-            let meta = &request.context.meta;
-            if meta.cancellation.is_cancelled() || meta.deadline.is_expired(Instant::now()) {
-                return Ok(CoreOutcome::NoResponse);
-            }
+        Box::pin(async move { self.resolve_with_metadata(request).await.0 })
+    }
 
-            let Some(listener_id) = ConfigId::new(meta.listener_id.as_ref().to_owned()).ok() else {
-                return servfail(request);
-            };
-            let qname = match CanonicalDomain::parse(&request.query.question().name().to_ascii()) {
-                Ok(qname) => qname,
-                Err(_) => return servfail(request),
-            };
-            let policy = self.policy.load();
-            let doh_path = reconstructed_doh_path(request);
-            let plan = match policy.index.evaluate(PolicyRequest {
-                listener_id: &listener_id,
-                doh_path: doh_path.as_deref(),
-                client_id: request
-                    .context
-                    .client
-                    .client_id
-                    .as_ref()
-                    .map(|client_id| client_id.as_str()),
-                client_addr: request.context.client.client_addr,
-                client_digest: None,
-                qname: Some(&qname),
-            }) {
-                Ok(plan) => plan,
-                Err(_error) => return servfail(request),
-            };
+    fn resolve_with_observation<'a>(
+        &'a self,
+        request: &'a DnsRequest,
+    ) -> PortFuture<
+        'a,
+        (
+            Result<CoreOutcome, CoreError>,
+            Option<DnsResolutionObservation>,
+        ),
+    > {
+        Box::pin(async move { self.resolve_with_metadata(request).await })
+    }
+}
 
-            if let Some(resource_id) = plan.hosts {
-                let Some(index) = policy.index.hosts_index(&resource_id) else {
-                    return servfail(request);
-                };
-                let (answers, known_name) = resource_answers(
-                    std::slice::from_ref(index.as_ref()),
-                    request.query.question().name(),
-                    request.query.question().query_type(),
-                    self.ttl,
-                );
-                let code = if answers.is_empty() && !known_name {
-                    ResponseCode::NXDomain
-                } else {
-                    ResponseCode::NoError
-                };
-                let response = if code == ResponseCode::NoError && !answers.is_empty() {
-                    CanonicalResponse::response_with_answers(&request.query, answers)
-                } else {
-                    CanonicalResponse::response_with_code(&request.query, code, answers)
-                };
-                return response
-                    .map(CoreOutcome::Response)
-                    .map_err(CoreError::ResponseConstruction);
-            }
+struct PolicyUpstreamResult {
+    outcome: UpstreamOutcome,
+    source: StatsSource,
+    cache_status: CacheStatus,
+}
 
-            let Some(outcome) = self.resolve_upstream(request, &plan).await else {
-                return servfail(request);
-            };
-            match outcome {
-                UpstreamOutcome::Response(response) if response.matches_query(&request.query) => {
-                    Ok(CoreOutcome::Response(response))
-                }
-                UpstreamOutcome::Cancelled(_) => Ok(CoreOutcome::NoResponse),
-                UpstreamOutcome::Response(_) | UpstreamOutcome::TransportFailure(_) => {
-                    servfail(request)
-                }
-            }
-        })
+impl PolicyUpstreamResult {
+    fn upstream(outcome: UpstreamOutcome, cache_status: CacheStatus) -> Self {
+        Self {
+            outcome,
+            source: StatsSource::Upstream,
+            cache_status,
+        }
+    }
+
+    fn cache(outcome: UpstreamOutcome, cache_status: CacheStatus) -> Self {
+        Self {
+            outcome,
+            source: StatsSource::Cache,
+            cache_status,
+        }
     }
 }
 
 impl PolicyDnsCore {
+    async fn resolve_with_metadata(
+        &self,
+        request: &DnsRequest,
+    ) -> (
+        Result<CoreOutcome, CoreError>,
+        Option<DnsResolutionObservation>,
+    ) {
+        let meta = &request.context.meta;
+        if meta.cancellation.is_cancelled() || meta.deadline.is_expired(Instant::now()) {
+            return (Ok(CoreOutcome::NoResponse), None);
+        }
+
+        let Some(listener_id) = ConfigId::new(meta.listener_id.as_ref().to_owned()).ok() else {
+            return (servfail(request), None);
+        };
+        let qname = match CanonicalDomain::parse(&request.query.question().name().to_ascii()) {
+            Ok(qname) => qname,
+            Err(_) => return (servfail(request), None),
+        };
+        let policy = self.policy.load();
+        let doh_path = reconstructed_doh_path(request);
+        let plan = match policy.index.evaluate(PolicyRequest {
+            listener_id: &listener_id,
+            doh_path: doh_path.as_deref(),
+            client_id: request
+                .context
+                .client
+                .client_id
+                .as_ref()
+                .map(|client_id| client_id.as_str()),
+            client_addr: request.context.client.client_addr,
+            client_digest: None,
+            qname: Some(&qname),
+        }) {
+            Ok(plan) => plan,
+            Err(_error) => return (servfail(request), None),
+        };
+        let strategy_id = Some(Arc::from(plan.strategy.id.as_str()));
+
+        if let Some(resource_id) = plan.hosts {
+            let Some(index) = policy.index.hosts_index(&resource_id) else {
+                return (servfail(request), None);
+            };
+            let (answers, known_name) = resource_answers(
+                std::slice::from_ref(index.as_ref()),
+                request.query.question().name(),
+                request.query.question().query_type(),
+                self.ttl,
+            );
+            let code = if answers.is_empty() && !known_name {
+                ResponseCode::NXDomain
+            } else {
+                ResponseCode::NoError
+            };
+            let response = if code == ResponseCode::NoError && !answers.is_empty() {
+                CanonicalResponse::response_with_answers(&request.query, answers)
+            } else {
+                CanonicalResponse::response_with_code(&request.query, code, answers)
+            };
+            let result = response
+                .map(CoreOutcome::Response)
+                .map_err(CoreError::ResponseConstruction);
+            return (
+                result,
+                Some(DnsResolutionObservation {
+                    strategy_id,
+                    source: StatsSource::Hosts,
+                    cache_status: CacheStatus::Disabled,
+                }),
+            );
+        }
+
+        let Some(outcome) = self.resolve_upstream(request, &plan).await else {
+            return (
+                servfail(request),
+                Some(DnsResolutionObservation {
+                    strategy_id,
+                    source: StatsSource::Upstream,
+                    cache_status: CacheStatus::StoreUnavailable,
+                }),
+            );
+        };
+        let result = match outcome.outcome {
+            UpstreamOutcome::Response(response) if response.matches_query(&request.query) => {
+                Ok(CoreOutcome::Response(response))
+            }
+            UpstreamOutcome::Cancelled(_) => Ok(CoreOutcome::NoResponse),
+            UpstreamOutcome::Response(_) | UpstreamOutcome::TransportFailure(_) => {
+                servfail(request)
+            }
+        };
+        (
+            result,
+            Some(DnsResolutionObservation {
+                strategy_id,
+                source: outcome.source,
+                cache_status: outcome.cache_status,
+            }),
+        )
+    }
+
     async fn resolve_upstream(
         &self,
         request: &DnsRequest,
         plan: &crate::policy::ResolutionPlan,
-    ) -> Option<UpstreamOutcome> {
+    ) -> Option<PolicyUpstreamResult> {
         let Some(key) = cache_key(plan, request) else {
             return self
                 .upstreams
                 .exchange(&plan.upstream, &request.query, &request.context, None)
-                .await;
+                .await
+                .map(|outcome| PolicyUpstreamResult::upstream(outcome, CacheStatus::Disabled));
         };
         let late_sink = self.late_result_sink(&key, request);
         let deadline = request.context.meta.deadline;
         match self.cache.lookup(&key, deadline).await {
             Ok(CacheLookup::Fresh(record)) => {
-                return Some(UpstreamOutcome::Response((*record.entry.response).clone()));
+                return Some(PolicyUpstreamResult::cache(
+                    UpstreamOutcome::Response((*record.entry.response).clone()),
+                    CacheStatus::Fresh,
+                ));
             }
             Ok(CacheLookup::Stale { record, refresh })
                 if matches!(
@@ -562,7 +639,10 @@ impl PolicyDnsCore {
                 if refresh.try_consume() {
                     self.schedule_optimistic_refresh(key.clone(), refresh.version(), request, plan);
                 }
-                return Some(UpstreamOutcome::Response((*stale_response).clone()));
+                return Some(PolicyUpstreamResult::cache(
+                    UpstreamOutcome::Response((*stale_response).clone()),
+                    CacheStatus::Stale,
+                ));
             }
             Ok(CacheLookup::Disabled)
             | Ok(CacheLookup::Miss)
@@ -582,7 +662,10 @@ impl PolicyDnsCore {
                         &request.context,
                         Some(Arc::clone(&late_sink)),
                     )
-                    .await;
+                    .await
+                    .map(|outcome| {
+                        PolicyUpstreamResult::upstream(outcome, CacheStatus::StoreUnavailable)
+                    });
             }
         };
         match reservation {
@@ -592,11 +675,15 @@ impl PolicyDnsCore {
                     .wait_load(waiter, deadline, &request.context.meta.cancellation)
                     .await
                 {
-                    Ok(CacheLoadCompletion::Ready(record)) => {
-                        Some(UpstreamOutcome::Response((*record.entry.response).clone()))
-                    }
+                    Ok(CacheLoadCompletion::Ready(record)) => Some(PolicyUpstreamResult::cache(
+                        UpstreamOutcome::Response((*record.entry.response).clone()),
+                        CacheStatus::Fresh,
+                    )),
                     Ok(CacheLoadCompletion::Failed(CacheLoadFailure::Cancelled(reason))) => {
-                        Some(UpstreamOutcome::Cancelled(reason))
+                        Some(PolicyUpstreamResult::upstream(
+                            UpstreamOutcome::Cancelled(reason),
+                            CacheStatus::Miss,
+                        ))
                     }
                     Ok(CacheLoadCompletion::Miss) | Ok(CacheLoadCompletion::Failed(_)) | Err(_) => {
                         self.upstreams
@@ -607,6 +694,9 @@ impl PolicyDnsCore {
                                 Some(Arc::clone(&late_sink)),
                             )
                             .await
+                            .map(|outcome| {
+                                PolicyUpstreamResult::upstream(outcome, CacheStatus::Miss)
+                            })
                     }
                 }
             }
@@ -634,7 +724,10 @@ impl PolicyDnsCore {
                                 .cache
                                 .publish_load(lease, CacheLoadCompletion::Miss, deadline)
                                 .await;
-                            return Some(UpstreamOutcome::Response(response));
+                            return Some(PolicyUpstreamResult::upstream(
+                                UpstreamOutcome::Response(response),
+                                CacheStatus::Miss,
+                            ));
                         }
                         let response_for_cache = Arc::new(response.clone());
                         let write = self
@@ -649,6 +742,11 @@ impl PolicyDnsCore {
                                 deadline,
                             })
                             .await;
+                        let cache_status = match &write {
+                            Ok(CacheWriteResult::Stored(_)) => CacheStatus::Miss,
+                            Ok(CacheWriteResult::Rejected(_)) => CacheStatus::WriteRejected,
+                            Err(_) => CacheStatus::StoreUnavailable,
+                        };
                         let completion = match write {
                             Ok(CacheWriteResult::Stored(_)) => self
                                 .cache
@@ -661,21 +759,30 @@ impl PolicyDnsCore {
                             Ok(CacheWriteResult::Rejected(_)) | Err(_) => CacheLoadCompletion::Miss,
                         };
                         let _ = self.cache.publish_load(lease, completion, deadline).await;
-                        Some(UpstreamOutcome::Response(response))
+                        Some(PolicyUpstreamResult::upstream(
+                            UpstreamOutcome::Response(response),
+                            cache_status,
+                        ))
                     }
                     UpstreamOutcome::Cancelled(reason) => {
                         let _ = self
                             .cache
                             .abandon_load(lease, CacheLoadFailure::Cancelled(reason), deadline)
                             .await;
-                        Some(UpstreamOutcome::Cancelled(reason))
+                        Some(PolicyUpstreamResult::upstream(
+                            UpstreamOutcome::Cancelled(reason),
+                            CacheStatus::Miss,
+                        ))
                     }
                     UpstreamOutcome::TransportFailure(failure) => {
                         let _ = self
                             .cache
                             .abandon_load(lease, CacheLoadFailure::Unavailable, deadline)
                             .await;
-                        Some(UpstreamOutcome::TransportFailure(failure))
+                        Some(PolicyUpstreamResult::upstream(
+                            UpstreamOutcome::TransportFailure(failure),
+                            CacheStatus::Miss,
+                        ))
                     }
                 }
             }
@@ -1314,6 +1421,56 @@ mod tests {
         );
         assert_eq!(request.connect_ip(), Some("192.0.2.44".parse().unwrap()));
         assert_eq!(Message::from_vec(request.body()).unwrap().id, 1);
+    }
+
+    #[tokio::test]
+    async fn policy_core_observation_reports_strategy_source_and_cache_status() {
+        let config = doh_config();
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry =
+            UpstreamRegistry::from_resolved_with_doh_transport(&config.upstreams, transport)
+                .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, registry).unwrap();
+
+        let (_, observation) = core
+            .resolve_with_observation(&request("remote.example.", RecordType::A))
+            .await;
+        let observation = observation.expect("policy core must report metadata");
+        assert_eq!(observation.strategy_id.as_deref(), Some("default"));
+        assert_eq!(
+            observation.source,
+            crate::ports::storage::StatsSource::Upstream
+        );
+        assert_eq!(
+            observation.cache_status,
+            crate::ports::telemetry::CacheStatus::Disabled
+        );
+
+        let mut cached_config = Arc::try_unwrap(doh_config()).unwrap();
+        cached_config.dns.cache.enabled = true;
+        let cached_config = Arc::new(cached_config);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry =
+            UpstreamRegistry::from_resolved_with_doh_transport(&cached_config.upstreams, transport)
+                .unwrap();
+        let core =
+            PolicyDnsCore::from_config_with_registry(cached_config.as_ref(), 42, registry).unwrap();
+        let (result, _) = core
+            .resolve_with_observation(&request("remote.example.", RecordType::A))
+            .await;
+        assert!(result.is_ok());
+        let (_, observation) = core
+            .resolve_with_observation(&request("remote.example.", RecordType::A))
+            .await;
+        let observation = observation.expect("cached policy core must report metadata");
+        assert_eq!(
+            observation.source,
+            crate::ports::storage::StatsSource::Cache
+        );
+        assert_eq!(
+            observation.cache_status,
+            crate::ports::telemetry::CacheStatus::Fresh
+        );
     }
 
     #[tokio::test]
