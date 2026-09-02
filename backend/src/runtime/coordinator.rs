@@ -162,6 +162,26 @@ impl ActiveRuntime {
         self.admission.draining.load(Ordering::Acquire)
     }
 
+    /// 在 deadline 内等待当前 Runtime 的存量请求全部释放。
+    pub async fn wait_for_drain(&self, deadline: crate::dns::Deadline) -> bool {
+        loop {
+            if self.active_requests() == 0 {
+                return true;
+            }
+            let notified = self.admission.drained.notified();
+            if self.active_requests() == 0 {
+                return true;
+            }
+            let remaining = deadline.remaining(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return false;
+            }
+        }
+    }
+
     fn into_candidate(self) -> BoundCandidate {
         let listeners = Arc::try_unwrap(self.listeners)
             .unwrap_or_else(|_| unreachable!("candidate listener set must be uniquely owned"));
@@ -181,10 +201,20 @@ impl fmt::Debug for ActiveRuntime {
     }
 }
 
-#[derive(Default)]
 struct AdmissionState {
     draining: AtomicBool,
     active: AtomicUsize,
+    drained: tokio::sync::Notify,
+}
+
+impl Default for AdmissionState {
+    fn default() -> Self {
+        Self {
+            draining: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+            drained: tokio::sync::Notify::new(),
+        }
+    }
 }
 
 /// 绑定到单个 ActiveRuntime 的请求生命周期 guard。
@@ -208,6 +238,9 @@ impl Drop for RequestGuard {
     fn drop(&mut self) {
         let previous = self.admission.active.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(previous > 0, "request guard count must not underflow");
+        if previous == 1 {
+            self.admission.drained.notify_waiters();
+        }
     }
 }
 
@@ -867,6 +900,25 @@ outbound: []
                 actual: RuntimeRevision(2),
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn runtime_wait_for_drain_completes_after_the_last_guard_is_released() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let runtime = coordinator.load();
+        let guard = runtime.try_acquire().unwrap();
+        runtime.begin_drain();
+
+        let waiting =
+            runtime.wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(1)));
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(guard);
+        assert!(waiting.await);
     }
 
     #[tokio::test]
