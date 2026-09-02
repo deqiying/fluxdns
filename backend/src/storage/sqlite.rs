@@ -250,11 +250,30 @@ pub struct SqliteStorageBackend {
     path: Arc<PathBuf>,
     state: Arc<Mutex<SqliteStorageState>>,
     operation_lock: Arc<tokio::sync::Mutex<()>>,
+    #[cfg(test)]
+    injected_fault: Arc<Mutex<Option<InjectedSqliteFault>>>,
 }
 
 #[derive(Clone, Copy)]
 struct SqliteStorageState {
     health: StorageHealth,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum InjectedSqliteFault {
+    Busy,
+    DiskFull,
+}
+
+#[cfg(test)]
+impl InjectedSqliteFault {
+    const fn safe_context(self) -> &'static str {
+        match self {
+            Self::Busy => "injected busy",
+            Self::DiskFull => "injected disk full",
+        }
+    }
 }
 
 impl Default for SqliteStorageState {
@@ -331,11 +350,29 @@ impl SqliteStorageBackend {
             path: Arc::new(path),
             state: Arc::new(Mutex::new(SqliteStorageState::default())),
             operation_lock: Arc::new(tokio::sync::Mutex::new(())),
+            #[cfg(test)]
+            injected_fault: Arc::new(Mutex::new(None)),
         })
     }
 
     pub fn path(&self) -> &Path {
         self.path.as_ref()
+    }
+
+    #[cfg(test)]
+    fn inject_fault(&self, fault: InjectedSqliteFault) {
+        *self
+            .injected_fault
+            .lock()
+            .expect("sqlite injected fault lock must not be poisoned") = Some(fault);
+    }
+
+    #[cfg(test)]
+    fn take_injected_fault(&self) -> Option<InjectedSqliteFault> {
+        self.injected_fault
+            .lock()
+            .expect("sqlite injected fault lock must not be poisoned")
+            .take()
     }
 
     fn available(&self, operation: &'static str) -> Result<(), PortError> {
@@ -428,6 +465,8 @@ impl SqliteStorageBackend {
             .begin()
             .await
             .map_err(|error| self.database_error(error, "sqlite_storage.execute"))?;
+        #[cfg(test)]
+        let mut injected_fault = self.take_injected_fault();
         for operation in transaction.operations {
             let result = match operation {
                 StorageOperation::StatsBatch(batch) => {
@@ -437,7 +476,21 @@ impl SqliteStorageBackend {
                     apply_resolve_batch(&mut sql_transaction, &batch).await
                 }
             };
-            result?;
+            #[cfg(test)]
+            let result = match injected_fault.take() {
+                Some(fault) => Err(PortError::new(
+                    PortErrorClass::Unavailable,
+                    "sqlite_storage.execute",
+                )
+                .with_safe_context(fault.safe_context())),
+                None => result,
+            };
+            if let Err(error) = result {
+                if matches!(error.class(), PortErrorClass::Unavailable) {
+                    self.mark_degraded();
+                }
+                return Err(error);
+            }
             check_deadline(deadline, "sqlite_storage.execute")?;
         }
         sql_transaction
@@ -465,7 +518,16 @@ impl SqliteStorageBackend {
             .begin()
             .await
             .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
-        let summary = apply_resolve_records_with_limits(&mut transaction, &records, limits).await?;
+        let summary =
+            match apply_resolve_records_with_limits(&mut transaction, &records, limits).await {
+                Ok(summary) => summary,
+                Err(error) => {
+                    if matches!(error.class(), PortErrorClass::Unavailable) {
+                        self.mark_degraded();
+                    }
+                    return Err(error);
+                }
+            };
         check_deadline(deadline, "sqlite_storage.resolve_detail")?;
         transaction
             .commit()
@@ -883,8 +945,8 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use super::{
-        SqliteResolveDetailLimits, SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError,
-        SqliteStorageBackend,
+        InjectedSqliteFault, SqliteResolveDetailLimits, SqliteResolveDetailWriter,
+        SqliteResolveDetailWriterBuildError, SqliteStorageBackend,
     };
     use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
@@ -1004,6 +1066,65 @@ mod tests {
             crate::ports::storage::StorageHealth::Failed
         );
         assert!(backend.checkpoint(deadline()).await.is_err());
+
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn injected_busy_and_disk_full_faults_degrade_then_recover() {
+        let path = path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+
+        for (fault, batch_id) in [
+            (InjectedSqliteFault::Busy, 77),
+            (InjectedSqliteFault::DiskFull, 78),
+        ] {
+            backend.inject_fault(fault);
+            let failed_batch = StatsBatch {
+                batch_id,
+                max_event_sequence: batch_id,
+                counter_epoch: 0,
+                events: vec![StatsEvent::new(batch_id, 20_260_902, vec![]).unwrap()],
+            };
+            let error = backend
+                .execute(transaction(failed_batch), deadline())
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error.class(),
+                crate::ports::PortErrorClass::Unavailable
+            ));
+            assert_eq!(
+                backend
+                    .state
+                    .lock()
+                    .expect("sqlite state lock must not be poisoned")
+                    .health,
+                crate::ports::storage::StorageHealth::Degraded
+            );
+
+            let recovered_batch = StatsBatch {
+                batch_id: batch_id + 100,
+                max_event_sequence: batch_id + 100,
+                counter_epoch: 0,
+                events: vec![StatsEvent::new(batch_id + 100, 20_260_902, vec![]).unwrap()],
+            };
+            backend
+                .execute(transaction(recovered_batch), deadline())
+                .await
+                .unwrap();
+            assert_eq!(
+                backend
+                    .state
+                    .lock()
+                    .expect("sqlite state lock must not be poisoned")
+                    .health,
+                crate::ports::storage::StorageHealth::Healthy
+            );
+        }
 
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);

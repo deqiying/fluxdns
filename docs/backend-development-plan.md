@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成；当前执行至阶段 76（稳定 telemetry ports 的有界 writer/flush 边界），后续重点是 SQLite 故障注入、真实 telemetry 输出接线和 v1 验收。
+> 状态：v1 模块方案已完成；当前执行至阶段 77（SQLite adapter fault 注入与 degraded/recovery 分类），后续重点是 SQLite 真实故障复现、真实 telemetry 输出接线和 v1 验收。
 >
 > 更新日期：2026-09-02
 >
@@ -13,12 +13,12 @@
 本节只保留当前决策所需的摘要；模块实现细节见对应 `docs/backend-modules/*.md`，完整阶段证据见本文“阶段实施记录”。
 
 - 已完成主链路：Config 严格加载与校验、Runtime 候选/激活/受管 task、UDP/TCP/DoH plain HTTP、Upstream direct/group/proxy、Policy/Resource 首次快照与 live publish、Cache memory/Moka/SQLite 首轮 adapter。
-- Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder`、首轮 `StorageRuntime` 生产接线、pending 内存保护/fatal 边界及首轮 degraded/recovery 状态边界；Observability 已完成低基数 metrics/health 基础和稳定 telemetry ports 的有界 writer/flush 边界。
+- Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder`、首轮 `StorageRuntime` 生产接线、pending 内存保护/fatal 边界、首轮 degraded/recovery 状态边界及 adapter-level Busy/DiskFull fault 注入恢复分类；Observability 已完成低基数 metrics/health 基础和稳定 telemetry ports 的有界 writer/flush 边界。
 - 当前未完成：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite busy/disk-full recovery、完整 source/cache/strategy 详情元数据、final tracing subscriber/真实输出与 supervisor 接线、最终故障/压力/conformance 验收。
 
-> 注：阶段 76 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
+> 注：阶段 77 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
 
-阶段 76 已完成稳定 telemetry ports 的有界 writer/flush 边界：低优先级日志拥塞可计数丢弃，warn/error 优先保留，metrics/health 不阻塞请求线程，输出失败会安全分类并重排队，flush 遵守 deadline，shutdown 拒绝新事件。最近一次大阶段全量测试为 417 passed、0 failed；本阶段增量测试为 `observability::tests::telemetry_writer` 5 项通过；阶段 75 的 SQLite 12 项增量证据保持不变。
+阶段 77 已完成 SQLite adapter-level Busy/DiskFull fault 注入与恢复分类：execute/detail transaction 内部 `Unavailable` 会进入 `Degraded`，下一次成功的有限操作恢复 `Healthy`；OS/SQLite 真实故障仍单独追踪。最近一次大阶段全量测试为 417 passed、0 failed；本阶段增量测试为 `storage::sqlite::tests::injected_busy_and_disk_full` 1 项通过；阶段 76 的 telemetry writer 5 项增量证据保持不变。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
@@ -29,9 +29,9 @@
 ### 当前验证记录
 
 - 最近一次大阶段全量后端测试：`417 passed、0 failed`。
-- 当前阶段（阶段 76）增量测试：`observability::tests::telemetry_writer`，`5 passed、0 failed`；阶段 75 的 `storage::sqlite::tests` `12 passed、0 failed` 及此前阶段（阶段 74）的 stats/service 增量证据均保持通过。
+- 当前阶段（阶段 77）增量测试：`storage::sqlite::tests::injected_busy_and_disk_full`，`1 passed、0 failed`；阶段 76 的 `observability::tests::telemetry_writer` `5 passed、0 failed`、阶段 75 的 `storage::sqlite::tests` `12 passed、0 failed` 及此前阶段（阶段 74）的 stats/service 增量证据均保持通过。
 - 小阶段只执行增量验证；完成大阶段时再执行全量后端测试。
-- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，但尚未接入 final subscriber/真实 output；当前进度更新为后端 `69.4%`、v1 `72.5%`。
+- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy，adapter-level Busy/DiskFull fault 已有确定性注入恢复分类；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，但尚未接入 final subscriber/真实 output；当前进度保持后端 `69.4%`、v1 `72.5%`，OS/SQLite 真实故障和最终故障压力验收仍未完成。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -299,7 +299,9 @@ transport / upstream / storage / observability adapters
 
 小阶段索引 24（已完成）：为稳定 telemetry ports 增加 `TelemetryWriter`，统一实现有界日志/metrics/health 排队、优先级丢弃与保留、输出失败重排队、deadline-aware flush 和 shutdown 关闭边界；`observability::tests::telemetry_writer` 增量测试 `5 passed、0 failed`。最终 tracing subscriber、真实文件/stderr output、degraded health 发布和 supervisor 接线仍待后续小阶段。
 
-阶段 9 当前边界：busy/disk-full 故障注入与真实恢复验收、完整 source/cache/strategy 详情元数据、final tracing subscriber/真实 telemetry output、degraded health 发布、supervisor 接线和最终故障注入仍未完成。
+小阶段索引 25（已完成）：为 SQLite execute/detail transaction 增加受 `cfg(test)` 限定的 `InjectedSqliteFault::{Busy,DiskFull}`，修正内部 `Unavailable` 错误进入 `Degraded` 的状态转换，并验证下一次成功操作恢复 `Healthy`；`storage::sqlite::tests::injected_busy_and_disk_full` 增量测试 `1 passed、0 failed`。OS/SQLite 真实故障复现仍待后续验收。
+
+阶段 9 当前边界：OS/SQLite 真实 busy/disk-full 故障复现与恢复验收、完整 source/cache/strategy 详情元数据、final tracing subscriber/真实 telemetry output、degraded health 发布、supervisor 接线和最终故障注入仍未完成；adapter-level fault 注入已完成。
 
 ### 阶段 10：刷新、故障注入和 v1 验收
 
