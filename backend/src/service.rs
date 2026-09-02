@@ -812,8 +812,11 @@ impl ObservedDnsCore {
                         {
                             dimensions.push(dimension);
                         }
-                        if let Some(upstream_id) =
-                            observation.upstream_id.as_deref().and_then(|id| {
+                        if let Some(upstream_id) = observation
+                            .upstream_member_id
+                            .as_deref()
+                            .or(observation.upstream_id.as_deref())
+                            .and_then(|id| {
                                 configured_id_from_validated(ConfiguredIdKind::Upstream, id)
                             })
                             && let Ok(dimension) = StatsDimension::upstream(upstream_id)
@@ -858,7 +861,12 @@ impl ObservedDnsCore {
                 .map(|route| Arc::from(route.as_ref())),
             client_bucket: observation.and_then(|value| value.client_bucket.clone()),
             strategy_id: observation.and_then(|value| value.strategy_id.clone()),
-            upstream_id: observation.and_then(|value| value.upstream_id.clone()),
+            upstream_id: observation.and_then(|value| {
+                value
+                    .upstream_member_id
+                    .clone()
+                    .or_else(|| value.upstream_id.clone())
+            }),
             transport: request.context.transport.class,
             qname: Arc::from(question.name().to_ascii()),
             qtype: u16::from(question.query_type()),

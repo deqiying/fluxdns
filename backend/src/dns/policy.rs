@@ -585,7 +585,7 @@ impl DnsCore for PolicyDnsCore {
 
 struct PolicyUpstreamResult {
     outcome: UpstreamOutcome,
-    upstream_id: Option<Arc<str>>,
+    selected_upstream_id: Option<Arc<str>>,
     source: StatsSource,
     cache_status: CacheStatus,
 }
@@ -595,30 +595,31 @@ impl PolicyUpstreamResult {
     fn upstream(result: UpstreamExecutionResult, cache_status: CacheStatus) -> Self {
         Self {
             outcome: result.outcome,
-            upstream_id: Some(result.upstream_id),
+            selected_upstream_id: Some(result.upstream_id),
             source: StatsSource::Upstream,
             cache_status,
         }
     }
 
-    /// 记录尚未选出实际成员时产生的上游终态。
+    /// 保留一次上游执行已归因的 direct upstream 或顶层 group member ID。
     fn upstream_outcome(
         outcome: UpstreamOutcome,
-        upstream_id: Arc<str>,
+        selected_upstream_id: Arc<str>,
         cache_status: CacheStatus,
     ) -> Self {
         Self {
             outcome,
-            upstream_id: Some(upstream_id),
+            selected_upstream_id: Some(selected_upstream_id),
             source: StatsSource::Upstream,
             cache_status,
         }
     }
 
+    /// 构造无法恢复原始 group member 归属的缓存结果。
     fn cache(outcome: UpstreamOutcome, cache_status: CacheStatus) -> Self {
         Self {
             outcome,
-            upstream_id: None,
+            selected_upstream_id: None,
             source: StatsSource::Cache,
             cache_status,
         }
@@ -701,6 +702,7 @@ impl PolicyDnsCore {
                     client_bucket,
                     strategy_id,
                     upstream_id: None,
+                    upstream_member_id: None,
                     source: StatsSource::Hosts,
                     cache_status: CacheStatus::Disabled,
                 }),
@@ -719,11 +721,16 @@ impl PolicyDnsCore {
                     client_bucket,
                     strategy_id,
                     upstream_id: Some(Arc::from(plan.upstream.as_str())),
+                    upstream_member_id: None,
                     source: StatsSource::Upstream,
                     cache_status: CacheStatus::StoreUnavailable,
                 }),
             );
         };
+        let upstream_id = Arc::<str>::from(plan.upstream.as_str());
+        let upstream_member_id = outcome
+            .selected_upstream_id
+            .filter(|selected| selected.as_ref() != upstream_id.as_ref());
         let result = match outcome.outcome {
             UpstreamOutcome::Response(mut response) if response.matches_query(&request.query) => {
                 apply_ttl_override(&mut response, &plan.ttl_override);
@@ -739,7 +746,8 @@ impl PolicyDnsCore {
             Some(DnsResolutionObservation {
                 client_bucket,
                 strategy_id,
-                upstream_id: outcome.upstream_id,
+                upstream_id: Some(upstream_id),
+                upstream_member_id,
                 source: outcome.source,
                 cache_status: outcome.cache_status,
             }),
@@ -2158,10 +2166,9 @@ mod tests {
             .unwrap();
 
         assert_eq!(transport.calls.load(Ordering::Acquire), 2);
-        assert_eq!(
-            observation.and_then(|value| value.upstream_id).as_deref(),
-            Some("inner")
-        );
+        let observation = observation.expect("group member ECS must report metadata");
+        assert_eq!(observation.upstream_id.as_deref(), Some("group"));
+        assert_eq!(observation.upstream_member_id.as_deref(), Some("inner"));
         let guard = transport.request.lock().unwrap();
         let wire = Message::from_vec(guard.as_ref().unwrap().body()).unwrap();
         assert!(matches!(
@@ -2295,6 +2302,7 @@ mod tests {
         let observation = observation.expect("policy core must report metadata");
         assert_eq!(observation.strategy_id.as_deref(), Some("default"));
         assert_eq!(observation.upstream_id.as_deref(), Some("remote"));
+        assert_eq!(observation.upstream_member_id, None);
         assert_eq!(
             observation.source,
             crate::ports::storage::StatsSource::Upstream
@@ -2321,7 +2329,8 @@ mod tests {
             .resolve_with_observation(&request("remote.example.", RecordType::A))
             .await;
         let observation = observation.expect("cached policy core must report metadata");
-        assert_eq!(observation.upstream_id, None);
+        assert_eq!(observation.upstream_id.as_deref(), Some("remote"));
+        assert_eq!(observation.upstream_member_id, None);
         assert_eq!(
             observation.source,
             crate::ports::storage::StatsSource::Cache
@@ -3599,13 +3608,9 @@ strategy:
         };
         assert_eq!(response.class(), crate::dns::ResponseClass::Positive);
         assert_eq!(response.ttl().min_ttl, Some(crate::dns::DEFAULT_LOCAL_TTL));
-        assert_eq!(
-            observation
-                .expect("group response must include observation")
-                .upstream_id
-                .as_deref(),
-            Some("first")
-        );
+        let observation = observation.expect("group response must include observation");
+        assert_eq!(observation.upstream_id.as_deref(), Some("group"));
+        assert_eq!(observation.upstream_member_id.as_deref(), Some("first"));
     }
 
     #[tokio::test]
