@@ -84,6 +84,10 @@ impl RuntimeSnapshot {
         self.policy_core.as_deref()
     }
 
+    pub(crate) fn policy_core_arc(&self) -> Option<Arc<PolicyDnsCore>> {
+        self.policy_core.as_ref().map(Arc::clone)
+    }
+
     /// 克隆与本 snapshot 同 revision 的不可变 DNS Core handle。
     pub fn dns_core(&self) -> Option<Arc<dyn DnsCore>> {
         self.policy_core

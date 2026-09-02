@@ -225,7 +225,7 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - REFUSED 和 transport failure 不准入；
 - quality CAS 和并发乱序；
 - single-flight 多 waiter 与取消；
-- optimistic 使用最新 Runtime snapshot；（当前已完成同一 immutable `PolicyDnsCore` 内的 snapshot-local refresh，Runtime 级最新 snapshot 捕获待后续接线）
+- [x] optimistic 使用最新 Runtime snapshot；`RuntimeCoordinator` current-target cell 已让旧 Runtime 的 refresh/late sink 路由到最新 cache/finalizer，目标缺失时回退 snapshot-local 语义
 - resource update 不全局失效；
 - Moka weight/expiry；
 - persistence format/checksum/recovery/page budget；
@@ -246,6 +246,6 @@ Moka adapter 不向 DNS Core 暴露具体 entry guard 或 future 类型。
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [ ] 完成跨 adapter 一致性、恢复和故障测试。
 
-阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；PolicyCore 新增配置启用缓存后的 upstream 命中、snapshot-local optimistic stale refresh 和 fast-positive late sink 写入测试；Runtime service 新增 previous/current Runtime finalizer owner 统一 shutdown 回收测试；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝。当前全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 415 passed、0 failed。真实 Runtime 最新 snapshot 捕获、完整 late-window/nested sink 传播、Moka/SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
+阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；PolicyCore 新增配置启用缓存后的 upstream 命中、snapshot-local optimistic stale refresh 和 fast-positive late sink 写入测试，另新增旧/最新 core optimistic refresh 路由测试；Runtime service 新增 previous/current Runtime finalizer owner 统一 shutdown 回收测试；新增 `cache::persistence::tests` 6 项通过，覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝。当前全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed。完整 late-window/nested sink 传播、Moka/SQLite adapter、WAL/SHM 观测、数据库故障恢复与 page-budget writer 仍未完成。
 
-当前实现进度：**50%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight、可取消有界 LateCacheFinalizer、RuntimeCoordinator 历史/当前 owner、基础 Cache-Core fresh/miss/CAS 接线、当前 PolicyDnsCore snapshot-local optimistic refresh、fast-positive late sink、Policy/DnsService snapshot owner 和文件快照 persistence 边界；最新 Runtime snapshot/完整生命周期、Moka、SQLite persistence 与跨 adapter 故障测试未实现）。
+当前实现进度：**50%**（内存 adapter、容量淘汰、响应准入/TTL、namespace/key builder、CacheFacade、single-flight、可取消有界 LateCacheFinalizer、RuntimeCoordinator 历史/当前 owner 与 current-target 路由、基础 Cache-Core fresh/miss/CAS 接线、PolicyDnsCore snapshot-local/最新 Runtime optimistic refresh、fast-positive late sink、Policy/DnsService snapshot owner 和文件快照 persistence 边界；完整生命周期、Moka、SQLite persistence 与跨 adapter 故障测试未实现）。

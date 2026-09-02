@@ -8,7 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
+use arc_swap::{ArcSwap, ArcSwapOption};
 use hickory_proto::op::ResponseCode;
 use thiserror::Error;
 
@@ -18,7 +18,7 @@ use crate::cache::{
     build_cache_key,
 };
 use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedUpstream};
-use crate::dns::{Cancellation, Deadline};
+use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::policy::{PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
 use crate::ports::cache::{CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation};
@@ -52,6 +52,34 @@ pub enum PolicyCoreBuildError {
     Cache { reason: String },
 }
 
+/// Runtime 级当前 Policy core 指针，供旧 Runtime 的后台刷新读取最新目标。
+pub(crate) struct RuntimeCoreCell {
+    current: ArcSwapOption<RuntimeCoreTarget>,
+}
+
+pub(crate) struct RuntimeCoreTarget {
+    pub(crate) core: Arc<PolicyDnsCore>,
+    pub(crate) revision: RuntimeRevision,
+}
+
+impl Default for RuntimeCoreCell {
+    fn default() -> Self {
+        Self {
+            current: ArcSwapOption::empty(),
+        }
+    }
+}
+
+impl RuntimeCoreCell {
+    pub(crate) fn current(&self) -> Option<Arc<RuntimeCoreTarget>> {
+        self.current.load_full()
+    }
+
+    pub(crate) fn publish(&self, target: Option<Arc<RuntimeCoreTarget>>) {
+        self.current.store(target);
+    }
+}
+
 /// 使用同一份 resolved config 构建 policy/resource 本地回答 core。
 #[derive(Clone)]
 pub struct PolicyDnsCore {
@@ -59,6 +87,7 @@ pub struct PolicyDnsCore {
     upstreams: UpstreamRuntime,
     cache: Arc<CacheFacade>,
     late_cache_finalizer: Arc<LateCacheFinalizer>,
+    runtime_cell: Arc<ArcSwap<RuntimeCoreCell>>,
     ttl: u32,
 }
 
@@ -216,6 +245,7 @@ impl PolicyDnsCore {
             upstreams,
             cache,
             late_cache_finalizer,
+            runtime_cell: Arc::new(ArcSwap::from_pointee(RuntimeCoreCell::default())),
             ttl,
         })
     }
@@ -239,6 +269,14 @@ impl PolicyDnsCore {
     /// 返回由 Runtime 生命周期统一托管的 late-cache finalizer。
     pub(crate) fn finalizer_owner(&self) -> Arc<LateCacheFinalizer> {
         Arc::clone(&self.late_cache_finalizer)
+    }
+
+    pub(crate) fn attach_runtime_cell(&self, cell: Arc<RuntimeCoreCell>) {
+        self.runtime_cell.store(cell);
+    }
+
+    fn latest_runtime_target(&self) -> Option<Arc<RuntimeCoreTarget>> {
+        self.runtime_cell.load().current()
     }
 
     pub fn publish_hosts_resource(
@@ -363,6 +401,7 @@ fn rule_set_versions(
 struct PolicyLateResultSink {
     cache: Arc<CacheFacade>,
     finalizer: Arc<LateCacheFinalizer>,
+    runtime_cell: Arc<ArcSwap<RuntimeCoreCell>>,
     key: crate::ports::cache::CacheKey,
     producer_revision: crate::dns::RuntimeRevision,
     format_version: u16,
@@ -382,14 +421,31 @@ impl LateResultSink for PolicyLateResultSink {
         if !response.matches_query(&query) {
             return;
         }
-        let _ = self.finalizer.submit(
-            Arc::clone(&self.cache),
+        let target = self.runtime_cell.load().current();
+        let (cache, finalizer, producer_revision) = target.map_or_else(
+            || {
+                (
+                    Arc::clone(&self.cache),
+                    Arc::clone(&self.finalizer),
+                    self.producer_revision,
+                )
+            },
+            |target| {
+                (
+                    Arc::clone(&target.core.cache),
+                    Arc::clone(&target.core.late_cache_finalizer),
+                    target.revision,
+                )
+            },
+        );
+        let _ = finalizer.submit(
+            cache,
             CacheWriteRequest {
                 key: self.key.clone(),
                 condition: crate::ports::cache::CacheCondition::Absent,
                 response: Arc::new(response),
                 now: Instant::now(),
-                producer_revision: self.producer_revision,
+                producer_revision,
                 format_version: self.format_version,
                 deadline: self.deadline,
             },
@@ -636,12 +692,30 @@ impl PolicyDnsCore {
         let query = request.query.clone();
         let context = optimistic_refresh_context(&request.context);
         let upstream = plan.upstream.clone();
-        let upstreams = self.upstreams.clone();
-        let cache = Arc::clone(&self.cache);
-        let producer_revision = request.context.runtime_revision;
+        let target = self.latest_runtime_target();
+        let (upstreams, cache, finalizer, producer_revision, condition) = target.map_or_else(
+            || {
+                (
+                    self.upstreams.clone(),
+                    Arc::clone(&self.cache),
+                    Arc::clone(&self.late_cache_finalizer),
+                    request.context.runtime_revision,
+                    crate::ports::cache::CacheCondition::Version(stale_version),
+                )
+            },
+            |target| {
+                (
+                    target.core.upstreams.clone(),
+                    Arc::clone(&target.core.cache),
+                    Arc::clone(&target.core.late_cache_finalizer),
+                    target.revision,
+                    crate::ports::cache::CacheCondition::Absent,
+                )
+            },
+        );
         let format_version = key.format_version;
         let deadline = context.meta.deadline;
-        let _ = self.late_cache_finalizer.submit_task(async move {
+        let _ = finalizer.submit_task(async move {
             let Some(UpstreamOutcome::Response(response)) =
                 upstreams.exchange(&upstream, &query, &context, None).await
             else {
@@ -653,7 +727,7 @@ impl PolicyDnsCore {
             let _ = cache
                 .write_response(CacheWriteRequest {
                     key,
-                    condition: crate::ports::cache::CacheCondition::Version(stale_version),
+                    condition,
                     response: Arc::new(response),
                     now: Instant::now(),
                     producer_revision,
@@ -672,6 +746,7 @@ impl PolicyDnsCore {
         Arc::new(PolicyLateResultSink {
             cache: Arc::clone(&self.cache),
             finalizer: Arc::clone(&self.late_cache_finalizer),
+            runtime_cell: Arc::clone(&self.runtime_cell),
             key: key.clone(),
             producer_revision: request.context.runtime_revision,
             format_version: key.format_version,
@@ -1102,7 +1177,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{PolicyDnsCore, UpstreamRuntime, cache_key};
+    use super::{PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, UpstreamRuntime, cache_key};
     use crate::upstream::UpstreamRegistry;
 
     struct FakeDohTransport {
@@ -1356,6 +1431,119 @@ mod tests {
         }
         assert!(refreshed, "stale lookup must complete a bounded refresh");
         assert_eq!(transport.calls.load(Ordering::Acquire), 2);
+    }
+
+    #[tokio::test]
+    async fn optimistic_refresh_targets_the_latest_runtime_snapshot() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        config.dns.cache.optimistic.enabled = true;
+        config.dns.cache.failure_ttl = Duration::from_millis(20);
+        let config = Arc::new(config);
+        let old_transport = Arc::new(FakeDohTransport::new());
+        let latest_transport = Arc::new(FakeDohTransport::new());
+        let old_registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            old_transport.clone(),
+        )
+        .unwrap();
+        let latest_registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            latest_transport.clone(),
+        )
+        .unwrap();
+        let old = Arc::new(
+            PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, old_registry).unwrap(),
+        );
+        let latest = Arc::new(
+            PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, latest_registry).unwrap(),
+        );
+
+        let first_request = request("remote.example.", RecordType::A);
+        let qname =
+            CanonicalDomain::parse(&first_request.query.question().name().to_ascii()).unwrap();
+        let listener_id = ConfigId::new("dns").unwrap();
+        let plan = old
+            .policy()
+            .evaluate(crate::policy::PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: first_request.context.client.client_addr,
+                client_digest: None,
+                qname: Some(&qname),
+            })
+            .unwrap();
+        let key = cache_key(&plan, &first_request).unwrap();
+        old.resolve(&first_request).await.unwrap();
+        let record = match old
+            .cache()
+            .lookup(&key, Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .await
+            .unwrap()
+        {
+            CacheLookup::Fresh(record) => record,
+            other => panic!("expected a fresh cache record, got {other:?}"),
+        };
+        let now = Instant::now();
+        let stale_entry = crate::ports::cache::CacheEntry {
+            response: Arc::clone(&record.entry.response),
+            inserted_at: now - Duration::from_secs(1),
+            expires_at: now - Duration::from_millis(1),
+            stale_until: Some(now + Duration::from_secs(5)),
+            response_class: record.entry.response_class,
+            producer_revision: record.entry.producer_revision,
+            quality: record.entry.quality,
+            checksum: record.entry.checksum,
+            format_version: record.entry.format_version,
+        };
+        old.cache()
+            .store()
+            .compare_and_swap(
+                key.clone(),
+                crate::ports::cache::CacheCondition::Version(record.version),
+                Arc::new(stale_entry),
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+            )
+            .await
+            .unwrap();
+
+        let cell = Arc::new(RuntimeCoreCell::default());
+        old.attach_runtime_cell(Arc::clone(&cell));
+        latest.attach_runtime_cell(Arc::clone(&cell));
+        cell.publish(Some(Arc::new(RuntimeCoreTarget {
+            core: Arc::clone(&latest),
+            revision: RuntimeRevision(2),
+        })));
+
+        let stale = old
+            .resolve(&request("remote.example.", RecordType::A))
+            .await
+            .unwrap();
+        assert!(matches!(stale, CoreOutcome::Response(_)));
+        let mut refreshed = false;
+        for _ in 0..100 {
+            if latest_transport.calls.load(Ordering::Acquire) >= 1
+                && matches!(
+                    latest
+                        .cache()
+                        .lookup(&key, Deadline::new(Instant::now() + Duration::from_secs(1)))
+                        .await
+                        .unwrap(),
+                    CacheLookup::Fresh(_)
+                )
+            {
+                refreshed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            refreshed,
+            "latest runtime cache must receive optimistic refresh"
+        );
+        assert_eq!(old_transport.calls.load(Ordering::Acquire), 1);
+        assert_eq!(latest_transport.calls.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]

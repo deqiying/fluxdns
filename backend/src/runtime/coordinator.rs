@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::cache::LateCacheFinalizer;
 use crate::config::resolve::ConfigId;
-use crate::dns::{PolicyDnsCore, RuntimeRevision};
+use crate::dns::{PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, RuntimeRevision};
 use crate::ports::effects::{ResourceFetcher, SocketFactory};
 use crate::resource::{ResourceScheduleDecision, ResourceSnapshot, RuleIndex};
 
@@ -68,6 +68,10 @@ impl ActiveRuntime {
         self.snapshot()
             .policy_core()
             .map(PolicyDnsCore::finalizer_owner)
+    }
+
+    fn policy_core_arc(&self) -> Option<Arc<PolicyDnsCore>> {
+        self.snapshot().policy_core_arc()
     }
 
     pub fn resource_worker_ids(&self) -> Vec<ConfigId> {
@@ -258,26 +262,46 @@ pub struct RuntimeCoordinator {
     active: ArcSwap<ActiveRuntime>,
     mutation: tokio::sync::Mutex<()>,
     finalizer_owners: std::sync::Mutex<Vec<Arc<LateCacheFinalizer>>>,
+    runtime_core_cell: Arc<RuntimeCoreCell>,
 }
 
 impl RuntimeCoordinator {
     pub fn new(initial: BoundCandidate) -> Self {
         let active = Arc::new(ActiveRuntime::from_candidate(initial));
-        Self {
+        let coordinator = Self {
             active: ArcSwap::from(Arc::clone(&active)),
             mutation: tokio::sync::Mutex::new(()),
             finalizer_owners: std::sync::Mutex::new(active.finalizer_owner().into_iter().collect()),
-        }
+            runtime_core_cell: Arc::new(RuntimeCoreCell::default()),
+        };
+        coordinator.register_runtime_core(&active);
+        coordinator
     }
 
     pub(crate) fn from_active(initial: Arc<ActiveRuntime>) -> Self {
-        Self {
+        let coordinator = Self {
             active: ArcSwap::from(Arc::clone(&initial)),
             mutation: tokio::sync::Mutex::new(()),
             finalizer_owners: std::sync::Mutex::new(
                 initial.finalizer_owner().into_iter().collect(),
             ),
-        }
+            runtime_core_cell: Arc::new(RuntimeCoreCell::default()),
+        };
+        coordinator.register_runtime_core(&initial);
+        coordinator
+    }
+
+    fn register_runtime_core(&self, runtime: &Arc<ActiveRuntime>) {
+        let Some(core) = runtime.policy_core_arc() else {
+            self.runtime_core_cell.publish(None);
+            return;
+        };
+        core.attach_runtime_cell(Arc::clone(&self.runtime_core_cell));
+        self.runtime_core_cell
+            .publish(Some(Arc::new(RuntimeCoreTarget {
+                core,
+                revision: runtime.revision(),
+            })));
     }
 
     fn register_finalizer_owner(&self, runtime: &ActiveRuntime) {
@@ -438,6 +462,7 @@ impl RuntimeCoordinator {
         let observed = self.active.compare_and_swap(&current, Arc::clone(&next));
         if Arc::ptr_eq(&*observed, &current) {
             self.register_finalizer_owner(&next);
+            self.register_runtime_core(&next);
             current.begin_drain();
             return Ok(next);
         }
@@ -451,6 +476,7 @@ impl RuntimeCoordinator {
     pub fn activate(&self, candidate: BoundCandidate) -> Arc<ActiveRuntime> {
         let next = Arc::new(ActiveRuntime::from_candidate(candidate));
         self.register_finalizer_owner(&next);
+        self.register_runtime_core(&next);
         let previous = self.active.swap(next);
         previous.begin_drain();
         previous
@@ -478,6 +504,7 @@ impl RuntimeCoordinator {
         let observed = self.active.compare_and_swap(&current, Arc::clone(&next));
         if Arc::ptr_eq(&*observed, &current) {
             self.register_finalizer_owner(&next);
+            self.register_runtime_core(&next);
             current.begin_drain();
             return Ok(current);
         }

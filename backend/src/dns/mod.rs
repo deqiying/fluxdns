@@ -23,3 +23,4 @@ pub use message::{
     ResponseClass, TtlMetadata,
 };
 pub use policy::{PolicyCoreBuildError, PolicyDnsCore, PolicyResourcePublishError};
+pub(crate) use policy::{RuntimeCoreCell, RuntimeCoreTarget};
