@@ -221,7 +221,7 @@ transport / upstream / storage / observability adapters
 - 完成 DNS ID、EDNS、截断、deadline 和错误响应语义；
 - 验收：UDP/TCP 一致性、并发、畸形报文和取消测试通过。
 
-当前边界：DoH plain HTTP GET/POST 与基本 HTTP/DNS 错误分层已实现；TLS terminate、PROXY protocol、forwarded header 和完整跨 transport 错误验收尚未实现。DoH endpoint 不会退化为 raw DNS/TCP。
+当前边界：DoH plain HTTP GET/POST 与基本 HTTP/DNS 错误分层已实现，`forwarded_header` 首轮可信 peer/链解析也已接入；TLS terminate、PROXY protocol 和完整跨 transport 错误验收尚未实现。DoH endpoint 不会退化为 raw DNS/TCP。
 
 阶段 3/4 当前验收证据：
 
