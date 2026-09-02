@@ -215,7 +215,7 @@ encoder 由 request correlation 持有并只能调用一次：
 
 ## 13. 实现检查清单
 
-- [ ] 实现 profile/capabilities 映射；
+- [x] 实现 v1 固定 profile/capabilities 映射，并由 transport 模块统一提供；
 - [x] 实现 UDP、TCP adapter；
 - [x] 实现 DoH plain HTTP GET/POST；
 - [x] 实现 TLS terminate 首轮证书加载和握手；
@@ -227,6 +227,6 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 完成 UDP/TCP/plain DoH 的真实 loopback response contract，统一验证 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED、DNS ID 和 canonical response，并验证大响应下 UDP TC、TCP/DoH 完整响应；
 - [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 16 项通过；system socket Rustls loopback 握手和 peer 保留定向测试 1 项通过；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
+阶段证据：DoH codec/session、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 16 项通过；system socket Rustls loopback 握手和 peer 保留定向测试 1 项通过；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility。真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
 
-当前实现进度：**76%**。
+当前实现进度：**77%**。

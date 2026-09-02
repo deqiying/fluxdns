@@ -12,9 +12,8 @@ use tokio::task::JoinSet;
 use crate::config::resolve::ConfigId;
 use crate::config::{BindTransport, ResolvedConfig};
 use crate::dns::{
-    CacheCompatibilityKey, CancelReason, Cancellation, CoreError, CoreOutcome, Deadline,
-    DispatchError, DnsCore, DnsRequest, ResponseClass, RuntimeRevision, TransportCapabilities,
-    TransportClass, dispatch_inbound,
+    CancelReason, Cancellation, CoreError, CoreOutcome, Deadline, DispatchError, DnsCore,
+    DnsRequest, ResponseClass, RuntimeRevision, TransportClass, dispatch_inbound,
 };
 use crate::observability::TelemetryWriter;
 use crate::ports::PortErrorClass;
@@ -42,6 +41,7 @@ use crate::storage::{
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
     DEFAULT_REQUEST_TIMEOUT, TcpAdapter, TcpAdapterError, TcpSession, UdpAdapter, UdpAdapterError,
+    transport_capabilities,
 };
 
 #[derive(Debug, Error)]
@@ -1246,7 +1246,7 @@ fn prepare_transport_plans(
                     BoundEndpointHandle { entry, socket },
                     config,
                     revision,
-                    capabilities(TransportClass::Multiplexed),
+                    transport_capabilities(TransportClass::Multiplexed),
                     request_timeout,
                 )
                 .map_err(|reason| ServiceStartError::Endpoint {
@@ -1264,7 +1264,7 @@ fn prepare_transport_plans(
                             socket: ActivatedSocketHandle::Udp(socket),
                         },
                         revision,
-                        capabilities(TransportClass::Datagram),
+                        transport_capabilities(TransportClass::Datagram),
                         request_timeout,
                     )
                     .map_err(|reason| ServiceStartError::Endpoint {
@@ -1281,7 +1281,7 @@ fn prepare_transport_plans(
                             socket: ActivatedSocketHandle::Tcp(listener),
                         },
                         revision,
-                        capabilities(TransportClass::Stream),
+                        transport_capabilities(TransportClass::Stream),
                         request_timeout,
                     )
                     .map_err(|reason| ServiceStartError::Endpoint {
@@ -1399,13 +1399,6 @@ fn task_failure(completion: &TaskCompletion) -> Option<ServiceError> {
         fault_level: completion.spec.fault_level,
         exit: completion.exit.clone(),
     })
-}
-
-fn capabilities(class: TransportClass) -> TransportCapabilities {
-    TransportCapabilities {
-        class,
-        cache_compatibility: CacheCompatibilityKey(1),
-    }
 }
 
 fn spawn_transport_task<F>(
@@ -2112,9 +2105,8 @@ mod tests {
     use tokio::net::{TcpStream, UdpSocket};
 
     use super::{
-        ResolveDetailDropCounters, ServiceError, capabilities, publish_component_health,
-        response_header_rcode, response_rcode, spawn_telemetry_task, spawn_transport_task,
-        task_failure,
+        ResolveDetailDropCounters, ServiceError, publish_component_health, response_header_rcode,
+        response_rcode, spawn_telemetry_task, spawn_transport_task, task_failure,
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
@@ -2133,6 +2125,7 @@ mod tests {
         SystemSocketFactory, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
     };
     use crate::storage::StorageRuntime;
+    use crate::transport::transport_capabilities;
 
     #[derive(Default)]
     struct CountingTelemetryOutput {
@@ -2298,21 +2291,21 @@ mod tests {
     #[test]
     fn service_capabilities_are_transport_specific_and_stable() {
         assert_eq!(
-            capabilities(TransportClass::Datagram),
+            transport_capabilities(TransportClass::Datagram),
             crate::dns::TransportCapabilities {
                 class: TransportClass::Datagram,
                 cache_compatibility: CacheCompatibilityKey(1),
             }
         );
         assert_eq!(
-            capabilities(TransportClass::Stream),
+            transport_capabilities(TransportClass::Stream),
             crate::dns::TransportCapabilities {
                 class: TransportClass::Stream,
                 cache_compatibility: CacheCompatibilityKey(1),
             }
         );
         assert_eq!(
-            capabilities(TransportClass::Multiplexed),
+            transport_capabilities(TransportClass::Multiplexed),
             crate::dns::TransportCapabilities {
                 class: TransportClass::Multiplexed,
                 cache_compatibility: CacheCompatibilityKey(1),
