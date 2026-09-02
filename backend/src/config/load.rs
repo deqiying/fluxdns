@@ -574,15 +574,19 @@ mod tests {
     };
     use std::{
         fs,
+        sync::atomic::{AtomicU64, Ordering},
         time::{SystemTime, UNIX_EPOCH},
     };
+
+    static TEMP_DIR_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
     fn temp_dir() -> std::path::PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("fluxdns-load-{suffix}"));
+        let sequence = TEMP_DIR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("fluxdns-load-{suffix}-{sequence}"));
         fs::create_dir_all(&path).unwrap();
         path
     }
