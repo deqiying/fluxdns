@@ -1,6 +1,6 @@
 # Cache 模块设计
 
-> 状态：v1 方案已完成，已实现内存 CacheStore、Moka CacheStore、文件快照和 SQLite cache persistence 首轮 adapter、文件/SQLite 基础 contract、SQLite metadata/disk-usage 观测和 test-only 故障重试 contract、一致的共享容量淘汰、响应准入/TTL、稳定 key builder、client identity 摘要隔离、CacheFacade 首轮切片、fresh 剩余 TTL/stale answer TTL、可取消有界 LateCacheFinalizer、RuntimeCoordinator 级历史/当前 owner、PolicyDnsCore 当前 snapshot-local optimistic refresh 边界
+> 状态：v1 方案已完成，已实现内存 CacheStore、Moka CacheStore、文件快照和 SQLite cache persistence 首轮 adapter、文件/SQLite 基础 contract、SQLite metadata/disk-usage 观测和 test-only 故障重试 contract、有界 persistence writer 生命周期、一致的共享容量淘汰、响应准入/TTL、稳定 key builder、client identity 摘要隔离、CacheFacade 首轮切片、fresh 剩余 TTL/stale answer TTL、可取消有界 LateCacheFinalizer、RuntimeCoordinator 级历史/当前 owner、PolicyDnsCore 当前 snapshot-local optimistic refresh 边界
 >
 > 更新日期：2026-09-03
 >
@@ -23,6 +23,7 @@ Cache 模块实现逻辑缓存池、entry 生命周期、single-flight、optimis
 | `moka.rs` | 基于 `moka::sync::Cache` 的并发 `CacheStore` adapter，复用同一 port 语义和 single-flight 边界 |
 | `persistence.rs` | 无外部依赖的版本化文件快照 `PersistentCacheStore` adapter，作为 SQLite adapter 的 codec 基线 |
 | `sqlite.rs` | 独立 SQLite cache persistence adapter，使用 WAL、独立 schema 和批量事务写入 |
+| `runtime.rs` | 有界非阻塞 persistence writer、单写者任务和有序 shutdown |
 | `service.rs` | `CacheFacade`、single-flight、TTL、CAS、invalidations 和 `LateCacheFinalizer` 的 typed 编排 |
 
 缓存 SQLite 与业务统计 SQLite 是不同文件、不同 schema、不同 writer 和不同故障边界。
@@ -200,9 +201,11 @@ Moka adapter 复用上述 `CacheStore` contract，但把实际 entry 存储和�
 - `recover` 在 adapter 边界隔离过期、损坏和不兼容记录并返回 `CacheRecoverySummary`；
 - `maintain_capacity` 与 `shutdown` 复用同一串行 operation lock，数据库关闭后拒绝继续恢复/写入。
 
-SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已实现；last-access bucket、异步批量 writer、busy/disk-full degraded recovery 和跨 adapter 故障 contract 仍待后续阶段实现。
+SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已实现；last-access bucket、生产 writer 接线、busy/disk-full degraded recovery 和跨 adapter 故障 contract 仍待后续阶段实现。
 
-阶段 97 已补充文件快照与 SQLite adapter 的基础 contract test，锁定 live/expired recovery、记录字段、容量维护和 shutdown 后拒绝操作的一致语义；真实数据库 busy/disk-full 故障矩阵、WAL/SHM 观测和异步批量 writer 仍未实现。
+阶段 125 增加 `CachePersistenceRuntime`：DNS 侧通过有界 `try_send` 提交 typed batch，单写者任务串行执行 adapter I/O，单批失败按 best-effort 计数后继续，正常 shutdown 按 FIFO 排空已入队批次并关闭 adapter。当前先固定该组件及测试，尚未接入生产 `PolicyDnsCore` 的 recovery/write/shutdown 路径。
+
+阶段 97 已补充文件快照与 SQLite adapter 的基础 contract test，锁定 live/expired recovery、记录字段、容量维护和 shutdown 后拒绝操作的一致语义；真实数据库 busy/disk-full 故障矩阵仍未实现。
 
 阶段 98 为 SQLite adapter 增加 `cfg(test)` 一次性 Busy/DiskFull 注入；失败写入返回 `Unavailable` 且不改变已持久化记录，清除注入后下一次写入成功。该 hook 只用于 deterministic retry 验证，不等价于真实 OS/SQLite 故障复现。
 
@@ -275,11 +278,12 @@ SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已�
 - [x] 实现独立 SQLite persistence 首轮 adapter；
 - [x] 在 SQLite cache DB 中记录并校验 schema/cache/key format metadata；
 - [x] 提供 SQLite 主库/WAL/SHM 磁盘占用观测 API；
+- [x] 实现有界 persistence writer 和有序 shutdown 生命周期；生产 CacheFacade/Runtime 接线仍待完成；
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [x] 完成文件/SQLite adapter 的基础一致性、恢复和 shutdown contract 测试。
 - [x] 完成 SQLite adapter test-only Busy/DiskFull 失败后重试 contract 测试。
 - [ ] 完成跨 adapter 的真实 busy/disk-full 故障测试矩阵。
 
-阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；PolicyCore 覆盖配置启用缓存后的 upstream 命中、fresh 剩余 TTL、stale answer TTL、snapshot-local optimistic refresh、fast-positive late sink 写入，以及最终 ECS subnet 和 client identity 的 cache key 隔离；Runtime service 覆盖 previous/current Runtime finalizer owner 统一 shutdown 回收；upstream executor 覆盖 nested parallel group sink 传播；`cache::persistence::tests` 6 项覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝；`cache::moka::tests` 3 项覆盖 fresh/stale/expiry、质量 CAS、容量边界和 shutdown；`cache::sqlite::tests` 5 项覆盖独立数据库 roundtrip/reopen、metadata 版本校验、disk usage、expiry recovery、容量淘汰、损坏记录隔离、shutdown/零预算边界和故障重试；跨 adapter contract 覆盖文件/SQLite 基础 contract、过期清理与 test-only Busy/DiskFull 重试。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed；完整 late-window、last-access writer 和真实数据库故障矩阵仍未完成。
+阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；`cache::runtime::tests` 2 项覆盖参数拒绝、失败批次隔离和 shutdown 排空；PolicyCore 覆盖配置启用缓存后的 upstream 命中、fresh 剩余 TTL、stale answer TTL、snapshot-local optimistic refresh、fast-positive late sink 写入，以及最终 ECS subnet 和 client identity 的 cache key 隔离；Runtime service 覆盖 previous/current Runtime finalizer owner 统一 shutdown 回收；upstream executor 覆盖 nested parallel group sink 传播；`cache::persistence::tests` 6 项覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝；`cache::moka::tests` 3 项覆盖 fresh/stale/expiry、质量 CAS、容量边界和 shutdown；`cache::sqlite::tests` 5 项覆盖独立数据库 roundtrip/reopen、metadata 版本校验、disk usage、expiry recovery、容量淘汰、损坏记录隔离、shutdown/零预算边界和故障重试；跨 adapter contract 覆盖文件/SQLite 基础 contract、过期清理与 test-only Busy/DiskFull 重试。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed；生产 persistence 接线、完整 late-window、last-access writer 和真实数据库故障矩阵仍未完成。
 
-当前实现进度：**77%**（内存/Moka/SQLite 首轮 adapter、容量淘汰、响应准入/TTL、namespace/key builder、最终 ECS key 隔离、client identity 摘要隔离、fresh 剩余 TTL/stale answer TTL、global/strategy/client 共享 facade 开关、per-pool stale max-age 限制、CacheFacade、single-flight、可取消有界 LateCacheFinalizer、RuntimeCoordinator 历史/当前 owner 与 current-target 路由、nested group sink 传播、基础 Cache-Core fresh/miss/CAS 接线、PolicyDnsCore snapshot-local/最新 Runtime optimistic refresh、fast-positive late sink、Policy/DnsService snapshot owner、文件快照 persistence 边界、文件/SQLite 基础 contract、过期清理语义统一、SQLite test-only Busy/DiskFull retry contract、SQLite cache metadata version 校验和主库/WAL/SHM disk usage 观测 API；完整 late-window 候选生命周期、last-access bucket、真实 busy/disk-full 数据库故障恢复、异步 page-budget writer 与跨 adapter 真实故障矩阵未实现）。
+当前实现进度：**78%**（内存/Moka/SQLite 首轮 adapter、容量淘汰、响应准入/TTL、namespace/key builder、最终 ECS key 隔离、client identity 摘要隔离、fresh 剩余 TTL/stale answer TTL、global/strategy/client 共享 facade 开关、per-pool stale max-age 限制、CacheFacade、single-flight、可取消有界 LateCacheFinalizer、RuntimeCoordinator 历史/当前 owner 与 current-target 路由、nested group sink 传播、基础 Cache-Core fresh/miss/CAS 接线、PolicyDnsCore snapshot-local/最新 Runtime optimistic refresh、fast-positive late sink、Policy/DnsService snapshot owner、文件快照 persistence 边界、文件/SQLite 基础 contract、有界 persistence writer、过期清理语义统一、SQLite test-only Busy/DiskFull retry contract、SQLite cache metadata version 校验和主库/WAL/SHM disk usage 观测 API；生产 persistence 接线、完整 late-window 候选生命周期、last-access bucket、真实 busy/disk-full 数据库故障恢复与跨 adapter 真实故障矩阵未实现）。

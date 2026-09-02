@@ -5,6 +5,7 @@ mod key;
 mod memory;
 mod moka;
 mod persistence;
+mod runtime;
 mod service;
 mod sqlite;
 
@@ -18,6 +19,10 @@ pub use key::{
 pub use memory::{MemoryCacheStore, MemoryCacheStoreBuildError};
 pub use moka::{MokaCacheStore, MokaCacheStoreBuildError};
 pub use persistence::{FilePersistentCacheStore, FilePersistentCacheStoreBuildError};
+pub use runtime::{
+    CachePersistenceEnqueueError, CachePersistenceRunSummary, CachePersistenceRuntime,
+    CachePersistenceRuntimeBuildError, CachePersistenceWriter,
+};
 pub use service::{
     CacheFacade, CacheFacadeBuildError, CacheFacadeError, CacheFacadeOptions, CacheLookup,
     CacheRefreshPermit, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer,
