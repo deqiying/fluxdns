@@ -2739,7 +2739,7 @@ clients: []
     }
 
     /// 通过 plain HTTP/1.1 POST 发送指定记录类型的 DoH 查询。
-    async fn doh_query_with_type(
+    async fn doh_post_query_with_type(
         address: SocketAddr,
         id: u16,
         name: &str,
@@ -2752,8 +2752,28 @@ clients: []
         )
         .into_bytes();
         request.extend_from_slice(&query);
+        send_doh_request(address, &request).await
+    }
+
+    /// 通过 plain HTTP/1.1 GET 发送 unpadded base64url DoH 查询。
+    async fn doh_get_query_with_type(
+        address: SocketAddr,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> Message {
+        let query = query_wire_with_type(id, name, record_type);
+        let request = format!(
+            "GET /dns?dns={} HTTP/1.1\r\nHost: localhost\r\nAccept: application/dns-message\r\nConnection: close\r\n\r\n",
+            base64url(&query)
+        );
+        send_doh_request(address, request.as_bytes()).await
+    }
+
+    /// 发送一条 plain DoH HTTP 请求并提取 DNS message body。
+    async fn send_doh_request(address: SocketAddr, request: &[u8]) -> Message {
         let mut stream = TcpStream::connect(address).await.unwrap();
-        stream.write_all(&request).await.unwrap();
+        stream.write_all(request).await.unwrap();
         let mut response = Vec::new();
         tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
             .await
@@ -2767,13 +2787,37 @@ clients: []
         Message::from_vec(&response[header_end + 4..]).unwrap()
     }
 
-    /// 对同一问题分别执行 UDP、TCP 和 plain DoH 请求，并使用不同 ID 验证关联恢复。
+    /// 将 DNS wire 编码为 DoH GET 使用的 unpadded base64url。
+    fn base64url(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut output = String::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            let first = bytes[index];
+            let second = bytes.get(index + 1).copied();
+            let third = bytes.get(index + 2).copied();
+            output.push(TABLE[(first >> 2) as usize] as char);
+            output.push(TABLE[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize] as char);
+            if let Some(second) = second {
+                output
+                    .push(TABLE[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize] as char);
+            }
+            if let Some(third) = third {
+                output.push(TABLE[(third & 0x3f) as usize] as char);
+            }
+            index += 3;
+        }
+        output
+    }
+
+    /// 对同一问题执行 UDP、TCP、DoH POST 和 DoH GET，并使用不同 ID 验证关联恢复。
     async fn query_all_transports(
         base_port: u16,
         first_id: u16,
         name: &str,
         record_type: RecordType,
-    ) -> [Message; 3] {
+    ) -> [Message; 4] {
         let udp = udp_query_with_type(
             SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)),
             first_id,
@@ -2788,19 +2832,26 @@ clients: []
             record_type,
         )
         .await;
-        let doh = doh_query_with_type(
+        let doh_post = doh_post_query_with_type(
             SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 2)),
             first_id + 2,
             name,
             record_type,
         )
         .await;
-        [udp, tcp, doh]
+        let doh_get = doh_get_query_with_type(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 2)),
+            first_id + 3,
+            name,
+            record_type,
+        )
+        .await;
+        [udp, tcp, doh_post, doh_get]
     }
 
-    /// 去除 transport 关联 ID 后，校验三种协议返回同一 canonical response。
+    /// 去除 transport 关联 ID 后，校验三种协议及两种 DoH method 返回同一响应。
     fn assert_cross_transport_contract(
-        responses: [Message; 3],
+        responses: [Message; 4],
         first_id: u16,
         name: &str,
         record_type: RecordType,
@@ -2815,6 +2866,7 @@ clients: []
             .collect::<Vec<_>>();
         assert_eq!(canonical[0], canonical[1]);
         assert_eq!(canonical[0], canonical[2]);
+        assert_eq!(canonical[0], canonical[3]);
         assert_eq!(canonical[0].class(), expected_class);
         canonical[0].clone()
     }
@@ -2960,14 +3012,16 @@ clients: []
             ResponseClass::NxDomain,
         );
 
-        let [udp, tcp, doh] =
+        let [udp, tcp, doh_post, doh_get] =
             query_all_transports(base_port, 71, "large.transport.test.", RecordType::A).await;
         assert_eq!(udp.metadata.id, 71);
         assert!(udp.metadata.truncation);
         assert_eq!(udp.metadata.response_code, ResponseCode::NoError);
         let tcp = canonicalize_response(tcp, 72, "large.transport.test.", RecordType::A);
-        let doh = canonicalize_response(doh, 73, "large.transport.test.", RecordType::A);
-        assert_eq!(tcp, doh);
+        let doh_post = canonicalize_response(doh_post, 73, "large.transport.test.", RecordType::A);
+        let doh_get = canonicalize_response(doh_get, 74, "large.transport.test.", RecordType::A);
+        assert_eq!(tcp, doh_post);
+        assert_eq!(tcp, doh_get);
         assert_eq!(tcp.class(), ResponseClass::Positive);
         assert!(!tcp.as_message().metadata.truncation);
         assert_eq!(tcp.as_message().answers.len(), 64);
