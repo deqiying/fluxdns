@@ -1,6 +1,6 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard，Application 提供配置文件 reload 触发 API，service 会观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障；Supervisor 已支持受管 task-scoped cancellation，DnsService 的 UDP/TCP/DoH listener task 已使用独立 scoped token，显式 service reload 已可重建 listener task，外部配置变更事件、资源 worker 集合重建和 flush 生命周期仍在后续阶段
+> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard，Application 提供配置文件 reload 触发 API，service 会观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障；Supervisor 已支持受管 task-scoped cancellation，DnsService 的 UDP/TCP/DoH listener 与 resource refresh task 已使用独立 scoped token，显式 service reload 已可重建 listener 和 resource task，外部配置变更事件和 flush 生命周期仍在后续阶段
 >
 > 更新日期：2026-09-02
 >
@@ -64,7 +64,7 @@ snapshot 不包含：
 - writer channel 的发送端实现细节；
 - mutable retry/backoff state。
 
-`DnsService::with_default_timeout_from_runtime` 从 active snapshot 取得 `DnsCore` handle，确保 service task 与请求入口使用同一 `RuntimeRevision`。正式 `run` 路径由 `Application` 创建 `Arc<RuntimeCoordinator>`，再通过 `DnsService::with_default_timeout_from_coordinator` 共享 coordinator；service 启动时固定一份 listener/runtime 句柄给 transport task，但显式 `reload_prepared` 会为候选 listener 预构造 adapter，在 revision CAS 激活后注册新 task 并取消旧 scoped token；资源 refresh task 每轮通过 coordinator 查询当前活动 runtime。`PreparedRuntime` 在候选构造阶段装配生产 `ReqwestResourceFetcher`，并由 `ActiveRuntime` 持有其 shared adapter；该 adapter 不进入请求 snapshot。对三类 `auto_update=true` 资源，service 会把按 due/backoff 执行的 refresh worker 注册进同一 `Supervisor`，成功候选在当前 ActiveRuntime 内经 Policy 版本 CAS 和 Runtime 元数据 CAS 生效；资源 worker 集合重建、独立 resource-only runtime swap 和 flush task 仍待完成。
+`DnsService::with_default_timeout_from_runtime` 从 active snapshot 取得 `DnsCore` handle，确保 service task 与请求入口使用同一 `RuntimeRevision`。正式 `run` 路径由 `Application` 创建 `Arc<RuntimeCoordinator>`，再通过 `DnsService::with_default_timeout_from_coordinator` 共享 coordinator；service 启动时固定一份 listener/runtime 句柄给 transport task，但显式 `reload_prepared` 会为候选 listener 预构造 adapter，在 revision CAS 激活后注册新 task 并取消旧 scoped token；resource refresh task 也按 active runtime 的 worker ID 集合使用独立 scoped token，在 reload 时取消旧集合并注册新集合。`PreparedRuntime` 在候选构造阶段装配生产 `ReqwestResourceFetcher`，并由 `ActiveRuntime` 持有其 shared adapter；该 adapter 不进入请求 snapshot。对三类 `auto_update=true` 资源，service 会把按 due/backoff 执行的 refresh worker 注册进同一 `Supervisor`，成功候选在当前 ActiveRuntime 内经 Policy 版本 CAS 和 Runtime 元数据 CAS 生效；独立 resource-only runtime swap 和 flush task 仍待完成。
 
 每个请求在 ingress 后只捕获一次 `Arc<RuntimeSnapshot>`。同一请求不能在策略、缓存和上游阶段分别读取不同 revision。
 
@@ -115,7 +115,7 @@ v1 首次启动不存在端口复用迁移。未来 rebind 只有平台允许并
 - CAS 失败后重新读取最新 registry 并重放本资源变更；
 - 不从旧 registry 构造完整替换，避免并发更新互相覆盖。
 
-当前 `RuntimeCoordinator` 已提供资源 worker 查询、刷新、关闭代理，以及把已 prepare 的候选通过 `bind_prepared` 和 revision CAS 激活的 `bind_and_activate` 入口；`refresh_resource_if_current` 在刷新前后校验 captured `ActiveRuntime` 仍是 coordinator 当前实例，stale 时由 service 跳过本轮并重新读取。Application 的 `reload_runtime_from_path` 已把无 snapshot 配置加载、SecretRef 校验、async prepare 和候选激活串成显式触发 API，`reload_service_from_path` 进一步调用 service listener swap，并验证失败保留当前 runtime；当前资源刷新仍在该 runtime 内完成 Policy/metadata CAS，`run` 尚未接入文件监视或管理事件。资源-only 更新复用现有 `BoundListenerSet` 和 `SharedServices`。需要 rebind 的候选拥有独立 listener set；发布后旧 runtime 进入 drain，旧 transport task 通过 scoped cancellation 退出。
+当前 `RuntimeCoordinator` 已提供资源 worker 查询、刷新、关闭代理，以及把已 prepare 的候选通过 `bind_prepared` 和 revision CAS 激活的 `bind_and_activate` 入口；`refresh_resource_if_current` 在刷新前后校验 captured `ActiveRuntime` 仍是 coordinator 当前实例，stale 时由 service 跳过本轮并重新读取。Application 的 `reload_runtime_from_path` 已把无 snapshot 配置加载、SecretRef 校验、async prepare 和候选激活串成显式触发 API，`reload_service_from_path` 进一步调用 service listener/resource task swap，并验证失败保留当前 runtime；当前资源刷新仍在该 runtime 内完成 Policy/metadata CAS，`run` 尚未接入文件监视或管理事件。资源-only 更新复用现有 `BoundListenerSet` 和 `SharedServices`。需要 rebind 的候选拥有独立 listener set；发布后旧 runtime 进入 drain，旧 transport 和 resource task 通过 scoped cancellation 退出。
 
 ## 7. Supervisor
 
@@ -214,9 +214,9 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [x] 为 `auto_update=true` 的 remote/file rule-set 与 file hosts 注册 Supervisor refresh task，并在当前 ActiveRuntime 内执行 Policy/Runtime metadata live publish；
 - [x] 由 `Application` 与 `DnsService` 共享持有 `RuntimeCoordinator`，资源 refresh task 通过 coordinator 读取当前活动 runtime；监听器 task 仍固定在启动时实例；
 - [x] `Supervisor::spawn_with_factory` 实现瞬时失败的可取消指数退避、有界重试、重试次数和上限耗尽识别；当前 service task 的具体故障策略接入仍待完成；
-- [x] `DnsService` 观察 Supervisor task completion，区分 Degraded 终止与 FatalEndpoint/Fatal、重试耗尽和 panic；listener factory 重建仍待完成；
+- [x] `DnsService` 观察 Supervisor task completion，区分 Degraded 终止与 FatalEndpoint/Fatal、重试耗尽和 panic；listener 故障自动 factory 重建仍待完成；
 - [x] `Supervisor::spawn_scoped` 提供 task-scoped cancellation，且全局 shutdown 仍能回收 scoped task；DnsService 的 UDP/TCP/DoH listener 已使用独立 scoped token；
-- [x] `DnsService::reload_prepared` 在候选激活后重建 UDP/TCP/DoH listener task，并取消旧 scoped token；资源 worker 集合重建仍待完成；
+- [x] `DnsService::reload_prepared` 在候选激活后重建 UDP/TCP/DoH listener 和 resource refresh task，并取消旧 scoped token；
 - [x] `RuntimeCoordinator::bind_and_activate` 接入候选 `PreparedRuntime → bind_prepared → revision CAS`，bind/CAS 失败保留旧 runtime 或返还可重试 candidate；Application 已提供显式配置文件 reload 触发 API，service-aware reload 可重建 listener task；
 - [x] `RuntimeCoordinator::refresh_resource_if_current` 以 captured runtime 做前后活动实例校验，stale 时返回显式 coordinator error；service 重新读取当前 runtime 后再尝试；
 - [ ] 定义状态类型与所有权转换；
@@ -226,6 +226,6 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [ ] 完成完整 drain/shutdown（flush、checkpoint、超时分项报告）；
 - [ ] 完成并发、故障和时间控制测试。
 
-阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter，并验证 async prepare 可在 bind 前完成 remote restore/fetch、file snapshot load、持久化、refresh worker 构造和第二次 fallback 恢复；`runtime::coordinator::tests` 进一步验证 coordinator 级资源刷新代理、stale-active guard、候选 bind/activate 成功路径和 CAS 失败返还 candidate；`runtime::supervisor::tests` 验证 factory task 的瞬时失败重试、重试上限耗尽识别、shutdown report 重试计数以及 scoped task 的单独取消和全局 shutdown 回收；`service::tests` 验证 Degraded 终止、FatalEndpoint 升级、重试耗尽、panic 分类以及系统 loopback listener reload；service 将 remote/file refresh task 注册进 Supervisor，成功候选通过 ActiveRuntime 的 Policy CAS 和 Runtime metadata CAS 发布，缺失 file 进入失败 backoff。`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS、SOCKS5H、取消和 body limit。Application 自动配置变更事件、资源 worker 集合重建、真正跨 Runtime snapshot 生命周期和 flush 仍未完成。
+阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter，并验证 async prepare 可在 bind 前完成 remote restore/fetch、file snapshot load、持久化、refresh worker 构造和第二次 fallback 恢复；`runtime::coordinator::tests` 进一步验证 coordinator 级资源刷新代理、stale-active guard、候选 bind/activate 成功路径和 CAS 失败返还 candidate；`runtime::supervisor::tests` 验证 factory task 的瞬时失败重试、重试上限耗尽识别、shutdown report 重试计数以及 scoped task 的单独取消和全局 shutdown 回收；`service::tests` 验证 Degraded 终止、FatalEndpoint 升级、重试耗尽、panic 分类、系统 loopback listener reload 以及 resource worker token reconciliation；service 将 remote/file refresh task 注册进 Supervisor，成功候选通过 ActiveRuntime 的 Policy CAS 和 Runtime metadata CAS 发布，缺失 file 进入失败 backoff。`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS、SOCKS5H、取消和 body limit。Application 自动配置变更事件、真正跨 Runtime snapshot 生命周期和 flush 仍未完成。
 
-当前实现进度：**60%**。已验证 Runtime snapshot 资源摘要、原子资源 metadata publish、service core 构造入口、生产 ResourceFetcher ownership、当前 Policy finalizer owner 和同一 ActiveRuntime 内的 remote/file refresh worker/CAS publish；真正跨 Runtime reload、独立 listener swap、flush 和完整服务级故障矩阵仍未接线。
+当前实现进度：**60%**。已验证 Runtime snapshot 资源摘要、原子资源 metadata publish、service core 构造入口、生产 ResourceFetcher ownership、当前 Policy finalizer owner、同一 ActiveRuntime 内的 remote/file refresh worker/CAS publish，以及显式 reload 的 listener/resource task 集合重建；自动配置事件、独立 resource-only runtime swap、flush 和完整服务级故障矩阵仍未接线。

@@ -15,8 +15,10 @@
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **62.8%** | Config 达到 100% 模块验收口径；Runtime 已增加原子资源元数据发布、三类 file/remote refresh worker、Application/DnsService 共享 coordinator 的资源刷新入口、可重建 task 的有界 transient restart/backoff、候选 bind/CAS 激活入口和 stale-active refresh guard；Application 已增加无 snapshot 副作用的配置文件 reload 触发 API与 service-aware reload 入口，DnsService 可为新 revision 重建 transport listener task 并取消旧 scoped token；DnsService 已观察 Supervisor task completion 并按 fault level 升级不可恢复故障；Policy/Resource 已补齐 supplied compiled file/remote snapshot、失败 backoff、取消释放和 Runtime live publish；仍缺少 `run` 外部配置变更事件接入、资源 worker 集合重建、完整跨 Runtime 配置候选发布、共享 Runtime finalizer owner、基于最新 Runtime snapshot 的完整 optimistic refresh、入站 DoH TLS/PROXY/forwarded、Moka/SQLite persistence、真实 SQLite/detail/telemetry writer 和完整服务级故障验收 |
+| 后端代码实现进度 | **62.8%** | Config 达到 100% 模块验收口径；Runtime 已增加原子资源元数据发布、三类 file/remote refresh worker、Application/DnsService 共享 coordinator 的资源刷新入口、可重建 task 的有界 transient restart/backoff、候选 bind/CAS 激活入口和 stale-active refresh guard；Application 已增加无 snapshot 副作用的配置文件 reload API 和 service-aware reload 入口，DnsService 可为新 revision 重建 transport listener 与 resource refresh task 并取消旧 scoped token；DnsService 已观察 Supervisor task completion 并按 fault level 升级不可恢复故障；Policy/Resource 已补齐 supplied compiled file/remote snapshot、失败 backoff、取消释放和 Runtime live publish；仍缺少 `run` 外部配置变更事件接入、完整跨 Runtime 配置候选发布、共享 Runtime finalizer owner、基于最新 Runtime snapshot 的完整 optimistic refresh、入站 DoH TLS/PROXY/forwarded、Moka/SQLite persistence、真实 SQLite/detail/telemetry writer 和完整服务级故障验收 |
 | v1 交付总进度 | **66.5%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 62.8%` |
+
+截至 2026-09-02，阶段 45 已将显式 service reload 的 listener 与 resource refresh task 集合按新 Runtime revision 重建；当前全量测试为 406 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -376,6 +378,8 @@ transport / upstream / storage / observability adapters
 第四十三个小阶段（已完成）：将 DnsService 的 UDP/TCP/DoH transport task 改为 `Supervisor::spawn_scoped` 注册，保存每个 listener 的独立 cancellation，并在 service shutdown 时显式取消 transport task；resource refresh task 继续使用 Supervisor 全局 cancellation。新增 transport task scoped registration 测试；listener reload/rebind 尚未接入，资源 worker 集合重建、完整 endpoint 故障矩阵和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 404 passed，0 failed。
 
 第四十四个小阶段（已完成）：新增 `DnsService::reload_prepared`，在候选 bind 与 transport adapter 预构造成功后执行 revision CAS，使用带 revision 的 task ID 注册新 UDP/TCP/DoH listener task，再取消旧 scoped token并更新 service runtime；Application 新增 `reload_service_from_path`，复用无 snapshot 配置加载、SecretRef 校验和 async prepare 边界。新增系统 loopback listener rebind 测试，验证新 revision 接管新端口并可正常 shutdown；`run` 自动配置变更事件、资源 worker 集合重建、listener 故障自动重建和完整 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 405 passed，0 failed。
+
+第四十五个小阶段（已完成）：将 resource refresh task 改为 `Supervisor::spawn_scoped` 注册并保存独立 cancellation；service reload 按新 Runtime 的 resource worker ID 集合重建任务，旧集合在新任务注册成功后取消，且取消清理作用于旧 task 捕获的 runtime，避免误停新 runtime scheduler。新增系统 loopback resource worker token reconciliation 测试；`run` 自动配置变更事件、完整跨 Runtime 候选发布、listener 故障自动重建和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 406 passed，0 failed。
 
 ## 6. 阶段提交规则
 
