@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 150（Policy 覆盖矩阵）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 151（health stale age 传播）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -54,14 +54,14 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Cache | 实现中 | 82% | 9% |
 | Resource | 已实现待验证 | 91% | 7% |
 | Storage | 已实现待验证 | 92% | 8% |
-| Observability | 实现中 | 91% | 3% |
+| Observability | 实现中 | 92% | 3% |
 
 进度计算：
 
 ```text
 4%×70% + 8%×70% + 10%×100% + 12%×77% + 11%×77%
 + 10%×82% + 8%×83% + 10%×99% + 9%×82% + 7%×91%
-+ 8%×92% + 3%×91% ≈ 84.7%
++ 8%×92% + 3%×92% ≈ 84.7%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 150 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 151 |
 
 ### 增量里程碑
 
@@ -123,14 +123,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 148 | 命中资源版本落库 | Policy observation 复用当前资源 snapshot 的 typed `ResourceVersion`；详情链路在 SQLite 边界写入 `epoch:revision`，缺失时不推测 |
 | 149 | Runtime reload 基线复核 | 配置 watcher、listener 复用/rebind、候选失败回滚和进程持有配置拒绝均已有定向证据；移除陈旧缺口，自动 listener 重建继续后置 |
 | 150 | Policy 覆盖矩阵 | 定向锁定 cache 的 client → strategy → global 显式启停/回退，以及 ECS 的 rule/strategy → client → upstream → global 优先级 |
+| 151 | health stale age 传播 | `TelemetryWriter` 在 degraded/failed 生命周期中保留最大 stale age，并在恢复 `Healthy` 时清零；不扩展跨 Runtime registry |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/policy/plan.rs`；
-- `policy::plan::tests`：10 passed；
+- 增量 `rustfmt`：`backend/src/observability.rs`；
+- `observability::tests`：20 passed；
 - `git diff --check`：通过。
 
-阶段 150 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 151 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

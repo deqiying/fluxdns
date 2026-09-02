@@ -939,6 +939,7 @@ struct TelemetryHealthRecord {
     last_changed: Instant,
     last_success: Option<Instant>,
     retry_count: u64,
+    stale_age_micros: Option<u64>,
     persistence_gap: bool,
 }
 
@@ -950,6 +951,7 @@ impl TelemetryHealthRecord {
             last_changed: event.last_changed,
             last_success: event.last_success,
             retry_count: event.retry_count,
+            stale_age_micros: event.stale_age_micros,
             persistence_gap: event.persistence_gap,
         }
     }
@@ -965,6 +967,15 @@ impl TelemetryHealthRecord {
             (None, current) => current,
         };
         event.retry_count = event.retry_count.max(self.retry_count);
+        event.stale_age_micros = if event.state == ComponentHealthState::Healthy {
+            None
+        } else {
+            match (self.stale_age_micros, event.stale_age_micros) {
+                (Some(previous), Some(current)) => Some(previous.max(current)),
+                (Some(previous), None) => Some(previous),
+                (None, current) => current,
+            }
+        };
         if self.persistence_gap && event.state != ComponentHealthState::Healthy {
             event.persistence_gap = true;
         }
@@ -977,7 +988,7 @@ impl TelemetryHealthRecord {
 /// `emit`/`record`/`update` 只执行内存操作，不等待输出端；低优先级日志在拥塞时计数
 /// 丢弃，warn/error 会优先淘汰已排队的低优先级日志，否则返回明确的容量错误。
 /// 健康事件只保留每个组件一条有界 lifecycle record，用于归一化首次时间、最近成功、
-/// 重试次数和 persistence gap，不会把任意请求字段存入 writer 状态。
+/// 重试次数、stale age 和 persistence gap，不会把任意请求字段存入 writer 状态。
 pub struct TelemetryWriter {
     capacity: usize,
     output: Arc<dyn TelemetryOutput>,
@@ -2195,6 +2206,7 @@ mod tests {
         failed.first_seen = first;
         failed.last_changed = first;
         failed.last_success = None;
+        failed.stale_age_micros = Some(3_000_000);
         failed.persistence_gap = true;
         HealthSink::update(&writer, failed.clone()).unwrap();
 
@@ -2210,6 +2222,7 @@ mod tests {
         healthy.last_changed = recovered;
         healthy.last_success = Some(recovered);
         healthy.retry_count = 0;
+        healthy.stale_age_micros = Some(9_000_000);
         healthy.persistence_gap = false;
         HealthSink::update(&writer, healthy).unwrap();
 
@@ -2224,10 +2237,12 @@ mod tests {
         assert_eq!(events[1].first_seen, first);
         assert_eq!(events[1].last_changed, first);
         assert_eq!(events[1].retry_count, 2);
+        assert_eq!(events[1].stale_age_micros, Some(3_000_000));
         assert_eq!(events[2].first_seen, first);
         assert_eq!(events[2].last_changed, recovered);
         assert_eq!(events[2].last_success, Some(recovered));
         assert_eq!(events[2].retry_count, 2);
+        assert_eq!(events[2].stale_age_micros, None);
         assert!(!events[2].persistence_gap);
     }
 
