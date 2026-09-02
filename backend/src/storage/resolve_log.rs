@@ -33,7 +33,7 @@ pub struct ResolveDetailRecord {
 }
 
 impl ResolveDetailRecord {
-    fn from_event(event: ResolveEvent) -> Result<Self, PortError> {
+    pub(crate) fn from_event(event: ResolveEvent) -> Result<Self, PortError> {
         validate_listener_id(&event.listener_id)?;
         let duration_millis =
             u64::try_from(event.duration_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);

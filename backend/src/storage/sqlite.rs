@@ -19,6 +19,7 @@ use crate::ports::storage::{
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 use super::STORAGE_SCHEMA_VERSION;
+use super::resolve_log::ResolveDetailRecord;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
 
@@ -432,12 +433,17 @@ async fn apply_resolve_batch(
     batch: &[crate::ports::storage::ResolveEvent],
 ) -> Result<(), PortError> {
     for event in batch {
-        let duration_millis = i64::try_from(
-            Instant::now()
-                .saturating_duration_since(event.duration_started_at)
-                .as_millis(),
-        )
-        .unwrap_or(i64::MAX);
+        let record = ResolveDetailRecord::from_event(event.clone())?;
+        let duration_millis = i64::try_from(record.duration_millis()).unwrap_or(i64::MAX);
+        let request_digest = if record.has_request_digest() {
+            "<present>"
+        } else {
+            "<absent>"
+        };
+        let route_id = record.has_route().then_some("<present>");
+        let client_bucket = record.has_client_bucket().then_some("<present>");
+        let strategy_id = record.has_strategy().then_some("<present>");
+        let canonical_qname = format!("len:{}", record.qname_byte_len());
         sqlx::query(
             "INSERT INTO resolve_log \
              (event_time_utc, duration_millis, request_id_digest, listener_id, route_id, \
@@ -445,23 +451,23 @@ async fn apply_resolve_batch(
               rcode, cache_status, failure_class, cancellation_reason, runtime_revision, resource_revision) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(system_time_millis(event.occurred_at))
+        .bind(system_time_millis(record.occurred_at()))
         .bind(duration_millis)
-        .bind(event.request_digest.as_ref())
-        .bind(event.listener_id.as_ref())
-        .bind(event.route_id.as_deref())
-        .bind(event.client_bucket.as_deref())
-        .bind(event.strategy_id.as_deref())
-        .bind(event.qname.as_ref())
-        .bind(i64::from(event.qtype))
-        .bind(i64::from(event.qclass))
+        .bind(request_digest)
+        .bind(record.listener_id())
+        .bind(route_id)
+        .bind(client_bucket)
+        .bind(strategy_id)
+        .bind(canonical_qname)
+        .bind(i64::from(record.qtype()))
+        .bind(i64::from(record.qclass()))
         .bind(Option::<&str>::None)
         .bind(Option::<&str>::None)
         .bind(0_i64)
-        .bind(cache_status_name(event.cache_status))
+        .bind(cache_status_name(record.cache_status()))
         .bind(Option::<&str>::None)
         .bind(Option::<&str>::None)
-        .bind(i64::try_from(event.runtime_revision.0).unwrap_or(i64::MAX))
+        .bind(i64::try_from(record.runtime_revision().0).unwrap_or(i64::MAX))
         .bind(Option::<&str>::None)
         .execute(&mut **transaction)
         .await
@@ -525,6 +531,7 @@ mod tests {
         StorageTransaction,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
+    use sqlx::Row;
 
     static NEXT_TEST_DB: AtomicU64 = AtomicU64::new(0);
 
@@ -651,6 +658,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+        let row = sqlx::query(
+            "SELECT request_id_digest, route_id, client_bucket, strategy_id, canonical_qname \
+             FROM resolve_log LIMIT 1",
+        )
+        .fetch_one(&backend.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.try_get::<String, _>("request_id_digest").unwrap(),
+            "<present>"
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("route_id")
+                .unwrap()
+                .as_deref(),
+            Some("<present>")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("client_bucket")
+                .unwrap()
+                .as_deref(),
+            None
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("strategy_id")
+                .unwrap()
+                .as_deref(),
+            Some("<present>")
+        );
+        assert_eq!(
+            row.try_get::<String, _>("canonical_qname").unwrap(),
+            "len:12"
+        );
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));

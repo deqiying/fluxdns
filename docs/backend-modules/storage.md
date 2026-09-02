@@ -1,6 +1,6 @@
 # Storage 模块设计
 
-> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema、SQLx SQLite storage 首轮 adapter 与可替换 stats writer 边界；详情 writer 和完整 flush 尚未实现
+> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema、SQLx SQLite storage 首轮 adapter、详情落库脱敏边界与可替换 stats writer 边界；详情 writer 和完整 flush 尚未实现
 >
 > 更新日期：2026-09-02
 >
@@ -194,7 +194,7 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 
 当前已新增 `backend/migrations/0001_storage.sql`，固定 `storage_meta`、按日统计、批次 ledger 和 `resolve_log` 表，以及有限统计维度约束。`SqliteStorageBackend` 已在独立业务数据库执行该 migration，使用 WAL、`synchronous=NORMAL`、busy timeout 和单 operation lock；`InMemoryStorageBackend` 继续作为无外部依赖的 contract baseline。
 
-SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 resolve detail batch：stats 通过 `stats_batch_ledger` 的 payload hash 做幂等重试/冲突拒绝，详情写入使用绑定参数；事务中任一 operation 失败都会整体回滚。数据库错误进入 degraded，health probe、WAL checkpoint 和 shutdown 均保留 typed `StorageBackend` 边界。详情淘汰/硬上限、独立 writer queue、busy/disk-full recovery 和最终 tracing flush 仍待后续切片。
+SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 resolve detail batch：stats 通过 `stats_batch_ledger` 的 payload hash 做幂等重试/冲突拒绝，详情写入先复用 `ResolveDetailRecord` 生成脱敏摘要，再使用绑定参数落库；事务中任一 operation 失败都会整体回滚。数据库错误进入 degraded，health probe、WAL checkpoint 和 shutdown 均保留 typed `StorageBackend` 边界。详情淘汰/硬上限、独立 writer queue、busy/disk-full recovery 和最终 tracing flush 仍待后续切片。
 
 ## 12. 测试
 
@@ -221,6 +221,6 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 - [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
 - [ ] 完成 migration、压力和故障测试。
 
-阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred；本阶段新增 `storage::sqlite::tests` 3 项通过，覆盖 SQLx migration、stats batch 幂等重试/reopen、详情 batch 写入、事务回滚、health/shutdown。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段 SQLite storage 增量测试 3 passed、0 failed。详情 writer、busy/disk-full recovery、详情淘汰硬上限和最终 flush 仍未完成。
+阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred；本阶段新增 `storage::sqlite::tests` 3 项通过，覆盖 SQLx migration、stats batch 幂等重试/reopen、详情 batch 写入及脱敏字段、事务回滚、health/shutdown。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段 SQLite storage 增量测试 3 passed、0 failed。详情 writer、busy/disk-full recovery、详情淘汰硬上限和最终 flush 仍未完成。
 
 当前实现进度：**52%**（内存 stats/ledger、业务 migration schema、SQLx SQLite 首轮 stats/detail transaction、health/checkpoint/shutdown；详情独立 writer queue、淘汰硬上限、busy/disk-full recovery、完整 flush 和故障测试仍未完成）。
