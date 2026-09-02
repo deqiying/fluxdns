@@ -1130,16 +1130,17 @@ outbound: []
         coordinator.activate(policy_candidate(2));
         coordinator.activate(policy_candidate(3));
 
-        let owners = coordinator
-            .finalizer_owners
-            .lock()
-            .expect("finalizer owner lock must not be poisoned");
-        assert!(
-            owners
-                .iter()
-                .any(|owner| Arc::ptr_eq(owner, &initial_owner))
-        );
-        drop(owners);
+        {
+            let owners = coordinator
+                .finalizer_owners
+                .lock()
+                .expect("finalizer owner lock must not be poisoned");
+            assert!(
+                owners
+                    .iter()
+                    .any(|owner| Arc::ptr_eq(owner, &initial_owner))
+            );
+        }
         initial_owner.shutdown().await;
     }
 

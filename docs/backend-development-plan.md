@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 126（cache persistence 生产接线）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 127（Cache 持久化大阶段验收）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -97,7 +97,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 126 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 127 |
 
 ### 增量里程碑
 
@@ -108,18 +108,19 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 97–101 | 文件/SQLite cache persistence contract、故障分类、metadata、WAL/SHM 占用观测 | persistence contract 与 SQLite focused suites |
 | 102–114 | 跨 Runtime drain/owner、受控 late-attempt、latest-target cache 写入和 finalizer 清理 | coordinator 15 项、Policy 22 项及 service focused suites |
 | 115–126 | 运行中资源 live publish、cache pool/TTL/ECS/身份隔离契约、persistence writer 生命周期及 production recovery/write/shutdown、Application service reload、进程级配置分类 | service 32 项；message 14 项；client 4 项、Policy plan 8 项、Registry 12 项、persistence runtime 2 项、cache service 8 项及相关端到端定向测试通过 |
+| 127 | Cache 持久化大阶段验收，并统一 reqwest/rustls crypto provider | fmt/check/clippy 通过；后端全量 511 passed、0 failed |
 
 ### 当前阶段验证
 
 ```text
-rustfmt --edition 2024 backend/src/cache/service.rs backend/src/dns/policy.rs backend/src/runtime/prepared.rs
-cargo test --manifest-path backend/Cargo.toml cache::service::tests
-cargo test --manifest-path backend/Cargo.toml cache_persistence_recovers_across_policy_core_instances
-cargo test --manifest-path backend/Cargo.toml async_prepare_attaches_cache_persistence_before_bind
+cargo fmt --manifest-path backend/Cargo.toml --all -- --check
+cargo check --manifest-path backend/Cargo.toml --locked
+cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
+cargo test --manifest-path backend/Cargo.toml --locked
 git diff --check
 ```
 
-以上均通过；阶段 126 仅对 3 个受影响的 Rust 文件执行增量 `rustfmt`，未重复全量 `cargo fmt/test`。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+以上均通过，完整测试结果为 **511 passed、0 failed**。阶段 127 是 Cache 持久化路线的大阶段边界，因此执行全量后端验收；后续普通小阶段继续只做增量 `rustfmt` 和定向测试。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

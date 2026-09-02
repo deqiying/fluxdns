@@ -239,6 +239,7 @@ impl LateCacheFinalizer {
     }
 
     /// 返回当前是否已绑定生产 persistence runtime。
+    #[cfg(test)]
     pub(crate) fn has_persistence_runtime(&self) -> bool {
         self.state
             .persistence

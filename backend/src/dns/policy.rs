@@ -349,6 +349,7 @@ impl PolicyDnsCore {
     }
 
     /// 返回生产 async prepare 是否已接入 cache persistence 生命周期。
+    #[cfg(test)]
     pub(crate) fn has_cache_persistence(&self) -> bool {
         self.late_cache_finalizer.has_persistence_runtime()
     }
@@ -1150,6 +1151,7 @@ fn optimistic_refresh_context(context: &crate::dns::RequestContext) -> crate::dn
     refresh
 }
 
+#[cfg(test)]
 fn cache_key(
     plan: &crate::policy::ResolutionPlan,
     request: &DnsRequest,

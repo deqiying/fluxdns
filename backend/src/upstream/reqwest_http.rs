@@ -373,6 +373,7 @@ impl DohHttpTransport for ReqwestDohHttpTransport {
 }
 
 fn client_builder() -> reqwest::ClientBuilder {
+    crate::ensure_rustls_crypto_provider();
     reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())

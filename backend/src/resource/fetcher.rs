@@ -128,6 +128,7 @@ fn build_client(
     profile: Option<&OutboundProfile>,
     root_certificate: Option<reqwest::Certificate>,
 ) -> Result<reqwest::Client, ResourceFetcherBuildError> {
+    crate::ensure_rustls_crypto_provider();
     let mut builder = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())

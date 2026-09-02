@@ -14,6 +14,13 @@ pub mod storage;
 pub mod transport;
 pub mod upstream;
 
+/// 确保依赖默认 builder 的 rustls 客户端已安装进程级 crypto provider。
+///
+/// 并行或重复调用会保留最先安装的 provider，避免测试和运行时初始化顺序影响 TLS。
+pub(crate) fn ensure_rustls_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
     if observability::init_bootstrap().is_err() {
