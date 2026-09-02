@@ -185,9 +185,9 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] fresh cache response 应用剩余 TTL，stale response 应用当前缓存池的 optimistic answer TTL；
 - [x] 实现 rule/strategy/client/global ECS 正常路径、canonical query 替换及最终 ECS cache key；
 - [x] 完成显式 direct upstream/group member ECS；完整错误映射仍待完成；
-- [x] 完成 UDP/TCP/plain DoH 同策略 answer 的首轮真实 loopback contract；
-- [ ] 完成跨 transport contract tests。
+- [x] 完成 UDP/TCP/plain DoH 的 Positive/NODATA/NXDOMAIN、DNS ID、canonical response 和 UDP TC 首轮真实 loopback contract；
+- [ ] 补齐 SERVFAIL/REFUSED 等错误响应的跨 transport contract tests。
 
-阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 34 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream/group member ECS 实际 DoH wire、成员 ECS group 缓存绕过、client ECS cache key 隔离、普通及嵌套 group 实际成员 observation，以及跨 Policy Core 实例的 SQLite cache 恢复；Service loopback 测试验证同一 hosts 策略经真实 UDP、DNS-over-TCP framing 和 plain DoH POST 返回一致 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 515 passed、0 failed。
+阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 34 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream/group member ECS 实际 DoH wire、成员 ECS group 缓存绕过、client ECS cache key 隔离、普通及嵌套 group 实际成员 observation，以及跨 Policy Core 实例的 SQLite cache 恢复；Service loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH POST 对 Positive/NODATA/NXDOMAIN 返回相同 canonical response 并恢复各自 DNS ID，大响应下 UDP 设置 TC 而 TCP/DoH 保留 64 条完整 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 515 passed、0 failed。
 
-当前实现进度：**76%**。
+当前实现进度：**77%**。

@@ -2073,8 +2073,8 @@ mod tests {
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
-        CacheCompatibilityKey, CancelReason, Cancellation, Deadline, RuntimeRevision,
-        TransportClass,
+        CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, CanonicalResponse,
+        Deadline, DnsMessageId, ResponseClass, RuntimeRevision, TransportClass,
     };
     use crate::observability::{TelemetryOutput, TelemetryWriter};
     use crate::ports::storage::ResolveEventDisposition;
@@ -2591,8 +2591,18 @@ clients: []
     }
 
     async fn udp_query(address: SocketAddr, id: u16, name: &str) -> Message {
+        udp_query_with_type(address, id, name, RecordType::A).await
+    }
+
+    /// 通过 UDP 发送指定记录类型的真实 DNS 查询。
+    async fn udp_query_with_type(
+        address: SocketAddr,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> Message {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let query = query_wire(id, name);
+        let query = query_wire_with_type(id, name, record_type);
         socket.send_to(&query, address).await.unwrap();
         let mut response = [0_u8; 4096];
         let (size, _) =
@@ -2603,16 +2613,21 @@ clients: []
         Message::from_vec(&response[..size]).unwrap()
     }
 
-    /// 为真实 transport loopback 测试生成同一份 DNS query wire。
-    fn query_wire(id: u16, name: &str) -> Vec<u8> {
+    /// 为指定记录类型生成 DNS query wire。
+    fn query_wire_with_type(id: u16, name: &str, record_type: RecordType) -> Vec<u8> {
         let mut query = Message::new(id, MessageType::Query, OpCode::Query);
-        query.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
+        query.add_query(Query::query(Name::from_ascii(name).unwrap(), record_type));
         query.to_vec().unwrap()
     }
 
-    /// 通过 DNS-over-TCP framing 发送查询并读取一条完整响应。
-    async fn tcp_query(address: SocketAddr, id: u16, name: &str) -> Message {
-        let query = query_wire(id, name);
+    /// 通过 DNS-over-TCP framing 发送指定记录类型的查询。
+    async fn tcp_query_with_type(
+        address: SocketAddr,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> Message {
+        let query = query_wire_with_type(id, name, record_type);
         let mut request = Vec::with_capacity(query.len() + 2);
         request.extend_from_slice(&(query.len() as u16).to_be_bytes());
         request.extend_from_slice(&query);
@@ -2632,9 +2647,14 @@ clients: []
         Message::from_vec(&response).unwrap()
     }
 
-    /// 通过 plain HTTP/1.1 POST 发送 DoH 查询，并只解析响应中的 DNS body。
-    async fn doh_query(address: SocketAddr, id: u16, name: &str) -> Message {
-        let query = query_wire(id, name);
+    /// 通过 plain HTTP/1.1 POST 发送指定记录类型的 DoH 查询。
+    async fn doh_query_with_type(
+        address: SocketAddr,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> Message {
+        let query = query_wire_with_type(id, name, record_type);
         let mut request = format!(
             "POST /dns HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             query.len()
@@ -2656,6 +2676,71 @@ clients: []
         Message::from_vec(&response[header_end + 4..]).unwrap()
     }
 
+    /// 对同一问题分别执行 UDP、TCP 和 plain DoH 请求，并使用不同 ID 验证关联恢复。
+    async fn query_all_transports(
+        base_port: u16,
+        first_id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> [Message; 3] {
+        let udp = udp_query_with_type(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)),
+            first_id,
+            name,
+            record_type,
+        )
+        .await;
+        let tcp = tcp_query_with_type(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 1)),
+            first_id + 1,
+            name,
+            record_type,
+        )
+        .await;
+        let doh = doh_query_with_type(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 2)),
+            first_id + 2,
+            name,
+            record_type,
+        )
+        .await;
+        [udp, tcp, doh]
+    }
+
+    /// 去除 transport 关联 ID 后，校验三种协议返回同一 canonical response。
+    fn assert_cross_transport_contract(
+        responses: [Message; 3],
+        first_id: u16,
+        name: &str,
+        record_type: RecordType,
+        expected_class: ResponseClass,
+    ) -> CanonicalResponse {
+        let canonical = responses
+            .into_iter()
+            .enumerate()
+            .map(|(index, response)| {
+                canonicalize_response(response, first_id + index as u16, name, record_type)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(canonical[0], canonical[1]);
+        assert_eq!(canonical[0], canonical[2]);
+        assert_eq!(canonical[0].class(), expected_class);
+        canonical[0].clone()
+    }
+
+    /// 校验响应 ID 与问题后，转换为不含 transport 关联信息的 canonical response。
+    fn canonicalize_response(
+        response: Message,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> CanonicalResponse {
+        assert_eq!(response.metadata.id, id);
+        let query = Message::from_vec(&query_wire_with_type(id, name, record_type)).unwrap();
+        let query = CanonicalQuery::from_message(query).unwrap();
+        CanonicalResponse::from_message(response, &query, DnsMessageId::new(id)).unwrap()
+    }
+
     /// 构造同时启用 UDP、TCP 和 plain DoH 的同策略 loopback 配置。
     fn cross_transport_runtime_config(
         udp_port: u16,
@@ -2663,6 +2748,10 @@ clients: []
         doh_port: u16,
     ) -> Arc<crate::config::resolve::ResolvedConfig> {
         let work_path = crate::config::test_support::absolute_path("service-cross-transport");
+        let large_hosts = (1..=64)
+            .map(|suffix| format!("198.51.100.{suffix} large.transport.test"))
+            .collect::<Vec<_>>()
+            .join("\n      ");
         ConfigLoader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
@@ -2716,7 +2805,9 @@ hosts:
   - type: const
     name: local-hosts
     format: hosts
-    hosts: "192.0.2.25 transport.test"
+    hosts: |
+      192.0.2.25 transport.test
+      {large_hosts}
 outbound: []
 rule_set: []
 strategy:
@@ -2732,7 +2823,7 @@ clients: []
     }
 
     #[tokio::test]
-    async fn udp_tcp_and_plain_doh_return_the_same_policy_answer() {
+    async fn udp_tcp_and_plain_doh_follow_the_same_dns_contract() {
         let base_port = 47_000 + (std::process::id() as u16 % 500) * 3;
         let config = cross_transport_runtime_config(base_port, base_port + 1, base_port + 2);
         let prepared =
@@ -2751,32 +2842,44 @@ clients: []
             super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
                 .unwrap();
 
-        let udp = udp_query(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)),
+        let positive = assert_cross_transport_contract(
+            query_all_transports(base_port, 41, "transport.test.", RecordType::A).await,
             41,
             "transport.test.",
-        )
-        .await;
-        let tcp = tcp_query(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 1)),
-            41,
-            "transport.test.",
-        )
-        .await;
-        let doh = doh_query(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 2)),
-            41,
-            "transport.test.",
-        )
-        .await;
-
-        assert_eq!(udp.metadata.response_code, ResponseCode::NoError);
-        assert_eq!(udp.answers, tcp.answers);
-        assert_eq!(udp.answers, doh.answers);
-        assert!(udp.answers.iter().any(|record| matches!(
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+        assert!(positive.as_message().answers.iter().any(|record| matches!(
             &record.data,
             RData::A(address) if address.0 == Ipv4Addr::new(192, 0, 2, 25)
         )));
+
+        assert_cross_transport_contract(
+            query_all_transports(base_port, 51, "transport.test.", RecordType::AAAA).await,
+            51,
+            "transport.test.",
+            RecordType::AAAA,
+            ResponseClass::NoData,
+        );
+        assert_cross_transport_contract(
+            query_all_transports(base_port, 61, "missing.transport.test.", RecordType::A).await,
+            61,
+            "missing.transport.test.",
+            RecordType::A,
+            ResponseClass::NxDomain,
+        );
+
+        let [udp, tcp, doh] =
+            query_all_transports(base_port, 71, "large.transport.test.", RecordType::A).await;
+        assert_eq!(udp.metadata.id, 71);
+        assert!(udp.metadata.truncation);
+        assert_eq!(udp.metadata.response_code, ResponseCode::NoError);
+        let tcp = canonicalize_response(tcp, 72, "large.transport.test.", RecordType::A);
+        let doh = canonicalize_response(doh, 73, "large.transport.test.", RecordType::A);
+        assert_eq!(tcp, doh);
+        assert_eq!(tcp.class(), ResponseClass::Positive);
+        assert!(!tcp.as_message().metadata.truncation);
+        assert_eq!(tcp.as_message().answers.len(), 64);
 
         let report = service
             .shutdown(
