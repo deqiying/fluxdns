@@ -209,6 +209,23 @@ impl<T> ResourceRefreshCoordinator<T> {
             .clone()
     }
 
+    /// 合并另一个 Runtime 中已经发布的更高版本资源。
+    ///
+    /// 只替换严格更高的 `ResourceVersion`，并保留本协调器中其他资源及其
+    /// reservation 状态。调用方应在外层按配置定义过滤资源。
+    pub fn merge_newer_from<F>(&self, incoming: &Self, allowed: F)
+    where
+        T: Clone,
+        F: FnMut(&ConfigId) -> bool,
+    {
+        let incoming_registry = incoming.current();
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.registry = state.registry.merge_newer_from(&incoming_registry, allowed);
+    }
+
     pub fn status(&self, resource_id: &ConfigId) -> ResourceRefreshStatus {
         let state = self
             .state

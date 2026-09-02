@@ -36,6 +36,38 @@ enum PreparedResourceWorker {
     FileHosts(FileHostsRefreshWorker),
 }
 
+impl PreparedResourceWorker {
+    fn merge_state_from(&mut self, incoming: &Self) {
+        match (self, incoming) {
+            (Self::RemoteRule(current), Self::RemoteRule(incoming)) => {
+                current.merge_state_from(incoming)
+            }
+            (Self::FileRule(current), Self::FileRule(incoming)) => {
+                current.merge_state_from(incoming)
+            }
+            (Self::FileHosts(current), Self::FileHosts(incoming)) => {
+                current.merge_state_from(incoming)
+            }
+            _ => {}
+        }
+    }
+
+    fn current_hosts_snapshot(&self) -> Option<ResourceSnapshot<HostsIndex>> {
+        match self {
+            Self::FileHosts(worker) => worker.current_snapshot(),
+            Self::RemoteRule(_) | Self::FileRule(_) => None,
+        }
+    }
+
+    fn current_rule_snapshot(&self) -> Option<ResourceSnapshot<RuleIndex>> {
+        match self {
+            Self::RemoteRule(worker) => worker.current_snapshot(),
+            Self::FileRule(worker) => worker.current_snapshot(),
+            Self::FileHosts(_) => None,
+        }
+    }
+}
+
 type InitialFileSnapshots = (
     BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>>,
     BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
@@ -173,10 +205,12 @@ impl PreparedRuntime {
             &host_snapshots,
             &rule_snapshots,
         )?;
-        let snapshot = Arc::new(RuntimeSnapshot::with_policy_core(
+        let snapshot = Arc::new(RuntimeSnapshot::with_policy_core_and_resources(
             revision,
             config,
             policy_core,
+            host_snapshots.values().cloned(),
+            rule_snapshots.values().cloned(),
         ));
         Ok(Self {
             snapshot,
@@ -206,6 +240,133 @@ impl PreparedRuntime {
 
     pub fn host_resource_snapshots(&self) -> &BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>> {
         &self.host_resource_snapshots
+    }
+
+    /// 合并旧 Runtime 中仍与当前配置完全一致的已发布资源和 worker 状态。
+    ///
+    /// 候选自身的新配置优先；只有旧 Runtime 的 `ResourceVersion` 严格更高时才
+    /// 迁移其 compiled snapshot。worker 只迁移已完成的 schedule/backoff 和 registry，
+    /// 不复制 in-flight reservation，避免旧 task 在 reload 后向候选提交结果。
+    pub(crate) fn merge_state_from(&mut self, incoming: &Self) {
+        let candidate_config = self.snapshot.config();
+        let incoming_config = incoming.snapshot.config();
+
+        for (resource_id, incoming_worker) in &incoming.resource_workers {
+            if !same_host_resource(candidate_config, incoming_config, resource_id) {
+                continue;
+            }
+            let Some(snapshot) = incoming_worker.current_hosts_snapshot() else {
+                continue;
+            };
+            let should_merge = self
+                .host_resource_snapshots
+                .get(resource_id)
+                .is_none_or(|current| snapshot.version() > current.version());
+            if should_merge {
+                self.host_resource_snapshots
+                    .insert(resource_id.clone(), snapshot.clone());
+                if let Some(policy) = self.snapshot.policy_core()
+                    && let Err(error) = policy.publish_hosts_resource(snapshot)
+                {
+                    debug_assert!(matches!(
+                        error,
+                        crate::dns::PolicyResourcePublishError::StaleVersion { .. }
+                    ));
+                }
+            }
+        }
+
+        for (resource_id, incoming_worker) in &incoming.resource_workers {
+            if !same_rule_set(candidate_config, incoming_config, resource_id) {
+                continue;
+            }
+            let Some(snapshot) = incoming_worker.current_rule_snapshot() else {
+                continue;
+            };
+            let should_merge = self
+                .resource_snapshots
+                .get(resource_id)
+                .is_none_or(|current| snapshot.version() > current.version());
+            if should_merge {
+                self.resource_snapshots
+                    .insert(resource_id.clone(), snapshot.clone());
+                if let Some(policy) = self.snapshot.policy_core()
+                    && let Err(error) = policy.publish_rule_set_resource(snapshot)
+                {
+                    debug_assert!(matches!(
+                        error,
+                        crate::dns::PolicyResourcePublishError::StaleVersion { .. }
+                    ));
+                }
+            }
+        }
+
+        for (resource_id, snapshot) in &incoming.host_resource_snapshots {
+            if !same_host_resource(candidate_config, incoming_config, resource_id) {
+                continue;
+            }
+            let should_merge = self
+                .host_resource_snapshots
+                .get(resource_id)
+                .is_none_or(|current| snapshot.version() > current.version());
+            if !should_merge {
+                continue;
+            }
+            self.host_resource_snapshots
+                .insert(resource_id.clone(), snapshot.clone());
+            if let Some(policy) = self.snapshot.policy_core()
+                && let Err(error) = policy.publish_hosts_resource(snapshot.clone())
+            {
+                debug_assert!(
+                    matches!(
+                        error,
+                        crate::dns::PolicyResourcePublishError::StaleVersion { .. }
+                    ),
+                    "candidate policy must register every compatible host resource"
+                );
+            }
+        }
+
+        for (resource_id, snapshot) in &incoming.resource_snapshots {
+            if !same_rule_set(candidate_config, incoming_config, resource_id) {
+                continue;
+            }
+            let should_merge = self
+                .resource_snapshots
+                .get(resource_id)
+                .is_none_or(|current| snapshot.version() > current.version());
+            if !should_merge {
+                continue;
+            }
+            self.resource_snapshots
+                .insert(resource_id.clone(), snapshot.clone());
+            if let Some(policy) = self.snapshot.policy_core()
+                && let Err(error) = policy.publish_rule_set_resource(snapshot.clone())
+            {
+                debug_assert!(
+                    matches!(
+                        error,
+                        crate::dns::PolicyResourcePublishError::StaleVersion { .. }
+                    ),
+                    "candidate policy must register every compatible rule-set resource"
+                );
+            }
+        }
+
+        self.snapshot
+            .merge_resource_metadata_from(&incoming.snapshot, |resource_id| {
+                same_resource(candidate_config, incoming_config, resource_id)
+            });
+
+        for (resource_id, worker) in &mut self.resource_workers {
+            if !same_resource(candidate_config, incoming_config, resource_id) {
+                continue;
+            }
+            let Some(incoming_worker) = incoming.resource_workers.get(resource_id) else {
+                continue;
+            };
+            worker.merge_state_from(incoming_worker);
+        }
     }
 
     pub fn resource_worker_ids(&self) -> Vec<ConfigId> {
@@ -426,6 +587,60 @@ pub enum ResourceRefreshError {
     Policy { resource: String, reason: String },
     #[error("runtime resource `{resource}` metadata could not be published: {reason}")]
     Snapshot { resource: String, reason: String },
+}
+
+fn same_resource(
+    candidate: &ResolvedConfig,
+    incoming: &ResolvedConfig,
+    resource_id: &ConfigId,
+) -> bool {
+    let candidate_host = find_host_resource(candidate, resource_id);
+    let incoming_host = find_host_resource(incoming, resource_id);
+    let candidate_rule = find_rule_set(candidate, resource_id);
+    let incoming_rule = find_rule_set(incoming, resource_id);
+    match (candidate_host, incoming_host, candidate_rule, incoming_rule) {
+        (Some(left), Some(right), None, None) => left == right,
+        (None, None, Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
+fn same_host_resource(
+    candidate: &ResolvedConfig,
+    incoming: &ResolvedConfig,
+    resource_id: &ConfigId,
+) -> bool {
+    find_host_resource(candidate, resource_id) == find_host_resource(incoming, resource_id)
+}
+
+fn same_rule_set(
+    candidate: &ResolvedConfig,
+    incoming: &ResolvedConfig,
+    resource_id: &ConfigId,
+) -> bool {
+    find_rule_set(candidate, resource_id) == find_rule_set(incoming, resource_id)
+}
+
+fn find_host_resource<'a>(
+    config: &'a ResolvedConfig,
+    resource_id: &ConfigId,
+) -> Option<&'a ResolvedHostsResource> {
+    config.hosts.iter().find(|resource| match resource {
+        ResolvedHostsResource::Const { id, .. } | ResolvedHostsResource::File { id, .. } => {
+            id == resource_id
+        }
+    })
+}
+
+fn find_rule_set<'a>(
+    config: &'a ResolvedConfig,
+    resource_id: &ConfigId,
+) -> Option<&'a ResolvedRuleSet> {
+    config.rule_sets.iter().find(|resource| match resource {
+        ResolvedRuleSet::Const { id, .. }
+        | ResolvedRuleSet::File { id, .. }
+        | ResolvedRuleSet::Remote { id, .. } => id == resource_id,
+    })
 }
 
 /// prepare 成功后可用于观测和验收的最小摘要。
@@ -1016,6 +1231,98 @@ clients: []
                 .consecutive_failures(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn merge_state_preserves_newer_resource_policy_metadata_and_schedule() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-runtime-merge-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("hosts.txt");
+        std::fs::write(&path, "192.0.2.10 old.example\n").unwrap();
+
+        let file_config = |path: &std::path::Path| {
+            let mut config = Arc::try_unwrap(config()).expect("runtime fixture must be unique");
+            config.hosts = vec![ResolvedHostsResource::File {
+                id: ConfigId::new("local-hosts").unwrap(),
+                format: crate::config::model::HostsFormat::Hosts,
+                path: path.to_owned(),
+                auto_update: true,
+                update_interval: Some(Duration::from_secs(1)),
+            }];
+            Arc::new(config)
+        };
+
+        let active = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            file_config(&path),
+            RuntimeRevision(1),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let mut candidate = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            file_config(&path),
+            RuntimeRevision(2),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+
+        std::fs::write(&path, "192.0.2.11 new.example\n").unwrap();
+        active
+            .refresh_resource(
+                &ConfigId::new("local-hosts").unwrap(),
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        candidate.merge_state_from(&active);
+        let resource = ConfigId::new("local-hosts").unwrap();
+        let merged = candidate.host_resource_snapshots().get(&resource).unwrap();
+        assert_eq!(merged.epoch(), 2);
+        assert!(
+            merged
+                .compiled()
+                .lookup(&crate::resource::CanonicalDomain::parse("new.example").unwrap())
+                .is_some()
+        );
+        assert_eq!(
+            candidate
+                .snapshot()
+                .resources()
+                .lookup(&resource)
+                .unwrap()
+                .version(),
+            crate::resource::ResourceVersion::new(2, 0)
+        );
+        let policy_index = candidate.snapshot().policy_core().unwrap().policy();
+        assert!(
+            policy_index
+                .hosts_index(&resource)
+                .unwrap()
+                .lookup(&crate::resource::CanonicalDomain::parse("new.example").unwrap())
+                .is_some()
+        );
+        assert_eq!(
+            candidate
+                .resource_refresh_decision(&resource, u64::MAX - 1)
+                .unwrap()
+                .next_due(),
+            Some(u64::MAX)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

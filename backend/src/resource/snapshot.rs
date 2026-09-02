@@ -244,6 +244,17 @@ impl<T> ResourceRegistrySnapshot<T> {
         self.resources.get(resource_id).cloned()
     }
 
+    /// 以候选内容替换同 ID 的 entry。
+    ///
+    /// 该原语只用于 Runtime prepare 阶段把已校验的初始快照装配进 metadata；
+    /// 运行期刷新必须使用 [`Self::publish`] 或 [`Self::compare_and_publish`] 的
+    /// epoch/CAS 约束。
+    pub(crate) fn replace(&self, candidate: ResourceSnapshot<T>) -> Self {
+        let mut resources = self.resources.clone();
+        resources.insert(candidate.resource_id().clone(), Arc::new(candidate));
+        Self { resources }
+    }
+
     pub fn summary(&self) -> Vec<(ConfigId, ResourceSummary)> {
         self.resources
             .iter()

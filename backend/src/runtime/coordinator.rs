@@ -232,18 +232,21 @@ impl fmt::Debug for RuntimeLease {
 /// 以 ArcSwap 原子持有唯一对外可见的 ActiveRuntime。
 pub struct RuntimeCoordinator {
     active: ArcSwap<ActiveRuntime>,
+    mutation: tokio::sync::Mutex<()>,
 }
 
 impl RuntimeCoordinator {
     pub fn new(initial: BoundCandidate) -> Self {
         Self {
             active: ArcSwap::from(Arc::new(ActiveRuntime::from_candidate(initial))),
+            mutation: tokio::sync::Mutex::new(()),
         }
     }
 
     pub(crate) fn from_active(initial: Arc<ActiveRuntime>) -> Self {
         Self {
             active: ArcSwap::from(initial),
+            mutation: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -283,6 +286,7 @@ impl RuntimeCoordinator {
         deadline: crate::dns::Deadline,
         cancellation: crate::dns::Cancellation,
     ) -> Result<RefreshedResourceSnapshot, ResourceRefreshError> {
+        let _mutation = self.mutation.lock().await;
         self.load()
             .refresh_resource(resource, now, deadline, cancellation)
             .await
@@ -296,6 +300,7 @@ impl RuntimeCoordinator {
         deadline: crate::dns::Deadline,
         cancellation: crate::dns::Cancellation,
     ) -> Result<RefreshedResourceSnapshot, ResourceRefreshCoordinatorError> {
+        let _mutation = self.mutation.lock().await;
         let current = self.load();
         if !Arc::ptr_eq(&current, expected) {
             return Err(ResourceRefreshCoordinatorError::Stale {
@@ -332,9 +337,20 @@ impl RuntimeCoordinator {
         let candidate = bind_prepared(prepared, factory, deadline, cancellation)
             .await
             .map_err(RuntimeReloadError::Bind)?;
-        self.compare_and_activate(expected, candidate)
+        self.compare_and_activate_serialized(expected, candidate)
+            .await
             .map_err(RuntimeReloadError::Activation)?;
         Ok(self.load())
+    }
+
+    /// 在同一 mutation gate 下合并候选状态并执行 revision CAS。
+    pub async fn compare_and_activate_serialized(
+        &self,
+        expected: RuntimeRevision,
+        candidate: BoundCandidate,
+    ) -> Result<Arc<ActiveRuntime>, ActivationError> {
+        let _mutation = self.mutation.lock().await;
+        self.compare_and_activate(expected, candidate)
     }
 
     /// 无条件发布候选，并把旧实例标记为 draining。
@@ -360,6 +376,9 @@ impl RuntimeCoordinator {
             });
         }
 
+        let (mut prepared, listeners) = candidate.into_parts();
+        prepared.merge_state_from(&current.prepared);
+        let candidate = BoundCandidate::from_parts(prepared, listeners);
         let next = Arc::new(ActiveRuntime::from_candidate(candidate));
         let observed = self.active.compare_and_swap(&current, Arc::clone(&next));
         if Arc::ptr_eq(&*observed, &current) {

@@ -77,6 +77,37 @@ impl<T> ResourceRefreshRuntime<T> {
         self.coordinator.current()
     }
 
+    /// 从旧 Runtime 迁移稳定的资源版本和调度状态。
+    ///
+    /// 正在执行的 reservation 不会复制到候选，避免旧 task 在 reload 后继续向
+    /// 新 Runtime 提交结果；已完成发布的 registry 版本和 schedule backoff 则按
+    /// 资源过滤条件保留。
+    pub fn merge_state_from<F>(&self, incoming: &Self, mut allowed: F)
+    where
+        T: Clone,
+        F: FnMut(&ConfigId) -> bool,
+    {
+        self.coordinator
+            .merge_newer_from(&incoming.coordinator, &mut allowed);
+
+        let incoming_schedules = incoming
+            .schedules
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        let mut schedules = self
+            .schedules
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for (resource_id, incoming_schedule) in incoming_schedules {
+            if allowed(&resource_id)
+                && let Some(schedule) = schedules.get_mut(&resource_id)
+            {
+                schedule.merge_stable_state_from(incoming_schedule);
+            }
+        }
+    }
+
     pub fn register(&self, resource_id: ConfigId, initial_due: u64) -> bool {
         let mut schedules = self
             .schedules
@@ -252,6 +283,18 @@ impl ResourceRefreshWorker {
         &self.runtime
     }
 
+    pub(crate) fn merge_state_from(&self, incoming: &Self) {
+        self.runtime.merge_state_from(&incoming.runtime, |_| true);
+    }
+
+    pub(crate) fn current_snapshot(&self) -> Option<ResourceSnapshot<RuleIndex>> {
+        let registry = self.runtime.current();
+        let (resource_id, _) = registry.summary().into_iter().next()?;
+        registry
+            .lookup(&resource_id)
+            .map(|snapshot| (*snapshot).clone())
+    }
+
     pub async fn refresh_remote_rule_set(
         &self,
         resource: &ResolvedRuleSet,
@@ -331,6 +374,18 @@ impl FileHostsRefreshWorker {
         &self.runtime
     }
 
+    pub(crate) fn merge_state_from(&self, incoming: &Self) {
+        self.runtime.merge_state_from(&incoming.runtime, |_| true);
+    }
+
+    pub(crate) fn current_snapshot(&self) -> Option<ResourceSnapshot<HostsIndex>> {
+        let registry = self.runtime.current();
+        let (resource_id, _) = registry.summary().into_iter().next()?;
+        registry
+            .lookup(&resource_id)
+            .map(|snapshot| (*snapshot).clone())
+    }
+
     pub fn refresh(
         &self,
         now: u64,
@@ -382,6 +437,18 @@ impl FileRuleSetRefreshWorker {
 
     pub fn runtime(&self) -> &ResourceRefreshRuntime<RuleIndex> {
         &self.runtime
+    }
+
+    pub(crate) fn merge_state_from(&self, incoming: &Self) {
+        self.runtime.merge_state_from(&incoming.runtime, |_| true);
+    }
+
+    pub(crate) fn current_snapshot(&self) -> Option<ResourceSnapshot<RuleIndex>> {
+        let registry = self.runtime.current();
+        let (resource_id, _) = registry.summary().into_iter().next()?;
+        registry
+            .lookup(&resource_id)
+            .map(|snapshot| (*snapshot).clone())
     }
 
     pub fn refresh(

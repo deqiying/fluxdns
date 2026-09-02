@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成；阶段 3 基础服务编排、阶段 4 UDP/TCP 基础链路、阶段 5 upstream 首轮小阶段、阶段 6 cache 首轮切片、阶段 7 resource/policy/DNS Core 首轮接线、阶段 8 DoH plain HTTP 首轮接入、阶段 9 统计/观测纯领域切片和阶段 10 resource refresh、coordinator ownership、supervisor restart、candidate activation、stale refresh guard、Application reload trigger、service fault escalation、scoped cancellation 及 listener rebind 首轮切片已实现
+> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成；阶段 3 基础服务编排、阶段 4 UDP/TCP 基础链路、阶段 5 upstream 首轮小阶段、阶段 6 cache 首轮切片、阶段 7 resource/policy/DNS Core 首轮接线、阶段 8 DoH plain HTTP 首轮接入、阶段 9 统计/观测纯领域切片和阶段 10 resource refresh、coordinator ownership、supervisor restart、candidate activation、stale refresh guard、Application reload trigger、service fault escalation、scoped cancellation、listener rebind 及跨 Runtime 候选状态合并首轮切片已实现
 >
 > 更新日期：2026-09-02
 >
@@ -12,11 +12,13 @@
 
 仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 411 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、可重建 task 的有界 transient restart/backoff、候选 bind/CAS 激活入口、stale-active refresh guard、系统 socket capability、Application CLI/校验接线和服务任务编排，并已让 snapshot 通过 `ArcSwap` 持有按配置生成的资源元数据摘要、让 service 从 active snapshot 自动取得同 revision 的 `DnsCore`，并由 `PreparedRuntime`/`ActiveRuntime` 持有生产 `ResourceFetcher`；正式 async prepare 已在 bind 前恢复或下载 remote rule-set、加载 file hosts/rule-set 初始 snapshot，并为 `auto_update=true` 的三类可刷新资源注册同一个 service Supervisor 下的长期 worker，成功候选在同一 ActiveRuntime 内完成 Policy live publish 和 Runtime 元数据原子更新，失败进入 backoff，取消和 shutdown 释放 schedule reservation；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源刷新 task 每轮通过 coordinator 查询当前活动实例，Application 已提供无 snapshot 副作用的配置文件 reload 触发 API和 service-aware reload 入口，`DnsService` 已观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障，Supervisor 已提供受管 task-scoped cancellation，DnsService 的 UDP/TCP/DoH listener task 已使用独立 scoped token，显式 reload 可为新 revision 重建 listener task 并取消旧 token；外部配置变更事件、资源 worker 集合重建和完整跨 Runtime 配置候选发布尚未完成；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、Reqwest Rustls HTTP/2 direct/proxy HTTPS DoH adapter、adapter-owned bounded client pool、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、协议无关 outbound stream port 与握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver、最小 SOCKS connector 闭环、standalone plain HTTP SOCKS5/SOCKS5H DoH transport adapter、配置驱动的 proxy Registry/Policy/Runtime prepare 接线、hosts/plain HTTP DoH registry、PolicyCore direct request path、direct group primary/fallback exchange 与 group timeout、group member selection、parallel late window、nested group 和结果聚合/fallback 判定，以及 Reqwest/Rustls loopback live TLS handshake 验证；parallel 快速完整 Positive 路径已接入协议中立的 typed late-result sink，并将合法 late response 交给有界 `LateCacheFinalizer`，但 nested late propagation、完整 late-window 候选语义、共享 Runtime finalizer owner 和完整 resource/service lifecycle 仍未完成。Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight、可取消有界 `LateCacheFinalizer`、基础 Cache/Core fresh/miss/single-flight/CAS 接线、当前 PolicyDnsCore snapshot-local optimistic refresh 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、direct hosts/plain HTTP DoH registry wiring、配置驱动 proxy DoH 与 group fallback request path、请求级资源规则匹配和安全的 matched-rule 摘要，以及 Policy compiled resource snapshot 的版本化 atomic live swap，并可在 supplied compiled remote/file snapshot 上构造初始 Policy；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验、scheduler/coordinator 的 Runtime-facing 纯逻辑编排、一次性 remote refresh worker、file hosts/rule-set refresh worker、生产 ReqwestResourceFetcher、async PreparedRuntime 首次 remote restore/fetch、file snapshot load 和 service Supervisor 长期 refresh task；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH 入站 TLS/PROXY/forwarded、bootstrap/连接执行的完整接线、Moka/SQLite persistence、完整跨 Runtime resource worker 生命周期、基于最新 Runtime snapshot 的完整 optimistic refresh、共享 Runtime finalizer owner、真实 SQLite/detail/telemetry writer 和完整服务级故障验收仍未实现。
 
+> 注：上段为阶段 50 完成时的能力基线；阶段 51 后当前数值以本节汇总表和“当前汇总（阶段 51）”为准。
+
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **62.8%** | Config 达到 100% 模块验收口径；Runtime 已增加原子资源元数据发布、三类 file/remote refresh worker、Application/DnsService 共享 coordinator 的资源刷新入口、可重建 task 的有界 transient restart/backoff、候选 bind/CAS 激活入口和 stale-active refresh guard；Application 已增加无 snapshot 副作用的配置文件 reload API 和 service-aware reload 入口，DnsService 可为新 revision 重建 transport listener 与 resource refresh task 并取消旧 scoped token；DnsService 已观察 Supervisor task completion 并按 fault level 升级不可恢复故障；Policy/Resource 已补齐 supplied compiled file/remote snapshot、失败 backoff、取消释放和 Runtime live publish；仍缺少 `run` 外部配置变更事件接入、完整跨 Runtime 配置候选发布、共享 Runtime finalizer owner、基于最新 Runtime snapshot 的完整 optimistic refresh、入站 DoH TLS/PROXY/forwarded、Moka/SQLite persistence、真实 SQLite/detail/telemetry writer 和完整服务级故障验收 |
-| v1 交付总进度 | **66.5%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 62.8%` |
+| 后端代码实现进度 | **63.4%** | Config 达到 100% 模块验收口径；Runtime 已增加原子资源元数据发布、三类 file/remote refresh worker、Application/DnsService 共享 coordinator 的资源刷新入口、可重建 task 的有界 transient restart/backoff、候选 bind/CAS 激活入口、stale-active refresh guard 和跨 Runtime 候选状态合并；Application 已增加无 snapshot 副作用的配置文件 reload API 和 service-aware reload 入口，DnsService 可为新 revision 重建 transport listener 与 resource refresh task 并取消旧 scoped token；DnsService 已观察 Supervisor task completion 并按 fault level 升级不可恢复故障；Policy/Resource 已补齐 supplied compiled file/remote snapshot、失败 backoff、取消释放和 Runtime live publish；仍缺少 `run` 外部配置变更事件接入、资源 worker 集合自动重建、完整跨 Runtime 配置候选发布、共享 Runtime finalizer owner、基于最新 Runtime snapshot 的完整 optimistic refresh、入站 DoH TLS/PROXY/forwarded、Moka/SQLite persistence、真实 SQLite/detail/telemetry writer 和完整服务级故障验收 |
+| v1 交付总进度 | **67.1%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 63.4%` |
 
 截至 2026-09-02，阶段 45 已将显式 service reload 的 listener 与 resource refresh task 集合按新 Runtime revision 重建；当前全量测试为 406 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
 
@@ -29,6 +31,8 @@
 截至 2026-09-02，阶段 49 已修复配置快照并发测试的临时目录命名碰撞；当前全量测试为 409 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
+
+当前汇总（阶段 51）：全量测试 412 passed、0 failed；后端代码实现进度按 Runtime 65% 重新计算为 63.4%，v1 交付进度为 67.1%。上文历史阶段记录中的测试数量保持原样，作为当时验收证据。
 
 ```text
 v1 交付总进度 = 10% × 设计阶段完成度 + 90% × 后端代码实现进度
@@ -68,7 +72,7 @@ v1 交付范围：
 | Application | `backend/src/main.rs`、`backend/src/app.rs` | [application.md](backend-modules/application.md) | 已完成 | 实现中 | 45% | 4% |
 | Ports | `backend/src/ports/*` | [ports.md](backend-modules/ports.md) | 已完成 | 实现中 | 35% | 8% |
 | Config | `backend/src/config/*` | [config.md](backend-modules/config.md) | 已完成 | 已验证 | 100% | 10% |
-| Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 60% | 12% |
+| Runtime | `backend/src/runtime/*` | [runtime.md](backend-modules/runtime.md) | 已完成 | 实现中 | 65% | 12% |
 | Transport | `backend/src/transport/*` | [transport.md](backend-modules/transport.md) | 已完成 | 实现中 | 50% | 11% |
 | DNS Core | `backend/src/dns/*` | [dns-core.md](backend-modules/dns-core.md) | 已完成 | 实现中 | 55% | 10% |
 | Policy | `backend/src/policy/*` | [policy.md](backend-modules/policy.md) | 已完成 | 实现中 | 70% | 8% |
@@ -81,7 +85,7 @@ v1 交付范围：
 后端代码实现总进度：
 
 ```text
-4% × 45% + 8% × 35% + 10% × 100% + 12% × 60% + 11% × 50% + 10% × 55% + 8% × 70% + 10% × 99% + 9% × 50% + 7% × 90% + 8% × 35% + 3% × 30% ≈ 62.8%
+4% × 45% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 50% + 10% × 55% + 8% × 70% + 10% × 99% + 9% × 50% + 7% × 90% + 8% × 35% + 3% × 30% ≈ 63.4%
 ```
 
 ## 4. 进度判定规则
@@ -127,7 +131,7 @@ transport / upstream / storage / observability adapters
 
 ### 后续开发路线（基于 2026-09-02 当前状态）
 
-当前后端代码实现进度为 62.8%，v1 交付进度为 66.5%。Config、Upstream、Resource 的基础链路和可信测试基线已经建立，剩余风险主要集中在 Runtime 生命周期、跨模块状态一致性、持久化故障语义和最终验收。因此后续不按模块百分比从低到高补齐，而采用“先运行时生命周期、再数据与观测、最后协议和 v1 验收”的垂直切片。
+当前后端代码实现进度为 63.4%，v1 交付进度为 67.1%。Config、Upstream、Resource 的基础链路和可信测试基线已经建立，阶段 1 已补齐候选 Runtime 的兼容资源、Policy、metadata 和 worker 稳定状态合并；剩余风险主要集中在 Runtime 生命周期、跨模块状态一致性、持久化故障语义和最终验收。因此后续不按模块百分比从低到高补齐，而采用“先运行时生命周期、再数据与观测、最后协议和 v1 验收”的垂直切片。
 
 | 顺序 | 目标 | 主要范围 | 退出条件 |
 | --- | --- | --- | --- |
@@ -420,6 +424,8 @@ transport / upstream / storage / observability adapters
 第四十九个小阶段（已完成）：为 `config::load` 测试临时目录增加进程内原子序号，避免并发测试仅依赖纳秒时间戳而发生目录复用和提前清理；生产配置快照逻辑未改变。并发快照测试及全量 409 项测试通过；`run` 自动配置变更事件、完整跨 Runtime 候选发布、listener 自动 rebind 和 flush 生命周期仍留在后续小阶段。
 
 第五十个小阶段（已完成）：为 `ResourceRegistrySnapshot` 增加按资源过滤的 immutable registry 合并原语；候选 registry 仅接收旧 Runtime 中严格更高的 `ResourceVersion`，同版本或候选更高版本保留候选内容，并补充不同资源、版本优先级和过滤条件测试。Policy、worker schedule、Runtime metadata 的跨 Runtime 同步仍留在后续小阶段。阶段完成后资源 snapshot 定向测试 6 项通过；全量测试基线更新为 411 passed，0 failed。
+
+第五十一个小阶段（已完成）：在候选 revision CAS 前合并与新配置完全一致资源的更高 compiled snapshot、Policy index 和 Runtime metadata，并迁移 worker 已完成的 registry/schedule/backoff 状态；不复制旧 Runtime 的 in-flight reservation。资源刷新与候选激活通过 coordinator mutation gate 串行化，避免 refresh/reload 竞态丢失已发布资源。新增跨 Runtime file hosts 合并回归测试；阶段完成后全量测试为 412 passed，0 failed。`run` 自动配置变更事件、资源 worker 集合自动重建、独立 resource-only swap 和 flush 生命周期仍留在后续小阶段。
 
 验证基线补充（已完成）：修复 Windows 下测试夹具对 Unix-only `work.path` 和非法临时文件名的依赖，统一使用进程隔离的绝对临时路径；生产配置解析和资源加载逻辑未改变。使用 Rust 1.98.0 执行 `fmt --check`、`check --locked`、`clippy --all-targets -- -D warnings` 及全量 `test --locked`，结果分别通过，测试为 411 passed、0 failed。
 

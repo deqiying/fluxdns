@@ -46,6 +46,28 @@ impl RuntimeSnapshot {
         }
     }
 
+    pub(crate) fn with_policy_core_and_resources(
+        revision: RuntimeRevision,
+        config: Arc<ResolvedConfig>,
+        policy_core: PolicyDnsCore,
+        host_snapshots: impl IntoIterator<Item = ResourceSnapshot<crate::resource::HostsIndex>>,
+        rule_snapshots: impl IntoIterator<Item = ResourceSnapshot<crate::resource::RuleIndex>>,
+    ) -> Self {
+        let mut resources = resource_snapshot(revision, &config);
+        for snapshot in host_snapshots {
+            resources = resources.replace(resource_metadata(&snapshot));
+        }
+        for snapshot in rule_snapshots {
+            resources = resources.replace(resource_metadata(&snapshot));
+        }
+        Self {
+            revision,
+            resources: Arc::new(ArcSwap::from_pointee(resources)),
+            config,
+            policy_core: Some(Arc::new(policy_core)),
+        }
+    }
+
     pub fn revision(&self) -> RuntimeRevision {
         self.revision
     }
@@ -71,6 +93,25 @@ impl RuntimeSnapshot {
 
     pub fn resources(&self) -> Arc<ResourceRegistrySnapshot<()>> {
         self.resources.load_full()
+    }
+
+    /// 将旧 Runtime 中仍与候选配置兼容的更高 metadata 版本合并到候选。
+    pub(crate) fn merge_resource_metadata_from<F>(&self, incoming: &Self, mut allowed: F)
+    where
+        F: FnMut(&crate::config::resolve::ConfigId) -> bool,
+    {
+        let incoming = incoming.resources.load_full();
+        loop {
+            let current = self.resources.load_full();
+            let next = current.merge_newer_from(&incoming, &mut allowed);
+            if current.summary() == next.summary() {
+                return;
+            }
+            let observed = self.resources.compare_and_swap(&current, Arc::new(next));
+            if Arc::ptr_eq(&*observed, &current) {
+                return;
+            }
+        }
     }
 
     pub(crate) fn publish_resource<T>(
@@ -191,7 +232,7 @@ fn resource_entry(
     ResourceSnapshot::new(
         id.clone(),
         0,
-        1,
+        0,
         normalized_hash,
         "config",
         "config-v1",
@@ -199,6 +240,22 @@ fn resource_entry(
         source_kind,
         false,
         ResourceStaleStatus::Fresh,
+        (),
+    )
+}
+
+fn resource_metadata<T>(snapshot: &ResourceSnapshot<T>) -> ResourceSnapshot<()> {
+    ResourceSnapshot::new(
+        snapshot.resource_id().clone(),
+        snapshot.epoch(),
+        snapshot.revision(),
+        snapshot.content_hash().to_owned(),
+        snapshot.source_fingerprint().to_owned(),
+        snapshot.parser_version().to_owned(),
+        snapshot.fetched_at(),
+        snapshot.source_kind(),
+        snapshot.used_fallback(),
+        snapshot.stale_status(),
         (),
     )
 }

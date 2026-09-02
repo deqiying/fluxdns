@@ -170,6 +170,21 @@ impl ResourceSchedule {
         self.stopped.is_some()
     }
 
+    /// 将另一个 Runtime 中已经确定的调度状态合并到候选 schedule。
+    ///
+    /// 刷新中的 reservation 不属于可迁移状态：旧 Runtime 任务会在 reload
+    /// 后被取消，候选只继承最近一次成功、失败退避和停止标记。
+    pub(crate) fn merge_stable_state_from(&mut self, incoming: Self) {
+        if self.policy != incoming.policy {
+            return;
+        }
+        self.initial_due = incoming.initial_due;
+        self.next_due = incoming.next_due;
+        self.last_success_at = incoming.last_success_at;
+        self.consecutive_failures = incoming.consecutive_failures;
+        self.stopped = incoming.stopped;
+    }
+
     pub const fn is_stale_at(self, now: u64) -> bool {
         if self.consecutive_failures >= self.policy.stale_after_failures {
             return true;

@@ -240,7 +240,8 @@ impl DnsService {
             .ok_or(ServiceReloadError::MissingDnsCore)?;
 
         self.coordinator
-            .compare_and_activate(expected, candidate)
+            .compare_and_activate_serialized(expected, candidate)
+            .await
             .map_err(ServiceReloadError::Activation)?;
         let runtime = self.coordinator.load();
         let transport_cancellations = spawn_transport_plans(
