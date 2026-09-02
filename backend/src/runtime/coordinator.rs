@@ -6,8 +6,9 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use arc_swap::ArcSwap;
 use thiserror::Error;
 
+use crate::cache::LateCacheFinalizer;
 use crate::config::resolve::ConfigId;
-use crate::dns::RuntimeRevision;
+use crate::dns::{PolicyDnsCore, RuntimeRevision};
 use crate::ports::effects::{ResourceFetcher, SocketFactory};
 use crate::resource::{ResourceScheduleDecision, ResourceSnapshot, RuleIndex};
 
@@ -61,6 +62,12 @@ impl ActiveRuntime {
 
     pub fn resource_fetcher(&self) -> Option<Arc<dyn ResourceFetcher>> {
         self.prepared.resource_fetcher()
+    }
+
+    fn finalizer_owner(&self) -> Option<Arc<LateCacheFinalizer>> {
+        self.snapshot()
+            .policy_core()
+            .map(PolicyDnsCore::finalizer_owner)
     }
 
     pub fn resource_worker_ids(&self) -> Vec<ConfigId> {
@@ -250,21 +257,57 @@ impl fmt::Debug for RuntimeLease {
 pub struct RuntimeCoordinator {
     active: ArcSwap<ActiveRuntime>,
     mutation: tokio::sync::Mutex<()>,
+    finalizer_owners: std::sync::Mutex<Vec<Arc<LateCacheFinalizer>>>,
 }
 
 impl RuntimeCoordinator {
     pub fn new(initial: BoundCandidate) -> Self {
+        let active = Arc::new(ActiveRuntime::from_candidate(initial));
         Self {
-            active: ArcSwap::from(Arc::new(ActiveRuntime::from_candidate(initial))),
+            active: ArcSwap::from(Arc::clone(&active)),
             mutation: tokio::sync::Mutex::new(()),
+            finalizer_owners: std::sync::Mutex::new(active.finalizer_owner().into_iter().collect()),
         }
     }
 
     pub(crate) fn from_active(initial: Arc<ActiveRuntime>) -> Self {
         Self {
-            active: ArcSwap::from(initial),
+            active: ArcSwap::from(Arc::clone(&initial)),
             mutation: tokio::sync::Mutex::new(()),
+            finalizer_owners: std::sync::Mutex::new(
+                initial.finalizer_owner().into_iter().collect(),
+            ),
         }
+    }
+
+    fn register_finalizer_owner(&self, runtime: &ActiveRuntime) {
+        let Some(owner) = runtime.finalizer_owner() else {
+            return;
+        };
+        let mut owners = self
+            .finalizer_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owners.iter().any(|current| Arc::ptr_eq(current, &owner)) {
+            return;
+        }
+        owners.push(owner);
+    }
+
+    /// 在统一 deadline 内关闭所有曾由该 coordinator 发布的 cache finalizer。
+    pub(crate) async fn shutdown_finalizers(&self, deadline: crate::dns::Deadline) -> bool {
+        let owners = self
+            .finalizer_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut completed = true;
+        for owner in owners {
+            if !owner.shutdown_until(deadline).await {
+                completed = false;
+            }
+        }
+        completed
     }
 
     pub fn load(&self) -> Arc<ActiveRuntime> {
@@ -393,6 +436,7 @@ impl RuntimeCoordinator {
         ));
         let observed = self.active.compare_and_swap(&current, Arc::clone(&next));
         if Arc::ptr_eq(&*observed, &current) {
+            self.register_finalizer_owner(&next);
             current.begin_drain();
             return Ok(next);
         }
@@ -405,6 +449,7 @@ impl RuntimeCoordinator {
     /// 无条件发布候选，并把旧实例标记为 draining。
     pub fn activate(&self, candidate: BoundCandidate) -> Arc<ActiveRuntime> {
         let next = Arc::new(ActiveRuntime::from_candidate(candidate));
+        self.register_finalizer_owner(&next);
         let previous = self.active.swap(next);
         previous.begin_drain();
         previous
@@ -431,6 +476,7 @@ impl RuntimeCoordinator {
         let next = Arc::new(ActiveRuntime::from_candidate(candidate));
         let observed = self.active.compare_and_swap(&current, Arc::clone(&next));
         if Arc::ptr_eq(&*observed, &current) {
+            self.register_finalizer_owner(&next);
             current.begin_drain();
             return Ok(current);
         }

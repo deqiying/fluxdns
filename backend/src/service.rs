@@ -320,9 +320,7 @@ impl DnsService {
         self.cancel_transport_tasks();
         self.cancel_resource_tasks();
         let mut report = self.supervisor.shutdown(clock, deadline).await;
-        if let Some(core) = self.runtime.snapshot().policy_core()
-            && !core.shutdown_until(deadline).await
-        {
+        if !self.coordinator.shutdown_finalizers(deadline).await {
             report.deadline_expired = true;
         }
         report
@@ -1626,6 +1624,60 @@ clients: []
             )
             .await;
         assert!(!report.deadline_expired);
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_finalizers_from_previous_and_current_runtime() {
+        let port = 41_500 + (std::process::id() as u16 % 500);
+        let initial =
+            PreparedRuntime::prepare_with_policy_core(runtime_config(port), RuntimeRevision(1))
+                .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let old_finalizer = initial.snapshot().policy_core().unwrap().finalizer_owner();
+        old_finalizer
+            .submit_task(std::future::pending::<()>())
+            .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(runtime_config(port), RuntimeRevision(2))
+                .unwrap();
+        let current_finalizer = prepared.snapshot().policy_core().unwrap().finalizer_owner();
+        current_finalizer
+            .submit_task(std::future::pending::<()>())
+            .unwrap();
+        service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!old_finalizer.is_shutdown());
+        assert!(!current_finalizer.is_shutdown());
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await;
+        assert!(!report.deadline_expired);
+        assert!(old_finalizer.is_shutdown());
+        assert!(current_finalizer.is_shutdown());
     }
 
     #[tokio::test]

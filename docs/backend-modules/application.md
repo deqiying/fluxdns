@@ -84,7 +84,8 @@ bootstrap telemetry
 1. 通过 `Supervisor` cancellation 停止 accept/receive；
 2. 先把 `ActiveRuntime` 标记为 draining，拒绝新请求 admission；
 3. 在固定 5 秒 grace deadline 内回收 UDP loop、TCP listener、DoH listener 和连接 session；
-4. 返回成功或 shutdown timeout 错误。
+4. 在同一 grace deadline 内关闭 `RuntimeCoordinator` 持有的历史/当前 `LateCacheFinalizer` owner；
+5. 返回成功或 shutdown timeout 错误。
 
 运行期 task 完成时，Degraded 组件的终止失败只记录并继续服务；FatalEndpoint/Fatal、重试耗尽和 panic 映射为 `RuntimeFatal`，先标记当前 runtime draining，再交由进程边界返回非零错误。显式 service reload 会为新 revision 注册新的 listener task，并通过 scoped cancellation 取消旧 task；运行期故障本身仍不会自动重建 listener。
 

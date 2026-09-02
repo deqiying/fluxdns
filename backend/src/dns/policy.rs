@@ -236,8 +236,9 @@ impl PolicyDnsCore {
         &self.cache
     }
 
-    pub(crate) async fn shutdown_until(&self, deadline: Deadline) -> bool {
-        self.late_cache_finalizer.shutdown_until(deadline).await
+    /// 返回由 Runtime 生命周期统一托管的 late-cache finalizer。
+    pub(crate) fn finalizer_owner(&self) -> Arc<LateCacheFinalizer> {
+        Arc::clone(&self.late_cache_finalizer)
     }
 
     pub fn publish_hosts_resource(
