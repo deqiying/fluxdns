@@ -2,6 +2,8 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -81,6 +83,12 @@ impl From<super::OutcomeError> for ExecutorError {
 /// sink 只拥有后台结果，不拥有客户端响应；实现方应自行提供容量和关闭语义。
 pub trait LateResultSink: Send + Sync {
     fn submit(&self, query: CanonicalQuery, context: RequestContext, attempt: UpstreamAttempt);
+
+    /// 接管 parallel 快速返回后仍在执行的 attempt drain。
+    ///
+    /// 生产实现应把 future 放入自身的有界生命周期容器，避免 upstream 编排创建
+    /// 无法在 shutdown 时回收的 detached task。
+    fn spawn_drain(&self, task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>);
 }
 
 /// group 成员的已绑定执行句柄。
@@ -423,7 +431,13 @@ impl UpstreamGroupExecutor {
             });
             if complete_response {
                 if let Some(sink) = late_sink {
-                    spawn_late_attempt_drain(tasks, query.clone(), context.clone(), sink);
+                    let drain = late_attempt_drain(
+                        tasks,
+                        query.clone(),
+                        context.clone(),
+                        Arc::clone(&sink),
+                    );
+                    sink.spawn_drain(drain);
                 } else {
                     tasks.abort_all();
                 }
@@ -434,13 +448,13 @@ impl UpstreamGroupExecutor {
     }
 }
 
-fn spawn_late_attempt_drain(
+fn late_attempt_drain(
     mut tasks: tokio::task::JoinSet<(usize, ConnectorId, UpstreamOutcome)>,
     query: CanonicalQuery,
     context: RequestContext,
     sink: Arc<dyn LateResultSink>,
-) {
-    tokio::spawn(async move {
+) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
+    Box::pin(async move {
         while let Some(joined) = tasks.join_next().await {
             let Ok((attempt_index, connector, outcome)) = joined else {
                 break;
@@ -458,7 +472,7 @@ fn spawn_late_attempt_drain(
                 },
             );
         }
-    });
+    })
 }
 
 impl ExecutionPhase {
@@ -743,6 +757,13 @@ mod tests {
                 attempt.connector.as_str().to_owned(),
                 response.class(),
             ));
+        }
+
+        fn spawn_drain(
+            &self,
+            task: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'static>>,
+        ) {
+            tokio::spawn(task);
         }
     }
 

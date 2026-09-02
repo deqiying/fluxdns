@@ -5,6 +5,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -454,6 +456,10 @@ impl LateResultSink for PolicyLateResultSink {
                 deadline: self.deadline,
             },
         );
+    }
+
+    fn spawn_drain(&self, task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>) {
+        let _ = self.finalizer.submit_task(task);
     }
 }
 
