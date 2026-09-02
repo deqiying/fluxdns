@@ -239,11 +239,23 @@ impl DnsService {
             Arc::clone(&runtime),
         )?;
 
+        let resource_worker_ids = runtime.resource_worker_ids();
+        if let Some(telemetry) = &telemetry
+            && !resource_worker_ids.is_empty()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Resource,
+                ComponentHealthState::Healthy,
+                None,
+            );
+        }
         let resource_tasks = spawn_resource_tasks(
             &mut supervisor,
             Arc::clone(&coordinator),
             runtime.revision(),
-            runtime.resource_worker_ids(),
+            resource_worker_ids,
+            telemetry.clone(),
         )?;
 
         Ok(Self {
@@ -375,6 +387,7 @@ impl DnsService {
                 runtime.revision(),
                 index,
                 resource,
+                self.telemetry.clone(),
             ) {
                 Ok(task) => {
                     spawned.push(task.clone());
@@ -1218,6 +1231,7 @@ fn spawn_resource_tasks(
     coordinator: Arc<RuntimeCoordinator>,
     revision: RuntimeRevision,
     resources: Vec<ConfigId>,
+    telemetry: Option<Arc<TelemetryWriter>>,
 ) -> Result<Vec<ResourceTask>, ServiceStartError> {
     let mut cancellations = Vec::with_capacity(resources.len());
     for (index, resource) in resources.into_iter().enumerate() {
@@ -1227,6 +1241,7 @@ fn spawn_resource_tasks(
             revision,
             index,
             resource,
+            telemetry.clone(),
         )?);
     }
     Ok(cancellations)
@@ -1238,6 +1253,7 @@ fn spawn_resource_task(
     revision: RuntimeRevision,
     index: usize,
     resource: ConfigId,
+    telemetry: Option<Arc<TelemetryWriter>>,
 ) -> Result<ResourceTask, ServiceStartError> {
     let spec = TaskSpec::new(
         format!("resource.refresh.{}.{index}", revision.0),
@@ -1254,7 +1270,7 @@ fn spawn_resource_task(
     let task_resource = resource.clone();
     let cancellation = supervisor
         .spawn_scoped(spec, move |cancellation| {
-            resource_refresh_task(task_coordinator, task_resource, cancellation)
+            resource_refresh_task(task_coordinator, task_resource, cancellation, telemetry)
         })
         .map_err(ServiceStartError::Task)?;
     Ok(ResourceTask {
@@ -1267,14 +1283,18 @@ fn resource_refresh_task(
     coordinator: Arc<RuntimeCoordinator>,
     resource: ConfigId,
     cancellation: Cancellation,
+    telemetry: Option<Arc<TelemetryWriter>>,
 ) -> crate::runtime::TaskFuture {
-    Box::pin(async move { run_resource_refresh_loop(coordinator, resource, cancellation).await })
+    Box::pin(async move {
+        run_resource_refresh_loop(coordinator, resource, cancellation, telemetry).await
+    })
 }
 
 async fn run_resource_refresh_loop(
     coordinator: Arc<RuntimeCoordinator>,
     resource: ConfigId,
     cancellation: Cancellation,
+    telemetry: Option<Arc<TelemetryWriter>>,
 ) -> Result<(), TaskError> {
     loop {
         if cancellation.is_cancelled() {
@@ -1283,6 +1303,16 @@ async fn run_resource_refresh_loop(
         let now = unix_seconds();
         let runtime = coordinator.load();
         let Some(decision) = runtime.resource_refresh_decision(&resource, now) else {
+            if !cancellation.is_cancelled()
+                && let Some(telemetry) = &telemetry
+            {
+                publish_component_health(
+                    telemetry,
+                    TelemetryComponent::Resource,
+                    ComponentHealthState::Failed,
+                    Some("resource worker is not configured"),
+                );
+            }
             return if cancellation.is_cancelled() {
                 Err(TaskError::Cancelled)
             } else {
@@ -1301,30 +1331,50 @@ async fn run_resource_refresh_loop(
                 )
                 .await
             {
-                Ok(snapshot) => tracing::info!(
-                    event = "resource_refresh_published",
-                    component = "resource",
-                    resource = %resource.as_str(),
-                    epoch = snapshot.epoch(),
-                    revision = snapshot.revision(),
-                    kind = match snapshot {
-                        RefreshedResourceSnapshot::Hosts(_) => "hosts",
-                        RefreshedResourceSnapshot::RuleSet(_) => "rule_set",
-                    },
-                    "resource_refresh_published"
-                ),
+                Ok(snapshot) => {
+                    if let Some(telemetry) = &telemetry {
+                        publish_component_health(
+                            telemetry,
+                            TelemetryComponent::Resource,
+                            ComponentHealthState::Healthy,
+                            None,
+                        );
+                    }
+                    tracing::info!(
+                        event = "resource_refresh_published",
+                        component = "resource",
+                        resource = %resource.as_str(),
+                        epoch = snapshot.epoch(),
+                        revision = snapshot.revision(),
+                        kind = match snapshot {
+                            RefreshedResourceSnapshot::Hosts(_) => "hosts",
+                            RefreshedResourceSnapshot::RuleSet(_) => "rule_set",
+                        },
+                        "resource_refresh_published"
+                    )
+                }
                 Err(ResourceRefreshCoordinatorError::Stale { .. }) => continue,
                 Err(_error) if cancellation.is_cancelled() => {
                     runtime.shutdown_resource_refresh();
                     return Err(TaskError::Cancelled);
                 }
-                Err(error) => tracing::warn!(
-                    event = "resource_refresh_failed",
-                    component = "resource",
-                    resource = %resource.as_str(),
-                    error = %error,
-                    "resource_refresh_failed"
-                ),
+                Err(error) => {
+                    if let Some(telemetry) = &telemetry {
+                        publish_component_health(
+                            telemetry,
+                            TelemetryComponent::Resource,
+                            ComponentHealthState::Degraded,
+                            Some("resource refresh failed"),
+                        );
+                    }
+                    tracing::warn!(
+                        event = "resource_refresh_failed",
+                        component = "resource",
+                        resource = %resource.as_str(),
+                        error = %error,
+                        "resource_refresh_failed"
+                    )
+                }
             }
             continue;
         }
@@ -1938,6 +1988,12 @@ mod tests {
             ComponentHealthState::Degraded,
             Some("storage flush failed"),
         );
+        publish_component_health(
+            &writer,
+            TelemetryComponent::Resource,
+            ComponentHealthState::Healthy,
+            None,
+        );
 
         crate::ports::telemetry::LogSink::flush(
             &writer,
@@ -1945,7 +2001,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(output.health.load(Ordering::Relaxed), 1);
+        assert_eq!(output.health.load(Ordering::Relaxed), 2);
     }
 
     fn completion(

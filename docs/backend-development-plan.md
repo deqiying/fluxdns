@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 93（telemetry 输出 fallback 接线）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 94（Resource refresh health 接线）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
 >
 > 更新日期：2026-09-02
 >
@@ -95,8 +95,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 6 | 已完成 | memory/Moka/cache facade、FDCP、SQLite cache 首轮 | adapter 定向测试；跨 adapter fault matrix 后置 |
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
-| 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据 | storage/observability/policy focused tests；OS/SQLite 真实故障和 degraded health 后置 |
-| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 93 |
+| 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish | storage/observability/policy focused tests；OS/SQLite 真实故障和完整 health lifecycle 后置 |
+| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 94 |
 
 ### 最新增量记录
 
@@ -111,20 +111,20 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 阶段 91：增加可 reload 的 typed tracing layer；配置校验后替换 bootstrap `fmt` layer，安全提取 `event/component/result/revision` 字段并写入 `TelemetryWriter`，typed layer focused test `1 passed、0 failed`，Observability focused tests `18 passed、0 failed`。
 - 阶段 92：将 Storage/Telemetry/Supervisor 的状态转换发布为 `ComponentHealthEvent`，覆盖 healthy/degraded/failed/stopping；健康事件 bounded telemetry focused test `1 passed、0 failed`，未重复全量 `cargo fmt/test`。
 - 阶段 93：结构化文件/共享输出失败时尝试安全 stderr fallback，两个输出均失败才保留队列并报告错误；fallback focused test `1 passed、0 failed`，Observability focused tests `19 passed、0 failed`，未重复全量 `cargo fmt/test`。
+- 阶段 94：Resource refresh task 接入同一 health publish 路径，覆盖启动 healthy、刷新成功 healthy、刷新失败 degraded 和 worker 缺失 failed；service focused suite `29 passed、0 failed`，未重复全量 `cargo fmt/test`。
 
-### 最近小阶段（93）验证命令
+### 最近小阶段（94）验证命令
 
 ```text
-backend/.cargo-home/bin/rustfmt --edition 2024 backend/src/observability.rs
-cargo test --manifest-path backend/Cargo.toml --locked --offline observability::tests::structured_output_falls_back_when_primary_writer_fails -- --nocapture
-cargo test --manifest-path backend/Cargo.toml --locked --offline observability::tests:: -- --nocapture
-cargo test --manifest-path backend/Cargo.toml --locked --offline service::tests::telemetry_flush_task_drains_writer_under_supervisor -- --nocapture
+backend/.cargo-home/bin/rustfmt --edition 2024 backend/src/service.rs
+cargo test --manifest-path backend/Cargo.toml --locked --offline service::tests::component_health_is_published_as_a_bounded_telemetry_event -- --nocapture
+cargo test --manifest-path backend/Cargo.toml --locked --offline service::tests:: -- --nocapture
 cargo check --manifest-path backend/Cargo.toml --locked --offline
 cargo clippy --manifest-path backend/Cargo.toml --locked --offline --all-targets -- -D warnings
 git diff --check
 ```
 
-以上均通过；阶段 93 未重复全量 `cargo fmt/test`。阶段 92 的 health publish focused test、阶段 91 的 typed tracing focused test、阶段 90 的 telemetry flush focused test、阶段 89 的 config watcher focused test及阶段 88 的 system socket/DoH focused tests 证据保留在对应提交中。
+以上均通过；阶段 94 未重复全量 `cargo fmt/test`。阶段 93 的 fallback focused test、阶段 92 的 health publish focused test、阶段 91 的 typed tracing focused test、阶段 90 的 telemetry flush focused test、阶段 89 的 config watcher focused test及阶段 88 的 system socket/DoH focused tests 证据保留在对应提交中。
 
 ## 5. v1 验收门槛
 
