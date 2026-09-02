@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 149（Runtime reload 基线复核）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 150（Policy 覆盖矩阵）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -35,8 +35,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **84.6%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **86.1%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **84.7%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **86.2%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -49,7 +49,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Runtime | 实现中 | 77% | 12% |
 | Transport | 实现中 | 77% | 11% |
 | DNS Core | 实现中 | 82% | 10% |
-| Policy | 实现中 | 82% | 8% |
+| Policy | 实现中 | 83% | 8% |
 | Upstream | 已实现待验证 | 99% | 10% |
 | Cache | 实现中 | 82% | 9% |
 | Resource | 已实现待验证 | 91% | 7% |
@@ -60,8 +60,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ```text
 4%×70% + 8%×70% + 10%×100% + 12%×77% + 11%×77%
-+ 10%×82% + 8%×82% + 10%×99% + 9%×82% + 7%×91%
-+ 8%×92% + 3%×91% ≈ 84.6%
++ 10%×82% + 8%×83% + 10%×99% + 9%×82% + 7%×91%
++ 8%×92% + 3%×91% ≈ 84.7%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 149 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 150 |
 
 ### 增量里程碑
 
@@ -122,15 +122,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 147 | Ports contract 基线复核 | 33 项聚焦测试覆盖 typed ports、脱敏、exactly-once、取消、CAS 与 single-flight；将陈旧进度保守校正至真实跨模块链路口径 |
 | 148 | 命中资源版本落库 | Policy observation 复用当前资源 snapshot 的 typed `ResourceVersion`；详情链路在 SQLite 边界写入 `epoch:revision`，缺失时不推测 |
 | 149 | Runtime reload 基线复核 | 配置 watcher、listener 复用/rebind、候选失败回滚和进程持有配置拒绝均已有定向证据；移除陈旧缺口，自动 listener 重建继续后置 |
+| 150 | Policy 覆盖矩阵 | 定向锁定 cache 的 client → strategy → global 显式启停/回退，以及 ECS 的 rule/strategy → client → upstream → global 优先级 |
 
 ### 当前阶段验证
 
-- `app::tests`：11 passed；
-- `runtime::coordinator::tests`：15 passed；
-- `service::tests::`：37 passed；
+- 增量 `rustfmt`：`backend/src/policy/plan.rs`；
+- `policy::plan::tests`：10 passed；
 - `git diff --check`：通过。
 
-阶段 149 仅复核已有实现并校正证据口径，无 Rust 代码变更，也未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 150 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

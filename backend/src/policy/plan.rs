@@ -708,7 +708,9 @@ mod tests {
     use crate::ports::cache::CacheNamespace;
     use crate::resource::{CanonicalDomain, HostsIndex, RuleIndex};
 
-    use super::{CacheDecision, MatchedRuleKind, PolicyError, PolicyIndex, PolicyRequest};
+    use super::{
+        CacheDecision, MatchedRuleKind, PolicyError, PolicyIndex, PolicyRequest, select_ecs,
+    };
 
     fn ecs() -> ResolvedEcs {
         ResolvedEcs {
@@ -816,6 +818,95 @@ mod tests {
             persistence_path: PathBuf::from("cache.db"),
             persistence_max_size_bytes: 1024,
         }
+    }
+
+    /// 验证 cache 显式配置在 client、strategy、global 三层按首个命中停止回退。
+    #[test]
+    fn cache_override_matrix_stops_at_the_first_explicit_layer() {
+        enum ExpectedCache {
+            Disabled,
+            Client,
+            Strategy,
+            Global,
+        }
+
+        let cases = [
+            (Some(true), Some(true), true, ExpectedCache::Client),
+            (Some(false), Some(true), true, ExpectedCache::Disabled),
+            (None, Some(true), true, ExpectedCache::Strategy),
+            (None, Some(false), true, ExpectedCache::Disabled),
+            (None, None, true, ExpectedCache::Global),
+            (None, None, false, ExpectedCache::Disabled),
+        ];
+        let listener_id = ConfigId::new("lan").unwrap();
+
+        for (client_cache, strategy_cache, global_cache, expected) in cases {
+            let index = PolicyIndex::build(
+                [listener()],
+                [strategy("default", strategy_cache.map(cache))],
+                [client("client1", None, client_cache.map(cache))],
+                global(global_cache),
+            )
+            .unwrap();
+            let plan = index
+                .evaluate(PolicyRequest {
+                    listener_id: &listener_id,
+                    doh_path: None,
+                    client_id: Some("alice"),
+                    client_addr: None,
+                    client_digest: None,
+                    qname: None,
+                })
+                .unwrap();
+
+            match expected {
+                ExpectedCache::Disabled => assert_eq!(plan.cache, CacheDecision::Disabled),
+                ExpectedCache::Client => assert!(matches!(
+                    plan.cache.namespace(),
+                    Some(CacheNamespace::ClientStrategy { .. })
+                )),
+                ExpectedCache::Strategy => assert!(matches!(
+                    plan.cache.namespace(),
+                    Some(CacheNamespace::Strategy(_))
+                )),
+                ExpectedCache::Global => {
+                    assert_eq!(plan.cache.namespace(), Some(&CacheNamespace::Global));
+                }
+            }
+        }
+    }
+
+    /// 验证 ECS 按 rule/strategy、client、upstream、global 的既定顺序选择。
+    #[test]
+    fn ecs_override_matrix_follows_the_configured_precedence() {
+        let custom = |source, address: &str| ResolvedEcs {
+            mode: EcsMode::Custom,
+            custom_ip: Some(address.parse().unwrap()),
+            source,
+        };
+        let strategy = custom(ValueSource::Strategy, "192.0.2.0/24");
+        let rule = custom(ValueSource::Rule, "198.51.100.0/24");
+        let client_ecs = custom(ValueSource::Client, "203.0.113.0/24");
+        let upstream = custom(ValueSource::Upstream, "2001:db8:1::/48");
+        let global = custom(ValueSource::Global, "2001:db8:2::/48");
+        let mut matched_client = client("client1", None, None);
+        matched_client.edns_client_subnet = client_ecs.clone();
+        let matched_client = Arc::new(matched_client);
+
+        assert_eq!(
+            select_ecs(rule.clone(), Some(&matched_client), Some(&upstream)),
+            rule
+        );
+        assert_eq!(
+            select_ecs(strategy.clone(), Some(&matched_client), Some(&upstream)),
+            strategy
+        );
+        assert_eq!(
+            select_ecs(global.clone(), Some(&matched_client), Some(&upstream)),
+            client_ecs
+        );
+        assert_eq!(select_ecs(global.clone(), None, Some(&upstream)), upstream);
+        assert_eq!(select_ecs(global.clone(), None, None), global);
     }
 
     #[test]
