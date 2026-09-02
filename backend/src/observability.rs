@@ -6,7 +6,7 @@ use std::{
     path::Path,
     str::FromStr,
     sync::atomic::{AtomicI64, AtomicU64, Ordering},
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::Instant,
 };
 
@@ -17,6 +17,8 @@ use crate::ports::telemetry::{
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 use tracing::Subscriber;
+
+static BOOTSTRAP_OUTPUT: OnceLock<Arc<Mutex<OutputTarget>>> = OnceLock::new();
 
 /// 构建仅写 stderr、固定为 INFO 及以上的阶段 1 bootstrap subscriber。
 pub fn bootstrap_subscriber() -> impl Subscriber + Send + Sync {
@@ -29,7 +31,62 @@ pub fn bootstrap_subscriber() -> impl Subscriber + Send + Sync {
 
 /// 安装进程级 bootstrap subscriber。
 pub fn init_bootstrap() -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
-    tracing::subscriber::set_global_default(bootstrap_subscriber())
+    let output = BOOTSTRAP_OUTPUT
+        .get_or_init(|| Arc::new(Mutex::new(OutputTarget::Stderr)))
+        .clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::INFO)
+        .with_target(false)
+        .with_writer(move || SharedOutputWriter(Arc::clone(&output)))
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)
+}
+
+/// 在 bootstrap subscriber 已安装后切换到配置指定的真实输出。
+///
+/// 级别过滤仍保持 bootstrap 的 INFO 上限；动态 filter 和 reload 时机属于后续
+/// final subscriber 切片。`enable=false` 时丢弃普通日志，Application 的 fatal
+/// 退出信息仍由进程边界直接写 stderr。
+pub fn configure_final_output(enable: bool, path: impl AsRef<Path>) -> io::Result<()> {
+    let output = BOOTSTRAP_OUTPUT.get().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "bootstrap output is not initialized",
+        )
+    })?;
+    let target = if !enable {
+        OutputTarget::Sink
+    } else {
+        OutputTarget::File(OpenOptions::new().create(true).append(true).open(path)?)
+    };
+    *lock_unpoisoned(output) = target;
+    Ok(())
+}
+
+enum OutputTarget {
+    Stderr,
+    File(std::fs::File),
+    Sink,
+}
+
+struct SharedOutputWriter(Arc<Mutex<OutputTarget>>);
+
+impl Write for SharedOutputWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match &mut *lock_unpoisoned(&self.0) {
+            OutputTarget::Stderr => io::stderr().write(bytes),
+            OutputTarget::File(file) => file.write(bytes),
+            OutputTarget::Sink => Ok(bytes.len()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        match &mut *lock_unpoisoned(&self.0) {
+            OutputTarget::Stderr => io::stderr().flush(),
+            OutputTarget::File(file) => file.flush(),
+            OutputTarget::Sink => Ok(()),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

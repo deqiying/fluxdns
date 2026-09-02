@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::config::resolve::SecretValidationError;
 use crate::config::{ConfigLoadError, ConfigLoader, LoadOptions};
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
+use crate::observability;
 use crate::ports::effects::SocketFactory;
 use crate::runtime::{
     ActiveRuntime, PrepareError, PreparedRuntime, RuntimeCoordinator, SystemSocketFactory,
@@ -404,6 +405,11 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .resolved
             .validate_secret_refs(64 * 1024)
             .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+        observability::configure_final_output(
+            output.resolved.logs.enable,
+            &output.resolved.logs.path,
+        )
+        .map_err(|_| AppError::new(AppErrorKind::Prepare, "日志输出初始化失败"))?;
     }
 
     match options.command {

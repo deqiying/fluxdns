@@ -182,7 +182,7 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱�
 5. supervisor 确认当前 task tree 清空。
 6. 由当前 runtime snapshot 的 `PolicyDnsCore` owner 在同一 grace deadline 内关闭 `LateCacheFinalizer`。
 
-stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 尚未接线。
+stats、resolve log、SQLite checkpoint 已由 `StorageRuntime`/`DnsService` 接线并纳入 drain shutdown；cache persistence 和 telemetry flush 仍尚未接入 Runtime 的统一生命周期。
 
 每一步有独立 deadline 和结果，最终报告不能只返回模糊的“shutdown failed”。
 

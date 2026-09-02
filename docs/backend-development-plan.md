@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成；当前执行至阶段 79（结构化 telemetry 文件/stderr 输出 adapter），后续重点是 final subscriber/监督任务接线、SQLite 真实故障复现和 v1 验收。
+> 状态：v1 模块方案已完成；当前执行至阶段 80（启动时切换 telemetry 输出目标），后续重点是 final subscriber/监督任务接线、SQLite 真实故障复现和 v1 验收。
 >
 > 更新日期：2026-09-02
 >
@@ -16,22 +16,22 @@
 - Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder`、首轮 `StorageRuntime` 生产接线、pending 内存保护/fatal 边界、首轮 degraded/recovery 状态边界及 adapter-level Busy/DiskFull fault 注入恢复分类；Observability 已完成低基数 metrics/health 基础和稳定 telemetry ports 的有界 writer/flush 边界。
 - 当前未完成：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite busy/disk-full recovery、完整 upstream/group/资源详情元数据、final tracing subscriber 与 supervisor 接线、最终故障/压力/conformance 验收。
 
-> 注：阶段 79 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
+> 注：阶段 80 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
 
-阶段 79 已完成结构化 telemetry 文件/stderr 输出 adapter：`LogEvent`、`MetricEvent` 和 `ComponentHealthEvent` 通过统一有界文本输出写入真实目标，写入/flush 失败返回安全 `PortError`；final subscriber 动态切换和 Supervisor 接线仍单独追踪。最近一次大阶段全量测试为 417 passed、0 failed；本阶段增量测试为 `observability::tests::structured_output_writes_typed_events_to_a_real_file` 1 项通过；阶段 78 的 Policy/Storage observation 证据保持不变。
+阶段 80 已将启动时 telemetry 输出目标接入 Application：严格配置和 SecretRef 校验通过后，`logs.enable/path` 切换 bootstrap subscriber 的共享输出到文件或 Sink；动态级别过滤、final subscriber 和 Supervisor 接线仍单独追踪。最近一次大阶段全量测试为 417 passed、0 failed；本阶段沿用阶段 79 的 `observability::tests::structured_output_writes_typed_events_to_a_real_file` 1 项输出 adapter 增量证据，并通过 `cargo check`/`clippy` 验证 Application 接线；阶段 79 的 adapter 证据保持不变。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **70.3%** | 主要请求、Runtime、策略、资源、缓存、Storage、观测元数据和 telemetry writer/真实输出 adapter 首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站安全边界、SQLite busy/disk-full 故障注入与恢复验收、完整 upstream/group/资源详情元数据、final subscriber/监督任务接线及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
-| v1 交付总进度 | **73.3%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 70.3%` |
+| 后端代码实现进度 | **70.4%** | 主要请求、Runtime、策略、资源、缓存、Storage、观测元数据和 telemetry writer/真实输出 adapter 首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站安全边界、SQLite busy/disk-full 故障注入与恢复验收、完整 upstream/group/资源详情元数据、final subscriber/监督任务接线及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
+| v1 交付总进度 | **73.4%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 70.4%` |
 
 ### 当前验证记录
 
 - 最近一次大阶段全量后端测试：`417 passed、0 failed`。
-- 当前阶段（阶段 79）增量测试：`observability::tests::structured_output_writes_typed_events_to_a_real_file`，`1 passed、0 failed`；阶段 78 的 `dns::policy::tests::` `18 passed、0 failed`、`storage::sqlite::tests::` `13 passed、0 failed`、`storage::resolve_log::tests::` `6 passed、0 failed`，以及阶段 77/76 的 adapter fault、telemetry writer 增量证据均保持通过。
+- 当前阶段（阶段 80）增量验证：复用阶段 79 的 `observability::tests::structured_output_writes_typed_events_to_a_real_file`，`1 passed、0 failed`，并执行 `cargo check --manifest-path backend/Cargo.toml --locked` 与 `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings`；阶段 78 的 Policy/Storage focused 测试及阶段 77/76 的 adapter fault、telemetry writer 增量证据均保持通过。
 - 小阶段只执行增量验证；完成大阶段时再执行全量后端测试。
-- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy，adapter-level Busy/DiskFull fault 已有确定性注入恢复分类；Policy Core 已通过可选 observation 接口向 Stats/resolve detail 传播 strategy/source/cache；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，`StructuredTelemetryOutput` 已能写入真实文件/stderr，但尚未接入 final subscriber/监督任务；当前进度为后端 `70.3%`、v1 `73.3%`，OS/SQLite 真实故障和最终故障压力验收仍未完成。
+- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy，adapter-level Busy/DiskFull fault 已有确定性注入恢复分类；Policy Core 已通过可选 observation 接口向 Stats/resolve detail 传播 strategy/source/cache；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，`StructuredTelemetryOutput` 已能写入真实文件/stderr，`run` 已在配置校验后切换共享输出目标，但尚未接入动态 final subscriber、degraded health 发布和监督任务；当前进度为后端 `70.4%`、v1 `73.4%`，OS/SQLite 真实故障和最终故障压力验收仍未完成。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -81,12 +81,12 @@ v1 交付范围：
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 66% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 90% | 7% |
 | Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 82% | 8% |
-| Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 55% | 3% |
+| Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 60% | 3% |
 
 后端代码实现总进度：
 
 ```text
-4% × 55% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 50% + 10% × 60% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 82% + 3% × 55% ≈ 70.3%
+4% × 55% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 50% + 10% × 60% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 82% + 3% × 60% ≈ 70.4%
 ```
 
 ## 4. 进度判定规则
