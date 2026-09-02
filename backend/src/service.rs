@@ -1,5 +1,7 @@
 //! Application 使用的 DNS service task 编排。
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -85,6 +87,8 @@ pub enum ServiceError {
 
 const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSPORT_RESTART_LIMIT: u32 = 3;
+
+type ServiceReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ServiceError>> + 'a>>;
 
 /// 已绑定 listener 的 DNS service；所有 receive loop 都由同一个 Supervisor 持有。
 pub struct DnsService {
@@ -289,8 +293,32 @@ impl DnsService {
         &mut self,
         grace_period: Duration,
     ) -> Result<ShutdownReport, ServiceError> {
+        self.wait_for_ctrl_c_with_reload(grace_period, Duration::from_secs(86_400), |_service| {
+            Box::pin(async { Ok(()) })
+        })
+        .await
+    }
+
+    /// 等待 Ctrl-C、受管 task 故障或配置变更轮询回调。
+    ///
+    /// 回调只负责决定是否执行一次 reload；配置错误应由调用方记录并吞掉，
+    /// 不应因为一次坏配置把当前仍可用的 Runtime 变成故障。
+    pub(crate) async fn wait_for_ctrl_c_with_reload<F>(
+        &mut self,
+        grace_period: Duration,
+        poll_interval: Duration,
+        mut on_poll: F,
+    ) -> Result<ShutdownReport, ServiceError>
+    where
+        F: for<'a> FnMut(&'a mut DnsService) -> ServiceReloadFuture<'a>,
+    {
+        if poll_interval.is_zero() {
+            return Err(ServiceError::Signal);
+        }
         let signal = tokio::signal::ctrl_c();
         tokio::pin!(signal);
+        let mut poll = tokio::time::interval(poll_interval);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 result = &mut signal => {
@@ -315,6 +343,9 @@ impl DnsService {
                         self.runtime.begin_drain();
                         return Err(error);
                     }
+                }
+                _ = poll.tick() => {
+                    on_poll(self).await?;
                 }
             }
         }

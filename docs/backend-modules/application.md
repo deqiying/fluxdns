@@ -1,6 +1,6 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API，并提供 service-aware reload 入口重建 listener task；`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障
+> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API、service-aware reload 入口重建 listener task，以及基于配置文件 fingerprint 的去抖自动 reload；`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障
 >
 > 更新日期：2026-09-02
 >
@@ -18,6 +18,7 @@ Application 模块是进程边界和依赖装配入口，负责把 Config、Runt
 - 建立最小 bootstrap 日志，再初始化正式观测组件；
 - 调用配置加载和 runtime prepare；
 - 把进程信号转换为统一 shutdown 请求；
+- 在运行期间轮询配置文件 fingerprint，并把稳定变更交给统一 reload 入口；
 - 将结构化错误映射为面向操作者的消息和稳定退出码；
 - 保证所有服务任务都交由 Runtime supervisor 管理。
 
@@ -66,7 +67,7 @@ bootstrap telemetry
   → prepare runtime candidate (restore/fetch remote resources)
   → bind all endpoints
   → activate runtime
-  → wait for supervisor or shutdown signal
+  → wait for supervisor, config change or shutdown signal
   → graceful shutdown
 ```
 
@@ -74,7 +75,7 @@ bootstrap telemetry
 
 依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch，创建 `Arc<RuntimeCoordinator>` 并交给 `DnsService`；service Supervisor 持有自动刷新 task，资源 task 通过 coordinator 查询当前活动 runtime，并以 scoped token 管理 reload 生命周期，transport task 在启动时绑定一份 runtime，显式 service reload 时切换到新 revision。测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
 
-`reload_runtime_from_path` 复用同一 Config → async prepare → bind → revision CAS 边界，读取配置时关闭 snapshot 写入，SecretRef 校验和候选失败均不会改变当前 `ActiveRuntime`。`reload_service_from_path` 则在同一 prepare 边界后调用 `DnsService::reload_prepared`：候选激活后为新 revision 重建 UDP/TCP/DoH listener 和 resource refresh task，并取消旧 scoped token。两个 API 目前都由调用方显式触发；`run` 尚未接入文件监视或管理接口。
+`reload_runtime_from_path` 复用同一 Config → async prepare → bind → revision CAS 边界，读取配置时关闭 snapshot 写入，SecretRef 校验和候选失败均不会改变当前 `ActiveRuntime`。`reload_service_from_path` 则在同一 prepare 边界后调用 `DnsService::reload_prepared`：候选激活后为新 revision 重建 UDP/TCP/DoH listener 和 resource refresh task，并取消旧 scoped token。`run` 以配置文件的 metadata fingerprint 做两次稳定轮询后触发该 service-aware 入口；成功才提交 fingerprint，坏配置或 bind 失败会记录并保留旧 Runtime，下一轮继续重试。
 
 ## 5. 信号与退出
 
@@ -87,7 +88,7 @@ bootstrap telemetry
 
 运行期 task 完成时，Degraded 组件的终止失败只记录并继续服务；FatalEndpoint/Fatal、重试耗尽和 panic 映射为 `RuntimeFatal`，先标记当前 runtime draining，再交由进程边界返回非零错误。显式 service reload 会为新 revision 注册新的 listener task，并通过 scoped cancellation 取消旧 task；运行期故障本身仍不会自动重建 listener。
 
-第二个终止信号快速退出、stats/resolve-log/cache flush 和 `SIGTERM` 专用处理仍未实现。
+第二个终止信号快速退出、stats/resolve-log/cache flush 和 `SIGTERM` 专用处理仍未实现。配置文件轮询只作为内部事件源，不提供外部管理 API。
 
 建议退出码分类：
 

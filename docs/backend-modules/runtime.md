@@ -1,6 +1,6 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard，Application 提供配置文件 reload 触发 API，service 会观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障；Supervisor 已支持受管 task-scoped cancellation，DnsService 的 UDP/TCP/DoH listener 与 resource refresh task 已使用独立 scoped token，显式 service reload 已可重建 listener 和 resource task，候选 registry 已具备更高版本资源合并原语；候选 revision CAS 现已在 mutation gate 下合并兼容资源的更高版本、Policy compiled index、Runtime metadata 和 worker 稳定调度状态，外部配置变更事件、完整跨 Runtime 配置候选发布、独立 resource-only swap 和 flush 生命周期仍在后续阶段
+> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard，Application 提供配置文件 reload 触发 API，service 会观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障；Supervisor 已支持受管 task-scoped cancellation，DnsService 的 UDP/TCP/DoH listener 与 resource refresh task 已使用独立 scoped token，显式 service reload 已可重建 listener 和 resource task，候选 registry 已具备更高版本资源合并原语；候选 revision CAS 现已在 mutation gate 下合并兼容资源的更高版本、Policy compiled index、Runtime metadata 和 worker 稳定调度状态，`run` 已通过 Application 的配置 fingerprint 轮询复用 service reload，完整跨 Runtime 配置候选发布、独立 resource-only swap 和 flush 生命周期仍在后续阶段
 >
 > 更新日期：2026-09-02
 >
@@ -107,7 +107,7 @@ v1 首次启动不存在端口复用迁移。未来 rebind 只有平台允许并
 
 ## 6. Coordinator 与 CAS
 
-`RuntimeCoordinator` 串行处理配置候选、资源更新和 fatal 状态迁移。资源刷新可以并行执行，但发布必须满足：
+`RuntimeCoordinator` 串行处理配置候选、资源更新和 fatal 状态迁移。Application 的配置 fingerprint 轮询只负责产生 reload 触发，不绕过 coordinator；资源刷新可以并行执行，但发布必须满足：
 
 - 每个资源有独立 epoch；
 - 结果 epoch 小于当前值时丢弃；
@@ -115,7 +115,7 @@ v1 首次启动不存在端口复用迁移。未来 rebind 只有平台允许并
 - CAS 失败后重新读取最新 registry 并重放本资源变更；
 - 不从旧 registry 构造完整替换，避免并发更新互相覆盖。
 
-当前 `RuntimeCoordinator` 已提供资源 worker 查询、刷新、关闭代理，以及把已 prepare 的候选通过 `bind_prepared` 和 revision CAS 激活的 `bind_and_activate` 入口；`refresh_resource_if_current` 在刷新前后校验 captured `ActiveRuntime` 仍是 coordinator 当前实例，stale 时由 service 跳过本轮并重新读取。Application 的 `reload_runtime_from_path` 已把无 snapshot 配置加载、SecretRef 校验、async prepare 和候选激活串成显式触发 API，`reload_service_from_path` 进一步调用 service listener/resource task swap，并验证失败保留当前 runtime；当前资源刷新仍在该 runtime 内完成 Policy/metadata CAS，`run` 尚未接入文件监视或管理事件。资源-only 更新复用现有 `BoundListenerSet` 和 `SharedServices`。需要 rebind 的候选拥有独立 listener set；发布后旧 runtime 进入 drain，旧 transport 和 resource task 通过 scoped cancellation 退出。
+当前 `RuntimeCoordinator` 已提供资源 worker 查询、刷新、关闭代理，以及把已 prepare 的候选通过 `bind_prepared` 和 revision CAS 激活的 `bind_and_activate` 入口；`refresh_resource_if_current` 在刷新前后校验 captured `ActiveRuntime` 仍是 coordinator 当前实例，stale 时由 service 跳过本轮并重新读取。Application 的 `reload_runtime_from_path` 已把无 snapshot 配置加载、SecretRef 校验、async prepare 和候选激活串成显式触发 API，`reload_service_from_path` 进一步调用 service listener/resource task swap，并验证失败保留当前 runtime；`run` 通过配置 fingerprint 两次稳定轮询复用该入口，失败不会切换当前 runtime。当前资源刷新仍在该 runtime 内完成 Policy/metadata CAS。资源-only 更新复用现有 `BoundListenerSet` 和 `SharedServices`。需要 rebind 的候选拥有独立 listener set；发布后旧 runtime 进入 drain，旧 transport 和 resource task 通过 scoped cancellation 退出。
 
 ## 7. Supervisor
 
