@@ -514,14 +514,17 @@ fn system_time_millis(time: SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use super::SqliteStorageBackend;
-    use crate::dns::Deadline;
+    use crate::dns::{Deadline, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
-        SchemaVersion, StatsBatch, StatsEvent, StorageBackend, StorageOperation, StorageTransaction,
+        ResolveEvent, SchemaVersion, StatsBatch, StatsEvent, StorageBackend, StorageOperation,
+        StorageTransaction,
     };
+    use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 
     static NEXT_TEST_DB: AtomicU64 = AtomicU64::new(0);
 
@@ -614,6 +617,41 @@ mod tests {
                 .await
                 .is_ok_and(|health| { health == crate::ports::storage::StorageHealth::Stopping })
         );
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn resolve_detail_batch_is_written_in_the_same_database_boundary() {
+        let path = path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        let transaction = StorageTransaction {
+            idempotency_key: "detail-batch".into(),
+            operations: vec![StorageOperation::ResolveBatch(vec![ResolveEvent {
+                occurred_at: SystemTime::now(),
+                duration_started_at: Instant::now(),
+                request_digest: Arc::from("digest"),
+                listener_id: Arc::from("listener"),
+                route_id: Some(Arc::from("route")),
+                client_bucket: None,
+                strategy_id: Some(Arc::from("strategy")),
+                transport: TransportClass::Datagram,
+                qname: Arc::from("example.com."),
+                qtype: 1,
+                qclass: 1,
+                outcome: OutcomeClass::Success,
+                cache_status: CacheStatus::Miss,
+                runtime_revision: RuntimeRevision(3),
+            }])],
+        };
+        backend.execute(transaction, deadline()).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
+        backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
