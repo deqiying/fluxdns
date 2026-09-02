@@ -718,12 +718,13 @@ mod tests {
     use super::{PrepareError, PreparedRuntime};
 
     fn config() -> Arc<crate::config::ResolvedConfig> {
+        let work_path = crate::config::test_support::absolute_path("runtime");
         ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(
+            .load_str(&format!(
                 r#"
 version: 1
 work:
-  path: /tmp/fluxdns-runtime-test
+  path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
@@ -737,7 +738,7 @@ webui:
   address: 127.0.0.1
   port: 8080
   users: []
-dns: {}
+dns: {{}}
 listener:
   - type: udp
     name: dns
@@ -760,7 +761,7 @@ strategy:
       - hosts: local-hosts
     default_upstream: local
 "#,
-            )
+            ))
             .expect("runtime fixture must be valid")
             .resolved
     }

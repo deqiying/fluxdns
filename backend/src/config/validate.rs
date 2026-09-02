@@ -1778,8 +1778,9 @@ mod tests {
 
     #[test]
     fn bind_plan_retains_doh_transport_without_confusing_tcp() {
+        let (source, _) = crate::config::test_support::portable_example();
         let output = ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(include_str!("../../../config-example.yaml"))
+            .load_str(&source)
             .expect("repository example must remain a valid configuration");
 
         assert!(

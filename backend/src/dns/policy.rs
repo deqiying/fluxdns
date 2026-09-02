@@ -1410,12 +1410,13 @@ mod tests {
     }
 
     fn config() -> std::sync::Arc<crate::config::ResolvedConfig> {
+        let work_path = crate::config::test_support::absolute_path("policy-core");
         ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(
+            .load_str(&format!(
                 r#"
 version: 1
 work:
-  path: /tmp/fluxdns-policy-core-test
+  path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
@@ -1429,7 +1430,7 @@ webui:
   address: 127.0.0.1
   port: 8080
   users: []
-dns: {}
+dns: {{}}
 listener:
   - type: udp
     name: dns
@@ -1452,7 +1453,7 @@ strategy:
       - hosts: local-hosts
     default_upstream: local
 "#,
-            )
+            ))
             .expect("policy core fixture must be valid")
             .resolved
     }
@@ -1489,10 +1490,12 @@ strategy:
     }
 
     fn doh_config_with_address(address: &str) -> std::sync::Arc<crate::config::ResolvedConfig> {
-        let source = r#"
+        let work_path = crate::config::test_support::absolute_path("policy-doh");
+        let source = format!(
+            r#"
 version: 1
 work:
-  path: /tmp/fluxdns-policy-doh-test
+  path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
@@ -1506,7 +1509,7 @@ webui:
   address: 127.0.0.1
   port: 8080
   users: []
-dns: {}
+dns: {{}}
 listener:
   - type: udp
     name: dns
@@ -1529,6 +1532,7 @@ hosts:
     format: hosts
     hosts: "192.0.2.99 unused.example"
         "#
+        )
         .replace("__DOH_ADDRESS__", address);
         ConfigLoader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
@@ -1645,12 +1649,13 @@ hosts:
     }
 
     fn group_config() -> std::sync::Arc<crate::config::ResolvedConfig> {
+        let work_path = crate::config::test_support::absolute_path("policy-group");
         ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(
+            .load_str(&format!(
                 r#"
 version: 1
 work:
-  path: /tmp/fluxdns-policy-group-test
+  path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
@@ -1664,7 +1669,7 @@ webui:
   address: 127.0.0.1
   port: 8080
   users: []
-dns: {}
+dns: {{}}
 listener:
   - type: udp
     name: dns
@@ -1700,7 +1705,7 @@ strategy:
       - hosts: unused-hosts
     default_upstream: group
 "#,
-            )
+            ))
             .expect("policy group fixture must be valid")
             .resolved
     }
@@ -1983,12 +1988,13 @@ strategy:
 
     #[tokio::test]
     async fn policy_executes_fallback_after_primary_servfail() {
+        let work_path = crate::config::test_support::absolute_path("policy-fallback");
         let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(
+            .load_str(&format!(
                 r#"
 version: 1
 work:
-  path: /tmp/fluxdns-policy-fallback-test
+  path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
@@ -2002,7 +2008,7 @@ webui:
   address: 127.0.0.1
   port: 8080
   users: []
-dns: {}
+dns: {{}}
 listener:
   - type: udp
     name: dns
@@ -2041,7 +2047,7 @@ strategy:
       - hosts: unused-hosts
     default_upstream: group
 "#,
-            )
+            ))
             .expect("policy fallback fixture must be valid")
             .resolved;
         let direct = super::direct_upstreams(&config.upstreams);

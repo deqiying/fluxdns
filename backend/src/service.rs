@@ -1341,12 +1341,13 @@ mod tests {
     }
 
     fn runtime_config(port: u16) -> Arc<crate::config::resolve::ResolvedConfig> {
+        let work_path = crate::config::test_support::absolute_path("service-reload");
         ConfigLoader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
 version: 1
 work:
-  path: /tmp/fluxdns-service-reload-test
+  path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
@@ -1387,6 +1388,7 @@ strategy:
 clients: []
 "#,
                 port = port,
+                work_path = work_path,
             ))
             .expect("service reload fixture must be valid")
             .resolved

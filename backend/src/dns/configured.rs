@@ -90,8 +90,9 @@ mod tests {
     use super::{ConfiguredDnsCore, CoreBuildError, DEFAULT_LOCAL_TTL};
 
     fn example_config() -> Arc<crate::config::ResolvedConfig> {
+        let (source, _) = crate::config::test_support::portable_example();
         ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(include_str!("../../../config-example.yaml"))
+            .load_str(&source)
             .expect("example config must remain valid")
             .resolved
     }

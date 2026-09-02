@@ -753,18 +753,16 @@ mod tests {
     #[test]
     fn repository_example_is_strictly_loaded_and_resolved_without_external_io() {
         let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let (source, work) = crate::config::test_support::portable_example();
         let output = loader
-            .load_str(include_str!("../../../config-example.yaml"))
+            .load_str(&source)
             .expect("repository configuration example should satisfy the v1 contract");
         assert_eq!(output.config.version, 1);
         assert_eq!(output.resolved.version, 1);
         assert_eq!(output.resolved.listeners.len(), 3);
         assert_eq!(output.resolved.upstreams.len(), 7);
         assert!(!output.resolved.normalized_hash.is_empty());
-        assert_eq!(
-            output.resolved.work.rules_path,
-            std::path::Path::new("/etc/fluxdns/rules")
-        );
+        assert_eq!(output.resolved.work.rules_path, work.join("rules"));
         let inner = output
             .resolved
             .strategies
@@ -861,8 +859,8 @@ mod tests {
     #[test]
     fn loader_normalizes_case_insensitive_log_level() {
         let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
-        let source =
-            include_str!("../../../config-example.yaml").replace("level: info", "level: INFO");
+        let (source, _) = crate::config::test_support::portable_example();
+        let source = source.replace("level: info", "level: INFO");
         let output = loader.load_str(&source).unwrap();
         assert_eq!(
             output.config.logs.level,
@@ -886,8 +884,8 @@ mod tests {
     #[test]
     fn configuration_debug_is_redacted_and_normalized_hash_tracks_secret_metadata() {
         let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
-        let source = include_str!("../../../config-example.yaml");
-        let output = loader.load_str(source).unwrap();
+        let (source, _) = crate::config::test_support::portable_example();
+        let output = loader.load_str(&source).unwrap();
         let debug = format!("{:?}", output.config);
         assert!(!debug.contains("jkBqXYJuD.4MlWKN"));
         assert!(!debug.contains("FLUXDNS_OUTBOUND_SG_URL"));

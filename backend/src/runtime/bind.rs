@@ -439,12 +439,13 @@ mod tests {
     }
 
     fn prepared_fixture() -> PreparedRuntime {
+        let work_path = crate::config::test_support::absolute_path("runtime-bind");
         let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(
+            .load_str(&format!(
                 r#"
 version: 1
 work:
-  path: /tmp/fluxdns-runtime-bind-test
+  path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
@@ -458,7 +459,7 @@ webui:
   address: 127.0.0.1
   port: 8080
   users: []
-dns: {}
+dns: {{}}
 listener:
   - type: udp
     name: dns-udp
@@ -486,7 +487,7 @@ strategy:
       - hosts: local-hosts
     default_upstream: local
 "#,
-            )
+            ))
             .expect("bind fixture must be valid")
             .resolved;
         PreparedRuntime::prepare(config, RuntimeRevision(3)).unwrap()

@@ -402,7 +402,16 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "fluxdns-resource-loader-{}-{}.hosts",
             std::process::id(),
-            std::thread::current().name().unwrap_or("test")
+            std::thread::current()
+                .name()
+                .unwrap_or("test")
+                .chars()
+                .map(|character| if character.is_ascii_alphanumeric() {
+                    character
+                } else {
+                    '_'
+                })
+                .collect::<String>()
         ));
         fs::write(&path, "192.0.2.3 file.example\n").unwrap();
         let resource = ResolvedHostsResource::File {

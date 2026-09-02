@@ -452,8 +452,9 @@ mod tests {
     use crate::runtime::PreparedRuntime;
 
     fn candidate(revision: u64) -> crate::runtime::BoundCandidate {
+        let (source, _) = crate::config::test_support::portable_example();
         let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(include_str!("../../../config-example.yaml"))
+            .load_str(&source)
             .expect("repository example must remain a valid runtime fixture")
             .resolved;
         let prepared = PreparedRuntime::prepare(config, RuntimeRevision(revision)).unwrap();
@@ -716,8 +717,9 @@ outbound: []
     #[tokio::test]
     async fn bind_and_activate_publishes_a_prepared_candidate_after_binding() {
         let coordinator = RuntimeCoordinator::new(candidate(1));
+        let (source, _) = crate::config::test_support::portable_example();
         let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(include_str!("../../../config-example.yaml"))
+            .load_str(&source)
             .unwrap()
             .resolved;
         let prepared = PreparedRuntime::prepare(config, RuntimeRevision(2)).unwrap();
@@ -739,8 +741,9 @@ outbound: []
     #[tokio::test]
     async fn bind_and_activate_returns_bound_candidate_when_activation_cas_loses() {
         let coordinator = RuntimeCoordinator::new(candidate(1));
+        let (source, _) = crate::config::test_support::portable_example();
         let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
-            .load_str(include_str!("../../../config-example.yaml"))
+            .load_str(&source)
             .unwrap()
             .resolved;
         let prepared = PreparedRuntime::prepare(config, RuntimeRevision(2)).unwrap();
