@@ -22,7 +22,8 @@ use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
 use crate::ports::storage::{ResolveEvent, ResolveEventSink, StatsDimension};
 use crate::ports::telemetry::{
-    CacheStatus, ConfiguredIdKind, LogSink, OutcomeClass, configured_id_from_validated,
+    CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
+    ConfiguredIdKind, HealthSink, LogSink, OutcomeClass, configured_id_from_validated,
 };
 use crate::runtime::{
     ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
@@ -206,9 +207,23 @@ impl DnsService {
         };
         let core = instrumented_core(core, stats_worker.clone(), resolve_event_sink.clone());
         if let Some(storage) = &storage {
-            spawn_storage_task(&mut supervisor, Arc::clone(storage))?;
+            spawn_storage_task(&mut supervisor, Arc::clone(storage), telemetry.clone())?;
         }
         if let Some(telemetry) = &telemetry {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Telemetry,
+                ComponentHealthState::Healthy,
+                None,
+            );
+            if storage.is_some() {
+                publish_component_health(
+                    telemetry,
+                    TelemetryComponent::Storage,
+                    ComponentHealthState::Healthy,
+                    None,
+                );
+            }
             spawn_telemetry_task(&mut supervisor, Arc::clone(telemetry))?;
         }
         let transport_plans = prepare_transport_plans(
@@ -506,11 +521,18 @@ impl DnsService {
         } else {
             None
         };
-        let telemetry_error = self
-            .telemetry
-            .take()
-            .and_then(|telemetry| telemetry.shutdown(deadline).err())
-            .map(ServiceError::Telemetry);
+        let telemetry_error = self.telemetry.take().and_then(|telemetry| {
+            publish_component_health(
+                &telemetry,
+                TelemetryComponent::Telemetry,
+                ComponentHealthState::Stopping,
+                None,
+            );
+            telemetry
+                .shutdown(deadline)
+                .err()
+                .map(ServiceError::Telemetry)
+        });
         if let Some(error) = storage_error {
             return Err(error);
         }
@@ -572,6 +594,14 @@ impl DnsService {
                         });
                     };
                     if let Some(error) = task_failure(&completion) {
+                        if let Some(telemetry) = &self.telemetry {
+                            publish_component_health(
+                                telemetry,
+                                telemetry_component_for_task(completion.spec.component),
+                                ComponentHealthState::Failed,
+                                Some("supervisor task failed"),
+                            );
+                        }
                         self.runtime.begin_drain();
                         return Err(error);
                     }
@@ -755,9 +785,51 @@ fn outcome_class(request: &DnsRequest, result: &Result<CoreOutcome, CoreError>) 
     }
 }
 
+fn publish_component_health(
+    telemetry: &TelemetryWriter,
+    component: TelemetryComponent,
+    state: ComponentHealthState,
+    safe_reason: Option<&'static str>,
+) {
+    let now = Instant::now();
+    if let Err(error) = HealthSink::update(
+        telemetry,
+        ComponentHealthEvent {
+            component,
+            state,
+            first_seen: now,
+            last_changed: now,
+            last_success: (state == ComponentHealthState::Healthy).then_some(now),
+            retry_count: 0,
+            stale_age_micros: None,
+            persistence_gap: false,
+            safe_reason,
+        },
+    ) {
+        tracing::debug!(
+            event = "telemetry_health_publish_failed",
+            component = ?component,
+            class = error.class().as_str(),
+            operation = error.operation(),
+            "telemetry_health_publish_failed"
+        );
+    }
+}
+
+fn telemetry_component_for_task(component: &'static str) -> TelemetryComponent {
+    match component {
+        "storage" => TelemetryComponent::Storage,
+        "resource" => TelemetryComponent::Resource,
+        "udp" | "tcp" | "doh" => TelemetryComponent::Listener,
+        "telemetry" => TelemetryComponent::Telemetry,
+        _ => TelemetryComponent::Runtime,
+    }
+}
+
 async fn storage_flush_task(
     storage: Arc<tokio::sync::Mutex<StorageRuntime>>,
     cancellation: Cancellation,
+    telemetry: Option<Arc<TelemetryWriter>>,
 ) -> Result<(), TaskError> {
     let mut interval = tokio::time::interval(DEFAULT_STORAGE_FLUSH_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -767,8 +839,26 @@ async fn storage_flush_task(
             _ = interval.tick() => {
                 let deadline = Deadline::new(Instant::now() + DEFAULT_STORAGE_OPERATION_TIMEOUT);
                 let mut storage = storage.lock().await;
-                if let Err(error) = storage.flush(deadline).await {
-                    if error.is_fatal() {
+                match storage.flush(deadline).await {
+                    Ok(_) => {
+                        if let Some(telemetry) = &telemetry {
+                            publish_component_health(
+                                telemetry,
+                                TelemetryComponent::Storage,
+                                ComponentHealthState::Healthy,
+                                None,
+                            );
+                        }
+                    }
+                    Err(error) if error.is_fatal() => {
+                        if let Some(telemetry) = &telemetry {
+                            publish_component_health(
+                                telemetry,
+                                TelemetryComponent::Storage,
+                                ComponentHealthState::Failed,
+                                Some("storage flush reached fatal limit"),
+                            );
+                        }
                         tracing::error!(
                             event = "storage_pending_limit_exceeded",
                             component = "storage",
@@ -777,12 +867,22 @@ async fn storage_flush_task(
                         );
                         return Err(TaskError::Fatal);
                     }
-                    tracing::warn!(
-                        event = "storage_flush_failed",
-                        component = "storage",
-                        error = %error,
-                        "storage_flush_failed"
-                    );
+                    Err(error) => {
+                        if let Some(telemetry) = &telemetry {
+                            publish_component_health(
+                                telemetry,
+                                TelemetryComponent::Storage,
+                                ComponentHealthState::Degraded,
+                                Some("storage flush failed"),
+                            );
+                        }
+                        tracing::warn!(
+                            event = "storage_flush_failed",
+                            component = "storage",
+                            error = %error,
+                            "storage_flush_failed"
+                        );
+                    }
                 }
             }
         }
@@ -792,6 +892,7 @@ async fn storage_flush_task(
 fn spawn_storage_task(
     supervisor: &mut Supervisor,
     storage: Arc<tokio::sync::Mutex<StorageRuntime>>,
+    telemetry: Option<Arc<TelemetryWriter>>,
 ) -> Result<Cancellation, ServiceStartError> {
     let spec = TaskSpec::new(
         "storage.writer",
@@ -806,7 +907,7 @@ fn spawn_storage_task(
     })?;
     supervisor
         .spawn_scoped(spec, move |cancellation| {
-            Box::pin(storage_flush_task(storage, cancellation))
+            Box::pin(storage_flush_task(storage, cancellation, telemetry))
         })
         .map_err(ServiceStartError::Task)
 }
@@ -823,21 +924,42 @@ async fn telemetry_flush_task(
             _ = interval.tick() => {
                 let deadline = Deadline::new(Instant::now() + TELEMETRY_OPERATION_TIMEOUT);
                 match LogSink::flush(telemetry.as_ref(), deadline).await {
-                    Ok(summary) if summary.failed > 0 => tracing::warn!(
-                        event = "telemetry_flush_degraded",
-                        component = "telemetry",
-                        failed = summary.failed,
-                        pending = telemetry.stats().pending(),
-                        "telemetry_flush_degraded"
+                    Ok(summary) if summary.failed > 0 => {
+                        publish_component_health(
+                            &telemetry,
+                            TelemetryComponent::Telemetry,
+                            ComponentHealthState::Degraded,
+                            Some("telemetry output failed"),
+                        );
+                        tracing::warn!(
+                            event = "telemetry_flush_degraded",
+                            component = "telemetry",
+                            failed = summary.failed,
+                            pending = telemetry.stats().pending(),
+                            "telemetry_flush_degraded"
+                        );
+                    }
+                    Ok(_) => publish_component_health(
+                        &telemetry,
+                        TelemetryComponent::Telemetry,
+                        ComponentHealthState::Healthy,
+                        None,
                     ),
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(
-                        event = "telemetry_flush_failed",
-                        component = "telemetry",
-                        class = error.class().as_str(),
-                        operation = error.operation(),
-                        "telemetry_flush_failed"
-                    ),
+                    Err(error) => {
+                        publish_component_health(
+                            &telemetry,
+                            TelemetryComponent::Telemetry,
+                            ComponentHealthState::Degraded,
+                            Some("telemetry flush failed"),
+                        );
+                        tracing::warn!(
+                            event = "telemetry_flush_failed",
+                            component = "telemetry",
+                            class = error.class().as_str(),
+                            operation = error.operation(),
+                            "telemetry_flush_failed"
+                        );
+                    }
                 }
             }
         }
@@ -1725,7 +1847,8 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use super::{
-        ServiceError, capabilities, spawn_telemetry_task, spawn_transport_task, task_failure,
+        ServiceError, capabilities, publish_component_health, spawn_telemetry_task,
+        spawn_transport_task, task_failure,
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
@@ -1734,7 +1857,8 @@ mod tests {
     };
     use crate::observability::{TelemetryOutput, TelemetryWriter};
     use crate::ports::telemetry::{
-        Component as TelemetryComponent, ComponentHealthEvent, LogEvent, LogLevel, MetricEvent,
+        Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState, LogEvent,
+        LogLevel, MetricEvent,
     };
     use crate::runtime::{
         FaultLevel, PreparedRuntime, RestartPolicy, RuntimeCoordinator, Supervisor, SystemClock,
@@ -1802,6 +1926,26 @@ mod tests {
             )
             .await;
         assert_eq!(report.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn component_health_is_published_as_a_bounded_telemetry_event() {
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(4, output.clone()).unwrap();
+        publish_component_health(
+            &writer,
+            TelemetryComponent::Storage,
+            ComponentHealthState::Degraded,
+            Some("storage flush failed"),
+        );
+
+        crate::ports::telemetry::LogSink::flush(
+            &writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.health.load(Ordering::Relaxed), 1);
     }
 
     fn completion(
