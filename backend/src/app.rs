@@ -11,7 +11,7 @@ use crate::ports::effects::SocketFactory;
 use crate::runtime::{
     ActiveRuntime, PrepareError, PreparedRuntime, RuntimeCoordinator, SystemSocketFactory,
 };
-use crate::service::{DnsService, ServiceError, ServiceStartError};
+use crate::service::{DnsService, ServiceError, ServiceReloadError, ServiceStartError};
 
 /// 进程退出码的大类，详细原因应由安全错误消息表达。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,6 +151,8 @@ pub enum ApplicationReloadError {
     Prepare(#[source] PrepareError),
     #[error("runtime reload activation failed: {0}")]
     Activation(#[source] crate::runtime::RuntimeReloadError),
+    #[error("runtime reload service activation failed: {0}")]
+    Service(#[source] ServiceReloadError),
 }
 
 /// 解析进程边界参数；不访问文件系统，也不猜测配置位置。
@@ -259,6 +261,37 @@ pub async fn reload_runtime_from_path(
     deadline: Deadline,
     cancellation: Cancellation,
 ) -> Result<Arc<ActiveRuntime>, ApplicationReloadError> {
+    let expected = coordinator.current_revision();
+    let prepared = prepare_reload_candidate(expected, path, deadline, cancellation.clone()).await?;
+
+    coordinator
+        .bind_and_activate(expected, prepared, factory, deadline, &cancellation)
+        .await
+        .map_err(ApplicationReloadError::Activation)
+}
+
+/// 从配置文件准备并通过已有 service 重建 listener task。
+pub async fn reload_service_from_path(
+    service: &mut DnsService,
+    path: impl AsRef<std::path::Path>,
+    factory: &dyn SocketFactory,
+    deadline: Deadline,
+    cancellation: Cancellation,
+) -> Result<Arc<ActiveRuntime>, ApplicationReloadError> {
+    let expected = service.coordinator().current_revision();
+    let prepared = prepare_reload_candidate(expected, path, deadline, cancellation.clone()).await?;
+    service
+        .reload_prepared(prepared, factory, deadline, cancellation)
+        .await
+        .map_err(ApplicationReloadError::Service)
+}
+
+async fn prepare_reload_candidate(
+    expected: RuntimeRevision,
+    path: impl AsRef<std::path::Path>,
+    deadline: Deadline,
+    cancellation: Cancellation,
+) -> Result<PreparedRuntime, ApplicationReloadError> {
     let output = ConfigLoader::new(LoadOptions::default().without_snapshot())
         .load_from_path(path)
         .map_err(ApplicationReloadError::Config)?;
@@ -266,27 +299,20 @@ pub async fn reload_runtime_from_path(
         .resolved
         .validate_secret_refs(64 * 1024)
         .map_err(ApplicationReloadError::SecretValidation)?;
-
-    let expected = coordinator.current_revision();
     let revision = RuntimeRevision(
         expected
             .0
             .checked_add(1)
             .ok_or(ApplicationReloadError::RevisionExhausted)?,
     );
-    let prepared = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+    PreparedRuntime::prepare_with_policy_core_and_remote_resources(
         output.resolved,
         revision,
         deadline,
-        cancellation.clone(),
+        cancellation,
     )
     .await
-    .map_err(ApplicationReloadError::Prepare)?;
-
-    coordinator
-        .bind_and_activate(expected, prepared, factory, deadline, &cancellation)
-        .await
-        .map_err(ApplicationReloadError::Activation)
+    .map_err(ApplicationReloadError::Prepare)
 }
 
 async fn run_command(options: CliOptions) -> Result<(), AppError> {

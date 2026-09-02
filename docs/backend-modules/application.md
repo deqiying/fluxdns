@@ -1,6 +1,6 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API，`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障
+> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API，并提供 service-aware reload 入口重建 listener task；`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障
 >
 > 更新日期：2026-09-02
 >
@@ -74,7 +74,7 @@ bootstrap telemetry
 
 依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch，创建 `Arc<RuntimeCoordinator>` 并交给 `DnsService`；service Supervisor 持有自动刷新 task，资源 task 通过 coordinator 查询当前活动 runtime，transport task 在当前阶段仍绑定启动时 runtime。测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
 
-`reload_runtime_from_path` 复用同一 Config → async prepare → bind → revision CAS 边界，读取配置时关闭 snapshot 写入，SecretRef 校验和候选失败均不会改变当前 `ActiveRuntime`。该 API 目前由调用方显式触发；`run` 尚未接入文件监视、管理接口或 listener task 重建。
+`reload_runtime_from_path` 复用同一 Config → async prepare → bind → revision CAS 边界，读取配置时关闭 snapshot 写入，SecretRef 校验和候选失败均不会改变当前 `ActiveRuntime`。`reload_service_from_path` 则在同一 prepare 边界后调用 `DnsService::reload_prepared`：候选激活后为新 revision 重建 UDP/TCP/DoH listener task，并取消旧 task。两个 API 目前都由调用方显式触发；`run` 尚未接入文件监视或管理接口，资源 worker 集合重建仍待完成。
 
 ## 5. 信号与退出
 
@@ -85,7 +85,7 @@ bootstrap telemetry
 3. 在固定 5 秒 grace deadline 内回收 UDP loop、TCP listener、DoH listener 和连接 session；
 4. 返回成功或 shutdown timeout 错误。
 
-运行期 task 完成时，Degraded 组件的终止失败只记录并继续服务；FatalEndpoint/Fatal、重试耗尽和 panic 映射为 `RuntimeFatal`，先标记当前 runtime draining，再交由进程边界返回非零错误。listener task 当前使用一次性注册，因此升级后不会在 service 内自动重建 listener。
+运行期 task 完成时，Degraded 组件的终止失败只记录并继续服务；FatalEndpoint/Fatal、重试耗尽和 panic 映射为 `RuntimeFatal`，先标记当前 runtime draining，再交由进程边界返回非零错误。显式 service reload 会为新 revision 注册新的 listener task，并通过 scoped cancellation 取消旧 task；运行期故障本身仍不会自动重建 listener。
 
 第二个终止信号快速退出、stats/resolve-log/cache flush 和 `SIGTERM` 专用处理仍未实现。
 
@@ -130,10 +130,11 @@ Application 将内部错误转换为：
 - [x] 接入读取配置后的 Config load/resolve/preflight 边界；
 - [x] 接入 Runtime bind、activate、wait、shutdown；
 - [x] 提供配置文件 reload 的 prepare/bind/activate 触发 API，并验证失败保留旧 runtime；
+- [x] 提供 service-aware reload 的 listener task 重建 API，并验证新 revision 接管新端口；
 - [x] 观察 Supervisor task 完成并按 fault level 映射运行期服务错误；
 - [ ] 完成信号与退出测试；
 - [x] 记录阶段 1 验证证据并更新实现进度。
 
-阶段证据：`app::tests::exit_codes_are_stable`、CLI 参数、`validate` 只读和 `reload_runtime_from_path` 成功/失败测试通过；正式 `run` 已切换到 async remote prepare，`runtime::prepared::tests` 验证首次 fetch、第二次 fallback restore 以及 refresh worker 的 Policy live publish。真实 smoke 使用临时配置在 UDP `8353`、TCP `8354`、DoH `8355` 启动，hosts 查询返回 `127.0.0.1`，同连接双 TCP frame 维持 ID 顺序，DoH GET/POST 保留 DNS ID/RCODE，`SIGINT` 后输出 `service_shutdown` 并以 0 退出。未测试 nginx、TLS 证书或特权端口。
+阶段证据：`app::tests::exit_codes_are_stable`、CLI 参数、`validate` 只读和 `reload_runtime_from_path` 成功/失败测试通过；`service::tests::reload_prepared_rebinds_listener_tasks_to_the_new_runtime` 通过系统 loopback socket 验证新 revision 接管新端口、旧 task 取消且 service runtime 更新；正式 `run` 已切换到 async remote prepare，`runtime::prepared::tests` 验证首次 fetch、第二次 fallback restore 以及 refresh worker 的 Policy live publish。真实 smoke 使用临时配置在 UDP `8353`、TCP `8354`、DoH `8355` 启动，hosts 查询返回 `127.0.0.1`，同连接双 TCP frame 维持 ID 顺序，DoH GET/POST 保留 DNS ID/RCODE，`SIGINT` 后输出 `service_shutdown` 并以 0 退出。未测试 nginx、TLS 证书或特权端口。
 
 当前实现进度：**45%**。

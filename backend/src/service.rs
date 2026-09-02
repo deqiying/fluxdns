@@ -10,15 +10,18 @@ use crate::config::BindTransport;
 use crate::config::resolve::ConfigId;
 use crate::dns::{
     CacheCompatibilityKey, CancelReason, Cancellation, Deadline, DispatchError, DnsCore,
-    TransportCapabilities, TransportClass, dispatch_inbound,
+    RuntimeRevision, TransportCapabilities, TransportClass, dispatch_inbound,
 };
 use crate::ports::PortErrorClass;
+use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
 use crate::runtime::{
-    ActiveRuntime, AdmissionError, BoundEndpointHandle, FaultLevel, RefreshedResourceSnapshot,
+    ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
+    BoundListenerSet, FaultLevel, PreparedRuntime, RefreshedResourceSnapshot,
     ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator, ShutdownReport, Supervisor,
     SupervisorError, SystemClock, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
+    bind_prepared,
 };
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
@@ -45,6 +48,27 @@ pub enum ServiceStartError {
 }
 
 #[derive(Debug, Error)]
+pub enum ServiceReloadError {
+    #[error("runtime reload bind failed: {0}")]
+    Bind(#[source] BindError),
+    #[error("runtime reload activation failed: {0}")]
+    Activation(#[source] ActivationError),
+    #[error("active runtime snapshot is missing its DNS core")]
+    MissingDnsCore,
+    #[error(
+        "runtime reload revision must increment by one: expected {expected:?}, actual {actual:?}"
+    )]
+    InvalidRevision {
+        expected: RuntimeRevision,
+        actual: RuntimeRevision,
+    },
+    #[error("runtime reload listener preparation failed: {0}")]
+    Endpoint(#[source] ServiceStartError),
+    #[error("runtime reload task registration failed: {0}")]
+    Task(#[source] SupervisorError),
+}
+
+#[derive(Debug, Error)]
 pub enum ServiceError {
     #[error("shutdown signal could not be installed")]
     Signal,
@@ -67,6 +91,7 @@ pub struct DnsService {
     coordinator: Arc<RuntimeCoordinator>,
     supervisor: Supervisor,
     transport_cancellations: Vec<Cancellation>,
+    request_timeout: Duration,
 }
 
 impl DnsService {
@@ -85,100 +110,20 @@ impl DnsService {
         request_timeout: Duration,
     ) -> Result<Self, ServiceStartError> {
         let runtime = coordinator.load();
-        let endpoints = runtime.listeners().endpoint_handles().map_err(|error| {
-            ServiceStartError::ListenerHandles {
-                class: error.class().as_str(),
-                operation: error.operation(),
-            }
-        })?;
         let mut supervisor = Supervisor::new();
         let resource_cancellation = supervisor.cancellation();
-        let mut transport_cancellations = Vec::new();
-
-        for (index, endpoint) in endpoints.into_iter().enumerate() {
-            let BoundEndpointHandle { entry, socket } = endpoint;
-            if entry.transport == BindTransport::Doh {
-                let adapter = DohAdapter::from_endpoint(
-                    BoundEndpointHandle { entry, socket },
-                    runtime.snapshot().config(),
-                    runtime.revision(),
-                    capabilities(TransportClass::Multiplexed),
-                    request_timeout,
-                )
-                .map_err(|reason| ServiceStartError::Endpoint {
-                    index,
-                    kind: "DoH",
-                    reason: reason.to_string(),
-                })?;
-                let task_id = format!("transport.doh.{index}");
-                let task_core = Arc::clone(&core);
-                let task_runtime = Arc::clone(&runtime);
-                let cancellation =
-                    spawn_transport_task(&mut supervisor, task_id, "doh", move |cancellation| {
-                        doh_listener_task(adapter, task_core, task_runtime, cancellation)
-                    })?;
-                transport_cancellations.push(cancellation);
-                continue;
-            }
-            match socket {
-                ActivatedSocketHandle::Udp(socket) => {
-                    let adapter = UdpAdapter::from_endpoint(
-                        BoundEndpointHandle {
-                            entry,
-                            socket: ActivatedSocketHandle::Udp(socket),
-                        },
-                        runtime.revision(),
-                        capabilities(TransportClass::Datagram),
-                        request_timeout,
-                    )
-                    .map_err(|reason| ServiceStartError::Endpoint {
-                        index,
-                        kind: "UDP",
-                        reason: reason.to_string(),
-                    })?;
-                    let task_id = format!("transport.udp.{index}");
-                    let task_core = Arc::clone(&core);
-                    let task_runtime = Arc::clone(&runtime);
-                    let cancellation = spawn_transport_task(
-                        &mut supervisor,
-                        task_id,
-                        "udp",
-                        move |cancellation| {
-                            service_task(adapter, task_core, task_runtime, cancellation)
-                        },
-                    )?;
-                    transport_cancellations.push(cancellation);
-                }
-                ActivatedSocketHandle::Tcp(listener) => {
-                    let adapter = TcpAdapter::from_endpoint(
-                        BoundEndpointHandle {
-                            entry,
-                            socket: ActivatedSocketHandle::Tcp(listener),
-                        },
-                        runtime.revision(),
-                        capabilities(TransportClass::Stream),
-                        request_timeout,
-                    )
-                    .map_err(|reason| ServiceStartError::Endpoint {
-                        index,
-                        kind: "TCP",
-                        reason: reason.to_string(),
-                    })?;
-                    let task_id = format!("transport.tcp.{index}");
-                    let task_core = Arc::clone(&core);
-                    let task_runtime = Arc::clone(&runtime);
-                    let cancellation = spawn_transport_task(
-                        &mut supervisor,
-                        task_id,
-                        "tcp",
-                        move |cancellation| {
-                            tcp_listener_task(adapter, task_core, task_runtime, cancellation)
-                        },
-                    )?;
-                    transport_cancellations.push(cancellation);
-                }
-            }
-        }
+        let transport_plans = prepare_transport_plans(
+            runtime.listeners(),
+            runtime.snapshot().config(),
+            runtime.revision(),
+            request_timeout,
+        )?;
+        let transport_cancellations = spawn_transport_plans(
+            &mut supervisor,
+            transport_plans,
+            Arc::clone(&core),
+            Arc::clone(&runtime),
+        )?;
 
         for (index, resource) in coordinator.resource_worker_ids().into_iter().enumerate() {
             let task_id = format!("resource.refresh.{index}");
@@ -195,6 +140,7 @@ impl DnsService {
             coordinator,
             supervisor,
             transport_cancellations,
+            request_timeout,
         })
     }
 
@@ -248,6 +194,60 @@ impl DnsService {
         }
     }
 
+    /// 绑定并切换一个新 Runtime，同时重建 UDP/TCP/DoH listener task。
+    ///
+    /// 资源 refresh task 仍由旧的 Supervisor 注册集合持有；资源 worker 集合重建
+    /// 需要后续阶段提供按资源粒度的 task 生命周期管理。
+    pub async fn reload_prepared(
+        &mut self,
+        prepared: PreparedRuntime,
+        factory: &dyn SocketFactory,
+        deadline: Deadline,
+        cancellation: Cancellation,
+    ) -> Result<Arc<ActiveRuntime>, ServiceReloadError> {
+        let expected = self.coordinator.current_revision();
+        let actual = prepared.snapshot().revision();
+        let expected_next = expected
+            .0
+            .checked_add(1)
+            .map(RuntimeRevision)
+            .ok_or(ServiceReloadError::InvalidRevision { expected, actual })?;
+        if actual != expected_next {
+            return Err(ServiceReloadError::InvalidRevision { expected, actual });
+        }
+        let candidate = bind_prepared(prepared, factory, deadline, &cancellation)
+            .await
+            .map_err(ServiceReloadError::Bind)?;
+        let transport_plans = prepare_transport_plans(
+            candidate.listeners(),
+            candidate.snapshot().config(),
+            candidate.revision(),
+            self.request_timeout,
+        )
+        .map_err(ServiceReloadError::Endpoint)?;
+        let core = candidate
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceReloadError::MissingDnsCore)?;
+
+        self.coordinator
+            .compare_and_activate(expected, candidate)
+            .map_err(ServiceReloadError::Activation)?;
+        let runtime = self.coordinator.load();
+        let transport_cancellations = spawn_transport_plans(
+            &mut self.supervisor,
+            transport_plans,
+            core,
+            Arc::clone(&runtime),
+        )
+        .map_err(map_reload_spawn_error)?;
+
+        self.cancel_transport_tasks();
+        self.transport_cancellations = transport_cancellations;
+        self.runtime = Arc::clone(&runtime);
+        Ok(runtime)
+    }
+
     pub async fn shutdown(
         &mut self,
         clock: &dyn Clock,
@@ -299,6 +299,144 @@ impl DnsService {
             }
         }
     }
+}
+
+fn map_reload_spawn_error(error: ServiceStartError) -> ServiceReloadError {
+    match error {
+        ServiceStartError::Task(source) => ServiceReloadError::Task(source),
+        other => ServiceReloadError::Endpoint(other),
+    }
+}
+
+enum TransportTaskPlan {
+    Udp { index: usize, adapter: UdpAdapter },
+    Tcp { index: usize, adapter: TcpAdapter },
+    Doh { index: usize, adapter: DohAdapter },
+}
+
+fn prepare_transport_plans(
+    listeners: &BoundListenerSet,
+    config: &crate::config::resolve::ResolvedConfig,
+    revision: RuntimeRevision,
+    request_timeout: Duration,
+) -> Result<Vec<TransportTaskPlan>, ServiceStartError> {
+    let endpoints =
+        listeners
+            .endpoint_handles()
+            .map_err(|error| ServiceStartError::ListenerHandles {
+                class: error.class().as_str(),
+                operation: error.operation(),
+            })?;
+    endpoints
+        .into_iter()
+        .enumerate()
+        .map(|(index, endpoint)| {
+            let BoundEndpointHandle { entry, socket } = endpoint;
+            if entry.transport == BindTransport::Doh {
+                let adapter = DohAdapter::from_endpoint(
+                    BoundEndpointHandle { entry, socket },
+                    config,
+                    revision,
+                    capabilities(TransportClass::Multiplexed),
+                    request_timeout,
+                )
+                .map_err(|reason| ServiceStartError::Endpoint {
+                    index,
+                    kind: "DoH",
+                    reason: reason.to_string(),
+                })?;
+                return Ok(TransportTaskPlan::Doh { index, adapter });
+            }
+            match socket {
+                ActivatedSocketHandle::Udp(socket) => {
+                    let adapter = UdpAdapter::from_endpoint(
+                        BoundEndpointHandle {
+                            entry,
+                            socket: ActivatedSocketHandle::Udp(socket),
+                        },
+                        revision,
+                        capabilities(TransportClass::Datagram),
+                        request_timeout,
+                    )
+                    .map_err(|reason| ServiceStartError::Endpoint {
+                        index,
+                        kind: "UDP",
+                        reason: reason.to_string(),
+                    })?;
+                    Ok(TransportTaskPlan::Udp { index, adapter })
+                }
+                ActivatedSocketHandle::Tcp(listener) => {
+                    let adapter = TcpAdapter::from_endpoint(
+                        BoundEndpointHandle {
+                            entry,
+                            socket: ActivatedSocketHandle::Tcp(listener),
+                        },
+                        revision,
+                        capabilities(TransportClass::Stream),
+                        request_timeout,
+                    )
+                    .map_err(|reason| ServiceStartError::Endpoint {
+                        index,
+                        kind: "TCP",
+                        reason: reason.to_string(),
+                    })?;
+                    Ok(TransportTaskPlan::Tcp { index, adapter })
+                }
+            }
+        })
+        .collect()
+}
+
+fn spawn_transport_plans(
+    supervisor: &mut Supervisor,
+    plans: Vec<TransportTaskPlan>,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+) -> Result<Vec<Cancellation>, ServiceStartError> {
+    let revision = runtime.revision().0;
+    let mut cancellations = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let cancellation = match plan {
+            TransportTaskPlan::Udp { index, adapter } => {
+                let task_core = Arc::clone(&core);
+                let task_runtime = Arc::clone(&runtime);
+                spawn_transport_task(
+                    supervisor,
+                    format!("transport.udp.{revision}.{index}"),
+                    "udp",
+                    move |cancellation| {
+                        service_task(adapter, task_core, task_runtime, cancellation)
+                    },
+                )?
+            }
+            TransportTaskPlan::Tcp { index, adapter } => {
+                let task_core = Arc::clone(&core);
+                let task_runtime = Arc::clone(&runtime);
+                spawn_transport_task(
+                    supervisor,
+                    format!("transport.tcp.{revision}.{index}"),
+                    "tcp",
+                    move |cancellation| {
+                        tcp_listener_task(adapter, task_core, task_runtime, cancellation)
+                    },
+                )?
+            }
+            TransportTaskPlan::Doh { index, adapter } => {
+                let task_core = Arc::clone(&core);
+                let task_runtime = Arc::clone(&runtime);
+                spawn_transport_task(
+                    supervisor,
+                    format!("transport.doh.{revision}.{index}"),
+                    "doh",
+                    move |cancellation| {
+                        doh_listener_task(adapter, task_core, task_runtime, cancellation)
+                    },
+                )?
+            }
+        };
+        cancellations.push(cancellation);
+    }
+    Ok(cancellations)
 }
 
 fn task_failure(completion: &TaskCompletion) -> Option<ServiceError> {
@@ -965,11 +1103,18 @@ impl From<DohAdapterError> for ServiceStartError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
     use super::{ServiceError, capabilities, spawn_transport_task, task_failure};
-    use crate::dns::{CacheCompatibilityKey, CancelReason, TransportClass};
+    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::dns::{
+        CacheCompatibilityKey, CancelReason, Cancellation, Deadline, RuntimeRevision,
+        TransportClass,
+    };
     use crate::runtime::{
-        FaultLevel, RestartPolicy, Supervisor, TaskCompletion, TaskError, TaskErrorKind, TaskExit,
-        TaskSpec,
+        FaultLevel, PreparedRuntime, RestartPolicy, RuntimeCoordinator, Supervisor, SystemClock,
+        TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
     };
 
     fn completion(
@@ -1103,5 +1248,112 @@ mod tests {
         assert_eq!(completion.spec.id.as_str(), "transport.test");
         assert_eq!(completion.exit, TaskExit::Cancelled);
         assert_eq!(supervisor.task_count(), 0);
+    }
+
+    fn runtime_config(port: u16) -> Arc<crate::config::resolve::ResolvedConfig> {
+        ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&format!(
+                r#"
+version: 1
+work:
+  path: /tmp/fluxdns-service-reload-test
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: {port}
+    strategy: default
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+hosts:
+  - type: const
+    name: local-hosts
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+outbound: []
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+"#,
+                port = port,
+            ))
+            .expect("service reload fixture must be valid")
+            .resolved
+    }
+
+    #[tokio::test]
+    async fn reload_prepared_rebinds_listener_tasks_to_the_new_runtime() {
+        let base_port = 40_000 + (std::process::id() as u16 % 1_000) * 2;
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config(base_port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config(base_port + 1),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let active = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+        assert_eq!(service.runtime().revision(), RuntimeRevision(2));
+        assert_eq!(service.transport_task_count(), 1);
+        assert_eq!(
+            active.listeners().local_addrs().unwrap()[0].port(),
+            base_port + 1
+        );
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await;
+        assert!(!report.deadline_expired);
     }
 }
