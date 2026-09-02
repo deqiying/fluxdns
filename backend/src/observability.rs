@@ -1,6 +1,9 @@
 use std::{
     collections::{BTreeMap, VecDeque},
     fmt,
+    fs::OpenOptions,
+    io::{self, Write},
+    path::Path,
     str::FromStr,
     sync::atomic::{AtomicI64, AtomicU64, Ordering},
     sync::{Arc, Mutex, MutexGuard},
@@ -619,6 +622,151 @@ pub trait TelemetryOutput: Send + Sync {
     fn write_health(&self, event: &ComponentHealthEvent) -> Result<(), PortError>;
 }
 
+/// 将已经通过 typed telemetry 契约校验的事件写入真实文本输出。
+///
+/// 输出 adapter 不接收原始请求、header 或 adapter error；事件中的 request digest、
+/// configured ID 和 message 仍按稳定字段写出，失败只返回安全的 `PortError`。
+pub struct StructuredTelemetryOutput {
+    writer: Mutex<Box<dyn Write + Send>>,
+}
+
+impl StructuredTelemetryOutput {
+    pub fn file(path: impl AsRef<Path>) -> io::Result<Self> {
+        let writer = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            writer: Mutex::new(Box::new(writer)),
+        })
+    }
+
+    pub fn stderr() -> Self {
+        Self {
+            writer: Mutex::new(Box::new(io::stderr())),
+        }
+    }
+
+    fn write_line(&self, line: &str) -> Result<(), PortError> {
+        let mut writer = lock_unpoisoned(&self.writer);
+        writer.write_all(line.as_bytes()).map_err(|_| {
+            PortError::new(
+                PortErrorClass::Unavailable,
+                "observability.telemetry.output",
+            )
+            .with_safe_context("output write failed")
+        })?;
+        writer.write_all(b"\n").map_err(|_| {
+            PortError::new(
+                PortErrorClass::Unavailable,
+                "observability.telemetry.output",
+            )
+            .with_safe_context("output write failed")
+        })?;
+        writer.flush().map_err(|_| {
+            PortError::new(
+                PortErrorClass::Unavailable,
+                "observability.telemetry.output",
+            )
+            .with_safe_context("output flush failed")
+        })
+    }
+}
+
+impl TelemetryOutput for StructuredTelemetryOutput {
+    fn write_log(&self, event: &LogEvent) -> Result<(), PortError> {
+        self.write_line(&format!(
+            "{{\"kind\":\"log\",\"occurred_at_ms\":{},\"level\":\"{}\",\"event\":{},\"component\":\"{}\",\"has_request_digest\":{},\"has_configured_id\":{},\"outcome\":\"{}\",\"runtime_revision\":{},\"message\":{}}}",
+            system_time_millis(event.occurred_at),
+            enum_name(event.level),
+            json_escape(event.name.as_str()),
+            enum_name(event.component),
+            event.request_digest.is_some(),
+            event.configured_id.is_some(),
+            enum_name(event.outcome),
+            event
+                .runtime_revision
+                .map_or_else(|| "null".to_owned(), |revision| revision.0.to_string()),
+            json_escape(event.message),
+        ))
+    }
+
+    fn write_metric(&self, event: &MetricEvent) -> Result<(), PortError> {
+        let labels = event
+            .labels()
+            .iter()
+            .map(metric_label)
+            .collect::<Vec<_>>()
+            .join(",");
+        self.write_line(&format!(
+            "{{\"kind\":\"metric\",\"name\":\"{}\",\"labels\":[{}],\"value\":\"{:?}\"}}",
+            enum_name(event.name()),
+            labels,
+            event.value(),
+        ))
+    }
+
+    fn write_health(&self, event: &ComponentHealthEvent) -> Result<(), PortError> {
+        self.write_line(&format!(
+            "{{\"kind\":\"health\",\"component\":\"{}\",\"state\":\"{}\",\"retry_count\":{},\"stale_age_micros\":{},\"persistence_gap\":{}}}",
+            enum_name(event.component),
+            enum_name(event.state),
+            event.retry_count,
+            event
+                .stale_age_micros
+                .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+            event.persistence_gap,
+        ))
+    }
+}
+
+fn metric_label(label: &crate::ports::telemetry::MetricLabel) -> String {
+    use crate::ports::telemetry::MetricLabelValue;
+
+    let value = match label.value() {
+        MetricLabelValue::Component(value) => enum_name(*value),
+        MetricLabelValue::Transport(value) => enum_name(*value),
+        MetricLabelValue::Outcome(value) => enum_name(*value),
+        MetricLabelValue::CacheStatus(value) => enum_name(*value),
+        MetricLabelValue::ConfiguredId(value) => {
+            format!("{}:{}", enum_name(value.kind()), value.as_str())
+        }
+    };
+    format!(
+        "{{\"key\":\"{}\",\"value\":{}}}",
+        enum_name(label.key()),
+        json_escape(&value),
+    )
+}
+
+fn enum_name<T: fmt::Debug>(value: T) -> String {
+    format!("{value:?}").to_ascii_lowercase()
+}
+
+fn json_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len() + 2);
+    escaped.push('"');
+    for character in value.chars() {
+        match character {
+            '"' => escaped.push_str("\\\""),
+            '\\' => escaped.push_str("\\\\"),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            character if character.is_control() => {
+                use std::fmt::Write as _;
+                let _ = write!(escaped, "\\u{:04x}", character as u32);
+            }
+            character => escaped.push(character),
+        }
+    }
+    escaped.push('"');
+    escaped
+}
+
+fn system_time_millis(time: std::time::SystemTime) -> u128 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default()
+}
+
 enum TelemetryItem {
     Log(LogEvent),
     Metric(MetricEvent),
@@ -1132,6 +1280,7 @@ impl<T> fmt::Display for Sensitive<T> {
 #[cfg(test)]
 mod tests {
     use std::{
+        fs,
         str::FromStr,
         sync::{Arc, Mutex as StdMutex},
         thread,
@@ -1150,8 +1299,9 @@ mod tests {
     use super::{
         BufferedEvent, Component, EmitResult, EventName, EventResult, EventSink, EventSinkError,
         EventWriter, EventWriterError, HealthState, LogLevel, MetricKey, MetricName, MetricValue,
-        ObservabilityRegistry, RegistryError, Sensitive, TelemetryOutput, TelemetryWriter,
-        TelemetryWriterBuildError, TypedEvent, bootstrap_subscriber,
+        ObservabilityRegistry, RegistryError, Sensitive, StructuredTelemetryOutput,
+        TelemetryOutput, TelemetryWriter, TelemetryWriterBuildError, TypedEvent,
+        bootstrap_subscriber,
     };
 
     #[derive(Debug)]
@@ -1678,5 +1828,40 @@ mod tests {
         assert!(writer.stats().closed());
         let error = LogSink::emit(&writer, telemetry_log(TelemetryLogLevel::Info)).unwrap_err();
         assert!(matches!(error.class(), PortErrorClass::Unavailable));
+    }
+
+    #[test]
+    fn structured_output_writes_typed_events_to_a_real_file() {
+        let path = std::env::temp_dir().join(format!(
+            "fluxdns-telemetry-output-{}-{}.log",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let output = StructuredTelemetryOutput::file(&path).unwrap();
+        output
+            .write_log(&telemetry_log(TelemetryLogLevel::Info))
+            .unwrap();
+        output
+            .write_metric(
+                &TelemetryMetricEvent::new(
+                    TelemetryMetricName::RequestsTotal,
+                    Vec::new(),
+                    TelemetryMetricValue::Counter(1),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        output.write_health(&telemetry_health()).unwrap();
+
+        let content = fs::read_to_string(&path).unwrap();
+        assert!(content.contains("\"kind\":\"log\""));
+        assert!(content.contains("\"event\":\"dns.request.complete\""));
+        assert!(content.contains("\"kind\":\"metric\""));
+        assert!(content.contains("\"kind\":\"health\""));
+        assert!(!content.contains("raw_dns_wire"));
+        let _ = fs::remove_file(path);
     }
 }
