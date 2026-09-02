@@ -6,6 +6,7 @@ mod memory;
 mod moka;
 mod persistence;
 mod service;
+mod sqlite;
 
 pub use admission::{
     CacheAdmissionError, CacheAdmissionOutcome, CacheAdmissionPolicy, CacheAdmissionRejection,
@@ -22,3 +23,4 @@ pub use service::{
     CacheRefreshPermit, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer,
     LateCacheFinalizerBuildError, LateCacheFinalizerSubmitError,
 };
+pub use sqlite::{SqlitePersistentCacheStore, SqlitePersistentCacheStoreBuildError};

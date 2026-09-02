@@ -1,6 +1,6 @@
 //! 无外部依赖的 cache persistence 快照 adapter。
 //!
-//! 该 adapter 固定了持久化 port 的边界和恢复语义；SQLite schema/writer 仍由后续阶段替换。
+//! 该 adapter 固定了持久化 port 的边界和恢复语义，并为 SQLite adapter 提供共享 codec。
 
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
@@ -227,7 +227,7 @@ impl PersistentCacheStore for FilePersistentCacheStore {
 }
 
 #[derive(Debug)]
-enum CodecError {
+pub(super) enum CodecError {
     Corrupt,
     Incompatible,
     ResourceExhausted,
@@ -255,7 +255,7 @@ fn is_visible(record: &CacheRecord, now: Instant) -> bool {
     now < record.entry.expires_at || record.entry.stale_until.is_some_and(|until| now < until)
 }
 
-fn prepare_snapshot(
+pub(super) fn prepare_snapshot(
     records: HashMap<CacheKey, CacheRecord>,
     max_size_bytes: u64,
     now: Instant,
@@ -353,7 +353,7 @@ fn write_snapshot(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     result
 }
 
-fn encode_record(
+pub(super) fn encode_record(
     key: &CacheKey,
     record: &CacheRecord,
     now: Instant,
@@ -444,7 +444,10 @@ fn decode_snapshot(
     Ok((records, summary))
 }
 
-fn decode_record(payload: &[u8], now: Instant) -> Result<(CacheKey, CacheRecord), CodecError> {
+pub(super) fn decode_record(
+    payload: &[u8],
+    now: Instant,
+) -> Result<(CacheKey, CacheRecord), CodecError> {
     let mut reader = Reader::new(payload);
     let namespace = decode_namespace(&mut reader)?;
     let key_format = reader.u16()?;
