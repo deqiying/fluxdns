@@ -163,6 +163,8 @@ Moka adapter 复用上述 `CacheStore` contract，但把实际 entry 存储和�
 - eviction listener 只统计 Moka 的 size eviction，不把显式失效、替换或 TTL 过期误计入容量淘汰；
 - single-flight reservation/wait/publish/abandon 复用已验证的 typed 实现，Moka 只负责 record 存储，不向 DNS Core 暴露 Moka 类型。
 
+`PolicyDnsCore` 的默认构造路径已使用 `MokaCacheStore::with_max_weight`；测试和未来替代实现仍可通过 `CacheStore` trait 注入其他 adapter。
+
 当前已实现的纯逻辑准入 helper：
 
 - 将 `CanonicalResponse` 映射为 `NoError/NoData/NxDomain/ServFail/Truncated` cache class 和质量等级；

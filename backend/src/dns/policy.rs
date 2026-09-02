@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::cache::{
     CacheAdmissionPolicy, CacheFacade, CacheFacadeOptions, CacheFingerprint, CacheKeyDimensions,
-    CacheLookup, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer, MemoryCacheStore,
+    CacheLookup, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer, MokaCacheStore,
     build_cache_key,
 };
 use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedUpstream};
@@ -763,7 +763,7 @@ const OPTIMISTIC_REFRESH_TIMEOUT_SECS: u64 = 2;
 fn build_cache_facade(
     config: &ResolvedConfig,
 ) -> Result<(Arc<CacheFacade>, Arc<LateCacheFinalizer>), PolicyCoreBuildError> {
-    let store = MemoryCacheStore::with_max_weight(config.dns.cache.memory_max_size_bytes).map_err(
+    let store = MokaCacheStore::with_max_weight(config.dns.cache.memory_max_size_bytes).map_err(
         |error| PolicyCoreBuildError::Cache {
             reason: error.to_string(),
         },
