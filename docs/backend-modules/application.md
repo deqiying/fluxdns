@@ -1,6 +1,6 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API、service-aware reload 入口重建 listener task，以及基于 metadata+content fingerprint 的去抖自动 reload；已接入配置驱动的正式日志输出目标和 reloadable level filter；`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障
+> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task 和 `TelemetryWriter` 周期 flush；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API、service-aware reload 入口重建 listener task，以及基于 metadata+content fingerprint 的去抖自动 reload；已接入配置驱动的正式日志输出目标和 reloadable level filter；`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障
 >
 > 更新日期：2026-09-02
 >
@@ -71,7 +71,7 @@ bootstrap telemetry
   → graceful shutdown
 ```
 
-当前实现以进程级 bootstrap subscriber 作为启动底座，并在严格配置/SecretRef 校验后切换正式日志文件、stderr 或关闭目标及 reloadable level filter；stats/detail flush 已接入 `DnsService` drain，cache persistence 与 telemetry flush 仍待统一生命周期接线。配置加载早期错误和服务生命周期事件均保持结构化、脱敏输出。DoH 首轮装配 plain HTTP 或 TLS terminate，支持 forwarded header/PROXY 首轮客户端地址恢复；PROXY 前导会在连接升级 TLS 前消费。HTTP/2、nginx 集成和特权端口仍未做端到端 smoke。
+当前实现以进程级 bootstrap subscriber 作为启动底座，并在严格配置/SecretRef 校验后切换正式日志文件、stderr 或关闭目标及 reloadable level filter；stats/detail flush 与 `TelemetryWriter` 周期/最终 flush 均接入 `DnsService` drain 生命周期。配置加载早期错误和服务生命周期事件均保持结构化、脱敏输出。DoH 首轮装配 plain HTTP 或 TLS terminate，支持 forwarded header/PROXY 首轮客户端地址恢复；PROXY 前导会在连接升级 TLS 前消费。HTTP/2、nginx 集成和特权端口仍未做端到端 smoke。
 
 依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch，创建 `Arc<RuntimeCoordinator>` 并交给 `DnsService`；service Supervisor 持有自动刷新 task，资源 task 通过 coordinator 查询当前活动 runtime，并以 scoped token 管理 reload 生命周期，transport task 在启动时绑定一份 runtime，显式 service reload 时切换到新 revision。测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
 

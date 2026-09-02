@@ -15,13 +15,14 @@ use crate::dns::{
     DispatchError, DnsCore, DnsRequest, ResponseClass, RuntimeRevision, TransportCapabilities,
     TransportClass, dispatch_inbound,
 };
+use crate::observability::TelemetryWriter;
 use crate::ports::PortErrorClass;
 use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
 use crate::ports::storage::{ResolveEvent, ResolveEventSink, StatsDimension};
 use crate::ports::telemetry::{
-    CacheStatus, ConfiguredIdKind, OutcomeClass, configured_id_from_validated,
+    CacheStatus, ConfiguredIdKind, LogSink, OutcomeClass, configured_id_from_validated,
 };
 use crate::runtime::{
     ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
@@ -96,10 +97,14 @@ pub enum ServiceError {
     },
     #[error("storage shutdown failed: {0}")]
     Storage(#[source] StorageServiceError),
+    #[error("telemetry shutdown failed: {0}")]
+    Telemetry(#[source] crate::ports::PortError),
 }
 
 const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSPORT_RESTART_LIMIT: u32 = 3;
+const TELEMETRY_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+const TELEMETRY_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 type ServiceReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ServiceError>> + 'a>>;
 
@@ -114,6 +119,7 @@ pub struct DnsService {
     storage: Option<Arc<tokio::sync::Mutex<StorageRuntime>>>,
     stats_worker: Option<Arc<StatsPersistenceWorker>>,
     resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
+    telemetry: Option<Arc<TelemetryWriter>>,
 }
 
 #[derive(Clone)]
@@ -149,11 +155,43 @@ impl DnsService {
         Self::start_with_optional_storage(coordinator, core, request_timeout, Some(storage))
     }
 
+    pub fn start_with_coordinator_storage_and_telemetry(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: StorageRuntime,
+        telemetry: Arc<TelemetryWriter>,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage_and_telemetry(
+            coordinator,
+            core,
+            request_timeout,
+            Some(storage),
+            Some(telemetry),
+        )
+    }
+
     fn start_with_optional_storage(
         coordinator: Arc<RuntimeCoordinator>,
         core: Arc<dyn DnsCore>,
         request_timeout: Duration,
         storage: Option<StorageRuntime>,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage_and_telemetry(
+            coordinator,
+            core,
+            request_timeout,
+            storage,
+            None,
+        )
+    }
+
+    fn start_with_optional_storage_and_telemetry(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: Option<StorageRuntime>,
+        telemetry: Option<Arc<TelemetryWriter>>,
     ) -> Result<Self, ServiceStartError> {
         let runtime = coordinator.load();
         let mut supervisor = Supervisor::new();
@@ -169,6 +207,9 @@ impl DnsService {
         let core = instrumented_core(core, stats_worker.clone(), resolve_event_sink.clone());
         if let Some(storage) = &storage {
             spawn_storage_task(&mut supervisor, Arc::clone(storage))?;
+        }
+        if let Some(telemetry) = &telemetry {
+            spawn_telemetry_task(&mut supervisor, Arc::clone(telemetry))?;
         }
         let transport_plans = prepare_transport_plans(
             runtime.listeners(),
@@ -200,6 +241,7 @@ impl DnsService {
             storage,
             stats_worker,
             resolve_event_sink,
+            telemetry,
         })
     }
 
@@ -245,6 +287,25 @@ impl DnsService {
             core,
             DEFAULT_REQUEST_TIMEOUT,
             storage,
+        )
+    }
+
+    pub fn with_default_timeout_from_coordinator_storage_and_telemetry(
+        coordinator: Arc<RuntimeCoordinator>,
+        storage: StorageRuntime,
+        telemetry: Arc<TelemetryWriter>,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::start_with_coordinator_storage_and_telemetry(
+            coordinator,
+            core,
+            DEFAULT_REQUEST_TIMEOUT,
+            storage,
+            telemetry,
         )
     }
 
@@ -434,11 +495,27 @@ impl DnsService {
         if !self.coordinator.shutdown_finalizers(deadline).await {
             report.deadline_expired = true;
         }
-        if let Some(storage) = self.storage.take() {
-            let result = storage.lock().await.shutdown(deadline).await;
-            if let Err(error) = result {
-                return Err(ServiceError::Storage(error));
-            }
+        let storage_error = if let Some(storage) = self.storage.take() {
+            storage
+                .lock()
+                .await
+                .shutdown(deadline)
+                .await
+                .err()
+                .map(ServiceError::Storage)
+        } else {
+            None
+        };
+        let telemetry_error = self
+            .telemetry
+            .take()
+            .and_then(|telemetry| telemetry.shutdown(deadline).err())
+            .map(ServiceError::Telemetry);
+        if let Some(error) = storage_error {
+            return Err(error);
+        }
+        if let Some(error) = telemetry_error {
+            return Err(error);
         }
         Ok(report)
     }
@@ -730,6 +807,61 @@ fn spawn_storage_task(
     supervisor
         .spawn_scoped(spec, move |cancellation| {
             Box::pin(storage_flush_task(storage, cancellation))
+        })
+        .map_err(ServiceStartError::Task)
+}
+
+async fn telemetry_flush_task(
+    telemetry: Arc<TelemetryWriter>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    let mut interval = tokio::time::interval(TELEMETRY_FLUSH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            _ = interval.tick() => {
+                let deadline = Deadline::new(Instant::now() + TELEMETRY_OPERATION_TIMEOUT);
+                match LogSink::flush(telemetry.as_ref(), deadline).await {
+                    Ok(summary) if summary.failed > 0 => tracing::warn!(
+                        event = "telemetry_flush_degraded",
+                        component = "telemetry",
+                        failed = summary.failed,
+                        pending = telemetry.stats().pending(),
+                        "telemetry_flush_degraded"
+                    ),
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(
+                        event = "telemetry_flush_failed",
+                        component = "telemetry",
+                        class = error.class().as_str(),
+                        operation = error.operation(),
+                        "telemetry_flush_failed"
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn spawn_telemetry_task(
+    supervisor: &mut Supervisor,
+    telemetry: Arc<TelemetryWriter>,
+) -> Result<Cancellation, ServiceStartError> {
+    let spec = TaskSpec::new(
+        "telemetry.flush",
+        "telemetry",
+        FaultLevel::Degraded,
+        RestartPolicy::Never,
+    )
+    .map_err(|error| ServiceStartError::Endpoint {
+        index: 0,
+        kind: "telemetry",
+        reason: error.to_string(),
+    })?;
+    supervisor
+        .spawn_scoped(spec, move |cancellation| {
+            Box::pin(telemetry_flush_task(telemetry, cancellation))
         })
         .map_err(ServiceStartError::Task)
 }
@@ -1585,23 +1717,92 @@ impl From<DohAdapterError> for ServiceStartError {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
     use std::sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
     };
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
-    use super::{ServiceError, capabilities, spawn_transport_task, task_failure};
+    use super::{
+        ServiceError, capabilities, spawn_telemetry_task, spawn_transport_task, task_failure,
+    };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, CancelReason, Cancellation, Deadline, RuntimeRevision,
         TransportClass,
+    };
+    use crate::observability::{TelemetryOutput, TelemetryWriter};
+    use crate::ports::telemetry::{
+        Component as TelemetryComponent, ComponentHealthEvent, LogEvent, LogLevel, MetricEvent,
     };
     use crate::runtime::{
         FaultLevel, PreparedRuntime, RestartPolicy, RuntimeCoordinator, Supervisor, SystemClock,
         TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
     };
     use crate::storage::StorageRuntime;
+
+    #[derive(Default)]
+    struct CountingTelemetryOutput {
+        logs: AtomicUsize,
+        metrics: AtomicUsize,
+        health: AtomicUsize,
+    }
+
+    impl TelemetryOutput for CountingTelemetryOutput {
+        fn write_log(&self, _event: &LogEvent) -> Result<(), crate::ports::PortError> {
+            self.logs.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn write_metric(&self, _event: &MetricEvent) -> Result<(), crate::ports::PortError> {
+            self.metrics.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn write_health(
+            &self,
+            _event: &ComponentHealthEvent,
+        ) -> Result<(), crate::ports::PortError> {
+            self.health.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    fn telemetry_log() -> LogEvent {
+        LogEvent {
+            occurred_at: SystemTime::now(),
+            level: LogLevel::Info,
+            name: crate::ports::telemetry::EventName::parse("service.test").unwrap(),
+            component: TelemetryComponent::Application,
+            request_digest: None,
+            configured_id: None,
+            outcome: crate::ports::telemetry::OutcomeClass::Success,
+            runtime_revision: None,
+            message: "service test",
+        }
+    }
+
+    #[tokio::test]
+    async fn telemetry_flush_task_drains_writer_under_supervisor() {
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = Arc::new(TelemetryWriter::new(4, output.clone()).unwrap());
+        crate::ports::telemetry::LogSink::emit(writer.as_ref(), telemetry_log()).unwrap();
+
+        let mut supervisor = Supervisor::new();
+        let cancellation = spawn_telemetry_task(&mut supervisor, writer).unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(output.logs.load(Ordering::Relaxed), 1);
+
+        cancellation.cancel(CancelReason::Shutdown);
+        let report = supervisor
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+            )
+            .await;
+        assert_eq!(report.failed, 0);
+    }
 
     fn completion(
         fault_level: FaultLevel,

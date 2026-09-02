@@ -472,6 +472,13 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             )
             .await
             .map_err(map_storage_prepare_error)?;
+            let telemetry = if prepared.snapshot().config().logs.enable {
+                Some(observability::build_runtime_telemetry().map_err(|error| {
+                    AppError::new(AppErrorKind::Prepare, bounded_message(error))
+                })?)
+            } else {
+                None
+            };
             let candidate = crate::runtime::bind_prepared(
                 prepared,
                 &socket_factory,
@@ -481,9 +488,20 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .await
             .map_err(map_bind_error)?;
             let coordinator = Arc::new(crate::runtime::RuntimeCoordinator::new(candidate));
-            let mut service =
-                DnsService::with_default_timeout_from_coordinator_and_storage(coordinator, storage)
-                    .map_err(map_service_start_error)?;
+            let mut service = match telemetry {
+                Some(telemetry) => {
+                    DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                        coordinator,
+                        storage,
+                        telemetry,
+                    )
+                }
+                None => DnsService::with_default_timeout_from_coordinator_and_storage(
+                    coordinator,
+                    storage,
+                ),
+            }
+            .map_err(map_service_start_error)?;
             tracing::info!(
                 event = "service_ready",
                 component = "application",
@@ -582,9 +600,10 @@ fn map_storage_prepare_error(error: crate::storage::StorageRuntimeBuildError) ->
 
 fn map_service_error(error: ServiceError) -> AppError {
     let kind = match &error {
-        ServiceError::Signal | ServiceError::TaskFailure { .. } | ServiceError::Storage(_) => {
-            AppErrorKind::RuntimeFatal
-        }
+        ServiceError::Signal
+        | ServiceError::TaskFailure { .. }
+        | ServiceError::Storage(_)
+        | ServiceError::Telemetry(_) => AppErrorKind::RuntimeFatal,
         ServiceError::ShutdownDeadline => AppErrorKind::ShutdownTimeout,
     };
     AppError::new(kind, bounded_message(error))

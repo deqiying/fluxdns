@@ -182,7 +182,7 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱�
 5. supervisor 确认当前 task tree 清空。
 6. 由当前 runtime snapshot 的 `PolicyDnsCore` owner 在同一 grace deadline 内关闭 `LateCacheFinalizer`。
 
-stats、resolve log、SQLite checkpoint 已由 `StorageRuntime`/`DnsService` 接线并纳入 drain shutdown；cache persistence 和 telemetry flush 仍尚未接入 Runtime 的统一生命周期。
+stats、resolve log、SQLite checkpoint 和 `TelemetryWriter` flush 已由 `StorageRuntime`/`DnsService` 接线并纳入 drain shutdown；cache persistence 仍尚未接入 Runtime 的统一生命周期。
 
 每一步有独立 deadline 和结果，最终报告不能只返回模糊的“shutdown failed”。
 
@@ -231,4 +231,4 @@ stats、resolve log、SQLite checkpoint 已由 `StorageRuntime`/`DnsService` 接
 
 阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter，并验证 async prepare 可在 bind 前完成 remote restore/fetch、file snapshot load、持久化、refresh worker 构造和第二次 fallback 恢复；`runtime::coordinator::tests` 进一步验证 coordinator 级资源刷新代理、stale-active guard、候选 bind/activate 成功路径和 CAS 失败返还 candidate；`runtime::supervisor::tests` 验证 factory task 的瞬时失败重试、重试上限耗尽识别、shutdown report 重试计数、scoped task 的单独取消和全局 shutdown 回收、scoped factory 的瞬时重试，以及 panic completion 按真实 task ID 保留 component/fault level；`service::tests` 验证 Degraded 终止、FatalEndpoint 升级、重试耗尽、panic 分类、transport task 瞬时重试、系统 loopback listener reload、resource worker 按 ID 复用/移除协调、same-BindPlan resource state merge 以及 previous/current Runtime finalizer 在统一 shutdown deadline 内回收；service 将 remote/file refresh task 注册进 Supervisor，成功候选通过 ActiveRuntime 的 Policy CAS 和 Runtime metadata CAS 发布，缺失 file 进入失败 backoff。`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS、SOCKS5H、取消和 body limit。Application 自动配置变更事件、真正跨 Runtime snapshot 生命周期和 flush 仍未完成。
 
-当前实现进度：**65%**。已验证 Runtime snapshot 资源摘要、原子资源 metadata publish、service core 构造入口、生产 ResourceFetcher ownership、RuntimeCoordinator 级历史/当前 Policy finalizer owner、同一 ActiveRuntime 内的 remote/file refresh worker/CAS publish、候选 registry 的更高版本合并原语、候选 revision CAS 下的 Policy/worker/metadata 合并、显式 reload 的 listener 重建、resource worker 按 ID 增量复用/移除，以及 transport listener task 的 scoped 有界瞬时重试；自动配置事件、完整跨 Runtime 配置候选发布、独立 resource-only runtime swap、自动 rebind、flush 和完整服务级故障矩阵仍未接线。
+当前实现进度：**65%**。已验证 Runtime snapshot 资源摘要、原子资源 metadata publish、service core 构造入口、生产 ResourceFetcher ownership、RuntimeCoordinator 级历史/当前 Policy finalizer owner、同一 ActiveRuntime 内的 remote/file refresh worker/CAS publish、候选 registry 的更高版本合并原语、候选 revision CAS 下的 Policy/worker/metadata 合并、显式 reload 的 listener 重建、resource worker 按 ID 增量复用/移除，以及 transport listener task 的 scoped 有界瞬时重试；自动配置事件、完整跨 Runtime 配置候选发布、独立 resource-only runtime swap、自动 rebind 和完整服务级故障矩阵仍未接线。

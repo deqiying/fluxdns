@@ -725,17 +725,23 @@ pub struct StructuredTelemetryOutput {
 }
 
 impl StructuredTelemetryOutput {
+    fn from_writer(writer: Box<dyn Write + Send>) -> Self {
+        Self {
+            writer: Mutex::new(writer),
+        }
+    }
+
+    fn shared(output: Arc<Mutex<OutputTarget>>) -> Self {
+        Self::from_writer(Box::new(SharedOutputWriter(output)))
+    }
+
     pub fn file(path: impl AsRef<Path>) -> io::Result<Self> {
         let writer = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self {
-            writer: Mutex::new(Box::new(writer)),
-        })
+        Ok(Self::from_writer(Box::new(writer)))
     }
 
     pub fn stderr() -> Self {
-        Self {
-            writer: Mutex::new(Box::new(io::stderr())),
-        }
+        Self::from_writer(Box::new(io::stderr()))
     }
 
     fn write_line(&self, line: &str) -> Result<(), PortError> {
@@ -1052,6 +1058,28 @@ impl HealthSink for TelemetryWriter {
     fn update(&self, event: ComponentHealthEvent) -> Result<(), PortError> {
         self.enqueue(TelemetryItem::Health(event), false)
     }
+}
+
+pub const DEFAULT_TELEMETRY_QUEUE_CAPACITY: usize = 1_024;
+
+#[derive(Debug, thiserror::Error)]
+pub enum TelemetryRuntimeBuildError {
+    #[error("bootstrap output is not initialized")]
+    BootstrapNotInitialized,
+    #[error("telemetry writer could not be created: {0}")]
+    Writer(#[from] TelemetryWriterBuildError),
+}
+
+/// 创建与进程级 tracing 共用输出目标的运行时 telemetry writer。
+pub fn build_runtime_telemetry() -> Result<Arc<TelemetryWriter>, TelemetryRuntimeBuildError> {
+    let output = BOOTSTRAP_OUTPUT
+        .get()
+        .cloned()
+        .ok_or(TelemetryRuntimeBuildError::BootstrapNotInitialized)?;
+    let output = Arc::new(StructuredTelemetryOutput::shared(output));
+    TelemetryWriter::new(DEFAULT_TELEMETRY_QUEUE_CAPACITY, output)
+        .map(Arc::new)
+        .map_err(TelemetryRuntimeBuildError::Writer)
 }
 
 /// writer 只保存事件的低基数元数据，不保存 `TypedEvent::message`。
