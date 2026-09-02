@@ -2768,6 +2768,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transport_task_exhaustion_is_promoted_after_configured_retries() {
+        let mut supervisor = Supervisor::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        spawn_transport_task(
+            &mut supervisor,
+            "transport.exhausted".to_owned(),
+            "udp",
+            move |_cancellation| {
+                factory_attempts.fetch_add(1, Ordering::AcqRel);
+                Box::pin(async { Err(TaskError::Transient) })
+            },
+        )
+        .unwrap();
+
+        let completion = tokio::time::timeout(Duration::from_secs(1), supervisor.join_next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // max_restarts 不包含初次执行，因此总尝试次数应再加一。
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            super::TRANSPORT_RESTART_LIMIT + 1
+        );
+        assert_eq!(completion.restart_count, super::TRANSPORT_RESTART_LIMIT);
+        assert!(completion.restart_exhausted());
+        assert!(matches!(
+            task_failure(&completion),
+            Some(ServiceError::TaskFailure {
+                fault_level: FaultLevel::FatalEndpoint,
+                exit: TaskExit::Failed(TaskErrorKind::Transient),
+                ..
+            })
+        ));
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
     async fn fatal_task_flushes_process_services_before_returning_error() {
         let base_port = 42_000 + (std::process::id() as u16 % 500) * 2;
         let work_path = crate::config::test_support::absolute_path("service-fatal-task-shutdown");
