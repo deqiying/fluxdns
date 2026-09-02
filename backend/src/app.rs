@@ -14,7 +14,9 @@ use crate::ports::effects::SocketFactory;
 use crate::runtime::{
     ActiveRuntime, PrepareError, PreparedRuntime, RuntimeCoordinator, SystemSocketFactory,
 };
-use crate::service::{DnsService, ServiceError, ServiceReloadError, ServiceStartError};
+use crate::service::{
+    DnsService, ServiceError, ServiceReloadError, ServiceStartError, process_owned_reload_change,
+};
 
 /// 进程退出码的大类，详细原因应由安全错误消息表达。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,6 +154,10 @@ pub enum ApplicationReloadError {
     RevisionExhausted,
     #[error("runtime reload prepare failed: {0}")]
     Prepare(#[source] PrepareError),
+    #[error(
+        "runtime reload changes process-owned {component} configuration and requires process restart"
+    )]
+    RestartRequired { component: &'static str },
     #[error("runtime reload activation failed: {0}")]
     Activation(#[source] crate::runtime::RuntimeReloadError),
     #[error("runtime reload service activation failed: {0}")]
@@ -349,8 +355,16 @@ pub async fn reload_runtime_from_path(
     deadline: Deadline,
     cancellation: Cancellation,
 ) -> Result<Arc<ActiveRuntime>, ApplicationReloadError> {
-    let expected = coordinator.current_revision();
-    let prepared = prepare_reload_candidate(expected, path, deadline, cancellation.clone()).await?;
+    let current = coordinator.load();
+    let expected = current.revision();
+    let prepared = prepare_reload_candidate(
+        current.snapshot().config(),
+        expected,
+        path,
+        deadline,
+        cancellation.clone(),
+    )
+    .await?;
 
     coordinator
         .bind_and_activate(expected, prepared, factory, deadline, &cancellation)
@@ -366,8 +380,16 @@ pub async fn reload_service_from_path(
     deadline: Deadline,
     cancellation: Cancellation,
 ) -> Result<Arc<ActiveRuntime>, ApplicationReloadError> {
-    let expected = service.coordinator().current_revision();
-    let prepared = prepare_reload_candidate(expected, path, deadline, cancellation.clone()).await?;
+    let current = Arc::clone(service.runtime());
+    let expected = current.revision();
+    let prepared = prepare_reload_candidate(
+        current.snapshot().config(),
+        expected,
+        path,
+        deadline,
+        cancellation.clone(),
+    )
+    .await?;
     service
         .reload_prepared(prepared, factory, deadline, cancellation)
         .await
@@ -375,6 +397,7 @@ pub async fn reload_service_from_path(
 }
 
 async fn prepare_reload_candidate(
+    current: &crate::config::ResolvedConfig,
     expected: RuntimeRevision,
     path: impl AsRef<std::path::Path>,
     deadline: Deadline,
@@ -387,6 +410,9 @@ async fn prepare_reload_candidate(
         .resolved
         .validate_secret_refs(64 * 1024)
         .map_err(ApplicationReloadError::SecretValidation)?;
+    if let Some(component) = process_owned_reload_change(current, &output.resolved) {
+        return Err(ApplicationReloadError::RestartRequired { component });
+    }
     let revision = RuntimeRevision(
         expected
             .0
@@ -1010,6 +1036,60 @@ clients: []
         assert!(matches!(error, ApplicationReloadError::Config(_)));
         assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
         assert!(!current.is_draining());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn runtime_reload_rejects_process_owned_change_before_prepare() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-app-reload-restart-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("reload.yaml");
+        std::fs::write(&path, reload_source(&root, 5300)).unwrap();
+        let initial = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_from_path(&path)
+            .unwrap()
+            .resolved;
+        let prepared = PreparedRuntime::prepare(initial, RuntimeRevision(1)).unwrap();
+        let candidate = crate::runtime::bind_prepared(
+            prepared,
+            &TestSocketFactory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = RuntimeCoordinator::new(candidate);
+        let current = coordinator.load();
+
+        let changed =
+            reload_source(&root, 5301).replace("path: ./data.sqlite", "path: ./other.sqlite");
+        std::fs::write(&path, changed).unwrap();
+        let error = reload_runtime_from_path(
+            &coordinator,
+            &path,
+            &TestSocketFactory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ApplicationReloadError::RestartRequired {
+                component: "database"
+            }
+        ));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+        assert!(!current.is_draining());
+        assert!(!root.join("other.sqlite").exists());
         let _ = std::fs::remove_dir_all(root);
     }
 

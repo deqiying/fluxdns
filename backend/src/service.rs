@@ -102,7 +102,22 @@ fn classify_service_reload(
     current: &ResolvedConfig,
     candidate: &ResolvedConfig,
 ) -> Result<ServiceReloadMode, ServiceReloadError> {
-    let component = if current.database != candidate.database {
+    if let Some(component) = process_owned_reload_change(current, candidate) {
+        return Err(ServiceReloadError::RestartRequired { component });
+    }
+    if current.bind_plan == candidate.bind_plan {
+        Ok(ServiceReloadMode::ReuseListeners)
+    } else {
+        Ok(ServiceReloadMode::RebindListeners)
+    }
+}
+
+/// 返回阻止当前候选热重载的进程持有配置组件。
+pub(crate) fn process_owned_reload_change(
+    current: &ResolvedConfig,
+    candidate: &ResolvedConfig,
+) -> Option<&'static str> {
+    if current.database != candidate.database {
         Some("database")
     } else if current.logs != candidate.logs {
         Some("logs")
@@ -112,14 +127,6 @@ fn classify_service_reload(
         Some("dns.resolve_log")
     } else {
         None
-    };
-    if let Some(component) = component {
-        return Err(ServiceReloadError::RestartRequired { component });
-    }
-    if current.bind_plan == candidate.bind_plan {
-        Ok(ServiceReloadMode::ReuseListeners)
-    } else {
-        Ok(ServiceReloadMode::RebindListeners)
     }
 }
 
