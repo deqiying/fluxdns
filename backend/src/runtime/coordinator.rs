@@ -359,6 +359,7 @@ impl RuntimeCoordinator {
             .runtime_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        owners.retain(|current| !current.is_draining() || current.active_requests() > 0);
         if owners.iter().any(|current| Arc::ptr_eq(current, runtime)) {
             return;
         }
@@ -979,6 +980,21 @@ outbound: []
         );
         drop(lease);
         assert!(waiting.await);
+    }
+
+    #[test]
+    fn completed_draining_runtime_owners_are_pruned_on_the_next_activation() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        coordinator.activate(candidate(2));
+        coordinator.activate(candidate(3));
+
+        let owners = coordinator
+            .runtime_owners
+            .lock()
+            .expect("runtime owner lock must not be poisoned");
+        assert_eq!(owners.len(), 2);
+        assert_eq!(owners[0].revision(), RuntimeRevision(2));
+        assert_eq!(owners[1].revision(), RuntimeRevision(3));
     }
 
     #[tokio::test]
