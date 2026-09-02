@@ -309,12 +309,16 @@ struct AppState {
 
 `RuntimeSnapshot` 只放请求热路径需要的不可变状态，不包含 socket、HTTP connection、数据库连接或 cache implementation；`cache_semantics` 是已解析的 key/TTL/namespace 规则，不是具体 cache backend。`PreparedRuntime` 是无 socket 的候选运行时，完成配置迁移、引用图、策略索引、上游 connector、transport capabilities、资源句柄、首次 remote/file resource snapshot、生产 `ResourceFetcher` 和 auto-update worker 准备；`ActiveRuntime` 继续持有这些 shared adapter/worker，但它们不进入请求 snapshot。资源-only 刷新在当前 ActiveRuntime 内通过 Policy CAS 与 Runtime 元数据 ArcSwap 生效并复用已绑定 listener；配置候选仍需完整 bind 后再切换 `ActiveRuntime`。绑定成功后才形成 `ActiveRuntime`。这样“prepare 失败不影响现有服务”和“bind/rebind 后原子切换”有明确的所有权边界。
 
-每个请求从 `active.load()` 得到同一 `ActiveRuntime`，再捕获其中的 `RuntimeSnapshot` 一次。资源仍可按资源粒度刷新，当前 service 通过 coordinator 代理读取和刷新活动实例；`refresh_resource_if_current` 在刷新前后确认 captured runtime 仍是 active，候选切换期间的旧结果会被标记为 stale 并由下一轮重新读取。候选激活已在 coordinator 层提供 bind/CAS 原子边界，service reload 还会在 CAS 成功后注册新 revision 的 transport/resource task 并取消旧 token；Application 自动触发和跨配置候选的顶层串行重试仍需在后续 reload 接线中完成，避免 hosts 与 rule_set 并发刷新时后发布者覆盖前一份资源更新。资源-only 更新复用现有 bound endpoints 和 shared services；需要 rebind 的候选则先绑定新 endpoints，成功后原子替换 `ActiveRuntime`，旧实例进入 drain。
+每个请求从 `active.load()` 得到同一 `ActiveRuntime`，再捕获其中的 `RuntimeSnapshot` 一次。资源仍可按资源粒度刷新，当前 service 通过 coordinator 代理读取和刷新活动实例；`refresh_resource_if_current` 在刷新前后确认 captured runtime 仍是 active，候选切换期间的旧结果会被标记为 stale 并由下一轮重新读取。候选激活已在 coordinator 层提供 bind/CAS 原子边界，service reload 还会在 CAS 成功后注册新 revision 的 transport/resource task 并取消旧 token；Application 文件 watcher 已通过稳定 fingerprint 串行触发该入口，hosts 与 rule_set 并发刷新通过 per-resource epoch/CAS 合并，后发布者不会覆盖其他资源。资源内容更新复用现有 bound endpoints 和 shared services；需要 rebind 的候选则先绑定新 endpoints，成功后原子替换 `ActiveRuntime`，旧实例进入 drain。
 
-资源-only swap 时旧、新 `ActiveRuntime` 共享同一 `Arc<BoundListenerSet>`，由 coordinator 转移所有权；只有没有任何 active/request 引用后才关闭 endpoint。rebind swap 则新旧 listener set 独立存在，旧 set 在 grace deadline 后关闭。
+资源内容刷新不创建新的 `ActiveRuntime`，只在当前实例内发布新的 Policy/资源 metadata snapshot，因此自然复用 listener 与 shared services。只有配置候选才执行 `ActiveRuntime` swap；需要 rebind 时新旧 listener set 独立存在，旧 set 在 grace deadline 后关闭。
 
 ```text
-config/resource change
+resource content change
+  → bounded read/fetch + parse
+  → per-resource Policy/metadata CAS in current ActiveRuntime
+
+config change
   → build PreparedRuntime candidate (no externally visible socket)
   → preflight + bind new endpoints when required
   → atomic ActiveRuntime swap

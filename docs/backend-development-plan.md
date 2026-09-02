@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 157（TLS 升级时限验证）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 158（资源热更新边界收口）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -23,7 +23,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ### 当前未完成
 
-- 完整跨 Runtime candidate 生命周期和独立 resource-only runtime swap；
+- 完整跨 Runtime candidate shared-service 生命周期；
 - listener task 的自动 factory 重建和完整 endpoint 故障矩阵；
 - DoH HTTP/2、完整 HTTP/DNS 协议组合和证书/信任边界矩阵；
 - cache persistence 的 last-access、真实故障复现与请求记录的跨故障源 health/recovery；
@@ -35,8 +35,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **85.4%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **86.9%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **85.8%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **87.2%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -46,22 +46,22 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Application | 实现中 | 70% | 4% |
 | Ports | 已实现待验证 | 70% | 8% |
 | Config | 已验证 | 100% | 10% |
-| Runtime | 实现中 | 77% | 12% |
+| Runtime | 实现中 | 80% | 12% |
 | Transport | 实现中 | 81% | 11% |
 | DNS Core | 实现中 | 82% | 10% |
 | Policy | 实现中 | 83% | 8% |
 | Upstream | 已实现待验证 | 99% | 10% |
 | Cache | 实现中 | 83% | 9% |
-| Resource | 已实现待验证 | 91% | 7% |
+| Resource | 已实现待验证 | 92% | 7% |
 | Storage | 已实现待验证 | 93% | 8% |
 | Observability | 实现中 | 94% | 3% |
 
 进度计算：
 
 ```text
-4%×70% + 8%×70% + 10%×100% + 12%×77% + 11%×81%
-+ 10%×82% + 8%×83% + 10%×99% + 9%×83% + 7%×91%
-+ 8%×93% + 3%×94% ≈ 85.4%
+4%×70% + 8%×70% + 10%×100% + 12%×80% + 11%×81%
++ 10%×82% + 8%×83% + 10%×99% + 9%×83% + 7%×92%
++ 8%×93% + 3%×94% ≈ 85.8%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -70,8 +70,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 | 顺序 | 目标 | 主要范围 | 退出条件 |
 | --- | --- | --- | --- |
-| 1 | Runtime 生命周期 | candidate registry、跨 Runtime 合并、revision CAS、resource-only swap | 候选失败保留旧 Runtime；并发资源发布不丢失；无 detached task |
-| 2 | 配置变更/rebind | 去抖、失败语义、resource-only/listener rebind 分类 | 新 listener 全部 bind 成功后切换；旧 task 可取消并 drain |
+| 1 | Runtime 生命周期 | candidate registry、跨 Runtime 合并、revision CAS | 候选失败保留旧 Runtime；并发资源发布不丢失；无 detached task |
+| 2 | 配置变更/rebind | 去抖、失败语义和 listener rebind 分类 | 新 listener 全部 bind 成功后切换；旧 task 可取消并 drain |
 | 3 | DNS Core/Cache 一致性 | 最新 snapshot、late-window/finalizer、跨 transport contract | 单请求固定 revision；资源更新只影响后续请求 |
 | 4 | Storage/Observability 生产链路 | final subscriber、health/event writer、Supervisor flush | 脱敏、backpressure 和有序 shutdown flush 可复现 |
 | 5 | Cache 持久化 | 独立 SQLite cache persistence、Moka/SQLite 基础 contract | expiry/weight 和正常 shutdown 持久化通过；极端故障恢复后置 |
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 157 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 158 |
 
 ### 增量里程碑
 
@@ -110,15 +110,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 127–135 | Cache 持久化大阶段验收、reqwest/rustls provider 统一、reload/详情生命周期补强、跨 transport 一致性及 Storage 停机观测 | 后端全量 515 passed；Application 11 项及 Service、StorageRuntime、UDP/TCP/plain DoH 定向测试通过 |
 | 136–145 | 上游/策略观测、Storage 结果元数据与跨 transport DNS 契约 | 拆分策略目标、实际成员、命中规则和资源版本；SQLite v2 写入 RCODE/failure/cancel；真实 UDP/TCP/plain DoH GET/POST 覆盖成功、否定、错误和大响应 |
 | 146–151 | capability/ports/reload 基线与配置优先级 | Transport 统一 capability 映射；Ports 33 项契约测试；reload 回滚、资源版本落库、Policy cache/ECS 优先级和 health stale age 均有定向证据 |
-| 152–157 | 持久化 health 与 DoH/TLS 安全边界 | Cache 停机摘要和 Storage writer degraded/recovery 已发布；DoH 补齐 Host、GET buffer、request-line 与媒体类型规则；真实 TLS 升级验证 deadline/cancellation |
+| 152–158 | 持久化 health、DoH/TLS 安全与资源热更新边界 | Cache/Storage health 已发布；DoH/TLS 补齐请求和时限规则；资源刷新固定为同 Runtime per-resource CAS，不再引入重复的 resource-only Runtime swap |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/runtime/system_socket.rs`；
-- `runtime::system_socket::tests::tcp_tls*`：2 passed；
+- 纯文档边界收口，未运行 `rustfmt`；
+- resource-only live publish：Service/Runtime 定向测试各 1 项通过；
 - `git diff --check`：通过。
 
-阶段 157 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 158 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 
