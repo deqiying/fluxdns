@@ -520,7 +520,7 @@ impl DnsService {
         self.cancel_transport_tasks();
         self.cancel_resource_tasks();
         let mut report = self.supervisor.shutdown(clock, deadline).await;
-        if !self.runtime.wait_for_drain(deadline).await {
+        if !self.coordinator.wait_for_drain(deadline).await {
             report.deadline_expired = true;
         }
         if !self.coordinator.shutdown_finalizers(deadline).await {

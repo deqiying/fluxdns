@@ -295,6 +295,7 @@ pub struct RuntimeCoordinator {
     active: ArcSwap<ActiveRuntime>,
     mutation: tokio::sync::Mutex<()>,
     finalizer_owners: std::sync::Mutex<Vec<Arc<LateCacheFinalizer>>>,
+    runtime_owners: std::sync::Mutex<Vec<Arc<ActiveRuntime>>>,
     runtime_core_cell: Arc<RuntimeCoreCell>,
 }
 
@@ -305,6 +306,7 @@ impl RuntimeCoordinator {
             active: ArcSwap::from(Arc::clone(&active)),
             mutation: tokio::sync::Mutex::new(()),
             finalizer_owners: std::sync::Mutex::new(active.finalizer_owner().into_iter().collect()),
+            runtime_owners: std::sync::Mutex::new(vec![Arc::clone(&active)]),
             runtime_core_cell: Arc::new(RuntimeCoreCell::default()),
         };
         coordinator.register_runtime_core(&active);
@@ -318,6 +320,7 @@ impl RuntimeCoordinator {
             finalizer_owners: std::sync::Mutex::new(
                 initial.finalizer_owner().into_iter().collect(),
             ),
+            runtime_owners: std::sync::Mutex::new(vec![Arc::clone(&initial)]),
             runtime_core_cell: Arc::new(RuntimeCoreCell::default()),
         };
         coordinator.register_runtime_core(&initial);
@@ -349,6 +352,39 @@ impl RuntimeCoordinator {
             return;
         }
         owners.push(owner);
+    }
+
+    fn register_runtime_owner(&self, runtime: &Arc<ActiveRuntime>) {
+        let mut owners = self
+            .runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owners.iter().any(|current| Arc::ptr_eq(current, runtime)) {
+            return;
+        }
+        owners.push(Arc::clone(runtime));
+    }
+
+    /// 在统一 deadline 内等待当前及 reload 后仍存活的旧 Runtime drain。
+    pub(crate) async fn wait_for_drain(&self, deadline: crate::dns::Deadline) -> bool {
+        let runtimes = self
+            .runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut completed = true;
+        for runtime in runtimes {
+            if !runtime.wait_for_drain(deadline).await {
+                completed = false;
+            }
+        }
+        if completed {
+            self.runtime_owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|runtime| !runtime.is_draining() || runtime.active_requests() > 0);
+        }
+        completed
     }
 
     /// 在统一 deadline 内关闭所有曾由该 coordinator 发布的 cache finalizer。
@@ -496,6 +532,8 @@ impl RuntimeCoordinator {
         if Arc::ptr_eq(&*observed, &current) {
             self.register_finalizer_owner(&next);
             self.register_runtime_core(&next);
+            self.register_runtime_owner(&next);
+            self.register_runtime_owner(&current);
             current.begin_drain();
             return Ok(next);
         }
@@ -510,7 +548,9 @@ impl RuntimeCoordinator {
         let next = Arc::new(ActiveRuntime::from_candidate(candidate));
         self.register_finalizer_owner(&next);
         self.register_runtime_core(&next);
-        let previous = self.active.swap(next);
+        let previous = self.active.swap(Arc::clone(&next));
+        self.register_runtime_owner(&next);
+        self.register_runtime_owner(&previous);
         previous.begin_drain();
         previous
     }
@@ -538,6 +578,8 @@ impl RuntimeCoordinator {
         if Arc::ptr_eq(&*observed, &current) {
             self.register_finalizer_owner(&next);
             self.register_runtime_core(&next);
+            self.register_runtime_owner(&next);
+            self.register_runtime_owner(&current);
             current.begin_drain();
             return Ok(current);
         }
@@ -918,6 +960,24 @@ outbound: []
                 .is_err()
         );
         drop(guard);
+        assert!(waiting.await);
+    }
+
+    #[tokio::test]
+    async fn coordinator_waits_for_a_previous_runtime_during_drain() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let lease = coordinator.acquire().unwrap();
+        coordinator.activate(candidate(2));
+
+        let waiting =
+            coordinator.wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(1)));
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(lease);
         assert!(waiting.await);
     }
 

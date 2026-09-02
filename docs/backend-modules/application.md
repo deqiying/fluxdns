@@ -1,6 +1,6 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task、typed tracing layer 和 `TelemetryWriter` 周期 flush；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API、service-aware reload 入口重建 listener task，以及基于 metadata+content fingerprint 的去抖自动 reload；已接入配置驱动的正式日志输出目标和 reloadable level filter；`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障；服务现统一处理 `SIGINT`/Unix `SIGTERM`，并在 graceful shutdown 期间快速响应第二个终止信号
+> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task、typed tracing layer 和 `TelemetryWriter` 周期 flush；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API、service-aware reload 入口重建 listener task，以及基于 metadata+content fingerprint 的去抖自动 reload；已接入配置驱动的正式日志输出目标和 reloadable level filter；`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障；服务现统一处理 `SIGINT`/Unix `SIGTERM`，并在 graceful shutdown 期间快速响应第二个终止信号，且由 coordinator 等待当前/旧 Runtime 的请求 drain
 >
 > 更新日期：2026-09-02
 >
@@ -84,8 +84,9 @@ bootstrap telemetry
 1. 通过 `Supervisor` cancellation 停止 accept/receive；
 2. 先把 `ActiveRuntime` 标记为 draining，拒绝新请求 admission；
 3. 在固定 5 秒 grace deadline 内回收 UDP loop、TCP listener、DoH listener 和连接 session；
-4. 在同一 grace deadline 内关闭 `RuntimeCoordinator` 持有的历史/当前 `LateCacheFinalizer` owner；
-5. 返回成功或 shutdown timeout 错误。
+4. 由 `RuntimeCoordinator` 在同一 grace deadline 内等待当前及旧 Runtime 的 request guard drain；
+5. 关闭 `RuntimeCoordinator` 持有的历史/当前 `LateCacheFinalizer` owner；
+6. 返回成功或 shutdown timeout 错误。
 
 运行期 task 完成时，Degraded 组件的终止失败只记录并继续服务；FatalEndpoint/Fatal、重试耗尽和 panic 映射为 `RuntimeFatal`，先标记当前 runtime draining，再交由进程边界返回非零错误。显式 service reload 会为新 revision 注册新的 listener task，并通过 scoped cancellation 取消旧 task；运行期故障本身仍不会自动重建 listener。
 
