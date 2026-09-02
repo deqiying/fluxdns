@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 161（运行期 fatal 有界收尾）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 162（listener 故障边界收口）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -23,7 +23,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ### 当前未完成
 
-- listener task 的自动 factory 重建和完整 endpoint 故障矩阵；
+- endpoint 瞬时错误、重试耗尽和多 listener 可用性的完整故障矩阵；
 - DoH HTTP/2、完整 HTTP/DNS 协议组合和证书/信任边界矩阵；
 - cache persistence 的 last-access、真实故障复现与请求记录的跨故障源 health/recovery；
 - 完整跨 transport DNS contract；
@@ -95,7 +95,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 161 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 162 |
 
 ### 增量里程碑
 
@@ -109,15 +109,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 127–135 | Cache 持久化大阶段验收、reqwest/rustls provider 统一、reload/详情生命周期补强、跨 transport 一致性及 Storage 停机观测 | 后端全量 515 passed；Application 11 项及 Service、StorageRuntime、UDP/TCP/plain DoH 定向测试通过 |
 | 136–145 | 上游/策略观测、Storage 结果元数据与跨 transport DNS 契约 | 拆分策略目标、实际成员、命中规则和资源版本；SQLite v2 写入 RCODE/failure/cancel；真实 UDP/TCP/plain DoH GET/POST 覆盖成功、否定、错误和大响应 |
 | 146–151 | capability/ports/reload 基线与配置优先级 | Transport 统一 capability 映射；Ports 33 项契约测试；reload 回滚、资源版本落库、Policy cache/ECS 优先级和 health stale age 均有定向证据 |
-| 152–161 | 持久化 health、DoH/TLS 安全与 Runtime 生命周期 | Cache/Storage health 已发布；DoH/TLS 补齐请求和时限规则；配置 reload 复用进程级服务；正常与 fatal task 退出均执行 Storage/Telemetry 有界收尾 |
+| 152–162 | 持久化 health、DoH/TLS 安全与 Runtime 生命周期 | Cache/Storage health 已发布；DoH/TLS 补齐请求和时限规则；正常与 fatal task 退出均有界收尾；listener 瞬时重试复用已绑定句柄，进程内自动 rebind 移出 v1 |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/service.rs`；
-- fatal task 有界收尾与正常 shutdown 回归：2 项真实 UDP/SQLite/Telemetry 定向测试通过；
+- 静态 ownership 审计：UDP/TCP/DoH adapter 均通过 `Arc` 复用已绑定 socket/listener；
+- 纯边界收口，未运行 `rustfmt` 或测试；
 - `git diff --check`：通过。
 
-阶段 161 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 162 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 
