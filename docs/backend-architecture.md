@@ -2,7 +2,7 @@
 
 > 状态：v1 技术方案（实现中，阶段 1 已完成）
 >
-> 日期：2026-08-30
+> 日期：2026-09-02
 >
 > 配置契约：[configuration-reference.md](configuration-reference.md)
 >
@@ -371,7 +371,7 @@ struct RequestMeta {
 7. 初始化 `CacheFacade`、内存/持久化 cache store、transport capabilities/profiles 和策略索引；持久化 cache 初始化失败只标记 degraded 并回退内存，不改变数据库统计的必需性；
 8. 生成无 socket 的 `RuntimeSnapshot`/`PreparedRuntime` candidate 并完成 preflight；
 9. 创建全部 socket，任何 bind 失败都关闭已创建 socket 并退出；成功后组合成包含 `bound_endpoints` 的 `ActiveRuntime`，再原子发布首个 runtime；
-10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，由 supervisor 启动 UDP、TCP、DoH、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务；当前 transport task 仍绑定首个 active runtime。
+10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，由 supervisor 启动 UDP、TCP、DoH、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务；`DnsService` 在等待退出信号时同时观察 task completion，当前 transport task 仍绑定首个 active runtime。
 
 停止时先停止接收新请求，再取消后台 refresh/accept，等待正在处理的请求到 `grace deadline`；随后按顺序 flush 统计、详情日志和缓存队列，关闭 SQLite，最后退出。后台任务必须由 supervisor 持有，不能 detach 后丢失 panic 或错误。
 
@@ -393,7 +393,7 @@ supervisor 对 task 使用结构化生命周期和显式故障等级，不以“
 | structured log writer/telemetry sink 不可用 | `degraded`；保留本地低基数 counters，日志回退 stderr/内存 ring buffer | 不影响 DNS；观测可能出现明确的 telemetry gap |
 | supervisor 自身 panic、不可恢复的 task panic 或 shutdown 超时 | `fatal`；取消所有 task，执行有限 flush 后退出并返回非零状态 | 进程退出，交由外部守护进程决定是否拉起 |
 
-数据库在启动阶段不可打开、migration 失败或没有写权限时属于 `fatal`，因为聚合统计是默认开启且有数据库持久化契约；运行中数据库故障属于 `degraded`，不能把每次 DNS 请求同步阻塞到数据库恢复。所有降级状态都必须进入 metrics/structured log，并带上组件、首发时间、最近重试时间、当前 stale age 和是否存在持久化缺口。v1 不在进程内无限重启 listener 或 supervisor；`Supervisor::spawn_with_factory` 现已为可重建 task 提供瞬时失败的有界指数退避和上限耗尽标记，具体 endpoint/resource/storage 故障矩阵、服务级升级和外部 service manager 接管仍需后续接线。
+数据库在启动阶段不可打开、migration 失败或没有写权限时属于 `fatal`，因为聚合统计是默认开启且有数据库持久化契约；运行中数据库故障属于 `degraded`，不能把每次 DNS 请求同步阻塞到数据库恢复。所有降级状态都必须进入 metrics/structured log，并带上组件、首发时间、最近重试时间、当前 stale age 和是否存在持久化缺口。v1 不在进程内无限重启 listener 或 supervisor；`Supervisor::spawn_with_factory` 现已为可重建 task 提供瞬时失败的有界指数退避和上限耗尽标记，`DnsService` 已把 FatalEndpoint/Fatal、重试耗尽和 task panic 升级为运行期错误并停止接收新请求，listener factory 重建、完整 endpoint/resource/storage 故障矩阵和外部 service manager 接管仍需后续接线。
 
 ## 6. 请求管线
 

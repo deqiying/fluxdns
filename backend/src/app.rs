@@ -383,7 +383,7 @@ fn map_service_start_error(error: ServiceStartError) -> AppError {
 
 fn map_service_error(error: ServiceError) -> AppError {
     let kind = match &error {
-        ServiceError::Signal => AppErrorKind::RuntimeFatal,
+        ServiceError::Signal | ServiceError::TaskFailure { .. } => AppErrorKind::RuntimeFatal,
         ServiceError::ShutdownDeadline => AppErrorKind::ShutdownTimeout,
     };
     AppError::new(kind, bounded_message(error))

@@ -18,7 +18,7 @@ use crate::ports::inbound::InboundAdapter;
 use crate::runtime::{
     ActiveRuntime, AdmissionError, BoundEndpointHandle, FaultLevel, RefreshedResourceSnapshot,
     ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator, ShutdownReport, Supervisor,
-    SupervisorError, SystemClock, TaskError, TaskSpec,
+    SupervisorError, SystemClock, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
 };
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
@@ -50,6 +50,13 @@ pub enum ServiceError {
     Signal,
     #[error("service shutdown deadline expired")]
     ShutdownDeadline,
+    #[error("service task {task_id} ({component}) failed at {fault_level:?}: {exit:?}")]
+    TaskFailure {
+        task_id: String,
+        component: &'static str,
+        fault_level: FaultLevel,
+        exit: TaskExit,
+    },
 }
 
 const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -240,17 +247,74 @@ impl DnsService {
         &mut self,
         grace_period: Duration,
     ) -> Result<ShutdownReport, ServiceError> {
-        tokio::signal::ctrl_c()
-            .await
-            .map_err(|_| ServiceError::Signal)?;
-        let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
-        let report = self.shutdown(&SystemClock::new(), deadline).await;
-        if report.deadline_expired {
-            Err(ServiceError::ShutdownDeadline)
-        } else {
-            Ok(report)
+        let signal = tokio::signal::ctrl_c();
+        tokio::pin!(signal);
+        loop {
+            tokio::select! {
+                result = &mut signal => {
+                    result.map_err(|_| ServiceError::Signal)?;
+                    let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
+                    let report = self.shutdown(&SystemClock::new(), deadline).await;
+                    if report.deadline_expired {
+                        return Err(ServiceError::ShutdownDeadline);
+                    }
+                    return Ok(report);
+                }
+                completion = self.supervisor.join_next() => {
+                    let Some(completion) = completion else {
+                        return Err(ServiceError::TaskFailure {
+                            task_id: "supervisor".to_owned(),
+                            component: "runtime",
+                            fault_level: FaultLevel::Fatal,
+                            exit: TaskExit::Panicked,
+                        });
+                    };
+                    if let Some(error) = task_failure(&completion) {
+                        self.runtime.begin_drain();
+                        return Err(error);
+                    }
+                }
+            }
         }
     }
+}
+
+fn task_failure(completion: &TaskCompletion) -> Option<ServiceError> {
+    let terminal = match completion.exit {
+        TaskExit::Completed | TaskExit::Cancelled => false,
+        TaskExit::Panicked => true,
+        TaskExit::Failed(TaskErrorKind::Fatal) => true,
+        TaskExit::Failed(TaskErrorKind::Panicked) => true,
+        TaskExit::Failed(TaskErrorKind::Transient) => match completion.spec.restart_policy {
+            RestartPolicy::Never => true,
+            RestartPolicy::Transient { .. } => completion.restart_exhausted(),
+        },
+    };
+    if !terminal {
+        return None;
+    }
+
+    let fatal_level = matches!(
+        completion.spec.fault_level,
+        FaultLevel::FatalCandidate | FaultLevel::FatalEndpoint | FaultLevel::Fatal
+    );
+    if !fatal_level && !matches!(completion.exit, TaskExit::Panicked) {
+        tracing::warn!(
+            event = "service_task_degraded",
+            component = completion.spec.component,
+            task_id = %completion.spec.id,
+            exit = ?completion.exit,
+            "service_task_degraded"
+        );
+        return None;
+    }
+
+    Some(ServiceError::TaskFailure {
+        task_id: completion.spec.id.to_string(),
+        component: completion.spec.component,
+        fault_level: completion.spec.fault_level,
+        exit: completion.exit.clone(),
+    })
 }
 
 fn capabilities(class: TransportClass) -> TransportCapabilities {
@@ -876,8 +940,24 @@ impl From<DohAdapterError> for ServiceStartError {
 
 #[cfg(test)]
 mod tests {
-    use super::capabilities;
+    use super::{ServiceError, capabilities, task_failure};
     use crate::dns::{CacheCompatibilityKey, TransportClass};
+    use crate::runtime::{
+        FaultLevel, RestartPolicy, TaskCompletion, TaskErrorKind, TaskExit, TaskSpec,
+    };
+
+    fn completion(
+        fault_level: FaultLevel,
+        restart_policy: RestartPolicy,
+        exit: TaskExit,
+        restart_count: u32,
+    ) -> TaskCompletion {
+        TaskCompletion {
+            spec: TaskSpec::new("test.task", "test", fault_level, restart_policy).unwrap(),
+            exit,
+            restart_count,
+        }
+    }
 
     #[test]
     fn service_capabilities_are_transport_specific_and_stable() {
@@ -902,5 +982,77 @@ mod tests {
                 cache_compatibility: CacheCompatibilityKey(1),
             }
         );
+    }
+
+    #[test]
+    fn degraded_terminal_task_is_observed_without_stopping_the_service() {
+        let completion = completion(
+            FaultLevel::Degraded,
+            RestartPolicy::Never,
+            TaskExit::Failed(TaskErrorKind::Transient),
+            0,
+        );
+
+        assert!(task_failure(&completion).is_none());
+    }
+
+    #[test]
+    fn fatal_endpoint_task_failure_is_promoted_to_service_error() {
+        let completion = completion(
+            FaultLevel::FatalEndpoint,
+            RestartPolicy::Never,
+            TaskExit::Failed(TaskErrorKind::Transient),
+            0,
+        );
+
+        assert!(matches!(
+            task_failure(&completion),
+            Some(ServiceError::TaskFailure {
+                task_id,
+                component: "test",
+                fault_level: FaultLevel::FatalEndpoint,
+                exit: TaskExit::Failed(TaskErrorKind::Transient),
+            }) if task_id == "test.task"
+        ));
+    }
+
+    #[test]
+    fn bounded_restart_failure_is_only_promoted_after_exhaustion() {
+        let running = completion(
+            FaultLevel::FatalEndpoint,
+            RestartPolicy::Transient { max_restarts: 2 },
+            TaskExit::Failed(TaskErrorKind::Transient),
+            1,
+        );
+        assert!(task_failure(&running).is_none());
+
+        let exhausted = completion(
+            FaultLevel::FatalEndpoint,
+            RestartPolicy::Transient { max_restarts: 2 },
+            TaskExit::Failed(TaskErrorKind::Transient),
+            2,
+        );
+        assert!(matches!(
+            task_failure(&exhausted),
+            Some(ServiceError::TaskFailure { .. })
+        ));
+    }
+
+    #[test]
+    fn task_panic_is_fatal_even_for_a_degraded_component() {
+        let completion = completion(
+            FaultLevel::Degraded,
+            RestartPolicy::Never,
+            TaskExit::Panicked,
+            0,
+        );
+
+        assert!(matches!(
+            task_failure(&completion),
+            Some(ServiceError::TaskFailure {
+                exit: TaskExit::Panicked,
+                ..
+            })
+        ));
     }
 }

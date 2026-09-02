@@ -1,8 +1,8 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API
+> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API，`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障
 >
-> 更新日期：2026-09-01
+> 更新日期：2026-09-02
 >
 > 目标代码：`backend/src/main.rs`、`backend/src/app.rs`
 >
@@ -78,12 +78,14 @@ bootstrap telemetry
 
 ## 5. 信号与退出
 
-当前实现处理 `SIGINT`：
+当前实现处理 `SIGINT` 或运行期 Supervisor task 终止：
 
 1. 通过 `Supervisor` cancellation 停止 accept/receive；
 2. 先把 `ActiveRuntime` 标记为 draining，拒绝新请求 admission；
 3. 在固定 5 秒 grace deadline 内回收 UDP loop、TCP listener、DoH listener 和连接 session；
 4. 返回成功或 shutdown timeout 错误。
+
+运行期 task 完成时，Degraded 组件的终止失败只记录并继续服务；FatalEndpoint/Fatal、重试耗尽和 panic 映射为 `RuntimeFatal`，先标记当前 runtime draining，再交由进程边界返回非零错误。listener task 当前使用一次性注册，因此升级后不会在 service 内自动重建 listener。
 
 第二个终止信号快速退出、stats/resolve-log/cache flush 和 `SIGTERM` 专用处理仍未实现。
 
@@ -128,6 +130,7 @@ Application 将内部错误转换为：
 - [x] 接入读取配置后的 Config load/resolve/preflight 边界；
 - [x] 接入 Runtime bind、activate、wait、shutdown；
 - [x] 提供配置文件 reload 的 prepare/bind/activate 触发 API，并验证失败保留旧 runtime；
+- [x] 观察 Supervisor task 完成并按 fault level 映射运行期服务错误；
 - [ ] 完成信号与退出测试；
 - [x] 记录阶段 1 验证证据并更新实现进度。
 
