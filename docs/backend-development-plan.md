@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 153（详情 writer health 恢复）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 154（DoH Host 边界）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -35,8 +35,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **85.0%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **86.5%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **85.1%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **86.6%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -47,7 +47,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Ports | 已实现待验证 | 70% | 8% |
 | Config | 已验证 | 100% | 10% |
 | Runtime | 实现中 | 77% | 12% |
-| Transport | 实现中 | 77% | 11% |
+| Transport | 实现中 | 78% | 11% |
 | DNS Core | 实现中 | 82% | 10% |
 | Policy | 实现中 | 83% | 8% |
 | Upstream | 已实现待验证 | 99% | 10% |
@@ -59,9 +59,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 进度计算：
 
 ```text
-4%×70% + 8%×70% + 10%×100% + 12%×77% + 11%×77%
+4%×70% + 8%×70% + 10%×100% + 12%×77% + 11%×78%
 + 10%×82% + 8%×83% + 10%×99% + 9%×83% + 7%×91%
-+ 8%×93% + 3%×94% ≈ 85.0%
++ 8%×93% + 3%×94% ≈ 85.1%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 153 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 154 |
 
 ### 增量里程碑
 
@@ -126,14 +126,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 151 | health stale age 传播 | `TelemetryWriter` 在 degraded/failed 生命周期中保留最大 stale age，并在恢复 `Healthy` 时清零；不扩展跨 Runtime registry |
 | 152 | Cache 持久化停机摘要 | 汇总历史/当前 Runtime 的成功、失败、丢弃与容量清理计数；缺口在 Telemetry 关闭前发布为 Cache degraded health，不改变 DNS best-effort 语义 |
 | 153 | 详情 writer health 恢复 | 队列满或 sink 错误限频发布 Storage degraded/gap，下一条 accepted 恢复 Healthy；主动策略丢弃只计数，状态跨 service reload 共享 |
+| 154 | DoH Host 边界 | HTTP/1.1 缺失 `Host`、任意 HTTP/1.x 重复 `Host` 均返回 400 并关闭连接；HTTP/1.0 保留兼容，完整 Host/SNI 路由后置 |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/service.rs`；
-- 详情 health、Storage 生命周期与 reload 关键路径：5 passed；
+- 增量 `rustfmt`：`backend/src/transport/doh.rs`；
+- `transport::doh::tests`：17 passed；
 - `git diff --check`：通过。
 
-阶段 153 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 154 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

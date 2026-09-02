@@ -15,9 +15,9 @@ v1 采用单进程、单 Rust binary、异步事件驱动架构：
 - `tokio` 负责 runtime、socket、timer、任务监督和优雅停机；
 - `hickory-proto` 作为低层 DNS 协议库，只负责 DNS wire、RR、EDNS/ECS 编解码；
 - UDP/TCP transport 自行实现，不把权威 DNS 的 `Catalog/Authority` 模型作为网关核心；
-- DoH 入站使用 `axum` + `hyper`/`hyper-util` + `tower-http`，TLS 使用 `rustls`；
+- DoH 入站当前使用仓库内有界 HTTP/1.x session/parser，TLS 使用 `rustls`；HTTP/2 adapter 后置；
 - DoH 上游使用 `reqwest` + `rustls`，按上游和 outbound 组合复用 client，并关闭默认 system proxy；
-- 内存缓存使用 `moka::future::Cache`，持久化缓存使用独立 SQLite 文件；缓存通过 `CacheStore`/`PersistentCacheStore` 接口接入，具体后端可替换；
+- 内存缓存使用 `moka::sync::Cache`，持久化缓存使用独立 SQLite 文件；缓存通过 `CacheStore`/`PersistentCacheStore` 接口接入，具体后端可替换；
 - 解析日志和聚合统计使用 `sqlx` + SQLite，并通过相互独立的有界 writer 与 DNS 数据面隔离；聚合统计默认开启，因此 `database` 是启动必需依赖；
 - 规则和 hosts 编译成按资源独立版本化的不可变 snapshot，资源注册表通过 `arc-swap` 原子发布，资源变化不再用全局 generation 直接清空缓存；
 - DNS 核心只依赖 canonical message、request context 和协议无关的 port，不直接依赖 UDP/TCP/DoH、HTTP client、SQLite 或 Moka；
@@ -32,12 +32,12 @@ v1 采用单进程、单 Rust binary、异步事件驱动架构：
 | 异步 runtime | `tokio`、`tokio-util` | I/O、timer、`JoinSet`、`CancellationToken`、有界 channel |
 | socket | `socket2` + Tokio socket | bind 前设置 IPv6 v6-only 等平台相关选项，再交给 Tokio |
 | DNS wire | `hickory-proto` | 低层 `Message`、RR、EDNS、ECS 和 DNS wire 编解码，不承担网关路由 |
-| HTTP/DoH server | `axum`、`hyper`、`hyper-util`、`tower`、`tower-http` | DoH routing、GET/POST 校验、连接上下文、超时和 tracing middleware |
-| TLS | `rustls`、`tokio-rustls`、`rustls-pemfile` | DoH 入站 TLS 和上游 HTTPS；实现阶段显式选择并验证 crypto provider |
+| HTTP/DoH server | 仓库内 HTTP/1.x session/parser | DoH routing、GET/POST/Host 校验、连接上下文、超时和有界 keep-alive；HTTP/2 后置 |
+| TLS | `rustls`、`tokio-rustls` | DoH 入站 TLS 和上游 HTTPS；证书解析复用 `rustls` PEM API，并显式选择和验证 crypto provider |
 | DoH client | `reqwest` | `default-features = false`，显式启用 `rustls`、`http2`、`socks`；连接池、代理和 Host/SNI 保持 |
-| PROXY protocol | `ppp` | 解析 PROXY v1/v2；调用方负责 TCP 分片、超时、最大长度、trusted proxy 和 required 语义 |
+| PROXY protocol | 仓库内有界 parser | 解析 PROXY v1/v2，并负责 TCP 分片、超时、最大长度、trusted proxy 和 required 语义 |
 | YAML/config | `serde`、`yaml_serde`、`serde_path_to_error` | 严格 DTO 反序列化、字段路径错误；`deny_unknown_fields` 拒绝未知字段 |
-| 地址和值 | `url`、`ipnet`、`humantime` | URL、CIDR、duration 的强类型解析 |
+| 地址和值 | `url`、`ipnet`、标准 `Duration` | URL、CIDR、duration 的强类型解析 |
 | 内存缓存 | `moka` | 并发缓存、按 entry weight 计费、逐条过期；容量是应用层预算，不是 RSS 硬上限 |
 | 数据库 | `sqlx` + SQLite | `runtime-tokio`、`sqlite`、`macros`、`migrate`；migration、解析明细、聚合统计、持久化缓存 |
 | snapshot | `arc-swap` | 低频原子替换、高频无锁读取规则/hosts snapshot |
@@ -471,7 +471,7 @@ aggregator 收到第一个 terminal response 后立即完成客户端响应。�
 
 ## 9. DoH 与连接接入层
 
-DoH route 同时实现 GET/POST，并在进入 DNS core 前完成 method、URI、Content-Type、body/wire length 和 DNS parse 校验。有效 DNS 错误响应仍返回 HTTP 2xx；HTTP 错误只表示没有形成可处理的 DNS transaction。
+DoH route 同时实现 GET/POST，并在进入 DNS core 前完成 method、URI、Host cardinality、Content-Type、body/wire length 和 DNS parse 校验。HTTP/1.1 缺失 `Host` 或任意 HTTP/1.x 重复 `Host` 返回 400 并关闭连接；有效 DNS 错误响应仍返回 HTTP 2xx，HTTP 错误只表示没有形成可处理的 DNS transaction。
 
 HTTP access log 和 tracing 不记录 query string、raw DNS wire、完整 `client_id` 或 ECS；只记录 route template、方法、状态、wire 字节数和脱敏后的请求关联 ID。
 

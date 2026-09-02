@@ -993,6 +993,8 @@ pub enum DohHttpError {
     UnsupportedTransferEncoding,
     #[error("POST request requires a content length")]
     MissingContentLength,
+    #[error("HTTP Host header is missing or duplicated")]
+    InvalidHost,
 }
 
 impl DohHttpError {
@@ -1010,7 +1012,8 @@ impl DohHttpError {
             | Self::InvalidDnsParameter
             | Self::InvalidDnsWire
             | Self::UnsupportedTransferEncoding
-            | Self::MissingContentLength => DohHttpStatus::BadRequest,
+            | Self::MissingContentLength
+            | Self::InvalidHost => DohHttpStatus::BadRequest,
         }
     }
 
@@ -1022,6 +1025,7 @@ impl DohHttpError {
                 | Self::UriTooLong
                 | Self::PayloadTooLarge
                 | Self::UnsupportedTransferEncoding
+                | Self::InvalidHost
         )
     }
 }
@@ -1068,6 +1072,7 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
 
     let mut content_length = None;
     let mut content_type = None;
+    let mut host_present = false;
     let mut connection_close = parts[2] == "HTTP/1.0";
     let mut forwarded_headers = ParsedForwardedHeaders::default();
     let mut header_count = 0_usize;
@@ -1110,6 +1115,12 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
                 }
             }
             "transfer-encoding" => return Err(DohHttpError::UnsupportedTransferEncoding),
+            "host" => {
+                if host_present {
+                    return Err(DohHttpError::InvalidHost);
+                }
+                host_present = true;
+            }
             "connection"
                 if value
                     .split(',')
@@ -1146,6 +1157,11 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
             "forwarded" => {}
             _ => {}
         }
+    }
+
+    // HTTP/1.1 缺少 Host 或任何 HTTP/1.x 请求重复 Host 都按 400 关闭，避免 authority 歧义。
+    if parts[2] == "HTTP/1.1" && !host_present {
+        return Err(DohHttpError::InvalidHost);
     }
 
     let body_length = content_length.unwrap_or(0);
@@ -1615,7 +1631,8 @@ mod tests {
     }
 
     fn request(method: &str, target: &str, headers: &str, body: &[u8]) -> Vec<u8> {
-        let mut bytes = format!("{method} {target} HTTP/1.1\r\n{headers}\r\n").into_bytes();
+        let mut bytes =
+            format!("{method} {target} HTTP/1.1\r\nHost: doh.test\r\n{headers}\r\n").into_bytes();
         bytes.extend_from_slice(body);
         bytes
     }
@@ -1750,12 +1767,7 @@ mod tests {
     fn parses_get_and_restores_wire_id_metadata() {
         let wire = wire();
         let encoded = base64url(&wire);
-        let request_bytes = request(
-            "GET",
-            &format!("/dns/{}/?dns={encoded}", "client"),
-            "Host: example\r\n",
-            &[],
-        );
+        let request_bytes = request("GET", &format!("/dns/{}/?dns={encoded}", "client"), "", &[]);
 
         let parsed = try_parse_request(&request_bytes).unwrap().unwrap();
         assert_eq!(parsed.method, DohHttpMethod::Get);
@@ -1795,6 +1807,29 @@ mod tests {
             try_parse_request(&invalid),
             Err(DohHttpError::UnsupportedMediaType)
         );
+    }
+
+    #[test]
+    fn rejects_missing_or_duplicate_http11_host() {
+        let encoded = base64url(&wire());
+        let missing = format!("GET /dns?dns={encoded} HTTP/1.1\r\n\r\n").into_bytes();
+        assert_eq!(try_parse_request(&missing), Err(DohHttpError::InvalidHost));
+        assert!(DohHttpError::InvalidHost.should_close());
+
+        let duplicate = request(
+            "GET",
+            &format!("/dns?dns={encoded}"),
+            "Host: duplicate.test\r\n",
+            &[],
+        );
+        assert_eq!(
+            try_parse_request(&duplicate),
+            Err(DohHttpError::InvalidHost)
+        );
+
+        let http10 = format!("GET /dns?dns={encoded} HTTP/1.0\r\n\r\n").into_bytes();
+        let parsed = try_parse_request(&http10).unwrap().unwrap();
+        assert!(parsed.connection_close);
     }
 
     #[test]
