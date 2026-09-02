@@ -554,7 +554,7 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 解析请求线程不等待 SQLite：
 
 - 每次请求先更新进程内的 sharded/atomic 聚合计数；stats writer 周期性从这些计数做带 checkpoint 的 snapshot/ack，而不是为每个请求建立一个可能溢出的详情式队列；
-- 聚合维度固定且有界，至少包括 UTC 自然日、总请求数、配置中的 client bucket（未匹配统一归入 `unknown`）、transport class、strategy、source/upstream、RCODE 和 cache status；不使用域名、完整 `client_id` 或原始 IP 作为无界维度；
+- 聚合维度固定且有界，包括 UTC 自然日、总请求数、配置中的 client bucket、transport class、strategy、source/upstream、实际 DNS response 的完整 RCODE、cache status 和 attempt outcome；`NoResponse`/Core error 不伪造 RCODE，也不使用域名、完整 `client_id` 或原始 IP 作为无界维度；
 - stats writer 周期性把增量批量 upsert 到数据库，恢复后按日和维度补写；统计数据默认开启，不因 `resolve_log` 关闭而停止。
 
 统计持久化采用 at-least-once + 幂等去重，而不是依赖“写库成功后再清零”的非原子 checkpoint：计数器使用 double-buffer/epoch swap，把新请求导向下一 epoch；每个批次有单调 `batch_id`/`max_event_seq`，SQLite 事务同时执行聚合 upsert 和 batch ledger 写入；提交成功后才 ack，重试同一批次由 ledger 去重。进程在计数尚未进入批次前崩溃，只会形成可观测的 in-memory persistence gap，不会造成已提交批次的重复累计。`day_utc` 在请求进入或完成时确定，跨午夜和延迟写入仍更新事件所属自然日。

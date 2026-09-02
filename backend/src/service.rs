@@ -793,6 +793,9 @@ impl ObservedDnsCore {
                         StatsDimension::transport(request.context.transport.class),
                         StatsDimension::attempt_outcome(outcome),
                     ];
+                    if let Some(rcode) = response_rcode(result) {
+                        dimensions.push(StatsDimension::rcode(rcode));
+                    }
                     if let Some(observation) = observation {
                         dimensions.push(StatsDimension::source(observation.source));
                         dimensions.push(StatsDimension::cache_status(observation.cache_status));
@@ -906,6 +909,16 @@ fn resolve_rule_source(source: crate::dns::MatchedRuleSource) -> ResolveRuleSour
         crate::dns::MatchedRuleSource::ListenerHosts => ResolveRuleSource::ListenerHosts,
         crate::dns::MatchedRuleSource::StrategyHosts => ResolveRuleSource::StrategyHosts,
         crate::dns::MatchedRuleSource::RuleSet => ResolveRuleSource::RuleSet,
+    }
+}
+
+/// 仅从实际 DNS 响应提取完整 RCODE；无响应或 Core 错误不伪造统计值。
+fn response_rcode(result: &Result<CoreOutcome, CoreError>) -> Option<u16> {
+    match result {
+        Ok(CoreOutcome::Response(response)) => {
+            Some(u16::from(response.as_message().metadata.response_code))
+        }
+        Ok(CoreOutcome::NoResponse) | Err(_) => None,
     }
 }
 
@@ -2091,7 +2104,7 @@ mod tests {
 
     use super::{
         ResolveDetailDropCounters, ServiceError, capabilities, publish_component_health,
-        spawn_telemetry_task, spawn_transport_task, task_failure,
+        response_rcode, spawn_telemetry_task, spawn_transport_task, task_failure,
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
@@ -2138,6 +2151,23 @@ mod tests {
                     .map_err(CoreError::ResponseConstruction)
             })
         }
+    }
+
+    #[test]
+    fn response_rcode_only_reports_actual_dns_responses() {
+        let mut message = Message::new(9, MessageType::Query, OpCode::Query);
+        message.add_query(Query::query(
+            Name::from_ascii("rcode.example.").unwrap(),
+            RecordType::A,
+        ));
+        let query = CanonicalQuery::from_message(message).unwrap();
+        let response = CanonicalResponse::empty_response(&query, ResponseCode::Refused).unwrap();
+
+        assert_eq!(
+            response_rcode(&Ok(CoreOutcome::Response(response))),
+            Some(5)
+        );
+        assert_eq!(response_rcode(&Ok(CoreOutcome::NoResponse)), None);
     }
 
     #[test]
