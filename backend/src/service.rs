@@ -37,7 +37,7 @@ use crate::runtime::{
 };
 use crate::storage::{
     DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StatsPersistenceWorker,
-    StorageRuntime, StorageServiceError, day_utc,
+    StorageRuntime, StorageServiceError, StorageServiceFlushSummary, day_utc,
 };
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
@@ -582,13 +582,21 @@ impl DnsService {
             report.deadline_expired = true;
         }
         let storage_error = if let Some(storage) = self.storage.take() {
-            storage
-                .lock()
-                .await
-                .shutdown(deadline)
-                .await
-                .err()
-                .map(ServiceError::Storage)
+            if let Some(telemetry) = &self.telemetry {
+                publish_component_health(
+                    telemetry,
+                    TelemetryComponent::Storage,
+                    ComponentHealthState::Stopping,
+                    None,
+                );
+            }
+            match storage.lock().await.shutdown(deadline).await {
+                Ok(summary) => {
+                    log_storage_shutdown_summary(summary);
+                    None
+                }
+                Err(error) => Some(ServiceError::Storage(error)),
+            }
         } else {
             None
         };
@@ -969,6 +977,31 @@ fn telemetry_component_for_task(component: &'static str) -> TelemetryComponent {
         "telemetry" => TelemetryComponent::Telemetry,
         _ => TelemetryComponent::Runtime,
     }
+}
+
+/// 输出不含请求内容的存储停机摘要，供正常停机后核对持久化缺口。
+fn log_storage_shutdown_summary(summary: StorageServiceFlushSummary) {
+    tracing::info!(
+        event = "storage_shutdown_summary",
+        component = "storage",
+        stats_batches_committed = summary.stats.batches_committed,
+        stats_events_committed = summary.stats.events_committed,
+        stats_pending_batches = summary.stats.pending_batches,
+        stats_persistence_gap = summary.stats.persistence_gap,
+        backend_stats_committed = summary.storage.stats_committed,
+        backend_details_committed = summary.storage.details_committed,
+        backend_details_dropped = summary.storage.details_dropped,
+        backend_persistence_gap = summary.storage.persistence_gap,
+        resolve_log_committed = summary.resolve_log.flush.committed,
+        resolve_log_pending = summary.resolve_log.flush.pending,
+        resolve_log_dropped_queue_full = summary.resolve_log.flush.dropped_queue_full,
+        resolve_log_sink_failures = summary.resolve_log.flush.sink_failures,
+        resolve_log_discarded_pending = summary.resolve_log.discarded_pending,
+        detail_committed = summary.detail.committed,
+        detail_evicted = summary.detail.evicted,
+        detail_dropped = summary.detail.dropped,
+        "storage_shutdown_summary"
+    );
 }
 
 async fn storage_flush_task(
