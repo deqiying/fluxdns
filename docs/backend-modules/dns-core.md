@@ -1,6 +1,6 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh 和低基数 resolution observation；Policy observation 已补充首轮 client bucket；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 已接入，但完整 latest-snapshot/resource reload 管线尚未接入
+> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh 和低基数 resolution observation；Policy observation 已补充首轮 client bucket/selected upstream；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 已接入，但完整 latest-snapshot/resource reload 管线尚未接入
 >
 > 更新日期：2026-09-02
 >
@@ -82,7 +82,7 @@ Policy 返回完整 `ResolutionPlan`，至少包含：
 
 Core 不再次计算继承，也不把 rule 文本写入日志。
 
-当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，stale 命中时可在当前 immutable core 内先返回并通过有界 finalizer 进行 optimistic refresh，`hosts[]` 本地命中仍绕过 response cache；`DnsCore::resolve_with_observation` 沿同一请求路径返回生效 strategy、answer source 和 cache status，供 service 的 stats/detail 使用；最新 Runtime snapshot 捕获、resource reload 和 TTL override 完整管线仍未接入。
+当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，stale 命中时可在当前 immutable core 内先返回并通过有界 finalizer 进行 optimistic refresh，`hosts[]` 本地命中仍绕过 response cache；`DnsCore::resolve_with_observation` 沿同一请求路径返回生效 strategy、selected upstream、answer source 和 cache status，供 service 的 stats/detail 使用；最新 Runtime snapshot 捕获、resource reload 和 TTL override 完整管线仍未接入。
 
 ## 6. Cache 交互
 
@@ -147,7 +147,7 @@ TTL override 不延长缓存 entry 的实际过期时间。返回 stale/optimist
 - cancellation/failure 分类；
 - runtime/resource revision 摘要。
 
-Policy Core 已提供首轮 `strategy`、`source`（hosts/cache/upstream）、`cache_status` 和配置 client bucket 元数据；upstream/group、matched resource/rule 等完整 resolution result 字段仍待后续切片。client bucket 仅使用已验证配置 ID，未知匹配保持缺省，不记录原始 client ID/IP。
+Policy Core 已提供首轮 `strategy`、selected `upstream`、`source`（hosts/cache/upstream）、`cache_status` 和配置 client bucket 元数据；group member、matched resource/rule 等完整 resolution result 字段仍待后续切片。client bucket/upstream 仅使用已验证配置 ID，未知匹配保持缺省，不记录原始 client ID/IP。
 
 parallel 的多个 attempt 另发 attempt event，但不重复增加 total request。
 
@@ -178,12 +178,12 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 定义 canonical query/response 与验证器；
 - [x] 定义 RequestContext、deadline 与 cancellation；
 - [ ] 定义完整 resolution result；
-- [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket 首轮元数据；
+- [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket/selected upstream 首轮元数据；
 - [x] 实现固定响应的 transport 无关 handler；
 - [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
 - [ ] 实现 ECS、TTL 和错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA、Resource CNAME/wildcard、ConfiguredDnsCore const/file loader/fallback，以及 PolicyDnsCore 的 upstream/cache 命中、snapshot-local optimistic refresh、compiled resource live swap 和 strategy/source/cache/client bucket observation 路径；最近一次大阶段全量测试为 417 passed、0 failed，阶段 82 的 Policy focused 增量测试为 19 passed、0 failed。
+阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA、Resource CNAME/wildcard、ConfiguredDnsCore const/file loader/fallback，以及 PolicyDnsCore 的 upstream/cache 命中、snapshot-local optimistic refresh、compiled resource live swap 和 strategy/source/cache/client bucket/selected upstream observation 路径；最近一次大阶段全量测试为 417 passed、0 failed，阶段 82 的 Policy focused 增量测试为 19 passed、0 failed。
 
 当前实现进度：**62%**。

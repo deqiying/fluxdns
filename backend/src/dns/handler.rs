@@ -25,11 +25,13 @@ pub enum CoreOutcome {
 /// Core 在完成请求后可选提供的低基数解析元数据。
 ///
 /// 默认 Core 不需要实现该观察接口；策略 Core 会提供实际命中的 strategy、
-/// answer source 和 cache 状态，供详情日志与聚合统计复用同一份判定结果。
+/// selected upstream、answer source 和 cache 状态，供详情日志与聚合统计复用同一份判定结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsResolutionObservation {
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
+    /// 当前策略选择的 upstream/group 配置 ID；只允许来自已校验配置。
+    pub upstream_id: Option<Arc<str>>,
     pub source: StatsSource,
     pub cache_status: CacheStatus,
 }

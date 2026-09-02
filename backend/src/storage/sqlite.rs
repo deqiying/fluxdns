@@ -859,6 +859,7 @@ async fn apply_resolve_records_with_limits(
         let route_id = record.has_route().then_some("<present>");
         let client_bucket = record.has_client_bucket().then_some("<present>");
         let strategy_id = record.has_strategy().then_some("<present>");
+        let upstream_id = record.has_upstream().then_some("<present>");
         let canonical_qname = format!("len:{}", record.qname_byte_len());
         sqlx::query(
             "INSERT INTO resolve_log \
@@ -878,7 +879,7 @@ async fn apply_resolve_records_with_limits(
         .bind(i64::from(record.qtype()))
         .bind(i64::from(record.qclass()))
         .bind(stats_source_name(record.source()))
-        .bind(Option::<&str>::None)
+        .bind(upstream_id)
         .bind(0_i64)
         .bind(cache_status_name(record.cache_status()))
         .bind(Option::<&str>::None)
@@ -1188,6 +1189,7 @@ mod tests {
                 route_id: Some(Arc::from("route")),
                 client_bucket: None,
                 strategy_id: Some(Arc::from("strategy")),
+                upstream_id: Some(Arc::from("upstream")),
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
@@ -1205,7 +1207,7 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         let row = sqlx::query(
-            "SELECT request_id_digest, route_id, client_bucket, strategy_id, canonical_qname, source \
+            "SELECT request_id_digest, route_id, client_bucket, strategy_id, upstream_id, canonical_qname, source \
              FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
@@ -1229,6 +1231,12 @@ mod tests {
         );
         assert_eq!(
             row.try_get::<Option<String>, _>("strategy_id")
+                .unwrap()
+                .as_deref(),
+            Some("<present>")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("upstream_id")
                 .unwrap()
                 .as_deref(),
             Some("<present>")
@@ -1261,6 +1269,7 @@ mod tests {
                     route_id: None,
                     client_bucket: None,
                     strategy_id: None,
+                    upstream_id: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1322,6 +1331,7 @@ mod tests {
                 route_id: None,
                 client_bucket: None,
                 strategy_id: None,
+                upstream_id: None,
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
@@ -1360,6 +1370,7 @@ mod tests {
                     route_id: None,
                     client_bucket: None,
                     strategy_id: None,
+                    upstream_id: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1386,6 +1397,7 @@ mod tests {
                 route_id: None,
                 client_bucket: None,
                 strategy_id: None,
+                upstream_id: None,
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
@@ -1434,6 +1446,7 @@ mod tests {
                     route_id: None,
                     client_bucket: None,
                     strategy_id: None,
+                    upstream_id: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1480,6 +1493,7 @@ mod tests {
                     route_id: None,
                     client_bucket: None,
                     strategy_id: None,
+                    upstream_id: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1523,6 +1537,7 @@ mod tests {
                 route_id: None,
                 client_bucket: None,
                 strategy_id: None,
+                upstream_id: None,
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,

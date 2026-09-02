@@ -575,6 +575,7 @@ impl PolicyDnsCore {
                 Some(DnsResolutionObservation {
                     client_bucket,
                     strategy_id,
+                    upstream_id: None,
                     source: StatsSource::Hosts,
                     cache_status: CacheStatus::Disabled,
                 }),
@@ -587,6 +588,7 @@ impl PolicyDnsCore {
                 Some(DnsResolutionObservation {
                     client_bucket,
                     strategy_id,
+                    upstream_id: Some(Arc::from(plan.upstream.as_str())),
                     source: StatsSource::Upstream,
                     cache_status: CacheStatus::StoreUnavailable,
                 }),
@@ -606,6 +608,8 @@ impl PolicyDnsCore {
             Some(DnsResolutionObservation {
                 client_bucket,
                 strategy_id,
+                upstream_id: (outcome.source == StatsSource::Upstream)
+                    .then(|| Arc::from(plan.upstream.as_str())),
                 source: outcome.source,
                 cache_status: outcome.cache_status,
             }),
@@ -1445,6 +1449,7 @@ mod tests {
             .await;
         let observation = observation.expect("policy core must report metadata");
         assert_eq!(observation.strategy_id.as_deref(), Some("default"));
+        assert_eq!(observation.upstream_id.as_deref(), Some("remote"));
         assert_eq!(
             observation.source,
             crate::ports::storage::StatsSource::Upstream
@@ -1471,6 +1476,7 @@ mod tests {
             .resolve_with_observation(&request("remote.example.", RecordType::A))
             .await;
         let observation = observation.expect("cached policy core must report metadata");
+        assert_eq!(observation.upstream_id, None);
         assert_eq!(
             observation.source,
             crate::ports::storage::StatsSource::Cache

@@ -350,6 +350,7 @@ pub struct ResolveEvent {
     pub route_id: Option<Arc<str>>,
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
+    pub upstream_id: Option<Arc<str>>,
     pub transport: TransportClass,
     pub qname: Arc<str>,
     pub qtype: u16,
@@ -371,6 +372,7 @@ impl fmt::Debug for ResolveEvent {
             .field("has_route_id", &self.route_id.is_some())
             .field("has_client_bucket", &self.client_bucket.is_some())
             .field("has_strategy_id", &self.strategy_id.is_some())
+            .field("has_upstream_id", &self.upstream_id.is_some())
             .field("transport", &self.transport)
             .field("qname_byte_len", &self.qname.len())
             .field("qtype", &self.qtype)
@@ -428,6 +430,7 @@ mod tests {
         let registry = ConfiguredIdRegistry::from_validated([
             ValidatedConfiguredId::new(ConfiguredIdKind::ClientBucket, "office-network").unwrap(),
             ValidatedConfiguredId::new(ConfiguredIdKind::Strategy, "primary").unwrap(),
+            ValidatedConfiguredId::new(ConfiguredIdKind::Upstream, "remote").unwrap(),
         ]);
 
         for raw_request_value in ["private.example.test.", "client-7f3a9d"] {
@@ -448,13 +451,19 @@ mod tests {
         let client_bucket = registry
             .issue(ConfiguredIdKind::ClientBucket, "office-network")
             .unwrap();
+        let upstream = registry
+            .issue(ConfiguredIdKind::Upstream, "remote")
+            .unwrap();
         let event = StatsEvent::new(
             3,
             20_260_830,
-            vec![StatsDimension::client_bucket(client_bucket).unwrap()],
+            vec![
+                StatsDimension::client_bucket(client_bucket).unwrap(),
+                StatsDimension::upstream(upstream).unwrap(),
+            ],
         )
         .unwrap();
-        assert_eq!(event.dimensions().len(), 1);
+        assert_eq!(event.dimensions().len(), 2);
     }
 
     #[test]
@@ -467,6 +476,7 @@ mod tests {
             route_id: Some(Arc::from("route-private-id")),
             client_bucket: Some(Arc::from("client-private-bucket")),
             strategy_id: Some(Arc::from("strategy-private-id")),
+            upstream_id: Some(Arc::from("upstream-private-id")),
             transport: TransportClass::Datagram,
             qname: Arc::from("private.example.test."),
             qtype: 1,
@@ -483,6 +493,7 @@ mod tests {
             "route-private-id",
             "client-private-bucket",
             "strategy-private-id",
+            "upstream-private-id",
             "private.example.test",
         ] {
             assert!(!debug.contains(sensitive));

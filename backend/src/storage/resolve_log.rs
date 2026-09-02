@@ -23,6 +23,7 @@ pub struct ResolveDetailRecord {
     has_route: bool,
     has_client_bucket: bool,
     has_strategy: bool,
+    has_upstream: bool,
     has_request_digest: bool,
     transport: TransportClass,
     qname_byte_len: u16,
@@ -48,6 +49,7 @@ impl ResolveDetailRecord {
             has_route: event.route_id.is_some(),
             has_client_bucket: event.client_bucket.is_some(),
             has_strategy: event.strategy_id.is_some(),
+            has_upstream: event.upstream_id.is_some(),
             has_request_digest: !event.request_digest.is_empty(),
             transport: event.transport,
             qname_byte_len,
@@ -82,6 +84,10 @@ impl ResolveDetailRecord {
 
     pub const fn has_strategy(&self) -> bool {
         self.has_strategy
+    }
+
+    pub const fn has_upstream(&self) -> bool {
+        self.has_upstream
     }
 
     pub const fn has_request_digest(&self) -> bool {
@@ -131,6 +137,7 @@ impl fmt::Debug for ResolveDetailRecord {
             .field("has_route", &self.has_route)
             .field("has_client_bucket", &self.has_client_bucket)
             .field("has_strategy", &self.has_strategy)
+            .field("has_upstream", &self.has_upstream)
             .field("has_request_digest", &self.has_request_digest)
             .field("transport", &self.transport)
             .field("qname_byte_len", &self.qname_byte_len)
@@ -392,6 +399,7 @@ mod tests {
             route_id: Some(Arc::from("route-private-id")),
             client_bucket: Some(Arc::from("client-private-bucket")),
             strategy_id: Some(Arc::from("strategy-private-id")),
+            upstream_id: Some(Arc::from("upstream-private-id")),
             transport: TransportClass::Datagram,
             qname: Arc::from("private.example.test."),
             qtype: 1,
@@ -419,6 +427,7 @@ mod tests {
         assert!(record.has_route());
         assert!(record.has_client_bucket());
         assert!(record.has_strategy());
+        assert!(record.has_upstream());
         assert!(record.has_request_digest());
         assert_eq!(record.source(), StatsSource::Upstream);
         let debug = format!("{record:?}");
