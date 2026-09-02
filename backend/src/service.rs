@@ -2074,7 +2074,8 @@ mod tests {
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, CanonicalResponse,
-        Deadline, DnsMessageId, ResponseClass, RuntimeRevision, TransportClass,
+        CoreError, CoreOutcome, Deadline, DnsCore, DnsMessageId, DnsRequest, ResponseClass,
+        RuntimeRevision, TransportClass,
     };
     use crate::observability::{TelemetryOutput, TelemetryWriter};
     use crate::ports::storage::ResolveEventDisposition;
@@ -2093,6 +2094,28 @@ mod tests {
         logs: AtomicUsize,
         metrics: AtomicUsize,
         health: AtomicUsize,
+    }
+
+    /// 为真实跨 transport 测试生成稳定的 SERVFAIL/REFUSED 响应。
+    struct CrossTransportErrorCore;
+
+    impl DnsCore for CrossTransportErrorCore {
+        /// A 查询返回 SERVFAIL，AAAA 查询返回 REFUSED，避免测试依赖外部上游。
+        fn resolve<'a>(
+            &'a self,
+            request: &'a DnsRequest,
+        ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
+            Box::pin(async move {
+                let code = match request.query.question().query_type() {
+                    RecordType::A => ResponseCode::ServFail,
+                    RecordType::AAAA => ResponseCode::Refused,
+                    record_type => panic!("unexpected error-contract record type: {record_type}"),
+                };
+                CanonicalResponse::empty_response(&request.query, code)
+                    .map(CoreOutcome::Response)
+                    .map_err(CoreError::ResponseConstruction)
+            })
+        }
     }
 
     #[test]
@@ -2880,6 +2903,53 @@ clients: []
         assert_eq!(tcp.class(), ResponseClass::Positive);
         assert!(!tcp.as_message().metadata.truncation);
         assert_eq!(tcp.as_message().answers.len(), 64);
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    #[tokio::test]
+    async fn udp_tcp_and_plain_doh_share_error_response_contract() {
+        let base_port = 48_000 + (std::process::id() as u16 % 500) * 3;
+        let config = cross_transport_runtime_config(base_port, base_port + 1, base_port + 2);
+        let prepared = PreparedRuntime::prepare(config, RuntimeRevision(2)).unwrap();
+        let factory = SystemSocketFactory::new();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let mut service = super::DnsService::start_with_coordinator(
+            Arc::clone(&coordinator),
+            Arc::new(CrossTransportErrorCore),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert_cross_transport_contract(
+            query_all_transports(base_port, 81, "error.transport.test.", RecordType::A).await,
+            81,
+            "error.transport.test.",
+            RecordType::A,
+            ResponseClass::ServFail,
+        );
+        assert_cross_transport_contract(
+            query_all_transports(base_port, 91, "error.transport.test.", RecordType::AAAA).await,
+            91,
+            "error.transport.test.",
+            RecordType::AAAA,
+            ResponseClass::Refused,
+        );
 
         let report = service
             .shutdown(
