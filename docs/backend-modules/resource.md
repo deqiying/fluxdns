@@ -1,6 +1,6 @@
 # Resource 模块设计
 
-> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取；async `PreparedRuntime` 已在 bind 前完成 remote rule-set restore-or-fetch、file hosts/rule-set snapshot 加载和 typed Policy 构造；`auto_update=true` 的 remote、file rule-set、file hosts 均由 service Supervisor 持有长期 refresh task，并在同一 ActiveRuntime 内完成 Policy live publish 与 Runtime 资源摘要原子更新；真正跨 Runtime 配置候选发布和独立 listener 生命周期仍未接入
+> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取；async `PreparedRuntime` 已在 bind 前完成 remote rule-set restore-or-fetch、file hosts/rule-set snapshot 加载和 typed Policy 构造；`auto_update=true` 的 remote、file rule-set、file hosts 均由 service Supervisor 持有长期 refresh task，并在同一 ActiveRuntime 内完成 Policy live publish 与 Runtime 资源摘要原子更新；`ResourceRegistrySnapshot` 已提供按资源过滤的更高版本合并原语，供后续候选 Runtime 合并使用；真正跨 Runtime 配置候选发布和独立 listener 生命周期仍未接入
 >
 > 更新日期：2026-09-01
 >
@@ -43,6 +43,8 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 - immutable compiled index。
 
 顶层 ResourceRegistrySnapshot 是资源名到 `Arc<ResourceSnapshot>` 的不可变 map。
+
+候选 Runtime 以自身 registry 为基准合并旧 Runtime 的资源结果时，只允许定义兼容的资源进入合并集合，并且仅接收严格更高的 `ResourceVersion`；同版本内容保留候选自身的值，避免旧 Runtime 覆盖新配置候选。该原语只处理 immutable registry，不负责 Policy、worker schedule 或 Runtime metadata 的同步，后续由 Runtime prepare 边界统一接线。
 
 ## 3. 加载流水线
 

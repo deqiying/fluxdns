@@ -397,6 +397,8 @@ transport / upstream / storage / observability adapters
 
 第四十九个小阶段（已完成）：为 `config::load` 测试临时目录增加进程内原子序号，避免并发测试仅依赖纳秒时间戳而发生目录复用和提前清理；生产配置快照逻辑未改变。并发快照测试及全量 409 项测试通过；`run` 自动配置变更事件、完整跨 Runtime 候选发布、listener 自动 rebind 和 flush 生命周期仍留在后续小阶段。
 
+第五十个小阶段（已完成）：为 `ResourceRegistrySnapshot` 增加按资源过滤的 immutable registry 合并原语；候选 registry 仅接收旧 Runtime 中严格更高的 `ResourceVersion`，同版本或候选更高版本保留候选内容，并补充不同资源、版本优先级和过滤条件测试。Policy、worker schedule、Runtime metadata 的跨 Runtime 同步仍留在后续小阶段。阶段完成后资源 snapshot 定向测试 6 项通过；全量测试基线更新为 411 passed，0 failed。
+
 ## 6. 阶段提交规则
 
 本计划中的每个编号阶段都必须形成一次独立的本地提交。若某个阶段继续拆分为多个可独立实现和验收的小阶段，则每个小阶段也必须各自提交一次，不能等到整个大阶段结束后合并成一个无法审计的提交。

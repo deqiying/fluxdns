@@ -261,6 +261,30 @@ impl<T> ResourceRegistrySnapshot<T> {
             .collect()
     }
 
+    /// 将另一个 registry 中允许的更高版本合并进当前候选。
+    ///
+    /// 当前 registry 代表待发布候选，因此同版本或更高版本始终保留候选内容；
+    /// 只有 incoming 资源版本严格更高时才替换。调用方通过 `allowed` 过滤已经
+    /// 从新配置删除或定义不兼容的资源。
+    pub fn merge_newer_from<F>(&self, incoming: &Self, mut allowed: F) -> Self
+    where
+        F: FnMut(&ConfigId) -> bool,
+    {
+        let mut resources = self.resources.clone();
+        for (resource_id, incoming_snapshot) in &incoming.resources {
+            if !allowed(resource_id) {
+                continue;
+            }
+            let should_replace = resources
+                .get(resource_id)
+                .is_none_or(|current| incoming_snapshot.version() > current.version());
+            if should_replace {
+                resources.insert(resource_id.clone(), Arc::clone(incoming_snapshot));
+            }
+        }
+        Self { resources }
+    }
+
     /// 发布一个资源，并返回保留其他资源的新 registry。
     pub fn publish(&self, candidate: ResourceSnapshot<T>) -> Result<Self, ResourcePublishError> {
         let resource_id = candidate.resource_id().clone();
@@ -386,6 +410,59 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["hosts", "rules"]
         );
+    }
+
+    #[test]
+    fn merge_newer_from_preserves_candidate_on_equal_or_newer_versions() {
+        let candidate = ResourceRegistrySnapshot::new()
+            .publish(snapshot("same", 2, 9, "candidate-same"))
+            .unwrap()
+            .publish(snapshot("newer", 4, 1, "candidate-newer"))
+            .unwrap();
+        let incoming = ResourceRegistrySnapshot::new()
+            .publish(snapshot("same", 2, 9, "incoming-same"))
+            .unwrap()
+            .publish(snapshot("newer", 3, 9, "incoming-older"))
+            .unwrap()
+            .publish(snapshot("older", 5, 1, "incoming-older-id"))
+            .unwrap();
+
+        let merged = candidate.merge_newer_from(&incoming, |_| true);
+
+        assert_eq!(
+            merged.lookup(&id("same")).unwrap().compiled(),
+            "candidate-same"
+        );
+        assert_eq!(
+            merged.lookup(&id("newer")).unwrap().compiled(),
+            "candidate-newer"
+        );
+        assert_eq!(
+            merged.lookup(&id("older")).unwrap().compiled(),
+            "incoming-older-id"
+        );
+    }
+
+    #[test]
+    fn merge_newer_from_filters_incoming_resources() {
+        let candidate = ResourceRegistrySnapshot::new()
+            .publish(snapshot("kept", 1, 1, "candidate"))
+            .unwrap();
+        let incoming = ResourceRegistrySnapshot::new()
+            .publish(snapshot("kept", 2, 1, "incoming-kept"))
+            .unwrap()
+            .publish(snapshot("filtered", 9, 1, "incoming-filtered"))
+            .unwrap();
+
+        let merged =
+            candidate.merge_newer_from(&incoming, |resource_id| resource_id == &id("kept"));
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(
+            merged.lookup(&id("kept")).unwrap().compiled(),
+            "incoming-kept"
+        );
+        assert!(merged.lookup(&id("filtered")).is_none());
     }
 
     #[test]
