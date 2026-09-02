@@ -366,6 +366,27 @@ impl RuntimeCoordinator {
         owners.push(Arc::clone(runtime));
     }
 
+    fn prune_finalizer_owners(&self) {
+        let runtimes = self
+            .runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let active_finalizers = runtimes
+            .iter()
+            .filter_map(|runtime| runtime.finalizer_owner())
+            .collect::<Vec<_>>();
+        self.finalizer_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|owner| {
+                owner.active_tasks() > 0
+                    || active_finalizers
+                        .iter()
+                        .any(|active| Arc::ptr_eq(active, owner))
+            });
+    }
+
     /// 将当前及 reload 后仍存活的旧 Runtime 统一切换到 drain 状态。
     pub(crate) fn begin_drain(&self) {
         let runtimes = self
@@ -548,6 +569,7 @@ impl RuntimeCoordinator {
             self.register_runtime_owner(&next);
             self.register_runtime_owner(&current);
             current.begin_drain();
+            self.prune_finalizer_owners();
             return Ok(next);
         }
         Err(RuntimeReuseError::RevisionMismatch {
@@ -565,6 +587,7 @@ impl RuntimeCoordinator {
         self.register_runtime_owner(&next);
         self.register_runtime_owner(&previous);
         previous.begin_drain();
+        self.prune_finalizer_owners();
         previous
     }
 
@@ -594,6 +617,7 @@ impl RuntimeCoordinator {
             self.register_runtime_owner(&next);
             self.register_runtime_owner(&current);
             current.begin_drain();
+            self.prune_finalizer_owners();
             return Ok(current);
         }
 
@@ -701,6 +725,63 @@ mod tests {
             .expect("repository example must remain a valid runtime fixture")
             .resolved;
         let prepared = PreparedRuntime::prepare(config, RuntimeRevision(revision)).unwrap();
+        super::super::bind::test_candidate(prepared)
+    }
+
+    fn policy_candidate(revision: u64) -> crate::runtime::BoundCandidate {
+        let work_path = crate::config::test_support::absolute_path("coordinator-finalizer");
+        let source = format!(
+            r#"
+version: 1
+work:
+  path: {work_path}
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: 5300
+    strategy: default
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+hosts:
+  - type: const
+    name: local-hosts
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+outbound: []
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+"#,
+            work_path = work_path,
+        );
+        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .expect("policy finalizer fixture must be valid")
+            .resolved;
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(revision)).unwrap();
         super::super::bind::test_candidate(prepared)
     }
 
@@ -1018,6 +1099,19 @@ outbound: []
         assert_eq!(owners.len(), 2);
         assert_eq!(owners[0].revision(), RuntimeRevision(2));
         assert_eq!(owners[1].revision(), RuntimeRevision(3));
+    }
+
+    #[test]
+    fn inactive_finalizer_owners_are_pruned_with_completed_runtime_owners() {
+        let coordinator = RuntimeCoordinator::new(policy_candidate(1));
+        coordinator.activate(policy_candidate(2));
+        coordinator.activate(policy_candidate(3));
+
+        let owners = coordinator
+            .finalizer_owners
+            .lock()
+            .expect("finalizer owner lock must not be poisoned");
+        assert_eq!(owners.len(), 2);
     }
 
     #[tokio::test]
