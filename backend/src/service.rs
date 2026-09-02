@@ -2466,6 +2466,15 @@ mod tests {
         work_path: &str,
         port: u16,
     ) -> Arc<crate::config::resolve::ResolvedConfig> {
+        runtime_config_with_answer_at(work_path, port, "127.0.0.1")
+    }
+
+    /// 构造 bind plan 不变、hosts answer 可变的 reload 测试配置。
+    fn runtime_config_with_answer_at(
+        work_path: &str,
+        port: u16,
+        answer: &str,
+    ) -> Arc<crate::config::resolve::ResolvedConfig> {
         ConfigLoader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
@@ -2496,12 +2505,12 @@ upstreams:
   - type: hosts
     name: local
     format: hosts
-    hosts: "127.0.0.1 example.test"
+    hosts: "{answer} example.test"
 hosts:
   - type: const
     name: local-hosts
     format: hosts
-    hosts: "127.0.0.1 example.test"
+    hosts: "{answer} example.test"
 outbound: []
 rule_set: []
 strategy:
@@ -2513,6 +2522,7 @@ clients: []
 "#,
                 port = port,
                 work_path = work_path,
+                answer = answer,
             ))
             .expect("service reload fixture must be valid")
             .resolved
@@ -2963,9 +2973,19 @@ clients: []
         let mut service =
             super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
                 .unwrap();
+        let initial_response = udp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            1,
+            "example.test.",
+        )
+        .await;
+        assert!(initial_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 1)
+        )));
 
         let prepared = PreparedRuntime::prepare_with_policy_core(
-            runtime_config_at(&work_path, port),
+            runtime_config_with_answer_at(&work_path, port, "127.0.0.2"),
             RuntimeRevision(2),
         )
         .unwrap();
@@ -2983,6 +3003,16 @@ clients: []
         assert_eq!(active.listeners().local_addrs().unwrap()[0].port(), port);
         assert_eq!(service.transport_task_count(), 1);
         assert_eq!(service.resource_task_count(), 0);
+        let reloaded_response = udp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            2,
+            "example.test.",
+        )
+        .await;
+        assert!(reloaded_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 2)
+        )));
 
         let report = service
             .shutdown(
