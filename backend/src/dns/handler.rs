@@ -30,12 +30,33 @@ pub enum CoreOutcome {
 pub struct DnsResolutionObservation {
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
+    /// 当前请求实际命中的 listener/strategy rule 摘要。
+    pub matched_rule: Option<MatchedRuleObservation>,
     /// 策略选中的 direct upstream 或 group ID。该值只允许来自已校验配置。
     pub upstream_id: Option<Arc<str>>,
     /// group 实际选中的顶层成员 ID；direct upstream 或 cache hit 时为空。
     pub upstream_member_id: Option<Arc<str>>,
     pub source: StatsSource,
     pub cache_status: CacheStatus,
+}
+
+/// 一条已命中规则的低基数来源，不携带规则文本或 matcher 内容。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MatchedRuleSource {
+    ListenerHosts,
+    StrategyHosts,
+    RuleSet,
+}
+
+/// Policy 已判定的规则命中摘要；资源 ID 只来自已验证配置。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MatchedRuleObservation {
+    /// 命中来自 listener hosts、strategy hosts 或 rule-set。
+    pub source: MatchedRuleSource,
+    /// 被命中的 hosts/rule-set 配置资源 ID。
+    pub resource_id: Arc<str>,
+    /// listener hosts 没有 strategy rule 序号，因此为 `None`。
+    pub ordinal: Option<u64>,
 }
 
 /// DNS Core 构造响应时的稳定错误分类。

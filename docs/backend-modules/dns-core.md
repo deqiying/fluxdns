@@ -82,7 +82,7 @@ Policy 返回完整 `ResolutionPlan`，至少包含：
 
 Core 不再次计算继承，也不把 rule 文本写入日志。
 
-当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，stale 命中时可在当前 immutable core 内先返回并通过有界 finalizer 进行 optimistic refresh，`hosts[]` 本地命中仍绕过 response cache；上游请求会按 plan 应用 `disabled`/`client`/`custom` ECS，group 可在更高优先级未覆盖时为每个 direct member 生成独立 query，并保留其他 EDNS option；普通请求以最终 ECS 隔离 cache key，成员 ECS group 当前绕过缓存；响应离开 Policy Core 前按当前 plan 对 answer/authority/additional RR 应用 TTL 上下界，缓存仍保存未覆写的 canonical response；`DnsCore::resolve_with_observation` 沿同一请求路径返回生效 strategy、策略目标 upstream/group、实际顶层 group member、answer source 和 cache status，供 service 的 stats/detail 使用。
+当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，stale 命中时可在当前 immutable core 内先返回并通过有界 finalizer 进行 optimistic refresh，`hosts[]` 本地命中仍绕过 response cache；上游请求会按 plan 应用 `disabled`/`client`/`custom` ECS，group 可在更高优先级未覆盖时为每个 direct member 生成独立 query，并保留其他 EDNS option；普通请求以最终 ECS 隔离 cache key，成员 ECS group 当前绕过缓存；响应离开 Policy Core 前按当前 plan 对 answer/authority/additional RR 应用 TTL 上下界，缓存仍保存未覆写的 canonical response；`DnsCore::resolve_with_observation` 沿同一请求路径返回生效 strategy、策略目标 upstream/group、实际顶层 group member、matched rule/resource、answer source 和 cache status，供后续 stats/detail 使用。
 
 ## 6. Cache 交互
 
@@ -147,7 +147,7 @@ TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 
 - cancellation/failure 分类；
 - runtime/resource revision 摘要。
 
-Policy Core 已提供首轮 `strategy`、策略目标 `upstream_id`、实际顶层 `upstream_member_id`、`source`（hosts/cache/upstream）、`cache_status` 和配置 client bucket 元数据；matched resource/rule 等完整 resolution result 字段仍待后续切片。client bucket/upstream/member 仅使用已验证配置 ID，未知匹配保持缺省，不记录原始 client ID/IP。
+Policy Core 已提供首轮 `strategy`、策略目标 `upstream_id`、实际顶层 `upstream_member_id`、`source`（hosts/cache/upstream）、`cache_status`、配置 client bucket，以及 matched rule 的来源、资源 ID 和可选 ordinal。rule observation 不包含 matcher 或规则文本；client bucket/upstream/member/resource 仅使用已验证配置 ID，未知匹配保持缺省，不记录原始 client ID/IP。
 
 parallel 的多个 attempt 另发 attempt event，但不重复增加 total request。
 
@@ -177,8 +177,8 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 
 - [x] 定义 canonical query/response 与验证器；
 - [x] 定义 RequestContext、deadline 与 cancellation；
-- [ ] 定义完整 resolution result；
-- [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket；策略目标 upstream/group 与实际顶层 group member 已拆分；
+- [ ] 定义包含失败细分和资源 revision 的完整 resolution result；
+- [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket；策略目标 upstream/group、实际顶层 group member 和 matched rule/resource 已拆分；
 - [x] 实现固定响应的 transport 无关 handler；
 - [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
 - [x] 实现配置驱动的 client-visible TTL min/max 覆写，且不改变 cache admission 使用的 origin TTL；
@@ -188,6 +188,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 完成 UDP/TCP/plain DoH 的 Positive/NODATA/NXDOMAIN、DNS ID、canonical response 和 UDP TC 首轮真实 loopback contract；
 - [x] 完成 SERVFAIL/REFUSED 错误响应的跨 transport contract tests。
 
-阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 34 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream/group member ECS 实际 DoH wire、成员 ECS group 缓存绕过、client ECS cache key 隔离、direct/cache/group 的目标与成员 observation，以及跨 Policy Core 实例的 SQLite cache 恢复；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH POST 对 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED 返回相同 canonical response 并恢复各自 DNS ID，大响应下 UDP 设置 TC 而 TCP/DoH 保留 64 条完整 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 515 passed、0 failed。
+阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 35 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream/group member ECS 实际 DoH wire、成员 ECS group 缓存绕过、client ECS cache key 隔离、direct/cache/group 的目标与成员 observation、hosts/rule-set 的 matched rule/resource 摘要，以及跨 Policy Core 实例的 SQLite cache 恢复；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH POST 对 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED 返回相同 canonical response 并恢复各自 DNS ID，大响应下 UDP 设置 TC 而 TCP/DoH 保留 64 条完整 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 515 passed、0 failed。
 
-当前实现进度：**79%**。
+当前实现进度：**80%**。

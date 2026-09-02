@@ -27,7 +27,7 @@ use crate::config::resolve::{
     ResolvedUpstream, ValueSource,
 };
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
-use crate::policy::{ClientMatch, PolicyBuildError, PolicyIndex, PolicyRequest};
+use crate::policy::{ClientMatch, MatchedRuleKind, PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
 use crate::ports::cache::{
     CacheCondition, CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation, CacheQuality,
@@ -669,6 +669,7 @@ impl PolicyDnsCore {
             ClientMatch::Unknown => None,
         };
         let strategy_id = Some(Arc::from(plan.strategy.id.as_str()));
+        let matched_rule = matched_rule_observation(plan.matched_rule.as_ref());
 
         if let Some(resource_id) = plan.hosts {
             let Some(index) = policy.index.hosts_index(&resource_id) else {
@@ -701,6 +702,7 @@ impl PolicyDnsCore {
                 Some(DnsResolutionObservation {
                     client_bucket,
                     strategy_id,
+                    matched_rule,
                     upstream_id: None,
                     upstream_member_id: None,
                     source: StatsSource::Hosts,
@@ -720,6 +722,7 @@ impl PolicyDnsCore {
                 Some(DnsResolutionObservation {
                     client_bucket,
                     strategy_id,
+                    matched_rule: matched_rule.clone(),
                     upstream_id: Some(Arc::from(plan.upstream.as_str())),
                     upstream_member_id: None,
                     source: StatsSource::Upstream,
@@ -746,6 +749,7 @@ impl PolicyDnsCore {
             Some(DnsResolutionObservation {
                 client_bucket,
                 strategy_id,
+                matched_rule,
                 upstream_id: Some(upstream_id),
                 upstream_member_id,
                 source: outcome.source,
@@ -1059,6 +1063,33 @@ impl PolicyDnsCore {
             ),
         })
     }
+}
+
+/// 将 Policy 内部 rule 结果压缩为不含规则文本和 matcher 内容的观测摘要。
+fn matched_rule_observation(
+    matched: Option<&crate::policy::MatchedRule>,
+) -> Option<super::MatchedRuleObservation> {
+    let matched = matched?;
+    let (source, resource_id, ordinal) = match &matched.kind {
+        MatchedRuleKind::ListenerHosts { resource } => {
+            (super::MatchedRuleSource::ListenerHosts, resource, None)
+        }
+        MatchedRuleKind::Hosts { resource } => (
+            super::MatchedRuleSource::StrategyHosts,
+            resource,
+            Some(u64::try_from(matched.ordinal).expect("rule ordinal must fit u64")),
+        ),
+        MatchedRuleKind::RuleSet { resource, .. } => (
+            super::MatchedRuleSource::RuleSet,
+            resource,
+            Some(u64::try_from(matched.ordinal).expect("rule ordinal must fit u64")),
+        ),
+    };
+    Some(super::MatchedRuleObservation {
+        source,
+        resource_id: Arc::from(resource_id.as_str()),
+        ordinal,
+    })
 }
 
 /// 在响应离开 Policy Core 前应用当前请求选中的 TTL 覆写。
@@ -1748,8 +1779,8 @@ mod tests {
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, Cancellation, CanonicalQuery, CanonicalResponse, ClientId,
-        CoreOutcome, Deadline, DnsCore, DnsRequest, ListenerId, RequestContext, RequestId,
-        RequestMeta, RuntimeRevision, TransportCapabilities, TransportClass,
+        CoreOutcome, Deadline, DnsCore, DnsRequest, ListenerId, MatchedRuleSource, RequestContext,
+        RequestId, RequestMeta, RuntimeRevision, TransportCapabilities, TransportClass,
     };
     use crate::ports::exchange::{ConnectorId, UpstreamOutcome};
     use crate::ports::{PortError, PortFuture};
@@ -3405,15 +3436,22 @@ strategy:
         assert_eq!(core.host_resource_count(), 1);
         assert_eq!(core.upstream_count(), 1);
 
-        let answer = core
-            .resolve(&request("local.example.", RecordType::A))
-            .await
-            .unwrap();
+        let (answer, observation) = core
+            .resolve_with_observation(&request("local.example.", RecordType::A))
+            .await;
+        let answer = answer.unwrap();
         let CoreOutcome::Response(answer) = answer else {
             panic!("expected local response");
         };
         assert_eq!(answer.class(), crate::dns::ResponseClass::Positive);
         assert_eq!(answer.ttl().min_ttl, Some(42));
+        let matched = observation
+            .expect("hosts response must include observation")
+            .matched_rule
+            .expect("hosts response must include matched rule");
+        assert_eq!(matched.source, MatchedRuleSource::StrategyHosts);
+        assert_eq!(matched.resource_id.as_ref(), "local-hosts");
+        assert_eq!(matched.ordinal, Some(0));
 
         let nodata = core
             .resolve(&request("local.example.", RecordType::AAAA))
@@ -3423,6 +3461,23 @@ strategy:
             panic!("expected nodata response");
         };
         assert_eq!(nodata.class(), crate::dns::ResponseClass::NoData);
+    }
+
+    #[tokio::test]
+    async fn policy_observation_reports_rule_set_resource_without_matcher_content() {
+        let core = PolicyDnsCore::from_config(rule_config().as_ref(), 42).unwrap();
+
+        let (_, observation) = core
+            .resolve_with_observation(&request("old.example.", RecordType::A))
+            .await;
+
+        let matched = observation
+            .expect("rule-set response must include observation")
+            .matched_rule
+            .expect("rule-set response must include matched rule");
+        assert_eq!(matched.source, MatchedRuleSource::RuleSet);
+        assert_eq!(matched.resource_id.as_ref(), "dynamic-rules");
+        assert_eq!(matched.ordinal, Some(0));
     }
 
     #[tokio::test]
