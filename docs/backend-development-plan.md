@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成，阶段 1、阶段 2 已完成；阶段 3 基础服务编排、阶段 4 UDP/TCP 基础链路、阶段 5 upstream 首轮小阶段、阶段 6 cache 首轮切片、阶段 7 resource/policy/DNS Core 首轮接线、阶段 8 DoH plain HTTP 首轮接入、阶段 9 统计/观测纯领域切片和阶段 10 resource refresh、coordinator ownership、supervisor restart、candidate activation、stale refresh guard、Application reload trigger、service fault escalation、scoped cancellation、listener rebind、跨 Runtime 候选状态合并、`run` 配置 fingerprint 自动 reload、Moka CacheStore、Policy 默认 Moka 装配、独立 SQLite cache persistence 及 SQLx SQLite storage 首轮 adapter 已实现
+> 状态：v1 模块方案已完成；当前执行至阶段 71（统计持久化 worker 首轮闭环），后续重点是 StorageService/Supervisor 生产装配、SQLite 故障恢复、Observability writer 和 v1 验收。
 >
 > 更新日期：2026-09-02
 >
@@ -10,31 +10,30 @@
 
 ## 1. 当前进度结论
 
-仓库已固定 `backend/` 与 `frontend/` 两个独立代码主目录；根目录不作为任一端的工程目录。`backend/` 已具备单 binary crate、核心契约、Config 配置系统、Runtime 候选骨架和基础服务启动闭环；阶段 2 记录起点为 69 个单元测试，当前全量测试为 411 个。Config 已完成自身的严格加载、v1 空迁移 registry、路径/SecretRef source normalization、semantic validation、reference graph、bind plan、安全快照和不可变 `ResolvedConfig`；Runtime 已完成 `RuntimeSnapshot`、`PreparedRuntime`、无 socket preflight、基于 `SocketFactory` 的 BindPlan 全成/全退、`ArcSwap` ActiveRuntime coordinator/CAS、请求 guard、Supervisor task tree 基础、可重建 task 的有界 transient restart/backoff、候选 bind/CAS 激活入口、stale-active refresh guard、系统 socket capability、Application CLI/校验接线和服务任务编排，并已让 snapshot 通过 `ArcSwap` 持有按配置生成的资源元数据摘要、让 service 从 active snapshot 自动取得同 revision 的 `DnsCore`，并由 `PreparedRuntime`/`ActiveRuntime` 持有生产 `ResourceFetcher`；正式 async prepare 已在 bind 前恢复或下载 remote rule-set、加载 file hosts/rule-set 初始 snapshot，并为 `auto_update=true` 的三类可刷新资源注册同一个 service Supervisor 下的长期 worker，成功候选在同一 ActiveRuntime 内完成 Policy live publish 和 Runtime 元数据原子更新，失败进入 backoff，取消和 shutdown 释放 schedule reservation；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源刷新 task 每轮通过 coordinator 查询当前活动实例，Application 已提供无 snapshot 副作用的配置文件 reload 触发 API和 service-aware reload 入口，`DnsService` 已观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障，Supervisor 已提供受管 task-scoped cancellation，DnsService 的 UDP/TCP/DoH listener task 已使用独立 scoped token，显式 reload 可为新 revision 重建 listener task 并取消旧 token；外部配置变更事件、资源 worker 集合重建和完整跨 Runtime 配置候选发布尚未完成；Transport/DNS Core 已完成共享 wire boundary、固定 SERVFAIL/hosts core、UDP/TCP adapter、UDP 截断、TCP 持久 session 和 DoH plain HTTP adapter/service 首轮链路，并已将 const/file hosts 资源接入本地 Core；Upstream 已完成内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、Reqwest Rustls HTTP/2 direct/proxy HTTPS DoH adapter、adapter-owned bounded client pool、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、Outbound profile/target 规划、SOCKS5/SOCKS5H protocol codec、协议无关 outbound stream port 与握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver、最小 SOCKS connector 闭环、standalone plain HTTP SOCKS5/SOCKS5H DoH transport adapter、配置驱动的 proxy Registry/Policy/Runtime prepare 接线、hosts/plain HTTP DoH registry、PolicyCore direct request path、direct group primary/fallback exchange 与 group timeout、group member selection、parallel late window、nested group 和结果聚合/fallback 判定，以及 Reqwest/Rustls loopback live TLS handshake 验证；parallel 快速完整 Positive 路径已接入协议中立的 typed late-result sink，并将合法 late response 交给有界 `LateCacheFinalizer`，但 nested late propagation、完整 late-window 候选语义、共享 Runtime finalizer owner 和完整 resource/service lifecycle 仍未完成。Cache 已完成无外部依赖的内存 `CacheStore`、容量淘汰、响应准入/TTL、稳定 key builder、`CacheFacade`、single-flight、可取消有界 `LateCacheFinalizer`、基础 Cache/Core fresh/miss/single-flight/CAS 接线、当前 PolicyDnsCore snapshot-local optimistic refresh 和版本化文件快照 persistence 边界；Policy 已完成 client/strategy/route immutable index、const/file hosts/rule-set loader 接线、direct hosts/plain HTTP DoH registry wiring、配置驱动 proxy DoH 与 group fallback request path、请求级资源规则匹配和安全的 matched-rule 摘要，以及 Policy compiled resource snapshot 的版本化 atomic live swap，并可在 supplied compiled remote/file snapshot 上构造初始 Policy；Resource 已完成 hosts/rule parser、受限 regex、const/file loader、资源 snapshot/CAS、远程 manifest/content 原子落盘和恢复校验、scheduler/coordinator 的 Runtime-facing 纯逻辑编排、一次性 remote refresh worker、file hosts/rule-set refresh worker、生产 ReqwestResourceFetcher、async PreparedRuntime 首次 remote restore/fetch、file snapshot load 和 service Supervisor 长期 refresh task；Storage 已完成纯内存统计 epoch/batch ledger、业务 migration schema 和可替换 stats writer contract；Observability 已完成有界 metrics/health registry。DoH 入站 TLS/PROXY/forwarded、bootstrap/连接执行的完整接线、Moka/SQLite persistence、完整跨 Runtime resource worker 生命周期、基于最新 Runtime snapshot 的完整 optimistic refresh、共享 Runtime finalizer owner、真实 SQLite/detail/telemetry writer 和完整服务级故障验收仍未实现。
+本节只保留当前决策所需的摘要；模块实现细节见对应 `docs/backend-modules/*.md`，完整阶段证据见本文“阶段实施记录”。
 
-> 注：上段为阶段 50 完成时的能力基线；阶段 71 后当前数值以本节汇总表和“当前汇总（阶段 71）”为准。
+- 已完成主链路：Config 严格加载与校验、Runtime 候选/激活/受管 task、UDP/TCP/DoH plain HTTP、Upstream direct/group/proxy、Policy/Resource 首次快照与 live publish、Cache memory/Moka/SQLite 首轮 adapter。
+- Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker` 和 backend/detail 生命周期 facade；Observability 已完成低基数 metrics/health 基础。
+- 当前未完成：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite degraded recovery、Stats/Detail writer 的 Supervisor/DnsService 生产装配、正式 telemetry writer、最终故障/压力/conformance 验收。
 
-截至阶段 71，自动配置变更轮询、同 BindPlan listener 复用、跨 Runtime 状态迁移、finalizer owner、最新 Runtime optimistic refresh、nested late-result 传播、资源 worker 集合增量复用、Moka CacheStore 首轮 adapter、Policy 默认 Moka 装配、独立 SQLite cache persistence 首轮 adapter、SQLx SQLite storage 首轮 adapter、SQLite 详情落库脱敏边界、独立 bounded detail writer channel、详情年龄/软阈值/硬上限策略、worker shutdown drain、周期 flush 运行入口、Storage backend/detail 统一生命周期 facade 和 StatsPersistenceWorker 首轮持久化闭环已接入；最近一次大阶段全量测试为 417 passed、0 failed，本阶段 StatsPersistenceWorker 增量测试 3 passed、0 failed；上方长段保留阶段 50 的能力基线描述。
+> 注：阶段 71 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
+
+阶段 71 已完成 StatsPersistenceWorker 首轮持久化闭环：epoch snapshot 经 BatchLedger 按序提交到 StorageBackend，失败保留 pending 并暴露 persistence gap；最近一次大阶段全量测试为 417 passed、0 failed，本阶段增量测试 3 passed、0 failed。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **67.9%** | Config 达到 100% 模块验收口径；Runtime 已增加原子资源元数据发布、三类 file/remote refresh worker、Application/DnsService 共享 coordinator 的资源刷新入口、可重建 task 的有界 transient restart/backoff、候选 bind/CAS 激活入口、stale-active refresh guard、跨 Runtime 候选状态合并、同 BindPlan listener 复用、跨 Runtime finalizer owner、最新 Runtime optimistic refresh 和资源 worker 集合按 ID 增量复用；Application 已增加无 snapshot 副作用的配置文件 reload API、service-aware reload 入口和 `run` 配置 fingerprint 自动 reload，DnsService 可为新 revision 重建 transport listener、复用未变化的 resource worker 并取消移除的 scoped token；DnsService 已观察 Supervisor task completion 并按 fault level 升级不可恢复故障；Policy/Resource 已补齐 supplied compiled file/remote snapshot、失败 backoff、取消释放、Runtime live publish 和 nested late-result sink 传播；Cache 已新增 Moka 共享 weight/per-entry expiry adapter 和独立 SQLite cache persistence 首轮 adapter，并将 Policy 默认装配切换为 Moka；Storage 已新增 SQLx SQLite migration、stats batch 幂等 transaction、脱敏 detail insert、bounded detail writer channel/batch flush、年龄/软阈值/硬上限、shutdown drain、周期 flush 运行入口、backend/detail 统一生命周期 facade 和 StatsPersistenceWorker 首轮持久化闭环；仍缺少完整跨 Runtime 配置候选发布、入站 DoH TLS/PROXY/forwarded、SQLite WAL/SHM 观测与 degraded recovery、Supervisor 级 writer 注册、真实 telemetry writer 和完整服务级故障验收 |
+| 后端代码实现进度 | **67.9%** | 主要请求、Runtime、策略、资源、缓存和 Storage 首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站安全边界、SQLite degraded recovery、Stats/Detail writer 的 Supervisor 生产装配、正式 telemetry writer 及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
 | v1 交付总进度 | **71.1%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 67.9%` |
 
-截至 2026-09-02，阶段 45 已将显式 service reload 的 listener 与 resource refresh task 集合按新 Runtime revision 重建；当前全量测试为 406 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
+### 当前验证记录
 
-截至 2026-09-02，阶段 46 已修正 Supervisor 对 JoinSet panic/abort 结果的 task ID 归因，避免按注册表顺序误删 sibling task；当前全量测试为 407 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
-
-截至 2026-09-02，阶段 47 已将 UDP/TCP/DoH transport task 接入带 scoped cancellation 的三次有界瞬时重试；该阶段只复用已绑定 socket，不实现自动 rebind，当前全量测试为 409 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
-
-截至 2026-09-02，阶段 48 已让 Supervisor 的 JoinSet 异常结果保留原始 `TaskSpec` component/fault level；当前全量测试仍为 409 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
-
-截至 2026-09-02，阶段 49 已修复配置快照并发测试的临时目录命名碰撞；当前全量测试为 409 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
+- 最近一次大阶段全量后端测试：`417 passed、0 failed`。
+- 当前阶段（阶段 71）增量测试：`storage::stats::tests`，`3 passed、0 failed`。
+- 小阶段只执行增量验证；完成大阶段时再执行全量后端测试。
+- `StatsPersistenceWorker` 尚未纳入 `StorageService/Supervisor/DnsService` 生产装配，因此当前进度仍为后端 `67.9%`、v1 `71.1%`。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
-
-当前汇总（阶段 71）：最近一次大阶段全量测试 417 passed、0 failed；本阶段 StatsPersistenceWorker 增量测试 3 passed、0 failed。StatsPersistenceWorker 尚未纳入 StorageService/Supervisor/DnsService 的生产装配，因此按当前模块权重重新计算后，后端代码实现进度保持 67.9%，v1 交付进度保持 71.1%。上文历史阶段记录中的测试数量保持原样，作为当时验收证据。
 
 ```text
 v1 交付总进度 = 10% × 设计阶段完成度 + 90% × 后端代码实现进度
@@ -133,7 +132,7 @@ transport / upstream / storage / observability adapters
 
 ### 后续开发路线（基于 2026-09-02 当前状态）
 
-当前后端代码实现进度为 67.9%，v1 交付进度为 71.1%。Config、Upstream、Resource 的基础链路和可信测试基线已经建立，阶段 1 已补齐候选 Runtime 的兼容资源、Policy、metadata 和 worker 稳定状态合并，后续路线第 2 项已为 `run` 接入配置 fingerprint 自动 reload；Storage 已补齐 SQLite detail writer 的 bounded channel、脱敏、淘汰/硬上限、shutdown drain、周期 flush 运行入口、backend/detail 统一生命周期 facade 和 StatsPersistenceWorker 首轮持久化闭环。剩余风险主要集中在 Runtime 生命周期、跨模块状态一致性、SQLite 故障恢复、Supervisor 级 writer/telemetry 接线和最终验收。因此后续不按模块百分比从低到高补齐，而采用“先运行时生命周期、再数据与观测、最后协议和 v1 验收”的垂直切片。
+当前后端代码实现进度为 67.9%，v1 交付进度为 71.1%。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker 和统一生命周期 facade。后续按“Runtime 生命周期 → Storage/Observability 生产接线 → DoH 安全边界 → v1 验收”推进，不按文档完成度虚增进度。
 
 | 顺序 | 目标 | 主要范围 | 退出条件 |
 | --- | --- | --- | --- |
@@ -152,6 +151,10 @@ transport / upstream / storage / observability adapters
 - 第 4、5 步共享故障、flush 和 shutdown 边界，但业务 SQLite 与 cache SQLite 必须保持独立文件、schema、writer 和健康状态。
 - 第 6 步不引入 WebUI、管理 API、主动健康检查或其他明确排除在 v1 之外的能力；配置热加载只复用已定义的内部 reload 入口。
 - 每个小阶段都必须同时更新直接受影响的模块文档、测试证据和本计划，并完成最小充分验证后再标记完成。
+
+### 阶段实施记录
+
+以下记录只保留每个阶段的目标、实际变更和验证证据；详细设计回链到对应模块文档。
 
 ### 阶段 0：方案基线
 
