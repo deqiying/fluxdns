@@ -10,6 +10,7 @@
 /target/
 /backend/target/
 /backend/.cargo-home/
+/backend/.rustup/
 
 # 前端依赖与构建产物
 /frontend/node_modules/
