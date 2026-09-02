@@ -23,7 +23,9 @@ pub use service::{
     CacheRefreshPermit, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer,
     LateCacheFinalizerBuildError, LateCacheFinalizerSubmitError,
 };
-pub use sqlite::{SqlitePersistentCacheStore, SqlitePersistentCacheStoreBuildError};
+pub use sqlite::{
+    SqliteCacheDiskUsage, SqlitePersistentCacheStore, SqlitePersistentCacheStoreBuildError,
+};
 
 #[cfg(test)]
 mod persistence_contract_tests {

@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 100（Cache SQLite metadata schema 契约）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 101（Cache SQLite 磁盘占用观测）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
 >
 > 更新日期：2026-09-02
 >
@@ -51,7 +51,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | DNS Core | 实现中 | 62% | 10% |
 | Policy | 实现中 | 70% | 8% |
 | Upstream | 已实现待验证 | 99% | 10% |
-| Cache | 实现中 | 71% | 9% |
+| Cache | 实现中 | 72% | 9% |
 | Resource | 已实现待验证 | 90% | 7% |
 | Storage | 已实现待验证 | 84% | 8% |
 | Observability | 实现中 | 90% | 3% |
@@ -60,7 +60,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ```text
 4%×55% + 8%×40% + 10%×100% + 12%×65% + 11%×72%
-+ 10%×62% + 8%×70% + 10%×99% + 9%×71% + 7%×90%
++ 10%×62% + 8%×70% + 10%×99% + 9%×72% + 7%×90%
 + 8%×84% + 3%×90% ≈ 75.0%
 ```
 
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 100 |
+| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 101 |
 
 ### 最新增量记录
 
@@ -118,8 +118,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 阶段 98：为 SQLite cache persistence 增加 test-only Busy/DiskFull 一次性故障注入，验证失败批次不发布且后续写入可恢复；SQLite fault focused test `1 passed、0 failed`，未重复全量 `cargo fmt/test`，真实 OS/SQLite 故障仍未宣称通过。
 - 阶段 99：统一文件与 SQLite adapter 的 `maintain_capacity` 过期/损坏/不兼容记录移除计数，并由共享 contract 覆盖过期清理后恢复结果；cache persistence contract `1 passed、0 failed`，SQLite persistence `4 passed、0 failed`，未重复全量 `cargo fmt/test`。
 - 阶段 100：SQLite cache DB 新增并校验 `schema/cache/key format` metadata；重开遇到版本不匹配时拒绝 adapter；SQLite persistence `5 passed、0 failed`，未重复全量 `cargo fmt/test`。
+- 阶段 101：SQLite cache adapter 新增主库/WAL/SHM 磁盘占用观测 API，并验证总量计算与 shutdown 边界；SQLite persistence `5 passed、0 failed`，未重复全量 `cargo fmt/test`。
 
-### 最近小阶段（100）验证命令
+### 最近小阶段（101）验证命令
 
 ```text
 backend/.cargo-home/bin/rustfmt --edition 2024 backend/src/cache/sqlite.rs
@@ -129,7 +130,7 @@ cargo clippy --manifest-path backend/Cargo.toml --locked --offline --all-targets
 git diff --check
 ```
 
-以上均通过；阶段 100 未重复全量 `cargo fmt/test`。阶段 99 的容量维护 contract、阶段 98 的 SQLite fault focused test、阶段 97 的 cache persistence contract、阶段 96 的 health lifecycle focused test、阶段 95 的 SIGINT/SIGTERM 编译验证、阶段 94 的 Resource health focused test、阶段 93 的 fallback focused test、阶段 92 的 health publish focused test、阶段 91 的 typed tracing focused test、阶段 90 的 telemetry flush focused test、阶段 89 的 config watcher focused test及阶段 88 的 system socket/DoH focused tests 证据保留在对应提交中。
+以上均通过；阶段 101 未重复全量 `cargo fmt/test`。阶段 100 的 metadata schema contract、阶段 99 的容量维护 contract、阶段 98 的 SQLite fault focused test、阶段 97 的 cache persistence contract、阶段 96 的 health lifecycle focused test、阶段 95 的 SIGINT/SIGTERM 编译验证、阶段 94 的 Resource health focused test、阶段 93 的 fallback focused test、阶段 92 的 health publish focused test、阶段 91 的 typed tracing focused test、阶段 90 的 telemetry flush focused test、阶段 89 的 config watcher focused test及阶段 88 的 system socket/DoH focused tests 证据保留在对应提交中。
 
 ## 5. v1 验收门槛
 

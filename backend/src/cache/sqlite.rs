@@ -33,6 +33,21 @@ pub struct SqlitePersistentCacheStore {
     injected_fault: Arc<Mutex<Option<InjectedSqliteFault>>>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SqliteCacheDiskUsage {
+    pub main_bytes: u64,
+    pub wal_bytes: u64,
+    pub shm_bytes: u64,
+}
+
+impl SqliteCacheDiskUsage {
+    pub const fn total_bytes(self) -> u64 {
+        self.main_bytes
+            .saturating_add(self.wal_bytes)
+            .saturating_add(self.shm_bytes)
+    }
+}
+
 #[derive(Default)]
 struct SqliteState {
     shutting_down: bool,
@@ -176,6 +191,22 @@ impl SqlitePersistentCacheStore {
         self.max_size_bytes
     }
 
+    /// 返回主数据库及 SQLite WAL/SHM sidecar 的当前磁盘占用。
+    pub fn disk_usage(&self) -> Result<SqliteCacheDiskUsage, PortError> {
+        self.available("sqlite_cache.disk_usage")?;
+        Ok(SqliteCacheDiskUsage {
+            main_bytes: file_size(self.path.as_ref(), "sqlite_cache.disk_usage")?,
+            wal_bytes: file_size(
+                &sidecar_path(self.path.as_ref(), "wal"),
+                "sqlite_cache.disk_usage",
+            )?,
+            shm_bytes: file_size(
+                &sidecar_path(self.path.as_ref(), "shm"),
+                "sqlite_cache.disk_usage",
+            )?,
+        })
+    }
+
     #[cfg(test)]
     fn inject_fault(&self, fault: InjectedSqliteFault) {
         *self
@@ -287,6 +318,21 @@ impl SqlitePersistentCacheStore {
             prepare_snapshot(std::mem::take(&mut records), self.max_size_bytes, now)
                 .map_err(|error| codec_error(error, operation))?;
         Ok(kept)
+    }
+}
+
+fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut value = path.as_os_str().to_os_string();
+    value.push("-");
+    value.push(suffix);
+    PathBuf::from(value)
+}
+
+fn file_size(path: &Path, operation: &'static str) -> Result<u64, PortError> {
+    match fs::metadata(path) {
+        Ok(metadata) => Ok(metadata.len()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(_) => Err(PortError::new(PortErrorClass::Unavailable, operation)),
     }
 }
 
@@ -514,6 +560,15 @@ mod tests {
             metadata.get::<i64, _>("key_format_version"),
             i64::from(CACHE_KEY_FORMAT_VERSION)
         );
+        let usage = store.disk_usage().unwrap();
+        assert!(usage.main_bytes > 0);
+        assert_eq!(
+            usage.total_bytes(),
+            usage
+                .main_bytes
+                .saturating_add(usage.wal_bytes)
+                .saturating_add(usage.shm_bytes)
+        );
         store
             .persist(
                 PersistentCacheBatch {
@@ -551,6 +606,7 @@ mod tests {
             .unwrap();
         store.shutdown(deadline()).await.unwrap();
         assert!(store.recover(deadline()).await.is_err());
+        assert!(store.disk_usage().is_err());
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
