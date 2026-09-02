@@ -10,7 +10,7 @@ use crate::ports::PortError;
 use crate::ports::storage::{ResolveEventSink, StatsRecorder, StorageBackend, StorageFlushSummary};
 
 use super::{
-    ResolveLogBuildError, ResolveLogWriter, STORAGE_SCHEMA_VERSION,
+    ResolveLogBuildError, ResolveLogShutdownSummary, ResolveLogWriter, STORAGE_SCHEMA_VERSION,
     SqliteResolveDetailFlushSummary, SqliteResolveDetailLimits, SqliteResolveDetailWorker,
     SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError, SqliteStorageBackend,
     SqliteStorageBackendBuildError, StatsPersistenceError, StatsPersistenceFlushSummary,
@@ -27,6 +27,8 @@ pub const DEFAULT_RESOLVE_LOG_BATCH_SIZE: usize = 128;
 pub struct StorageServiceFlushSummary {
     pub stats: StatsPersistenceFlushSummary,
     pub storage: StorageFlushSummary,
+    /// 详情前端队列的提交、丢弃和 sink 失败摘要。
+    pub resolve_log: ResolveLogShutdownSummary,
     pub detail: SqliteResolveDetailFlushSummary,
 }
 
@@ -180,6 +182,7 @@ impl StorageService {
         Ok(StorageServiceFlushSummary {
             stats,
             storage,
+            resolve_log: ResolveLogShutdownSummary::default(),
             detail,
         })
     }
@@ -203,6 +206,7 @@ impl StorageService {
             (Ok(stats), Ok(detail), Ok(storage)) => Ok(StorageServiceFlushSummary {
                 stats,
                 storage,
+                resolve_log: ResolveLogShutdownSummary::default(),
                 detail,
             }),
             (Err(stats), Err(detail), Err(backend)) => Err(StorageServiceError::All {
@@ -295,24 +299,37 @@ impl StorageRuntime {
             .map(|sink| Arc::clone(sink) as Arc<dyn ResolveEventSink>)
     }
 
+    /// 将详情前端队列交给 worker 后，统一提交当前存储批次并返回完整摘要。
     pub async fn flush(
         &mut self,
         deadline: Deadline,
     ) -> Result<StorageServiceFlushSummary, StorageServiceError> {
-        if let Some(sink) = &self.resolve_log {
-            let _ = sink.flush();
-        }
-        self.service.flush(deadline).await
+        let resolve_log =
+            self.resolve_log
+                .as_ref()
+                .map_or_else(ResolveLogShutdownSummary::default, |sink| {
+                    ResolveLogShutdownSummary {
+                        flush: sink.flush(),
+                        discarded_pending: 0,
+                    }
+                });
+        let mut summary = self.service.flush(deadline).await?;
+        summary.resolve_log = resolve_log;
+        Ok(summary)
     }
 
+    /// 停止详情前端接收并返回最终丢弃数，再按既定顺序关闭存储 worker。
     pub async fn shutdown(
         &mut self,
         deadline: Deadline,
     ) -> Result<StorageServiceFlushSummary, StorageServiceError> {
-        if let Some(sink) = &self.resolve_log {
-            let _ = sink.shutdown();
-        }
-        self.service.shutdown(deadline).await
+        let resolve_log = self
+            .resolve_log
+            .as_ref()
+            .map_or_else(ResolveLogShutdownSummary::default, |sink| sink.shutdown());
+        let mut summary = self.service.shutdown(deadline).await?;
+        summary.resolve_log = resolve_log;
+        Ok(summary)
     }
 }
 
@@ -330,14 +347,16 @@ impl std::fmt::Debug for StorageService {
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::{Duration, Instant, SystemTime};
 
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::Deadline;
     use crate::ports::PortFuture;
     use crate::ports::storage::{
-        SchemaVersion, StorageBackend, StorageFlushSummary, StorageHealth, StorageTransaction,
+        ResolveEvent, ResolveEventDisposition, SchemaVersion, StatsSource, StorageBackend,
+        StorageFlushSummary, StorageHealth, StorageTransaction,
     };
+    use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 
     use super::{StorageRuntime, StorageService, StorageServiceError};
 
@@ -471,11 +490,40 @@ mod tests {
 
         let _stats_recorder = runtime.stats_recorder();
         assert_eq!(runtime.stats_worker().pending_batch_count(), 0);
-        assert!(runtime.resolve_event_sink().is_some());
-        runtime
+        let sink = runtime
+            .resolve_event_sink()
+            .expect("resolved fixture enables detail sink");
+        let disposition = sink
+            .try_record(ResolveEvent {
+                occurred_at: SystemTime::now(),
+                duration_started_at: Instant::now(),
+                request_digest: std::sync::Arc::from("request-digest"),
+                listener_id: std::sync::Arc::from("udp-main"),
+                route_id: None,
+                client_bucket: None,
+                strategy_id: None,
+                upstream_id: None,
+                transport: crate::dns::TransportClass::Datagram,
+                qname: std::sync::Arc::from("example.test."),
+                qtype: 1,
+                qclass: 1,
+                outcome: OutcomeClass::Success,
+                source: StatsSource::Upstream,
+                cache_status: CacheStatus::Miss,
+                runtime_revision: crate::dns::RuntimeRevision(1),
+            })
+            .expect("detail event must be accepted");
+        assert_eq!(disposition, ResolveEventDisposition::Accepted);
+
+        let flush = runtime.flush(deadline()).await.unwrap();
+        assert_eq!(flush.resolve_log.flush.committed, 1);
+        assert_eq!(flush.resolve_log.discarded_pending, 0);
+        assert_eq!(flush.detail.committed, 1);
+        let shutdown = runtime
             .shutdown(deadline())
             .await
             .expect("storage runtime shutdown must drain configured writers");
+        assert_eq!(shutdown.resolve_log.discarded_pending, 0);
         let _ = std::fs::remove_dir_all(work_path);
     }
 
