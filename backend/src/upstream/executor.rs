@@ -424,12 +424,14 @@ impl UpstreamGroupExecutor {
                 UpstreamOutcome::Response(response)
                     if response.class() == crate::dns::ResponseClass::Positive
             );
+            let terminal_response = matches!(&outcome, UpstreamOutcome::Response(_))
+                && matches!(assess(&outcome).fallback, FallbackDecision::Stop);
             attempts.push(UpstreamAttempt {
                 attempt_index: index,
                 connector,
                 outcome,
             });
-            if complete_response {
+            if complete_response || (terminal_response && late_sink.is_some()) {
                 if let Some(sink) = late_sink {
                     let drain = late_attempt_drain(
                         tasks,
@@ -957,6 +959,47 @@ mod tests {
             sink.results(),
             vec![(1, "slow".to_owned(), ResponseClass::NoData)]
         );
+    }
+
+    #[tokio::test]
+    async fn parallel_returns_terminal_nodata_while_draining_late_positive() {
+        let query = query();
+        let early = exchange("early");
+        early.push(response(&query, ResponseCode::NoError)).unwrap();
+        let late = Arc::new(DelayedExchange::new(
+            ConnectorId::new("late").unwrap(),
+            Duration::from_millis(250),
+            positive_response(&query),
+        ));
+        let selector = crate::upstream::GroupSelector::new(
+            SelectionPolicy::Parallel,
+            vec![member("early"), member("late")],
+        )
+        .unwrap();
+        let executor = UpstreamGroupExecutor::new(selector, vec![early, late]).unwrap();
+        let sink = Arc::new(LateCollector::default());
+        let started = Instant::now();
+        let result = executor
+            .execute_with_late_sink(&query, &context(), sink.clone())
+            .await
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(200));
+        assert!(matches!(
+            result,
+            UpstreamOutcome::Response(response) if response.class() == ResponseClass::NoData
+        ));
+
+        for _ in 0..300 {
+            if sink.results().iter().any(|(_, connector, class)| {
+                connector == "late" && *class == ResponseClass::Positive
+            }) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(sink.results().iter().any(|(_, connector, class)| {
+            connector == "late" && *class == ResponseClass::Positive
+        }));
     }
 
     #[tokio::test]
