@@ -1115,6 +1115,35 @@ outbound: []
     }
 
     #[tokio::test]
+    async fn active_finalizer_owner_survives_runtime_owner_pruning() {
+        let coordinator = RuntimeCoordinator::new(policy_candidate(1));
+        let initial_owner = coordinator
+            .load()
+            .snapshot()
+            .policy_core()
+            .expect("policy core must exist")
+            .finalizer_owner();
+        initial_owner
+            .submit_task(std::future::pending::<()>())
+            .expect("active finalizer task must be accepted");
+
+        coordinator.activate(policy_candidate(2));
+        coordinator.activate(policy_candidate(3));
+
+        let owners = coordinator
+            .finalizer_owners
+            .lock()
+            .expect("finalizer owner lock must not be poisoned");
+        assert!(
+            owners
+                .iter()
+                .any(|owner| Arc::ptr_eq(owner, &initial_owner))
+        );
+        drop(owners);
+        initial_owner.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn bind_and_activate_publishes_a_prepared_candidate_after_binding() {
         let coordinator = RuntimeCoordinator::new(candidate(1));
         let (source, _) = crate::config::test_support::portable_example();
