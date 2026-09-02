@@ -559,6 +559,14 @@ impl ObservedDnsCore {
                     if let Some(observation) = observation {
                         dimensions.push(StatsDimension::source(observation.source));
                         dimensions.push(StatsDimension::cache_status(observation.cache_status));
+                        if let Some(client_bucket) =
+                            observation.client_bucket.as_deref().and_then(|id| {
+                                configured_id_from_validated(ConfiguredIdKind::ClientBucket, id)
+                            })
+                            && let Ok(dimension) = StatsDimension::client_bucket(client_bucket)
+                        {
+                            dimensions.push(dimension);
+                        }
                         if let Some(strategy_id) =
                             observation.strategy_id.as_deref().and_then(|id| {
                                 configured_id_from_validated(ConfiguredIdKind::Strategy, id)
@@ -603,7 +611,7 @@ impl ObservedDnsCore {
                 .route_id
                 .as_ref()
                 .map(|route| Arc::from(route.as_ref())),
-            client_bucket: None,
+            client_bucket: observation.and_then(|value| value.client_bucket.clone()),
             strategy_id: observation.and_then(|value| value.strategy_id.clone()),
             transport: request.context.transport.class,
             qname: Arc::from(question.name().to_ascii()),

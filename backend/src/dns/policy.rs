@@ -19,7 +19,7 @@ use crate::cache::{
 };
 use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedUpstream};
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
-use crate::policy::{PolicyBuildError, PolicyIndex, PolicyRequest};
+use crate::policy::{ClientMatch, PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
 use crate::ports::cache::{CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation};
 use crate::ports::exchange::{
@@ -541,6 +541,10 @@ impl PolicyDnsCore {
             Ok(plan) => plan,
             Err(_error) => return (servfail(request), None),
         };
+        let client_bucket = match &plan.client {
+            ClientMatch::Matched { client, .. } => Some(Arc::from(client.name.as_str())),
+            ClientMatch::Unknown => None,
+        };
         let strategy_id = Some(Arc::from(plan.strategy.id.as_str()));
 
         if let Some(resource_id) = plan.hosts {
@@ -569,6 +573,7 @@ impl PolicyDnsCore {
             return (
                 result,
                 Some(DnsResolutionObservation {
+                    client_bucket,
                     strategy_id,
                     source: StatsSource::Hosts,
                     cache_status: CacheStatus::Disabled,
@@ -580,6 +585,7 @@ impl PolicyDnsCore {
             return (
                 servfail(request),
                 Some(DnsResolutionObservation {
+                    client_bucket,
                     strategy_id,
                     source: StatsSource::Upstream,
                     cache_status: CacheStatus::StoreUnavailable,
@@ -598,6 +604,7 @@ impl PolicyDnsCore {
         (
             result,
             Some(DnsResolutionObservation {
+                client_bucket,
                 strategy_id,
                 source: outcome.source,
                 cache_status: outcome.cache_status,
@@ -1267,13 +1274,14 @@ mod tests {
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RecordType};
+    use ipnet::IpNet;
 
     use crate::cache::CacheLookup;
     use crate::config::model::{EcsMode, RuleSetFormat};
     use crate::config::resolve::{
-        ConfigId, ResolvedEcs, ResolvedOutbound, ResolvedRuleSet, ResolvedRuleSetRef,
-        ResolvedSecretRef, ResolvedStrategyRule, ResolvedUpstream, ResolvedUpstreamMember,
-        ValueSource,
+        ConfigId, ResolvedClient, ResolvedEcs, ResolvedOutbound, ResolvedRuleSet,
+        ResolvedRuleSetRef, ResolvedSecretRef, ResolvedStrategyRule, ResolvedTtlOverride,
+        ResolvedUpstream, ResolvedUpstreamMember, ValueSource,
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
@@ -1470,6 +1478,46 @@ mod tests {
         assert_eq!(
             observation.cache_status,
             crate::ports::telemetry::CacheStatus::Fresh
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_core_observation_reports_matched_client_bucket() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.clients.push(ResolvedClient {
+            id: ConfigId::new("office").unwrap(),
+            ids: Vec::new(),
+            ips: vec![IpNet::from_str("127.0.0.0/8").unwrap()],
+            strategy: None,
+            cache: None,
+            ttl_override: ResolvedTtlOverride {
+                enabled: false,
+                min: None,
+                max: None,
+                source: ValueSource::Default,
+            },
+            edns_client_subnet: ResolvedEcs {
+                mode: EcsMode::Disabled,
+                custom_ip: None,
+                source: ValueSource::Default,
+            },
+        });
+        let config = Arc::new(config);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry =
+            UpstreamRegistry::from_resolved_with_doh_transport(&config.upstreams, transport)
+                .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, registry).unwrap();
+
+        let (_, observation) = core
+            .resolve_with_observation(&request("remote.example.", RecordType::A))
+            .await;
+        assert_eq!(
+            observation
+                .expect("matched client must be included in policy observation")
+                .client_bucket
+                .as_deref(),
+            Some("office")
         );
     }
 

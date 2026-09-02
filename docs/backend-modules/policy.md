@@ -1,6 +1,6 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Policy 可消费 async PreparedRuntime 提供的 compiled file/remote snapshot，并已由 ActiveRuntime remote/file refresh worker 驱动版本化 atomic live swap，Runtime snapshot 资源摘要可原子更新，配置候选级 reload 尚未实现
+> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Policy 可消费 async PreparedRuntime 提供的 compiled file/remote snapshot，并已由 ActiveRuntime remote/file refresh worker 驱动版本化 atomic live swap，Runtime snapshot 资源摘要可原子更新；Policy Core 已将匹配后的 client bucket 作为低基数 observation 首轮输出，配置候选级 reload 尚未实现
 >
 > 更新日期：2026-09-01
 >
@@ -60,6 +60,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 - `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash rule-set；remote/dat/selector/缺失资源在普通同步构造边界返回显式错误；`from_config_with_resource_indexes` 可消费 prepare 阶段已编译的 file/remote snapshot；
 - rule/hosts 执行：固定 listener hosts → strategy rule 顺序，输出不含原文的 matched-rule 摘要，并覆盖 local hosts、rule-set upstream 与 rule ECS；
 - `PolicyDnsCore::UpstreamRuntime`：direct hosts/plain HTTP DoH connector 统一由 `UpstreamRegistry` 构造，Unsupported DoH 能力在 prepare 边界向上游构建错误传播；
+- `PolicyDnsCore::resolve_with_observation`：复用同一次 `PolicyIndex::evaluate` 的 client match，输出配置 client bucket 以及 strategy/source/cache 首轮元数据，不泄露原始 client ID/IP；
 - 这些索引只持有已解析 typed 值，不在请求路径读取 YAML 或执行网络 I/O。
 
 ## 4. 域名规范化
@@ -193,7 +194,8 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [ ] 接入 Runtime snapshot 原子发布；
 - [x] 完成冲突、优先级、未知资源和 file loader 测试；
 - [x] 完成 Policy compiled resource snapshot 的版本化 atomic swap，并支持 supplied compiled file/remote hosts/rule-set snapshot 的初始构造；跨 transport contract 和完整覆盖矩阵测试仍待完成。
+- [x] 提供 client bucket/strategy/source/cache 首轮低基数 observation；完整 upstream/group/resource result 仍待完成。
 
-阶段证据：Policy focused tests 14 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path、基础 Cache/Core 命中、snapshot-local optimistic refresh 和 unsupported feature propagation；最近一次大阶段 backend 全量测试为 417 passed、0 failed，本阶段 upstream executor 增量测试 13 passed、0 failed。新增 supplied compiled file/remote snapshot 的初始构造，并由 async PreparedRuntime file/remote prepare 与 ActiveRuntime refresh worker 路径验证；Runtime 已提供原子资源摘要并由 service 捕获同 revision core，`RuntimeCoordinator` 现统一托管历史/当前 Policy finalizer owner，并在 service drain 后按 deadline 关闭；旧 Runtime optimistic refresh 现可经 current-target 路由到最新 Runtime cache/finalizer，nested group late sink 也会继续传播；仍未接入跨 Runtime 配置候选 reload 和完整 late-window 候选语义；Policy compiled resource live swap/stale version 已验证，也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
+阶段证据：Policy focused tests 当前 19 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path、基础 Cache/Core 命中、snapshot-local optimistic refresh、unsupported feature propagation 和 client bucket observation；最近一次大阶段 backend 全量测试为 417 passed、0 failed，本阶段 upstream executor 增量测试 13 passed、0 failed。新增 supplied compiled file/remote snapshot 的初始构造，并由 async PreparedRuntime file/remote prepare 与 ActiveRuntime refresh worker 路径验证；Runtime 已提供原子资源摘要并由 service 捕获同 revision core，`RuntimeCoordinator` 现统一托管历史/当前 Policy finalizer owner，并在 service drain 后按 deadline 关闭；旧 Runtime optimistic refresh 现可经 current-target 路由到最新 Runtime cache/finalizer，nested group late sink 也会继续传播；仍未接入跨 Runtime 配置候选 reload 和完整 late-window 候选语义；Policy compiled resource live swap/stale version 已验证，也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
 
 当前实现进度：**70%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan 首轮组合、supplied compiled file/remote snapshot、注入式 direct DoH request path、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、nested late sink 传播和 Policy resource live CAS；Runtime snapshot 配置候选 reload、fast-positive late sink、RuntimeCoordinator 历史/当前 finalizer owner、完整 late-window 候选语义、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。

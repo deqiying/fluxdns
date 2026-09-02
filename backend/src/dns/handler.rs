@@ -28,6 +28,7 @@ pub enum CoreOutcome {
 /// answer source 和 cache 状态，供详情日志与聚合统计复用同一份判定结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsResolutionObservation {
+    pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
     pub source: StatsSource,
     pub cache_status: CacheStatus,
