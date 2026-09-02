@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use thiserror::Error;
-use tokio::task::JoinSet;
+use tokio::task::{Id as TokioTaskId, JoinSet};
 
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::effects::Clock;
@@ -169,6 +169,7 @@ pub enum SupervisorError {
 pub struct Supervisor {
     cancellation: Cancellation,
     tasks: JoinSet<TaskCompletion>,
+    task_ids: BTreeMap<TokioTaskId, TaskId>,
     registered: BTreeSet<TaskId>,
     scoped_cancellations: BTreeMap<TaskId, Cancellation>,
 }
@@ -184,6 +185,7 @@ impl Supervisor {
         Self {
             cancellation: Cancellation::new(),
             tasks: JoinSet::new(),
+            task_ids: BTreeMap::new(),
             registered: BTreeSet::new(),
             scoped_cancellations: BTreeMap::new(),
         }
@@ -201,7 +203,8 @@ impl Supervisor {
         if !self.registered.insert(spec.id.clone()) {
             return Err(SupervisorError::DuplicateTask(spec.id));
         }
-        self.tasks.spawn(async move {
+        let task_id = spec.id.clone();
+        let task_handle = self.tasks.spawn(async move {
             let spec_for_completion = spec.clone();
             let exit = match future.await {
                 Ok(()) => TaskExit::Completed,
@@ -213,6 +216,7 @@ impl Supervisor {
                 restart_count: 0,
             }
         });
+        self.task_ids.insert(task_handle.id(), task_id);
         Ok(())
     }
 
@@ -234,7 +238,7 @@ impl Supervisor {
         let supervisor_cancellation = self.cancellation.clone();
         self.scoped_cancellations
             .insert(task_id.clone(), task_cancellation.clone());
-        self.tasks.spawn(async move {
+        let task_handle = self.tasks.spawn(async move {
             let result = tokio::select! {
                 result = future => result,
                 _ = supervisor_cancellation.cancelled() => Err(TaskError::Cancelled),
@@ -251,6 +255,7 @@ impl Supervisor {
                 restart_count: 0,
             }
         });
+        self.task_ids.insert(task_handle.id(), task_id.clone());
         Ok(self
             .scoped_cancellations
             .get(&task_id)
@@ -270,9 +275,10 @@ impl Supervisor {
         if !self.registered.insert(spec.id.clone()) {
             return Err(SupervisorError::DuplicateTask(spec.id));
         }
+        let task_id = spec.id.clone();
         let cancellation = self.cancellation.clone();
         let factory: Arc<dyn Fn() -> TaskFuture + Send + Sync> = Arc::new(factory);
-        self.tasks.spawn(async move {
+        let task_handle = self.tasks.spawn(async move {
             let mut restart_count = 0;
             let exit = loop {
                 let result = tokio::select! {
@@ -299,27 +305,29 @@ impl Supervisor {
                 restart_count,
             }
         });
+        self.task_ids.insert(task_handle.id(), task_id);
         Ok(())
     }
 
     /// 等待一个 task 结束，并从注册表移除它。
     pub async fn join_next(&mut self) -> Option<TaskCompletion> {
-        let result = self.tasks.join_next().await?;
+        let result = self.tasks.join_next_with_id().await?;
         match result {
-            Ok(completion) => {
-                self.registered.remove(&completion.spec.id);
-                self.scoped_cancellations.remove(&completion.spec.id);
+            Ok((task_id, completion)) => {
+                let registered_id = self
+                    .task_ids
+                    .remove(&task_id)
+                    .unwrap_or_else(|| completion.spec.id.clone());
+                self.registered.remove(&registered_id);
+                self.scoped_cancellations.remove(&registered_id);
                 Some(completion)
             }
             Err(error) => {
-                // A JoinError without an attached task descriptor can only happen when
-                // the task panics or is aborted. Keep the tree accounting conservative.
-                let id = self
-                    .registered
-                    .iter()
-                    .next()
-                    .cloned()
-                    .unwrap_or_else(|| TaskId::new("unknown").expect("static task id"));
+                let task_id = error.id();
+                let id = self.task_ids.remove(&task_id).unwrap_or_else(|| {
+                    TaskId::new(format!("join-error.{task_id}"))
+                        .expect("tokio task id must produce a valid fallback task id")
+                });
                 self.registered.remove(&id);
                 self.scoped_cancellations.remove(&id);
                 Some(TaskCompletion {
@@ -463,6 +471,33 @@ mod tests {
         assert!(exits.contains(&TaskExit::Completed));
         assert!(exits.contains(&TaskExit::Failed(TaskErrorKind::Transient)));
         assert!(exits.contains(&TaskExit::Panicked));
+    }
+
+    #[tokio::test]
+    async fn panic_completion_is_attributed_to_the_panicking_task() {
+        let mut supervisor = Supervisor::new();
+        let sibling_cancellation = supervisor
+            .spawn_scoped(spec("a.sibling"), |cancellation| {
+                Box::pin(async move {
+                    cancellation.cancelled().await;
+                    Err(TaskError::Cancelled)
+                })
+            })
+            .unwrap();
+        supervisor
+            .spawn(spec("z.panic"), Box::pin(async { panic!("test panic") }))
+            .unwrap();
+
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.spec.id.as_str(), "z.panic");
+        assert_eq!(completion.exit, TaskExit::Panicked);
+        assert_eq!(supervisor.task_count(), 1);
+
+        sibling_cancellation.cancel(CancelReason::Shutdown);
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.spec.id.as_str(), "a.sibling");
+        assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(supervisor.task_count(), 0);
     }
 
     #[tokio::test]

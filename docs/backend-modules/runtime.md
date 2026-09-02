@@ -143,7 +143,7 @@ Supervisor
 - 最近启动、失败和重试时间；
 - shutdown hook。
 
-`Supervisor::spawn` 继续接收一次性 `TaskFuture`，用于已经由上层持有重建逻辑的 task。需要 supervisor 自己重建的 task 使用 `spawn_with_factory`：factory 每次尝试生成一个新 future，只有 `TaskError::Transient` 且未收到 shutdown cancellation 时才按 `RestartPolicy::Transient { max_restarts }` 有界重试，并在重试间使用可取消的指数退避。需要在 reload 时单独停止的 task 使用 `spawn_scoped`，其 cancellation 仍由 supervisor 持有，并在全局 shutdown 时统一回收。最终 `TaskCompletion` 携带 `restart_count`，达到上限的瞬时失败可由 `restart_exhausted()` 明确识别；`ShutdownReport` 聚合已发生的重试次数。当前 service 的 listener/resource task 仍使用 `RestartPolicy::Never` 或内部自带 backoff；显式 service reload 已使用 revision 化 task ID 注册新 listener，并取消旧 token；`DnsService` 已在等待 Ctrl-C 时观察 task completion，Degraded 终止只记录，FatalEndpoint/Fatal、重试耗尽和 panic 会升级为 `ServiceError::TaskFailure`，listener factory 自动重建和完整 endpoint 故障矩阵仍留在后续阶段。
+`Supervisor::spawn` 继续接收一次性 `TaskFuture`，用于已经由上层持有重建逻辑的 task。需要 supervisor 自己重建的 task 使用 `spawn_with_factory`：factory 每次尝试生成一个新 future，只有 `TaskError::Transient` 且未收到 shutdown cancellation 时才按 `RestartPolicy::Transient { max_restarts }` 有界重试，并在重试间使用可取消的指数退避。需要在 reload 时单独停止的 task 使用 `spawn_scoped`，其 cancellation 仍由 supervisor 持有，并在全局 shutdown 时统一回收。Supervisor 同时记录 Tokio `JoinSet` task ID 到 FluxDNS `TaskId` 的映射，`JoinError` 的 panic/abort 结果按真实 task 归因，不使用注册表顺序猜测兄弟 task。最终 `TaskCompletion` 携带 `restart_count`，达到上限的瞬时失败可由 `restart_exhausted()` 明确识别；`ShutdownReport` 聚合已发生的重试次数。当前 service 的 listener/resource task 仍使用 `RestartPolicy::Never` 或内部自带 backoff；显式 service reload 已使用 revision 化 task ID 注册新 listener，并取消旧 token；`DnsService` 已在等待 Ctrl-C 时观察 task completion，Degraded 终止只记录，FatalEndpoint/Fatal、重试耗尽和 panic 会升级为 `ServiceError::TaskFailure`，listener factory 自动重建和完整 endpoint 故障矩阵仍留在后续阶段。
 
 ## 8. 故障处理
 
@@ -216,6 +216,7 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [x] `Supervisor::spawn_with_factory` 实现瞬时失败的可取消指数退避、有界重试、重试次数和上限耗尽识别；当前 service task 的具体故障策略接入仍待完成；
 - [x] `DnsService` 观察 Supervisor task completion，区分 Degraded 终止与 FatalEndpoint/Fatal、重试耗尽和 panic；listener 故障自动 factory 重建仍待完成；
 - [x] `Supervisor::spawn_scoped` 提供 task-scoped cancellation，且全局 shutdown 仍能回收 scoped task；DnsService 的 UDP/TCP/DoH listener 已使用独立 scoped token；
+- [x] Supervisor 通过 Tokio `JoinSet` task ID 映射精确归因 panic/abort 任务，避免按注册表顺序误删 sibling task；
 - [x] `DnsService::reload_prepared` 在候选激活后重建 UDP/TCP/DoH listener 和 resource refresh task，并取消旧 scoped token；
 - [x] `RuntimeCoordinator::bind_and_activate` 接入候选 `PreparedRuntime → bind_prepared → revision CAS`，bind/CAS 失败保留旧 runtime 或返还可重试 candidate；Application 已提供显式配置文件 reload 触发 API，service-aware reload 可重建 listener task；
 - [x] `RuntimeCoordinator::refresh_resource_if_current` 以 captured runtime 做前后活动实例校验，stale 时返回显式 coordinator error；service 重新读取当前 runtime 后再尝试；
@@ -226,6 +227,6 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [ ] 完成完整 drain/shutdown（flush、checkpoint、超时分项报告）；
 - [ ] 完成并发、故障和时间控制测试。
 
-阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter，并验证 async prepare 可在 bind 前完成 remote restore/fetch、file snapshot load、持久化、refresh worker 构造和第二次 fallback 恢复；`runtime::coordinator::tests` 进一步验证 coordinator 级资源刷新代理、stale-active guard、候选 bind/activate 成功路径和 CAS 失败返还 candidate；`runtime::supervisor::tests` 验证 factory task 的瞬时失败重试、重试上限耗尽识别、shutdown report 重试计数以及 scoped task 的单独取消和全局 shutdown 回收；`service::tests` 验证 Degraded 终止、FatalEndpoint 升级、重试耗尽、panic 分类、系统 loopback listener reload 以及 resource worker token reconciliation；service 将 remote/file refresh task 注册进 Supervisor，成功候选通过 ActiveRuntime 的 Policy CAS 和 Runtime metadata CAS 发布，缺失 file 进入失败 backoff。`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS、SOCKS5H、取消和 body limit。Application 自动配置变更事件、真正跨 Runtime snapshot 生命周期和 flush 仍未完成。
+阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter，并验证 async prepare 可在 bind 前完成 remote restore/fetch、file snapshot load、持久化、refresh worker 构造和第二次 fallback 恢复；`runtime::coordinator::tests` 进一步验证 coordinator 级资源刷新代理、stale-active guard、候选 bind/activate 成功路径和 CAS 失败返还 candidate；`runtime::supervisor::tests` 验证 factory task 的瞬时失败重试、重试上限耗尽识别、shutdown report 重试计数、scoped task 的单独取消和全局 shutdown 回收，以及 panic completion 按真实 task ID 归因；`service::tests` 验证 Degraded 终止、FatalEndpoint 升级、重试耗尽、panic 分类、系统 loopback listener reload 以及 resource worker token reconciliation；service 将 remote/file refresh task 注册进 Supervisor，成功候选通过 ActiveRuntime 的 Policy CAS 和 Runtime metadata CAS 发布，缺失 file 进入失败 backoff。`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS、SOCKS5H、取消和 body limit。Application 自动配置变更事件、真正跨 Runtime snapshot 生命周期和 flush 仍未完成。
 
 当前实现进度：**60%**。已验证 Runtime snapshot 资源摘要、原子资源 metadata publish、service core 构造入口、生产 ResourceFetcher ownership、当前 Policy finalizer owner、同一 ActiveRuntime 内的 remote/file refresh worker/CAS publish，以及显式 reload 的 listener/resource task 集合重建；自动配置事件、独立 resource-only runtime swap、flush 和完整服务级故障矩阵仍未接线。
