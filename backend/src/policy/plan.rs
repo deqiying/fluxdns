@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::config::model::RuleSetFormat;
 use crate::config::resolve::{
@@ -116,7 +117,7 @@ pub enum CacheDecision {
     Disabled,
     Pool {
         namespace: CacheNamespace,
-        optimistic: bool,
+        optimistic_answer_ttl: Option<Duration>,
     },
 }
 
@@ -130,6 +131,17 @@ impl CacheDecision {
 
     pub const fn is_enabled(&self) -> bool {
         matches!(self, Self::Pool { .. })
+    }
+
+    /// 返回当前缓存池启用 optimistic stale 时使用的客户端应答 TTL。
+    pub const fn optimistic_answer_ttl(&self) -> Option<Duration> {
+        match self {
+            Self::Disabled => None,
+            Self::Pool {
+                optimistic_answer_ttl,
+                ..
+            } => *optimistic_answer_ttl,
+        }
     }
 }
 
@@ -465,7 +477,11 @@ impl PolicyIndex {
                     client_digest: digest,
                     strategy: strategy_namespace(strategy)?,
                 },
-                optimistic: cache.optimistic.as_ref().is_some_and(|value| value.enabled),
+                optimistic_answer_ttl: cache
+                    .optimistic
+                    .as_ref()
+                    .filter(|value| value.enabled)
+                    .map(|value| value.answer_ttl),
             });
         }
         if let Some(cache) = &strategy.cache {
@@ -474,7 +490,11 @@ impl PolicyIndex {
             }
             return Ok(CacheDecision::Pool {
                 namespace: CacheNamespace::Strategy(strategy_namespace(strategy)?),
-                optimistic: cache.optimistic.as_ref().is_some_and(|value| value.enabled),
+                optimistic_answer_ttl: cache
+                    .optimistic
+                    .as_ref()
+                    .filter(|value| value.enabled)
+                    .map(|value| value.answer_ttl),
             });
         }
         if !self.global_cache.enabled {
@@ -482,7 +502,11 @@ impl PolicyIndex {
         }
         Ok(CacheDecision::Pool {
             namespace: CacheNamespace::Global,
-            optimistic: self.global_cache.optimistic.enabled,
+            optimistic_answer_ttl: self
+                .global_cache
+                .optimistic
+                .enabled
+                .then_some(self.global_cache.optimistic.answer_ttl),
         })
     }
 }
@@ -789,9 +813,9 @@ mod tests {
         assert!(matches!(
             plan.cache,
             CacheDecision::Pool {
-                optimistic: true,
+                optimistic_answer_ttl: Some(ttl),
                 ..
-            }
+            } if ttl == Duration::from_secs(10)
         ));
     }
 

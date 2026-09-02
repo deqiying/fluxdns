@@ -678,20 +678,19 @@ impl PolicyDnsCore {
         match self.cache.lookup(&key, deadline).await {
             Ok(CacheLookup::Fresh(record)) => {
                 return Some(PolicyUpstreamResult::cache(
-                    UpstreamOutcome::Response((*record.entry.response).clone()),
+                    UpstreamOutcome::Response(fresh_cache_response(&record)),
                     CacheStatus::Fresh,
                 ));
             }
             Ok(CacheLookup::Stale { record, refresh })
-                if matches!(
-                    &plan.cache,
-                    crate::policy::CacheDecision::Pool {
-                        optimistic: true,
-                        ..
-                    }
-                ) =>
+                if plan.cache.optimistic_answer_ttl().is_some() =>
             {
-                let stale_response = Arc::clone(&record.entry.response);
+                let mut stale_response = (*record.entry.response).clone();
+                stale_response.set_ttl(
+                    plan.cache
+                        .optimistic_answer_ttl()
+                        .expect("stale branch requires optimistic answer TTL"),
+                );
                 if refresh.try_consume() {
                     self.schedule_optimistic_refresh(
                         key.clone(),
@@ -702,7 +701,7 @@ impl PolicyDnsCore {
                     );
                 }
                 return Some(PolicyUpstreamResult::cache(
-                    UpstreamOutcome::Response((*stale_response).clone()),
+                    UpstreamOutcome::Response(stale_response),
                     CacheStatus::Stale,
                 ));
             }
@@ -738,7 +737,7 @@ impl PolicyDnsCore {
                     .await
                 {
                     Ok(CacheLoadCompletion::Ready(record)) => Some(PolicyUpstreamResult::cache(
-                        UpstreamOutcome::Response((*record.entry.response).clone()),
+                        UpstreamOutcome::Response(fresh_cache_response(&record)),
                         CacheStatus::Fresh,
                     )),
                     Ok(CacheLoadCompletion::Failed(CacheLoadFailure::Cancelled(reason))) => {
@@ -934,6 +933,13 @@ fn apply_ttl_override(response: &mut CanonicalResponse, ttl_override: &ResolvedT
     if ttl_override.enabled {
         response.clamp_ttl(ttl_override.min, ttl_override.max);
     }
+}
+
+/// 从 fresh cache record 构造客户端响应，并按已缓存时间递减 RR TTL。
+fn fresh_cache_response(record: &crate::ports::cache::CacheRecord) -> CanonicalResponse {
+    let mut response = (*record.entry.response).clone();
+    response.age_ttl(Instant::now().saturating_duration_since(record.entry.inserted_at));
+    response
 }
 
 /// 根据请求级 ECS 配置生成真正发往上游的 canonical query。
@@ -1833,6 +1839,106 @@ mod tests {
         );
         assert_eq!(transport.calls.load(Ordering::Acquire), 1);
         assert_eq!(core.cache().store().stats().hits, 2);
+    }
+
+    #[tokio::test]
+    async fn cache_hits_apply_remaining_and_stale_answer_ttl() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        config.dns.cache.optimistic.enabled = true;
+        config.dns.cache.optimistic.answer_ttl = Duration::from_secs(7);
+        let config = Arc::new(config);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry =
+            UpstreamRegistry::from_resolved_with_doh_transport(&config.upstreams, transport)
+                .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, registry).unwrap();
+        let request = request("ttl-cache.example.", RecordType::A);
+        let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).unwrap();
+        let listener_id = ConfigId::new("dns").unwrap();
+        let plan = core
+            .policy()
+            .evaluate(crate::policy::PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: request.context.client.client_addr,
+                client_digest: None,
+                qname: Some(&qname),
+            })
+            .unwrap();
+        let key = cache_key(&plan, &request).unwrap();
+        let response = Arc::new(
+            CanonicalResponse::response_with_answers(
+                &request.query,
+                [Record::from_rdata(
+                    request.query.question().name().clone(),
+                    120,
+                    RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, 20))),
+                )],
+            )
+            .unwrap(),
+        );
+        let now = Instant::now();
+        let fresh_entry = Arc::new(crate::ports::cache::CacheEntry {
+            response: Arc::clone(&response),
+            inserted_at: now - Duration::from_secs(20),
+            expires_at: now + Duration::from_secs(100),
+            stale_until: Some(now + Duration::from_secs(160)),
+            response_class: crate::ports::cache::CacheResponseClass::NoError,
+            producer_revision: RuntimeRevision(1),
+            quality: crate::ports::cache::CacheQuality::Complete,
+            checksum: 1,
+            format_version: key.format_version,
+        });
+        let version = match core
+            .cache()
+            .store()
+            .compare_and_swap(
+                key.clone(),
+                crate::ports::cache::CacheCondition::Absent,
+                fresh_entry,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+            )
+            .await
+            .unwrap()
+        {
+            crate::ports::cache::CacheWriteOutcome::Inserted(version) => version,
+            other => panic!("expected inserted cache entry, got {other:?}"),
+        };
+
+        let CoreOutcome::Response(fresh) = core.resolve(&request).await.unwrap() else {
+            panic!("expected fresh cache response");
+        };
+        assert!((99..=100).contains(&fresh.as_message().answers[0].ttl));
+
+        let stale_now = Instant::now();
+        let stale_entry = Arc::new(crate::ports::cache::CacheEntry {
+            response,
+            inserted_at: stale_now - Duration::from_secs(121),
+            expires_at: stale_now - Duration::from_secs(1),
+            stale_until: Some(stale_now + Duration::from_secs(60)),
+            response_class: crate::ports::cache::CacheResponseClass::NoError,
+            producer_revision: RuntimeRevision(1),
+            quality: crate::ports::cache::CacheQuality::Complete,
+            checksum: 1,
+            format_version: key.format_version,
+        });
+        core.cache()
+            .store()
+            .compare_and_swap(
+                key,
+                crate::ports::cache::CacheCondition::Version(version),
+                stale_entry,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+            )
+            .await
+            .unwrap();
+
+        let CoreOutcome::Response(stale) = core.resolve(&request).await.unwrap() else {
+            panic!("expected stale cache response");
+        };
+        assert_eq!(stale.as_message().answers[0].ttl, 7);
     }
 
     #[tokio::test]

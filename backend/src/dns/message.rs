@@ -343,6 +343,36 @@ impl CanonicalResponse {
         self.ttl = extract_ttl_metadata(&self.message, self.class);
     }
 
+    /// 按缓存中已经过的整秒递减全部 RR TTL，并同步刷新派生 TTL 元数据。
+    pub(crate) fn age_ttl(&mut self, elapsed: Duration) {
+        let elapsed = u32::try_from(elapsed.as_secs()).unwrap_or(u32::MAX);
+        for record in self
+            .message
+            .answers
+            .iter_mut()
+            .chain(&mut self.message.authorities)
+            .chain(&mut self.message.additionals)
+        {
+            record.ttl = record.ttl.saturating_sub(elapsed);
+        }
+        self.ttl = extract_ttl_metadata(&self.message, self.class);
+    }
+
+    /// 将 stale 响应中的全部 RR TTL 设置为配置的乐观应答 TTL。
+    pub(crate) fn set_ttl(&mut self, ttl: Duration) {
+        let ttl = u32::try_from(ttl.as_secs()).unwrap_or(u32::MAX);
+        for record in self
+            .message
+            .answers
+            .iter_mut()
+            .chain(&mut self.message.authorities)
+            .chain(&mut self.message.additionals)
+        {
+            record.ttl = ttl;
+        }
+        self.ttl = extract_ttl_metadata(&self.message, self.class);
+    }
+
     pub fn matches_query(&self, query: &CanonicalQuery) -> bool {
         CanonicalQuestion::from_query(&self.message.queries[0]) == *query.question()
     }
@@ -612,6 +642,53 @@ mod tests {
         assert_eq!(response.as_message().answers[0].ttl, 10);
         assert_eq!(response.as_message().authorities[0].ttl, 50);
         assert_eq!(response.as_message().additionals[0].ttl, 100);
+        assert_eq!(response.ttl().min_ttl, Some(10));
+    }
+
+    #[test]
+    fn cached_ttl_ages_without_underflow() {
+        let expected = CanonicalQuery::from_message(query(1, "example.com.")).unwrap();
+        let mut message = response(&expected, ResponseCode::NoError);
+        message.add_answer(Record::from_rdata(
+            Name::from_str("example.com.").unwrap(),
+            30,
+            RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
+        ));
+        let mut response =
+            CanonicalResponse::from_message(message, &expected, DnsMessageId::new(77)).unwrap();
+
+        response.age_ttl(Duration::from_secs(40));
+
+        assert_eq!(response.as_message().answers[0].ttl, 0);
+        assert_eq!(response.ttl().min_ttl, Some(0));
+    }
+
+    #[test]
+    fn stale_ttl_replaces_all_rr_sections_and_metadata() {
+        let expected = CanonicalQuery::from_message(query(1, "example.com.")).unwrap();
+        let record = |ttl, address| {
+            Record::from_rdata(
+                Name::from_str("example.com.").unwrap(),
+                ttl,
+                RData::A(A(address)),
+            )
+        };
+        let mut message = response(&expected, ResponseCode::NoError);
+        message.add_answer(record(5, Ipv4Addr::new(192, 0, 2, 1)));
+        message
+            .authorities
+            .push(record(50, Ipv4Addr::new(192, 0, 2, 2)));
+        message
+            .additionals
+            .push(record(500, Ipv4Addr::new(192, 0, 2, 3)));
+        let mut response =
+            CanonicalResponse::from_message(message, &expected, DnsMessageId::new(77)).unwrap();
+
+        response.set_ttl(Duration::from_secs(10));
+
+        assert_eq!(response.as_message().answers[0].ttl, 10);
+        assert_eq!(response.as_message().authorities[0].ttl, 10);
+        assert_eq!(response.as_message().additionals[0].ttl, 10);
         assert_eq!(response.ttl().min_ttl, Some(10));
     }
 

@@ -1,6 +1,6 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh 和低基数 resolution observation；Policy observation 已补充首轮 client bucket/selected upstream；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入
+> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh 和低基数 resolution observation；Policy observation 已补充首轮 client bucket/selected upstream；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR，fresh/stale cache response 已应用剩余 TTL 与 optimistic answer TTL；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入
 >
 > 更新日期：2026-09-03
 >
@@ -133,7 +133,7 @@ NXDOMAIN、REFUSED、SERVFAIL、TC 都是有效 DNS response，不转换成 adap
 - cache expiry TTL：用于 entry 生命周期；
 - client-visible TTL：按当前 override 和剩余 TTL 生成。
 
-TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 的实际过期时间。当前已实现全部 RR 的配置 min/max 覆写；基于剩余生命周期递减 TTL，以及 stale/optimistic `answer_ttl` 限制仍待后续切片。
+TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 的实际过期时间。当前已实现全部 RR 的配置 min/max 覆写；fresh cache response 按 `inserted_at` 后经过的整秒递减全部 RR TTL，stale response 先统一使用所选缓存池的 `optimistic.answer_ttl`，再应用当前请求的 TTL override。
 
 ## 10. 事件
 
@@ -182,10 +182,11 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 实现固定响应的 transport 无关 handler；
 - [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
 - [x] 实现配置驱动的 client-visible TTL min/max 覆写，且不改变 cache admission 使用的 origin TTL；
+- [x] fresh cache response 应用剩余 TTL，stale response 应用当前缓存池的 optimistic answer TTL；
 - [x] 实现 rule/strategy/client/global ECS 正常路径、canonical query 替换及最终 ECS cache key；
-- [ ] 完成显式 upstream/group member ECS、剩余 TTL/stale answer TTL 和完整错误映射；
+- [ ] 完成显式 upstream/group member ECS 和完整错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：`dns::message::tests` 当前 12 项通过，覆盖 TTL 上下界、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 27 项通过，覆盖 global custom ECS 实际 DoH wire、请求 ECS 优先与 client ECS cache key 隔离；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
+阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 28 项通过，覆盖 cache hit 剩余/stale TTL、global custom ECS 实际 DoH wire、请求 ECS 优先与 client ECS cache key 隔离；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
 
-当前实现进度：**67%**。
+当前实现进度：**69%**。
