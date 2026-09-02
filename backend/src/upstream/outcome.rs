@@ -41,6 +41,12 @@ pub struct UpstreamAttempt {
     pub outcome: UpstreamOutcome,
 }
 
+/// 聚合后的上游结果及产生该结果的成员。
+pub(super) struct AggregatedOutcome {
+    pub connector: Option<ConnectorId>,
+    pub outcome: UpstreamOutcome,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutcomeError {
     DuplicateAttemptIndex { index: usize },
@@ -124,10 +130,19 @@ pub fn deduplicate_connector_order(
 /// truncated response 和可重试 transport failure 会继续 fallback；若没有可接受
 /// response，取消优先于固定 SERVFAIL。
 pub fn aggregate(
-    _mode: SelectionPolicy,
+    mode: SelectionPolicy,
+    query: &CanonicalQuery,
+    attempts: Vec<UpstreamAttempt>,
+) -> Result<UpstreamOutcome, OutcomeError> {
+    Ok(aggregate_with_connector(mode, query, attempts)?.outcome)
+}
+
+/// 聚合一次 group 尝试，并保留实际产生终态响应或取消的成员 ID。
+pub(super) fn aggregate_with_connector(
+    mode: SelectionPolicy,
     query: &CanonicalQuery,
     mut attempts: Vec<UpstreamAttempt>,
-) -> Result<UpstreamOutcome, OutcomeError> {
+) -> Result<AggregatedOutcome, OutcomeError> {
     attempts.sort_by_key(|attempt| attempt.attempt_index);
     for pair in attempts.windows(2) {
         if pair[0].attempt_index == pair[1].attempt_index {
@@ -137,35 +152,35 @@ pub fn aggregate(
         }
     }
 
-    let mut cancellation = None;
-    let mut selected_response: Option<CanonicalResponse> = None;
+    let mut cancellation: Option<(ConnectorId, CancelReason)> = None;
+    let mut selected_response: Option<(ConnectorId, CanonicalResponse)> = None;
     let mut fallback_blocked = false;
     for attempt in attempts {
         if fallback_blocked {
             if let UpstreamOutcome::Cancelled(reason) = attempt.outcome {
-                cancellation = Some(prefer_cancel(cancellation, reason));
+                cancellation = Some(prefer_cancel(cancellation, attempt.connector, reason));
             }
             continue;
         }
         match assess(&attempt.outcome).fallback {
             FallbackDecision::Continue => {
                 if let UpstreamOutcome::Cancelled(reason) = attempt.outcome {
-                    cancellation = Some(prefer_cancel(cancellation, reason));
+                    cancellation = Some(prefer_cancel(cancellation, attempt.connector, reason));
                 }
             }
             FallbackDecision::Stop => match attempt.outcome {
                 UpstreamOutcome::Response(candidate) => {
-                    let replace = selected_response.as_ref().is_none_or(|current| {
-                        _mode == SelectionPolicy::Parallel
+                    let replace = selected_response.as_ref().is_none_or(|(_, current)| {
+                        mode == SelectionPolicy::Parallel
                             && response_preference(candidate.class())
                                 > response_preference(current.class())
                     });
                     if replace {
-                        selected_response = Some(candidate);
+                        selected_response = Some((attempt.connector, candidate));
                     }
                 }
                 UpstreamOutcome::Cancelled(reason) => {
-                    cancellation = Some(prefer_cancel(cancellation, reason));
+                    cancellation = Some(prefer_cancel(cancellation, attempt.connector, reason));
                 }
                 UpstreamOutcome::TransportFailure(failure) => {
                     fallback_blocked |= !failure.retryable;
@@ -174,19 +189,34 @@ pub fn aggregate(
         }
     }
 
-    if let Some(reason) = cancellation.filter(|reason| cancel_priority(*reason) >= 3) {
-        return Ok(UpstreamOutcome::Cancelled(reason));
+    if let Some((connector, reason)) = cancellation
+        .as_ref()
+        .filter(|(_, reason)| cancel_priority(*reason) >= 3)
+    {
+        return Ok(AggregatedOutcome {
+            connector: Some(connector.clone()),
+            outcome: UpstreamOutcome::Cancelled(*reason),
+        });
     }
-    if let Some(response) = selected_response {
-        return Ok(UpstreamOutcome::Response(response));
+    if let Some((connector, response)) = selected_response {
+        return Ok(AggregatedOutcome {
+            connector: Some(connector),
+            outcome: UpstreamOutcome::Response(response),
+        });
     }
-    if let Some(reason) = cancellation {
-        return Ok(UpstreamOutcome::Cancelled(reason));
+    if let Some((connector, reason)) = cancellation {
+        return Ok(AggregatedOutcome {
+            connector: Some(connector),
+            outcome: UpstreamOutcome::Cancelled(reason),
+        });
     }
-    Ok(UpstreamOutcome::Response(
-        CanonicalResponse::empty_response(query, ResponseCode::ServFail)
-            .expect("canonical SERVFAIL response construction is infallible"),
-    ))
+    Ok(AggregatedOutcome {
+        connector: None,
+        outcome: UpstreamOutcome::Response(
+            CanonicalResponse::empty_response(query, ResponseCode::ServFail)
+                .expect("canonical SERVFAIL response construction is infallible"),
+        ),
+    })
 }
 
 fn response_preference(class: ResponseClass) -> u8 {
@@ -198,14 +228,18 @@ fn response_preference(class: ResponseClass) -> u8 {
     }
 }
 
-fn prefer_cancel(current: Option<CancelReason>, candidate: CancelReason) -> CancelReason {
-    current.map_or(candidate, |current| {
-        if cancel_priority(candidate) > cancel_priority(current) {
-            candidate
-        } else {
-            current
+fn prefer_cancel(
+    current: Option<(ConnectorId, CancelReason)>,
+    connector: ConnectorId,
+    candidate: CancelReason,
+) -> (ConnectorId, CancelReason) {
+    match current {
+        None => (connector, candidate),
+        Some(current) if cancel_priority(candidate) > cancel_priority(current.1) => {
+            (connector, candidate)
         }
-    })
+        Some(current) => current,
+    }
 }
 
 fn cancel_priority(reason: CancelReason) -> u8 {
@@ -229,8 +263,8 @@ mod tests {
     use crate::ports::exchange::{ConnectorId, SelectionPolicy, TransportFailureClass};
 
     use super::{
-        AttemptClass, FallbackDecision, UpstreamAttempt, aggregate, assess,
-        deduplicate_connector_order, should_enter_fallback,
+        AttemptClass, FallbackDecision, UpstreamAttempt, aggregate, aggregate_with_connector,
+        assess, deduplicate_connector_order, should_enter_fallback,
     };
 
     fn query() -> CanonicalQuery {
@@ -322,7 +356,7 @@ mod tests {
 
     #[test]
     fn valid_response_wins_in_fallback_order() {
-        let outcome = aggregate(
+        let outcome = aggregate_with_connector(
             SelectionPolicy::Failover,
             &query(),
             vec![
@@ -350,7 +384,11 @@ mod tests {
             ],
         )
         .unwrap();
-        let crate::ports::exchange::UpstreamOutcome::Response(response) = outcome else {
+        assert_eq!(
+            outcome.connector.as_ref().map(ConnectorId::as_str),
+            Some("two")
+        );
+        let crate::ports::exchange::UpstreamOutcome::Response(response) = outcome.outcome else {
             panic!("expected DNS response");
         };
         assert_eq!(response.class(), ResponseClass::NxDomain);

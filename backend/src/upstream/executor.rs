@@ -11,6 +11,7 @@ use crate::dns::{CancelReason, CanonicalQuery, RequestContext};
 use crate::ports::PortFuture;
 use crate::ports::exchange::{ConnectorId, DnsExchange, SelectionPolicy, UpstreamOutcome};
 
+use super::outcome::aggregate_with_connector;
 use super::{FallbackDecision, GroupSelector, GroupSelectorError, UpstreamAttempt, assess};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -89,6 +90,12 @@ pub trait LateResultSink: Send + Sync {
     /// 生产实现应把 future 放入自身的有界生命周期容器，避免 upstream 编排创建
     /// 无法在 shutdown 时回收的 detached task。
     fn spawn_drain(&self, task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>);
+}
+
+/// group 执行终态及实际产生该终态的成员。
+pub(crate) struct GroupExecutionResult {
+    pub(crate) connector: Option<ConnectorId>,
+    pub(crate) outcome: UpstreamOutcome,
 }
 
 /// group 成员的已绑定执行句柄。
@@ -255,7 +262,7 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
     ) -> Result<UpstreamOutcome, ExecutorError> {
-        self.execute_inner(query, context, None).await
+        Ok(self.execute_inner(query, context, None).await?.outcome)
     }
 
     pub async fn execute_with_late_sink(
@@ -264,6 +271,28 @@ impl UpstreamGroupExecutor {
         context: &RequestContext,
         sink: Arc<dyn LateResultSink>,
     ) -> Result<UpstreamOutcome, ExecutorError> {
+        Ok(self
+            .execute_inner(query, context, Some(sink))
+            .await?
+            .outcome)
+    }
+
+    /// 执行 group 并返回实际选中的成员 ID。
+    pub(crate) async fn execute_with_selection(
+        &self,
+        query: &CanonicalQuery,
+        context: &RequestContext,
+    ) -> Result<GroupExecutionResult, ExecutorError> {
+        self.execute_inner(query, context, None).await
+    }
+
+    /// 执行带 late sink 的 group，并返回实际选中的成员 ID。
+    pub(crate) async fn execute_with_selection_and_late_sink(
+        &self,
+        query: &CanonicalQuery,
+        context: &RequestContext,
+        sink: Arc<dyn LateResultSink>,
+    ) -> Result<GroupExecutionResult, ExecutorError> {
         self.execute_inner(query, context, Some(sink)).await
     }
 
@@ -272,7 +301,7 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
-    ) -> Result<UpstreamOutcome, ExecutorError> {
+    ) -> Result<GroupExecutionResult, ExecutorError> {
         let primary = self
             .execute_phase(&self.primary, query, context, late_sink.clone())
             .await?;
@@ -281,7 +310,7 @@ impl UpstreamGroupExecutor {
             || context.meta.cancellation.is_cancelled()
             || context.meta.deadline.is_expired(Instant::now())
         {
-            return Ok(primary.outcome);
+            return Ok(primary.result);
         }
         Ok(self
             .execute_phase(
@@ -291,7 +320,7 @@ impl UpstreamGroupExecutor {
                 late_sink,
             )
             .await?
-            .outcome)
+            .result)
     }
 
     async fn execute_phase(
@@ -309,9 +338,14 @@ impl UpstreamGroupExecutor {
             self.execute_ordered(phase, query, &phase_context, late_sink)
                 .await?
         };
+        let enter_fallback = super::should_enter_fallback(&attempts);
+        let result = aggregate_with_connector(phase.selector.mode(), query, attempts)?;
         Ok(PhaseResult {
-            enter_fallback: super::should_enter_fallback(&attempts),
-            outcome: super::aggregate(phase.selector.mode(), query, attempts)?,
+            enter_fallback,
+            result: GroupExecutionResult {
+                connector: result.connector,
+                outcome: result.outcome,
+            },
         })
     }
 
@@ -551,7 +585,7 @@ impl ExecutionPhase {
 }
 
 struct PhaseResult {
-    outcome: UpstreamOutcome,
+    result: GroupExecutionResult,
     enter_fallback: bool,
 }
 

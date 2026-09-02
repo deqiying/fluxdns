@@ -350,6 +350,7 @@ pub struct ResolveEvent {
     pub route_id: Option<Arc<str>>,
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
+    /// 实际选中的 direct upstream 或顶层 group member ID；无法归因时为策略 upstream/group。
     pub upstream_id: Option<Arc<str>>,
     pub transport: TransportClass,
     pub qname: Arc<str>,

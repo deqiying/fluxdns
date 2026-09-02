@@ -30,7 +30,8 @@ pub enum CoreOutcome {
 pub struct DnsResolutionObservation {
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
-    /// 当前策略选择的 upstream/group 配置 ID；只允许来自已校验配置。
+    /// 实际选中的 direct upstream 或顶层 group member ID；无法归因时回退到策略
+    /// 选中的 upstream/group ID。该值只允许来自已校验配置。
     pub upstream_id: Option<Arc<str>>,
     pub source: StatsSource,
     pub cache_status: CacheStatus,

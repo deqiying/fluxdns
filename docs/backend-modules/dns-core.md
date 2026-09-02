@@ -1,6 +1,6 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh、SQLite cache non-blocking write/recovery 和低基数 resolution observation；Policy observation 已补充首轮 client bucket/selected upstream；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR，fresh/stale cache response 已应用剩余 TTL 与 optimistic answer TTL；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入
+> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh、SQLite cache non-blocking write/recovery 和低基数 resolution observation；Policy observation 已补充 client bucket，并在 group 路径记录实际选中的成员；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR，fresh/stale cache response 已应用剩余 TTL 与 optimistic answer TTL；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入
 >
 > 更新日期：2026-09-03
 >
@@ -178,7 +178,7 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 定义 canonical query/response 与验证器；
 - [x] 定义 RequestContext、deadline 与 cancellation；
 - [ ] 定义完整 resolution result；
-- [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket/selected upstream 首轮元数据；
+- [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket/selected upstream；group 路径已记录实际成员；
 - [x] 实现固定响应的 transport 无关 handler；
 - [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
 - [x] 实现配置驱动的 client-visible TTL min/max 覆写，且不改变 cache admission 使用的 origin TTL；
@@ -188,6 +188,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 完成 UDP/TCP/plain DoH 同策略 answer 的首轮真实 loopback contract；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 32 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream ECS 实际 DoH wire、client ECS cache key 隔离，以及跨 Policy Core 实例的 SQLite cache 恢复；Service loopback 测试验证同一 hosts 策略经真实 UDP、DNS-over-TCP framing 和 plain DoH POST 返回一致 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 515 passed、0 failed。
+阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 32 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream ECS 实际 DoH wire、client ECS cache key 隔离、普通及嵌套 group 实际成员 observation，以及跨 Policy Core 实例的 SQLite cache 恢复；Service loopback 测试验证同一 hosts 策略经真实 UDP、DNS-over-TCP framing 和 plain DoH POST 返回一致 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 515 passed、0 failed。
 
-当前实现进度：**74%**。
+当前实现进度：**75%**。

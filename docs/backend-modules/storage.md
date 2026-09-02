@@ -235,7 +235,7 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 - [x] 消费详情 sink 的明确丢弃 disposition，按原因累计并限频报告 backpressure；
 - [x] 将详情前端队列的 flush/shutdown 结果纳入 `StorageRuntime` 统一生命周期摘要；
 - [x] 在 telemetry 关闭前发布 Storage `Stopping` health 和纯计数 shutdown 摘要；
-- [ ] 完成 OS/SQLite 真实 busy/disk-full 故障复现及完整 upstream/group/资源详情元数据；
+- [ ] 完成 OS/SQLite 真实 busy/disk-full 故障复现及独立 group/member、资源详情元数据；当前 `upstream_id` 已传播实际选中的 group member；
 - [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
 - [ ] 完成 migration、压力和故障测试。
 
@@ -243,6 +243,6 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 
 阶段 131 的 `StorageRuntime` 定向测试已验证详情事件从前端队列提交至 SQLite worker，且统一 flush/shutdown 摘要保留前端 committed 与 discarded pending 计数。
 
-阶段 133 复用受监督 StorageRuntime 停机测试，验证 service drain 后可正常取得统一摘要；生产路径会在 Telemetry 关闭前输出 stats/backend/resolve-log/detail 的安全计数，不记录请求内容。
+阶段 133 复用受监督 StorageRuntime 停机测试，验证 service drain 后可正常取得统一摘要；生产路径会在 Telemetry 关闭前输出 stats/backend/resolve-log/detail 的安全计数，不记录请求内容。阶段 136 将 group 聚合实际选中的成员 ID 传播到既有 `ResolveEvent.upstream_id`，没有新增高基数字段。
 
 当前实现进度：**87%**（内存 stats/ledger、业务 migration schema、SQLx SQLite 首轮 stats/detail transaction、StatsPersistenceWorker epoch/batch 提交与失败保留、脱敏详情记录、bounded writer channel/batch flush、详情 backpressure 分类计数/限频事件及生命周期摘要、年龄/软阈值/硬上限首轮策略、worker shutdown drain/周期 flush、stats/backend/detail 统一生命周期 facade、共享 recorder、health/checkpoint/shutdown、`StorageRuntime` 按配置组装、Application prepare 接线、DnsService/Supervisor flush 与 drain shutdown、停机摘要观测、pending batch/event 内存保护及 fatal 分类、SQLite 首轮 degraded/recovery 状态转换、adapter-level Busy/DiskFull fault 注入和恢复分类、Policy source/cache/strategy/client bucket/selected upstream 首轮 observation 与 source/client bucket/upstream 维度和详情存在性落库；OS/SQLite 真实故障、完整 group member/资源详情元数据和故障压力测试仍未完成）。

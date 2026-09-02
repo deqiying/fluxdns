@@ -42,8 +42,8 @@ use crate::resource::{
     CanonicalDomain, HostsIndex, ResourceLoadError, ResourceSnapshot, ResourceVersion, RuleIndex,
 };
 use crate::upstream::{
-    GroupMember, GroupSelector, LateResultSink, RegistryError, UpstreamAttempt,
-    UpstreamGroupExecutor, UpstreamRegistry,
+    GroupExecutionResult, GroupMember, GroupSelector, LateResultSink, RegistryError,
+    UpstreamAttempt, UpstreamGroupExecutor, UpstreamRegistry,
 };
 
 use super::handler::resource_answers;
@@ -585,14 +585,31 @@ impl DnsCore for PolicyDnsCore {
 
 struct PolicyUpstreamResult {
     outcome: UpstreamOutcome,
+    upstream_id: Option<Arc<str>>,
     source: StatsSource,
     cache_status: CacheStatus,
 }
 
 impl PolicyUpstreamResult {
-    fn upstream(outcome: UpstreamOutcome, cache_status: CacheStatus) -> Self {
+    /// 将一次真实上游执行结果转换为策略层结果。
+    fn upstream(result: UpstreamExecutionResult, cache_status: CacheStatus) -> Self {
+        Self {
+            outcome: result.outcome,
+            upstream_id: Some(result.upstream_id),
+            source: StatsSource::Upstream,
+            cache_status,
+        }
+    }
+
+    /// 记录尚未选出实际成员时产生的上游终态。
+    fn upstream_outcome(
+        outcome: UpstreamOutcome,
+        upstream_id: Arc<str>,
+        cache_status: CacheStatus,
+    ) -> Self {
         Self {
             outcome,
+            upstream_id: Some(upstream_id),
             source: StatsSource::Upstream,
             cache_status,
         }
@@ -601,6 +618,7 @@ impl PolicyUpstreamResult {
     fn cache(outcome: UpstreamOutcome, cache_status: CacheStatus) -> Self {
         Self {
             outcome,
+            upstream_id: None,
             source: StatsSource::Cache,
             cache_status,
         }
@@ -721,8 +739,7 @@ impl PolicyDnsCore {
             Some(DnsResolutionObservation {
                 client_bucket,
                 strategy_id,
-                upstream_id: (outcome.source == StatsSource::Upstream)
-                    .then(|| Arc::from(plan.upstream.as_str())),
+                upstream_id: outcome.upstream_id,
                 source: outcome.source,
                 cache_status: outcome.cache_status,
             }),
@@ -807,8 +824,9 @@ impl PolicyDnsCore {
                         CacheStatus::Fresh,
                     )),
                     Ok(CacheLoadCompletion::Failed(CacheLoadFailure::Cancelled(reason))) => {
-                        Some(PolicyUpstreamResult::upstream(
+                        Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::Cancelled(reason),
+                            Arc::from(plan.upstream.as_str()),
                             CacheStatus::Miss,
                         ))
                     }
@@ -844,6 +862,10 @@ impl PolicyDnsCore {
                         .await;
                     return None;
                 };
+                let UpstreamExecutionResult {
+                    outcome,
+                    upstream_id,
+                } = outcome;
                 match outcome {
                     UpstreamOutcome::Response(response) => {
                         if !response.matches_query(query) {
@@ -851,8 +873,9 @@ impl PolicyDnsCore {
                                 .cache
                                 .publish_load(lease, CacheLoadCompletion::Miss, deadline)
                                 .await;
-                            return Some(PolicyUpstreamResult::upstream(
+                            return Some(PolicyUpstreamResult::upstream_outcome(
                                 UpstreamOutcome::Response(response),
+                                upstream_id,
                                 CacheStatus::Miss,
                             ));
                         }
@@ -886,8 +909,9 @@ impl PolicyDnsCore {
                             Ok(CacheWriteResult::Rejected(_)) | Err(_) => CacheLoadCompletion::Miss,
                         };
                         let _ = self.cache.publish_load(lease, completion, deadline).await;
-                        Some(PolicyUpstreamResult::upstream(
+                        Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::Response(response),
+                            upstream_id,
                             cache_status,
                         ))
                     }
@@ -896,8 +920,9 @@ impl PolicyDnsCore {
                             .cache
                             .abandon_load(lease, CacheLoadFailure::Cancelled(reason), deadline)
                             .await;
-                        Some(PolicyUpstreamResult::upstream(
+                        Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::Cancelled(reason),
+                            upstream_id,
                             CacheStatus::Miss,
                         ))
                     }
@@ -906,8 +931,9 @@ impl PolicyDnsCore {
                             .cache
                             .abandon_load(lease, CacheLoadFailure::Unavailable, deadline)
                             .await;
-                        Some(PolicyUpstreamResult::upstream(
+                        Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::TransportFailure(failure),
+                            upstream_id,
                             CacheStatus::Miss,
                         ))
                     }
@@ -951,8 +977,10 @@ impl PolicyDnsCore {
         let format_version = key.format_version;
         let deadline = context.meta.deadline;
         let _ = finalizer.submit_task(async move {
-            let Some(UpstreamOutcome::Response(response)) =
-                upstreams.exchange(&upstream, &query, &context, None).await
+            let Some(UpstreamExecutionResult {
+                outcome: UpstreamOutcome::Response(response),
+                ..
+            }) = upstreams.exchange(&upstream, &query, &context, None).await
             else {
                 return;
             };
@@ -1224,6 +1252,12 @@ struct UpstreamRuntime {
     all: BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
 }
 
+/// 一次上游执行的终态和实际选中的配置成员 ID。
+struct UpstreamExecutionResult {
+    outcome: UpstreamOutcome,
+    upstream_id: Arc<str>,
+}
+
 impl fmt::Debug for UpstreamRuntime {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -1298,21 +1332,33 @@ impl UpstreamRuntime {
         query: &super::CanonicalQuery,
         context: &super::RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
-    ) -> Option<UpstreamOutcome> {
+    ) -> Option<UpstreamExecutionResult> {
         if let Some(exchange) = self.direct.get(upstream) {
-            return Some(exchange.exchange(query, context).await);
+            return Some(UpstreamExecutionResult {
+                outcome: exchange.exchange(query, context).await,
+                upstream_id: Arc::from(exchange.connector_id().as_str()),
+            });
         }
         if let Some(executor) = self.groups.get(upstream) {
-            return match late_sink {
+            let result = match late_sink {
                 Some(sink) => executor
-                    .execute_with_late_sink(query, context, sink)
+                    .execute_with_selection_and_late_sink(query, context, sink)
                     .await
                     .ok(),
-                None => executor.execute(query, context).await.ok(),
-            };
+                None => executor.execute_with_selection(query, context).await.ok(),
+            }?;
+            let GroupExecutionResult { connector, outcome } = result;
+            return Some(UpstreamExecutionResult {
+                upstream_id: connector
+                    .map_or_else(|| Arc::from(upstream.as_str()), |id| Arc::from(id.as_str())),
+                outcome,
+            });
         }
         if let Some(exchange) = self.all.get(upstream) {
-            return Some(exchange.exchange(query, context).await);
+            return Some(UpstreamExecutionResult {
+                outcome: exchange.exchange(query, context).await,
+                upstream_id: Arc::from(exchange.connector_id().as_str()),
+            });
         }
         None
     }
@@ -3284,15 +3330,22 @@ strategy:
         assert_eq!(core.host_resource_count(), 1);
         assert_eq!(core.upstream_count(), 3);
 
-        let response = core
-            .resolve(&request("group.example.", RecordType::A))
-            .await
-            .unwrap();
+        let (response, observation) = core
+            .resolve_with_observation(&request("group.example.", RecordType::A))
+            .await;
+        let response = response.unwrap();
         let CoreOutcome::Response(response) = response else {
             panic!("expected group response");
         };
         assert_eq!(response.class(), crate::dns::ResponseClass::Positive);
         assert_eq!(response.ttl().min_ttl, Some(crate::dns::DEFAULT_LOCAL_TTL));
+        assert_eq!(
+            observation
+                .expect("group response must include observation")
+                .upstream_id
+                .as_deref(),
+            Some("first")
+        );
     }
 
     #[tokio::test]
@@ -3338,8 +3391,9 @@ strategy:
             )
             .await
             .expect("nested group must resolve");
+        assert_eq!(outcome.upstream_id.as_ref(), "inner");
         assert!(matches!(
-            outcome,
+            &outcome.outcome,
             UpstreamOutcome::Response(response)
                 if response.class() == crate::dns::ResponseClass::Positive
         ));
