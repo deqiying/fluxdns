@@ -339,13 +339,15 @@ impl PersistentCacheStore for SqlitePersistentCacheStore {
             self.available("sqlite_cache.maintain_capacity")?;
             let _guard = self.operation_lock.lock().await;
             let now = Instant::now();
-            let records = self
+            let decoded = self
                 .read_rows(now, "sqlite_cache.maintain_capacity")
-                .await?
-                .records;
-            let before = records.len() as u64;
+                .await?;
+            let before = (decoded.records.len() as u64)
+                .saturating_add(decoded.recovery.expired)
+                .saturating_add(decoded.recovery.corrupt)
+                .saturating_add(decoded.recovery.incompatible);
             let kept = self
-                .prepare_records(records, now, "sqlite_cache.maintain_capacity")
+                .prepare_records(decoded.records, now, "sqlite_cache.maintain_capacity")
                 .await?;
             let removed = before.saturating_sub(kept.len() as u64);
             if removed > 0 {

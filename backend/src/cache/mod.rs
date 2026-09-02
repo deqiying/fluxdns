@@ -107,9 +107,10 @@ mod persistence_contract_tests {
             .expect("persistence succeeds");
         tokio::time::sleep(Duration::from_millis(40)).await;
 
+        assert_eq!(store.maintain_capacity(deadline()).await.unwrap(), 1);
         let (batch, summary) = store.recover(deadline()).await.expect("recovery succeeds");
         assert_eq!(summary.loaded, 1);
-        assert_eq!(summary.expired, 1);
+        assert_eq!(summary.expired, 0);
         assert_eq!(batch.records.len(), 1);
         assert_eq!(batch.records[0].0, live.0);
         assert_eq!(batch.records[0].1.version, live.1.version);
