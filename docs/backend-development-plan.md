@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 88（DoH TLS terminate 首轮握手）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 89（配置 watcher 内容 fingerprint）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
 >
 > 更新日期：2026-09-02
 >
@@ -97,7 +97,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、真实 output、启动日志切换、policy 首轮观测元数据 | storage/observability/policy focused tests；OS/SQLite 真实故障和 final subscriber 后置 |
-| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 88 |
+| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 89 |
 
 ### 最新增量记录
 
@@ -107,19 +107,17 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 阶段 86：DoH `forwarded_header` trusted peer、链解析、missing/invalid fallback；`12 passed、0 failed`。
 - 阶段 87：DoH PROXY v1/v2、分片、TCP4/TCP6、长度上限和 trusted peer；`14 passed、0 failed`。
 - 阶段 88：DoH TLS terminate 首轮。PEM/DER cert chain/private key 加载和匹配，显式 ring provider 的 TLS 1.2/1.3，PROXY 前导消费后 TLS upgrade；system socket `1 passed、0 failed`，DoH 定向测试 `16 passed、0 failed`。
+- 阶段 89：配置 watcher 增加内容 fingerprint，与 metadata 一起做两次稳定轮询；相同长度内容变更定向测试 `2 passed、0 failed`，未跨越模块进度档位。
 
-### 阶段 88 验证命令
+### 最近小阶段（89）验证命令
 
 ```text
-backend/.cargo-home/bin/rustfmt --edition 2024 <变更 Rust 文件>
-cargo test --manifest-path backend/Cargo.toml --locked --offline transport::doh::tests:: -- --nocapture
-cargo test --manifest-path backend/Cargo.toml --locked --offline runtime::system_socket::tests:: -- --nocapture
-cargo check --manifest-path backend/Cargo.toml --locked --offline
-cargo clippy --manifest-path backend/Cargo.toml --locked --offline --all-targets -- -D warnings
+backend/.cargo-home/bin/rustfmt --edition 2024 backend/src/app.rs
+cargo test --manifest-path backend/Cargo.toml --locked --offline app::tests::config_file_watcher -- --nocapture
 git diff --check
 ```
 
-以上均通过；阶段 88 未重复全量 `cargo fmt/test`。
+以上均通过；阶段 89 未重复全量 `cargo fmt/test`。阶段 88 的 system socket/DoH focused tests、`cargo check` 和 `cargo clippy` 证据保留在阶段摘要及对应提交中。
 
 ## 5. v1 验收门槛
 

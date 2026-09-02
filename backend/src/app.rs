@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
@@ -234,10 +235,14 @@ enum ConfigFileStamp {
     Present {
         modified: Option<SystemTime>,
         len: u64,
+        content_hash: Option<u64>,
     },
 }
 
-/// 轮询配置文件元数据，避免在服务循环中重复解析未变更的配置。
+/// 轮询配置文件元数据和内容 fingerprint，避免在服务循环中重复解析未变更的配置。
+///
+/// 内容 hash 只用于变更检测，不作为安全校验或配置身份；真正加载时仍由
+/// `ConfigLoader` 重新读取并执行完整 strict validation。
 #[derive(Debug)]
 struct ConfigFileWatcher {
     path: PathBuf,
@@ -297,6 +302,11 @@ fn config_file_stamp(path: &std::path::Path) -> ConfigFileStamp {
         Ok(metadata) => ConfigFileStamp::Present {
             modified: metadata.modified().ok(),
             len: metadata.len(),
+            content_hash: std::fs::read(path).ok().map(|content| {
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                content.hash(&mut hasher);
+                hasher.finish()
+            }),
         },
         Err(_) => ConfigFileStamp::Missing,
     }
@@ -810,6 +820,33 @@ clients: []
         let stamp = watcher.poll_change().expect("deletion must be reported");
         watcher.retry(stamp);
         assert_eq!(watcher.poll_change(), Some(stamp));
+        watcher.commit(stamp);
+        assert_eq!(watcher.poll_change(), None);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_file_watcher_reports_same_length_content_changes() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-config-watcher-content-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("config.yaml");
+        std::fs::write(&path, b"version: 1\n").unwrap();
+        let mut watcher = ConfigFileWatcher::new(path.clone());
+
+        assert_eq!(watcher.poll_change(), None);
+        std::fs::write(&path, b"version: 2\n").unwrap();
+        assert_eq!(watcher.poll_change(), None);
+        let stamp = watcher
+            .poll_change()
+            .expect("same-length content change must be reported");
         watcher.commit(stamp);
         assert_eq!(watcher.poll_change(), None);
 
