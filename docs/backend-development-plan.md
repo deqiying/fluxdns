@@ -125,6 +125,28 @@ transport / upstream / storage / observability adapters
 
 推荐分阶段推进：
 
+### 后续开发路线（基于 2026-09-02 当前状态）
+
+当前后端代码实现进度为 62.8%，v1 交付进度为 66.5%。Config、Upstream、Resource 的基础链路和可信测试基线已经建立，剩余风险主要集中在 Runtime 生命周期、跨模块状态一致性、持久化故障语义和最终验收。因此后续不按模块百分比从低到高补齐，而采用“先运行时生命周期、再数据与观测、最后协议和 v1 验收”的垂直切片。
+
+| 顺序 | 目标 | 主要范围 | 退出条件 |
+| --- | --- | --- | --- |
+| 0 | 开发环境与验证门 | 直接调用项目 Rust 1.98.0；执行 `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`、`cargo check --manifest-path backend/Cargo.toml --locked`、`cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings` 和 `cargo test --manifest-path backend/Cargo.toml --locked` | 版本来源可追溯，基线保持 `411 passed、0 failed`，后续阶段不得用 `--ignore-rust-version` 替代正式验证 |
+| 1 | Runtime 候选与跨 Runtime 生命周期 | 在 `PreparedRuntime → BindPlan → ActiveRuntime` 中统一组合 Config、Policy、Resource registry、Runtime metadata 和 worker 集合；完成候选 registry 的跨 Runtime 合并与 revision CAS | 候选 prepare/bind/CAS 失败均保留旧 Runtime；并发资源更新不丢失；同一请求只使用一个 Runtime revision；无 detached task |
+| 2 | 配置变更与自动 rebind | 为 `run` 接入已确定的配置变更事件源和去抖/失败语义；区分 resource-only、listener rebind 与必须重启的变更；重建 listener/resource task 集合 | 新 revision 的 listener 全部 bind 成功后才切换；失败保留旧端点；旧 task 可取消并完成 drain；显式 reload 与自动 reload 复用同一入口 |
+| 3 | DNS Core/Cache 一致性 | 让 optimistic refresh 捕获最新 Runtime snapshot；完成共享 `LateCacheFinalizer` owner、完整 late-window/nested sink 传播、Policy/Core/Cache/Upstream 跨 transport contract tests | stale refresh、取消、CAS、旧 Runtime drain 和 shutdown 行为确定；资源更新只影响后续请求，不破坏已开始请求 |
+| 4 | Storage 与 Observability 生产切片 | 先接 SQLx pool、migration、health probe、stats checkpoint/ledger 和 resolve-log writer；再接正式 telemetry subscriber、health/event writer、flush/backpressure，并纳入 Supervisor | stats 幂等重试、detail 有界丢弃、DB busy/磁盘故障降级、脱敏日志和 deadline-aware flush 均有测试与分项报告 |
+| 5 | Cache 持久化 | 先以现有 `CacheStore`/`PersistentCacheStore` port 接入 Moka adapter，再实现独立 SQLite cache persistence；不复用业务 Storage 数据库 | Moka weight/expiry、文件/SQLite 恢复校验、容量预算、corrupt/busy/disk-full 降级和 shutdown 持久化通过 adapter contract tests |
+| 6 | DoH 入站安全边界 | 实现 TLS terminate、证书/私钥校验、握手 timeout/cancellation、PROXY v1/v2、trusted proxy/forwarded header 信任链，以及计划要求的 HTTP/2 边界 | 非法或不可信输入 fail-closed；Host/SNI、客户端地址恢复、GET/POST、HTTP/DNS 错误分类和 rebind 行为有端到端证据 |
+| 7 | v1 最终验收 | 补齐 listener、resource、cache、storage、telemetry 故障注入；执行 UDP/TCP/DoH conformance、压力/长期运行、完整 drain/flush/shutdown 和文档回链 | 所有 v1 验收门槛有可复现记录，进度按实际代码与验证证据更新，不以文档完成替代实现 |
+
+实施约束：
+
+- 第 1～3 步是主线，优先完成后再扩大持久化和协议范围；不要单独继续打磨 Upstream 的剩余 1%，其 late-window 和 finalizer 工作应并入 Runtime/Cache 生命周期切片。
+- 第 4、5 步共享故障、flush 和 shutdown 边界，但业务 SQLite 与 cache SQLite 必须保持独立文件、schema、writer 和健康状态。
+- 第 6 步不引入 WebUI、管理 API、主动健康检查或其他明确排除在 v1 之外的能力；配置热加载只复用已定义的内部 reload 入口。
+- 每个小阶段都必须同时更新直接受影响的模块文档、测试证据和本计划，并完成最小充分验证后再标记完成。
+
 ### 阶段 0：方案基线
 
 状态：**已完成**
