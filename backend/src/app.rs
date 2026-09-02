@@ -4,9 +4,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::config::resolve::SecretValidationError;
 use crate::config::{ConfigLoadError, ConfigLoader, LoadOptions};
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
-use crate::runtime::SystemSocketFactory;
+use crate::ports::effects::SocketFactory;
+use crate::runtime::{
+    ActiveRuntime, PrepareError, PreparedRuntime, RuntimeCoordinator, SystemSocketFactory,
+};
 use crate::service::{DnsService, ServiceError, ServiceStartError};
 
 /// 进程退出码的大类，详细原因应由安全错误消息表达。
@@ -135,6 +139,20 @@ pub enum CliError {
     DuplicateConfigPath,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum ApplicationReloadError {
+    #[error("runtime reload configuration load failed: {0}")]
+    Config(#[source] ConfigLoadError),
+    #[error("runtime reload secret validation failed: {0}")]
+    SecretValidation(#[source] SecretValidationError),
+    #[error("runtime reload revision space is exhausted")]
+    RevisionExhausted,
+    #[error("runtime reload prepare failed: {0}")]
+    Prepare(#[source] PrepareError),
+    #[error("runtime reload activation failed: {0}")]
+    Activation(#[source] crate::runtime::RuntimeReloadError),
+}
+
 /// 解析进程边界参数；不访问文件系统，也不猜测配置位置。
 pub fn parse_args<I>(args: I) -> Result<(CliAction, CliOptions), CliError>
 where
@@ -228,6 +246,47 @@ where
         }
         CliAction::Command => run_command(options).await,
     }
+}
+
+/// 从配置文件准备并激活下一版运行时。
+///
+/// reload 只读取并校验输入，不创建工作目录配置 snapshot；候选在 bind 和
+/// revision CAS 成功前不会改变当前 ActiveRuntime。
+pub async fn reload_runtime_from_path(
+    coordinator: &RuntimeCoordinator,
+    path: impl AsRef<std::path::Path>,
+    factory: &dyn SocketFactory,
+    deadline: Deadline,
+    cancellation: Cancellation,
+) -> Result<Arc<ActiveRuntime>, ApplicationReloadError> {
+    let output = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        .load_from_path(path)
+        .map_err(ApplicationReloadError::Config)?;
+    output
+        .resolved
+        .validate_secret_refs(64 * 1024)
+        .map_err(ApplicationReloadError::SecretValidation)?;
+
+    let expected = coordinator.current_revision();
+    let revision = RuntimeRevision(
+        expected
+            .0
+            .checked_add(1)
+            .ok_or(ApplicationReloadError::RevisionExhausted)?,
+    );
+    let prepared = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+        output.resolved,
+        revision,
+        deadline,
+        cancellation.clone(),
+    )
+    .await
+    .map_err(ApplicationReloadError::Prepare)?;
+
+    coordinator
+        .bind_and_activate(expected, prepared, factory, deadline, &cancellation)
+        .await
+        .map_err(ApplicationReloadError::Activation)
 }
 
 async fn run_command(options: CliOptions) -> Result<(), AppError> {
@@ -364,8 +423,123 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
+    use std::net::SocketAddr;
+    use std::time::{Duration, Instant};
 
-    use super::{AppCommand, AppErrorKind, AppExitCode, CliAction, CliError, parse_args};
+    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::dns::{Cancellation, Deadline, RuntimeRevision};
+    use crate::ports::effects::{
+        ActivatedSocket, ActivatedSocketHandle, PreparedSocket, SocketFactory, SocketKind,
+        SocketSpec,
+    };
+    use crate::ports::{PortError, PortErrorClass, PortFuture};
+    use crate::runtime::{PreparedRuntime, RuntimeCoordinator};
+
+    use super::{
+        AppCommand, AppErrorKind, AppExitCode, ApplicationReloadError, CliAction, CliError,
+        parse_args, reload_runtime_from_path,
+    };
+
+    #[derive(Clone, Copy)]
+    struct TestSocketFactory;
+
+    struct TestPreparedSocket {
+        spec: SocketSpec,
+    }
+
+    struct TestActivatedSocket {
+        spec: SocketSpec,
+    }
+
+    impl SocketFactory for TestSocketFactory {
+        fn prepare<'a>(
+            &'a self,
+            spec: SocketSpec,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<Box<dyn PreparedSocket>, PortError>> {
+            Box::pin(
+                async move { Ok(Box::new(TestPreparedSocket { spec }) as Box<dyn PreparedSocket>) },
+            )
+        }
+    }
+
+    impl PreparedSocket for TestPreparedSocket {
+        fn local_addr(&self) -> Result<SocketAddr, PortError> {
+            Ok(self.spec.address)
+        }
+
+        fn activate(self: Box<Self>) -> Result<Box<dyn ActivatedSocket>, PortError> {
+            Ok(Box::new(TestActivatedSocket { spec: self.spec }))
+        }
+    }
+
+    impl ActivatedSocket for TestActivatedSocket {
+        fn local_addr(&self) -> Result<SocketAddr, PortError> {
+            Ok(self.spec.address)
+        }
+
+        fn kind(&self) -> SocketKind {
+            self.spec.kind
+        }
+
+        fn socket_handle(&self) -> Result<ActivatedSocketHandle, PortError> {
+            Err(PortError::new(
+                PortErrorClass::Unavailable,
+                "test_socket.handle",
+            ))
+        }
+    }
+
+    fn reload_source(work: &std::path::Path, port: u16) -> String {
+        format!(
+            r#"
+version: 1
+work:
+  path: {}
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: {}
+    strategy: default
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+hosts:
+  - type: const
+    name: local-hosts
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+outbound: []
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+"#,
+            work.display(),
+            port,
+        )
+    }
 
     #[test]
     fn exit_codes_are_stable() {
@@ -437,6 +611,98 @@ mod tests {
 
         assert!(result.is_ok());
         assert!(!work.join("config.yaml").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn reload_loads_prepares_binds_and_activates_next_revision_without_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-app-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("reload.yaml");
+        std::fs::write(&path, reload_source(&root, 5300)).unwrap();
+
+        let initial = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_from_path(&path)
+            .unwrap()
+            .resolved;
+        let prepared = PreparedRuntime::prepare(initial, RuntimeRevision(1)).unwrap();
+        let bind_cancellation = Cancellation::new();
+        let candidate = crate::runtime::bind_prepared(
+            prepared,
+            &TestSocketFactory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &bind_cancellation,
+        )
+        .await
+        .unwrap();
+        let coordinator = RuntimeCoordinator::new(candidate);
+        let previous = coordinator.load();
+
+        std::fs::write(&path, reload_source(&root, 5301)).unwrap();
+        let active = reload_runtime_from_path(
+            &coordinator,
+            &path,
+            &TestSocketFactory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+        assert!(previous.is_draining());
+        assert_eq!(active.listeners().local_addrs().unwrap()[0].port(), 5301);
+        assert!(!root.join("config.yaml").exists());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn reload_failure_keeps_the_current_runtime_active() {
+        let root =
+            std::env::temp_dir().join(format!("fluxdns-app-reload-failure-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("reload.yaml");
+        std::fs::write(&path, reload_source(&root, 5300)).unwrap();
+
+        let initial = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_from_path(&path)
+            .unwrap()
+            .resolved;
+        let prepared = PreparedRuntime::prepare(initial, RuntimeRevision(1)).unwrap();
+        let bind_cancellation = Cancellation::new();
+        let candidate = crate::runtime::bind_prepared(
+            prepared,
+            &TestSocketFactory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &bind_cancellation,
+        )
+        .await
+        .unwrap();
+        let coordinator = RuntimeCoordinator::new(candidate);
+        let current = coordinator.load();
+        std::fs::write(&path, "version: 1\n").unwrap();
+
+        let error = reload_runtime_from_path(
+            &coordinator,
+            &path,
+            &TestSocketFactory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(error, ApplicationReloadError::Config(_)));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+        assert!(!current.is_draining());
         let _ = std::fs::remove_dir_all(root);
     }
 }

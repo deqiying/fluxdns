@@ -1,6 +1,6 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task
+> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API
 >
 > 更新日期：2026-09-01
 >
@@ -74,6 +74,8 @@ bootstrap telemetry
 
 依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。正式 `run` 通过 async `PreparedRuntime` 在 bind 前完成 remote rule-set restore-or-fetch，创建 `Arc<RuntimeCoordinator>` 并交给 `DnsService`；service Supervisor 持有自动刷新 task，资源 task 通过 coordinator 查询当前活动 runtime，transport task 在当前阶段仍绑定启动时 runtime。测试通过 fake ports 注入 clock、socket、fetcher、storage 和 telemetry。
 
+`reload_runtime_from_path` 复用同一 Config → async prepare → bind → revision CAS 边界，读取配置时关闭 snapshot 写入，SecretRef 校验和候选失败均不会改变当前 `ActiveRuntime`。该 API 目前由调用方显式触发；`run` 尚未接入文件监视、管理接口或 listener task 重建。
+
 ## 5. 信号与退出
 
 当前实现处理 `SIGINT`：
@@ -125,9 +127,10 @@ Application 将内部错误转换为：
 - [x] 接入 bootstrap telemetry 初始化；
 - [x] 接入读取配置后的 Config load/resolve/preflight 边界；
 - [x] 接入 Runtime bind、activate、wait、shutdown；
+- [x] 提供配置文件 reload 的 prepare/bind/activate 触发 API，并验证失败保留旧 runtime；
 - [ ] 完成信号与退出测试；
 - [x] 记录阶段 1 验证证据并更新实现进度。
 
-阶段证据：`app::tests::exit_codes_are_stable`、CLI 参数和 `validate` 只读测试通过；正式 `run` 已切换到 async remote prepare，`runtime::prepared::tests` 验证首次 fetch、第二次 fallback restore 以及 refresh worker 的 Policy live publish。真实 smoke 使用临时配置在 UDP `8353`、TCP `8354`、DoH `8355` 启动，hosts 查询返回 `127.0.0.1`，同连接双 TCP frame 维持 ID 顺序，DoH GET/POST 保留 DNS ID/RCODE，`SIGINT` 后输出 `service_shutdown` 并以 0 退出。未测试 nginx、TLS 证书或特权端口。
+阶段证据：`app::tests::exit_codes_are_stable`、CLI 参数、`validate` 只读和 `reload_runtime_from_path` 成功/失败测试通过；正式 `run` 已切换到 async remote prepare，`runtime::prepared::tests` 验证首次 fetch、第二次 fallback restore 以及 refresh worker 的 Policy live publish。真实 smoke 使用临时配置在 UDP `8353`、TCP `8354`、DoH `8355` 启动，hosts 查询返回 `127.0.0.1`，同连接双 TCP frame 维持 ID 顺序，DoH GET/POST 保留 DNS ID/RCODE，`SIGINT` 后输出 `service_shutdown` 并以 0 退出。未测试 nginx、TLS 证书或特权端口。
 
 当前实现进度：**45%**。

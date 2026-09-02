@@ -1,6 +1,6 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard；监听器 task 仍绑定启动时实例，Application 配置变更触发、独立 listener swap 和 flush 生命周期仍在后续阶段
+> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard，Application 提供配置文件 reload 触发 API；监听器 task 仍绑定启动时实例，外部配置变更事件、独立 listener swap 和 flush 生命周期仍在后续阶段
 >
 > 更新日期：2026-09-01
 >
@@ -115,7 +115,7 @@ v1 首次启动不存在端口复用迁移。未来 rebind 只有平台允许并
 - CAS 失败后重新读取最新 registry 并重放本资源变更；
 - 不从旧 registry 构造完整替换，避免并发更新互相覆盖。
 
-当前 `RuntimeCoordinator` 已提供资源 worker 查询、刷新、关闭代理，以及把已 prepare 的候选通过 `bind_prepared` 和 revision CAS 激活的 `bind_and_activate` 入口；`refresh_resource_if_current` 在刷新前后校验 captured `ActiveRuntime` 仍是 coordinator 当前实例，stale 时由 service 跳过本轮并重新读取。当前资源刷新仍在该 runtime 内完成 Policy/metadata CAS，候选激活 API 已验证旧 runtime 保留与 CAS 失败返还 candidate，但 Application 尚未提供配置变更触发器，service 也尚未重建 listener task。资源-only 更新复用现有 `BoundListenerSet` 和 `SharedServices`。需要 rebind 的候选拥有独立 listener set；发布后旧 runtime 进入 drain。
+当前 `RuntimeCoordinator` 已提供资源 worker 查询、刷新、关闭代理，以及把已 prepare 的候选通过 `bind_prepared` 和 revision CAS 激活的 `bind_and_activate` 入口；`refresh_resource_if_current` 在刷新前后校验 captured `ActiveRuntime` 仍是 coordinator 当前实例，stale 时由 service 跳过本轮并重新读取。Application 的 `reload_runtime_from_path` 已把无 snapshot 配置加载、SecretRef 校验、async prepare 和候选激活串成显式触发 API，并验证失败保留当前 runtime；当前资源刷新仍在该 runtime 内完成 Policy/metadata CAS，service 也尚未重建 listener task，`run` 尚未接入文件监视或管理事件。资源-only 更新复用现有 `BoundListenerSet` 和 `SharedServices`。需要 rebind 的候选拥有独立 listener set；发布后旧 runtime 进入 drain。
 
 ## 7. Supervisor
 
@@ -214,7 +214,7 @@ stats、resolve log、cache persistence、SQLite checkpoint 和 telemetry flush 
 - [x] 为 `auto_update=true` 的 remote/file rule-set 与 file hosts 注册 Supervisor refresh task，并在当前 ActiveRuntime 内执行 Policy/Runtime metadata live publish；
 - [x] 由 `Application` 与 `DnsService` 共享持有 `RuntimeCoordinator`，资源 refresh task 通过 coordinator 读取当前活动 runtime；监听器 task 仍固定在启动时实例；
 - [x] `Supervisor::spawn_with_factory` 实现瞬时失败的可取消指数退避、有界重试、重试次数和上限耗尽识别；当前 service task 的具体故障策略接入仍待完成；
-- [x] `RuntimeCoordinator::bind_and_activate` 接入候选 `PreparedRuntime → bind_prepared → revision CAS`，bind/CAS 失败保留旧 runtime 或返还可重试 candidate；Application 触发和 service listener 重建仍待完成；
+- [x] `RuntimeCoordinator::bind_and_activate` 接入候选 `PreparedRuntime → bind_prepared → revision CAS`，bind/CAS 失败保留旧 runtime 或返还可重试 candidate；Application 已提供显式配置文件 reload 触发 API，service listener 重建仍待完成；
 - [x] `RuntimeCoordinator::refresh_resource_if_current` 以 captured runtime 做前后活动实例校验，stale 时返回显式 coordinator error；service 重新读取当前 runtime 后再尝试；
 - [ ] 定义状态类型与所有权转换；
 - [ ] 完成跨模块资源装配版 PreparedRuntime/preflight；

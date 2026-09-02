@@ -267,7 +267,7 @@ RawConfigVn
   → AppState
 ```
 
-`PreparedRuntime` 在 bind 前完成路径、引用图、策略索引、上游 connector、adapter-owned transport profile、核心可见 capabilities、资源句柄和数据库/日志能力的预构建，并在同一 prepare 边界装配生产 `ResourceFetcher`。正式 async prepare 对 remote rule-set 先校验落盘 content/manifest fallback，恢复失败后才执行 bounded fetch、解析和原子持久化；对 file hosts/rule-set 则执行稳定读取、hash、解析和编译，再把 typed snapshot 交给 Policy 构造；任一步失败都不会进入 bind。对 `auto_update=true` 的 remote、file rule-set 和 file hosts，ActiveRuntime 会把独立 refresh worker 纳入 service Supervisor，成功候选在同一 Policy core 内做版本化 live publish，并原子更新当前 Runtime 的资源元数据。正式 `run` 路径由 `Application` 创建 `RuntimeCoordinator` 并交给 `DnsService` 持有；资源 task 通过 coordinator 查询当前活动实例，coordinator 也提供已 prepare 候选的 bind/CAS 激活入口，但现阶段 transport task 仍固定启动时 runtime，Application 尚未触发配置候选 reload。`RuntimeSnapshot` 是请求读取的不可变配置句柄；未来配置热加载时，先完整 prepare 新 revision，再原子切换，不在请求中重新解释 YAML 或继承规则。
+`PreparedRuntime` 在 bind 前完成路径、引用图、策略索引、上游 connector、adapter-owned transport profile、核心可见 capabilities、资源句柄和数据库/日志能力的预构建，并在同一 prepare 边界装配生产 `ResourceFetcher`。正式 async prepare 对 remote rule-set 先校验落盘 content/manifest fallback，恢复失败后才执行 bounded fetch、解析和原子持久化；对 file hosts/rule-set 则执行稳定读取、hash、解析和编译，再把 typed snapshot 交给 Policy 构造；任一步失败都不会进入 bind。对 `auto_update=true` 的 remote、file rule-set 和 file hosts，ActiveRuntime 会把独立 refresh worker 纳入 service Supervisor，成功候选在同一 Policy core 内做版本化 live publish，并原子更新当前 Runtime 的资源元数据。正式 `run` 路径由 `Application` 创建 `RuntimeCoordinator` 并交给 `DnsService` 持有；资源 task 通过 coordinator 查询当前活动实例，coordinator 也提供已 prepare 候选的 bind/CAS 激活入口，Application 另提供显式配置文件 reload 触发 API，但现阶段 transport task 仍固定启动时 runtime，`run` 尚未接入文件监视或管理事件。`RuntimeSnapshot` 是请求读取的不可变配置句柄；配置 reload 时先完整 prepare 新 revision，再原子切换，不在请求中重新解释 YAML 或继承规则。
 
 ```rust
 struct RuntimeSnapshot {
