@@ -879,6 +879,8 @@ impl ObservedDnsCore {
             qname: Arc::from(question.name().to_ascii()),
             qtype: u16::from(question.query_type()),
             qclass: u16::from(question.query_class()),
+            rcode: response_header_rcode(result),
+            cancellation_reason: request.context.meta.cancellation.reason(),
             outcome,
             source: observation
                 .map(|value| value.source)
@@ -920,6 +922,13 @@ fn response_rcode(result: &Result<CoreOutcome, CoreError>) -> Option<u16> {
         }
         Ok(CoreOutcome::NoResponse) | Err(_) => None,
     }
+}
+
+/// `resolve_log.rcode` 保持基础 DNS header 的 4-bit 契约；无响应时由 failure 分类区分。
+fn response_header_rcode(result: &Result<CoreOutcome, CoreError>) -> u8 {
+    response_rcode(result)
+        .map(|rcode| u8::try_from(rcode & 0x0f).expect("4-bit RCODE must fit u8"))
+        .unwrap_or(0)
 }
 
 fn outcome_class(request: &DnsRequest, result: &Result<CoreOutcome, CoreError>) -> OutcomeClass {
@@ -2104,7 +2113,8 @@ mod tests {
 
     use super::{
         ResolveDetailDropCounters, ServiceError, capabilities, publish_component_health,
-        response_rcode, spawn_telemetry_task, spawn_transport_task, task_failure,
+        response_header_rcode, response_rcode, spawn_telemetry_task, spawn_transport_task,
+        task_failure,
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
@@ -2167,7 +2177,13 @@ mod tests {
             response_rcode(&Ok(CoreOutcome::Response(response))),
             Some(5)
         );
+        let response = CanonicalResponse::empty_response(&query, ResponseCode::Refused).unwrap();
+        assert_eq!(
+            response_header_rcode(&Ok(CoreOutcome::Response(response))),
+            5
+        );
         assert_eq!(response_rcode(&Ok(CoreOutcome::NoResponse)), None);
+        assert_eq!(response_header_rcode(&Ok(CoreOutcome::NoResponse)), 0);
     }
 
     #[test]

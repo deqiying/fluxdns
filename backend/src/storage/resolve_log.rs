@@ -3,7 +3,7 @@ use std::fmt;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use crate::dns::{RuntimeRevision, TransportClass};
+use crate::dns::{CancelReason, RuntimeRevision, TransportClass};
 use crate::ports::storage::{
     ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource, StatsSource,
 };
@@ -34,6 +34,8 @@ pub struct ResolveDetailRecord {
     qname_byte_len: u16,
     qtype: u16,
     qclass: u16,
+    rcode: u8,
+    cancellation_reason: Option<CancelReason>,
     outcome: OutcomeClass,
     source: StatsSource,
     cache_status: CacheStatus,
@@ -43,6 +45,12 @@ pub struct ResolveDetailRecord {
 impl ResolveDetailRecord {
     pub(crate) fn from_event(event: ResolveEvent) -> Result<Self, PortError> {
         validate_listener_id(&event.listener_id)?;
+        if event.rcode > 0x0f {
+            return Err(
+                PortError::new(PortErrorClass::InvalidInput, "resolve detail writer")
+                    .with_safe_context("invalid DNS header RCODE"),
+            );
+        }
         let duration_millis =
             u64::try_from(event.duration_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let qname_byte_len = u16::try_from(event.qname.len()).unwrap_or(u16::MAX);
@@ -64,6 +72,8 @@ impl ResolveDetailRecord {
             qname_byte_len,
             qtype: event.qtype,
             qclass: event.qclass,
+            rcode: event.rcode,
+            cancellation_reason: event.cancellation_reason,
             outcome: event.outcome,
             source: event.source,
             cache_status: event.cache_status,
@@ -135,6 +145,14 @@ impl ResolveDetailRecord {
         self.qclass
     }
 
+    pub const fn rcode(&self) -> u8 {
+        self.rcode
+    }
+
+    pub const fn cancellation_reason(&self) -> Option<CancelReason> {
+        self.cancellation_reason
+    }
+
     pub const fn outcome(&self) -> OutcomeClass {
         self.outcome
     }
@@ -172,6 +190,8 @@ impl fmt::Debug for ResolveDetailRecord {
             .field("qname_byte_len", &self.qname_byte_len)
             .field("qtype", &self.qtype)
             .field("qclass", &self.qclass)
+            .field("rcode", &self.rcode)
+            .field("cancellation_reason", &self.cancellation_reason)
             .field("outcome", &self.outcome)
             .field("source", &self.source)
             .field("cache_status", &self.cache_status)
@@ -369,7 +389,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Instant, SystemTime};
 
-    use crate::dns::{RuntimeRevision, TransportClass};
+    use crate::dns::{CancelReason, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
         ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource, StatsSource,
     };
@@ -437,6 +457,8 @@ mod tests {
             qname: Arc::from("private.example.test."),
             qtype: 1,
             qclass: 1,
+            rcode: 2,
+            cancellation_reason: Some(CancelReason::Shutdown),
             outcome: OutcomeClass::Success,
             source: StatsSource::Upstream,
             cache_status: CacheStatus::Miss,
@@ -469,6 +491,8 @@ mod tests {
         assert!(record.has_matched_resource());
         assert_eq!(record.matched_rule_ordinal(), Some(3));
         assert!(record.has_request_digest());
+        assert_eq!(record.rcode(), 2);
+        assert_eq!(record.cancellation_reason(), Some(CancelReason::Shutdown));
         assert_eq!(record.source(), StatsSource::Upstream);
         let debug = format!("{record:?}");
         for sensitive in [
@@ -573,6 +597,13 @@ mod tests {
         let writer = ResolveLogWriter::new(true, 1, sink).unwrap();
         assert!(matches!(
             writer.try_record(event("bad listener value")),
+            Err(error) if matches!(error.class(), PortErrorClass::InvalidInput)
+        ));
+
+        let mut invalid_rcode = event("listener");
+        invalid_rcode.rcode = 16;
+        assert!(matches!(
+            writer.try_record(invalid_rcode),
             Err(error) if matches!(error.class(), PortErrorClass::InvalidInput)
         ));
     }

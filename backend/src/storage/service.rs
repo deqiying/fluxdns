@@ -511,6 +511,8 @@ mod tests {
                 qname: std::sync::Arc::from("example.test."),
                 qtype: 1,
                 qclass: 1,
+                rcode: 0,
+                cancellation_reason: None,
                 outcome: OutcomeClass::Success,
                 source: StatsSource::Upstream,
                 cache_status: CacheStatus::Miss,

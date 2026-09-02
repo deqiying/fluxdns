@@ -12,7 +12,7 @@ use sqlx::{Row, Sqlite, SqlitePool};
 use thiserror::Error;
 use tokio::sync::mpsc;
 
-use crate::dns::Deadline;
+use crate::dns::{CancelReason, Deadline};
 use crate::ports::storage::{
     ResolveRuleSource, SchemaVersion, StatsBatch, StorageBackend, StorageFlushSummary,
     StorageHealth, StorageOperation, StorageTransaction,
@@ -941,10 +941,10 @@ async fn apply_resolve_records_with_limits(
         .bind(matched_rule_source)
         .bind(matched_resource_id)
         .bind(matched_rule_ordinal)
-        .bind(0_i64)
+        .bind(i64::from(record.rcode()))
         .bind(cache_status_name(record.cache_status()))
-        .bind(Option::<&str>::None)
-        .bind(Option::<&str>::None)
+        .bind(failure_class_name(record.outcome()))
+        .bind(record.cancellation_reason().map(cancellation_reason_name))
         .bind(i64::try_from(record.runtime_revision().0).unwrap_or(i64::MAX))
         .bind(Option::<&str>::None)
         .execute(&mut **transaction)
@@ -997,6 +997,29 @@ fn resolve_rule_source_name(value: ResolveRuleSource) -> &'static str {
         ResolveRuleSource::ListenerHosts => "listener_hosts",
         ResolveRuleSource::StrategyHosts => "strategy_hosts",
         ResolveRuleSource::RuleSet => "rule_set",
+    }
+}
+
+/// 将请求终态压缩为详情表的低基数 failure 分类；正常响应和拒绝由 RCODE 表达。
+fn failure_class_name(value: crate::ports::telemetry::OutcomeClass) -> Option<&'static str> {
+    match value {
+        crate::ports::telemetry::OutcomeClass::Success
+        | crate::ports::telemetry::OutcomeClass::Rejected => None,
+        crate::ports::telemetry::OutcomeClass::Failure => Some("failure"),
+        crate::ports::telemetry::OutcomeClass::Timeout => Some("timeout"),
+        crate::ports::telemetry::OutcomeClass::Cancelled => Some("cancelled"),
+        crate::ports::telemetry::OutcomeClass::Dropped => Some("dropped"),
+    }
+}
+
+/// 将协作式取消原因编码为稳定的 SQLite 文本值。
+fn cancellation_reason_name(value: CancelReason) -> &'static str {
+    match value {
+        CancelReason::ClientDisconnected => "client_disconnected",
+        CancelReason::DeadlineExceeded => "deadline_exceeded",
+        CancelReason::Shutdown => "shutdown",
+        CancelReason::GroupPolicy => "group_policy",
+        CancelReason::UpstreamCancelled => "upstream_cancelled",
     }
 }
 
@@ -1348,7 +1371,9 @@ mod tests {
                 qname: Arc::from("example.com."),
                 qtype: 1,
                 qclass: 1,
-                outcome: OutcomeClass::Success,
+                rcode: 2,
+                cancellation_reason: Some(CancelReason::Shutdown),
+                outcome: OutcomeClass::Failure,
                 source: StatsSource::Upstream,
                 cache_status: CacheStatus::Miss,
                 runtime_revision: RuntimeRevision(3),
@@ -1363,7 +1388,7 @@ mod tests {
         let row = sqlx::query(
             "SELECT request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
              upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
-             canonical_qname, source \
+             canonical_qname, source, rcode, failure_class, cancellation_reason \
              FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
@@ -1425,6 +1450,19 @@ mod tests {
             "len:12"
         );
         assert_eq!(row.try_get::<String, _>("source").unwrap(), "upstream");
+        assert_eq!(row.try_get::<i64, _>("rcode").unwrap(), 2);
+        assert_eq!(
+            row.try_get::<Option<String>, _>("failure_class")
+                .unwrap()
+                .as_deref(),
+            Some("failure")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("cancellation_reason")
+                .unwrap()
+                .as_deref(),
+            Some("shutdown")
+        );
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
@@ -1457,6 +1495,8 @@ mod tests {
                     qname: Arc::from("example.com."),
                     qtype: 1,
                     qclass: 1,
+                    rcode: 0,
+                    cancellation_reason: None,
                     outcome: OutcomeClass::Success,
                     source: StatsSource::Upstream,
                     cache_status: CacheStatus::Miss,
@@ -1523,6 +1563,8 @@ mod tests {
                 qname: Arc::from("example.com."),
                 qtype: 1,
                 qclass: 1,
+                rcode: 0,
+                cancellation_reason: None,
                 outcome: OutcomeClass::Success,
                 source: StatsSource::Upstream,
                 cache_status: CacheStatus::Miss,
@@ -1566,6 +1608,8 @@ mod tests {
                     qname: Arc::from("example.com."),
                     qtype: 1,
                     qclass: 1,
+                    rcode: 0,
+                    cancellation_reason: None,
                     outcome: OutcomeClass::Success,
                     source: StatsSource::Upstream,
                     cache_status: CacheStatus::Miss,
@@ -1597,6 +1641,8 @@ mod tests {
                 qname: Arc::from("example.com."),
                 qtype: 1,
                 qclass: 1,
+                rcode: 0,
+                cancellation_reason: None,
                 outcome: OutcomeClass::Success,
                 source: StatsSource::Upstream,
                 cache_status: CacheStatus::Miss,
@@ -1650,6 +1696,8 @@ mod tests {
                     qname: Arc::from("example.com."),
                     qtype: 1,
                     qclass: 1,
+                    rcode: 0,
+                    cancellation_reason: None,
                     outcome: OutcomeClass::Success,
                     source: StatsSource::Upstream,
                     cache_status: CacheStatus::Miss,
@@ -1701,6 +1749,8 @@ mod tests {
                     qname: Arc::from("example.com."),
                     qtype: 1,
                     qclass: 1,
+                    rcode: 0,
+                    cancellation_reason: None,
                     outcome: OutcomeClass::Success,
                     source: StatsSource::Upstream,
                     cache_status: CacheStatus::Miss,
@@ -1749,6 +1799,8 @@ mod tests {
                 qname: Arc::from("example.com."),
                 qtype: 1,
                 qclass: 1,
+                rcode: 0,
+                cancellation_reason: None,
                 outcome: OutcomeClass::Success,
                 source: StatsSource::Upstream,
                 cache_status: CacheStatus::Miss,

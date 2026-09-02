@@ -563,7 +563,7 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 
 逻辑存储至少分为 `stats_daily`（按日/有界维度的聚合）、`stats_batch_ledger`（批次幂等与 checkpoint）和 `resolve_log`（可选详情）三类职责；物理表字段可随 SQLite schema version 演进，但不能把详情淘汰策略和统计批次 ledger 合并成一个不可区分的表。
 
-`resolve_log.enable` 只控制每次解析请求的详情记录。开启时由独立的有界 `ResolveLogWriter` 批量写入同一数据库，并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰；队列满、数据库忙或硬上限命中时丢弃详情并递增 `dropped_detail_records`，DNS 和聚合统计都不能被拖慢。关闭时不写详情表，但仍写聚合统计。
+`resolve_log.enable` 只控制每次解析请求的详情记录。开启时由独立的有界 `ResolveLogWriter` 批量写入同一数据库，并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰；详情保存 DNS header RCODE、由 `OutcomeClass` 压缩的 failure class 和首个协作式 cancellation reason。队列满、数据库忙或硬上限命中时丢弃详情并递增 `dropped_detail_records`，DNS 和聚合统计都不能被拖慢。关闭时不写详情表，但仍写聚合统计。
 
 这里的“`resolve_log` 依赖数据库”表示详情的权威持久化后端是 `database`，不表示请求线程同步写库或在有界容量下承诺绝对无损；若未来要求无损审计，应另行定义持久化 spool/背压和磁盘配额，不能悄悄改变当前 `max_records` 语义。
 

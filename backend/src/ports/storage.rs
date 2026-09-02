@@ -4,7 +4,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use crate::dns::{Deadline, RuntimeRevision, TransportClass};
+use crate::dns::{CancelReason, Deadline, RuntimeRevision, TransportClass};
 
 use super::telemetry::{CacheStatus, ConfiguredId, ConfiguredIdKind, OutcomeClass};
 use super::{PortError, PortFuture};
@@ -372,6 +372,10 @@ pub struct ResolveEvent {
     pub qname: Arc<str>,
     pub qtype: u16,
     pub qclass: u16,
+    /// DNS header 的 4-bit RCODE；无 DNS response 时为 0，并由 outcome/failure 分类区分。
+    pub rcode: u8,
+    /// 请求结束时已记录的首个协作式取消原因。
+    pub cancellation_reason: Option<CancelReason>,
     pub outcome: OutcomeClass,
     pub source: StatsSource,
     pub cache_status: CacheStatus,
@@ -401,6 +405,8 @@ impl fmt::Debug for ResolveEvent {
             .field("qname_byte_len", &self.qname.len())
             .field("qtype", &self.qtype)
             .field("qclass", &self.qclass)
+            .field("rcode", &self.rcode)
+            .field("cancellation_reason", &self.cancellation_reason)
             .field("outcome", &self.outcome)
             .field("source", &self.source)
             .field("cache_status", &self.cache_status)
@@ -509,6 +515,8 @@ mod tests {
             qname: Arc::from("private.example.test."),
             qtype: 1,
             qclass: 1,
+            rcode: 5,
+            cancellation_reason: Some(CancelReason::GroupPolicy),
             outcome: OutcomeClass::Success,
             source: StatsSource::Upstream,
             cache_status: CacheStatus::Miss,
