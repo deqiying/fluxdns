@@ -547,7 +547,7 @@ domain exact、suffix、regex、CIDR 等匹配结构在加载时编译，查询�
 
 `database.type`/`database.path` 是必填字段，即使 `dns.resolve_log.enable: false` 也必须打开数据库。v1 不提供关闭聚合统计的配置项：聚合统计默认开启，并且必须依赖该数据库持久化。prepare 阶段完成 SQLite 打开、schema migration、基本读写和目录权限检查；任何失败都是启动 `fatal`。
 
-storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 stats/detail/backend 生命周期顺序并暴露共享 recorder；`StorageRuntime` 已在 Application prepare 阶段按配置组装，并由 `DnsService` 注册受监督的周期 flush task，在 drain 后关闭 writer 和 backend。统计 pending batch/event 已有固定内存保护，超限时保留活动 epoch 并通过 Supervisor 升级 fatal；普通数据库不可用仍按 degraded 路径保留 pending 重试。当前数据面已接入 transport/outcome 聚合及脱敏详情的首轮记录，但完整 source/cache/strategy 元数据和正式 telemetry writer 仍待后续切片。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
+storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 stats/detail/backend 生命周期顺序并暴露共享 recorder；`StorageRuntime` 已在 Application prepare 阶段按配置组装，并由 `DnsService` 注册受监督的周期 flush task，在 drain 后关闭 writer 和 backend。统计 pending batch/event 已有固定内存保护，超限时保留活动 epoch 并通过 Supervisor 升级 fatal；普通数据库不可用仍按 degraded 路径保留 pending 重试，SQLite 成功的有限操作可将状态恢复为 healthy，不可恢复 adapter 错误保持 failed。当前数据面已接入 transport/outcome 聚合及脱敏详情的首轮记录，但完整 source/cache/strategy 元数据和正式 telemetry writer 仍待后续切片。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
 
 解析请求线程不等待 SQLite：
 

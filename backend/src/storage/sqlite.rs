@@ -344,8 +344,8 @@ impl SqliteStorageBackend {
             .lock()
             .map_err(|_| PortError::new(PortErrorClass::Internal, operation))?;
         match state.health {
-            StorageHealth::Healthy => Ok(()),
-            StorageHealth::Degraded | StorageHealth::Failed | StorageHealth::Stopping => {
+            StorageHealth::Healthy | StorageHealth::Degraded => Ok(()),
+            StorageHealth::Failed | StorageHealth::Stopping => {
                 Err(PortError::new(PortErrorClass::Unavailable, operation))
             }
         }
@@ -353,9 +353,28 @@ impl SqliteStorageBackend {
 
     fn mark_degraded(&self) {
         if let Ok(mut state) = self.state.lock()
-            && state.health == StorageHealth::Healthy
+            && matches!(
+                state.health,
+                StorageHealth::Healthy | StorageHealth::Degraded
+            )
         {
             state.health = StorageHealth::Degraded;
+        }
+    }
+
+    fn mark_failed(&self) {
+        if let Ok(mut state) = self.state.lock()
+            && state.health != StorageHealth::Stopping
+        {
+            state.health = StorageHealth::Failed;
+        }
+    }
+
+    fn mark_healthy(&self) {
+        if let Ok(mut state) = self.state.lock()
+            && state.health == StorageHealth::Degraded
+        {
+            state.health = StorageHealth::Healthy;
         }
     }
 
@@ -386,6 +405,7 @@ impl SqliteStorageBackend {
                     .with_safe_context("schema version mismatch"),
             );
         }
+        self.mark_healthy();
         Ok(target)
     }
 
@@ -423,7 +443,9 @@ impl SqliteStorageBackend {
         sql_transaction
             .commit()
             .await
-            .map_err(|error| self.database_error(error, "sqlite_storage.execute"))
+            .map_err(|error| self.database_error(error, "sqlite_storage.execute"))?;
+        self.mark_healthy();
+        Ok(())
     }
 
     async fn write_detail_records(
@@ -449,6 +471,7 @@ impl SqliteStorageBackend {
             .commit()
             .await
             .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
+        self.mark_healthy();
         Ok(summary)
     }
 
@@ -459,16 +482,24 @@ impl SqliteStorageBackend {
             .execute(&self.pool)
             .await
             .map_err(|error| self.database_error(error, "sqlite_storage.checkpoint"))?;
+        self.mark_healthy();
         Ok(())
     }
 
     fn database_error(&self, error: sqlx::Error, operation: &'static str) -> PortError {
-        self.mark_degraded();
         match error {
-            sqlx::Error::PoolClosed | sqlx::Error::Io(_) | sqlx::Error::Database(_) => {
+            sqlx::Error::Io(_) | sqlx::Error::Database(_) => {
+                self.mark_degraded();
                 PortError::new(PortErrorClass::Unavailable, operation)
             }
-            _ => PortError::new(PortErrorClass::Internal, operation),
+            sqlx::Error::PoolClosed => {
+                self.mark_failed();
+                PortError::new(PortErrorClass::Unavailable, operation)
+            }
+            _ => {
+                self.mark_failed();
+                PortError::new(PortErrorClass::Internal, operation)
+            }
         }
     }
 }
@@ -502,14 +533,17 @@ impl StorageBackend for SqliteStorageBackend {
     fn health_probe(&self, deadline: Deadline) -> PortFuture<'_, Result<StorageHealth, PortError>> {
         Box::pin(async move {
             check_deadline(deadline, "sqlite_storage.health_probe")?;
-            let stopping = {
+            let state_health = {
                 let state = self.state.lock().map_err(|_| {
                     PortError::new(PortErrorClass::Internal, "sqlite_storage.health_probe")
                 })?;
-                state.health == StorageHealth::Stopping
+                state.health
             };
-            if stopping {
-                return Ok(StorageHealth::Stopping);
+            if matches!(
+                state_health,
+                StorageHealth::Stopping | StorageHealth::Failed
+            ) {
+                return Ok(state_health);
             }
             match sqlx::query("SELECT 1").execute(&self.pool).await {
                 Ok(_) => {
@@ -919,6 +953,59 @@ mod tests {
         let health = reopened.health_probe(deadline()).await.unwrap();
         assert_eq!(health, crate::ports::storage::StorageHealth::Healthy);
         reopened.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn degraded_backend_recovers_after_successful_operation() {
+        let path = path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        backend
+            .state
+            .lock()
+            .expect("sqlite state lock must not be poisoned")
+            .health = crate::ports::storage::StorageHealth::Degraded;
+
+        let batch = StatsBatch {
+            batch_id: 99,
+            max_event_sequence: 1,
+            counter_epoch: 0,
+            events: vec![StatsEvent::new(1, 20_260_902, vec![]).unwrap()],
+        };
+        backend
+            .execute(transaction(batch), deadline())
+            .await
+            .unwrap();
+        assert_eq!(
+            backend.health_probe(deadline()).await.unwrap(),
+            crate::ports::storage::StorageHealth::Healthy
+        );
+
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn failed_backend_does_not_auto_recover_from_probe() {
+        let path = path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        backend
+            .state
+            .lock()
+            .expect("sqlite state lock must not be poisoned")
+            .health = crate::ports::storage::StorageHealth::Failed;
+
+        assert_eq!(
+            backend.health_probe(deadline()).await.unwrap(),
+            crate::ports::storage::StorageHealth::Failed
+        );
+        assert!(backend.checkpoint(deadline()).await.is_err());
+
+        backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
