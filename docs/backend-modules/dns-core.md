@@ -190,4 +190,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 
 阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 35 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream/group member ECS 实际 DoH wire、成员 ECS group 缓存绕过、client ECS cache key 隔离、direct/cache/group 的目标与成员 observation、hosts/rule-set 的 matched rule/resource 摘要，以及跨 Policy Core 实例的 SQLite cache 恢复；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH POST 对 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED 返回相同 canonical response 并恢复各自 DNS ID，大响应下 UDP 设置 TC 而 TCP/DoH 保留 64 条完整 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 515 passed、0 failed。
 
-当前实现进度：**80%**。
+阶段 142 将同一 observation 的策略目标、实际组成员和 matched rule/resource 摘要接入 `ResolveEvent` 与 SQLite schema v2；存储层聚焦测试通过，未重复大阶段全量测试。
+
+当前实现进度：**81%**。

@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 141（matched rule observation）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 142（解析规则与组成员元数据落库）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -13,7 +13,7 @@
 - Config：`version: 1` strict load、路径/SecretRef 归一化、语义校验、迁移边界和快照安全边界。
 - Runtime/Application：`PreparedRuntime → BoundCandidate → ActiveRuntime`、revision CAS、Supervisor、受管 task、配置文件轮询 reload、listener 复用/rebind、graceful shutdown。
 - DNS 数据面：UDP、TCP、DoH plain HTTP/1.x；hosts、Policy、Cache、Upstream 主链路；资源首次加载和 auto-update refresh。
-- Storage：SQLite migration、stats/detail transaction、bounded writer、flush/shutdown、pending 内存保护、首轮 degraded/recovery 和 adapter-level Busy/DiskFull fault 注入。
+- Storage：SQLite schema v2 migration、stats/detail transaction、规则/资源/组成员详情摘要、bounded writer、flush/shutdown、pending 内存保护、首轮 degraded/recovery 和 adapter-level Busy/DiskFull fault 注入。
 - Observability：低基数 metrics/health、typed event、typed final tracing layer、degraded health 发布、输出失败 stderr fallback、`TelemetryWriter` 有界队列、失败重排队、deadline-aware flush、真实文件/stderr output、启动时日志目标/级别切换，以及 `DnsService`/Supervisor 周期 flush 与 shutdown 接线。
 - DoH 安全首轮：trusted forwarded header、PROXY v1/v2 地址恢复，TLS terminate 的 PEM/DER 证书加载、私钥匹配、TLS 1.2/1.3 握手；PROXY 前导先消费再升级 TLS。
 
@@ -26,9 +26,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 完整跨 Runtime candidate 生命周期和独立 resource-only runtime swap；
 - 配置变更的完整 resource-only/listener-rebind 分类及正常运行路径验证；
 - DoH HTTP/2、完整 HTTP/DNS 协议组合和证书/信任边界矩阵；
-- cache persistence 的 last-access/故障观测与请求记录的完整 health/recovery 闭环；
+- cache persistence 的 last-access/故障观测与请求记录的 failure/revision、完整 health/recovery 闭环；
 - 完整跨 transport DNS contract；
-- 完整 group/member/resource metadata；
 - v1 最终压力、长期运行、conformance、drain/flush/shutdown 验收。
 
 ## 2. 进度总览
@@ -36,8 +35,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **80.6%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **82.6%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **80.9%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **82.8%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -49,20 +48,20 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Config | 已验证 | 100% | 10% |
 | Runtime | 实现中 | 75% | 12% |
 | Transport | 实现中 | 75% | 11% |
-| DNS Core | 实现中 | 80% | 10% |
+| DNS Core | 实现中 | 81% | 10% |
 | Policy | 实现中 | 82% | 8% |
 | Upstream | 已实现待验证 | 99% | 10% |
 | Cache | 实现中 | 82% | 9% |
 | Resource | 已实现待验证 | 90% | 7% |
-| Storage | 已实现待验证 | 87% | 8% |
+| Storage | 已实现待验证 | 89% | 8% |
 | Observability | 实现中 | 91% | 3% |
 
 进度计算：
 
 ```text
 4%×60% + 8%×40% + 10%×100% + 12%×75% + 11%×75%
-+ 10%×80% + 8%×82% + 10%×99% + 9%×82% + 7%×90%
-+ 8%×87% + 3%×91% ≈ 80.6%
++ 10%×81% + 8%×82% + 10%×99% + 9%×82% + 7%×90%
++ 8%×89% + 3%×91% ≈ 80.9%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -97,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 141 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 142 |
 
 ### 增量里程碑
 
@@ -115,16 +114,18 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 139 | 跨 transport 错误响应契约 | 独立测试 Core 经真实 UDP/TCP/plain DoH 返回一致的 SERVFAIL/REFUSED canonical response，且恢复各协议请求 ID |
 | 140 | group/member observation 拆分 | `upstream_id` 固定表示策略目标，`upstream_member_id` 表示实际顶层成员；cache hit 仍保留目标 ID，既有 stats/detail 继续聚合实际成员 |
 | 141 | matched rule observation | 输出 listener/strategy hosts 或 rule-set 来源、已验证资源 ID 和可选 rule ordinal；不复制 matcher、规则文本或查询内容 |
+| 142 | 解析元数据落库 | SQLite schema v2 拆分策略目标、实际组成员和 matched rule/resource 摘要；v1 数据库自动升级且历史记录不回填 |
 
 ### 当前阶段验证
 
 ```text
-rustfmt --edition 2024 backend/src/dns/handler.rs backend/src/dns/mod.rs backend/src/dns/policy.rs
-cargo test --manifest-path backend/Cargo.toml --locked dns::policy::tests
+rustfmt --edition 2024 backend/src/ports/storage.rs backend/src/service.rs backend/src/storage/resolve_log.rs backend/src/storage/service.rs backend/src/storage/sqlite.rs backend/src/storage/writer.rs
+cargo test --manifest-path backend/Cargo.toml storage::resolve_log::tests
+cargo test --manifest-path backend/Cargo.toml storage::sqlite::tests
 git diff --check
 ```
 
-以上均通过；阶段 141 仅格式化 3 个受影响文件并执行 Policy 35 项定向测试，未重复阶段 135 已通过的全量后端验收。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+以上均通过；阶段 142 仅格式化 6 个受影响的 Rust 文件，并执行 resolve-log 6 项、SQLite 14 项定向测试，未重复阶段 135 已通过的全量后端验收。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

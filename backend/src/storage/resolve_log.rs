@@ -4,8 +4,9 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::dns::{RuntimeRevision, TransportClass};
-use crate::ports::storage::StatsSource;
-use crate::ports::storage::{ResolveEvent, ResolveEventDisposition, ResolveEventSink};
+use crate::ports::storage::{
+    ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource, StatsSource,
+};
 use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 use crate::ports::{PortError, PortErrorClass};
 
@@ -24,6 +25,10 @@ pub struct ResolveDetailRecord {
     has_client_bucket: bool,
     has_strategy: bool,
     has_upstream: bool,
+    has_upstream_member: bool,
+    matched_rule_source: Option<ResolveRuleSource>,
+    has_matched_resource: bool,
+    matched_rule_ordinal: Option<u64>,
     has_request_digest: bool,
     transport: TransportClass,
     qname_byte_len: u16,
@@ -50,6 +55,10 @@ impl ResolveDetailRecord {
             has_client_bucket: event.client_bucket.is_some(),
             has_strategy: event.strategy_id.is_some(),
             has_upstream: event.upstream_id.is_some(),
+            has_upstream_member: event.upstream_member_id.is_some(),
+            matched_rule_source: event.matched_rule_source,
+            has_matched_resource: event.matched_resource_id.is_some(),
+            matched_rule_ordinal: event.matched_rule_ordinal,
             has_request_digest: !event.request_digest.is_empty(),
             transport: event.transport,
             qname_byte_len,
@@ -88,6 +97,22 @@ impl ResolveDetailRecord {
 
     pub const fn has_upstream(&self) -> bool {
         self.has_upstream
+    }
+
+    pub const fn has_upstream_member(&self) -> bool {
+        self.has_upstream_member
+    }
+
+    pub const fn matched_rule_source(&self) -> Option<ResolveRuleSource> {
+        self.matched_rule_source
+    }
+
+    pub const fn has_matched_resource(&self) -> bool {
+        self.has_matched_resource
+    }
+
+    pub const fn matched_rule_ordinal(&self) -> Option<u64> {
+        self.matched_rule_ordinal
     }
 
     pub const fn has_request_digest(&self) -> bool {
@@ -138,6 +163,10 @@ impl fmt::Debug for ResolveDetailRecord {
             .field("has_client_bucket", &self.has_client_bucket)
             .field("has_strategy", &self.has_strategy)
             .field("has_upstream", &self.has_upstream)
+            .field("has_upstream_member", &self.has_upstream_member)
+            .field("matched_rule_source", &self.matched_rule_source)
+            .field("has_matched_resource", &self.has_matched_resource)
+            .field("matched_rule_ordinal", &self.matched_rule_ordinal)
             .field("has_request_digest", &self.has_request_digest)
             .field("transport", &self.transport)
             .field("qname_byte_len", &self.qname_byte_len)
@@ -342,7 +371,7 @@ mod tests {
 
     use crate::dns::{RuntimeRevision, TransportClass};
     use crate::ports::storage::{
-        ResolveEvent, ResolveEventDisposition, ResolveEventSink, StatsSource,
+        ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource, StatsSource,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
     use crate::ports::{PortError, PortErrorClass};
@@ -400,6 +429,10 @@ mod tests {
             client_bucket: Some(Arc::from("client-private-bucket")),
             strategy_id: Some(Arc::from("strategy-private-id")),
             upstream_id: Some(Arc::from("upstream-private-id")),
+            upstream_member_id: Some(Arc::from("member-private-id")),
+            matched_rule_source: Some(ResolveRuleSource::RuleSet),
+            matched_resource_id: Some(Arc::from("resource-private-id")),
+            matched_rule_ordinal: Some(3),
             transport: TransportClass::Datagram,
             qname: Arc::from("private.example.test."),
             qtype: 1,
@@ -428,6 +461,13 @@ mod tests {
         assert!(record.has_client_bucket());
         assert!(record.has_strategy());
         assert!(record.has_upstream());
+        assert!(record.has_upstream_member());
+        assert_eq!(
+            record.matched_rule_source(),
+            Some(ResolveRuleSource::RuleSet)
+        );
+        assert!(record.has_matched_resource());
+        assert_eq!(record.matched_rule_ordinal(), Some(3));
         assert!(record.has_request_digest());
         assert_eq!(record.source(), StatsSource::Upstream);
         let debug = format!("{record:?}");
@@ -437,6 +477,9 @@ mod tests {
             "route-private-id",
             "client-private-bucket",
             "strategy-private-id",
+            "upstream-private-id",
+            "member-private-id",
+            "resource-private-id",
             "private.example.test",
         ] {
             assert!(!debug.contains(sensitive));

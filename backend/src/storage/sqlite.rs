@@ -14,8 +14,8 @@ use tokio::sync::mpsc;
 
 use crate::dns::Deadline;
 use crate::ports::storage::{
-    SchemaVersion, StatsBatch, StorageBackend, StorageFlushSummary, StorageHealth,
-    StorageOperation, StorageTransaction,
+    ResolveRuleSource, SchemaVersion, StatsBatch, StorageBackend, StorageFlushSummary,
+    StorageHealth, StorageOperation, StorageTransaction,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -23,6 +23,7 @@ use super::STORAGE_SCHEMA_VERSION;
 use super::resolve_log::{ResolveDetailRecord, ResolveDetailWriter};
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
+const INITIAL_STORAGE_SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum SqliteResolveDetailWriterBuildError {
@@ -338,13 +339,14 @@ impl SqliteStorageBackend {
              (singleton, schema_version, database_id, created_at_utc, migrated_at_utc) \
              VALUES (1, ?, ?, ?, ?)",
         )
-        .bind(i64::from(STORAGE_SCHEMA_VERSION.0))
+        .bind(i64::from(INITIAL_STORAGE_SCHEMA_VERSION.0))
         .bind(format!("fluxdns-{}", std::process::id()))
         .bind(unix_millis())
         .bind(unix_millis())
         .execute(&pool)
         .await
         .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+        migrate_storage_schema(&pool).await?;
         Ok(Self {
             pool,
             path: Arc::new(path),
@@ -564,6 +566,54 @@ impl SqliteStorageBackend {
             }
         }
     }
+}
+
+/// 按版本顺序执行小步 migration；每个版本在同一事务中更新 schema 标记。
+async fn migrate_storage_schema(pool: &SqlitePool) -> Result<(), SqliteStorageBackendBuildError> {
+    let row = sqlx::query("SELECT schema_version FROM storage_meta WHERE singleton = 1")
+        .fetch_one(pool)
+        .await
+        .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+    let version = row
+        .try_get::<i64, _>("schema_version")
+        .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+    if version == i64::from(STORAGE_SCHEMA_VERSION.0) {
+        return Ok(());
+    }
+    if version != i64::from(INITIAL_STORAGE_SCHEMA_VERSION.0) {
+        return Err(SqliteStorageBackendBuildError::Schema);
+    }
+
+    let mut transaction = pool
+        .begin()
+        .await
+        .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+    for statement in include_str!("../../migrations/0002_resolution_metadata.sql").split(';') {
+        let statement = statement.trim();
+        if !statement.is_empty() {
+            sqlx::query(statement)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+        }
+    }
+    let update = sqlx::query(
+        "UPDATE storage_meta SET schema_version = ?, migrated_at_utc = ? \
+         WHERE singleton = 1 AND schema_version = ?",
+    )
+    .bind(i64::from(STORAGE_SCHEMA_VERSION.0))
+    .bind(unix_millis())
+    .bind(i64::from(INITIAL_STORAGE_SCHEMA_VERSION.0))
+    .execute(&mut *transaction)
+    .await
+    .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+    if update.rows_affected() != 1 {
+        return Err(SqliteStorageBackendBuildError::Schema);
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(|_| SqliteStorageBackendBuildError::Schema)
 }
 
 impl std::fmt::Debug for SqliteStorageBackend {
@@ -860,13 +910,20 @@ async fn apply_resolve_records_with_limits(
         let client_bucket = record.has_client_bucket().then_some("<present>");
         let strategy_id = record.has_strategy().then_some("<present>");
         let upstream_id = record.has_upstream().then_some("<present>");
+        let upstream_member_id = record.has_upstream_member().then_some("<present>");
+        let matched_rule_source = record.matched_rule_source().map(resolve_rule_source_name);
+        let matched_resource_id = record.has_matched_resource().then_some("<present>");
+        let matched_rule_ordinal = record
+            .matched_rule_ordinal()
+            .map(|ordinal| i64::try_from(ordinal).unwrap_or(i64::MAX));
         let canonical_qname = format!("len:{}", record.qname_byte_len());
         sqlx::query(
             "INSERT INTO resolve_log \
              (event_time_utc, duration_millis, request_id_digest, listener_id, route_id, \
-              client_bucket, strategy_id, canonical_qname, qtype, qclass, source, upstream_id, \
-              rcode, cache_status, failure_class, cancellation_reason, runtime_revision, resource_revision) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               client_bucket, strategy_id, canonical_qname, qtype, qclass, source, upstream_id, \
+               upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
+               rcode, cache_status, failure_class, cancellation_reason, runtime_revision, resource_revision) \
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(system_time_millis(record.occurred_at()))
         .bind(duration_millis)
@@ -880,6 +937,10 @@ async fn apply_resolve_records_with_limits(
         .bind(i64::from(record.qclass()))
         .bind(stats_source_name(record.source()))
         .bind(upstream_id)
+        .bind(upstream_member_id)
+        .bind(matched_rule_source)
+        .bind(matched_resource_id)
+        .bind(matched_rule_ordinal)
         .bind(0_i64)
         .bind(cache_status_name(record.cache_status()))
         .bind(Option::<&str>::None)
@@ -930,6 +991,15 @@ fn stats_source_name(value: crate::ports::storage::StatsSource) -> &'static str 
     }
 }
 
+/// 将规则来源编码为稳定且低基数的 SQLite 文本值。
+fn resolve_rule_source_name(value: ResolveRuleSource) -> &'static str {
+    match value {
+        ResolveRuleSource::ListenerHosts => "listener_hosts",
+        ResolveRuleSource::StrategyHosts => "strategy_hosts",
+        ResolveRuleSource::RuleSet => "rule_set",
+    }
+}
+
 fn check_deadline(deadline: Deadline, operation: &'static str) -> Result<(), PortError> {
     if deadline.is_expired(Instant::now()) {
         Err(PortError::new(PortErrorClass::Timeout, operation))
@@ -955,12 +1025,12 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use super::{
-        InjectedSqliteFault, SqliteResolveDetailLimits, SqliteResolveDetailWriter,
-        SqliteResolveDetailWriterBuildError, SqliteStorageBackend,
+        InjectedSqliteFault, SqliteConnectOptions, SqlitePoolOptions, SqliteResolveDetailLimits,
+        SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError, SqliteStorageBackend,
     };
     use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
-        ResolveEvent, ResolveEventSink, SchemaVersion, StatsBatch, StatsEvent, StatsSource,
+        ResolveEvent, ResolveEventSink, ResolveRuleSource, StatsBatch, StatsEvent, StatsSource,
         StorageBackend, StorageOperation, StorageTransaction,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
@@ -993,8 +1063,11 @@ mod tests {
         let path = path();
         let backend = SqliteStorageBackend::connect(&path).await.unwrap();
         assert_eq!(
-            backend.migrate(SchemaVersion(1), deadline()).await.unwrap(),
-            SchemaVersion(1)
+            backend
+                .migrate(crate::storage::STORAGE_SCHEMA_VERSION, deadline())
+                .await
+                .unwrap(),
+            crate::storage::STORAGE_SCHEMA_VERSION
         );
         let batch = StatsBatch {
             batch_id: 1,
@@ -1025,6 +1098,83 @@ mod tests {
         let health = reopened.health_probe(deadline()).await.unwrap();
         assert_eq!(health, crate::ports::storage::StorageHealth::Healthy);
         reopened.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn connect_upgrades_v1_schema_without_backfilling_existing_details() {
+        let path = path();
+        let options = SqliteConnectOptions::new()
+            .filename(&path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        for statement in include_str!("../../migrations/0001_storage.sql").split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+        sqlx::query(
+            "INSERT INTO storage_meta \
+             (singleton, schema_version, database_id, created_at_utc, migrated_at_utc) \
+             VALUES (1, 1, 'v1-test', '0', '0')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO resolve_log \
+             (event_time_utc, duration_millis, request_id_digest, listener_id, canonical_qname, \
+              qtype, qclass, source, upstream_id, rcode, cache_status, runtime_revision) \
+             VALUES ('0', 0, '<present>', 'listener', 'len:0', 1, 1, 'upstream', \
+                     '<present>', 0, 'miss', 1)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        let version: i64 =
+            sqlx::query_scalar("SELECT schema_version FROM storage_meta WHERE singleton = 1")
+                .fetch_one(&backend.pool)
+                .await
+                .unwrap();
+        assert_eq!(version, i64::from(crate::storage::STORAGE_SCHEMA_VERSION.0));
+        let row = sqlx::query(
+            "SELECT upstream_member_id, matched_rule_source, matched_resource_id, \
+             matched_rule_ordinal FROM resolve_log LIMIT 1",
+        )
+        .fetch_one(&backend.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            row.try_get::<Option<String>, _>("upstream_member_id")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("matched_rule_source")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("matched_resource_id")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("matched_rule_ordinal")
+                .unwrap(),
+            None
+        );
+        backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
@@ -1190,6 +1340,10 @@ mod tests {
                 client_bucket: None,
                 strategy_id: Some(Arc::from("strategy")),
                 upstream_id: Some(Arc::from("upstream")),
+                upstream_member_id: Some(Arc::from("member")),
+                matched_rule_source: Some(ResolveRuleSource::RuleSet),
+                matched_resource_id: Some(Arc::from("rules")),
+                matched_rule_ordinal: Some(2),
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
@@ -1207,7 +1361,9 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         let row = sqlx::query(
-            "SELECT request_id_digest, route_id, client_bucket, strategy_id, upstream_id, canonical_qname, source \
+            "SELECT request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
+             upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
+             canonical_qname, source \
              FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
@@ -1242,6 +1398,29 @@ mod tests {
             Some("<present>")
         );
         assert_eq!(
+            row.try_get::<Option<String>, _>("upstream_member_id")
+                .unwrap()
+                .as_deref(),
+            Some("<present>")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("matched_rule_source")
+                .unwrap()
+                .as_deref(),
+            Some("rule_set")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("matched_resource_id")
+                .unwrap()
+                .as_deref(),
+            Some("<present>")
+        );
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("matched_rule_ordinal")
+                .unwrap(),
+            Some(2)
+        );
+        assert_eq!(
             row.try_get::<String, _>("canonical_qname").unwrap(),
             "len:12"
         );
@@ -1270,6 +1449,10 @@ mod tests {
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
+                    upstream_member_id: None,
+                    matched_rule_source: None,
+                    matched_resource_id: None,
+                    matched_rule_ordinal: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1332,6 +1515,10 @@ mod tests {
                 client_bucket: None,
                 strategy_id: None,
                 upstream_id: None,
+                upstream_member_id: None,
+                matched_rule_source: None,
+                matched_resource_id: None,
+                matched_rule_ordinal: None,
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
@@ -1371,6 +1558,10 @@ mod tests {
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
+                    upstream_member_id: None,
+                    matched_rule_source: None,
+                    matched_resource_id: None,
+                    matched_rule_ordinal: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1398,6 +1589,10 @@ mod tests {
                 client_bucket: None,
                 strategy_id: None,
                 upstream_id: None,
+                upstream_member_id: None,
+                matched_rule_source: None,
+                matched_resource_id: None,
+                matched_rule_ordinal: None,
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
@@ -1447,6 +1642,10 @@ mod tests {
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
+                    upstream_member_id: None,
+                    matched_rule_source: None,
+                    matched_resource_id: None,
+                    matched_rule_ordinal: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1494,6 +1693,10 @@ mod tests {
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
+                    upstream_member_id: None,
+                    matched_rule_source: None,
+                    matched_resource_id: None,
+                    matched_rule_ordinal: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1538,6 +1741,10 @@ mod tests {
                 client_bucket: None,
                 strategy_id: None,
                 upstream_id: None,
+                upstream_member_id: None,
+                matched_rule_source: None,
+                matched_resource_id: None,
+                matched_rule_ordinal: None,
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,

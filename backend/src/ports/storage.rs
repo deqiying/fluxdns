@@ -267,6 +267,14 @@ pub enum StatsSource {
     Upstream,
 }
 
+/// 详情记录中的规则来源；不携带规则文本或 matcher 内容。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ResolveRuleSource {
+    ListenerHosts,
+    StrategyHosts,
+    RuleSet,
+}
+
 pub const MAX_STATS_DIMENSIONS: usize = 8;
 
 #[derive(Clone, Debug)]
@@ -350,8 +358,16 @@ pub struct ResolveEvent {
     pub route_id: Option<Arc<str>>,
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
-    /// 实际选中的 direct upstream 或顶层 group member ID；无法归因时为策略 upstream/group。
+    /// 策略选中的 direct upstream 或 group ID。
     pub upstream_id: Option<Arc<str>>,
+    /// group 实际选中的顶层成员 ID。
+    pub upstream_member_id: Option<Arc<str>>,
+    /// 命中规则的低基数来源，不包含 matcher 或规则文本。
+    pub matched_rule_source: Option<ResolveRuleSource>,
+    /// 命中 hosts/rule-set 的已验证资源 ID。
+    pub matched_resource_id: Option<Arc<str>>,
+    /// strategy 规则序号；listener hosts 没有序号。
+    pub matched_rule_ordinal: Option<u64>,
     pub transport: TransportClass,
     pub qname: Arc<str>,
     pub qtype: u16,
@@ -374,6 +390,13 @@ impl fmt::Debug for ResolveEvent {
             .field("has_client_bucket", &self.client_bucket.is_some())
             .field("has_strategy_id", &self.strategy_id.is_some())
             .field("has_upstream_id", &self.upstream_id.is_some())
+            .field("has_upstream_member_id", &self.upstream_member_id.is_some())
+            .field("matched_rule_source", &self.matched_rule_source)
+            .field(
+                "has_matched_resource_id",
+                &self.matched_resource_id.is_some(),
+            )
+            .field("matched_rule_ordinal", &self.matched_rule_ordinal)
             .field("transport", &self.transport)
             .field("qname_byte_len", &self.qname.len())
             .field("qtype", &self.qtype)
@@ -478,6 +501,10 @@ mod tests {
             client_bucket: Some(Arc::from("client-private-bucket")),
             strategy_id: Some(Arc::from("strategy-private-id")),
             upstream_id: Some(Arc::from("upstream-private-id")),
+            upstream_member_id: Some(Arc::from("member-private-id")),
+            matched_rule_source: Some(ResolveRuleSource::RuleSet),
+            matched_resource_id: Some(Arc::from("resource-private-id")),
+            matched_rule_ordinal: Some(3),
             transport: TransportClass::Datagram,
             qname: Arc::from("private.example.test."),
             qtype: 1,
@@ -495,6 +522,8 @@ mod tests {
             "client-private-bucket",
             "strategy-private-id",
             "upstream-private-id",
+            "member-private-id",
+            "resource-private-id",
             "private.example.test",
         ] {
             assert!(!debug.contains(sensitive));

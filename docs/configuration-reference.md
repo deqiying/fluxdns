@@ -582,7 +582,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 1. `dot`/`doq` listener 的字段、TLS/QUIC 材料来源和协议特有校验。
 2. 主动上游健康检查、熔断器和持久健康分数配置。
 3. 远程规则的 expected checksum、版本锁定和签名验证字段；v1 只记录内部 content hash/source fingerprint。
-4. 未来配置版本、SQLite schema 的兼容窗口和实际 migration SQL；当前只固定迁移框架和 [Storage 模块](backend-modules/storage.md) 的逻辑表职责。
+4. 未来配置版本及 SQLite schema v2 之后的兼容窗口和 migration SQL；当前业务库升级链见 [Storage 模块](backend-modules/storage.md)。
 5. WebUI 正式启用版本的管理 API、认证/session、CSRF、TLS/bind 及历史统计保留契约。
 
 ## 18. 协议依据

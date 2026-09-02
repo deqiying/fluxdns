@@ -22,7 +22,7 @@ use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
 use crate::ports::storage::{
-    ResolveEvent, ResolveEventDisposition, ResolveEventSink, StatsDimension,
+    ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource, StatsDimension,
 };
 use crate::ports::telemetry::{
     CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
@@ -861,12 +861,17 @@ impl ObservedDnsCore {
                 .map(|route| Arc::from(route.as_ref())),
             client_bucket: observation.and_then(|value| value.client_bucket.clone()),
             strategy_id: observation.and_then(|value| value.strategy_id.clone()),
-            upstream_id: observation.and_then(|value| {
-                value
-                    .upstream_member_id
-                    .clone()
-                    .or_else(|| value.upstream_id.clone())
-            }),
+            upstream_id: observation.and_then(|value| value.upstream_id.clone()),
+            upstream_member_id: observation.and_then(|value| value.upstream_member_id.clone()),
+            matched_rule_source: observation
+                .and_then(|value| value.matched_rule.as_ref())
+                .map(|matched| resolve_rule_source(matched.source)),
+            matched_resource_id: observation
+                .and_then(|value| value.matched_rule.as_ref())
+                .map(|matched| Arc::clone(&matched.resource_id)),
+            matched_rule_ordinal: observation
+                .and_then(|value| value.matched_rule.as_ref())
+                .and_then(|matched| matched.ordinal),
             transport: request.context.transport.class,
             qname: Arc::from(question.name().to_ascii()),
             qtype: u16::from(question.query_type()),
@@ -892,6 +897,15 @@ impl ObservedDnsCore {
                 );
             }
         }
+    }
+}
+
+/// 将 DNS policy 的规则来源映射为稳定的存储契约，避免存储层依赖 policy 内部类型。
+fn resolve_rule_source(source: crate::dns::MatchedRuleSource) -> ResolveRuleSource {
+    match source {
+        crate::dns::MatchedRuleSource::ListenerHosts => ResolveRuleSource::ListenerHosts,
+        crate::dns::MatchedRuleSource::StrategyHosts => ResolveRuleSource::StrategyHosts,
+        crate::dns::MatchedRuleSource::RuleSet => ResolveRuleSource::RuleSet,
     }
 }
 
