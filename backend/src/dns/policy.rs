@@ -19,7 +19,9 @@ use crate::cache::{
     CacheLookup, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer, MokaCacheStore,
     build_cache_key,
 };
-use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedUpstream};
+use crate::config::resolve::{
+    ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedTtlOverride, ResolvedUpstream,
+};
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::policy::{ClientMatch, PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
@@ -597,7 +599,10 @@ impl PolicyDnsCore {
                 CanonicalResponse::response_with_code(&request.query, code, answers)
             };
             let result = response
-                .map(CoreOutcome::Response)
+                .map(|mut response| {
+                    apply_ttl_override(&mut response, &plan.ttl_override);
+                    CoreOutcome::Response(response)
+                })
                 .map_err(CoreError::ResponseConstruction);
             return (
                 result,
@@ -624,7 +629,8 @@ impl PolicyDnsCore {
             );
         };
         let result = match outcome.outcome {
-            UpstreamOutcome::Response(response) if response.matches_query(&request.query) => {
+            UpstreamOutcome::Response(mut response) if response.matches_query(&request.query) => {
+                apply_ttl_override(&mut response, &plan.ttl_override);
                 Ok(CoreOutcome::Response(response))
             }
             UpstreamOutcome::Cancelled(_) => Ok(CoreOutcome::NoResponse),
@@ -901,6 +907,15 @@ impl PolicyDnsCore {
                 Instant::now() + Duration::from_secs(OPTIMISTIC_REFRESH_TIMEOUT_SECS),
             ),
         })
+    }
+}
+
+/// 在响应离开 Policy Core 前应用当前请求选中的 TTL 覆写。
+///
+/// 缓存写入发生在此步骤之前，因此这里仅改变客户端可见 TTL，不改变缓存过期时间。
+fn apply_ttl_override(response: &mut CanonicalResponse, ttl_override: &ResolvedTtlOverride) {
+    if ttl_override.enabled {
+        response.clamp_ttl(ttl_override.min, ttl_override.max);
     }
 }
 
@@ -2486,6 +2501,61 @@ strategy:
             panic!("expected nodata response");
         };
         assert_eq!(nodata.class(), crate::dns::ResponseClass::NoData);
+    }
+
+    #[tokio::test]
+    async fn policy_applies_selected_ttl_override_to_hosts_and_upstream_answers() {
+        let mut config = Arc::try_unwrap(config()).unwrap();
+        config.dns.cache.enabled = true;
+        config.strategies[0].ttl_override = ResolvedTtlOverride {
+            enabled: true,
+            min: Some(Duration::from_secs(50)),
+            max: Some(Duration::from_secs(50)),
+            source: ValueSource::Strategy,
+        };
+        let core = PolicyDnsCore::from_config(&config, 42).unwrap();
+
+        let CoreOutcome::Response(local) = core
+            .resolve(&request("local.example.", RecordType::A))
+            .await
+            .unwrap()
+        else {
+            panic!("expected local policy response");
+        };
+        assert_eq!(local.ttl().min_ttl, Some(50));
+
+        let upstream_request = request("upstream.example.", RecordType::A);
+        let qname =
+            CanonicalDomain::parse(&upstream_request.query.question().name().to_ascii()).unwrap();
+        let plan = core
+            .policy()
+            .evaluate(crate::policy::PolicyRequest {
+                listener_id: &ConfigId::new("dns").unwrap(),
+                doh_path: None,
+                client_id: None,
+                client_addr: upstream_request.context.client.client_addr,
+                client_digest: None,
+                qname: Some(&qname),
+            })
+            .unwrap();
+        let key = cache_key(&plan, &upstream_request).unwrap();
+        let CoreOutcome::Response(upstream) = core.resolve(&upstream_request).await.unwrap() else {
+            panic!("expected upstream policy response");
+        };
+        assert_eq!(upstream.ttl().min_ttl, Some(50));
+
+        let CacheLookup::Fresh(stored) = core
+            .cache()
+            .lookup(&key, upstream_request.context.meta.deadline)
+            .await
+            .unwrap()
+        else {
+            panic!("expected cached origin response");
+        };
+        assert_eq!(
+            stored.entry.response.ttl().min_ttl,
+            Some(crate::dns::DEFAULT_LOCAL_TTL)
+        );
     }
 
     #[test]

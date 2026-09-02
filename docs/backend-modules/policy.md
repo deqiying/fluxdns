@@ -1,8 +1,8 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Policy 可消费 async PreparedRuntime 提供的 compiled file/remote snapshot，并已由 ActiveRuntime remote/file refresh worker 驱动版本化 atomic live swap，Runtime snapshot 资源摘要可原子更新；Policy Core 已将匹配后的 client bucket 作为低基数 observation 首轮输出，缓存 facade 遵循 `dns.cache.enabled` 与 `dns.cache.optimistic.enabled`，`PolicyLateResultSink` 已支持基于当前 `CacheEntry.quality` 的 late response 候选比较，配置候选级 reload 尚未实现
+> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Policy 可消费 async PreparedRuntime 提供的 compiled file/remote snapshot，并已由 ActiveRuntime remote/file refresh worker 驱动版本化 atomic live swap；ResolutionPlan 已按 client → 所选 strategy → global 解析 TTL override，Policy Core 会在缓存写入后应用 client-visible TTL；缓存 facade 遵循 `dns.cache.enabled` 与 `dns.cache.optimistic.enabled`，`PolicyLateResultSink` 已支持基于当前 `CacheEntry.quality` 的 late response 候选比较，配置候选 reload 已接入 Application
 >
-> 更新日期：2026-09-02
+> 更新日期：2026-09-03
 >
 > 目标代码：`backend/src/policy/*`
 >
@@ -189,6 +189,7 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 实现 strategy/route 编译；
 - [x] 实现 rule/hosts/resource matcher 编排；
 - [x] 实现覆盖矩阵与 ResolutionPlan（首轮 cache/TTL/ECS/client override）；
+- [x] 客户端未显式配置 TTL override 时继承实际选中的 strategy，并在 Policy Core 返回前应用；
 - [x] 将 direct hosts/plain HTTP DoH connector 通过 `UpstreamRegistry` 接入 `PolicyDnsCore`；
 - [x] 提供 protocol-neutral registry 注入入口并验证 DoH request path；
 - [x] 接入 Runtime snapshot 原子发布；
@@ -197,6 +198,6 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 提供 client bucket/strategy/source/cache/selected upstream 首轮低基数 observation；完整 group member、matched resource/rule result 仍待完成。
 - [x] `PolicyLateResultSink` 按当前 `CacheEntry.quality` 使用 `CacheCondition::Version` 更新候选，允许更优 late Positive 替换早期 Negative，并拒绝同级 Negative/Positive 或更低 Failure 覆盖；跨 adapter/并发候选矩阵仍待完成。
 
-阶段证据：Policy focused tests 当前 23 项通过，覆盖 client strategy/cache 兼容、listener hosts 优先、strategy rule 顺序、rule-set upstream、缺失资源、const/file loader，以及 ConfigLoader 生成的 disabled ECS、direct plain HTTP DoH registry wiring、注入式 DoH request path、基础 Cache/Core 命中、snapshot-local optimistic refresh、unsupported feature propagation、client bucket 和 selected upstream observation；新增 `cache_facade_follows_global_cache_configuration` 验证全局 cache/optimistic 开关；最近一次大阶段 backend 全量测试为 417 passed、0 failed，本阶段 upstream executor 增量测试 13 passed、0 failed。新增 supplied compiled file/remote snapshot 的初始构造，并由 async PreparedRuntime file/remote prepare 与 ActiveRuntime refresh worker 路径验证；Runtime 已提供原子资源摘要并由 service 捕获同 revision core，`RuntimeCoordinator` 现统一托管历史/当前 Policy finalizer owner，并在 service drain 后按 deadline 关闭；旧 Runtime optimistic refresh 与普通 late sink 均可经 current-target 路由到最新 Runtime cache/finalizer，nested group late sink 也会继续传播；新增 late Positive 提升、同级 Negative/Positive 保持和 Failure 不覆盖的 cache candidate 验证；仍未接入跨 Runtime 配置候选 reload 和完整 late-window 候选语义；Policy compiled resource live swap/stale version 已验证，也未完成真实网络的完整 DNS Core→Policy→Cache→Upstream 请求管线。
+阶段证据：`policy::plan::tests` 当前 7 项通过，新增验证匹配客户端未声明 TTL override 时继承其所选 strategy；`dns::policy::tests` 当前 24 项通过，覆盖 client/strategy/cache 兼容、hosts/rule-set/group/DoH 路径、配置 reload 所用 compiled resource、optimistic refresh/late sink，以及 hosts/upstream response 的 TTL override。最近一次大阶段 backend 全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
 
-当前实现进度：**71%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan 首轮组合、supplied compiled file/remote snapshot、注入式 direct DoH request path、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、nested late sink 传播、基于 `CacheEntry.quality` 的 late cache candidate 和 Policy resource live CAS；Runtime snapshot 配置候选 reload、fast-positive late sink、RuntimeCoordinator 历史/当前 finalizer owner、完整 late-window 候选语义、remote/dat selector、完整覆盖矩阵和跨 transport contract tests 未完成）。
+当前实现进度：**72%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan、client/strategy/global TTL 选择与返回覆写、supplied compiled file/remote snapshot、direct DoH、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、late sink、RuntimeCoordinator finalizer owner 和配置候选 reload 已接入；剩余 TTL/stale TTL、remote/dat selector、完整 metadata/覆盖矩阵和跨 transport contract tests 未完成）。

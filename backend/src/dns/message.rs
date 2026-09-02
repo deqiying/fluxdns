@@ -1,4 +1,5 @@
 use std::fmt;
+use std::time::Duration;
 
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query, ResponseCode},
@@ -288,9 +289,40 @@ impl CanonicalResponse {
         self.ttl
     }
 
+    /// 对所有客户端可见 RR 应用 TTL 上下界，并同步刷新派生 TTL 元数据。
+    ///
+    /// `Duration::ZERO` 表示该边界未设置；调用方应在缓存写入完成后再调用，避免
+    /// 客户端级覆写延长缓存条目的实际生命周期。
+    pub(crate) fn clamp_ttl(&mut self, min: Option<Duration>, max: Option<Duration>) {
+        let min = ttl_bound_seconds(min);
+        let max = ttl_bound_seconds(max);
+        for record in self
+            .message
+            .answers
+            .iter_mut()
+            .chain(&mut self.message.authorities)
+            .chain(&mut self.message.additionals)
+        {
+            if let Some(min) = min {
+                record.ttl = record.ttl.max(min);
+            }
+            if let Some(max) = max {
+                record.ttl = record.ttl.min(max);
+            }
+        }
+        self.ttl = extract_ttl_metadata(&self.message, self.class);
+    }
+
     pub fn matches_query(&self, query: &CanonicalQuery) -> bool {
         CanonicalQuestion::from_query(&self.message.queries[0]) == *query.question()
     }
+}
+
+/// 将配置时长转换为 DNS wire 可表达的秒数，零值表示未设置。
+fn ttl_bound_seconds(value: Option<Duration>) -> Option<u32> {
+    value
+        .filter(|value| !value.is_zero())
+        .map(|value| u32::try_from(value.as_secs()).unwrap_or(u32::MAX))
 }
 
 /// canonical message 构造失败的稳定分类。
@@ -485,6 +517,38 @@ mod tests {
         let truncated =
             CanonicalResponse::from_message(truncated, &expected, DnsMessageId::new(77)).unwrap();
         assert_eq!(truncated.class(), ResponseClass::Truncated);
+    }
+
+    #[test]
+    fn ttl_bounds_apply_to_all_rr_sections_and_metadata() {
+        let expected = CanonicalQuery::from_message(query(1, "example.com.")).unwrap();
+        let record = |ttl, address| {
+            Record::from_rdata(
+                Name::from_str("example.com.").unwrap(),
+                ttl,
+                RData::A(A(address)),
+            )
+        };
+        let mut message = response(&expected, ResponseCode::NoError);
+        message.add_answer(record(5, Ipv4Addr::new(192, 0, 2, 1)));
+        message
+            .authorities
+            .push(record(50, Ipv4Addr::new(192, 0, 2, 2)));
+        message
+            .additionals
+            .push(record(500, Ipv4Addr::new(192, 0, 2, 3)));
+        let mut response =
+            CanonicalResponse::from_message(message, &expected, DnsMessageId::new(77)).unwrap();
+
+        response.clamp_ttl(
+            Some(Duration::from_secs(10)),
+            Some(Duration::from_secs(100)),
+        );
+
+        assert_eq!(response.as_message().answers[0].ttl, 10);
+        assert_eq!(response.as_message().authorities[0].ttl, 50);
+        assert_eq!(response.as_message().additionals[0].ttl, 100);
+        assert_eq!(response.ttl().min_ttl, Some(10));
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh 和低基数 resolution observation；Policy observation 已补充首轮 client bucket/selected upstream；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 已接入，但完整 latest-snapshot/resource reload 管线尚未接入
+> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh 和低基数 resolution observation；Policy observation 已补充首轮 client bucket/selected upstream；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入
 >
-> 更新日期：2026-09-02
+> 更新日期：2026-09-03
 >
 > 目标代码：`backend/src/dns/*`
 >
@@ -82,7 +82,7 @@ Policy 返回完整 `ResolutionPlan`，至少包含：
 
 Core 不再次计算继承，也不把 rule 文本写入日志。
 
-当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，stale 命中时可在当前 immutable core 内先返回并通过有界 finalizer 进行 optimistic refresh，`hosts[]` 本地命中仍绕过 response cache；`DnsCore::resolve_with_observation` 沿同一请求路径返回生效 strategy、selected upstream、answer source 和 cache status，供 service 的 stats/detail 使用；最新 Runtime snapshot 捕获、resource reload 和 TTL override 完整管线仍未接入。
+当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，stale 命中时可在当前 immutable core 内先返回并通过有界 finalizer 进行 optimistic refresh，`hosts[]` 本地命中仍绕过 response cache；响应离开 Policy Core 前按当前 plan 对 answer/authority/additional RR 应用 TTL 上下界，缓存仍保存未覆写的 canonical response；`DnsCore::resolve_with_observation` 沿同一请求路径返回生效 strategy、selected upstream、answer source 和 cache status，供 service 的 stats/detail 使用。
 
 ## 6. Cache 交互
 
@@ -133,7 +133,7 @@ NXDOMAIN、REFUSED、SERVFAIL、TC 都是有效 DNS response，不转换成 adap
 - cache expiry TTL：用于 entry 生命周期；
 - client-visible TTL：按当前 override 和剩余 TTL 生成。
 
-TTL override 不延长缓存 entry 的实际过期时间。返回 stale/optimistic entry 时使用 `answer_ttl`，且不超过该 entry 允许的 stale 窗口。
+TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 的实际过期时间。当前已实现全部 RR 的配置 min/max 覆写；基于剩余生命周期递减 TTL，以及 stale/optimistic `answer_ttl` 限制仍待后续切片。
 
 ## 10. 事件
 
@@ -181,9 +181,10 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket/selected upstream 首轮元数据；
 - [x] 实现固定响应的 transport 无关 handler；
 - [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
-- [ ] 实现 ECS、TTL 和错误映射；
+- [x] 实现配置驱动的 client-visible TTL min/max 覆写，且不改变 cache admission 使用的 origin TTL；
+- [ ] 实现 ECS、剩余 TTL/stale answer TTL 和完整错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：测试覆盖 canonical DNS ID 归零、带显式 correlation 的 response ID 校验、QNAME 规范化、opcode/question/EDNS version 校验、response question 匹配、response/TTL 分类、deadline 只能缩短、首个取消原因优先、DNS/ECS Debug 脱敏、固定 SERVFAIL dispatch、HostsCore A/AAAA/NXDOMAIN/NODATA、Resource CNAME/wildcard、ConfiguredDnsCore const/file loader/fallback，以及 PolicyDnsCore 的 upstream/cache 命中、snapshot-local optimistic refresh、compiled resource live swap 和 strategy/source/cache/client bucket/selected upstream observation 路径；最近一次大阶段全量测试为 417 passed、0 failed，阶段 82 的 Policy focused 增量测试为 19 passed、0 failed。
+阶段证据：`dns::message::tests` 当前 10 项通过，新增覆盖 answer/authority/additional RR 的 TTL 上下界与派生 metadata 更新；`dns::policy::tests` 当前 24 项通过，新增覆盖 hosts/upstream 的 strategy TTL override；既有测试继续覆盖 canonical 校验、固定响应、Policy/Cache/Upstream 主链、资源 live swap 和低基数 observation。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
 
-当前实现进度：**62%**。
+当前实现进度：**64%**。

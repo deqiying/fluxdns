@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::config::model::RuleSetFormat;
 use crate::config::resolve::{
     ConfigId, ResolvedClient, ResolvedConfig, ResolvedEcs, ResolvedGlobalCache,
-    ResolvedHostsResource, ResolvedRuleSet, ResolvedStrategy, ResolvedTtlOverride,
+    ResolvedHostsResource, ResolvedRuleSet, ResolvedStrategy, ResolvedTtlOverride, ValueSource,
 };
 use crate::ports::cache::{CacheNamespace, CacheStrategyId, ClientCacheDigest};
 use crate::resource::{
@@ -313,6 +313,7 @@ impl PolicyIndex {
         };
         let cache = self.select_cache(client_config, strategy.as_ref(), request.client_digest)?;
         let ttl_override = client_config
+            .filter(|client| client.ttl_override.source == ValueSource::Client)
             .map(|client| client.ttl_override.clone())
             .unwrap_or_else(|| strategy.ttl_override.clone());
         let edns_client_subnet = client_config
@@ -742,6 +743,46 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn client_without_ttl_override_inherits_selected_strategy() {
+        let mut inner = strategy("inner", None);
+        inner.ttl_override = ResolvedTtlOverride {
+            enabled: true,
+            min: None,
+            max: Some(Duration::from_secs(30)),
+            source: ValueSource::Strategy,
+        };
+        let mut matched_client = client("client1", Some("inner"), None);
+        matched_client.ttl_override = ResolvedTtlOverride {
+            enabled: true,
+            min: None,
+            max: Some(Duration::from_secs(120)),
+            source: ValueSource::Global,
+        };
+        let index = PolicyIndex::build(
+            [listener()],
+            [strategy("default", None), inner],
+            [matched_client],
+            global(false),
+        )
+        .unwrap();
+        let listener_id = ConfigId::new("lan").unwrap();
+
+        let plan = index
+            .evaluate(PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: Some("alice"),
+                client_addr: Some(IpAddr::from([192, 0, 2, 10])),
+                client_digest: None,
+                qname: None,
+            })
+            .unwrap();
+
+        assert_eq!(plan.ttl_override.source, ValueSource::Strategy);
+        assert_eq!(plan.ttl_override.max, Some(Duration::from_secs(30)));
     }
 
     #[test]

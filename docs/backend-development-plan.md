@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 118（进程级配置热重载 fail-closed）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 119（配置驱动的 client-visible TTL override）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -35,8 +35,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **76.0%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **78.4%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **76.3%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **78.7%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -48,8 +48,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Config | 已验证 | 100% | 10% |
 | Runtime | 实现中 | 71% | 12% |
 | Transport | 实现中 | 72% | 11% |
-| DNS Core | 实现中 | 62% | 10% |
-| Policy | 实现中 | 71% | 8% |
+| DNS Core | 实现中 | 64% | 10% |
+| Policy | 实现中 | 72% | 8% |
 | Upstream | 已实现待验证 | 99% | 10% |
 | Cache | 实现中 | 72% | 9% |
 | Resource | 已实现待验证 | 90% | 7% |
@@ -60,8 +60,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ```text
 4%×60% + 8%×40% + 10%×100% + 12%×71% + 11%×72%
-+ 10%×62% + 8%×71% + 10%×99% + 9%×72% + 7%×90%
-+ 8%×84% + 3%×90% ≈ 76.0%
++ 10%×64% + 8%×72% + 10%×99% + 9%×72% + 7%×90%
++ 8%×84% + 3%×90% ≈ 76.3%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 118 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 119 |
 
 ### 增量里程碑
 
@@ -106,17 +106,19 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 84–96 | DoH TLS/PROXY/forwarded、配置 watcher、Telemetry/health、信号处理首轮 | transport、service、observability focused suites |
 | 97–101 | 文件/SQLite cache persistence contract、故障分类、metadata、WAL/SHM 占用观测 | persistence contract 与 SQLite focused suites |
 | 102–114 | 跨 Runtime drain/owner、受控 late-attempt、latest-target cache 写入和 finalizer 清理 | coordinator 15 项、Policy 22 项及 service focused suites |
-| 115–118 | 运行中资源 live publish、cache 开关契约、Application service reload、进程级配置 restart-required 分类 | service 32 项、Policy 23 项、Application 10 项均通过 |
+| 115–119 | 运行中资源 live publish、cache 开关契约、Application service reload、进程级配置分类、client-visible TTL override | service 32 项；本阶段 message 10 项、Policy plan 7 项、Policy Core 24 项通过 |
 
 ### 当前阶段验证
 
 ```text
-rustfmt --edition 2024 backend/src/service.rs
-cargo test --manifest-path backend/Cargo.toml --locked --offline service::tests:: -- --nocapture
+rustfmt --edition 2024 backend/src/dns/message.rs backend/src/policy/plan.rs backend/src/dns/policy.rs
+cargo test --manifest-path backend/Cargo.toml --locked --offline dns::message::tests:: -- --nocapture
+cargo test --manifest-path backend/Cargo.toml --locked --offline policy::plan::tests:: -- --nocapture
+cargo test --manifest-path backend/Cargo.toml --locked --offline dns::policy::tests:: -- --nocapture
 git diff --check
 ```
 
-以上均通过；阶段 118 未重复全量 `cargo fmt/test`。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+以上均通过；阶段 119 未重复全量 `cargo fmt/test`。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 
