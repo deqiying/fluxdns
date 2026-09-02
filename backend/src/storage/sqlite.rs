@@ -177,6 +177,20 @@ impl SqliteResolveDetailWorker {
         }
         Ok(summary)
     }
+
+    pub async fn shutdown(
+        mut self,
+        deadline: Deadline,
+    ) -> Result<SqliteResolveDetailFlushSummary, PortError> {
+        let mut total = SqliteResolveDetailFlushSummary::default();
+        while self.pending_len() > 0 {
+            let summary = self.flush(deadline).await?;
+            total.committed = total.committed.saturating_add(summary.committed);
+            total.evicted = total.evicted.saturating_add(summary.evicted);
+            total.dropped = total.dropped.saturating_add(summary.dropped);
+        }
+        Ok(total)
+    }
 }
 
 #[derive(Clone)]
@@ -1168,6 +1182,49 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_detail_worker_shutdown_drains_all_pending_batches() {
+        let path = path();
+        let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
+        let (sink, worker) =
+            SqliteResolveDetailWriter::channel(Arc::clone(&backend), 3, 2).unwrap();
+        let writer = ResolveLogWriter::new(true, 3, sink).unwrap();
+        for listener_id in ["listener-a", "listener-b", "listener-c"] {
+            writer
+                .try_record(ResolveEvent {
+                    occurred_at: SystemTime::now(),
+                    duration_started_at: Instant::now(),
+                    request_digest: Arc::from("digest"),
+                    listener_id: Arc::from(listener_id),
+                    route_id: None,
+                    client_bucket: None,
+                    strategy_id: None,
+                    transport: TransportClass::Datagram,
+                    qname: Arc::from("example.com."),
+                    qtype: 1,
+                    qclass: 1,
+                    outcome: OutcomeClass::Success,
+                    cache_status: CacheStatus::Miss,
+                    runtime_revision: RuntimeRevision(1),
+                })
+                .unwrap();
+        }
+        assert_eq!(writer.flush().committed, 3);
+        let summary = worker.shutdown(deadline()).await.unwrap();
+        assert_eq!(summary.committed, 3);
+        assert_eq!(summary.evicted, 0);
+        assert_eq!(summary.dropped, 0);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 3);
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
