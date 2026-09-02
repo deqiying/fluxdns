@@ -3588,6 +3588,82 @@ clients: []
     }
 
     #[tokio::test]
+    async fn reload_reuses_process_owned_stats_worker_for_the_new_core() {
+        let port = 41_000 + (std::process::id() as u16 % 500);
+        let work_path = crate::config::test_support::absolute_path("service-reload-shared-stats");
+        let config = runtime_config_at(&work_path, port);
+        let initial =
+            PreparedRuntime::prepare_with_policy_core(Arc::clone(&config), RuntimeRevision(1))
+                .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let storage = StorageRuntime::open(
+            coordinator.load().snapshot().config(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let mut service = super::DnsService::with_default_timeout_from_coordinator_and_storage(
+            Arc::clone(&coordinator),
+            storage,
+        )
+        .unwrap();
+        let stats_worker = Arc::clone(service.stats_worker.as_ref().unwrap());
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        // 先让 interval 的启动 tick 完成，避免它在第一条请求后立即切换统计 epoch。
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let initial_response = udp_query(address, 1, "example.test.").await;
+        assert_eq!(initial_response.metadata.id, 1);
+        assert_eq!(stats_worker.accumulator().active_event_count(), 1);
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_with_answer_at(&work_path, port, "127.0.0.2"),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(
+            &stats_worker,
+            service.stats_worker.as_ref().unwrap()
+        ));
+        let reloaded_response = udp_query(address, 2, "example.test.").await;
+        assert_eq!(reloaded_response.metadata.id, 2);
+        assert!(reloaded_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 2)
+        )));
+        assert_eq!(stats_worker.accumulator().active_event_count(), 2);
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    #[tokio::test]
     async fn reload_rejects_process_owned_config_change_without_switching_runtime() {
         let port = 45_000 + (std::process::id() as u16 % 500);
         let work_path = crate::config::test_support::absolute_path("service-reload-restart");

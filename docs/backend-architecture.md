@@ -311,7 +311,7 @@ struct AppState {
 
 每个请求从 `active.load()` 得到同一 `ActiveRuntime`，再捕获其中的 `RuntimeSnapshot` 一次。资源仍可按资源粒度刷新，当前 service 通过 coordinator 代理读取和刷新活动实例；`refresh_resource_if_current` 在刷新前后确认 captured runtime 仍是 active，候选切换期间的旧结果会被标记为 stale 并由下一轮重新读取。候选激活已在 coordinator 层提供 bind/CAS 原子边界，service reload 还会在 CAS 成功后注册新 revision 的 transport/resource task 并取消旧 token；Application 文件 watcher 已通过稳定 fingerprint 串行触发该入口，hosts 与 rule_set 并发刷新通过 per-resource epoch/CAS 合并，后发布者不会覆盖其他资源。资源内容更新复用现有 bound endpoints 和 shared services；需要 rebind 的候选则先绑定新 endpoints，成功后原子替换 `ActiveRuntime`，旧实例进入 drain。
 
-资源内容刷新不创建新的 `ActiveRuntime`，只在当前实例内发布新的 Policy/资源 metadata snapshot，因此自然复用 listener 与 shared services。只有配置候选才执行 `ActiveRuntime` swap；需要 rebind 时新旧 listener set 独立存在，旧 set 在 grace deadline 后关闭。
+资源内容刷新不创建新的 `ActiveRuntime`，只在当前实例内发布新的 Policy/资源 metadata snapshot，因此自然复用 listener 与 shared services。只有配置候选才执行 `ActiveRuntime` swap；需要 rebind 时新旧 listener set 独立存在，旧 set 在 grace deadline 后关闭。Storage 与 Telemetry adapter 由进程级 `DnsService` 持有，配置 reload 会使用同一组 stats/detail/telemetry sink 包装新 core；相关进程级配置变化必须返回 `RestartRequired`，不能在 revision 切换中替换这些实例。
 
 ```text
 resource content change
