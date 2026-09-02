@@ -637,6 +637,30 @@ impl DnsService {
         Ok(report)
     }
 
+    /// 运行期 task 失败后执行有界收尾；清理异常只记录，调用方仍返回原始 task 错误。
+    async fn shutdown_after_runtime_failure(&mut self, grace_period: Duration) {
+        let clock = SystemClock::new();
+        let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
+        match self.shutdown(&clock, deadline).await {
+            Ok(report) if report.deadline_expired => {
+                tracing::error!(
+                    event = "runtime_failure_shutdown_timeout",
+                    component = "runtime",
+                    "runtime_failure_shutdown_timeout"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(
+                    event = "runtime_failure_shutdown_failed",
+                    component = "runtime",
+                    reason = %error,
+                    "runtime_failure_shutdown_failed"
+                );
+            }
+        }
+    }
+
     /// 等待进程终止信号后执行有界 graceful shutdown。
     pub async fn wait_for_ctrl_c(
         &mut self,
@@ -694,12 +718,14 @@ impl DnsService {
                 }
                 completion = self.supervisor.join_next() => {
                     let Some(completion) = completion else {
-                        return Err(ServiceError::TaskFailure {
+                        let error = ServiceError::TaskFailure {
                             task_id: "supervisor".to_owned(),
                             component: "runtime",
                             fault_level: FaultLevel::Fatal,
                             exit: TaskExit::Panicked,
-                        });
+                        };
+                        self.shutdown_after_runtime_failure(grace_period).await;
+                        return Err(error);
                     };
                     if let Some(error) = task_failure(&completion) {
                         if let Some(telemetry) = &self.telemetry {
@@ -710,7 +736,7 @@ impl DnsService {
                                 Some("supervisor task failed"),
                             );
                         }
-                        self.coordinator.begin_drain();
+                        self.shutdown_after_runtime_failure(grace_period).await;
                         return Err(error);
                     }
                 }
@@ -2742,11 +2768,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fatal_task_drains_all_runtime_owners_before_returning_error() {
+    async fn fatal_task_flushes_process_services_before_returning_error() {
         let base_port = 42_000 + (std::process::id() as u16 % 500) * 2;
+        let work_path = crate::config::test_support::absolute_path("service-fatal-task-shutdown");
+        let initial_config = runtime_config_at(&work_path, base_port);
+        let database_path = initial_config.database.path.clone();
         let factory = SystemSocketFactory::new();
         let initial = PreparedRuntime::prepare_with_policy_core(
-            runtime_config(base_port),
+            Arc::clone(&initial_config),
             crate::dns::RuntimeRevision(1),
         )
         .unwrap();
@@ -2760,12 +2789,33 @@ mod tests {
         .unwrap();
         let coordinator = Arc::new(RuntimeCoordinator::new(initial));
         let previous = coordinator.load();
+        let storage = StorageRuntime::open(
+            &initial_config,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let telemetry = Arc::new(TelemetryWriter::new(16, output).unwrap());
+        let telemetry_probe = Arc::clone(&telemetry);
         let mut service =
-            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
-                .unwrap();
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                Arc::clone(&coordinator),
+                storage,
+                telemetry,
+            )
+            .unwrap();
+
+        let response = udp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)),
+            1,
+            "example.test.",
+        )
+        .await;
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
 
         let next = PreparedRuntime::prepare_with_policy_core(
-            runtime_config(base_port + 1),
+            runtime_config_at(&work_path, base_port + 1),
             crate::dns::RuntimeRevision(2),
         )
         .unwrap();
@@ -2805,20 +2855,25 @@ mod tests {
         assert!(matches!(error, ServiceError::TaskFailure { .. }));
         assert!(previous.is_draining());
         assert!(current.is_draining());
-
-        let report = service
-            .shutdown(
-                &SystemClock::new(),
-                crate::dns::Deadline::new(Instant::now() + Duration::from_secs(5)),
-            )
-            .await
-            .unwrap();
-        assert!(!report.deadline_expired);
+        assert!(telemetry_probe.stats().closed());
+        assert_eq!(sqlite_total_requests(&database_path).await, 1);
+        let _ = std::fs::remove_dir_all(work_path);
     }
 
-    fn runtime_config(port: u16) -> Arc<crate::config::resolve::ResolvedConfig> {
-        let work_path = crate::config::test_support::absolute_path("service-reload");
-        runtime_config_at(&work_path, port)
+    async fn sqlite_total_requests(path: &std::path::Path) -> i64 {
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(path);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let total =
+            sqlx::query_scalar("SELECT COALESCE(SUM(total_requests), 0) FROM stats_daily_total")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        total
     }
 
     fn runtime_config_at(
@@ -3537,19 +3592,7 @@ clients: []
         }));
         drop(health_events);
 
-        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&database_path);
-        let pool = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(options)
-            .await
-            .unwrap();
-        let total_requests: i64 =
-            sqlx::query_scalar("SELECT SUM(total_requests) FROM stats_daily_total")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-        assert_eq!(total_requests, 1);
-        pool.close().await;
+        assert_eq!(sqlite_total_requests(&database_path).await, 1);
         let _ = std::fs::remove_dir_all(work_path);
     }
 

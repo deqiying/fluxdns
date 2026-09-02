@@ -399,7 +399,7 @@ supervisor 对 task 使用结构化生命周期和显式故障等级，不以“
 | structured log writer/telemetry sink 不可用 | `degraded`；保留本地低基数 counters，日志回退 stderr/内存 ring buffer | 不影响 DNS；观测可能出现明确的 telemetry gap |
 | supervisor 自身 panic、不可恢复的 task panic 或 shutdown 超时 | `fatal`；取消所有 task，执行有限 flush 后退出并返回非零状态 | 进程退出，交由外部守护进程决定是否拉起 |
 
-数据库在启动阶段不可打开、migration 失败或没有写权限时属于 `fatal`，因为聚合统计是默认开启且有数据库持久化契约；运行中数据库故障属于 `degraded`，不能把每次 DNS 请求同步阻塞到数据库恢复。所有降级状态都必须进入 metrics/structured log，并带上组件、首发时间、最近重试时间、当前 stale age 和是否存在持久化缺口。v1 不在进程内无限重启 listener 或 supervisor；`Supervisor::spawn_with_factory` 现已为可重建 task 提供瞬时失败的有界指数退避和上限耗尽标记，`spawn_scoped_with_factory` 还可保留 task-scoped cancellation，transport listener task 已接入三次有界瞬时重试但只复用现有 bound socket，JoinSet 的 panic/abort 结果按 Tokio task ID 映射回完整 FluxDNS `TaskSpec`，`DnsService` 已把 FatalEndpoint/Fatal、重试耗尽和 task panic 升级为运行期错误并停止接收新请求，listener 自动 rebind、完整 endpoint/resource/storage 故障矩阵和外部 service manager 接管仍需后续接线。
+数据库在启动阶段不可打开、migration 失败或没有写权限时属于 `fatal`，因为聚合统计是默认开启且有数据库持久化契约；运行中数据库故障属于 `degraded`，不能把每次 DNS 请求同步阻塞到数据库恢复。所有降级状态都必须进入 metrics/structured log，并带上组件、首发时间、最近重试时间、当前 stale age 和是否存在持久化缺口。v1 不在进程内无限重启 listener 或 supervisor；`Supervisor::spawn_with_factory` 现已为可重建 task 提供瞬时失败的有界指数退避和上限耗尽标记，`spawn_scoped_with_factory` 还可保留 task-scoped cancellation，transport listener task 已接入三次有界瞬时重试但只复用现有 bound socket，JoinSet 的 panic/abort 结果按 Tokio task ID 映射回完整 FluxDNS `TaskSpec`。`DnsService` 会把 FatalEndpoint/Fatal、重试耗尽和 task panic 升级为运行期错误，并在返回原始错误前按 shutdown grace period 停止请求、关闭其余 task、提交 Storage 并关闭 Telemetry；清理失败或超时另行记录但不覆盖首要故障。listener 自动 rebind、完整 endpoint/resource/storage 故障矩阵和外部 service manager 接管仍需后续接线。
 
 ## 6. 请求管线
 
@@ -555,7 +555,7 @@ domain exact、suffix、regex、CIDR 等匹配结构在加载时编译，查询�
 
 storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 stats/detail/backend 生命周期顺序并暴露共享 recorder；`StorageRuntime` 已在 Application prepare 阶段按配置组装，并由 `DnsService` 注册受监督的周期 flush task，在 drain 后关闭 writer 和 backend。统计 pending batch/event 已有固定内存保护，超限时保留活动 epoch 并通过 Supervisor 升级 fatal；普通数据库不可用仍按 degraded 路径保留 pending 重试，SQLite 成功的有限操作可将状态恢复为 healthy，不可恢复 adapter 错误保持 failed。当前数据面已接入 transport/outcome 聚合及脱敏详情；Policy Core 通过可选 observation 同步提供 strategy/source/cache/client bucket、独立的策略目标 `upstream_id` 与实际顶层 `upstream_member_id`，以及不含规则文本和 matcher 的 matched rule/resource 摘要及 typed `ResourceVersion`。stats 继续优先聚合实际成员；SQLite schema v2 将目标、成员和规则资源摘要拆分落库，配置 ID 仍只保存存在性标记，资源版本在 SQLite 边界编码为 `epoch:revision`。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
 
-Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `TelemetryWriter`：请求线程只做有界内存排队，低优先级日志可计数丢弃，warn/error 优先保留，输出失败按安全 `PortError` 分类并重排队，flush 遵守 deadline；`StructuredTelemetryOutput` 可将已脱敏事件写入真实文件或 stderr，Application 在启动配置校验后切换共享输出目标和 reloadable level filter。typed final tracing subscriber、degraded health 发布和 supervisor task 接线仍属于后续小阶段。
+Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `TelemetryWriter`：请求线程只做有界内存排队，低优先级日志可计数丢弃，warn/error 优先保留，输出失败按安全 `PortError` 分类并重排队，flush 遵守 deadline；`StructuredTelemetryOutput` 可将已脱敏事件写入真实文件或 stderr，Application 在启动配置校验后切换共享输出目标和 reloadable level filter。typed final tracing subscriber、degraded health、Supervisor 周期 flush，以及正常/fatal task 退出的 final flush 均已接线。
 
 解析请求线程不等待 SQLite：
 

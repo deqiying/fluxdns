@@ -230,6 +230,7 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 - [x] 实现 StatsPersistenceWorker 的 epoch snapshot、BatchLedger 顺序提交和失败保留；
 - [x] 实现 `StorageRuntime`、Supervisor 注册和 DnsService 首轮生产装配；
 - [x] 配置 reload 后复用进程级 stats worker，并由新 Runtime core 延续统计累计；
+- [x] Supervisor fatal task 返回错误前执行 Storage 有界 shutdown，保留最终提交机会；
 - [x] 实现 stats pending batch/event 内存保护上限与 fatal 分类；
 - [x] 实现 SQLite 首轮 degraded/recovery 状态转换；
 - [x] 完成受 `cfg(test)` 限定的 Busy/DiskFull adapter fault 注入、Unavailable→Degraded 分类和成功恢复测试；
@@ -249,6 +250,6 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 
 阶段 131 的 `StorageRuntime` 定向测试已验证详情事件从前端队列提交至 SQLite worker，且统一 flush/shutdown 摘要保留前端 committed 与 discarded pending 计数。
 
-阶段 133 复用受监督 StorageRuntime 停机测试，验证 service drain 后可正常取得统一摘要；生产路径会在 Telemetry 关闭前输出 stats/backend/resolve-log/detail 的安全计数，不记录请求内容。阶段 140–142 拆分并落库策略目标、实际顶层成员和 matched rule/resource 摘要；阶段 143–144 分别补齐聚合统计的完整 RCODE，以及详情表的 header RCODE、failure class 和 cancellation reason；阶段 148 将匹配时的资源 epoch/revision 写入既有 `resource_revision` 列。阶段 153 补齐详情 writer 的 queue-full/sink-error degraded health 和 accepted recovery，5 项 Service 定向测试覆盖状态字段、Storage 生命周期与 reload；阶段 159 验证 Runtime reload 前后的新旧 core 复用同一进程级 stats worker；阶段 160 验证真实 UDP 请求在 Service shutdown 后完成 SQLite 最终提交。
+阶段 133 复用受监督 StorageRuntime 停机测试，验证 service drain 后可正常取得统一摘要；生产路径会在 Telemetry 关闭前输出 stats/backend/resolve-log/detail 的安全计数，不记录请求内容。阶段 140–142 拆分并落库策略目标、实际顶层成员和 matched rule/resource 摘要；阶段 143–144 分别补齐聚合统计的完整 RCODE，以及详情表的 header RCODE、failure class 和 cancellation reason；阶段 148 将匹配时的资源 epoch/revision 写入既有 `resource_revision` 列。阶段 153 补齐详情 writer 的 queue-full/sink-error degraded health 和 accepted recovery，5 项 Service 定向测试覆盖状态字段、Storage 生命周期与 reload；阶段 159 验证 Runtime reload 前后的新旧 core 复用同一进程级 stats worker；阶段 160 验证真实 UDP 请求在正常 Service shutdown 后完成 SQLite 最终提交；阶段 161 验证 Supervisor fatal task 退出前也完成同一最终提交。
 
-当前实现进度：**95%**（已完成内存 stats/ledger、schema v2、SQLite stats/detail transaction、幂等提交、脱敏详情与策略元数据、bounded writer、详情 backpressure health/recovery、跨 Runtime stats worker 复用、统一 flush/shutdown 及正常停机落盘验收、pending 内存保护及 adapter-level Busy/DiskFull 注入；OS/SQLite 真实故障和故障压力测试仍未完成）。
+当前实现进度：**96%**（已完成内存 stats/ledger、schema v2、SQLite stats/detail transaction、幂等提交、脱敏详情与策略元数据、bounded writer、详情 backpressure health/recovery、跨 Runtime stats worker 复用、统一 flush/shutdown 及正常/fatal task 停机落盘验收、pending 内存保护及 adapter-level Busy/DiskFull 注入；OS/SQLite 真实故障和故障压力测试仍未完成）。
