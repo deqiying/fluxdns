@@ -1,6 +1,6 @@
 # Storage 模块设计
 
-> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema、SQLx SQLite storage 首轮 adapter、StatsPersistenceWorker、详情落库脱敏边界、bounded detail writer channel、年龄/软阈值/硬上限策略、worker shutdown drain/周期 flush、Storage backend/detail 统一生命周期 facade 与可替换 stats writer 边界；Supervisor 注册和服务级统一 flush 尚未实现
+> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema、SQLx SQLite storage 首轮 adapter、StatsPersistenceWorker、详情落库脱敏边界、bounded detail writer channel、年龄/软阈值/硬上限策略、worker shutdown drain/周期 flush、Storage stats/backend/detail 统一生命周期 facade 与可共享 stats recorder 边界；Supervisor 注册和服务级生产装配尚未实现
 >
 > 更新日期：2026-09-02
 >
@@ -123,7 +123,7 @@ writer 周期性执行：
 
 重试前先查 ledger；已提交 batch 不重复累加。新请求始终写下一 epoch，不等待旧批次。
 
-当前 `StatsPersistenceWorker` 已实现上述首轮闭环：`record_request` 和 `StatsRecorder` 只触碰内存 accumulator，`flush` 先冻结 epoch，再将 pending batch 通过 `StorageBackend::execute` 按 batch ID 顺序提交；backend 失败时仅增加 batch 的失败尝试次数并保留原 payload，后续 flush 可继续幂等重试。worker 同时返回 committed batch/event 数量、pending 数量和 persistence gap 摘要。
+当前 `StatsPersistenceWorker` 已实现上述首轮闭环：`record_request` 和 `StatsRecorder` 只触碰内存 accumulator，`flush` 先冻结 epoch，再将 pending batch 通过 `StorageBackend::execute` 按 batch ID 顺序提交；backend 失败时仅增加 batch 的失败尝试次数并保留原 payload，后续 flush 可继续幂等重试。worker 同时返回 committed batch/event 数量、pending 数量和 persistence gap 摘要。`StorageService` 普通 flush 按 stats → backend checkpoint → detail 执行，shutdown 按 stats → detail drain → backend close 执行，并可返回共享的同步 `StatsRecorder`。
 
 进程在计数尚未进入 checkpoint 前崩溃会产生 in-memory persistence gap；系统必须报告，不承诺绝对无损。
 
@@ -198,7 +198,7 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 
 当前已新增 `backend/migrations/0001_storage.sql`，固定 `storage_meta`、按日统计、批次 ledger 和 `resolve_log` 表，以及有限统计维度约束。`SqliteStorageBackend` 已在独立业务数据库执行该 migration，使用 WAL、`synchronous=NORMAL`、busy timeout 和单 operation lock；`InMemoryStorageBackend` 继续作为无外部依赖的 contract baseline。
 
-SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 resolve detail batch：stats 通过 `stats_batch_ledger` 的 payload hash 做幂等重试/冲突拒绝，详情写入先复用 `ResolveDetailRecord` 生成脱敏摘要，再使用绑定参数落库；`SqliteResolveDetailWriter` 通过 bounded `mpsc` 只做非阻塞入队，`SqliteResolveDetailWorker` 按上限批量取出并以独立事务提交，失败时保留 pending 记录。启用详情限制时，同一事务先按年龄和软阈值淘汰，再按 `max_records` 裁剪新批次，并返回 committed/evicted/dropped 摘要；worker shutdown 会在 deadline 内循环 drain 所有 pending batch，`run` 入口按 flush interval 周期执行并在取消前完成最终 drain。事务中任一 operation 失败都会整体回滚。数据库错误进入 degraded，health probe、WAL checkpoint 和 shutdown 均保留 typed `StorageBackend` 边界。新增 `StorageService` 统一 facade，flush 先 checkpoint backend 再提交 detail，shutdown 先 drain detail 再关闭 backend，并保留双故障 typed error。Supervisor 注册、busy/disk-full recovery 和服务级统一 flush 仍待后续切片。
+SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 resolve detail batch：stats 通过 `stats_batch_ledger` 的 payload hash 做幂等重试/冲突拒绝，详情写入先复用 `ResolveDetailRecord` 生成脱敏摘要，再使用绑定参数落库；`SqliteResolveDetailWriter` 通过 bounded `mpsc` 只做非阻塞入队，`SqliteResolveDetailWorker` 按上限批量取出并以独立事务提交，失败时保留 pending 记录。启用详情限制时，同一事务先按年龄和软阈值淘汰，再按 `max_records` 裁剪新批次，并返回 committed/evicted/dropped 摘要；worker shutdown 会在 deadline 内循环 drain 所有 pending batch，`run` 入口按 flush interval 周期执行并在取消前完成最终 drain。事务中任一 operation 失败都会整体回滚。数据库错误进入 degraded，health probe、WAL checkpoint 和 shutdown 均保留 typed `StorageBackend` 边界。`StorageService` 现统一 stats/backend/detail 的 flush/shutdown 顺序，并保留 stats/detail/backend 的 typed error 上下文。Supervisor 注册、busy/disk-full recovery 和服务级生产装配仍待后续切片。
 
 ## 12. 测试
 
@@ -221,12 +221,12 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 - [x] 实现 stats SQLite schema/upsert/checkpoint writer 首轮 adapter；
 - [x] 实现独立 resolve-log writer channel 与 SQLite batch flush 首轮 adapter；
 - [x] 实现详情年龄淘汰、软阈值和硬上限首轮策略；
-- [x] 提供 backend/detail 统一 flush/shutdown facade，并固定 detail drain 在 backend shutdown 之前；
+- [x] 提供 stats/backend/detail 统一 flush/shutdown facade，并固定 stats 提交、detail drain 均在 backend shutdown 之前；
 - [x] 实现 StatsPersistenceWorker 的 epoch snapshot、BatchLedger 顺序提交和失败保留；
-- [ ] 实现 degraded/recovery 和服务级统一 flush；
+- [ ] 实现 degraded/recovery、Supervisor 注册和服务级生产装配；
 - [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
 - [ ] 完成 migration、压力和故障测试。
 
-阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred；本阶段新增 `storage::sqlite::tests` 10 项通过，覆盖 SQLx migration、stats batch 幂等重试/reopen、详情 batch 写入及脱敏字段、bounded writer 分批 flush、队列容量校验、backend 失败保留 pending、年龄淘汰、软阈值/硬上限、shutdown drain、周期 flush、事务回滚、health/shutdown；新增 `storage::service::tests` 2 项通过，覆盖 facade 对 backend 的单次 flush/shutdown 委托和 typed detail error 边界；新增 `storage::stats::tests` 3 项通过，覆盖 epoch 提交、StatsRecorder sequence 推进和 backend 失败保留 pending。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段仅执行 StatsPersistenceWorker 增量测试 3 passed、0 failed。Supervisor 注册、busy/disk-full recovery 和服务级统一 flush 仍未完成。
+阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred；本阶段新增 `storage::sqlite::tests` 10 项通过，覆盖 SQLx migration、stats batch 幂等重试/reopen、详情 batch 写入及脱敏字段、bounded writer 分批 flush、队列容量校验、backend 失败保留 pending、年龄淘汰、软阈值/硬上限、shutdown drain、周期 flush、事务回滚、health/shutdown；新增 `storage::service::tests` 3 项通过，覆盖 facade 对 stats/backend/detail 的顺序委托、共享 recorder 和 typed error 边界；新增 `storage::stats::tests` 3 项通过，覆盖 epoch 提交、StatsRecorder sequence 推进和 backend 失败保留 pending。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段仅执行 StorageService 增量测试 3 passed、0 failed。Supervisor 注册、busy/disk-full recovery 和服务级生产装配仍未完成。
 
-当前实现进度：**68%**（内存 stats/ledger、业务 migration schema、SQLx SQLite 首轮 stats/detail transaction、StatsPersistenceWorker epoch/batch 提交与失败保留、脱敏详情记录、bounded writer channel/batch flush、年龄/软阈值/硬上限首轮策略、worker shutdown drain/周期 flush、backend/detail 统一生命周期 facade、health/checkpoint/shutdown；Supervisor 注册、pending 内存保护上限、busy/disk-full recovery、服务级统一 flush 和故障测试仍未完成）。
+当前实现进度：**68%**（内存 stats/ledger、业务 migration schema、SQLx SQLite 首轮 stats/detail transaction、StatsPersistenceWorker epoch/batch 提交与失败保留、脱敏详情记录、bounded writer channel/batch flush、年龄/软阈值/硬上限首轮策略、worker shutdown drain/周期 flush、stats/backend/detail 统一生命周期 facade、共享 recorder、health/checkpoint/shutdown；Supervisor 注册、pending 内存保护上限、busy/disk-full recovery、服务级生产装配和故障测试仍未完成）。

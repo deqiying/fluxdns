@@ -547,7 +547,7 @@ domain exact、suffix、regex、CIDR 等匹配结构在加载时编译，查询�
 
 `database.type`/`database.path` 是必填字段，即使 `dns.resolve_log.enable: false` 也必须打开数据库。v1 不提供关闭聚合统计的配置项：聚合统计默认开启，并且必须依赖该数据库持久化。prepare 阶段完成 SQLite 打开、schema migration、基本读写和目录权限检查；任何失败都是启动 `fatal`。
 
-storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 backend/detail 生命周期顺序；两者当前仍待纳入 Supervisor/DnsService 的生产装配。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
+storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 stats/detail/backend 生命周期顺序并暴露共享 recorder；该 facade 当前仍待纳入 Supervisor/DnsService 的生产装配。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
 
 解析请求线程不等待 SQLite：
 

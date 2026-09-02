@@ -39,6 +39,7 @@ pub struct StatsPersistenceWorker {
     backend: Arc<dyn StorageBackend>,
     accumulator: Arc<StatsAccumulator>,
     ledger: Mutex<BatchLedger>,
+    flush_lock: tokio::sync::Mutex<()>,
 }
 
 impl StatsPersistenceWorker {
@@ -54,6 +55,7 @@ impl StatsPersistenceWorker {
             backend,
             accumulator,
             ledger: Mutex::new(BatchLedger::new()),
+            flush_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -84,9 +86,10 @@ impl StatsPersistenceWorker {
 
     /// 原子冻结当前 epoch，并按 batch ID 顺序提交所有 pending stats batch。
     pub async fn flush(
-        &mut self,
+        &self,
         deadline: Deadline,
     ) -> Result<StatsPersistenceFlushSummary, StatsPersistenceError> {
+        let _flush = self.flush_lock.lock().await;
         let snapshot = self.accumulator.swap_epoch();
         if snapshot.event_count() > 0 {
             self.ledger
@@ -182,7 +185,7 @@ mod tests {
             .migrate(STORAGE_SCHEMA_VERSION, deadline())
             .await
             .unwrap();
-        let mut worker = StatsPersistenceWorker::new(backend.clone());
+        let worker = StatsPersistenceWorker::new(backend.clone());
         worker
             .record_request(
                 20_260_902,
@@ -209,7 +212,7 @@ mod tests {
             .migrate(STORAGE_SCHEMA_VERSION, deadline())
             .await
             .unwrap();
-        let mut worker = StatsPersistenceWorker::new(backend.clone());
+        let worker = StatsPersistenceWorker::new(backend.clone());
         let event = crate::ports::storage::StatsEvent::new(
             41,
             20_260_902,
@@ -237,7 +240,7 @@ mod tests {
             .migrate(STORAGE_SCHEMA_VERSION, deadline())
             .await
             .unwrap();
-        let mut worker = StatsPersistenceWorker::new(backend.clone());
+        let worker = StatsPersistenceWorker::new(backend.clone());
         worker.record_request(20_260_902, vec![]).unwrap();
         backend.shutdown(deadline()).await.unwrap();
 

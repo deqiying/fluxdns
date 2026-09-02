@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成；当前执行至阶段 71（统计持久化 worker 首轮闭环），后续重点是 StorageService/Supervisor 生产装配、SQLite 故障恢复、Observability writer 和 v1 验收。
+> 状态：v1 模块方案已完成；当前执行至阶段 72（统计 worker 接入 StorageService 生命周期），后续重点是 Supervisor/DnsService 生产装配、SQLite 故障恢复、Observability writer 和 v1 验收。
 >
 > 更新日期：2026-09-02
 >
@@ -13,12 +13,12 @@
 本节只保留当前决策所需的摘要；模块实现细节见对应 `docs/backend-modules/*.md`，完整阶段证据见本文“阶段实施记录”。
 
 - 已完成主链路：Config 严格加载与校验、Runtime 候选/激活/受管 task、UDP/TCP/DoH plain HTTP、Upstream direct/group/proxy、Policy/Resource 首次快照与 live publish、Cache memory/Moka/SQLite 首轮 adapter。
-- Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker` 和 backend/detail 生命周期 facade；Observability 已完成低基数 metrics/health 基础。
+- Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade 和可共享 `StatsRecorder`；Observability 已完成低基数 metrics/health 基础。
 - 当前未完成：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite degraded recovery、Stats/Detail writer 的 Supervisor/DnsService 生产装配、正式 telemetry writer、最终故障/压力/conformance 验收。
 
-> 注：阶段 71 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
+> 注：阶段 72 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
 
-阶段 71 已完成 StatsPersistenceWorker 首轮持久化闭环：epoch snapshot 经 BatchLedger 按序提交到 StorageBackend，失败保留 pending 并暴露 persistence gap；最近一次大阶段全量测试为 417 passed、0 failed，本阶段增量测试 3 passed、0 failed。
+阶段 72 已完成 StorageService 对 stats/backend/detail 的统一生命周期接入：stats 先提交，detail drain 后关闭 backend，并暴露可共享的同步 `StatsRecorder`；最近一次大阶段全量测试为 417 passed、0 failed，本阶段增量测试 3 passed、0 failed。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
@@ -29,9 +29,9 @@
 ### 当前验证记录
 
 - 最近一次大阶段全量后端测试：`417 passed、0 failed`。
-- 当前阶段（阶段 71）增量测试：`storage::stats::tests`，`3 passed、0 failed`。
+- 当前阶段（阶段 72）增量测试：`storage::service::tests`，`3 passed、0 failed`。
 - 小阶段只执行增量验证；完成大阶段时再执行全量后端测试。
-- `StatsPersistenceWorker` 尚未纳入 `StorageService/Supervisor/DnsService` 生产装配，因此当前进度仍为后端 `67.9%`、v1 `71.1%`。
+- `StatsPersistenceWorker` 已纳入 `StorageService` 生命周期 facade，但尚未注册到 `Supervisor/DnsService` 生产装配，因此当前进度仍为后端 `67.9%`、v1 `71.1%`。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -132,11 +132,11 @@ transport / upstream / storage / observability adapters
 
 ### 后续开发路线（基于 2026-09-02 当前状态）
 
-当前后端代码实现进度为 67.9%，v1 交付进度为 71.1%。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker 和统一生命周期 facade。后续按“Runtime 生命周期 → Storage/Observability 生产接线 → DoH 安全边界 → v1 验收”推进，不按文档完成度虚增进度。
+当前后端代码实现进度为 67.9%，v1 交付进度为 71.1%。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker 及 stats/backend/detail 统一生命周期 facade。后续按“Runtime 生命周期 → Storage/Observability 生产接线 → DoH 安全边界 → v1 验收”推进，不按文档完成度虚增进度。
 
 | 顺序 | 目标 | 主要范围 | 退出条件 |
 | --- | --- | --- | --- |
-| 0 | 开发环境与验证门 | 直接调用项目 Rust 1.98.0；执行 `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`、`cargo check --manifest-path backend/Cargo.toml --locked`、`cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings` 和 `cargo test --manifest-path backend/Cargo.toml --locked` | 版本来源可追溯，基线保持 `411 passed、0 failed`，后续阶段不得用 `--ignore-rust-version` 替代正式验证 |
+| 0 | 开发环境与验证门 | 直接调用项目 Rust 1.98.0；执行 `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`、`cargo check --manifest-path backend/Cargo.toml --locked`、`cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings` 和 `cargo test --manifest-path backend/Cargo.toml --locked` | 版本来源可追溯，最近一次大阶段基线为 `417 passed、0 failed`，后续阶段不得用 `--ignore-rust-version` 替代正式验证 |
 | 1 | Runtime 候选与跨 Runtime 生命周期 | 在 `PreparedRuntime → BindPlan → ActiveRuntime` 中统一组合 Config、Policy、Resource registry、Runtime metadata 和 worker 集合；完成候选 registry 的跨 Runtime 合并与 revision CAS | 候选 prepare/bind/CAS 失败均保留旧 Runtime；并发资源更新不丢失；同一请求只使用一个 Runtime revision；无 detached task |
 | 2 | 配置变更与自动 rebind | 为 `run` 接入已确定的配置变更事件源和去抖/失败语义；区分 resource-only、listener rebind 与必须重启的变更；重建 listener/resource task 集合 | 新 revision 的 listener 全部 bind 成功后才切换；失败保留旧端点；旧 task 可取消并完成 drain；显式 reload 与自动 reload 复用同一入口 |
 | 3 | DNS Core/Cache 一致性 | 让 optimistic refresh 捕获最新 Runtime snapshot；完成共享 `LateCacheFinalizer` owner、完整 late-window/nested sink 传播、Policy/Core/Cache/Upstream 跨 transport contract tests | stale refresh、取消、CAS、旧 Runtime drain 和 shutdown 行为确定；资源更新只影响后续请求，不破坏已开始请求 |
@@ -204,35 +204,13 @@ transport / upstream / storage / observability adapters
 - 候选 prepare/bind 失败不得发布半成品；
 - 验收：原子切换、失败保留旧 runtime、shutdown deadline 测试通过。
 
-首个小阶段（已完成）：新增 `RuntimeSnapshot`、`PreparedRuntime` 和无 socket preflight；只消费 `Arc<ResolvedConfig>`，校验 revision、bind plan 端点和重复项，不绑定 listener。
-
-第二个小阶段（已完成）：新增 `BoundCandidate`/`BoundListenerSet` 和 `bind_prepared`；`SocketSpec` 显式传递 IPv6 `v6_only`，先准备全部 socket，再统一激活，准备或激活任一步失败都回滚本轮对象。
-
-第三个小阶段（已完成）：引入 `ArcSwap` `RuntimeCoordinator`，实现 ActiveRuntime 的原子激活、revision CAS、旧实例 draining 和请求 guard/lease；CAS 失败会返还候选供调用方重试。Runtime targeted tests：13 passed；真实 Tokio/socket2 adapter、supervisor 和 Application 启动接线留在阶段 3 后续小阶段。
-
-第四个小阶段（已完成）：新增 `Supervisor`、task ID/故障等级/重启策略元数据和 shutdown 回收报告；所有 task 由 `JoinSet` 持有，重复注册被拒绝，正常退出、失败、取消和 panic 均有明确分类。Runtime targeted tests：3 passed；有界重启、完整 drain/flush 顺序和 Application 启动接线留在阶段 3 后续小阶段。
-
-第五个小阶段（已完成）：扩展 `ports::effects` 的 UDP/TCP 不透明 socket capability，接入 `socket2`/Tokio `SystemSocketFactory`，并由 `BoundListenerSet::endpoint_handles` 以 `Arc` clone 方式交给后续 Transport；I/O 保留 deadline、cancellation 和安全错误分类，公共 API 不泄漏 Tokio 类型。新增 UDP/TCP activation tests；Transport framing、Application 接线和完整 shutdown 顺序留在阶段 3/4 后续小阶段。
-
-第六个小阶段（已完成）：Application 接入严格 CLI 解析、默认 `config.yaml`、`validate` 只读命令和配置错误/启动错误映射；`validate` 不创建配置快照、不读取 SecretRef 实际值，`run` 完成 Config → Runtime preflight → bind → service 装配，并等待 Ctrl-C 后执行有界 shutdown。
-
-第七个小阶段（已完成）：为 UDP/TCP service 接入真实 `InboundAdapter`、固定 Core 和 response encoder；最小配置可在非特权端口启动并返回内联 hosts 答案。`DnsService::shutdown` 先调用 `ActiveRuntime::begin_drain`，再取消 supervisor task。
-
-第八个小阶段（已完成）：TCP adapter 拆分 listener/session，连接 task 由 listener 内部 `JoinSet` 持有；同一连接按读取顺序处理连续 frame，clean EOF、半帧和 admission 拒绝都限制在连接级，不终止其他连接。DoH endpoint 额外保留 `BindTransport::Doh`，在 HTTP adapter 完成前由 service 装配显式拒绝。
-
-第九个小阶段（已完成）：`RuntimeSnapshot` 持有按 `ResolvedConfig` 生成的不可变 `ResourceRegistrySnapshot<()>` 元数据摘要，并在 summary 中报告资源数量；`DnsService` 新增从 `ActiveRuntime` snapshot 自动取得同 revision `DnsCore` 的构造入口，Application 不再单独从 snapshot 外传递 core。该阶段只建立 Runtime-facing immutable handle 边界，资源真实 fetch/parse worker、资源级原子 reload、共享 listener 的 resource-only swap、cache/telemetry flush 仍留在后续阶段。
+阶段 3 小阶段索引（1～9，均已完成）：建立 `PreparedRuntime`/`RuntimeSnapshot`/`BoundCandidate`、`ArcSwap` revision CAS 与 drain、`Supervisor` task tree、系统 socket capability、Application CLI/run、UDP/TCP service、TCP session 和 Runtime metadata/core 同 revision 边界。代表性证据为 Runtime targeted tests、UDP/TCP activation tests 及 service smoke；具体变更见 Runtime/Application 模块文档和对应提交。
 
 ### 阶段 4：DNS Core 与 UDP/TCP
 
 涉及：DNS Core、Transport、Policy 的最小默认策略。
 
-第一个小阶段（已完成）：新增共享 `transport::wire` codec，固定原始 DNS ID 与 canonical query/response 分离，decode/encode 的 65,535 字节绝对上限和安全错误分类；响应编码只在副本上恢复请求 ID，不修改 canonical response。新增 wire codec 单测。
-
-第二个小阶段（已完成）：新增固定 `SERVFAIL` Core、`dispatch_inbound` 和内联 hosts 解析器，并由 `ConfiguredDnsCore` 按已解析配置选择 hosts 或安全 fallback。Core 不读取 transport envelope，响应关联仍由 `ResponseHandle` exactly-once 管理。
-
-第三个小阶段（已完成）：接入 UDP datagram adapter 和 TCP 两字节 length framing，完成 request context、原始 DNS ID 恢复、peer identity、deadline/cancellation 传递和 response encoder。UDP 响应使用 RR-boundary truncation 并在需要时设置 `TC`。
-
-第四个小阶段（已完成）：补齐 TCP exact-read 的 clean EOF/partial EOF 分类、持久 session、连续 frame 的 `ConnectionId`/`StreamId` 语义和连接级顺序响应；新增同连接双 frame、半帧和 clean EOF 测试。
+阶段 4 小阶段索引（1～4，均已完成）：完成 wire codec、固定 SERVFAIL/hosts Core、UDP/TCP framing、ID/EDNS/TC、TCP 持久 session 和连接级顺序响应；验收覆盖 UDP/TCP 一致性、畸形报文、连续 frame、半帧、clean EOF 与取消。
 
 - 打通 UDP/TCP framing → canonical request → core → response encoder；
 - 完成 DNS ID、EDNS、截断、deadline 和错误响应语义；
@@ -257,71 +235,15 @@ transport / upstream / storage / observability adapters
 - 实现 `parallel`、`round-robin`、`load-balance`、`failover` 和 fallback；
 - 验收：Host/SNI、HTTP/DNS 错误分层、超时与确定性选择测试通过。
 
-首个小阶段（已完成）：修正 `ConfiguredDnsCore` 的 hosts 所有权，只加载顶层本地 hosts；新增内联 hosts `DnsExchange`、JSON/hosts 格式边界、DNS positive/NODATA/NXDOMAIN、取消/超时 outcome 和 typed `UpstreamRegistry`。Registry 首轮构造 hosts connector，对尚未接入的 DoH/Group 在构建边界显式返回 `UnsupportedUpstream`。
+小阶段索引 1～13（均已完成）：完成 hosts/DoH exchange、group selection/outcome、bootstrap answer/resolver 及 Registry 基础接线；具体边界与测试见 [upstream.md](backend-modules/upstream.md)。
 
-第二个小阶段（已完成）：新增无网络副作用的 `GroupSelector`，固定 failover/parallel 配置顺序、smooth weighted round-robin、weighted least-in-flight、平局轮转和 `SelectionLease` 生命周期；该阶段尚未接入真实 exchange、fallback aggregator 或 DNS Core。
+小阶段索引 14～21（均已完成）：完成 outbound profile/credential、SOCKS5/SOCKS5H codec、stream/dial/hostname resolver、proxy DoH adapter 和配置驱动 Registry/Policy/Runtime prepare；具体边界与测试见 [upstream.md](backend-modules/upstream.md)。
 
-第三个小阶段（已完成）：新增按 attempt index 聚合的 outcome/fallback 判定，固定 terminal response、retryable transport failure、SERVFAIL/TC、取消优先级和 fallback connector 去重；定向 outcome 测试 7 项通过。真实网络 exchange、bootstrap/connect_ip 和 DNS Core 接线仍未实现。
+小阶段索引 22～26（均已完成）：完成 direct/group fallback、Reqwest/Rustls direct/proxy HTTPS、parallel late-window、nested group 和对应的 deadline/取消语义；具体边界与测试见 [upstream.md](backend-modules/upstream.md)。
 
-第四个小阶段（已完成）：新增可注入 `DohHttpTransport` 与 `DohExchange`，固定 DoH POST、Host/SNI/connect_ip、内部 DNS ID、deadline/cancellation 和稳定错误映射；`upstream::doh` 定向测试 7 项通过。真实 HTTP/TLS/socket adapter、bootstrap/connect_ip、SOCKS5/SOCKS5H、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
+小阶段索引 27～35（均已完成）：完成 loopback TLS 信任链验证、parallel late sink、finalizer 生命周期、ResourceRefreshWorker、Policy live swap、生产 ResourceFetcher、async prepare 及 remote/file refresh worker；具体边界与测试见 [upstream.md](backend-modules/upstream.md)、[cache.md](backend-modules/cache.md)、[resource.md](backend-modules/resource.md)。
 
-第五个小阶段（已完成）：新增 `TokioDohHttpTransport` plain HTTP/1.1 adapter，固定 Host/path、Content-Length、bounded header/body、deadline/cancellation 和 chunked 拒绝；`upstream::http::tests` 3 项通过。HTTPS/TLS、proxy、连接池、bootstrap、fallback 执行和 group 与策略/Core 的跨模块接线仍未实现。
-
-第六个小阶段（已完成）：将 plain HTTP DoH connector 接入 `UpstreamRegistry`，默认使用 `TokioDohHttpTransport`，并提供可注入 transport 构造入口；registry 在构造边界拒绝 HTTPS、bootstrap、proxy 和启用的 ECS 覆盖，允许归一化后的 `EcsMode::Disabled`，新增 `upstream::registry` 4 项定向测试。该阶段只完成 connector registry wiring，不改变 `PolicyDnsCore` 的装配路径。
-
-第七个小阶段（已完成）：将 `PolicyDnsCore::UpstreamRuntime` 的 direct connector 构造统一切换到 `UpstreamRegistry`，使 hosts/plain HTTP DoH 使用同一 typed registry 边界；新增 3 项 Policy focused tests，验证 ConfigLoader 生成的 disabled ECS、plain HTTP DoH 注册和 unsupported feature 错误传播。该阶段不实现 Cache、bootstrap、fallback 或 Runtime snapshot 接线。
-
-第八个小阶段（已完成）：增加 protocol-neutral 的 `PolicyDnsCore::from_config_with_registry`，通过 fake DoH transport 验证策略选择、DoH request envelope、connect_ip、内部 DNS ID 和响应转换；新增 1 项 Policy focused test，整个请求路径不访问真实网络。该阶段不实现 RuntimeSnapshot、Cache、真实 outbound 或 bootstrap。
-
-第九个小阶段（已完成）：从 `TokioDohHttpTransport` 抽出可注入的 `DohAddressResolver` port，默认实现仍使用 Tokio `lookup_host`；新增 resolver 注入和显式 `connect_ip` 旁路测试，验证地址解析不被写死在 HTTP adapter 内。该阶段不实现 bootstrap 查询、HTTPS/TLS、SOCKS5/SOCKS5H 或真实 Runtime 接线。
-
-第十个小阶段（已完成）：在 `DohHttpRequest`/`DohExchange` 中透传可选 bootstrap 引用，默认 system resolver 对未配置 bootstrap adapter 的请求明确 fail-closed；新增未接入 bootstrap 时不偷偷回退 system resolver 的测试。该阶段不实现 bootstrap 查询、HTTPS/TLS、SOCKS5/SOCKS5H 或真实 Runtime 接线。
-
-第十一个小阶段（已完成）：新增 `bootstrap_answer_from_response`，从已校验 `CanonicalResponse` 提取 question owner 匹配的 A/AAAA 地址，并按地址记录最低 TTL 建立 `BootstrapAnswer`；补充正向响应提取和非正向响应拒绝测试。该阶段不实现 bootstrap 查询 I/O、HTTPS/TLS、SOCKS5/SOCKS5H 或真实 Runtime 接线。
-
-第十二个小阶段（已完成）：新增 `BootstrapResolver`，通过调用方注入的 `DnsExchange` 顺序执行 A/AAAA 查询，合并合法地址并取最低 TTL；对无地址、transport failure、取消和非法 host 返回稳定错误，补充 hosts connector、fake failure、取消和非法 host 测试。该阶段不把 resolver 接入 DoH address resolver、Registry、outbound 或 Runtime。
-
-第十三个小阶段（已完成）：为默认 `UpstreamRegistry::from_resolved` 创建共享 bootstrap connector registry，将 hosts/DoH connector 登记后交给 `TokioDohAddressResolver`；DoH address resolver 按 bootstrap 引用执行 A/AAAA 查询、转换请求端口并完成 plain HTTP loopback path。补充 resolver registry 和真实 Registry→DoH→hosts bootstrap 测试。自定义 transport 的 resolver 注入、HTTPS/TLS、outbound 和 Runtime 接线仍延后。
-
-第十四个小阶段（已完成）：新增 `OutboundProfile`/`OutboundTarget`，在显式边界解析 SecretRef 代理 URL，固化 socks5/socks5h scheme、代理端点、credential 脱敏和本地/远程 hostname resolution 规划；对非法 host/port 及 socks5h 与 bootstrap 组合返回稳定错误，补充 4 项 focused tests。该阶段不实现 SOCKS5/SOCKS5H 握手、认证、socket dial 或 Runtime 接线。
-
-第十五个小阶段（已完成）：新增协议无关的 `socks5` codec，固定 method negotiation、username/password authentication、CONNECT 请求、IPv4/IPv6/domain 地址编码、reply 与 bound address 解析，并对截断、尾随字节、版本、保留字段、认证失败和地址类型错误返回稳定错误；`upstream::socks5::tests` 6 项通过。该阶段不建立 outbound stream、不执行实际握手/认证 I/O、socket dial 或 Runtime 接线。
-
-第十六个小阶段（已完成）：在 `ports::effects` 增加独立的 `OutboundStream` byte-stream port，并实现受 deadline/cancellation 约束的 SOCKS5 method、username/password、CONNECT 握手编排；按 address type 读取固定或可变长度 response，区分 credentials 缺失、proxy reply、clean EOF 和底层 port 错误；新增 3 项异步 focused tests。该阶段不提供系统 socket dial、连接池、HTTPS/TLS 或 Runtime 接线。
-
-第十七个小阶段（已完成）：增加 `OutboundDialer` port 和 `TokioOutboundDialer`，以 bounded read/write、deadline/cancellation 和脱敏 `PortError` 包装 Tokio TCP stream；`Socks5Connector` 在调用方提供已解析 proxy `SocketAddr` 后完成 dial → handshake → CONNECT 最小闭环，并以 loopback SOCKS server 验证真实 socket path。该阶段不负责 proxy hostname 解析、SecretRef credential 到 connector 的完整装配、连接池、HTTPS/TLS 或 Runtime 接线。
-
-第十八个小阶段（已完成）：`OutboundProfile` 在 prepare 边界解析 URL userinfo，百分号解码并保存长度受限的 `OutboundCredentials`；`Socks5Connector::connect_profile` 自动把脱敏 credential material 传递给握手，拒绝缺失 password、空值、非法百分号和超过 255 字节的字段；新增 profile credential 与 loopback username/password tests。该阶段不负责 proxy hostname 解析、连接池、HTTPS/TLS 或 Runtime 接线。
-
-第十九个小阶段（已完成）：增加 `OutboundAddressResolver` port 与 `TokioOutboundAddressResolver`，限制 proxy endpoint 的 host/port、地址数量和 deadline/cancellation；`Socks5Connector::connect_profile_with_resolver` 将 proxy hostname 解析为候选 `SocketAddr` 后复用已有 dial/handshake path，并用注入 resolver + loopback SOCKS server 验证。该阶段不实现连接池、HTTPS/TLS、DoH/Runtime proxy 接线或 bootstrap resolver 复用。
-
-第二十个小阶段（已完成）：增加 `OutboundStream::read_chunk` byte-stream 能力和 `TokioSocks5DohHttpTransport`，将 proxy hostname resolver、target `DohAddressResolver`、`OutboundProfile`、SOCKS5/SOCKS5H handshake、HTTP/1.1 request/response bounded path 组合为 plain HTTP DoH adapter；通过 loopback SOCKS server 验证本地解析后的 IPv4 CONNECT、`socks5h` 域名 CONNECT、Host/path/body 和 Content-Length response。该阶段未接入 Registry/Runtime snapshot、连接池、HTTPS/TLS 或完整 group/fallback 执行。
-
-第二十一个小阶段（已完成）：增加 `UpstreamRegistry::from_resolved_with_outbounds` 和配置驱动的 `ConfiguredDohTransport`，从 `ResolvedConfig.outbounds` 解析 proxy profile，按 DoH upstream 选择 direct 或 SOCKS5/SOCKS5H transport；`PolicyDnsCore::from_config` 和 `PreparedRuntime::prepare_with_policy_core` 使用同一 Registry 路径。新增 Registry 的 SOCKS5+bootstrap loopback、missing/invalid outbound 与 `socks5h + bootstrap` fail-fast 测试，PolicyCore 的配置驱动 proxy DoH loopback 交换，以及 Runtime prepare 的错误传播测试。该阶段不引入新依赖，不实现 HTTPS/TLS、连接池、group/fallback 实际执行或 Runtime live resource/service snapshot 接线。
-
-第二十二个小阶段（已完成）：将 direct hosts/DoH group 的 primary/fallback exchange 接入 `UpstreamGroupExecutor`，消费 `timeout`/`fallback_timeout` 并为每个 phase 收紧请求 deadline；主组仅在全部尝试为 SERVFAIL/TC 或可重试 transport failure 时进入独立 fallback window。Policy prepare 现在绑定 primary/fallback direct connector，缺失成员、非法 selector 或 timeout 在 prepare 边界返回错误，不再静默跳过。新增 executor fallback/terminal/timeout 测试和 PolicyCore DoH SERVFAIL→hosts fallback loopback 测试。nested group、parallel late window、late cache finalizer、HTTPS/TLS 与连接池仍未实现。
-
-第二十三个小阶段（已完成）：新增锁定版本的 `reqwest 0.13.4` direct dependency，显式启用 Rustls、HTTP/2 和 SOCKS features；增加 `ReqwestDohHttpTransport`，支持 direct HTTP/HTTPS、`connect_ip`/bootstrap resolver、`no_proxy`、禁用 redirect、deadline/cancellation 和 bounded response body；配置驱动 `UpstreamRegistry`/`PolicyDnsCore` 可构造 direct HTTPS DoH connector，旧的注入式 custom transport API 仍对 HTTPS 明确返回 unsupported。新增 reqwest loopback HTTP envelope、`connect_ip`、bootstrap resolver、cancellation、Registry HTTPS 构造和 Policy HTTPS prepare 测试。proxy HTTPS、连接池 key/复用、TLS live handshake 验证、nested group、parallel late window 与 late cache finalizer 仍未实现。
-
-第二十四个小阶段（已完成）：扩展 `ReqwestDohHttpTransport` 支持配置驱动 SOCKS5/SOCKS5H proxy，代理端点通过 `OutboundAddressResolver` 解析，目标地址覆盖与 proxy endpoint、SOCKS 本地/远程解析模式共同组成 adapter-owned bounded LRU client pool key；`socks5h + connect_ip` 使用等价的本地 SOCKS5 目标模式，仍保留 URL Host/SNI，`socks5h + bootstrap` 在 Registry 边界拒绝。新增 proxy loopback exchange、pool entry 复用、HTTPS+proxy Registry 构造和 HTTPS+socks5h+bootstrap fail-fast 测试。TLS live handshake 验证、nested group、parallel late window 与 late cache finalizer 仍未实现。
-
-第二十五个小阶段（已完成）：修正 parallel group 执行时序，使用 `JoinSet` 按完成顺序消费 attempt；完整 `Positive` response 立即作为客户端终态并取消剩余成员，非完整 `NoData`/SERVFAIL/TC 继续在 group deadline 内收集，聚合器在 parallel late window 中优先完整 `Positive`，再按配置顺序选择其他可缓存终态。新增快速终态不等待慢成员和 late window 选择测试。TLS live handshake 验证、nested group、late cache finalizer 与 Runtime live resource/service snapshot 仍未实现。
-
-第二十六个小阶段（已完成）：`UpstreamRuntime` 改为按 upstream definition 递归构造 group，nested group member 通过 `GroupExchange` 复用统一 `DnsExchange` 边界，保留 group timeout/fallback 语义；新增 nested group 成功执行和递归 cycle guard 测试，避免绕过 Config 校验时静默跳过或无限递归。TLS live handshake 验证、group late-result sink、Runtime 级 late cache finalizer 生命周期与 Runtime live resource/service snapshot 仍未实现。
-
-当前阶段 5 边界：Reqwest/Rustls live TLS handshake 已通过 loopback server 和验证根证书完成；parallel 快速完整 Positive 路径已接入 typed late-result sink，当前 PolicyDnsCore finalizer 可由 DnsService 在 supervisor drain 后按 deadline 关闭，但完整 late-window 候选选择、nested group 透传、共享 Runtime owner 和严格 encoder 完成 hook 仍未实现。阶段 6 已接入当前 PolicyDnsCore snapshot-local optimistic refresh 与有界 `LateCacheFinalizer`；最新 Runtime snapshot 捕获和完整 resource/service snapshot 生命周期仍未实现。
-
-第二十七个小阶段（已完成）：为 `ReqwestDohHttpTransport` 增加仅测试使用的根证书注入入口，以 `rcgen` 生成 SAN 为 `resolver.example.test` 的测试证书，并用 `tokio-rustls` loopback server 完成真实 TLS handshake、Host/path/body 和 `application/dns-message` 响应验证；生产构造仍使用系统信任链，不接受任意证书。该阶段不实现入站 DoH TLS terminate/external、PROXY/forwarded、parallel group late-result sink 或 Runtime live resource/service snapshot。
-第二十八个小阶段（已完成）：为 `UpstreamGroupExecutor` 增加协议中立的 `LateResultSink` 入口；parallel 快速完整 Positive 返回客户端终态后，剩余 attempt 在现有 group deadline 内由受控 drainer 完成，合法 response 交给 sink。`PolicyDnsCore` 将其转换为 `CacheCondition::Absent` 的有界 `LateCacheFinalizer` 写请求，既不阻塞客户端响应，也不覆盖已存在 cache entry。新增 executor sink 非阻塞测试和 Policy late cache 写入测试；该阶段不实现非 Positive 快速终态、nested group sink 透传、独立 Runtime owner 或严格 encoder 完成 hook。
-第二十九个小阶段（已完成）：为 `LateCacheFinalizer` 增加 `JoinSet` 任务归属、提交/关闭互斥边界、panic-safe active 计数和 `shutdown_until(Deadline)`；`PolicyDnsCore` 暴露 crate 内 shutdown 入口，`DnsService::shutdown` 在 supervisor drain 后关闭当前 runtime snapshot 的 finalizer，并将超时并入 `ShutdownReport`。该阶段只覆盖当前 Policy core 的 service owner，不实现跨 runtime 共享后台 owner、resource/telemetry/cache flush 或 detached late drainer 的完整监督。
-第三十个小阶段（已完成）：新增 `ResourceRefreshWorker`，在 due reservation 内调用 `ResourceFetcher` 和 remote rule-set bounded fetch/parse/persist，按 coordinator 分配的 epoch 重绑定候选并执行 CAS publish；取消/截止时间释放 reservation，解析失败进入 backoff。新增 worker 成功发布和失败退避测试；Runtime supervisor task、跨 Runtime snapshot 发布和 Runtime live resource swap 仍未接线。
-第三十一个小阶段（已完成）：`PolicyDnsCore` 以 `ArcSwap` 持有包含 hosts/rule-set compiled index 与 per-resource version 的 immutable state，新增按资源类型的版本检查、CAS live swap 和 stale candidate 拒绝；新请求读取新 rule-set，已持有旧 core 的请求不受影响。新增 Policy live swap/stale version 测试；Runtime snapshot 原子发布、Resource worker 到 Policy/Runtime 的跨模块接线仍未实现。
-第三十二个小阶段（已完成）：新增生产 `ReqwestResourceFetcher`，在 prepare 边界装配已解析的 outbound profile，固定 direct HTTP/HTTPS、SOCKS5/SOCKS5H、禁用环境代理与重定向、bounded body、safe URL、deadline/cancellation 和安全错误分类；`PreparedRuntime`/`ActiveRuntime` 持有 shared fetcher，但请求 `RuntimeSnapshot` 不包含 HTTP client。新增 7 项 fetcher focused tests，覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy 和 SecretRef 脱敏；Runtime supervisor 长期调度、跨 Runtime resource publish 和 Policy/Runtime service lifecycle 仍未接线。
-第三十二个小阶段（已完成）：新增生产 `ReqwestResourceFetcher`，在 prepare 边界装配已解析的 outbound profile，固定 direct HTTP/HTTPS、SOCKS5/SOCKS5H、禁用环境代理与重定向、bounded body、safe URL、deadline/cancellation 和安全错误分类；`PreparedRuntime`/`ActiveRuntime` 持有 shared fetcher，但请求 `RuntimeSnapshot` 不包含 HTTP client。新增 7 项 fetcher focused tests，覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy 和 SecretRef 脱敏；Runtime supervisor 长期调度、跨 Runtime resource publish 和 Policy/Runtime service lifecycle 仍未接线。
-第三十三个小阶段（已完成）：新增 async `PreparedRuntime` prepare 路径，在 bind 前为每个 remote rule-set 先校验落盘 content/manifest fallback，失败后通过生产 `ResourceFetcher` 下载、解析并原子持久化；Policy 使用本阶段得到的 compiled snapshot 构造初始 rule index，Application `run` 已切换到该路径，候选失败不会绑定 listener。新增 restore/fetch 两次启动测试；长期 timer、ResourceRefreshWorker supervisor ownership、跨 Runtime Policy live publish 和 resource-only service lifecycle 仍未接线。
-第三十四个小阶段（已完成）：为每个 `auto_update=true` 的 remote rule-set 建立独立 `ResourceRefreshWorker` 和 service Supervisor task；task 按逻辑时间检查 due/backoff，调用 bounded fetch/parse/persist worker，并在成功后通过 `PolicyDnsCore::publish_rule_set_resource` 做同一 ActiveRuntime 内的版本化 live swap；取消和 shutdown 由同一 Supervisor 回收。跨 Runtime 配置发布、file/hosts 长期刷新、resource-only listener/service 生命周期和完整故障注入仍未接线。
-
-第三十五个小阶段（已完成）：在 Resource 层新增 file hosts/rule-set refresh worker，复用稳定文件读取、content hash、parser version 和 per-resource epoch/CAS；async `PreparedRuntime` 在 bind 前加载 file snapshot，并把 supplied typed indexes 交给 Policy 初始构造；service Supervisor 统一调度 remote、file rule-set 和 file hosts worker，成功候选同时更新当前 Policy 与 RuntimeSnapshot 的原子资源摘要，失败进入 backoff，取消/停机释放 reservation。新增 file hosts/rule-set worker、Runtime metadata publish、缺失文件失败退避和 async prepare 集成测试；仍未完成真正跨 `ActiveRuntime` 配置候选发布、共享 listener set 的独立 resource-only runtime swap、完整 service-level fault matrix 和长期压力验收。
+阶段 5/资源当前边界：完整跨 Runtime candidate 生命周期、resource-only swap、严格 encoder 完成 hook、长期压力和 service-level fault matrix 仍未实现。
 
 ### 阶段 6：缓存
 
@@ -331,25 +253,9 @@ transport / upstream / storage / observability adapters
 - 接入 Moka 与独立 SQLite cache store；
 - 验收：缓存准入、质量替换、恢复降级和资源变化不全局失效测试通过。
 
-首个小阶段（已完成）：新增无外部依赖的内存 `CacheStore` adapter，覆盖 fresh/stale/expiry lookup、质量感知 CAS、显式失效、single-flight leader/follower、独立 waiter cancellation、leader abandon/drop 和 shutdown 生命周期；定向测试 7 项通过。当前 adapter 使用 `HashMap + Mutex`，后续容量淘汰仍独立于 persistence。
+小阶段索引 1～7（均已完成）：完成内存 `CacheStore`、响应准入、稳定 key/namespace、`CacheFacade`、single-flight、容量淘汰、FDCP 文件持久化、`LateCacheFinalizer` 和 Policy 请求链路；具体边界与测试见 [cache.md](backend-modules/cache.md)。
 
-第二个小阶段（已完成）：新增纯逻辑响应准入 helper，按 canonical response class 计算 cache quality、origin/failure/negative TTL、optimistic stale 窗口和稳定 checksum，明确拒绝 REFUSED、未知类、缺失 TTL 和零 TTL；定向测试 4 项通过。该 helper 尚未接入 DNS Core 的请求管线。
-
-第三个小阶段（已完成）：新增稳定 `CacheKey` 编码与 `CacheFacade` 首轮编排，固定 namespace、canonical query、strategy/client/ECS 维度、transport compatibility 和 format version；Facade 将 disabled/miss/fresh/stale/store-unavailable 分层，并以一次性 refresh permit 与 typed write request 暴露 adapter 边界；定向 key/facade 测试通过。Moka 容量淘汰、optimistic 后台刷新和 SQLite persistence 仍未实现。
-
-第四个小阶段（已完成）：为内存 adapter 增加共享 weight 上限、确定性 oldest eviction、oversized entry 拒绝和 eviction 计数；定向测试 3 项通过。Moka adapter、optimistic 后台刷新和 SQLite persistence 仍未实现。
-
-第五个小阶段（已完成）：新增无外部依赖的 `FilePersistentCacheStore`，固定 `FDCP` 版本化快照格式、canonical wire/checksum/response class 校验、wall-clock expiry 恢复、record 级损坏隔离、文件预算和 oldest eviction；`cache::persistence::tests` 6 项通过。Moka/SQLite persistence、last-access bucket、WAL/SHM 观测和 degraded recovery 仍未实现。
-
-第六个小阶段（已完成）：新增可取消、有界的 `LateCacheFinalizer`，以 typed `CacheWriteRequest` 接收客户端响应完成后的 cache write；容量不足时拒绝提交，shutdown 会取消并等待已提交任务退出，不阻塞客户端响应。新增 finalizer 构造、异步写入和 shutdown 测试，并扩展 `submit_task` 供后台 refresh 复用同一容量边界；parallel 快速完整 Positive late sink 已在第二十八个小阶段消费该 finalizer，但 共享 Runtime shutdown owner 仍留在后续阶段；当前 snapshot 的 DnsService owner 已接入。
-
-第七个小阶段（已完成）：`PolicyDnsCore` 为 upstream 请求构造稳定 cache key，接入 fresh lookup、miss single-flight、leader admission/CAS 写回和 follower 共享结果；缓存 store 失败时降级到上游，hosts[] 本地命中仍绕过 response cache。新增配置启用缓存后的 upstream 命中、snapshot-local optimistic stale refresh 和 fast-positive late sink 写入测试；当前 snapshot-local optimistic stale refresh 已通过有界 finalizer 和 `CacheCondition::Version` 写回接入并验证，仍缺最新 Runtime snapshot 捕获、Moka/SQLite persistence 和 Runtime live resource reload。
-
-第八个小阶段（已完成）：新增 `MokaCacheStore`，以 `moka::sync::Cache` 承担并发 record 存储、共享 weight 容量和 per-entry expiry；adapter 保持现有 `CacheStore` 的 fresh/stale、质量 CAS、显式失效、shutdown 和错误分类语义，并复用已验证的 typed single-flight 实现。新增 `cache::moka::tests` 3 项通过，覆盖 fresh/stale/expiry、质量 CAS、容量边界和 shutdown；最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段仅执行 Moka adapter 增量测试 3 passed、0 failed。SQLite cache persistence、跨 adapter contract/fault 测试和完整 late-window 候选生命周期仍待后续切片。
-
-第九个小阶段（已完成）：将 `PolicyDnsCore` 默认缓存装配从 `MemoryCacheStore` 切换为 `MokaCacheStore`，保留 `CacheStore` trait 注入边界和现有错误映射；Policy focused tests 与 Moka adapter tests 共 17 项增量通过。最近一次大阶段全量测试仍为 417 passed、0 failed；SQLite cache persistence、跨 adapter contract/fault 测试和完整 late-window 候选生命周期仍待后续切片。
-
-第十个小阶段（已完成）：新增独立 `SqlitePersistentCacheStore`，使用 SQLx SQLite pool、WAL、独立 `cache_entries` schema 和串行 operation lock；复用 FDCP codec 做 canonical/checksum/expiry 恢复校验，在事务中合并、按 max-size budget 淘汰并重写 payload rows，数据库关闭后拒绝恢复/写入。新增 `cache::sqlite::tests` 3 项通过，覆盖 roundtrip/reopen、expiry recovery、容量淘汰、损坏记录隔离、shutdown 和零预算边界；最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段仅执行 SQLite adapter 增量测试 3 passed、0 failed。WAL/SHM 观测、busy/disk-full degraded recovery、跨 adapter contract tests 和完整 late-window 候选生命周期仍待后续切片。
+小阶段索引 8～10（均已完成）：接入 `MokaCacheStore` 并作为 Policy 默认 store，新增独立 `SqlitePersistentCacheStore`；Moka、Policy 与 SQLite adapter 增量测试均通过。WAL/SHM 观测、busy/disk-full recovery、跨 adapter contract/fault tests 和完整 late-window candidate 生命周期仍未完成。
 
 ### 阶段 7：完整策略与资源
 
@@ -359,21 +265,7 @@ transport / upstream / storage / observability adapters
 - 完成本地/远程资源首次快照、每资源 revision 和原子发布；
 - 验收：匹配优先级、资源解析、首次失败和乱序刷新测试通过。
 
-首个小阶段（已完成）：新增 `ClientIndex` 和 `StrategyIndex`，覆盖 exact ID 优先、IPv4/IPv6 longest-prefix、unknown、重复匹配拒绝和 immutable strategy lookup；定向测试 5 项通过。
-
-第二个小阶段（已完成）：新增 listener/stream 与 DoH route 编译索引，固定 route template 校验、`{client_id}` segment 提取、基础 strategy 引用和 listener hosts 元数据；定向 route 测试通过。规则资源 matcher 尚未接入。
-
-第三个小阶段（已完成）：新增 `PolicyIndex::evaluate` 与不可变 `ResolutionPlan` 首轮组合，覆盖 client strategy override、cache tri-state、client digest namespace、strategy/global fallback、TTL/ECS effective value 和 upstream target；定向 plan 测试 3 项通过。后续第四至第七个小阶段已补齐 rule/hosts/resource matcher、loader 和 DNS Core/Policy 首轮接线；Runtime snapshot 原子发布仍未实现。
-
-第四个小阶段（已完成）：实现 hosts/rule 资源 parser 与 immutable matcher，支持 A/AAAA/CNAME、wildcard、JSON/hosts/Clash、exact/suffix/regex 优先级、输入和 program size 限制；定向 Resource 测试通过。
-
-第五个小阶段（已完成）：实现 const/file hosts 与 rule-set loader、稳定文件 fingerprint、UTF-8/大小/symlink/稳定读取边界，以及 `ResourceSnapshot`/registry 的版本 CAS 发布；资源 loader、snapshot 定向测试通过。remote fetch、manifest/content 原子落盘与恢复校验已补齐，scheduler/coordinator 的 Runtime-facing 纯逻辑编排也已完成，一次性 remote fetch/parse/persist worker 已接入 refresh reservation，async PreparedRuntime 首次 remote restore/fetch 已接入，真实 Runtime supervisor task 仍未接入。
-
-第八个小阶段（已完成）：新增 `ResourceRefreshRuntime`，将 per-resource schedule、single-flight reservation、CAS publish、failure backoff、cancel 和 shutdown 组合为 Runtime-facing facade；`resource::orchestrator::tests` 4 项通过。一次性 `ResourceRefreshWorker` 已在后续小阶段补齐；真实 Runtime supervisor、资源 I/O worker 的长期调度和跨 Runtime snapshot 发布仍未实现。
-
-第六个小阶段（已完成）：`ConfiguredDnsCore` 接入 Resource hosts index，支持 const/file、JSON、CNAME、wildcard 和 exact/NODATA/NXDOMAIN 语义；DNS Core focused tests 14 项通过。
-
-第七个小阶段（已完成）：`PolicyIndex` 接入 const/file hosts/rule-set loader，按 listener hosts → strategy rule 顺序生成安全的 `ResolutionPlan` matched-rule 摘要，并对 remote/dat/selector/缺失资源返回显式错误；随后增加 supplied compiled remote snapshot 的初始构造路径，供 async PreparedRuntime 在 bind 前完成 remote rule-set 编译。Policy focused tests 和 async prepare 测试通过；Runtime snapshot 原子接线和完整 upstream/cache 管线仍未实现。
+小阶段索引 1～8（均已完成）：完成 client/strategy/route index、`ResolutionPlan`、hosts/rule parser 与 loader、resource snapshot/CAS、`ResourceRefreshRuntime`，并接入 DNS Core/Policy；具体边界与测试见 [policy.md](backend-modules/policy.md)、[resource.md](backend-modules/resource.md) 和 [dns-core.md](backend-modules/dns-core.md)。
 
 ### 阶段 8：DoH 接入与代理安全边界
 
@@ -383,7 +275,7 @@ transport / upstream / storage / observability adapters
 - 实现 PROXY v1/v2、SOCKS5/SOCKS5H 和 SecretRef 防泄漏；
 - 验收：协议边界、可信代理、Host/SNI 和大消息限制测试通过。
 
-首个小阶段（已完成）：为 DoH bind plan 增加 typed endpoint binding，补充 opaque TCP byte-stream capability，实现 plain HTTP/1.x GET/POST codec、无填充 base64url、路由 `{client_id}` 匹配、固定 HTTP 错误状态和 DNS `application/dns-message` 响应；service 以受监督 listener/session task 接入。当前只接受 `tls.mode: external` 与 `client_ip.source: peer`，`terminate`、`forwarded_header`、`proxy_protocol` 会在装配阶段明确拒绝。定向 codec/session 测试 9 项，真实 smoke 使用 `127.0.0.1:8355` 直接 HTTP POST/GET。
+小阶段索引 1（已完成）：接入 DoH plain HTTP/1.x GET/POST、typed endpoint、路由、HTTP/DNS 错误分层及受监督 listener/session；codec/session 定向测试和 `127.0.0.1:8355` smoke 通过。具体边界见 [transport.md](backend-modules/transport.md)。
 
 当前边界：HTTP/1.x 仍按读取顺序处理，未实现入站 TLS terminate/external 握手、PROXY v1/v2、forwarded header 信任链、HTTP/2 和完整资源/故障注入验收；上游 DoH HTTPS/TLS adapter 已完成 live handshake 验证。
 
@@ -395,25 +287,11 @@ transport / upstream / storage / observability adapters
 - 完成 degraded 状态、persistence gap、低基数 metrics 和脱敏日志；
 - 验收：跨午夜、幂等重试、队列溢出、数据库 busy/磁盘故障测试通过。
 
-当前已完成的纯领域小阶段：Storage 建立 UTC day、sharded stats accumulator、epoch snapshot、persistence gap、batch ledger、业务 migration schema 与可替换 stats writer contract；Observability 建立有界 metric registry、原子 counter/gauge、health 状态、retry/gap 计数和 typed event 脱敏。Storage 已新增 SQLx SQLite pool/migration、stats batch 幂等事务、`StatsPersistenceWorker`、resolve detail insert、bounded detail writer、详情淘汰策略、health/checkpoint/shutdown 首轮 adapter 和 backend/detail 生命周期 facade；pending 内存保护上限、Supervisor/StorageService 生产装配、busy/disk-full recovery、最终 tracing writer、flush/backpressure 和故障注入仍未实现。
+小阶段索引 1～19（均已完成）：完成 UTC day/sharded accumulator、epoch/batch ledger、SQLite migration 与幂等 stats transaction、脱敏 detail、bounded detail writer、淘汰/硬上限、周期 flush/shutdown，以及 `StorageService` backend/detail 生命周期 facade 和 `StatsPersistenceWorker` 首轮闭环。代表性证据见 [storage.md](backend-modules/storage.md)；最近一次大阶段全量基线为 `417 passed、0 failed`，各小阶段只保留增量测试记录。
 
-第十一个小阶段（已完成）：新增 `SqliteStorageBackend`，在独立业务 SQLite 文件中执行 `0001_storage.sql`，配置 WAL/`synchronous=NORMAL`/busy timeout，并通过 `StorageBackend` 实现 stats batch 的 sequence 校验、按日/维度 upsert、ledger payload hash 幂等重试与冲突拒绝；同一事务支持 `ResolveBatch` 详情插入，health probe、checkpoint 和 shutdown 保留 typed 状态。新增 `storage::sqlite::tests` 2 项通过，覆盖 migration、stats 幂等重试/reopen、事务回滚和 shutdown；最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段仅执行 SQLite storage 增量测试 2 passed、0 failed。详情 writer queue、淘汰硬上限、busy/disk-full recovery 和完整 flush 仍待后续切片。
+小阶段索引 20（已完成）：将 `StatsPersistenceWorker` 接入 `StorageService` 的 stats flush/shutdown 顺序，并暴露可共享的同步 `StatsRecorder`；`storage::service::tests` 增量测试 `3 passed、0 failed`。
 
-第十二个小阶段（已完成）：补充 `SqliteStorageBackend` 的 `ResolveBatch` 详情写入回归测试，验证详情事件在同一 SQLite 业务存储边界内落入 `resolve_log`，并与既有 migration、stats 幂等重试/reopen、事务回滚和 shutdown 覆盖合并为 `storage::sqlite::tests` 3 项；最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段仅执行 SQLite storage 增量测试 3 passed、0 failed。详情 writer queue、淘汰硬上限、busy/disk-full recovery 和完整 flush 仍待后续切片。
-
-第十三个小阶段（已完成）：SQLite `ResolveBatch` 统一复用 `ResolveDetailRecord` 脱敏摘要后再写入 `resolve_log`，request digest、route/client/strategy 标识和 qname 不再原样落库，仅保留存在性与长度摘要；新增定向断言覆盖数据库字段。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段仅执行 SQLite storage 增量测试 3 passed、0 failed。详情 writer queue、淘汰硬上限、busy/disk-full recovery 和完整 flush 仍待后续切片。
-
-第十四个小阶段（已完成）：新增 `SqliteResolveDetailWriter` bounded channel 与 `SqliteResolveDetailWorker` 批量 flush 端；`ResolveLogWriter` 只执行非阻塞 `try_send`，worker 在受控 batch 内调用 SQLite 事务，数据库失败时保留 pending 记录，队列和 batch 容量为零时显式拒绝。新增 SQLite detail writer 定向测试 6 项通过；最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段仅执行 SQLite storage 增量测试 6 passed、0 failed。worker 的 Supervisor 周期调度、淘汰硬上限、busy/disk-full recovery 和完整 flush 仍待后续切片。
-
-第十五个小阶段（已完成）：为 `SqliteResolveDetailWorker` 接入 `max_record_age`、`eviction_threshold_records` 与 `max_records` 策略；每个 detail batch 在同一事务中先删除过期记录、将存量降到软阈值以下，再按硬上限裁剪待写记录并返回 committed/evicted/dropped 摘要。新增年龄淘汰和硬上限定向测试，SQLite storage 增量测试累计 8 passed；最近一次大阶段全量测试仍为 417 passed、0 failed。Supervisor 周期调度、busy/disk-full recovery 和完整 flush 仍待后续切片。
-
-第十六个小阶段（已完成）：增加 `SqliteResolveDetailWorker::shutdown`，在给定 deadline 内循环 drain 所有 receiver/pending batch，累计 committed/evicted/dropped 摘要；任一事务失败直接返回错误且保留未提交记录。新增多批次 shutdown drain 测试，SQLite storage 增量测试累计 9 passed；最近一次大阶段全量测试仍为 417 passed、0 failed。Supervisor 周期调度、busy/disk-full recovery 和服务级统一 flush 仍待后续切片。
-
-第十七个小阶段（已完成）：增加 `SqliteResolveDetailWorker::run` 周期 flush 入口，使用 cancellation 停止循环并在退出前执行最终 drain；单次 flush 失败只累计失败次数、保留 pending，最终 drain 失败显式返回错误。新增周期 flush 与取消 drain 测试，SQLite storage 增量测试累计 10 passed；最近一次大阶段全量测试仍为 417 passed、0 failed。Supervisor 注册、busy/disk-full recovery 和服务级统一 flush 仍待后续切片。
-
-第十八个小阶段（已完成）：新增 `StorageService` 生命周期 facade，统一 backend checkpoint/flush、detail worker flush、detail shutdown drain 与 backend shutdown 顺序；shutdown 尽力执行两个子边界，并在双故障时保留 backend/detail typed 错误上下文。新增 `storage::service::tests` 2 项通过；本阶段只执行 StorageService 增量测试 2 passed、0 failed，最近一次大阶段全量测试基线保持 417 passed、0 failed。Supervisor 注册、真实 stats/detail 事件接入、busy/disk-full recovery 和服务级 task flush 仍未完成。
-
-第十九个小阶段（已完成）：新增 `StatsPersistenceWorker`，将 `StatsAccumulator` 的 epoch snapshot 通过 `BatchLedger` 按 batch ID 顺序提交到 `StorageBackend`；提交失败时保留 pending batch，重试不重复累计，并通过 `persistence_gap` 摘要暴露当前缺口。同步实现 `StatsRecorder` adapter，保持请求热路径无 await。新增 `storage::stats::tests` 3 项通过；本阶段只执行 StatsPersistenceWorker 增量测试 3 passed、0 failed，最近一次大阶段全量测试基线保持 417 passed、0 failed。StatsPersistenceWorker 纳入 StorageService/Supervisor、pending 内存保护上限、真实 stats/detail 事件接入、busy/disk-full recovery 和服务级 task flush 仍未完成。
+阶段 9 当前边界：Supervisor/DnsService 生产注册、pending 内存保护上限、busy/disk-full recovery、正式 telemetry writer、flush/backpressure 和故障注入仍未完成。
 
 ### 阶段 10：刷新、故障注入和 v1 验收
 
@@ -424,53 +302,9 @@ transport / upstream / storage / observability adapters
 - 完成协议 conformance、压力测试和长期运行检查；
 - 同步 README、配置示例、模块进度和最终验收证据。
 
-第三十六个小阶段（已完成）：将 `RuntimeCoordinator` 的资源 worker 查询、刷新和关闭入口提升为 coordinator-facing API；`Application` 创建并共享 `Arc<RuntimeCoordinator>`，`DnsService` 持有该 coordinator，资源 refresh task 每轮读取当前活动 runtime，同时保留启动时 listener task 的固定 runtime 句柄。新增 coordinator 级 file hosts 刷新测试，验证资源 metadata 在当前活动实例上完成版本化发布；当前配置候选 prepare/bind/activate、动态 worker 集合重建、独立 listener swap 和完整服务故障矩阵仍留在后续小阶段。阶段完成后全量测试为 389 passed，0 failed。
+小阶段索引 36～58（均已完成）：完成 RuntimeCoordinator/Resource worker 生命周期、Supervisor 有界重试与 scoped cancellation、精确 task 归因、配置 fingerprint 自动 reload、listener 复用与 rebind、跨 Runtime 资源状态合并、LateCacheFinalizer owner、最新 Runtime 路由和 resource worker 增量协调。
 
-第三十七个小阶段（已完成）：为 `Supervisor` 增加 `spawn_with_factory`，允许可重建 task 在 `TaskError::Transient` 下按 `RestartPolicy::Transient { max_restarts }` 进行可取消的指数退避和有界重试；`TaskCompletion` 暴露 `restart_count` 与 `restart_exhausted()`，`ShutdownReport` 聚合已发生的重试次数。新增成功重试、上限耗尽和 shutdown 计数测试；当前 service listener/resource task 的具体 factory 故障矩阵接入、fatal/degraded 分项升级和完整 shutdown 报告仍留在后续小阶段。阶段完成后全量测试为 392 passed，0 failed。
-
-第三十八个小阶段（已完成）：为 `RuntimeCoordinator` 增加候选 `bind_and_activate` 入口，统一调用 `bind_prepared`、revision CAS 和旧 runtime drain；bind 失败不发布候选，CAS 失败通过 `RuntimeReloadError` 返回已绑定 candidate 供调用方重试。新增 fake `SocketFactory` 成功激活与 CAS 失败保留旧 runtime 测试；Application 配置变更触发、transport listener 重建和完整跨 Runtime service reload 仍留在后续小阶段。阶段完成后全量测试为 394 passed，0 failed。
-
-第三十九个小阶段（已完成）：为 `RuntimeCoordinator` 增加 `refresh_resource_if_current`，以 captured `Arc<ActiveRuntime>` 做刷新前后活动实例校验；service refresh loop 使用同一 captured runtime 计算 due/backoff，检测到候选切换后跳过旧结果并重新读取当前实例。新增 stale-active rejection 测试；跨 Runtime resource candidate merge、动态 worker 集合重建、Application reload trigger、transport listener 重绑和完整故障矩阵仍留在后续小阶段。阶段完成后全量测试为 395 passed，0 failed。
-
-第四十个小阶段（已完成）：新增 `Application::reload_runtime_from_path`，在无 snapshot 写入的配置加载边界执行 SecretRef 校验、async `PreparedRuntime` 构造和 `RuntimeCoordinator::bind_and_activate`；配置错误或候选失败均不改变当前 `ActiveRuntime`，成功 reload 递增 revision 并 drain 旧实例。新增 Application reload 成功/失败测试；`run` 尚未接入文件监视或管理事件，transport listener 重建、资源 worker 集合重建和完整跨 Runtime 服务生命周期仍留在后续小阶段。阶段完成后全量测试为 397 passed，0 failed。
-
-第四十一个小阶段（已完成）：让 `DnsService::wait_for_ctrl_c` 同时观察 Supervisor task completion；Degraded 组件的终止失败仅记录并继续，FatalEndpoint/Fatal、重试耗尽和 task panic 映射为 `ServiceError::TaskFailure` 并停止接收新请求。新增 service fault classification 测试，并同步 Application 的运行期错误映射；listener factory 重建、完整 endpoint/resource/storage 故障矩阵和 shutdown 分项报告仍留在后续小阶段。阶段完成后全量测试为 401 passed，0 failed。
-
-第四十二个小阶段（已完成）：为 `Supervisor` 增加 `spawn_scoped` 和 `cancel_task`，由 Supervisor 持有每个 scoped task 的 cancellation；scoped task 同时响应自身取消和全局 shutdown，完成后从注册表清理。新增 sibling 隔离取消与全局回收测试；service listener swap 尚未接入该能力，listener factory 重建、资源 worker 集合重建和完整服务故障矩阵仍留在后续小阶段。阶段完成后全量测试为 403 passed，0 failed。
-
-第四十三个小阶段（已完成）：将 DnsService 的 UDP/TCP/DoH transport task 改为 `Supervisor::spawn_scoped` 注册，保存每个 listener 的独立 cancellation，并在 service shutdown 时显式取消 transport task；resource refresh task 继续使用 Supervisor 全局 cancellation。新增 transport task scoped registration 测试；listener reload/rebind 尚未接入，资源 worker 集合重建、完整 endpoint 故障矩阵和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 404 passed，0 failed。
-
-第四十四个小阶段（已完成）：新增 `DnsService::reload_prepared`，在候选 bind 与 transport adapter 预构造成功后执行 revision CAS，使用带 revision 的 task ID 注册新 UDP/TCP/DoH listener task，再取消旧 scoped token并更新 service runtime；Application 新增 `reload_service_from_path`，复用无 snapshot 配置加载、SecretRef 校验和 async prepare 边界。新增系统 loopback listener rebind 测试，验证新 revision 接管新端口并可正常 shutdown；`run` 自动配置变更事件、资源 worker 集合重建、listener 故障自动重建和完整 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 405 passed，0 failed。
-
-第四十五个小阶段（已完成）：将 resource refresh task 改为 `Supervisor::spawn_scoped` 注册并保存独立 cancellation；service reload 按新 Runtime 的 resource worker ID 集合重建任务，旧集合在新任务注册成功后取消，且取消清理作用于旧 task 捕获的 runtime，避免误停新 runtime scheduler。新增系统 loopback resource worker token reconciliation 测试；`run` 自动配置变更事件、完整跨 Runtime 候选发布、listener 故障自动重建和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 406 passed，0 failed。
-
-第四十六个小阶段（已完成）：为 Supervisor 记录 Tokio `JoinSet` task ID 到 FluxDNS `TaskId` 的映射，并改用 `join_next_with_id` 精确处理正常退出、panic 和 abort；JoinError 不再按注册表顺序猜测任务，补充 sibling 保持存活的 panic 归因回归测试。`run` 自动配置变更事件、完整跨 Runtime 候选发布、listener 故障自动重建和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 407 passed，0 failed。
-
-第四十七个小阶段（已完成）：新增 `Supervisor::spawn_scoped_with_factory`，让 task 同时具备 scoped cancellation 和 `TaskError::Transient` 有界重试；UDP/TCP/DoH transport task 改为三次重试上限，重试间复用同一已绑定 socket和共享请求/连接计数器，重试耗尽仍按 `FatalEndpoint` 升级。新增 scoped factory 与 service transport retry 测试；自动 listener rebind、`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 409 passed，0 failed。
-
-第四十八个小阶段（已完成）：将 Supervisor 的 Tokio `JoinSet` task ID 映射从单独 `TaskId` 升级为完整 `TaskSpec`，panic/abort 结果在精确归因的同时保留原始 component、fault level 和 restart policy；补充 panic completion 元数据断言。`run` 自动配置变更事件、完整跨 Runtime 候选发布、listener 自动 rebind 和 flush 生命周期仍留在后续小阶段。阶段完成后全量测试为 409 passed，0 failed。
-
-第四十九个小阶段（已完成）：为 `config::load` 测试临时目录增加进程内原子序号，避免并发测试仅依赖纳秒时间戳而发生目录复用和提前清理；生产配置快照逻辑未改变。并发快照测试及全量 409 项测试通过；`run` 自动配置变更事件、完整跨 Runtime 候选发布、listener 自动 rebind 和 flush 生命周期仍留在后续小阶段。
-
-第五十个小阶段（已完成）：为 `ResourceRegistrySnapshot` 增加按资源过滤的 immutable registry 合并原语；候选 registry 仅接收旧 Runtime 中严格更高的 `ResourceVersion`，同版本或候选更高版本保留候选内容，并补充不同资源、版本优先级和过滤条件测试。Policy、worker schedule、Runtime metadata 的跨 Runtime 同步仍留在后续小阶段。阶段完成后资源 snapshot 定向测试 6 项通过；全量测试基线更新为 411 passed，0 failed。
-
-第五十一个小阶段（已完成）：在候选 revision CAS 前合并与新配置完全一致资源的更高 compiled snapshot、Policy index 和 Runtime metadata，并迁移 worker 已完成的 registry/schedule/backoff 状态；不复制旧 Runtime 的 in-flight reservation。资源刷新与候选激活通过 coordinator mutation gate 串行化，避免 refresh/reload 竞态丢失已发布资源。新增跨 Runtime file hosts 合并回归测试；阶段完成后全量测试为 412 passed，0 failed。`run` 自动配置变更事件、资源 worker 集合自动重建、独立 resource-only swap 和 flush 生命周期仍留在后续小阶段。
-
-第五十二个小阶段（已完成）：为 `run` 增加基于配置文件 metadata fingerprint 的自动变更轮询；连续两次观察到同一 fingerprint 才触发既有 `reload_service_from_path`，成功后才提交 fingerprint，配置解析、SecretRef、prepare 或 bind 失败会记录并保留旧 Runtime，下一轮继续重试。`DnsService` 新增受管轮询回调入口，与 Ctrl-C、Supervisor 故障和 graceful shutdown 共用同一事件循环。新增 fingerprint 去抖、提交和失败重试测试；阶段完成后全量测试为 413 passed，0 failed。资源 worker 集合的完整跨 Runtime 生命周期、独立 resource-only swap 和 flush 生命周期仍未完成。
-
-第五十三个小阶段（已完成）：`DnsService::reload_prepared` 按 BindPlan 选择 listener 生命周期；端点未变化时由 `RuntimeCoordinator` 通过 Arc 复用已激活 listener，仅切换 prepared Runtime 并重建受管 transport/resource task，端点变化时继续走全量 bind/CAS。新增同端口 reload 回归测试，验证不重复 bind 仍能切换 Runtime revision 并在 shutdown 时回收任务；阶段完成后全量测试为 414 passed，0 failed。完整跨 Runtime 配置候选发布和 flush 生命周期仍未完成。
-
-第五十四个小阶段（已完成）：将 `LateCacheFinalizer` owner 提升到 `RuntimeCoordinator`，每次 Runtime 成功激活或 listener 复用时登记唯一 owner；`DnsService::shutdown` 在 supervisor drain 后使用同一 deadline 关闭当前及历史 Runtime 的 finalizer，避免旧 Runtime 的 late-cache task 脱离 shutdown。新增 previous/current Runtime finalizer 回收测试；阶段完成后全量测试为 415 passed，0 failed。完整跨 Runtime 配置候选发布和 flush 生命周期仍未完成。
-
-第五十五个小阶段（已完成）：修正同 BindPlan listener 复用路径，使其在成功切换前执行与全量 bind/CAS 相同的 `PreparedRuntime::merge_state_from`；已发布的更高资源版本、Policy index、Runtime metadata 和 worker schedule/backoff 不再因复用 listener 而丢失。新增已刷新 file hosts 在同端口 reload 后保持版本的回归测试；阶段完成后全量测试为 416 passed，0 failed。完整跨 Runtime 配置候选发布和 flush 生命周期仍未完成。
-
-第五十六个小阶段（已完成）：为 `PolicyDnsCore` 增加 Runtime current-target cell；`RuntimeCoordinator` 在每次成功发布时更新当前 core/revision，旧 Runtime 的 optimistic refresh 与 parallel late sink 均优先把后台写入路由到最新 Runtime cache/finalizer，目标不存在时保留原 snapshot-local 行为。新增旧/最新 core optimistic refresh 路由测试；阶段完成后全量测试为 417 passed，0 failed。完整跨 Runtime 配置候选发布和 flush 生命周期仍未完成。
-
-第五十七个小阶段（已完成）：为 upstream group executor 引入可传递的 nested group member 句柄，外层 parallel/ordered 执行在调用嵌套 group 时继续传递 typed late-result sink；嵌套 group 的 late response 不再在 `GroupExchange` 边界丢失。新增 nested parallel group sink 传播测试；本阶段 upstream executor 增量测试 13 passed、0 failed，最近一次大阶段全量测试基线保持 417 passed、0 failed。完整 late-window 候选语义、跨 Runtime 配置候选发布和 flush 生命周期仍未完成。
-
-第五十八个小阶段（已完成）：`DnsService` reload 按资源 `ConfigId` 增量协调 refresh task；配置仍存在的 worker 复用原有 scoped cancellation，新增资源才注册新 task，移除资源在新集合确认后取消，避免每次 listener reload 都重启未变化的资源 worker。扩展 service 回归测试覆盖 worker 复用和移除清理；本阶段 service 相关增量测试 20 passed、0 failed，最近一次大阶段全量测试基线保持 417 passed、0 failed。完整跨 Runtime 配置候选发布和 flush 生命周期仍未完成。
-
-验证基线补充（已完成）：修复 Windows 下测试夹具对 Unix-only `work.path` 和非法临时文件名的依赖，统一使用进程隔离的绝对临时路径；生产配置解析和资源加载逻辑未改变。使用 Rust 1.98.0 执行 `fmt --check`、`check --locked`、`clippy --all-targets -- -D warnings` 及全量 `test --locked`，结果分别通过，测试为 411 passed、0 failed。
+代表性验证：Runtime/Service/Application focused tests、loopback listener/resource reload 和并发快照测试均通过；最近一次大阶段全量基线为 `417 passed、0 failed`。当前仍未完成完整跨 Runtime candidate 生命周期、resource-only swap、listener 自动重建、Storage/telemetry flush 与最终故障矩阵；具体边界见 [runtime.md](backend-modules/runtime.md)、[application.md](backend-modules/application.md) 和 [cache.md](backend-modules/cache.md)。
 
 ## 6. 阶段提交规则
 
