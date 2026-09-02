@@ -99,7 +99,7 @@ strategy.rules[].edns_client_subnet
 `mode` 的取值为 `disabled`、`client`、`custom`：
 
 - `disabled` 显式停止当前请求继续向上游传递 ECS；
-- `client` 优先使用请求携带的 ECS，没有时按客户端地址推导前缀；
+- `client` 优先使用并规范化请求携带的合法 ECS；没有时按客户端地址推导 IPv4 `/24` 或 IPv6 `/56` 前缀，避免向上游传递完整客户端地址；
 - `custom` 使用 `custom_ip`，因此 `custom_ip` 必填。
 
 #### 缓存和 TTL

@@ -2,8 +2,11 @@ use std::fmt;
 use std::time::Duration;
 
 use hickory_proto::{
-    op::{Message, MessageType, OpCode, Query, ResponseCode},
-    rr::{DNSClass, Name, RData, Record, RecordType},
+    op::{Edns, Message, MessageType, OpCode, Query, ResponseCode},
+    rr::{
+        DNSClass, Name, RData, Record, RecordType,
+        rdata::opt::{ClientSubnet, EdnsCode, EdnsOption},
+    },
 };
 use thiserror::Error;
 
@@ -130,6 +133,33 @@ impl CanonicalQuery {
 
     pub fn as_message(&self) -> &Message {
         &self.message
+    }
+
+    /// 返回 canonical query 当前携带的首个 ECS；不存在时返回 `None`。
+    pub(crate) fn edns_client_subnet(&self) -> Option<ClientSubnet> {
+        match self.message.edns.as_ref()?.option(EdnsCode::Subnet)? {
+            EdnsOption::Subnet(subnet) => Some(*subnet),
+            _ => None,
+        }
+    }
+
+    /// 创建只替换 ECS 的 canonical query，并保留其他 EDNS flags/options。
+    ///
+    /// `None` 只删除 ECS；即使 EDNS 中已无其他 option，也保留原有 EDNS envelope。
+    pub(crate) fn with_edns_client_subnet(&self, subnet: Option<ClientSubnet>) -> Self {
+        let mut query = self.clone();
+        if let Some(edns) = query.message.edns.as_mut() {
+            edns.options_mut().remove(EdnsCode::Subnet);
+        }
+        if let Some(subnet) = subnet {
+            query
+                .message
+                .edns
+                .get_or_insert_with(Edns::new)
+                .options_mut()
+                .insert(EdnsOption::Subnet(subnet));
+        }
+        query
     }
 
     /// 为 transport/upstream 编码创建带关联 ID 的副本，不修改 canonical query。
@@ -417,12 +447,9 @@ fn extract_ttl_metadata(message: &Message, class: ResponseClass) -> TtlMetadata 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hickory_proto::{
-        op::Edns,
-        rr::{
-            RData, Record,
-            rdata::{A, opt::EdnsOption},
-        },
+    use hickory_proto::rr::{
+        RData, Record,
+        rdata::{A, opt::NSIDPayload},
     };
     use std::{net::Ipv4Addr, str::FromStr};
 
@@ -455,6 +482,43 @@ mod tests {
 
         assert_eq!(query.question().name().to_ascii(), "www.example.com.");
         assert!(query.question().name().is_fqdn());
+    }
+
+    #[test]
+    fn ecs_replacement_preserves_other_edns_options_and_flags() {
+        let mut message = query(1, "example.com.");
+        let mut edns = Edns::new();
+        edns.flags_mut().dnssec_ok = true;
+        edns.options_mut()
+            .insert(EdnsOption::Subnet("198.51.100.0/24".parse().unwrap()));
+        edns.options_mut()
+            .insert(EdnsOption::NSID(NSIDPayload::new([1, 2, 3]).unwrap()));
+        message.set_edns(edns);
+        let query = CanonicalQuery::from_message(message).unwrap();
+        let replacement = "203.0.113.0/24".parse().unwrap();
+
+        let replaced = query.with_edns_client_subnet(Some(replacement));
+
+        assert_eq!(replaced.edns_client_subnet(), Some(replacement));
+        let edns = replaced.as_message().edns.as_ref().unwrap();
+        assert!(edns.flags().dnssec_ok);
+        assert!(edns.option(EdnsCode::NSID).is_some());
+        assert_eq!(edns.options().get_all(EdnsCode::Subnet).len(), 1);
+    }
+
+    #[test]
+    fn ecs_removal_preserves_existing_edns_envelope() {
+        let mut message = query(1, "example.com.");
+        let mut edns = Edns::new();
+        edns.options_mut()
+            .insert(EdnsOption::Subnet("198.51.100.0/24".parse().unwrap()));
+        message.set_edns(edns);
+        let query = CanonicalQuery::from_message(message).unwrap();
+
+        let without_ecs = query.with_edns_client_subnet(None);
+
+        assert_eq!(without_ecs.edns_client_subnet(), None);
+        assert!(without_ecs.as_message().edns.is_some());
     }
 
     #[test]

@@ -6,12 +6,14 @@
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::future::Future;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use arc_swap::{ArcSwap, ArcSwapOption};
-use hickory_proto::op::ResponseCode;
+use hickory_proto::{op::ResponseCode, rr::rdata::opt::ClientSubnet};
+use ipnet::IpNet;
 use thiserror::Error;
 
 use crate::cache::{
@@ -19,8 +21,10 @@ use crate::cache::{
     CacheLookup, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer, MokaCacheStore,
     build_cache_key,
 };
+use crate::config::model::EcsMode;
 use crate::config::resolve::{
-    ConfigId, ResolvedConfig, ResolvedHostsResource, ResolvedTtlOverride, ResolvedUpstream,
+    ConfigId, ResolvedConfig, ResolvedEcs, ResolvedHostsResource, ResolvedTtlOverride,
+    ResolvedUpstream,
 };
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::policy::{ClientMatch, PolicyBuildError, PolicyIndex, PolicyRequest};
@@ -616,7 +620,12 @@ impl PolicyDnsCore {
             );
         }
 
-        let Some(outcome) = self.resolve_upstream(request, &plan).await else {
+        let upstream_query = effective_upstream_query(
+            &request.query,
+            &plan.edns_client_subnet,
+            request.context.client.client_addr,
+        );
+        let Some(outcome) = self.resolve_upstream(request, &plan, &upstream_query).await else {
             return (
                 servfail(request),
                 Some(DnsResolutionObservation {
@@ -655,11 +664,12 @@ impl PolicyDnsCore {
         &self,
         request: &DnsRequest,
         plan: &crate::policy::ResolutionPlan,
+        query: &crate::dns::CanonicalQuery,
     ) -> Option<PolicyUpstreamResult> {
-        let Some(key) = cache_key(plan, request) else {
+        let Some(key) = cache_key_for_query(plan, request, query) else {
             return self
                 .upstreams
-                .exchange(&plan.upstream, &request.query, &request.context, None)
+                .exchange(&plan.upstream, query, &request.context, None)
                 .await
                 .map(|outcome| PolicyUpstreamResult::upstream(outcome, CacheStatus::Disabled));
         };
@@ -683,7 +693,13 @@ impl PolicyDnsCore {
             {
                 let stale_response = Arc::clone(&record.entry.response);
                 if refresh.try_consume() {
-                    self.schedule_optimistic_refresh(key.clone(), refresh.version(), request, plan);
+                    self.schedule_optimistic_refresh(
+                        key.clone(),
+                        refresh.version(),
+                        request,
+                        plan,
+                        query,
+                    );
                 }
                 return Some(PolicyUpstreamResult::cache(
                     UpstreamOutcome::Response((*stale_response).clone()),
@@ -704,7 +720,7 @@ impl PolicyDnsCore {
                     .upstreams
                     .exchange(
                         &plan.upstream,
-                        &request.query,
+                        query,
                         &request.context,
                         Some(Arc::clone(&late_sink)),
                     )
@@ -735,7 +751,7 @@ impl PolicyDnsCore {
                         self.upstreams
                             .exchange(
                                 &plan.upstream,
-                                &request.query,
+                                query,
                                 &request.context,
                                 Some(Arc::clone(&late_sink)),
                             )
@@ -751,7 +767,7 @@ impl PolicyDnsCore {
                     .upstreams
                     .exchange(
                         &plan.upstream,
-                        &request.query,
+                        query,
                         &request.context,
                         Some(Arc::clone(&late_sink)),
                     )
@@ -765,7 +781,7 @@ impl PolicyDnsCore {
                 };
                 match outcome {
                     UpstreamOutcome::Response(response) => {
-                        if !response.matches_query(&request.query) {
+                        if !response.matches_query(query) {
                             let _ = self
                                 .cache
                                 .publish_load(lease, CacheLoadCompletion::Miss, deadline)
@@ -841,8 +857,9 @@ impl PolicyDnsCore {
         stale_version: crate::ports::cache::CacheVersion,
         request: &DnsRequest,
         plan: &crate::policy::ResolutionPlan,
+        query: &crate::dns::CanonicalQuery,
     ) {
-        let query = request.query.clone();
+        let query = query.clone();
         let context = optimistic_refresh_context(&request.context);
         let upstream = plan.upstream.clone();
         let target = self.latest_runtime_target();
@@ -919,6 +936,52 @@ fn apply_ttl_override(response: &mut CanonicalResponse, ttl_override: &ResolvedT
     }
 }
 
+/// 根据请求级 ECS 配置生成真正发往上游的 canonical query。
+fn effective_upstream_query(
+    query: &crate::dns::CanonicalQuery,
+    ecs: &ResolvedEcs,
+    client_addr: Option<IpAddr>,
+) -> crate::dns::CanonicalQuery {
+    let subnet = match ecs.mode {
+        EcsMode::Disabled => None,
+        EcsMode::Custom => ecs
+            .custom_ip
+            .map(|network| ClientSubnet::new(network.network(), network.prefix_len(), 0)),
+        EcsMode::Client => query
+            .edns_client_subnet()
+            .and_then(normalize_client_subnet)
+            .or_else(|| client_addr.map(client_address_subnet)),
+    };
+    query.with_edns_client_subnet(subnet)
+}
+
+/// 校验并规范化请求携带的 ECS，避免 host bits 进入 cache fingerprint。
+fn normalize_client_subnet(subnet: ClientSubnet) -> Option<ClientSubnet> {
+    let max_prefix = match subnet.addr() {
+        IpAddr::V4(_) => 32,
+        IpAddr::V6(_) => 128,
+    };
+    if subnet.source_prefix() > max_prefix || subnet.scope_prefix() > max_prefix {
+        return None;
+    }
+    let network = IpNet::new(subnet.addr(), subnet.source_prefix()).ok()?;
+    Some(ClientSubnet::new(
+        network.network(),
+        subnet.source_prefix(),
+        subnet.scope_prefix(),
+    ))
+}
+
+/// 按固定的隐私前缀从客户端地址生成 ECS，避免传递完整客户端地址。
+fn client_address_subnet(address: IpAddr) -> ClientSubnet {
+    let source_prefix = match address {
+        IpAddr::V4(_) => 24,
+        IpAddr::V6(_) => 56,
+    };
+    let network = IpNet::new(address, source_prefix).expect("fixed ECS prefix must be valid");
+    ClientSubnet::new(network.network(), source_prefix, 0)
+}
+
 fn late_response_preference(class: crate::dns::ResponseClass) -> CacheQuality {
     match class {
         crate::dns::ResponseClass::Positive => CacheQuality::Complete,
@@ -976,22 +1039,51 @@ fn cache_key(
     plan: &crate::policy::ResolutionPlan,
     request: &DnsRequest,
 ) -> Option<crate::ports::cache::CacheKey> {
-    let namespace = plan.cache.namespace()?.clone();
-    let ecs = format!(
-        "{:?}:{:?}",
-        plan.edns_client_subnet.mode, plan.edns_client_subnet.custom_ip
+    let query = effective_upstream_query(
+        &request.query,
+        &plan.edns_client_subnet,
+        request.context.client.client_addr,
     );
+    cache_key_for_query(plan, request, &query)
+}
+
+/// 使用已应用最终 ECS 的 query 构造 cache key，避免不同客户端地址共享错误条目。
+fn cache_key_for_query(
+    plan: &crate::policy::ResolutionPlan,
+    request: &DnsRequest,
+    query: &crate::dns::CanonicalQuery,
+) -> Option<crate::ports::cache::CacheKey> {
+    let namespace = plan.cache.namespace()?.clone();
     build_cache_key(
         namespace,
-        &request.query,
+        query,
         request.context.transport.cache_compatibility,
         CacheKeyDimensions {
             policy: Some(cache_fingerprint(plan.strategy.id.as_str().as_bytes())),
             target: Some(cache_fingerprint(plan.upstream.as_str().as_bytes())),
-            ecs: Some(cache_fingerprint(ecs.as_bytes())),
+            ecs: ecs_cache_fingerprint(query),
         },
     )
     .ok()
+}
+
+/// 将最终 ECS 编码为不含明文的稳定 fingerprint。
+fn ecs_cache_fingerprint(query: &crate::dns::CanonicalQuery) -> Option<CacheFingerprint> {
+    let subnet = query.edns_client_subnet()?;
+    let mut encoded = Vec::with_capacity(19);
+    match subnet.addr() {
+        IpAddr::V4(address) => {
+            encoded.push(4);
+            encoded.extend_from_slice(&address.octets());
+        }
+        IpAddr::V6(address) => {
+            encoded.push(6);
+            encoded.extend_from_slice(&address.octets());
+        }
+    }
+    encoded.push(subnet.source_prefix());
+    encoded.push(subnet.scope_prefix());
+    Some(cache_fingerprint(&encoded))
 }
 
 fn cache_fingerprint(input: &[u8]) -> CacheFingerprint {
@@ -1334,7 +1426,13 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
+    use hickory_proto::rr::{
+        Name, RData, Record, RecordType,
+        rdata::{
+            A,
+            opt::{EdnsCode, EdnsOption},
+        },
+    };
     use ipnet::IpNet;
 
     use crate::cache::CacheLookup;
@@ -1361,7 +1459,10 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    use super::{PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, UpstreamRuntime, cache_key};
+    use super::{
+        PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, UpstreamRuntime, cache_key,
+        effective_upstream_query,
+    };
     use crate::upstream::UpstreamRegistry;
 
     struct FakeDohTransport {
@@ -1504,6 +1605,111 @@ mod tests {
         );
         assert_eq!(request.connect_ip(), Some("192.0.2.44".parse().unwrap()));
         assert_eq!(Message::from_vec(request.body()).unwrap().id, 1);
+    }
+
+    #[tokio::test]
+    async fn policy_core_applies_global_custom_ecs_to_upstream_query() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        let ecs = ResolvedEcs {
+            mode: EcsMode::Custom,
+            custom_ip: Some("203.0.113.0/24".parse().unwrap()),
+            source: ValueSource::Global,
+        };
+        config.dns.edns_client_subnet = ecs.clone();
+        config.strategies[0].edns_client_subnet = ecs.clone();
+        let ResolvedUpstream::Doh {
+            edns_client_subnet, ..
+        } = &mut config.upstreams[0]
+        else {
+            panic!("fixture must contain a DoH upstream");
+        };
+        *edns_client_subnet = Some(ecs);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(&config, 42, registry).unwrap();
+
+        core.resolve(&request("ecs.example.", RecordType::A))
+            .await
+            .unwrap();
+
+        let guard = transport.request.lock().unwrap();
+        let wire = Message::from_vec(guard.as_ref().unwrap().body()).unwrap();
+        let option = wire
+            .edns
+            .as_ref()
+            .and_then(|edns| edns.option(EdnsCode::Subnet));
+        assert!(matches!(
+            option,
+            Some(EdnsOption::Subnet(subnet))
+                if subnet.addr() == IpAddr::from([203, 0, 113, 0])
+                    && subnet.source_prefix() == 24
+        ));
+    }
+
+    #[test]
+    fn client_mode_prefers_and_normalizes_request_ecs() {
+        let supplied = hickory_proto::rr::rdata::opt::ClientSubnet::new(
+            IpAddr::from([198, 51, 100, 42]),
+            24,
+            0,
+        );
+        let query = request("ecs-client.example.", RecordType::A)
+            .query
+            .with_edns_client_subnet(Some(supplied));
+        let ecs = ResolvedEcs {
+            mode: EcsMode::Client,
+            custom_ip: None,
+            source: ValueSource::Strategy,
+        };
+
+        let query = effective_upstream_query(&query, &ecs, Some(IpAddr::from([203, 0, 113, 10])));
+
+        let subnet = query.edns_client_subnet().unwrap();
+        assert_eq!(subnet.addr(), IpAddr::from([198, 51, 100, 0]));
+        assert_eq!(subnet.source_prefix(), 24);
+    }
+
+    #[tokio::test]
+    async fn client_ecs_subnets_isolate_cache_entries() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        config.strategies[0].edns_client_subnet = ResolvedEcs {
+            mode: EcsMode::Client,
+            custom_ip: None,
+            source: ValueSource::Strategy,
+        };
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(&config, 42, registry).unwrap();
+        let first = request("ecs-cache.example.", RecordType::A);
+        let mut second = first.clone();
+        second.context.client.client_addr = Some(IpAddr::from([192, 0, 2, 2]));
+        let mut same_subnet = first.clone();
+        same_subnet.context.client.client_addr = Some(IpAddr::from([192, 0, 2, 99]));
+
+        core.resolve(&first).await.unwrap();
+        core.resolve(&second).await.unwrap();
+        core.resolve(&same_subnet).await.unwrap();
+
+        assert_eq!(transport.calls.load(Ordering::Acquire), 2);
+        let guard = transport.request.lock().unwrap();
+        let wire = Message::from_vec(guard.as_ref().unwrap().body()).unwrap();
+        assert!(matches!(
+            wire.edns
+                .as_ref()
+                .and_then(|edns| edns.option(EdnsCode::Subnet)),
+            Some(EdnsOption::Subnet(subnet))
+                if subnet.addr() == IpAddr::from([192, 0, 2, 0])
+                    && subnet.source_prefix() == 24
+        ));
     }
 
     #[tokio::test]

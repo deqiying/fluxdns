@@ -190,6 +190,7 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 实现 rule/hosts/resource matcher 编排；
 - [x] 实现覆盖矩阵与 ResolutionPlan（首轮 cache/TTL/ECS/client override）；
 - [x] 客户端未显式配置 TTL override 时继承实际选中的 strategy，并在 Policy Core 返回前应用；
+- [x] 按 rule/strategy/client/upstream/global 来源选择最终 ECS；未显式覆盖的 client 不再遮蔽所选 strategy；
 - [x] 将 direct hosts/plain HTTP DoH connector 通过 `UpstreamRegistry` 接入 `PolicyDnsCore`；
 - [x] 提供 protocol-neutral registry 注入入口并验证 DoH request path；
 - [x] 接入 Runtime snapshot 原子发布；
@@ -198,6 +199,6 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 提供 client bucket/strategy/source/cache/selected upstream 首轮低基数 observation；完整 group member、matched resource/rule result 仍待完成。
 - [x] `PolicyLateResultSink` 按当前 `CacheEntry.quality` 使用 `CacheCondition::Version` 更新候选，允许更优 late Positive 替换早期 Negative，并拒绝同级 Negative/Positive 或更低 Failure 覆盖；跨 adapter/并发候选矩阵仍待完成。
 
-阶段证据：`policy::plan::tests` 当前 7 项通过，新增验证匹配客户端未声明 TTL override 时继承其所选 strategy；`dns::policy::tests` 当前 24 项通过，覆盖 client/strategy/cache 兼容、hosts/rule-set/group/DoH 路径、配置 reload 所用 compiled resource、optimistic refresh/late sink，以及 hosts/upstream response 的 TTL override。最近一次大阶段 backend 全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
+阶段证据：`policy::plan::tests` 当前 8 项通过，覆盖匹配客户端未声明 TTL/ECS override 时继承其所选 strategy；`dns::policy::tests` 当前 27 项通过，覆盖 client/strategy/cache 兼容、hosts/rule-set/group/DoH 路径、配置 reload 所用 compiled resource、optimistic refresh/late sink、TTL override 和 ECS 上游 query。最近一次大阶段 backend 全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
 
-当前实现进度：**72%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan、client/strategy/global TTL 选择与返回覆写、supplied compiled file/remote snapshot、direct DoH、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、late sink、RuntimeCoordinator finalizer owner 和配置候选 reload 已接入；剩余 TTL/stale TTL、remote/dat selector、完整 metadata/覆盖矩阵和跨 transport contract tests 未完成）。
+当前实现进度：**74%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan、TTL/ECS 层级选择、supplied compiled file/remote snapshot、direct DoH、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、late sink、RuntimeCoordinator finalizer owner 和配置候选 reload 已接入；显式 upstream/group member ECS、剩余 stale TTL、remote/dat selector、完整 metadata/覆盖矩阵和跨 transport contract tests 未完成）。

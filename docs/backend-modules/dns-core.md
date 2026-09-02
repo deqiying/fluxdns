@@ -82,7 +82,7 @@ Policy 返回完整 `ResolutionPlan`，至少包含：
 
 Core 不再次计算继承，也不把 rule 文本写入日志。
 
-当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，stale 命中时可在当前 immutable core 内先返回并通过有界 finalizer 进行 optimistic refresh，`hosts[]` 本地命中仍绕过 response cache；响应离开 Policy Core 前按当前 plan 对 answer/authority/additional RR 应用 TTL 上下界，缓存仍保存未覆写的 canonical response；`DnsCore::resolve_with_observation` 沿同一请求路径返回生效 strategy、selected upstream、answer source 和 cache status，供 service 的 stats/detail 使用。
+当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，stale 命中时可在当前 immutable core 内先返回并通过有界 finalizer 进行 optimistic refresh，`hosts[]` 本地命中仍绕过 response cache；上游请求会按 plan 应用 `disabled`/`client`/`custom` ECS，保留其他 EDNS option，并以最终 ECS 隔离 cache key；响应离开 Policy Core 前按当前 plan 对 answer/authority/additional RR 应用 TTL 上下界，缓存仍保存未覆写的 canonical response；`DnsCore::resolve_with_observation` 沿同一请求路径返回生效 strategy、selected upstream、answer source 和 cache status，供 service 的 stats/detail 使用。
 
 ## 6. Cache 交互
 
@@ -182,9 +182,10 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 实现固定响应的 transport 无关 handler；
 - [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
 - [x] 实现配置驱动的 client-visible TTL min/max 覆写，且不改变 cache admission 使用的 origin TTL；
-- [ ] 实现 ECS、剩余 TTL/stale answer TTL 和完整错误映射；
+- [x] 实现 rule/strategy/client/global ECS 正常路径、canonical query 替换及最终 ECS cache key；
+- [ ] 完成显式 upstream/group member ECS、剩余 TTL/stale answer TTL 和完整错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：`dns::message::tests` 当前 10 项通过，新增覆盖 answer/authority/additional RR 的 TTL 上下界与派生 metadata 更新；`dns::policy::tests` 当前 24 项通过，新增覆盖 hosts/upstream 的 strategy TTL override；既有测试继续覆盖 canonical 校验、固定响应、Policy/Cache/Upstream 主链、资源 live swap 和低基数 observation。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
+阶段证据：`dns::message::tests` 当前 12 项通过，覆盖 TTL 上下界、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 27 项通过，覆盖 global custom ECS 实际 DoH wire、请求 ECS 优先与 client ECS cache key 隔离；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
 
-当前实现进度：**64%**。
+当前实现进度：**67%**。

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use thiserror::Error;
 
 use crate::config::model::EcsMode;
-use crate::config::resolve::{ProxyScheme, ResolvedOutbound, ResolvedUpstream};
+use crate::config::resolve::{ProxyScheme, ResolvedOutbound, ResolvedUpstream, ValueSource};
 use crate::dns::{Cancellation, Deadline};
 use crate::ports::exchange::{ConnectorId, DnsExchange};
 use crate::ports::{PortError, PortFuture};
@@ -290,10 +290,11 @@ impl UpstreamRegistry {
                     edns_client_subnet,
                     ..
                 } => {
-                    if edns_client_subnet
-                        .as_ref()
-                        .is_some_and(|ecs| !matches!(ecs.mode, EcsMode::Disabled))
-                    {
+                    // 全局继承值由 Policy Core 统一应用；显式 upstream 覆盖仍需成员级语义。
+                    if edns_client_subnet.as_ref().is_some_and(|ecs| {
+                        ecs.source == ValueSource::Upstream
+                            && !matches!(ecs.mode, EcsMode::Disabled)
+                    }) {
                         return Err(RegistryError::UnsupportedUpstream {
                             upstream: id.as_str().to_owned(),
                             kind: "doh_edns_client_subnet",
@@ -560,6 +561,24 @@ mod tests {
             Err(RegistryError::UnsupportedUpstream { upstream, kind })
                 if upstream == "ecs" && kind == "doh_edns_client_subnet"
         ));
+    }
+
+    #[test]
+    fn inherited_global_ecs_does_not_block_connector_build() {
+        let doh = ResolvedUpstream::Doh {
+            id: ConfigId::new("remote").unwrap(),
+            address: "http://dns.example.test/dns-query".parse().unwrap(),
+            bootstrap: None,
+            connect_ip: Some("192.0.2.44".parse().unwrap()),
+            proxy: None,
+            edns_client_subnet: Some(ResolvedEcs {
+                mode: EcsMode::Custom,
+                custom_ip: Some("203.0.113.0/24".parse().unwrap()),
+                source: ValueSource::Global,
+            }),
+        };
+
+        assert!(UpstreamRegistry::from_resolved(&[doh]).is_ok());
     }
 
     #[test]

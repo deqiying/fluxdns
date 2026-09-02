@@ -7,7 +7,8 @@ use std::sync::Arc;
 use crate::config::model::RuleSetFormat;
 use crate::config::resolve::{
     ConfigId, ResolvedClient, ResolvedConfig, ResolvedEcs, ResolvedGlobalCache,
-    ResolvedHostsResource, ResolvedRuleSet, ResolvedStrategy, ResolvedTtlOverride, ValueSource,
+    ResolvedHostsResource, ResolvedRuleSet, ResolvedStrategy, ResolvedTtlOverride,
+    ResolvedUpstream, ValueSource,
 };
 use crate::ports::cache::{CacheNamespace, CacheStrategyId, ClientCacheDigest};
 use crate::resource::{
@@ -151,6 +152,7 @@ pub struct PolicyIndex {
     routes: RouteIndex,
     clients: ClientIndex,
     client_configs: BTreeMap<ConfigId, Arc<ResolvedClient>>,
+    upstream_ecs: BTreeMap<ConfigId, ResolvedEcs>,
     global_cache: ResolvedGlobalCache,
     hosts: BTreeMap<ConfigId, Arc<HostsIndex>>,
     rule_sets: BTreeMap<ConfigId, Arc<RuleIndex>>,
@@ -167,6 +169,7 @@ impl PolicyIndex {
             listeners,
             strategies,
             clients,
+            BTreeMap::new(),
             global_cache,
             BTreeMap::new(),
             BTreeMap::new(),
@@ -177,6 +180,7 @@ impl PolicyIndex {
         listeners: impl IntoIterator<Item = crate::config::resolve::ResolvedListener>,
         strategies: impl IntoIterator<Item = ResolvedStrategy>,
         clients: impl IntoIterator<Item = ResolvedClient>,
+        upstream_ecs: BTreeMap<ConfigId, ResolvedEcs>,
         global_cache: ResolvedGlobalCache,
         hosts: BTreeMap<ConfigId, Arc<HostsIndex>>,
         rule_sets: BTreeMap<ConfigId, Arc<RuleIndex>>,
@@ -199,6 +203,7 @@ impl PolicyIndex {
             routes,
             clients,
             client_configs,
+            upstream_ecs,
             global_cache,
             hosts,
             rule_sets,
@@ -212,6 +217,7 @@ impl PolicyIndex {
             config.listeners.clone(),
             config.strategies.clone(),
             config.clients.clone(),
+            collect_upstream_ecs(&config.upstreams),
             config.dns.cache.clone(),
             hosts,
             rule_sets,
@@ -233,6 +239,7 @@ impl PolicyIndex {
             config.listeners.clone(),
             config.strategies.clone(),
             config.clients.clone(),
+            collect_upstream_ecs(&config.upstreams),
             config.dns.cache.clone(),
             hosts,
             rule_sets,
@@ -316,15 +323,17 @@ impl PolicyIndex {
             .filter(|client| client.ttl_override.source == ValueSource::Client)
             .map(|client| client.ttl_override.clone())
             .unwrap_or_else(|| strategy.ttl_override.clone());
-        let edns_client_subnet = client_config
-            .map(|client| client.edns_client_subnet.clone())
-            .unwrap_or_else(|| strategy.edns_client_subnet.clone());
-        let (hosts, matched_rule, upstream, edns_client_subnet) = self.evaluate_rules(
+        let (hosts, matched_rule, upstream, strategy_ecs) = self.evaluate_rules(
             &routing,
             strategy.as_ref(),
             request.qname,
-            edns_client_subnet,
+            strategy.edns_client_subnet.clone(),
         )?;
+        let edns_client_subnet = select_ecs(
+            strategy_ecs,
+            client_config,
+            self.upstream_ecs.get(&upstream),
+        );
         Ok(ResolutionPlan {
             listener_id: routing.listener_id,
             route: routing.route,
@@ -476,6 +485,47 @@ impl PolicyIndex {
             optimistic: self.global_cache.optimistic.enabled,
         })
     }
+}
+
+/// 收集 direct DoH upstream 的 ECS 基线，供请求选出最终 upstream 后补齐优先级。
+fn collect_upstream_ecs(upstreams: &[ResolvedUpstream]) -> BTreeMap<ConfigId, ResolvedEcs> {
+    upstreams
+        .iter()
+        .filter_map(|upstream| match upstream {
+            ResolvedUpstream::Doh {
+                id,
+                edns_client_subnet: Some(ecs),
+                ..
+            } => Some((id.clone(), ecs.clone())),
+            ResolvedUpstream::Hosts { .. }
+            | ResolvedUpstream::Doh {
+                edns_client_subnet: None,
+                ..
+            }
+            | ResolvedUpstream::Group { .. } => None,
+        })
+        .collect()
+}
+
+/// 按 rule/strategy、client、upstream、global 的顺序选出最终 ECS 配置。
+fn select_ecs(
+    strategy_ecs: ResolvedEcs,
+    client: Option<&Arc<ResolvedClient>>,
+    upstream_ecs: Option<&ResolvedEcs>,
+) -> ResolvedEcs {
+    if matches!(
+        strategy_ecs.source,
+        ValueSource::Rule | ValueSource::Strategy
+    ) {
+        return strategy_ecs;
+    }
+    if let Some(client_ecs) = client
+        .map(|client| &client.edns_client_subnet)
+        .filter(|ecs| ecs.source == ValueSource::Client)
+    {
+        return client_ecs.clone();
+    }
+    upstream_ecs.cloned().unwrap_or(strategy_ecs)
 }
 
 fn compile_resources(
@@ -786,6 +836,47 @@ mod tests {
     }
 
     #[test]
+    fn client_without_ecs_override_inherits_selected_strategy() {
+        let mut inner = strategy("inner", None);
+        inner.edns_client_subnet = ResolvedEcs {
+            mode: EcsMode::Custom,
+            custom_ip: Some("203.0.113.0/24".parse().unwrap()),
+            source: ValueSource::Strategy,
+        };
+        let mut matched_client = client("client1", Some("inner"), None);
+        matched_client.edns_client_subnet = ResolvedEcs {
+            mode: EcsMode::Disabled,
+            custom_ip: None,
+            source: ValueSource::Global,
+        };
+        let index = PolicyIndex::build(
+            [listener()],
+            [strategy("default", None), inner],
+            [matched_client],
+            global(false),
+        )
+        .unwrap();
+        let listener_id = ConfigId::new("lan").unwrap();
+
+        let plan = index
+            .evaluate(PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: Some("alice"),
+                client_addr: Some(IpAddr::from([192, 0, 2, 10])),
+                client_digest: None,
+                qname: None,
+            })
+            .unwrap();
+
+        assert_eq!(plan.edns_client_subnet.source, ValueSource::Strategy);
+        assert_eq!(
+            plan.edns_client_subnet.custom_ip,
+            Some("203.0.113.0/24".parse().unwrap())
+        );
+    }
+
+    #[test]
     fn explicit_disabled_strategy_cache_stops_global_fallback() {
         let index = PolicyIndex::build(
             [listener()],
@@ -871,6 +962,7 @@ mod tests {
             [listener],
             [strategy],
             [],
+            BTreeMap::new(),
             global(false),
             hosts,
             rule_sets,
