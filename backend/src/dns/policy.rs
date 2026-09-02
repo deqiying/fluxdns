@@ -461,8 +461,7 @@ impl LateResultSink for PolicyLateResultSink {
             let condition = match current {
                 None => crate::ports::cache::CacheCondition::Absent,
                 Some(record)
-                    if late_response_preference(response.class())
-                        > late_response_preference(record.entry.response.class()) =>
+                    if late_response_preference(response.class()) > record.entry.quality =>
                 {
                     crate::ports::cache::CacheCondition::Version(record.version)
                 }
@@ -1960,7 +1959,71 @@ mod tests {
         assert_eq!(
             final_record.entry.response.as_ref(),
             &expected_positive,
-            "same-quality late response must not overwrite the promoted cache entry"
+            "same or lower quality late response must not overwrite the promoted cache entry"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_late_result_sink_keeps_negative_quality_stable() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        let config = Arc::new(config);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry =
+            UpstreamRegistry::from_resolved_with_doh_transport(&config.upstreams, transport)
+                .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, registry).unwrap();
+        let request = request("late-negative.example.", RecordType::A);
+        let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).unwrap();
+        let listener_id = ConfigId::new("dns").unwrap();
+        let plan = core
+            .policy()
+            .evaluate(crate::policy::PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: request.context.client.client_addr,
+                client_digest: None,
+                qname: Some(&qname),
+            })
+            .unwrap();
+        let key = cache_key(&plan, &request).expect("cache must be enabled");
+        let early = core.resolve(&request).await.unwrap();
+        assert!(matches!(
+            early,
+            CoreOutcome::Response(response)
+                if response.class() == crate::dns::ResponseClass::NoData
+        ));
+
+        let sink = core.late_result_sink(&key, &request);
+        for (attempt_index, code) in [(1, ResponseCode::NXDomain), (2, ResponseCode::ServFail)] {
+            let response = CanonicalResponse::empty_response(&request.query, code).unwrap();
+            sink.submit(
+                request.query.clone(),
+                request.context.clone(),
+                UpstreamAttempt {
+                    attempt_index,
+                    connector: ConnectorId::new(format!("late-negative-{attempt_index}")).unwrap(),
+                    outcome: UpstreamOutcome::Response(response),
+                },
+            );
+        }
+
+        let deadline = Deadline::new(Instant::now() + Duration::from_secs(1));
+        for _ in 0..100 {
+            if core.finalizer_owner().active_tasks() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let record = match core.cache().lookup(&key, deadline).await.unwrap() {
+            CacheLookup::Fresh(record) => record,
+            other => panic!("expected a fresh negative cache record, got {other:?}"),
+        };
+        assert_eq!(
+            record.entry.response.class(),
+            crate::dns::ResponseClass::NoData,
+            "equal-quality Negative and lower-quality Failure must not replace NoData"
         );
     }
 
