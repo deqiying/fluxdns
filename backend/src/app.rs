@@ -647,8 +647,12 @@ fn print_help() {
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
-    use std::net::SocketAddr;
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::time::{Duration, Instant};
+
+    use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+    use hickory_proto::rr::{Name, RData, RecordType};
+    use tokio::net::UdpSocket;
 
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{Cancellation, Deadline, RuntimeRevision};
@@ -658,10 +662,11 @@ mod tests {
     };
     use crate::ports::{PortError, PortErrorClass, PortFuture};
     use crate::runtime::{PreparedRuntime, RuntimeCoordinator};
+    use crate::service::DnsService;
 
     use super::{
         AppCommand, AppErrorKind, AppExitCode, ApplicationReloadError, CliAction, CliError,
-        ConfigFileWatcher, parse_args, reload_runtime_from_path,
+        ConfigFileWatcher, parse_args, reload_runtime_from_path, reload_service_from_path,
     };
 
     #[derive(Clone, Copy)]
@@ -763,6 +768,23 @@ clients: []
             work.display(),
             port,
         )
+    }
+
+    async fn udp_query(address: SocketAddr, id: u16, name: &str) -> Message {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut query = Message::new(id, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
+        socket
+            .send_to(&query.to_vec().unwrap(), address)
+            .await
+            .unwrap();
+        let mut response = [0_u8; 4096];
+        let (size, _) =
+            tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+        Message::from_vec(&response[..size]).unwrap()
     }
 
     #[test]
@@ -988,6 +1010,88 @@ clients: []
         assert!(matches!(error, ApplicationReloadError::Config(_)));
         assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
         assert!(!current.is_draining());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn service_reload_api_switches_listener_and_policy_snapshot() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-app-service-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("reload.yaml");
+        let initial_port = 44_000 + (std::process::id() as u16 % 400) * 2;
+        std::fs::write(&path, reload_source(&root, initial_port)).unwrap();
+
+        let initial = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_from_path(&path)
+            .unwrap()
+            .resolved;
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(initial, RuntimeRevision(1)).unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let candidate = crate::runtime::bind_prepared(
+            prepared,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = std::sync::Arc::new(RuntimeCoordinator::new(candidate));
+        let mut service =
+            DnsService::with_default_timeout_from_coordinator(std::sync::Arc::clone(&coordinator))
+                .unwrap();
+        let initial_address = service.runtime().listeners().local_addrs().unwrap()[0];
+        let initial_response = udp_query(initial_address, 1, "example.test.").await;
+        assert_eq!(
+            initial_response.metadata.response_code,
+            ResponseCode::NoError
+        );
+        assert!(initial_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 1)
+        )));
+
+        let updated = reload_source(&root, initial_port + 1)
+            .replace("127.0.0.1 example.test", "127.0.0.2 example.test");
+        std::fs::write(&path, updated).unwrap();
+        let active = reload_service_from_path(
+            &mut service,
+            &path,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        let updated_address = active.listeners().local_addrs().unwrap()[0];
+        assert_eq!(updated_address.port(), initial_port + 1);
+
+        let updated_response = udp_query(updated_address, 2, "example.test.").await;
+        assert_eq!(
+            updated_response.metadata.response_code,
+            ResponseCode::NoError
+        );
+        assert!(updated_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 2)
+        )));
+
+        let report = service
+            .shutdown(
+                &crate::runtime::SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
         let _ = std::fs::remove_dir_all(root);
     }
 }
