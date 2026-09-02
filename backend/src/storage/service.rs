@@ -1,15 +1,26 @@
 //! Storage writer 的统一 flush/shutdown 生命周期边界。
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::config::model::DatabaseType;
+use crate::config::resolve::ResolvedConfig;
 use crate::dns::Deadline;
 use crate::ports::PortError;
-use crate::ports::storage::{StatsRecorder, StorageBackend, StorageFlushSummary};
+use crate::ports::storage::{ResolveEventSink, StatsRecorder, StorageBackend, StorageFlushSummary};
 
 use super::{
-    SqliteResolveDetailFlushSummary, SqliteResolveDetailWorker, StatsPersistenceError,
-    StatsPersistenceFlushSummary, StatsPersistenceWorker,
+    ResolveLogBuildError, ResolveLogWriter, STORAGE_SCHEMA_VERSION,
+    SqliteResolveDetailFlushSummary, SqliteResolveDetailLimits, SqliteResolveDetailWorker,
+    SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError, SqliteStorageBackend,
+    SqliteStorageBackendBuildError, StatsPersistenceError, StatsPersistenceFlushSummary,
+    StatsPersistenceWorker,
 };
+
+pub const DEFAULT_STORAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+pub const DEFAULT_STORAGE_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_RESOLVE_LOG_QUEUE_CAPACITY: usize = 1_024;
+pub const DEFAULT_RESOLVE_LOG_BATCH_SIZE: usize = 128;
 
 /// Storage stats、backend 与 resolve detail worker 的一次生命周期汇总。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -49,6 +60,28 @@ pub enum StorageServiceError {
         detail: PortError,
         backend: PortError,
     },
+}
+
+/// 由已解析配置创建的业务存储运行时；持有数据面 sink 和 writer 生命周期。
+pub struct StorageRuntime {
+    service: StorageService,
+    resolve_log: Option<Arc<ResolveLogWriter<SqliteResolveDetailWriter>>>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum StorageRuntimeBuildError {
+    #[error("unsupported storage database type")]
+    DatabaseType,
+    #[error("sqlite storage could not be opened: {0}")]
+    Connect(#[source] SqliteStorageBackendBuildError),
+    #[error("sqlite storage migration failed: {0}")]
+    Migration(#[source] PortError),
+    #[error("resolve detail limits are invalid: {0}")]
+    DetailLimits(#[source] SqliteResolveDetailWriterBuildError),
+    #[error("resolve detail channel could not be created: {0}")]
+    DetailChannel(#[source] SqliteResolveDetailWriterBuildError),
+    #[error("resolve detail writer could not be created: {0}")]
+    DetailWriter(#[source] ResolveLogBuildError),
 }
 
 /// 业务 Storage 的统一 flush/shutdown facade。
@@ -95,6 +128,10 @@ impl StorageService {
             .map(|worker| Arc::clone(worker) as Arc<dyn StatsRecorder>)
     }
 
+    pub fn stats_worker(&self) -> Option<Arc<StatsPersistenceWorker>> {
+        self.stats_worker.as_ref().map(Arc::clone)
+    }
+
     /// 先提交 stats，再 checkpoint backend，最后提交当前 detail batch。
     pub async fn flush(
         &mut self,
@@ -128,7 +165,7 @@ impl StorageService {
 
     /// 在同一 deadline 内提交 stats、drain detail，再关闭 backend。
     pub async fn shutdown(
-        mut self,
+        &mut self,
         deadline: Deadline,
     ) -> Result<StorageServiceFlushSummary, StorageServiceError> {
         let stats = match self.stats_worker.take() {
@@ -168,6 +205,96 @@ impl StorageService {
     }
 }
 
+impl StorageRuntime {
+    /// 按已完成校验的配置打开业务数据库并组装 stats/detail writer。
+    pub async fn open(
+        config: &ResolvedConfig,
+        deadline: Deadline,
+    ) -> Result<Self, StorageRuntimeBuildError> {
+        if !matches!(config.database.kind, DatabaseType::Sqlite) {
+            return Err(StorageRuntimeBuildError::DatabaseType);
+        }
+        let backend = Arc::new(
+            SqliteStorageBackend::connect(config.database.path.clone())
+                .await
+                .map_err(StorageRuntimeBuildError::Connect)?,
+        );
+        backend
+            .migrate(STORAGE_SCHEMA_VERSION, deadline)
+            .await
+            .map_err(StorageRuntimeBuildError::Migration)?;
+
+        let stats_worker = Arc::new(StatsPersistenceWorker::new(backend.clone()));
+        let mut service = StorageService::new(backend.clone()).with_stats_worker(stats_worker);
+        let resolve_log = if config.dns.resolve_log.enable {
+            let limits = SqliteResolveDetailLimits::new(
+                config.dns.resolve_log.eviction_threshold_records,
+                config.dns.resolve_log.max_records,
+                config.dns.resolve_log.max_record_age,
+            )
+            .map_err(StorageRuntimeBuildError::DetailLimits)?;
+            let (writer, worker) = SqliteResolveDetailWriter::channel_with_limits(
+                backend,
+                DEFAULT_RESOLVE_LOG_QUEUE_CAPACITY,
+                DEFAULT_RESOLVE_LOG_BATCH_SIZE,
+                limits,
+            )
+            .map_err(StorageRuntimeBuildError::DetailChannel)?;
+            let sink = Arc::new(
+                ResolveLogWriter::new(true, DEFAULT_RESOLVE_LOG_QUEUE_CAPACITY, writer)
+                    .map_err(StorageRuntimeBuildError::DetailWriter)?,
+            );
+            service = service.with_detail_worker(worker);
+            Some(sink)
+        } else {
+            None
+        };
+
+        Ok(Self {
+            service,
+            resolve_log,
+        })
+    }
+
+    pub fn stats_worker(&self) -> Arc<StatsPersistenceWorker> {
+        self.service
+            .stats_worker()
+            .expect("storage runtime always owns a stats worker")
+    }
+
+    pub fn stats_recorder(&self) -> Arc<dyn StatsRecorder> {
+        self.service
+            .stats_recorder()
+            .expect("storage runtime always owns a stats recorder")
+    }
+
+    pub fn resolve_event_sink(&self) -> Option<Arc<dyn ResolveEventSink>> {
+        self.resolve_log
+            .as_ref()
+            .map(|sink| Arc::clone(sink) as Arc<dyn ResolveEventSink>)
+    }
+
+    pub async fn flush(
+        &mut self,
+        deadline: Deadline,
+    ) -> Result<StorageServiceFlushSummary, StorageServiceError> {
+        if let Some(sink) = &self.resolve_log {
+            let _ = sink.flush();
+        }
+        self.service.flush(deadline).await
+    }
+
+    pub async fn shutdown(
+        &mut self,
+        deadline: Deadline,
+    ) -> Result<StorageServiceFlushSummary, StorageServiceError> {
+        if let Some(sink) = &self.resolve_log {
+            let _ = sink.shutdown();
+        }
+        self.service.shutdown(deadline).await
+    }
+}
+
 impl std::fmt::Debug for StorageService {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -184,13 +311,14 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
+    use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::Deadline;
     use crate::ports::PortFuture;
     use crate::ports::storage::{
         SchemaVersion, StorageBackend, StorageFlushSummary, StorageHealth, StorageTransaction,
     };
 
-    use super::{StorageService, StorageServiceError};
+    use super::{StorageRuntime, StorageService, StorageServiceError};
 
     fn deadline() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(1))
@@ -307,6 +435,27 @@ mod tests {
         let shutdown = service.shutdown(deadline()).await.unwrap();
         assert_eq!(shutdown.stats.events_committed, 1);
         assert_eq!(backend.total_for_day(20_260_902), 2);
+    }
+
+    #[tokio::test]
+    async fn storage_runtime_opens_from_resolved_config_with_detail_sink() {
+        let (source, work_path) = crate::config::test_support::portable_example();
+        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .expect("storage runtime fixture must be valid")
+            .resolved;
+        let mut runtime = StorageRuntime::open(config.as_ref(), deadline())
+            .await
+            .expect("storage runtime must open configured sqlite");
+
+        let _stats_recorder = runtime.stats_recorder();
+        assert_eq!(runtime.stats_worker().pending_batch_count(), 0);
+        assert!(runtime.resolve_event_sink().is_some());
+        runtime
+            .shutdown(deadline())
+            .await
+            .expect("storage runtime shutdown must drain configured writers");
+        let _ = std::fs::remove_dir_all(work_path);
     }
 
     #[test]

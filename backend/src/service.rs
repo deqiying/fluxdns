@@ -11,19 +11,26 @@ use tokio::task::JoinSet;
 use crate::config::BindTransport;
 use crate::config::resolve::ConfigId;
 use crate::dns::{
-    CacheCompatibilityKey, CancelReason, Cancellation, Deadline, DispatchError, DnsCore,
-    RuntimeRevision, TransportCapabilities, TransportClass, dispatch_inbound,
+    CacheCompatibilityKey, CancelReason, Cancellation, CoreError, CoreOutcome, Deadline,
+    DispatchError, DnsCore, DnsRequest, ResponseClass, RuntimeRevision, TransportCapabilities,
+    TransportClass, dispatch_inbound,
 };
 use crate::ports::PortErrorClass;
 use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
+use crate::ports::storage::{ResolveEvent, ResolveEventSink, StatsDimension};
+use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 use crate::runtime::{
     ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
     BoundListenerSet, FaultLevel, PreparedRuntime, RefreshedResourceSnapshot,
     ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator, RuntimeReuseError,
     ShutdownReport, Supervisor, SupervisorError, SystemClock, TaskCompletion, TaskError,
     TaskErrorKind, TaskExit, TaskSpec, bind_prepared,
+};
+use crate::storage::{
+    DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StatsPersistenceWorker,
+    StorageRuntime, StorageServiceError, day_utc,
 };
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
@@ -85,6 +92,8 @@ pub enum ServiceError {
         fault_level: FaultLevel,
         exit: TaskExit,
     },
+    #[error("storage shutdown failed: {0}")]
+    Storage(#[source] StorageServiceError),
 }
 
 const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -100,6 +109,9 @@ pub struct DnsService {
     transport_cancellations: Vec<Cancellation>,
     resource_tasks: Vec<ResourceTask>,
     request_timeout: Duration,
+    storage: Option<Arc<tokio::sync::Mutex<StorageRuntime>>>,
+    stats_worker: Option<Arc<StatsPersistenceWorker>>,
+    resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
 }
 
 #[derive(Clone)]
@@ -123,8 +135,39 @@ impl DnsService {
         core: Arc<dyn DnsCore>,
         request_timeout: Duration,
     ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage(coordinator, core, request_timeout, None)
+    }
+
+    pub fn start_with_coordinator_and_storage(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: StorageRuntime,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage(coordinator, core, request_timeout, Some(storage))
+    }
+
+    fn start_with_optional_storage(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: Option<StorageRuntime>,
+    ) -> Result<Self, ServiceStartError> {
         let runtime = coordinator.load();
         let mut supervisor = Supervisor::new();
+        let (storage, stats_worker, resolve_event_sink) = match storage {
+            Some(storage) => {
+                let stats_worker = storage.stats_worker();
+                let resolve_event_sink = storage.resolve_event_sink();
+                let storage = Arc::new(tokio::sync::Mutex::new(storage));
+                (Some(storage), Some(stats_worker), resolve_event_sink)
+            }
+            None => (None, None, None),
+        };
+        let core = instrumented_core(core, stats_worker.clone(), resolve_event_sink.clone());
+        if let Some(storage) = &storage {
+            spawn_storage_task(&mut supervisor, Arc::clone(storage))?;
+        }
         let transport_plans = prepare_transport_plans(
             runtime.listeners(),
             runtime.snapshot().config(),
@@ -152,6 +195,9 @@ impl DnsService {
             transport_cancellations,
             resource_tasks,
             request_timeout,
+            storage,
+            stats_worker,
+            resolve_event_sink,
         })
     }
 
@@ -181,6 +227,23 @@ impl DnsService {
             .dns_core()
             .ok_or(ServiceStartError::MissingDnsCore)?;
         Self::start_with_coordinator(coordinator, core, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub fn with_default_timeout_from_coordinator_and_storage(
+        coordinator: Arc<RuntimeCoordinator>,
+        storage: StorageRuntime,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::start_with_coordinator_and_storage(
+            coordinator,
+            core,
+            DEFAULT_REQUEST_TIMEOUT,
+            storage,
+        )
     }
 
     pub fn runtime(&self) -> &Arc<ActiveRuntime> {
@@ -288,6 +351,7 @@ impl DnsService {
                 .snapshot()
                 .dns_core()
                 .ok_or(ServiceReloadError::MissingDnsCore)?;
+            let core = self.instrument_core(core);
             let runtime = self
                 .coordinator
                 .activate_prepared_reusing_listeners(expected, prepared)
@@ -323,6 +387,7 @@ impl DnsService {
             .snapshot()
             .dns_core()
             .ok_or(ServiceReloadError::MissingDnsCore)?;
+        let core = self.instrument_core(core);
 
         self.coordinator
             .compare_and_activate_serialized(expected, candidate)
@@ -347,11 +412,19 @@ impl DnsService {
         Ok(runtime)
     }
 
+    fn instrument_core(&self, core: Arc<dyn DnsCore>) -> Arc<dyn DnsCore> {
+        instrumented_core(
+            core,
+            self.stats_worker.clone(),
+            self.resolve_event_sink.clone(),
+        )
+    }
+
     pub async fn shutdown(
         &mut self,
         clock: &dyn Clock,
         deadline: crate::dns::Deadline,
-    ) -> ShutdownReport {
+    ) -> Result<ShutdownReport, ServiceError> {
         self.runtime.begin_drain();
         self.cancel_transport_tasks();
         self.cancel_resource_tasks();
@@ -359,7 +432,13 @@ impl DnsService {
         if !self.coordinator.shutdown_finalizers(deadline).await {
             report.deadline_expired = true;
         }
-        report
+        if let Some(storage) = self.storage.take() {
+            let result = storage.lock().await.shutdown(deadline).await;
+            if let Err(error) = result {
+                return Err(ServiceError::Storage(error));
+            }
+        }
+        Ok(report)
     }
 
     /// 等待 Ctrl-C 后执行有界 graceful shutdown。
@@ -398,7 +477,7 @@ impl DnsService {
                 result = &mut signal => {
                     result.map_err(|_| ServiceError::Signal)?;
                     let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
-                    let report = self.shutdown(&SystemClock::new(), deadline).await;
+                    let report = self.shutdown(&SystemClock::new(), deadline).await?;
                     if report.deadline_expired {
                         return Err(ServiceError::ShutdownDeadline);
                     }
@@ -424,6 +503,185 @@ impl DnsService {
             }
         }
     }
+}
+
+fn instrumented_core(
+    core: Arc<dyn DnsCore>,
+    stats_worker: Option<Arc<StatsPersistenceWorker>>,
+    resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
+) -> Arc<dyn DnsCore> {
+    if stats_worker.is_none() && resolve_event_sink.is_none() {
+        return core;
+    }
+    Arc::new(ObservedDnsCore {
+        inner: core,
+        stats_worker,
+        resolve_event_sink,
+    })
+}
+
+struct ObservedDnsCore {
+    inner: Arc<dyn DnsCore>,
+    stats_worker: Option<Arc<StatsPersistenceWorker>>,
+    resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
+}
+
+impl DnsCore for ObservedDnsCore {
+    fn resolve<'a>(
+        &'a self,
+        request: &'a DnsRequest,
+    ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
+        Box::pin(async move {
+            let result = self.inner.resolve(request).await;
+            self.record(request, &result);
+            result
+        })
+    }
+}
+
+impl ObservedDnsCore {
+    fn record(&self, request: &DnsRequest, result: &Result<CoreOutcome, CoreError>) {
+        let outcome = outcome_class(request, result);
+        if let Some(worker) = &self.stats_worker {
+            match day_utc(request.context.meta.received_at_utc) {
+                Ok(day) => {
+                    let dimensions = vec![
+                        StatsDimension::transport(request.context.transport.class),
+                        StatsDimension::attempt_outcome(outcome),
+                    ];
+                    if let Err(_error) = worker.record_request(day, dimensions) {
+                        tracing::warn!(
+                            event = "stats_record_failed",
+                            component = "storage",
+                            class = "recording",
+                            "stats_record_failed"
+                        );
+                    }
+                }
+                Err(_error) => {
+                    tracing::warn!(
+                        event = "stats_record_failed",
+                        component = "storage",
+                        class = "recording",
+                        "stats_record_failed"
+                    );
+                }
+            }
+        }
+
+        let Some(sink) = &self.resolve_event_sink else {
+            return;
+        };
+        let question = request.query.question();
+        let event = ResolveEvent {
+            occurred_at: SystemTime::now(),
+            duration_started_at: request.context.meta.received_at,
+            request_digest: Arc::from(format!("{:032x}", request.context.meta.request_id.0)),
+            listener_id: Arc::from(request.context.meta.listener_id.as_ref()),
+            route_id: request
+                .context
+                .meta
+                .route_id
+                .as_ref()
+                .map(|route| Arc::from(route.as_ref())),
+            client_bucket: None,
+            strategy_id: None,
+            transport: request.context.transport.class,
+            qname: Arc::from(question.name().to_ascii()),
+            qtype: u16::from(question.query_type()),
+            qclass: u16::from(question.query_class()),
+            outcome,
+            cache_status: CacheStatus::Disabled,
+            runtime_revision: request.context.runtime_revision,
+        };
+        if let Err(error) = sink.try_record(event) {
+            tracing::warn!(
+                event = "resolve_detail_record_failed",
+                component = "storage",
+                class = error.class().as_str(),
+                operation = error.operation(),
+                "resolve_detail_record_failed"
+            );
+        }
+    }
+}
+
+fn outcome_class(request: &DnsRequest, result: &Result<CoreOutcome, CoreError>) -> OutcomeClass {
+    match result {
+        Ok(CoreOutcome::Response(response)) => match response.class() {
+            ResponseClass::Positive | ResponseClass::NoData | ResponseClass::NxDomain => {
+                OutcomeClass::Success
+            }
+            ResponseClass::Refused => OutcomeClass::Rejected,
+            ResponseClass::ServFail | ResponseClass::Truncated | ResponseClass::Other(_) => {
+                OutcomeClass::Failure
+            }
+        },
+        Ok(CoreOutcome::NoResponse) => {
+            if request.context.meta.cancellation.is_cancelled() {
+                if matches!(
+                    request.context.meta.cancellation.reason(),
+                    Some(CancelReason::DeadlineExceeded)
+                ) {
+                    OutcomeClass::Timeout
+                } else {
+                    OutcomeClass::Cancelled
+                }
+            } else if request.context.meta.deadline.is_expired(Instant::now()) {
+                OutcomeClass::Timeout
+            } else {
+                OutcomeClass::Dropped
+            }
+        }
+        Err(_) => OutcomeClass::Failure,
+    }
+}
+
+async fn storage_flush_task(
+    storage: Arc<tokio::sync::Mutex<StorageRuntime>>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    let mut interval = tokio::time::interval(DEFAULT_STORAGE_FLUSH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            _ = interval.tick() => {
+                let deadline = Deadline::new(Instant::now() + DEFAULT_STORAGE_OPERATION_TIMEOUT);
+                let mut storage = storage.lock().await;
+                if let Err(error) = storage.flush(deadline).await {
+                    tracing::warn!(
+                        event = "storage_flush_failed",
+                        component = "storage",
+                        error = %error,
+                        "storage_flush_failed"
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn spawn_storage_task(
+    supervisor: &mut Supervisor,
+    storage: Arc<tokio::sync::Mutex<StorageRuntime>>,
+) -> Result<Cancellation, ServiceStartError> {
+    let spec = TaskSpec::new(
+        "storage.writer",
+        "storage",
+        FaultLevel::Degraded,
+        RestartPolicy::Never,
+    )
+    .map_err(|error| ServiceStartError::Endpoint {
+        index: 0,
+        kind: "storage",
+        reason: error.to_string(),
+    })?;
+    supervisor
+        .spawn_scoped(spec, move |cancellation| {
+            Box::pin(storage_flush_task(storage, cancellation))
+        })
+        .map_err(ServiceStartError::Task)
 }
 
 fn map_reload_spawn_error(error: ServiceStartError) -> ServiceReloadError {
@@ -1293,6 +1551,7 @@ mod tests {
         FaultLevel, PreparedRuntime, RestartPolicy, RuntimeCoordinator, Supervisor, SystemClock,
         TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
     };
+    use crate::storage::StorageRuntime;
 
     fn completion(
         fault_level: FaultLevel,
@@ -1633,8 +1892,51 @@ clients: []
                 &SystemClock::new(),
                 Deadline::new(Instant::now() + Duration::from_secs(5)),
             )
-            .await;
+            .await
+            .unwrap();
         assert!(!report.deadline_expired);
+    }
+
+    #[tokio::test]
+    async fn storage_runtime_is_supervised_and_shutdown_after_service_drain() {
+        let port = 40_250 + (std::process::id() as u16 % 500);
+        let config = runtime_config(port);
+        let work_path = config.work.path.clone();
+        let initial =
+            PreparedRuntime::prepare_with_policy_core(Arc::clone(&config), RuntimeRevision(1))
+                .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let storage = StorageRuntime::open(
+            coordinator.load().snapshot().config(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let mut service = super::DnsService::with_default_timeout_from_coordinator_and_storage(
+            Arc::clone(&coordinator),
+            storage,
+        )
+        .unwrap();
+
+        assert_eq!(service.task_count(), 2);
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+        let _ = std::fs::remove_dir_all(work_path);
     }
 
     #[tokio::test]
@@ -1680,7 +1982,8 @@ clients: []
                 &SystemClock::new(),
                 Deadline::new(Instant::now() + Duration::from_secs(5)),
             )
-            .await;
+            .await
+            .unwrap();
         assert!(!report.deadline_expired);
     }
 
@@ -1805,7 +2108,8 @@ clients: []
                 &SystemClock::new(),
                 Deadline::new(Instant::now() + Duration::from_secs(5)),
             )
-            .await;
+            .await
+            .unwrap();
         assert!(!report.deadline_expired);
         assert!(old_finalizer.is_shutdown());
         assert!(current_finalizer.is_shutdown());
@@ -1896,7 +2200,8 @@ clients: []
                 &SystemClock::new(),
                 Deadline::new(Instant::now() + Duration::from_secs(5)),
             )
-            .await;
+            .await
+            .unwrap();
         assert!(!report.deadline_expired);
         let _ = std::fs::remove_dir_all(root);
     }
