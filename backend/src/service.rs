@@ -1627,6 +1627,79 @@ clients: []
     }
 
     #[tokio::test]
+    async fn reusing_listener_merges_published_resource_state() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-service-reuse-resource-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let resource_path = root.join("hosts.txt");
+        std::fs::write(&resource_path, "192.0.2.10 old.example\n").unwrap();
+        let port = 42_500 + (std::process::id() as u16 % 500);
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            resource_runtime_config(&root, &resource_path, port),
+            RuntimeRevision(1),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = RuntimeCoordinator::new(initial);
+
+        std::fs::write(&resource_path, "192.0.2.11 new.example\n").unwrap();
+        let resource = crate::config::resolve::ConfigId::new("local-hosts").unwrap();
+        let refreshed = coordinator
+            .refresh_resource(
+                &resource,
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed.epoch(), 2);
+
+        let prepared = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            resource_runtime_config(&root, &resource_path, port),
+            RuntimeRevision(2),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let active = coordinator
+            .activate_prepared_reusing_listeners(RuntimeRevision(1), prepared)
+            .await
+            .unwrap();
+
+        assert_eq!(active.listeners().local_addrs().unwrap()[0].port(), port);
+        assert_eq!(
+            active
+                .snapshot()
+                .resources()
+                .lookup(&resource)
+                .unwrap()
+                .version(),
+            crate::resource::ResourceVersion::new(2, 0)
+        );
+        active.shutdown_resource_refresh();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn shutdown_closes_finalizers_from_previous_and_current_runtime() {
         let port = 41_500 + (std::process::id() as u16 % 500);
         let initial =

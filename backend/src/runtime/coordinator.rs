@@ -417,7 +417,7 @@ impl RuntimeCoordinator {
     pub async fn activate_prepared_reusing_listeners(
         &self,
         expected: RuntimeRevision,
-        prepared: PreparedRuntime,
+        mut prepared: PreparedRuntime,
     ) -> Result<Arc<ActiveRuntime>, RuntimeReuseError> {
         let _mutation = self.mutation.lock().await;
         let current = self.load();
@@ -430,6 +430,7 @@ impl RuntimeCoordinator {
         if current.bind_plan() != prepared.bind_plan() {
             return Err(RuntimeReuseError::BindPlanChanged);
         }
+        prepared.merge_state_from(&current.prepared);
         let next = Arc::new(ActiveRuntime::from_prepared_and_listeners(
             prepared,
             Arc::clone(&current.listeners),
