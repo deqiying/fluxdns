@@ -1,7 +1,7 @@
 //! 无外部依赖的统计 writer 边界。
 //!
 //! 该 adapter 用内存状态模拟业务 SQLite 的事务和 batch ledger，供 Runtime/Storage
-//! 接线及 contract tests 使用。真实 SQLite pool、PRAGMA 和 migration 执行留给后续阶段。
+//! 接线及 contract tests 使用；真实 SQLite 行为由同目录的 `sqlite` adapter 提供。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};

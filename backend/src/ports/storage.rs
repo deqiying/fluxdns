@@ -159,6 +159,51 @@ impl StatsDimension {
         self.kind
     }
 
+    pub(crate) fn database_parts(&self) -> (&'static str, String) {
+        let kind = match self.kind {
+            StatsDimensionKind::ClientBucket => "client_bucket",
+            StatsDimensionKind::Transport => "transport",
+            StatsDimensionKind::Strategy => "strategy",
+            StatsDimensionKind::Source => "source",
+            StatsDimensionKind::Upstream => "upstream",
+            StatsDimensionKind::Rcode => "rcode",
+            StatsDimensionKind::CacheStatus => "cache_status",
+            StatsDimensionKind::AttemptOutcome => "attempt_outcome",
+        };
+        let value = match &self.value {
+            StatsDimensionValue::ConfiguredId(id) => id.as_str().to_owned(),
+            StatsDimensionValue::Transport(value) => match value {
+                crate::dns::TransportClass::Datagram => "datagram".to_owned(),
+                crate::dns::TransportClass::Stream => "stream".to_owned(),
+                crate::dns::TransportClass::Multiplexed => "multiplexed".to_owned(),
+            },
+            StatsDimensionValue::Source(value) => match value {
+                StatsSource::Cache => "cache".to_owned(),
+                StatsSource::Hosts => "hosts".to_owned(),
+                StatsSource::RuleSet => "rule_set".to_owned(),
+                StatsSource::Upstream => "upstream".to_owned(),
+            },
+            StatsDimensionValue::Rcode(value) => value.to_string(),
+            StatsDimensionValue::CacheStatus(value) => match value {
+                CacheStatus::Disabled => "disabled".to_owned(),
+                CacheStatus::Miss => "miss".to_owned(),
+                CacheStatus::Fresh => "fresh".to_owned(),
+                CacheStatus::Stale => "stale".to_owned(),
+                CacheStatus::StoreUnavailable => "store_unavailable".to_owned(),
+                CacheStatus::WriteRejected => "write_rejected".to_owned(),
+            },
+            StatsDimensionValue::AttemptOutcome(value) => match value {
+                OutcomeClass::Success => "success".to_owned(),
+                OutcomeClass::Failure => "failure".to_owned(),
+                OutcomeClass::Timeout => "timeout".to_owned(),
+                OutcomeClass::Cancelled => "cancelled".to_owned(),
+                OutcomeClass::Rejected => "rejected".to_owned(),
+                OutcomeClass::Dropped => "dropped".to_owned(),
+            },
+        };
+        (kind, value)
+    }
+
     fn validate(&self) -> Result<(), StatsEventError> {
         match &self.value {
             StatsDimensionValue::ConfiguredId(id)

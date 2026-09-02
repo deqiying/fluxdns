@@ -1,8 +1,8 @@
 # Storage 模块设计
 
-> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema 与可替换 stats writer 边界；真实 SQLite pool、详情 writer 和 flush 尚未实现
+> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema、SQLx SQLite storage 首轮 adapter 与可替换 stats writer 边界；详情 writer 和完整 flush 尚未实现
 >
-> 更新日期：2026-09-01
+> 更新日期：2026-09-02
 >
 > 目标代码：`backend/src/storage/*`、`backend/migrations/*`
 >
@@ -25,7 +25,7 @@ Storage 模块实现业务 SQLite：
 
 | 文件 | 职责 |
 | --- | --- |
-| `sqlite.rs` | pool、PRAGMA、migration、transaction、health（待接入） |
+| `sqlite.rs` | SQLx pool、PRAGMA、migration、统计/详情 transaction、health/checkpoint/shutdown 首轮实现 |
 | `statistics.rs` | sharded counters、checkpoint、batch ledger |
 | `resolve_log.rs` | 有界详情队列、批量写入和淘汰 |
 | `writer.rs` | 无外部依赖的事务/幂等 writer contract 实现与 focused tests |
@@ -192,7 +192,9 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 - migration 失败保留原库并阻止启动；
 - backup/rollback CLI 属于后续独立契约。
 
-当前已新增 `backend/migrations/0001_storage.sql`，固定 `storage_meta`、按日统计、批次 ledger 和 `resolve_log` 表，以及有限统计维度约束。该 SQL 作为后续 SQLx adapter 的 schema 基线；当前 `InMemoryStorageBackend` 只验证同一事务中的 upsert、幂等重试、冲突拒绝和失败回滚，不声称已经执行 SQLite migration。
+当前已新增 `backend/migrations/0001_storage.sql`，固定 `storage_meta`、按日统计、批次 ledger 和 `resolve_log` 表，以及有限统计维度约束。`SqliteStorageBackend` 已在独立业务数据库执行该 migration，使用 WAL、`synchronous=NORMAL`、busy timeout 和单 operation lock；`InMemoryStorageBackend` 继续作为无外部依赖的 contract baseline。
+
+SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 resolve detail batch：stats 通过 `stats_batch_ledger` 的 payload hash 做幂等重试/冲突拒绝，详情写入使用绑定参数；事务中任一 operation 失败都会整体回滚。数据库错误进入 degraded，health probe、WAL checkpoint 和 shutdown 均保留 typed `StorageBackend` 边界。详情淘汰/硬上限、独立 writer queue、busy/disk-full recovery 和最终 tracing flush 仍待后续切片。
 
 ## 12. 测试
 
@@ -209,16 +211,16 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 
 ## 13. 实现检查清单
 
-- [ ] 建立 SQLx pool/migration；
+- [x] 建立 SQLx pool/migration 首轮 adapter；
 - [x] 建立业务 migration schema 与可替换 stats writer contract；
 - [x] 实现内存 stats counters/checkpoint/epoch/ledger 领域边界；
-- [ ] 实现 stats SQLite schema/upsert/checkpoint writer；
+- [x] 实现 stats SQLite schema/upsert/checkpoint writer 首轮 adapter；
 - [ ] 实现独立 resolve-log writer；
 - [ ] 实现淘汰与硬上限；
 - [ ] 实现 degraded/recovery/flush；
 - [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
 - [ ] 完成 migration、压力和故障测试。
 
-阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred。真实 SQLx pool、PRAGMA、数据库故障恢复与详情持久化仍未完成。
+阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred；本阶段新增 `storage::sqlite::tests` 2 项通过，覆盖 SQLx migration、stats batch 幂等重试/reopen、事务回滚、health/shutdown。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段 SQLite storage 增量测试 2 passed、0 failed。详情 writer、busy/disk-full recovery、详情淘汰硬上限和最终 flush 仍未完成。
 
-当前实现进度：**35%**。
+当前实现进度：**52%**（内存 stats/ledger、业务 migration schema、SQLx SQLite 首轮 stats/detail transaction、health/checkpoint/shutdown；详情独立 writer queue、淘汰硬上限、busy/disk-full recovery、完整 flush 和故障测试仍未完成）。
