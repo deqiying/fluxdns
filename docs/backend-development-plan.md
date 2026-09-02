@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：v1 模块方案已完成；当前执行至阶段 75（SQLite degraded/recovery 状态边界），后续重点是故障注入、Observability writer 和 v1 验收。
+> 状态：v1 模块方案已完成；当前执行至阶段 76（稳定 telemetry ports 的有界 writer/flush 边界），后续重点是 SQLite 故障注入、真实 telemetry 输出接线和 v1 验收。
 >
 > 更新日期：2026-09-02
 >
@@ -13,25 +13,25 @@
 本节只保留当前决策所需的摘要；模块实现细节见对应 `docs/backend-modules/*.md`，完整阶段证据见本文“阶段实施记录”。
 
 - 已完成主链路：Config 严格加载与校验、Runtime 候选/激活/受管 task、UDP/TCP/DoH plain HTTP、Upstream direct/group/proxy、Policy/Resource 首次快照与 live publish、Cache memory/Moka/SQLite 首轮 adapter。
-- Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder`、首轮 `StorageRuntime` 生产接线、pending 内存保护/fatal 边界及首轮 degraded/recovery 状态边界；Observability 已完成低基数 metrics/health 基础。
-- 当前未完成：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite busy/disk-full recovery、完整 source/cache/strategy 详情元数据、正式 telemetry writer、最终故障/压力/conformance 验收。
+- Storage 已完成 SQLite migration、stats/detail transaction、脱敏详情 bounded worker、淘汰策略、`StatsPersistenceWorker`、统一 stats/backend/detail 生命周期 facade、可共享 `StatsRecorder`、首轮 `StorageRuntime` 生产接线、pending 内存保护/fatal 边界及首轮 degraded/recovery 状态边界；Observability 已完成低基数 metrics/health 基础和稳定 telemetry ports 的有界 writer/flush 边界。
+- 当前未完成：完整跨 Runtime 配置候选发布、DoH 入站 TLS/PROXY/forwarded、SQLite busy/disk-full recovery、完整 source/cache/strategy 详情元数据、final tracing subscriber/真实输出与 supervisor 接线、最终故障/压力/conformance 验收。
 
-> 注：阶段 75 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
+> 注：阶段 76 后的当前数值以本节汇总表和“当前验证记录”为准；历史阶段证据只在“阶段实施记录”中保留。
 
-阶段 75 已完成 SQLite `Healthy → Degraded → Healthy` 的首轮恢复状态边界；degraded 状态允许有限操作继续重试，不可恢复错误进入 `Failed` 且不会被健康探针自动复活。最近一次大阶段全量测试为 417 passed、0 failed，本阶段增量测试为 SQLite 12 项通过；此前阶段的 stats/service 增量证据保持不变。
+阶段 76 已完成稳定 telemetry ports 的有界 writer/flush 边界：低优先级日志拥塞可计数丢弃，warn/error 优先保留，metrics/health 不阻塞请求线程，输出失败会安全分类并重排队，flush 遵守 deadline，shutdown 拒绝新事件。最近一次大阶段全量测试为 417 passed、0 failed；本阶段增量测试为 `observability::tests::telemetry_writer` 5 项通过；阶段 75 的 SQLite 12 项增量证据保持不变。
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
-| 后端代码实现进度 | **68.9%** | 主要请求、Runtime、策略、资源、缓存和 Storage 首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站安全边界、SQLite busy/disk-full 故障注入与恢复验收、完整详情元数据、正式 telemetry writer 及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
-| v1 交付总进度 | **72.0%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 68.9%` |
+| 后端代码实现进度 | **69.4%** | 主要请求、Runtime、策略、资源、缓存、Storage 和 telemetry writer 首轮链路已接入；当前剩余工作集中在跨 Runtime 候选发布、DoH 入站安全边界、SQLite busy/disk-full 故障注入与恢复验收、完整详情元数据、final tracing/真实输出接线及最终故障验收。各模块的实现细节和证据见对应模块文档。 |
+| v1 交付总进度 | **72.5%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 69.4%` |
 
 ### 当前验证记录
 
 - 最近一次大阶段全量后端测试：`417 passed、0 failed`。
-- 当前阶段（阶段 75）增量测试：`storage::sqlite::tests`，`12 passed、0 failed`；此前阶段（阶段 74）的 `storage::stats::tests`、`storage::statistics::tests`、`storage::service::tests` 和 service failure classification 均保持通过。
+- 当前阶段（阶段 76）增量测试：`observability::tests::telemetry_writer`，`5 passed、0 failed`；阶段 75 的 `storage::sqlite::tests` `12 passed、0 failed` 及此前阶段（阶段 74）的 stats/service 增量证据均保持通过。
 - 小阶段只执行增量验证；完成大阶段时再执行全量后端测试。
-- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy；当前进度更新为后端 `68.9%`、v1 `72.0%`。
+- `StorageRuntime` 已纳入 `Application` prepare、`DnsService` 的 `Supervisor` flush task 和 drain 后 shutdown；统计 pending 超限会通过受监督 task 升级为 fatal，SQLite degraded 成功操作可恢复 healthy；`TelemetryWriter` 已纳入稳定 telemetry ports 的有界排队、优先级、失败重排队和 deadline-aware flush 边界，但尚未接入 final subscriber/真实 output；当前进度更新为后端 `69.4%`、v1 `72.5%`。
 
 后续日常更新以“后端代码实现进度”为主指标，避免文档完成造成进度虚高。v1 交付总进度按以下公式计算：
 
@@ -81,12 +81,12 @@ v1 交付范围：
 | Cache | `backend/src/cache/*` | [cache.md](backend-modules/cache.md) | 已完成 | 实现中 | 66% | 9% |
 | Resource | `backend/src/resource/*` | [resource.md](backend-modules/resource.md) | 已完成 | 实现中 | 90% | 7% |
 | Storage | `backend/src/storage/*`、`backend/migrations/*` | [storage.md](backend-modules/storage.md) | 已完成 | 实现中 | 80% | 8% |
-| Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 30% | 3% |
+| Observability | `backend/src/observability.rs` | [observability.md](backend-modules/observability.md) | 已完成 | 实现中 | 50% | 3% |
 
 后端代码实现总进度：
 
 ```text
-4% × 55% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 50% + 10% × 55% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 80% + 3% × 30% ≈ 68.9%
+4% × 55% + 8% × 35% + 10% × 100% + 12% × 65% + 11% × 50% + 10% × 55% + 8% × 70% + 10% × 99% + 9% × 66% + 7% × 90% + 8% × 80% + 3% × 50% ≈ 69.4%
 ```
 
 ## 4. 进度判定规则
@@ -132,7 +132,7 @@ transport / upstream / storage / observability adapters
 
 ### 后续开发路线（基于 2026-09-02 当前状态）
 
-当前后端代码实现进度为 68.9%，v1 交付进度为 72.0%。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker、统一生命周期 facade、首轮服务生产接线、pending 内存保护边界及首轮 degraded/recovery 状态转换。后续按“Runtime 生命周期 → Storage/Observability 完整性 → DoH 安全边界 → v1 验收”推进，不按文档完成度虚增进度。
+当前后端代码实现进度为 69.4%，v1 交付进度为 72.5%。Config、Runtime、Transport、Upstream、Policy、Resource 和 Cache 的首轮链路已建立；Storage 已完成 SQLite adapter、detail writer、StatsPersistenceWorker、统一生命周期 facade、首轮服务生产接线、pending 内存保护边界及首轮 degraded/recovery 状态转换；Observability 已完成稳定 telemetry ports 的有界 writer/flush 边界。后续按“Runtime 生命周期 → Storage/Observability 完整性 → DoH 安全边界 → v1 验收”推进，不按文档完成度虚增进度。
 
 | 顺序 | 目标 | 主要范围 | 退出条件 |
 | --- | --- | --- | --- |
@@ -297,7 +297,9 @@ transport / upstream / storage / observability adapters
 
 小阶段索引 23（已完成）：修正 SQLite `Degraded` 状态的可恢复边界，允许 degraded 状态继续执行有限重试；成功 migration/execute/detail/checkpoint 会恢复 `Healthy`，不可恢复 SQL 错误进入 `Failed`，健康探针不会绕过 failed 状态。`storage::sqlite::tests` 增量测试 `12 passed、0 failed`。
 
-阶段 9 当前边界：busy/disk-full 故障注入与真实恢复验收、完整 source/cache/strategy 详情元数据、正式 telemetry writer、flush/backpressure 和故障注入仍未完成。
+小阶段索引 24（已完成）：为稳定 telemetry ports 增加 `TelemetryWriter`，统一实现有界日志/metrics/health 排队、优先级丢弃与保留、输出失败重排队、deadline-aware flush 和 shutdown 关闭边界；`observability::tests::telemetry_writer` 增量测试 `5 passed、0 failed`。最终 tracing subscriber、真实文件/stderr output、degraded health 发布和 supervisor 接线仍待后续小阶段。
+
+阶段 9 当前边界：busy/disk-full 故障注入与真实恢复验收、完整 source/cache/strategy 详情元数据、final tracing subscriber/真实 telemetry output、degraded health 发布、supervisor 接线和最终故障注入仍未完成。
 
 ### 阶段 10：刷新、故障注入和 v1 验收
 

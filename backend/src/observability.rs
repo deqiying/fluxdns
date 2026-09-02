@@ -7,6 +7,12 @@ use std::{
     time::Instant,
 };
 
+use crate::dns::Deadline;
+use crate::ports::telemetry::{
+    ComponentHealthEvent, HealthSink, LogEvent, LogLevel as TelemetryLogLevel, LogSink,
+    MetricEvent, MetricsSink, TelemetryFlushSummary,
+};
+use crate::ports::{PortError, PortErrorClass, PortFuture};
 use tracing::Subscriber;
 
 /// 构建仅写 stderr、固定为 INFO 及以上的阶段 1 bootstrap subscriber。
@@ -566,6 +572,246 @@ impl Default for ObservabilityRegistry {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum TelemetryWriterBuildError {
+    #[error("telemetry writer capacity must be greater than zero")]
+    ZeroCapacity,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TelemetryWriterStats {
+    pending: usize,
+    emitted: u64,
+    dropped_low_priority: u64,
+    failed: u64,
+    closed: bool,
+}
+
+impl TelemetryWriterStats {
+    pub const fn pending(self) -> usize {
+        self.pending
+    }
+
+    pub const fn emitted(self) -> u64 {
+        self.emitted
+    }
+
+    pub const fn dropped_low_priority(self) -> u64 {
+        self.dropped_low_priority
+    }
+
+    pub const fn failed(self) -> u64 {
+        self.failed
+    }
+
+    pub const fn closed(self) -> bool {
+        self.closed
+    }
+}
+
+/// Telemetry writer 的同步输出边界。
+///
+/// 输出端不得把原始 adapter 错误、query、header 或 secret 写回 `PortError`；writer
+/// 只负责有界排队和生命周期，具体 tracing/file/stderr 输出由后续 adapter 提供。
+pub trait TelemetryOutput: Send + Sync {
+    fn write_log(&self, event: &LogEvent) -> Result<(), PortError>;
+    fn write_metric(&self, event: &MetricEvent) -> Result<(), PortError>;
+    fn write_health(&self, event: &ComponentHealthEvent) -> Result<(), PortError>;
+}
+
+enum TelemetryItem {
+    Log(LogEvent),
+    Metric(MetricEvent),
+    Health(ComponentHealthEvent),
+}
+
+struct TelemetryWriterState {
+    queue: VecDeque<TelemetryItem>,
+    emitted: u64,
+    dropped_low_priority: u64,
+    failed: u64,
+    closed: bool,
+}
+
+/// 面向稳定 telemetry ports 的非阻塞有界 writer。
+///
+/// `emit`/`record`/`update` 只执行内存操作，不等待输出端；低优先级日志在拥塞时计数
+/// 丢弃，warn/error 会优先淘汰已排队的低优先级日志，否则返回明确的容量错误。
+pub struct TelemetryWriter {
+    capacity: usize,
+    output: Arc<dyn TelemetryOutput>,
+    state: Mutex<TelemetryWriterState>,
+    flush_lock: Mutex<()>,
+}
+
+impl TelemetryWriter {
+    pub fn new(
+        capacity: usize,
+        output: Arc<dyn TelemetryOutput>,
+    ) -> Result<Self, TelemetryWriterBuildError> {
+        if capacity == 0 {
+            return Err(TelemetryWriterBuildError::ZeroCapacity);
+        }
+        Ok(Self {
+            capacity,
+            output,
+            state: Mutex::new(TelemetryWriterState {
+                queue: VecDeque::with_capacity(capacity),
+                emitted: 0,
+                dropped_low_priority: 0,
+                failed: 0,
+                closed: false,
+            }),
+            flush_lock: Mutex::new(()),
+        })
+    }
+
+    pub fn stats(&self) -> TelemetryWriterStats {
+        let state = lock_unpoisoned(&self.state);
+        TelemetryWriterStats {
+            pending: state.queue.len(),
+            emitted: state.emitted,
+            dropped_low_priority: state.dropped_low_priority,
+            failed: state.failed,
+            closed: state.closed,
+        }
+    }
+
+    pub fn shutdown(&self, deadline: Deadline) -> Result<TelemetryFlushSummary, PortError> {
+        {
+            let mut state = lock_unpoisoned(&self.state);
+            state.closed = true;
+        }
+        self.flush_now(deadline)
+    }
+
+    fn enqueue(&self, item: TelemetryItem, low_priority: bool) -> Result<(), PortError> {
+        let mut state = lock_unpoisoned(&self.state);
+        if state.closed {
+            return Err(PortError::new(
+                PortErrorClass::Unavailable,
+                "observability.telemetry.enqueue",
+            )
+            .with_safe_context("writer closed"));
+        }
+
+        if state.queue.len() < self.capacity {
+            state.queue.push_back(item);
+            return Ok(());
+        }
+
+        if low_priority {
+            state.dropped_low_priority = state.dropped_low_priority.saturating_add(1);
+            return Ok(());
+        }
+
+        if let Some(index) = state.queue.iter().position(TelemetryItem::is_low_priority) {
+            let _ = state.queue.remove(index);
+            state.dropped_low_priority = state.dropped_low_priority.saturating_add(1);
+            state.queue.push_back(item);
+            return Ok(());
+        }
+
+        Err(PortError::new(
+            PortErrorClass::ResourceExhausted,
+            "observability.telemetry.enqueue",
+        )
+        .with_safe_context("high-priority queue full"))
+    }
+
+    fn flush_now(&self, deadline: Deadline) -> Result<TelemetryFlushSummary, PortError> {
+        let _flush_guard = lock_unpoisoned(&self.flush_lock);
+        loop {
+            if deadline.is_expired(Instant::now()) {
+                return Err(PortError::new(
+                    PortErrorClass::Timeout,
+                    "observability.telemetry.flush",
+                ));
+            }
+
+            let item = {
+                let mut state = lock_unpoisoned(&self.state);
+                state.queue.pop_front()
+            };
+            let Some(item) = item else {
+                let state = lock_unpoisoned(&self.state);
+                return Ok(TelemetryFlushSummary {
+                    emitted: state.emitted,
+                    dropped_low_priority: state.dropped_low_priority,
+                    failed: state.failed,
+                });
+            };
+
+            let result = match &item {
+                TelemetryItem::Log(event) => self.output.write_log(event),
+                TelemetryItem::Metric(event) => self.output.write_metric(event),
+                TelemetryItem::Health(event) => self.output.write_health(event),
+            };
+            match result {
+                Ok(()) => {
+                    let mut state = lock_unpoisoned(&self.state);
+                    state.emitted = state.emitted.saturating_add(1);
+                }
+                Err(error) => {
+                    let mut state = lock_unpoisoned(&self.state);
+                    state.failed = state.failed.saturating_add(1);
+                    state.queue.push_front(item);
+                    return Err(error);
+                }
+            }
+        }
+    }
+}
+
+impl TelemetryItem {
+    fn is_low_priority(&self) -> bool {
+        matches!(
+            self,
+            Self::Log(LogEvent {
+                level: TelemetryLogLevel::Trace
+                    | TelemetryLogLevel::Debug
+                    | TelemetryLogLevel::Info,
+                ..
+            })
+        )
+    }
+}
+
+impl LogSink for TelemetryWriter {
+    fn emit(&self, event: LogEvent) -> Result<(), PortError> {
+        let low_priority = matches!(
+            event.level,
+            TelemetryLogLevel::Trace | TelemetryLogLevel::Debug | TelemetryLogLevel::Info
+        );
+        self.enqueue(TelemetryItem::Log(event), low_priority)
+    }
+
+    fn flush(
+        &self,
+        deadline: Deadline,
+    ) -> PortFuture<'_, Result<TelemetryFlushSummary, PortError>> {
+        Box::pin(async move { self.flush_now(deadline) })
+    }
+}
+
+impl MetricsSink for TelemetryWriter {
+    fn record(&self, event: MetricEvent) -> Result<(), PortError> {
+        event.validate().map_err(|_| {
+            PortError::new(
+                PortErrorClass::InvalidInput,
+                "observability.telemetry.metric.validate",
+            )
+        })?;
+        self.enqueue(TelemetryItem::Metric(event), false)
+    }
+}
+
+impl HealthSink for TelemetryWriter {
+    fn update(&self, event: ComponentHealthEvent) -> Result<(), PortError> {
+        self.enqueue(TelemetryItem::Health(event), false)
+    }
+}
+
 /// writer 只保存事件的低基数元数据，不保存 `TypedEvent::message`。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BufferedEvent {
@@ -887,15 +1133,25 @@ impl<T> fmt::Display for Sensitive<T> {
 mod tests {
     use std::{
         str::FromStr,
-        sync::Arc,
+        sync::{Arc, Mutex as StdMutex},
         thread,
-        time::{Duration, Instant},
+        time::{Duration, Instant, SystemTime},
+    };
+
+    use crate::dns::Deadline;
+    use crate::ports::PortErrorClass;
+    use crate::ports::telemetry::{
+        Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
+        EventName as TelemetryEventName, HealthSink, LogEvent as TelemetryLogEvent,
+        LogLevel as TelemetryLogLevel, LogSink, MetricEvent as TelemetryMetricEvent,
+        MetricName as TelemetryMetricName, MetricValue as TelemetryMetricValue, MetricsSink,
     };
 
     use super::{
         BufferedEvent, Component, EmitResult, EventName, EventResult, EventSink, EventSinkError,
         EventWriter, EventWriterError, HealthState, LogLevel, MetricKey, MetricName, MetricValue,
-        ObservabilityRegistry, RegistryError, Sensitive, TypedEvent, bootstrap_subscriber,
+        ObservabilityRegistry, RegistryError, Sensitive, TelemetryOutput, TelemetryWriter,
+        TelemetryWriterBuildError, TypedEvent, bootstrap_subscriber,
     };
 
     #[derive(Debug)]
@@ -1234,5 +1490,193 @@ mod tests {
             EventWriterError::Closed
         );
         assert_eq!(writer.shutdown().discarded(), 1);
+    }
+
+    #[derive(Default)]
+    struct RecordingTelemetryOutput {
+        fail: std::sync::atomic::AtomicBool,
+        logs: StdMutex<Vec<String>>,
+        metrics: StdMutex<usize>,
+        health: StdMutex<usize>,
+    }
+
+    impl RecordingTelemetryOutput {
+        fn check(&self, operation: &'static str) -> Result<(), crate::ports::PortError> {
+            if self.fail.load(std::sync::atomic::Ordering::Acquire) {
+                Err(crate::ports::PortError::new(
+                    PortErrorClass::Unavailable,
+                    operation,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl TelemetryOutput for RecordingTelemetryOutput {
+        fn write_log(&self, event: &TelemetryLogEvent) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.log")?;
+            self.logs
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.name.as_str().to_owned());
+            Ok(())
+        }
+
+        fn write_metric(
+            &self,
+            _event: &TelemetryMetricEvent,
+        ) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.metric")?;
+            *self
+                .metrics
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+            Ok(())
+        }
+
+        fn write_health(
+            &self,
+            _event: &ComponentHealthEvent,
+        ) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.health")?;
+            *self
+                .health
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+            Ok(())
+        }
+    }
+
+    fn telemetry_log(level: TelemetryLogLevel) -> TelemetryLogEvent {
+        TelemetryLogEvent {
+            occurred_at: SystemTime::UNIX_EPOCH,
+            level,
+            name: TelemetryEventName::parse("dns.request.complete").unwrap(),
+            component: TelemetryComponent::Dns,
+            request_digest: None,
+            configured_id: None,
+            outcome: crate::ports::telemetry::OutcomeClass::Success,
+            runtime_revision: None,
+            message: "safe message",
+        }
+    }
+
+    fn telemetry_health() -> ComponentHealthEvent {
+        let now = Instant::now();
+        ComponentHealthEvent {
+            component: TelemetryComponent::Telemetry,
+            state: ComponentHealthState::Healthy,
+            first_seen: now,
+            last_changed: now,
+            last_success: Some(now),
+            retry_count: 0,
+            stale_age_micros: None,
+            persistence_gap: false,
+            safe_reason: None,
+        }
+    }
+
+    #[test]
+    fn telemetry_writer_is_bounded_and_preserves_high_priority_logs() {
+        let output = Arc::new(RecordingTelemetryOutput::default());
+        assert!(matches!(
+            TelemetryWriter::new(0, output.clone()),
+            Err(TelemetryWriterBuildError::ZeroCapacity)
+        ));
+        let writer = TelemetryWriter::new(1, output.clone()).unwrap();
+
+        LogSink::emit(&writer, telemetry_log(TelemetryLogLevel::Info)).unwrap();
+        LogSink::emit(&writer, telemetry_log(TelemetryLogLevel::Debug)).unwrap();
+        assert_eq!(writer.stats().dropped_low_priority(), 1);
+        LogSink::emit(&writer, telemetry_log(TelemetryLogLevel::Error)).unwrap();
+        assert_eq!(writer.stats().dropped_low_priority(), 2);
+
+        let summary = writer
+            .flush_now(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(summary.emitted, 1);
+        let logs = output.logs.lock().unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0], "dns.request.complete");
+        assert_eq!(writer.stats().pending(), 0);
+    }
+
+    #[test]
+    fn telemetry_writer_rejects_high_priority_when_no_lower_priority_can_be_evicted() {
+        let output = Arc::new(RecordingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(1, output).unwrap();
+        LogSink::emit(&writer, telemetry_log(TelemetryLogLevel::Warn)).unwrap();
+        let error = LogSink::emit(&writer, telemetry_log(TelemetryLogLevel::Error)).unwrap_err();
+        assert!(matches!(error.class(), PortErrorClass::ResourceExhausted));
+        assert_eq!(writer.stats().pending(), 1);
+    }
+
+    #[test]
+    fn telemetry_writer_queues_metrics_and_health_without_waiting_for_output() {
+        let output = Arc::new(RecordingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(2, output.clone()).unwrap();
+        MetricsSink::record(
+            &writer,
+            TelemetryMetricEvent::new(
+                TelemetryMetricName::RequestsTotal,
+                Vec::new(),
+                TelemetryMetricValue::Counter(1),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        HealthSink::update(&writer, telemetry_health()).unwrap();
+        writer
+            .flush_now(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .unwrap();
+        assert_eq!(*output.metrics.lock().unwrap(), 1);
+        assert_eq!(*output.health.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn telemetry_writer_requeues_output_failures_and_honors_deadline() {
+        let output = Arc::new(RecordingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(1, output.clone()).unwrap();
+        LogSink::emit(&writer, telemetry_log(TelemetryLogLevel::Error)).unwrap();
+        output
+            .fail
+            .store(true, std::sync::atomic::Ordering::Release);
+        let failed = writer.flush_now(Deadline::new(Instant::now() + Duration::from_secs(1)));
+        assert!(failed.is_err());
+        assert_eq!(writer.stats().pending(), 1);
+        assert_eq!(writer.stats().failed(), 1);
+
+        let expired = writer.flush_now(Deadline::new(Instant::now()));
+        assert!(matches!(
+            expired.unwrap_err().class(),
+            PortErrorClass::Timeout
+        ));
+        assert_eq!(writer.stats().pending(), 1);
+
+        output
+            .fail
+            .store(false, std::sync::atomic::Ordering::Release);
+        let summary = LogSink::flush(
+            &writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(summary.emitted, 1);
+        assert_eq!(writer.stats().pending(), 0);
+    }
+
+    #[test]
+    fn telemetry_writer_shutdown_closes_future_emits_after_flush() {
+        let output = Arc::new(RecordingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(1, output).unwrap();
+        LogSink::emit(&writer, telemetry_log(TelemetryLogLevel::Info)).unwrap();
+        writer
+            .shutdown(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .unwrap();
+        assert!(writer.stats().closed());
+        let error = LogSink::emit(&writer, telemetry_log(TelemetryLogLevel::Info)).unwrap_err();
+        assert!(matches!(error.class(), PortErrorClass::Unavailable));
     }
 }

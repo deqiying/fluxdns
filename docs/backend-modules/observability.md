@@ -1,8 +1,8 @@
 # Observability 模块设计
 
-> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数和 typed event 脱敏；正式 writer/flush 尚未实现
+> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure 与 deadline-aware flush；最终 tracing subscriber、真实输出和 supervisor 接线尚未完成
 >
-> 更新日期：2026-08-31
+> 更新日期：2026-09-02
 >
 > 目标代码：`backend/src/observability.rs`
 >
@@ -126,14 +126,15 @@ redaction 在 typed event 构造时完成，不依赖 formatter 最后补救。
 
 ## 8. Backpressure
 
-日志 writer 使用有界 non-blocking channel：
+`TelemetryWriter` 使用有界 non-blocking 内存队列，统一实现 `LogSink`、`MetricsSink` 和 `HealthSink`：
 
 - debug/info 拥塞时可丢弃并计数；
-- warn/error 尝试较高优先级队列或同步 stderr fallback；
+- warn/error 优先淘汰已排队的低优先级日志；没有可淘汰项时返回明确的 `resource_exhausted`；
+- metrics/health 不等待输出端，队列已满时返回明确的容量错误；
 - DNS 请求线程不等待磁盘；
-- writer failure 标记 degraded；
+- writer failure 保留失败事件并重新排队，返回安全分类错误供上层标记 degraded；
 - telemetry/log writer 失败不影响 DNS response；
-- telemetry 自身错误避免递归写日志，使用最小 stderr fallback。
+- telemetry 自身错误不递归写日志，具体 stderr/file fallback 由后续 output adapter 提供。
 
 ## 9. 事件分类
 
@@ -161,7 +162,9 @@ redaction 在 typed event 构造时完成，不依赖 formatter 最后补救。
 
 ## 11. Flush 与失败
 
-shutdown 在 deadline 内：
+当前 writer 的 `flush(deadline)` 在 deadline 内逐项调用 `TelemetryOutput`，成功项计入 emitted，输出失败项放回队首并保留 pending；deadline 到期返回 timeout，不会静默丢失队列。`shutdown(deadline)` 先关闭新事件，再复用同一 flush 边界。
+
+最终接线的 shutdown 顺序为：
 
 1. 停止接收低优先级事件；
 2. 写入最终 runtime/storage/cache 摘要；
@@ -190,12 +193,13 @@ shutdown 在 deadline 内：
 - [x] 实现 bootstrap tracing；
 - [ ] 实现读取配置后的 final tracing；
 - [x] 实现 redaction 和低基数校验；
-- [ ] 实现有界 writer/backpressure；
+- [x] 实现稳定 telemetry ports 的有界 writer/backpressure；
 - [x] 实现有界 health registry、状态恢复、retry/gap 计数和 typed event 更新；
-- [ ] 实现 final writer/backpressure 和 flush；
+- [x] 实现 writer flush/requeue/deadline 边界；
 - [x] 完成当前 schema、安全、低基数和状态测试；
-- [ ] 完成 writer 故障注入和 flush 测试。
+- [x] 完成 writer 输出故障、队列拥塞、deadline 和 shutdown 定向测试；
+- [ ] 接入 final tracing subscriber、真实文件/stderr output、degraded health 发布和 supervisor task。
 
-阶段 1 证据：bootstrap subscriber、日志级别解析、`Sensitive<T>`、DNS/resource/resolve event Debug 脱敏、metric label 类型匹配/去重/数量上限与敏感字段拒绝测试，以及 registry health/retry/gap focused tests 均通过；当前 backend 全量测试为 238 passed、0 failed。
+阶段 1/9 证据：bootstrap subscriber、日志级别解析、`Sensitive<T>`、DNS/resource/resolve event Debug 脱敏、metric label 类型匹配/去重/数量上限与敏感字段拒绝、registry health/retry/gap，以及 `TelemetryWriter` 的容量、优先级、flush/requeue/deadline/shutdown focused tests 均通过；本阶段新增 `observability::tests::telemetry_writer` 5 passed、0 failed。最近一次 backend 全量测试仍为 417 passed、0 failed，未因本小阶段重复执行。
 
-当前实现进度：**30%**。
+当前实现进度：**50%**。
