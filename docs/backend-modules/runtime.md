@@ -175,7 +175,7 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱�
 
 顺序固定：
 
-1. `DnsService::shutdown` 标记 runtime draining；
+1. `RuntimeCoordinator::begin_drain` 标记当前及历史 Runtime draining；
 2. supervisor cancellation 停止 accept/receive 新请求；
 3. TCP listener 取消并 join 内部 connection `JoinSet`；
 4. supervisor 确认当前 task tree 清空；
@@ -223,6 +223,7 @@ stats、resolve log、SQLite checkpoint 和 `TelemetryWriter` flush 已由 `Stor
 - [x] `RuntimeCoordinator::refresh_resource_if_current` 以 captured runtime 做前后活动实例校验，stale 时返回显式 coordinator error；service 重新读取当前 runtime 后再尝试；
 - [x] 候选 revision CAS 与资源刷新共用 mutation gate，并迁移兼容资源的 Policy、metadata 和 worker 稳定调度状态；in-flight reservation 不跨 Runtime 复制；
 - [x] 当前及旧 Runtime 均提供基于 `Notify` 的 deadline-aware request drain wait，并由 `RuntimeCoordinator`/`DnsService::shutdown` 接线；
+- [x] `RuntimeCoordinator::begin_drain` 统一标记当前及历史 Runtime 为 draining，shutdown 不依赖可能过期的 service runtime 句柄；
 - [x] `RuntimeCoordinator` 在新 Runtime 激活时惰性清理无活动请求的旧 draining owner；仍保留有活动请求的 owner 直到 drain；
 - [ ] 定义状态类型与所有权转换；
 - [ ] 完成跨模块资源装配版 PreparedRuntime/preflight；
@@ -231,6 +232,6 @@ stats、resolve log、SQLite checkpoint 和 `TelemetryWriter` flush 已由 `Stor
 - [ ] 完成完整 drain/shutdown（flush、checkpoint、超时分项报告）；
 - [ ] 完成并发、故障和时间控制测试。
 
-阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter，并验证 async prepare 可在 bind 前完成 remote restore/fetch、file snapshot load、持久化、refresh worker 构造和第二次 fallback 恢复；`runtime::coordinator::tests` 进一步验证 coordinator 级资源刷新代理、stale-active guard、候选 bind/activate 成功路径和 CAS 失败返还 candidate、当前与旧 Runtime 的 request drain wait、新激活时旧 owner 的惰性清理；`runtime::supervisor::tests` 验证 factory task 的瞬时失败重试、重试上限耗尽识别、shutdown report 重试计数、scoped task 的单独取消和全局 shutdown 回收、scoped factory 的瞬时重试，以及 panic completion 按真实 task ID 保留 component/fault level；`service::tests` 验证 Degraded 终止、FatalEndpoint 升级、重试耗尽、panic 分类、transport task 瞬时重试、系统 loopback listener reload、resource worker 按 ID 复用/移除协调、same-BindPlan resource state merge 以及 previous/current Runtime finalizer 在统一 shutdown deadline 内回收；service 将 remote/file refresh task 注册进 Supervisor，成功候选通过 ActiveRuntime 的 Policy CAS 和 Runtime metadata CAS 发布，缺失 file 进入失败 backoff。`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS、SOCKS5H、取消和 body limit。Application 自动配置变更事件、真正跨 Runtime snapshot 生命周期和 flush 仍未完成。
+阶段证据：`runtime::prepared::tests` 验证带 Policy core 的候选运行时持有生产 resource fetcher，基础候选不创建网络 adapter，并验证 async prepare 可在 bind 前完成 remote restore/fetch、file snapshot load、持久化、refresh worker 构造和第二次 fallback 恢复；`runtime::coordinator::tests` 进一步验证 coordinator 级资源刷新代理、stale-active guard、候选 bind/activate 成功路径和 CAS 失败返还 candidate、当前与旧 Runtime 的 request drain wait、新激活时旧 owner 的惰性清理，以及 begin_drain 对当前/历史 owner 的统一标记；`runtime::supervisor::tests` 验证 factory task 的瞬时失败重试、重试上限耗尽识别、shutdown report 重试计数、scoped task 的单独取消和全局 shutdown 回收、scoped factory 的瞬时重试，以及 panic completion 按真实 task ID 保留 component/fault level；`service::tests` 验证 Degraded 终止、FatalEndpoint 升级、重试耗尽、panic 分类、transport task 瞬时重试、系统 loopback listener reload、resource worker 按 ID 复用/移除协调、same-BindPlan resource state merge 以及 previous/current Runtime finalizer 在统一 shutdown deadline 内回收；service 将 remote/file refresh task 注册进 Supervisor，成功候选通过 ActiveRuntime 的 Policy CAS 和 Runtime metadata CAS 发布，缺失 file 进入失败 backoff。`resource::fetcher::tests` 7 项验证 direct HTTP、HTTPS、SOCKS5H、取消和 body limit。Application 自动配置变更事件、真正跨 Runtime snapshot 生命周期和 flush 仍未完成。
 
-当前实现进度：**68%**。已验证 Runtime snapshot 资源摘要、原子资源 metadata publish、service core 构造入口、生产 ResourceFetcher ownership、RuntimeCoordinator 级历史/当前 Policy finalizer owner、同一 ActiveRuntime 内的 remote/file refresh worker/CAS publish、候选 registry 的更高版本合并原语、候选 revision CAS 下的 Policy/worker/metadata 合并、显式 reload 的 listener 重建、resource worker 按 ID 增量复用/移除、transport listener task 的 scoped 有界瞬时重试、当前与旧 Runtime 的 deadline-aware request drain wait，以及新激活时无活动旧 draining owner 的惰性清理；自动配置事件、完整跨 Runtime 配置候选发布、独立 resource-only runtime swap、自动 rebind 和完整服务级故障矩阵仍未接线。
+当前实现进度：**69%**。已验证 Runtime snapshot 资源摘要、原子资源 metadata publish、service core 构造入口、生产 ResourceFetcher ownership、RuntimeCoordinator 级历史/当前 Policy finalizer owner、同一 ActiveRuntime 内的 remote/file refresh worker/CAS publish、候选 registry 的更高版本合并原语、候选 revision CAS 下的 Policy/worker/metadata 合并、显式 reload 的 listener 重建、resource worker 按 ID 增量复用/移除、transport listener task 的 scoped 有界瞬时重试、当前与旧 Runtime 的 deadline-aware request drain wait、新激活时无活动旧 draining owner 的惰性清理，以及当前/历史 Runtime 的统一 begin_drain；自动配置事件、完整跨 Runtime 配置候选发布、独立 resource-only runtime swap、自动 rebind 和完整服务级故障矩阵仍未接线。

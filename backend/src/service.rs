@@ -516,7 +516,7 @@ impl DnsService {
         clock: &dyn Clock,
         deadline: crate::dns::Deadline,
     ) -> Result<ShutdownReport, ServiceError> {
-        self.runtime.begin_drain();
+        self.coordinator.begin_drain();
         self.cancel_transport_tasks();
         self.cancel_resource_tasks();
         let mut report = self.supervisor.shutdown(clock, deadline).await;

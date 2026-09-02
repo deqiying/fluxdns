@@ -366,6 +366,18 @@ impl RuntimeCoordinator {
         owners.push(Arc::clone(runtime));
     }
 
+    /// 将当前及 reload 后仍存活的旧 Runtime 统一切换到 drain 状态。
+    pub(crate) fn begin_drain(&self) {
+        let runtimes = self
+            .runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for runtime in runtimes {
+            runtime.begin_drain();
+        }
+    }
+
     /// 在统一 deadline 内等待当前及 reload 后仍存活的旧 Runtime drain。
     pub(crate) async fn wait_for_drain(&self, deadline: crate::dns::Deadline) -> bool {
         let runtimes = self
@@ -980,6 +992,17 @@ outbound: []
         );
         drop(lease);
         assert!(waiting.await);
+    }
+
+    #[test]
+    fn coordinator_begin_drain_marks_current_and_previous_runtimes() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let previous = coordinator.activate(candidate(2));
+
+        coordinator.begin_drain();
+
+        assert!(previous.is_draining());
+        assert!(coordinator.load().is_draining());
     }
 
     #[test]
