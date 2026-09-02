@@ -197,7 +197,21 @@ impl StatsAccumulator {
         Ok(sequence)
     }
 
-    fn record_event(&self, event: StatsEvent) -> Result<(), StatsAccumulatorError> {
+    /// 接收已经构造好的事件，并推进内部 sequence 下界，供 `StatsRecorder` adapter 使用。
+    pub fn record_event(&self, event: StatsEvent) -> Result<(), StatsAccumulatorError> {
+        let next_sequence = event
+            .sequence()
+            .checked_add(1)
+            .ok_or(StatsAccumulatorError::SequenceExhausted)?;
+        let _ = self.next_event_sequence.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |current| Some(current.max(next_sequence)),
+        );
+        self.record_event_inner(event)
+    }
+
+    fn record_event_inner(&self, event: StatsEvent) -> Result<(), StatsAccumulatorError> {
         if event.dimensions().len() > MAX_STATS_DIMENSIONS {
             return Err(StatsAccumulatorError::InvalidEvent(
                 StatsEventError::TooManyDimensions,

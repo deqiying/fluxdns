@@ -1,12 +1,13 @@
 //! Storage 的纯业务域逻辑。
 //!
-//! 本模块负责内存统计、epoch checkpoint、批次幂等状态以及 SQLite/service writer 生命周期边界。
+//! 本模块负责内存统计、epoch checkpoint、批次幂等状态以及 SQLite/stats/service writer 生命周期边界。
 
 mod ledger;
 mod resolve_log;
 mod service;
 mod sqlite;
 mod statistics;
+mod stats;
 mod writer;
 
 pub use ledger::{BatchDecision, BatchLedger, BatchLedgerError, BatchReceipt, PendingStatsBatch};
@@ -24,4 +25,5 @@ pub use statistics::{
     DimensionCount, PersistenceGapState, StatsAccumulator, StatsAccumulatorError, StatsSnapshot,
     day_utc,
 };
+pub use stats::{StatsPersistenceError, StatsPersistenceFlushSummary, StatsPersistenceWorker};
 pub use writer::{InMemoryStorageBackend, STORAGE_SCHEMA_VERSION};

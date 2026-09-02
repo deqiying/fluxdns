@@ -121,6 +121,13 @@ impl BatchLedger {
         self.pending.get(&batch_id)
     }
 
+    pub(crate) fn next_pending_batch(&self) -> Option<StatsBatch> {
+        self.pending
+            .values()
+            .next()
+            .map(|pending| pending.batch.clone())
+    }
+
     pub fn mark_failed(&mut self, batch_id: u64) -> Result<(), BatchLedgerError> {
         let pending = self
             .pending

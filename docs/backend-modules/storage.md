@@ -1,6 +1,6 @@
 # Storage 模块设计
 
-> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema、SQLx SQLite storage 首轮 adapter、详情落库脱敏边界、bounded detail writer channel、年龄/软阈值/硬上限策略、worker shutdown drain/周期 flush、Storage backend/detail 统一生命周期 facade 与可替换 stats writer 边界；Supervisor 注册和服务级统一 flush 尚未实现
+> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 migration schema、SQLx SQLite storage 首轮 adapter、StatsPersistenceWorker、详情落库脱敏边界、bounded detail writer channel、年龄/软阈值/硬上限策略、worker shutdown drain/周期 flush、Storage backend/detail 统一生命周期 facade 与可替换 stats writer 边界；Supervisor 注册和服务级统一 flush 尚未实现
 >
 > 更新日期：2026-09-02
 >
@@ -27,6 +27,7 @@ Storage 模块实现业务 SQLite：
 | --- | --- |
 | `sqlite.rs` | SQLx pool、PRAGMA、migration、统计/详情 transaction、bounded detail writer、详情淘汰/硬上限、worker shutdown drain/周期 flush、health/checkpoint/shutdown 首轮实现 |
 | `service.rs` | backend/detail flush 与 shutdown 顺序 facade |
+| `stats.rs` | StatsAccumulator epoch snapshot、BatchLedger 顺序提交与失败重试 worker |
 | `statistics.rs` | sharded counters、checkpoint、batch ledger |
 | `resolve_log.rs` | 有界详情队列、批量写入和淘汰 |
 | `writer.rs` | 无外部依赖的事务/幂等 writer contract 实现与 focused tests |
@@ -121,6 +122,8 @@ writer 周期性执行：
 7. commit 失败保留同一 batch 重试。
 
 重试前先查 ledger；已提交 batch 不重复累加。新请求始终写下一 epoch，不等待旧批次。
+
+当前 `StatsPersistenceWorker` 已实现上述首轮闭环：`record_request` 和 `StatsRecorder` 只触碰内存 accumulator，`flush` 先冻结 epoch，再将 pending batch 通过 `StorageBackend::execute` 按 batch ID 顺序提交；backend 失败时仅增加 batch 的失败尝试次数并保留原 payload，后续 flush 可继续幂等重试。worker 同时返回 committed batch/event 数量、pending 数量和 persistence gap 摘要。
 
 进程在计数尚未进入 checkpoint 前崩溃会产生 in-memory persistence gap；系统必须报告，不承诺绝对无损。
 
@@ -219,10 +222,11 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 - [x] 实现独立 resolve-log writer channel 与 SQLite batch flush 首轮 adapter；
 - [x] 实现详情年龄淘汰、软阈值和硬上限首轮策略；
 - [x] 提供 backend/detail 统一 flush/shutdown facade，并固定 detail drain 在 backend shutdown 之前；
+- [x] 实现 StatsPersistenceWorker 的 epoch snapshot、BatchLedger 顺序提交和失败保留；
 - [ ] 实现 degraded/recovery 和服务级统一 flush；
 - [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
 - [ ] 完成 migration、压力和故障测试。
 
-阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred；本阶段新增 `storage::sqlite::tests` 10 项通过，覆盖 SQLx migration、stats batch 幂等重试/reopen、详情 batch 写入及脱敏字段、bounded writer 分批 flush、队列容量校验、backend 失败保留 pending、年龄淘汰、软阈值/硬上限、shutdown drain、周期 flush、事务回滚、health/shutdown；新增 `storage::service::tests` 2 项通过，覆盖 facade 对 backend 的单次 flush/shutdown 委托和 typed detail error 边界。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段仅执行 StorageService 增量测试 2 passed、0 failed。Supervisor 注册、busy/disk-full recovery 和服务级统一 flush 仍未完成。
+阶段证据：原有 Storage focused tests 8 项通过，新增 `storage::writer::tests` 4 项通过，覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突、失败回滚和 `ResolveBatch` 明确 deferred；本阶段新增 `storage::sqlite::tests` 10 项通过，覆盖 SQLx migration、stats batch 幂等重试/reopen、详情 batch 写入及脱敏字段、bounded writer 分批 flush、队列容量校验、backend 失败保留 pending、年龄淘汰、软阈值/硬上限、shutdown drain、周期 flush、事务回滚、health/shutdown；新增 `storage::service::tests` 2 项通过，覆盖 facade 对 backend 的单次 flush/shutdown 委托和 typed detail error 边界；新增 `storage::stats::tests` 3 项通过，覆盖 epoch 提交、StatsRecorder sequence 推进和 backend 失败保留 pending。最近一次大阶段全量 `cargo test --manifest-path backend/Cargo.toml --locked` 为 417 passed、0 failed，本阶段仅执行 StatsPersistenceWorker 增量测试 3 passed、0 failed。Supervisor 注册、busy/disk-full recovery 和服务级统一 flush 仍未完成。
 
-当前实现进度：**68%**（内存 stats/ledger、业务 migration schema、SQLx SQLite 首轮 stats/detail transaction、脱敏详情记录、bounded writer channel/batch flush、年龄/软阈值/硬上限首轮策略、worker shutdown drain/周期 flush、backend/detail 统一生命周期 facade、health/checkpoint/shutdown；Supervisor 注册、busy/disk-full recovery、服务级统一 flush 和故障测试仍未完成）。
+当前实现进度：**68%**（内存 stats/ledger、业务 migration schema、SQLx SQLite 首轮 stats/detail transaction、StatsPersistenceWorker epoch/batch 提交与失败保留、脱敏详情记录、bounded writer channel/batch flush、年龄/软阈值/硬上限首轮策略、worker shutdown drain/周期 flush、backend/detail 统一生命周期 facade、health/checkpoint/shutdown；Supervisor 注册、pending 内存保护上限、busy/disk-full recovery、服务级统一 flush 和故障测试仍未完成）。
