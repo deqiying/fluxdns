@@ -1,6 +1,6 @@
 # Observability 模块设计
 
-> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、deadline-aware flush、结构化文件/stderr 输出 adapter 和 Application 启动时输出目标切换；最终 tracing subscriber、degraded health 发布和 supervisor 接线尚未完成
+> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、deadline-aware flush、结构化文件/stderr 输出 adapter、Application 启动时输出目标和级别过滤切换；typed final tracing subscriber、degraded health 发布和 supervisor 接线尚未完成
 >
 > 更新日期：2026-09-02
 >
@@ -28,7 +28,7 @@ Observability 模块实现 Ports 定义的 telemetry/metrics 契约，提供：
 两阶段：
 
 1. bootstrap：stderr、固定 info/error 格式，用于 CLI/config/telemetry 初始化错误；
-2. final：读取 `ResolvedConfig.logs` 后构建正式 subscriber。
+2. final：读取 `ResolvedConfig.logs` 后切换共享输出目标和 reloadable level filter；typed event subscriber 仍待后续切片。
 
 `logs.enable=false` 时关闭常规服务日志，但启动 fatal 和最终退出原因仍写 stderr。`logs.enable=true` 时写配置路径的追加文件，并保留 fatal stderr。
 
@@ -172,7 +172,7 @@ redaction 在 typed event 构造时完成，不依赖 formatter 最后补救。
 4. flush 文件；
 5. 返回 dropped/failure 计数。
 
-`StructuredTelemetryOutput` 已提供真实文件与 stderr 目标，并将文件写入/flush 错误转换为安全 `PortError`；`run` 在严格配置和 SecretRef 校验后切换共享 bootstrap 输出目标，`logs.enable=false` 时丢弃普通日志。文件不可写、磁盘满或 writer panic 时进入 degraded 并 fallback stderr 的最终监督策略仍待接线。如果连 fatal stderr 都不可用，仍返回非零退出码，不能假装记录成功。
+`StructuredTelemetryOutput` 已提供真实文件与 stderr 目标，并将文件写入/flush 错误转换为安全 `PortError`；`run` 在严格配置和 SecretRef 校验后切换共享 bootstrap 输出目标及 reloadable level filter，`logs.enable=false` 时丢弃普通日志。文件不可写、磁盘满或 writer panic 时进入 degraded 并 fallback stderr 的最终监督策略仍待接线。如果连 fatal stderr 都不可用，仍返回非零退出码，不能假装记录成功。
 
 ## 12. 测试
 
@@ -200,8 +200,9 @@ redaction 在 typed event 构造时完成，不依赖 formatter 最后补救。
 - [x] 完成 writer 输出故障、队列拥塞、deadline 和 shutdown 定向测试；
 - [x] 实现结构化真实文件/stderr output adapter；
 - [x] 在 Application 启动阶段按 `logs.enable/path` 切换共享输出目标；
-- [ ] 接入动态 final tracing subscriber、degraded health 发布和 supervisor task。
+- [x] 在 Application 启动阶段按 `logs.level` 切换 reloadable level filter；
+- [ ] 接入 typed final tracing subscriber、degraded health 发布和 supervisor task。
 
-阶段 1/9 证据：bootstrap subscriber、日志级别解析、`Sensitive<T>`、DNS/resource/resolve event Debug 脱敏、metric label 类型匹配/去重/数量上限与敏感字段拒绝、registry health/retry/gap，以及 `TelemetryWriter` 的容量、优先级、flush/requeue/deadline/shutdown focused tests 均通过；阶段 79 新增 `StructuredTelemetryOutput` 文件输出 adapter，阶段 80 接入 Application 启动时输出目标切换，本阶段复用输出测试 `1 passed、0 failed` 并通过 `cargo check`/`cargo clippy`。最近一次 backend 全量测试仍为 417 passed、0 failed，未因这些小阶段重复执行。
+阶段 1/9 证据：bootstrap subscriber、日志级别解析、`Sensitive<T>`、DNS/resource/resolve event Debug 脱敏、metric label 类型匹配/去重/数量上限与敏感字段拒绝、registry health/retry/gap，以及 `TelemetryWriter` 的容量、优先级、flush/requeue/deadline/shutdown focused tests 均通过；阶段 79 新增 `StructuredTelemetryOutput` 文件输出 adapter，阶段 80 接入 Application 启动时输出目标切换，阶段 81 接入 reloadable level filter，本阶段复用输出测试 `1 passed、0 failed` 并通过 `cargo check`/`cargo clippy`。最近一次 backend 全量测试仍为 417 passed、0 failed，未因这些小阶段重复执行。
 
-当前实现进度：**60%**。
+当前实现进度：**65%**。

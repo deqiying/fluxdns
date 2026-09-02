@@ -19,6 +19,12 @@ use crate::ports::{PortError, PortErrorClass, PortFuture};
 use tracing::Subscriber;
 
 static BOOTSTRAP_OUTPUT: OnceLock<Arc<Mutex<OutputTarget>>> = OnceLock::new();
+static BOOTSTRAP_FILTER: OnceLock<
+    tracing_subscriber::reload::Handle<
+        tracing_subscriber::filter::LevelFilter,
+        tracing_subscriber::Registry,
+    >,
+> = OnceLock::new();
 
 /// 构建仅写 stderr、固定为 INFO 及以上的阶段 1 bootstrap subscriber。
 pub fn bootstrap_subscriber() -> impl Subscriber + Send + Sync {
@@ -34,11 +40,15 @@ pub fn init_bootstrap() -> Result<(), tracing::subscriber::SetGlobalDefaultError
     let output = BOOTSTRAP_OUTPUT
         .get_or_init(|| Arc::new(Mutex::new(OutputTarget::Stderr)))
         .clone();
-    let subscriber = tracing_subscriber::fmt()
-        .with_max_level(tracing::Level::INFO)
-        .with_target(false)
-        .with_writer(move || SharedOutputWriter(Arc::clone(&output)))
-        .finish();
+    let (filter, filter_handle) =
+        tracing_subscriber::reload::Layer::new(tracing_subscriber::filter::LevelFilter::INFO);
+    let _ = BOOTSTRAP_FILTER.set(filter_handle);
+    use tracing_subscriber::layer::SubscriberExt as _;
+    let subscriber = tracing_subscriber::registry().with(filter).with(
+        tracing_subscriber::fmt::layer()
+            .with_target(false)
+            .with_writer(move || SharedOutputWriter(Arc::clone(&output))),
+    );
     tracing::subscriber::set_global_default(subscriber)
 }
 
@@ -47,7 +57,11 @@ pub fn init_bootstrap() -> Result<(), tracing::subscriber::SetGlobalDefaultError
 /// 级别过滤仍保持 bootstrap 的 INFO 上限；动态 filter 和 reload 时机属于后续
 /// final subscriber 切片。`enable=false` 时丢弃普通日志，Application 的 fatal
 /// 退出信息仍由进程边界直接写 stderr。
-pub fn configure_final_output(enable: bool, path: impl AsRef<Path>) -> io::Result<()> {
+pub fn configure_final_output(
+    enable: bool,
+    path: impl AsRef<Path>,
+    level: LogLevel,
+) -> io::Result<()> {
     let output = BOOTSTRAP_OUTPUT.get().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
@@ -60,6 +74,19 @@ pub fn configure_final_output(enable: bool, path: impl AsRef<Path>) -> io::Resul
         OutputTarget::File(OpenOptions::new().create(true).append(true).open(path)?)
     };
     *lock_unpoisoned(output) = target;
+    let filter = BOOTSTRAP_FILTER.get().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "bootstrap filter is not initialized",
+        )
+    })?;
+    filter
+        .reload(if enable {
+            level.as_filter()
+        } else {
+            tracing_subscriber::filter::LevelFilter::OFF
+        })
+        .map_err(|_| io::Error::other("bootstrap filter reload failed"))?;
     Ok(())
 }
 
@@ -106,6 +133,16 @@ impl LogLevel {
             Self::Info => "info",
             Self::Warn => "warn",
             Self::Error => "error",
+        }
+    }
+
+    const fn as_filter(self) -> tracing_subscriber::filter::LevelFilter {
+        match self {
+            Self::Trace => tracing_subscriber::filter::LevelFilter::TRACE,
+            Self::Debug => tracing_subscriber::filter::LevelFilter::DEBUG,
+            Self::Info => tracing_subscriber::filter::LevelFilter::INFO,
+            Self::Warn => tracing_subscriber::filter::LevelFilter::WARN,
+            Self::Error => tracing_subscriber::filter::LevelFilter::ERROR,
         }
     }
 }

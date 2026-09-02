@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::config::model::LogLevelDto;
 use crate::config::resolve::SecretValidationError;
 use crate::config::{ConfigLoadError, ConfigLoader, LoadOptions};
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
@@ -408,6 +409,13 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
         observability::configure_final_output(
             output.resolved.logs.enable,
             &output.resolved.logs.path,
+            match output.resolved.logs.level {
+                LogLevelDto::Trace => observability::LogLevel::Trace,
+                LogLevelDto::Debug => observability::LogLevel::Debug,
+                LogLevelDto::Info => observability::LogLevel::Info,
+                LogLevelDto::Warn => observability::LogLevel::Warn,
+                LogLevelDto::Error => observability::LogLevel::Error,
+            },
         )
         .map_err(|_| AppError::new(AppErrorKind::Prepare, "日志输出初始化失败"))?;
     }
