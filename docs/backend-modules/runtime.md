@@ -180,9 +180,9 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱�
 3. TCP listener 取消并 join 内部 connection `JoinSet`；
 4. supervisor 确认当前 task tree 清空；
 5. `RuntimeCoordinator` 在 grace deadline 内等待当前及旧 Runtime 的请求 guard 归零；
-6. 由 `RuntimeCoordinator` 统一登记的各 Runtime `PolicyDnsCore` owner 在同一 grace deadline 内关闭 `LateCacheFinalizer`，并排空、关闭该 owner 托管的 cache persistence writer。
+6. 由 `RuntimeCoordinator` 统一登记的各 Runtime `PolicyDnsCore` owner 在同一 grace deadline 内关闭 `LateCacheFinalizer`，排空 cache persistence writer，并合并安全停机计数。
 
-stats、resolve log、SQLite checkpoint 和 `TelemetryWriter` flush 已由 `StorageRuntime`/`DnsService` 接线并纳入 drain shutdown；production async prepare 也会在 bind 前完成 cache SQLite 恢复，并把 persistence writer 交给现有 finalizer owner 在同一 deadline 内有序关闭。
+stats、resolve log、SQLite checkpoint 和 `TelemetryWriter` flush 已由 `StorageRuntime`/`DnsService` 接线并纳入 drain shutdown；production async prepare 也会在 bind 前完成 cache SQLite 恢复，并把 persistence writer 交给现有 finalizer owner 在同一 deadline 内有序关闭。finalizer 摘要会在 Telemetry 关闭前发布，未完成关闭才标记 shutdown deadline，失败或丢弃批次保持 degraded gap 语义。
 
 每一步有独立 deadline 和结果，最终报告不能只返回模糊的“shutdown failed”。
 
@@ -208,7 +208,7 @@ stats、resolve log、SQLite checkpoint 和 `TelemetryWriter` flush 已由 `Stor
 - [x] 实现 UDP/TCP 不透明 socket capability、`SystemSocketFactory` 和 `BoundListenerSet` 句柄交接；
 - [x] 接入真实 UDP/TCP service task、TCP session `JoinSet` 和基础 drain/shutdown；
 - [x] 接入按配置生成的 immutable resource snapshot 摘要，并让 service 从 active snapshot 捕获同 revision `DnsCore`；
-- [x] 接入 `RuntimeCoordinator` 级共享 `PolicyDnsCore` finalizer owner，在 service shutdown 中按统一 deadline 关闭历史与当前 Runtime owner；
+- [x] 接入 `RuntimeCoordinator` 级共享 `PolicyDnsCore` finalizer owner，在 service shutdown 中按统一 deadline 关闭历史与当前 Runtime owner，并合并 persistence 摘要；
 - [x] 在 `PreparedRuntime`/`ActiveRuntime` 持有生产 `ResourceFetcher`，不把 HTTP client 放入请求 snapshot；
 - [x] async prepare 在 bind 前完成 remote rule-set restore-or-fetch，并把 compiled snapshot 交给 Policy 初始构造；
 - [x] 为 `auto_update=true` 的 remote/file rule-set 与 file hosts 注册 Supervisor refresh task，并在当前 ActiveRuntime 内执行 Policy/Runtime metadata live publish；
@@ -234,6 +234,6 @@ stats、resolve log、SQLite checkpoint 和 `TelemetryWriter` flush 已由 `Stor
 - [ ] 完成完整 drain/shutdown（flush、checkpoint、超时分项报告）；
 - [ ] 完成并发、故障和时间控制测试。
 
-阶段证据：`runtime::prepared::tests` 验证 async prepare 的 remote restore/fetch、file snapshot load、持久化和 refresh worker 构造；定向测试额外验证 cache persistence 在 bind 前完成 recovery/owner 接线并可有序 shutdown；`runtime::coordinator::tests` 当前 15 项通过，覆盖资源刷新代理、stale-active guard、候选 bind/activate、revision CAS、Runtime drain 和 finalizer owner 清理；`app::tests` 当前 11 项通过，新增用例验证直接 Runtime reload 在 prepare 前拒绝进程持有配置变化；`runtime::supervisor::tests` 覆盖有界重试、scoped cancellation、shutdown report 和 panic 归因；`service::tests::` 聚焦筛选当前 37 项通过，其中主 Service 24 项，覆盖 listener reload/reuse、bind plan 不变时同一地址读取新 Policy answer、候选 bind 失败保留旧 UDP 请求路径、resource task、故障升级、统一 drain、live resource publish、跨 transport 一致性，以及进程级配置变化时返回 `RestartRequired` 且旧 Runtime 不切换。真正跨 Runtime snapshot 生命周期、独立 resource-only swap 和完整 flush 仍未完成。
+阶段证据：`runtime::prepared::tests` 验证 async prepare 的 remote restore/fetch、file snapshot load、持久化和 refresh worker 构造；定向测试额外验证 cache persistence 在 bind 前完成 recovery/owner 接线并可有序 shutdown；`runtime::coordinator::tests` 当前 16 项通过，覆盖资源刷新代理、stale-active guard、候选 bind/activate、revision CAS、Runtime drain、finalizer owner 清理与停机摘要合并；`app::tests` 当前 11 项通过，新增用例验证直接 Runtime reload 在 prepare 前拒绝进程持有配置变化；`runtime::supervisor::tests` 覆盖有界重试、scoped cancellation、shutdown report 和 panic 归因；`service::tests::` 聚焦筛选当前 37 项通过，其中主 Service 24 项，覆盖 listener reload/reuse、bind plan 不变时同一地址读取新 Policy answer、候选 bind 失败保留旧 UDP 请求路径、resource task、故障升级、统一 drain、live resource publish、跨 transport 一致性，以及进程级配置变化时返回 `RestartRequired` 且旧 Runtime 不切换。真正跨 Runtime snapshot 生命周期、独立 resource-only swap 和完整 flush 仍未完成。
 
 当前实现进度：**77%**。已验证 Runtime snapshot 资源摘要、原子资源 metadata publish、service core 构造入口、生产 ResourceFetcher ownership、production async cache recovery/persistence owner、RuntimeCoordinator 级历史/当前 Policy finalizer owner、无活动旧 finalizer owner 的淘汰清理、同一 ActiveRuntime 内的 remote/file refresh worker/CAS publish、候选 registry 的更高版本合并原语、候选 revision CAS 下的 Policy/worker/metadata 合并、配置 watcher 的 service-aware reload、进程持有配置早期拒绝、listener 重建/复用、Policy answer 切换及 bind 失败回滚、resource worker 按 ID 增量复用/移除、transport listener task 的 scoped 有界瞬时重试、当前与旧 Runtime 的 deadline-aware request drain wait、新激活时无活动旧 draining owner 的惰性清理、当前/历史 Runtime 的统一 begin_drain，以及运行期 fatal/panic 路径的 coordinator drain；完整跨 Runtime shared-service 生命周期、独立 resource-only runtime swap、listener factory 自动重建和完整服务级故障矩阵仍未接线。

@@ -1,8 +1,8 @@
 # Observability 模块设计
 
-> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、health lifecycle 与 stale age 归一化、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown；typed final tracing layer 和 Storage/Telemetry/Supervisor/Resource refresh 的首轮 degraded health 发布已接入，跨 Runtime registry 生命周期和 fallback 失败后的最终处置仍待完善
+> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、health lifecycle 与 stale age 归一化、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown；typed final tracing layer、Storage/Telemetry/Supervisor/Resource refresh 首轮 health 和 Cache persistence 停机 gap 发布已接入，跨 Runtime registry 生命周期和 fallback 失败后的最终处置仍待完善
 >
-> 更新日期：2026-09-02
+> 更新日期：2026-09-03
 >
 > 目标代码：`backend/src/observability.rs`
 >
@@ -172,7 +172,7 @@ TelemetryWriter 接入后的 shutdown 顺序为：
 4. flush 文件；
 5. 返回 dropped/failure 计数。
 
-`StructuredTelemetryOutput` 已提供真实文件与 stderr 目标，并将文件写入/flush 错误转换为安全 `PortError`；主输出失败时会尝试写入安全结构化 stderr，只有 fallback 也失败才返回错误并由 `TelemetryWriter` 重排队。`run` 在严格配置和 SecretRef 校验后切换共享 bootstrap 输出目标及 reloadable level filter，并将 tracing layer reload 为 typed layer；`logs.enable=false` 时丢弃普通日志。Storage flush、Telemetry flush、Supervisor fatal、Resource refresh 和 shutdown 已发布首轮 `ComponentHealthEvent`；writer 会在 degraded/failed 重复事件间保留最大 `stale_age_micros`，并在恢复 `Healthy` 时清零。fallback 失败后的 health registry 最终处置、跨 Runtime 生命周期和真实 writer panic 复现仍待完善。
+`StructuredTelemetryOutput` 已提供真实文件与 stderr 目标，并将文件写入/flush 错误转换为安全 `PortError`；主输出失败时会尝试写入安全结构化 stderr，只有 fallback 也失败才返回错误并由 `TelemetryWriter` 重排队。`run` 在严格配置和 SecretRef 校验后切换共享 bootstrap 输出目标及 reloadable level filter，并将 tracing layer reload 为 typed layer；`logs.enable=false` 时丢弃普通日志。Storage flush、Telemetry flush、Supervisor fatal、Resource refresh、shutdown 和 Cache persistence 停机 gap 已发布 `ComponentHealthEvent`；writer 会在 degraded/failed 重复事件间保留最大 `stale_age_micros`，并在恢复 `Healthy` 时清零。fallback 失败后的 health registry 最终处置、跨 Runtime 生命周期和真实 writer panic 复现仍待完善。
 
 ## 12. 测试
 
@@ -205,6 +205,7 @@ TelemetryWriter 接入后的 shutdown 顺序为：
 - [x] 接入 typed final tracing layer，并把安全 `event/component/result/revision` 字段写入 `TelemetryWriter`；
 - [x] 接入 Storage/Telemetry/Supervisor/Resource refresh 的首轮 degraded/failed/stopping health 发布；
 - [x] 在 Telemetry 关闭前记录 Storage 正常停机的提交、积压、失败和丢弃纯计数摘要；
+- [x] 在 Telemetry 关闭前发布 Cache persistence 停机计数、degraded health 和 gap；
 - [x] 在 `TelemetryWriter` 内归一化组件 health lifecycle 字段，保留首次时间、最近成功、累计重试和 gap 语义；
 - [x] 在 degraded/failed health 生命周期中传播 stale age，并在恢复 `Healthy` 时清零；
 - [ ] 完善 health registry 的跨 Runtime 生命周期和 fallback 失败后的最终处置。
@@ -215,4 +216,6 @@ TelemetryWriter 接入后的 shutdown 顺序为：
 
 阶段 151 补齐 `TelemetryWriter` 的 stale age 生命周期归一化，并由 Observability 20 项定向测试验证重复故障保留和健康恢复清零。
 
-当前实现进度：**92%**。
+阶段 152 在 Cache finalizer 关闭后、Telemetry 关闭前发布仅含安全计数的停机摘要；失败、丢弃或 deadline 未完成会设置 Cache degraded/persistence gap，定向测试验证 retry 与 gap 字段。
+
+当前实现进度：**93%**。

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use arc_swap::ArcSwap;
 use thiserror::Error;
 
-use crate::cache::LateCacheFinalizer;
+use crate::cache::{CachePersistenceRunSummary, LateCacheFinalizer};
 use crate::config::resolve::ConfigId;
 use crate::dns::{PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, RuntimeRevision};
 use crate::ports::effects::{ResourceFetcher, SocketFactory};
@@ -299,6 +299,17 @@ pub struct RuntimeCoordinator {
     runtime_core_cell: Arc<RuntimeCoreCell>,
 }
 
+/// coordinator 汇总所有新旧 Runtime cache finalizer 的停机结果。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CacheFinalizerShutdownSummary {
+    /// 所有 owner 是否都在统一 deadline 内完成关闭。
+    pub completed: bool,
+    /// 本次关闭覆盖的 owner 数量。
+    pub owners: u64,
+    /// 所有 owner 的 persistence 安全计数。
+    pub persistence: CachePersistenceRunSummary,
+}
+
 impl RuntimeCoordinator {
     pub fn new(initial: BoundCandidate) -> Self {
         let active = Arc::new(ActiveRuntime::from_candidate(initial));
@@ -421,20 +432,28 @@ impl RuntimeCoordinator {
         completed
     }
 
-    /// 在统一 deadline 内关闭所有曾由该 coordinator 发布的 cache finalizer。
-    pub(crate) async fn shutdown_finalizers(&self, deadline: crate::dns::Deadline) -> bool {
+    /// 在统一 deadline 内关闭所有曾由该 coordinator 发布的 cache finalizer 并合并摘要。
+    pub(crate) async fn shutdown_finalizers(
+        &self,
+        deadline: crate::dns::Deadline,
+    ) -> CacheFinalizerShutdownSummary {
         let owners = self
             .finalizer_owners
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
-        let mut completed = true;
+        let mut summary = CacheFinalizerShutdownSummary {
+            completed: true,
+            owners: 0,
+            persistence: CachePersistenceRunSummary::default(),
+        };
         for owner in owners {
-            if !owner.shutdown_until(deadline).await {
-                completed = false;
-            }
+            let owner_summary = owner.shutdown_until(deadline).await;
+            summary.completed &= owner_summary.completed;
+            summary.owners = summary.owners.saturating_add(1);
+            summary.persistence.merge(owner_summary.persistence);
         }
-        completed
+        summary
     }
 
     pub fn load(&self) -> Arc<ActiveRuntime> {
@@ -704,6 +723,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+    use crate::cache::CachePersistenceRunSummary;
     use crate::config::resolve::ConfigId;
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{Cancellation, Deadline, RuntimeRevision};
@@ -1142,6 +1162,20 @@ outbound: []
             );
         }
         initial_owner.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_finalizers_reports_all_registered_owners() {
+        let coordinator = RuntimeCoordinator::new(policy_candidate(1));
+        coordinator.activate(policy_candidate(2));
+
+        let summary = coordinator
+            .shutdown_finalizers(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .await;
+
+        assert!(summary.completed);
+        assert_eq!(summary.owners, 2);
+        assert_eq!(summary.persistence, CachePersistenceRunSummary::default());
     }
 
     #[tokio::test]

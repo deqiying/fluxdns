@@ -1114,7 +1114,12 @@ clients: []
         .unwrap();
         let core = candidate.snapshot().policy_core().unwrap();
         assert!(core.has_cache_persistence());
-        assert!(core.finalizer_owner().shutdown_until(deadline).await);
+        assert!(
+            core.finalizer_owner()
+                .shutdown_until(deadline)
+                .await
+                .completed
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -375,7 +375,7 @@ struct RequestMeta {
 9. 创建全部 socket，任何 bind 失败都关闭已创建 socket 并退出；成功后组合成包含 `bound_endpoints` 的 `ActiveRuntime`，再原子发布首个 runtime；
 10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，由 supervisor 启动 UDP、TCP、DoH、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务；`DnsService` 在等待退出信号时同时观察 task completion，UDP/TCP/DoH transport task 使用独立 scoped cancellation，显式 service reload 可将其切换到新的 active runtime。
 
-停止时先停止接收新请求，再取消后台 refresh/accept，等待正在处理的请求到 `grace deadline`；随后按顺序 flush 统计、详情日志和缓存队列，关闭 SQLite，最后退出。后台任务必须由 supervisor 持有，不能 detach 后丢失 panic 或错误。
+停止时先停止接收新请求，再取消后台 refresh/accept，等待正在处理的请求到 `grace deadline`；随后排空历史/当前 Runtime 的 cache finalizer 与 persistence writer，并发布安全计数，再 flush 统计、详情日志和 SQLite，最后关闭 Telemetry 后退出。后台任务必须由 supervisor 持有，不能 detach 后丢失 panic 或错误。
 
 ### 5.1 supervisor 故障策略
 
@@ -391,7 +391,7 @@ supervisor 对 task 使用结构化生命周期和显式故障等级，不以“
 | 详情 `resolve_log` writer 队列满/提交失败 | `degraded`；丢弃详情并累计 `dropped_detail_records`，持续重试 | 不影响 DNS；不影响聚合统计 writer |
 | 聚合统计 writer 运行时数据库短暂不可写 | `degraded`；写入进程内补偿计数并重试，恢复后按序补写 | DNS 继续服务；进程崩溃前未落盘部分需报告为 persistence gap |
 | 聚合统计 pending batch/补偿计数达到固定内存保护上限 | `fatal`；停止接收新请求，执行有限 flush 后退出 | 避免数据库长期故障导致 OOM；退出前报告未持久化 gap |
-| cache persistence writer 失败 | `degraded`；停止持久化写入，保留内存 cache | 不影响 DNS；重启后可能丢失持久化 cache |
+| cache persistence writer 失败或队列满 | `degraded`；失败批次计数后继续，队列满则丢弃本批，始终保留内存 cache；停机时汇总 persistence gap | 不影响 DNS；重启后可能丢失未持久化 cache |
 | structured log writer/telemetry sink 不可用 | `degraded`；保留本地低基数 counters，日志回退 stderr/内存 ring buffer | 不影响 DNS；观测可能出现明确的 telemetry gap |
 | supervisor 自身 panic、不可恢复的 task panic 或 shutdown 超时 | `fatal`；取消所有 task，执行有限 flush 后退出并返回非零状态 | 进程退出，交由外部守护进程决定是否拉起 |
 

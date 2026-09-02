@@ -2030,7 +2030,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first_transport.calls.load(Ordering::Acquire), 1);
-        assert!(first.finalizer_owner().shutdown_until(deadline()).await);
+        assert!(
+            first
+                .finalizer_owner()
+                .shutdown_until(deadline())
+                .await
+                .completed
+        );
 
         let second_transport = Arc::new(FakeDohTransport::new());
         let second_registry = UpstreamRegistry::from_resolved_with_doh_transport(
@@ -2050,7 +2056,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(second_transport.calls.load(Ordering::Acquire), 0);
-        assert!(second.finalizer_owner().shutdown_until(deadline()).await);
+        assert!(
+            second
+                .finalizer_owner()
+                .shutdown_until(deadline())
+                .await
+                .completed
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

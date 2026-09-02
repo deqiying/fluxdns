@@ -25,12 +25,34 @@ pub enum CachePersistenceEnqueueError {
     Closed,
 }
 
+/// Cache persistence worker 在本次生命周期内产生的安全计数。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CachePersistenceRunSummary {
+    /// 已成功提交到底层持久化 adapter 的批次数。
     pub persisted_batches: u64,
+    /// adapter 写入失败的批次数。
     pub failed_batches: u64,
+    /// 有界队列满或关闭时丢弃的批次数。
     pub dropped_batches: u64,
+    /// 停机容量维护阶段删除的过期批次数。
     pub capacity_removed: u64,
+}
+
+impl CachePersistenceRunSummary {
+    /// 合并另一个 persistence owner 的安全计数，避免热重载后遗漏旧 Runtime 摘要。
+    pub fn merge(&mut self, other: Self) {
+        self.persisted_batches = self
+            .persisted_batches
+            .saturating_add(other.persisted_batches);
+        self.failed_batches = self.failed_batches.saturating_add(other.failed_batches);
+        self.dropped_batches = self.dropped_batches.saturating_add(other.dropped_batches);
+        self.capacity_removed = self.capacity_removed.saturating_add(other.capacity_removed);
+    }
+
+    /// 返回运行期间是否出现未持久化批次。
+    pub const fn has_persistence_gap(self) -> bool {
+        self.failed_batches > 0 || self.dropped_batches > 0
+    }
 }
 
 #[derive(Clone)]
@@ -282,6 +304,30 @@ mod tests {
         PersistentCacheBatch {
             records: Vec::new(),
         }
+    }
+
+    #[test]
+    fn run_summary_merges_owners_and_detects_persistence_gaps() {
+        let mut summary = CachePersistenceRunSummary {
+            persisted_batches: u64::MAX,
+            failed_batches: 0,
+            dropped_batches: 1,
+            capacity_removed: 2,
+        };
+
+        summary.merge(CachePersistenceRunSummary {
+            persisted_batches: 1,
+            failed_batches: 3,
+            dropped_batches: 4,
+            capacity_removed: 5,
+        });
+
+        assert_eq!(summary.persisted_batches, u64::MAX);
+        assert_eq!(summary.failed_batches, 3);
+        assert_eq!(summary.dropped_batches, 5);
+        assert_eq!(summary.capacity_removed, 7);
+        assert!(summary.has_persistence_gap());
+        assert!(!CachePersistenceRunSummary::default().has_persistence_gap());
     }
 
     #[test]

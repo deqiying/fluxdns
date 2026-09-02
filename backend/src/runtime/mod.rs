@@ -9,6 +9,7 @@ mod system_clock;
 mod system_socket;
 
 pub use bind::{BindError, BoundCandidate, BoundEndpointHandle, BoundListenerSet, bind_prepared};
+pub(crate) use coordinator::CacheFinalizerShutdownSummary;
 pub use coordinator::{
     ActivationError, ActiveRuntime, AdmissionError, RequestGuard, ResourceRefreshCoordinatorError,
     RuntimeCoordinator, RuntimeLease, RuntimeReloadError, RuntimeReuseError,

@@ -19,7 +19,7 @@ use super::admission::{
     CacheAdmissionError, CacheAdmissionOutcome, CacheAdmissionPolicy, CacheAdmissionRejection,
     admit_response,
 };
-use super::runtime::{CachePersistenceRuntime, CachePersistenceWriter};
+use super::runtime::{CachePersistenceRunSummary, CachePersistenceRuntime, CachePersistenceWriter};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheFacadeOptions {
@@ -42,6 +42,15 @@ pub enum LateCacheFinalizerBuildError {
 pub enum LateCacheFinalizerSubmitError {
     Shutdown,
     Capacity,
+}
+
+/// 单个 cache finalizer 在停机阶段产生的有界结果。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LateCacheFinalizerShutdownSummary {
+    /// 后台任务和 persistence owner 是否都在 deadline 内完成关闭。
+    pub completed: bool,
+    /// persistence owner 返回的安全聚合计数。
+    pub persistence: CachePersistenceRunSummary,
 }
 
 impl Default for CacheFacadeOptions {
@@ -190,9 +199,12 @@ impl LateCacheFinalizer {
         }
     }
 
-    /// 触发 shutdown，并在 deadline 内等待所有已提交任务回收。
-    /// 超时后 abort 剩余 task，并返回 false；调用方可将其并入 Runtime shutdown report。
-    pub async fn shutdown_until(&self, deadline: crate::dns::Deadline) -> bool {
+    /// 触发 shutdown，并在 deadline 内等待所有已提交任务和 persistence owner 回收。
+    /// 超时后 abort 剩余 task，并以摘要通知 Runtime 是否存在持久化缺口。
+    pub async fn shutdown_until(
+        &self,
+        deadline: crate::dns::Deadline,
+    ) -> LateCacheFinalizerShutdownSummary {
         let mut tasks = self.take_tasks_for_shutdown();
         let tasks_completed = loop {
             if tasks.is_empty() {
@@ -214,11 +226,17 @@ impl LateCacheFinalizer {
                 }
             }
         };
-        let persistence_completed = match self.persistence_runtime() {
-            Some(persistence) => persistence.shutdown(deadline).await.is_ok(),
-            None => true,
+        let (persistence_completed, persistence) = match self.persistence_runtime() {
+            Some(runtime) => match runtime.shutdown(deadline).await {
+                Ok(summary) => (true, summary),
+                Err(_) => (false, CachePersistenceRunSummary::default()),
+            },
+            None => (true, CachePersistenceRunSummary::default()),
         };
-        tasks_completed && persistence_completed
+        LateCacheFinalizerShutdownSummary {
+            completed: tasks_completed && persistence_completed,
+            persistence,
+        }
     }
 
     /// 绑定与该 finalizer 同生命周期的 cache persistence owner。
@@ -639,8 +657,8 @@ mod tests {
 
     use crate::cache::{
         CacheAdmissionPolicy, CacheFacade, CacheFacadeBuildError, CacheFacadeOptions, CacheLookup,
-        CacheWriteRequest, CacheWriteResult, LateCacheFinalizer, LateCacheFinalizerBuildError,
-        LateCacheFinalizerSubmitError, MemoryCacheStore,
+        CachePersistenceRunSummary, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer,
+        LateCacheFinalizerBuildError, LateCacheFinalizerSubmitError, MemoryCacheStore,
     };
     use crate::dns::{CanonicalQuery, CanonicalResponse, Deadline, RuntimeRevision};
     use crate::ports::cache::{CacheCondition, CacheKey, CacheNamespace, CacheStore};
@@ -876,13 +894,13 @@ mod tests {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             })
             .unwrap();
-        assert!(
-            finalizer
-                .shutdown_until(crate::dns::Deadline::new(
-                    Instant::now() + std::time::Duration::from_secs(1),
-                ))
-                .await
-        );
+        let summary = finalizer
+            .shutdown_until(crate::dns::Deadline::new(
+                Instant::now() + std::time::Duration::from_secs(1),
+            ))
+            .await;
+        assert!(summary.completed);
+        assert_eq!(summary.persistence, CachePersistenceRunSummary::default());
         assert!(finalizer.is_shutdown());
         assert_eq!(finalizer.active_tasks(), 0);
     }

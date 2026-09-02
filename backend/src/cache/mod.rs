@@ -26,7 +26,7 @@ pub use runtime::{
 pub use service::{
     CacheFacade, CacheFacadeBuildError, CacheFacadeError, CacheFacadeOptions, CacheLookup,
     CacheRefreshPermit, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer,
-    LateCacheFinalizerBuildError, LateCacheFinalizerSubmitError,
+    LateCacheFinalizerBuildError, LateCacheFinalizerShutdownSummary, LateCacheFinalizerSubmitError,
 };
 pub use sqlite::{
     SqliteCacheDiskUsage, SqlitePersistentCacheStore, SqlitePersistentCacheStoreBuildError,

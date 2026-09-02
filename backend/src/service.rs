@@ -29,10 +29,10 @@ use crate::ports::telemetry::{
 };
 use crate::runtime::{
     ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
-    BoundListenerSet, FaultLevel, PreparedRuntime, RefreshedResourceSnapshot,
-    ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator, RuntimeReuseError,
-    ShutdownReport, Supervisor, SupervisorError, SystemClock, TaskCompletion, TaskError,
-    TaskErrorKind, TaskExit, TaskSpec, bind_prepared,
+    BoundListenerSet, CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime,
+    RefreshedResourceSnapshot, ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator,
+    RuntimeReuseError, ShutdownReport, Supervisor, SupervisorError, SystemClock, TaskCompletion,
+    TaskError, TaskErrorKind, TaskExit, TaskSpec, bind_prepared,
 };
 use crate::storage::{
     DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StatsPersistenceWorker,
@@ -578,9 +578,14 @@ impl DnsService {
         if !self.coordinator.wait_for_drain(deadline).await {
             report.deadline_expired = true;
         }
-        if !self.coordinator.shutdown_finalizers(deadline).await {
+        let cache_summary = self.coordinator.shutdown_finalizers(deadline).await;
+        if !cache_summary.completed {
             report.deadline_expired = true;
         }
+        if let Some(telemetry) = &self.telemetry {
+            publish_cache_shutdown_health(telemetry, cache_summary);
+        }
+        log_cache_shutdown_summary(cache_summary);
         let storage_error = if let Some(storage) = self.storage.take() {
             if let Some(telemetry) = &self.telemetry {
                 publish_component_health(
@@ -1024,6 +1029,55 @@ fn telemetry_component_for_task(component: &'static str) -> TelemetryComponent {
         "telemetry" => TelemetryComponent::Telemetry,
         _ => TelemetryComponent::Runtime,
     }
+}
+
+/// 发布 cache persistence 的停机健康状态，不把 key、响应或 adapter 错误写入 telemetry。
+fn publish_cache_shutdown_health(
+    telemetry: &TelemetryWriter,
+    summary: CacheFinalizerShutdownSummary,
+) {
+    let now = Instant::now();
+    let persistence_gap = !summary.completed || summary.persistence.has_persistence_gap();
+    let event = ComponentHealthEvent {
+        component: TelemetryComponent::Cache,
+        state: if persistence_gap {
+            ComponentHealthState::Degraded
+        } else {
+            ComponentHealthState::Stopping
+        },
+        first_seen: now,
+        last_changed: now,
+        last_success: None,
+        retry_count: summary.persistence.failed_batches,
+        stale_age_micros: None,
+        persistence_gap,
+        safe_reason: persistence_gap.then_some("cache persistence shutdown has gaps"),
+    };
+    if let Err(error) = HealthSink::update(telemetry, event) {
+        tracing::debug!(
+            event = "telemetry_health_publish_failed",
+            component = ?TelemetryComponent::Cache,
+            class = error.class().as_str(),
+            operation = error.operation(),
+            "telemetry_health_publish_failed"
+        );
+    }
+}
+
+/// 输出不含缓存 key 或响应内容的停机摘要，供核对 best-effort 持久化缺口。
+fn log_cache_shutdown_summary(summary: CacheFinalizerShutdownSummary) {
+    tracing::info!(
+        event = "cache_shutdown_summary",
+        component = "cache",
+        owners = summary.owners,
+        completed = summary.completed,
+        persisted_batches = summary.persistence.persisted_batches,
+        failed_batches = summary.persistence.failed_batches,
+        dropped_batches = summary.persistence.dropped_batches,
+        capacity_removed = summary.persistence.capacity_removed,
+        persistence_gap = !summary.completed || summary.persistence.has_persistence_gap(),
+        "cache_shutdown_summary"
+    );
 }
 
 /// 输出不含请求内容的存储停机摘要，供正常停机后核对持久化缺口。
@@ -2097,7 +2151,7 @@ mod tests {
     use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::atomic::AtomicUsize;
     use std::sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicU32, Ordering},
     };
     use std::time::{Duration, Instant, SystemTime};
@@ -2108,9 +2162,11 @@ mod tests {
     use tokio::net::{TcpStream, UdpSocket};
 
     use super::{
-        ResolveDetailDropCounters, ServiceError, publish_component_health, response_header_rcode,
-        response_rcode, spawn_telemetry_task, spawn_transport_task, task_failure,
+        ResolveDetailDropCounters, ServiceError, publish_cache_shutdown_health,
+        publish_component_health, response_header_rcode, response_rcode, spawn_telemetry_task,
+        spawn_transport_task, task_failure,
     };
+    use crate::cache::CachePersistenceRunSummary;
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, CanonicalResponse,
@@ -2124,8 +2180,9 @@ mod tests {
         LogLevel, MetricEvent,
     };
     use crate::runtime::{
-        FaultLevel, PreparedRuntime, RestartPolicy, RuntimeCoordinator, Supervisor, SystemClock,
-        SystemSocketFactory, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
+        CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime, RestartPolicy,
+        RuntimeCoordinator, Supervisor, SystemClock, SystemSocketFactory, TaskCompletion,
+        TaskError, TaskErrorKind, TaskExit, TaskSpec,
     };
     use crate::storage::StorageRuntime;
     use crate::transport::transport_capabilities;
@@ -2135,6 +2192,7 @@ mod tests {
         logs: AtomicUsize,
         metrics: AtomicUsize,
         health: AtomicUsize,
+        health_events: Mutex<Vec<ComponentHealthEvent>>,
     }
 
     /// 为真实跨 transport 测试生成稳定的 SERVFAIL/REFUSED 响应。
@@ -2210,9 +2268,10 @@ mod tests {
 
         fn write_health(
             &self,
-            _event: &ComponentHealthEvent,
+            event: &ComponentHealthEvent,
         ) -> Result<(), crate::ports::PortError> {
             self.health.fetch_add(1, Ordering::Relaxed);
+            self.health_events.lock().unwrap().push(event.clone());
             Ok(())
         }
     }
@@ -2276,6 +2335,42 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(output.health.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn cache_shutdown_gap_is_published_before_telemetry_closes() {
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(4, output.clone()).unwrap();
+        publish_cache_shutdown_health(
+            &writer,
+            CacheFinalizerShutdownSummary {
+                completed: true,
+                owners: 2,
+                persistence: CachePersistenceRunSummary {
+                    persisted_batches: 7,
+                    failed_batches: 3,
+                    dropped_batches: 1,
+                    capacity_removed: 4,
+                },
+            },
+        );
+
+        crate::ports::telemetry::LogSink::flush(
+            &writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        let health_events = output.health_events.lock().unwrap();
+        assert_eq!(health_events.len(), 1);
+        assert_eq!(health_events[0].component, TelemetryComponent::Cache);
+        assert_eq!(health_events[0].state, ComponentHealthState::Degraded);
+        assert_eq!(health_events[0].retry_count, 3);
+        assert!(health_events[0].persistence_gap);
+        assert_eq!(
+            health_events[0].safe_reason,
+            Some("cache persistence shutdown has gaps")
+        );
     }
 
     fn completion(
