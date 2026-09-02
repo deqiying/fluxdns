@@ -1,10 +1,10 @@
 //! Storage 的纯业务域逻辑。
 //!
-//! 本模块只负责内存统计、epoch checkpoint 和批次幂等状态；SQLite adapter、migration
-//! 与 writer 装配由后续阶段接入 `StorageBackend`。
+//! 本模块负责内存统计、epoch checkpoint、批次幂等状态以及 SQLite/service writer 生命周期边界。
 
 mod ledger;
 mod resolve_log;
+mod service;
 mod sqlite;
 mod statistics;
 mod writer;
@@ -14,6 +14,7 @@ pub use resolve_log::{
     ResolveDetailRecord, ResolveDetailWriter, ResolveLogBuildError, ResolveLogFlushSummary,
     ResolveLogShutdownSummary, ResolveLogWriter,
 };
+pub use service::{StorageService, StorageServiceError, StorageServiceFlushSummary};
 pub use sqlite::{
     SqliteResolveDetailFlushSummary, SqliteResolveDetailLimits, SqliteResolveDetailRunSummary,
     SqliteResolveDetailWorker, SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError,
