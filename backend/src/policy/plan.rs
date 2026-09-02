@@ -118,6 +118,7 @@ pub enum CacheDecision {
     Pool {
         namespace: CacheNamespace,
         optimistic_answer_ttl: Option<Duration>,
+        optimistic_max_age: Option<Duration>,
     },
 }
 
@@ -141,6 +142,16 @@ impl CacheDecision {
                 optimistic_answer_ttl,
                 ..
             } => *optimistic_answer_ttl,
+        }
+    }
+
+    /// 返回当前缓存池启用 optimistic stale 时允许的最长过期时间。
+    pub const fn optimistic_max_age(&self) -> Option<Duration> {
+        match self {
+            Self::Disabled => None,
+            Self::Pool {
+                optimistic_max_age, ..
+            } => *optimistic_max_age,
         }
     }
 }
@@ -482,6 +493,11 @@ impl PolicyIndex {
                     .as_ref()
                     .filter(|value| value.enabled)
                     .map(|value| value.answer_ttl),
+                optimistic_max_age: cache
+                    .optimistic
+                    .as_ref()
+                    .filter(|value| value.enabled)
+                    .map(|value| value.max_age),
             });
         }
         if let Some(cache) = &strategy.cache {
@@ -495,6 +511,11 @@ impl PolicyIndex {
                     .as_ref()
                     .filter(|value| value.enabled)
                     .map(|value| value.answer_ttl),
+                optimistic_max_age: cache
+                    .optimistic
+                    .as_ref()
+                    .filter(|value| value.enabled)
+                    .map(|value| value.max_age),
             });
         }
         if !self.global_cache.enabled {
@@ -507,6 +528,11 @@ impl PolicyIndex {
                 .optimistic
                 .enabled
                 .then_some(self.global_cache.optimistic.answer_ttl),
+            optimistic_max_age: self
+                .global_cache
+                .optimistic
+                .enabled
+                .then_some(self.global_cache.optimistic.max_age),
         })
     }
 }
@@ -811,12 +837,16 @@ mod tests {
             .unwrap();
         assert_eq!(plan.strategy.id.as_str(), "inner");
         assert!(matches!(
-            plan.cache,
+            &plan.cache,
             CacheDecision::Pool {
                 optimistic_answer_ttl: Some(ttl),
                 ..
-            } if ttl == Duration::from_secs(10)
+            } if *ttl == Duration::from_secs(10)
         ));
+        assert_eq!(
+            plan.cache.optimistic_max_age(),
+            Some(Duration::from_secs(60))
+        );
     }
 
     #[test]

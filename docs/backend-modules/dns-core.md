@@ -133,7 +133,7 @@ NXDOMAIN、REFUSED、SERVFAIL、TC 都是有效 DNS response，不转换成 adap
 - cache expiry TTL：用于 entry 生命周期；
 - client-visible TTL：按当前 override 和剩余 TTL 生成。
 
-TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 的实际过期时间。当前已实现全部 RR 的配置 min/max 覆写；fresh cache response 按 `inserted_at` 后经过的整秒递减全部 RR TTL，stale response 先统一使用所选缓存池的 `optimistic.answer_ttl`，再应用当前请求的 TTL override。
+TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 的实际过期时间。当前已实现全部 RR 的配置 min/max 覆写；fresh cache response 按 `inserted_at` 后经过的整秒递减全部 RR TTL，stale response 先检查所选缓存池的 `optimistic.max_age` 并统一使用其 `answer_ttl`，再应用当前请求的 TTL override。
 
 ## 10. 事件
 
@@ -187,6 +187,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [ ] 完成显式 upstream/group member ECS 和完整错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 28 项通过，覆盖 cache hit 剩余/stale TTL、global custom ECS 实际 DoH wire、请求 ECS 优先与 client ECS cache key 隔离；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
+阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 29 项通过，覆盖 global pool 关闭时的 strategy cache、cache hit 剩余/stale TTL、global custom ECS 实际 DoH wire、请求 ECS 优先与 client ECS cache key 隔离；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
 
 当前实现进度：**69%**。

@@ -682,32 +682,29 @@ impl PolicyDnsCore {
                     CacheStatus::Fresh,
                 ));
             }
-            Ok(CacheLookup::Stale { record, refresh })
-                if plan.cache.optimistic_answer_ttl().is_some() =>
-            {
-                let mut stale_response = (*record.entry.response).clone();
-                stale_response.set_ttl(
-                    plan.cache
-                        .optimistic_answer_ttl()
-                        .expect("stale branch requires optimistic answer TTL"),
-                );
-                if refresh.try_consume() {
-                    self.schedule_optimistic_refresh(
-                        key.clone(),
-                        refresh.version(),
-                        request,
-                        plan,
-                        query,
-                    );
+            Ok(CacheLookup::Stale { record, refresh }) => {
+                if let Some(answer_ttl) =
+                    stale_answer_ttl(&plan.cache, record.entry.expires_at, Instant::now())
+                {
+                    let mut stale_response = (*record.entry.response).clone();
+                    stale_response.set_ttl(answer_ttl);
+                    if refresh.try_consume() {
+                        self.schedule_optimistic_refresh(
+                            key.clone(),
+                            refresh.version(),
+                            request,
+                            plan,
+                            query,
+                        );
+                    }
+                    return Some(PolicyUpstreamResult::cache(
+                        UpstreamOutcome::Response(stale_response),
+                        CacheStatus::Stale,
+                    ));
                 }
-                return Some(PolicyUpstreamResult::cache(
-                    UpstreamOutcome::Response(stale_response),
-                    CacheStatus::Stale,
-                ));
             }
             Ok(CacheLookup::Disabled)
             | Ok(CacheLookup::Miss)
-            | Ok(CacheLookup::Stale { .. })
             | Ok(CacheLookup::StoreUnavailable)
             | Err(_) => {}
         }
@@ -942,6 +939,20 @@ fn fresh_cache_response(record: &crate::ports::cache::CacheRecord) -> CanonicalR
     response
 }
 
+/// 仅在当前 pool 的 optimistic max-age 内返回其 stale answer TTL。
+fn stale_answer_ttl(
+    decision: &crate::policy::CacheDecision,
+    expires_at: Instant,
+    now: Instant,
+) -> Option<Duration> {
+    let answer_ttl = decision.optimistic_answer_ttl()?;
+    let max_age = decision.optimistic_max_age()?;
+    expires_at
+        .checked_add(max_age)
+        .is_some_and(|stale_until| now < stale_until)
+        .then_some(answer_ttl)
+}
+
 /// 根据请求级 ECS 配置生成真正发往上游的 canonical query。
 fn effective_upstream_query(
     query: &crate::dns::CanonicalQuery,
@@ -1012,14 +1023,7 @@ fn build_cache_facade(
             reason: error.to_string(),
         },
     )?;
-    let options = CacheFacadeOptions {
-        enabled: config.dns.cache.enabled,
-        optimistic_enabled: config.dns.cache.optimistic.enabled,
-        admission: CacheAdmissionPolicy::new(
-            config.dns.cache.failure_ttl,
-            Some(config.dns.cache.optimistic.max_age),
-        ),
-    };
+    let options = cache_runtime_options(config);
     let finalizer =
         LateCacheFinalizer::new(DEFAULT_LATE_CACHE_FINALIZER_CAPACITY).map_err(|error| {
             PolicyCoreBuildError::Cache {
@@ -1030,6 +1034,41 @@ fn build_cache_facade(
         Arc::new(CacheFacade::new(Arc::new(store), options)),
         Arc::new(finalizer),
     ))
+}
+
+/// 汇总所有逻辑 pool 的运行时能力；`dns.cache.enabled` 只控制全局池。
+fn cache_runtime_options(config: &ResolvedConfig) -> CacheFacadeOptions {
+    let mut enabled = config.dns.cache.enabled;
+    let mut optimistic_max_age = (config.dns.cache.enabled && config.dns.cache.optimistic.enabled)
+        .then_some(config.dns.cache.optimistic.max_age);
+    for cache in config
+        .strategies
+        .iter()
+        .filter_map(|strategy| strategy.cache.as_ref())
+        .chain(
+            config
+                .clients
+                .iter()
+                .filter_map(|client| client.cache.as_ref()),
+        )
+        .filter(|cache| cache.enabled)
+    {
+        enabled = true;
+        if let Some(max_age) = cache
+            .optimistic
+            .as_ref()
+            .filter(|optimistic| optimistic.enabled)
+            .map(|optimistic| optimistic.max_age)
+        {
+            optimistic_max_age =
+                Some(optimistic_max_age.map_or(max_age, |current| current.max(max_age)));
+        }
+    }
+    CacheFacadeOptions {
+        enabled,
+        optimistic_enabled: optimistic_max_age.is_some(),
+        admission: CacheAdmissionPolicy::new(config.dns.cache.failure_ttl, optimistic_max_age),
+    }
 }
 
 fn optimistic_refresh_context(context: &crate::dns::RequestContext) -> crate::dns::RequestContext {
@@ -1444,9 +1483,9 @@ mod tests {
     use crate::cache::CacheLookup;
     use crate::config::model::{EcsMode, RuleSetFormat};
     use crate::config::resolve::{
-        ConfigId, ResolvedClient, ResolvedEcs, ResolvedOutbound, ResolvedRuleSet,
-        ResolvedRuleSetRef, ResolvedSecretRef, ResolvedStrategyRule, ResolvedTtlOverride,
-        ResolvedUpstream, ResolvedUpstreamMember, ValueSource,
+        ConfigId, ResolvedCacheOverride, ResolvedClient, ResolvedEcs, ResolvedOutbound,
+        ResolvedRuleSet, ResolvedRuleSetRef, ResolvedSecretRef, ResolvedStrategyRule,
+        ResolvedTtlOverride, ResolvedUpstream, ResolvedUpstreamMember, ValueSource,
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
@@ -1467,7 +1506,7 @@ mod tests {
 
     use super::{
         PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, UpstreamRuntime, cache_key,
-        effective_upstream_query,
+        effective_upstream_query, stale_answer_ttl,
     };
     use crate::upstream::UpstreamRegistry;
 
@@ -1582,6 +1621,34 @@ mod tests {
         let enabled = PolicyDnsCore::from_config(&config, 42).unwrap();
         assert!(enabled.cache().options().enabled);
         assert!(enabled.cache().options().optimistic_enabled);
+    }
+
+    #[tokio::test]
+    async fn strategy_cache_works_when_global_pool_is_disabled() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        assert!(!config.dns.cache.enabled);
+        config.strategies[0].cache = Some(ResolvedCacheOverride {
+            enabled: true,
+            optimistic: Some(config.dns.cache.optimistic.clone()),
+            source: ValueSource::Strategy,
+        });
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(&config, 42, registry).unwrap();
+
+        core.resolve(&request("strategy-cache.example.", RecordType::A))
+            .await
+            .unwrap();
+        core.resolve(&request("strategy-cache.example.", RecordType::A))
+            .await
+            .unwrap();
+
+        assert!(core.cache().options().enabled);
+        assert_eq!(transport.calls.load(Ordering::Acquire), 1);
     }
 
     #[tokio::test]
@@ -1847,6 +1914,7 @@ mod tests {
         config.dns.cache.enabled = true;
         config.dns.cache.optimistic.enabled = true;
         config.dns.cache.optimistic.answer_ttl = Duration::from_secs(7);
+        config.dns.cache.optimistic.max_age = Duration::from_secs(60);
         let config = Arc::new(config);
         let transport = Arc::new(FakeDohTransport::new());
         let registry =
@@ -1867,6 +1935,15 @@ mod tests {
                 qname: Some(&qname),
             })
             .unwrap();
+        let max_age_now = Instant::now();
+        assert_eq!(
+            stale_answer_ttl(
+                &plan.cache,
+                max_age_now - Duration::from_secs(61),
+                max_age_now,
+            ),
+            None
+        );
         let key = cache_key(&plan, &request).unwrap();
         let response = Arc::new(
             CanonicalResponse::response_with_answers(
