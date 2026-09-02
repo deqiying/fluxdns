@@ -1,6 +1,6 @@
 # Storage 模块设计
 
-> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 schema v2 migration、SQLx SQLite storage 首轮 adapter、StatsPersistenceWorker、详情落库脱敏边界、group member、matched rule/resource、RCODE、failure 与 cancellation 摘要列、bounded detail writer channel、详情丢弃分类计数与限频事件、年龄/软阈值/硬上限策略、worker shutdown drain/周期 flush、Storage stats/backend/detail 统一生命周期 facade、可共享 stats recorder、首轮 `StorageRuntime`/`DnsService`/`Supervisor` 生产接线、pending 内存保护/fatal 边界、首轮 degraded/recovery 状态转换、受 `cfg(test)` 限定的 Busy/DiskFull adapter fault 注入及恢复分类，以及 Policy Core 的低基数元数据传播；OS/SQLite 真实故障复现和最终 telemetry 接线尚未完成
+> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 schema v2 migration、SQLx SQLite storage 首轮 adapter、StatsPersistenceWorker、详情落库脱敏边界、group member、matched rule/resource、RCODE、failure 与 cancellation 摘要列、bounded detail writer channel、详情丢弃分类计数、限频 health 与成功恢复、年龄/软阈值/硬上限策略、worker shutdown drain/周期 flush、Storage stats/backend/detail 统一生命周期 facade、可共享 stats recorder、首轮 `StorageRuntime`/`DnsService`/`Supervisor` 生产接线、pending 内存保护/fatal 边界、首轮 degraded/recovery 状态转换、受 `cfg(test)` 限定的 Busy/DiskFull adapter fault 注入及恢复分类，以及 Policy Core 的低基数元数据传播；OS/SQLite 真实故障复现和跨故障源 telemetry 闭环尚未完成
 >
 > 更新日期：2026-09-03
 >
@@ -166,7 +166,7 @@ writer 周期性执行：
 SQLite busy、磁盘满、I/O error：
 
 - stats：保留未 ack batch，继续内存计数，进入 degraded；
-- detail：允许丢弃并按 queue-full/policy 分类计数，计数达到 2 的幂次时输出限频状态事件；
+- detail：允许丢弃并按 queue-full/policy 分类计数；queue-full 或 sink 错误在首次和 2 的幂次累计点发布 degraded/gap，下一条 accepted 恢复 Healthy；
 - DNS 请求继续服务；
 - 恢复后 stats 按 batch ledger 幂等补写；
 - 记录 degraded 首发、最近重试、积压 batch、persistence gap 风险；
@@ -174,7 +174,7 @@ SQLite busy、磁盘满、I/O error：
 
 `StorageBackend` 自身 panic、schema corruption 或无法保证 ledger 正确性时升级 fatal，不继续写可能重复的统计。
 
-周期 flush 和有序 shutdown 会把详情前端队列的 committed、pending、queue-full、sink failure 与最终 discarded pending 一并带入统一生命周期摘要，供上层诊断正常运行中的记录缺口。
+周期 flush 和有序 shutdown 会把详情前端队列的 committed、pending、queue-full、sink failure 与最终 discarded pending 一并带入统一生命周期摘要，供上层诊断正常运行中的记录缺口。详情热路径只发布低基数计数和安全原因，状态由 `DnsService` 共享，不因普通 Runtime reload 重置。
 
 Policy Core 通过 `DnsCore::resolve_with_observation` 提供已经完成策略判定的低基数 `strategy_id`、answer `source`、`cache_status`、`client_bucket`、独立的策略目标 `upstream_id` 与实际顶层 `upstream_member_id`，以及不含规则文本/matcher 的 matched rule/resource 摘要和 typed `ResourceVersion`；service 使用同一份 observation 写入现有 stats 维度与 resolve detail，避免从请求字段推测命中结果。client bucket/upstream/member/resource 仅接受已验证配置 ID，未知匹配不写入；stats 继续按实际成员优先聚合，`resolve_log` 则分别保存目标与成员存在性、规则来源、资源存在性、ordinal 和 `epoch:revision`。配置 ID 在详情表中统一脱敏为 `<present>`，不复制原值。
 
@@ -234,6 +234,7 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 - [x] 完成受 `cfg(test)` 限定的 Busy/DiskFull adapter fault 注入、Unavailable→Degraded 分类和成功恢复测试；
 - [x] 接入 Policy Core 的 source/cache/strategy/client bucket/selected upstream observation，并仅为实际 DNS response 聚合完整 RCODE；
 - [x] 消费详情 sink 的明确丢弃 disposition，按原因累计并限频报告 backpressure；
+- [x] 将详情 queue-full/sink 错误发布为 Storage degraded/gap，并在后续 accepted 时恢复 Healthy；
 - [x] 将详情前端队列的 flush/shutdown 结果纳入 `StorageRuntime` 统一生命周期摘要；
 - [x] 在 telemetry 关闭前发布 Storage `Stopping` health 和纯计数 shutdown 摘要；
 - [x] 通过 schema v2 拆分 `upstream_id`/`upstream_member_id`，并持久化 matched rule/resource 摘要；
@@ -247,6 +248,6 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 
 阶段 131 的 `StorageRuntime` 定向测试已验证详情事件从前端队列提交至 SQLite worker，且统一 flush/shutdown 摘要保留前端 committed 与 discarded pending 计数。
 
-阶段 133 复用受监督 StorageRuntime 停机测试，验证 service drain 后可正常取得统一摘要；生产路径会在 Telemetry 关闭前输出 stats/backend/resolve-log/detail 的安全计数，不记录请求内容。阶段 140–142 拆分并落库策略目标、实际顶层成员和 matched rule/resource 摘要；阶段 143–144 分别补齐聚合统计的完整 RCODE，以及详情表的 header RCODE、failure class 和 cancellation reason；阶段 148 将匹配时的资源 epoch/revision 写入既有 `resource_revision` 列。
+阶段 133 复用受监督 StorageRuntime 停机测试，验证 service drain 后可正常取得统一摘要；生产路径会在 Telemetry 关闭前输出 stats/backend/resolve-log/detail 的安全计数，不记录请求内容。阶段 140–142 拆分并落库策略目标、实际顶层成员和 matched rule/resource 摘要；阶段 143–144 分别补齐聚合统计的完整 RCODE，以及详情表的 header RCODE、failure class 和 cancellation reason；阶段 148 将匹配时的资源 epoch/revision 写入既有 `resource_revision` 列。阶段 153 补齐详情 writer 的 queue-full/sink-error degraded health 和 accepted recovery，5 项 Service 定向测试覆盖状态字段、Storage 生命周期与 reload。
 
-当前实现进度：**92%**（内存 stats/ledger、业务 schema v2 migration、SQLx SQLite stats/detail transaction、StatsPersistenceWorker epoch/batch 提交与失败保留、完整统计 RCODE、脱敏详情记录、group member、matched rule/resource revision、header RCODE、failure 与 cancellation 摘要落库、bounded writer channel/batch flush、详情 backpressure 分类计数/限频事件及生命周期摘要、年龄/软阈值/硬上限策略、worker shutdown drain/周期 flush、统一生命周期 facade、`StorageRuntime`/DnsService/Supervisor 接线、pending 内存保护、SQLite 首轮 degraded/recovery 和 adapter-level Busy/DiskFull fault 注入；OS/SQLite 真实故障和故障压力测试仍未完成）。
+当前实现进度：**93%**（已完成内存 stats/ledger、schema v2、SQLite stats/detail transaction、幂等提交、脱敏详情与策略元数据、bounded writer、详情 backpressure health/recovery、统一 flush/shutdown、pending 内存保护及 adapter-level Busy/DiskFull 注入；OS/SQLite 真实故障和故障压力测试仍未完成）。

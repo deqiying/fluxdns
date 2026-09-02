@@ -170,6 +170,7 @@ pub struct DnsService {
     storage: Option<Arc<tokio::sync::Mutex<StorageRuntime>>>,
     stats_worker: Option<Arc<StatsPersistenceWorker>>,
     resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
+    resolve_detail_drops: Arc<ResolveDetailDropCounters>,
     telemetry: Option<Arc<TelemetryWriter>>,
 }
 
@@ -255,7 +256,14 @@ impl DnsService {
             }
             None => (None, None, None),
         };
-        let core = instrumented_core(core, stats_worker.clone(), resolve_event_sink.clone());
+        let resolve_detail_drops = Arc::new(ResolveDetailDropCounters::default());
+        let core = instrumented_core(
+            core,
+            stats_worker.clone(),
+            resolve_event_sink.clone(),
+            telemetry.clone(),
+            Arc::clone(&resolve_detail_drops),
+        );
         if let Some(storage) = &storage {
             spawn_storage_task(&mut supervisor, Arc::clone(storage), telemetry.clone())?;
         }
@@ -318,6 +326,7 @@ impl DnsService {
             storage,
             stats_worker,
             resolve_event_sink,
+            resolve_detail_drops,
             telemetry,
         })
     }
@@ -563,6 +572,8 @@ impl DnsService {
             core,
             self.stats_worker.clone(),
             self.resolve_event_sink.clone(),
+            self.telemetry.clone(),
+            Arc::clone(&self.resolve_detail_drops),
         )
     }
 
@@ -715,6 +726,8 @@ fn instrumented_core(
     core: Arc<dyn DnsCore>,
     stats_worker: Option<Arc<StatsPersistenceWorker>>,
     resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
+    telemetry: Option<Arc<TelemetryWriter>>,
+    resolve_detail_drops: Arc<ResolveDetailDropCounters>,
 ) -> Arc<dyn DnsCore> {
     if stats_worker.is_none() && resolve_event_sink.is_none() {
         return core;
@@ -723,7 +736,8 @@ fn instrumented_core(
         inner: core,
         stats_worker,
         resolve_event_sink,
-        resolve_detail_drops: ResolveDetailDropCounters::default(),
+        telemetry,
+        resolve_detail_drops,
     })
 }
 
@@ -731,22 +745,35 @@ struct ObservedDnsCore {
     inner: Arc<dyn DnsCore>,
     stats_worker: Option<Arc<StatsPersistenceWorker>>,
     resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
-    resolve_detail_drops: ResolveDetailDropCounters,
+    telemetry: Option<Arc<TelemetryWriter>>,
+    resolve_detail_drops: Arc<ResolveDetailDropCounters>,
 }
 
 #[derive(Default)]
 struct ResolveDetailDropCounters {
     queue_full: AtomicU64,
     policy: AtomicU64,
+    failed: AtomicU64,
+    degraded: std::sync::atomic::AtomicBool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ResolveDetailHealthUpdate {
+    state: ComponentHealthState,
+    retry_count: u64,
+    safe_reason: Option<&'static str>,
 }
 
 impl ResolveDetailDropCounters {
     /// 累计详情记录的明确丢弃，并按 2 的幂次输出限频状态事件。
-    fn record(&self, disposition: ResolveEventDisposition) {
+    fn record(&self, disposition: ResolveEventDisposition) -> Option<ResolveDetailHealthUpdate> {
+        if disposition == ResolveEventDisposition::Accepted {
+            return self.recover_if_needed();
+        }
         let (reason, counter) = match disposition {
             ResolveEventDisposition::DroppedQueueFull => ("queue_full", &self.queue_full),
             ResolveEventDisposition::DroppedByPolicy => ("policy", &self.policy),
-            ResolveEventDisposition::Accepted | ResolveEventDisposition::Disabled => return,
+            ResolveEventDisposition::Accepted | ResolveEventDisposition::Disabled => return None,
         };
         let dropped_total = counter.fetch_add(1, Ordering::Relaxed).saturating_add(1);
         if dropped_total.is_power_of_two() {
@@ -758,6 +785,57 @@ impl ResolveDetailDropCounters {
                 "resolve_detail_record_dropped"
             );
         }
+        if disposition == ResolveEventDisposition::DroppedByPolicy {
+            return None;
+        }
+        self.degraded_update(
+            dropped_total.is_power_of_two(),
+            "resolve detail queue is full",
+        )
+    }
+
+    /// 累计详情 sink 错误，并以同一限频规则生成 degraded health 更新。
+    fn record_failure(&self) -> Option<ResolveDetailHealthUpdate> {
+        let failed_total = self
+            .failed
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        self.degraded_update(
+            failed_total.is_power_of_two(),
+            "resolve detail record failed",
+        )
+    }
+
+    /// 首次故障和 2 的幂次累计点发布更新，避免持续故障淹没有界 telemetry 队列。
+    fn degraded_update(
+        &self,
+        publish_counter_update: bool,
+        safe_reason: &'static str,
+    ) -> Option<ResolveDetailHealthUpdate> {
+        let was_degraded = self.degraded.swap(true, Ordering::AcqRel);
+        (!was_degraded || publish_counter_update).then(|| ResolveDetailHealthUpdate {
+            state: ComponentHealthState::Degraded,
+            retry_count: self.total_failures(),
+            safe_reason: Some(safe_reason),
+        })
+    }
+
+    /// 下一条成功接收的详情记录负责关闭本地 degraded 生命周期。
+    fn recover_if_needed(&self) -> Option<ResolveDetailHealthUpdate> {
+        self.degraded
+            .swap(false, Ordering::AcqRel)
+            .then(|| ResolveDetailHealthUpdate {
+                state: ComponentHealthState::Healthy,
+                retry_count: self.total_failures(),
+                safe_reason: None,
+            })
+    }
+
+    /// 返回队列溢出和 sink 错误的累计次数；主动策略丢弃不计入故障重试。
+    fn total_failures(&self) -> u64 {
+        self.queue_full
+            .load(Ordering::Relaxed)
+            .saturating_add(self.failed.load(Ordering::Relaxed))
     }
 
     #[cfg(test)]
@@ -899,7 +977,13 @@ impl ObservedDnsCore {
             runtime_revision: request.context.runtime_revision,
         };
         match sink.try_record(event) {
-            Ok(disposition) => self.resolve_detail_drops.record(disposition),
+            Ok(disposition) => {
+                if let Some(update) = self.resolve_detail_drops.record(disposition)
+                    && let Some(telemetry) = &self.telemetry
+                {
+                    publish_resolve_detail_health(telemetry, update);
+                }
+            }
             Err(error) => {
                 tracing::warn!(
                     event = "resolve_detail_record_failed",
@@ -908,6 +992,11 @@ impl ObservedDnsCore {
                     operation = error.operation(),
                     "resolve_detail_record_failed"
                 );
+                if let Some(update) = self.resolve_detail_drops.record_failure()
+                    && let Some(telemetry) = &self.telemetry
+                {
+                    publish_resolve_detail_health(telemetry, update);
+                }
             }
         }
     }
@@ -1014,6 +1103,33 @@ fn publish_component_health(
         tracing::debug!(
             event = "telemetry_health_publish_failed",
             component = ?component,
+            class = error.class().as_str(),
+            operation = error.operation(),
+            "telemetry_health_publish_failed"
+        );
+    }
+}
+
+/// 将详情 writer 的限频状态变化发布为低基数 Storage health 事件。
+fn publish_resolve_detail_health(telemetry: &TelemetryWriter, update: ResolveDetailHealthUpdate) {
+    let now = Instant::now();
+    if let Err(error) = HealthSink::update(
+        telemetry,
+        ComponentHealthEvent {
+            component: TelemetryComponent::Storage,
+            state: update.state,
+            first_seen: now,
+            last_changed: now,
+            last_success: (update.state == ComponentHealthState::Healthy).then_some(now),
+            retry_count: update.retry_count,
+            stale_age_micros: None,
+            persistence_gap: update.state != ComponentHealthState::Healthy,
+            safe_reason: update.safe_reason,
+        },
+    ) {
+        tracing::debug!(
+            event = "telemetry_health_publish_failed",
+            component = ?TelemetryComponent::Storage,
             class = error.class().as_str(),
             operation = error.operation(),
             "telemetry_health_publish_failed"
@@ -2162,9 +2278,10 @@ mod tests {
     use tokio::net::{TcpStream, UdpSocket};
 
     use super::{
-        ResolveDetailDropCounters, ServiceError, publish_cache_shutdown_health,
-        publish_component_health, response_header_rcode, response_rcode, spawn_telemetry_task,
-        spawn_transport_task, task_failure,
+        ResolveDetailDropCounters, ResolveDetailHealthUpdate, ServiceError,
+        publish_cache_shutdown_health, publish_component_health, publish_resolve_detail_health,
+        response_header_rcode, response_rcode, spawn_telemetry_task, spawn_transport_task,
+        task_failure,
     };
     use crate::cache::CachePersistenceRunSummary;
     use crate::config::{ConfigLoader, LoadOptions};
@@ -2244,11 +2361,33 @@ mod tests {
     fn resolve_detail_drops_are_counted_by_reason() {
         let counters = ResolveDetailDropCounters::default();
 
-        counters.record(ResolveEventDisposition::Accepted);
-        counters.record(ResolveEventDisposition::Disabled);
-        counters.record(ResolveEventDisposition::DroppedQueueFull);
-        counters.record(ResolveEventDisposition::DroppedQueueFull);
-        counters.record(ResolveEventDisposition::DroppedByPolicy);
+        assert_eq!(counters.record(ResolveEventDisposition::Accepted), None);
+        assert_eq!(counters.record(ResolveEventDisposition::Disabled), None);
+        let first = counters
+            .record(ResolveEventDisposition::DroppedQueueFull)
+            .unwrap();
+        assert_eq!(first.state, ComponentHealthState::Degraded);
+        assert_eq!(first.retry_count, 1);
+        assert_eq!(first.safe_reason, Some("resolve detail queue is full"));
+        assert_eq!(
+            counters
+                .record(ResolveEventDisposition::DroppedQueueFull)
+                .unwrap()
+                .retry_count,
+            2
+        );
+        assert_eq!(
+            counters.record(ResolveEventDisposition::DroppedByPolicy),
+            None
+        );
+        let failed = counters.record_failure().unwrap();
+        assert_eq!(failed.retry_count, 3);
+        assert_eq!(failed.safe_reason, Some("resolve detail record failed"));
+        let recovered = counters.record(ResolveEventDisposition::Accepted).unwrap();
+        assert_eq!(recovered.state, ComponentHealthState::Healthy);
+        assert_eq!(recovered.retry_count, 3);
+        assert_eq!(recovered.safe_reason, None);
+        assert_eq!(counters.record(ResolveEventDisposition::Accepted), None);
 
         assert_eq!(counters.load(ResolveEventDisposition::DroppedQueueFull), 2);
         assert_eq!(counters.load(ResolveEventDisposition::DroppedByPolicy), 1);
@@ -2371,6 +2510,44 @@ mod tests {
             health_events[0].safe_reason,
             Some("cache persistence shutdown has gaps")
         );
+    }
+
+    #[tokio::test]
+    async fn resolve_detail_health_publishes_gap_and_recovery() {
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(4, output.clone()).unwrap();
+        publish_resolve_detail_health(
+            &writer,
+            ResolveDetailHealthUpdate {
+                state: ComponentHealthState::Degraded,
+                retry_count: 2,
+                safe_reason: Some("resolve detail queue is full"),
+            },
+        );
+        publish_resolve_detail_health(
+            &writer,
+            ResolveDetailHealthUpdate {
+                state: ComponentHealthState::Healthy,
+                retry_count: 2,
+                safe_reason: None,
+            },
+        );
+
+        crate::ports::telemetry::LogSink::flush(
+            &writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        let health_events = output.health_events.lock().unwrap();
+        assert_eq!(health_events.len(), 2);
+        assert_eq!(health_events[0].component, TelemetryComponent::Storage);
+        assert_eq!(health_events[0].state, ComponentHealthState::Degraded);
+        assert!(health_events[0].persistence_gap);
+        assert_eq!(health_events[1].state, ComponentHealthState::Healthy);
+        assert_eq!(health_events[1].retry_count, 2);
+        assert!(!health_events[1].persistence_gap);
+        assert!(health_events[1].last_success.is_some());
     }
 
     fn completion(

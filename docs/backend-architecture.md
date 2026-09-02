@@ -388,7 +388,7 @@ supervisor 对 task 使用结构化生命周期和显式故障等级，不以“
 | 单个请求解析、上游超时或客户端取消 | `request-local`；记录结构化原因并结束该请求 | 不影响其他请求 |
 | 单个资源刷新失败、内容校验不匹配或解析失败 | `degraded`；保留该资源最后有效 snapshot，指数退避并封顶重试；超过 stale horizon 只升级告警，不自动清空或替换为半成品 | 继续使用旧资源；无旧 snapshot 的引用请求 fail-closed；不清空缓存 |
 | 资源刷新产生乱序结果 | `stale-result`；按 per-resource epoch/CAS 丢弃旧结果 | 不改变当前 runtime |
-| 详情 `resolve_log` writer 队列满/提交失败 | `degraded`；丢弃详情并累计 `dropped_detail_records`，持续重试 | 不影响 DNS；不影响聚合统计 writer |
+| 详情 `resolve_log` writer 队列满/提交失败 | `degraded`；丢弃详情并累计计数，首次及 2 的幂次累计点发布 gap，下一条 accepted 恢复 Healthy | 不影响 DNS；不影响聚合统计 writer |
 | 聚合统计 writer 运行时数据库短暂不可写 | `degraded`；写入进程内补偿计数并重试，恢复后按序补写 | DNS 继续服务；进程崩溃前未落盘部分需报告为 persistence gap |
 | 聚合统计 pending batch/补偿计数达到固定内存保护上限 | `fatal`；停止接收新请求，执行有限 flush 后退出 | 避免数据库长期故障导致 OOM；退出前报告未持久化 gap |
 | cache persistence writer 失败或队列满 | `degraded`；失败批次计数后继续，队列满则丢弃本批，始终保留内存 cache；停机时汇总 persistence gap | 不影响 DNS；重启后可能丢失未持久化 cache |
@@ -563,7 +563,7 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 
 逻辑存储至少分为 `stats_daily`（按日/有界维度的聚合）、`stats_batch_ledger`（批次幂等与 checkpoint）和 `resolve_log`（可选详情）三类职责；物理表字段可随 SQLite schema version 演进，但不能把详情淘汰策略和统计批次 ledger 合并成一个不可区分的表。
 
-`resolve_log.enable` 只控制每次解析请求的详情记录。开启时由独立的有界 `ResolveLogWriter` 批量写入同一数据库，并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰；详情保存 DNS header RCODE、由 `OutcomeClass` 压缩的 failure class、首个协作式 cancellation reason，以及匹配时存在的资源 `epoch:revision`。队列满、数据库忙或硬上限命中时丢弃详情并递增 `dropped_detail_records`，DNS 和聚合统计都不能被拖慢。关闭时不写详情表，但仍写聚合统计。
+`resolve_log.enable` 只控制每次解析请求的详情记录。开启时由独立的有界 `ResolveLogWriter` 批量写入同一数据库，并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰；详情保存 DNS header RCODE、由 `OutcomeClass` 压缩的 failure class、首个协作式 cancellation reason，以及匹配时存在的资源 `epoch:revision`。队列满、数据库忙或硬上限命中时丢弃详情并递增 `dropped_detail_records`，DNS 和聚合统计都不能被拖慢；queue-full/sink 错误会限频发布 Storage degraded/gap，下一条 accepted 恢复 Healthy，主动策略丢弃不误报故障。关闭时不写详情表，但仍写聚合统计。
 
 这里的“`resolve_log` 依赖数据库”表示详情的权威持久化后端是 `database`，不表示请求线程同步写库或在有界容量下承诺绝对无损；若未来要求无损审计，应另行定义持久化 spool/背压和磁盘配额，不能悄悄改变当前 `max_records` 语义。
 
