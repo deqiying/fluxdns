@@ -471,7 +471,7 @@ aggregator 收到第一个 terminal response 后立即完成客户端响应。�
 
 ## 9. DoH 与连接接入层
 
-DoH route 同时实现 GET/POST，并在进入 DNS core 前完成 method、URI、Host cardinality、Content-Type、body/wire length 和 DNS parse 校验。HTTP/1.1 缺失 `Host` 或任意 HTTP/1.x 重复 `Host` 返回 400 并关闭连接；有效 DNS 错误响应仍返回 HTTP 2xx，HTTP 错误只表示没有形成可处理的 DNS transaction。
+DoH route 同时实现 GET/POST，并在进入 DNS core 前完成 request-line、Host cardinality、Content-Type、body/wire length 和 DNS parse 校验。method 必须符合 token 语法，request-target 只接受可见 ASCII；`application/dns-message` 的 type/subtype 大小写不敏感且不接受未定义参数。HTTP/1.1 缺失 `Host` 或任意 HTTP/1.x 重复 `Host` 返回 400 并关闭连接；有效 DNS 错误响应仍返回 HTTP 2xx，HTTP 错误只表示没有形成可处理的 DNS transaction。
 
 HTTP access log 和 tracing 不记录 query string、raw DNS wire、完整 `client_id` 或 ECS；只记录 route template、方法、状态、wire 字节数和脱敏后的请求关联 ID。
 

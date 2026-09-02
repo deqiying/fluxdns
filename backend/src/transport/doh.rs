@@ -1066,6 +1066,11 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
     if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
         return Err(DohHttpError::Malformed);
     }
+    // 严格校验 method token 和可见 ASCII request-target，避免上下游采用不同宽松规则。
+    if !parts[0].bytes().all(is_token_byte) || !parts[1].bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return Err(DohHttpError::Malformed);
+    }
     let method = match parts[0] {
         "GET" => DohHttpMethod::Get,
         "POST" => DohHttpMethod::Post,
@@ -1204,7 +1209,10 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
             if content_length.is_none() {
                 return Err(DohHttpError::MissingContentLength);
             }
-            if content_type.as_deref() != Some("application/dns-message") {
+            if !content_type
+                .as_deref()
+                .is_some_and(|value| value.eq_ignore_ascii_case("application/dns-message"))
+            {
                 return Err(DohHttpError::UnsupportedMediaType);
             }
             if body.is_empty() {
@@ -1787,7 +1795,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_post_and_requires_exact_media_type() {
+    fn parses_post_and_requires_supported_media_type() {
         let wire = wire();
         let request_bytes = request(
             "POST",
@@ -1803,6 +1811,17 @@ mod tests {
             wire
         );
 
+        let mixed_case = request(
+            "POST",
+            "/dns",
+            &format!(
+                "Content-Type: Application/DNS-Message\r\nContent-Length: {}\r\n",
+                wire.len()
+            ),
+            &wire,
+        );
+        assert_eq!(try_parse_request(&mixed_case).unwrap().unwrap().wire, wire);
+
         let invalid = request(
             "POST",
             "/dns",
@@ -1814,6 +1833,20 @@ mod tests {
         );
         assert_eq!(
             try_parse_request(&invalid),
+            Err(DohHttpError::UnsupportedMediaType)
+        );
+
+        let parameterized = request(
+            "POST",
+            "/dns",
+            &format!(
+                "Content-Type: application/dns-message; charset=utf-8\r\nContent-Length: {}\r\n",
+                wire.len()
+            ),
+            &wire,
+        );
+        assert_eq!(
+            try_parse_request(&parameterized),
             Err(DohHttpError::UnsupportedMediaType)
         );
     }
@@ -1839,6 +1872,31 @@ mod tests {
         let http10 = format!("GET /dns?dns={encoded} HTTP/1.0\r\n\r\n").into_bytes();
         let parsed = try_parse_request(&http10).unwrap().unwrap();
         assert!(parsed.connection_close);
+    }
+
+    #[test]
+    fn rejects_invalid_request_line_tokens() {
+        let encoded = base64url(&wire());
+        let invalid_method =
+            format!("G\tET /dns?dns={encoded} HTTP/1.1\r\nHost: doh.test\r\n\r\n").into_bytes();
+        assert_eq!(
+            try_parse_request(&invalid_method),
+            Err(DohHttpError::Malformed)
+        );
+
+        let invalid_target =
+            format!("GET /dns?dns={encoded}\0 HTTP/1.1\r\nHost: doh.test\r\n\r\n").into_bytes();
+        assert_eq!(
+            try_parse_request(&invalid_target),
+            Err(DohHttpError::Malformed)
+        );
+
+        let unsupported =
+            format!("PUT /dns?dns={encoded} HTTP/1.1\r\nHost: doh.test\r\n\r\n").into_bytes();
+        assert_eq!(
+            try_parse_request(&unsupported),
+            Err(DohHttpError::MethodNotAllowed)
+        );
     }
 
     #[test]
