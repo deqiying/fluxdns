@@ -2,7 +2,7 @@
 
 > 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Policy 可消费 async PreparedRuntime 提供的 compiled file/remote snapshot，并已由 ActiveRuntime remote/file refresh worker 驱动版本化 atomic live swap，Runtime snapshot 资源摘要可原子更新；Policy Core 已将匹配后的 client bucket 作为低基数 observation 首轮输出，配置候选级 reload 尚未实现
 >
-> 更新日期：2026-09-01
+> 更新日期：2026-09-02
 >
 > 目标代码：`backend/src/policy/*`
 >
