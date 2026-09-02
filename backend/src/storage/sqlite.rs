@@ -68,6 +68,12 @@ pub struct SqliteResolveDetailFlushSummary {
     pub dropped: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SqliteResolveDetailRunSummary {
+    pub flush: SqliteResolveDetailFlushSummary,
+    pub failed_flushes: u64,
+}
+
 /// 将已脱敏的详情记录送入独立 SQLite writer channel。
 pub struct SqliteResolveDetailWriter {
     sender: mpsc::Sender<ResolveDetailRecord>,
@@ -190,6 +196,51 @@ impl SqliteResolveDetailWorker {
             total.dropped = total.dropped.saturating_add(summary.dropped);
         }
         Ok(total)
+    }
+
+    pub async fn run(
+        mut self,
+        cancellation: crate::dns::Cancellation,
+        flush_interval: Duration,
+        operation_timeout: Duration,
+    ) -> Result<SqliteResolveDetailRunSummary, PortError> {
+        if flush_interval.is_zero() || operation_timeout.is_zero() {
+            return Err(
+                PortError::new(PortErrorClass::InvalidInput, "sqlite_resolve_log.run")
+                    .with_safe_context("flush interval and operation timeout must be positive"),
+            );
+        }
+        let mut summary = SqliteResolveDetailRunSummary::default();
+        loop {
+            tokio::select! {
+                _ = cancellation.cancelled() => break,
+                _ = tokio::time::sleep(flush_interval) => {
+                    match self
+                        .flush(Deadline::new(Instant::now() + operation_timeout))
+                        .await
+                    {
+                        Ok(flush) => {
+                            summary.flush.committed = summary.flush.committed.saturating_add(flush.committed);
+                            summary.flush.evicted = summary.flush.evicted.saturating_add(flush.evicted);
+                            summary.flush.dropped = summary.flush.dropped.saturating_add(flush.dropped);
+                        }
+                        Err(_) => {
+                            summary.failed_flushes = summary.failed_flushes.saturating_add(1);
+                        }
+                    }
+                }
+            }
+        }
+        let final_flush = self
+            .shutdown(Deadline::new(Instant::now() + operation_timeout))
+            .await?;
+        summary.flush.committed = summary
+            .flush
+            .committed
+            .saturating_add(final_flush.committed);
+        summary.flush.evicted = summary.flush.evicted.saturating_add(final_flush.evicted);
+        summary.flush.dropped = summary.flush.dropped.saturating_add(final_flush.dropped);
+        Ok(summary)
     }
 }
 
@@ -801,7 +852,7 @@ mod tests {
         SqliteResolveDetailLimits, SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError,
         SqliteStorageBackend,
     };
-    use crate::dns::{Deadline, RuntimeRevision, TransportClass};
+    use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
         ResolveEvent, ResolveEventSink, SchemaVersion, StatsBatch, StatsEvent, StorageBackend,
         StorageOperation, StorageTransaction,
@@ -1225,6 +1276,56 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 3);
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_detail_worker_run_flushes_periodically_and_drains_on_cancel() {
+        let path = path();
+        let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
+        let (sink, worker) =
+            SqliteResolveDetailWriter::channel(Arc::clone(&backend), 2, 2).unwrap();
+        let writer = ResolveLogWriter::new(true, 2, sink).unwrap();
+        writer
+            .try_record(ResolveEvent {
+                occurred_at: SystemTime::now(),
+                duration_started_at: Instant::now(),
+                request_digest: Arc::from("digest"),
+                listener_id: Arc::from("listener"),
+                route_id: None,
+                client_bucket: None,
+                strategy_id: None,
+                transport: TransportClass::Datagram,
+                qname: Arc::from("example.com."),
+                qtype: 1,
+                qclass: 1,
+                outcome: OutcomeClass::Success,
+                cache_status: CacheStatus::Miss,
+                runtime_revision: RuntimeRevision(1),
+            })
+            .unwrap();
+        assert_eq!(writer.flush().committed, 1);
+        let cancellation = Cancellation::new();
+        let task = tokio::spawn(worker.run(
+            cancellation.clone(),
+            Duration::from_millis(5),
+            Duration::from_secs(5),
+        ));
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        cancellation.cancel(CancelReason::Shutdown);
+        let summary = task.await.unwrap().unwrap();
+        assert_eq!(summary.flush.committed, 1);
+        assert_eq!(summary.flush.evicted, 0);
+        assert_eq!(summary.flush.dropped, 0);
+        assert_eq!(summary.failed_flushes, 0);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1);
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));

@@ -15,6 +15,7 @@ pub use resolve_log::{
     ResolveLogShutdownSummary, ResolveLogWriter,
 };
 pub use sqlite::{
+    SqliteResolveDetailFlushSummary, SqliteResolveDetailLimits, SqliteResolveDetailRunSummary,
     SqliteResolveDetailWorker, SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError,
     SqliteStorageBackend, SqliteStorageBackendBuildError,
 };
