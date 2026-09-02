@@ -175,6 +175,6 @@ Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
 - [x] 增加 bounded TCP byte-stream capability，区分 data/clean EOF 并覆盖 deadline/cancellation。
 - [x] 增加脱敏 TLS server material、listener accept 和连接升级 capability，不向 Ports 泄漏 Rustls/Tokio 类型。
 
-阶段 1/3 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。系统 socket bounded byte-stream 定向测试 4 项通过，TLS loopback 握手定向测试 1 项通过。
+阶段 1/3 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。系统 socket bounded byte-stream 定向测试 4 项通过，TLS loopback 握手定向测试 1 项通过。阶段 147 复核 `ports::` 聚焦测试 33 项全部通过；完整生产 adapter 故障矩阵和 conformance 仍随各实现模块验收。
 
-当前实现进度：**40%**。
+当前实现进度：**70%**。typed contract、fake kit 和主要生产 adapter 接线已具备真实跨模块证据；完整 adapter 故障/conformance 矩阵尚未完成，因此不标记为 85% 以上。

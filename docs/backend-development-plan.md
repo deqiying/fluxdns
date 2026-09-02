@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 146（Transport capability 映射收口）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 147（Ports contract 基线复核）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -35,8 +35,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **81.3%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **83.2%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **83.7%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **85.3%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -44,7 +44,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 模块 | 实现状态 | 进度 | 权重 |
 | --- | --- | ---: | ---: |
 | Application | 实现中 | 60% | 4% |
-| Ports | 实现中 | 40% | 8% |
+| Ports | 已实现待验证 | 70% | 8% |
 | Config | 已验证 | 100% | 10% |
 | Runtime | 实现中 | 75% | 12% |
 | Transport | 实现中 | 77% | 11% |
@@ -59,9 +59,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 进度计算：
 
 ```text
-4%×60% + 8%×40% + 10%×100% + 12%×75% + 11%×77%
+4%×60% + 8%×70% + 10%×100% + 12%×75% + 11%×77%
 + 10%×81% + 8%×82% + 10%×99% + 9%×82% + 7%×90%
-+ 8%×91% + 3%×91% ≈ 81.3%
++ 8%×91% + 3%×91% ≈ 83.7%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 146 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 147 |
 
 ### 增量里程碑
 
@@ -119,16 +119,16 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 144 | 解析详情结果分类 | `resolve_log` 写入 header RCODE、低基数 failure class 和首个取消原因；复用既有 outcome/cancellation 契约 |
 | 145 | DoH GET/POST 跨协议契约 | 真实 UDP/TCP/plain DoH GET/POST 统一验证成功、否定和错误响应；大响应继续验证 UDP TC 与 stream 完整响应 |
 | 146 | Transport capability 映射收口 | v1 Datagram/Stream/Multiplexed 能力映射由 transport 模块统一提供；service 不再持有重复协议知识 |
+| 147 | Ports contract 基线复核 | 33 项聚焦测试覆盖 typed ports、脱敏、exactly-once、取消、CAS 与 single-flight；将陈旧进度保守校正至真实跨模块链路口径 |
 
 ### 当前阶段验证
 
 ```text
-rustfmt --edition 2024 backend/src/transport/mod.rs backend/src/service.rs
-cargo test --manifest-path backend/Cargo.toml service::tests::service_capabilities_are_transport_specific_and_stable
+cargo test --manifest-path backend/Cargo.toml ports::
 git diff --check
 ```
 
-以上均通过；阶段 146 仅格式化 2 个受影响的 Rust 文件并执行 1 项 capability 定向测试，未重复阶段 135 已通过的全量后端验收。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+以上均通过；阶段 147 仅复核 Ports 33 项聚焦测试并更新证据口径，无 Rust 代码变更，也未重复阶段 135 已通过的全量后端验收。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 
