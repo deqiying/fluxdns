@@ -9,6 +9,7 @@ use crate::ports::storage::{
 };
 use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 use crate::ports::{PortError, PortErrorClass};
+use crate::resource::ResourceVersion;
 
 const MAX_LISTENER_ID_BYTES: usize = 128;
 
@@ -29,6 +30,7 @@ pub struct ResolveDetailRecord {
     matched_rule_source: Option<ResolveRuleSource>,
     has_matched_resource: bool,
     matched_rule_ordinal: Option<u64>,
+    resource_version: Option<ResourceVersion>,
     has_request_digest: bool,
     transport: TransportClass,
     qname_byte_len: u16,
@@ -67,6 +69,7 @@ impl ResolveDetailRecord {
             matched_rule_source: event.matched_rule_source,
             has_matched_resource: event.matched_resource_id.is_some(),
             matched_rule_ordinal: event.matched_rule_ordinal,
+            resource_version: event.resource_version,
             has_request_digest: !event.request_digest.is_empty(),
             transport: event.transport,
             qname_byte_len,
@@ -123,6 +126,11 @@ impl ResolveDetailRecord {
 
     pub const fn matched_rule_ordinal(&self) -> Option<u64> {
         self.matched_rule_ordinal
+    }
+
+    /// 返回命中资源的 epoch/revision；未命中资源时返回 `None`。
+    pub const fn resource_version(&self) -> Option<ResourceVersion> {
+        self.resource_version
     }
 
     pub const fn has_request_digest(&self) -> bool {
@@ -185,6 +193,7 @@ impl fmt::Debug for ResolveDetailRecord {
             .field("matched_rule_source", &self.matched_rule_source)
             .field("has_matched_resource", &self.has_matched_resource)
             .field("matched_rule_ordinal", &self.matched_rule_ordinal)
+            .field("resource_version", &self.resource_version)
             .field("has_request_digest", &self.has_request_digest)
             .field("transport", &self.transport)
             .field("qname_byte_len", &self.qname_byte_len)
@@ -395,6 +404,7 @@ mod tests {
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
     use crate::ports::{PortError, PortErrorClass};
+    use crate::resource::ResourceVersion;
 
     use super::{ResolveDetailRecord, ResolveDetailWriter, ResolveLogBuildError, ResolveLogWriter};
 
@@ -453,6 +463,7 @@ mod tests {
             matched_rule_source: Some(ResolveRuleSource::RuleSet),
             matched_resource_id: Some(Arc::from("resource-private-id")),
             matched_rule_ordinal: Some(3),
+            resource_version: Some(ResourceVersion::new(2, 1)),
             transport: TransportClass::Datagram,
             qname: Arc::from("private.example.test."),
             qtype: 1,
@@ -490,6 +501,7 @@ mod tests {
         );
         assert!(record.has_matched_resource());
         assert_eq!(record.matched_rule_ordinal(), Some(3));
+        assert_eq!(record.resource_version(), Some(ResourceVersion::new(2, 1)));
         assert!(record.has_request_digest());
         assert_eq!(record.rcode(), 2);
         assert_eq!(record.cancellation_reason(), Some(CancelReason::Shutdown));

@@ -11,7 +11,7 @@ use crate::ports::PortFuture;
 use crate::ports::inbound::{EncodeErrorClass, InboundRequest};
 use crate::ports::storage::StatsSource;
 use crate::ports::telemetry::CacheStatus;
-use crate::resource::{CanonicalDomain, HostsIndex, HostsLookup, HostsRecord};
+use crate::resource::{CanonicalDomain, HostsIndex, HostsLookup, HostsRecord, ResourceVersion};
 
 use super::{CanonicalMessageError, CanonicalResponse, DnsRequest, HostsTable};
 
@@ -55,6 +55,8 @@ pub struct MatchedRuleObservation {
     pub source: MatchedRuleSource,
     /// 被命中的 hosts/rule-set 配置资源 ID。
     pub resource_id: Arc<str>,
+    /// 生成当前匹配结果的资源 epoch/revision；缺失时不推测版本。
+    pub resource_version: Option<ResourceVersion>,
     /// listener hosts 没有 strategy rule 序号，因此为 `None`。
     pub ordinal: Option<u64>,
 }

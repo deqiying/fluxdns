@@ -547,7 +547,7 @@ domain exact、suffix、regex、CIDR 等匹配结构在加载时编译，查询�
 
 `database.type`/`database.path` 是必填字段，即使 `dns.resolve_log.enable: false` 也必须打开数据库。v1 不提供关闭聚合统计的配置项：聚合统计默认开启，并且必须依赖该数据库持久化。prepare 阶段完成 SQLite 打开、schema migration、基本读写和目录权限检查；任何失败都是启动 `fatal`。
 
-storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 stats/detail/backend 生命周期顺序并暴露共享 recorder；`StorageRuntime` 已在 Application prepare 阶段按配置组装，并由 `DnsService` 注册受监督的周期 flush task，在 drain 后关闭 writer 和 backend。统计 pending batch/event 已有固定内存保护，超限时保留活动 epoch 并通过 Supervisor 升级 fatal；普通数据库不可用仍按 degraded 路径保留 pending 重试，SQLite 成功的有限操作可将状态恢复为 healthy，不可恢复 adapter 错误保持 failed。当前数据面已接入 transport/outcome 聚合及脱敏详情；Policy Core 通过可选 observation 同步提供 strategy/source/cache/client bucket、独立的策略目标 `upstream_id` 与实际顶层 `upstream_member_id`，以及不含规则文本和 matcher 的 matched rule/resource 摘要。stats 继续优先聚合实际成员；SQLite schema v2 将目标、成员和规则资源摘要拆分落库，配置 ID 仍只保存存在性标记。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
+storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 stats/detail/backend 生命周期顺序并暴露共享 recorder；`StorageRuntime` 已在 Application prepare 阶段按配置组装，并由 `DnsService` 注册受监督的周期 flush task，在 drain 后关闭 writer 和 backend。统计 pending batch/event 已有固定内存保护，超限时保留活动 epoch 并通过 Supervisor 升级 fatal；普通数据库不可用仍按 degraded 路径保留 pending 重试，SQLite 成功的有限操作可将状态恢复为 healthy，不可恢复 adapter 错误保持 failed。当前数据面已接入 transport/outcome 聚合及脱敏详情；Policy Core 通过可选 observation 同步提供 strategy/source/cache/client bucket、独立的策略目标 `upstream_id` 与实际顶层 `upstream_member_id`，以及不含规则文本和 matcher 的 matched rule/resource 摘要及 typed `ResourceVersion`。stats 继续优先聚合实际成员；SQLite schema v2 将目标、成员和规则资源摘要拆分落库，配置 ID 仍只保存存在性标记，资源版本在 SQLite 边界编码为 `epoch:revision`。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
 
 Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `TelemetryWriter`：请求线程只做有界内存排队，低优先级日志可计数丢弃，warn/error 优先保留，输出失败按安全 `PortError` 分类并重排队，flush 遵守 deadline；`StructuredTelemetryOutput` 可将已脱敏事件写入真实文件或 stderr，Application 在启动配置校验后切换共享输出目标和 reloadable level filter。typed final tracing subscriber、degraded health 发布和 supervisor task 接线仍属于后续小阶段。
 
@@ -563,7 +563,7 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 
 逻辑存储至少分为 `stats_daily`（按日/有界维度的聚合）、`stats_batch_ledger`（批次幂等与 checkpoint）和 `resolve_log`（可选详情）三类职责；物理表字段可随 SQLite schema version 演进，但不能把详情淘汰策略和统计批次 ledger 合并成一个不可区分的表。
 
-`resolve_log.enable` 只控制每次解析请求的详情记录。开启时由独立的有界 `ResolveLogWriter` 批量写入同一数据库，并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰；详情保存 DNS header RCODE、由 `OutcomeClass` 压缩的 failure class 和首个协作式 cancellation reason。队列满、数据库忙或硬上限命中时丢弃详情并递增 `dropped_detail_records`，DNS 和聚合统计都不能被拖慢。关闭时不写详情表，但仍写聚合统计。
+`resolve_log.enable` 只控制每次解析请求的详情记录。开启时由独立的有界 `ResolveLogWriter` 批量写入同一数据库，并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰；详情保存 DNS header RCODE、由 `OutcomeClass` 压缩的 failure class、首个协作式 cancellation reason，以及匹配时存在的资源 `epoch:revision`。队列满、数据库忙或硬上限命中时丢弃详情并递增 `dropped_detail_records`，DNS 和聚合统计都不能被拖慢。关闭时不写详情表，但仍写聚合统计。
 
 这里的“`resolve_log` 依赖数据库”表示详情的权威持久化后端是 `database`，不表示请求线程同步写库或在有界容量下承诺绝对无损；若未来要求无损审计，应另行定义持久化 spool/背压和磁盘配额，不能悄悄改变当前 `max_records` 语义。
 

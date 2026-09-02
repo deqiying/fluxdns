@@ -669,7 +669,7 @@ impl PolicyDnsCore {
             ClientMatch::Unknown => None,
         };
         let strategy_id = Some(Arc::from(plan.strategy.id.as_str()));
-        let matched_rule = matched_rule_observation(plan.matched_rule.as_ref());
+        let matched_rule = matched_rule_observation(&policy, plan.matched_rule.as_ref());
 
         if let Some(resource_id) = plan.hosts {
             let Some(index) = policy.index.hosts_index(&resource_id) else {
@@ -1067,27 +1067,34 @@ impl PolicyDnsCore {
 
 /// 将 Policy 内部 rule 结果压缩为不含规则文本和 matcher 内容的观测摘要。
 fn matched_rule_observation(
+    policy: &PolicyState,
     matched: Option<&crate::policy::MatchedRule>,
 ) -> Option<super::MatchedRuleObservation> {
     let matched = matched?;
-    let (source, resource_id, ordinal) = match &matched.kind {
-        MatchedRuleKind::ListenerHosts { resource } => {
-            (super::MatchedRuleSource::ListenerHosts, resource, None)
-        }
+    let (source, resource_id, resource_version, ordinal) = match &matched.kind {
+        MatchedRuleKind::ListenerHosts { resource } => (
+            super::MatchedRuleSource::ListenerHosts,
+            resource,
+            policy.host_versions.get(resource).copied(),
+            None,
+        ),
         MatchedRuleKind::Hosts { resource } => (
             super::MatchedRuleSource::StrategyHosts,
             resource,
+            policy.host_versions.get(resource).copied(),
             Some(u64::try_from(matched.ordinal).expect("rule ordinal must fit u64")),
         ),
         MatchedRuleKind::RuleSet { resource, .. } => (
             super::MatchedRuleSource::RuleSet,
             resource,
+            policy.rule_set_versions.get(resource).copied(),
             Some(u64::try_from(matched.ordinal).expect("rule ordinal must fit u64")),
         ),
     };
     Some(super::MatchedRuleObservation {
         source,
         resource_id: Arc::from(resource_id.as_str()),
+        resource_version,
         ordinal,
     })
 }
@@ -1785,7 +1792,8 @@ mod tests {
     use crate::ports::exchange::{ConnectorId, UpstreamOutcome};
     use crate::ports::{PortError, PortFuture};
     use crate::resource::{
-        CanonicalDomain, ResourceSnapshot, ResourceSourceKind, ResourceStaleStatus, RuleIndex,
+        CanonicalDomain, ResourceSnapshot, ResourceSourceKind, ResourceStaleStatus,
+        ResourceVersion, RuleIndex,
     };
     use crate::upstream::{
         DohHttpRequest, DohHttpResponseOwned, DohHttpTransport, UpstreamAttempt,
@@ -3451,6 +3459,7 @@ strategy:
             .expect("hosts response must include matched rule");
         assert_eq!(matched.source, MatchedRuleSource::StrategyHosts);
         assert_eq!(matched.resource_id.as_ref(), "local-hosts");
+        assert_eq!(matched.resource_version, Some(ResourceVersion::new(1, 1)));
         assert_eq!(matched.ordinal, Some(0));
 
         let nodata = core
@@ -3477,6 +3486,7 @@ strategy:
             .expect("rule-set response must include matched rule");
         assert_eq!(matched.source, MatchedRuleSource::RuleSet);
         assert_eq!(matched.resource_id.as_ref(), "dynamic-rules");
+        assert_eq!(matched.resource_version, Some(ResourceVersion::new(1, 1)));
         assert_eq!(matched.ordinal, Some(0));
     }
 
@@ -3535,8 +3545,8 @@ strategy:
         );
     }
 
-    #[test]
-    fn policy_core_publishes_new_rule_set_snapshot_and_rejects_stale_version() {
+    #[tokio::test]
+    async fn policy_core_publishes_new_rule_set_snapshot_and_rejects_stale_version() {
         let core = PolicyDnsCore::from_config(rule_config().as_ref(), 42).unwrap();
         let evaluate = |name: &str| {
             let request = request(name, RecordType::A);
@@ -3576,6 +3586,15 @@ strategy:
 
         assert!(evaluate("new.example.").matched_rule.is_some());
         assert!(evaluate("old.example.").matched_rule.is_none());
+        let (_, observation) = core
+            .resolve_with_observation(&request("new.example.", RecordType::A))
+            .await;
+        assert_eq!(
+            observation
+                .and_then(|value| value.matched_rule)
+                .and_then(|matched| matched.resource_version),
+            Some(ResourceVersion::new(2, 1))
+        );
 
         let stale = ResourceSnapshot::new(
             resource,

@@ -875,6 +875,9 @@ impl ObservedDnsCore {
             matched_rule_ordinal: observation
                 .and_then(|value| value.matched_rule.as_ref())
                 .and_then(|matched| matched.ordinal),
+            resource_version: observation
+                .and_then(|value| value.matched_rule.as_ref())
+                .and_then(|matched| matched.resource_version),
             transport: request.context.transport.class,
             qname: Arc::from(question.name().to_ascii()),
             qtype: u16::from(question.query_type()),

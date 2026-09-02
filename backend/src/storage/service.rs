@@ -507,6 +507,7 @@ mod tests {
                 matched_rule_source: None,
                 matched_resource_id: None,
                 matched_rule_ordinal: None,
+                resource_version: None,
                 transport: crate::dns::TransportClass::Datagram,
                 qname: std::sync::Arc::from("example.test."),
                 qtype: 1,

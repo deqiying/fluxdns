@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
 use crate::dns::{CancelReason, Deadline, RuntimeRevision, TransportClass};
+use crate::resource::ResourceVersion;
 
 use super::telemetry::{CacheStatus, ConfiguredId, ConfiguredIdKind, OutcomeClass};
 use super::{PortError, PortFuture};
@@ -368,6 +369,8 @@ pub struct ResolveEvent {
     pub matched_resource_id: Option<Arc<str>>,
     /// strategy 规则序号；listener hosts 没有序号。
     pub matched_rule_ordinal: Option<u64>,
+    /// 命中资源的 epoch/revision。
+    pub resource_version: Option<ResourceVersion>,
     pub transport: TransportClass,
     pub qname: Arc<str>,
     pub qtype: u16,
@@ -401,6 +404,7 @@ impl fmt::Debug for ResolveEvent {
                 &self.matched_resource_id.is_some(),
             )
             .field("matched_rule_ordinal", &self.matched_rule_ordinal)
+            .field("resource_version", &self.resource_version)
             .field("transport", &self.transport)
             .field("qname_byte_len", &self.qname.len())
             .field("qtype", &self.qtype)
@@ -511,6 +515,7 @@ mod tests {
             matched_rule_source: Some(ResolveRuleSource::RuleSet),
             matched_resource_id: Some(Arc::from("resource-private-id")),
             matched_rule_ordinal: Some(3),
+            resource_version: Some(ResourceVersion::new(2, 1)),
             transport: TransportClass::Datagram,
             qname: Arc::from("private.example.test."),
             qtype: 1,

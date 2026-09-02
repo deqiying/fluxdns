@@ -147,7 +147,7 @@ TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 
 - cancellation/failure 分类；
 - runtime/resource revision 摘要。
 
-Policy Core 已提供首轮 `strategy`、策略目标 `upstream_id`、实际顶层 `upstream_member_id`、`source`（hosts/cache/upstream）、`cache_status`、配置 client bucket，以及 matched rule 的来源、资源 ID 和可选 ordinal。rule observation 不包含 matcher 或规则文本；client bucket/upstream/member/resource 仅使用已验证配置 ID，未知匹配保持缺省，不记录原始 client ID/IP。
+Policy Core 已提供首轮 `strategy`、策略目标 `upstream_id`、实际顶层 `upstream_member_id`、`source`（hosts/cache/upstream）、`cache_status`、配置 client bucket，以及 matched rule 的来源、资源 ID、typed `ResourceVersion` 和可选 ordinal。rule observation 不包含 matcher 或规则文本；client bucket/upstream/member/resource 仅使用已验证配置 ID，未知匹配或版本缺失时保持缺省，不记录原始 client ID/IP。
 
 parallel 的多个 attempt 另发 attempt event，但不重复增加 total request。
 
@@ -178,7 +178,7 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 定义 canonical query/response 与验证器；
 - [x] 定义 RequestContext、deadline 与 cancellation；
 - [ ] 定义包含失败细分和资源 revision 的完整 resolution result；
-- [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket；策略目标 upstream/group、实际顶层 group member 和 matched rule/resource 已拆分；
+- [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket；策略目标 upstream/group、实际顶层 group member、matched rule/resource 及命中资源版本已拆分；
 - [x] 实现固定响应的 transport 无关 handler；
 - [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
 - [x] 实现配置驱动的 client-visible TTL min/max 覆写，且不改变 cache admission 使用的 origin TTL；
@@ -190,6 +190,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 
 阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 35 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream/group member ECS 实际 DoH wire、成员 ECS group 缓存绕过、client ECS cache key 隔离、direct/cache/group 的目标与成员 observation、hosts/rule-set 的 matched rule/resource 摘要，以及跨 Policy Core 实例的 SQLite cache 恢复；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 对 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED 返回相同 canonical response 并恢复各自 DNS ID，大响应下 UDP 设置 TC 而 TCP/DoH GET/POST 保留 64 条完整 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 515 passed、0 failed。
 
-阶段 142 将同一 observation 的策略目标、实际组成员和 matched rule/resource 摘要接入 `ResolveEvent` 与 SQLite schema v2；存储层聚焦测试通过，未重复大阶段全量测试。
+阶段 142 将同一 observation 的策略目标、实际组成员和 matched rule/resource 摘要接入 `ResolveEvent` 与 SQLite schema v2；阶段 148 继续从当前 Policy snapshot 传播命中资源的 epoch/revision。Policy 35 项及存储层聚焦测试通过，未重复大阶段全量测试。
 
-当前实现进度：**81%**。
+当前实现进度：**82%**。

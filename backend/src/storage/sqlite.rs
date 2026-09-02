@@ -916,6 +916,9 @@ async fn apply_resolve_records_with_limits(
         let matched_rule_ordinal = record
             .matched_rule_ordinal()
             .map(|ordinal| i64::try_from(ordinal).unwrap_or(i64::MAX));
+        let resource_revision = record
+            .resource_version()
+            .map(|version| format!("{}:{}", version.epoch(), version.revision()));
         let canonical_qname = format!("len:{}", record.qname_byte_len());
         sqlx::query(
             "INSERT INTO resolve_log \
@@ -946,7 +949,7 @@ async fn apply_resolve_records_with_limits(
         .bind(failure_class_name(record.outcome()))
         .bind(record.cancellation_reason().map(cancellation_reason_name))
         .bind(i64::try_from(record.runtime_revision().0).unwrap_or(i64::MAX))
-        .bind(Option::<&str>::None)
+        .bind(resource_revision.as_deref())
         .execute(&mut **transaction)
         .await
         .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_batch"))?;
@@ -1057,6 +1060,7 @@ mod tests {
         StorageBackend, StorageOperation, StorageTransaction,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
+    use crate::resource::ResourceVersion;
     use crate::storage::ResolveLogWriter;
     use sqlx::Row;
 
@@ -1367,6 +1371,7 @@ mod tests {
                 matched_rule_source: Some(ResolveRuleSource::RuleSet),
                 matched_resource_id: Some(Arc::from("rules")),
                 matched_rule_ordinal: Some(2),
+                resource_version: Some(ResourceVersion::new(2, 1)),
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
@@ -1388,7 +1393,7 @@ mod tests {
         let row = sqlx::query(
             "SELECT request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
              upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
-             canonical_qname, source, rcode, failure_class, cancellation_reason \
+             canonical_qname, source, rcode, failure_class, cancellation_reason, resource_revision \
              FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
@@ -1463,6 +1468,12 @@ mod tests {
                 .as_deref(),
             Some("shutdown")
         );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("resource_revision")
+                .unwrap()
+                .as_deref(),
+            Some("2:1")
+        );
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
@@ -1491,6 +1502,7 @@ mod tests {
                     matched_rule_source: None,
                     matched_resource_id: None,
                     matched_rule_ordinal: None,
+                    resource_version: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1559,6 +1571,7 @@ mod tests {
                 matched_rule_source: None,
                 matched_resource_id: None,
                 matched_rule_ordinal: None,
+                resource_version: None,
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
@@ -1604,6 +1617,7 @@ mod tests {
                     matched_rule_source: None,
                     matched_resource_id: None,
                     matched_rule_ordinal: None,
+                    resource_version: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1637,6 +1651,7 @@ mod tests {
                 matched_rule_source: None,
                 matched_resource_id: None,
                 matched_rule_ordinal: None,
+                resource_version: None,
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
@@ -1692,6 +1707,7 @@ mod tests {
                     matched_rule_source: None,
                     matched_resource_id: None,
                     matched_rule_ordinal: None,
+                    resource_version: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1745,6 +1761,7 @@ mod tests {
                     matched_rule_source: None,
                     matched_resource_id: None,
                     matched_rule_ordinal: None,
+                    resource_version: None,
                     transport: TransportClass::Datagram,
                     qname: Arc::from("example.com."),
                     qtype: 1,
@@ -1795,6 +1812,7 @@ mod tests {
                 matched_rule_source: None,
                 matched_resource_id: None,
                 matched_rule_ordinal: None,
+                resource_version: None,
                 transport: TransportClass::Datagram,
                 qname: Arc::from("example.com."),
                 qtype: 1,
