@@ -199,6 +199,30 @@ impl PreparedRuntime {
         .map_err(|error| PrepareError::PolicyCore {
             reason: error.to_string(),
         })?;
+        if policy_core.cache().options().enabled {
+            match policy_core
+                .initialize_cache_persistence(&config, deadline)
+                .await
+            {
+                Ok(summary) => tracing::info!(
+                    event = "cache_persistence_ready",
+                    component = "cache",
+                    result = "success",
+                    loaded = summary.loaded,
+                    expired = summary.expired,
+                    corrupt = summary.corrupt,
+                    incompatible = summary.incompatible,
+                    "cache_persistence_ready"
+                ),
+                Err(error) => tracing::warn!(
+                    event = "cache_persistence_disabled",
+                    component = "cache",
+                    result = "degraded",
+                    error = %error,
+                    "cache_persistence_disabled"
+                ),
+            }
+        }
         let resource_workers = build_resource_workers(
             &config,
             Arc::clone(&resource_fetcher),
@@ -1061,6 +1085,37 @@ clients: []
         assert!(candidate.resource_fetcher().is_some());
         assert!(candidate.snapshot().policy_core().is_some());
         assert!(candidate.snapshot().dns_core().is_some());
+    }
+
+    #[tokio::test]
+    async fn async_prepare_attaches_cache_persistence_before_bind() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-runtime-cache-persistence-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut config = Arc::try_unwrap(config()).unwrap();
+        config.dns.cache.enabled = true;
+        config.dns.cache.persistence_path = root.join("cache.sqlite3");
+        config.dns.cache.persistence_max_size_bytes = 1024 * 1024;
+        let deadline = Deadline::new(Instant::now() + Duration::from_secs(5));
+
+        let candidate = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            Arc::new(config),
+            RuntimeRevision(3),
+            deadline,
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let core = candidate.snapshot().policy_core().unwrap();
+        assert!(core.has_cache_persistence());
+        assert!(core.finalizer_owner().shutdown_until(deadline).await);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]

@@ -209,7 +209,7 @@ RawConfigVn
 | `dns.cache.persistence.path` | string | 持久化缓存文件路径；相对路径以 `work.path` 为基准。 |
 | `dns.cache.persistence.max_size_bytes` | integer | 持久化缓存文件最大大小，单位为字节。 |
 
-`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS；`persistence.max_size_bytes` 只限制持久化缓存主数据库的 page budget。SQLite 的临时 `-wal`/`-shm` 文件可能短时产生额外占用，超过预算时停止新的持久化写入并优先 checkpoint/淘汰，不能影响内存缓存或 DNS 解析。两者使用相同字段名，但作用域不同。
+`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS；`persistence.max_size_bytes` 只限制持久化缓存主数据库的 page budget。任一逻辑缓存池启用时，production async prepare 会从独立 SQLite 恢复可用记录；内存 CAS 成功后通过有界队列 best-effort 持久化，并在有序 shutdown 时排空已入队批次。SQLite 的临时 `-wal`/`-shm` 文件可能短时产生额外占用，超过预算时停止新的持久化写入并优先 checkpoint/淘汰；队列满或持久化失败只降级为内存缓存，不能影响 DNS 解析。两者使用相同字段名，但作用域不同。
 
 策略级和客户端级 `cache` 只允许 `enabled` 与 `optimistic` 子对象，不包含 `memory`、`failure_ttl` 或 `persistence`。只要出现策略级或客户端级 `cache` 对象，`enabled` 就必须显式提供；整个对象缺失才表示继续向较低优先级选择。
 

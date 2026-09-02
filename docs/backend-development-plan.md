@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 125（有界 cache persistence writer 生命周期）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 126（cache persistence 生产接线）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -26,7 +26,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 完整跨 Runtime candidate 生命周期和独立 resource-only runtime swap；
 - 配置变更的完整 resource-only/listener-rebind 分类及正常运行路径验证；
 - DoH HTTP/2、完整 HTTP/DNS 协议组合和证书/信任边界矩阵；
-- 缓存与请求记录的基础持久化接线和有序 shutdown flush；
+- cache persistence 的 last-access/故障观测与请求记录的完整运行状态闭环；
 - 显式 upstream/group member ECS 和完整跨 transport DNS contract；
 - 完整 group/member/resource metadata；
 - v1 最终压力、长期运行、conformance、drain/flush/shutdown 验收。
@@ -36,8 +36,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **78.0%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **80.2%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **78.7%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **80.8%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -47,12 +47,12 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Application | 实现中 | 60% | 4% |
 | Ports | 实现中 | 40% | 8% |
 | Config | 已验证 | 100% | 10% |
-| Runtime | 实现中 | 71% | 12% |
+| Runtime | 实现中 | 72% | 12% |
 | Transport | 实现中 | 72% | 11% |
-| DNS Core | 实现中 | 71% | 10% |
+| DNS Core | 实现中 | 73% | 10% |
 | Policy | 实现中 | 78% | 8% |
 | Upstream | 已实现待验证 | 99% | 10% |
-| Cache | 实现中 | 78% | 9% |
+| Cache | 实现中 | 82% | 9% |
 | Resource | 已实现待验证 | 90% | 7% |
 | Storage | 已实现待验证 | 84% | 8% |
 | Observability | 实现中 | 90% | 3% |
@@ -60,9 +60,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 进度计算：
 
 ```text
-4%×60% + 8%×40% + 10%×100% + 12%×71% + 11%×72%
-+ 10%×71% + 8%×78% + 10%×99% + 9%×78% + 7%×90%
-+ 8%×84% + 3%×90% ≈ 78.0%
+4%×60% + 8%×40% + 10%×100% + 12%×72% + 11%×72%
++ 10%×73% + 8%×78% + 10%×99% + 9%×82% + 7%×90%
++ 8%×84% + 3%×90% ≈ 78.7%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -97,7 +97,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 125 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 126 |
 
 ### 增量里程碑
 
@@ -107,17 +107,19 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 84–96 | DoH TLS/PROXY/forwarded、配置 watcher、Telemetry/health、信号处理首轮 | transport、service、observability focused suites |
 | 97–101 | 文件/SQLite cache persistence contract、故障分类、metadata、WAL/SHM 占用观测 | persistence contract 与 SQLite focused suites |
 | 102–114 | 跨 Runtime drain/owner、受控 late-attempt、latest-target cache 写入和 finalizer 清理 | coordinator 15 项、Policy 22 项及 service focused suites |
-| 115–125 | 运行中资源 live publish、cache pool/TTL/ECS/身份隔离契约、persistence writer 生命周期、Application service reload、进程级配置分类 | service 32 项；message 14 项；client 4 项、Policy plan 8 项、Registry 12 项、persistence runtime 2 项及相关端到端定向测试通过 |
+| 115–126 | 运行中资源 live publish、cache pool/TTL/ECS/身份隔离契约、persistence writer 生命周期及 production recovery/write/shutdown、Application service reload、进程级配置分类 | service 32 项；message 14 项；client 4 项、Policy plan 8 项、Registry 12 项、persistence runtime 2 项、cache service 8 项及相关端到端定向测试通过 |
 
 ### 当前阶段验证
 
 ```text
-rustfmt --edition 2024 backend/src/cache/mod.rs backend/src/cache/runtime.rs
-cargo test --manifest-path backend/Cargo.toml cache::runtime::tests
+rustfmt --edition 2024 backend/src/cache/service.rs backend/src/dns/policy.rs backend/src/runtime/prepared.rs
+cargo test --manifest-path backend/Cargo.toml cache::service::tests
+cargo test --manifest-path backend/Cargo.toml cache_persistence_recovers_across_policy_core_instances
+cargo test --manifest-path backend/Cargo.toml async_prepare_attaches_cache_persistence_before_bind
 git diff --check
 ```
 
-以上均通过；阶段 125 仅对 2 个受影响的 Rust 文件执行增量 `rustfmt`，未重复全量 `cargo fmt/test`。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+以上均通过；阶段 126 仅对 3 个受影响的 Rust 文件执行增量 `rustfmt`，未重复全量 `cargo fmt/test`。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

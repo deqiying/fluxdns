@@ -2,14 +2,15 @@
 
 use std::fmt;
 use std::future::Future;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::dns::{CancelReason, Cancellation, CanonicalResponse, RuntimeRevision};
 use crate::ports::cache::{
     CacheCondition, CacheKey, CacheLoadCompletion, CacheLoadFailure, CacheLoadLease,
     CacheLoadReservation, CacheLoadWaiter, CacheRecord, CacheStore, CacheWriteOutcome,
+    PersistentCacheBatch,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 use tokio::task::JoinSet;
@@ -18,6 +19,7 @@ use super::admission::{
     CacheAdmissionError, CacheAdmissionOutcome, CacheAdmissionPolicy, CacheAdmissionRejection,
     admit_response,
 };
+use super::runtime::{CachePersistenceRuntime, CachePersistenceWriter};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheFacadeOptions {
@@ -57,6 +59,7 @@ pub struct CacheFacade {
     store: Arc<dyn CacheStore>,
     options: CacheFacadeOptions,
     refresh_admission: Arc<RefreshAdmission>,
+    persistence: Arc<Mutex<Option<CachePersistenceWriter>>>,
 }
 
 /// 在客户端响应已经完成后执行有界 cache write 的后台 finalizer。
@@ -75,6 +78,7 @@ struct LateCacheFinalizerState {
     active: AtomicUsize,
     idle: tokio::sync::Notify,
     tasks: std::sync::Mutex<JoinSet<()>>,
+    persistence: Mutex<Option<Arc<CachePersistenceRuntime>>>,
 }
 
 struct FinalizerTaskGuard {
@@ -112,6 +116,7 @@ impl LateCacheFinalizer {
                 active: AtomicUsize::new(0),
                 idle: tokio::sync::Notify::new(),
                 tasks: std::sync::Mutex::new(JoinSet::new()),
+                persistence: Mutex::new(None),
             }),
         })
     }
@@ -176,32 +181,70 @@ impl LateCacheFinalizer {
     pub async fn shutdown(&self) {
         let mut tasks = self.take_tasks_for_shutdown();
         while tasks.join_next().await.is_some() {}
+        if let Some(persistence) = self.persistence_runtime() {
+            let _ = persistence
+                .shutdown(crate::dns::Deadline::new(
+                    Instant::now() + std::time::Duration::from_secs(30),
+                ))
+                .await;
+        }
     }
 
     /// 触发 shutdown，并在 deadline 内等待所有已提交任务回收。
     /// 超时后 abort 剩余 task，并返回 false；调用方可将其并入 Runtime shutdown report。
     pub async fn shutdown_until(&self, deadline: crate::dns::Deadline) -> bool {
         let mut tasks = self.take_tasks_for_shutdown();
-        loop {
+        let tasks_completed = loop {
             if tasks.is_empty() {
-                return true;
+                break true;
             }
             let remaining = deadline.remaining(Instant::now());
             if remaining.is_zero() {
                 tasks.abort_all();
                 while tasks.join_next().await.is_some() {}
-                return false;
+                break false;
             }
             match tokio::time::timeout(remaining, tasks.join_next()).await {
                 Ok(Some(_)) => {}
-                Ok(None) => return true,
+                Ok(None) => break true,
                 Err(_) => {
                     tasks.abort_all();
                     while tasks.join_next().await.is_some() {}
-                    return false;
+                    break false;
                 }
             }
-        }
+        };
+        let persistence_completed = match self.persistence_runtime() {
+            Some(persistence) => persistence.shutdown(deadline).await.is_ok(),
+            None => true,
+        };
+        tasks_completed && persistence_completed
+    }
+
+    /// 绑定与该 finalizer 同生命周期的 cache persistence owner。
+    pub(crate) fn attach_persistence_runtime(&self, runtime: Arc<CachePersistenceRuntime>) {
+        *self
+            .state
+            .persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(runtime);
+    }
+
+    fn persistence_runtime(&self) -> Option<Arc<CachePersistenceRuntime>> {
+        self.state
+            .persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// 返回当前是否已绑定生产 persistence runtime。
+    pub(crate) fn has_persistence_runtime(&self) -> bool {
+        self.state
+            .persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
     }
 
     fn take_tasks_for_shutdown(&self) -> JoinSet<()> {
@@ -283,6 +326,14 @@ impl fmt::Debug for CacheFacade {
             .field(
                 "refresh_capacity",
                 &self.refresh_admission.max_concurrency(),
+            )
+            .field(
+                "persistence",
+                &self
+                    .persistence
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .is_some(),
             )
             .finish_non_exhaustive()
     }
@@ -381,6 +432,7 @@ impl CacheFacade {
                 RefreshAdmission::new(None)
                     .expect("unbounded refresh admission must always be valid"),
             ),
+            persistence: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -393,6 +445,7 @@ impl CacheFacade {
             store,
             options,
             refresh_admission: Arc::new(RefreshAdmission::new(Some(max_concurrency))?),
+            persistence: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -402,6 +455,14 @@ impl CacheFacade {
 
     pub fn store(&self) -> &Arc<dyn CacheStore> {
         &self.store
+    }
+
+    /// 绑定非阻塞 persistence 写入端；恢复完成前不应调用。
+    pub(crate) fn attach_persistence_writer(&self, writer: CachePersistenceWriter) {
+        *self
+            .persistence
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(writer);
     }
 
     pub fn refresh_capacity(&self) -> Option<usize> {
@@ -477,11 +538,30 @@ impl CacheFacade {
                     return Ok(CacheWriteResult::Rejected(rejection));
                 }
             };
-            self.store
-                .compare_and_swap(request.key, request.condition, entry, request.deadline)
+            let key = request.key;
+            let outcome = self
+                .store
+                .compare_and_swap(
+                    key.clone(),
+                    request.condition,
+                    Arc::clone(&entry),
+                    request.deadline,
+                )
                 .await
-                .map(CacheWriteResult::Stored)
-                .map_err(CacheFacadeError::Store)
+                .map_err(CacheFacadeError::Store)?;
+            if let CacheWriteOutcome::Inserted(version) | CacheWriteOutcome::Replaced(version) =
+                outcome
+                && let Some(writer) = self
+                    .persistence
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone()
+            {
+                let _ = writer.enqueue(PersistentCacheBatch {
+                    records: vec![(key, CacheRecord { version, entry })],
+                });
+            }
+            Ok(CacheWriteResult::Stored(outcome))
         })
     }
 

@@ -1,6 +1,6 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh 和低基数 resolution observation；Policy observation 已补充首轮 client bucket/selected upstream；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR，fresh/stale cache response 已应用剩余 TTL 与 optimistic answer TTL；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入
+> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh、SQLite cache non-blocking write/recovery 和低基数 resolution observation；Policy observation 已补充首轮 client bucket/selected upstream；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR，fresh/stale cache response 已应用剩余 TTL 与 optimistic answer TTL；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入
 >
 > 更新日期：2026-09-03
 >
@@ -93,7 +93,7 @@ Core 不再次计算继承，也不把 rule 文本写入日志。
 - stale hit 可以先返回，并启动捕获最新 snapshot 的 refresh；
 - miss 进入 single-flight；
 - waiter 取消只释放自身，不取消仍有其他 waiter 的 exchange；
-- Core 把上游结果交给 CacheFacade 做准入和质量 CAS。
+- Core 把上游结果交给 CacheFacade 做准入和质量 CAS；内存 CAS 成功后仅向有界 persistence queue 非阻塞入队，SQLite I/O 不阻塞请求路径。
 
 Core 不直接调用 Moka 或持久化 store。
 
@@ -187,6 +187,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [ ] 完成显式 upstream/group member ECS 和完整错误映射；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 29 项通过，覆盖 global pool 关闭时的 strategy cache、cache hit 剩余/stale TTL、global custom ECS 实际 DoH wire、请求 ECS 优先与 client ECS cache key 隔离；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
+阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 32 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream ECS 实际 DoH wire、client ECS cache key 隔离，以及跨 Policy Core 实例的 SQLite cache 恢复；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
 
-当前实现进度：**69%**。
+当前实现进度：**73%**。
