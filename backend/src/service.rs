@@ -8,8 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::task::JoinSet;
 
-use crate::config::BindTransport;
 use crate::config::resolve::ConfigId;
+use crate::config::{BindTransport, ResolvedConfig};
 use crate::dns::{
     CacheCompatibilityKey, CancelReason, Cancellation, CoreError, CoreOutcome, Deadline,
     DispatchError, DnsCore, DnsRequest, ResponseClass, RuntimeRevision, TransportCapabilities,
@@ -81,6 +81,46 @@ pub enum ServiceReloadError {
     Endpoint(#[source] ServiceStartError),
     #[error("runtime reload task registration failed: {0}")]
     Task(#[source] SupervisorError),
+    #[error(
+        "runtime reload changes process-owned {component} configuration and requires process restart"
+    )]
+    RestartRequired { component: &'static str },
+}
+
+/// 表示热重载是否需要替换网络 listener。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServiceReloadMode {
+    ReuseListeners,
+    RebindListeners,
+}
+
+/// 根据新旧配置选择 service 热重载路径。
+///
+/// 由进程启动阶段持有的资源当前不能原位替换；检测到相关配置变化时必须拒绝
+/// 热重载，使调用方保留旧 Runtime 并提示重启进程。
+fn classify_service_reload(
+    current: &ResolvedConfig,
+    candidate: &ResolvedConfig,
+) -> Result<ServiceReloadMode, ServiceReloadError> {
+    let component = if current.database != candidate.database {
+        Some("database")
+    } else if current.logs != candidate.logs {
+        Some("logs")
+    } else if current.webui != candidate.webui {
+        Some("webui")
+    } else if current.dns.resolve_log != candidate.dns.resolve_log {
+        Some("dns.resolve_log")
+    } else {
+        None
+    };
+    if let Some(component) = component {
+        return Err(ServiceReloadError::RestartRequired { component });
+    }
+    if current.bind_plan == candidate.bind_plan {
+        Ok(ServiceReloadMode::ReuseListeners)
+    } else {
+        Ok(ServiceReloadMode::RebindListeners)
+    }
 }
 
 #[derive(Debug, Error)]
@@ -409,10 +449,11 @@ impl DnsService {
         Ok(next)
     }
 
-    /// 绑定并切换一个新 Runtime，同时重建 UDP/TCP/DoH listener task。
+    /// 切换一个新 Runtime，并按配置差异复用或重建 UDP/TCP/DoH listener task。
     ///
     /// 资源 refresh task 会按新 Runtime 的 worker ID 集合重建，旧集合在新 task
-    /// 注册成功后通过 scoped cancellation 退出。
+    /// 注册成功后通过 scoped cancellation 退出。进程级资源配置发生变化时拒绝切换，
+    /// 由调用方保留旧 Runtime 并要求重启进程。
     pub async fn reload_prepared(
         &mut self,
         prepared: PreparedRuntime,
@@ -430,7 +471,11 @@ impl DnsService {
         if actual != expected_next {
             return Err(ServiceReloadError::InvalidRevision { expected, actual });
         }
-        if self.runtime.bind_plan() == prepared.bind_plan() {
+        let reload_mode = classify_service_reload(
+            self.runtime.snapshot().config(),
+            prepared.snapshot().config(),
+        )?;
+        if reload_mode == ServiceReloadMode::ReuseListeners {
             let transport_plans = prepare_transport_plans(
                 self.runtime.listeners(),
                 prepared.snapshot().config(),
@@ -2313,6 +2358,13 @@ mod tests {
 
     fn runtime_config(port: u16) -> Arc<crate::config::resolve::ResolvedConfig> {
         let work_path = crate::config::test_support::absolute_path("service-reload");
+        runtime_config_at(&work_path, port)
+    }
+
+    fn runtime_config_at(
+        work_path: &str,
+        port: u16,
+    ) -> Arc<crate::config::resolve::ResolvedConfig> {
         ConfigLoader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
@@ -2447,8 +2499,9 @@ clients: []
     #[tokio::test]
     async fn reload_prepared_rebinds_listener_tasks_to_the_new_runtime() {
         let base_port = 40_000 + (std::process::id() as u16 % 1_000) * 2;
+        let work_path = crate::config::test_support::absolute_path("service-reload-rebind");
         let initial = PreparedRuntime::prepare_with_policy_core(
-            runtime_config(base_port),
+            runtime_config_at(&work_path, base_port),
             RuntimeRevision(1),
         )
         .unwrap();
@@ -2467,7 +2520,7 @@ clients: []
                 .unwrap();
 
         let prepared = PreparedRuntime::prepare_with_policy_core(
-            runtime_config(base_port + 1),
+            runtime_config_at(&work_path, base_port + 1),
             RuntimeRevision(2),
         )
         .unwrap();
@@ -2545,9 +2598,12 @@ clients: []
     #[tokio::test]
     async fn reload_prepared_reuses_unchanged_listener_without_rebinding() {
         let port = 40_500 + (std::process::id() as u16 % 500);
-        let initial =
-            PreparedRuntime::prepare_with_policy_core(runtime_config(port), RuntimeRevision(1))
-                .unwrap();
+        let work_path = crate::config::test_support::absolute_path("service-reload-reuse");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
         let factory = crate::runtime::SystemSocketFactory::new();
         let initial = crate::runtime::bind_prepared(
             initial,
@@ -2562,9 +2618,11 @@ clients: []
             super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
                 .unwrap();
 
-        let prepared =
-            PreparedRuntime::prepare_with_policy_core(runtime_config(port), RuntimeRevision(2))
-                .unwrap();
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(2),
+        )
+        .unwrap();
         let active = service
             .reload_prepared(
                 prepared,
@@ -2579,6 +2637,67 @@ clients: []
         assert_eq!(active.listeners().local_addrs().unwrap()[0].port(), port);
         assert_eq!(service.transport_task_count(), 1);
         assert_eq!(service.resource_task_count(), 0);
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_process_owned_config_change_without_switching_runtime() {
+        let port = 45_000 + (std::process::id() as u16 % 500);
+        let work_path = crate::config::test_support::absolute_path("service-reload-restart");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let current = coordinator.load();
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let mut candidate_config = Arc::try_unwrap(runtime_config_at(&work_path, port)).unwrap();
+        candidate_config.database.path = candidate_config.work.path.join("other.sqlite");
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            Arc::new(candidate_config),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let error = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ServiceReloadError::RestartRequired {
+                component: "database"
+            }
+        ));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+        assert!(!current.is_draining());
+        assert_eq!(service.runtime().revision(), RuntimeRevision(1));
 
         let report = service
             .shutdown(
@@ -2748,9 +2867,12 @@ clients: []
     #[tokio::test]
     async fn shutdown_closes_finalizers_from_previous_and_current_runtime() {
         let port = 41_500 + (std::process::id() as u16 % 500);
-        let initial =
-            PreparedRuntime::prepare_with_policy_core(runtime_config(port), RuntimeRevision(1))
-                .unwrap();
+        let work_path = crate::config::test_support::absolute_path("service-reload-finalizer");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
         let factory = crate::runtime::SystemSocketFactory::new();
         let initial = crate::runtime::bind_prepared(
             initial,
@@ -2769,9 +2891,11 @@ clients: []
             super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
                 .unwrap();
 
-        let prepared =
-            PreparedRuntime::prepare_with_policy_core(runtime_config(port), RuntimeRevision(2))
-                .unwrap();
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(2),
+        )
+        .unwrap();
         let current_finalizer = prepared.snapshot().policy_core().unwrap().finalizer_owner();
         current_finalizer
             .submit_task(std::future::pending::<()>())

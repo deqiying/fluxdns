@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 117（Application service reload loopback 回归）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 118（进程级配置热重载 fail-closed）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -24,9 +24,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 ### 当前未完成
 
 - 完整跨 Runtime candidate 生命周期和独立 resource-only runtime swap；
-- 配置变更的完整 resource-only/listener-rebind/restart 分类及自动 rebind 故障矩阵；
+- 配置变更的完整 resource-only/listener-rebind 分类及正常运行路径验证；
 - DoH HTTP/2、完整 HTTP/DNS 协议组合和证书/信任边界矩阵；
-- SQLite 真实 busy/disk-full 复现与恢复验收、独立 cache persistence 故障矩阵；
+- 缓存与请求记录的基础持久化接线和有序 shutdown flush；
 - 完整 group/member/resource metadata；
 - v1 最终压力、长期运行、conformance、drain/flush/shutdown 验收。
 
@@ -71,14 +71,14 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 顺序 | 目标 | 主要范围 | 退出条件 |
 | --- | --- | --- | --- |
 | 1 | Runtime 生命周期 | candidate registry、跨 Runtime 合并、revision CAS、resource-only swap | 候选失败保留旧 Runtime；并发资源发布不丢失；无 detached task |
-| 2 | 配置变更/rebind | 去抖、失败语义、resource-only/listener rebind/restart 分类 | 新 listener 全部 bind 成功后切换；旧 task 可取消并 drain |
+| 2 | 配置变更/rebind | 去抖、失败语义、resource-only/listener rebind 分类 | 新 listener 全部 bind 成功后切换；旧 task 可取消并 drain |
 | 3 | DNS Core/Cache 一致性 | 最新 snapshot、late-window/finalizer、跨 transport contract | 单请求固定 revision；资源更新只影响后续请求 |
-| 4 | Storage/Observability 生产链路 | SQLx/SQLite 故障恢复、final subscriber、health/event writer、Supervisor flush | busy/disk-full、脱敏、backpressure、flush/shutdown 可复现 |
-| 5 | Cache 持久化 | 独立 SQLite cache persistence、Moka/SQLite contract | expiry/weight、corrupt/busy/disk-full、shutdown 持久化通过 |
+| 4 | Storage/Observability 生产链路 | final subscriber、health/event writer、Supervisor flush | 脱敏、backpressure 和有序 shutdown flush 可复现 |
+| 5 | Cache 持久化 | 独立 SQLite cache persistence、Moka/SQLite 基础 contract | expiry/weight 和正常 shutdown 持久化通过；极端故障恢复后置 |
 | 6 | DoH 安全与协议 | HTTP/2、TLS/PROXY/forwarded 完整矩阵 | 不可信输入 fail-closed；Host/SNI、GET/POST、错误分层有端到端证据 |
-| 7 | v1 最终验收 | 故障注入、conformance、压力、长期运行、完整 drain | 所有验收门槛有可复现记录 |
+| 7 | v1 最终验收 | conformance、基础压力、正常运行和完整 drain | 核心验收门槛有可复现记录；服务器宕机恢复不阻塞当前版本 |
 
-实施原则：先完成主线和 MVP；小阶段只做增量改动和定向验证；大阶段结束时才做全量 `cargo fmt`、`cargo check`、`cargo clippy`、`cargo test`。不为 MVP 追加 WebUI、管理 API、认证、DoT/DoQ、主动健康检查或外部 metrics exporter。
+实施原则：坚持配置驱动，先完成正常运行主线和可用版本；小阶段只做增量改动和定向验证；大阶段结束时才做全量 `cargo fmt`、`cargo check`、`cargo clippy`、`cargo test`。暂不为服务器重启/宕机恢复或缓存、请求记录的绝对持久化过度设计，也不追加 WebUI、管理 API、认证、DoT/DoQ、主动健康检查或外部 metrics exporter。
 
 ## 4. 阶段摘要
 
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 117 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 118 |
 
 ### 增量里程碑
 
@@ -106,17 +106,17 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 84–96 | DoH TLS/PROXY/forwarded、配置 watcher、Telemetry/health、信号处理首轮 | transport、service、observability focused suites |
 | 97–101 | 文件/SQLite cache persistence contract、故障分类、metadata、WAL/SHM 占用观测 | persistence contract 与 SQLite focused suites |
 | 102–114 | 跨 Runtime drain/owner、受控 late-attempt、latest-target cache 写入和 finalizer 清理 | coordinator 15 项、Policy 22 项及 service focused suites |
-| 115–117 | 运行中资源 live publish、cache 开关契约、Application service reload | service 31 项、Policy 23 项、Application 10 项均通过 |
+| 115–118 | 运行中资源 live publish、cache 开关契约、Application service reload、进程级配置 restart-required 分类 | service 32 项、Policy 23 项、Application 10 项均通过 |
 
 ### 当前阶段验证
 
 ```text
-rustfmt --edition 2024 backend/src/app.rs
-cargo test --manifest-path backend/Cargo.toml --locked --offline app::tests:: -- --nocapture
+rustfmt --edition 2024 backend/src/service.rs
+cargo test --manifest-path backend/Cargo.toml --locked --offline service::tests:: -- --nocapture
 git diff --check
 ```
 
-以上均通过；阶段 117 未重复全量 `cargo fmt/test`。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+以上均通过；阶段 118 未重复全量 `cargo fmt/test`。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 
@@ -126,7 +126,7 @@ git diff --check
 2. UDP、TCP、DoH 对同一 canonical query 的策略结果一致；
 3. 单请求只捕获一次 Runtime revision，资源并发更新不丢失；
 4. 所有后台任务受 Supervisor 管理，无 detached task；
-5. 数据库、详情日志、缓存持久化故障不阻塞 DNS 数据面；启动必需数据库失败时拒绝启动；
+5. 数据库、详情日志和缓存持久化在正常运行与有序 shutdown 路径可用；极端宕机下不承诺绝对可靠；
 6. 日志和 metrics 不暴露 SecretRef、完整 client ID、原始 IP、query、header 或 raw DNS wire；
 7. 缓存、上游组、资源刷新、统计具备确定性并发/故障测试；
 8. 全量 `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`、`cargo test --manifest-path backend/Cargo.toml --locked`、`cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings` 和 `git diff --check` 通过。
