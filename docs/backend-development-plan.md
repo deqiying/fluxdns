@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 134（listener 复用下的 Policy reload）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 135（正常运行主线第二轮全量验收）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -97,7 +97,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 134 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 135 |
 
 ### 增量里程碑
 
@@ -108,17 +108,19 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 97–101 | 文件/SQLite cache persistence contract、故障分类、metadata、WAL/SHM 占用观测 | persistence contract 与 SQLite focused suites |
 | 102–114 | 跨 Runtime drain/owner、受控 late-attempt、latest-target cache 写入和 finalizer 清理 | coordinator 15 项、Policy 22 项及 service focused suites |
 | 115–126 | 运行中资源 live publish、cache pool/TTL/ECS/身份隔离契约、persistence writer 生命周期及 production recovery/write/shutdown、Application service reload、进程级配置分类 | service 32 项；message 14 项；client 4 项、Policy plan 8 项、Registry 12 项、persistence runtime 2 项、cache service 8 项及相关端到端定向测试通过 |
-| 127–134 | Cache 持久化大阶段验收、reqwest/rustls provider 统一、reload/详情生命周期补强、跨 transport 一致性及 Storage 停机观测 | 后端全量 511 passed；Application 11 项及 Service、StorageRuntime、UDP/TCP/plain DoH 定向测试通过 |
+| 127–135 | Cache 持久化大阶段验收、reqwest/rustls provider 统一、reload/详情生命周期补强、跨 transport 一致性及 Storage 停机观测 | 后端全量 515 passed；Application 11 项及 Service、StorageRuntime、UDP/TCP/plain DoH 定向测试通过 |
 
 ### 当前阶段验证
 
 ```text
-rustfmt --edition 2024 backend/src/service.rs
-cargo test --manifest-path backend/Cargo.toml --locked reload_prepared_reuses_unchanged_listener_without_rebinding
+cargo fmt --manifest-path backend/Cargo.toml --all -- --check
+cargo check --manifest-path backend/Cargo.toml --locked
+cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings
+cargo test --manifest-path backend/Cargo.toml --locked
 git diff --check
 ```
 
-以上均通过；阶段 134 仅格式化 1 个受影响的 Rust 文件并执行 listener 复用下 Policy 切换定向测试，未重复阶段 127 已通过的全量后端验收。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+以上均通过；阶段 135 在正常运行主线大阶段结束后执行第二轮全量验收，结果为 515 passed、0 failed。各小阶段的详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

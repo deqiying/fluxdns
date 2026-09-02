@@ -188,6 +188,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 完成 UDP/TCP/plain DoH 同策略 answer 的首轮真实 loopback contract；
 - [ ] 完成跨 transport contract tests。
 
-阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 32 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream ECS 实际 DoH wire、client ECS cache key 隔离，以及跨 Policy Core 实例的 SQLite cache 恢复；Service loopback 测试验证同一 hosts 策略经真实 UDP、DNS-over-TCP framing 和 plain DoH POST 返回一致 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 511 passed、0 failed。
+阶段证据：`dns::message::tests` 当前 14 项通过，覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 32 项通过，覆盖 global pool 关闭时的 strategy/client cache、cache hit 剩余/stale TTL、global/client/direct upstream ECS 实际 DoH wire、client ECS cache key 隔离，以及跨 Policy Core 实例的 SQLite cache 恢复；Service loopback 测试验证同一 hosts 策略经真实 UDP、DNS-over-TCP framing 和 plain DoH POST 返回一致 answer；既有测试继续覆盖 canonical 校验、Policy/Cache/Upstream 主链、资源 live swap、TTL override 和低基数 observation。最近一次大阶段全量测试为 515 passed、0 failed。
 
 当前实现进度：**74%**。
