@@ -29,8 +29,8 @@ use crate::resource::{
     CanonicalDomain, HostsIndex, ResourceLoadError, ResourceSnapshot, ResourceVersion, RuleIndex,
 };
 use crate::upstream::{
-    GroupSelector, LateResultSink, RegistryError, UpstreamAttempt, UpstreamGroupExecutor,
-    UpstreamRegistry,
+    GroupMember, GroupSelector, LateResultSink, RegistryError, UpstreamAttempt,
+    UpstreamGroupExecutor, UpstreamRegistry,
 };
 
 use super::handler::resource_answers;
@@ -997,7 +997,7 @@ fn build_group_executor(
         let exchanges =
             group_member_exchanges(definitions, all, groups, building, id, members, "primary")?;
         let executor = if fallbacks.is_empty() {
-            UpstreamGroupExecutor::new_with_timeout(selector, exchanges, *timeout)
+            UpstreamGroupExecutor::new_with_members(selector, exchanges, *timeout)
         } else {
             let fallback_mode = (*fallback_upstream_mode)
                 .ok_or_else(|| group_build_error(id, "fallback mode is missing".to_owned()))?;
@@ -1015,7 +1015,7 @@ fn build_group_executor(
                 fallbacks,
                 "fallback",
             )?;
-            UpstreamGroupExecutor::new_with_fallback(
+            UpstreamGroupExecutor::new_with_fallback_members(
                 selector,
                 exchanges,
                 *timeout,
@@ -1050,21 +1050,29 @@ fn group_member_exchanges(
     group: &ConfigId,
     members: &[crate::config::resolve::ResolvedUpstreamMember],
     role: &str,
-) -> Result<Vec<Arc<dyn DnsExchange>>, UpstreamRuntimeBuildError> {
+) -> Result<Vec<GroupMember>, UpstreamRuntimeBuildError> {
     members
         .iter()
         .map(|member| {
-            if let Some(exchange) = all.get(&member.name) {
-                return Ok(Arc::clone(exchange));
-            }
             if matches!(
                 definitions.get(&member.name),
                 Some(ResolvedUpstream::Group { .. })
             ) {
                 build_group_executor(&member.name, definitions, all, groups, building)?;
-                return all.get(&member.name).cloned().ok_or_else(|| {
+                let executor = groups.get(&member.name).cloned().ok_or_else(|| {
                     group_build_error(group, "nested group connector is missing".to_owned())
+                })?;
+                let connector =
+                    ConnectorId::new(member.name.as_str().to_owned()).map_err(|_| {
+                        group_build_error(group, "nested group connector id is invalid".to_owned())
+                    })?;
+                return Ok(GroupMember::Nested {
+                    connector,
+                    executor,
                 });
+            }
+            if let Some(exchange) = all.get(&member.name) {
+                return Ok(GroupMember::Direct(Arc::clone(exchange)));
             }
             Err(group_build_error(
                 group,

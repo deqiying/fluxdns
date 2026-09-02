@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::dns::{CancelReason, CanonicalQuery, RequestContext};
+use crate::ports::PortFuture;
 use crate::ports::exchange::{ConnectorId, DnsExchange, SelectionPolicy, UpstreamOutcome};
 
 use super::{FallbackDecision, GroupSelector, GroupSelectorError, UpstreamAttempt, assess};
@@ -82,6 +83,19 @@ pub trait LateResultSink: Send + Sync {
     fn submit(&self, query: CanonicalQuery, context: RequestContext, attempt: UpstreamAttempt);
 }
 
+/// group 成员的已绑定执行句柄。
+///
+/// 嵌套 group 不能退化为普通 `DnsExchange`，否则外层 parallel 的 late sink
+/// 会在 `GroupExchange` 边界丢失。该类型只在 upstream 编排层传递 sink。
+#[derive(Clone)]
+pub(crate) enum GroupMember {
+    Direct(Arc<dyn DnsExchange>),
+    Nested {
+        connector: ConnectorId,
+        executor: Arc<UpstreamGroupExecutor>,
+    },
+}
+
 /// 执行一个已经解析的 upstream group。
 pub struct UpstreamGroupExecutor {
     primary: ExecutionPhase,
@@ -90,8 +104,48 @@ pub struct UpstreamGroupExecutor {
 
 struct ExecutionPhase {
     selector: Arc<GroupSelector>,
-    exchanges: Arc<[Arc<dyn DnsExchange>]>,
+    exchanges: Arc<[GroupMember]>,
     timeout: Option<Duration>,
+}
+
+impl GroupMember {
+    fn connector_id(&self) -> &ConnectorId {
+        match self {
+            Self::Direct(exchange) => exchange.connector_id(),
+            Self::Nested { connector, .. } => connector,
+        }
+    }
+
+    fn exchange<'a>(
+        &'a self,
+        query: &'a CanonicalQuery,
+        context: &'a RequestContext,
+        late_sink: Option<Arc<dyn LateResultSink>>,
+    ) -> PortFuture<'a, UpstreamOutcome> {
+        match self {
+            Self::Direct(exchange) => exchange.exchange(query, context),
+            Self::Nested {
+                connector,
+                executor,
+            } => {
+                let connector = connector.clone();
+                Box::pin(async move {
+                    let result = match late_sink {
+                        Some(sink) => executor.execute_with_late_sink(query, context, sink).await,
+                        None => executor.execute(query, context).await,
+                    };
+                    result.unwrap_or(UpstreamOutcome::TransportFailure(
+                        crate::ports::exchange::TransportFailure {
+                            connector,
+                            class: crate::ports::exchange::TransportFailureClass::Internal,
+                            retryable: false,
+                            safe_context: Some("nested group execution failed"),
+                        },
+                    ))
+                })
+            }
+        }
+    }
 }
 
 impl fmt::Debug for UpstreamGroupExecutor {
@@ -140,6 +194,30 @@ impl UpstreamGroupExecutor {
         Self::build(selector, exchanges, Some(timeout), Some(fallback))
     }
 
+    pub(crate) fn new_with_members(
+        selector: GroupSelector,
+        members: Vec<GroupMember>,
+        timeout: Duration,
+    ) -> Result<Self, ExecutorBuildError> {
+        Self::build_members(selector, members, Some(timeout), None)
+    }
+
+    pub(crate) fn new_with_fallback_members(
+        selector: GroupSelector,
+        members: Vec<GroupMember>,
+        timeout: Duration,
+        fallback_selector: GroupSelector,
+        fallback_members: Vec<GroupMember>,
+        fallback_timeout: Duration,
+    ) -> Result<Self, ExecutorBuildError> {
+        let fallback = ExecutionPhase::new_members(
+            fallback_selector,
+            fallback_members,
+            Some(fallback_timeout),
+        )?;
+        Self::build_members(selector, members, Some(timeout), Some(fallback))
+    }
+
     fn build(
         selector: GroupSelector,
         exchanges: Vec<Arc<dyn DnsExchange>>,
@@ -147,6 +225,16 @@ impl UpstreamGroupExecutor {
         fallback: Option<ExecutionPhase>,
     ) -> Result<Self, ExecutorBuildError> {
         let primary = ExecutionPhase::new(selector, exchanges, timeout)?;
+        Ok(Self { primary, fallback })
+    }
+
+    fn build_members(
+        selector: GroupSelector,
+        members: Vec<GroupMember>,
+        timeout: Option<Duration>,
+        fallback: Option<ExecutionPhase>,
+    ) -> Result<Self, ExecutorBuildError> {
+        let primary = ExecutionPhase::new_members(selector, members, timeout)?;
         Ok(Self { primary, fallback })
     }
 
@@ -210,7 +298,8 @@ impl UpstreamGroupExecutor {
             self.execute_parallel(phase, query, &phase_context, late_sink)
                 .await?
         } else {
-            self.execute_ordered(phase, query, &phase_context).await?
+            self.execute_ordered(phase, query, &phase_context, late_sink)
+                .await?
         };
         Ok(PhaseResult {
             enter_fallback: super::should_enter_fallback(&attempts),
@@ -223,12 +312,13 @@ impl UpstreamGroupExecutor {
         phase: &ExecutionPhase,
         query: &CanonicalQuery,
         context: &RequestContext,
+        late_sink: Option<Arc<dyn LateResultSink>>,
     ) -> Result<Vec<UpstreamAttempt>, ExecutorError> {
         let primary = match phase.selector.mode() {
             SelectionPolicy::LoadBalance => {
                 let lease = phase.selector.acquire_primary()?;
                 let result = self
-                    .execute_ordered_members(phase, query, context, lease.member_index())
+                    .execute_ordered_members(phase, query, context, lease.member_index(), late_sink)
                     .await;
                 drop(lease);
                 return result;
@@ -238,7 +328,7 @@ impl UpstreamGroupExecutor {
             }
             SelectionPolicy::Sequential | SelectionPolicy::Parallel => unreachable!(),
         };
-        self.execute_ordered_members(phase, query, context, primary)
+        self.execute_ordered_members(phase, query, context, primary, late_sink)
             .await
     }
 
@@ -248,6 +338,7 @@ impl UpstreamGroupExecutor {
         query: &CanonicalQuery,
         context: &RequestContext,
         primary: usize,
+        late_sink: Option<Arc<dyn LateResultSink>>,
     ) -> Result<Vec<UpstreamAttempt>, ExecutorError> {
         let mut indices = Vec::with_capacity(phase.exchanges.len());
         indices.push(primary);
@@ -257,7 +348,7 @@ impl UpstreamGroupExecutor {
             let exchange = &phase.exchanges[index];
             let outcome = match cancelled_outcome(context) {
                 Some(outcome) => outcome,
-                None => run_exchange(exchange, query, context).await,
+                None => run_exchange(exchange, query, context, late_sink.clone()).await,
             };
             let should_stop = matches!(assess(&outcome).fallback, FallbackDecision::Stop);
             attempts.push(UpstreamAttempt {
@@ -289,12 +380,14 @@ impl UpstreamGroupExecutor {
                     outcome,
                 }]);
             }
-            let exchange = Arc::clone(&phase.exchanges[index]);
+            let exchange = phase.exchanges[index].clone();
             let query = query.clone();
             let context = context.clone();
+            let late_sink = late_sink.clone();
             tasks.spawn(async move {
-                let outcome = run_exchange(&exchange, &query, &context).await;
-                (index, exchange.connector_id().clone(), outcome)
+                let connector = exchange.connector_id().clone();
+                let outcome = run_exchange(&exchange, &query, &context, late_sink).await;
+                (index, connector, outcome)
             });
         }
         let mut attempts = Vec::with_capacity(phase.exchanges.len());
@@ -374,15 +467,42 @@ impl ExecutionPhase {
         exchanges: Vec<Arc<dyn DnsExchange>>,
         timeout: Option<Duration>,
     ) -> Result<Self, ExecutorBuildError> {
-        if exchanges.is_empty() {
+        Self::new_members(
+            selector,
+            exchanges.into_iter().map(GroupMember::Direct).collect(),
+            timeout,
+        )
+    }
+
+    fn new_members(
+        selector: GroupSelector,
+        members: Vec<GroupMember>,
+        timeout: Option<Duration>,
+    ) -> Result<Self, ExecutorBuildError> {
+        if members.is_empty() {
             return Err(ExecutorBuildError::EmptyExchanges);
         }
         if timeout.is_some_and(|value| value.is_zero()) {
             return Err(ExecutorBuildError::InvalidTimeout);
         }
-        let mut by_id = HashMap::with_capacity(exchanges.len());
-        for exchange in exchanges {
-            let id = exchange.connector_id().clone();
+        let mut by_id = HashMap::with_capacity(members.len());
+        for member in members {
+            let (id, exchange) = match member {
+                GroupMember::Direct(exchange) => (
+                    exchange.connector_id().clone(),
+                    GroupMember::Direct(exchange),
+                ),
+                GroupMember::Nested {
+                    connector,
+                    executor,
+                } => (
+                    connector.clone(),
+                    GroupMember::Nested {
+                        connector,
+                        executor,
+                    },
+                ),
+            };
             if by_id.insert(id.clone(), exchange).is_some() {
                 return Err(ExecutorBuildError::DuplicateConnector {
                     connector: id.as_str().to_owned(),
@@ -430,9 +550,10 @@ fn phase_context(context: &RequestContext, timeout: Option<Duration>) -> Request
 }
 
 async fn run_exchange(
-    exchange: &Arc<dyn DnsExchange>,
+    exchange: &GroupMember,
     query: &CanonicalQuery,
     context: &RequestContext,
+    late_sink: Option<Arc<dyn LateResultSink>>,
 ) -> UpstreamOutcome {
     if let Some(outcome) = cancelled_outcome(context) {
         return outcome;
@@ -447,11 +568,11 @@ async fn run_exchange(
             context.meta.cancellation.reason().unwrap_or(CancelReason::UpstreamCancelled),
         ),
         _ = tokio::time::sleep(remaining) => timeout_failure(exchange),
-        outcome = exchange.exchange(query, context) => outcome,
+        outcome = exchange.exchange(query, context, late_sink) => outcome,
     }
 }
 
-fn timeout_failure(exchange: &Arc<dyn DnsExchange>) -> UpstreamOutcome {
+fn timeout_failure(exchange: &GroupMember) -> UpstreamOutcome {
     UpstreamOutcome::TransportFailure(crate::ports::exchange::TransportFailure {
         connector: exchange.connector_id().clone(),
         class: crate::ports::exchange::TransportFailureClass::Timeout,
@@ -481,7 +602,7 @@ mod tests {
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
 
-    use super::{ExecutorBuildError, LateResultSink, UpstreamGroupExecutor};
+    use super::{ExecutorBuildError, GroupMember, LateResultSink, UpstreamGroupExecutor};
     use crate::config::resolve::{ConfigId, ResolvedUpstreamMember};
     use crate::dns::{
         CacheCompatibilityKey, Cancellation, CanonicalQuery, CanonicalResponse, ClientIdentity,
@@ -815,6 +936,72 @@ mod tests {
             sink.results(),
             vec![(1, "slow".to_owned(), ResponseClass::NoData)]
         );
+    }
+
+    #[tokio::test]
+    async fn nested_parallel_group_propagates_late_attempt_to_outer_sink() {
+        let query = query();
+        let inner_fast = exchange("inner-fast");
+        inner_fast.push(positive_response(&query)).unwrap();
+        let inner_slow = Arc::new(DelayedExchange::new(
+            ConnectorId::new("inner-slow").unwrap(),
+            Duration::from_millis(25),
+            response(&query, ResponseCode::NoError),
+        ));
+        let inner_selector = crate::upstream::GroupSelector::new(
+            SelectionPolicy::Parallel,
+            vec![member("inner-fast"), member("inner-slow")],
+        )
+        .unwrap();
+        let inner = Arc::new(
+            UpstreamGroupExecutor::new(inner_selector, vec![inner_fast, inner_slow]).unwrap(),
+        );
+
+        let outer_slow = Arc::new(DelayedExchange::new(
+            ConnectorId::new("outer-slow").unwrap(),
+            Duration::from_millis(100),
+            response(&query, ResponseCode::NoError),
+        ));
+        let outer_selector = crate::upstream::GroupSelector::new(
+            SelectionPolicy::Parallel,
+            vec![member("inner"), member("outer-slow")],
+        )
+        .unwrap();
+        let outer = UpstreamGroupExecutor::new_with_members(
+            outer_selector,
+            vec![
+                GroupMember::Nested {
+                    connector: ConnectorId::new("inner").unwrap(),
+                    executor: inner,
+                },
+                GroupMember::Direct(outer_slow),
+            ],
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let sink = Arc::new(LateCollector::default());
+        let result = outer
+            .execute_with_late_sink(&query, &context(), sink.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            result,
+            UpstreamOutcome::Response(response) if response.class() == ResponseClass::Positive
+        ));
+
+        for _ in 0..100 {
+            if sink
+                .results()
+                .iter()
+                .any(|(_, connector, _)| connector == "inner-slow")
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(sink.results().iter().any(|(_, connector, class)| {
+            connector == "inner-slow" && *class == ResponseClass::NoData
+        }));
     }
 
     #[tokio::test]
