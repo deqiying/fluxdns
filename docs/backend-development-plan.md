@@ -20,7 +20,7 @@
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 本计划覆盖 12 个后端顶层模块，每个模块均有独立方案文档 |
 | 后端代码实现进度 | **67.9%** | Config 达到 100% 模块验收口径；Runtime 已增加原子资源元数据发布、三类 file/remote refresh worker、Application/DnsService 共享 coordinator 的资源刷新入口、可重建 task 的有界 transient restart/backoff、候选 bind/CAS 激活入口、stale-active refresh guard、跨 Runtime 候选状态合并、同 BindPlan listener 复用、跨 Runtime finalizer owner、最新 Runtime optimistic refresh 和资源 worker 集合按 ID 增量复用；Application 已增加无 snapshot 副作用的配置文件 reload API、service-aware reload 入口和 `run` 配置 fingerprint 自动 reload，DnsService 可为新 revision 重建 transport listener、复用未变化的 resource worker 并取消移除的 scoped token；DnsService 已观察 Supervisor task completion 并按 fault level 升级不可恢复故障；Policy/Resource 已补齐 supplied compiled file/remote snapshot、失败 backoff、取消释放、Runtime live publish 和 nested late-result sink 传播；Cache 已新增 Moka 共享 weight/per-entry expiry adapter 和独立 SQLite cache persistence 首轮 adapter，并将 Policy 默认装配切换为 Moka；Storage 已新增 SQLx SQLite migration、stats batch 幂等 transaction、脱敏 detail insert、bounded detail writer channel/batch flush、年龄/软阈值/硬上限、shutdown drain 和周期 flush 运行入口首轮能力；仍缺少完整跨 Runtime 配置候选发布、入站 DoH TLS/PROXY/forwarded、SQLite WAL/SHM 观测与 degraded recovery、Supervisor 级 writer 注册、真实 telemetry writer 和完整服务级故障验收 |
-| v1 交付总进度 | **70.8%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 67.6%` |
+| v1 交付总进度 | **71.1%** | 设计阶段 10% 已完成，加上实现与验收部分的 `90% × 67.9%` |
 
 截至 2026-09-02，阶段 45 已将显式 service reload 的 listener 与 resource refresh task 集合按新 Runtime revision 重建；当前全量测试为 406 个，`run` 自动配置变更事件、完整跨 Runtime 候选发布和 flush 生命周期仍未完成。
 
