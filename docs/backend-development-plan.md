@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 107（统一 Runtime shutdown drain）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 108（统一 Runtime fatal drain）。后续按 v1 需要补齐跨 Runtime 生命周期、协议组合、安全故障复现、持久化故障恢复和最终验收。
 >
 > 更新日期：2026-09-02
 >
@@ -35,7 +35,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **75.5%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| 后端代码实现进度 | **75.6%** | 以模块代码和验证证据计算，不因文档完成虚增 |
 | v1 交付总进度 | **78.0%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
@@ -46,7 +46,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Application | 实现中 | 55% | 4% |
 | Ports | 实现中 | 40% | 8% |
 | Config | 已验证 | 100% | 10% |
-| Runtime | 实现中 | 69% | 12% |
+| Runtime | 实现中 | 70% | 12% |
 | Transport | 实现中 | 72% | 11% |
 | DNS Core | 实现中 | 62% | 10% |
 | Policy | 实现中 | 70% | 8% |
@@ -59,9 +59,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 进度计算：
 
 ```text
-4%×55% + 8%×40% + 10%×100% + 12%×69% + 11%×72%
+4%×55% + 8%×40% + 10%×100% + 12%×70% + 11%×72%
 + 10%×62% + 8%×70% + 10%×99% + 9%×72% + 7%×90%
-+ 8%×84% + 3%×90% ≈ 75.5%
++ 8%×84% + 3%×90% ≈ 75.6%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 107 |
+| 10 | 进行中 | 资源刷新、故障注入、安全边界和最终验收持续补齐 | 当前最新小阶段为 108 |
 
 ### 最新增量记录
 
@@ -125,11 +125,12 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 阶段 105：parallel upstream 的 late-attempt drain 改由 `LateResultSink` 接管，生产路径复用有界 `LateCacheFinalizer`，避免 executor 直接创建 detached task；upstream executor focused `12 passed、0 failed`，Policy focused `19 passed、0 failed`，未重复全量 `cargo fmt/test`。
 - 阶段 106：parallel 在提供 `LateResultSink` 时对首个可停止 DNS 终态快速返回，并由 sink 继续 drain 慢速 attempt；新增快速 NoData/慢速 Positive 验证；upstream executor focused `13 passed、0 failed`，Policy focused `19 passed、0 failed`，未重复全量 `cargo fmt/test`。
 - 阶段 107：`RuntimeCoordinator` 统一标记当前及历史 Runtime 为 draining，`DnsService::shutdown` 不再依赖可能过期的 service runtime 句柄；Runtime coordinator focused `13 passed、0 failed`，service focused `29 passed、0 failed`，未重复全量 `cargo fmt/test`。
+- 阶段 108：Supervisor 运行期 fatal/panic 分支改由 `RuntimeCoordinator` 统一标记当前及历史 Runtime draining，避免外部切换后仅标记过期 service runtime；复用 coordinator `13 passed、0 failed` 与 service `29 passed、0 failed` focused 证据，未重复全量 `cargo fmt/test`。
 
-### 最近小阶段（107）验证命令
+### 最近小阶段（108）验证命令
 
 ```text
-backend/.cargo-home/bin/rustfmt --edition 2024 backend/src/runtime/coordinator.rs backend/src/service.rs
+backend/.cargo-home/bin/rustfmt --edition 2024 backend/src/service.rs
 cargo test --manifest-path backend/Cargo.toml --locked --offline runtime::coordinator::tests:: -- --nocapture
 cargo test --manifest-path backend/Cargo.toml --locked --offline service::tests:: -- --nocapture
 cargo check --manifest-path backend/Cargo.toml --locked --offline
@@ -137,7 +138,7 @@ cargo clippy --manifest-path backend/Cargo.toml --locked --offline --all-targets
 git diff --check
 ```
 
-以上均通过；阶段 107 未重复全量 `cargo fmt/test`。阶段 106 的 parallel terminal response、阶段 105 的受控 late-attempt drain、阶段 104 的 Runtime owner pruning、阶段 103 的跨 Runtime drain focused test、阶段 102 的当前 Runtime drain focused test、阶段 101 的 SQLite disk usage focused test、阶段 100 的 metadata schema contract、阶段 99 的容量维护 contract、阶段 98 的 SQLite fault focused test、阶段 97 的 cache persistence contract、阶段 96 的 health lifecycle focused test、阶段 95 的 SIGINT/SIGTERM 编译验证、阶段 94 的 Resource health focused test、阶段 93 的 fallback focused test、阶段 92 的 health publish focused test、阶段 91 的 typed tracing focused test、阶段 90 的 telemetry flush focused test、阶段 89 的 config watcher focused test及阶段 88 的 system socket/DoH focused tests 证据保留在对应提交中。
+以上均通过；阶段 108 未重复全量 `cargo fmt/test`。阶段 107 的统一 shutdown drain、阶段 106 的 parallel terminal response、阶段 105 的受控 late-attempt drain、阶段 104 的 Runtime owner pruning、阶段 103 的跨 Runtime drain focused test、阶段 102 的当前 Runtime drain focused test、阶段 101 的 SQLite disk usage focused test、阶段 100 的 metadata schema contract、阶段 99 的容量维护 contract、阶段 98 的 SQLite fault focused test、阶段 97 的 cache persistence contract、阶段 96 的 health lifecycle focused test、阶段 95 的 SIGINT/SIGTERM 编译验证、阶段 94 的 Resource health focused test、阶段 93 的 fallback focused test、阶段 92 的 health publish focused test、阶段 91 的 typed tracing focused test、阶段 90 的 telemetry flush focused test、阶段 89 的 config watcher focused test及阶段 88 的 system socket/DoH focused tests 证据保留在对应提交中。
 
 ## 5. v1 验收门槛
 

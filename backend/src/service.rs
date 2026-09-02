@@ -631,7 +631,7 @@ impl DnsService {
                                 Some("supervisor task failed"),
                             );
                         }
-                        self.runtime.begin_drain();
+                        self.coordinator.begin_drain();
                         return Err(error);
                     }
                 }

@@ -88,7 +88,7 @@ bootstrap telemetry
 5. 关闭 `RuntimeCoordinator` 持有的历史/当前 `LateCacheFinalizer` owner；
 6. 返回成功或 shutdown timeout 错误。
 
-运行期 task 完成时，Degraded 组件的终止失败只记录并继续服务；FatalEndpoint/Fatal、重试耗尽和 panic 映射为 `RuntimeFatal`，先标记当前 runtime draining，再交由进程边界返回非零错误。显式 service reload 会为新 revision 注册新的 listener task，并通过 scoped cancellation 取消旧 task；运行期故障本身仍不会自动重建 listener。
+运行期 task 完成时，Degraded 组件的终止失败只记录并继续服务；FatalEndpoint/Fatal、重试耗尽和 panic 映射为 `RuntimeFatal`，先通过 `RuntimeCoordinator::begin_drain` 统一标记当前及历史 runtime draining，再交由进程边界返回非零错误。显式 service reload 会为新 revision 注册新的 listener task，并通过 scoped cancellation 取消旧 task；运行期故障本身仍不会自动重建 listener。
 
 第二个终止信号快速退出和 `SIGTERM` 已接入；cache persistence 仍由独立后续阶段处理。配置文件轮询只作为内部事件源，不提供外部管理 API。
 
