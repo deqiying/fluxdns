@@ -6,8 +6,7 @@ use std::sync::Arc;
 
 use thiserror::Error;
 
-use crate::config::model::EcsMode;
-use crate::config::resolve::{ProxyScheme, ResolvedOutbound, ResolvedUpstream, ValueSource};
+use crate::config::resolve::{ProxyScheme, ResolvedOutbound, ResolvedUpstream};
 use crate::dns::{Cancellation, Deadline};
 use crate::ports::exchange::{ConnectorId, DnsExchange};
 use crate::ports::{PortError, PortFuture};
@@ -287,19 +286,8 @@ impl UpstreamRegistry {
                     address,
                     bootstrap,
                     connect_ip,
-                    edns_client_subnet,
                     ..
                 } => {
-                    // 全局继承值由 Policy Core 统一应用；显式 upstream 覆盖仍需成员级语义。
-                    if edns_client_subnet.as_ref().is_some_and(|ecs| {
-                        ecs.source == ValueSource::Upstream
-                            && !matches!(ecs.mode, EcsMode::Disabled)
-                    }) {
-                        return Err(RegistryError::UnsupportedUpstream {
-                            upstream: id.as_str().to_owned(),
-                            kind: "doh_edns_client_subnet",
-                        });
-                    }
                     if !matches!(address.scheme(), "http" | "https") {
                         return Err(RegistryError::InvalidDoh {
                             upstream: id.as_str().to_owned(),
@@ -543,8 +531,11 @@ mod tests {
             Err(RegistryError::UnsupportedUpstream { upstream, kind })
                 if upstream == "proxy" && kind == "doh_proxy"
         ));
+    }
 
-        let ecs = ResolvedUpstream::Doh {
+    #[test]
+    fn explicit_upstream_ecs_does_not_block_connector_build() {
+        let doh = ResolvedUpstream::Doh {
             id: ConfigId::new("ecs").unwrap(),
             address: "http://dns.example.test/dns-query".parse().unwrap(),
             bootstrap: None,
@@ -556,11 +547,8 @@ mod tests {
                 source: ValueSource::Upstream,
             }),
         };
-        assert!(matches!(
-            UpstreamRegistry::from_resolved(&[ecs]),
-            Err(RegistryError::UnsupportedUpstream { upstream, kind })
-                if upstream == "ecs" && kind == "doh_edns_client_subnet"
-        ));
+
+        assert!(UpstreamRegistry::from_resolved(&[doh]).is_ok());
     }
 
     #[test]

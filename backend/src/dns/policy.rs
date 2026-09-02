@@ -1770,6 +1770,46 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn policy_core_applies_explicit_upstream_custom_ecs_to_query() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        let ResolvedUpstream::Doh {
+            edns_client_subnet, ..
+        } = &mut config.upstreams[0]
+        else {
+            panic!("fixture must contain a DoH upstream");
+        };
+        *edns_client_subnet = Some(ResolvedEcs {
+            mode: EcsMode::Custom,
+            custom_ip: Some("198.51.100.0/24".parse().unwrap()),
+            source: ValueSource::Upstream,
+        });
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(&config, 42, registry).unwrap();
+
+        core.resolve(&request("upstream-ecs.example.", RecordType::A))
+            .await
+            .unwrap();
+
+        let guard = transport.request.lock().unwrap();
+        let wire = Message::from_vec(guard.as_ref().unwrap().body()).unwrap();
+        let option = wire
+            .edns
+            .as_ref()
+            .and_then(|edns| edns.option(EdnsCode::Subnet));
+        assert!(matches!(
+            option,
+            Some(EdnsOption::Subnet(subnet))
+                if subnet.addr() == IpAddr::from([198, 51, 100, 0])
+                    && subnet.source_prefix() == 24
+        ));
+    }
+
     #[test]
     fn client_mode_prefers_and_normalizes_request_ecs() {
         let supplied = hickory_proto::rr::rdata::opt::ClientSubnet::new(
