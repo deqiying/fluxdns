@@ -6,8 +6,10 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 use ipnet::IpNet;
+use sha2::{Digest, Sha256};
 
 use crate::config::resolve::{ConfigId, ResolvedClient};
+use crate::ports::cache::ClientCacheDigest;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ClientRule {
@@ -57,6 +59,59 @@ pub enum ClientMatch {
         kind: ClientMatchKind,
     },
     Unknown,
+}
+
+impl ClientMatch {
+    /// 根据实际命中的身份类型生成域分隔摘要，避免把客户端原始标识写入缓存键。
+    pub(crate) fn cache_digest(
+        &self,
+        client_id: Option<&str>,
+        client_addr: Option<IpAddr>,
+    ) -> Option<ClientCacheDigest> {
+        let mut hasher = Sha256::new();
+        hasher.update(b"fluxdns/client-cache/v1\0");
+        match (self, client_id, client_addr) {
+            (
+                Self::Matched {
+                    kind: ClientMatchKind::ExactId,
+                    ..
+                },
+                Some(client_id),
+                _,
+            ) => {
+                hasher.update(b"id\0");
+                hasher.update(client_id.as_bytes());
+            }
+            (
+                Self::Matched {
+                    kind: ClientMatchKind::Cidr { .. },
+                    ..
+                },
+                _,
+                Some(IpAddr::V4(client_addr)),
+            ) => {
+                hasher.update(b"ipv4\0");
+                hasher.update(client_addr.octets());
+            }
+            (
+                Self::Matched {
+                    kind: ClientMatchKind::Cidr { .. },
+                    ..
+                },
+                _,
+                Some(IpAddr::V6(client_addr)),
+            ) => {
+                hasher.update(b"ipv6\0");
+                hasher.update(client_addr.octets());
+            }
+            _ => return None,
+        }
+
+        let digest = hasher.finalize();
+        let mut bytes = [0_u8; 32];
+        bytes.copy_from_slice(&digest);
+        Some(ClientCacheDigest::from_digest(bytes))
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -229,6 +284,28 @@ mod tests {
             ClientIndex::build([rule("one", &["same"], &[]), rule("two", &["same"], &[]),])
                 .unwrap_err(),
             ClientRuleBuildError::DuplicateId
+        );
+    }
+
+    #[test]
+    fn cache_digest_uses_the_identity_that_actually_matched() {
+        let index = ClientIndex::build([rule("mixed", &["alice"], &["192.0.2.0/24"])]).unwrap();
+        let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 8));
+
+        let exact = index.match_client(Some("alice"), Some(address));
+        assert_eq!(
+            exact.cache_digest(Some("alice"), Some(address)),
+            exact.cache_digest(Some("alice"), None)
+        );
+
+        let cidr = index.match_client(Some("unknown-a"), Some(address));
+        assert_eq!(
+            cidr.cache_digest(Some("unknown-a"), Some(address)),
+            cidr.cache_digest(Some("unknown-b"), Some(address))
+        );
+        assert_ne!(
+            exact.cache_digest(Some("alice"), Some(address)),
+            cidr.cache_digest(Some("alice"), Some(address))
         );
     }
 }

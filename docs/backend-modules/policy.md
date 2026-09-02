@@ -84,7 +84,7 @@ regex 在资源加载时编译，运行时只执行已限制语法和大小的 m
 3. 都未命中时使用 `unknown` bucket；
 4. 同优先级冲突必须在 Config prepare 阶段失败，运行时不依赖数组顺序。
 
-匹配结果包含 client rule ID 与实际 identity。cache namespace 使用实际 client ID 的不可逆摘要，或规范化 IP 的受控表示，不只使用 client rule name。
+匹配结果包含 client rule ID 与实际 identity。cache namespace 使用实际命中的 client ID 或规范化 IP 生成域分隔 SHA-256 摘要，不只使用 client rule name，也不把原始身份写入缓存键。
 
 ## 6. Strategy 选择
 
@@ -200,6 +200,6 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 提供 client bucket/strategy/source/cache/selected upstream 首轮低基数 observation；完整 group member、matched resource/rule result 仍待完成。
 - [x] `PolicyLateResultSink` 按当前 `CacheEntry.quality` 使用 `CacheCondition::Version` 更新候选，允许更优 late Positive 替换早期 Negative，并拒绝同级 Negative/Positive 或更低 Failure 覆盖；跨 adapter/并发候选矩阵仍待完成。
 
-阶段证据：`policy::plan::tests` 当前 8 项通过，覆盖匹配客户端未声明 TTL/ECS override 时继承其所选 strategy，并验证 client pool 的 optimistic answer TTL/max-age；`dns::policy::tests` 当前 29 项通过，覆盖 global pool 关闭时的 strategy cache、client/strategy/cache 兼容、hosts/rule-set/group/DoH 路径、optimistic refresh/late sink、cache hit TTL、TTL override 和 ECS 上游 query。最近一次大阶段 backend 全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
+阶段证据：`policy::client::tests` 当前 4 项、`policy::plan::tests` 当前 8 项通过，覆盖实际命中身份的域分隔摘要、client pool namespace、TTL/ECS override 与 strategy 继承；`dns::policy::tests` 当前 30 项通过，覆盖 global pool 关闭时的 strategy/client cache、client identity 隔离、hosts/rule-set/group/DoH 路径、optimistic refresh/late sink、cache hit TTL、TTL override 和 ECS 上游 query。最近一次大阶段 backend 全量测试仍为 417 passed、0 failed，本阶段未重复全量测试。
 
-当前实现进度：**75%**（client/strategy/route immutable index、const/file resource loader、rule/hosts matcher 编排、请求级 plan、TTL/ECS 层级选择、per-pool optimistic answer TTL/max-age、supplied compiled file/remote snapshot、direct DoH、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、late sink、RuntimeCoordinator finalizer owner 和配置候选 reload 已接入；显式 upstream/group member ECS、client digest、remote/dat selector、完整 metadata/覆盖矩阵和跨 transport contract tests 未完成）。
+当前实现进度：**77%**（client/strategy/route immutable index、client identity cache digest、const/file resource loader、rule/hosts matcher 编排、请求级 plan、TTL/ECS 层级选择、per-pool optimistic answer TTL/max-age、supplied compiled file/remote snapshot、direct DoH、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、late sink、RuntimeCoordinator finalizer owner 和配置候选 reload 已接入；显式 upstream/group member ECS、remote/dat selector、完整 metadata/覆盖矩阵和跨 transport contract tests 未完成）。

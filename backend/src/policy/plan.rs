@@ -341,7 +341,10 @@ impl PolicyIndex {
         } else {
             routing.strategy.clone()
         };
-        let cache = self.select_cache(client_config, strategy.as_ref(), request.client_digest)?;
+        let client_digest = request
+            .client_digest
+            .or_else(|| client.cache_digest(request.client_id, request.client_addr));
+        let cache = self.select_cache(client_config, strategy.as_ref(), client_digest)?;
         let ttl_override = client_config
             .filter(|client| client.ttl_override.source == ValueSource::Client)
             .map(|client| client.ttl_override.clone())
@@ -702,7 +705,7 @@ mod tests {
         ResolvedHostsResource, ResolvedListener, ResolvedOptimistic, ResolvedRuleSetRef,
         ResolvedStrategy, ResolvedStrategyRule, ResolvedTtlOverride, ValueSource,
     };
-    use crate::ports::cache::ClientCacheDigest;
+    use crate::ports::cache::CacheNamespace;
     use crate::resource::{CanonicalDomain, HostsIndex, RuleIndex};
 
     use super::{CacheDecision, MatchedRuleKind, PolicyError, PolicyIndex, PolicyRequest};
@@ -831,7 +834,7 @@ mod tests {
                 doh_path: None,
                 client_id: Some("alice"),
                 client_addr: Some(IpAddr::from([192, 0, 2, 10])),
-                client_digest: Some(ClientCacheDigest::from_digest([0x11; 32])),
+                client_digest: None,
                 qname: None,
             })
             .unwrap();
@@ -954,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    fn missing_client_digest_does_not_create_client_namespace() {
+    fn matched_identity_creates_client_cache_namespace() {
         let index = PolicyIndex::build(
             [listener()],
             [strategy("default", None)],
@@ -973,7 +976,13 @@ mod tests {
                 qname: None,
             })
             .unwrap();
-        assert_eq!(plan.cache, CacheDecision::Disabled);
+        assert!(matches!(
+            plan.cache,
+            CacheDecision::Pool {
+                namespace: CacheNamespace::ClientStrategy { .. },
+                ..
+            }
+        ));
     }
 
     #[test]

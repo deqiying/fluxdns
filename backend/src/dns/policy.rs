@@ -1489,9 +1489,9 @@ mod tests {
     };
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
-        CacheCompatibilityKey, Cancellation, CanonicalQuery, CanonicalResponse, CoreOutcome,
-        Deadline, DnsCore, DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta,
-        RuntimeRevision, TransportCapabilities, TransportClass,
+        CacheCompatibilityKey, Cancellation, CanonicalQuery, CanonicalResponse, ClientId,
+        CoreOutcome, Deadline, DnsCore, DnsRequest, ListenerId, RequestContext, RequestId,
+        RequestMeta, RuntimeRevision, TransportCapabilities, TransportClass,
     };
     use crate::ports::exchange::{ConnectorId, UpstreamOutcome};
     use crate::ports::{PortError, PortFuture};
@@ -1649,6 +1649,53 @@ mod tests {
 
         assert!(core.cache().options().enabled);
         assert_eq!(transport.calls.load(Ordering::Acquire), 1);
+    }
+
+    #[tokio::test]
+    async fn client_cache_uses_matched_identity_and_isolates_clients() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        assert!(!config.dns.cache.enabled);
+        config.clients.push(ResolvedClient {
+            id: ConfigId::new("authenticated").unwrap(),
+            ids: vec!["alice".to_owned(), "bob".to_owned()],
+            ips: Vec::new(),
+            strategy: None,
+            cache: Some(ResolvedCacheOverride {
+                enabled: true,
+                optimistic: Some(config.dns.cache.optimistic.clone()),
+                source: ValueSource::Client,
+            }),
+            ttl_override: ResolvedTtlOverride {
+                enabled: false,
+                min: None,
+                max: None,
+                source: ValueSource::Default,
+            },
+            edns_client_subnet: ResolvedEcs {
+                mode: EcsMode::Disabled,
+                custom_ip: None,
+                source: ValueSource::Default,
+            },
+        });
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            transport.clone(),
+        )
+        .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(&config, 42, registry).unwrap();
+        let mut alice = request("client-cache.example.", RecordType::A);
+        alice.context.client.client_id = Some(ClientId::from("alice"));
+        let mut bob = request("client-cache.example.", RecordType::A);
+        bob.context.client.client_id = Some(ClientId::from("bob"));
+
+        core.resolve(&alice).await.unwrap();
+        core.resolve(&alice).await.unwrap();
+        core.resolve(&bob).await.unwrap();
+        core.resolve(&bob).await.unwrap();
+
+        assert!(core.cache().options().enabled);
+        assert_eq!(transport.calls.load(Ordering::Acquire), 2);
     }
 
     #[tokio::test]

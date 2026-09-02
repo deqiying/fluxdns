@@ -433,6 +433,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_path_to_error",
+ "sha2",
  "socket2",
  "sqlx",
  "thiserror 2.0.20",
