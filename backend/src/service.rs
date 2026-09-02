@@ -1948,7 +1948,7 @@ mod tests {
     };
     use crate::runtime::{
         FaultLevel, PreparedRuntime, RestartPolicy, RuntimeCoordinator, Supervisor, SystemClock,
-        TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
+        SystemSocketFactory, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
     };
     use crate::storage::StorageRuntime;
 
@@ -2229,6 +2229,81 @@ mod tests {
         assert_eq!(completion.exit, TaskExit::Cancelled);
         assert_eq!(completion.restart_count, 1);
         assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn fatal_task_drains_all_runtime_owners_before_returning_error() {
+        let base_port = 42_000 + (std::process::id() as u16 % 500) * 2;
+        let factory = SystemSocketFactory::new();
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config(base_port),
+            crate::dns::RuntimeRevision(1),
+        )
+        .unwrap();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            crate::dns::Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let previous = coordinator.load();
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let next = PreparedRuntime::prepare_with_policy_core(
+            runtime_config(base_port + 1),
+            crate::dns::RuntimeRevision(2),
+        )
+        .unwrap();
+        let next = crate::runtime::bind_prepared(
+            next,
+            &factory,
+            crate::dns::Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        coordinator.activate(next);
+        let current = coordinator.load();
+
+        service
+            .supervisor
+            .spawn(
+                TaskSpec::new(
+                    "fatal.test",
+                    "test",
+                    FaultLevel::Fatal,
+                    RestartPolicy::Never,
+                )
+                .unwrap(),
+                Box::pin(async { Err(TaskError::Fatal) }),
+            )
+            .unwrap();
+        let error = service
+            .wait_for_ctrl_c_with_reload(
+                Duration::from_millis(100),
+                Duration::from_secs(1),
+                |_service| Box::pin(async { Ok(()) }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ServiceError::TaskFailure { .. }));
+        assert!(previous.is_draining());
+        assert!(current.is_draining());
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                crate::dns::Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
     }
 
     fn runtime_config(port: u16) -> Arc<crate::config::resolve::ResolvedConfig> {
