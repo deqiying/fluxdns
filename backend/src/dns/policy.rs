@@ -2027,6 +2027,91 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn policy_late_result_sink_routes_to_latest_runtime_cache() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        let config = Arc::new(config);
+        let old_registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            Arc::new(FakeDohTransport::new()),
+        )
+        .unwrap();
+        let latest_registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &config.upstreams,
+            Arc::new(FakeDohTransport::new()),
+        )
+        .unwrap();
+        let old = Arc::new(
+            PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, old_registry).unwrap(),
+        );
+        let latest = Arc::new(
+            PolicyDnsCore::from_config_with_registry(config.as_ref(), 43, latest_registry).unwrap(),
+        );
+        let request = request("late-latest.example.", RecordType::A);
+        let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).unwrap();
+        let listener_id = ConfigId::new("dns").unwrap();
+        let plan = old
+            .policy()
+            .evaluate(crate::policy::PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: request.context.client.client_addr,
+                client_digest: None,
+                qname: Some(&qname),
+            })
+            .unwrap();
+        let key = cache_key(&plan, &request).expect("cache must be enabled");
+
+        let cell = Arc::new(RuntimeCoreCell::default());
+        old.attach_runtime_cell(Arc::clone(&cell));
+        latest.attach_runtime_cell(Arc::clone(&cell));
+        cell.publish(Some(Arc::new(RuntimeCoreTarget {
+            core: Arc::clone(&latest),
+            revision: RuntimeRevision(43),
+        })));
+
+        let response = CanonicalResponse::response_with_answers(
+            &request.query,
+            [Record::from_rdata(
+                request.query.question().name().clone(),
+                30,
+                RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, 12))),
+            )],
+        )
+        .unwrap();
+        old.late_result_sink(&key, &request).submit(
+            request.query.clone(),
+            request.context.clone(),
+            UpstreamAttempt {
+                attempt_index: 1,
+                connector: ConnectorId::new("late-latest").unwrap(),
+                outcome: UpstreamOutcome::Response(response),
+            },
+        );
+
+        let deadline = Deadline::new(Instant::now() + Duration::from_secs(1));
+        let mut routed = false;
+        for _ in 0..100 {
+            if let CacheLookup::Fresh(record) = latest.cache().lookup(&key, deadline).await.unwrap()
+                && record.entry.response.class() == crate::dns::ResponseClass::Positive
+            {
+                routed = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            routed,
+            "late sink should publish into the latest Runtime cache"
+        );
+        assert!(matches!(
+            old.cache().lookup(&key, deadline).await.unwrap(),
+            CacheLookup::Miss
+        ));
+    }
+
     fn config() -> std::sync::Arc<crate::config::ResolvedConfig> {
         let work_path = crate::config::test_support::absolute_path("policy-core");
         ConfigLoader::new(LoadOptions::default().without_snapshot())
