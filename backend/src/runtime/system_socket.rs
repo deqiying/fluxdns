@@ -858,4 +858,78 @@ mod tests {
             TcpReadChunkResult::Data(b"hello".to_vec())
         );
     }
+
+    #[tokio::test]
+    async fn tcp_tls_upgrade_observes_deadline_and_cancellation() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let material = Arc::new(TlsServerMaterial {
+            certificate_chain: vec![certified.cert.der().to_vec()],
+            private_key: certified.signing_key.serialize_der(),
+        });
+        let factory = SystemSocketFactory::new();
+        let cancellation = Cancellation::new();
+        let prepared = factory
+            .prepare(
+                crate::ports::effects::SocketSpec {
+                    kind: SocketKind::Tcp,
+                    address: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0),
+                    reuse_port: false,
+                    v6_only: false,
+                },
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        let activated = prepared.activate().unwrap();
+        let ActivatedSocketHandle::Tcp(listener) = activated.socket_handle().unwrap() else {
+            unreachable!();
+        };
+        let address = listener.local_addr().unwrap();
+
+        let _silent_client = TcpStream::connect(address).await.unwrap();
+        let mut connection = listener
+            .accept(
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let timeout = connection
+            .start_tls(
+                Arc::clone(&material),
+                Deadline::new(Instant::now() + Duration::from_millis(20)),
+                &cancellation,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            timeout.class(),
+            crate::ports::PortErrorClass::Timeout
+        ));
+        assert_eq!(timeout.operation(), "system_socket.tls_handshake");
+
+        let _second_silent_client = TcpStream::connect(address).await.unwrap();
+        let mut connection = listener
+            .accept(
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let handshake = connection.start_tls(
+            material,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+            &cancellation,
+        );
+        cancellation.cancel(crate::dns::CancelReason::Shutdown);
+        let cancelled = handshake.await.unwrap_err();
+        assert!(matches!(
+            cancelled.class(),
+            crate::ports::PortErrorClass::Cancelled(crate::dns::CancelReason::Shutdown)
+        ));
+        assert_eq!(cancelled.operation(), "system_socket.tls_handshake");
+    }
 }
