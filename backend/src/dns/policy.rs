@@ -23,7 +23,9 @@ use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedHostsResource, Re
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::policy::{ClientMatch, PolicyBuildError, PolicyIndex, PolicyRequest};
 use crate::ports::PortFuture;
-use crate::ports::cache::{CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation};
+use crate::ports::cache::{
+    CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation, CacheQuality,
+};
 use crate::ports::exchange::{
     ConnectorId, DnsExchange, TransportFailure, TransportFailureClass, UpstreamOutcome,
 };
@@ -444,18 +446,40 @@ impl LateResultSink for PolicyLateResultSink {
                 )
             },
         );
-        let _ = finalizer.submit(
-            cache,
-            CacheWriteRequest {
-                key: self.key.clone(),
-                condition: crate::ports::cache::CacheCondition::Absent,
-                response: Arc::new(response),
-                now: Instant::now(),
-                producer_revision,
-                format_version: self.format_version,
-                deadline: self.deadline,
-            },
-        );
+        let key = self.key.clone();
+        let format_version = self.format_version;
+        let deadline = self.deadline;
+        let response = Arc::new(response);
+        let _ = finalizer.submit_task(async move {
+            let current = match cache.lookup(&key, deadline).await {
+                Ok(CacheLookup::Fresh(record)) | Ok(CacheLookup::Stale { record, .. }) => {
+                    Some(record)
+                }
+                Ok(CacheLookup::Miss) => None,
+                Ok(CacheLookup::Disabled) | Ok(CacheLookup::StoreUnavailable) | Err(_) => return,
+            };
+            let condition = match current {
+                None => crate::ports::cache::CacheCondition::Absent,
+                Some(record)
+                    if late_response_preference(response.class())
+                        > late_response_preference(record.entry.response.class()) =>
+                {
+                    crate::ports::cache::CacheCondition::Version(record.version)
+                }
+                Some(_) => return,
+            };
+            let _ = cache
+                .write_response(CacheWriteRequest {
+                    key,
+                    condition,
+                    response,
+                    now: Instant::now(),
+                    producer_revision,
+                    format_version,
+                    deadline,
+                })
+                .await;
+        });
     }
 
     fn spawn_drain(&self, task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>) {
@@ -881,6 +905,19 @@ impl PolicyDnsCore {
     }
 }
 
+fn late_response_preference(class: crate::dns::ResponseClass) -> CacheQuality {
+    match class {
+        crate::dns::ResponseClass::Positive => CacheQuality::Complete,
+        crate::dns::ResponseClass::NoData | crate::dns::ResponseClass::NxDomain => {
+            CacheQuality::Negative
+        }
+        crate::dns::ResponseClass::Refused
+        | crate::dns::ResponseClass::ServFail
+        | crate::dns::ResponseClass::Truncated
+        | crate::dns::ResponseClass::Other(_) => CacheQuality::Failure,
+    }
+}
+
 const DEFAULT_LATE_CACHE_FINALIZER_CAPACITY: usize = 64;
 const OPTIMISTIC_REFRESH_TIMEOUT_SECS: u64 = 2;
 
@@ -1283,7 +1320,7 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RecordType};
+    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
     use ipnet::IpNet;
 
     use crate::cache::CacheLookup;
@@ -1820,6 +1857,110 @@ mod tests {
         assert!(
             stored,
             "late response should be published through the finalizer"
+        );
+    }
+
+    #[tokio::test]
+    async fn policy_late_result_sink_promotes_positive_over_early_negative() {
+        let mut config = Arc::try_unwrap(doh_config()).unwrap();
+        config.dns.cache.enabled = true;
+        let config = Arc::new(config);
+        let transport = Arc::new(FakeDohTransport::new());
+        let registry =
+            UpstreamRegistry::from_resolved_with_doh_transport(&config.upstreams, transport)
+                .unwrap();
+        let core = PolicyDnsCore::from_config_with_registry(config.as_ref(), 42, registry).unwrap();
+        let request = request("late-positive.example.", RecordType::A);
+        let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).unwrap();
+        let listener_id = ConfigId::new("dns").unwrap();
+        let plan = core
+            .policy()
+            .evaluate(crate::policy::PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: request.context.client.client_addr,
+                client_digest: None,
+                qname: Some(&qname),
+            })
+            .unwrap();
+        let key = cache_key(&plan, &request).expect("cache must be enabled");
+        let early = core.resolve(&request).await.unwrap();
+        assert!(matches!(
+            early,
+            CoreOutcome::Response(response)
+                if response.class() == crate::dns::ResponseClass::NoData
+        ));
+
+        let sink = core.late_result_sink(&key, &request);
+        let positive = CanonicalResponse::response_with_answers(
+            &request.query,
+            [Record::from_rdata(
+                request.query.question().name().clone(),
+                30,
+                RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, 10))),
+            )],
+        )
+        .unwrap();
+        let expected_positive = positive.clone();
+        sink.submit(
+            request.query.clone(),
+            request.context.clone(),
+            UpstreamAttempt {
+                attempt_index: 1,
+                connector: ConnectorId::new("late-positive").unwrap(),
+                outcome: UpstreamOutcome::Response(positive),
+            },
+        );
+
+        let deadline = Deadline::new(Instant::now() + Duration::from_secs(1));
+        let mut promoted = false;
+        for _ in 0..100 {
+            if let CacheLookup::Fresh(record) = core.cache().lookup(&key, deadline).await.unwrap()
+                && record.entry.response.class() == crate::dns::ResponseClass::Positive
+            {
+                promoted = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert!(
+            promoted,
+            "late positive response should replace an early negative cache entry"
+        );
+
+        let replacement = CanonicalResponse::response_with_answers(
+            &request.query,
+            [Record::from_rdata(
+                request.query.question().name().clone(),
+                30,
+                RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, 11))),
+            )],
+        )
+        .unwrap();
+        sink.submit(
+            request.query.clone(),
+            request.context.clone(),
+            UpstreamAttempt {
+                attempt_index: 2,
+                connector: ConnectorId::new("late-positive-replacement").unwrap(),
+                outcome: UpstreamOutcome::Response(replacement),
+            },
+        );
+        for _ in 0..100 {
+            if core.finalizer_owner().active_tasks() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        let final_record = match core.cache().lookup(&key, deadline).await.unwrap() {
+            CacheLookup::Fresh(record) => record,
+            other => panic!("expected a fresh promoted cache record, got {other:?}"),
+        };
+        assert_eq!(
+            final_record.entry.response.as_ref(),
+            &expected_positive,
+            "same-quality late response must not overwrite the promoted cache entry"
         );
     }
 
