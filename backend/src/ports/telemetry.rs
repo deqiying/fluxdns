@@ -10,7 +10,7 @@ use crate::dns::{Deadline, RuntimeRevision, TransportClass};
 
 use super::{PortError, PortFuture};
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum Component {
     Application,
     Runtime,

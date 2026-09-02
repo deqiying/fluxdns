@@ -1,6 +1,6 @@
 # Observability 模块设计
 
-> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown；typed final tracing layer 和 Storage/Telemetry/Supervisor/Resource refresh 的首轮 degraded health 发布已接入，完整 health registry 生命周期和 fallback 失败后的最终处置仍待完善
+> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、health lifecycle 归一化、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown；typed final tracing layer 和 Storage/Telemetry/Supervisor/Resource refresh 的首轮 degraded health 发布已接入，跨 Runtime registry 生命周期和 fallback 失败后的最终处置仍待完善
 >
 > 更新日期：2026-09-02
 >
@@ -204,8 +204,9 @@ TelemetryWriter 接入后的 shutdown 顺序为：
 - [x] 将 `TelemetryWriter` 接入 `DnsService`/Supervisor 周期 flush 和 shutdown；
 - [x] 接入 typed final tracing layer，并把安全 `event/component/result/revision` 字段写入 `TelemetryWriter`；
 - [x] 接入 Storage/Telemetry/Supervisor/Resource refresh 的首轮 degraded/failed/stopping health 发布；
+- [x] 在 `TelemetryWriter` 内归一化组件 health lifecycle 字段，保留首次时间、最近成功、累计重试和 gap 语义；
 - [ ] 完善 health registry 的跨 Runtime 生命周期、retry/stale/gap 传播和 fallback 失败后的最终处置。
 
-阶段 1/9 证据：bootstrap subscriber、日志级别解析、`Sensitive<T>`、DNS/resource/resolve event Debug 脱敏、metric label 类型匹配/去重/数量上限与敏感字段拒绝、registry health/retry/gap，以及 `TelemetryWriter` 的容量、优先级、flush/requeue/deadline/shutdown focused tests 均通过；阶段 79 新增 `StructuredTelemetryOutput` 文件输出 adapter，阶段 80 接入 Application 启动时输出目标切换，阶段 81 接入 reloadable level filter，阶段 90 将 writer 接入 Supervisor 周期 flush/shutdown，阶段 91 接入 typed tracing layer，阶段 92 接入首轮 health publish，阶段 93 接入主输出失败 stderr fallback，阶段 94 接入 Resource refresh health publish；Observability focused tests `19 passed、0 failed`，typed layer 和 fallback focused test 各 `1 passed、0 failed`，service telemetry flush task 和 health publish 各 `1 passed、0 failed`，service focused suite `29 passed、0 failed`，并通过 `cargo check`/`cargo clippy --all-targets -D warnings`。完整 health registry 生命周期和 fallback 失败后的最终处置仍待后续切片。
+阶段 1/9 证据：bootstrap subscriber、日志级别解析、`Sensitive<T>`、DNS/resource/resolve event Debug 脱敏、metric label 类型匹配/去重/数量上限与敏感字段拒绝、registry health/retry/gap，以及 `TelemetryWriter` 的容量、优先级、flush/requeue/deadline/shutdown focused tests 均通过；阶段 79 新增 `StructuredTelemetryOutput` 文件输出 adapter，阶段 80 接入 Application 启动时输出目标切换，阶段 81 接入 reloadable level filter，阶段 90 将 writer 接入 Supervisor 周期 flush/shutdown，阶段 91 接入 typed tracing layer，阶段 92 接入首轮 health publish，阶段 93 接入主输出失败 stderr fallback，阶段 94 接入 Resource refresh health publish，阶段 96 接入 health lifecycle 归一化；Observability focused tests `20 passed、0 failed`，typed layer、fallback 和 lifecycle focused test 各 `1 passed、0 failed`，service telemetry flush task 和 health publish 各 `1 passed、0 failed`，service focused suite `29 passed、0 failed`，并通过 `cargo check`/`cargo clippy --all-targets -D warnings`。跨 Runtime health registry 生命周期和 fallback 失败后的最终处置仍待后续切片。
 
-当前实现进度：**85%**。
+当前实现进度：**90%**。

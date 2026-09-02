@@ -12,9 +12,9 @@ use std::{
 
 use crate::dns::Deadline;
 use crate::ports::telemetry::{
-    Component as TelemetryComponent, ComponentHealthEvent, EventName as TelemetryEventName,
-    HealthSink, LogEvent, LogLevel as TelemetryLogLevel, LogSink, MetricEvent, MetricsSink,
-    OutcomeClass, TelemetryFlushSummary,
+    Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
+    EventName as TelemetryEventName, HealthSink, LogEvent, LogLevel as TelemetryLogLevel, LogSink,
+    MetricEvent, MetricsSink, OutcomeClass, TelemetryFlushSummary,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 use tracing::Subscriber;
@@ -932,15 +932,58 @@ struct TelemetryWriterState {
     closed: bool,
 }
 
+#[derive(Clone, Copy)]
+struct TelemetryHealthRecord {
+    state: ComponentHealthState,
+    first_seen: Instant,
+    last_changed: Instant,
+    last_success: Option<Instant>,
+    retry_count: u64,
+    persistence_gap: bool,
+}
+
+impl TelemetryHealthRecord {
+    fn from_event(event: &ComponentHealthEvent) -> Self {
+        Self {
+            state: event.state,
+            first_seen: event.first_seen,
+            last_changed: event.last_changed,
+            last_success: event.last_success,
+            retry_count: event.retry_count,
+            persistence_gap: event.persistence_gap,
+        }
+    }
+
+    fn normalize(&self, mut event: ComponentHealthEvent) -> ComponentHealthEvent {
+        event.first_seen = self.first_seen;
+        if event.state == self.state || event.last_changed < self.last_changed {
+            event.last_changed = self.last_changed;
+        }
+        event.last_success = match (self.last_success, event.last_success) {
+            (Some(previous), Some(current)) => Some(previous.max(current)),
+            (Some(previous), None) => Some(previous),
+            (None, current) => current,
+        };
+        event.retry_count = event.retry_count.max(self.retry_count);
+        if self.persistence_gap && event.state != ComponentHealthState::Healthy {
+            event.persistence_gap = true;
+        }
+        event
+    }
+}
+
 /// 面向稳定 telemetry ports 的非阻塞有界 writer。
 ///
 /// `emit`/`record`/`update` 只执行内存操作，不等待输出端；低优先级日志在拥塞时计数
 /// 丢弃，warn/error 会优先淘汰已排队的低优先级日志，否则返回明确的容量错误。
+/// 健康事件只保留每个组件一条有界 lifecycle record，用于归一化首次时间、最近成功、
+/// 重试次数和 persistence gap，不会把任意请求字段存入 writer 状态。
 pub struct TelemetryWriter {
     capacity: usize,
     output: Arc<dyn TelemetryOutput>,
     state: Mutex<TelemetryWriterState>,
     flush_lock: Mutex<()>,
+    health: Mutex<BTreeMap<TelemetryComponent, TelemetryHealthRecord>>,
 }
 
 impl TelemetryWriter {
@@ -962,6 +1005,7 @@ impl TelemetryWriter {
                 closed: false,
             }),
             flush_lock: Mutex::new(()),
+            health: Mutex::new(BTreeMap::new()),
         })
     }
 
@@ -1107,7 +1151,13 @@ impl MetricsSink for TelemetryWriter {
 
 impl HealthSink for TelemetryWriter {
     fn update(&self, event: ComponentHealthEvent) -> Result<(), PortError> {
-        self.enqueue(TelemetryItem::Health(event), false)
+        let mut health = lock_unpoisoned(&self.health);
+        let event = health
+            .get(&event.component)
+            .map_or(event.clone(), |record| record.normalize(event));
+        self.enqueue(TelemetryItem::Health(event.clone()), false)?;
+        health.insert(event.component, TelemetryHealthRecord::from_event(&event));
+        Ok(())
     }
 }
 
@@ -1962,6 +2012,7 @@ mod tests {
         logs: StdMutex<Vec<String>>,
         metrics: StdMutex<usize>,
         health: StdMutex<usize>,
+        health_events: StdMutex<Vec<ComponentHealthEvent>>,
     }
 
     struct FailingWriter;
@@ -2029,13 +2080,17 @@ mod tests {
 
         fn write_health(
             &self,
-            _event: &ComponentHealthEvent,
+            event: &ComponentHealthEvent,
         ) -> Result<(), crate::ports::PortError> {
             self.check("test.telemetry.health")?;
             *self
                 .health
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+            self.health_events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(event.clone());
             Ok(())
         }
     }
@@ -2124,6 +2179,56 @@ mod tests {
             .unwrap();
         assert_eq!(*output.metrics.lock().unwrap(), 1);
         assert_eq!(*output.health.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn telemetry_writer_preserves_health_lifecycle_fields() {
+        let output = Arc::new(RecordingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(4, output.clone()).unwrap();
+        let first = Instant::now();
+        let changed = first + Duration::from_secs(1);
+        let recovered = changed + Duration::from_secs(1);
+
+        let mut failed = telemetry_health();
+        failed.component = TelemetryComponent::Storage;
+        failed.state = ComponentHealthState::Failed;
+        failed.first_seen = first;
+        failed.last_changed = first;
+        failed.last_success = None;
+        failed.persistence_gap = true;
+        HealthSink::update(&writer, failed.clone()).unwrap();
+
+        let mut repeated = failed.clone();
+        repeated.first_seen = changed;
+        repeated.last_changed = changed;
+        repeated.retry_count = 2;
+        HealthSink::update(&writer, repeated).unwrap();
+
+        let mut healthy = failed;
+        healthy.state = ComponentHealthState::Healthy;
+        healthy.first_seen = recovered;
+        healthy.last_changed = recovered;
+        healthy.last_success = Some(recovered);
+        healthy.retry_count = 0;
+        healthy.persistence_gap = false;
+        HealthSink::update(&writer, healthy).unwrap();
+
+        writer
+            .flush_now(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .unwrap();
+        let events = output
+            .health_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[1].first_seen, first);
+        assert_eq!(events[1].last_changed, first);
+        assert_eq!(events[1].retry_count, 2);
+        assert_eq!(events[2].first_seen, first);
+        assert_eq!(events[2].last_changed, recovered);
+        assert_eq!(events[2].last_success, Some(recovered));
+        assert_eq!(events[2].retry_count, 2);
+        assert!(!events[2].persistence_gap);
     }
 
     #[tokio::test]
