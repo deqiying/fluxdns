@@ -747,25 +747,41 @@ pub trait TelemetryOutput: Send + Sync {
 /// 将已经通过 typed telemetry 契约校验的事件写入真实文本输出。
 ///
 /// 输出 adapter 不接收原始请求、header 或 adapter error；事件中的 request digest、
-/// configured ID 和 message 仍按稳定字段写出，失败只返回安全的 `PortError`。
+/// configured ID 和 message 仍按稳定字段写出。主输出失败时尝试写入 stderr fallback，
+/// 两个输出都失败才返回安全的 `PortError`。
 pub struct StructuredTelemetryOutput {
     writer: Mutex<Box<dyn Write + Send>>,
+    fallback: Mutex<Option<Box<dyn Write + Send>>>,
 }
 
 impl StructuredTelemetryOutput {
     fn from_writer(writer: Box<dyn Write + Send>) -> Self {
+        Self::from_writer_with_fallback(writer, None)
+    }
+
+    fn from_writer_with_fallback(
+        writer: Box<dyn Write + Send>,
+        fallback: Option<Box<dyn Write + Send>>,
+    ) -> Self {
         Self {
             writer: Mutex::new(writer),
+            fallback: Mutex::new(fallback),
         }
     }
 
     fn shared(output: Arc<Mutex<OutputTarget>>) -> Self {
-        Self::from_writer(Box::new(SharedOutputWriter(output)))
+        Self::from_writer_with_fallback(
+            Box::new(SharedOutputWriter(output)),
+            Some(Box::new(io::stderr())),
+        )
     }
 
     pub fn file(path: impl AsRef<Path>) -> io::Result<Self> {
         let writer = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(Self::from_writer(Box::new(writer)))
+        Ok(Self::from_writer_with_fallback(
+            Box::new(writer),
+            Some(Box::new(io::stderr())),
+        ))
     }
 
     pub fn stderr() -> Self {
@@ -773,29 +789,36 @@ impl StructuredTelemetryOutput {
     }
 
     fn write_line(&self, line: &str) -> Result<(), PortError> {
-        let mut writer = lock_unpoisoned(&self.writer);
-        writer.write_all(line.as_bytes()).map_err(|_| {
-            PortError::new(
-                PortErrorClass::Unavailable,
-                "observability.telemetry.output",
-            )
-            .with_safe_context("output write failed")
-        })?;
-        writer.write_all(b"\n").map_err(|_| {
-            PortError::new(
-                PortErrorClass::Unavailable,
-                "observability.telemetry.output",
-            )
-            .with_safe_context("output write failed")
-        })?;
-        writer.flush().map_err(|_| {
-            PortError::new(
-                PortErrorClass::Unavailable,
-                "observability.telemetry.output",
-            )
-            .with_safe_context("output flush failed")
-        })
+        let primary_succeeded = {
+            let mut writer = lock_unpoisoned(&self.writer);
+            write_line_to(&mut **writer, line).is_ok()
+        };
+        if primary_succeeded {
+            return Ok(());
+        }
+
+        let fallback_succeeded = {
+            let mut fallback = lock_unpoisoned(&self.fallback);
+            fallback
+                .as_mut()
+                .is_some_and(|writer| write_line_to(&mut **writer, line).is_ok())
+        };
+        if fallback_succeeded {
+            return Ok(());
+        }
+
+        Err(PortError::new(
+            PortErrorClass::Unavailable,
+            "observability.telemetry.output",
+        )
+        .with_safe_context("output write failed"))
     }
+}
+
+fn write_line_to(writer: &mut dyn Write, line: &str) -> io::Result<()> {
+    writer.write_all(line.as_bytes())?;
+    writer.write_all(b"\n")?;
+    writer.flush()
 }
 
 impl TelemetryOutput for StructuredTelemetryOutput {
@@ -1545,6 +1568,7 @@ impl<T> fmt::Display for Sensitive<T> {
 mod tests {
     use std::{
         fs,
+        io::{self, Write},
         str::FromStr,
         sync::{Arc, Mutex as StdMutex},
         thread,
@@ -1940,6 +1964,34 @@ mod tests {
         health: StdMutex<usize>,
     }
 
+    struct FailingWriter;
+
+    impl Write for FailingWriter {
+        fn write(&mut self, _bytes: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("injected output failure"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::other("injected output failure"))
+        }
+    }
+
+    struct RecordingWriter(Arc<StdMutex<Vec<u8>>>);
+
+    impl Write for RecordingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     impl RecordingTelemetryOutput {
         fn check(&self, operation: &'static str) -> Result<(), crate::ports::PortError> {
             if self.fail.load(std::sync::atomic::Ordering::Acquire) {
@@ -2153,5 +2205,28 @@ mod tests {
         assert!(content.contains("\"kind\":\"health\""));
         assert!(!content.contains("raw_dns_wire"));
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn structured_output_falls_back_when_primary_writer_fails() {
+        let fallback = Arc::new(StdMutex::new(Vec::new()));
+        let output = StructuredTelemetryOutput::from_writer_with_fallback(
+            Box::new(FailingWriter),
+            Some(Box::new(RecordingWriter(Arc::clone(&fallback)))),
+        );
+
+        output
+            .write_log(&telemetry_log(TelemetryLogLevel::Error))
+            .unwrap();
+
+        let content = String::from_utf8(
+            fallback
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .unwrap();
+        assert!(content.contains("\"kind\":\"log\""));
+        assert!(content.contains("\"event\":\"dns.request.complete\""));
     }
 }
