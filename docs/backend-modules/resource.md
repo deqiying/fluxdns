@@ -167,14 +167,12 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 remote 有效内容与 manifest：
 
 1. 写同目录临时文件；
-2. flush/fsync；
-3. 写 manifest 临时文件；
-4. 原子 rename 内容；
-5. 原子 rename manifest；
-6. fsync 目录；
-7. 清理旧临时文件。
+2. `sync_all` 文件内容；
+3. 原子 rename 内容；
+4. 写入、`sync_all` 并原子 rename manifest；
+5. 当前操作失败时清理本次临时文件。
 
-恢复时只有 resource id、format、parser version、byte length 和 content hash 均一致的 pair 才可使用；校验失败不会产生 fallback snapshot。
+content 与 manifest 各自原子替换，但不构成跨文件事务；恢复时只有 resource id、format、parser version、byte length 和 content hash 均一致的 pair 才可使用。校验失败不会产生 fallback snapshot，服务器宕机时的跨文件绝对持久化不作为当前 MVP 阻塞项。
 
 ## 11. 安全与观测
 
@@ -212,7 +210,7 @@ remote 有效内容与 manifest：
 - [x] 接入当前 ActiveRuntime 的 file/hosts 长期刷新、Policy live publish 和 Runtime 元数据 CAS；
 - [x] 接入候选 Runtime 的兼容 snapshot/registry 合并和稳定 worker schedule 迁移，并与 revision CAS 绑定；
 - [x] 完成当前解析、安全边界、文件稳定读取和并发 CAS 测试；
-- [ ] 完成 remote 恢复、原子落盘和长期刷新测试。
+- [x] 完成当前 MVP 范围的 remote 恢复、原子落盘和长期刷新定向测试；宕机中断与长期压力验收后置。
 
 阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；`resource::fetcher::tests` 7 项通过，覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy、SecretRef 脱敏和 prepare 错误；reqwest 与项目 `ring` provider 的初始化顺序已统一，并通过 515 项后端并行全量测试；async PreparedRuntime restore/fetch 与 file snapshot 测试验证 bind 前资源准备，ResourceRefreshWorker focused tests 验证 remote/file worker 的 due/reservation、CAS publish、backoff、cancel 和 shutdown；service 已为 remote/file rule-set/hosts 注册长期 refresh task，成功候选经 Policy CAS 和 Runtime metadata CAS 发布；新增跨 Runtime 合并测试验证更高资源版本、compiled Policy、metadata 和 worker schedule 状态迁移，service 增量测试验证 reload 时 unchanged worker 复用与 removed worker 取消；Policy 35 项定向测试验证命中结果携带当前 hosts/rule-set 的 typed `ResourceVersion`。独立 resource-only swap、完整配置候选生命周期和长期故障验收仍未完成。
 

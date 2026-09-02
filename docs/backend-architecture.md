@@ -50,13 +50,13 @@ v1 采用单进程、单 Rust binary、异步事件驱动架构：
 | 组件 | 检索基线 | 官方参考 |
 | --- | --- | --- |
 | `tokio` / `tokio-util` | `1.x` | [Tokio](https://docs.rs/tokio/latest/tokio/) |
-| `axum` / `hyper` / `hyper-util` / `tower-http` | `0.8.x` / `1.x` / `1.x` / `0.7.x` | [axum](https://docs.rs/axum/latest/axum/) |
+| 入站 DoH HTTP/1.x | 仓库内有界 parser/session | 不引入 Web framework；HTTP/2 后置 |
 | `hickory-proto` | `0.26.x` | [hickory-proto](https://docs.rs/hickory-proto/latest/hickory_proto/) |
 | `reqwest` | `0.13.x` | [reqwest](https://docs.rs/reqwest/latest/reqwest/) |
 | `rustls` / `tokio-rustls` | `0.23.x` / `0.26.x` | [rustls](https://docs.rs/rustls/latest/rustls/) |
 | `yaml_serde` / `serde_path_to_error` | `0.10.x` / `0.1.x` | [yaml_serde](https://docs.rs/yaml_serde/latest/yaml_serde/) |
 | `sqlx` / `moka` / `arc-swap` | `0.9.x` / `0.12.x` / `1.x` | [sqlx](https://docs.rs/sqlx/latest/sqlx/)、[moka](https://docs.rs/moka/latest/moka/)、[arc-swap](https://docs.rs/arc-swap/latest/arc_swap/) |
-| `ppp` / `socket2` | `2.3.x` / `0.6.x` | [ppp](https://docs.rs/ppp/latest/ppp/)、[socket2](https://docs.rs/socket2/latest/socket2/) |
+| `socket2` | `0.6.x` | [socket2](https://docs.rs/socket2/latest/socket2/) |
 
 ## 3. 模块边界
 
@@ -174,7 +174,7 @@ runtime（PreparedRuntime、supervisor、bind planner）
 binary / CLI
 ```
 
-DNS 核心不得在公开接口中泄漏 `axum`、`reqwest`、`sqlx`、`moka`、`rustls` 或 YAML DTO 类型。建议最小稳定接口如下：
+DNS 核心不得在公开接口中泄漏入站 HTTP parser、`reqwest`、`sqlx`、`moka`、`rustls` 或 YAML DTO 类型。建议最小稳定接口如下：
 
 - `InboundAdapter`：accept、framing、客户端身份恢复，产出 `DnsRequest`；
 - `DnsExchange`/`UpstreamConnector`：发送 canonical query，返回结构化 `UpstreamOutcome`；
@@ -498,8 +498,8 @@ TCP accept
   → peer CIDR trust check
   → optional required PROXY v1/v2 parser
   → optional rustls handshake
-  → hyper connection
-  → axum route
+  → bounded HTTP/1.x session/parser
+  → route matcher
 ```
 
 其中 “optional” 由 endpoint 的 `client_ip.source`/`tls.mode` 决定；一旦选择 `proxy_protocol`，前导头就是 required。解析器只自动识别 v1/v2，不猜测裸 HTTP/TLS。未知 v2 TLV 在长度合法时跳过，未知协议版本拒绝。

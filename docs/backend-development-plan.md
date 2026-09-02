@@ -108,27 +108,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 102–114 | 跨 Runtime drain/owner、受控 late-attempt、latest-target cache 写入和 finalizer 清理 | coordinator 15 项、Policy 22 项及 service focused suites |
 | 115–126 | 运行中资源 live publish、cache pool/TTL/ECS/身份隔离契约、persistence writer 生命周期及 production recovery/write/shutdown、Application service reload、进程级配置分类 | service 32 项；message 14 项；client 4 项、Policy plan 8 项、Registry 12 项、persistence runtime 2 项、cache service 8 项及相关端到端定向测试通过 |
 | 127–135 | Cache 持久化大阶段验收、reqwest/rustls provider 统一、reload/详情生命周期补强、跨 transport 一致性及 Storage 停机观测 | 后端全量 515 passed；Application 11 项及 Service、StorageRuntime、UDP/TCP/plain DoH 定向测试通过 |
-| 136 | group 实际成员观测 | 聚合结果保留所选成员；Policy/ResolveEvent 不再只记录 group ID；group 12 项、executor 13 项及 outcome 8 项通过 |
-| 137 | group member ECS | 遵循 rule/strategy/client/member/global 优先级；成员 ECS group 暂停缓存以防跨成员误复用；Policy 34 项通过 |
-| 138 | 跨 transport 响应契约 | 真实 UDP/TCP/plain DoH 统一验证 Positive/NODATA/NXDOMAIN、DNS ID 和 canonical response；大响应验证 UDP TC 与 TCP/DoH 完整响应边界 |
-| 139 | 跨 transport 错误响应契约 | 独立测试 Core 经真实 UDP/TCP/plain DoH 返回一致的 SERVFAIL/REFUSED canonical response，且恢复各协议请求 ID |
-| 140 | group/member observation 拆分 | `upstream_id` 固定表示策略目标，`upstream_member_id` 表示实际顶层成员；cache hit 仍保留目标 ID，既有 stats/detail 继续聚合实际成员 |
-| 141 | matched rule observation | 输出 listener/strategy hosts 或 rule-set 来源、已验证资源 ID 和可选 rule ordinal；不复制 matcher、规则文本或查询内容 |
-| 142 | 解析元数据落库 | SQLite schema v2 拆分策略目标、实际组成员和 matched rule/resource 摘要；v1 数据库自动升级且历史记录不回填 |
-| 143 | DNS RCODE 聚合 | 聚合统计仅从实际 DNS response 提取完整 RCODE；`NoResponse`/Core error 不伪造 `NOERROR` 维度 |
-| 144 | 解析详情结果分类 | `resolve_log` 写入 header RCODE、低基数 failure class 和首个取消原因；复用既有 outcome/cancellation 契约 |
-| 145 | DoH GET/POST 跨协议契约 | 真实 UDP/TCP/plain DoH GET/POST 统一验证成功、否定和错误响应；大响应继续验证 UDP TC 与 stream 完整响应 |
-| 146 | Transport capability 映射收口 | v1 Datagram/Stream/Multiplexed 能力映射由 transport 模块统一提供；service 不再持有重复协议知识 |
-| 147 | Ports contract 基线复核 | 33 项聚焦测试覆盖 typed ports、脱敏、exactly-once、取消、CAS 与 single-flight；将陈旧进度保守校正至真实跨模块链路口径 |
-| 148 | 命中资源版本落库 | Policy observation 复用当前资源 snapshot 的 typed `ResourceVersion`；详情链路在 SQLite 边界写入 `epoch:revision`，缺失时不推测 |
-| 149 | Runtime reload 基线复核 | 配置 watcher、listener 复用/rebind、候选失败回滚和进程持有配置拒绝均已有定向证据；移除陈旧缺口，自动 listener 重建继续后置 |
-| 150 | Policy 覆盖矩阵 | 定向锁定 cache 的 client → strategy → global 显式启停/回退，以及 ECS 的 rule/strategy → client → upstream → global 优先级 |
-| 151 | health stale age 传播 | `TelemetryWriter` 在 degraded/failed 生命周期中保留最大 stale age，并在恢复 `Healthy` 时清零；不扩展跨 Runtime registry |
-| 152 | Cache 持久化停机摘要 | 汇总历史/当前 Runtime 的成功、失败、丢弃与容量清理计数；缺口在 Telemetry 关闭前发布为 Cache degraded health，不改变 DNS best-effort 语义 |
-| 153 | 详情 writer health 恢复 | 队列满或 sink 错误限频发布 Storage degraded/gap，下一条 accepted 恢复 Healthy；主动策略丢弃只计数，状态跨 service reload 共享 |
-| 154 | DoH Host 边界 | HTTP/1.1 缺失 `Host`、任意 HTTP/1.x 重复 `Host` 均返回 400 并关闭连接；HTTP/1.0 保留兼容，完整 Host/SNI 路由后置 |
-| 155 | DoH GET 上限修正 | request-target、header fields 和 POST body 独立计费；最大 request-target 可解析，超 1 字节返回 414，session 仍保留固定总上限 |
-| 156 | DoH 请求语法收口 | 严格校验 method token 和 request-target 可见字符；媒体类型大小写不敏感，未定义参数继续返回 415 |
+| 136–145 | 上游/策略观测、Storage 结果元数据与跨 transport DNS 契约 | 拆分策略目标、实际成员、命中规则和资源版本；SQLite v2 写入 RCODE/failure/cancel；真实 UDP/TCP/plain DoH GET/POST 覆盖成功、否定、错误和大响应 |
+| 146–151 | capability/ports/reload 基线与配置优先级 | Transport 统一 capability 映射；Ports 33 项契约测试；reload 回滚、资源版本落库、Policy cache/ECS 优先级和 health stale age 均有定向证据 |
+| 152–156 | 持久化 health 与 DoH HTTP/1.x 安全边界 | Cache 停机摘要和 Storage writer degraded/recovery 已发布；DoH 补齐 Host cardinality、GET buffer 上限、request-line 与媒体类型规则 |
 
 ### 当前阶段验证
 
