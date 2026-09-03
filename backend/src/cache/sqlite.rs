@@ -699,6 +699,68 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
+    /// 通过真实 SQLite 写锁验证 Busy 不会破坏旧快照，释放锁后允许重试。
+    #[tokio::test]
+    async fn real_sqlite_write_lock_preserves_snapshot_and_allows_retry() {
+        let path = db_path();
+        let store = SqlitePersistentCacheStore::connect(&path, 16 * 1024)
+            .await
+            .unwrap();
+        store
+            .persist(
+                PersistentCacheBatch {
+                    records: vec![(key(b"baseline"), record(Duration::from_secs(60)))],
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+
+        let mut lock_connection = store.pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *lock_connection)
+            .await
+            .unwrap();
+        let retry_record = (key(b"retry"), record(Duration::from_secs(60)));
+        let error = store
+            .persist(
+                PersistentCacheBatch {
+                    records: vec![retry_record.clone()],
+                },
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.class(),
+            crate::ports::PortErrorClass::Unavailable
+        ));
+        let unchanged = store.recover(deadline()).await.unwrap();
+        assert_eq!(unchanged.1.loaded, 1);
+        assert_eq!(unchanged.0.records[0].0.encoded.as_ref(), b"baseline");
+
+        sqlx::query("ROLLBACK")
+            .execute(&mut *lock_connection)
+            .await
+            .unwrap();
+        drop(lock_connection);
+        store
+            .persist(
+                PersistentCacheBatch {
+                    records: vec![retry_record],
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(store.recover(deadline()).await.unwrap().1.loaded, 2);
+
+        store.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
     #[tokio::test]
     async fn metadata_version_mismatch_rejects_the_cache_adapter() {
         let path = db_path();

@@ -203,7 +203,7 @@ Moka adapter 复用上述 `CacheStore` contract，但把实际 entry 存储和�
 - `recover` 在 adapter 边界隔离过期、损坏和不兼容记录并返回 `CacheRecoverySummary`；
 - `maintain_capacity` 与 `shutdown` 复用同一串行 operation lock，数据库关闭后拒绝继续恢复/写入。
 
-SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已实现；last-access bucket、busy/disk-full degraded recovery 和跨 adapter 故障 contract 仍待后续阶段实现。
+SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已实现；真实 SQLite Busy 已验证旧 snapshot 保留和后续重试，last-access bucket、真实 disk-full recovery 和剩余跨 adapter 故障 contract 仍待后续阶段实现。
 
 阶段 125 增加 `CachePersistenceRuntime`：DNS 侧通过有界 `try_send` 提交 typed batch，单写者任务串行执行 adapter I/O，单批失败按 best-effort 计数后继续，正常 shutdown 按 FIFO 排空已入队批次并关闭 adapter。
 
@@ -211,7 +211,7 @@ SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已�
 
 阶段 152 将各 finalizer owner 的 `CachePersistenceRunSummary` 汇总到 service shutdown：成功、失败、队列丢弃和容量清理均以安全计数输出；未按 deadline 关闭或出现失败/丢弃批次时，在 Telemetry 关闭前发布 Cache degraded health 与 persistence gap。该观测不把缓存 key、响应内容或 adapter 原始错误写入日志，也不把 best-effort persistence 失败升级为 DNS 请求失败。
 
-阶段 97 已补充文件快照与 SQLite adapter 的基础 contract test，锁定 live/expired recovery、记录字段、容量维护和 shutdown 后拒绝操作的一致语义；真实数据库 busy/disk-full 故障矩阵仍未实现。
+阶段 97 已补充文件快照与 SQLite adapter 的基础 contract test，锁定 live/expired recovery、记录字段、容量维护和 shutdown 后拒绝操作的一致语义；真实数据库 disk-full 故障矩阵仍未实现。
 
 阶段 98 为 SQLite adapter 增加 `cfg(test)` 一次性 Busy/DiskFull 注入；失败写入返回 `Unavailable` 且不改变已持久化记录，清除注入后下一次写入成功。该 hook 只用于 deterministic retry 验证，不等价于真实 OS/SQLite 故障复现。
 
@@ -291,8 +291,9 @@ SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已�
 - [x] 完成内存 adapter 的 fresh/stale/expiry、质量 CAS、失效、取消、abandon 和 shutdown 测试；
 - [x] 完成文件/SQLite adapter 的基础一致性、恢复和 shutdown contract 测试。
 - [x] 完成 SQLite adapter test-only Busy/DiskFull 失败后重试 contract 测试。
-- [ ] 完成跨 adapter 的真实 busy/disk-full 故障测试矩阵。
+- [x] 完成 SQLite adapter 的真实 Busy 写锁、旧 snapshot 保留和重试测试。
+- [ ] 完成跨 adapter 的真实 disk-full 故障测试矩阵。
 
-阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；`cache::runtime::tests` 4 项覆盖参数拒绝、失败批次隔离、摘要合并、shutdown 排空和 adapter 停机超时 abort，`cache::service::tests` 8 项覆盖 memory CAS 后的 writer 接线；PolicyCore 定向测试覆盖配置启用缓存后的 upstream 命中、跨 core SQLite 恢复、fresh 剩余 TTL、stale answer TTL、snapshot-local optimistic refresh、fast-positive late sink 写入、最终 ECS subnet/client identity 的 cache key 隔离，以及成员 ECS group 的安全缓存绕过；async prepare 定向测试覆盖 bind 前 persistence owner 构造及有序 shutdown；Runtime coordinator/service 定向测试覆盖 previous/current Runtime finalizer owner 的摘要合并、统一 shutdown 回收和 Cache health 发布；upstream executor 覆盖 nested parallel group sink 传播；`cache::persistence::tests` 6 项覆盖文件快照 roundtrip、wall-clock expiry、容量淘汰、checksum 损坏隔离、格式边界和文件预算拒绝；`cache::moka::tests` 3 项覆盖 fresh/stale/expiry、质量 CAS、容量边界和 shutdown；`cache::sqlite::tests` 5 项覆盖独立数据库 roundtrip/reopen、metadata 版本校验、disk usage、expiry recovery、容量淘汰、损坏记录隔离、shutdown/零预算边界和故障重试；跨 adapter contract 覆盖文件/SQLite 基础 contract、过期清理与 test-only Busy/DiskFull 重试。阶段 170 大阶段全量为 `539 passed、0 failed`；完整 late-window、last-access writer 和真实数据库故障矩阵仍未完成。
+阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；`cache::runtime::tests` 覆盖参数拒绝、失败批次隔离、摘要合并、shutdown 排空和 adapter 停机超时 abort，`cache::service::tests` 覆盖 memory CAS 后的 writer 接线；PolicyCore 定向测试覆盖配置启用缓存后的 upstream 命中、跨 core SQLite 恢复、fresh 剩余 TTL、stale answer TTL、snapshot-local optimistic refresh、fast-positive late sink 写入、最终 ECS subnet/client identity 的 cache key 隔离，以及成员 ECS group 的安全缓存绕过；async prepare 定向测试覆盖 bind 前 persistence owner 构造及有序 shutdown；Runtime coordinator/service 定向测试覆盖 previous/current Runtime finalizer owner 的摘要合并、统一 shutdown 回收和 Cache health 发布；upstream executor 覆盖 nested parallel group sink 传播；文件快照、Moka、SQLite 和跨 adapter contract 覆盖 roundtrip、expiry、容量、checksum、metadata、disk usage、shutdown 及 test-only Busy/DiskFull 重试。阶段 180 后端全量 `547 passed、0 failed`；阶段 184 以独立连接持有真实 SQLite 写锁，验证 Busy 返回 `Unavailable`、旧 snapshot 不变且释放锁后重试成功，SQLite cache 6 项定向测试通过。完整 late-window、last-access writer 和真实 disk-full 故障矩阵仍未完成。
 
-当前实现进度：**84%**（已完成内存/Moka/SQLite 首轮 adapter、Cache-Core 主链、稳定 key/TTL/CAS、latest-target finalizer、production recovery/non-blocking persistence、历史/当前 owner 有序 shutdown、adapter 停机超时 abort 与安全 gap 摘要；完整 late-window 候选生命周期、last-access bucket、真实 busy/disk-full 数据库故障恢复与跨 adapter 真实故障矩阵未实现）。
+当前实现进度：**85%**（已完成内存/Moka/SQLite 首轮 adapter、Cache-Core 主链、稳定 key/TTL/CAS、latest-target finalizer、production recovery/non-blocking persistence、历史/当前 owner 有序 shutdown、adapter 停机超时 abort、安全 gap 摘要与真实 SQLite Busy 重试；完整 late-window 候选生命周期、last-access bucket、真实 disk-full 数据库故障恢复与跨 adapter 真实故障矩阵未实现）。
