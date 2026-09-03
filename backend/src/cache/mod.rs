@@ -33,6 +33,9 @@ pub use sqlite::{
 };
 
 #[cfg(test)]
+mod backend_contract_tests;
+
+#[cfg(test)]
 mod persistence_contract_tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};

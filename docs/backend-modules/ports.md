@@ -1,6 +1,6 @@
 # Ports 模块设计
 
-> 状态：v1 方案已完成，公共契约、UDP/TCP socket capability、TCP EOF/session、bounded byte-stream 和首轮 TLS accept 语义已实现；内存与 SQLite 业务存储 adapter 已接入共享 conformance 测试
+> 状态：v1 方案已完成，公共契约、UDP/TCP socket capability、TCP EOF/session、bounded byte-stream 和首轮 TLS accept 语义已实现；Memory/Moka CacheStore 与内存/SQLite StorageBackend 已接入共享 conformance 测试
 >
 > 更新日期：2026-08-31
 >
@@ -175,6 +175,6 @@ Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
 - [x] 增加 bounded TCP byte-stream capability，区分 data/clean EOF 并覆盖 deadline/cancellation。
 - [x] 增加脱敏 TLS server material、listener accept 和连接升级 capability，不向 Ports 泄漏 Rustls/Tokio 类型。
 
-阶段 1/3 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。系统 socket bounded byte-stream 定向测试 4 项通过，TLS loopback 握手定向测试 1 项通过。阶段 147 复核 `ports::` 聚焦测试 33 项全部通过；阶段 194 以同一测试函数验证内存与 SQLite `StorageBackend` 的 deadline、migration、幂等、冲突分类、flush 和 shutdown 契约，`2 passed、0 failed`；其余生产 adapter 故障矩阵和 conformance 仍随各实现模块验收。
+阶段 1/3 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。系统 socket bounded byte-stream 定向测试 4 项通过，TLS loopback 握手定向测试 1 项通过。阶段 147 复核 `ports::` 聚焦测试 33 项全部通过；阶段 194 以同一测试函数验证内存与 SQLite `StorageBackend` 的 deadline、migration、幂等、冲突分类、flush 和 shutdown 契约；阶段 195 以同一测试函数验证 Memory 与 Moka `CacheStore` 的 deadline、CAS、single-flight、失效和 shutdown 契约，两组均为 `2 passed、0 failed`；其余生产 adapter 故障矩阵和 conformance 仍随各实现模块验收。
 
-当前实现进度：**72%**。typed contract、fake kit、主要生产 adapter 接线和双 Storage adapter 共享契约已有真实证据；完整 adapter 故障/conformance 矩阵尚未完成，因此不标记为 85% 以上。
+当前实现进度：**74%**。typed contract、fake kit、主要生产 adapter 接线，以及双 CacheStore/StorageBackend adapter 共享契约已有真实证据；完整 adapter 故障/conformance 矩阵尚未完成，因此不标记为 85% 以上。
