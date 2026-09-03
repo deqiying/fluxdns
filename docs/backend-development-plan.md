@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 168（DoH HTTP framing 安全验证）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 169（Listener health 跨 Runtime 生命周期）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -34,15 +34,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **87.9%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **89.1%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **88.0%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **89.2%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
 
 | 模块 | 实现状态 | 进度 | 权重 |
 | --- | --- | ---: | ---: |
-| Application | 实现中 | 75% | 4% |
+| Application | 实现中 | 76% | 4% |
 | Ports | 已实现待验证 | 70% | 8% |
 | Config | 已验证 | 100% | 10% |
 | Runtime | 实现中 | 88% | 12% |
@@ -53,14 +53,14 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Cache | 实现中 | 83% | 9% |
 | Resource | 已实现待验证 | 92% | 7% |
 | Storage | 已实现待验证 | 96% | 8% |
-| Observability | 实现中 | 96% | 3% |
+| Observability | 实现中 | 97% | 3% |
 
 进度计算：
 
 ```text
-4%×75% + 8%×70% + 10%×100% + 12%×88% + 11%×87%
+4%×76% + 8%×70% + 10%×100% + 12%×88% + 11%×87%
 + 10%×82% + 8%×83% + 10%×99% + 9%×83% + 7%×92%
-+ 8%×96% + 3%×96% ≈ 87.9%
++ 8%×96% + 3%×97% ≈ 88.0%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -94,8 +94,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 6 | 已完成 | memory/Moka/cache facade、FDCP、SQLite cache 首轮 | adapter 定向测试；跨 adapter fault matrix 后置 |
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
-| 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障和跨 Runtime health lifecycle 后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 168 |
+| 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 169 |
 
 ### 增量里程碑
 
@@ -109,15 +109,16 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 127–135 | Cache 持久化大阶段验收、reqwest/rustls provider 统一、reload/详情生命周期补强、跨 transport 一致性及 Storage 停机观测 | 后端全量 515 passed；Application 11 项及 Service、StorageRuntime、UDP/TCP/plain DoH 定向测试通过 |
 | 136–145 | 上游/策略观测、Storage 结果元数据与跨 transport DNS 契约 | 拆分策略目标、实际成员、命中规则和资源版本；SQLite v2 写入 RCODE/failure/cancel；真实 UDP/TCP/plain DoH GET/POST 覆盖成功、否定、错误和大响应 |
 | 146–151 | capability/ports/reload 基线与配置优先级 | Transport 统一 capability 映射；Ports 33 项契约测试；reload 回滚、资源版本落库、Policy cache/ECS 优先级和 health stale age 均有定向证据 |
-| 152–168 | 持久化 health、DoH/TLS 安全与 Runtime 生命周期 | Cache/Storage health 已发布；正常与 fatal task 退出均有界收尾；坏 TLS 握手只终止当前 DoH session；同组 endpoint 可故障隔离；listener 空闲不消耗重试；stream session 和 DoH framing 均有硬上限 |
+| 152–169 | 持久化 health、DoH/TLS 安全与 Runtime 生命周期 | Cache/Storage health 已发布；正常与 fatal task 退出均有界收尾；坏 TLS 握手只终止当前 DoH session；同组 endpoint 可故障隔离；listener 空闲不消耗重试；stream session 和 DoH framing 均有硬上限；Listener health 覆盖 `Healthy → Degraded → Healthy → Stopping` |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/transport/doh.rs`；
-- DoH 重复 `Content-Length`、`Transfer-Encoding`、header 数量/字节上限：1 项定向测试通过；
+- 增量 `rustfmt`：`backend/src/service.rs`；
+- Listener 启动、降级、成功 reload 恢复和 shutdown 状态：1 项定向测试通过；
+- 既有 Service shutdown/Telemetry 回归：1 项定向测试通过；
 - `git diff --check`：通过。
 
-阶段 168 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 169 未重复阶段 135 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

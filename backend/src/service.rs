@@ -305,6 +305,16 @@ impl DnsService {
             Arc::clone(&core),
             Arc::clone(&runtime),
         )?;
+        if let Some(telemetry) = &telemetry
+            && !transport_tasks.is_empty()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Listener,
+                ComponentHealthState::Healthy,
+                None,
+            );
+        }
 
         let resource_worker_ids = runtime.resource_worker_ids();
         if let Some(telemetry) = &telemetry
@@ -537,6 +547,16 @@ impl DnsService {
             self.transport_tasks = transport_tasks;
             self.resource_tasks = resource_tasks;
             self.runtime = Arc::clone(&runtime);
+            if let Some(telemetry) = &self.telemetry
+                && !self.transport_tasks.is_empty()
+            {
+                publish_component_health(
+                    telemetry,
+                    TelemetryComponent::Listener,
+                    ComponentHealthState::Healthy,
+                    None,
+                );
+            }
             return Ok(runtime);
         }
         let candidate = bind_prepared(prepared, factory, deadline, &cancellation)
@@ -575,6 +595,16 @@ impl DnsService {
         self.transport_tasks = transport_tasks;
         self.resource_tasks = resource_tasks;
         self.runtime = Arc::clone(&runtime);
+        if let Some(telemetry) = &self.telemetry
+            && !self.transport_tasks.is_empty()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Listener,
+                ComponentHealthState::Healthy,
+                None,
+            );
+        }
         Ok(runtime)
     }
 
@@ -594,6 +624,16 @@ impl DnsService {
         deadline: crate::dns::Deadline,
     ) -> Result<ShutdownReport, ServiceError> {
         self.coordinator.begin_drain();
+        if let Some(telemetry) = &self.telemetry
+            && !self.transport_tasks.is_empty()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Listener,
+                ComponentHealthState::Stopping,
+                None,
+            );
+        }
         self.cancel_transport_tasks();
         self.cancel_resource_tasks();
         let mut report = self.supervisor.shutdown(clock, deadline).await;
@@ -3968,6 +4008,86 @@ clients: []
             .await
             .unwrap();
         assert!(!report.deadline_expired);
+    }
+
+    /// 验证 Listener health 跨启动、降级、成功 reload 和 shutdown 完成闭环。
+    #[tokio::test]
+    async fn listener_health_recovers_on_reload_and_stops_on_shutdown() {
+        let port = 40_750 + (std::process::id() as u16 % 500);
+        let work_path = crate::config::test_support::absolute_path("service-listener-health");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let core = coordinator.load().snapshot().dns_core().unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let telemetry = Arc::new(TelemetryWriter::new(16, output.clone()).unwrap());
+        let mut service = super::DnsService::start_with_optional_storage_and_telemetry(
+            Arc::clone(&coordinator),
+            core,
+            Duration::from_secs(5),
+            None,
+            Some(Arc::clone(&telemetry)),
+        )
+        .unwrap();
+        publish_component_health(
+            &telemetry,
+            TelemetryComponent::Listener,
+            ComponentHealthState::Degraded,
+            Some("test listener degradation"),
+        );
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_with_answer_at(&work_path, port, "127.0.0.2"),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+
+        let listener_states = output
+            .health_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.component == TelemetryComponent::Listener)
+            .map(|event| event.state)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listener_states,
+            vec![
+                ComponentHealthState::Healthy,
+                ComponentHealthState::Degraded,
+                ComponentHealthState::Healthy,
+                ComponentHealthState::Stopping,
+            ]
+        );
+        let _ = std::fs::remove_dir_all(work_path);
     }
 
     #[tokio::test]
