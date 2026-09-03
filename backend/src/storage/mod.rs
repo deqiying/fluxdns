@@ -3,6 +3,7 @@
 //! 本模块负责内存统计、epoch checkpoint、批次幂等状态以及 SQLite/stats/service writer 生命周期边界。
 
 mod ledger;
+mod management_read;
 mod resolve_log;
 mod service;
 mod sqlite;
@@ -14,6 +15,7 @@ mod writer;
 mod backend_contract_tests;
 
 pub use ledger::{BatchDecision, BatchLedger, BatchLedgerError, BatchReceipt, PendingStatsBatch};
+pub use management_read::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
 pub use resolve_log::{
     ResolveDetailRecord, ResolveDetailWriter, ResolveLogBuildError, ResolveLogFlushSummary,
     ResolveLogShutdownSummary, ResolveLogWriter,
