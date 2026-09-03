@@ -25,7 +25,7 @@ FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 managemen
 
 以下三项是进入实现前必须冻结的安全与持久化契约：
 
-- management 的 TLS 终止模式与唯一 `public_origin`；
+- 只提供 HTTP 的 management listener 与唯一 `public_origin`，TLS 由 Nginx 等外部反向代理终止；
 - 初始化密码策略、Argon2id 参数和会话 TTL；
 - 配置源文件与 `work/config.yaml` 派生快照的可恢复写入规则。
 
@@ -117,7 +117,7 @@ FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 managemen
 
 | 模块 | 责任 | 禁止事项 |
 | --- | --- | --- |
-| `management::server` | 监听、TLS、连接生命周期、请求上限、优雅关闭 | 不处理 DNS wire，不访问 SQL |
+| `management::server` | HTTP 监听、连接生命周期、请求上限、优雅关闭 | 不终止 TLS，不处理 DNS wire，不访问 SQL |
 | `management::router` | 路由优先级、中间件、错误和 request ID | 不持有全局可变配置 |
 | `management::auth` | setup/login/logout/session、密码验证、限流 | 不序列化配置，不记录凭据 |
 | `management::session` | 生成、查找、过期和撤销不透明 session | 不把 session token 持久化到前端存储或配置 |
@@ -178,7 +178,7 @@ backend/src/
 
 ### 5.2 故障与关闭语义
 
-- 启动阶段无法绑定、加载 TLS、构造资源索引或恢复配置事务：启动失败。
+- 启动阶段无法绑定、构造资源索引或恢复配置事务：启动失败。
 - 单个非法请求、认证失败、读取查询失败：返回有界错误，不影响 DNS 数据面。
 - management accept loop 在重试预算耗尽后：management component 进入 `failed`，触发进程级优雅关闭；避免配置声明已启用但进程长期只提供部分能力。
 - 关闭顺序为：停止接收新请求、等待已接收请求的短时 drain、撤销 session、停止 management tasks，再按现有顺序关闭 DNS transport、resource、storage 与 telemetry。总 drain 受既有 shutdown budget 约束。
@@ -189,7 +189,7 @@ backend/src/
 
 | 变化 | 行为 |
 | --- | --- |
-| `webui.enable/address/port/tls/public_origin` | 进程拥有，继续要求重启 |
+| `webui.enable/address/port/public_origin` | 进程拥有，继续要求重启 |
 | `webui.users` | 动态更新 `AuthState`；不重绑 listener，不重建 DNS Runtime |
 | management 自己提交的首次用户写入 | 提交成功后原子替换 `AuthState`，并抑制 watcher 对本次指纹的重复 reload |
 | 外部编辑 `webui.users` | 严格校验后替换认证快照；已有 session 默认全部撤销 |
@@ -321,14 +321,14 @@ load SPA
 ### 8.2 Session
 
 - Session ID 使用至少 256 bit CSPRNG 熵，只通过 Cookie 传输；服务端 `SessionStore` 保存 session 元数据和过期时间。
-- Cookie 固定 `HttpOnly`、`SameSite=Strict`、`Path=/` 且不设置 `Domain`；生产环境固定 `Secure`，名称建议使用 `__Host-fluxdns_session`。loopback 开发例外不得继续使用 `__Host-` 前缀，应使用单独的开发 Cookie 名称。
+- Cookie 固定 `HttpOnly`、`SameSite=Strict`、`Path=/` 且不设置 `Domain`。`public_origin` 为 HTTPS 时使用 `__Host-fluxdns_session` 并设置 `Secure`；为 HTTP 时使用 `fluxdns_session` 且不能设置 `Secure`。
 - Session 采用绝对 TTL 与空闲 TTL，建议初始值分别为 24 小时和 30 分钟；最终值在 v2.0 契约阶段冻结。
 - SessionStore 设置全局和单用户上限，定时清理过期项；进程重启后 session 失效。
 - 用户列表发生外部 reload、hash 变化或删除时撤销全部 session，避免旧权限继续存在。
 
-### 8.3 TLS 与同源前置契约
+### 8.3 HTTP、反向代理与同源前置契约
 
-现有 `webui` 配置没有 TLS 和外部 origin 信息，而 OpenAPI 要求 `Secure` Cookie 与同源校验。v2 应复用 DoH 已有的 `TlsDto` 语义，并为 WebUI 增加唯一 `public_origin`：
+WebUI Management Server 不实现 TLS 终止，只绑定 HTTP endpoint；浏览器访问的唯一外部 origin 由 `public_origin` 明确给出：
 
 ```yaml
 webui:
@@ -336,17 +336,15 @@ webui:
   address: 127.0.0.1
   port: 8080
   public_origin: https://dns.example.com
-  tls:
-    mode: external
   users: []
 ```
 
-- `tls.mode: terminate`：FluxDNS 直接完成 TLS，复用证书链和私钥文件字段及路径规则。
-- `tls.mode: external`：可信反向代理完成 TLS，FluxDNS 只绑定受保护的本地/内网 endpoint；浏览器仍通过 `public_origin` 的 HTTPS 访问。
-- `public_origin` 是单一绝对 origin，不包含 path、query 或 fragment；生产配置只允许 `https`。
-- 本地 Vite 开发可显式使用 loopback HTTP origin，并仅在 management bind 与 public origin 都是 loopback 时省略 `Secure`；该例外必须在 OpenAPI 和配置参考中标记为开发边界，不能用于公网部署。
+- `public_origin` 是单一绝对 `http` 或 `https` origin，不包含凭据、path、query 或 fragment。
+- 常规部署由 Nginx 等可信反向代理终止 TLS，FluxDNS 只绑定受保护的本地/内网 HTTP endpoint；`public_origin` 填写浏览器看到的 HTTPS origin。
+- 允许浏览器直接通过 HTTP 访问 Management Server；此时 Cookie 不能设置 `Secure`，凭据与 session 也没有传输加密，只适合 loopback 或可信隔离管理网络。
+- 同源校验以 `public_origin` 为唯一事实来源，不信任或解析 `X-Forwarded-Proto`、`X-Forwarded-Host` 来动态放宽 Origin。
 
-如果 v2.0 不接受上述配置扩展，则不能同时可靠满足反向代理部署、严格 Origin 校验和 OpenAPI 的 Secure Cookie 契约；该问题必须先解决，不能在 handler 内静默降级。
+`public_origin` 缺失或与请求 Origin 不一致时必须拒绝请求，不能根据监听地址或代理 header 静默降级。
 
 ## 9. 配置持久化设计
 
@@ -485,7 +483,6 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 | `webui.enable` | `true` 启动 management server；`false` 不创建任何 WebUI 资源 |
 | `webui.address/port` | 独立 management endpoint；与所有 DNS endpoint 统一检测冲突 |
 | `webui.public_origin` | 浏览器访问的唯一 origin，用于 Origin 校验和 Cookie 策略 |
-| `webui.tls` | 复用 `terminate/external` 语义；证书路径仍相对 `work.path` |
 | `webui.users` | 可省略或为空；resolve 后均为 `[]` 并表示 `setup_required`，非空表示 `ready` |
 | `webui.users[].name` | 严格唯一，沿用统一用户名校验 |
 | `webui.users[].password_hash` | 只接受支持的 PHC/bcrypt hash；拒绝明文 `password` 字段 |
@@ -498,8 +495,8 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 
 工作项：
 
-- 扩展 OpenAPI 的 setup endpoint/schema、错误码和开发 loopback Cookie 例外；
-- 冻结 `webui.tls/public_origin` 配置、Argon2id 参数、session TTL 和密码策略；
+- 扩展 OpenAPI 的 setup endpoint/schema、错误码和 HTTP/HTTPS Cookie 差异；
+- 冻结仅 HTTP 的 management listener、`public_origin` 配置、Argon2id 参数、session TTL 和密码策略；
 - 定义 management query ports 与 API DTO 映射；
 - 完成 YAML source-preserving adapter spike；
 - 更新 Cargo feature 与 release build 入口设计。
@@ -566,7 +563,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 
 ### 13.1 后端单元与契约测试
 
-- 配置：省略 users、空 users、`users: null`、重复用户名、非法 hash、TLS/public origin 组合、management/DNS bind 冲突。
+- 配置：省略 users、空 users、`users: null`、重复用户名、非法 hash、HTTP/HTTPS public origin、management/DNS bind 冲突。
 - 密码：Argon2id 生成与验证、bcrypt 兼容验证、错误密码、未知用户 dummy verify、Debug/错误脱敏。
 - setup：合法创建、校验失败、并发 CAS、外部配置冲突、hash 失败、配置提交失败、已初始化重试。
 - 配置事务：同路径与双路径写入、每个 crash point 的恢复、权限、journal 损坏、snapshot 冲突、watcher self-change。
@@ -609,7 +606,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 | 风险 | 影响 | 控制措施 |
 | --- | --- | --- |
 | 把 DoH parser 扩成通用管理 HTTP | 协议复杂度和安全回归扩散到 DNS 数据面 | 使用独立 management adapter，DoH 只保留 DNS envelope |
-| `Secure` Cookie 与当前无 TLS 配置冲突 | 登录在真实浏览器中失效或被迫降级 | 先冻结 TLS/public origin；仅允许显式 loopback 开发例外 |
+| HTTP 直连泄露凭据或 session | 管理权限被窃取 | 文档明确限制在 loopback/可信隔离网络；常规部署使用 Nginx 等反向代理提供 HTTPS |
 | 双配置文件无法整体原子 rename | 崩溃后源文件与 snapshot 不一致 | journal、fingerprint、启动恢复与 fail-closed |
 | YAML 重写覆盖用户注释/SecretRef | 配置丢失或秘密落盘 | source-preserving adapter、语义 diff、严格回读；不序列化 resolved 模型 |
 | 并发 setup 创建多个首用户 | 认证状态不可预测 | 进程锁 + 文件锁 + empty-users/fingerprint CAS |
@@ -634,13 +631,13 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 
 ## 16. 实施前评审清单
 
-- [ ] 确认 `webui.tls` 与 `public_origin` 的最终 schema，以及 loopback HTTP 开发例外。
+- [x] 确认 Management Server 只提供 HTTP，不实现 TLS 终止；`public_origin` 接受 HTTP/HTTPS，并据此决定 Cookie `Secure` 策略。
 - [ ] 确认 session 绝对 TTL、空闲 TTL、Cookie 名称与容量上限。
 - [ ] 确认 setup 密码最小长度与最终 Argon2id 参数。
-- [ ] 通过 YAML source-preserving adapter spike，并确认无法保留格式时的产品行为。
+- [x] 通过 YAML source-preserving adapter spike；基于 CST 范围只替换 `webui.users`，不支持的表达明确失败。
 - [ ] 确认 source config 与 snapshot journal 的恢复点和跨平台替换语义。
 - [ ] 确认 management accept loop 失败触发进程优雅关闭。
 - [ ] 确认 `/queries` 的安全投影继续禁止 qname、client IP 与 DNS wire。
 - [ ] 确认 release feature、前端构建入口和缺失 `dist` 时的失败方式。
 - [ ] 确认两个 Rust target/linker 的来源和 CI runner；确认 `frontend/dist/`、`backend/target/` 与 `deploy/` 的隔离及两个发布文件名。
-- [ ] 确认 `dev.ps1 start` 的 `-ConfigPath` 必填行为，以及未传入时不会回退到任何默认配置路径；确认 `status`/`stop` 的 PID 记录、身份校验和失效状态处理。
+- [x] 确认 `dev.ps1 start` 的 `-ConfigPath` 必填行为，未传入时禁止启动且不回退默认路径；`status`/`stop` 保留 PID、启动时间和可执行文件身份校验。
