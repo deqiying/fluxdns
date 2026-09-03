@@ -13,6 +13,7 @@
 | 后端架构、配置、开发计划和模块文档 | [后端文档索引](backend/README.md) |
 | 前端总体架构、技术栈和实施边界 | [前端文档索引](frontend/README.md) |
 | 跨模块开发与协作规范 | [规范文档索引](standards/README.md) |
+| 跨前后端、尚未实施的评审方案 | [方案文档索引](plans/README.md) |
 
 ## 目录职责
 
