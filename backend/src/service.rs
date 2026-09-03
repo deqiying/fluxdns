@@ -164,7 +164,7 @@ pub struct DnsService {
     runtime: Arc<ActiveRuntime>,
     coordinator: Arc<RuntimeCoordinator>,
     supervisor: Supervisor,
-    transport_cancellations: Vec<Cancellation>,
+    transport_tasks: Vec<TransportTask>,
     resource_tasks: Vec<ResourceTask>,
     request_timeout: Duration,
     storage: Option<Arc<tokio::sync::Mutex<StorageRuntime>>>,
@@ -177,6 +177,14 @@ pub struct DnsService {
 #[derive(Clone)]
 struct ResourceTask {
     resource: ConfigId,
+    cancellation: Cancellation,
+}
+
+/// 当前 Runtime 的 transport task 身份、逻辑 listener 归属和取消句柄。
+#[derive(Clone)]
+struct TransportTask {
+    task_id: String,
+    owner: String,
     cancellation: Cancellation,
 }
 
@@ -290,7 +298,7 @@ impl DnsService {
             runtime.revision(),
             request_timeout,
         )?;
-        let transport_cancellations = spawn_transport_plans(
+        let transport_tasks = spawn_transport_plans(
             &mut supervisor,
             transport_plans,
             Arc::clone(&core),
@@ -320,7 +328,7 @@ impl DnsService {
             runtime,
             coordinator,
             supervisor,
-            transport_cancellations,
+            transport_tasks,
             resource_tasks,
             request_timeout,
             storage,
@@ -407,13 +415,15 @@ impl DnsService {
         self.supervisor.task_count()
     }
 
+    /// 返回当前 Runtime 仍可服务的 transport endpoint task 数量。
     pub fn transport_task_count(&self) -> usize {
-        self.transport_cancellations.len()
+        self.transport_tasks.len()
     }
 
+    /// 取消当前 Runtime 的 transport task；旧 revision 的 task 已由 reload 单独取消。
     pub fn cancel_transport_tasks(&self) {
-        for cancellation in &self.transport_cancellations {
-            cancellation.cancel(CancelReason::Shutdown);
+        for task in &self.transport_tasks {
+            task.cancellation.cancel(CancelReason::Shutdown);
         }
     }
 
@@ -512,7 +522,7 @@ impl DnsService {
                 .activate_prepared_reusing_listeners(expected, prepared)
                 .await
                 .map_err(ServiceReloadError::Reuse)?;
-            let transport_cancellations = spawn_transport_plans(
+            let transport_tasks = spawn_transport_plans(
                 &mut self.supervisor,
                 transport_plans,
                 core,
@@ -523,7 +533,7 @@ impl DnsService {
                 .reconcile_resource_tasks(&runtime)
                 .map_err(map_reload_spawn_error)?;
             self.cancel_transport_tasks();
-            self.transport_cancellations = transport_cancellations;
+            self.transport_tasks = transport_tasks;
             self.resource_tasks = resource_tasks;
             self.runtime = Arc::clone(&runtime);
             return Ok(runtime);
@@ -549,7 +559,7 @@ impl DnsService {
             .await
             .map_err(ServiceReloadError::Activation)?;
         let runtime = self.coordinator.load();
-        let transport_cancellations = spawn_transport_plans(
+        let transport_tasks = spawn_transport_plans(
             &mut self.supervisor,
             transport_plans,
             core,
@@ -561,7 +571,7 @@ impl DnsService {
             .map_err(map_reload_spawn_error)?;
 
         self.cancel_transport_tasks();
-        self.transport_cancellations = transport_cancellations;
+        self.transport_tasks = transport_tasks;
         self.resource_tasks = resource_tasks;
         self.runtime = Arc::clone(&runtime);
         Ok(runtime)
@@ -728,6 +738,42 @@ impl DnsService {
                         return Err(error);
                     };
                     if let Some(error) = task_failure(&completion) {
+                        if is_exhausted_endpoint(&completion) {
+                            match retire_current_transport_task(
+                                &mut self.transport_tasks,
+                                &completion,
+                            ) {
+                                Some(remaining) if remaining > 0 => {
+                                    if let Some(telemetry) = &self.telemetry {
+                                        publish_component_health(
+                                            telemetry,
+                                            TelemetryComponent::Listener,
+                                            ComponentHealthState::Degraded,
+                                            Some("listener endpoint exhausted retries"),
+                                        );
+                                    }
+                                    tracing::warn!(
+                                        event = "listener_endpoint_unavailable",
+                                        component = completion.spec.component,
+                                        task_id = %completion.spec.id,
+                                        remaining,
+                                        "listener_endpoint_unavailable"
+                                    );
+                                    continue;
+                                }
+                                None => {
+                                    tracing::debug!(
+                                        event = "stale_listener_failure_ignored",
+                                        component = completion.spec.component,
+                                        task_id = %completion.spec.id,
+                                        "stale_listener_failure_ignored"
+                                    );
+                                    continue;
+                                }
+                                Some(0) => {}
+                                Some(_) => unreachable!(),
+                            }
+                        }
                         if let Some(telemetry) = &self.telemetry {
                             publish_component_health(
                                 telemetry,
@@ -1417,9 +1463,21 @@ fn map_reload_spawn_error(error: ServiceStartError) -> ServiceReloadError {
 }
 
 enum TransportTaskPlan {
-    Udp { index: usize, adapter: UdpAdapter },
-    Tcp { index: usize, adapter: TcpAdapter },
-    Doh { index: usize, adapter: DohAdapter },
+    Udp {
+        index: usize,
+        owner: String,
+        adapter: UdpAdapter,
+    },
+    Tcp {
+        index: usize,
+        owner: String,
+        adapter: TcpAdapter,
+    },
+    Doh {
+        index: usize,
+        owner: String,
+        adapter: DohAdapter,
+    },
 }
 
 fn prepare_transport_plans(
@@ -1440,6 +1498,7 @@ fn prepare_transport_plans(
         .enumerate()
         .map(|(index, endpoint)| {
             let BoundEndpointHandle { entry, socket } = endpoint;
+            let owner = entry.owner.clone();
             if entry.transport == BindTransport::Doh {
                 let adapter = DohAdapter::from_endpoint(
                     BoundEndpointHandle { entry, socket },
@@ -1453,7 +1512,11 @@ fn prepare_transport_plans(
                     kind: "DoH",
                     reason: reason.to_string(),
                 })?;
-                return Ok(TransportTaskPlan::Doh { index, adapter });
+                return Ok(TransportTaskPlan::Doh {
+                    index,
+                    owner,
+                    adapter,
+                });
             }
             match socket {
                 ActivatedSocketHandle::Udp(socket) => {
@@ -1471,7 +1534,11 @@ fn prepare_transport_plans(
                         kind: "UDP",
                         reason: reason.to_string(),
                     })?;
-                    Ok(TransportTaskPlan::Udp { index, adapter })
+                    Ok(TransportTaskPlan::Udp {
+                        index,
+                        owner,
+                        adapter,
+                    })
                 }
                 ActivatedSocketHandle::Tcp(listener) => {
                     let adapter = TcpAdapter::from_endpoint(
@@ -1488,29 +1555,39 @@ fn prepare_transport_plans(
                         kind: "TCP",
                         reason: reason.to_string(),
                     })?;
-                    Ok(TransportTaskPlan::Tcp { index, adapter })
+                    Ok(TransportTaskPlan::Tcp {
+                        index,
+                        owner,
+                        adapter,
+                    })
                 }
             }
         })
         .collect()
 }
 
+/// 注册 transport task，并保留 current-revision 故障聚合所需的身份和 owner。
 fn spawn_transport_plans(
     supervisor: &mut Supervisor,
     plans: Vec<TransportTaskPlan>,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
-) -> Result<Vec<Cancellation>, ServiceStartError> {
+) -> Result<Vec<TransportTask>, ServiceStartError> {
     let revision = runtime.revision().0;
-    let mut cancellations = Vec::with_capacity(plans.len());
+    let mut tasks = Vec::with_capacity(plans.len());
     for plan in plans {
-        let cancellation = match plan {
-            TransportTaskPlan::Udp { index, adapter } => {
+        let (task_id, owner, cancellation) = match plan {
+            TransportTaskPlan::Udp {
+                index,
+                owner,
+                adapter,
+            } => {
                 let task_core = Arc::clone(&core);
                 let task_runtime = Arc::clone(&runtime);
-                spawn_transport_task(
+                let task_id = format!("transport.udp.{revision}.{index}");
+                let cancellation = spawn_transport_task(
                     supervisor,
-                    format!("transport.udp.{revision}.{index}"),
+                    task_id.clone(),
                     "udp",
                     move |cancellation| {
                         service_task(
@@ -1520,14 +1597,20 @@ fn spawn_transport_plans(
                             cancellation,
                         )
                     },
-                )?
+                )?;
+                (task_id, owner, cancellation)
             }
-            TransportTaskPlan::Tcp { index, adapter } => {
+            TransportTaskPlan::Tcp {
+                index,
+                owner,
+                adapter,
+            } => {
                 let task_core = Arc::clone(&core);
                 let task_runtime = Arc::clone(&runtime);
-                spawn_transport_task(
+                let task_id = format!("transport.tcp.{revision}.{index}");
+                let cancellation = spawn_transport_task(
                     supervisor,
-                    format!("transport.tcp.{revision}.{index}"),
+                    task_id.clone(),
                     "tcp",
                     move |cancellation| {
                         tcp_listener_task(
@@ -1537,14 +1620,20 @@ fn spawn_transport_plans(
                             cancellation,
                         )
                     },
-                )?
+                )?;
+                (task_id, owner, cancellation)
             }
-            TransportTaskPlan::Doh { index, adapter } => {
+            TransportTaskPlan::Doh {
+                index,
+                owner,
+                adapter,
+            } => {
                 let task_core = Arc::clone(&core);
                 let task_runtime = Arc::clone(&runtime);
-                spawn_transport_task(
+                let task_id = format!("transport.doh.{revision}.{index}");
+                let cancellation = spawn_transport_task(
                     supervisor,
-                    format!("transport.doh.{revision}.{index}"),
+                    task_id.clone(),
                     "doh",
                     move |cancellation| {
                         doh_listener_task(
@@ -1554,12 +1643,41 @@ fn spawn_transport_plans(
                             cancellation,
                         )
                     },
-                )?
+                )?;
+                (task_id, owner, cancellation)
             }
         };
-        cancellations.push(cancellation);
+        tasks.push(TransportTask {
+            task_id,
+            owner,
+            cancellation,
+        });
     }
-    Ok(cancellations)
+    Ok(tasks)
+}
+
+/// 判断 transport endpoint 是否已耗尽瞬时重试，且应进入 endpoint 聚合判定。
+fn is_exhausted_endpoint(completion: &TaskCompletion) -> bool {
+    completion.spec.fault_level == FaultLevel::FatalEndpoint && completion.restart_exhausted()
+}
+
+/// 从当前 Runtime 移除已失效 endpoint，返回同一逻辑 listener 的剩余 endpoint 数量。
+///
+/// 返回 `None` 表示完成事件属于旧 Runtime；reload 后的迟到事件不能影响新 Runtime。
+fn retire_current_transport_task(
+    tasks: &mut Vec<TransportTask>,
+    completion: &TaskCompletion,
+) -> Option<usize> {
+    let index = tasks
+        .iter()
+        .position(|task| task.task_id == completion.spec.id.as_str())?;
+    let retired = tasks.swap_remove(index);
+    Some(
+        tasks
+            .iter()
+            .filter(|task| task.owner == retired.owner)
+            .count(),
+    )
 }
 
 fn task_failure(completion: &TaskCompletion) -> Option<ServiceError> {
@@ -2304,10 +2422,10 @@ mod tests {
     use tokio::net::{TcpStream, UdpSocket};
 
     use super::{
-        ResolveDetailDropCounters, ResolveDetailHealthUpdate, ServiceError,
-        publish_cache_shutdown_health, publish_component_health, publish_resolve_detail_health,
-        response_header_rcode, response_rcode, spawn_telemetry_task, spawn_transport_task,
-        task_failure,
+        ResolveDetailDropCounters, ResolveDetailHealthUpdate, ServiceError, TransportTask,
+        is_exhausted_endpoint, publish_cache_shutdown_health, publish_component_health,
+        publish_resolve_detail_health, response_header_rcode, response_rcode,
+        retire_current_transport_task, spawn_telemetry_task, spawn_transport_task, task_failure,
     };
     use crate::cache::CachePersistenceRunSummary;
     use crate::config::{ConfigLoader, LoadOptions};
@@ -2804,6 +2922,73 @@ mod tests {
             })
         ));
         assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[test]
+    fn exhausted_endpoint_only_stops_service_after_listener_group_is_empty() {
+        let mut tasks = vec![
+            TransportTask {
+                task_id: "transport.udp.2.0".to_owned(),
+                owner: "listener.primary".to_owned(),
+                cancellation: Cancellation::new(),
+            },
+            TransportTask {
+                task_id: "transport.tcp.2.1".to_owned(),
+                owner: "listener.primary".to_owned(),
+                cancellation: Cancellation::new(),
+            },
+            TransportTask {
+                task_id: "transport.udp.2.2".to_owned(),
+                owner: "listener.secondary".to_owned(),
+                cancellation: Cancellation::new(),
+            },
+        ];
+        let first = completion(
+            FaultLevel::FatalEndpoint,
+            RestartPolicy::Transient { max_restarts: 3 },
+            TaskExit::Failed(TaskErrorKind::Transient),
+            3,
+        );
+        let first = TaskCompletion {
+            spec: TaskSpec::new(
+                "transport.udp.2.0",
+                "udp",
+                first.spec.fault_level,
+                first.spec.restart_policy,
+            )
+            .unwrap(),
+            ..first
+        };
+
+        assert!(is_exhausted_endpoint(&first));
+        assert_eq!(retire_current_transport_task(&mut tasks, &first), Some(1));
+
+        let stale = TaskCompletion {
+            spec: TaskSpec::new(
+                "transport.udp.1.0",
+                "udp",
+                FaultLevel::FatalEndpoint,
+                RestartPolicy::Transient { max_restarts: 3 },
+            )
+            .unwrap(),
+            exit: TaskExit::Failed(TaskErrorKind::Transient),
+            restart_count: 3,
+        };
+        assert_eq!(retire_current_transport_task(&mut tasks, &stale), None);
+
+        let last = TaskCompletion {
+            spec: TaskSpec::new(
+                "transport.tcp.2.1",
+                "tcp",
+                FaultLevel::FatalEndpoint,
+                RestartPolicy::Transient { max_restarts: 3 },
+            )
+            .unwrap(),
+            exit: TaskExit::Failed(TaskErrorKind::Transient),
+            restart_count: 3,
+        };
+        assert_eq!(retire_current_transport_task(&mut tasks, &last), Some(0));
+        assert_eq!(tasks.len(), 1);
     }
 
     #[tokio::test]
