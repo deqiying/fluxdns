@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 172（Supervisor shutdown deadline/abort 验证）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 173（Service request drain timeout 验证）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -34,8 +34,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **88.2%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **89.3%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **88.3%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **89.5%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -45,7 +45,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Application | 实现中 | 76% | 4% |
 | Ports | 已实现待验证 | 70% | 8% |
 | Config | 已验证 | 100% | 10% |
-| Runtime | 实现中 | 89% | 12% |
+| Runtime | 实现中 | 90% | 12% |
 | Transport | 实现中 | 87% | 11% |
 | DNS Core | 实现中 | 82% | 10% |
 | Policy | 实现中 | 83% | 8% |
@@ -58,9 +58,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 进度计算：
 
 ```text
-4%×76% + 8%×70% + 10%×100% + 12%×89% + 11%×87%
+4%×76% + 8%×70% + 10%×100% + 12%×90% + 11%×87%
 + 10%×82% + 8%×83% + 10%×99% + 9%×83% + 7%×92%
-+ 8%×96% + 3%×98% ≈ 88.2%
++ 8%×96% + 3%×98% ≈ 88.3%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -95,7 +95,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 172 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 173 |
 
 ### 增量里程碑
 
@@ -112,14 +112,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 152–170 | 持久化 health、DoH/TLS 安全与 Runtime 生命周期 | Cache/Storage health 已发布；正常与 fatal task 退出均有界收尾；坏 TLS 握手只终止当前 DoH session；同组 endpoint 可故障隔离；listener 空闲不消耗重试；stream session 和 DoH framing 均有硬上限；Listener health 覆盖 `Healthy → Degraded → Healthy → Stopping`；后端全量 539 passed |
 | 171 | Telemetry 输出 health 闭环 | 主输出与 fallback 同时失败时记录 `Failed`；后续完整 flush 成功恢复 `Healthy`，不受历史累计失败数影响 |
 | 172 | Supervisor shutdown deadline | 不合作 task 到期后 abort；`ShutdownReport` 准确记录 aborted/deadline 且无 task 残留 |
+| 173 | Service request drain timeout | 活动请求超时准确设置 `deadline_expired`；guard 释放后 Runtime 完成 drain |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/runtime/supervisor.rs`；
-- Supervisor 不合作 task deadline abort 与合作式 shutdown 回归：2 项定向测试通过；
+- 增量 `rustfmt`：`backend/src/service.rs`；
+- Service request drain timeout 与既有 Storage/Telemetry shutdown 回归：2 项定向测试通过；
 - `git diff --check`：通过。
 
-阶段 172 未重复阶段 170 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 173 未重复阶段 170 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

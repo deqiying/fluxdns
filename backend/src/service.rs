@@ -3992,6 +3992,57 @@ clients: []
         let _ = std::fs::remove_dir_all(work_path);
     }
 
+    /// 验证活动请求超过 deadline 时 Service 报告超时，并在 guard 释放后完成 drain。
+    #[tokio::test]
+    async fn service_shutdown_reports_request_drain_timeout() {
+        let port = available_transport_ports()[0];
+        let work_path =
+            crate::config::test_support::absolute_path("service-shutdown-drain-timeout");
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &SystemSocketFactory::new(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let runtime = coordinator.load();
+        let request_guard = runtime.try_acquire().unwrap();
+        let core = runtime.snapshot().dns_core().unwrap();
+        let mut service = super::DnsService::start_with_coordinator(
+            Arc::clone(&coordinator),
+            core,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_millis(500)),
+            )
+            .await
+            .unwrap();
+
+        assert!(report.deadline_expired);
+        assert_eq!(report.aborted, 0);
+        assert!(runtime.is_draining());
+        assert_eq!(runtime.active_requests(), 1);
+        drop(request_guard);
+        assert!(
+            runtime
+                .wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(1)))
+                .await
+        );
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
     #[tokio::test]
     async fn reload_prepared_reuses_unchanged_listener_without_rebinding() {
         let port = 40_500 + (std::process::id() as u16 % 500);
