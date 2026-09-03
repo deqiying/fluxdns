@@ -12,7 +12,7 @@
 
 ## 1. 结论
 
-FluxDNS 前端已实现 **React + TypeScript + Vite 的独立 SPA**。当前 F1–F4 的工程、鉴权、应用壳和只读页面已能基于 contract fixture 构建与测试；后端 management API、`webui` feature gate 解除和真实同源联调尚未实现。生产环境约定由未来的 FluxDNS management server 托管随发布包交付的 `frontend/dist`，浏览器通过同源的 `/api/v1` 访问后端 JSON API。
+FluxDNS 前端已实现 **React + TypeScript + Vite 的独立 SPA**。当前 F1–F4 的工程、鉴权、应用壳和只读页面已能基于 contract fixture 构建与测试；后端 management API、`webui` feature gate 解除和真实同源联调尚未实现。生产发布目标是由未来的 FluxDNS management server 托管编译期内嵌到单个 Rust binary 的资源，浏览器通过同源的 `/api/v1` 访问后端 JSON API；`frontend/dist` 仍保留为独立前端构建物。
 
 当前阶段的 WebUI 只负责：
 
@@ -82,9 +82,10 @@ FluxDNS 后端是单 Rust binary。当前 DoH 入站使用独立的 HTTP/1.x par
 ### 3.1 部署模型
 
 - 开发环境由 Vite dev server 提供页面，并将 `/api` 代理到本地 management API；
-- 生产环境执行 `vite build`，生成 `frontend/dist`；
+- 前端独立构建始终执行 `vite build`，生成并保留 `frontend/dist`；
 - 生产环境优先使用同源路径提供静态文件和 `/api/v1`，避免在浏览器中配置跨域 API 地址；
-- 首版静态文件由未来的 FluxDNS management server 从随发布包交付的 `frontend/dist` 提供；不引入 `rust-embed`，也不要求额外反向代理；
+- v2 发布由 `script/package-embedded.ps1` 先构建 `frontend/dist`，再通过 `webui-embed` 将资源编译进 Rust binary；最终的 Linux/Windows x86_64 二进制分别输出到 `deploy/`，不要求部署机器提供外部 `frontend/dist`；
+- `backend/target` 继续保留 Cargo 的独立构建物，不与 `deploy/` 混用；
 - 生产环境不需要运行 Node.js 服务。
 
 ### 3.2 请求方向
@@ -293,7 +294,7 @@ vite build
 
 静态资源使用带 hash 的文件名并设置长期缓存；`index.html` 使用短缓存或 no-cache。服务端需要为未知前端路由回退到 `index.html`，但 `/api/*` 请求必须交给 API router，不能回退成 HTML。
 
-首版采用“构建产物随发布包交付、由 management server 托管”的方式。未知 SPA 路由回退 `index.html`，`/api/*` 始终交给 API router；不使用 `rust-embed`，也不把反向代理设为首版交付依赖。
+发布采用“前端独立构建 -> `webui-embed` 编译期内嵌 -> `deploy/` 双平台二进制”的方式。未知 SPA 路由回退 `index.html`，`/api/*` 始终交给 API router；开发阶段仍可直接使用 `frontend/dist` 做静态检查，但发布运行不依赖该目录或 Node.js。
 
 ## 10. 实施顺序和验收
 

@@ -12,7 +12,7 @@
 
 ## 1. 摘要
 
-FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 management server，并把前端产物与后端编译到同一个 Rust 可执行文件中。management server 独占 `webui.address:webui.port`，负责以下能力：
+FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 management server，并把前端产物与后端编译到同一个 Rust 可执行文件中。开发构建物继续分别保留在 `frontend/dist` 与 `backend/target`；发布脚本只将带内嵌 WebUI 的两个平台二进制复制到 `deploy/`。management server 独占 `webui.address:webui.port`，负责以下能力：
 
 1. 路由并实现 `/api/v1/*` Management API；
 2. 托管编译后的 React SPA，且对非 API 的前端路由回退 `index.html`；
@@ -54,7 +54,7 @@ FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 managemen
 | 首次初始化 | 前端只有 `/login` 与 `ProtectedRoute`，没有初始化状态和页面 | `users: []` 时无法安全创建首个账号 |
 | 配置写入 | `ConfigLoader` 只读；配置 DTO 只实现 `Deserialize` | 需要专用、原子、可恢复且不泄密的 writer |
 | Storage 读取 port | `StorageBackend` 主要提供 migration、写入、健康、flush 与 shutdown | 统计和查询 handler 不能直接在路由层执行 SQL |
-| 单二进制发布 | `frontend/dist/` 是本地忽略的外部构建物 | release 流程需要先构建前端再将产物编译进 Rust binary |
+| 发布产物布局 | 前端 `frontend/dist/` 与后端 `backend/target/` 各自保留，`deploy/` 只存放发布二进制 | release 流程需要先构建前端，再将产物编译进两个目标平台的 Rust binary |
 
 ### 2.3 现有约束
 
@@ -63,6 +63,8 @@ FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 managemen
 - 前端不直接读取配置文件、SQLite、日志文件、SecretRef 或 Runtime 内部对象。
 - `webui.enable: false` 时不绑定 management socket、不创建 router、SessionStore 或 management 后台任务。
 - `webui.enable: true` 且 `users` 被省略或显式为 `[]` 都是合法的初始化状态，不再是启动错误；v2 模型需要为 `users` 增加空列表默认值，并拒绝 `null`。
+- 前端独立构建物固定保留在 `frontend/dist/`，后端 Cargo 构建物固定保留在 `backend/target/`；不得通过 `CARGO_TARGET_DIR` 或复制操作让两者改用 `deploy/`。
+- `script/package-embedded.ps1` 负责构建并复制 `Linux x86_64` 与 `Windows x86_64` 的内嵌资源二进制到 `deploy/`；`script/dev.ps1 start` 启动发布二进制时必须显式接收 `-ConfigPath`，不在脚本中预设配置文件路径，并由同一脚本提供 `status`/`stop` 生命周期管理。
 - 本方案只设计和拆分实施工作，不代表相应代码已经完成。
 
 ## 3. 目标与非目标
@@ -414,19 +416,58 @@ webui:
 
 ## 10. 静态资源与单二进制发布
 
-### 10.1 构建链
+### 10.1 产物目录与命名
+
+构建目录和发布目录严格分离：
+
+| 类型 | 目录/文件 | 说明 |
+| --- | --- | --- |
+| 前端独立构建物 | `frontend/dist/` | `pnpm run build` 的输出，供前端开发和静态检查使用；不移动到 `deploy/` |
+| 后端独立构建物 | `backend/target/<triple>/release/` | Cargo 的原生输出，保留完整 target 层级；不把 `target` 重定向到 `deploy/` |
+| Linux 发布二进制 | `deploy/fluxdns-linux-x86_64` | `x86_64-unknown-linux-gnu`，包含编译期内嵌 WebUI |
+| Windows 发布二进制 | `deploy/fluxdns-windows-x86_64.exe` | `x86_64-pc-windows-msvc`，包含编译期内嵌 WebUI |
+
+`deploy/` 只保存可分发的最终二进制，已由仓库 `.gitignore` 忽略；不提交其中的个人构建物。脚本只覆盖对应目标的最终文件，并使用同目录临时文件避免留下半成品；不会清理或移动 `frontend/dist/`、`backend/target/` 中的其他内容。
+
+### 10.2 一键打包脚本
+
+`script/package-embedded.ps1` 是仓库唯一的一键发布打包入口，使用 PowerShell 7，必须从仓库根目录或通过脚本绝对路径调用。脚本不安装额外工具，运行前应按[项目环境使用规范](../standards/environment-usage.md)准备 `pnpm`、Rust target 以及对应的跨平台 linker。
 
 release 构建顺序固定为：
 
-1. 在 `frontend/` 执行 `pnpm install --frozen-lockfile`；
-2. 执行 `pnpm run build`，生成 `frontend/dist/index.html` 与带内容 hash 的 assets；
-3. 从仓库根目录执行带 `webui-embed` feature 的 Cargo release build；
-4. 编译期检查 `index.html` 和 asset manifest 存在，并将整个 `dist` 作为只读字节嵌入 binary；
-5. 在干净环境中运行产物，确认删除外部 `frontend/dist` 后仍可访问 WebUI。
+1. 先检查后端 manifest 已声明 `webui-embed` feature，并要求运行环境预先准备两个 Rust target/linker；可用 `rustup` 时由脚本核验 target，缺少 feature 时立即失败，缺少 target/linker 则由对应 Cargo 构建步骤失败，避免生成伪发布物；
+2. 在 `frontend/` 执行 `pnpm install --frozen-lockfile`；
+3. 执行 `pnpm run build`，生成 `frontend/dist/index.html` 与带内容 hash 的 assets；缺少入口文件时立即失败，禁止生成未内嵌资源的伪发布物；
+4. 对 `x86_64-unknown-linux-gnu` 和 `x86_64-pc-windows-msvc` 依次执行 `cargo build --locked --release --features webui-embed --target <triple>`；
+5. 编译期检查 `index.html` 和 asset manifest 存在，并将整个 `dist` 作为只读字节嵌入 binary；
+6. 将 Cargo 输出复制为本节约定的两个 `deploy/` 文件名，保留前端和后端独立构建物。
 
-不要从 `build.rs` 隐式执行 `pnpm install` 或联网下载依赖。CI/发布脚本显式完成前端构建，再调用 Cargo；这样依赖锁、失败位置和缓存边界可审计。后端日常检查可保留不内嵌 WebUI 的开发 feature，但正式发布 profile 必须启用 `webui-embed`，并在缺少前端产物时失败。
+脚本不得从 `build.rs` 隐式执行 `pnpm install` 或联网下载依赖，也不得自动安装 Rust target/linker。CI/发布脚本显式完成前端构建，再调用 Cargo；这样依赖锁、失败位置和缓存边界可审计。后端日常检查可保留不内嵌 WebUI 的开发 feature，但正式发布 profile 必须启用 `webui-embed`，并在缺少前端产物时失败。
 
-### 10.2 静态响应契约
+### 10.3 开发服务管理脚本
+
+`script/dev.ps1` 是本地开发和测试时管理 `deploy/` 中单个发布二进制的统一入口，支持 `start`、`status` 和 `stop` 三个动作。`start` 动作的 `-ConfigPath` 是必填参数，脚本先将其解析为普通文件，再以 `run --config <绝对路径>` 传给二进制；脚本不包含任何默认配置文件路径。未显式提供 `-BinaryPath` 时，仅根据当前系统和架构选择对应的 `deploy/` 文件：
+
+```powershell
+# Windows x86_64
+pwsh -File script/dev.ps1 start -ConfigPath .\_fluxdns\config.yaml
+
+# Linux x86_64（PowerShell 7）
+pwsh -File script/dev.ps1 start -ConfigPath ./_fluxdns/config.yaml
+
+# 需要指定其他二进制时，配置文件仍然必须显式传入
+pwsh -File script/dev.ps1 start -BinaryPath .\deploy\fluxdns-windows-x86_64.exe -ConfigPath .\_fluxdns\config.yaml
+
+# 查看脚本记录的进程是否仍在运行
+pwsh -File script/dev.ps1 status
+
+# 停止脚本记录的进程
+pwsh -File script/dev.ps1 stop
+```
+
+脚本启动后将 PID、二进制路径、配置路径和启动时间写入 `_fluxdns/dev-process.json`，并将标准输出/标准错误重定向到 `_fluxdns/logs/dev.stdout.log` 与 `_fluxdns/logs/dev.stderr.log`。`status`/`stop` 会同时校验 PID、进程启动时间和可执行文件路径，避免 PID 被复用时误报或误停；检测到失效状态文件时会清理，状态无法安全核验或 JSON 损坏时则拒绝操作并保留文件供人工诊断。`stop` 等待进程退出后删除状态文件；没有状态文件时停止动作幂等返回。脚本不复制、修改或生成配置；配置相对路径的解析仍遵循[本地测试规范](../standards/local-testing.md)和后端 CLI 契约。
+
+### 10.4 静态响应契约
 
 - `index.html`：`Cache-Control: no-cache` 或短缓存；每次可重新验证。
 - 文件名含内容 hash 的 assets：`Cache-Control: public, max-age=31536000, immutable`。
@@ -513,12 +554,13 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 
 工作项：
 
-- 固化 frontend build -> Rust embed -> release binary 的 CI/发布步骤；
+- 固化 `script/package-embedded.ps1` 的 frontend build -> Rust embed -> 双平台 release binary 步骤，以及 `script/dev.ps1 start -ConfigPath <path>`、`status`、`stop` 生命周期入口；
+- 验证 `frontend/dist/`、`backend/target/` 独立保留，`deploy/` 只包含两个约定命名的发布二进制；
 - 运行 DNS 与 management 端到端回归；
 - 更新根 README、后端/前端架构、配置参考、模块文档、开发计划和示例；
 - 将本方案中的稳定事实迁移到权威文档，确认无保留价值后删除本方案与对应索引项。
 
-退出条件：干净环境可复现单 binary；权威文档只描述真实已实现行为，不再保留 v1 WebUI feature gate 结论。
+退出条件：干净环境可复现 Linux x86_64 与 Windows x86_64 两个单 binary；不依赖外部 `frontend/dist/` 或 Node.js 运行；启动脚本没有配置路径默认值；权威文档只描述真实已实现行为，不再保留 v1 WebUI feature gate 结论。
 
 ## 13. 验证方案
 
@@ -551,7 +593,10 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 | 完成 setup | 源配置与 snapshot 只有 username/hash；当前浏览器获得 session |
 | 重启 | 状态为 `ready`，可使用同一账号登录 |
 | `users` 预配置 | 首次访问进入 login，不允许 setup |
-| 删除外部 `frontend/dist` | release binary 仍能完整加载 SPA |
+| 删除外部 `frontend/dist` | `deploy/fluxdns-linux-x86_64` 与 `deploy/fluxdns-windows-x86_64.exe` 仍能完整加载 SPA |
+| 独立构建物保留 | `frontend/dist/` 与 `backend/target/` 不被移动或重定向，`deploy/` 只产生两个发布二进制 |
+| 启动参数 | `dev.ps1 start` 缺少 `-ConfigPath` 时拒绝执行；显式配置路径能传给二进制，`status`/`stop` 不依赖默认配置 |
+| 进程生命周期 | `dev.ps1` 记录 PID 和进程身份信息；`status` 能识别运行/失效状态，`stop` 只停止身份匹配的进程 |
 | SPA 深链接 | 非 API 路径回退 `index.html`；未知 `/api/*` 返回 JSON 404 |
 | management endpoint 冲突 | 启动前失败并给出明确、脱敏错误 |
 | DNS 回归 | UDP、TCP、DoH 的既有 contract/smoke test 不受影响 |
@@ -569,7 +614,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 | YAML 重写覆盖用户注释/SecretRef | 配置丢失或秘密落盘 | source-preserving adapter、语义 diff、严格回读；不序列化 resolved 模型 |
 | 并发 setup 创建多个首用户 | 认证状态不可预测 | 进程锁 + 文件锁 + empty-users/fingerprint CAS |
 | handler 直接查询 SQLite | 层次泄漏、阻塞和 SQL 风险 | 独立 `StorageReadModel` port、只读连接、参数绑定和固定上限 |
-| 内嵌前端产物陈旧 | binary 与 OpenAPI/前端版本不一致 | release 构建固定顺序、manifest/hash 检查、干净环境 E2E |
+| 内嵌前端产物陈旧 | binary 与 OpenAPI/前端版本不一致 | 固定脚本顺序、manifest/hash 检查、双平台产物命名和干净环境 E2E |
 | management 依赖污染核心层 | 后续维护和测试成本上升 | 框架类型只留在 adapter，应用层通过 trait 与 DTO 交互 |
 
 ## 15. 验收标准
@@ -585,6 +630,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 7. 登录、session 恢复、退出、过期、Origin/Fetch Metadata、限流和 Cookie 属性通过真实浏览器验证。
 8. 所有只读 handler 经由稳定 query/snapshot 边界，不直接引用 SQLite 或 DNS transport 内部实现。
 9. 根 README、配置参考、后端/前端架构、模块文档、开发计划和示例已与真实实现同步。
+10. `script/package-embedded.ps1` 能在准备好的双平台 target/linker 环境中生成 `deploy/fluxdns-linux-x86_64` 和 `deploy/fluxdns-windows-x86_64.exe`；`script/dev.ps1 start` 要求显式 `-ConfigPath`，并可通过 `status`/`stop` 管理已启动进程。
 
 ## 16. 实施前评审清单
 
@@ -596,3 +642,5 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 - [ ] 确认 management accept loop 失败触发进程优雅关闭。
 - [ ] 确认 `/queries` 的安全投影继续禁止 qname、client IP 与 DNS wire。
 - [ ] 确认 release feature、前端构建入口和缺失 `dist` 时的失败方式。
+- [ ] 确认两个 Rust target/linker 的来源和 CI runner；确认 `frontend/dist/`、`backend/target/` 与 `deploy/` 的隔离及两个发布文件名。
+- [ ] 确认 `dev.ps1 start` 的 `-ConfigPath` 必填行为，以及未传入时不会回退到任何默认配置路径；确认 `status`/`stop` 的 PID 记录、身份校验和失效状态处理。

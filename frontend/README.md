@@ -56,3 +56,13 @@ pnpm run build
 ```
 
 `pnpm run test` 使用 Node 26 时可能输出 Node experimental localStorage warning；测试环境会用内存 `Storage` polyfill 隔离该能力，并断言应用未写入 `localStorage` 或 `sessionStorage`。
+
+## 发布打包
+
+前端独立构建物始终保留在 `frontend/dist/`。需要生成内嵌 WebUI 的 Linux x86_64 与 Windows x86_64 单文件发布物时，从仓库根目录执行：
+
+```powershell
+pwsh -File script/package-embedded.ps1
+```
+
+该脚本随后将最终二进制复制到 `deploy/`；不会移动或重定向 `frontend/dist/`。management server 和 `webui-embed` feature 尚未完成前，脚本会明确停止，不生成未内嵌资源的发布物。发布二进制的启动、状态查看和停止入口及必填配置参数见[项目环境使用规范](../docs/standards/environment-usage.md)和[整合方案](../docs/plans/webui-v2-management-integration.md#103-开发服务管理脚本)。

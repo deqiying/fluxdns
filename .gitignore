@@ -17,6 +17,9 @@
 /frontend/dist/
 /frontend/.cache/
 
+# 部署构建物
+/deploy/
+
 # 本地运行配置与运行时数据
 /config.yaml
 /work/

@@ -76,12 +76,17 @@ mise exec -- node --version
 | Rust 工具链缓存 | `backend/.cargo-home/` | 由 `mise.toml` 固定，已加入 `.gitignore` |
 | 前端依赖 | `frontend/node_modules/` | 已加入 `.gitignore` |
 | 前端构建物 | `frontend/dist/` | 已加入 `.gitignore` |
+| 发布二进制 | `deploy/` | 用于保存 `script/package-embedded.ps1` 生成的 Linux/Windows x86_64 内嵌资源二进制；已加入 `.gitignore` |
 | Node 编译缓存 | `frontend/.cache/node-compile-cache/` | 由 `mise.toml` 固定，已加入 `.gitignore` |
 | npm 下载缓存 | `frontend/.cache/npm-cache/` | 由 `mise.toml` 固定，已加入 `.gitignore` |
 | pnpm metadata cache | `frontend/.cache/pnpm-cache/` | 由 `mise.toml` 与 `frontend/pnpm-workspace.yaml` 固定，已加入 `.gitignore` |
 | pnpm content-addressable store | `frontend/.cache/pnpm-store/` | 由 `mise.toml` 与 `frontend/pnpm-workspace.yaml` 固定，已加入 `.gitignore` |
 
 新增前端技术栈或测试框架后，如产生其他固定目录，应在提交代码前同步补充 `.gitignore` 和本规范；不要通过 `git add -f` 强行提交构建物。个人配置、数据库、日志和本地测试运行时文件统一放在 `_fluxdns/`，其目录规则见[本地测试规范](local-testing.md)。
+
+前端和后端的独立构建物不得重定向到 `deploy/`：`frontend/dist/` 由 Vite 保留，`backend/target/` 由 Cargo 保留。发布脚本只在两个目标构建成功后复制最终文件到 `deploy/`，不移动或清理上述目录。
+
+双平台发布打包从仓库根目录执行 `pwsh -File script/package-embedded.ps1`；脚本要求 `webui-embed` feature、两个 Rust target 及对应 linker 已提前准备，不自动安装工具链。运行时使用 `pwsh -File script/dev.ps1 start -ConfigPath <path>`，配置路径为必填参数，不能省略或依赖脚本默认值；可用 `pwsh -File script/dev.ps1 status` 查看状态，或用 `pwsh -File script/dev.ps1 stop` 停止由脚本启动的进程。
 
 ## 4. 工具安装边界
 

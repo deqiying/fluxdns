@@ -18,6 +18,8 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 - `backend/`：Rust 后端的独立主目录，包含 `Cargo.toml`、`Cargo.lock` 与 `src/`；
 - `frontend/`：React + TypeScript + Vite 的只读 WebUI 工程；当前可用 contract fixture 独立开发，真实 management API 尚未接入；
+- `script/`：双平台内嵌 WebUI 发布打包与开发服务生命周期脚本；`package-embedded.ps1` 生成发布二进制，`dev.ps1` 提供显式配置启动、状态查看和停止；当前后端 `webui-embed` feature 尚未完成，打包脚本会在发布前置检查处停止；
+- `deploy/`：用于存放打包脚本生成的发布二进制，目录及内容已加入 `.gitignore`；
 - `docs/`：仓库级技术文档，入口见 [docs/README.md](docs/README.md)；
 - `config-example.yaml`：仓库级配置示例；
 - `_fluxdns/`：本地测试配置、运行数据和日志目录，仅供本机使用，不提交到 Git。

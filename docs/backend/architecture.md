@@ -586,7 +586,7 @@ v1 保留 `webui` schema，目的是避免未来新增顶层配置时破坏结�
 - `address`、`port`、`users` 仍做类型、安全和未知字段校验；
 - WebUI 不参与 v1 bind planner，也不会与 DoH 共享 router 或端口。
 
-前端已在 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 冻结首版只读 management API 的目标 schema；这不表示后端接口已经实现。后续启用 WebUI 时，应由独立 management router/adapter 对齐该 schema，补齐认证/session、同源请求校验、TLS/bind、权限模型、历史统计保留和 Rust contract tests，再解除 feature gate。首版生产静态文件由 management server 托管随发布包交付的 `frontend/dist`，未知 SPA 路由回退 `index.html`，`/api/*` 不得回退为 HTML，也不与 DoH router 共享语义。
+前端已在 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 冻结首版只读 management API 的目标 schema；这不表示后端接口已经实现。后续启用 WebUI 时，应由独立 management router/adapter 对齐该 schema，补齐认证/session、同源请求校验、TLS/bind、权限模型、历史统计保留和 Rust contract tests，再解除 feature gate。生产静态文件由 management server 托管通过 `webui-embed` 编译期内嵌到单个 Rust binary；`frontend/dist` 仍是独立前端构建物，未知 SPA 路由回退 `index.html`，`/api/*` 不得回退为 HTML，也不与 DoH router 共享语义。双平台发布脚本和 `deploy/` 产物目录遵循[项目环境使用规范](../standards/environment-usage.md)，显式配置启动参数由 `script/dev.ps1 start` 强制执行，进程状态可通过同一脚本的 `status`/`stop` 动作管理。
 
 ## 14. 验证基线
 

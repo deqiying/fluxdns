@@ -136,7 +136,7 @@ F0 未通过前不进入真实页面联调。退出条件为：
 2. 每个接口的请求参数、响应 DTO、错误码、分页/时间限制、认证/CSRF 和脱敏字段有可审查的 schema 或 Rust contract test；
 3. 明确 `Queries` 是否允许任何 qname 展示；默认选择安全摘要；
 4. Node.js 26.8.1、pnpm 11.25.0、`frontend/pnpm-lock.yaml`、Vitest/Testing Library/MSW 已成为仓库基线，缓存固定在 `frontend/.cache/`；
-5. 首版生产静态文件由未来的 management server 托管随发布包交付的 `frontend/dist`，未知 SPA 路由回退 `index.html`，`/api/*` 始终交给 API router。
+5. 生产发布由未来的 management server 托管通过 `webui-embed` 编译期内嵌到单个 Rust binary 的前端资源；`frontend/dist` 仍作为独立构建物保留，未知 SPA 路由回退 `index.html`，`/api/*` 始终交给 API router。
 
 ## 6. 前端目录和模块
 
