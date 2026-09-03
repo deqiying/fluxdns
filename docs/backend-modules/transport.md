@@ -1,6 +1,6 @@
 # Transport 模块设计
 
-> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter 与 Host cardinality 边界、forwarded header、PROXY v1/v2 首轮客户端地址恢复和 TLS terminate 首轮握手
+> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter 与 Host cardinality 边界、forwarded header、PROXY v1/v2 首轮客户端地址恢复和 TLS terminate 首轮握手；坏 TLS 握手的连接级隔离已有真实 loopback 证据
 >
 > 更新日期：2026-09-03
 >
@@ -25,7 +25,7 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 | `udp.rs` | datagram receive/send、EDNS 尺寸和截断 |
 | `tcp.rs` | accept、两字节 length framing、连接内请求 |
 | `doh.rs` | plain HTTP route、GET/POST、HTTP/DNS 错误分层、forwarded header/PROXY 首轮恢复和 session |
-| `runtime/system_socket.rs` | 系统 TCP listener、Rustls `ServerConfig` 和 TLS accept |
+| `runtime/system_socket.rs` | 系统 TCP listener、Rustls `ServerConfig` 和 TLS stream upgrade |
 
 ### 3.1 当前已实现：共享 DNS wire codec
 
@@ -132,7 +132,7 @@ TCP adapter：
 - 已形成 DNS transaction 后，NXDOMAIN/REFUSED/SERVFAIL 等使用 HTTP 2xx；
 - 成功响应 Content-Type 为 `application/dns-message`，Cache-Control 固定 `no-store`。
 
-首轮实现边界：`tls.mode=terminate` 在 endpoint 装配阶段加载 PEM/DER 证书链和私钥，system socket 显式使用 ring provider 完成 TLS 1.2/1.3 握手；`tls.mode=external` 不读取证书材料。启用 PROXY 时，DoH session 先以单字节有界读取消费可信前导，再升级同一连接到 TLS。`client_ip.source=forwarded_header` 已支持三个配置 header、trusted proxy CIDR、右向左链解析及 missing/invalid 的 `reject`/`use_peer` 策略；`client_ip.source=proxy_protocol` 已支持可信 peer、PROXY v1/v2、TCP4/TCP6、分片读取和长度上限，未知 v2 TLV 在长度合法时跳过；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2、证书热加载和完整握手/故障矩阵验收。
+首轮实现边界：`tls.mode=terminate` 在 endpoint 装配阶段加载 PEM/DER 证书链和私钥，system socket 显式使用 ring provider 完成 TLS 1.2/1.3 握手；`tls.mode=external` 不读取证书材料。启用 PROXY 时，DoH session 先以单字节有界读取消费可信前导，再升级同一连接到 TLS。TLS 握手失败只关闭当前 session，listener 继续接收后续连接。`client_ip.source=forwarded_header` 已支持三个配置 header、trusted proxy CIDR、右向左链解析及 missing/invalid 的 `reject`/`use_peer` 策略；`client_ip.source=proxy_protocol` 已支持可信 peer、PROXY v1/v2、TCP4/TCP6、分片读取和长度上限，未知 v2 TLV 在长度合法时跳过；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2、证书热加载和完整握手/故障矩阵验收。
 
 route template 负责提取可选 `client_id`，但日志不记录实际路径参数或 query string。
 
@@ -143,11 +143,11 @@ route template 负责提取可选 `client_id`，但日志不记录实际路径�
 - 读取证书链和私钥；
 - 拒绝空链、无匹配 key、加密但无法解密的 key 和不支持算法；
 - 显式安装 Rustls crypto provider；
-- 将脱敏的 DER 材料交给 system socket，由其构造 `ServerConfig` 并完成 accept-time handshake。
+- 将脱敏的 DER 材料交给 system socket，由其构造 `ServerConfig` 并在连接 session 内完成 stream upgrade。
 
 `tls.mode=external` 不读取证书材料。v1 不实现证书热加载；证书变化需要新 candidate/rebind。
 
-TLS handshake 受 endpoint request timeout 和 cancellation 约束，失败不进入 HTTP router；v1 暂不实现独立 TLS timeout 或证书热加载。
+TLS handshake 受 endpoint request timeout 和 cancellation 约束，失败不进入 HTTP router且不影响 listener；真实 loopback 已验证坏握手后同一 listener 仍可完成下一条 TLS DoH 请求。v1 暂不实现独立 TLS timeout 或证书热加载。
 
 ## 9. Client IP 恢复
 
@@ -209,7 +209,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - UDP/TCP canonical equivalence、ID 恢复和 UDP TC；
 - TCP length 分片、半包、EOF、idle timeout 和顺序响应；
 - DoH GET/POST、request-line、Host cardinality、媒体类型、方法、65,535/87,380 边界、最大 request-target 独立计费和 HTTP/DNS 分层；
-- TLS 证书/key 组合与 handshake timeout；
+- TLS 证书/key 组合、handshake timeout 与坏连接隔离；
 - forwarded header 信任链、伪造 header、missing/invalid policy；
 - PROXY v1/v2 分片、未知 TLV、非法长度、不可信 peer；
 - admission control、client disconnect、shutdown cancellation；
@@ -232,8 +232,9 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 完成 UDP/TCP framing、尺寸、EOF、取消和顺序响应测试；
 - [x] 完成 UDP/TCP/plain DoH 的真实 loopback response contract，统一验证 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED、DNS ID 和 canonical response，并验证大响应下 UDP TC、TCP/DoH 完整响应；
 - [x] 验证 transport task 的三次 transient retry 上限和 `FatalEndpoint` 耗尽升级；
+- [x] 验证坏 TLS 握手只终止当前 DoH session，同一 listener 可继续服务后续正常连接；
 - [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、request-line/media type、Host cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 19 项通过；system socket Rustls loopback 2 项验证成功握手、peer 保留、deadline 和 cancellation；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163 验证 transport task 初次执行加三次 transient retry 后标记耗尽并升级 `FatalEndpoint`。真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
+阶段证据：DoH codec/session、request-line/media type、Host cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 19 项通过；system socket Rustls loopback 2 项验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163 验证 transport task 初次执行加三次 transient retry 后标记耗尽并升级 `FatalEndpoint`。真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
 
-当前实现进度：**82%**。
+当前实现进度：**83%**。

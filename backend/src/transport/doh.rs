@@ -1780,6 +1780,107 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn failed_tls_handshake_does_not_poison_listener() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_der = certified.cert.der().to_vec();
+        let material = Arc::new(TlsServerMaterial {
+            certificate_chain: vec![certificate_der.clone()],
+            private_key: certified.signing_key.serialize_der(),
+        });
+        let factory = SystemSocketFactory::new();
+        let cancellation = Cancellation::new();
+        let prepared = factory
+            .prepare(
+                SocketSpec {
+                    kind: SocketKind::Tcp,
+                    address: "127.0.0.1:0".parse().unwrap(),
+                    reuse_port: false,
+                    v6_only: false,
+                },
+                Deadline::new(std::time::Instant::now() + Duration::from_secs(1)),
+                &cancellation,
+            )
+            .await
+            .unwrap();
+        let activated = prepared.activate().unwrap();
+        let ActivatedSocketHandle::Tcp(listener) = activated.socket_handle().unwrap() else {
+            unreachable!();
+        };
+        let address = listener.local_addr().unwrap();
+        let adapter = DohAdapter::new_with_tls(
+            Arc::clone(&listener),
+            crate::config::DohBindingRef {
+                listener_id: "doh".to_owned(),
+                endpoint_id: "tls".to_owned(),
+            },
+            vec![DohRoutePattern::new("/dns", "default").unwrap()],
+            RuntimeRevision(1),
+            doh_capabilities(),
+            Duration::from_secs(3),
+            DohClientIpPolicy::default(),
+            Some(material),
+        )
+        .unwrap();
+
+        // 非 TLS 客户端只应终止自己的 session，底层 listener 仍须继续接收连接。
+        let mut invalid_client = TcpStream::connect(address).await.unwrap();
+        let mut invalid_session = adapter
+            .accept_session(&cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+        invalid_client
+            .write_all(b"GET / HTTP/1.1\r\n\r\n")
+            .await
+            .unwrap();
+        invalid_client.shutdown().await.unwrap();
+        let handshake_error = match invalid_session.receive(&cancellation).await {
+            Err(error) => error,
+            Ok(_) => panic!("非 TLS 输入不应形成 DoH session event"),
+        };
+        assert_eq!(handshake_error.operation(), "system_socket.tls_handshake");
+
+        let client = TcpStream::connect(address).await.unwrap();
+        let mut session = adapter
+            .accept_session(&cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+        let server = tokio::spawn(async move { session.receive(&Cancellation::new()).await });
+        let mut roots = RootCertStore::empty();
+        roots.add(CertificateDer::from(certificate_der)).unwrap();
+        let client_config =
+            ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+                .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
+                .unwrap()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+        let connector = TlsConnector::from(Arc::new(client_config));
+        let mut client = connector
+            .connect(ServerName::try_from("localhost").unwrap(), client)
+            .await
+            .unwrap();
+        let wire = wire();
+        client
+            .write_all(&request(
+                "POST",
+                "/dns",
+                &format!(
+                    "Content-Type: application/dns-message\r\nContent-Length: {}\r\n",
+                    wire.len()
+                ),
+                &wire,
+            ))
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            server.await.unwrap().unwrap(),
+            DohSessionEvent::Request(_)
+        ));
+    }
+
     #[test]
     fn parses_get_and_restores_wire_id_metadata() {
         let wire = wire();
