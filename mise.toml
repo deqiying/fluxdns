@@ -1,8 +1,14 @@
 min_version = "2026.7.7"
 
 [tools]
+node = "26.8.1"
+pnpm = "11.25.0"
 rust = "1.98.0"
 
 [env]
 MISE_RUSTUP_HOME = "{{config_root}}/backend/.rustup"
 MISE_CARGO_HOME = "{{config_root}}/backend/.cargo-home"
+NODE_COMPILE_CACHE = "{{config_root}}/frontend/.cache/node-compile-cache"
+npm_config_cache = "{{config_root}}/frontend/.cache/npm-cache"
+npm_config_cache_dir = "{{config_root}}/frontend/.cache/pnpm-cache"
+npm_config_store_dir = "{{config_root}}/frontend/.cache/pnpm-store"
