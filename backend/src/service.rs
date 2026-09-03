@@ -154,6 +154,7 @@ pub enum ServiceError {
 
 const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 const TRANSPORT_RESTART_LIMIT: u32 = 3;
+const MAX_CONCURRENT_STREAM_SESSIONS: usize = 1_024;
 const TELEMETRY_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
 const TELEMETRY_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -1969,7 +1970,8 @@ async fn run_tcp_listener_loop(
             joined = sessions.join_next(), if !sessions.is_empty() => {
                 observe_tcp_session(joined);
             }
-            accepted = adapter.accept_session(&cancellation), if !cancellation.is_cancelled() => {
+            accepted = adapter.accept_session(&cancellation),
+                if !cancellation.is_cancelled() && can_accept_stream_session(sessions.len()) => {
                 match accepted {
                     Ok(Some(session)) => {
                         let session_core = Arc::clone(&core);
@@ -2041,7 +2043,8 @@ async fn run_doh_listener_loop(
             joined = sessions.join_next(), if !sessions.is_empty() => {
                 observe_doh_session(joined);
             }
-            accepted = adapter.accept_session(&cancellation), if !cancellation.is_cancelled() => {
+            accepted = adapter.accept_session(&cancellation),
+                if !cancellation.is_cancelled() && can_accept_stream_session(sessions.len()) => {
                 match accepted {
                     Ok(Some(session)) => {
                         let session_core = Arc::clone(&core);
@@ -2320,6 +2323,11 @@ fn is_cancelled_error(error: &crate::ports::PortError, cancellation: &Cancellati
     cancellation.is_cancelled() || matches!(error.class(), PortErrorClass::Cancelled(_))
 }
 
+/// 判断 TCP/DoH listener 是否仍可接收新 session，避免慢连接无限扩张 task 集合。
+fn can_accept_stream_session(active_sessions: usize) -> bool {
+    active_sessions < MAX_CONCURRENT_STREAM_SESSIONS
+}
+
 /// 识别 listener 在无流量期间的正常 deadline 轮询，不把空闲误计为 endpoint 故障。
 fn is_listener_idle_timeout(error: &crate::ports::PortError) -> bool {
     matches!(error.class(), PortErrorClass::Timeout)
@@ -2432,10 +2440,11 @@ mod tests {
     use tokio::net::{TcpStream, UdpSocket};
 
     use super::{
-        ResolveDetailDropCounters, ResolveDetailHealthUpdate, ServiceError, TransportTask,
-        is_exhausted_endpoint, publish_cache_shutdown_health, publish_component_health,
-        publish_resolve_detail_health, response_header_rcode, response_rcode,
-        retire_current_transport_task, spawn_telemetry_task, spawn_transport_task, task_failure,
+        MAX_CONCURRENT_STREAM_SESSIONS, ResolveDetailDropCounters, ResolveDetailHealthUpdate,
+        ServiceError, TransportTask, can_accept_stream_session, is_exhausted_endpoint,
+        publish_cache_shutdown_health, publish_component_health, publish_resolve_detail_health,
+        response_header_rcode, response_rcode, retire_current_transport_task, spawn_telemetry_task,
+        spawn_transport_task, task_failure,
     };
     use crate::cache::CachePersistenceRunSummary;
     use crate::config::{ConfigLoader, LoadOptions};
@@ -2740,6 +2749,16 @@ mod tests {
                 cache_compatibility: CacheCompatibilityKey(1),
             }
         );
+    }
+
+    /// 验证 TCP/DoH session 并发上限在边界前允许接收，达到边界后暂停 accept。
+    #[test]
+    fn stream_session_limit_is_enforced_at_accept_boundary() {
+        assert!(can_accept_stream_session(
+            MAX_CONCURRENT_STREAM_SESSIONS - 1
+        ));
+        assert!(!can_accept_stream_session(MAX_CONCURRENT_STREAM_SESSIONS));
+        assert!(!can_accept_stream_session(usize::MAX));
     }
 
     #[test]
