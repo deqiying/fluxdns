@@ -21,6 +21,8 @@ use sha2::{Digest, Sha256};
 
 use super::assets;
 use super::auth::{AuthError, AuthState, hash_password, validate_setup_credentials};
+use super::query;
+use super::query::ManagementQueryService;
 use super::session::{SessionStore, SessionView};
 use crate::config::store::{ConfigStore, ConfigStoreError};
 
@@ -43,6 +45,7 @@ pub(crate) struct AuthServices {
     pub(crate) auth: Arc<AuthState>,
     pub(crate) sessions: Arc<SessionStore>,
     pub(crate) config_store: Arc<ConfigStore>,
+    pub(crate) queries: Option<Arc<ManagementQueryService>>,
     public_origin: String,
     attempts: Arc<AttemptLimiter>,
 }
@@ -53,11 +56,13 @@ impl AuthServices {
         sessions: Arc<SessionStore>,
         config_store: Arc<ConfigStore>,
         public_origin: String,
+        queries: Option<Arc<ManagementQueryService>>,
     ) -> Self {
         Self {
             auth,
             sessions,
             config_store,
+            queries,
             public_origin,
             attempts: Arc::new(AttemptLimiter::default()),
         }
@@ -65,7 +70,7 @@ impl AuthServices {
 }
 
 #[derive(Clone)]
-struct RequestId(String);
+pub(super) struct RequestId(pub(super) String);
 
 #[derive(Default)]
 struct AttemptLimiter {
@@ -123,6 +128,7 @@ struct BoundaryState {
 pub(crate) fn build_router(services: Arc<AuthServices>) -> Router {
     let protected = Router::new()
         .route("/api/v1/auth/session", get(get_session))
+        .merge(query::routes())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&services),
             require_session,
@@ -518,12 +524,22 @@ fn invalid_json(request_id: &RequestId) -> Response {
     )
 }
 
-fn internal_error(request_id: &RequestId) -> Response {
+pub(super) fn internal_error(request_id: &RequestId) -> Response {
     error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
         "INTERNAL_ERROR",
         "management service is unavailable",
         true,
+        request_id,
+    )
+}
+
+pub(super) fn invalid_argument(request_id: &RequestId) -> Response {
+    error_response(
+        StatusCode::BAD_REQUEST,
+        "INVALID_ARGUMENT",
+        "query parameters are invalid",
+        false,
         request_id,
     )
 }
@@ -636,6 +652,7 @@ mod tests {
                 sessions,
                 config_store,
                 "http://127.0.0.1:8080".to_owned(),
+                None,
             )),
             root,
             source_path,

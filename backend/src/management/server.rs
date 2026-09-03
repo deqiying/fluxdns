@@ -10,17 +10,44 @@ use thiserror::Error;
 use super::ManagementRuntime;
 use super::assets;
 use super::auth::{AuthError, AuthState};
+use super::query::ManagementQueryService;
 use super::router::{AuthServices, build_router};
 use super::session::SessionStore;
 use crate::config::resolve::ResolvedWebUi;
 use crate::config::store::ConfigStore;
 use crate::dns::Cancellation;
-use crate::runtime::TaskError;
+use crate::observability::TelemetryWriter;
+use crate::ports::management::ManagementStorageRead;
+use crate::runtime::{RuntimeCoordinator, TaskError};
+use crate::storage::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
 
 pub(crate) struct ManagementService {
     listener: tokio::net::TcpListener,
     router: Router,
     runtime: Arc<ManagementRuntime>,
+}
+
+pub(crate) struct ManagementQueryDependencies {
+    coordinator: Arc<RuntimeCoordinator>,
+    database_path: PathBuf,
+    resolve_log_enabled: bool,
+    telemetry: Option<Arc<TelemetryWriter>>,
+}
+
+impl ManagementQueryDependencies {
+    pub(crate) fn new(
+        coordinator: Arc<RuntimeCoordinator>,
+        database_path: PathBuf,
+        resolve_log_enabled: bool,
+        telemetry: Option<Arc<TelemetryWriter>>,
+    ) -> Self {
+        Self {
+            coordinator,
+            database_path,
+            resolve_log_enabled,
+            telemetry,
+        }
+    }
 }
 
 impl ManagementService {
@@ -29,6 +56,7 @@ impl ManagementService {
         source_path: PathBuf,
         snapshot_path: PathBuf,
         source_fingerprint: String,
+        dependencies: ManagementQueryDependencies,
     ) -> Result<Self, ManagementBuildError> {
         assets::ensure_available().map_err(ManagementBuildError::Assets)?;
         let origin = config
@@ -42,11 +70,23 @@ impl ManagementService {
             snapshot_path,
             source_fingerprint,
         ));
+        let read_model: Arc<dyn ManagementStorageRead> = Arc::new(
+            SqliteManagementReadModel::connect(dependencies.database_path)
+                .await
+                .map_err(ManagementBuildError::ReadModel)?,
+        );
+        let queries = Arc::new(ManagementQueryService::new(
+            dependencies.coordinator,
+            read_model,
+            dependencies.telemetry,
+            dependencies.resolve_log_enabled,
+        ));
         let services = Arc::new(AuthServices::new(
             Arc::clone(&auth),
             Arc::clone(&sessions),
             Arc::clone(&config_store),
             origin.as_str().trim_end_matches('/').to_owned(),
+            Some(queries),
         ));
         let runtime = Arc::new(ManagementRuntime::new(auth, sessions, config_store));
         let address = SocketAddr::new(config.address, config.port);
@@ -96,6 +136,8 @@ pub(crate) enum ManagementBuildError {
     MissingPublicOrigin,
     #[error("management authentication initialization failed")]
     Auth(#[source] AuthError),
+    #[error("management read model initialization failed")]
+    ReadModel(#[source] SqliteManagementReadModelBuildError),
     #[error("management WebUI assets are unavailable: {0}")]
     Assets(&'static str),
     #[error("management HTTP listener bind failed")]
@@ -104,13 +146,18 @@ pub(crate) enum ManagementBuildError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use super::ManagementService;
-    use crate::config::resolve::ResolvedWebUi;
+    use super::{ManagementService, build_router};
+    use crate::config::migrate::deterministic_hash;
+    use crate::config::store::ConfigStore;
     use crate::dns::Cancellation;
+    use crate::management::ManagementRuntime;
+    use crate::management::auth::AuthState;
+    use crate::management::router::AuthServices;
+    use crate::management::session::SessionStore;
     use crate::runtime::TaskError;
 
     #[tokio::test]
@@ -119,21 +166,25 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let source_path = std::path::Path::new(&root).join("config.yaml");
         std::fs::write(&source_path, "version: 1\n").unwrap();
-        let config = ResolvedWebUi {
-            enable: true,
-            address: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            port: 0,
-            public_origin: Some("http://127.0.0.1".parse().unwrap()),
-            users: Vec::new(),
-        };
-        let service = ManagementService::bind(
-            &config,
+        let auth = Arc::new(AuthState::new(&[]).unwrap());
+        let sessions = Arc::new(SessionStore::new(false));
+        let config_store = Arc::new(ConfigStore::new(
             source_path.clone(),
             source_path,
-            "test-fingerprint".to_owned(),
-        )
-        .await
-        .unwrap();
+            deterministic_hash(b"version: 1\n"),
+        ));
+        let services = Arc::new(AuthServices::new(
+            Arc::clone(&auth),
+            Arc::clone(&sessions),
+            Arc::clone(&config_store),
+            "http://127.0.0.1".to_owned(),
+            None,
+        ));
+        let service = ManagementService {
+            listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
+            router: build_router(services),
+            runtime: Arc::new(ManagementRuntime::new(auth, sessions, config_store)),
+        };
         let address = service.local_addr().unwrap();
         let cancellation = Cancellation::new();
         let task_cancellation = cancellation.clone();

@@ -941,6 +941,7 @@ struct TelemetryHealthRecord {
     retry_count: u64,
     stale_age_micros: Option<u64>,
     persistence_gap: bool,
+    safe_reason: Option<&'static str>,
 }
 
 impl TelemetryHealthRecord {
@@ -953,6 +954,7 @@ impl TelemetryHealthRecord {
             retry_count: event.retry_count,
             stale_age_micros: event.stale_age_micros,
             persistence_gap: event.persistence_gap,
+            safe_reason: event.safe_reason,
         }
     }
 
@@ -981,6 +983,20 @@ impl TelemetryHealthRecord {
         }
         event
     }
+}
+
+/// Management API 可读取的有界健康快照，不包含日志正文或任意请求字段。
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TelemetryHealthSnapshot {
+    pub(crate) component: TelemetryComponent,
+    pub(crate) state: ComponentHealthState,
+    pub(crate) first_seen: Instant,
+    pub(crate) last_changed: Instant,
+    pub(crate) last_success: Option<Instant>,
+    pub(crate) retry_count: u64,
+    pub(crate) stale: bool,
+    pub(crate) persistence_gap: bool,
+    pub(crate) safe_reason: Option<&'static str>,
 }
 
 /// 面向稳定 telemetry ports 的非阻塞有界 writer。
@@ -1029,6 +1045,24 @@ impl TelemetryWriter {
             failed: state.failed,
             closed: state.closed,
         }
+    }
+
+    pub(crate) fn health_snapshot(&self) -> Vec<TelemetryHealthSnapshot> {
+        let health = lock_unpoisoned(&self.health);
+        health
+            .iter()
+            .map(|(component, record)| TelemetryHealthSnapshot {
+                component: *component,
+                state: record.state,
+                first_seen: record.first_seen,
+                last_changed: record.last_changed,
+                last_success: record.last_success,
+                retry_count: record.retry_count,
+                stale: record.stale_age_micros.is_some(),
+                persistence_gap: record.persistence_gap,
+                safe_reason: record.safe_reason,
+            })
+            .collect()
     }
 
     pub fn shutdown(&self, deadline: Deadline) -> Result<TelemetryFlushSummary, PortError> {

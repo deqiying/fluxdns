@@ -480,6 +480,8 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                     output.source_path.clone(),
                     output.resolved.work.snapshot_path.clone(),
                     output.resolved.input_hash.clone(),
+                    output.resolved.database.path.clone(),
+                    output.resolved.dns.resolve_log.enable,
                 )
             });
             let telemetry = if output.resolved.logs.enable {
@@ -531,17 +533,30 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .map_err(map_bind_error)?;
             let coordinator = Arc::new(crate::runtime::RuntimeCoordinator::new(candidate));
             let management = match management_bootstrap {
-                Some((config, Some(source_path), snapshot_path, source_fingerprint)) => Some(
+                Some((
+                    config,
+                    Some(source_path),
+                    snapshot_path,
+                    source_fingerprint,
+                    database_path,
+                    resolve_log_enabled,
+                )) => Some(
                     crate::management::ManagementService::bind(
                         &config,
                         source_path,
                         snapshot_path,
                         source_fingerprint,
+                        crate::management::ManagementQueryDependencies::new(
+                            Arc::clone(&coordinator),
+                            database_path,
+                            resolve_log_enabled,
+                            telemetry.clone(),
+                        ),
                     )
                     .await
                     .map_err(map_management_build_error)?,
                 ),
-                Some((_, None, _, _)) => {
+                Some((_, None, _, _, _, _)) => {
                     return Err(AppError::new(
                         AppErrorKind::Prepare,
                         "Management Server 需要文件形式的启动配置",

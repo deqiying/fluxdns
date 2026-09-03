@@ -2,6 +2,7 @@
 
 mod assets;
 mod auth;
+mod query;
 mod router;
 mod server;
 mod session;
@@ -14,7 +15,7 @@ use session::SessionStore;
 use crate::config::resolve::ResolvedWebUiUser;
 use crate::config::store::ConfigStore;
 
-pub(crate) use server::{ManagementBuildError, ManagementService};
+pub(crate) use server::{ManagementBuildError, ManagementQueryDependencies, ManagementService};
 
 /// 由 DNS service 同生命周期持有的认证状态和配置写入协调器。
 pub(crate) struct ManagementRuntime {
