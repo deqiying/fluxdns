@@ -10,6 +10,9 @@ mod statistics;
 mod stats;
 mod writer;
 
+#[cfg(test)]
+mod backend_contract_tests;
+
 pub use ledger::{BatchDecision, BatchLedger, BatchLedgerError, BatchReceipt, PendingStatsBatch};
 pub use resolve_log::{
     ResolveDetailRecord, ResolveDetailWriter, ResolveLogBuildError, ResolveLogFlushSummary,

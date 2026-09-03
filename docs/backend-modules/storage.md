@@ -245,11 +245,12 @@ SQLite 首轮 adapter 的 `execute` 在一个事务内处理 stats batch 与 res
 - [x] 完成真实 SQLite 写锁 Busy 故障复现及恢复；
 - [x] 完成业务 SQLite 串行 operation lock 的 deadline 与 shutdown 超时测试；
 - [x] 完成连接池耗尽时完整数据库 future 的 deadline 测试；
+- [x] 以内存和 SQLite adapter 共用测试验证 `StorageBackend` 可观测行为契约；
 - [ ] 完成真实 OS disk-full 故障复现；
 - [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
 - [ ] 完成 migration、压力和故障测试。
 
-阶段证据：Storage focused tests 覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突和失败回滚；`storage::sqlite::tests` 覆盖新库升级链、v1→v2 additive migration、历史详情不回填、stats batch 幂等重试/reopen、RCODE/failure/cancellation、resource revision 与其他详情摘要列写入、bounded writer、容量/年龄淘汰、事务回滚、health/shutdown 及 adapter fault 注入恢复；`storage::resolve_log::tests` 覆盖摘要转换、脱敏和队列边界；Service 的 RCODE 定向测试验证完整统计 RCODE 与详情 header RCODE 只来自实际 DNS response，shared-service reload 定向测试验证新旧 Runtime 的真实 UDP 请求由同一 stats worker 连续累计，正常 shutdown 定向测试验证请求统计最终写入并可从 SQLite 重新读取。阶段 180 后端全量 `547 passed、0 failed`；阶段 183 使用独立连接持有真实 SQLite 写锁，验证 Busy 映射为 `Unavailable`、health 进入 `Degraded`，释放锁后的事务恢复 `Healthy`；阶段 187 使业务 SQLite 串行锁等待遵守 deadline；阶段 189 进一步限制完整数据库 future，并以连接池耗尽验证短 deadline 稳定返回 `Timeout`，SQLite 17 项定向测试通过。
+阶段证据：Storage focused tests 覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突和失败回滚；`storage::sqlite::tests` 覆盖新库升级链、v1→v2 additive migration、历史详情不回填、stats batch 幂等重试/reopen、RCODE/failure/cancellation、resource revision 与其他详情摘要列写入、bounded writer、容量/年龄淘汰、事务回滚、health/shutdown 及 adapter fault 注入恢复；`storage::resolve_log::tests` 覆盖摘要转换、脱敏和队列边界；Service 的 RCODE 定向测试验证完整统计 RCODE 与详情 header RCODE 只来自实际 DNS response，shared-service reload 定向测试验证新旧 Runtime 的真实 UDP 请求由同一 stats worker 连续累计，正常 shutdown 定向测试验证请求统计最终写入并可从 SQLite 重新读取。阶段 190 后端全量 `555 passed、0 failed`；阶段 183 使用独立连接持有真实 SQLite 写锁，验证 Busy 映射为 `Unavailable`、health 进入 `Degraded`，释放锁后的事务恢复 `Healthy`；阶段 187 使业务 SQLite 串行锁等待遵守 deadline；阶段 189 进一步限制完整数据库 future，并以连接池耗尽验证短 deadline 稳定返回 `Timeout`；阶段 194 以共享测试验证内存与 SQLite `StorageBackend` 契约，`2 passed、0 failed`。
 
 阶段 131 的 `StorageRuntime` 定向测试已验证详情事件从前端队列提交至 SQLite worker，且统一 flush/shutdown 摘要保留前端 committed 与 discarded pending 计数。
 
