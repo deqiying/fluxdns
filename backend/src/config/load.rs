@@ -107,6 +107,19 @@ impl ConfigLoader {
         self.load_str(source)
     }
 
+    /// 使用指定源路径作为相对路径基准校验候选内容，但不读取或写入该路径。
+    pub(crate) fn load_candidate_bytes(
+        &self,
+        bytes: &[u8],
+        source_path: &Path,
+    ) -> Result<ConfigLoadOutput, ConfigLoadError> {
+        let bytes = bounded_bytes(bytes, self.options.max_bytes)?;
+        let source_path = absolute_config_path(source_path)?;
+        let mut output = self.load_bytes_inner(bytes, Some(source_path))?;
+        output.snapshot = SnapshotStatus::Skipped;
+        Ok(output)
+    }
+
     pub fn load_path<P: AsRef<Path>>(&self, path: P) -> Result<ConfigLoadOutput, ConfigLoadError> {
         let source_path = absolute_config_path(path.as_ref())?;
         let bytes = read_bounded_file(&source_path, self.options.max_bytes)?;

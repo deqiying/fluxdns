@@ -4,6 +4,8 @@ pub mod load;
 pub mod migrate;
 pub mod model;
 pub mod resolve;
+pub(crate) mod source_edit;
+pub(crate) mod store;
 pub mod validate;
 
 pub use load::{

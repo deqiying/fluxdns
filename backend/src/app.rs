@@ -430,6 +430,10 @@ async fn prepare_reload_candidate(
 }
 
 async fn run_command(options: CliOptions) -> Result<(), AppError> {
+    if options.command == AppCommand::Run {
+        crate::config::store::recover_pending_transaction(&options.config_path)
+            .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+    }
     let load_options = match options.command {
         AppCommand::Run => LoadOptions::default(),
         AppCommand::Validate => LoadOptions::default().without_snapshot(),
