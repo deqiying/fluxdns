@@ -2201,7 +2201,7 @@ mod tests {
             try_parse_request(&request("GET", &oversized, "", &[])),
             Err(DohHttpError::UriTooLong)
         );
-        assert!(MAX_DOH_BUFFER_BYTES > MAX_DOH_REQUEST_HEAD_BYTES);
+        const { assert!(MAX_DOH_BUFFER_BYTES > MAX_DOH_REQUEST_HEAD_BYTES) };
     }
 
     #[test]

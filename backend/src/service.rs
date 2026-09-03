@@ -2466,7 +2466,9 @@ impl From<DohAdapterError> for ServiceStartError {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, SocketAddr};
+    use std::net::{
+        Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket,
+    };
     use std::sync::atomic::AtomicUsize;
     use std::sync::{
         Arc, Mutex,
@@ -3427,36 +3429,48 @@ clients: []
         output
     }
 
+    /// 让操作系统选择当前可绑定的 UDP、TCP 和 DoH loopback 端口。
+    fn available_transport_ports() -> [u16; 3] {
+        let udp = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let tcp = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let doh = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        [
+            udp.local_addr().unwrap().port(),
+            tcp.local_addr().unwrap().port(),
+            doh.local_addr().unwrap().port(),
+        ]
+    }
+
     /// 对同一问题执行 UDP、TCP、DoH POST 和 DoH GET，并使用不同 ID 验证关联恢复。
     async fn query_all_transports(
-        base_port: u16,
+        ports: [u16; 3],
         first_id: u16,
         name: &str,
         record_type: RecordType,
     ) -> [Message; 4] {
         let udp = udp_query_with_type(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, ports[0])),
             first_id,
             name,
             record_type,
         )
         .await;
         let tcp = tcp_query_with_type(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 1)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, ports[1])),
             first_id + 1,
             name,
             record_type,
         )
         .await;
         let doh_post = doh_post_query_with_type(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 2)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, ports[2])),
             first_id + 2,
             name,
             record_type,
         )
         .await;
         let doh_get = doh_get_query_with_type(
-            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port + 2)),
+            SocketAddr::from((Ipv4Addr::LOCALHOST, ports[2])),
             first_id + 3,
             name,
             record_type,
@@ -3583,8 +3597,8 @@ clients: []
 
     #[tokio::test]
     async fn udp_tcp_and_plain_doh_follow_the_same_dns_contract() {
-        let base_port = 47_000 + (std::process::id() as u16 % 500) * 3;
-        let config = cross_transport_runtime_config(base_port, base_port + 1, base_port + 2);
+        let ports = available_transport_ports();
+        let config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
         let prepared =
             PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(1)).unwrap();
         let factory = SystemSocketFactory::new();
@@ -3602,7 +3616,7 @@ clients: []
                 .unwrap();
 
         let positive = assert_cross_transport_contract(
-            query_all_transports(base_port, 41, "transport.test.", RecordType::A).await,
+            query_all_transports(ports, 41, "transport.test.", RecordType::A).await,
             41,
             "transport.test.",
             RecordType::A,
@@ -3614,14 +3628,14 @@ clients: []
         )));
 
         assert_cross_transport_contract(
-            query_all_transports(base_port, 51, "transport.test.", RecordType::AAAA).await,
+            query_all_transports(ports, 51, "transport.test.", RecordType::AAAA).await,
             51,
             "transport.test.",
             RecordType::AAAA,
             ResponseClass::NoData,
         );
         assert_cross_transport_contract(
-            query_all_transports(base_port, 61, "missing.transport.test.", RecordType::A).await,
+            query_all_transports(ports, 61, "missing.transport.test.", RecordType::A).await,
             61,
             "missing.transport.test.",
             RecordType::A,
@@ -3629,7 +3643,7 @@ clients: []
         );
 
         let [udp, tcp, doh_post, doh_get] =
-            query_all_transports(base_port, 71, "large.transport.test.", RecordType::A).await;
+            query_all_transports(ports, 71, "large.transport.test.", RecordType::A).await;
         assert_eq!(udp.metadata.id, 71);
         assert!(udp.metadata.truncation);
         assert_eq!(udp.metadata.response_code, ResponseCode::NoError);
@@ -3654,8 +3668,8 @@ clients: []
 
     #[tokio::test]
     async fn udp_tcp_and_plain_doh_share_error_response_contract() {
-        let base_port = 48_000 + (std::process::id() as u16 % 500) * 3;
-        let config = cross_transport_runtime_config(base_port, base_port + 1, base_port + 2);
+        let ports = available_transport_ports();
+        let config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
         let prepared = PreparedRuntime::prepare(config, RuntimeRevision(2)).unwrap();
         let factory = SystemSocketFactory::new();
         let bound = crate::runtime::bind_prepared(
@@ -3675,14 +3689,14 @@ clients: []
         .unwrap();
 
         assert_cross_transport_contract(
-            query_all_transports(base_port, 81, "error.transport.test.", RecordType::A).await,
+            query_all_transports(ports, 81, "error.transport.test.", RecordType::A).await,
             81,
             "error.transport.test.",
             RecordType::A,
             ResponseClass::ServFail,
         );
         assert_cross_transport_contract(
-            query_all_transports(base_port, 91, "error.transport.test.", RecordType::AAAA).await,
+            query_all_transports(ports, 91, "error.transport.test.", RecordType::AAAA).await,
             91,
             "error.transport.test.",
             RecordType::AAAA,
@@ -3702,8 +3716,8 @@ clients: []
     /// 验证无流量 deadline 只触发 listener 轮询，不消耗 endpoint 重试预算。
     #[tokio::test]
     async fn idle_listener_deadlines_do_not_exhaust_transport_tasks() {
-        let base_port = 49_000 + (std::process::id() as u16 % 500) * 3;
-        let config = cross_transport_runtime_config(base_port, base_port + 1, base_port + 2);
+        let ports = available_transport_ports();
+        let config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
         let prepared =
             PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(3)).unwrap();
         let factory = SystemSocketFactory::new();
@@ -3726,8 +3740,7 @@ clients: []
 
         // 等待时间超过四轮 deadline；旧行为会在此期间耗尽三次重试。
         tokio::time::sleep(Duration::from_millis(350)).await;
-        let responses =
-            query_all_transports(base_port, 101, "transport.test.", RecordType::A).await;
+        let responses = query_all_transports(ports, 101, "transport.test.", RecordType::A).await;
         assert_cross_transport_contract(
             responses,
             101,
@@ -3922,16 +3935,17 @@ clients: []
             .unwrap();
         assert!(!report.deadline_expired);
         assert!(telemetry_probe.stats().closed());
-        let health_events = output.health_events.lock().unwrap();
-        assert!(health_events.iter().any(|event| {
-            event.component == TelemetryComponent::Storage
-                && event.state == ComponentHealthState::Stopping
-        }));
-        assert!(health_events.iter().any(|event| {
-            event.component == TelemetryComponent::Telemetry
-                && event.state == ComponentHealthState::Stopping
-        }));
-        drop(health_events);
+        {
+            let health_events = output.health_events.lock().unwrap();
+            assert!(health_events.iter().any(|event| {
+                event.component == TelemetryComponent::Storage
+                    && event.state == ComponentHealthState::Stopping
+            }));
+            assert!(health_events.iter().any(|event| {
+                event.component == TelemetryComponent::Telemetry
+                    && event.state == ComponentHealthState::Stopping
+            }));
+        }
 
         assert_eq!(sqlite_total_requests(&database_path).await, 1);
         let _ = std::fs::remove_dir_all(work_path);
