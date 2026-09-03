@@ -603,18 +603,40 @@ async fn migrate_storage_schema(pool: &SqlitePool) -> Result<(), SqliteStorageBa
     let version = row
         .try_get::<i64, _>("schema_version")
         .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
-    if version == i64::from(STORAGE_SCHEMA_VERSION.0) {
-        return Ok(());
+    let mut version = u32::try_from(version).map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+    while version < STORAGE_SCHEMA_VERSION.0 {
+        let (next, migration) = match version {
+            1 => (
+                2,
+                include_str!("../../migrations/0002_resolution_metadata.sql"),
+            ),
+            2 => (
+                3,
+                include_str!("../../migrations/0003_management_query_projection.sql"),
+            ),
+            _ => return Err(SqliteStorageBackendBuildError::Schema),
+        };
+        apply_storage_migration(pool, version, next, migration).await?;
+        version = next;
     }
-    if version != i64::from(INITIAL_STORAGE_SCHEMA_VERSION.0) {
-        return Err(SqliteStorageBackendBuildError::Schema);
+    if version == STORAGE_SCHEMA_VERSION.0 {
+        Ok(())
+    } else {
+        Err(SqliteStorageBackendBuildError::Schema)
     }
+}
 
+async fn apply_storage_migration(
+    pool: &SqlitePool,
+    from: u32,
+    to: u32,
+    migration: &'static str,
+) -> Result<(), SqliteStorageBackendBuildError> {
     let mut transaction = pool
         .begin()
         .await
         .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
-    for statement in include_str!("../../migrations/0002_resolution_metadata.sql").split(';') {
+    for statement in migration.split(';') {
         let statement = statement.trim();
         if !statement.is_empty() {
             sqlx::query(statement)
@@ -627,9 +649,9 @@ async fn migrate_storage_schema(pool: &SqlitePool) -> Result<(), SqliteStorageBa
         "UPDATE storage_meta SET schema_version = ?, migrated_at_utc = ? \
          WHERE singleton = 1 AND schema_version = ?",
     )
-    .bind(i64::from(STORAGE_SCHEMA_VERSION.0))
+    .bind(i64::from(to))
     .bind(unix_millis())
-    .bind(i64::from(INITIAL_STORAGE_SCHEMA_VERSION.0))
+    .bind(i64::from(from))
     .execute(&mut *transaction)
     .await
     .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
@@ -990,8 +1012,9 @@ async fn apply_resolve_records_with_limits(
              (event_time_utc, duration_millis, request_id_digest, listener_id, route_id, \
                client_bucket, strategy_id, canonical_qname, qtype, qclass, source, upstream_id, \
                upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
-               rcode, cache_status, failure_class, cancellation_reason, runtime_revision, resource_revision) \
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               rcode, cache_status, failure_class, cancellation_reason, runtime_revision, resource_revision, \
+               transport) \
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(system_time_millis(record.occurred_at()))
         .bind(duration_millis)
@@ -1015,6 +1038,7 @@ async fn apply_resolve_records_with_limits(
         .bind(record.cancellation_reason().map(cancellation_reason_name))
         .bind(i64::try_from(record.runtime_revision().0).unwrap_or(i64::MAX))
         .bind(resource_revision.as_deref())
+        .bind(transport_name(record.transport()))
         .execute(&mut **transaction)
         .await
         .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_batch"))?;
@@ -1056,6 +1080,14 @@ fn stats_source_name(value: crate::ports::storage::StatsSource) -> &'static str 
         crate::ports::storage::StatsSource::Hosts => "hosts",
         crate::ports::storage::StatsSource::RuleSet => "rule_set",
         crate::ports::storage::StatsSource::Upstream => "upstream",
+    }
+}
+
+fn transport_name(value: crate::dns::TransportClass) -> &'static str {
+    match value {
+        crate::dns::TransportClass::Datagram => "udp",
+        crate::dns::TransportClass::Stream => "tcp",
+        crate::dns::TransportClass::Multiplexed => "doh",
     }
 }
 
@@ -1241,7 +1273,7 @@ mod tests {
         assert_eq!(version, i64::from(crate::storage::STORAGE_SCHEMA_VERSION.0));
         let row = sqlx::query(
             "SELECT upstream_member_id, matched_rule_source, matched_resource_id, \
-             matched_rule_ordinal FROM resolve_log LIMIT 1",
+             matched_rule_ordinal, transport FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
         .await
@@ -1266,6 +1298,7 @@ mod tests {
                 .unwrap(),
             None
         );
+        assert_eq!(row.try_get::<Option<String>, _>("transport").unwrap(), None);
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
@@ -1623,7 +1656,8 @@ mod tests {
         let row = sqlx::query(
             "SELECT request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
              upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
-             canonical_qname, source, rcode, failure_class, cancellation_reason, resource_revision \
+             canonical_qname, source, rcode, failure_class, cancellation_reason, resource_revision, \
+             transport \
              FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
@@ -1704,6 +1738,7 @@ mod tests {
                 .as_deref(),
             Some("2:1")
         );
+        assert_eq!(row.try_get::<String, _>("transport").unwrap(), "udp");
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
