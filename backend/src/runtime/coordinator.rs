@@ -918,6 +918,34 @@ clients: []
         assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
     }
 
+    /// 验证同一基准 revision 的并发候选只允许一个获胜，并完整返还失败候选。
+    #[tokio::test]
+    async fn concurrent_serialized_activation_allows_exactly_one_winner() {
+        let coordinator = Arc::new(RuntimeCoordinator::new(candidate(1)));
+        let initial = coordinator.load();
+        let left = coordinator.compare_and_activate_serialized(RuntimeRevision(1), candidate(2));
+        let right = coordinator.compare_and_activate_serialized(RuntimeRevision(1), candidate(3));
+
+        let (left, right) = tokio::join!(left, right);
+        match (left, right) {
+            (Ok(previous), Err(error)) => {
+                assert!(Arc::ptr_eq(&previous, &initial));
+                assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+                assert_eq!(error.actual(), RuntimeRevision(2));
+                assert_eq!(error.into_candidate().revision(), RuntimeRevision(3));
+            }
+            (Err(error), Ok(previous)) => {
+                assert!(Arc::ptr_eq(&previous, &initial));
+                assert_eq!(coordinator.current_revision(), RuntimeRevision(3));
+                assert_eq!(error.actual(), RuntimeRevision(3));
+                assert_eq!(error.into_candidate().revision(), RuntimeRevision(2));
+            }
+            (Ok(_), Ok(_)) => panic!("同一基准 revision 不能同时发布两个候选"),
+            (Err(_), Err(_)) => panic!("同一基准 revision 必须有一个候选成功"),
+        }
+        assert!(initial.is_draining());
+    }
+
     #[test]
     fn lease_keeps_old_runtime_alive_after_atomic_swap() {
         let coordinator = Arc::new(RuntimeCoordinator::new(candidate(1)));
