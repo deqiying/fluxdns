@@ -1,6 +1,6 @@
 # Policy 模块设计
 
-> 状态：v1 方案已完成，已实现 client/strategy/route immutable index、const/file resource loader 接线、请求级 rule/hosts ResolutionPlan 首轮组合、hosts/plain HTTP DoH direct registry wiring 和注入式 DoH request path；Policy 可消费 async PreparedRuntime 提供的 compiled file/remote snapshot，并已由 ActiveRuntime remote/file refresh worker 驱动版本化 atomic live swap；ResolutionPlan 已按 client → 所选 strategy → global 解析 TTL override，Policy Core 会在缓存写入后应用 client-visible TTL；缓存 facade 遵循 `dns.cache.enabled` 与 `dns.cache.optimistic.enabled`，`PolicyLateResultSink` 已支持基于当前 `CacheEntry.quality` 的 late response 候选比较，配置候选 reload 已接入 Application
+> 状态：v1 主链已完成，client/strategy/route immutable index、resource snapshot、ResolutionPlan、cache/TTL/ECS、direct/group upstream、late candidate 和配置 reload 均已接线并有跨 transport/cross-adapter 证据；`dat selector` 仍后置
 >
 > 更新日期：2026-09-03
 >
@@ -196,10 +196,13 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 提供 protocol-neutral registry 注入入口并验证 DoH request path；
 - [x] 接入 Runtime snapshot 原子发布；
 - [x] 完成冲突、优先级、未知资源和 file loader 测试；
-- [x] 完成 Policy compiled resource snapshot 的版本化 atomic swap，并支持 supplied compiled file/remote hosts/rule-set snapshot 的初始构造；跨 transport contract 仍待完成。
+- [x] 完成 Policy compiled resource snapshot 的版本化 atomic swap，并支持 supplied compiled file/remote hosts/rule-set snapshot 的初始构造及跨 transport contract；
 - [x] 提供 client bucket/strategy/source/cache/selected upstream 低基数 observation；`upstream_id`、实际顶层 `upstream_member_id` 和 matched rule/resource 摘要已拆分。
-- [x] `PolicyLateResultSink` 按当前 `CacheEntry.quality` 使用 `CacheCondition::Version` 更新候选，允许更优 late Positive 替换早期 Negative，并拒绝同级 Negative/Positive 或更低 Failure 覆盖；跨 adapter/并发候选矩阵仍待完成。
+- [x] `PolicyLateResultSink` 按当前 `CacheEntry.quality` 使用 `CacheCondition::Version` 更新候选，允许更优 late Positive 替换早期 Negative，并拒绝同级 Negative/Positive 或更低 Failure 覆盖；hosts/DoH cross-adapter 并发候选已有回归；
+- [ ] 实现 `dat selector` 的二进制资源解析和 selector matcher；MVP 不为此新增未经验证的格式依赖。
 
-阶段证据：`policy::client::tests` 当前 4 项、`policy::plan::tests` 当前 10 项通过，覆盖实际命中身份的域分隔摘要、client pool namespace、TTL override 与 strategy 继承，以及 cache 的 client → strategy → global 显式启停/回退和 ECS 的 rule/strategy → client → upstream → global 优先级矩阵；`dns::policy::tests` 当前 35 项通过，覆盖 global pool 关闭时的 strategy/client cache、client identity 隔离、hosts/rule-set/group/DoH 路径、optimistic refresh/late sink、cache hit TTL、TTL override、global/client/direct upstream/group member ECS 上游 query，以及跨 Policy Core 实例的 SQLite cache 恢复；member ECS、目标/member 拆分及 hosts/rule-set matched rule/resource version 摘要均有定向断言。最近一次大阶段 backend 全量测试为 515 passed、0 failed。
+阶段证据：`policy::client::tests` 4 项、`policy::plan::tests` 10 项通过，覆盖实际命中身份摘要、client pool namespace、TTL/strategy 继承、cache 显式启停/回退和 ECS 优先级矩阵；`dns::policy::tests` 35 项通过，覆盖 strategy/client cache、身份隔离、hosts/rule-set/group/DoH、optimistic refresh/late sink、TTL、ECS 和 SQLite cache 恢复；Service 的真实 UDP/TCP/plain DoH 成功与错误契约测试均通过；阶段 176 补齐 hosts/DoH cross-adapter 并发候选。最近一次大阶段 backend 全量测试为 539 passed、0 failed。
 
-当前实现进度：**83%**（client/strategy/route immutable index、client identity cache digest、const/file resource loader、rule/hosts matcher 编排、请求级 plan、cache/TTL/ECS 层级选择与首轮覆盖矩阵、显式 direct upstream/group member ECS、策略目标/member/matched rule/resource version observation、per-pool optimistic answer TTL/max-age、supplied compiled file/remote snapshot、direct DoH、基础 Cache/Core request path、snapshot-local/最新 Runtime optimistic refresh、late sink、RuntimeCoordinator finalizer owner 和配置候选 reload 已接入；dat selector、late 候选的跨 adapter/并发矩阵和跨 transport contract tests 未完成）。
+阶段 178 复核 Policy plan 10 项、Policy Core 35 项及 UDP/TCP/plain DoH 两条真实契约，确认原文中的 cross-adapter 与跨 transport 缺口已闭合；未执行全量后端测试。
+
+当前实现进度：**88%**（v1 配置驱动主链、资源 live snapshot、cache/TTL/ECS、观测和协议组合已完成；主要剩余项为 `dat selector`）。
