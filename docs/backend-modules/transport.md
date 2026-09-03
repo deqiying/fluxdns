@@ -129,7 +129,7 @@ TCP adapter：
 - request target/body 超限返回 414/413；
 - base64 或 DNS wire 非法返回 400；
 - method 必须符合 token 语法，request-target 只接受可见 ASCII；畸形 request-line 返回 400，合法但不支持的方法返回 405；
-- HTTP/1.1 缺少 `Host` 或任意 HTTP/1.x 重复 `Host` 返回 400 并关闭连接；
+- HTTP/1.1 缺少 `Host`，或任意 HTTP/1.x 的 `Host` 重复、包含非法 authority 时返回 400 并关闭连接；
 - 已形成 DNS transaction 后，NXDOMAIN/REFUSED/SERVFAIL 等使用 HTTP 2xx；
 - 成功响应 Content-Type 为 `application/dns-message`，Cache-Control 固定 `no-store`。
 
@@ -209,7 +209,7 @@ encoder 由 request correlation 持有并只能调用一次：
 
 - UDP/TCP canonical equivalence、ID 恢复和 UDP TC；
 - TCP length 分片、半包、EOF、idle timeout 和顺序响应；
-- DoH GET/POST、request-line、Host cardinality、媒体类型、body framing、header 数量/字节、方法、65,535/87,380 边界、最大 request-target 独立计费和 HTTP/DNS 分层；
+- DoH GET/POST、request-line、Host authority/cardinality、媒体类型、严格十进制 `Content-Length`、body framing、header 数量/字节、方法、65,535/87,380 边界、最大 request-target 独立计费和 HTTP/DNS 分层；
 - TLS 证书/key 组合、handshake timeout 与坏连接隔离；
 - forwarded header 信任链、伪造 header、missing/invalid policy；
 - PROXY v1/v2 分片、未知 TLV、非法长度、不可信 peer；
@@ -223,7 +223,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 实现 v1 固定 profile/capabilities 映射，并由 transport 模块统一提供；
 - [x] 实现 UDP、TCP adapter；
 - [x] 实现 DoH plain HTTP GET/POST；
-- [x] 按 HTTP/1.1 契约拒绝缺失或重复 `Host`，并保留 HTTP/1.0 兼容路径；
+- [x] 按 HTTP/1.1 契约拒绝缺失、重复或非法 authority 的 `Host`，并保留 HTTP/1.0 兼容路径；
 - [x] 分离 DoH request-target、header fields 和 POST body 上限，确保完整 GET wire 不被 header 预算提前拒绝；
 - [x] 拒绝重复 `Content-Length`、`Transfer-Encoding`、超过 64 个 header 和超过 16 KiB header fields；
 - [x] 严格校验 request-line，并按 HTTP 媒体类型规则接受 `application/dns-message` 大小写变体；
@@ -240,6 +240,6 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 验证坏 TLS 握手只终止当前 DoH session，同一 listener 可继续服务后续正常连接；
 - [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、request-line/media type、Host cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 19 项通过；system socket Rustls loopback 2 项验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163 验证 transport task 初次执行加三次 transient retry 后标记耗尽并升级 `FatalEndpoint`，阶段 165 验证同组 sibling 与旧 revision 不会被单 endpoint 耗尽误伤，阶段 166 验证 UDP/TCP/DoH 多轮空闲 deadline 后仍可服务且 task 未重启，阶段 167 验证 TCP/DoH active session accept 上限边界，阶段 168 验证重复长度、传输编码与 header 资源边界均 fail-closed；阶段 170 将跨 transport loopback 改为 OS 分配可绑定端口，并通过后端全量 `539 passed、0 failed`。真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
+阶段证据：DoH codec/session、request-line/media type、Host authority/cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试通过；system socket Rustls loopback 验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163–168 验证 transient retry 上限、endpoint 故障隔离、空闲 listener、session 上限和 framing 资源边界；阶段 180 后端全量 `547 passed、0 failed`。阶段 182 新增 Host authority 与严格十进制 `Content-Length` 校验，DoH 22 项定向测试通过。真实 plain HTTP smoke 已验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
 
-当前实现进度：**87%**。
+当前实现进度：**88%**。

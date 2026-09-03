@@ -996,7 +996,7 @@ pub enum DohHttpError {
     UnsupportedTransferEncoding,
     #[error("POST request requires a content length")]
     MissingContentLength,
-    #[error("HTTP Host header is missing or duplicated")]
+    #[error("HTTP Host header is missing, duplicated, or invalid")]
     InvalidHost,
 }
 
@@ -1118,9 +1118,7 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
                 if content_length.is_some() {
                     return Err(DohHttpError::Malformed);
                 }
-                let parsed = value
-                    .parse::<usize>()
-                    .map_err(|_| DohHttpError::Malformed)?;
+                let parsed = parse_content_length(value)?;
                 content_length = Some(parsed);
             }
             "content-type" => {
@@ -1130,7 +1128,7 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
             }
             "transfer-encoding" => return Err(DohHttpError::UnsupportedTransferEncoding),
             "host" => {
-                if host_present {
+                if host_present || !is_valid_host_header(value) {
                     return Err(DohHttpError::InvalidHost);
                 }
                 host_present = true;
@@ -1553,6 +1551,30 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
         .windows(needle.len())
         .position(|window| window == needle)
+}
+
+/// 严格解析十进制 Content-Length，拒绝整数 parser 可能接受的符号前缀。
+fn parse_content_length(value: &str) -> Result<usize, DohHttpError> {
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(DohHttpError::Malformed);
+    }
+    value.parse().map_err(|_| DohHttpError::Malformed)
+}
+
+/// 校验 Host 为不含 userinfo、路径或查询参数的 HTTP authority。
+fn is_valid_host_header(value: &str) -> bool {
+    if value.is_empty() || value.bytes().any(|byte| byte.is_ascii_whitespace()) {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(&format!("http://{value}/")) else {
+        return false;
+    };
+    url.has_host()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
 
 fn is_token_byte(byte: u8) -> bool {
@@ -2026,9 +2048,43 @@ mod tests {
             Err(DohHttpError::InvalidHost)
         );
 
+        for invalid_host in ["", "bad host", "user@doh.test", "doh.test/path"] {
+            let invalid =
+                format!("GET /dns?dns={encoded} HTTP/1.1\r\nHost: {invalid_host}\r\n\r\n")
+                    .into_bytes();
+            assert_eq!(try_parse_request(&invalid), Err(DohHttpError::InvalidHost));
+        }
+
+        for valid_host in ["doh.test:443", "[::1]:443"] {
+            let valid = format!("GET /dns?dns={encoded} HTTP/1.1\r\nHost: {valid_host}\r\n\r\n")
+                .into_bytes();
+            assert!(try_parse_request(&valid).unwrap().is_some());
+        }
+
         let http10 = format!("GET /dns?dns={encoded} HTTP/1.0\r\n\r\n").into_bytes();
         let parsed = try_parse_request(&http10).unwrap().unwrap();
         assert!(parsed.connection_close);
+    }
+
+    /// 验证 Content-Length 只接受 RFC 定义的十进制数字形式。
+    #[test]
+    fn rejects_signed_or_non_decimal_content_length() {
+        let wire = wire();
+        for content_length in [
+            format!("+{}", wire.len()),
+            format!("-{}", wire.len()),
+            "0x20".into(),
+        ] {
+            let invalid = request(
+                "POST",
+                "/dns",
+                &format!(
+                    "Content-Type: application/dns-message\r\nContent-Length: {content_length}\r\n"
+                ),
+                &wire,
+            );
+            assert_eq!(try_parse_request(&invalid), Err(DohHttpError::Malformed));
+        }
     }
 
     #[test]
