@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 188（Cache SQLite 完整操作 deadline）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 189（Storage SQLite 完整操作 deadline）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -35,8 +35,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **90.1%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **91.1%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **90.2%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **91.2%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -53,7 +53,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Upstream | 已验证 | 100% | 10% |
 | Cache | 实现中 | 87% | 9% |
 | Resource | 已实现待验证 | 92% | 7% |
-| Storage | 已实现待验证 | 98% | 8% |
+| Storage | 已实现待验证 | 99% | 8% |
 | Observability | 已验证 | 100% | 3% |
 
 进度计算：
@@ -61,7 +61,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 ```text
 4%×76% + 8%×70% + 10%×100% + 12%×93% + 11%×89%
 + 10%×84% + 8%×88% + 10%×100% + 9%×87% + 7%×92%
-+ 8%×98% + 3%×100% ≈ 90.1%
++ 8%×99% + 3%×100% ≈ 90.2%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -96,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 188 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 189 |
 
 ### 增量里程碑
 
@@ -129,14 +129,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 186 | Cache SQLite 锁等待 deadline | recover/persist/maintain/shutdown 等待串行锁时受 deadline 限制；超时不破坏 adapter 后续可用性 |
 | 187 | Storage SQLite 锁等待 deadline | migrate/execute/detail/checkpoint/shutdown 等待串行锁时受 deadline 限制；超时不改变健康状态或后续可用性 |
 | 188 | Cache SQLite 完整操作 deadline | 在完整数据库 future 外层限制 deadline；真实 Busy 下短预算优先返回稳定 `Timeout` |
+| 189 | Storage SQLite 完整操作 deadline | migrate/execute/detail/health/checkpoint/flush/shutdown 均受完整 deadline 限制；连接池排队超时稳定分类 |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/cache/sqlite.rs`；
-- `cargo test --manifest-path backend/Cargo.toml --locked cache::sqlite::tests`：`8 passed、0 failed`；
+- 增量 `rustfmt`：`backend/src/storage/sqlite.rs`；
+- `cargo test --manifest-path backend/Cargo.toml --locked storage::sqlite::tests`：`17 passed、0 failed`；
 - `git diff --check`：通过。
 
-阶段 188 未重复阶段 180 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 189 未重复阶段 180 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

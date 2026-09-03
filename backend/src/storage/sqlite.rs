@@ -528,36 +528,38 @@ impl SqliteStorageBackend {
         limits: Option<SqliteResolveDetailLimits>,
         deadline: Deadline,
     ) -> Result<SqliteResolveDetailFlushSummary, PortError> {
-        check_deadline(deadline, "sqlite_storage.resolve_detail")?;
-        self.available("sqlite_storage.resolve_detail")?;
-        if records.is_empty() {
-            return Ok(SqliteResolveDetailFlushSummary::default());
-        }
-        let _guard = self
-            .lock_operation(deadline, "sqlite_storage.resolve_detail")
-            .await?;
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
-        let summary =
-            match apply_resolve_records_with_limits(&mut transaction, &records, limits).await {
-                Ok(summary) => summary,
-                Err(error) => {
-                    if matches!(error.class(), PortErrorClass::Unavailable) {
-                        self.mark_degraded();
+        run_with_deadline(deadline, "sqlite_storage.resolve_detail", async move {
+            self.available("sqlite_storage.resolve_detail")?;
+            if records.is_empty() {
+                return Ok(SqliteResolveDetailFlushSummary::default());
+            }
+            let _guard = self
+                .lock_operation(deadline, "sqlite_storage.resolve_detail")
+                .await?;
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
+            let summary =
+                match apply_resolve_records_with_limits(&mut transaction, &records, limits).await {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        if matches!(error.class(), PortErrorClass::Unavailable) {
+                            self.mark_degraded();
+                        }
+                        return Err(error);
                     }
-                    return Err(error);
-                }
-            };
-        check_deadline(deadline, "sqlite_storage.resolve_detail")?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
-        self.mark_healthy();
-        Ok(summary)
+                };
+            check_deadline(deadline, "sqlite_storage.resolve_detail")?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
+            self.mark_healthy();
+            Ok(summary)
+        })
+        .await
     }
 
     async fn checkpoint_now(&self, deadline: Deadline) -> Result<(), PortError> {
@@ -649,13 +651,32 @@ impl std::fmt::Debug for SqliteStorageBackend {
     }
 }
 
+/// 将完整 SQLite 操作限制在调用方 deadline 内，并保留稳定的超时分类。
+async fn run_with_deadline<T>(
+    deadline: Deadline,
+    operation: &'static str,
+    future: impl std::future::Future<Output = Result<T, PortError>>,
+) -> Result<T, PortError> {
+    let now = Instant::now();
+    if deadline.is_expired(now) {
+        return Err(PortError::new(PortErrorClass::Timeout, operation));
+    }
+    tokio::time::timeout(deadline.remaining(now), future)
+        .await
+        .map_err(|_| PortError::new(PortErrorClass::Timeout, operation))?
+}
+
 impl StorageBackend for SqliteStorageBackend {
     fn migrate(
         &self,
         target: SchemaVersion,
         deadline: Deadline,
     ) -> PortFuture<'_, Result<SchemaVersion, PortError>> {
-        Box::pin(self.migrate_now(target, deadline))
+        Box::pin(run_with_deadline(
+            deadline,
+            "sqlite_storage.migrate",
+            self.migrate_now(target, deadline),
+        ))
     }
 
     fn execute(
@@ -663,69 +684,87 @@ impl StorageBackend for SqliteStorageBackend {
         transaction: StorageTransaction,
         deadline: Deadline,
     ) -> PortFuture<'_, Result<(), PortError>> {
-        Box::pin(self.execute_now(transaction, deadline))
+        Box::pin(run_with_deadline(
+            deadline,
+            "sqlite_storage.execute",
+            self.execute_now(transaction, deadline),
+        ))
     }
 
     fn health_probe(&self, deadline: Deadline) -> PortFuture<'_, Result<StorageHealth, PortError>> {
-        Box::pin(async move {
-            check_deadline(deadline, "sqlite_storage.health_probe")?;
-            let state_health = {
-                let state = self.state.lock().map_err(|_| {
-                    PortError::new(PortErrorClass::Internal, "sqlite_storage.health_probe")
-                })?;
-                state.health
-            };
-            if matches!(
-                state_health,
-                StorageHealth::Stopping | StorageHealth::Failed
-            ) {
-                return Ok(state_health);
-            }
-            match sqlx::query("SELECT 1").execute(&self.pool).await {
-                Ok(_) => {
-                    if let Ok(mut state) = self.state.lock() {
-                        state.health = StorageHealth::Healthy;
-                    }
-                    Ok(StorageHealth::Healthy)
+        Box::pin(run_with_deadline(
+            deadline,
+            "sqlite_storage.health_probe",
+            async move {
+                let state_health = {
+                    let state = self.state.lock().map_err(|_| {
+                        PortError::new(PortErrorClass::Internal, "sqlite_storage.health_probe")
+                    })?;
+                    state.health
+                };
+                if matches!(
+                    state_health,
+                    StorageHealth::Stopping | StorageHealth::Failed
+                ) {
+                    return Ok(state_health);
                 }
-                Err(error) => Err(self.database_error(error, "sqlite_storage.health_probe")),
-            }
-        })
+                match sqlx::query("SELECT 1").execute(&self.pool).await {
+                    Ok(_) => {
+                        if let Ok(mut state) = self.state.lock() {
+                            state.health = StorageHealth::Healthy;
+                        }
+                        Ok(StorageHealth::Healthy)
+                    }
+                    Err(error) => Err(self.database_error(error, "sqlite_storage.health_probe")),
+                }
+            },
+        ))
     }
 
     fn checkpoint(&self, deadline: Deadline) -> PortFuture<'_, Result<(), PortError>> {
-        Box::pin(self.checkpoint_now(deadline))
+        Box::pin(run_with_deadline(
+            deadline,
+            "sqlite_storage.checkpoint",
+            self.checkpoint_now(deadline),
+        ))
     }
 
     fn flush(&self, deadline: Deadline) -> PortFuture<'_, Result<StorageFlushSummary, PortError>> {
-        Box::pin(async move {
-            self.checkpoint_now(deadline).await?;
-            Ok(StorageFlushSummary::default())
-        })
+        Box::pin(run_with_deadline(
+            deadline,
+            "sqlite_storage.flush",
+            async move {
+                self.checkpoint_now(deadline).await?;
+                Ok(StorageFlushSummary::default())
+            },
+        ))
     }
 
     fn shutdown(
         &self,
         deadline: Deadline,
     ) -> PortFuture<'_, Result<StorageFlushSummary, PortError>> {
-        Box::pin(async move {
-            check_deadline(deadline, "sqlite_storage.shutdown")?;
-            let _guard = self
-                .lock_operation(deadline, "sqlite_storage.shutdown")
-                .await?;
-            if let Ok(mut state) = self.state.lock() {
-                if state.health == StorageHealth::Stopping {
-                    return Ok(StorageFlushSummary::default());
+        Box::pin(run_with_deadline(
+            deadline,
+            "sqlite_storage.shutdown",
+            async move {
+                let _guard = self
+                    .lock_operation(deadline, "sqlite_storage.shutdown")
+                    .await?;
+                if let Ok(mut state) = self.state.lock() {
+                    if state.health == StorageHealth::Stopping {
+                        return Ok(StorageFlushSummary::default());
+                    }
+                    state.health = StorageHealth::Stopping;
                 }
-                state.health = StorageHealth::Stopping;
-            }
-            sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
-                .execute(&self.pool)
-                .await
-                .map_err(|error| self.database_error(error, "sqlite_storage.shutdown"))?;
-            self.pool.close().await;
-            Ok(StorageFlushSummary::default())
-        })
+                sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
+                    .execute(&self.pool)
+                    .await
+                    .map_err(|error| self.database_error(error, "sqlite_storage.shutdown"))?;
+                self.pool.close().await;
+                Ok(StorageFlushSummary::default())
+            },
+        ))
     }
 }
 
@@ -1447,6 +1486,58 @@ mod tests {
             max_event_sequence: 82,
             counter_epoch: 0,
             events: vec![StatsEvent::new(82, 20_260_902, vec![]).unwrap()],
+        };
+        backend
+            .execute(transaction(recovered_batch), deadline())
+            .await
+            .unwrap();
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    /// 验证连接池排队不会越过更短的调用方 deadline。
+    #[tokio::test]
+    async fn sqlite_pool_wait_honors_short_caller_deadline() {
+        let path = path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        let mut connections = Vec::new();
+        for _ in 0..4 {
+            connections.push(backend.pool.acquire().await.unwrap());
+        }
+
+        let batch = StatsBatch {
+            batch_id: 83,
+            max_event_sequence: 83,
+            counter_epoch: 0,
+            events: vec![StatsEvent::new(83, 20_260_902, vec![]).unwrap()],
+        };
+        let short_deadline = Deadline::new(Instant::now() + Duration::from_millis(20));
+        let error = backend
+            .execute(transaction(batch), short_deadline)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.class(),
+            crate::ports::PortErrorClass::Timeout
+        ));
+        assert_eq!(error.operation(), "sqlite_storage.execute");
+        assert_eq!(
+            backend
+                .state
+                .lock()
+                .expect("sqlite state lock must not be poisoned")
+                .health,
+            crate::ports::storage::StorageHealth::Healthy
+        );
+
+        drop(connections);
+        let recovered_batch = StatsBatch {
+            batch_id: 84,
+            max_event_sequence: 84,
+            counter_epoch: 0,
+            events: vec![StatsEvent::new(84, 20_260_902, vec![]).unwrap()],
         };
         backend
             .execute(transaction(recovered_batch), deadline())
