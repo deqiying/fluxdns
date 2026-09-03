@@ -65,4 +65,4 @@ pnpm run build
 pwsh -File script/package-embedded.ps1
 ```
 
-该脚本随后将最终二进制复制到 `deploy/`；不会移动或重定向 `frontend/dist/`。脚本会在缺少 `webui-embed`、前端产物或 Rust target/linker 时 fail fast，不生成未内嵌资源的发布物。发布二进制的启动、状态查看和停止入口及必填配置参数见[项目环境使用规范](../docs/standards/environment-usage.md)和[整合方案](../docs/plans/webui-v2-management-integration.md#103-开发服务管理脚本)。
+该脚本随后将最终二进制复制到 `deploy/`；不会移动或重定向 `frontend/dist/`。脚本会在缺少 `webui-embed`、前端产物或 Rust target 时 fail fast，linker 缺失则由对应 Cargo 构建阶段失败，不生成未内嵌资源的发布物。发布二进制的启动、状态查看和停止入口及必填配置参数见[项目环境使用规范](../docs/standards/environment-usage.md)和[整合方案](../docs/plans/webui-v2-management-integration.md#103-开发服务管理脚本)。
