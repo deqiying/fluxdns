@@ -6,7 +6,7 @@
 >
 > 适用范围：DNS Core 与 adapter 之间的稳定接口、错误语义和 contract test
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联实现：`backend/src/ports/*`
 >
@@ -14,7 +14,7 @@
 
 ## 当前实现边界
 
-v1 方案已完成，公共契约、UDP/TCP socket capability、TCP EOF/session、bounded byte-stream 和首轮 TLS accept 语义已实现；Memory/Moka CacheStore 与内存/SQLite StorageBackend 已接入共享 conformance 测试。
+v1 方案已完成，公共契约、UDP/TCP socket capability、TCP EOF/session、bounded byte-stream 和首轮 TLS accept 语义已实现；Memory/Moka CacheStore 与内存/SQLite StorageBackend 已接入共享 conformance 测试，Management overview/statistics/queries 通过独立的只读 port 与 HTTP adapter 解耦。
 
 ## 1. 目标
 
@@ -28,6 +28,7 @@ Ports 模块定义 DNS 核心与外部副作用之间的稳定契约。核心业
 | `exchange.rs` | 上游 exchange、connector、选择结果 |
 | `cache.rs` | 内存缓存和持久化缓存能力 |
 | `storage.rs` | migration、统计、解析详情、flush/shutdown |
+| `management.rs` | Management overview、分页统计和解析详情的只读查询及安全投影 |
 | `telemetry.rs` | structured event、metrics、组件健康状态 |
 | `effects.rs` | clock、resource fetcher、secret、socket factory |
 
@@ -108,6 +109,8 @@ DNS RCODE 不是 transport failure。`NXDOMAIN`、`REFUSED`、`SERVFAIL` 和 `TC
 - ResolveEventSink 接收可选详情，允许按明确策略丢弃并累计计数；
 - 两者不能共享会互相阻塞的单一 channel。
 
+`ManagementStorageRead` 只接受 UTC day、分页和有限 enum filter/sort，返回不含 qname、client identity、DNS wire、route 文本或数据库 row ID 的领域投影。HTTP handler 只依赖该 port；SQLite adapter 自行负责 opaque ID、固定 SQL 模板、绑定参数和 read-only 连接。
+
 ## 7. Telemetry 与副作用
 
 `LogSink`/`MetricsSink` 只接受已经脱敏、标签集合受限的事件。Observability 模块实现这些 port；Ports 只定义字段与语义。组件健康状态通过同一 telemetry facade 写入结构化状态事件和低基数 gauge，不另设含义重叠的泛化 sink。
@@ -176,6 +179,7 @@ Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
 - [x] 定义 canonical port types 与稳定错误分类；
 - [x] 定义 inbound/response correlation 契约；
 - [x] 定义 exchange、cache、storage、telemetry 和 effects port；
+- [x] 定义 Management 只读查询 port 与安全投影；
 - [x] 建立 deadline/cancellation 统一辅助函数；
 - [x] 建立 fake 和 contract test kit；
 - [x] 检查公共接口未泄漏 adapter crate 类型。

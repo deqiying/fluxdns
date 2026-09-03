@@ -6,7 +6,7 @@
 >
 > 适用范围：FluxDNS 后端交付阶段、总体进度、后续优先级与 v1 验收门槛
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联文档：[后端架构设计](architecture.md) · [配置字段参考](configuration-reference.md)
 
@@ -19,9 +19,10 @@ MVP v0.1 已完成；当前已完成至阶段 198（`geosite.dat` protobuf selec
 - Config：`version: 1` strict load、路径/SecretRef 归一化、语义校验、迁移边界和快照安全边界。
 - Runtime/Application：`PreparedRuntime → BoundCandidate → ActiveRuntime`、revision CAS、Supervisor、受管 task、配置文件轮询 reload、listener 复用/rebind、graceful shutdown。
 - DNS 数据面：UDP、TCP、DoH plain HTTP/1.x；hosts、Policy、Cache、Upstream 主链路；资源首次加载和 auto-update refresh。
-- Storage：SQLite schema v2 migration、stats/detail transaction、规则/资源/组成员详情摘要、bounded writer、flush/shutdown、pending 内存保护、首轮 degraded/recovery 和 adapter-level Busy/DiskFull fault 注入。
+- Storage：SQLite schema v3 migration、stats/detail transaction、规则/资源/组成员详情摘要、Management 独立只读 adapter、bounded writer、flush/shutdown、pending 内存保护、首轮 degraded/recovery 和 adapter-level Busy/DiskFull fault 注入。
 - Observability：低基数 metrics/health、typed event、typed final tracing layer、degraded health 发布、输出失败 stderr fallback、`TelemetryWriter` 有界队列、失败重排队、deadline-aware flush、真实文件/stderr output、启动时日志目标/级别切换，以及 `DnsService`/Supervisor 周期 flush 与 shutdown 接线。
 - DoH 安全首轮：trusted forwarded header、PROXY v1/v2 地址恢复，TLS terminate 的 PEM/DER 证书加载、私钥匹配、TLS 1.2/1.3 握手；PROXY 前导先消费再升级 TLS。
+- WebUI Management 后端：独立纯 HTTP listener、认证/session/首次初始化、配置事务恢复、内嵌 SPA，以及通过稳定 query port 提供的七个只读 API。
 
 ### MVP 边界
 

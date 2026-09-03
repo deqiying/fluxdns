@@ -6,7 +6,7 @@
 >
 > 适用范围：FluxDNS Rust 后端总体架构、跨模块边界、运行时契约与 v1 设计
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联文档：[配置字段参考](configuration-reference.md) · [后端开发计划](development-plan.md)
 
@@ -593,7 +593,7 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 - HTTPS origin 使用 `Secure` 的 `__Host-fluxdns_session`，HTTP origin 使用不带 `Secure` 的开发/可信内网 Cookie；session 仅存于有界进程内存；
 - `webui.users` 可热更新并撤销外部变更前的 session，`enable/address/port/public_origin` 变化要求重启。
 
-前端接口以 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 为权威。当前后端已实现 setup、login、logout、session、统一 request ID/错误 envelope、请求限制、Origin/Fetch Metadata、内嵌静态资源和 `/api/*` 隔离；只读 Runtime/Health/Storage query handler 在下一整合阶段接入。生产静态文件通过 `webui-embed` 编译进单个 binary；`frontend/dist` 仍是独立前端构建物。双平台发布与显式配置启动入口遵循[项目环境使用规范](../standards/environment-usage.md)。
+前端接口以 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 为权威。当前后端已实现 setup、login、logout、session、统一 request ID/错误 envelope、请求限制、Origin/Fetch Metadata、内嵌静态资源和 `/api/*` 隔离，并通过注入的 Runtime/Telemetry snapshot 与 `ManagementStorageRead` port 提供 overview、runtime、health、statistics、queries、resources 和 system 七个只读端点。Management query handler 不引用 SQLx，SQLite adapter 使用独立只读 pool、绑定参数和固定查询模板；`/queries` 只返回 opaque ID 及枚举/布尔安全投影，不返回 qname、client IP、DNS wire 或配置路径。生产静态文件通过 `webui-embed` 编译进单个 binary；`frontend/dist` 仍是独立前端构建物。双平台发布与显式配置启动入口遵循[项目环境使用规范](../standards/environment-usage.md)。
 
 ## 14. 验证基线
 

@@ -2,11 +2,11 @@
 
 > 文档状态：草案
 >
-> 实现状态：未实现
+> 实现状态：部分实现
 >
 > 适用范围：FluxDNS v2 management server、Management API、WebUI 静态资源打包、认证会话、首次用户初始化与配置持久化
 >
-> 最后核对：2026-09-03
+> 最后核对：2026-09-04
 >
 > 关联文档：[后端总体架构](../backend/architecture.md) · [配置参考](../backend/configuration-reference.md) · [前端总体架构](../frontend/architecture.md) · [前端开发计划](../frontend/development-plan.md) · [Management API OpenAPI](../../frontend/openapi/management-api-v1.yaml)
 
@@ -526,6 +526,8 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 退出条件：空 users 可一次性初始化；配置中只有 hash；重启后可登录；并发 setup 最多成功一个；崩溃恢复测试通过。
 
 ### 12.4 V2.3：只读 Management API
+
+实现状态：已完成。Runtime、Health、Resource 安全投影，Storage 只读 port/SQLite adapter，以及七个受 Session 保护的只读 handler 已接入；定向契约测试覆盖分页边界、日期上限、request ID 和敏感字段 deny-list。
 
 工作项：
 

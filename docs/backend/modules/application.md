@@ -6,7 +6,7 @@
 >
 > 适用范围：进程入口、依赖装配、信号、退出和服务生命周期
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联实现：`backend/src/main.rs`、`backend/src/app.rs`
 >
@@ -14,7 +14,7 @@
 
 ## 当前实现边界
 
-当前已实现配置校验、Runtime bind、UDP/TCP/DoH 与独立 HTTP Management service 启动和 graceful shutdown。Management listener、setup/auth/session、配置写入恢复和静态资源 task 纳入同一个 Supervisor；`enable/address/port/public_origin` 是进程持有配置，`webui.users` 可随配置 reload 动态替换。正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 同时负责 transport、management、长期 remote refresh、typed tracing 和 `TelemetryWriter` 周期 flush。配置 reload、日志输出、故障升级与信号处理仍遵循既有有界收尾语义。进程级 Unix `SIGTERM` 和第二终止信号 smoke 尚未完成。
+当前已实现配置校验、Runtime bind、UDP/TCP/DoH 与独立 HTTP Management service 启动和 graceful shutdown。Management listener、setup/auth/session、配置写入恢复、静态资源 task 和七个只读 API 纳入同一个 Supervisor；`enable/address/port/public_origin` 是进程持有配置，`webui.users` 可随配置 reload 动态替换。正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 与 Management query service 共享，并为 Management 另建 read-only SQLite pool、注入可选 `TelemetryWriter` 健康快照。service Supervisor 同时负责 transport、management、长期 remote refresh、typed tracing 和 telemetry 周期 flush。配置 reload、日志输出、故障升级与信号处理仍遵循既有有界收尾语义。进程级 Unix `SIGTERM` 和第二终止信号 smoke 尚未完成。
 
 ## 1. 职责与边界
 
@@ -144,6 +144,7 @@ Application 将内部错误转换为：
 - [x] 提供 service-aware reload 的 listener task 重建 API，并验证新 revision 接管新端口和 Policy snapshot；
 - [x] 拒绝原位替换 database/logs/WebUI listener 与 origin/resolve-log，允许 WebUI users 动态替换；
 - [x] 接入独立 HTTP Management listener、setup/auth/session 与配置事务恢复，并纳入 Supervisor；
+- [x] 为 Management 注入 Runtime、Telemetry 与独立 Storage read model，并接入全部只读 handler；
 - [x] 观察 Supervisor task 完成并按 fault level 映射运行期服务错误，返回 fatal task error 前执行有界 shutdown；
 - [x] 统一接入 `SIGINT`/Unix `SIGTERM`，并在 graceful shutdown 期间响应第二个终止信号；
 - [ ] 完成 Unix `SIGTERM` 和第二终止信号的进程级 runtime smoke；
