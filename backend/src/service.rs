@@ -149,22 +149,22 @@ pub enum ServiceError {
     #[error("storage shutdown failed: {source}")]
     Storage {
         #[source]
-        source: StorageServiceError,
-        report: ShutdownReport,
+        source: Box<StorageServiceError>,
+        report: Box<ShutdownReport>,
     },
     #[error("telemetry shutdown failed: {source}")]
     Telemetry {
         #[source]
         source: crate::ports::PortError,
-        report: ShutdownReport,
+        report: Box<ShutdownReport>,
     },
 }
 
 impl ServiceError {
     /// 返回失败前已完成的分项停机报告；非停机阶段错误没有该报告。
-    pub const fn shutdown_report(&self) -> Option<&ShutdownReport> {
+    pub fn shutdown_report(&self) -> Option<&ShutdownReport> {
         match self {
-            Self::Storage { report, .. } | Self::Telemetry { report, .. } => Some(report),
+            Self::Storage { report, .. } | Self::Telemetry { report, .. } => Some(report.as_ref()),
             Self::Signal | Self::ShutdownDeadline | Self::TaskFailure { .. } => None,
         }
     }
@@ -736,10 +736,16 @@ impl DnsService {
             }
         };
         if let Some(source) = storage_error {
-            return Err(ServiceError::Storage { source, report });
+            return Err(ServiceError::Storage {
+                source: Box::new(source),
+                report: Box::new(report),
+            });
         }
         if let Some(source) = telemetry_error {
-            return Err(ServiceError::Telemetry { source, report });
+            return Err(ServiceError::Telemetry {
+                source,
+                report: Box::new(report),
+            });
         }
         Ok(report)
     }
