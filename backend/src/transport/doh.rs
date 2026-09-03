@@ -1705,6 +1705,33 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// 验证无需 PEM 包装的 DER 证书和私钥可直接装配为 TLS material。
+    #[test]
+    fn loads_der_tls_material() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let certificate_der = certified.cert.der().to_vec();
+        let private_key_der = certified.signing_key.serialize_der();
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-doh-tls-der-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let certificate_path = root.join("cert.der");
+        let key_path = root.join("key.der");
+        fs::write(&certificate_path, &certificate_der).unwrap();
+        fs::write(&key_path, &private_key_der).unwrap();
+
+        let material = load_tls_material(Some(&certificate_path), Some(&key_path)).unwrap();
+        assert_eq!(material.certificate_chain, vec![certificate_der]);
+        assert_eq!(material.private_key, private_key_der);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn session_consumes_proxy_header_before_upgrading_tls() {
         let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
