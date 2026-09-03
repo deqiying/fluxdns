@@ -294,13 +294,6 @@ fn validate_basic(config: &ConfigDto, report: &mut ConfigErrorReport) {
         }
     }
 
-    if config.webui.enable {
-        report.push(ConfigError::new(
-            ConfigErrorKind::UnsupportedFeature,
-            "webui.enable",
-            "webui management server is not available in this build yet",
-        ));
-    }
     if config.webui.port == 0 {
         report.push(ConfigError::new(
             ConfigErrorKind::InvalidValue,
@@ -1916,6 +1909,10 @@ mod tests {
                 .iter()
                 .any(|error| error.path == "webui.public_origin")
         );
+        assert!(!report.errors.iter().any(|error| {
+            error.kind == ConfigErrorKind::UnsupportedFeature && error.path == "webui.enable"
+        }));
+
         config.webui.public_origin = None;
         let mut report = ConfigErrorReport::default();
         super::validate_basic(&config, &mut report);

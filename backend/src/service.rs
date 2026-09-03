@@ -15,6 +15,7 @@ use crate::dns::{
     CancelReason, Cancellation, CoreError, CoreOutcome, Deadline, DispatchError, DnsCore,
     DnsRequest, ResponseClass, RuntimeRevision, TransportClass, dispatch_inbound,
 };
+use crate::management::{ManagementRuntime, ManagementService};
 use crate::observability::TelemetryWriter;
 use crate::ports::PortErrorClass;
 use crate::ports::effects::SocketFactory;
@@ -124,7 +125,11 @@ pub(crate) fn process_owned_reload_change(
         Some("database")
     } else if current.logs != candidate.logs {
         Some("logs")
-    } else if current.webui != candidate.webui {
+    } else if current.webui.enable != candidate.webui.enable
+        || current.webui.address != candidate.webui.address
+        || current.webui.port != candidate.webui.port
+        || current.webui.public_origin != candidate.webui.public_origin
+    {
         Some("webui")
     } else if current.dns.resolve_log != candidate.dns.resolve_log {
         Some("dns.resolve_log")
@@ -191,6 +196,8 @@ pub struct DnsService {
     resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
     resolve_detail_drops: Arc<ResolveDetailDropCounters>,
     telemetry: Option<Arc<TelemetryWriter>>,
+    management: Option<Arc<ManagementRuntime>>,
+    management_cancellation: Option<Cancellation>,
 }
 
 #[derive(Clone)]
@@ -365,6 +372,8 @@ impl DnsService {
             resolve_event_sink,
             resolve_detail_drops,
             telemetry,
+            management: None,
+            management_cancellation: None,
         })
     }
 
@@ -442,6 +451,30 @@ impl DnsService {
 
     pub fn task_count(&self) -> usize {
         self.supervisor.task_count()
+    }
+
+    /// 将已完成 bind 的 Management Server 纳入同一个 Supervisor。
+    pub(crate) fn attach_management(
+        &mut self,
+        management: ManagementService,
+    ) -> Result<(), ServiceStartError> {
+        let runtime = management.runtime();
+        let spec = TaskSpec::new(
+            "management.http",
+            "management",
+            FaultLevel::Fatal,
+            RestartPolicy::Never,
+        )
+        .expect("static management task id must be valid");
+        let cancellation = self
+            .supervisor
+            .spawn_scoped(spec, move |cancellation| {
+                Box::pin(management.serve(cancellation))
+            })
+            .map_err(ServiceStartError::Task)?;
+        self.management = Some(runtime);
+        self.management_cancellation = Some(cancellation);
+        Ok(())
     }
 
     /// 返回当前 Runtime 仍可服务的 transport endpoint task 数量。
@@ -565,6 +598,7 @@ impl DnsService {
             self.transport_tasks = transport_tasks;
             self.resource_tasks = resource_tasks;
             self.runtime = Arc::clone(&runtime);
+            self.reconcile_management_users(&runtime);
             if let Some(telemetry) = &self.telemetry
                 && !self.transport_tasks.is_empty()
             {
@@ -613,6 +647,7 @@ impl DnsService {
         self.transport_tasks = transport_tasks;
         self.resource_tasks = resource_tasks;
         self.runtime = Arc::clone(&runtime);
+        self.reconcile_management_users(&runtime);
         if let Some(telemetry) = &self.telemetry
             && !self.transport_tasks.is_empty()
         {
@@ -636,11 +671,26 @@ impl DnsService {
         )
     }
 
+    fn reconcile_management_users(&self, runtime: &ActiveRuntime) {
+        if let Some(management) = &self.management {
+            management.reconcile_users(
+                &runtime.snapshot().config().webui.users,
+                &runtime.snapshot().config().input_hash,
+            );
+        }
+    }
+
     pub async fn shutdown(
         &mut self,
         clock: &dyn Clock,
         deadline: crate::dns::Deadline,
     ) -> Result<ShutdownReport, ServiceError> {
+        if let Some(management) = &self.management {
+            management.shutdown();
+        }
+        if let Some(cancellation) = &self.management_cancellation {
+            cancellation.cancel(CancelReason::Shutdown);
+        }
         self.coordinator.begin_drain();
         if let Some(telemetry) = &self.telemetry
             && !self.transport_tasks.is_empty()
@@ -4554,6 +4604,41 @@ clients: []
             .await
             .unwrap();
         assert!(!report.deadline_expired);
+    }
+
+    #[test]
+    fn webui_users_reload_dynamically_but_origin_requires_restart() {
+        let (source, _) = crate::config::test_support::portable_example();
+        let current = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .unwrap()
+            .resolved;
+        let with_user = source.replace(
+            "  users: []",
+            "  users:\n    - name: admin\n      password_hash: '$2b$04$QEeYuMZftq59wD41AcT2ruVzQinG4azJldvj/LXO7u9bzmP6dX6ri'",
+        );
+        let candidate = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&with_user)
+            .unwrap()
+            .resolved;
+
+        assert_eq!(
+            super::process_owned_reload_change(&current, &candidate),
+            None
+        );
+
+        let mut changed_origin = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&with_user)
+            .unwrap()
+            .resolved;
+        Arc::get_mut(&mut changed_origin)
+            .unwrap()
+            .webui
+            .public_origin = Some("https://dns.example.com".parse().unwrap());
+        assert_eq!(
+            super::process_owned_reload_change(&current, &changed_origin),
+            Some("webui")
+        );
     }
 
     #[tokio::test]

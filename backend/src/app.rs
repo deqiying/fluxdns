@@ -474,6 +474,14 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             Ok(())
         }
         AppCommand::Run => {
+            let management_bootstrap = output.resolved.webui.enable.then(|| {
+                (
+                    output.resolved.webui.clone(),
+                    output.source_path.clone(),
+                    output.resolved.work.snapshot_path.clone(),
+                    output.resolved.input_hash.clone(),
+                )
+            });
             let telemetry = if output.resolved.logs.enable {
                 let writer = observability::build_runtime_telemetry().map_err(|error| {
                     AppError::new(AppErrorKind::Prepare, bounded_message(error))
@@ -522,6 +530,25 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .await
             .map_err(map_bind_error)?;
             let coordinator = Arc::new(crate::runtime::RuntimeCoordinator::new(candidate));
+            let management = match management_bootstrap {
+                Some((config, Some(source_path), snapshot_path, source_fingerprint)) => Some(
+                    crate::management::ManagementService::bind(
+                        &config,
+                        source_path,
+                        snapshot_path,
+                        source_fingerprint,
+                    )
+                    .await
+                    .map_err(map_management_build_error)?,
+                ),
+                Some((_, None, _, _)) => {
+                    return Err(AppError::new(
+                        AppErrorKind::Prepare,
+                        "Management Server 需要文件形式的启动配置",
+                    ));
+                }
+                None => None,
+            };
             let mut service = match telemetry {
                 Some(telemetry) => {
                     DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
@@ -536,6 +563,11 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 ),
             }
             .map_err(map_service_start_error)?;
+            if let Some(management) = management {
+                service
+                    .attach_management(management)
+                    .map_err(map_service_start_error)?;
+            }
             tracing::info!(
                 event = "service_ready",
                 component = "application",
@@ -625,6 +657,10 @@ fn map_bind_error(error: crate::runtime::BindError) -> AppError {
 }
 
 fn map_service_start_error(error: ServiceStartError) -> AppError {
+    AppError::new(AppErrorKind::BindOrStartup, bounded_message(error))
+}
+
+fn map_management_build_error(error: crate::management::ManagementBuildError) -> AppError {
     AppError::new(AppErrorKind::BindOrStartup, bounded_message(error))
 }
 
