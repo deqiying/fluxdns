@@ -4,6 +4,7 @@ pub mod app;
 pub mod cache;
 pub mod config;
 pub mod dns;
+pub mod management;
 pub mod observability;
 pub mod policy;
 pub mod ports;

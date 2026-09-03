@@ -69,7 +69,7 @@ tokio-rustls = { version = "=0.26.4", default-features = false, features = [
     "tls12",
 ] }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
-tower = { version = "=0.5.3", default-features = false, features = ["limit"] }
+tower = { version = "=0.5.3", default-features = false, features = ["limit", "util"] }
 tower-http = { version = "=0.6.11", default-features = false, features = [
     "limit",
     "timeout",
