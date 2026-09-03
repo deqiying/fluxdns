@@ -4,6 +4,30 @@
  */
 
 export interface paths {
+    "/auth/setup": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * 读取首次初始化状态
+         * @description 只返回 required 或 ready，不返回用户名、用户数量或密码 hash。
+         */
+        get: operations["getSetupStatus"];
+        put?: never;
+        /**
+         * 创建首个管理用户
+         * @description 仅在状态为 required 时可调用。服务端先持久化 Argon2id hash，再设置 HttpOnly、 SameSite=Strict Cookie；public_origin 为 HTTPS 时同时设置 Secure 和 __Host- 前缀。
+         */
+        post: operations["initializeWebUi"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/auth/login": {
         parameters: {
             query?: never;
@@ -15,7 +39,7 @@ export interface paths {
         put?: never;
         /**
          * 建立服务端 session
-         * @description 成功后由服务端设置 HttpOnly、Secure、SameSite=Strict Cookie。 服务端校验 Origin 和 Fetch Metadata；前端不持久化 token。
+         * @description 成功后由服务端设置 HttpOnly、SameSite=Strict Cookie；public_origin 为 HTTPS 时设置 Secure 和 __Host- 前缀。 服务端校验 Origin 和 Fetch Metadata；前端不持久化 token。
          */
         post: operations["login"];
         delete?: never;
@@ -197,6 +221,15 @@ export interface components {
             username: string;
             password: string;
         };
+        /** @enum {string} */
+        SetupState: "required" | "ready";
+        SetupStatus: {
+            state: components["schemas"]["SetupState"];
+        };
+        SetupRequest: {
+            username: string;
+            password: string;
+        };
         Session: {
             user: components["schemas"]["SessionUser"];
             /** Format: date-time */
@@ -347,6 +380,7 @@ export interface components {
         /** @description 参数或同源请求校验失败 */
         BadRequest: {
             headers: {
+                "X-Request-Id": components["headers"]["RequestId"];
                 [name: string]: unknown;
             };
             content: {
@@ -356,6 +390,7 @@ export interface components {
         /** @description session 缺失、无效或已过期 */
         Unauthorized: {
             headers: {
+                "X-Request-Id": components["headers"]["RequestId"];
                 [name: string]: unknown;
             };
             content: {
@@ -365,6 +400,7 @@ export interface components {
         /** @description 当前用户无权读取该资源 */
         Forbidden: {
             headers: {
+                "X-Request-Id": components["headers"]["RequestId"];
                 [name: string]: unknown;
             };
             content: {
@@ -374,8 +410,19 @@ export interface components {
         /** @description 请求超过管理面限制 */
         RateLimited: {
             headers: {
+                "X-Request-Id": components["headers"]["RequestId"];
                 /** @description 建议重试等待秒数 */
                 "Retry-After"?: number;
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["ErrorEnvelope"];
+            };
+        };
+        /** @description 初始化已完成或源配置发生并发修改 */
+        Conflict: {
+            headers: {
+                "X-Request-Id": components["headers"]["RequestId"];
                 [name: string]: unknown;
             };
             content: {
@@ -385,6 +432,7 @@ export interface components {
         /** @description 服务端错误，响应不得包含堆栈或内部路径 */
         InternalError: {
             headers: {
+                "X-Request-Id": components["headers"]["RequestId"];
                 [name: string]: unknown;
             };
             content: {
@@ -410,6 +458,58 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    getSetupStatus: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 当前初始化状态 */
+            200: {
+                headers: {
+                    "X-Request-Id": components["headers"]["RequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SetupStatus"];
+                };
+            };
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    initializeWebUi: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SetupRequest"];
+            };
+        };
+        responses: {
+            /** @description 初始化成功并建立 session */
+            201: {
+                headers: {
+                    "X-Request-Id": components["headers"]["RequestId"];
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Session"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            409: components["responses"]["Conflict"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
     login: {
         parameters: {
             query?: never;

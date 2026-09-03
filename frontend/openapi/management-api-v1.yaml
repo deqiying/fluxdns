@@ -3,7 +3,7 @@ info:
   title: FluxDNS Management API
   version: 1.0.0
   description: >-
-    FluxDNS 只读 WebUI 的同源管理契约。除登录和登出外，首版接口均为只读查询；
+    FluxDNS WebUI 的同源管理契约。除首次初始化、登录和登出外，首版接口均为只读查询；
     API 不返回原始 qname、client IP、SecretRef、密码 hash、TLS material 或 DNS wire。
 servers:
   - url: /api/v1
@@ -18,13 +18,64 @@ tags:
   - name: Resources
   - name: System
 paths:
+  /auth/setup:
+    get:
+      tags: [Auth]
+      operationId: getSetupStatus
+      summary: 读取首次初始化状态
+      description: 只返回 required 或 ready，不返回用户名、用户数量或密码 hash。
+      responses:
+        "200":
+          description: 当前初始化状态
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SetupStatus"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+    post:
+      tags: [Auth]
+      operationId: initializeWebUi
+      summary: 创建首个管理用户
+      description: >-
+        仅在状态为 required 时可调用。服务端先持久化 Argon2id hash，再设置 HttpOnly、
+        SameSite=Strict Cookie；public_origin 为 HTTPS 时同时设置 Secure 和 __Host- 前缀。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetupRequest"
+      responses:
+        "201":
+          description: 初始化成功并建立 session
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
   /auth/login:
     post:
       tags: [Auth]
       operationId: login
       summary: 建立服务端 session
       description: >-
-        成功后由服务端设置 HttpOnly、Secure、SameSite=Strict Cookie。
+        成功后由服务端设置 HttpOnly、SameSite=Strict Cookie；public_origin 为 HTTPS 时设置 Secure 和 __Host- 前缀。
         服务端校验 Origin 和 Fetch Metadata；前端不持久化 token。
       requestBody:
         required: true
@@ -339,18 +390,27 @@ components:
   responses:
     BadRequest:
       description: 参数或同源请求校验失败
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     Unauthorized:
       description: session 缺失、无效或已过期
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
     Forbidden:
       description: 当前用户无权读取该资源
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
@@ -358,6 +418,8 @@ components:
     RateLimited:
       description: 请求超过管理面限制
       headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
         Retry-After:
           description: 建议重试等待秒数
           schema:
@@ -367,8 +429,20 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/ErrorEnvelope"
+    Conflict:
+      description: 初始化已完成或源配置发生并发修改
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
     InternalError:
       description: 服务端错误，响应不得包含堆栈或内部路径
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/RequestId"
       content:
         application/json:
           schema:
@@ -401,6 +475,29 @@ components:
         password:
           type: string
           minLength: 1
+          maxLength: 1024
+    SetupState:
+      type: string
+      enum: [required, ready]
+    SetupStatus:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state:
+          $ref: "#/components/schemas/SetupState"
+    SetupRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 128
+        password:
+          type: string
+          minLength: 12
           maxLength: 1024
     Session:
       type: object

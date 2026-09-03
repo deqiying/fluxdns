@@ -4,6 +4,9 @@ type Schemas = components["schemas"];
 
 export type ErrorEnvelope = Schemas["ErrorEnvelope"];
 export type LoginRequest = Schemas["LoginRequest"];
+export type SetupState = Schemas["SetupState"];
+export type SetupStatus = Schemas["SetupStatus"];
+export type SetupRequest = Schemas["SetupRequest"];
 export type Session = Schemas["Session"];
 export type HealthStatus = Schemas["HealthStatus"];
 export type Overview = Schemas["Overview"];
