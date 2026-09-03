@@ -1752,6 +1752,18 @@ fn is_supported_password_hash(value: &str) -> bool {
     bcrypt || (value.starts_with("$argon2id$") && value.len() >= 20)
 }
 
+/// 统一 setup/login 与配置校验使用的 WebUI 用户名规则。
+pub(crate) fn normalize_webui_username(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 128 {
+        return None;
+    }
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!'))
+        .then(|| value.to_owned())
+}
+
 fn is_valid_public_origin(origin: &url::Url) -> bool {
     matches!(origin.scheme(), "http" | "https")
         && origin.host().is_some()
@@ -1904,7 +1916,6 @@ mod tests {
                 .iter()
                 .any(|error| error.path == "webui.public_origin")
         );
-
         config.webui.public_origin = None;
         let mut report = ConfigErrorReport::default();
         super::validate_basic(&config, &mut report);

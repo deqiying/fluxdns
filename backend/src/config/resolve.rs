@@ -120,6 +120,10 @@ impl ResolvedWebUiUser {
             && value.len() == 60
             || (value.starts_with("$argon2id$") && value.len() >= 20)
     }
+
+    pub(crate) fn password_hash(&self) -> &str {
+        &self.password_hash
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
