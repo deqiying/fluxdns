@@ -1319,6 +1319,70 @@ mod tests {
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
     }
 
+    /// 通过真实 SQLite 写锁验证 Busy 会降级，并在锁释放后的成功事务中恢复。
+    #[tokio::test]
+    async fn real_sqlite_write_lock_degrades_then_recovers() {
+        let path = path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        let mut lock_connection = backend.pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *lock_connection)
+            .await
+            .unwrap();
+
+        let locked_batch = StatsBatch {
+            batch_id: 79,
+            max_event_sequence: 79,
+            counter_epoch: 0,
+            events: vec![StatsEvent::new(79, 20_260_902, vec![]).unwrap()],
+        };
+        let error = backend
+            .execute(transaction(locked_batch), deadline())
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.class(),
+            crate::ports::PortErrorClass::Unavailable
+        ));
+        assert_eq!(
+            backend
+                .state
+                .lock()
+                .expect("sqlite state lock must not be poisoned")
+                .health,
+            crate::ports::storage::StorageHealth::Degraded
+        );
+
+        sqlx::query("ROLLBACK")
+            .execute(&mut *lock_connection)
+            .await
+            .unwrap();
+        drop(lock_connection);
+        let recovered_batch = StatsBatch {
+            batch_id: 80,
+            max_event_sequence: 80,
+            counter_epoch: 0,
+            events: vec![StatsEvent::new(80, 20_260_902, vec![]).unwrap()],
+        };
+        backend
+            .execute(transaction(recovered_batch), deadline())
+            .await
+            .unwrap();
+        assert_eq!(
+            backend
+                .state
+                .lock()
+                .expect("sqlite state lock must not be poisoned")
+                .health,
+            crate::ports::storage::StorageHealth::Healthy
+        );
+
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
     #[tokio::test]
     async fn transaction_rolls_back_on_invalid_batch_and_shutdown_is_terminal() {
         let path = path();
