@@ -6,10 +6,30 @@ rust-version = "1.98"
 description = "A policy-driven DNS server"
 publish = false
 
+[features]
+default = []
+webui-embed = ["dep:mime_guess", "dep:rust-embed"]
+
 [dependencies]
 arc-swap = "=1.9.1"
+argon2 = { version = "=0.6.0", default-features = false, features = [
+    "alloc",
+    "getrandom",
+    "password-hash",
+] }
+axum = { version = "=0.8.9", default-features = false, features = [
+    "http1",
+    "json",
+    "query",
+    "tokio",
+] }
+base64 = "=0.22.1"
+bcrypt = { version = "=0.19.3", default-features = false, features = ["std"] }
+cookie = { version = "=0.18.2", default-features = false }
+getrandom = "=0.4.3"
 hickory-proto = { version = "=0.26.1", default-features = false, features = ["std"] }
 ipnet = "=2.12.1"
+mime_guess = { version = "=2.0.5", default-features = false, optional = true }
 moka = { version = "=0.12.10", default-features = false, features = ["sync"] }
 reqwest = { version = "=0.13.4", default-features = false, features = [
     "http2",
@@ -21,8 +41,12 @@ rustls = { version = "=0.23.43", default-features = false, features = [
     "std",
     "tls12",
 ] }
+rust-embed = { version = "=8.12.0", default-features = false, features = [
+    "include-exclude",
+], optional = true }
 socket2 = "=0.6.5"
 serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
 serde_path_to_error = "=0.1.20"
 sha2 = "=0.10.9"
 sqlx = { version = "=0.9.0", default-features = false, features = [
@@ -30,6 +54,7 @@ sqlx = { version = "=0.9.0", default-features = false, features = [
     "sqlite",
 ] }
 thiserror = "=2.0.20"
+time = { version = "=0.3.55", default-features = false, features = ["formatting"] }
 tokio = { version = "=1.53.1", default-features = false, features = [
     "io-util",
     "macros",
@@ -44,10 +69,19 @@ tokio-rustls = { version = "=0.26.4", default-features = false, features = [
     "tls12",
 ] }
 tokio-util = { version = "=0.7.19", default-features = false, features = ["rt"] }
+tower = { version = "=0.5.3", default-features = false, features = ["limit"] }
+tower-http = { version = "=0.6.11", default-features = false, features = [
+    "limit",
+    "timeout",
+] }
 tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt"] }
 url = "=2.5.8"
+yaml-edit = { version = "=0.2.3", default-features = false }
 yaml_serde = "=0.10.7"
 
 [dev-dependencies]
 rcgen = "=0.14.10"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }
