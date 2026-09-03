@@ -611,7 +611,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 | DNS 回归 | UDP、TCP、DoH 的既有 contract/smoke test 不受影响 |
 | shutdown | management 和 DNS 连接均在预算内 drain/终止，无悬挂任务 |
 
-最终还应在支持的平台上执行真实浏览器同源 smoke test，检查 Cookie、CSP、静态缓存和初始化跳转；仅有 mock 或 handler 单测不能作为该项通过的依据。
+2026-09-04 已在 Windows release binary 上完成真实 HTTP smoke，并由 in-app browser 检查 `/initialize` 深链接、表单必填校验和 Console；仍需在支持的平台上补充 Cookie、CSP、静态缓存和 Network/Storage 观察，且仅有 mock 或 handler 单测不能作为该项通过的依据。
 
 ## 14. 风险与控制
 
