@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 174（Cache persistence shutdown timeout 验证）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 175（DNS resolution result 契约闭合）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -34,8 +34,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **88.4%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **89.5%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **88.6%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **89.7%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -47,7 +47,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Config | 已验证 | 100% | 10% |
 | Runtime | 实现中 | 90% | 12% |
 | Transport | 实现中 | 87% | 11% |
-| DNS Core | 实现中 | 82% | 10% |
+| DNS Core | 实现中 | 84% | 10% |
 | Policy | 实现中 | 83% | 8% |
 | Upstream | 已实现待验证 | 99% | 10% |
 | Cache | 实现中 | 84% | 9% |
@@ -59,8 +59,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ```text
 4%×76% + 8%×70% + 10%×100% + 12%×90% + 11%×87%
-+ 10%×82% + 8%×83% + 10%×99% + 9%×84% + 7%×92%
-+ 8%×96% + 3%×98% ≈ 88.4%
++ 10%×84% + 8%×83% + 10%×99% + 9%×84% + 7%×92%
++ 8%×96% + 3%×98% ≈ 88.6%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -95,7 +95,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 174 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 175 |
 
 ### 增量里程碑
 
@@ -114,14 +114,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 172 | Supervisor shutdown deadline | 不合作 task 到期后 abort；`ShutdownReport` 准确记录 aborted/deadline 且无 task 残留 |
 | 173 | Service request drain timeout | 活动请求超时准确设置 `deadline_expired`；guard 释放后 Runtime 完成 drain |
 | 174 | Cache persistence shutdown timeout | adapter 停机阻塞到期后 abort worker，并返回稳定 `Timeout` 分类 |
+| 175 | DNS resolution result 契约闭合 | 同一次解析事件保留 failure/timeout/cancellation 细分与 matched resource revision；复用现有 Core/observation/event 契约，不新增平行抽象 |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/cache/runtime.rs`；
-- Cache persistence shutdown timeout 与正常失败批次排空回归：2 项定向测试通过；
+- 增量 `rustfmt`：`backend/src/service.rs`；
+- DNS resolution result 聚焦契约测试：1 项通过；
 - `git diff --check`：通过。
 
-阶段 174 未重复阶段 170 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 175 未重复阶段 170 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

@@ -2472,25 +2472,32 @@ mod tests {
     use tokio::net::{TcpStream, UdpSocket};
 
     use super::{
-        MAX_CONCURRENT_STREAM_SESSIONS, ResolveDetailDropCounters, ResolveDetailHealthUpdate,
-        ServiceError, TransportTask, can_accept_stream_session, flush_telemetry_once,
-        is_exhausted_endpoint, publish_cache_shutdown_health, publish_component_health,
-        publish_resolve_detail_health, response_header_rcode, response_rcode,
-        retire_current_transport_task, spawn_telemetry_task, spawn_transport_task, task_failure,
+        MAX_CONCURRENT_STREAM_SESSIONS, ObservedDnsCore, ResolveDetailDropCounters,
+        ResolveDetailHealthUpdate, ServiceError, TransportTask, can_accept_stream_session,
+        flush_telemetry_once, is_exhausted_endpoint, publish_cache_shutdown_health,
+        publish_component_health, publish_resolve_detail_health, response_header_rcode,
+        response_rcode, retire_current_transport_task, spawn_telemetry_task, spawn_transport_task,
+        task_failure,
     };
     use crate::cache::CachePersistenceRunSummary;
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, CanonicalResponse,
-        CoreError, CoreOutcome, Deadline, DnsCore, DnsMessageId, DnsRequest, ResponseClass,
-        RuntimeRevision, TransportClass,
+        ClientIdentity, CoreError, CoreOutcome, Deadline, DnsCore, DnsMessageId, DnsRequest,
+        DnsResolutionObservation, ListenerId, MatchedRuleObservation, MatchedRuleSource,
+        RequestContext, RequestId, RequestMeta, ResponseClass, RuntimeRevision,
+        TransportCapabilities, TransportClass,
     };
     use crate::observability::{TelemetryOutput, TelemetryWriter};
-    use crate::ports::storage::ResolveEventDisposition;
-    use crate::ports::telemetry::{
-        Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState, LogEvent,
-        LogLevel, MetricEvent,
+    use crate::ports::PortError;
+    use crate::ports::storage::{
+        ResolveEvent, ResolveEventDisposition, ResolveEventSink, StatsSource,
     };
+    use crate::ports::telemetry::{
+        CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
+        LogEvent, LogLevel, MetricEvent, OutcomeClass,
+    };
+    use crate::resource::ResourceVersion;
     use crate::runtime::{
         CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime, RestartPolicy,
         RuntimeCoordinator, Supervisor, SystemClock, SystemSocketFactory, TaskCompletion,
@@ -2530,6 +2537,19 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct CapturingResolveEventSink {
+        events: Mutex<Vec<ResolveEvent>>,
+    }
+
+    impl ResolveEventSink for CapturingResolveEventSink {
+        /// 保留完整事件，供测试核对同一次解析的终态分类与资源版本。
+        fn try_record(&self, event: ResolveEvent) -> Result<ResolveEventDisposition, PortError> {
+            self.events.lock().unwrap().push(event);
+            Ok(ResolveEventDisposition::Accepted)
+        }
+    }
+
     #[test]
     fn response_rcode_only_reports_actual_dns_responses() {
         let mut message = Message::new(9, MessageType::Query, OpCode::Query);
@@ -2551,6 +2571,84 @@ mod tests {
         );
         assert_eq!(response_rcode(&Ok(CoreOutcome::NoResponse)), None);
         assert_eq!(response_header_rcode(&Ok(CoreOutcome::NoResponse)), 0);
+    }
+
+    #[test]
+    fn observed_core_records_failure_detail_and_resource_revision_together() {
+        let mut message = Message::new(11, MessageType::Query, OpCode::Query);
+        message.add_query(Query::query(
+            Name::from_ascii("resolution-result.example.").unwrap(),
+            RecordType::A,
+        ));
+        let query = CanonicalQuery::from_message(message).unwrap();
+        let cancellation = Cancellation::new();
+        let request = DnsRequest {
+            query: query.clone(),
+            context: RequestContext {
+                meta: RequestMeta {
+                    request_id: RequestId(11),
+                    trace_id: None,
+                    received_at: Instant::now(),
+                    received_at_utc: SystemTime::UNIX_EPOCH,
+                    deadline: Deadline::new(Instant::now() + Duration::from_secs(1)),
+                    cancellation: cancellation.clone(),
+                    connection_id: None,
+                    stream_id: None,
+                    listener_id: ListenerId::from("udp-main"),
+                    route_id: None,
+                    original_dns_id: Some(11),
+                },
+                client: ClientIdentity::default(),
+                transport: TransportCapabilities {
+                    class: TransportClass::Datagram,
+                    cache_compatibility: CacheCompatibilityKey(1),
+                },
+                runtime_revision: RuntimeRevision(7),
+            },
+        };
+        let observation = DnsResolutionObservation {
+            client_bucket: None,
+            strategy_id: Some(Arc::from("default")),
+            matched_rule: Some(MatchedRuleObservation {
+                source: MatchedRuleSource::RuleSet,
+                resource_id: Arc::from("blocked-domains"),
+                resource_version: Some(ResourceVersion::new(3, 5)),
+                ordinal: Some(2),
+            }),
+            upstream_id: Some(Arc::from("primary")),
+            upstream_member_id: None,
+            source: StatsSource::Upstream,
+            cache_status: CacheStatus::Miss,
+        };
+        let sink = Arc::new(CapturingResolveEventSink::default());
+        let core = ObservedDnsCore {
+            inner: Arc::new(CrossTransportErrorCore),
+            stats_worker: None,
+            resolve_event_sink: Some(Arc::clone(&sink) as Arc<dyn ResolveEventSink>),
+            telemetry: None,
+            resolve_detail_drops: Arc::new(ResolveDetailDropCounters::default()),
+        };
+
+        let response = CanonicalResponse::empty_response(&query, ResponseCode::ServFail).unwrap();
+        core.record(
+            &request,
+            &Ok(CoreOutcome::Response(response)),
+            Some(&observation),
+        );
+        cancellation.cancel(CancelReason::DeadlineExceeded);
+        core.record(&request, &Ok(CoreOutcome::NoResponse), Some(&observation));
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].outcome, OutcomeClass::Failure);
+        assert_eq!(events[0].rcode, 2);
+        assert_eq!(events[0].resource_version, Some(ResourceVersion::new(3, 5)));
+        assert_eq!(events[1].outcome, OutcomeClass::Timeout);
+        assert_eq!(
+            events[1].cancellation_reason,
+            Some(CancelReason::DeadlineExceeded)
+        );
+        assert_eq!(events[1].resource_version, Some(ResourceVersion::new(3, 5)));
     }
 
     #[test]
