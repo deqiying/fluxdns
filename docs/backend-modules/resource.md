@@ -19,7 +19,7 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 | 文件 | 职责 |
 | --- | --- |
 | `hosts.rs` | JSON/hosts 格式、本地 RR 索引 |
-| `rules.rs` | JSON/Clash/dat 规则解析和 matcher |
+| `rules.rs` | JSON/Clash 规则解析和 matcher；`dat selector` 后置 |
 | `loader.rs` | const/file、大小限制、稳定读取与 parser 边界；remote 内容加载由 `remote.rs` 编排 |
 | `orchestrator.rs` | schedule、refresh coordinator、due/backoff、CAS publish 和 stop 语义的 Runtime-facing 纯逻辑编排 |
 | `snapshot.rs` | metadata、revision、registry 和 publish input |
@@ -117,9 +117,9 @@ v1 本地回答支持 A、AAAA 和 CNAME：
 
 v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽略；未知 rule type、缺列或多余不可解释字段报带行号错误。
 
-### dat
+### dat（后置）
 
-解析为 selector → domain matcher map。selector 必须是非空 ASCII 标识，加载时统一转为小写；大小写归一化后重复的 selector 报错。`geosite:cn` 先解析大小写敏感的资源名 `geosite`，再查 canonical selector `cn`。selector 不存在时 prepare/refresh 失败，不返回空 matcher。
+目标契约为 selector → domain matcher map。selector 必须是非空 ASCII 标识，加载时统一转为小写；大小写归一化后重复的 selector 报错。`geosite:cn` 先解析大小写敏感的资源名 `geosite`，再查 canonical selector `cn`。当前实现对 `dat` 返回稳定 `UnsupportedFormat`，待确认二进制格式和依赖边界后再接入。
 
 ## 7. Matcher
 
@@ -129,7 +129,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 - reversed-label suffix trie；
 - wildcard suffix trie；
 - 预编译 regex set；
-- dat selector map。
+- `dat selector` map（后置）。
 
 匹配优先级由 Policy 固定。matcher 无内部 mutable cache，保证 snapshot 可跨线程共享。
 
@@ -185,7 +185,7 @@ content 与 manifest 各自原子替换，但不构成跨文件事务；恢复�
 ## 12. 测试
 
 - hosts JSON/line、A/AAAA/CNAME、wildcard/exact；
-- JSON/Clash/dat rule 和 selector；
+- JSON/Clash rule，以及 `dat` 的稳定拒绝边界；
 - canonical domain、重复、冲突和 regex 限制；
 - const/file/remote 首次加载；
 - ETag/304、body limit、重定向、代理 failure；
@@ -212,6 +212,6 @@ content 与 manifest 各自原子替换，但不构成跨文件事务；恢复�
 - [x] 完成当前解析、安全边界、文件稳定读取和并发 CAS 测试；
 - [x] 完成当前 MVP 范围的 remote 恢复、原子落盘和长期刷新定向测试；宕机中断与长期压力验收后置。
 
-阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；`resource::fetcher::tests` 7 项通过，覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy、SecretRef 脱敏和 prepare 错误；reqwest 与项目 `ring` provider 的初始化顺序已统一，并通过 515 项后端并行全量测试；async PreparedRuntime restore/fetch 与 file snapshot 测试验证 bind 前资源准备，ResourceRefreshWorker focused tests 验证 remote/file worker 的 due/reservation、CAS publish、backoff、cancel 和 shutdown；service 已为 remote/file rule-set/hosts 注册长期 refresh task，成功候选经 Policy CAS 和 Runtime metadata CAS 发布；新增跨 Runtime 合并测试验证更高资源版本、compiled Policy、metadata 和 worker schedule 状态迁移，service 增量测试验证 reload 时 unchanged worker 复用与 removed worker 取消；Policy 35 项定向测试验证命中结果携带当前 hosts/rule-set 的 typed `ResourceVersion`。资源热更新的 Service/Runtime 两项关键测试已复核通过；完整配置候选生命周期和长期故障验收仍未完成。
+阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；`resource::fetcher::tests` 覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy、SecretRef 脱敏和 prepare 错误；reqwest 与项目 `ring` provider 的初始化顺序已统一；async PreparedRuntime restore/fetch 与 file snapshot 测试验证 bind 前资源准备，ResourceRefreshWorker focused tests 验证 remote/file worker 的 due/reservation、CAS publish、backoff、cancel 和 shutdown；service 已为 remote/file rule-set/hosts 注册长期 refresh task，成功候选经 Policy CAS 和 Runtime metadata CAS 发布；跨 Runtime 合并测试验证更高资源版本、compiled Policy、metadata 和 worker schedule 状态迁移，service 增量测试验证 reload 时 unchanged worker 复用与 removed worker 取消；Policy 定向测试验证命中结果携带当前 hosts/rule-set 的 typed `ResourceVersion`。阶段 181 复核 Resource 56 项及候选合并、运行中刷新、reload worker 生命周期 4 项定向测试，共 `60 passed、0 failed`；配置候选生命周期已闭合，剩余功能项为 `dat selector`，长期压力与宕机中断继续后置。
 
 当前实现进度：**92%**。

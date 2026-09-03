@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 180（策略、停机报告与可观测性大阶段验收）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 181（Resource 候选生命周期复核）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -26,6 +26,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 具体 UDP/TCP/DoH adapter 瞬时错误的完整故障矩阵；
 - DoH HTTP/2、完整 HTTP/DNS 协议组合和证书/信任边界矩阵；
 - cache persistence 的 last-access、真实故障复现与请求记录的跨故障源 health/recovery；
+- Resource/Policy 的 `dat selector` 二进制解析；
 - 完整跨 transport DNS contract；
 - v1 最终压力、长期运行、conformance，以及 shutdown 故障/超时矩阵验收。
 
@@ -95,7 +96,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 180 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 181 |
 
 ### 增量里程碑
 
@@ -120,16 +121,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 178 | Policy 主链验收复核 | plan/Core 定向测试与真实 UDP/TCP/plain DoH 契约通过；清除已闭合的 cross-adapter/transport 旧缺口，保留 `dat selector` 后置项 |
 | 179 | Observability v1 验收闭合 | 完整实现清单已闭合；Observability 与 Service telemetry 定向测试覆盖 schema、脱敏、低基数、队列、输出故障、health lifecycle 和停机 flush |
 | 180 | 策略、停机报告与可观测性大阶段验收 | 收缩 `ServiceError` 停机失败变体体积并保留完整 report；后端全量 547 项测试及格式、编译、lint 门槛通过 |
+| 181 | Resource 候选生命周期复核 | 配置候选合并、运行中刷新、reload worker 复用/取消均有定向证据；修正 `dat` 已实现的旧描述并保留该后置项 |
 
 ### 当前阶段验证
 
-- 全量 `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过；
-- 全量 `cargo check --manifest-path backend/Cargo.toml --locked`：通过；
-- 全量 `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings`：通过；
-- 全量 `cargo test --manifest-path backend/Cargo.toml --locked`：`547 passed、0 failed`；
+- 本阶段仅修正文档中的能力边界，无代码格式化；
+- Resource 56 项、Runtime 候选合并 1 项、Service 资源生命周期 3 项通过，共 `60 passed、0 failed`；
 - `git diff --check`：通过。
 
-阶段 180 是阶段 170 后的下一次大阶段全量验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 181 未重复阶段 180 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 
