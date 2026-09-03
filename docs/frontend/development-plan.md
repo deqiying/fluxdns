@@ -289,7 +289,7 @@ pnpm run test
 pnpm run build
 ```
 
-2026-09-04 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、29 项 tests 通过（含初始化并发 `409` 后刷新 setup 状态并返回登录页）；Vite 生产构建成功，生产 `dist/` 不包含 MSW worker；后端 `webui-embed` 测试覆盖 SPA fallback、HEAD、ETag 和静态响应头。MSW fixture smoke 覆盖 setup、初始化、登录、只读页面和登出，并断言未写入浏览器持久化存储；Windows `webui-embed` release binary 的真实 HTTP smoke 已覆盖 SPA 200、setup required、未认证 401、初始化后 session/overview 200 和重复 setup 409，且在临时移出 `frontend/dist/` 后仍能返回嵌入 SPA；in-app browser 已检查真实 `/initialize` 页面、表单校验和 Console。浏览器 Network/Storage 观察与 Linux target 发布尚未执行，不将这些边界写成已通过。
+2026-09-04 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、29 项 tests 通过（含初始化并发 `409` 后刷新 setup 状态并返回登录页）；Vite 生产构建成功，生产 `dist/` 不包含 MSW worker；后端 `webui-embed` 测试覆盖 SPA fallback、HEAD、ETag 和静态响应头。MSW fixture smoke 覆盖 setup、初始化、登录、只读页面和登出，并断言未写入浏览器持久化存储；Windows `webui-embed` release binary 的真实 HTTP smoke 已覆盖 SPA 200、setup required、未认证 401、初始化后 session/overview 200 和重复 setup 409，且在临时移出 `frontend/dist/` 后仍能返回嵌入 SPA；`dev.ps1` 已用显式 `-ConfigPath`/`-BinaryPath` 完成 `start`、`status`、`stop` 生命周期 smoke；in-app browser 已检查真实 `/initialize` 页面、表单校验和 Console。浏览器 Network/Storage 观察与 Linux target 发布尚未执行，不将这些边界写成已通过。
 
 ### 10.2 Management API 集成验收
 
