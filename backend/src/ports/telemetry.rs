@@ -22,6 +22,7 @@ pub enum Component {
     Resource,
     Storage,
     Telemetry,
+    Management,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

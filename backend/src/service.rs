@@ -474,6 +474,14 @@ impl DnsService {
             .map_err(ServiceStartError::Task)?;
         self.management = Some(runtime);
         self.management_cancellation = Some(cancellation);
+        if let Some(telemetry) = &self.telemetry {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Management,
+                ComponentHealthState::Healthy,
+                None,
+            );
+        }
         Ok(())
     }
 
@@ -687,6 +695,16 @@ impl DnsService {
     ) -> Result<ShutdownReport, ServiceError> {
         if let Some(management) = &self.management {
             management.shutdown();
+        }
+        if let Some(telemetry) = &self.telemetry
+            && self.management.is_some()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Management,
+                ComponentHealthState::Stopping,
+                None,
+            );
         }
         if let Some(cancellation) = &self.management_cancellation {
             cancellation.cancel(CancelReason::Shutdown);
@@ -1368,6 +1386,7 @@ fn telemetry_component_for_task(component: &'static str) -> TelemetryComponent {
         "resource" => TelemetryComponent::Resource,
         "udp" | "tcp" | "doh" => TelemetryComponent::Listener,
         "telemetry" => TelemetryComponent::Telemetry,
+        "management" => TelemetryComponent::Management,
         _ => TelemetryComponent::Runtime,
     }
 }
@@ -2589,7 +2608,7 @@ mod tests {
         flush_telemetry_once, is_exhausted_endpoint, publish_cache_shutdown_health,
         publish_component_health, publish_resolve_detail_health, response_header_rcode,
         response_rcode, retire_current_transport_task, spawn_telemetry_task, spawn_transport_task,
-        task_failure,
+        task_failure, telemetry_component_for_task,
     };
     use crate::cache::CachePersistenceRunSummary;
     use crate::config::{ConfigLoader, LoadOptions};
@@ -2930,6 +2949,14 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(output.health.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn management_task_uses_dedicated_health_component() {
+        assert_eq!(
+            telemetry_component_for_task("management"),
+            TelemetryComponent::Management
+        );
     }
 
     #[tokio::test]

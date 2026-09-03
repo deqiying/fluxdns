@@ -1359,6 +1359,7 @@ fn telemetry_component(value: &str) -> TelemetryComponent {
         "resource" => TelemetryComponent::Resource,
         "storage" => TelemetryComponent::Storage,
         "telemetry" => TelemetryComponent::Telemetry,
+        "management" => TelemetryComponent::Management,
         _ => TelemetryComponent::Application,
     }
 }
