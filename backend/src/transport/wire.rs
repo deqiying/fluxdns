@@ -6,6 +6,13 @@ use crate::dns::{CanonicalMessageError, CanonicalQuery, CanonicalResponse, DnsMe
 
 pub const MAX_DNS_WIRE_BYTES: usize = u16::MAX as usize;
 
+const DNS_HEADER_BYTES: usize = 12;
+const DNS_RESPONSE_FLAG: u16 = 0x8000;
+// 错误响应只继承 opcode、RD 和 CD，避免复制请求中的响应专属或保留位。
+const DNS_SAFE_ERROR_FLAG_MASK: u16 = 0x7910;
+const DNS_RCODE_FORMERR: u16 = 1;
+const DNS_RCODE_NOTIMP: u16 = 4;
+
 #[derive(Debug, Error, Eq, PartialEq)]
 pub enum WireError {
     #[error("DNS wire message is empty")]
@@ -38,6 +45,40 @@ pub fn decode_query(bytes: &[u8], max_bytes: usize) -> Result<ParsedQuery, WireE
     let id = DnsMessageId::new(message.metadata.id);
     let query = CanonicalQuery::from_message(message).map_err(WireError::InvalidQuery)?;
     Ok(ParsedQuery { id, query })
+}
+
+/// 在无需解析 question 的前提下，为具有可靠 header 的非法查询生成错误响应。
+///
+/// EDNS BADVERS 需要合法 OPT response，无法仅凭 header 安全构造，因此继续交由调用方丢弃。
+pub(super) fn encode_query_error_response(bytes: &[u8], error: &WireError) -> Option<Vec<u8>> {
+    if bytes.len() < DNS_HEADER_BYTES {
+        return None;
+    }
+    let request_flags = u16::from_be_bytes([bytes[2], bytes[3]]);
+    if request_flags & DNS_RESPONSE_FLAG != 0 {
+        return None;
+    }
+    let response_code = match error {
+        WireError::Decode | WireError::InvalidQuery(CanonicalMessageError::QuestionCount(_)) => {
+            DNS_RCODE_FORMERR
+        }
+        WireError::InvalidQuery(CanonicalMessageError::UnsupportedOpCode(_)) => DNS_RCODE_NOTIMP,
+        WireError::Empty
+        | WireError::TooLarge { .. }
+        | WireError::Encode
+        | WireError::InvalidQuery(
+            CanonicalMessageError::UnexpectedMessageType { .. }
+            | CanonicalMessageError::UnsupportedEdnsVersion(_)
+            | CanonicalMessageError::MessageIdMismatch { .. }
+            | CanonicalMessageError::QuestionMismatch,
+        ) => return None,
+    };
+    let response_flags =
+        DNS_RESPONSE_FLAG | (request_flags & DNS_SAFE_ERROR_FLAG_MASK) | response_code;
+    let mut response = vec![0_u8; DNS_HEADER_BYTES];
+    response[..2].copy_from_slice(&bytes[..2]);
+    response[2..4].copy_from_slice(&response_flags.to_be_bytes());
+    Some(response)
 }
 
 pub fn encode_response(
@@ -94,10 +135,11 @@ mod tests {
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
 
-    use crate::dns::{CanonicalQuery, CanonicalResponse, DnsMessageId};
+    use crate::dns::{CanonicalMessageError, CanonicalQuery, CanonicalResponse, DnsMessageId};
 
     use super::{
-        MAX_DNS_WIRE_BYTES, WireError, decode_query, encode_response, encode_response_truncated,
+        MAX_DNS_WIRE_BYTES, WireError, decode_query, encode_query_error_response, encode_response,
+        encode_response_truncated,
     };
 
     fn query(id: u16) -> Message {
@@ -138,6 +180,40 @@ mod tests {
                 limit: MAX_DNS_WIRE_BYTES
             })
         );
+    }
+
+    /// 验证非法 query 仅在 header 可靠时生成 FORMERR/NOTIMP，且不回显 question。
+    #[test]
+    fn query_error_response_preserves_safe_header_fields() {
+        let mut malformed = vec![0_u8; 12];
+        malformed[..2].copy_from_slice(&0xbeef_u16.to_be_bytes());
+        malformed[2..4].copy_from_slice(&0x0110_u16.to_be_bytes());
+        let response = encode_query_error_response(
+            &malformed,
+            &WireError::InvalidQuery(CanonicalMessageError::QuestionCount(0)),
+        )
+        .unwrap();
+        let decoded = Message::from_vec(&response).unwrap();
+        assert_eq!(decoded.metadata.id, 0xbeef);
+        assert_eq!(decoded.metadata.message_type, MessageType::Response);
+        assert_eq!(decoded.metadata.response_code, ResponseCode::FormErr);
+        assert!(decoded.metadata.recursion_desired);
+        assert!(decoded.metadata.checking_disabled);
+        assert!(decoded.queries.is_empty());
+
+        malformed[2..4].copy_from_slice(&0x1100_u16.to_be_bytes());
+        let response = encode_query_error_response(
+            &malformed,
+            &WireError::InvalidQuery(CanonicalMessageError::UnsupportedOpCode(OpCode::Status)),
+        )
+        .unwrap();
+        let decoded = Message::from_vec(&response).unwrap();
+        assert_eq!(decoded.metadata.op_code, OpCode::Status);
+        assert_eq!(decoded.metadata.response_code, ResponseCode::NotImp);
+
+        assert!(encode_query_error_response(&malformed[..11], &WireError::Decode).is_none());
+        malformed[2..4].copy_from_slice(&0x8000_u16.to_be_bytes());
+        assert!(encode_query_error_response(&malformed, &WireError::Decode).is_none());
     }
 
     #[test]

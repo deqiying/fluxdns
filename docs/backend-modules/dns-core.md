@@ -44,7 +44,7 @@ Core 不读取配置文件，不持有 socket/HTTP client/SQLite/Moka，也不�
 - 附带解析后的 TTL metadata 和 response class；
 - 只有通过问题段匹配和 wire 完整性验证的响应才能构造。
 
-非法 query 在能够安全形成 DNS 响应时返回 FORMERR/NOTIMP/BADVERS；无法获得可靠 ID/question 时由 Transport 丢弃或返回协议层错误。
+非法 query 在无需伪造 question 且 header 可靠时由 UDP/TCP Transport 返回 FORMERR/NOTIMP；短 header、`QR=1` 或需要合法 OPT 的 BADVERS 不猜测响应。DoH 非法 DNS wire 继续按 HTTP 400 分层。
 
 ## 4. 请求管线
 
@@ -194,6 +194,6 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 
 阶段 175 增加同一次解析结果的端到端契约测试，验证 SERVFAIL、deadline cancellation 分别稳定归类为 failure/timeout，并与 matched resource revision 一同进入 `ResolveEvent`；不为已有组合契约新增平行 `ResolutionResult` 抽象。
 
-阶段 196 验证非法客户端 ECS 不会进入上游或 cache key：存在客户端地址时回退到脱敏网段，不存在时移除 ECS。
+阶段 196 验证非法客户端 ECS 不会进入上游或 cache key：存在客户端地址时回退到脱敏网段，不存在时移除 ECS。阶段 197 在共享 wire 边界生成 header-only FORMERR/NOTIMP，UDP 回应后继续收包，TCP 回应后关闭当前 session；wire/UDP/TCP 定向测试分别 `7/5/12 passed`。
 
-当前实现进度：**85%**。
+当前实现进度：**86%**。

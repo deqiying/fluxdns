@@ -217,6 +217,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - admission control、client disconnect、shutdown cancellation；
 - UDP/TCP/DoH 多轮无流量 deadline 后继续服务且不消耗 endpoint retry；
 - wire codec 的 DNS ID 分离/恢复、canonicalization、输入输出尺寸上限和安全错误分类；
+- UDP/TCP 在 header 可靠时对非法 question/解码返回 FORMERR、对非 QUERY opcode 返回 NOTIMP；短 header 和需要 OPT 的 BADVERS 不猜测响应；
 - 所有 adapter 通过 Ports contract suite。
 
 ## 13. 实现检查清单
@@ -233,6 +234,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 实现 PROXY v1/v2 首轮 client IP 恢复；
 - [x] 实现 UDP/TCP response correlation/encoder；
 - [x] 建立共享 DNS wire decode/encode boundary 和尺寸/错误分类测试；
+- [x] 在不伪造 question 的前提下，为 UDP/TCP 具有可靠 header 的非法 query 返回 FORMERR/NOTIMP；
 - [x] 完成 UDP/TCP framing、尺寸、EOF、取消和顺序响应测试；
 - [x] 完成 UDP/TCP/plain DoH 的真实 loopback response contract，统一验证 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED、DNS ID 和 canonical response，并验证大响应下 UDP TC、TCP/DoH 完整响应；
 - [x] 验证 transport task 的三次 transient retry 上限和 `FatalEndpoint` 耗尽升级；
@@ -241,6 +243,6 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 验证坏 TLS 握手只终止当前 DoH session，同一 listener 可继续服务后续正常连接；
 - [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、request-line/media type、Host authority/cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试通过；system socket Rustls loopback 验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163–168 验证 transient retry 上限、endpoint 故障隔离、空闲 listener、session 上限和 framing 资源边界；阶段 190 后端全量 `555 passed、0 failed`。阶段 182 新增 Host authority 与严格十进制 `Content-Length` 校验；阶段 185 补齐 DER 证书/私钥直接加载证据；阶段 191 为证书链与私钥读取增加独立硬上限；阶段 193 对未实现的 `Expect` interim response 立即返回 417，DoH 25 项定向测试通过。真实 plain HTTP smoke 已验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
+阶段证据：DoH codec/session、request-line/media type、Host authority/cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试通过；system socket Rustls loopback 验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163–168 验证 transient retry 上限、endpoint 故障隔离、空闲 listener、session 上限和 framing 资源边界；阶段 190 后端全量 `555 passed、0 failed`。阶段 182 新增 Host authority 与严格十进制 `Content-Length` 校验；阶段 185 补齐 DER 证书/私钥直接加载证据；阶段 191 为证书链与私钥读取增加独立硬上限；阶段 193 对未实现的 `Expect` interim response 立即返回 417；阶段 197 为 UDP/TCP 安全 header 增加 FORMERR/NOTIMP 响应，wire/UDP/TCP 定向测试分别 `7/5/12 passed`。真实 plain HTTP smoke 已验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
 
-当前实现进度：**91%**。
+当前实现进度：**92%**。

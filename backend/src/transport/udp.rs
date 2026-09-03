@@ -17,7 +17,10 @@ use crate::ports::effects::{ActivatedSocketHandle, UdpSocketHandle};
 use crate::ports::inbound::{InboundAdapter, InboundRequest, ResponseEncoder};
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
-use super::wire::{MAX_DNS_WIRE_BYTES, WireError, decode_query, encode_response_truncated};
+use super::wire::{
+    MAX_DNS_WIRE_BYTES, WireError, decode_query, encode_query_error_response,
+    encode_response_truncated,
+};
 use crate::runtime::BoundEndpointHandle;
 
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
@@ -134,7 +137,16 @@ impl InboundAdapter for UdpAdapter {
 
                 let parsed = match decode_query(&datagram.payload, MAX_DNS_WIRE_BYTES) {
                     Ok(parsed) => parsed,
-                    Err(_) => continue,
+                    Err(error) => {
+                        if let Some(response) =
+                            encode_query_error_response(&datagram.payload, &error)
+                        {
+                            self.socket
+                                .send_to(response, datagram.peer, deadline, cancellation)
+                                .await?;
+                        }
+                        continue;
+                    }
                 };
 
                 let request_id = RequestId::from(
@@ -325,11 +337,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn drops_malformed_datagrams_and_builds_canonical_request() {
+    async fn responds_to_safe_malformed_datagram_and_builds_next_canonical_request() {
         let socket = Arc::new(FakeUdpSocket::default());
         let peer = SocketAddr::from(([192, 0, 2, 10], 53000));
         socket.push(Ok(UdpDatagram {
             payload: vec![0xff, 0x00],
+            peer,
+        }));
+        let mut malformed = vec![0_u8; 12];
+        malformed[..2].copy_from_slice(&0xcafe_u16.to_be_bytes());
+        socket.push(Ok(UdpDatagram {
+            payload: malformed,
             peer,
         }));
         socket.push(Ok(UdpDatagram {
@@ -354,6 +372,12 @@ mod tests {
             inbound.request().context.runtime_revision,
             RuntimeRevision(3)
         );
+        let sent = socket.sent();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].1, peer);
+        let response = Message::from_vec(&sent[0].0).unwrap();
+        assert_eq!(response.metadata.id, 0xcafe);
+        assert_eq!(response.metadata.response_code, ResponseCode::FormErr);
     }
 
     #[tokio::test]

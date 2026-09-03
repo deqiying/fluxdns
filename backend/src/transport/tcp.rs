@@ -236,9 +236,23 @@ impl TcpSession {
             let Some(payload) = read_frame(&self.connection, deadline, cancellation).await? else {
                 return Ok(None);
             };
-            let parsed = super::wire::decode_query(&payload, MAX_DNS_WIRE_BYTES).map_err(|_| {
-                PortError::new(PortErrorClass::ProtocolViolation, "transport.tcp.decode")
-            })?;
+            let parsed = match super::wire::decode_query(&payload, MAX_DNS_WIRE_BYTES) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    if let Some(response) =
+                        super::wire::encode_query_error_response(&payload, &error)
+                    {
+                        let frame =
+                            encode_frame(&response, MAX_DNS_WIRE_BYTES).map_err(map_frame_error)?;
+                        let mut connection = self.connection.lock().await;
+                        connection.write_all(frame, deadline, cancellation).await?;
+                    }
+                    return Err(PortError::new(
+                        PortErrorClass::ProtocolViolation,
+                        "transport.tcp.decode",
+                    ));
+                }
+            };
 
             self.next_stream_id = self.next_stream_id.wrapping_add(1).max(1);
             let request_id = RequestId::from(
@@ -697,6 +711,40 @@ mod tests {
         let error = session.receive(&cancellation).await.unwrap_err();
         assert!(matches!(error.class(), PortErrorClass::ProtocolViolation));
         session.close().await;
+    }
+
+    /// 验证完整非法 DNS header 会先得到 FORMERR，再由当前 TCP session 关闭连接。
+    #[tokio::test]
+    async fn session_writes_formerr_for_safe_malformed_query() {
+        let listener = Arc::new(FakeTcpListener {
+            connections: Mutex::new(VecDeque::new()),
+        });
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let mut malformed = vec![0_u8; 12];
+        malformed[..2].copy_from_slice(&0xcafe_u16.to_be_bytes());
+        listener.push(Box::new(FakeTcpConnection::new(
+            encode_frame(&malformed, MAX_DNS_WIRE_BYTES).unwrap(),
+            Arc::clone(&writes),
+            SocketAddr::from(([192, 0, 2, 20], 53010)),
+        )));
+        let adapter = adapter(listener);
+        let cancellation = Cancellation::new();
+        let mut session = adapter
+            .accept_session(&cancellation)
+            .await
+            .unwrap()
+            .unwrap();
+
+        let error = session.receive(&cancellation).await.unwrap_err();
+        assert!(matches!(error.class(), PortErrorClass::ProtocolViolation));
+        let writes = writes.lock().unwrap();
+        assert_eq!(writes.len(), 1);
+        let response = hickory_proto::op::Message::from_vec(&writes[0][2..]).unwrap();
+        assert_eq!(response.metadata.id, 0xcafe);
+        assert_eq!(
+            response.metadata.response_code,
+            hickory_proto::op::ResponseCode::FormErr
+        );
     }
 
     #[test]
