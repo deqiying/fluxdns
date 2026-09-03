@@ -19,8 +19,8 @@ pub use prepared::{
 };
 pub use snapshot::{RuntimeSnapshot, RuntimeSnapshotSummary};
 pub use supervisor::{
-    FaultLevel, RestartPolicy, ShutdownReport, Supervisor, SupervisorError, TaskCompletion,
-    TaskError, TaskErrorKind, TaskExit, TaskFuture, TaskId, TaskIdError, TaskSpec,
+    FaultLevel, RestartPolicy, ShutdownPhaseStatus, ShutdownReport, Supervisor, SupervisorError,
+    TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskFuture, TaskId, TaskIdError, TaskSpec,
 };
 pub use system_clock::SystemClock;
 pub use system_socket::SystemSocketFactory;

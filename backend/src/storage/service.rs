@@ -65,6 +65,32 @@ pub enum StorageServiceError {
 }
 
 impl StorageServiceError {
+    /// 判断任一存储子阶段是否以稳定的 timeout 分类失败。
+    pub fn is_timeout(&self) -> bool {
+        fn port_timeout(error: &PortError) -> bool {
+            matches!(error.class(), crate::ports::PortErrorClass::Timeout)
+        }
+
+        fn stats_timeout(error: &StatsPersistenceError) -> bool {
+            matches!(error, StatsPersistenceError::Backend(source) if port_timeout(source))
+        }
+
+        match self {
+            Self::Stats(error) => stats_timeout(error),
+            Self::Backend(error) | Self::Detail(error) => port_timeout(error),
+            Self::Both { detail, backend } => port_timeout(detail) || port_timeout(backend),
+            Self::StatsAndDetail { stats, detail } => stats_timeout(stats) || port_timeout(detail),
+            Self::StatsAndBackend { stats, backend } => {
+                stats_timeout(stats) || port_timeout(backend)
+            }
+            Self::All {
+                stats,
+                detail,
+                backend,
+            } => stats_timeout(stats) || port_timeout(detail) || port_timeout(backend),
+        }
+    }
+
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,

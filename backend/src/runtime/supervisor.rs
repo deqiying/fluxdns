@@ -142,6 +142,17 @@ impl TaskCompletion {
     }
 }
 
+/// Service 停机阶段的稳定终态；`NotRun` 仅用于独立 Supervisor 报告。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ShutdownPhaseStatus {
+    #[default]
+    NotRun,
+    Skipped,
+    Completed,
+    Failed,
+    TimedOut,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ShutdownReport {
     pub completed: u32,
@@ -151,6 +162,14 @@ pub struct ShutdownReport {
     pub aborted: u32,
     pub restarted: u32,
     pub deadline_expired: bool,
+    /// 等待当前及历史 Runtime 请求计数归零的结果。
+    pub request_drain: ShutdownPhaseStatus,
+    /// 关闭当前及历史 cache finalizer owner 的结果。
+    pub cache_finalizers: ShutdownPhaseStatus,
+    /// 关闭 StorageRuntime 的结果；未配置时为 `Skipped`。
+    pub storage: ShutdownPhaseStatus,
+    /// 最终 flush 并关闭 TelemetryWriter 的结果；未配置时为 `Skipped`。
+    pub telemetry: ShutdownPhaseStatus,
 }
 
 impl ShutdownReport {

@@ -632,8 +632,8 @@ fn map_service_error(error: ServiceError) -> AppError {
     let kind = match &error {
         ServiceError::Signal
         | ServiceError::TaskFailure { .. }
-        | ServiceError::Storage(_)
-        | ServiceError::Telemetry(_) => AppErrorKind::RuntimeFatal,
+        | ServiceError::Storage { .. }
+        | ServiceError::Telemetry { .. } => AppErrorKind::RuntimeFatal,
         ServiceError::ShutdownDeadline => AppErrorKind::ShutdownTimeout,
     };
     AppError::new(kind, bounded_message(error))

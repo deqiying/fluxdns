@@ -31,8 +31,8 @@ use crate::runtime::{
     ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
     BoundListenerSet, CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime,
     RefreshedResourceSnapshot, ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator,
-    RuntimeReuseError, ShutdownReport, Supervisor, SupervisorError, SystemClock, TaskCompletion,
-    TaskError, TaskErrorKind, TaskExit, TaskSpec, bind_prepared,
+    RuntimeReuseError, ShutdownPhaseStatus, ShutdownReport, Supervisor, SupervisorError,
+    SystemClock, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec, bind_prepared,
 };
 use crate::storage::{
     DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StatsPersistenceWorker,
@@ -146,10 +146,28 @@ pub enum ServiceError {
         fault_level: FaultLevel,
         exit: TaskExit,
     },
-    #[error("storage shutdown failed: {0}")]
-    Storage(#[source] StorageServiceError),
-    #[error("telemetry shutdown failed: {0}")]
-    Telemetry(#[source] crate::ports::PortError),
+    #[error("storage shutdown failed: {source}")]
+    Storage {
+        #[source]
+        source: StorageServiceError,
+        report: ShutdownReport,
+    },
+    #[error("telemetry shutdown failed: {source}")]
+    Telemetry {
+        #[source]
+        source: crate::ports::PortError,
+        report: ShutdownReport,
+    },
+}
+
+impl ServiceError {
+    /// 返回失败前已完成的分项停机报告；非停机阶段错误没有该报告。
+    pub const fn shutdown_report(&self) -> Option<&ShutdownReport> {
+        match self {
+            Self::Storage { report, .. } | Self::Telemetry { report, .. } => Some(report),
+            Self::Signal | Self::ShutdownDeadline | Self::TaskFailure { .. } => None,
+        }
+    }
 }
 
 const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -637,53 +655,91 @@ impl DnsService {
         self.cancel_transport_tasks();
         self.cancel_resource_tasks();
         let mut report = self.supervisor.shutdown(clock, deadline).await;
-        if !self.coordinator.wait_for_drain(deadline).await {
+        if self.coordinator.wait_for_drain(deadline).await {
+            report.request_drain = ShutdownPhaseStatus::Completed;
+        } else {
+            report.request_drain = ShutdownPhaseStatus::TimedOut;
             report.deadline_expired = true;
         }
         let cache_summary = self.coordinator.shutdown_finalizers(deadline).await;
-        if !cache_summary.completed {
+        if cache_summary.completed {
+            report.cache_finalizers = ShutdownPhaseStatus::Completed;
+        } else {
+            report.cache_finalizers = ShutdownPhaseStatus::TimedOut;
             report.deadline_expired = true;
         }
         if let Some(telemetry) = &self.telemetry {
             publish_cache_shutdown_health(telemetry, cache_summary);
         }
         log_cache_shutdown_summary(cache_summary);
-        let storage_error = if let Some(storage) = self.storage.take() {
-            if let Some(telemetry) = &self.telemetry {
+        let storage_error = match self.storage.take() {
+            Some(storage) => {
+                if let Some(telemetry) = &self.telemetry {
+                    publish_component_health(
+                        telemetry,
+                        TelemetryComponent::Storage,
+                        ComponentHealthState::Stopping,
+                        None,
+                    );
+                }
+                match storage.lock().await.shutdown(deadline).await {
+                    Ok(summary) => {
+                        report.storage = ShutdownPhaseStatus::Completed;
+                        log_storage_shutdown_summary(summary);
+                        None
+                    }
+                    Err(error) => {
+                        let timeout = error.is_timeout();
+                        report.storage = if timeout {
+                            ShutdownPhaseStatus::TimedOut
+                        } else {
+                            ShutdownPhaseStatus::Failed
+                        };
+                        report.deadline_expired |= timeout;
+                        Some(error)
+                    }
+                }
+            }
+            None => {
+                report.storage = ShutdownPhaseStatus::Skipped;
+                None
+            }
+        };
+        let telemetry_error = match self.telemetry.take() {
+            Some(telemetry) => {
                 publish_component_health(
-                    telemetry,
-                    TelemetryComponent::Storage,
+                    &telemetry,
+                    TelemetryComponent::Telemetry,
                     ComponentHealthState::Stopping,
                     None,
                 );
-            }
-            match storage.lock().await.shutdown(deadline).await {
-                Ok(summary) => {
-                    log_storage_shutdown_summary(summary);
-                    None
+                match telemetry.shutdown(deadline) {
+                    Ok(_summary) => {
+                        report.telemetry = ShutdownPhaseStatus::Completed;
+                        None
+                    }
+                    Err(error) => {
+                        let timeout = matches!(error.class(), PortErrorClass::Timeout);
+                        report.telemetry = if timeout {
+                            ShutdownPhaseStatus::TimedOut
+                        } else {
+                            ShutdownPhaseStatus::Failed
+                        };
+                        report.deadline_expired |= timeout;
+                        Some(error)
+                    }
                 }
-                Err(error) => Some(ServiceError::Storage(error)),
             }
-        } else {
-            None
+            None => {
+                report.telemetry = ShutdownPhaseStatus::Skipped;
+                None
+            }
         };
-        let telemetry_error = self.telemetry.take().and_then(|telemetry| {
-            publish_component_health(
-                &telemetry,
-                TelemetryComponent::Telemetry,
-                ComponentHealthState::Stopping,
-                None,
-            );
-            telemetry
-                .shutdown(deadline)
-                .err()
-                .map(ServiceError::Telemetry)
-        });
-        if let Some(error) = storage_error {
-            return Err(error);
+        if let Some(source) = storage_error {
+            return Err(ServiceError::Storage { source, report });
         }
-        if let Some(error) = telemetry_error {
-            return Err(error);
+        if let Some(source) = telemetry_error {
+            return Err(ServiceError::Telemetry { source, report });
         }
         Ok(report)
     }
@@ -2500,8 +2556,8 @@ mod tests {
     use crate::resource::ResourceVersion;
     use crate::runtime::{
         CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime, RestartPolicy,
-        RuntimeCoordinator, Supervisor, SystemClock, SystemSocketFactory, TaskCompletion,
-        TaskError, TaskErrorKind, TaskExit, TaskSpec,
+        RuntimeCoordinator, ShutdownPhaseStatus, Supervisor, SystemClock, SystemSocketFactory,
+        TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
     };
     use crate::storage::StorageRuntime;
     use crate::transport::transport_capabilities;
@@ -4073,6 +4129,10 @@ clients: []
             .await
             .unwrap();
         assert!(!report.deadline_expired);
+        assert_eq!(report.request_drain, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.cache_finalizers, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.storage, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.telemetry, ShutdownPhaseStatus::Completed);
         assert!(telemetry_probe.stats().closed());
         {
             let health_events = output.health_events.lock().unwrap();
@@ -4087,6 +4147,61 @@ clients: []
         }
 
         assert_eq!(sqlite_total_requests(&database_path).await, 1);
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    /// 验证后置阶段失败仍携带此前各停机阶段的完整终态。
+    #[tokio::test]
+    async fn service_shutdown_error_keeps_completed_phase_report() {
+        let port = available_transport_ports()[0];
+        let work_path = crate::config::test_support::absolute_path("service-shutdown-phase-error");
+        let config = runtime_config_at(&work_path, port);
+        let initial =
+            PreparedRuntime::prepare_with_policy_core(Arc::clone(&config), RuntimeRevision(1))
+                .unwrap();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &SystemSocketFactory::new(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let storage = StorageRuntime::open(
+            coordinator.load().snapshot().config(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let telemetry = Arc::new(TelemetryWriter::new(16, output.clone()).unwrap());
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                Arc::clone(&coordinator),
+                storage,
+                telemetry,
+            )
+            .unwrap();
+        output.fail.store(true, Ordering::Relaxed);
+
+        let error = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap_err();
+        let report = error
+            .shutdown_report()
+            .expect("shutdown phase failure must preserve its report");
+
+        assert!(matches!(error, ServiceError::Telemetry { .. }));
+        assert!(!report.deadline_expired);
+        assert_eq!(report.request_drain, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.cache_finalizers, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.storage, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.telemetry, ShutdownPhaseStatus::Failed);
         let _ = std::fs::remove_dir_all(work_path);
     }
 
@@ -4130,6 +4245,10 @@ clients: []
 
         assert!(report.deadline_expired);
         assert_eq!(report.aborted, 0);
+        assert_eq!(report.request_drain, ShutdownPhaseStatus::TimedOut);
+        assert_eq!(report.cache_finalizers, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.storage, ShutdownPhaseStatus::Skipped);
+        assert_eq!(report.telemetry, ShutdownPhaseStatus::Skipped);
         assert!(runtime.is_draining());
         assert_eq!(runtime.active_requests(), 1);
         drop(request_guard);
