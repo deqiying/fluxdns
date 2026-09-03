@@ -201,7 +201,7 @@ Moka adapter 复用上述 `CacheStore` contract，但把实际 entry 存储和�
 - 使用独立 `SqlitePool`、独立 `cache_entries` schema 和 WAL/`synchronous=NORMAL` 初始化，不复用业务 Storage pool 或表；
 - `persist` 在单事务中合并已存在记录、复用 FDCP codec 做 canonical/checksum/expiry 校验、按 cache max-size budget 淘汰后重写 payload rows；
 - `recover` 在 adapter 边界隔离过期、损坏和不兼容记录并返回 `CacheRecoverySummary`；
-- `recover`、`persist`、`maintain_capacity` 与 `shutdown` 复用同一串行 operation lock，锁等待受调用方 deadline 约束；数据库关闭后拒绝继续恢复/写入。
+- `recover`、`persist`、`maintain_capacity` 与 `shutdown` 复用同一串行 operation lock，完整数据库 future 和锁等待均受调用方 deadline 约束；数据库关闭后拒绝继续恢复/写入。
 
 SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已实现；真实 SQLite Busy 已验证旧 snapshot 保留和后续重试，last-access bucket、真实 disk-full recovery 和剩余跨 adapter 故障 contract 仍待后续阶段实现。
 
@@ -293,8 +293,9 @@ SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已�
 - [x] 完成 SQLite adapter test-only Busy/DiskFull 失败后重试 contract 测试。
 - [x] 完成 SQLite adapter 的真实 Busy 写锁、旧 snapshot 保留和重试测试。
 - [x] 完成 SQLite adapter 串行 operation lock 的 deadline 与 shutdown 超时测试。
+- [x] 完成真实 SQLite Busy 下调用方短 deadline 优先返回 `Timeout` 的测试。
 - [ ] 完成跨 adapter 的真实 disk-full 故障测试矩阵。
 
-阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；`cache::runtime::tests` 覆盖参数拒绝、失败批次隔离、摘要合并、shutdown 排空和 adapter 停机超时 abort，`cache::service::tests` 覆盖 memory CAS 后的 writer 接线；PolicyCore 定向测试覆盖配置启用缓存后的 upstream 命中、跨 core SQLite 恢复、fresh 剩余 TTL、stale answer TTL、snapshot-local optimistic refresh、fast-positive late sink 写入、最终 ECS subnet/client identity 的 cache key 隔离，以及成员 ECS group 的安全缓存绕过；async prepare 定向测试覆盖 bind 前 persistence owner 构造及有序 shutdown；Runtime coordinator/service 定向测试覆盖 previous/current Runtime finalizer owner 的摘要合并、统一 shutdown 回收和 Cache health 发布；upstream executor 覆盖 nested parallel group sink 传播；文件快照、Moka、SQLite 和跨 adapter contract 覆盖 roundtrip、expiry、容量、checksum、metadata、disk usage、shutdown 及 test-only Busy/DiskFull 重试。阶段 180 后端全量 `547 passed、0 failed`；阶段 184 以独立连接持有真实 SQLite 写锁，验证 Busy 返回 `Unavailable`、旧 snapshot 不变且释放锁后重试成功；阶段 186 使 SQLite cache 的串行锁等待遵守 deadline，并验证超时后仍可恢复和关闭，SQLite cache 7 项定向测试通过。完整 late-window、last-access writer 和真实 disk-full 故障矩阵仍未完成。
+阶段证据：内存/cache focused tests 覆盖 fresh/stale/expiry、质量 CAS、失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、稳定 key、Facade 状态、容量淘汰和 `LateCacheFinalizer` 的异步写入/取消；`cache::runtime::tests` 覆盖参数拒绝、失败批次隔离、摘要合并、shutdown 排空和 adapter 停机超时 abort，`cache::service::tests` 覆盖 memory CAS 后的 writer 接线；PolicyCore 定向测试覆盖配置启用缓存后的 upstream 命中、跨 core SQLite 恢复、fresh 剩余 TTL、stale answer TTL、snapshot-local optimistic refresh、fast-positive late sink 写入、最终 ECS subnet/client identity 的 cache key 隔离，以及成员 ECS group 的安全缓存绕过；async prepare 定向测试覆盖 bind 前 persistence owner 构造及有序 shutdown；Runtime coordinator/service 定向测试覆盖 previous/current Runtime finalizer owner 的摘要合并、统一 shutdown 回收和 Cache health 发布；upstream executor 覆盖 nested parallel group sink 传播；文件快照、Moka、SQLite 和跨 adapter contract 覆盖 roundtrip、expiry、容量、checksum、metadata、disk usage、shutdown 及 test-only Busy/DiskFull 重试。阶段 180 后端全量 `547 passed、0 failed`；阶段 184 以独立连接持有真实 SQLite 写锁，验证 Busy 返回 `Unavailable`、旧 snapshot 不变且释放锁后重试成功；阶段 186 使 SQLite cache 的串行锁等待遵守 deadline；阶段 188 进一步限制完整数据库 future，真实 Busy 下短 deadline 优先返回 `Timeout`，SQLite cache 8 项定向测试通过。完整 late-window、last-access writer 和真实 disk-full 故障矩阵仍未完成。
 
-当前实现进度：**86%**（已完成内存/Moka/SQLite 首轮 adapter、Cache-Core 主链、稳定 key/TTL/CAS、latest-target finalizer、production recovery/non-blocking persistence、历史/当前 owner 有序 shutdown、adapter/锁等待超时、安全 gap 摘要与真实 SQLite Busy 重试；完整 late-window 候选生命周期、last-access bucket、真实 disk-full 数据库故障恢复与跨 adapter 真实故障矩阵未实现）。
+当前实现进度：**87%**（已完成内存/Moka/SQLite 首轮 adapter、Cache-Core 主链、稳定 key/TTL/CAS、latest-target finalizer、production recovery/non-blocking persistence、历史/当前 owner 有序 shutdown、完整 SQLite future deadline、安全 gap 摘要与真实 SQLite Busy 重试；完整 late-window 候选生命周期、last-access bucket、真实 disk-full 数据库故障恢复与跨 adapter 真实故障矩阵未实现）。
