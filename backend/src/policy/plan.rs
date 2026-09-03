@@ -5,7 +5,6 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::model::RuleSetFormat;
 use crate::config::resolve::{
     ConfigId, ResolvedClient, ResolvedConfig, ResolvedEcs, ResolvedGlobalCache,
     ResolvedHostsResource, ResolvedRuleSet, ResolvedStrategy, ResolvedTtlOverride,
@@ -236,6 +235,7 @@ impl PolicyIndex {
     pub fn from_config(config: &ResolvedConfig) -> Result<Self, PolicyBuildError> {
         let (hosts, rule_sets) =
             compile_resources(&config.hosts, &config.rule_sets, &BTreeMap::new())?;
+        validate_rule_set_selectors(config, &rule_sets)?;
         Self::build_with_resources(
             config.listeners.clone(),
             config.strategies.clone(),
@@ -258,6 +258,7 @@ impl PolicyIndex {
             supplied_hosts,
             supplied_rule_indexes,
         )?;
+        validate_rule_set_selectors(config, &rule_sets)?;
         Self::build_with_resources(
             config.listeners.clone(),
             config.strategies.clone(),
@@ -440,16 +441,25 @@ impl PolicyIndex {
             let Some(rule_set) = &rule.rule_set else {
                 continue;
             };
-            if let Some(selector) = &rule_set.selector {
-                return Err(PolicyError::UnsupportedRuleSetSelector {
-                    resource: rule_set.resource.clone(),
-                    selector: selector.clone(),
-                });
-            }
             let index = self
                 .rule_sets
                 .get(&rule_set.resource)
                 .ok_or_else(|| PolicyError::RuleSetNotFound(rule_set.resource.clone()))?;
+            let index = match &rule_set.selector {
+                Some(selector) => index.selector(selector).ok_or_else(|| {
+                    PolicyError::UnsupportedRuleSetSelector {
+                        resource: rule_set.resource.clone(),
+                        selector: selector.clone(),
+                    }
+                })?,
+                None if index.is_selector_map() => {
+                    return Err(PolicyError::UnsupportedRuleSetSelector {
+                        resource: rule_set.resource.clone(),
+                        selector: "<missing>".to_owned(),
+                    });
+                }
+                None => index.as_ref(),
+            };
             if let Some(matcher) = index.matches(qname) {
                 return Ok((
                     None,
@@ -638,43 +648,35 @@ fn compile_resources_with_supplied(
                         kind: "remote",
                     });
                 }
-                ResolvedRuleSet::Const { format, .. } | ResolvedRuleSet::File { format, .. } => {
-                    if *format == RuleSetFormat::Dat {
-                        return Err(PolicyBuildError::UnsupportedRuleSet {
-                            resource: id.clone(),
-                            kind: "dat",
-                        });
-                    }
-                    Arc::new(
-                        load_rule_set(resource, RuleLimits::default())
-                            .map_err(|source| match source {
-                                RuleResourceLoadError::Parse { source, .. } => {
-                                    PolicyBuildError::RuleSetParse {
-                                        resource: id.clone(),
-                                        source,
-                                    }
-                                }
-                                RuleResourceLoadError::UnsupportedFormat { .. } => {
-                                    PolicyBuildError::UnsupportedRuleSet {
-                                        resource: id.clone(),
-                                        kind: "dat",
-                                    }
-                                }
-                                RuleResourceLoadError::UnsupportedSource { kind, .. } => {
-                                    PolicyBuildError::UnsupportedRuleSet {
-                                        resource: id.clone(),
-                                        kind,
-                                    }
-                                }
-                                source => PolicyBuildError::RuleSetLoad {
+                ResolvedRuleSet::Const { .. } | ResolvedRuleSet::File { .. } => Arc::new(
+                    load_rule_set(resource, RuleLimits::default())
+                        .map_err(|source| match source {
+                            RuleResourceLoadError::Parse { source, .. } => {
+                                PolicyBuildError::RuleSetParse {
                                     resource: id.clone(),
                                     source,
-                                },
-                            })?
-                            .index()
-                            .clone(),
-                    )
-                }
+                                }
+                            }
+                            RuleResourceLoadError::UnsupportedFormat { .. } => {
+                                PolicyBuildError::UnsupportedRuleSet {
+                                    resource: id.clone(),
+                                    kind: "format",
+                                }
+                            }
+                            RuleResourceLoadError::UnsupportedSource { kind, .. } => {
+                                PolicyBuildError::UnsupportedRuleSet {
+                                    resource: id.clone(),
+                                    kind,
+                                }
+                            }
+                            source => PolicyBuildError::RuleSetLoad {
+                                resource: id.clone(),
+                                source,
+                            },
+                        })?
+                        .index()
+                        .clone(),
+                ),
             }
         };
         if rule_indexes.insert(id.clone(), index).is_some() {
@@ -682,6 +684,39 @@ fn compile_resources_with_supplied(
         }
     }
     Ok((host_indexes, rule_indexes))
+}
+
+fn validate_rule_set_selectors(
+    config: &ResolvedConfig,
+    indexes: &BTreeMap<ConfigId, Arc<RuleIndex>>,
+) -> Result<(), PolicyBuildError> {
+    for strategy in &config.strategies {
+        for rule in &strategy.rules {
+            let Some(reference) = &rule.rule_set else {
+                continue;
+            };
+            let Some(index) = indexes.get(&reference.resource) else {
+                continue;
+            };
+            match (&reference.selector, index.is_selector_map()) {
+                (Some(selector), true) if index.selector(selector).is_some() => {}
+                (None, false) => {}
+                (Some(selector), _) => {
+                    return Err(PolicyBuildError::UnsupportedRuleSetSelector {
+                        resource: reference.resource.clone(),
+                        selector: selector.clone(),
+                    });
+                }
+                (None, true) => {
+                    return Err(PolicyBuildError::UnsupportedRuleSetSelector {
+                        resource: reference.resource.clone(),
+                        selector: "<missing>".to_owned(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn strategy_namespace(strategy: &ResolvedStrategy) -> Result<CacheStrategyId, PolicyError> {
@@ -706,7 +741,7 @@ mod tests {
         ResolvedStrategy, ResolvedStrategyRule, ResolvedTtlOverride, ValueSource,
     };
     use crate::ports::cache::CacheNamespace;
-    use crate::resource::{CanonicalDomain, HostsIndex, RuleIndex};
+    use crate::resource::{CanonicalDomain, HostsIndex, RuleIndex, RuleMatch};
 
     use super::{
         CacheDecision, MatchedRuleKind, PolicyError, PolicyIndex, PolicyRequest, select_ecs,
@@ -818,6 +853,14 @@ mod tests {
             persistence_path: PathBuf::from("cache.db"),
             persistence_max_size_bytes: 1024,
         }
+    }
+
+    fn dat_fixture() -> Vec<u8> {
+        let mut bytes = vec![
+            0x0a, 0x16, 0x0a, 0x02, b'C', b'N', 0x12, 0x10, 0x08, 0x03, 0x12, 0x0c,
+        ];
+        bytes.extend_from_slice(b"example.test");
+        bytes
     }
 
     /// 验证 cache 显式配置在 client、strategy、global 三层按首个命中停止回退。
@@ -1171,6 +1214,59 @@ mod tests {
         assert!(matches!(
             rule_plan.matched_rule.as_ref().map(|matched| &matched.kind),
             Some(MatchedRuleKind::RuleSet { resource, .. }) if resource == &rule_set
+        ));
+    }
+
+    #[test]
+    fn dat_selector_uses_the_selected_matcher() {
+        let resource = ConfigId::new("geosite").unwrap();
+        let strategy = strategy_with_rules(
+            "default",
+            vec![ResolvedStrategyRule {
+                rule_set: Some(ResolvedRuleSetRef {
+                    resource: resource.clone(),
+                    selector: Some("cn".to_owned()),
+                }),
+                hosts: None,
+                upstream: Some(ConfigId::new("selected").unwrap()),
+                edns_client_subnet: ecs(),
+            }],
+        );
+        let mut rule_sets = BTreeMap::new();
+        rule_sets.insert(
+            resource.clone(),
+            Arc::new(RuleIndex::parse_dat(&dat_fixture()).unwrap()),
+        );
+        let index = PolicyIndex::build_with_resources(
+            [listener()],
+            [strategy],
+            [],
+            BTreeMap::new(),
+            global(false),
+            BTreeMap::new(),
+            rule_sets,
+        )
+        .unwrap();
+        let listener_id = ConfigId::new("lan").unwrap();
+        let qname = CanonicalDomain::parse("example.test").unwrap();
+        let plan = index
+            .evaluate(PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: None,
+                client_id: None,
+                client_addr: None,
+                client_digest: None,
+                qname: Some(&qname),
+            })
+            .unwrap();
+
+        assert_eq!(plan.upstream.as_str(), "selected");
+        assert!(matches!(
+            plan.matched_rule.as_ref().map(|matched| &matched.kind),
+            Some(MatchedRuleKind::RuleSet {
+                resource: matched_resource,
+                matcher: RuleMatch::Exact,
+            }) if matched_resource == &resource
         ));
     }
 

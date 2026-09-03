@@ -1,6 +1,6 @@
 # Resource 模块设计
 
-> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取；async `PreparedRuntime` 已在 bind 前完成 remote rule-set restore-or-fetch、file hosts/rule-set snapshot 加载和 typed Policy 构造；`auto_update=true` 的 remote、file rule-set、file hosts 均由 service Supervisor 持有长期 refresh task，并在同一 ActiveRuntime 原子更新 Policy 与资源摘要；`ResourceRegistrySnapshot` 已提供按资源过滤的更高版本合并原语，`ResourceRefreshRuntime` 现可迁移已发布 registry 版本和稳定 schedule/backoff 状态，供配置候选 Runtime 合并使用；service reload 现按资源 ID 增量复用未变化 worker、取消移除 worker；资源内容刷新不创建新 Runtime 或重绑 listener
+> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、`geosite.dat` protobuf selector 解析、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取；async `PreparedRuntime` 已在 bind 前完成 remote rule-set restore-or-fetch、file hosts/rule-set snapshot 加载和 typed Policy 构造；`auto_update=true` 的 remote、file rule-set、file hosts 均由 service Supervisor 持有长期 refresh task，并在同一 ActiveRuntime 原子更新 Policy 与资源摘要；`ResourceRegistrySnapshot` 已提供按资源过滤的更高版本合并原语，`ResourceRefreshRuntime` 现可迁移已发布 registry 版本和稳定 schedule/backoff 状态，供配置候选 Runtime 合并使用；service reload 现按资源 ID 增量复用未变化 worker、取消移除 worker；资源内容刷新不创建新 Runtime 或重绑 listener
 >
 > 更新日期：2026-09-03
 >
@@ -19,7 +19,7 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 | 文件 | 职责 |
 | --- | --- |
 | `hosts.rs` | JSON/hosts 格式、本地 RR 索引 |
-| `rules.rs` | JSON/Clash 规则解析和 matcher；`dat selector` 后置 |
+| `rules.rs` | JSON/Clash/`geosite.dat` 规则解析和 matcher |
 | `loader.rs` | const/file、大小限制、稳定读取与 parser 边界；remote 内容加载由 `remote.rs` 编排 |
 | `orchestrator.rs` | schedule、refresh coordinator、due/backoff、CAS publish 和 stop 语义的 Runtime-facing 纯逻辑编排 |
 | `snapshot.rs` | metadata、revision、registry 和 publish input |
@@ -101,7 +101,7 @@ v1 本地回答支持 A、AAAA 和 CNAME：
 
 ## 6. Rule 格式
 
-当前实现覆盖 JSON 与 Clash 的 exact/suffix/受限 regex matcher；`dat` selector map 仍保留为后续边界。
+当前实现覆盖 JSON 与 Clash 的 exact/suffix/受限 regex matcher，并解析 V2Ray `geosite.dat` protobuf 的 selector map。`Full`/`RootDomain`/`Regex`/`Plain` 四种 domain type 分别映射到 exact/suffix/受限 regex/keyword matcher；未知 protobuf 字段按 wire type 跳过，输入、selector 和规则数量均受有界限制。
 
 ### JSON
 
@@ -117,9 +117,9 @@ v1 本地回答支持 A、AAAA 和 CNAME：
 
 v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽略；未知 rule type、缺列或多余不可解释字段报带行号错误。
 
-### dat（后置）
+### dat（geosite.dat）
 
-目标契约为 selector → domain matcher map。selector 必须是非空 ASCII 标识，加载时统一转为小写；大小写归一化后重复的 selector 报错。`geosite:cn` 先解析大小写敏感的资源名 `geosite`，再查 canonical selector `cn`。当前实现对 `dat` 返回稳定 `UnsupportedFormat`，待确认二进制格式和依赖边界后再接入。
+目标契约为 selector → domain matcher map，采用 V2Ray `GeoSiteList` protobuf schema。selector 必须是非空 ASCII 标识，加载时统一转为小写；大小写归一化后重复的 selector 报错。`geosite:cn` 先解析大小写敏感的资源名 `geosite`，再查 canonical selector `cn`。解析器只依赖现有代码，拒绝截断、非法 wire type、未知 domain type、超限 selector 和超限规则；Policy 在 prepare 阶段校验 selector 存在，查询热路径只使用已编译 matcher。
 
 ## 7. Matcher
 
@@ -129,7 +129,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 - reversed-label suffix trie；
 - wildcard suffix trie；
 - 预编译 regex set；
-- `dat selector` map（后置）。
+- `dat selector` map（V2Ray `GeoSiteList` protobuf）。
 
 匹配优先级由 Policy 固定。matcher 无内部 mutable cache，保证 snapshot 可跨线程共享。
 
@@ -185,7 +185,7 @@ content 与 manifest 各自原子替换，但不构成跨文件事务；恢复�
 ## 12. 测试
 
 - hosts JSON/line、A/AAAA/CNAME、wildcard/exact；
-- JSON/Clash rule，以及 `dat` 的稳定拒绝边界；
+- JSON/Clash rule、`geosite.dat` protobuf selector 及其稳定错误边界；
 - canonical domain、重复、冲突和 regex 限制；
 - const/file/remote 首次加载；
 - ETag/304、body limit、重定向、代理 failure；
@@ -210,8 +210,8 @@ content 与 manifest 各自原子替换，但不构成跨文件事务；恢复�
 - [x] 接入当前 ActiveRuntime 的 file/hosts 长期刷新、Policy live publish 和 Runtime 元数据 CAS；
 - [x] 接入候选 Runtime 的兼容 snapshot/registry 合并和稳定 worker schedule 迁移，并与 revision CAS 绑定；
 - [x] 完成当前解析、安全边界、文件稳定读取和并发 CAS 测试；
-- [x] 完成当前 MVP 范围的 remote 恢复、原子落盘和长期刷新定向测试；宕机中断与长期压力验收后置。
+- [x] 完成当前 MVP 范围的 remote 恢复、原子落盘、`dat` selector 和长期刷新定向测试；宕机中断与长期压力验收后置。
 
-阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；`resource::fetcher::tests` 覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy、SecretRef 脱敏和 prepare 错误；reqwest 与项目 `ring` provider 的初始化顺序已统一；async PreparedRuntime restore/fetch 与 file snapshot 测试验证 bind 前资源准备，ResourceRefreshWorker focused tests 验证 remote/file worker 的 due/reservation、CAS publish、backoff、cancel 和 shutdown；service 已为 remote/file rule-set/hosts 注册长期 refresh task，成功候选经 Policy CAS 和 Runtime metadata CAS 发布；跨 Runtime 合并测试验证更高资源版本、compiled Policy、metadata 和 worker schedule 状态迁移，service 增量测试验证 reload 时 unchanged worker 复用与 removed worker 取消；Policy 定向测试验证命中结果携带当前 hosts/rule-set 的 typed `ResourceVersion`。阶段 181 复核 Resource 56 项及候选合并、运行中刷新、reload worker 生命周期 4 项定向测试，共 `60 passed、0 failed`；配置候选生命周期已闭合，剩余功能项为 `dat selector`，长期压力与宕机中断继续后置。
+阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size/`dat` tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；`resource::fetcher::tests` 覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy、SecretRef 脱敏和 prepare 错误；reqwest 与项目 `ring` provider 的初始化顺序已统一；async PreparedRuntime restore/fetch 与 file snapshot 测试验证 bind 前资源准备，ResourceRefreshWorker focused tests 验证 remote/file worker 的 due/reservation、CAS publish、backoff、cancel 和 shutdown；service 已为 remote/file rule-set/hosts 注册长期 refresh task，成功候选经 Policy CAS 和 Runtime metadata CAS 发布；跨 Runtime 合并测试验证更高资源版本、compiled Policy、metadata 和 worker schedule 状态迁移，service 增量测试验证 reload 时 unchanged worker 复用与 removed worker 取消；Policy 定向测试验证命中结果携带当前 hosts/rule-set 的 typed `ResourceVersion`。阶段 181 复核 Resource 56 项及候选合并、运行中刷新、reload worker 生命周期 4 项定向测试，共 `60 passed、0 failed`；阶段 198 增加 `geosite.dat` protobuf selector、四类 domain type、边界/远程恢复和 PreparedRuntime 接线测试；后续仅剩长期压力与宕机中断验收。
 
-当前实现进度：**92%**。
+当前实现进度：**96%**。

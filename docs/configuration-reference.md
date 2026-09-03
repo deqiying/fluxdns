@@ -533,7 +533,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 
 进程启动后的刷新只有在下载/读取、完整解析和内容校验都成功后才能原子替换当前快照；失败时保留上一份有效快照并记录带字段路径的错误。`auto_update` 只控制启动后的刷新，不降低首次快照要求；重试采用指数退避并封顶 5 分钟，连续三次计划刷新失败或超过 `3 × update_interval` 未成功时标记资源 `stale`，但仍可使用上一份有效快照。没有旧快照的资源引用必须 fail-closed。模板暂未提供远程版本锁定或 expected checksum 字段，当前仅记录内部 content hash/source fingerprint，生产部署的固定版本策略需后续定稿。
 
-`geosite:cn` 这类写法表示引用 `dat` 地理规则集中的命名子集。解析时先尝试完整资源名；完整名不存在时再按第一个 `:` 拆分。资源名大小写敏感，selector 必须是非空 ASCII 标识并归一化为小写；格式不支持 selector 或 selector 不存在时在 prepare 阶段失败。
+`geosite:cn` 这类写法表示引用 V2Ray `GeoSiteList` protobuf `dat` 地理规则集中的命名子集。解析时先尝试完整资源名；完整名不存在时再按第一个 `:` 拆分。资源名大小写敏感，selector 必须是非空 ASCII 标识并归一化为小写；格式不支持 selector 或 selector 不存在时在 prepare 阶段失败。`dat` 内容按二进制 protobuf 读取，不先转换为 UTF-8。
 
 ## 15. `clients[]`
 

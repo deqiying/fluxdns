@@ -268,19 +268,21 @@ pub fn load_rule_set(
             resource: id.as_str().to_owned(),
         });
     }
-    if format == crate::config::model::RuleSetFormat::Dat {
-        return Err(RuleResourceLoadError::UnsupportedFormat {
-            resource: id.as_str().to_owned(),
-        });
-    }
-    let text = String::from_utf8(bytes).map_err(|_| RuleResourceLoadError::InvalidUtf8 {
-        resource: id.as_str().to_owned(),
-    })?;
-    let index = RuleIndex::parse_with_limits(&text, format, limits).map_err(|source| {
-        RuleResourceLoadError::Parse {
-            resource: id.as_str().to_owned(),
-            source,
+    let index = match format {
+        crate::config::model::RuleSetFormat::Dat => {
+            RuleIndex::parse_bytes_with_limits(&bytes, format, limits)
         }
+        crate::config::model::RuleSetFormat::Json | crate::config::model::RuleSetFormat::Clash => {
+            let text =
+                std::str::from_utf8(&bytes).map_err(|_| RuleResourceLoadError::InvalidUtf8 {
+                    resource: id.as_str().to_owned(),
+                })?;
+            RuleIndex::parse_with_limits(text, format, limits)
+        }
+    }
+    .map_err(|source| RuleResourceLoadError::Parse {
+        resource: id.as_str().to_owned(),
+        source,
     })?;
 
     Ok(LoadedRuleSetResource {
@@ -371,6 +373,14 @@ mod tests {
 
     fn id(value: &str) -> ConfigId {
         ConfigId::new(value).unwrap()
+    }
+
+    fn dat_fixture() -> Vec<u8> {
+        let mut bytes = vec![
+            0x0a, 0x16, 0x0a, 0x02, b'C', b'N', 0x12, 0x10, 0x08, 0x03, 0x12, 0x0c,
+        ];
+        bytes.extend_from_slice(b"example.test");
+        bytes
     }
 
     #[test]
@@ -523,17 +533,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_rule_formats_and_sources_not_supported_by_this_slice() {
+    fn loads_dat_rule_sets_and_rejects_remote_sources_at_local_boundary() {
         let dat = ResolvedRuleSet::Const {
             id: id("dat-rules"),
             format: RuleSetFormat::Dat,
-            rule: "opaque".to_owned(),
+            rule: String::from_utf8(dat_fixture()).unwrap(),
         };
-        assert!(matches!(
-            load_rule_set(&dat, super::RuleLimits::default()),
-            Err(RuleResourceLoadError::UnsupportedFormat { resource })
-                if resource == "dat-rules"
-        ));
+        let loaded = load_rule_set(&dat, super::RuleLimits::default()).unwrap();
+        assert_eq!(loaded.index().selector_count(), 1);
+        assert!(loaded.index().selector("cn").is_some());
 
         let remote = ResolvedRuleSet::Remote {
             id: id("remote-rules"),

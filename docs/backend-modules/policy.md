@@ -1,6 +1,6 @@
 # Policy 模块设计
 
-> 状态：v1 主链已完成，client/strategy/route immutable index、resource snapshot、ResolutionPlan、cache/TTL/ECS、direct/group upstream、late candidate 和配置 reload 均已接线并有跨 transport/cross-adapter 证据；`dat selector` 仍后置
+> 状态：v1 主链已完成，client/strategy/route immutable index、resource snapshot、ResolutionPlan、cache/TTL/ECS、direct/group upstream、late candidate、`geosite.dat` selector 和配置 reload 均已接线并有跨 transport/cross-adapter 证据
 >
 > 更新日期：2026-09-03
 >
@@ -57,7 +57,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 - `StrategyIndex`：将已解析策略编译为不可变 `BTreeMap<ConfigId, Arc<ResolvedStrategy>>`，重复策略 ID 在构建时拒绝；
 - `RouteIndex`：编译 stream listener 与 DoH route，校验 `{client_id}` segment 模板并保留 typed listener/route 选择结果；
 - `PolicyIndex::evaluate`：组合 client strategy override、cache tri-state、TTL/ECS effective value 和 upstream target，输出不可变 `ResolutionPlan`；
-- `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash rule-set；remote/dat/selector/缺失资源在普通同步构造边界返回显式错误；`from_config_with_resource_indexes` 可消费 prepare 阶段已编译的 file/remote snapshot；
+- `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash/`geosite.dat` rule-set；remote 资源和缺失资源在普通同步构造边界返回显式错误；`from_config_with_resource_indexes` 可消费 prepare 阶段已编译的 file/remote snapshot；`dat` selector 在 prepare 阶段校验存在，运行时只读取已编译 selector matcher；
 - rule/hosts 执行：固定 listener hosts → strategy rule 顺序，输出不含原文的 matched-rule 摘要，并覆盖 local hosts、rule-set upstream 与 rule ECS；
 - `PolicyDnsCore::UpstreamRuntime`：direct hosts/plain HTTP DoH connector 统一由 `UpstreamRegistry` 构造，Unsupported DoH 能力在 prepare 边界向上游构建错误传播；
 - `PolicyDnsCore::resolve_with_observation`：复用同一次 `PolicyIndex::evaluate` 的结果，输出配置 client bucket、策略目标 upstream/group、实际顶层 group member、matched rule/resource 以及 strategy/source/cache 首轮元数据，不泄露原始 client ID/IP、matcher 或规则文本；
@@ -199,10 +199,12 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 完成 Policy compiled resource snapshot 的版本化 atomic swap，并支持 supplied compiled file/remote hosts/rule-set snapshot 的初始构造及跨 transport contract；
 - [x] 提供 client bucket/strategy/source/cache/selected upstream 低基数 observation；`upstream_id`、实际顶层 `upstream_member_id` 和 matched rule/resource 摘要已拆分。
 - [x] `PolicyLateResultSink` 按当前 `CacheEntry.quality` 使用 `CacheCondition::Version` 更新候选，允许更优 late Positive 替换早期 Negative，并拒绝同级 Negative/Positive 或更低 Failure 覆盖；hosts/DoH cross-adapter 并发候选已有回归；
-- [ ] 实现 `dat selector` 的二进制资源解析和 selector matcher；MVP 不为此新增未经验证的格式依赖。
+- [x] 实现 `dat selector` 的 V2Ray `GeoSiteList` protobuf 资源解析和 selector matcher；复用现有代码，不新增二进制格式依赖。
 
-阶段证据：`policy::client::tests` 4 项、`policy::plan::tests` 10 项通过，覆盖实际命中身份摘要、client pool namespace、TTL/strategy 继承、cache 显式启停/回退和 ECS 优先级矩阵；`dns::policy::tests` 35 项通过，覆盖 strategy/client cache、身份隔离、hosts/rule-set/group/DoH、optimistic refresh/late sink、TTL、ECS 和 SQLite cache 恢复；Service 的真实 UDP/TCP/plain DoH 成功与错误契约测试均通过；阶段 176 补齐 hosts/DoH cross-adapter 并发候选。最近一次大阶段 backend 全量测试为 539 passed、0 failed。
+阶段证据：`policy::client::tests` 4 项、`policy::plan::tests` 11 项通过，覆盖实际命中身份摘要、client pool namespace、TTL/strategy 继承、cache 显式启停/回退、ECS 优先级矩阵和 `dat` selector；`dns::policy::tests` 35 项通过，覆盖 strategy/client cache、身份隔离、hosts/rule-set/group/DoH、optimistic refresh/late sink、TTL、ECS 和 SQLite cache 恢复；Service 的真实 UDP/TCP/plain DoH 成功与错误契约测试均通过；阶段 176 补齐 hosts/DoH cross-adapter 并发候选。阶段 198 的 Resource/Policy/PreparedRuntime 定向测试验证 V2Ray `GeoSiteList` protobuf、四类 domain type、selector 选择和 bind 前编译。最近一次大阶段 backend 全量测试为 569 passed、0 failed。
 
 阶段 178 复核 Policy plan 10 项、Policy Core 35 项及 UDP/TCP/plain DoH 两条真实契约，确认原文中的 cross-adapter 与跨 transport 缺口已闭合；未执行全量后端测试。
 
-当前实现进度：**88%**（v1 配置驱动主链、资源 live snapshot、cache/TTL/ECS、观测和协议组合已完成；主要剩余项为 `dat selector`）。
+阶段 198 增加 `geosite.dat` V2Ray protobuf selector 解析、`Plain`/`Regex`/`RootDomain`/`Full` matcher、重复/截断/限额错误，以及 Policy/PreparedRuntime 的选择和 bind 前编译证据。
+
+当前实现进度：**92%**（v1 配置驱动主链、资源 live snapshot、cache/TTL/ECS、观测、协议组合和 `dat selector` 已完成；剩余为长期压力与最终验收矩阵）。

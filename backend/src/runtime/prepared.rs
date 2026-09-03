@@ -1060,6 +1060,14 @@ clients: []
             .resolved
     }
 
+    fn dat_fixture() -> Vec<u8> {
+        let mut bytes = vec![
+            0x0a, 0x16, 0x0a, 0x02, b'C', b'N', 0x12, 0x10, 0x08, 0x03, 0x12, 0x0c,
+        ];
+        bytes.extend_from_slice(b"example.test");
+        bytes
+    }
+
     #[test]
     fn prepare_creates_a_candidate_without_binding() {
         let config = config();
@@ -1291,6 +1299,56 @@ clients: []
                 .consecutive_failures(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn async_prepare_compiles_file_dat_selector_before_bind() {
+        let path = std::env::temp_dir().join(format!(
+            "fluxdns-runtime-dat-{}-{}.dat",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, dat_fixture()).unwrap();
+        let resource_id = ConfigId::new("geosite").unwrap();
+        let mut config = Arc::try_unwrap(config()).unwrap();
+        config.rule_sets = vec![crate::config::resolve::ResolvedRuleSet::File {
+            id: resource_id.clone(),
+            format: crate::config::model::RuleSetFormat::Dat,
+            path: path.clone(),
+            auto_update: false,
+            update_interval: None,
+        }];
+        let strategy_ecs = config.strategies[0].edns_client_subnet.clone();
+        config.strategies[0].rules = vec![crate::config::resolve::ResolvedStrategyRule {
+            rule_set: Some(crate::config::resolve::ResolvedRuleSetRef {
+                resource: resource_id.clone(),
+                selector: Some("cn".to_owned()),
+            }),
+            hosts: None,
+            upstream: Some(ConfigId::new("local").unwrap()),
+            edns_client_subnet: strategy_ecs,
+        }];
+
+        let candidate = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            Arc::new(config),
+            RuntimeRevision(7),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(candidate.preflight().resource_snapshot_count, 1);
+        assert!(
+            candidate.resource_snapshots()[&resource_id]
+                .compiled()
+                .selector("cn")
+                .is_some()
+        );
+        std::fs::remove_file(path).unwrap();
     }
 
     #[tokio::test]

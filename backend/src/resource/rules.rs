@@ -1,7 +1,8 @@
 //! 受限规则集的解析、规范化和不可变匹配索引。
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
+use std::sync::Arc;
 
 use serde::Deserialize;
 use thiserror::Error;
@@ -14,6 +15,12 @@ const DEFAULT_MAX_RULES: usize = 131_072;
 const DEFAULT_MAX_RULE_BYTES: usize = 4 * 1024;
 const DEFAULT_MAX_REGEX_BYTES: usize = 2 * 1024;
 const DEFAULT_MAX_REGEX_PROGRAM: usize = 4_096;
+const DEFAULT_MAX_SELECTORS: usize = 4_096;
+const DEFAULT_MAX_SELECTOR_BYTES: usize = 128;
+const WIRE_VARINT: u8 = 0;
+const WIRE_I64: u8 = 1;
+const WIRE_LEN_DELIM: u8 = 2;
+const WIRE_I32: u8 = 5;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuleLimits {
@@ -22,6 +29,8 @@ pub struct RuleLimits {
     pub max_rule_bytes: usize,
     pub max_regex_bytes: usize,
     pub max_regex_program: usize,
+    pub max_selectors: usize,
+    pub max_selector_bytes: usize,
 }
 
 impl Default for RuleLimits {
@@ -32,6 +41,8 @@ impl Default for RuleLimits {
             max_rule_bytes: DEFAULT_MAX_RULE_BYTES,
             max_regex_bytes: DEFAULT_MAX_REGEX_BYTES,
             max_regex_program: DEFAULT_MAX_REGEX_PROGRAM,
+            max_selectors: DEFAULT_MAX_SELECTORS,
+            max_selector_bytes: DEFAULT_MAX_SELECTOR_BYTES,
         }
     }
 }
@@ -64,12 +75,23 @@ pub enum RuleParseError {
     UnsupportedRegex { line: usize },
     #[error("rule line {line} contains too many regex instructions")]
     RegexProgramTooLarge { line: usize },
+    #[error("rule resource dat payload is invalid")]
+    InvalidDat,
+    #[error("rule resource dat contains too many selectors")]
+    TooManySelectors,
+    #[error("rule resource dat selector is invalid")]
+    InvalidDatSelector,
+    #[error("rule resource dat selector is too long")]
+    DatSelectorTooLong,
+    #[error("rule resource dat contains an unsupported domain type")]
+    UnsupportedDatDomainType,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuleMatch {
     Exact,
     Suffix { label_count: usize },
+    Keyword { ordinal: usize },
     Regex { ordinal: usize },
 }
 
@@ -77,7 +99,9 @@ pub enum RuleMatch {
 pub struct RuleIndex {
     exact: BTreeSet<CanonicalDomain>,
     suffix: BTreeSet<CanonicalDomain>,
+    keywords: BTreeSet<String>,
     regex: Vec<CompiledRegex>,
+    selectors: BTreeMap<String, Arc<RuleIndex>>,
     rule_count: usize,
 }
 
@@ -87,7 +111,9 @@ impl fmt::Debug for RuleIndex {
             .debug_struct("RuleIndex")
             .field("exact_count", &self.exact.len())
             .field("suffix_count", &self.suffix.len())
+            .field("keyword_count", &self.keywords.len())
             .field("regex_count", &self.regex.len())
+            .field("selector_count", &self.selectors.len())
             .field("rule_count", &self.rule_count)
             .finish()
     }
@@ -109,8 +135,82 @@ impl RuleIndex {
         match format {
             RuleSetFormat::Json => Self::parse_json_with_limits(input, limits),
             RuleSetFormat::Clash => Self::parse_clash_with_limits(input, limits),
-            RuleSetFormat::Dat => Err(RuleParseError::UnsupportedFormat),
+            RuleSetFormat::Dat => Self::parse_dat_with_limits(input.as_bytes(), limits),
         }
+    }
+
+    /// 解析指定格式的原始字节。`dat` 是 protobuf 二进制，不能先转换为 UTF-8。
+    pub fn parse_bytes(input: &[u8], format: RuleSetFormat) -> Result<Self, RuleParseError> {
+        Self::parse_bytes_with_limits(input, format, RuleLimits::default())
+    }
+
+    pub fn parse_bytes_with_limits(
+        input: &[u8],
+        format: RuleSetFormat,
+        limits: RuleLimits,
+    ) -> Result<Self, RuleParseError> {
+        if input.len() > limits.max_input_bytes {
+            return Err(RuleParseError::InputTooLarge);
+        }
+        match format {
+            RuleSetFormat::Dat => Self::parse_dat_with_limits(input, limits),
+            RuleSetFormat::Json | RuleSetFormat::Clash => {
+                let text = std::str::from_utf8(input).map_err(|_| RuleParseError::InvalidJson)?;
+                Self::parse_with_limits(text, format, limits)
+            }
+        }
+    }
+
+    pub fn parse_dat(input: &[u8]) -> Result<Self, RuleParseError> {
+        Self::parse_dat_with_limits(input, RuleLimits::default())
+    }
+
+    pub fn parse_dat_with_limits(input: &[u8], limits: RuleLimits) -> Result<Self, RuleParseError> {
+        if input.len() > limits.max_input_bytes {
+            return Err(RuleParseError::InputTooLarge);
+        }
+        let mut reader = DatReader::new(input);
+        let mut selectors: BTreeMap<String, RuleIndex> = BTreeMap::new();
+        while let Some((field, wire)) = reader.read_key()? {
+            if field == 1 && wire == WIRE_LEN_DELIM {
+                let payload = reader.read_length_delimited()?;
+                let site = parse_dat_site(payload, limits)?;
+                let selector = normalize_dat_selector(&site.selector, limits)?;
+                if selectors.contains_key(&selector) {
+                    return Err(RuleParseError::InvalidDatSelector);
+                }
+                if selectors.len() >= limits.max_selectors {
+                    return Err(RuleParseError::TooManySelectors);
+                }
+                let total_rules = selectors
+                    .values()
+                    .map(|index| index.rule_count)
+                    .sum::<usize>()
+                    .checked_add(site.index.rule_count)
+                    .ok_or(RuleParseError::TooManyRules)?;
+                if total_rules > limits.max_rules {
+                    return Err(RuleParseError::TooManyRules);
+                }
+                selectors.insert(selector, site.index);
+            } else {
+                reader.skip_field(wire)?;
+            }
+        }
+        if !reader.is_exhausted() || selectors.is_empty() {
+            return Err(RuleParseError::InvalidDat);
+        }
+        let rule_count = selectors.values().map(|index| index.rule_count).sum();
+        Ok(Self {
+            exact: BTreeSet::new(),
+            suffix: BTreeSet::new(),
+            keywords: BTreeSet::new(),
+            regex: Vec::new(),
+            selectors: selectors
+                .into_iter()
+                .map(|(name, index)| (name, Arc::new(index)))
+                .collect(),
+            rule_count,
+        })
     }
 
     pub fn parse_json(input: &str) -> Result<Self, RuleParseError> {
@@ -207,6 +307,22 @@ impl RuleIndex {
         self.regex.len()
     }
 
+    pub fn keyword_count(&self) -> usize {
+        self.keywords.len()
+    }
+
+    pub fn selector_count(&self) -> usize {
+        self.selectors.len()
+    }
+
+    pub fn is_selector_map(&self) -> bool {
+        !self.selectors.is_empty()
+    }
+
+    pub fn selector(&self, value: &str) -> Option<&RuleIndex> {
+        self.selectors.get(value).map(Arc::as_ref)
+    }
+
     pub fn matches(&self, name: &CanonicalDomain) -> Option<RuleMatch> {
         if self.exact.contains(name) {
             return Some(RuleMatch::Exact);
@@ -225,6 +341,15 @@ impl RuleIndex {
             }
         }
 
+        if let Some((ordinal, _)) = self
+            .keywords
+            .iter()
+            .enumerate()
+            .find(|(_, keyword)| name.as_str().contains(keyword.as_str()))
+        {
+            return Some(RuleMatch::Keyword { ordinal });
+        }
+
         self.regex.iter().enumerate().find_map(|(ordinal, regex)| {
             regex
                 .is_match(name.as_str())
@@ -236,7 +361,9 @@ impl RuleIndex {
         Self {
             exact: BTreeSet::new(),
             suffix: BTreeSet::new(),
+            keywords: BTreeSet::new(),
             regex: Vec::new(),
+            selectors: BTreeMap::new(),
             rule_count: 0,
         }
     }
@@ -279,6 +406,17 @@ impl RuleIndex {
             .map_err(|error| error.with_line(line))?;
         self.regex.push(compiled);
         self.bump_rule_count(limits)
+    }
+
+    fn add_keyword(&mut self, value: &str, limits: RuleLimits) -> Result<(), RuleParseError> {
+        if value.len() > limits.max_rule_bytes || value.is_empty() {
+            return Err(RuleParseError::InvalidDat);
+        }
+        let value = value.to_ascii_lowercase();
+        if self.keywords.insert(value) {
+            self.bump_rule_count(limits)?;
+        }
+        Ok(())
     }
 
     fn bump_rule_count(&mut self, limits: RuleLimits) -> Result<(), RuleParseError> {
@@ -577,6 +715,187 @@ fn atom_matches(atom: &RegexAtom, character: char) -> bool {
     }
 }
 
+/// `geosite.dat` 使用 V2Ray 的 protobuf GeoSiteList schema。
+///
+/// 这里只解析路由需要的字段，未知字段按 protobuf wire type 跳过；整个输入、
+/// selector 数量和每个 selector 的规则数量均由 `RuleLimits` 约束，避免把不可信
+/// 二进制内容转换为无界内存结构。
+struct DatReader<'a> {
+    input: &'a [u8],
+    position: usize,
+}
+
+impl<'a> DatReader<'a> {
+    const fn new(input: &'a [u8]) -> Self {
+        Self { input, position: 0 }
+    }
+
+    fn read_key(&mut self) -> Result<Option<(u32, u8)>, RuleParseError> {
+        if self.position == self.input.len() {
+            return Ok(None);
+        }
+        let key = self.read_varint()?;
+        let field = u32::try_from(key >> 3).map_err(|_| RuleParseError::InvalidDat)?;
+        let wire = u8::try_from(key & 0x07).map_err(|_| RuleParseError::InvalidDat)?;
+        if field == 0 {
+            return Err(RuleParseError::InvalidDat);
+        }
+        Ok(Some((field, wire)))
+    }
+
+    fn read_length_delimited(&mut self) -> Result<&'a [u8], RuleParseError> {
+        let length =
+            usize::try_from(self.read_varint()?).map_err(|_| RuleParseError::InvalidDat)?;
+        let end = self
+            .position
+            .checked_add(length)
+            .ok_or(RuleParseError::InvalidDat)?;
+        if end > self.input.len() {
+            return Err(RuleParseError::InvalidDat);
+        }
+        let value = &self.input[self.position..end];
+        self.position = end;
+        Ok(value)
+    }
+
+    fn skip_field(&mut self, wire: u8) -> Result<(), RuleParseError> {
+        match wire {
+            WIRE_VARINT => {
+                let _ = self.read_varint()?;
+            }
+            WIRE_I64 => self.advance(8)?,
+            WIRE_LEN_DELIM => {
+                let _ = self.read_length_delimited()?;
+            }
+            WIRE_I32 => self.advance(4)?,
+            _ => return Err(RuleParseError::InvalidDat),
+        }
+        Ok(())
+    }
+
+    fn read_varint(&mut self) -> Result<u64, RuleParseError> {
+        let mut value = 0_u64;
+        for shift in (0..=63).step_by(7) {
+            let byte = *self
+                .input
+                .get(self.position)
+                .ok_or(RuleParseError::InvalidDat)?;
+            self.position += 1;
+            if shift == 63 && byte > 1 {
+                return Err(RuleParseError::InvalidDat);
+            }
+            value |= u64::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+        }
+        Err(RuleParseError::InvalidDat)
+    }
+
+    fn advance(&mut self, count: usize) -> Result<(), RuleParseError> {
+        let end = self
+            .position
+            .checked_add(count)
+            .ok_or(RuleParseError::InvalidDat)?;
+        if end > self.input.len() {
+            return Err(RuleParseError::InvalidDat);
+        }
+        self.position = end;
+        Ok(())
+    }
+
+    const fn is_exhausted(&self) -> bool {
+        self.position == self.input.len()
+    }
+}
+
+struct DatSite {
+    selector: String,
+    index: RuleIndex,
+}
+
+struct DatDomain {
+    kind: u64,
+    value: String,
+}
+
+fn parse_dat_site(payload: &[u8], limits: RuleLimits) -> Result<DatSite, RuleParseError> {
+    let mut reader = DatReader::new(payload);
+    let mut selector = None;
+    let mut domains = Vec::new();
+    while let Some((field, wire)) = reader.read_key()? {
+        match (field, wire) {
+            (1, WIRE_LEN_DELIM) => {
+                if selector.is_some() {
+                    return Err(RuleParseError::InvalidDat);
+                }
+                selector = Some(
+                    String::from_utf8(reader.read_length_delimited()?.to_vec())
+                        .map_err(|_| RuleParseError::InvalidDat)?,
+                );
+            }
+            (2, WIRE_LEN_DELIM) => {
+                let domain = parse_dat_domain(reader.read_length_delimited()?)?;
+                domains.push(domain);
+            }
+            _ => reader.skip_field(wire)?,
+        }
+    }
+    let selector = selector.ok_or(RuleParseError::InvalidDat)?;
+    let mut index = RuleIndex::empty();
+    for domain in domains {
+        match domain.kind {
+            0 => index.add_keyword(&domain.value, limits)?,
+            1 => index.add_regex(&domain.value, 0, limits)?,
+            2 => index.add_domain(RuleKind::Suffix, &domain.value, 0, limits)?,
+            3 => index.add_domain(RuleKind::Exact, &domain.value, 0, limits)?,
+            _ => return Err(RuleParseError::UnsupportedDatDomainType),
+        }
+    }
+    Ok(DatSite { selector, index })
+}
+
+fn parse_dat_domain(payload: &[u8]) -> Result<DatDomain, RuleParseError> {
+    let mut reader = DatReader::new(payload);
+    let mut kind = 0_u64;
+    let mut value = None;
+    while let Some((field, wire)) = reader.read_key()? {
+        match (field, wire) {
+            (1, WIRE_VARINT) => kind = reader.read_varint()?,
+            (2, WIRE_LEN_DELIM) => {
+                if value.is_some() {
+                    return Err(RuleParseError::InvalidDat);
+                }
+                value = Some(
+                    String::from_utf8(reader.read_length_delimited()?.to_vec())
+                        .map_err(|_| RuleParseError::InvalidDat)?,
+                );
+            }
+            _ => reader.skip_field(wire)?,
+        }
+    }
+    let value = value.ok_or(RuleParseError::InvalidDat)?;
+    Ok(DatDomain { kind, value })
+}
+
+fn normalize_dat_selector(selector: &str, limits: RuleLimits) -> Result<String, RuleParseError> {
+    if selector.is_empty() {
+        return Err(RuleParseError::InvalidDatSelector);
+    }
+    if selector.len() > limits.max_selector_bytes {
+        return Err(RuleParseError::DatSelectorTooLong);
+    }
+    let selector = selector.to_ascii_lowercase();
+    if !selector.is_ascii()
+        || !selector.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
+        })
+    {
+        return Err(RuleParseError::InvalidDatSelector);
+    }
+    Ok(selector)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -674,5 +993,124 @@ mod tests {
             RuleIndex::parse_clash("DOMAIN,secret.example\n").unwrap()
         );
         assert!(!debug.contains("secret.example"));
+    }
+
+    fn varint(value: u64) -> Vec<u8> {
+        let mut value = value;
+        let mut bytes = Vec::new();
+        loop {
+            let mut byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 0x80;
+            }
+            bytes.push(byte);
+            if value == 0 {
+                return bytes;
+            }
+        }
+    }
+
+    fn field(number: u64, wire: u64, payload: &[u8]) -> Vec<u8> {
+        let mut bytes = varint((number << 3) | wire);
+        if wire == u64::from(WIRE_LEN_DELIM) {
+            bytes.extend(varint(payload.len() as u64));
+        }
+        bytes.extend(payload);
+        bytes
+    }
+
+    fn dat_domain(kind: u64, value: &str) -> Vec<u8> {
+        let mut bytes = field(1, u64::from(WIRE_VARINT), &varint(kind));
+        bytes.extend(field(2, u64::from(WIRE_LEN_DELIM), value.as_bytes()));
+        bytes
+    }
+
+    fn dat_site(selector: &str, domains: &[(u64, &str)]) -> Vec<u8> {
+        let mut site = field(1, u64::from(WIRE_LEN_DELIM), selector.as_bytes());
+        for (kind, value) in domains {
+            site.extend(field(
+                2,
+                u64::from(WIRE_LEN_DELIM),
+                &dat_domain(*kind, value),
+            ));
+        }
+        field(1, u64::from(WIRE_LEN_DELIM), &site)
+    }
+
+    #[test]
+    fn parses_geosite_dat_selectors_and_domain_types() {
+        let mut input = dat_site(
+            "CN",
+            &[
+                (0, "keyword"),
+                (1, "^api[0-9]+\\.example\\.com$"),
+                (2, "suffix.example"),
+                (3, "exact.example"),
+            ],
+        );
+        input.extend(dat_site("private", &[(3, "internal.example")]));
+
+        let index = RuleIndex::parse_dat(&input).expect("valid geosite.dat payload");
+        assert_eq!(index.selector_count(), 2);
+        assert_eq!(index.selector("cn").unwrap().keyword_count(), 1);
+        let cn = index.selector("cn").unwrap();
+        assert_eq!(
+            cn.matches(&domain("keyword.example")),
+            Some(RuleMatch::Keyword { ordinal: 0 })
+        );
+        assert_eq!(
+            cn.matches(&domain("api12.example.com")),
+            Some(RuleMatch::Regex { ordinal: 0 })
+        );
+        assert_eq!(
+            cn.matches(&domain("a.suffix.example")),
+            Some(RuleMatch::Suffix { label_count: 2 })
+        );
+        assert_eq!(cn.matches(&domain("exact.example")), Some(RuleMatch::Exact));
+        assert_eq!(
+            index
+                .selector("private")
+                .unwrap()
+                .matches(&domain("internal.example")),
+            Some(RuleMatch::Exact)
+        );
+        assert!(!format!("{index:?}").contains("suffix.example"));
+    }
+
+    #[test]
+    fn dat_parser_rejects_duplicates_malformed_payload_and_limits() {
+        let mut duplicate = dat_site("cn", &[(3, "example.test")]);
+        duplicate.extend(dat_site("CN", &[(3, "other.test")]));
+        assert!(matches!(
+            RuleIndex::parse_dat(&duplicate),
+            Err(RuleParseError::InvalidDatSelector)
+        ));
+
+        assert!(matches!(
+            RuleIndex::parse_dat(&[0x0a, 0x05, 0x0a]),
+            Err(RuleParseError::InvalidDat)
+        ));
+        let input = dat_site("cn", &[(3, "example.test")]);
+        assert!(matches!(
+            RuleIndex::parse_dat_with_limits(
+                &input,
+                RuleLimits {
+                    max_selectors: 0,
+                    ..RuleLimits::default()
+                }
+            ),
+            Err(RuleParseError::TooManySelectors)
+        ));
+        assert!(matches!(
+            RuleIndex::parse_dat_with_limits(
+                &input,
+                RuleLimits {
+                    max_selector_bytes: 1,
+                    ..RuleLimits::default()
+                }
+            ),
+            Err(RuleParseError::DatSelectorTooLong)
+        ));
     }
 }

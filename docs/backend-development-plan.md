@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 197（UDP/TCP 非法 query 安全响应）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 198（`geosite.dat` protobuf selector）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -26,7 +26,6 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 具体 UDP/TCP/DoH adapter 瞬时错误的完整故障矩阵；
 - DoH HTTP/2、完整 HTTP/DNS 协议组合和证书/信任边界矩阵；
 - cache persistence 的 last-access、真实故障复现与请求记录的跨故障源 health/recovery；
-- Resource/Policy 的 `dat selector` 二进制解析；
 - v1 最终压力、长期运行、conformance，以及 shutdown 故障/超时矩阵验收。
 
 ## 2. 进度总览
@@ -34,8 +33,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **91.2%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **92.1%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **91.8%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **92.6%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -48,10 +47,10 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Runtime | 实现中 | 94% | 12% |
 | Transport | 实现中 | 92% | 11% |
 | DNS Core | 实现中 | 86% | 10% |
-| Policy | 实现中 | 88% | 8% |
+| Policy | 实现中 | 92% | 8% |
 | Upstream | 已验证 | 100% | 10% |
 | Cache | 实现中 | 87% | 9% |
-| Resource | 已实现待验证 | 92% | 7% |
+| Resource | 已实现待验证 | 96% | 7% |
 | Storage | 已实现待验证 | 99% | 8% |
 | Observability | 已验证 | 100% | 3% |
 
@@ -59,8 +58,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ```text
 4%×76% + 8%×74% + 10%×100% + 12%×94% + 11%×92%
-+ 10%×86% + 8%×88% + 10%×100% + 9%×87% + 7%×92%
-+ 8%×99% + 3%×100% ≈ 91.2%
++ 10%×86% + 8%×92% + 10%×100% + 9%×87% + 7%×96%
++ 8%×99% + 3%×100% ≈ 91.8%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -95,7 +94,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 197 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 198 |
 
 ### 增量里程碑
 
@@ -117,10 +116,10 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 175 | DNS resolution result 契约闭合 | 同一次解析事件保留 failure/timeout/cancellation 细分与 matched resource revision；复用现有 Core/observation/event 契约，不新增平行抽象 |
 | 176 | Upstream v1 验收闭合 | 真实 hosts/DoH adapter 并发矩阵保留早期选中成员与 late candidate；结合既有 proxy/TLS/selector/fallback 证据完成模块验收 |
 | 177 | Runtime 停机分项报告 | request drain、cache finalizers、Storage、Telemetry 分别记录终态；阶段失败仍携带此前完整 report |
-| 178 | Policy 主链验收复核 | plan/Core 定向测试与真实 UDP/TCP/plain DoH 契约通过；清除已闭合的 cross-adapter/transport 旧缺口，保留 `dat selector` 后置项 |
+| 178 | Policy 主链验收复核 | plan/Core 定向测试与真实 UDP/TCP/plain DoH 契约通过；清除已闭合的 cross-adapter/transport 旧缺口，保留 `dat selector` 待实现项 |
 | 179 | Observability v1 验收闭合 | 完整实现清单已闭合；Observability 与 Service telemetry 定向测试覆盖 schema、脱敏、低基数、队列、输出故障、health lifecycle 和停机 flush |
 | 180 | 策略、停机报告与可观测性大阶段验收 | 收缩 `ServiceError` 停机失败变体体积并保留完整 report；后端全量 547 项测试及格式、编译、lint 门槛通过 |
-| 181 | Resource 候选生命周期复核 | 配置候选合并、运行中刷新、reload worker 复用/取消均有定向证据；修正 `dat` 已实现的旧描述并保留该后置项 |
+| 181 | Resource 候选生命周期复核 | 配置候选合并、运行中刷新、reload worker 复用/取消均有定向证据；修正资源候选生命周期描述，当时保留 `dat selector` 后置项 |
 | 182 | DoH Host 与消息长度加固 | `Host` 必须是唯一合法 authority；`Content-Length` 只接受十进制数字，拒绝符号前缀和非十进制形式 |
 | 183 | 真实 SQLite Busy 恢复 | 独立连接持有写锁时生产 adapter 返回 `Unavailable` 并降级；释放锁后成功事务恢复健康 |
 | 184 | Cache 真实 SQLite Busy 重试 | 写锁冲突返回 `Unavailable` 且旧 snapshot 不变；释放锁后同一记录可重试成功 |
@@ -137,16 +136,20 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 195 | CacheStore 双 adapter conformance | Memory 与 Moka store 共用 deadline、CAS、single-flight、失效和 shutdown 契约断言 |
 | 196 | 非法客户端 ECS 安全回退 | 非法 prefix 不进入上游/cache key；有 client address 时使用脱敏网段，否则移除 ECS |
 | 197 | UDP/TCP 非法 query 安全响应 | 可靠 header 的非法 query 返回 FORMERR/NOTIMP；不伪造 question 或 BADVERS OPT |
+| 198 | `geosite.dat` selector 主链 | V2Ray `GeoSiteList` protobuf 解析、四类 domain matcher、selector/Policy 选择、const/file/remote restore 和 PreparedRuntime bind 前编译；不新增二进制格式依赖 |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/transport/wire.rs`、`udp.rs`、`tcp.rs`；
-- `cargo test --manifest-path backend/Cargo.toml --locked transport::wire::tests`：`7 passed、0 failed`；
-- `cargo test --manifest-path backend/Cargo.toml --locked transport::udp::tests`：`5 passed、0 failed`；
-- `cargo test --manifest-path backend/Cargo.toml --locked transport::tcp::tests`：`12 passed、0 failed`；
+- `cargo fmt --manifest-path backend/Cargo.toml -- --check`：通过；
+- `cargo check --manifest-path backend/Cargo.toml --locked`：通过；
+- `cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings`：通过；
+- `cargo test --manifest-path backend/Cargo.toml --locked resource::`：`58 passed、0 failed`；
+- `cargo test --manifest-path backend/Cargo.toml --locked policy::plan::tests`：`11 passed、0 failed`；
+- `cargo test --manifest-path backend/Cargo.toml --locked runtime::prepared::tests::async_prepare_compiles_file_dat_selector_before_bind`：`1 passed、0 failed`；
+- `cargo test --manifest-path backend/Cargo.toml --locked`：`569 passed、0 failed`；
 - `git diff --check`：通过。
 
-阶段 197 未重复阶段 190 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 198 完成 `geosite.dat` selector 主链；服务器重启/宕机恢复、缓存/请求记录绝对持久化、HTTP/2 和长期压力仍按计划不作为本阶段阻塞项。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 

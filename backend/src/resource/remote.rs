@@ -268,14 +268,16 @@ pub async fn fetch_remote_rule_set(
     validate_result(&result, options.max_bytes)?;
 
     let index = match format {
-        RuleSetFormat::Dat => return Err(RemoteResourceError::UnsupportedFormat),
+        RuleSetFormat::Dat => {
+            RuleIndex::parse_bytes_with_limits(&result.body, format, options.rule_limits)
+        }
         RuleSetFormat::Json | RuleSetFormat::Clash => {
             let text =
                 std::str::from_utf8(&result.body).map_err(|_| RemoteResourceError::InvalidUtf8)?;
             RuleIndex::parse_with_limits(text, format, options.rule_limits)
-                .map_err(RemoteResourceError::Parse)?
         }
-    };
+    }
+    .map_err(RemoteResourceError::Parse)?;
     let manifest = RemoteResourceManifest {
         manifest_version: MANIFEST_VERSION,
         resource_id: id.clone(),
@@ -362,14 +364,17 @@ pub fn restore_remote_rule_set(
         })
         .transpose()?;
 
-    let text = std::str::from_utf8(&content).map_err(|_| RemoteResourceError::InvalidUtf8)?;
     let index = match format {
-        RuleSetFormat::Dat => return Err(RemoteResourceError::UnsupportedFormat),
-        RuleSetFormat::Json | RuleSetFormat::Clash => {
-            RuleIndex::parse_with_limits(text, format, options.rule_limits)
-                .map_err(RemoteResourceError::Parse)?
+        RuleSetFormat::Dat => {
+            RuleIndex::parse_bytes_with_limits(&content, format, options.rule_limits)
         }
-    };
+        RuleSetFormat::Json | RuleSetFormat::Clash => {
+            let text =
+                std::str::from_utf8(&content).map_err(|_| RemoteResourceError::InvalidUtf8)?;
+            RuleIndex::parse_with_limits(text, format, options.rule_limits)
+        }
+    }
+    .map_err(RemoteResourceError::Parse)?;
     let content_hash: Arc<str> = Arc::from(persisted.content_hash);
     let manifest = RemoteResourceManifest {
         manifest_version: persisted.manifest_version,
@@ -596,6 +601,14 @@ mod tests {
         )
     }
 
+    fn dat_fixture() -> Arc<[u8]> {
+        let mut bytes = vec![
+            0x0a, 0x16, 0x0a, 0x02, b'C', b'N', 0x12, 0x10, 0x08, 0x03, 0x12, 0x0c,
+        ];
+        bytes.extend_from_slice(b"example.test");
+        Arc::from(bytes)
+    }
+
     #[tokio::test]
     async fn fetches_valid_rule_set_and_persists_safe_metadata_atomically() {
         let root = std::env::temp_dir().join(format!(
@@ -762,7 +775,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_oversize_utf8_and_dat_before_persistence() {
+    async fn rejects_oversize_and_invalid_utf8_then_persists_dat() {
         let root = std::env::temp_dir().join(format!(
             "fluxdns-remote-reject-{}",
             TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -796,19 +809,17 @@ mod tests {
         ));
 
         let valid = FakeFetcher {
-            body: Arc::from(&b"opaque"[..]),
+            body: dat_fixture(),
             calls: Arc::new(AtomicUsize::new(0)),
         };
-        assert!(matches!(
-            fetch_remote_rule_set(
-                &valid,
-                &remote(RuleSetFormat::Dat, "https://rules.example.test/rules"),
-                options(&root),
-            )
-            .await,
-            Err(RemoteResourceError::UnsupportedFormat)
-        ));
-        assert!(!root.join("rules.txt").exists());
+        let resource = remote(RuleSetFormat::Dat, "https://rules.example.test/rules");
+        let loaded = fetch_remote_rule_set(&valid, &resource, options(&root))
+            .await
+            .unwrap();
+        assert!(loaded.index().selector("cn").is_some());
+        let restored = restore_remote_rule_set(&resource, options(&root)).unwrap();
+        assert!(restored.index().selector("cn").is_some());
+        assert!(root.join("rules.txt").exists());
         let _ = fs::remove_dir_all(root);
     }
 
