@@ -2299,6 +2299,33 @@ mod tests {
         assert_eq!(subnet.source_prefix(), 24);
     }
 
+    /// 验证非法客户端 ECS 不会进入上游或 cache key，并安全回退到脱敏客户端网段。
+    #[test]
+    fn client_mode_rejects_invalid_request_ecs_and_uses_safe_fallback() {
+        let invalid = hickory_proto::rr::rdata::opt::ClientSubnet::new(
+            IpAddr::from([198, 51, 100, 42]),
+            33,
+            0,
+        );
+        let query = request("invalid-ecs-client.example.", RecordType::A)
+            .query
+            .with_edns_client_subnet(Some(invalid));
+        let ecs = ResolvedEcs {
+            mode: EcsMode::Client,
+            custom_ip: None,
+            source: ValueSource::Strategy,
+        };
+
+        let fallback =
+            effective_upstream_query(&query, &ecs, Some(IpAddr::from([203, 0, 113, 10])));
+        let subnet = fallback.edns_client_subnet().unwrap();
+        assert_eq!(subnet.addr(), IpAddr::from([203, 0, 113, 0]));
+        assert_eq!(subnet.source_prefix(), 24);
+
+        let without_client = effective_upstream_query(&query, &ecs, None);
+        assert!(without_client.edns_client_subnet().is_none());
+    }
+
     #[tokio::test]
     async fn client_ecs_subnets_isolate_cache_entries() {
         let mut config = Arc::try_unwrap(doh_config()).unwrap();
