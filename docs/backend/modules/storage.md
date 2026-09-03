@@ -1,14 +1,20 @@
 # Storage 模块设计
 
-> 状态：v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 schema v2 migration、SQLx SQLite storage 首轮 adapter、StatsPersistenceWorker、详情落库脱敏边界、group member、matched rule/resource、RCODE、failure 与 cancellation 摘要列、bounded detail writer channel、详情丢弃分类计数、限频 health 与成功恢复、年龄/软阈值/硬上限策略、worker shutdown drain/周期 flush、Storage stats/backend/detail 统一生命周期 facade、可共享 stats recorder、首轮 `StorageRuntime`/`DnsService`/`Supervisor` 生产接线、pending 内存保护/fatal 边界、首轮 degraded/recovery 状态转换、受 `cfg(test)` 限定的 Busy/DiskFull adapter fault 注入及恢复分类，以及 Policy Core 的低基数元数据传播；OS/SQLite 真实故障复现和跨故障源 telemetry 闭环尚未完成
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：部分实现
 >
-> 目标代码：`backend/src/storage/*`、`backend/migrations/*`
+> 适用范围：SQLite、统计、解析记录、migration、容量边界和存储生命周期
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
+> 最后核对：待核对
 >
-> 相关方案：[Ports](ports.md) · [Observability](observability.md) · [Cache](cache.md)
+> 关联实现：`backend/src/storage/*`、`backend/migrations/*`
+>
+> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [Ports](ports.md) · [Observability](observability.md) · [Cache](cache.md)
+
+## 当前实现边界
+
+v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 schema v2 migration、SQLx SQLite storage 首轮 adapter、StatsPersistenceWorker、详情落库脱敏边界、group member、matched rule/resource、RCODE、failure 与 cancellation 摘要列、bounded detail writer channel、详情丢弃分类计数、限频 health 与成功恢复、年龄/软阈值/硬上限策略、worker shutdown drain/周期 flush、Storage stats/backend/detail 统一生命周期 facade、可共享 stats recorder、首轮 `StorageRuntime`/`DnsService`/`Supervisor` 生产接线、pending 内存保护/fatal 边界、首轮 degraded/recovery 状态转换、受 `cfg(test)` 限定的 Busy/DiskFull adapter fault 注入及恢复分类，以及 Policy Core 的低基数元数据传播。真实 OS disk-full 复现、migration 压力与故障测试和跨故障源 telemetry 闭环尚未完成。
 
 ## 1. 职责与边界
 

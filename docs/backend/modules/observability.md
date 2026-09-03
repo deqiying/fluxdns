@@ -1,14 +1,20 @@
 # Observability 模块设计
 
-> 状态：v1 实现与验收已完成。已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、health lifecycle 与 stale age 归一化、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown，正常停机和 fatal task 退出均已验证最终输出及 writer 关闭；typed final tracing layer、Storage/Telemetry/Supervisor/Resource refresh health、Cache persistence 停机 gap、详情 writer backpressure/recovery、Listener 跨 Runtime lifecycle，以及主输出与 fallback 同时失败后的 `Failed → Healthy` 闭环均已接入
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：已实现
 >
-> 目标代码：`backend/src/observability.rs`
+> 适用范围：tracing、metrics、health、脱敏、backpressure 和 telemetry 生命周期
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
+> 最后核对：待核对
 >
-> 相关方案：[Ports](ports.md) · [Runtime](runtime.md) · [Storage](storage.md)
+> 关联实现：`backend/src/observability.rs`
+>
+> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [Ports](ports.md) · [Runtime](runtime.md) · [Storage](storage.md)
+
+## 当前实现边界
+
+v1 实现与验收已完成。已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、health lifecycle 与 stale age 归一化、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown，正常停机和 fatal task 退出均已验证最终输出及 writer 关闭；typed final tracing layer、Storage/Telemetry/Supervisor/Resource refresh health、Cache persistence 停机 gap、详情 writer backpressure/recovery、Listener 跨 Runtime lifecycle，以及主输出与 fallback 同时失败后的 `Failed → Healthy` 闭环均已接入。
 
 ## 1. 职责与边界
 

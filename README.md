@@ -1,5 +1,9 @@
 # FluxDNS
 
+> 文档状态：有效
+>
+> 适用范围：FluxDNS 项目概览、仓库入口与面向使用者的状态摘要
+
 面向策略分流的 DNS 服务。
 
 FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析决策，并支持常见的 DNS 传输方式；主动上游健康检查属于后续版本能力。
@@ -31,7 +35,7 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 [config-example.yaml](config-example.yaml) 是配置草案。本地运行时应复制为 `_fluxdns/config.yaml` 后按测试环境调整；配置、规则文件、运行数据、缓存与日志均放在 `_fluxdns/` 下，不提交到 Git。
 
-完整文档入口见 [docs/README.md](docs/README.md)。字段语义见 [docs/configuration-reference.md](docs/configuration-reference.md)，本地测试约定见 [docs/standards/local-testing.md](docs/standards/local-testing.md)，项目协作规则见 [AGENTS.md](AGENTS.md)，Rust 后端总体方案见 [docs/backend-architecture.md](docs/backend-architecture.md)，模块方案、阶段安排和当前进度见 [docs/backend-development-plan.md](docs/backend-development-plan.md)。
+完整文档入口见 [docs/README.md](docs/README.md)。字段语义见 [docs/backend/configuration-reference.md](docs/backend/configuration-reference.md)，本地测试约定见 [docs/standards/local-testing.md](docs/standards/local-testing.md)，项目协作规则见 [AGENTS.md](AGENTS.md)，Rust 后端总体方案见 [docs/backend/architecture.md](docs/backend/architecture.md)，模块方案、阶段安排和当前进度见 [docs/backend/development-plan.md](docs/backend/development-plan.md)。
 
 Config 阶段 2 记录起点为 69 tests；上次后端全量验证为 238 passed、0 failed，`clippy --all-targets -- -D warnings` 和 `fmt --check` 均已通过。本次新增配置路径解析测试后，需在可用 Rust 1.98 toolchain 下重新复验最新结果。真实 smoke 使用临时配置在 UDP `127.0.0.1:8353`、TCP `127.0.0.1:8354` 和 DoH `127.0.0.1:8355` 验证 hosts 响应、同连接双 frame、DoH GET/POST 的 DNS ID/RCODE 和 `SIGINT` 停机；端口仅用于本机验证，不改变配置契约。阶段 5 的 hosts/group/outcome 定向测试覆盖格式解析、DNS outcome、取消/超时、registry fail-closed、选择器并发 lease、terminal/fallback 判定和 connector 去重；阶段 6 的内存 cache 定向测试覆盖 fresh/stale/expiry、质量 CAS、显式失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、容量淘汰，key/facade 定向测试覆盖稳定编码和 lookup/write 状态；阶段 7 的 Resource/DNS/Policy 定向测试覆盖 hosts/rule parser、受限 regex、const/file loader、snapshot/CAS、CNAME/wildcard、listener hosts 优先、strategy rule 顺序、缺失资源和 file 接线。阶段 9 的 Storage/Observability 定向测试覆盖 UTC day、epoch swap、幂等 ledger、persistence gap、有界 metrics、health recovery、retry/gap 和 typed event 脱敏。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
 

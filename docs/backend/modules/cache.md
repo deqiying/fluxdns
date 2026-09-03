@@ -1,14 +1,20 @@
 # Cache 模块设计
 
-> 状态：v1 方案已完成，已实现内存 CacheStore、Moka CacheStore、文件快照和 SQLite cache persistence 首轮 adapter、文件/SQLite 基础 contract、SQLite metadata/disk-usage 观测和 test-only 故障重试 contract、有界 persistence writer 生命周期、production async recovery/write/shutdown 接线与停机摘要、一致的共享容量淘汰、响应准入/TTL、稳定 key builder、client identity 摘要隔离、CacheFacade 首轮切片、fresh 剩余 TTL/stale answer TTL、可取消有界 LateCacheFinalizer、RuntimeCoordinator 级历史/当前 owner、PolicyDnsCore 当前 snapshot-local optimistic refresh 边界
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：部分实现
 >
-> 目标代码：`backend/src/cache/*`
+> 适用范围：缓存 key、TTL、single-flight、memory adapter 和 persistence 生命周期
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
+> 最后核对：待核对
 >
-> 相关方案：[Ports](ports.md) · [DNS Core](dns-core.md) · [Storage](storage.md)
+> 关联实现：`backend/src/cache/*`
+>
+> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [Ports](ports.md) · [DNS Core](dns-core.md) · [Storage](storage.md)
+
+## 当前实现边界
+
+v1 方案已完成，已实现内存 CacheStore、Moka CacheStore、文件快照和 SQLite cache persistence 首轮 adapter、文件/SQLite 基础 contract、SQLite metadata/disk-usage 观测和 test-only 故障重试 contract、有界 persistence writer 生命周期、production async recovery/write/shutdown 接线与停机摘要、一致的共享容量淘汰、响应准入/TTL、稳定 key builder、client identity 摘要隔离、CacheFacade 首轮切片、fresh 剩余 TTL/stale answer TTL、可取消有界 LateCacheFinalizer、RuntimeCoordinator 级历史/当前 owner、PolicyDnsCore 当前 snapshot-local optimistic refresh 边界。跨 adapter 的真实 disk-full 故障测试矩阵尚未完成。
 
 ## 1. 职责
 

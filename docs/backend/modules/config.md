@@ -1,14 +1,20 @@
 # Config 模块设计
 
-> 状态：v1 方案和阶段 2 实现已完成；既有基线已验证，相对 `work.path` 增量待 Rust 1.98 环境复验
+> 文档状态：有效
 >
-> 更新日期：2026-09-01
+> 实现状态：已实现
 >
-> 目标代码：`backend/src/config/*`
+> 适用范围：配置加载、迁移、归一化、校验、引用图和安全快照
 >
-> 字段唯一契约：[配置字段参考](../configuration-reference.md)
+> 最后核对：待核对
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [开发计划](../backend-development-plan.md)
+> 关联实现：`backend/src/config/*`
+>
+> 关联文档：[配置字段参考](../configuration-reference.md) · [后端架构](../architecture.md) · [后端开发计划](../development-plan.md)
+
+## 当前实现边界
+
+v1 方案和阶段 2 实现已完成；既有基线已验证，相对 `work.path` 增量待 Rust 1.98 环境复验。
 
 ## 1. 职责
 

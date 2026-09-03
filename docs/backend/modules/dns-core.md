@@ -1,14 +1,20 @@
 # DNS Core 模块设计
 
-> 状态：v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh、SQLite cache non-blocking write/recovery 和低基数 resolution observation；Policy observation 已补充 client bucket，并拆分策略目标 upstream/group 与实际顶层 group member；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR，fresh/stale cache response 已应用剩余 TTL 与 optimistic answer TTL；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：已实现
 >
-> 目标代码：`backend/src/dns/*`
+> 适用范围：canonical DNS message、请求管线、缓存交互和上游结果处理
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [开发计划](../backend-development-plan.md)
+> 最后核对：待核对
 >
-> 相关方案：[Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
+> 关联实现：`backend/src/dns/*`
+>
+> 关联文档：[后端架构](../architecture.md) · [后端开发计划](../development-plan.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
+
+## 当前实现边界
+
+v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh、SQLite cache non-blocking write/recovery 和低基数 resolution observation；Policy observation 已补充 client bucket，并拆分策略目标 upstream/group 与实际顶层 group member；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR，fresh/stale cache response 已应用剩余 TTL 与 optimistic answer TTL；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入。
 
 ## 1. 目标
 

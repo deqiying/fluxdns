@@ -1,5 +1,9 @@
 # 本地测试规范
 
+> 文档状态：有效
+>
+> 适用范围：FluxDNS 本地配置、运行时文件、构建物、工具和 DoH smoke test 管理
+
 本文档约定 FluxDNS 在本地开发和验证时的文件位置、构建物管理、工具使用和 DoH smoke test 方式。除非另有说明，命令均从仓库根目录执行。
 
 ## 1. 本地目录约定
@@ -32,7 +36,7 @@ Copy-Item config-example.yaml _fluxdns/config.yaml
 2. 相对 `work.path` 再相对于 `config_dir` 解析，得到 `resolved_work_path`。
 3. 其他配置中的相对路径统一相对于 `resolved_work_path` 解析。
 
-因此，配置文件为 `_fluxdns/config.yaml` 且 `work.path: ./` 时，`resolved_work_path` 是 `_fluxdns`；`database.path: ./data/fluxdns.sqlite3` 的实际路径是 `_fluxdns/data/fluxdns.sqlite3`，而不是进程当前目录下的 `data/fluxdns.sqlite3`。完整字段规则见 [配置参考](../configuration-reference.md)。
+因此，配置文件为 `_fluxdns/config.yaml` 且 `work.path: ./` 时，`resolved_work_path` 是 `_fluxdns`；`database.path: ./data/fluxdns.sqlite3` 的实际路径是 `_fluxdns/data/fluxdns.sqlite3`，而不是进程当前目录下的 `data/fluxdns.sqlite3`。完整字段规则见 [配置参考](../backend/configuration-reference.md)。
 
 `_fluxdns/` 已加入 `.gitignore`，其中内容默认不应被提交。需要长期维护、可复现并纳入版本控制的测试夹具，应放在专门的受跟踪目录中，不要依赖个人 `_fluxdns/` 内容。
 

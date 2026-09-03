@@ -1,14 +1,20 @@
 # Transport 模块设计
 
-> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter 与 Host cardinality 边界、forwarded header、PROXY v1/v2 首轮客户端地址恢复和 TLS terminate 首轮握手；TLS material 已有启动读取上限，坏 TLS 握手的连接级隔离已有真实 loopback 证据
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：部分实现
 >
-> 目标代码：`backend/src/transport/*`
+> 适用范围：DNS wire、UDP、TCP、DoH、TLS、client IP 恢复和响应编码
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
+> 最后核对：待核对
 >
-> 相关契约：[Ports 模块](ports.md) · [DNS Core 模块](dns-core.md)
+> 关联实现：`backend/src/transport/*`
+>
+> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [Ports 模块](ports.md) · [DNS Core 模块](dns-core.md)
+
+## 当前实现边界
+
+v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter 与 Host cardinality 边界、forwarded header、PROXY v1/v2 首轮客户端地址恢复和 TLS terminate 首轮握手；TLS material 已有启动读取上限，坏 TLS 握手的连接级隔离已有真实 loopback 证据。DoH/TLS 资源限制、安全和协议测试尚未全部完成。
 
 ## 1. 职责与边界
 

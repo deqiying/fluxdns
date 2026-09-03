@@ -1,12 +1,14 @@
 # FluxDNS Rust 后端架构设计
 
-> 状态：v1 技术方案（实现中，阶段 1 已完成）
+> 文档状态：有效
 >
-> 日期：2026-09-02
+> 实现状态：部分实现
 >
-> 配置契约：[configuration-reference.md](configuration-reference.md)
+> 适用范围：FluxDNS Rust 后端总体架构、跨模块边界、运行时契约与 v1 设计
 >
-> 模块方案与开发计划：[backend-development-plan.md](backend-development-plan.md)
+> 最后核对：待核对
+>
+> 关联文档：[配置字段参考](configuration-reference.md) · [后端开发计划](development-plan.md)
 
 ## 1. 结论
 
@@ -123,7 +125,7 @@ backend/src/
 
 不预先创建空的 `webui` 模块。v1 的 HTTP router 只挂载 DoH；未来实现 WebUI 时，在同一 transport 边界下增加独立 management router，不把管理逻辑混入 DNS handler。
 
-各顶层模块的职责、内部流程、并发/失败语义和验收项见 [后端开发计划](backend-development-plan.md) 中的模块索引。`app.rs` 只负责进程级装配，task 监督、listener 生命周期和 drain 统一由 `runtime/*` 持有。
+各顶层模块的职责、内部流程、并发/失败语义和验收项见 [后端开发计划](development-plan.md) 中的模块索引。`app.rs` 只负责进程级装配，task 监督、listener 生命周期和 drain 统一由 `runtime/*` 持有。
 
 业务 SQLite 的 SQLx migration 存放在 `backend/migrations/*`，由 `backend/src/storage/sqlite.rs` 在 prepare 阶段嵌入并执行；缓存持久化使用独立 schema，不复用该目录中的业务表。
 
@@ -604,7 +606,7 @@ v1 保留 `webui` schema，目的是避免未来新增顶层配置时破坏结�
 
 ## 15. 推荐实现顺序
 
-阶段状态、模块权重和当前进度以 [后端开发计划](backend-development-plan.md) 为准。
+阶段状态、模块权重和当前进度以 [后端开发计划](development-plan.md) 为准。
 
 1. 定义 domain/ports：canonical message、`RequestContext`、`TransportCapabilities`/adapter profile、`DnsExchange`、cache/storage/telemetry seams；
 2. 实现 versioned config DTO、迁移链、严格校验、默认值矩阵和 `ResolvedConfig`；

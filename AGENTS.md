@@ -1,5 +1,9 @@
 # FluxDNS 项目级协作规范
 
+> 文档状态：有效
+>
+> 适用范围：FluxDNS 仓库及其所有子目录的协作、变更与验证基线
+
 本文档适用于 FluxDNS 仓库及其所有子目录。更具体的目录级 `AGENTS.md`（如后续新增）优先于本文档；用户明确要求优先于本文档和其他项目文档。
 
 ## 文档路由
@@ -8,12 +12,12 @@
 
 | 任务范围 | 必读文档 |
 | --- | --- |
-| 文档新增、迁移、重命名、状态维护和废弃 | [`docs/standards/documentation-maintenance.md`](docs/standards/documentation-maintenance.md)，并从 [`docs/README.md`](docs/README.md)确认权威文档与目录职责 |
+| 文档目录结构、新增、迁移、重命名、状态维护和废弃 | [`docs/standards/documentation-maintenance.md`](docs/standards/documentation-maintenance.md)，并从 [`docs/README.md`](docs/README.md)确认权威文档与目录职责 |
 | 本地配置、构建物、工具安装、DoH smoke test 和测试结果记录 | [`docs/standards/local-testing.md`](docs/standards/local-testing.md) |
 | 规范文档索引及新增规范的存放位置 | [`docs/standards/README.md`](docs/standards/README.md) |
-| 配置字段、路径解析、校验和迁移 | [`docs/configuration-reference.md`](docs/configuration-reference.md) |
-| 后端总体架构、运行时边界和跨模块契约 | [`docs/backend-architecture.md`](docs/backend-architecture.md) |
-| 后端模块实现 | 对应的 [`docs/backend-modules/`](docs/backend-modules/) 文档，并结合 [`docs/backend-development-plan.md`](docs/backend-development-plan.md) |
+| 配置字段、路径解析、校验和迁移 | [`docs/backend/configuration-reference.md`](docs/backend/configuration-reference.md) |
+| 后端总体架构、运行时边界和跨模块契约 | [`docs/backend/architecture.md`](docs/backend/architecture.md) |
+| 后端模块实现 | 对应的 [`docs/backend/modules/`](docs/backend/modules/) 文档，并结合 [`docs/backend/development-plan.md`](docs/backend/development-plan.md) |
 | 前端目录和前端工程约定 | [`frontend/README.md`](frontend/README.md) |
 
 `docs/README.md` 是文档总入口，`docs/standards/` 用于存放跨模块、可执行的项目规范。文档目录、职责和生命周期遵循 `docs/standards/documentation-maintenance.md`；新增规范文档时，应同步更新该目录的索引和本表，避免只新增文件而没有路由入口。
@@ -22,7 +26,7 @@
 
 - 本地测试配置、规则、数据库、缓存、日志、临时证书及其他运行时文件统一放在仓库根目录的 `_fluxdns/`，不得散落到仓库根目录或源码目录。
 - `_fluxdns/` 是本地专用目录，已加入 `.gitignore`，不得提交其中的个人配置或运行数据。
-- 配置路径遵循两级基准：相对 `work.path` 以启动配置文件所在目录为基准；其他配置中的相对路径以解析后的 `work.path` 为基准。具体规则以 `docs/configuration-reference.md` 为准。
+- 配置路径遵循两级基准：相对 `work.path` 以启动配置文件所在目录为基准；其他配置中的相对路径以解析后的 `work.path` 为基准。具体规则以 `docs/backend/configuration-reference.md` 为准。
 
 ## 构建与验证
 

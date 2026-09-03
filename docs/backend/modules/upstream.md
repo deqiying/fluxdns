@@ -1,14 +1,20 @@
 # Upstream 模块设计
 
-> 状态：v1 方案与实现已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、Reqwest Rustls HTTP/2 direct/proxy HTTPS DoH transport、adapter-owned bounded client pool、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、hosts/plain HTTP DoH registry、Outbound profile/target 规划、协议无关 SOCKS5/SOCKS5H codec、OutboundStream port 与握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver、最小 SOCKS connector 闭环、standalone plain HTTP SOCKS5/SOCKS5H DoH transport adapter、配置驱动的 proxy Registry/Policy/Runtime prepare 接线、PolicyCore direct request path、direct hosts/DoH group primary/fallback exchange 与 phase timeout、纯 group member selection、parallel late window、nested group、outcome/fallback 判定和 Reqwest/Rustls loopback live TLS handshake 验证；parallel 快速完整 Positive 路径已接入 typed late-result sink，late-attempt drain 由 sink 接管并在生产路径交给有界 cache finalizer，提供 sink 时首个可停止 DNS 终态可快速返回，nested group 也会继续传播该 sink；RuntimeCoordinator 已统一托管历史/当前 finalizer、提供最新 Runtime current-target，并在旧 owner 淘汰时清理无活动 finalizer，`PolicyLateResultSink` 已按 `CacheEntry.quality` 进行更优响应候选更新，运行中 service 的资源刷新 live snapshot 已通过 UDP loopback 回归验证；跨 hosts/DoH adapter 的并发候选与 late-result 路径已有矩阵回归
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：已实现
 >
-> 目标代码：`backend/src/upstream/*`
+> 适用范围：upstream connector、bootstrap、outbound、group、并发选择和故障回退
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
+> 最后核对：待核对
 >
-> 相关方案：[Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md)
+> 关联实现：`backend/src/upstream/*`
+>
+> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md)
+
+## 当前实现边界
+
+v1 方案与实现已完成，已实现内联 hosts exchange、可注入 DoH exchange、plain HTTP DoH transport、Reqwest Rustls HTTP/2 direct/proxy HTTPS DoH transport、adapter-owned bounded client pool、可注入地址解析 port、bootstrap 引用元数据透传、bootstrap 响应地址提取、注入 connector 的 bootstrap A/AAAA 查询、默认 DoH transport/Registry bootstrap 接线、hosts/plain HTTP DoH registry、Outbound profile/target 规划、协议无关 SOCKS5/SOCKS5H codec、OutboundStream port 与握手认证编排、Tokio TCP dial adapter、profile credential 装配、proxy hostname resolver、最小 SOCKS connector 闭环、standalone plain HTTP SOCKS5/SOCKS5H DoH transport adapter、配置驱动的 proxy Registry/Policy/Runtime prepare 接线、PolicyCore direct request path、direct hosts/DoH group primary/fallback exchange 与 phase timeout、纯 group member selection、parallel late window、nested group、outcome/fallback 判定和 Reqwest/Rustls loopback live TLS handshake 验证；parallel 快速完整 Positive 路径已接入 typed late-result sink，late-attempt drain 由 sink 接管并在生产路径交给有界 cache finalizer，提供 sink 时首个可停止 DNS 终态可快速返回，nested group 也会继续传播该 sink；RuntimeCoordinator 已统一托管历史/当前 finalizer、提供最新 Runtime current-target，并在旧 owner 淘汰时清理无活动 finalizer，`PolicyLateResultSink` 已按 `CacheEntry.quality` 进行更优响应候选更新，运行中 service 的资源刷新 live snapshot 已通过 UDP loopback 回归验证；跨 hosts/DoH adapter 的并发候选与 late-result 路径已有矩阵回归。
 
 ## 1. 职责
 

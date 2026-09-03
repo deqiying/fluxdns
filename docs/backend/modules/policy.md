@@ -1,14 +1,20 @@
 # Policy 模块设计
 
-> 状态：v1 主链已完成，client/strategy/route immutable index、resource snapshot、ResolutionPlan、cache/TTL/ECS、direct/group upstream、late candidate、`geosite.dat` selector 和配置 reload 均已接线并有跨 transport/cross-adapter 证据
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：已实现
 >
-> 目标代码：`backend/src/policy/*`
+> 适用范围：client、strategy、rule、resource matcher 和 `ResolutionPlan`
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
+> 最后核对：待核对
 >
-> 相关方案：[DNS Core](dns-core.md) · [Resource](resource.md) · [Upstream](upstream.md)
+> 关联实现：`backend/src/policy/*`
+>
+> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [DNS Core](dns-core.md) · [Resource](resource.md) · [Upstream](upstream.md)
+
+## 当前实现边界
+
+v1 主链已完成，client/strategy/route immutable index、resource snapshot、ResolutionPlan、cache/TTL/ECS、direct/group upstream、late candidate、`geosite.dat` selector 和配置 reload 均已接线并有跨 transport/cross-adapter 证据。
 
 ## 1. 职责
 

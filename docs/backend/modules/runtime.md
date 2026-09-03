@@ -1,12 +1,20 @@
 # Runtime 模块设计
 
-> 状态：v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard，Application 提供配置文件 reload 触发 API，service 会观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障；Supervisor 已支持受管 task-scoped cancellation，DnsService 的 UDP/TCP/DoH listener 与 resource refresh task 已使用独立 scoped token，显式 service reload 已可按 BindPlan 变化选择重绑或复用 listener，并重建 listener/resource task；database/logs/webui/resolve-log 等进程持有配置变化会拒绝热重载并保留旧 Runtime；候选 revision CAS 现已在 mutation gate 下合并兼容资源的更高版本、Policy compiled index、Runtime metadata 和 worker 稳定调度状态，同一基准 revision 的并发候选只允许一个获胜；`run` 已通过 Application 的配置 fingerprint 轮询复用 service reload，当前 Runtime 已提供 deadline-aware request drain wait，旧 draining Runtime owner 会在新激活时惰性清理，并在 owner 淘汰时同步清理无活动 `LateCacheFinalizer` owner，运行中 service 已验证资源 refresh 对同一 listener 的 live publish；资源内容刷新明确不创建新 Runtime，跨 Runtime 的进程级 shared-service 复用、正常停机 flush 和 fatal task 有界收尾已有定向证据，故障与超时分项验收仍在后续阶段
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：部分实现
 >
-> 目标代码：`backend/src/runtime/*`
+> 适用范围：Runtime 状态、listener 生命周期、后台任务监督、原子激活和 shutdown
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [开发计划](../backend-development-plan.md)
+> 最后核对：待核对
+>
+> 关联实现：`backend/src/runtime/*`
+>
+> 关联文档：[后端架构](../architecture.md) · [后端开发计划](../development-plan.md)
+
+## 当前实现边界
+
+v1 方案已完成，阶段 3 基础服务编排、Runtime 资源摘要和 service core 构造入口已实现；`PreparedRuntime`/`ActiveRuntime` 现已持有生产 `ResourceFetcher`，async `PreparedRuntime` 已在 bind 前完成 remote restore-or-fetch、file hosts/rule-set compiled snapshot 构造，`auto_update=true` 的 remote/file refresh task 已纳入 service Supervisor，并在当前 ActiveRuntime 原子更新 Policy 与资源摘要；`Application` 与 `DnsService` 现已共享持有 `RuntimeCoordinator`，资源循环通过 coordinator 读取当前活动实例，coordinator 还提供候选 `bind_and_activate` 入口和 stale-active refresh guard，Application 提供配置文件 reload 触发 API，service 会观察 Supervisor 终止 task 并按 fault level 升级不可恢复故障；Supervisor 已支持受管 task-scoped cancellation，DnsService 的 UDP/TCP/DoH listener 与 resource refresh task 已使用独立 scoped token，显式 service reload 已可按 BindPlan 变化选择重绑或复用 listener，并重建 listener/resource task；database/logs/webui/resolve-log 等进程持有配置变化会拒绝热重载并保留旧 Runtime；候选 revision CAS 现已在 mutation gate 下合并兼容资源的更高版本、Policy compiled index、Runtime metadata 和 worker 稳定调度状态，同一基准 revision 的并发候选只允许一个获胜；`run` 已通过 Application 的配置 fingerprint 轮询复用 service reload，当前 Runtime 已提供 deadline-aware request drain wait，旧 draining Runtime owner 会在新激活时惰性清理，并在 owner 淘汰时同步清理无活动 `LateCacheFinalizer` owner，运行中 service 已验证资源 refresh 对同一 listener 的 live publish；资源内容刷新明确不创建新 Runtime，跨 Runtime 的进程级 shared-service 复用、正常停机 flush 和 fatal task 有界收尾已有定向证据。并发、故障和时间控制测试尚未全部完成。
 
 ## 1. 职责
 

@@ -1,12 +1,20 @@
 # Application 模块设计
 
-> 状态：v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task、typed tracing layer 和 `TelemetryWriter` 周期 flush；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API、service-aware reload 入口重建 listener task，以及基于 metadata+content fingerprint 的去抖自动 reload，且已用 UDP loopback 验证 reload 后 revision、listener 和 Policy snapshot 同步切换；进程持有的 database/logs/webui/resolve-log 配置变化会 fail-closed 并要求重启，旧 Runtime 保持服务；已接入配置驱动的正式日志输出目标和 reloadable level filter；`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障，返回原始 task error 前先执行有界收尾；服务现统一处理 `SIGINT`/Unix `SIGTERM`，并在 graceful shutdown 期间快速响应第二个终止信号，由 coordinator 等待当前/旧 Runtime 的请求 drain；Listener health 已覆盖首启、降级、成功 reload 恢复和 shutdown，正常与 fatal task 退出均已验证 SQLite 最终提交和 Telemetry 关闭
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：部分实现
 >
-> 目标代码：`backend/src/main.rs`、`backend/src/app.rs`
+> 适用范围：进程入口、依赖装配、信号、退出和服务生命周期
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [开发计划](../backend-development-plan.md)
+> 最后核对：待核对
+>
+> 关联实现：`backend/src/main.rs`、`backend/src/app.rs`
+>
+> 关联文档：[后端架构](../architecture.md) · [后端开发计划](../development-plan.md)
+
+## 当前实现边界
+
+v1 方案已完成，已实现配置校验、Runtime bind、UDP/TCP/DoH plain HTTP service 启动和基础 graceful shutdown；正式 `run` prepare 已在 bind 前完成 remote rule-set restore-or-fetch，`Application` 创建的 `RuntimeCoordinator` 由 `DnsService` 持有，service Supervisor 负责长期 remote refresh task、typed tracing layer 和 `TelemetryWriter` 周期 flush；Application 已提供无 snapshot 副作用的配置文件 reload 触发 API、service-aware reload 入口重建 listener task，以及基于 metadata+content fingerprint 的去抖自动 reload，且已用 UDP loopback 验证 reload 后 revision、listener 和 Policy snapshot 同步切换；进程持有的 database/logs/webui/resolve-log 配置变化会 fail-closed 并要求重启，旧 Runtime 保持服务；已接入配置驱动的正式日志输出目标和 reloadable level filter；`DnsService` 会观察 Supervisor 的终止 task 并升级不可恢复故障，返回原始 task error 前先执行有界收尾；服务现统一处理 `SIGINT`/Unix `SIGTERM`，并在 graceful shutdown 期间快速响应第二个终止信号，由 coordinator 等待当前/旧 Runtime 的请求 drain；Listener health 已覆盖首启、降级、成功 reload 恢复和 shutdown，正常与 fatal task 退出均已验证 SQLite 最终提交和 Telemetry 关闭。进程级 Unix `SIGTERM` 和第二终止信号 smoke 尚未完成。
 
 ## 1. 职责与边界
 

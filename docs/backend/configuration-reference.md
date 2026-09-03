@@ -1,9 +1,16 @@
 # FluxDNS 配置字段参考
 
-> 状态：v1 配置模板草案
-> 依据：[config-example.yaml](../config-example.yaml)
+> 文档状态：有效
+>
+> 实现状态：部分实现
+>
 > 适用范围：本文与当前模板同步，描述配置契约和校验意图。运行时尚未实现时，本文没有定义的行为不应视为已支持。
-> 模块方案与进度：[backend-development-plan.md](backend-development-plan.md)
+>
+> 最后核对：待核对
+>
+> 依据：[config-example.yaml](../../config-example.yaml)
+>
+> 关联文档：[后端开发计划](development-plan.md)
 
 ## 1. 配置模型概览
 
@@ -50,7 +57,7 @@ listener
 
 启动时若配置文件所在目录不是 `resolved_work_path`，程序将配置复制到 `<resolved_work_path>/config.yaml`，固定文件名为 `config.yaml`。该文件是工作目录中的配置快照；启动流程负责创建工作目录和所需父目录。
 
-配置副本按 [Config 模块方案](backend-modules/config.md) 原子创建：目标不存在时在同目录写临时文件并以 no-replace 方式发布，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
+配置副本按 [Config 模块方案](modules/config.md) 原子创建：目标不存在时在同目录写临时文件并以 no-replace 方式发布，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
 
 ### 2.3 命名与引用
 
@@ -429,7 +436,7 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 | `upstreams[].name` / `fallbacks[].name` | string | 必填 | 成员上游名称。 |
 | `upstreams[].weight` / `fallbacks[].weight` | positive integer | 必填 | 正整数权重。 |
 
-组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。精确算法见 [Upstream 模块方案](backend-modules/upstream.md)：`round-robin` 使用 smooth weighted round-robin，`load-balance` 使用按 weight 归一化的 least-in-flight，`failover` 严格按配置顺序且 weight 必须为 1。三种模式都只在 transport failure 时尝试其他成员，任意终态 DNS 响应都会结束当前组；主组完全没有终态响应时才进入 fallback。
+组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。精确算法见 [Upstream 模块方案](modules/upstream.md)：`round-robin` 使用 smooth weighted round-robin，`load-balance` 使用按 weight 归一化的 least-in-flight，`failover` 严格按配置顺序且 weight 必须为 1。三种模式都只在 transport failure 时尝试其他成员，任意终态 DNS 响应都会结束当前组；主组完全没有终态响应时才进入 fallback。
 
 `parallel` 的 v1 语义固定如下：
 
@@ -582,7 +589,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 1. `dot`/`doq` listener 的字段、TLS/QUIC 材料来源和协议特有校验。
 2. 主动上游健康检查、熔断器和持久健康分数配置。
 3. 远程规则的 expected checksum、版本锁定和签名验证字段；v1 只记录内部 content hash/source fingerprint。
-4. 未来配置版本及 SQLite schema v2 之后的兼容窗口和 migration SQL；当前业务库升级链见 [Storage 模块](backend-modules/storage.md)。
+4. 未来配置版本及 SQLite schema v2 之后的兼容窗口和 migration SQL；当前业务库升级链见 [Storage 模块](modules/storage.md)。
 5. WebUI 正式启用版本的管理 API、认证/session、CSRF、TLS/bind 及历史统计保留契约。
 
 ## 18. 协议依据

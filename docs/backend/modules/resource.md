@@ -1,14 +1,20 @@
 # Resource 模块设计
 
-> 状态：v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、`geosite.dat` protobuf selector 解析、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取；async `PreparedRuntime` 已在 bind 前完成 remote rule-set restore-or-fetch、file hosts/rule-set snapshot 加载和 typed Policy 构造；`auto_update=true` 的 remote、file rule-set、file hosts 均由 service Supervisor 持有长期 refresh task，并在同一 ActiveRuntime 原子更新 Policy 与资源摘要；`ResourceRegistrySnapshot` 已提供按资源过滤的更高版本合并原语，`ResourceRefreshRuntime` 现可迁移已发布 registry 版本和稳定 schedule/backoff 状态，供配置候选 Runtime 合并使用；service reload 现按资源 ID 增量复用未变化 worker、取消移除 worker；资源内容刷新不创建新 Runtime 或重绑 listener
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：已实现
 >
-> 目标代码：`backend/src/resource/*`
+> 适用范围：hosts/rule 解析、加载、snapshot、持久化和刷新发布
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [配置字段参考](../configuration-reference.md)
+> 最后核对：待核对
 >
-> 相关方案：[Policy](policy.md) · [Runtime](runtime.md) · [Upstream](upstream.md)
+> 关联实现：`backend/src/resource/*`
+>
+> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [Policy](policy.md) · [Runtime](runtime.md) · [Upstream](upstream.md)
+
+## 当前实现边界
+
+v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、`geosite.dat` protobuf selector 解析、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取；async `PreparedRuntime` 已在 bind 前完成 remote rule-set restore-or-fetch、file hosts/rule-set snapshot 加载和 typed Policy 构造；`auto_update=true` 的 remote、file rule-set、file hosts 均由 service Supervisor 持有长期 refresh task，并在同一 ActiveRuntime 原子更新 Policy 与资源摘要；`ResourceRegistrySnapshot` 已提供按资源过滤的更高版本合并原语，`ResourceRefreshRuntime` 现可迁移已发布 registry 版本和稳定 schedule/backoff 状态，供配置候选 Runtime 合并使用；service reload 现按资源 ID 增量复用未变化 worker、取消移除 worker；资源内容刷新不创建新 Runtime 或重绑 listener。
 
 ## 1. 职责
 

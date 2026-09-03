@@ -1,12 +1,20 @@
 # Ports 模块设计
 
-> 状态：v1 方案已完成，公共契约、UDP/TCP socket capability、TCP EOF/session、bounded byte-stream 和首轮 TLS accept 语义已实现；Memory/Moka CacheStore 与内存/SQLite StorageBackend 已接入共享 conformance 测试
+> 文档状态：有效
 >
-> 更新日期：2026-08-31
+> 实现状态：已实现
 >
-> 目标代码：`backend/src/ports/*`
+> 适用范围：DNS Core 与 adapter 之间的稳定接口、错误语义和 contract test
 >
-> 上位设计：[后端架构](../backend-architecture.md) · [开发计划](../backend-development-plan.md)
+> 最后核对：待核对
+>
+> 关联实现：`backend/src/ports/*`
+>
+> 关联文档：[后端架构](../architecture.md) · [后端开发计划](../development-plan.md)
+
+## 当前实现边界
+
+v1 方案已完成，公共契约、UDP/TCP socket capability、TCP EOF/session、bounded byte-stream 和首轮 TLS accept 语义已实现；Memory/Moka CacheStore 与内存/SQLite StorageBackend 已接入共享 conformance 测试。
 
 ## 1. 目标
 

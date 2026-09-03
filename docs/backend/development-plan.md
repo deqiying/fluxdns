@@ -1,12 +1,18 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 198（`geosite.dat` protobuf selector）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 文档状态：有效
 >
-> 更新日期：2026-09-03
+> 实现状态：部分实现
 >
-> 总体架构：[backend-architecture.md](backend-architecture.md) · 配置契约：[configuration-reference.md](configuration-reference.md)
+> 适用范围：FluxDNS 后端交付阶段、总体进度、后续优先级与 v1 验收门槛
+>
+> 最后核对：待核对
+>
+> 关联文档：[后端架构设计](architecture.md) · [配置字段参考](configuration-reference.md)
 
 ## 1. 当前结论
+
+MVP v0.1 已完成；当前已完成至阶段 198（`geosite.dat` protobuf selector）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 
 ### 已交付
 
@@ -149,7 +155,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - `cargo test --manifest-path backend/Cargo.toml --locked`：`569 passed、0 failed`；
 - `git diff --check`：通过。
 
-阶段 198 完成 `geosite.dat` selector 主链；服务器重启/宕机恢复、缓存/请求记录绝对持久化、HTTP/2 和长期压力仍按计划不作为本阶段阻塞项。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 198 完成 `geosite.dat` selector 主链；服务器重启/宕机恢复、缓存/请求记录绝对持久化、HTTP/2 和长期压力仍按计划不作为本阶段阻塞项。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend/modules/*.md`。
 
 ## 5. v1 验收门槛
 
@@ -166,23 +172,23 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ## 6. 文档与提交规则
 
-通用的文档权威边界、目录选址、状态、同步和废弃流程遵循[文档维护规范](standards/documentation-maintenance.md)。本节只保留后端分阶段开发特有的维护要求。
+通用的文档权威边界、目录选址、状态、同步和废弃流程遵循[文档维护规范](../standards/documentation-maintenance.md)。本节只保留后端分阶段开发特有的维护要求。
 
 - 每个可独立验收的小阶段单独本地提交，提交范围只覆盖该阶段文件；不使用 `git add .`，不 push。
 - 小阶段同步更新直接受影响的模块文档、验证证据和本计划；不重复抄录每个测试用例。
 - 代码/配置变更使用 `feat`/`fix`，纯计划或规范调整使用 `docs`，最终验收使用 `test`；提交说明采用简体中文 Conventional Commit。
-- 计划只保留决策、边界、进度和证据。详细设计放入 `docs/backend-modules/*.md`，命令输出放入提交或验证记录，避免持续扩大上下文。
+- 计划只保留决策、边界、进度和证据。详细设计放入 `docs/backend/modules/*.md`，命令输出放入提交或验证记录，避免持续扩大上下文。
 
 相关模块文档：
 
-- [application.md](backend-modules/application.md)
-- [ports.md](backend-modules/ports.md)
-- [runtime.md](backend-modules/runtime.md)
-- [transport.md](backend-modules/transport.md)
-- [dns-core.md](backend-modules/dns-core.md)
-- [policy.md](backend-modules/policy.md)
-- [upstream.md](backend-modules/upstream.md)
-- [cache.md](backend-modules/cache.md)
-- [resource.md](backend-modules/resource.md)
-- [storage.md](backend-modules/storage.md)
-- [observability.md](backend-modules/observability.md)
+- [application.md](modules/application.md)
+- [ports.md](modules/ports.md)
+- [runtime.md](modules/runtime.md)
+- [transport.md](modules/transport.md)
+- [dns-core.md](modules/dns-core.md)
+- [policy.md](modules/policy.md)
+- [upstream.md](modules/upstream.md)
+- [cache.md](modules/cache.md)
+- [resource.md](modules/resource.md)
+- [storage.md](modules/storage.md)
+- [observability.md](modules/observability.md)

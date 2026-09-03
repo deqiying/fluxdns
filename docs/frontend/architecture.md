@@ -1,10 +1,14 @@
 # FluxDNS 前端架构设计
 
-> 状态：已确定方案（只读 WebUI 第一阶段）
+> 文档状态：有效
 >
-> 日期：2026-09-03
+> 实现状态：未实现
 >
-> 技术方案：React + TypeScript + Vite
+> 适用范围：FluxDNS 只读 WebUI 第一阶段的总体架构、技术栈、Management API 边界与实施顺序
+>
+> 最后核对：待核对
+>
+> 关联文档：[前端工程入口](../../frontend/README.md) · [后端架构设计](../backend/architecture.md)
 
 ## 1. 结论
 
@@ -29,11 +33,11 @@ FluxDNS 前端采用 **React + TypeScript + Vite 的独立 SPA**。生产环境�
 
 ### 2.1 仓库边界
 
-`frontend/` 是独立的前端主目录，当前没有 `package.json`、构建配置或源码。前端实现不得把仓库根目录作为工程目录，也不得把构建物或依赖提交到仓库。相关目录约定见 [本地测试规范](standards/local-testing.md)。
+`frontend/` 是独立的前端主目录，当前没有 `package.json`、构建配置或源码。前端实现不得把仓库根目录作为工程目录，也不得把构建物或依赖提交到仓库。相关目录约定见 [本地测试规范](../standards/local-testing.md)。
 
 ### 2.2 后端边界
 
-FluxDNS 后端是单 Rust binary。当前 DoH 入站使用独立的 HTTP/1.x parser，WebUI 配置仍处于 feature gate 阶段；`webui.enable` 为 `true` 时当前版本应拒绝启动，不会实例化管理服务。[后端架构：WebUI 预留](backend-architecture.md#13-webui-预留) [配置参考：`webui`](configuration-reference.md#7-webui)
+FluxDNS 后端是单 Rust binary。当前 DoH 入站使用独立的 HTTP/1.x parser，WebUI 配置仍处于 feature gate 阶段；`webui.enable` 为 `true` 时当前版本应拒绝启动，不会实例化管理服务。[后端架构：WebUI 预留](../backend/architecture.md#13-webui-预留) [配置参考：`webui`](../backend/configuration-reference.md#7-webui)
 
 后续启用 WebUI 时，管理 API 必须与 DoH router 和 DNS handler 分离。当前前端架构遵守这一边界：前端只访问 management API，不把现有 DoH 路由当作管理 API，也不承担 DNS 数据面的协议转换。
 
@@ -264,7 +268,7 @@ GET  /api/v1/system
 
 后端应增加独立的 `management` adapter/router，并由现有 supervisor 管理其 listener/task 生命周期。管理服务的绑定地址和端口应进入全局 TCP bind 冲突校验，但不得与 DoH router 共享路由语义。管理 handler 通过只读的 Storage、Telemetry、Health 和 RuntimeCoordinator 入口读取数据，不直接操作 `DnsCore`、socket、SQLite connection 或具体 cache implementation。
 
-现有 `webui.users[].password_hash` 只能在服务端用于密码验证；它不应作为 API 字段返回给前端。[配置参考：用户 hash](configuration-reference.md#7-webui)
+现有 `webui.users[].password_hash` 只能在服务端用于密码验证；它不应作为 API 字段返回给前端。[配置参考：用户 hash](../backend/configuration-reference.md#7-webui)
 
 ## 9. 构建和交付
 
@@ -331,5 +335,5 @@ vite build
 - [React Router 官方文档](https://reactrouter.com/)
 - [TanStack Query React 官方文档](https://tanstack.com/query/latest/docs/framework/react/overview)
 - [Ant Design 官方文档](https://ant.design/)
-- [FluxDNS 后端架构设计](backend-architecture.md)
-- [FluxDNS 配置参考](configuration-reference.md)
+- [FluxDNS 后端架构设计](../backend/architecture.md)
+- [FluxDNS 配置参考](../backend/configuration-reference.md)
