@@ -1952,6 +1952,62 @@ mod tests {
         );
     }
 
+    /// 验证歧义 body framing 和无界 header 在进入 DNS parser 前 fail-closed。
+    #[test]
+    fn rejects_ambiguous_or_unbounded_http_framing() {
+        let wire = wire();
+        let duplicate_length = request(
+            "POST",
+            "/dns",
+            &format!(
+                "Content-Type: application/dns-message\r\nContent-Length: {}\r\nContent-Length: {}\r\n",
+                wire.len(),
+                wire.len()
+            ),
+            &wire,
+        );
+        assert_eq!(
+            try_parse_request(&duplicate_length),
+            Err(DohHttpError::Malformed)
+        );
+
+        let transfer_encoding = request(
+            "POST",
+            "/dns",
+            "Content-Type: application/dns-message\r\nTransfer-Encoding: chunked\r\n",
+            &wire,
+        );
+        assert_eq!(
+            try_parse_request(&transfer_encoding),
+            Err(DohHttpError::UnsupportedTransferEncoding)
+        );
+
+        let too_many_headers = (0..=MAX_HEADER_COUNT)
+            .map(|index| format!("X-Test-{index}: value\r\n"))
+            .collect::<String>();
+        let encoded = base64url(&wire);
+        assert_eq!(
+            try_parse_request(&request(
+                "GET",
+                &format!("/dns?dns={encoded}"),
+                &too_many_headers,
+                &[],
+            )),
+            Err(DohHttpError::Malformed)
+        );
+
+        let oversized_headers = format!("X-Large: {}\r\n", "a".repeat(MAX_DOH_HEADER_BYTES));
+        assert_eq!(
+            try_parse_request(&request(
+                "GET",
+                &format!("/dns?dns={encoded}"),
+                &oversized_headers,
+                &[],
+            )),
+            Err(DohHttpError::Malformed)
+        );
+    }
+
     #[test]
     fn rejects_missing_or_duplicate_http11_host() {
         let encoded = base64url(&wire());
