@@ -8,14 +8,15 @@
 
 | 任务范围 | 必读文档 |
 | --- | --- |
+| 文档新增、迁移、重命名、状态维护和废弃 | [`docs/standards/documentation-maintenance.md`](docs/standards/documentation-maintenance.md)，并从 [`docs/README.md`](docs/README.md)确认权威文档与目录职责 |
 | 本地配置、构建物、工具安装、DoH smoke test 和测试结果记录 | [`docs/standards/local-testing.md`](docs/standards/local-testing.md) |
-| 规范文档索引及新增规范的归档位置 | [`docs/standards/README.md`](docs/standards/README.md) |
+| 规范文档索引及新增规范的存放位置 | [`docs/standards/README.md`](docs/standards/README.md) |
 | 配置字段、路径解析、校验和迁移 | [`docs/configuration-reference.md`](docs/configuration-reference.md) |
 | 后端总体架构、运行时边界和跨模块契约 | [`docs/backend-architecture.md`](docs/backend-architecture.md) |
 | 后端模块实现 | 对应的 [`docs/backend-modules/`](docs/backend-modules/) 文档，并结合 [`docs/backend-development-plan.md`](docs/backend-development-plan.md) |
 | 前端目录和前端工程约定 | [`frontend/README.md`](frontend/README.md) |
 
-`docs/standards/` 用于存放跨模块、可执行的项目规范。新增规范文档时，应同步更新该目录的索引和本表，避免只新增文件而没有路由入口。
+`docs/README.md` 是文档总入口，`docs/standards/` 用于存放跨模块、可执行的项目规范。文档目录、职责和生命周期遵循 `docs/standards/documentation-maintenance.md`；新增规范文档时，应同步更新该目录的索引和本表，避免只新增文件而没有路由入口。
 
 ## 本地文件与路径
 

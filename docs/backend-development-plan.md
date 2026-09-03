@@ -166,6 +166,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 
 ## 6. 文档与提交规则
 
+通用的文档权威边界、目录选址、状态、同步和废弃流程遵循[文档维护规范](standards/documentation-maintenance.md)。本节只保留后端分阶段开发特有的维护要求。
+
 - 每个可独立验收的小阶段单独本地提交，提交范围只覆盖该阶段文件；不使用 `git add .`，不 push。
 - 小阶段同步更新直接受影响的模块文档、验证证据和本计划；不重复抄录每个测试用例。
 - 代码/配置变更使用 `feat`/`fix`，纯计划或规范调整使用 `docs`，最终验收使用 `test`；提交说明采用简体中文 Conventional Commit。
