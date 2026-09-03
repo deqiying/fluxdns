@@ -700,20 +700,24 @@ mod tests {
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
     use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
+    use url::Url;
 
     use super::{ExecutorBuildError, GroupMember, LateResultSink, UpstreamGroupExecutor};
-    use crate::config::resolve::{ConfigId, ResolvedUpstreamMember};
+    use crate::config::resolve::{ConfigId, ResolvedUpstream, ResolvedUpstreamMember};
     use crate::dns::{
         CacheCompatibilityKey, Cancellation, CanonicalQuery, CanonicalResponse, ClientIdentity,
         Deadline, ListenerId, RequestContext, RequestId, RequestMeta, ResponseClass,
         RuntimeRevision, TransportCapabilities, TransportClass,
     };
-    use crate::ports::PortFuture;
     use crate::ports::exchange::{
         ConnectorId, DnsExchange, SelectionPolicy, TransportFailure, TransportFailureClass,
         UpstreamOutcome,
     };
     use crate::ports::testing::FakeExchange;
+    use crate::ports::{PortError, PortFuture};
+    use crate::upstream::{
+        DohExchange, DohHttpRequest, DohHttpResponseOwned, DohHttpTransport, HostsExchange,
+    };
 
     fn query() -> CanonicalQuery {
         let mut message = Message::new(1, MessageType::Query, OpCode::Query);
@@ -813,6 +817,12 @@ mod tests {
         outcome: Mutex<Option<UpstreamOutcome>>,
     }
 
+    /// 为跨 adapter 并发测试返回与请求 ID 关联的延迟 DoH 响应。
+    struct DelayedDohTransport {
+        delay: Duration,
+        response_code: ResponseCode,
+    }
+
     #[derive(Default)]
     struct LateCollector {
         results: Mutex<Vec<(usize, String, ResponseClass)>>,
@@ -877,6 +887,30 @@ mod tests {
             Box::pin(async move {
                 tokio::time::sleep(delay).await;
                 outcome.expect("delayed exchange must be called once")
+            })
+        }
+    }
+
+    impl DohHttpTransport for DelayedDohTransport {
+        /// 从真实 DoH request envelope 重建响应，确保测试经过 connector 校验边界。
+        fn post<'a>(
+            &'a self,
+            request: DohHttpRequest,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
+            Box::pin(async move {
+                tokio::time::sleep(self.delay).await;
+                let request = Message::from_vec(request.body()).unwrap();
+                let mut response =
+                    Message::new(request.metadata.id, MessageType::Response, OpCode::Query);
+                response.metadata.response_code = self.response_code;
+                response.add_query(request.queries[0].clone());
+                Ok(DohHttpResponseOwned {
+                    status: 200,
+                    content_type: Some("application/dns-message".to_owned()),
+                    body: response.to_vec().unwrap(),
+                })
             })
         }
     }
@@ -1149,6 +1183,62 @@ mod tests {
         assert!(sink.results().iter().any(|(_, connector, class)| {
             connector == "inner-slow" && *class == ResponseClass::NoData
         }));
+    }
+
+    #[tokio::test]
+    async fn parallel_hosts_and_doh_adapters_keep_selected_and_late_candidates() {
+        let query = query();
+        let hosts = Arc::new(
+            HostsExchange::from_resolved(&ResolvedUpstream::Hosts {
+                id: ConfigId::new("hosts").unwrap(),
+                format: "hosts".to_owned(),
+                hosts: "192.0.2.1 example.com.\n".to_owned(),
+            })
+            .unwrap(),
+        );
+        let doh = Arc::new(
+            DohExchange::new(
+                ConnectorId::new("doh").unwrap(),
+                Url::parse("https://resolver.example/dns-query").unwrap(),
+                None,
+                Arc::new(DelayedDohTransport {
+                    delay: Duration::from_millis(25),
+                    response_code: ResponseCode::NoError,
+                }),
+            )
+            .unwrap(),
+        );
+        let selector = crate::upstream::GroupSelector::new(
+            SelectionPolicy::Parallel,
+            vec![member("hosts"), member("doh")],
+        )
+        .unwrap();
+        let executor = UpstreamGroupExecutor::new(selector, vec![hosts, doh]).unwrap();
+        let sink = Arc::new(LateCollector::default());
+
+        let result = executor
+            .execute_with_selection_and_late_sink(&query, &context(), sink.clone(), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            result.connector.as_ref().map(ConnectorId::as_str),
+            Some("hosts")
+        );
+        assert!(matches!(
+            result.outcome,
+            UpstreamOutcome::Response(response) if response.class() == ResponseClass::Positive
+        ));
+
+        for _ in 0..100 {
+            if !sink.results().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        assert_eq!(
+            sink.results(),
+            vec![(1, "doh".to_owned(), ResponseClass::NoData)]
+        );
     }
 
     #[tokio::test]
