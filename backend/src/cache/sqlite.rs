@@ -235,6 +235,21 @@ impl SqlitePersistentCacheStore {
         }
     }
 
+    /// 在 deadline 内取得串行 operation lock，避免数据库排队无限越过调用方预算。
+    async fn lock_operation(
+        &self,
+        deadline: Deadline,
+        operation: &'static str,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, PortError> {
+        let now = Instant::now();
+        if deadline.is_expired(now) {
+            return Err(PortError::new(PortErrorClass::Timeout, operation));
+        }
+        tokio::time::timeout(deadline.remaining(now), self.operation_lock.lock())
+            .await
+            .map_err(|_| PortError::new(PortErrorClass::Timeout, operation))
+    }
+
     async fn read_rows(
         &self,
         now: Instant,
@@ -388,7 +403,9 @@ impl PersistentCacheStore for SqlitePersistentCacheStore {
                 ));
             }
             self.available("sqlite_cache.recover")?;
-            let _guard = self.operation_lock.lock().await;
+            let _guard = self
+                .lock_operation(deadline, "sqlite_cache.recover")
+                .await?;
             let decoded = self
                 .read_rows(Instant::now(), "sqlite_cache.recover")
                 .await?;
@@ -414,7 +431,9 @@ impl PersistentCacheStore for SqlitePersistentCacheStore {
                 ));
             }
             self.available("sqlite_cache.persist")?;
-            let _guard = self.operation_lock.lock().await;
+            let _guard = self
+                .lock_operation(deadline, "sqlite_cache.persist")
+                .await?;
             let now = Instant::now();
             let mut records = self.read_rows(now, "sqlite_cache.persist").await?.records;
             records.extend(batch.records);
@@ -434,7 +453,9 @@ impl PersistentCacheStore for SqlitePersistentCacheStore {
                 ));
             }
             self.available("sqlite_cache.maintain_capacity")?;
-            let _guard = self.operation_lock.lock().await;
+            let _guard = self
+                .lock_operation(deadline, "sqlite_cache.maintain_capacity")
+                .await?;
             let now = Instant::now();
             let decoded = self
                 .read_rows(now, "sqlite_cache.maintain_capacity")
@@ -455,9 +476,11 @@ impl PersistentCacheStore for SqlitePersistentCacheStore {
         })
     }
 
-    fn shutdown(&self, _deadline: Deadline) -> PortFuture<'_, Result<(), PortError>> {
+    fn shutdown(&self, deadline: Deadline) -> PortFuture<'_, Result<(), PortError>> {
         Box::pin(async move {
-            let _guard = self.operation_lock.lock().await;
+            let _guard = self
+                .lock_operation(deadline, "sqlite_cache.shutdown")
+                .await?;
             {
                 let mut state = self.state.lock().map_err(|_| {
                     PortError::new(PortErrorClass::Internal, "sqlite_cache.shutdown")
@@ -755,6 +778,39 @@ mod tests {
             .unwrap();
         assert_eq!(store.recover(deadline()).await.unwrap().1.loaded, 2);
 
+        store.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    /// 验证串行数据库操作和 shutdown 在等待锁时遵守 deadline。
+    #[tokio::test]
+    async fn operation_lock_wait_honors_deadline() {
+        let path = db_path();
+        let store = SqlitePersistentCacheStore::connect(&path, 16 * 1024)
+            .await
+            .unwrap();
+        let guard = store.operation_lock.lock().await;
+
+        let recover_deadline = Deadline::new(Instant::now() + Duration::from_millis(20));
+        let recover_error = store.recover(recover_deadline).await.unwrap_err();
+        assert!(matches!(
+            recover_error.class(),
+            crate::ports::PortErrorClass::Timeout
+        ));
+        assert_eq!(recover_error.operation(), "sqlite_cache.recover");
+
+        let shutdown_deadline = Deadline::new(Instant::now() + Duration::from_millis(20));
+        let shutdown_error = store.shutdown(shutdown_deadline).await.unwrap_err();
+        assert!(matches!(
+            shutdown_error.class(),
+            crate::ports::PortErrorClass::Timeout
+        ));
+        assert_eq!(shutdown_error.operation(), "sqlite_cache.shutdown");
+
+        drop(guard);
+        assert_eq!(store.recover(deadline()).await.unwrap().1.loaded, 0);
         store.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
