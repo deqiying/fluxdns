@@ -13,7 +13,8 @@
 | 任务范围 | 必读文档 |
 | --- | --- |
 | 文档目录结构、新增、迁移、重命名、状态维护和废弃 | [`docs/standards/documentation-maintenance.md`](docs/standards/documentation-maintenance.md)，并从 [`docs/README.md`](docs/README.md)确认权威文档与目录职责 |
-| 本地配置、构建物、工具安装、DoH smoke test 和测试结果记录 | [`docs/standards/local-testing.md`](docs/standards/local-testing.md) |
+| 项目工具链、构建物、缓存、命令调用和工具安装边界 | [`docs/standards/environment-usage.md`](docs/standards/environment-usage.md) |
+| 本地测试配置、运行时文件、DoH smoke test 和测试结果记录 | [`docs/standards/local-testing.md`](docs/standards/local-testing.md) |
 | 规范文档索引及新增规范的存放位置 | [`docs/standards/README.md`](docs/standards/README.md) |
 | 配置字段、路径解析、校验和迁移 | [`docs/backend/configuration-reference.md`](docs/backend/configuration-reference.md) |
 | 后端总体架构、运行时边界和跨模块契约 | [`docs/backend/architecture.md`](docs/backend/architecture.md) |
@@ -24,15 +25,14 @@
 
 ## 本地文件与路径
 
-- 本地测试配置、规则、数据库、缓存、日志、临时证书及其他运行时文件统一放在仓库根目录的 `_fluxdns/`，不得散落到仓库根目录或源码目录。
+- 本地测试配置、规则、数据库、日志、临时证书及其他运行时文件统一放在仓库根目录的 `_fluxdns/`，不得散落到仓库根目录或源码目录；项目工具链缓存按 [`docs/standards/environment-usage.md`](docs/standards/environment-usage.md) 管理。
 - `_fluxdns/` 是本地专用目录，已加入 `.gitignore`，不得提交其中的个人配置或运行数据。
 - 配置路径遵循两级基准：相对 `work.path` 以启动配置文件所在目录为基准；其他配置中的相对路径以解析后的 `work.path` 为基准。具体规则以 `docs/backend/configuration-reference.md` 为准。
 
 ## 构建与验证
 
-- 后端命令从仓库根目录执行，并通过 `--manifest-path backend/Cargo.toml` 指定 Rust manifest。
-- Rust toolchain 使用项目 `mise.toml` 声明的版本；执行 `cargo`、`rustc`、`doggo` 等由 `mise` 管理的命令时，优先直接调用命令（例如 `cargo fmt --manifest-path backend/Cargo.toml -- --check`），仅当命令未找到、shim 不可用或未解析到项目工具链等无法直接执行的情况才使用 `mise exec --` 桥接，并记录回退原因；本地测试、DoH 工具和安装边界遵循 `docs/standards/local-testing.md`。
-- 构建物和依赖目录必须由 `.gitignore` 覆盖。提交前检查 `git status --short`，不要使用 `git add -f` 提交本地产物。
+- 后端命令从仓库根目录执行，并通过 `--manifest-path backend/Cargo.toml` 指定 Rust manifest；项目 Rust、Node、pnpm 工具链调用、构建物、缓存和安装边界遵循 [`docs/standards/environment-usage.md`](docs/standards/environment-usage.md)。
+- 本地测试配置、DoH 工具和测试结果记录遵循 [`docs/standards/local-testing.md`](docs/standards/local-testing.md)。构建物和依赖目录必须由 `.gitignore` 覆盖；提交前检查 `git status --short`，不要使用 `git add -f` 提交本地产物。
 - 文档或规则修改后至少检查 `git diff --check`，并按受影响范围执行最小充分验证；不要把未执行的测试描述为已通过。
 
 ## 代码注释

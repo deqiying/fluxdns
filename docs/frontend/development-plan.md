@@ -181,7 +181,7 @@ frontend/
 | --- | --- |
 | 主要文件 | `frontend/package.json`、锁文件、`tsconfig.json`、`vite.config.ts`、`src/app/*`、`src/shared/api/*`。 |
 | 主要实现 | React + TypeScript + Vite 工程、TypeScript strict、路径别名、`/api` dev proxy、生产相对路径、QueryClient、基础样式和错误边界。 |
-| 约束 | 构建物只写入 `frontend/dist`；依赖和缓存按本地测试规范放置并由 `.gitignore` 覆盖；不把环境变量变成任意生产 API 地址。 |
+| 约束 | 构建物只写入 `frontend/dist`；依赖和缓存按[项目环境使用规范](../standards/environment-usage.md)放置并由 `.gitignore` 覆盖；不把环境变量变成任意生产 API 地址。 |
 | 验证 | 类型检查、最小 `vite build`、空壳路由加载；命令在工具链确认后执行，当前不宣称已通过。 |
 | 退出条件 | 空壳可启动，`/login`、受保护路由和 404 路由可渲染，开发代理和生产相对 API 路径配置可审查。 |
 
@@ -318,5 +318,6 @@ cd frontend
 - [后端开发计划](../backend/development-plan.md)
 - [Storage 模块设计](../backend/modules/storage.md)
 - [Observability 模块设计](../backend/modules/observability.md)
+- [项目环境使用规范](../standards/environment-usage.md)
 - [本地测试规范](../standards/local-testing.md)
 - [文档维护规范](../standards/documentation-maintenance.md)

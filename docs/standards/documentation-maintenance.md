@@ -29,7 +29,7 @@
 | 后端模块内部设计和实现边界 | [`backend/modules/*.md`](../backend/modules/README.md) | 源码行为变化时更新对应模块文档 |
 | 后端阶段、总体进度和验收门槛 | [`backend/development-plan.md`](../backend/development-plan.md) | 只记录里程碑级进度与证据摘要，不承载详细设计 |
 | 配置字段、路径、校验和迁移 | [`backend/configuration-reference.md`](../backend/configuration-reference.md) | 必须与 `config-example.yaml`、配置模型、校验和测试同步 |
-| 前端总体架构和实施边界 | [`frontend/architecture.md`](../frontend/architecture.md) | 前端目录内的运行命令和工程入口由 [`frontend/README.md`](../../frontend/README.md) 维护 |
+| 前端总体架构和实施边界 | [`frontend/architecture.md`](../frontend/architecture.md) | 前端目录入口由 [`frontend/README.md`](../../frontend/README.md) 维护；项目工具链和命令调用由 [`standards/environment-usage.md`](environment-usage.md) 维护 |
 | 面向使用者的项目概览和入口 | 根 [`README.md`](../../README.md) | 只保留高层摘要，详细内容链接到 `docs/` 权威文档 |
 
 源码、测试、schema 和实际命令结果是“当前实现是否如此”的验证依据；文档是项目接受的设计、契约和维护入口。两者冲突时不得按更新时间直接选择一方，也不得只修改其中一边：应先确认预期契约，再在同一任务中对齐实现、测试、示例和权威文档，或明确记录尚未实现的边界。
@@ -172,7 +172,8 @@ docs/
 | 单一后端模块行为、失败语义或模块测试 | 对应 `backend/modules/*.md` | 改变公共配置或跨模块契约时更新对应权威文档 |
 | 阶段完成、优先级或总体进度 | `backend/development-plan.md` | 只有面向使用者的项目状态发生明显变化时更新根 README |
 | 前端技术栈、边界或 Management API 设计 | `frontend/architecture.md` | 工程命令或目录变化时更新 `frontend/README.md`；后端契约变化时更新后端架构或对应模块文档 |
-| 本地目录、工具、测试方法或结果记录要求 | `standards/local-testing.md` | 更新 `AGENTS.md` 中的强制入口或高层规则 |
+| 项目工具链、构建物、依赖目录、缓存或安装边界 | `standards/environment-usage.md` | 更新 `AGENTS.md` 中的强制入口或高层规则 |
+| 本地测试目录、测试方法或结果记录要求 | `standards/local-testing.md` | 更新 `AGENTS.md` 中的强制入口或高层规则 |
 | 新增或修改跨模块规范 | 对应 `standards/*.md`、`standards/README.md`、根 `AGENTS.md` | 影响文档导航时更新 `docs/README.md` 和相关模块入口 |
 | 文档新增、移动、重命名或删除 | 所在目录 `README.md`、全部入站链接 | 改变一级路由或目录职责时更新 `docs/README.md`；改变协作读取路径时更新根 `AGENTS.md` |
 

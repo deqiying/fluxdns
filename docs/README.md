@@ -32,6 +32,7 @@ docs/
 ## 维护入口
 
 - [文档维护规范](standards/documentation-maintenance.md)：文档目录结构、选址、命名、状态、同步、验证和废弃规则。
-- [本地测试规范](standards/local-testing.md)：本地文件、工具、构建物和测试结果记录规则。
+- [项目环境使用规范](standards/environment-usage.md)：项目工具链、Node.js 与 pnpm 命令调用、构建物、依赖目录、缓存和工具安装边界。
+- [本地测试规范](standards/local-testing.md)：本地测试文件、DoH smoke test 和测试结果记录规则。
 
 新增、重命名或删除一级目录或索引项时，必须在同一变更中更新本索引；领域、规范和模块文档还要更新最近一级目录的 `README.md`。

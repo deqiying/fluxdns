@@ -33,7 +33,7 @@ FluxDNS 前端采用 **React + TypeScript + Vite 的独立 SPA**。生产环境�
 
 ### 2.1 仓库边界
 
-`frontend/` 是独立的前端主目录，当前没有 `package.json`、构建配置或源码。前端实现不得把仓库根目录作为工程目录，也不得把构建物或依赖提交到仓库。相关目录约定见 [本地测试规范](../standards/local-testing.md)。
+`frontend/` 是独立的前端主目录，当前没有 `package.json`、构建配置或源码。前端实现不得把仓库根目录作为工程目录，也不得把构建物或依赖提交到仓库。相关构建物、依赖和缓存目录约定见[项目环境使用规范](../standards/environment-usage.md)，本地测试运行时文件见[本地测试规范](../standards/local-testing.md)。
 
 ### 2.2 后端边界
 
