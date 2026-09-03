@@ -253,6 +253,7 @@ mod tests {
     struct FakeState {
         batches: usize,
         fail_next: bool,
+        block_shutdown: bool,
         shutdown: bool,
     }
 
@@ -294,6 +295,10 @@ mod tests {
 
         fn shutdown(&self, _deadline: Deadline) -> PortFuture<'_, Result<(), PortError>> {
             Box::pin(async move {
+                let block_shutdown = self.state.lock().unwrap().block_shutdown;
+                if block_shutdown {
+                    std::future::pending::<()>().await;
+                }
                 self.state.lock().unwrap().shutdown = true;
                 Ok(())
             })
@@ -374,5 +379,26 @@ mod tests {
         let state = store.state.lock().unwrap();
         assert_eq!(state.batches, 1);
         assert!(state.shutdown);
+    }
+
+    /// 验证 persistence adapter 停机阻塞超过 deadline 时 worker 被 abort 并返回 Timeout。
+    #[tokio::test]
+    async fn shutdown_aborts_worker_when_store_exceeds_deadline() {
+        let store = Arc::new(FakePersistentStore::default());
+        store.state.lock().unwrap().block_shutdown = true;
+        let runtime =
+            CachePersistenceRuntime::start(store.clone(), 1, Duration::from_secs(1)).unwrap();
+
+        let error = runtime
+            .shutdown(Deadline::new(Instant::now() + Duration::from_millis(20)))
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error.class(),
+            crate::ports::PortErrorClass::Timeout
+        ));
+        assert_eq!(error.operation(), "cache_persistence.shutdown");
+        assert!(!store.state.lock().unwrap().shutdown);
     }
 }
