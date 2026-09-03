@@ -10,6 +10,7 @@ pub mod cache;
 pub mod effects;
 pub mod exchange;
 pub mod inbound;
+pub mod management;
 pub mod storage;
 pub mod telemetry;
 pub mod testing;
