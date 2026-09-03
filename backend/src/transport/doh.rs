@@ -970,6 +970,7 @@ pub enum DohHttpStatus {
     PayloadTooLarge,
     UriTooLong,
     UnsupportedMediaType,
+    ExpectationFailed,
     InternalServerError,
 }
 
@@ -983,6 +984,7 @@ impl DohHttpStatus {
             Self::PayloadTooLarge => 413,
             Self::UriTooLong => 414,
             Self::UnsupportedMediaType => 415,
+            Self::ExpectationFailed => 417,
             Self::InternalServerError => 500,
         }
     }
@@ -996,6 +998,7 @@ impl DohHttpStatus {
             Self::PayloadTooLarge => "Payload Too Large",
             Self::UriTooLong => "URI Too Long",
             Self::UnsupportedMediaType => "Unsupported Media Type",
+            Self::ExpectationFailed => "Expectation Failed",
             Self::InternalServerError => "Internal Server Error",
         }
     }
@@ -1023,6 +1026,8 @@ pub enum DohHttpError {
     PayloadTooLarge,
     #[error("DoH POST content type is unsupported")]
     UnsupportedMediaType,
+    #[error("HTTP request expectation is unsupported")]
+    UnsupportedExpectation,
     #[error("DNS wire message is invalid")]
     InvalidDnsWire,
     #[error("transfer encoding is unsupported")]
@@ -1039,6 +1044,7 @@ impl DohHttpError {
             Self::UriTooLong => DohHttpStatus::UriTooLong,
             Self::PayloadTooLarge => DohHttpStatus::PayloadTooLarge,
             Self::UnsupportedMediaType => DohHttpStatus::UnsupportedMediaType,
+            Self::UnsupportedExpectation => DohHttpStatus::ExpectationFailed,
             Self::MethodNotAllowed => DohHttpStatus::MethodNotAllowed,
             Self::NotFound => DohHttpStatus::NotFound,
             Self::Incomplete
@@ -1061,6 +1067,7 @@ impl DohHttpError {
                 | Self::UriTooLong
                 | Self::PayloadTooLarge
                 | Self::UnsupportedTransferEncoding
+                | Self::UnsupportedExpectation
                 | Self::InvalidHost
         )
     }
@@ -1160,6 +1167,8 @@ pub fn try_parse_request(buffer: &[u8]) -> Result<Option<ParsedDohRequest>, DohH
                 }
             }
             "transfer-encoding" => return Err(DohHttpError::UnsupportedTransferEncoding),
+            // 当前 session 不发送 1xx interim response，立即拒绝可避免双方等待 body。
+            "expect" => return Err(DohHttpError::UnsupportedExpectation),
             "host" => {
                 if host_present || !is_valid_host_header(value) {
                     return Err(DohHttpError::InvalidHost);
@@ -2182,6 +2191,27 @@ mod tests {
             );
             assert_eq!(try_parse_request(&invalid), Err(DohHttpError::Malformed));
         }
+    }
+
+    /// 验证服务在未实现 100 Continue 时立即返回 417，而不是等待尚未发送的 body。
+    #[test]
+    fn rejects_expectation_before_waiting_for_post_body() {
+        let request_bytes = request(
+            "POST",
+            "/dns",
+            "Content-Type: application/dns-message\r\nContent-Length: 32\r\nExpect: 100-continue\r\n",
+            &[],
+        );
+        let error = try_parse_request(&request_bytes).unwrap_err();
+
+        assert_eq!(error, DohHttpError::UnsupportedExpectation);
+        assert_eq!(error.status(), DohHttpStatus::ExpectationFailed);
+        assert!(error.should_close());
+        assert!(
+            String::from_utf8(encode_http_error(error))
+                .unwrap()
+                .starts_with("HTTP/1.1 417 Expectation Failed\r\n")
+        );
     }
 
     #[test]

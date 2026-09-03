@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 192（Runtime 并发候选单一获胜）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 193（DoH `Expect` 协议边界）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -27,7 +27,6 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - DoH HTTP/2、完整 HTTP/DNS 协议组合和证书/信任边界矩阵；
 - cache persistence 的 last-access、真实故障复现与请求记录的跨故障源 health/recovery；
 - Resource/Policy 的 `dat selector` 二进制解析；
-- 完整跨 transport DNS contract；
 - v1 最终压力、长期运行、conformance，以及 shutdown 故障/超时矩阵验收。
 
 ## 2. 进度总览
@@ -35,8 +34,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **90.5%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **91.4%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **90.6%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **91.5%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -47,7 +46,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Ports | 已实现待验证 | 70% | 8% |
 | Config | 已验证 | 100% | 10% |
 | Runtime | 实现中 | 94% | 12% |
-| Transport | 实现中 | 90% | 11% |
+| Transport | 实现中 | 91% | 11% |
 | DNS Core | 实现中 | 84% | 10% |
 | Policy | 实现中 | 88% | 8% |
 | Upstream | 已验证 | 100% | 10% |
@@ -59,9 +58,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 进度计算：
 
 ```text
-4%×76% + 8%×70% + 10%×100% + 12%×94% + 11%×90%
+4%×76% + 8%×70% + 10%×100% + 12%×94% + 11%×91%
 + 10%×84% + 8%×88% + 10%×100% + 9%×87% + 7%×92%
-+ 8%×99% + 3%×100% ≈ 90.5%
++ 8%×99% + 3%×100% ≈ 90.6%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -96,7 +95,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 192 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 193 |
 
 ### 增量里程碑
 
@@ -133,14 +132,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 190 | 资源、传输与 SQLite 边界大阶段验收 | 全量 fmt/check/clippy 通过；后端 `555 passed、0 failed` |
 | 191 | TLS material 有界读取 | 证书链和私钥在解析前受独立硬上限保护，超限返回稳定错误分类 |
 | 192 | Runtime 并发候选单一获胜 | 同一基准 revision 的两个并发候选恰好一个发布，失败方保留 candidate 和实际 revision |
+| 193 | DoH `Expect` 协议边界 | 未实现 interim response 时立即返回 417 并关闭连接，避免客户端与服务端互相等待 body |
 
 ### 当前阶段验证
 
-- 增量 `rustfmt`：`backend/src/runtime/coordinator.rs`；
-- `cargo test --manifest-path backend/Cargo.toml --locked runtime::coordinator::tests`：`17 passed、0 failed`；
+- 增量 `rustfmt`：`backend/src/transport/doh.rs`；
+- `cargo test --manifest-path backend/Cargo.toml --locked transport::doh::tests`：`25 passed、0 failed`；
 - `git diff --check`：通过。
 
-阶段 192 未重复阶段 190 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 193 未重复阶段 190 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 
