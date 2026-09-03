@@ -1,8 +1,8 @@
 # FluxDNS 前端开发方案
 
-> 文档状态：草案
+> 文档状态：有效
 >
-> 实现状态：未实现
+> 实现状态：部分实现
 >
 > 适用范围：FluxDNS 只读 WebUI 首版从契约冻结、工程初始化到可交付验收的具体开发步骤；不负责配置写入、运行时控制或 DNS 数据面功能
 >
@@ -12,23 +12,34 @@
 
 ## 1. 结论
 
-当前前端处于“方案与契约准备”阶段，而不是可直接编码的页面开发阶段。`frontend/` 尚未初始化工程；后端 `webui` 仍是严格校验的预留配置，`webui.enable: true` 会在配置校验阶段以 `UnsupportedFeature` 拒绝启动，仓库中也没有 management API 或管理路由。因此，首个可交付目标应拆成一个前置阶段 F0（管理 API 契约冻结）和五个实施阶段 F1–F5（工程骨架、鉴权与应用壳、只读页面、同源集成和交付验收）。
+当前前端已完成 F0 的前端契约与工程决策，以及 F1–F4 的工程骨架、鉴权、应用壳和只读页面；类型检查、26 项组件/contract tests、生产构建和 MSW fixture 浏览器 smoke 已通过。后端 `webui` 仍是严格校验的预留配置，`webui.enable: true` 会在配置校验阶段以 `UnsupportedFeature` 拒绝启动，仓库中仍没有 management API 或管理路由，因此 F5 的真实同源联调、静态托管和真实响应的浏览器 Network/Storage 验收尚未执行。
 
 首版交付目标是一个通过同源 `/api/v1` 访问管理面的 React + TypeScript + Vite SPA，使用服务端 session Cookie，提供登录、Dashboard、Runtime、Health、Statistics、Queries、Resources 和 System 的只读视图。首版不把任何前端页面或请求接到 UDP/TCP/DoH 数据面，不读取 SQLite、配置文件或服务日志，也不新增配置编辑、reload/restart、缓存清理、资源刷新和 WebSocket/SSE。
 
-本方案只确定前端实现顺序、模块边界、接口依赖和验收门槛；management API 的具体 JSON 字段、认证策略和静态文件托管方式必须在阶段 F0 通过后才能进入代码实现。当前不修改后端业务代码或配置契约。
+本方案确定前端实现顺序、模块边界、接口依赖和验收门槛；management API 的具体 JSON 字段、认证策略和静态文件托管目标已收敛到 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 和[前端架构设计](architecture.md)。当前实现不修改后端业务代码或配置契约，后端必须以独立阶段实现并验证该目标契约。
+
+### 1.1 当前实施进度
+
+| 阶段 | 状态 | 当前证据与边界 |
+| --- | --- | --- |
+| F0 | 部分完成 | Node.js 26.8.1、pnpm 11.25.0、OpenAPI v1、同源 session 和静态托管目标已冻结；Rust management contract test 等待后端实现。 |
+| F1 | 已完成 | React/TypeScript/Vite、strict typecheck、路径别名、`/api` proxy、QueryClient、错误边界和路由级代码拆分已实现。 |
+| F2 | 已完成 | 统一 fetch、超时/取消、错误 envelope、401、session/login/logout 和 `ProtectedRoute` 已实现并有测试。 |
+| F3 | 已完成 | 应用壳、Dashboard、Runtime、Health、System 与受控轮询已实现。 |
+| F4 | 已完成 | Statistics、Queries、Resources 的服务端参数、分页、筛选和安全摘要已实现。 |
+| F5 | 部分完成 | typecheck、fixtures、tests、production build 和 fixture 浏览器 smoke 已完成；真实 management API、静态托管和真实响应的浏览器安全验收等待后端。 |
 
 ## 2. 当前基线和事实依据
 
 | 对象 | 已核对事实 | 对本方案的影响 |
 | --- | --- | --- |
-| `frontend/` 工程 | [前端工程入口](../../frontend/README.md) 说明当前只有目录边界，没有 package manifest、构建配置和源码。 | 阶段 F1 必须从工程初始化开始，不能假设已有脚手架、依赖或测试命令。 |
+| `frontend/` 工程 | [前端工程入口](../../frontend/README.md) 维护已实现的 package manifest、构建/测试命令、OpenAPI 类型生成和 mock 预览入口。 | F1–F4 已完成；后续改动必须复用现有工程和模块边界。 |
 | WebUI 配置 | `WebUiDto`/`ResolvedWebUi` 已存在并保留 `enable`、监听地址、端口和用户 hash；`backend/src/config/validate.rs` 在 `enable=true` 时返回 unsupported。 | 前端开发不能以“启动 WebUI 已可用”为前提；启用管理服务是后端独立前置阶段。 |
 | Runtime 摘要 | `RuntimeSnapshot::summary()` 已提供 revision、normalized hash、listener/bind/resource 数量和 `has_policy_core`；`BindEntry` 还包含 transport、地址、端口、owner 和 `v6_only`。 | Runtime 页面应消费后端安全 DTO，不直接序列化 `ResolvedConfig` 或 socket 对象。 |
 | Resource 摘要 | `ResourceRegistrySnapshot::summary()` 只提供资源版本、来源类型、fallback 和 stale 状态；资源正文和编译结果不属于管理面。 | Resources 页面只显示元数据、版本和状态，不下载、解析或展示规则正文。 |
 | Storage 统计/详情 | 统计按 UTC 日和有限维度聚合；`resolve_log` 含解析详情和敏感字段，Storage 规定详情与统计分别受有界 writer/上限保护。 | Statistics 使用服务端聚合和分页查询；Queries 必须先定义脱敏 projection，不能把 SQLite 行原样返回浏览器。 |
 | Telemetry/Health | Telemetry 组件和 health 状态有固定枚举（`healthy`、`degraded`、`failed`、`stopping`），并记录时间、重试、stale/gap 等状态信息。 | Health 页面展示稳定状态和安全原因分类；不展示原始错误堆栈、SecretRef、原始 IP、完整 query 或 header。 |
-| Management API | 当前源码未发现 management router、session 服务或 `/api/v1` handler；架构文档中的接口列表仍是建议契约。 | 所有 API 路径和字段在本方案中标记为“拟议/未实现”，不得据此声称已能联调。 |
+| Management API | 当前源码未发现 management router、session 服务或 `/api/v1` handler；前端 OpenAPI schema 已冻结目标接口。 | 前端按已冻结契约实现，后端状态仍标记为“未实现”，不得据此声称已能联调。 |
 
 核对依据包括 [`WebUiDto`](../../backend/src/config/model.rs)、[`validate_config`](../../backend/src/config/validate.rs)、[`RuntimeSnapshot`](../../backend/src/runtime/snapshot.rs)、[`ResourceSnapshot`](../../backend/src/resource/snapshot.rs)、[`Storage` 契约](../../backend/src/ports/storage.rs)、[`Telemetry` 契约](../../backend/src/ports/telemetry.rs) 和 SQLite migrations。具体跨模块边界仍以前端架构和后端架构为权威。
 
@@ -71,7 +82,7 @@ Browser
                   └─ Telemetry/Health snapshot
 ```
 
-开发环境由 Vite 提供静态资源，并将 `/api` 代理到本地 management API；生产环境只发布 `vite build` 产物，由 management server 或既有反向代理提供静态文件和同源 API。前端 API client 固定使用相对路径，生产环境不开放任意 `baseURL` 或跨域目标。
+开发环境由 Vite 提供静态资源，并将 `/api` 代理到本地 management API；生产环境只发布 `vite build` 产物，由 management server 提供静态文件和同源 API。前端 API client 固定使用相对路径，生产环境不开放任意 `baseURL` 或跨域目标。
 
 页面只消费后端管理面 DTO。后端 adapter 负责从 `RuntimeCoordinator`、`StorageRuntime`、`ObservabilityRegistry` 等内部边界构造稳定的 JSON read model；前端不把 Rust 内部类型、配置继承规则或数据库 schema 直接映射成业务状态。
 
@@ -79,18 +90,18 @@ Browser
 
 ### 5.1 接口分组
 
-下表只冻结调用方向和读写边界，路径与字段在 management API 评审前均为拟议值：
+下表汇总已由 [`management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 冻结的前端目标契约；后端接口仍未实现：
 
-| 分组 | 拟议接口 | 前端用途 | 当前状态 |
+| 分组 | 目标接口 | 前端用途 | 当前状态 |
 | --- | --- | --- | --- |
-| Session | `POST /api/v1/auth/login`、`POST /api/v1/auth/logout`、`GET /api/v1/auth/session` | 登录、登出、启动时恢复会话 | 后端未实现 |
-| 总览 | `GET /api/v1/overview` | Dashboard 卡片和采样时间 | 后端未实现 |
-| Runtime | `GET /api/v1/runtime` | revision、listener/bind 和运行时摘要 | 后端未实现 |
-| Health | `GET /api/v1/health` | 组件状态、原因分类和更新时间 | 后端未实现 |
-| Statistics | `GET /api/v1/statistics` | 时间范围、维度聚合和分页/限制 | 后端未实现 |
-| Queries | `GET /api/v1/queries` | 脱敏解析详情的服务端分页 | 后端未实现 |
-| Resources | `GET /api/v1/resources` | 资源版本、来源、fallback、stale | 后端未实现 |
-| System | `GET /api/v1/system` | 版本、运行时间和只读能力摘要 | 后端未实现 |
+| Session | `POST /api/v1/auth/login`、`POST /api/v1/auth/logout`、`GET /api/v1/auth/session` | 登录、登出、启动时恢复会话 | 前端 schema/fixture 已实现；后端未实现 |
+| 总览 | `GET /api/v1/overview` | Dashboard 卡片和采样时间 | 前端 schema/fixture 已实现；后端未实现 |
+| Runtime | `GET /api/v1/runtime` | revision、listener/bind 和运行时摘要 | 前端 schema/fixture 已实现；后端未实现 |
+| Health | `GET /api/v1/health` | 组件状态、原因分类和更新时间 | 前端 schema/fixture 已实现；后端未实现 |
+| Statistics | `GET /api/v1/statistics` | 时间范围、维度聚合和分页/限制 | 前端 schema/fixture 已实现；后端未实现 |
+| Queries | `GET /api/v1/queries` | 脱敏解析详情的服务端分页 | 前端 schema/fixture 已实现；后端未实现 |
+| Resources | `GET /api/v1/resources` | 资源版本、来源、fallback、stale | 前端 schema/fixture 已实现；后端未实现 |
+| System | `GET /api/v1/system` | 版本、运行时间和只读能力摘要 | 前端 schema/fixture 已实现；后端未实现 |
 
 除 login/logout 外，首版只允许 `GET` 查询。若后端最终采用不同路径或版本号，必须在 F0 更新本表和前端类型，不在页面中保留兼容猜测分支。
 
@@ -111,7 +122,7 @@ Browser
 ### 5.3 通用响应和错误契约
 
 - 响应使用 JSON；时间统一为 UTC RFC 3339 字符串；revision、epoch、计数和 opaque ID 按契约声明的类型处理，不从字符串猜测业务含义。
-- 错误使用稳定 envelope（建议包含 `code`、用户可读 `message`、`request_id`、`retryable`）；前端按 HTTP status 和 `code` 分类，不按自然语言匹配。
+- 错误使用包含 `code`、用户可读 `message`、`request_id`、`retryable` 的稳定 envelope；前端按 HTTP status 和 `code` 分类，不按自然语言匹配。
 - `401` 清理内存 session 并跳转 `/login`；`403`、`429`、`5xx`、网络错误和超时分别展示权限、限流、服务端和连接失败状态。
 - 列表接口必须由服务端施加最大页大小、最大时间范围、允许的过滤字段和排序字段；前端控件只能选择契约声明的选项。
 - 变更 session 的请求遵循后端 CSRF 契约；前端不自行添加与后端不一致的 token/header 方案。
@@ -124,8 +135,8 @@ F0 未通过前不进入真实页面联调。退出条件为：
 1. 后端确认独立 management router/adapter 的生命周期、绑定方式和同源静态文件边界，不改写 DoH handler 语义；
 2. 每个接口的请求参数、响应 DTO、错误码、分页/时间限制、认证/CSRF 和脱敏字段有可审查的 schema 或 Rust contract test；
 3. 明确 `Queries` 是否允许任何 qname 展示；默认选择安全摘要；
-4. 确认 Node.js、包管理器、锁文件和前端测试工具的仓库基线；当前 `mise.toml` 只声明 Rust，不能假设 Node/pnpm 已受项目管理；
-5. 确认生产静态文件由 management server 还是既有反向代理托管，并写明未知 SPA 路由与 `/api/*` 的分流规则。
+4. Node.js 26.8.1、pnpm 11.25.0、`frontend/pnpm-lock.yaml`、Vitest/Testing Library/MSW 已成为仓库基线，缓存固定在 `frontend/.cache/`；
+5. 首版生产静态文件由未来的 management server 托管随发布包交付的 `frontend/dist`，未知 SPA 路由回退 `index.html`，`/api/*` 始终交给 API router。
 
 ## 6. 前端目录和模块
 
@@ -182,7 +193,7 @@ frontend/
 | 主要文件 | `frontend/package.json`、锁文件、`tsconfig.json`、`vite.config.ts`、`src/app/*`、`src/shared/api/*`。 |
 | 主要实现 | React + TypeScript + Vite 工程、TypeScript strict、路径别名、`/api` dev proxy、生产相对路径、QueryClient、基础样式和错误边界。 |
 | 约束 | 构建物只写入 `frontend/dist`；依赖和缓存按[项目环境使用规范](../standards/environment-usage.md)放置并由 `.gitignore` 覆盖；不把环境变量变成任意生产 API 地址。 |
-| 验证 | 类型检查、最小 `vite build`、空壳路由加载；命令在工具链确认后执行，当前不宣称已通过。 |
+| 验证 | 类型检查、`vite build`、路由加载和浏览器 fixture smoke 已通过，证据见 10.1。 |
 | 退出条件 | 空壳可启动，`/login`、受保护路由和 404 路由可渲染，开发代理和生产相对 API 路径配置可审查。 |
 
 ### F2：统一 API client 和 session
@@ -267,17 +278,16 @@ frontend/
 
 ### 10.1 前端静态/组件验收
 
-在 F1 工具链确认后，建议执行以下命令（当前尚未执行，不能写成通过）：
+F1 工具链确认后，从 `frontend/` 实际执行：
 
 ```text
-cd frontend
-<package-manager> install --frozen-lockfile
-<package-manager> run typecheck
-<package-manager> run test
-<package-manager> run build
+pnpm install --frozen-lockfile
+pnpm run typecheck
+pnpm run test
+pnpm run build
 ```
 
-验收关注 strict TypeScript、query/error/auth 单元测试、组件状态、路由守卫、构建产物位置和依赖锁定；不因当前后端尚无 management API 而伪造真实联调结果。
+2026-09-03 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、26 项 tests 通过；Vite 生产构建成功并经路由级代码拆分消除超大 chunk warning，生产 `dist/` 不包含 MSW worker；MSW fixture 浏览器 smoke 已覆盖登录、全部只读页面路由、登出、390 px 窄屏和 Console 检查，未发现横向溢出或 Console error/warning。真实 management API 联调、静态托管和真实响应的 Network/Storage 验收仍未执行，不因当前后端尚无 management API 而伪造真实联调结果。
 
 ### 10.2 Management API 集成验收
 
@@ -296,18 +306,18 @@ cd frontend
 - 新文档只使用仓库内相对链接，不写个人绝对路径、凭据或本地产物；
 - 执行 `git diff --check`、链接目标检查和 `git status --short`；
 - 若后续实现改变 API、配置或静态托管契约，同步更新前端架构、后端架构/配置文档和相关测试说明；
-- 文档方案未实施前保持“草案/未实现”，不能因工程脚手架完成而将 management API 或页面整体标为已实现。
+- 未实施部分必须保持明确边界，不能因前端工程完成而将后端 management API 或真实同源联调标为已实现。
 
 ## 11. 风险、决策门和后续拆分
 
 | 风险/未决项 | 影响 | 处理方式 |
 | --- | --- | --- |
 | 后端 management API 尚不存在 | 无法执行真实页面联调和端到端验收 | 先完成 F0 contract，再由后端独立阶段解除 `webui` gate；前端使用 fixture 并行开发。 |
-| `mise.toml` 未声明 Node 工具链 | 本地命令、锁文件和 CI 可能不一致 | F0 明确 Node 版本、包管理器、缓存目录和 CI 安装方式后再初始化。 |
+| 项目级 Node/pnpm 基线 | 已解决；工具版本与缓存路径可复现 | `mise.toml` 固定 Node.js 26.8.1 / pnpm 11.25.0，前端 manifest、lockfile 与环境规范同步维护。 |
 | `resolve_log` 含敏感 qname | 错误 projection 可能泄露请求数据 | 默认只做安全摘要；后端 contract test 固定禁止字段，任何扩展需单独授权。 |
 | health/metrics 只有内部 registry | 页面可能直接依赖实现细节 | 后端增加只读 adapter/DTO；前端只依赖版本化 JSON。 |
 | 轮询增加管理面负载 | 多页面打开时触发限流 | 由 API 契约给出采样/限流边界；页面隐藏暂停，`429` 退避，避免各模块自定义无限重试。 |
-| 静态托管未知 | 刷新深层路由可能返回 404 或 HTML API | F0 固定 management server/反向代理职责和 `/api` 分流测试。 |
+| 后端静态托管未实现 | 刷新深层路由可能返回 404 或将 API 错误回退成 HTML | 后端阶段按已冻结的 management server 职责实现 SPA fallback 和 `/api` 分流测试。 |
 
 后续若增加配置写入或 runtime command，应另建独立方案，至少补充权限模型、CSRF、审计、revision conflict、幂等、确认交互和失败回滚；不得在本方案的只读模块中预留未定义的 command client。
 

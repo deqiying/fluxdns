@@ -2,17 +2,17 @@
 
 > 文档状态：有效
 >
-> 实现状态：未实现
+> 实现状态：部分实现
 >
 > 适用范围：FluxDNS 只读 WebUI 第一阶段的总体架构、技术栈、Management API 边界与实施顺序
 >
-> 最后核对：待核对
+> 最后核对：2026-09-03
 >
 > 关联文档：[前端工程入口](../../frontend/README.md) · [后端架构设计](../backend/architecture.md)
 
 ## 1. 结论
 
-FluxDNS 前端采用 **React + TypeScript + Vite 的独立 SPA**。生产环境将 Vite 构建出的静态资源交给 FluxDNS 的 management server 或反向代理，浏览器通过同源的 `/api/v1` 访问后端 JSON API。
+FluxDNS 前端已实现 **React + TypeScript + Vite 的独立 SPA**。当前 F1–F4 的工程、鉴权、应用壳和只读页面已能基于 contract fixture 构建与测试；后端 management API、`webui` feature gate 解除和真实同源联调尚未实现。生产环境约定由未来的 FluxDNS management server 托管随发布包交付的 `frontend/dist`，浏览器通过同源的 `/api/v1` 访问后端 JSON API。
 
 当前阶段的 WebUI 只负责：
 
@@ -33,7 +33,7 @@ FluxDNS 前端采用 **React + TypeScript + Vite 的独立 SPA**。生产环境�
 
 ### 2.1 仓库边界
 
-`frontend/` 是独立的前端主目录，当前没有 `package.json`、构建配置或源码。前端实现不得把仓库根目录作为工程目录，也不得把构建物或依赖提交到仓库。相关构建物、依赖和缓存目录约定见[项目环境使用规范](../standards/environment-usage.md)，本地测试运行时文件见[本地测试规范](../standards/local-testing.md)。
+`frontend/` 是独立的前端主目录，已包含 package manifest、pnpm lockfile、Vite/Vitest 配置、OpenAPI schema 和源码。前端实现不得把仓库根目录作为工程目录，也不得把构建物、依赖或 `.cache/` 提交到仓库。相关构建物、依赖和缓存目录约定见[项目环境使用规范](../standards/environment-usage.md)，本地测试运行时文件见[本地测试规范](../standards/local-testing.md)。
 
 ### 2.2 后端边界
 
@@ -84,7 +84,7 @@ FluxDNS 后端是单 Rust binary。当前 DoH 入站使用独立的 HTTP/1.x par
 - 开发环境由 Vite dev server 提供页面，并将 `/api` 代理到本地 management API；
 - 生产环境执行 `vite build`，生成 `frontend/dist`；
 - 生产环境优先使用同源路径提供静态文件和 `/api/v1`，避免在浏览器中配置跨域 API 地址；
-- 静态文件可以由 FluxDNS management server 提供，也可以由 Nginx 等已有反向代理提供；这不改变前端 API 契约；
+- 首版静态文件由未来的 FluxDNS management server 从随发布包交付的 `frontend/dist` 提供；不引入 `rust-embed`，也不要求额外反向代理；
 - 生产环境不需要运行 Node.js 服务。
 
 ### 3.2 请求方向
@@ -105,13 +105,13 @@ FluxDNS 后端是单 Rust binary。当前 DoH 入站使用独立的 HTTP/1.x par
 | 构建 | `Vite` | 开发 server、HMR 和静态生产构建。 |
 | 路由 | `React Router` | 登录页、受保护页面和 404 路由。 |
 | Server state | `TanStack Query` for React | 查询缓存、轮询、分页、取消、错误和 stale 状态。 |
-| UI 组件 | `Ant Design`（首选） | 表格、表单、筛选器、状态标签、分页和反馈组件。具体主题在视觉设计阶段确定。 |
+| UI 组件 | `Ant Design` | 表格、表单、筛选器、状态标签、分页和反馈组件；主题由 `AppProviders` 统一配置。 |
 | HTTP client | 浏览器 `fetch` 封装 | 统一 base path、Cookie、超时、取消、JSON 解码和错误映射。首版不额外引入 Axios。 |
 | 客户端全局状态 | React Context/Hooks | 当前仅承载认证会话和少量布局状态；不把查询数据复制到全局 store。 |
 
 当前阶段不默认引入 Redux、Zustand 或其他全局状态库。只有当客户端状态出现明确的跨页面写入需求时，才单独评估；后端查询数据仍由 `TanStack Query` 管理。
 
-API 类型应以后端管理 API schema 为权威。管理 API 契约稳定后，优先生成 TypeScript 类型；前端可以在 HTTP 边界增加运行时校验，但不得在前端复制后端配置继承、引用环、策略选择或 DNS 业务校验。
+API 字段以 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 为当前版本权威，并由 `openapi-typescript` 生成 TypeScript 类型。后端实现必须通过 contract test 对齐该 schema；前端可以在 HTTP 边界增加运行时校验，但不得复制后端配置继承、引用环、策略选择或 DNS 业务校验。
 
 ## 5. 前端目录和模块
 
@@ -119,21 +119,20 @@ API 类型应以后端管理 API schema 为权威。管理 API 契约稳定后�
 frontend/
 ├── README.md
 ├── package.json
+├── pnpm-lock.yaml
+├── pnpm-workspace.yaml
 ├── tsconfig.json
 ├── vite.config.ts
+├── openapi/
 ├── public/
 └── src/
     ├── app/
     │   ├── App.tsx
     │   ├── providers.tsx       # Router、QueryClient、Auth provider
-    │   ├── router.tsx
     │   └── query-client.ts
+    ├── mocks/                   # MSW contract fixtures
     ├── modules/
     │   ├── auth/
-    │   │   ├── api.ts
-    │   │   ├── hooks.ts
-    │   │   ├── pages/
-    │   │   └── components/
     │   ├── dashboard/
     │   ├── runtime/
     │   ├── health/
@@ -141,24 +140,24 @@ frontend/
     │   ├── queries/
     │   ├── resources/
     │   └── system/
-    └── shared/
-        ├── api/
-        │   ├── client.ts        # fetch、Cookie、错误和取消
-        │   ├── errors.ts
-        │   └── types.ts
-        ├── components/
-        ├── hooks/
-        ├── formatters/
-        └── styles/
+    ├── shared/
+    │   ├── api/
+    │   │   ├── client.ts        # fetch、Cookie、错误和取消
+    │   │   ├── errors.ts
+    │   │   └── types.ts
+    │   ├── components/
+    │   └── formatters/
+    ├── styles/
+    └── test/
 ```
 
-每个 `modules/*` 模块拥有自己的页面、查询 hook、API 映射、视图模型和测试。模块之间不得互相导入对方的内部 API；可复用的无业务组件、格式化器和 HTTP 基础能力放入 `shared/`。
+每个 `modules/*` 模块拥有自己的页面、查询 hook 和 API 映射；测试按模块或跨路由契约放置。模块之间不得互相导入对方的内部 API；可复用的无业务组件、格式化器和 HTTP 基础能力放入 `shared/`。
 
 首版不创建 `config`、`control`、`reload` 或 `cache-management` 模块。后期增加控制能力时，应作为独立模块加入，并通过新的权限和审计契约接入。
 
 ## 6. 页面和路由
 
-建议路由如下：
+首版路由如下：
 
 ```text
 /login
@@ -194,7 +193,7 @@ frontend/
 
 ### 7.1 接口分组
 
-首版建议使用以下接口集合。具体字段在后端管理 API 契约评审时冻结；本节冻结的是调用方向和读写边界。
+首版接口、字段、参数枚举、分页上限和错误响应已在 [`management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 冻结。后端当前尚未实现这些接口；实现时不得由页面猜测兼容分支。
 
 ```text
 POST /api/v1/auth/login
@@ -222,11 +221,11 @@ GET  /api/v1/system
 - 查询响应应带 `request_id` 和必要的 `runtime_revision`，便于页面展示数据采样时间和运行时一致性；
 - 资源和健康状态需要携带采样时间、状态和安全的原因分类，不能把后端原始错误堆栈直接返回浏览器。
 
-建议的错误结构为稳定的 JSON error envelope，例如：
+错误结构固定为稳定的 JSON error envelope，例如：
 
 ```json
 {
-  "code": "session_expired",
+  "code": "AUTH_SESSION_EXPIRED",
   "message": "session expired",
   "request_id": "redacted-request-id",
   "retryable": false
@@ -251,7 +250,7 @@ GET  /api/v1/system
 ### 8.1 Session
 
 - 使用服务端 session 和 `HttpOnly` Cookie；
-- Cookie 设置 `Secure`、`SameSite=Lax` 或更严格策略，并限制 Path/Domain；
+- Cookie 设置 `HttpOnly`、`Secure`、`SameSite=Strict` 并限制 Path/Domain；
 - 前端不把长期 token、密码或 `password_hash` 写入 `localStorage`、IndexedDB、URL 或日志；
 - 登录表单只通过 HTTPS/同源 management API 提交，登录失败使用统一错误分类；
 - login 应实施服务端限速和失败计数，前端只展示安全的失败信息。
@@ -259,7 +258,7 @@ GET  /api/v1/system
 ### 8.2 请求和展示
 
 - 生产环境使用同源 `/api`，不在前端开放任意 `baseURL` 或跨域目标；
-- 需要改变 session 的请求遵循后端 CSRF 契约；未来增加写操作时必须复用同一安全边界；
+- login/logout 由后端校验同源 `Origin` 和 Fetch Metadata，前端不新增自定义 token/header；未来增加写操作时必须另行评审 CSRF 契约；
 - 服务端负责最终授权，前端路由隐藏不等于权限控制；
 - 表格、日志和错误展示必须对 HTML、URL、header 和日志字段进行文本化处理，不能把后端字符串当作 HTML 注入；
 - 查询接口默认最小权限和最小字段，前端不请求未使用的敏感字段。
@@ -294,9 +293,11 @@ vite build
 
 静态资源使用带 hash 的文件名并设置长期缓存；`index.html` 使用短缓存或 no-cache。服务端需要为未知前端路由回退到 `index.html`，但 `/api/*` 请求必须交给 API router，不能回退成 HTML。
 
-首版优先采用“构建产物随发布包交付、由 management server 或既有反向代理托管”的方式。是否进一步使用 `rust-embed` 把前端嵌入 Rust binary，属于发布工程决策，不改变 React 应用架构和 API 契约。
+首版采用“构建产物随发布包交付、由 management server 托管”的方式。未知 SPA 路由回退 `index.html`，`/api/*` 始终交给 API router；不使用 `rust-embed`，也不把反向代理设为首版交付依赖。
 
 ## 10. 实施顺序和验收
+
+当前阶段 A–C 已基于 OpenAPI/MSW contract fixture 实现；阶段 D 的 typecheck、组件/contract tests、生产构建和 fixture 浏览器 smoke 已通过。真实同源 API、静态托管与真实响应的浏览器 Network/Storage 验收等待后端 management server 实现。
 
 ### 阶段 A：工程初始化
 

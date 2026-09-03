@@ -17,7 +17,7 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 ## 仓库布局
 
 - `backend/`：Rust 后端的独立主目录，包含 `Cargo.toml`、`Cargo.lock` 与 `src/`；
-- `frontend/`：前端的独立主目录，当前尚未初始化具体技术栈；
+- `frontend/`：React + TypeScript + Vite 的只读 WebUI 工程；当前可用 contract fixture 独立开发，真实 management API 尚未接入；
 - `docs/`：仓库级技术文档，入口见 [docs/README.md](docs/README.md)；
 - `config-example.yaml`：仓库级配置示例；
 - `_fluxdns/`：本地测试配置、运行数据和日志目录，仅供本机使用，不提交到 Git。

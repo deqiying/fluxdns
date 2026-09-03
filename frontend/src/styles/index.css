@@ -1,0 +1,375 @@
+:root {
+  color: #172033;
+  background: #f3f6fa;
+  font-family:
+    Inter, "SF Pro Text", "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  min-width: 320px;
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at 82% 0%, rgb(25 181 173 / 10%), transparent 28rem),
+    #f3f6fa;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+.app-shell {
+  min-height: 100vh;
+}
+
+.app-shell > .ant-layout {
+  min-width: 0;
+}
+
+.app-sider {
+  position: sticky !important;
+  top: 0;
+  height: 100vh;
+  overflow: auto;
+  background: #07111f !important;
+  border-right: 1px solid rgb(255 255 255 / 7%);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 72px;
+  padding: 0 20px;
+  color: #fff;
+}
+
+.brand-mark {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  color: #07111f;
+  font-weight: 800;
+  letter-spacing: -1px;
+  background: linear-gradient(135deg, #5eead4, #22d3ee);
+  border-radius: 11px;
+  box-shadow: 0 8px 26px rgb(34 211 238 / 24%);
+}
+
+.brand-copy strong,
+.brand-copy span {
+  display: block;
+}
+
+.brand-copy strong {
+  letter-spacing: 0.02em;
+}
+
+.brand-copy span {
+  margin-top: 2px;
+  color: #7890aa;
+  font-size: 11px;
+}
+
+.nav-glyph {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  color: #80d9d1;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1px solid rgb(94 234 212 / 25%);
+  border-radius: 7px;
+}
+
+.app-menu.ant-menu-dark {
+  background: transparent;
+}
+
+.app-menu.ant-menu-dark .ant-menu-item-selected {
+  color: #cffff9;
+  background: linear-gradient(90deg, rgb(20 184 166 / 24%), rgb(20 184 166 / 7%));
+}
+
+.app-menu.ant-menu-dark .ant-menu-item-selected::after {
+  border-right-color: #5eead4;
+}
+
+.app-header {
+  height: 72px;
+  padding: 0 28px;
+  background: rgb(255 255 255 / 88%) !important;
+  border-bottom: 1px solid #e7ebf0;
+  backdrop-filter: blur(14px);
+}
+
+.header-title {
+  margin: 0 !important;
+}
+
+.content-wrap {
+  width: 100%;
+  max-width: 1540px;
+  margin: 0 auto;
+  padding: 28px;
+}
+
+.page-frame .ant-typography {
+  margin-bottom: 0;
+}
+
+.page-heading {
+  margin-bottom: 22px;
+}
+
+.snapshot-card,
+.data-card,
+.metric-card {
+  border: 1px solid #e8edf2;
+  box-shadow: 0 10px 30px rgb(15 36 57 / 5%);
+}
+
+.metric-card {
+  min-height: 145px;
+  overflow: hidden;
+}
+
+.metric-card::before {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: linear-gradient(#14b8a6, #22d3ee);
+  content: "";
+}
+
+.metric-label {
+  color: #64748b;
+  font-size: 13px;
+  letter-spacing: 0.03em;
+}
+
+.metric-value {
+  margin-top: 13px;
+  color: #10253f;
+  font-size: 30px;
+  font-weight: 700;
+}
+
+.reason-code {
+  color: #a46313 !important;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.table-toolbar {
+  margin-bottom: 18px;
+}
+
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px;
+  width: 100%;
+}
+
+.filter-field label {
+  display: block;
+  margin-bottom: 6px;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.filter-field .ant-select,
+.filter-field .ant-input {
+  width: 100%;
+}
+
+.login-page {
+  display: grid;
+  min-height: 100vh;
+  grid-template-columns: minmax(0, 1.1fr) minmax(420px, 0.9fr);
+  background: #07111f;
+}
+
+.login-visual {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  min-height: 100vh;
+  padding: clamp(42px, 7vw, 92px);
+  overflow: hidden;
+  color: #fff;
+}
+
+.login-visual::before,
+.login-visual::after {
+  position: absolute;
+  border: 1px solid rgb(94 234 212 / 15%);
+  border-radius: 50%;
+  content: "";
+}
+
+.login-visual::before {
+  top: -180px;
+  right: -80px;
+  width: 560px;
+  height: 560px;
+  box-shadow: 0 0 120px rgb(34 211 238 / 10%);
+}
+
+.login-visual::after {
+  right: 180px;
+  bottom: -260px;
+  width: 640px;
+  height: 640px;
+}
+
+.login-kicker {
+  color: #5eead4;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+.login-visual h1 {
+  max-width: 720px;
+  margin: 22px 0;
+  font-size: clamp(42px, 6vw, 80px);
+  line-height: 0.98;
+  letter-spacing: -0.045em;
+}
+
+.login-visual p {
+  max-width: 600px;
+  color: #a9b9cb;
+  font-size: 17px;
+  line-height: 1.8;
+}
+
+.login-panel {
+  display: grid;
+  min-height: 100vh;
+  padding: 48px;
+  place-items: center;
+  background: #f7f9fc;
+  border-radius: 36px 0 0 36px;
+}
+
+.login-card {
+  width: min(420px, 100%);
+  border: 1px solid #e4eaf0;
+  box-shadow: 0 28px 70px rgb(11 28 47 / 12%);
+}
+
+.login-card .ant-card-body {
+  padding: 38px;
+}
+
+.login-submit {
+  height: 44px;
+  font-weight: 650;
+}
+
+.fullscreen-state {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  background: #f3f6fa;
+}
+
+@media (max-width: 900px) {
+  .login-page {
+    grid-template-columns: 1fr;
+  }
+
+  .login-visual {
+    display: none;
+  }
+
+  .login-panel {
+    padding: 24px;
+    border-radius: 0;
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell.ant-layout-has-sider {
+    flex-direction: column;
+  }
+
+  .app-shell.ant-layout-has-sider > .ant-layout {
+    width: 100% !important;
+  }
+
+  .app-sider {
+    position: static !important;
+    z-index: 20;
+    width: 100% !important;
+    min-width: 100% !important;
+    max-width: 100% !important;
+    height: auto;
+    flex: 0 0 auto !important;
+    overflow: hidden;
+  }
+
+  .app-sider .ant-layout-sider-children {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .app-sider .ant-layout-sider-trigger {
+    display: none;
+  }
+
+  .brand {
+    height: 56px;
+    padding: 0 16px;
+  }
+
+  .brand-mark {
+    width: 32px;
+    height: 32px;
+  }
+
+  .app-menu.ant-menu-inline {
+    display: flex;
+    gap: 4px;
+    padding: 0 8px 8px;
+    overflow-x: auto;
+    border-inline-end: 0;
+  }
+
+  .app-menu.ant-menu-inline .ant-menu-item {
+    width: auto;
+    min-width: max-content;
+    margin: 0;
+    flex: 0 0 auto;
+  }
+
+  .content-wrap {
+    padding: 20px 16px;
+  }
+
+  .app-header {
+    padding: 0 16px;
+  }
+}

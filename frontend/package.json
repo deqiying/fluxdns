@@ -1,0 +1,47 @@
+{
+  "name": "fluxdns-webui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": "26.x",
+    "pnpm": "11.25.x"
+  },
+  "scripts": {
+    "dev": "vite",
+    "generate:api": "openapi-typescript openapi/management-api-v1.yaml -o src/shared/api/generated.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "pnpm run typecheck && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "5.102.8",
+    "antd": "6.6.2",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-router-dom": "7.18.3"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "10.4.1",
+    "@testing-library/jest-dom": "7.0.1",
+    "@testing-library/react": "16.3.3",
+    "@testing-library/user-event": "14.6.7",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.1.1",
+    "jsdom": "30.0.1",
+    "msw": "2.15.0",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3",
+    "vite": "8.2.2",
+    "vitest": "4.1.11"
+  },
+  "msw": {
+    "workerDirectory": [
+      "public"
+    ]
+  }
+}

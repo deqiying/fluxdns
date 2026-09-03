@@ -1,0 +1,93 @@
+import { QueryClient } from "@tanstack/react-query";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it } from "vitest";
+import { http, HttpResponse } from "msw";
+import { setMockAuthenticated } from "@/mocks/handlers";
+import { server } from "@/mocks/server";
+import { AppProviders } from "./providers";
+import { App } from "./App";
+
+function renderApp(path: string) {
+  window.history.replaceState({}, "", path);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  return render(
+    <AppProviders queryClient={queryClient}>
+      <App />
+    </AppProviders>,
+  );
+}
+
+describe("application routes", () => {
+  it("未登录时保护所有业务路由", async () => {
+    renderApp("/runtime");
+    expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("登录后回跳原受保护路由且不持久化密码", async () => {
+    const user = userEvent.setup();
+    renderApp("/runtime");
+    await screen.findByRole("heading", { name: "登录 FluxDNS" });
+
+    await user.type(screen.getByLabelText("用户名"), "operator");
+    const password = screen.getByLabelText("密码") as HTMLInputElement;
+    await user.type(password, "fixture-password");
+    await user.click(screen.getByRole("button", { name: /登\s*录/ }));
+
+    expect(await screen.findByRole("heading", { name: "Runtime" })).toBeInTheDocument();
+    await waitFor(() => expect(password.value).toBe(""));
+    expect(window.localStorage.length).toBe(0);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("有效 session 可直接进入 Dashboard 并区分局部不可用卡片", async () => {
+    setMockAuthenticated(true);
+    renderApp("/dashboard");
+    expect(await screen.findByRole("heading", { name: "运行总览" })).toBeInTheDocument();
+    expect(await screen.findByText("STORAGE_GAP")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["/health", "健康状态"],
+    ["/statistics", "解析统计"],
+    ["/queries", "解析详情"],
+    ["/resources", "资源状态"],
+    ["/system", "系统信息"],
+  ])("有效 session 可加载只读页面 %s", async (path, heading) => {
+    setMockAuthenticated(true);
+    renderApp(path);
+    expect(await screen.findByRole("heading", { name: heading, level: 2 })).toBeInTheDocument();
+  });
+
+  it("普通 API 返回 401 时只跳转一次并显示 session 过期提示", async () => {
+    setMockAuthenticated(true);
+    server.use(
+      http.get("/api/v1/overview", () =>
+        HttpResponse.json(
+          { code: "AUTH_SESSION_EXPIRED", message: "expired", request_id: "expired-401", retryable: false },
+          { status: 401 },
+        ),
+      ),
+    );
+    renderApp("/dashboard");
+    expect(await screen.findByText("登录状态已过期，请重新登录。")).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("登出后清理 session 并返回登录页", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/dashboard");
+    await screen.findByRole("heading", { name: "运行总览" });
+    await user.click(screen.getByRole("button", { name: /退\s*出/ }));
+    expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("未知受保护路由显示 404 而不泄漏内部路径", async () => {
+    setMockAuthenticated(true);
+    renderApp("/unknown-route");
+    expect(await screen.findByText("页面不存在")).toBeInTheDocument();
+  });
+});

@@ -1,0 +1,720 @@
+openapi: 3.1.0
+info:
+  title: FluxDNS Management API
+  version: 1.0.0
+  description: >-
+    FluxDNS 只读 WebUI 的同源管理契约。除登录和登出外，首版接口均为只读查询；
+    API 不返回原始 qname、client IP、SecretRef、密码 hash、TLS material 或 DNS wire。
+servers:
+  - url: /api/v1
+    description: 与 WebUI 同源的固定 API 前缀
+tags:
+  - name: Auth
+  - name: Overview
+  - name: Runtime
+  - name: Health
+  - name: Statistics
+  - name: Queries
+  - name: Resources
+  - name: System
+paths:
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: 建立服务端 session
+      description: >-
+        成功后由服务端设置 HttpOnly、Secure、SameSite=Strict Cookie。
+        服务端校验 Origin 和 Fetch Metadata；前端不持久化 token。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: 登录成功
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: 终止当前 session
+      description: 服务端必须校验同源 Origin 和 Fetch Metadata，并清除 session Cookie。
+      responses:
+        "204":
+          description: session 已终止；重复登出同样成功
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /auth/session:
+    get:
+      tags: [Auth]
+      operationId: getSession
+      summary: 读取当前 session
+      responses:
+        "200":
+          description: 当前 session
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /overview:
+    get:
+      tags: [Overview]
+      operationId: getOverview
+      summary: 读取 Dashboard 摘要
+      responses:
+        "200":
+          description: 有界摘要卡片
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Overview"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /runtime:
+    get:
+      tags: [Runtime]
+      operationId: getRuntime
+      summary: 读取当前 Runtime 和 bind 摘要
+      responses:
+        "200":
+          description: 当前 Runtime 摘要
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuntimeSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /health:
+    get:
+      tags: [Health]
+      operationId: getHealth
+      summary: 读取组件健康状态
+      responses:
+        "200":
+          description: 健康状态快照
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /statistics:
+    get:
+      tags: [Statistics]
+      operationId: getStatistics
+      summary: 读取服务端聚合统计
+      parameters:
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+        - $ref: "#/components/parameters/Dimension"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: 分页聚合结果
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatisticsPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /queries:
+    get:
+      tags: [Queries]
+      operationId: getQueries
+      summary: 读取脱敏解析详情
+      description: 返回安全投影，不包含 qname、request digest、client IP、route 文本或 DNS wire。
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - name: transport
+          in: query
+          schema:
+            $ref: "#/components/schemas/Transport"
+        - name: source
+          in: query
+          schema:
+            $ref: "#/components/schemas/QuerySource"
+        - name: rcode
+          in: query
+          schema:
+            $ref: "#/components/schemas/Rcode"
+        - name: outcome
+          in: query
+          schema:
+            $ref: "#/components/schemas/QueryOutcome"
+        - name: sort
+          in: query
+          schema:
+            type: string
+            enum: [occurred_at, duration_ms]
+            default: occurred_at
+        - name: order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: desc
+      responses:
+        "200":
+          description: 服务端分页的安全投影
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QueryPage"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /resources:
+    get:
+      tags: [Resources]
+      operationId: getResources
+      summary: 读取资源元数据摘要
+      responses:
+        "200":
+          description: 资源摘要列表
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ResourceSnapshot"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+  /system:
+    get:
+      tags: [System]
+      operationId: getSystem
+      summary: 读取系统版本和只读能力
+      responses:
+        "200":
+          description: 系统公开摘要
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/RequestId"
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SystemInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+components:
+  headers:
+    RequestId:
+      description: 用于服务端日志关联的非敏感请求标识
+      schema:
+        type: string
+  parameters:
+    DateFrom:
+      name: date_from
+      in: query
+      required: true
+      description: UTC 起始日期，最大查询区间为 31 天
+      schema:
+        type: string
+        format: date
+    DateTo:
+      name: date_to
+      in: query
+      required: true
+      description: UTC 结束日期，包含当天
+      schema:
+        type: string
+        format: date
+    Dimension:
+      name: dimension
+      in: query
+      required: true
+      schema:
+        $ref: "#/components/schemas/StatisticDimension"
+    Page:
+      name: page
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: page_size
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+  responses:
+    BadRequest:
+      description: 参数或同源请求校验失败
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Unauthorized:
+      description: session 缺失、无效或已过期
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    Forbidden:
+      description: 当前用户无权读取该资源
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    RateLimited:
+      description: 请求超过管理面限制
+      headers:
+        Retry-After:
+          description: 建议重试等待秒数
+          schema:
+            type: integer
+            minimum: 1
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+    InternalError:
+      description: 服务端错误，响应不得包含堆栈或内部路径
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+  schemas:
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id, retryable]
+      properties:
+        code:
+          type: string
+          pattern: "^[A-Z0-9_]+$"
+        message:
+          type: string
+          maxLength: 240
+        request_id:
+          type: string
+        retryable:
+          type: boolean
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 128
+        password:
+          type: string
+          minLength: 1
+          maxLength: 1024
+    Session:
+      type: object
+      additionalProperties: false
+      required: [user, expires_at]
+      properties:
+        user:
+          $ref: "#/components/schemas/SessionUser"
+        expires_at:
+          type: string
+          format: date-time
+    SessionUser:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name:
+          type: string
+    HealthStatus:
+      type: string
+      enum: [healthy, degraded, failed, stopping]
+    Overview:
+      type: object
+      additionalProperties: false
+      required: [sampled_at, runtime_revision, overall_status, cards]
+      properties:
+        sampled_at:
+          type: string
+          format: date-time
+        runtime_revision:
+          type: string
+        overall_status:
+          $ref: "#/components/schemas/HealthStatus"
+        cards:
+          type: array
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/OverviewCard"
+    OverviewCard:
+      type: object
+      additionalProperties: false
+      required: [key, label, status]
+      properties:
+        key:
+          type: string
+          enum: [queries_24h, cache_hit_rate, failed_queries_24h, active_listeners, resources]
+        label:
+          type: string
+        value:
+          type: number
+        unit:
+          type: string
+          enum: [count, percent]
+        status:
+          type: string
+          enum: [available, unavailable]
+        unavailable_reason_code:
+          type: string
+    Transport:
+      type: string
+      enum: [udp, tcp, doh]
+    BindState:
+      type: string
+      enum: [active, draining]
+    RuntimeSnapshot:
+      type: object
+      additionalProperties: false
+      required:
+        [sampled_at, revision, normalized_hash, listener_count, bind_count, resource_count, has_policy_core, binds]
+      properties:
+        sampled_at:
+          type: string
+          format: date-time
+        revision:
+          type: string
+        normalized_hash:
+          type: string
+          description: 截断后的非敏感配置摘要，不是原始配置内容
+        listener_count:
+          type: integer
+          minimum: 0
+        bind_count:
+          type: integer
+          minimum: 0
+        resource_count:
+          type: integer
+          minimum: 0
+        has_policy_core:
+          type: boolean
+        binds:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/BindEntry"
+    BindEntry:
+      type: object
+      additionalProperties: false
+      required: [transport, address, port, owner, v6_only, state]
+      properties:
+        transport:
+          $ref: "#/components/schemas/Transport"
+        address:
+          type: string
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        owner:
+          type: string
+        v6_only:
+          type: boolean
+        state:
+          $ref: "#/components/schemas/BindState"
+    HealthSnapshot:
+      type: object
+      additionalProperties: false
+      required: [sampled_at, overall_status, components]
+      properties:
+        sampled_at:
+          type: string
+          format: date-time
+        overall_status:
+          $ref: "#/components/schemas/HealthStatus"
+        components:
+          type: array
+          maxItems: 256
+          items:
+            $ref: "#/components/schemas/ComponentHealth"
+    ComponentHealth:
+      type: object
+      additionalProperties: false
+      required: [component, status, reason_code, last_changed_at, retry_count, stale, gap]
+      properties:
+        component:
+          type: string
+        status:
+          $ref: "#/components/schemas/HealthStatus"
+        reason_code:
+          type: string
+        first_changed_at:
+          type: [string, "null"]
+          format: date-time
+        last_changed_at:
+          type: string
+          format: date-time
+        last_success_at:
+          type: [string, "null"]
+          format: date-time
+        retry_count:
+          type: integer
+          minimum: 0
+        stale:
+          type: boolean
+        gap:
+          type: boolean
+    StatisticDimension:
+      type: string
+      enum: [total, transport, source, rcode, outcome, cache]
+    StatisticsPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          additionalProperties: false
+          required: [sampled_at, runtime_revision, items]
+          properties:
+            sampled_at:
+              type: string
+              format: date-time
+            runtime_revision:
+              type: string
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/StatisticItem"
+    StatisticItem:
+      type: object
+      additionalProperties: false
+      required: [date, dimension_kind, dimension_value, count]
+      properties:
+        date:
+          type: string
+          format: date
+        dimension_kind:
+          $ref: "#/components/schemas/StatisticDimension"
+        dimension_value:
+          type: string
+        count:
+          type: integer
+          minimum: 0
+    QuerySource:
+      type: string
+      enum: [cache, hosts, rule, upstream, synthetic]
+    Rcode:
+      type: string
+      enum: [NOERROR, FORMERR, SERVFAIL, NXDOMAIN, NOTIMP, REFUSED, OTHER]
+    QueryOutcome:
+      type: string
+      enum: [answered, negative, timeout, rejected, failed]
+    CacheOutcome:
+      type: string
+      enum: [hit, stale, miss, bypass]
+    QueryPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          additionalProperties: false
+          required: [sampled_at, runtime_revision, items]
+          properties:
+            sampled_at:
+              type: string
+              format: date-time
+            runtime_revision:
+              type: string
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/QueryRecord"
+    QueryRecord:
+      type: object
+      additionalProperties: false
+      required:
+        [id, occurred_at, duration_ms, transport, source, rcode, outcome, cache, policy_matched, resource_matched]
+      properties:
+        id:
+          type: string
+          description: 不可逆、无业务含义的 opaque ID
+        occurred_at:
+          type: string
+          format: date-time
+        duration_ms:
+          type: number
+          minimum: 0
+        transport:
+          $ref: "#/components/schemas/Transport"
+        source:
+          $ref: "#/components/schemas/QuerySource"
+        rcode:
+          $ref: "#/components/schemas/Rcode"
+        outcome:
+          $ref: "#/components/schemas/QueryOutcome"
+        cache:
+          $ref: "#/components/schemas/CacheOutcome"
+        policy_matched:
+          type: boolean
+        resource_matched:
+          type: boolean
+    ResourceSnapshot:
+      type: object
+      additionalProperties: false
+      required: [sampled_at, runtime_revision, items]
+      properties:
+        sampled_at:
+          type: string
+          format: date-time
+        runtime_revision:
+          type: string
+        items:
+          type: array
+          maxItems: 1024
+          items:
+            $ref: "#/components/schemas/ResourceSummary"
+    ResourceSummary:
+      type: object
+      additionalProperties: false
+      required: [id, display_name, epoch, revision, source_kind, fallback, stale]
+      properties:
+        id:
+          type: string
+        display_name:
+          type: string
+        epoch:
+          type: string
+        revision:
+          type: string
+        source_kind:
+          type: string
+          enum: [const, file, remote]
+        fallback:
+          type: boolean
+        stale:
+          type: boolean
+    Capability:
+      type: string
+      enum:
+        [read:overview, read:runtime, read:health, read:statistics, read:queries, read:resources, read:system]
+    SystemInfo:
+      type: object
+      additionalProperties: false
+      required: [version, started_at, uptime_seconds, capabilities]
+      properties:
+        version:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        uptime_seconds:
+          type: integer
+          minimum: 0
+        capabilities:
+          type: array
+          uniqueItems: true
+          items:
+            $ref: "#/components/schemas/Capability"
+    PageMeta:
+      type: object
+      required: [page, page_size, total_items]
+      properties:
+        page:
+          type: integer
+          minimum: 1
+        page_size:
+          type: integer
+          minimum: 1
+          maximum: 100
+        total_items:
+          type: integer
+          minimum: 0
