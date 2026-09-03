@@ -298,7 +298,7 @@ fn validate_basic(config: &ConfigDto, report: &mut ConfigErrorReport) {
         report.push(ConfigError::new(
             ConfigErrorKind::UnsupportedFeature,
             "webui.enable",
-            "webui is not supported in version 1",
+            "webui management server is not available in this build yet",
         ));
     }
     if config.webui.port == 0 {
@@ -307,6 +307,19 @@ fn validate_basic(config: &ConfigDto, report: &mut ConfigErrorReport) {
             "webui.port",
             "port must be between 1 and 65535",
         ));
+    }
+    match &config.webui.public_origin {
+        None if config.webui.enable => report.push(ConfigError::new(
+            ConfigErrorKind::MissingField,
+            "webui.public_origin",
+            "public_origin is required when webui is enabled",
+        )),
+        Some(origin) if !is_valid_public_origin(origin) => report.push(ConfigError::new(
+            ConfigErrorKind::InvalidValue,
+            "webui.public_origin",
+            "public_origin must be an absolute http or https origin without credentials, path, query, or fragment",
+        )),
+        _ => {}
     }
     let mut users = BTreeSet::new();
     for (index, user) in config.webui.users.iter().enumerate() {
@@ -1604,6 +1617,20 @@ pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport
             }
         }
     }
+    if config.webui.enable {
+        for entry in &plan.entries {
+            if entry.protocol == BindProtocol::Tcp
+                && entry.port == config.webui.port
+                && addresses_overlap(entry.address, config.webui.address)
+            {
+                report.push(ConfigError::new(
+                    ConfigErrorKind::BindConflict,
+                    format!("bind.webui.{}", config.webui.port),
+                    "management endpoint conflicts with a DNS TCP endpoint",
+                ));
+            }
+        }
+    }
     report.sort_deterministically();
     if report.is_empty() {
         plan.sort_deterministically();
@@ -1725,6 +1752,16 @@ fn is_supported_password_hash(value: &str) -> bool {
     bcrypt || (value.starts_with("$argon2id$") && value.len() >= 20)
 }
 
+fn is_valid_public_origin(origin: &url::Url) -> bool {
+    matches!(origin.scheme(), "http" | "https")
+        && origin.host().is_some()
+        && origin.username().is_empty()
+        && origin.password().is_none()
+        && origin.path() == "/"
+        && origin.query().is_none()
+        && origin.fragment().is_none()
+}
+
 fn is_valid_env_name(value: &str) -> bool {
     let mut bytes = value.bytes();
     matches!(
@@ -1755,7 +1792,10 @@ mod tests {
 
     use crate::config::{ConfigLoader, LoadOptions};
 
-    use super::{BindProtocol, BindTransport, ConfigErrorKind, DohBindingRef, addresses_overlap};
+    use super::{
+        BindProtocol, BindTransport, ConfigErrorKind, ConfigErrorReport, DohBindingRef,
+        addresses_overlap,
+    };
 
     #[test]
     fn wildcard_overlap_is_family_local() {
@@ -1818,5 +1858,65 @@ mod tests {
                 .any(|entry| entry.transport == BindTransport::Udp
                     && entry.protocol == BindProtocol::Udp)
         );
+    }
+
+    #[test]
+    fn management_endpoint_conflicts_with_tcp_but_not_udp() {
+        let (source, _) = crate::config::test_support::portable_example();
+        let mut config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .expect("repository example must remain a valid configuration")
+            .config;
+        config.webui.enable = true;
+        config.webui.public_origin = Some("http://127.0.0.1:53".parse().unwrap());
+        config.webui.address = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        config.webui.port = 53;
+
+        let report = super::build_bind_plan(&config).unwrap_err();
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|error| error.kind == ConfigErrorKind::BindConflict)
+        );
+
+        config
+            .listener
+            .retain(|listener| !matches!(listener, crate::config::model::ListenerDto::Tcp { .. }));
+        assert!(super::build_bind_plan(&config).is_ok());
+    }
+
+    #[test]
+    fn webui_public_origin_accepts_http_and_rejects_missing_or_path() {
+        let (source, _) = crate::config::test_support::portable_example();
+        let mut config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .expect("repository example must remain a valid configuration")
+            .config;
+        config.webui.enable = true;
+
+        config.webui.public_origin = Some("http://127.0.0.1:8080".parse().unwrap());
+        let mut report = ConfigErrorReport::default();
+        super::validate_basic(&config, &mut report);
+        assert!(
+            !report
+                .errors
+                .iter()
+                .any(|error| error.path == "webui.public_origin")
+        );
+
+        config.webui.public_origin = None;
+        let mut report = ConfigErrorReport::default();
+        super::validate_basic(&config, &mut report);
+        assert!(report.errors.iter().any(|error| {
+            error.kind == ConfigErrorKind::MissingField && error.path == "webui.public_origin"
+        }));
+
+        config.webui.public_origin = Some("https://dns.example.com/admin".parse().unwrap());
+        let mut report = ConfigErrorReport::default();
+        super::validate_basic(&config, &mut report);
+        assert!(report.errors.iter().any(|error| {
+            error.kind == ConfigErrorKind::InvalidValue && error.path == "webui.public_origin"
+        }));
     }
 }

@@ -93,6 +93,7 @@ pub struct ResolvedWebUi {
     pub enable: bool,
     pub address: std::net::IpAddr,
     pub port: u16,
+    pub public_origin: Option<Url>,
     pub users: Vec<ResolvedWebUiUser>,
 }
 
@@ -790,6 +791,7 @@ pub(crate) fn resolve_config_with_base_dir(
         enable: config.webui.enable,
         address: config.webui.address,
         port: config.webui.port,
+        public_origin: config.webui.public_origin.clone(),
         users: config
             .webui
             .users

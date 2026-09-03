@@ -37,20 +37,18 @@ logs:
   # 日志文件路径，相对于 work.path。
   path: ./logs/fluxdns.log
 
-# Web 管理界面预留配置。v1 仅保留 schema，不启动 WebUI、管理 API 或认证服务。
+# Web 管理界面配置。Management Server 只提供 HTTP；公网部署应由 Nginx 等反向代理终止 TLS。
 webui:
-  # v1 必须为 false；设为 true 时以“不支持的功能”拒绝启动，不能静默忽略。
+  # true 启动独立 Management Server；false 不创建对应 listener 和认证状态。
   enable: false
-  # 以下字段作为后续版本的设计预留，v1 仍进行类型和安全校验，但不参与绑定。
+  # Management Server 的本地监听地址和端口。
   address: 127.0.0.1
   port: 8080
-  # 保留登录用户结构，便于后续版本兼容；真实 hash 不应提交到公开仓库。
-  users:
-    # 用户名必须唯一。
-    - name: example-admin
-      # 初始化流程接收一次明文密码并只将单向 hash 写入此字段；运行时仅执行 verify。
-      # 这里只是不可作为默认凭据的格式 fixture，后续启用 WebUI 前必须替换。
-      password_hash: "$2a$10$jkBqXYJuD.4MlWKNMGF7yOao.t5povZHMghW/IvFtU6aCVTak05sS"
+  # 浏览器实际访问的唯一 origin；Nginx 提供 HTTPS 时应填写外部 https origin。
+  # 直接 HTTP 仅应用于 loopback 或可信管理网络，凭据和 session 不具备传输加密。
+  public_origin: http://127.0.0.1:8080
+  # 可省略或为空；启用 WebUI 且没有用户时进入一次性初始化流程。
+  users: []
 
 # DNS 全局配置。
 dns:

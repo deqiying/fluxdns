@@ -29,7 +29,7 @@ listener
 - `routes` 在同一个 DoH listener 内共享；每条路由选择一个策略。
 - `clients` 按客户端标识或 IP 网段选择策略，并覆盖缓存、TTL 和 ECS 等设置。
 - `upstreams`、`hosts`、`rule_set` 和 `outbound` 是可复用的命名资源。
-- `webui` 保留为后续版本的配置命名空间；v1 不启动 WebUI 或管理 API。
+- `webui` 定义独立的 WebUI Management Server、浏览器 origin 和登录用户。
 
 ## 2. 通用约定
 
@@ -150,7 +150,7 @@ RawConfigVn
 | `work` | object | 工作目录和规则资源落盘目录。 |
 | `database` | object | 默认开启的聚合统计、可选解析详情和其他持久化能力使用的数据库；始终必填。 |
 | `logs` | object | 服务日志输出。 |
-| `webui` | object | Web 管理界面的预留配置；v1 不实例化。 |
+| `webui` | object | WebUI Management Server、浏览器 origin 和登录用户。 |
 | `dns` | object | 全局缓存、TTL、ECS 和解析日志默认值。 |
 | `listener` | array | UDP、TCP 和 DoH 请求入口。 |
 | `upstreams` | array | hosts 上游、DoH 上游和上游组。 |
@@ -188,18 +188,21 @@ RawConfigVn
 
 ## 7. `webui`
 
-`webui` 是后续版本的设计预留。v1 保留并严格解析该对象，但不启动 WebUI、管理 API、认证服务或监听 socket；`webui.enable` 必须为 `false`，设为 `true` 时以“不支持的功能”拒绝启动，不能按 no-op 静默成功。
+`webui` 描述独立于 DoH 的 Management Server 配置契约；当前配置基础阶段仍拒绝 `enable: true`，待 Management Server 接入服务生命周期后解除。FluxDNS 在该端口只提供 HTTP，不实现 TLS 终止，也不根据 `X-Forwarded-*` 推断浏览器 origin；公网部署应将监听限制在 loopback 或受保护的内网地址，并由 Nginx 等可信反向代理提供外部 HTTPS。
 
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
-| `webui.enable` | boolean | 必填 | v1 固定为 `false`；后续版本再赋予启用语义。 |
-| `webui.address` | string | 必填 | 预留监听地址；v1 只校验地址格式，不参与 bind 计划。 |
-| `webui.port` | integer | 必填 | 预留监听端口；v1 只校验端口范围。 |
-| `webui.users` | array | 必填 | 预留登录用户列表；v1 不执行认证。 |
+| `webui.enable` | boolean | 必填 | `true` 启动 Management Server；`false` 不创建 management listener 或认证状态。 |
+| `webui.address` | string | 必填 | HTTP Management Server 的监听地址；与 DNS TCP/DoH endpoint 统一检查端口冲突。 |
+| `webui.port` | integer | 必填 | HTTP Management Server 的监听端口，范围为 `1..=65535`。 |
+| `webui.public_origin` | absolute URL | `enable: true` 时必填 | 浏览器实际访问的唯一 `http` 或 `https` origin；不得包含凭据、path、query 或 fragment，用于严格 Origin 校验和 Cookie 策略。 |
+| `webui.users` | array | 可选 | 省略或 `[]` 表示需要一次性初始化；非空表示已可登录；显式 `null` 拒绝。 |
 | `webui.users[].name` | string | 必填 | 用户名；列表内必须唯一。 |
 | `webui.users[].password_hash` | string | 必填 | 初始化时由一次性明文密码生成的单向 hash。 |
 
-即使当前不实例化 WebUI，仍拒绝未知字段、重复用户名、非法 hash 和明文 `webui.users[].password`，避免预留配置在未来启用时产生不同解释。真实密码和 hash 不应提交到公开仓库。
+配置仍拒绝未知字段、重复用户名、非法 hash 和明文 `webui.users[].password`。首次初始化只把 Argon2id PHC hash 写入源配置和工作目录快照；真实密码和 hash 不应提交到公开仓库。
+
+`public_origin` 使用 HTTP 时，session Cookie 不设置 `Secure`，因此凭据与 session 的传输安全完全依赖管理网络；这只适合 loopback 或明确受信任的隔离网络。常规部署应由反向代理提供 HTTPS，并把 `public_origin` 配置成浏览器看到的 `https://...` origin，此时后端仍只监听 HTTP。
 
 ## 8. `dns`
 

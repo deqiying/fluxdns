@@ -167,6 +167,9 @@ pub struct WebUiDto {
     #[serde(deserialize_with = "deserialize_ip")]
     pub address: IpAddr,
     pub port: u16,
+    #[serde(default, deserialize_with = "deserialize_optional_url")]
+    pub public_origin: Option<Url>,
+    #[serde(default)]
     pub users: Vec<WebUiUserDto>,
 }
 
@@ -177,6 +180,7 @@ impl fmt::Debug for WebUiDto {
             .field("enable", &self.enable)
             .field("address", &self.address)
             .field("port", &self.port)
+            .field("public_origin", &self.public_origin.as_ref().map(SafeUrl))
             .field("users", &self.users)
             .finish()
     }
@@ -1023,6 +1027,17 @@ where
     Url::parse(&text).map_err(|error| de::Error::custom(format!("invalid URL: {error}")))
 }
 
+fn deserialize_optional_url<'de, D>(deserializer: D) -> Result<Option<Url>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let text = Option::<String>::deserialize(deserializer)?
+        .ok_or_else(|| de::Error::custom("null is not allowed; omit the field instead"))?;
+    Url::parse(&text)
+        .map(Some)
+        .map_err(|error| de::Error::custom(format!("invalid URL: {error}")))
+}
+
 /// Parse a compact duration such as `10s`, `1d`, or `1h30m` without platform-dependent floats.
 pub fn parse_duration(value: &str) -> Result<Duration, String> {
     let input = value.trim();
@@ -1121,7 +1136,9 @@ pub fn is_non_empty_path(path: &Path) -> bool {
 mod tests {
     use std::time::Duration;
 
-    use super::parse_duration;
+    use serde::Deserialize;
+
+    use super::{WebUiDto, parse_duration};
 
     #[test]
     fn parses_compact_and_compound_durations() {
@@ -1139,5 +1156,25 @@ mod tests {
         assert_eq!(parse_duration("0s").unwrap(), Duration::ZERO);
         assert!(parse_duration("2fortnights").is_err());
         assert!(parse_duration("1.1234567890s").is_err());
+    }
+
+    #[test]
+    fn webui_users_can_be_omitted_but_not_null() {
+        fn parse(source: &str) -> Result<WebUiDto, String> {
+            WebUiDto::deserialize(yaml_serde::Deserializer::from_slice(source.as_bytes()))
+                .map_err(|error| error.to_string())
+        }
+
+        let webui = parse(
+            "enable: false\naddress: 127.0.0.1\nport: 8080\npublic_origin: http://127.0.0.1:8080\n",
+        )
+        .unwrap();
+        assert!(webui.users.is_empty());
+
+        let error = parse(
+            "enable: false\naddress: 127.0.0.1\nport: 8080\npublic_origin: http://127.0.0.1:8080\nusers: null\n",
+        )
+        .unwrap_err();
+        assert!(error.contains("invalid type"));
     }
 }
