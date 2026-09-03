@@ -25,7 +25,7 @@ v1 采用单进程、单 Rust binary、异步事件驱动架构：
 - DNS 核心只依赖 canonical message、request context 和协议无关的 port，不直接依赖 UDP/TCP/DoH、HTTP client、SQLite 或 Moka；
 - WebUI 使用独立的 HTTP Management listener 和 `axum` router，认证、session、首次初始化与内嵌静态资源不进入 DoH 或 DNS 数据面。
 
-仓库固定 `backend/` 与 `frontend/` 两个相互独立的代码主目录；根目录只承载仓库级文档、配置示例和工具配置，不作为任一端的工程目录。`backend/` 当前使用一个 binary crate，`frontend/` 当前仅保留目录边界，尚未初始化具体技术栈。v1 后端不建立多 crate workspace；等出现可独立复用或需要独立发布的组件后再拆 crate。
+仓库固定 `backend/` 与 `frontend/` 两个相互独立的代码主目录；根目录只承载仓库级文档、配置示例和工具配置，不作为任一端的工程目录。`backend/` 当前使用一个 binary crate，`frontend/` 使用 React + TypeScript + Vite 独立 SPA，并通过 `webui-embed` 在发布时内嵌到 Rust binary。v1 后端不建立多 crate workspace；等出现可独立复用或需要独立发布的组件后再拆 crate。
 
 ## 2. 技术栈
 
@@ -72,7 +72,7 @@ backend/src/
 │   ├── load.rs             # YAML、SecretRef、路径解析
 │   ├── migrate.rs          # MigrationStep、MigrationReport、版本链
 │   ├── resolve.rs          # 默认值/继承归一化为 ResolvedConfig
-│   └── validate.rs         # 引用、环、bind、条件字段和 feature gate
+│   └── validate.rs         # 引用、环、bind 和条件字段
 ├── transport/
 │   ├── udp.rs
 │   ├── tcp.rs

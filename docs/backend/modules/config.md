@@ -39,7 +39,7 @@ Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 pre
 | `load.rs` | 文件读取、大小/编码检查、字段路径解析、版本迁移和安全配置快照 |
 | `migrate.rs` | `MigrationStep` 注册表和 `MigrationReport` |
 | `resolve.rs` | 默认值、三态、继承和来源信息归一化 |
-| `validate.rs` | 名称、引用图、循环、条件字段、bind 和 feature gate |
+| `validate.rs` | 名称、引用图、循环、条件字段和 bind |
 
 DTO、ValidatedConfig 和 ResolvedConfig 必须是不同类型，不能用布尔字段表示“也许已校验”。
 
