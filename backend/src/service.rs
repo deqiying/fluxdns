@@ -1430,46 +1430,36 @@ async fn telemetry_flush_task(
         tokio::select! {
             _ = cancellation.cancelled() => return Ok(()),
             _ = interval.tick() => {
-                let deadline = Deadline::new(Instant::now() + TELEMETRY_OPERATION_TIMEOUT);
-                match LogSink::flush(telemetry.as_ref(), deadline).await {
-                    Ok(summary) if summary.failed > 0 => {
-                        publish_component_health(
-                            &telemetry,
-                            TelemetryComponent::Telemetry,
-                            ComponentHealthState::Degraded,
-                            Some("telemetry output failed"),
-                        );
-                        tracing::warn!(
-                            event = "telemetry_flush_degraded",
-                            component = "telemetry",
-                            failed = summary.failed,
-                            pending = telemetry.stats().pending(),
-                            "telemetry_flush_degraded"
-                        );
-                    }
-                    Ok(_) => publish_component_health(
-                        &telemetry,
-                        TelemetryComponent::Telemetry,
-                        ComponentHealthState::Healthy,
-                        None,
-                    ),
-                    Err(error) => {
-                        publish_component_health(
-                            &telemetry,
-                            TelemetryComponent::Telemetry,
-                            ComponentHealthState::Degraded,
-                            Some("telemetry flush failed"),
-                        );
-                        tracing::warn!(
-                            event = "telemetry_flush_failed",
-                            component = "telemetry",
-                            class = error.class().as_str(),
-                            operation = error.operation(),
-                            "telemetry_flush_failed"
-                        );
-                    }
-                }
+                flush_telemetry_once(&telemetry).await;
             }
+        }
+    }
+}
+
+/// 执行一次有界 Telemetry flush，并把当前输出结果映射为 health 生命周期。
+async fn flush_telemetry_once(telemetry: &TelemetryWriter) {
+    let deadline = Deadline::new(Instant::now() + TELEMETRY_OPERATION_TIMEOUT);
+    match LogSink::flush(telemetry, deadline).await {
+        Ok(_) => publish_component_health(
+            telemetry,
+            TelemetryComponent::Telemetry,
+            ComponentHealthState::Healthy,
+            None,
+        ),
+        Err(error) => {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Telemetry,
+                ComponentHealthState::Failed,
+                Some("telemetry flush failed"),
+            );
+            tracing::warn!(
+                event = "telemetry_flush_failed",
+                component = "telemetry",
+                class = error.class().as_str(),
+                operation = error.operation(),
+                "telemetry_flush_failed"
+            );
         }
     }
 }
@@ -2469,7 +2459,7 @@ mod tests {
     use std::net::{
         Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket,
     };
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicU32, Ordering},
@@ -2483,10 +2473,10 @@ mod tests {
 
     use super::{
         MAX_CONCURRENT_STREAM_SESSIONS, ResolveDetailDropCounters, ResolveDetailHealthUpdate,
-        ServiceError, TransportTask, can_accept_stream_session, is_exhausted_endpoint,
-        publish_cache_shutdown_health, publish_component_health, publish_resolve_detail_health,
-        response_header_rcode, response_rcode, retire_current_transport_task, spawn_telemetry_task,
-        spawn_transport_task, task_failure,
+        ServiceError, TransportTask, can_accept_stream_session, flush_telemetry_once,
+        is_exhausted_endpoint, publish_cache_shutdown_health, publish_component_health,
+        publish_resolve_detail_health, response_header_rcode, response_rcode,
+        retire_current_transport_task, spawn_telemetry_task, spawn_transport_task, task_failure,
     };
     use crate::cache::CachePersistenceRunSummary;
     use crate::config::{ConfigLoader, LoadOptions};
@@ -2511,6 +2501,7 @@ mod tests {
 
     #[derive(Default)]
     struct CountingTelemetryOutput {
+        fail: AtomicBool,
         logs: AtomicUsize,
         metrics: AtomicUsize,
         health: AtomicUsize,
@@ -2601,11 +2592,13 @@ mod tests {
 
     impl TelemetryOutput for CountingTelemetryOutput {
         fn write_log(&self, _event: &LogEvent) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.log")?;
             self.logs.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
 
         fn write_metric(&self, _event: &MetricEvent) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.metric")?;
             self.metrics.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -2614,9 +2607,24 @@ mod tests {
             &self,
             event: &ComponentHealthEvent,
         ) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.health")?;
             self.health.fetch_add(1, Ordering::Relaxed);
             self.health_events.lock().unwrap().push(event.clone());
             Ok(())
+        }
+    }
+
+    impl CountingTelemetryOutput {
+        /// 为 Service 测试提供可恢复的安全输出故障注入。
+        fn check(&self, operation: &'static str) -> Result<(), crate::ports::PortError> {
+            if self.fail.load(Ordering::Acquire) {
+                Err(crate::ports::PortError::new(
+                    crate::ports::PortErrorClass::Unavailable,
+                    operation,
+                ))
+            } else {
+                Ok(())
+            }
         }
     }
 
@@ -2653,6 +2661,39 @@ mod tests {
             )
             .await;
         assert_eq!(report.failed, 0);
+    }
+
+    /// 验证输出故障进入 Failed，恢复后不会被历史累计失败数永久误判。
+    #[tokio::test]
+    async fn telemetry_flush_health_recovers_after_output_returns() {
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(4, output.clone()).unwrap();
+        crate::ports::telemetry::LogSink::emit(&writer, telemetry_log()).unwrap();
+        output.fail.store(true, Ordering::Release);
+
+        flush_telemetry_once(&writer).await;
+        assert_eq!(writer.stats().failed(), 1);
+        output.fail.store(false, Ordering::Release);
+        flush_telemetry_once(&writer).await;
+        crate::ports::telemetry::LogSink::flush(
+            &writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        let states = output
+            .health_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.component == TelemetryComponent::Telemetry)
+            .map(|event| event.state)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            vec![ComponentHealthState::Failed, ComponentHealthState::Healthy]
+        );
     }
 
     #[tokio::test]

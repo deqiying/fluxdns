@@ -1089,11 +1089,14 @@ impl TelemetryWriter {
             };
             let Some(item) = item else {
                 let state = lock_unpoisoned(&self.state);
-                return Ok(TelemetryFlushSummary {
+                let summary = TelemetryFlushSummary {
                     emitted: state.emitted,
                     dropped_low_priority: state.dropped_low_priority,
                     failed: state.failed,
-                });
+                };
+                drop(state);
+                self.record_output_recovery(Instant::now());
+                return Ok(summary);
             };
 
             let result = match &item {
@@ -1110,10 +1113,73 @@ impl TelemetryWriter {
                     let mut state = lock_unpoisoned(&self.state);
                     state.failed = state.failed.saturating_add(1);
                     state.queue.push_front(item);
+                    drop(state);
+                    self.record_output_failure(Instant::now());
                     return Err(error);
                 }
             }
         }
+    }
+
+    /// 在输出端与 fallback 均失败时记录进程内最终状态，不递归写入故障输出。
+    fn record_output_failure(&self, now: Instant) {
+        let mut health = lock_unpoisoned(&self.health);
+        let previous = health.get(&TelemetryComponent::Telemetry).copied();
+        let retry_count = previous.map_or(1, |record| record.retry_count.saturating_add(1));
+        let stale_age_micros =
+            previous
+                .and_then(|record| record.last_success)
+                .map(|last_success| {
+                    now.saturating_duration_since(last_success)
+                        .as_micros()
+                        .min(u128::from(u64::MAX)) as u64
+                });
+        let event = ComponentHealthEvent {
+            component: TelemetryComponent::Telemetry,
+            state: ComponentHealthState::Failed,
+            first_seen: now,
+            last_changed: now,
+            last_success: None,
+            retry_count,
+            stale_age_micros,
+            persistence_gap: false,
+            safe_reason: Some("telemetry output unavailable"),
+        };
+        let event = if let Some(previous) = previous {
+            previous.normalize(event)
+        } else {
+            event
+        };
+        health.insert(
+            TelemetryComponent::Telemetry,
+            TelemetryHealthRecord::from_event(&event),
+        );
+    }
+
+    /// 在故障后的完整 flush 成功时恢复进程内 Telemetry health。
+    fn record_output_recovery(&self, now: Instant) {
+        let mut health = lock_unpoisoned(&self.health);
+        let Some(previous) = health.get(&TelemetryComponent::Telemetry).copied() else {
+            return;
+        };
+        if previous.state != ComponentHealthState::Failed {
+            return;
+        }
+        let event = previous.normalize(ComponentHealthEvent {
+            component: TelemetryComponent::Telemetry,
+            state: ComponentHealthState::Healthy,
+            first_seen: now,
+            last_changed: now,
+            last_success: Some(now),
+            retry_count: previous.retry_count,
+            stale_age_micros: None,
+            persistence_gap: false,
+            safe_reason: None,
+        });
+        health.insert(
+            TelemetryComponent::Telemetry,
+            TelemetryHealthRecord::from_event(&event),
+        );
     }
 }
 
@@ -1651,7 +1717,7 @@ mod tests {
         EventWriter, EventWriterError, HealthState, LogLevel, MetricKey, MetricName, MetricValue,
         ObservabilityRegistry, RegistryError, Sensitive, StructuredTelemetryOutput,
         TelemetryOutput, TelemetryWriter, TelemetryWriterBuildError, TypedEvent, TypedTracingLayer,
-        bootstrap_subscriber,
+        bootstrap_subscriber, lock_unpoisoned,
     };
 
     #[derive(Debug)]
@@ -2258,6 +2324,12 @@ mod tests {
         assert!(failed.is_err());
         assert_eq!(writer.stats().pending(), 1);
         assert_eq!(writer.stats().failed(), 1);
+        {
+            let health = lock_unpoisoned(&writer.health);
+            let record = health.get(&TelemetryComponent::Telemetry).unwrap();
+            assert_eq!(record.state, ComponentHealthState::Failed);
+            assert_eq!(record.retry_count, 1);
+        }
 
         let expired = writer.flush_now(Deadline::new(Instant::now()));
         assert!(matches!(
@@ -2277,6 +2349,13 @@ mod tests {
         .unwrap();
         assert_eq!(summary.emitted, 1);
         assert_eq!(writer.stats().pending(), 0);
+        {
+            let health = lock_unpoisoned(&writer.health);
+            let record = health.get(&TelemetryComponent::Telemetry).unwrap();
+            assert_eq!(record.state, ComponentHealthState::Healthy);
+            assert_eq!(record.retry_count, 1);
+            assert!(record.last_success.is_some());
+        }
     }
 
     #[test]
@@ -2348,5 +2427,20 @@ mod tests {
         .unwrap();
         assert!(content.contains("\"kind\":\"log\""));
         assert!(content.contains("\"event\":\"dns.request.complete\""));
+    }
+
+    /// 验证主输出与 fallback 同时失败时返回稳定、安全的错误边界。
+    #[test]
+    fn structured_output_reports_failure_when_primary_and_fallback_fail() {
+        let output = StructuredTelemetryOutput::from_writer_with_fallback(
+            Box::new(FailingWriter),
+            Some(Box::new(FailingWriter)),
+        );
+
+        let error = output
+            .write_log(&telemetry_log(TelemetryLogLevel::Error))
+            .unwrap_err();
+        assert!(matches!(error.class(), PortErrorClass::Unavailable));
+        assert_eq!(error.operation(), "observability.telemetry.output");
     }
 }

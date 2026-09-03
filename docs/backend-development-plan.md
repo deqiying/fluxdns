@@ -1,6 +1,6 @@
 # FluxDNS 后端开发计划
 
-> 状态：MVP v0.1 已完成；当前已完成至阶段 170（Runtime/Transport 加固大阶段验收）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+> 状态：MVP v0.1 已完成；当前已完成至阶段 171（Telemetry 输出失败最终状态与恢复）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 >
 > 更新日期：2026-09-03
 >
@@ -53,14 +53,14 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | Cache | 实现中 | 83% | 9% |
 | Resource | 已实现待验证 | 92% | 7% |
 | Storage | 已实现待验证 | 96% | 8% |
-| Observability | 实现中 | 97% | 3% |
+| Observability | 实现中 | 98% | 3% |
 
 进度计算：
 
 ```text
 4%×76% + 8%×70% + 10%×100% + 12%×88% + 11%×87%
 + 10%×82% + 8%×83% + 10%×99% + 9%×83% + 7%×92%
-+ 8%×96% + 3%×97% ≈ 88.0%
++ 8%×96% + 3%×98% ≈ 88.0%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -95,7 +95,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 170 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 171 |
 
 ### 增量里程碑
 
@@ -110,17 +110,15 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 136–145 | 上游/策略观测、Storage 结果元数据与跨 transport DNS 契约 | 拆分策略目标、实际成员、命中规则和资源版本；SQLite v2 写入 RCODE/failure/cancel；真实 UDP/TCP/plain DoH GET/POST 覆盖成功、否定、错误和大响应 |
 | 146–151 | capability/ports/reload 基线与配置优先级 | Transport 统一 capability 映射；Ports 33 项契约测试；reload 回滚、资源版本落库、Policy cache/ECS 优先级和 health stale age 均有定向证据 |
 | 152–170 | 持久化 health、DoH/TLS 安全与 Runtime 生命周期 | Cache/Storage health 已发布；正常与 fatal task 退出均有界收尾；坏 TLS 握手只终止当前 DoH session；同组 endpoint 可故障隔离；listener 空闲不消耗重试；stream session 和 DoH framing 均有硬上限；Listener health 覆盖 `Healthy → Degraded → Healthy → Stopping`；后端全量 539 passed |
+| 171 | Telemetry 输出 health 闭环 | 主输出与 fallback 同时失败时记录 `Failed`；后续完整 flush 成功恢复 `Healthy`，不受历史累计失败数影响 |
 
 ### 当前阶段验证
 
-- 全量 `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过；
-- `cargo check --manifest-path backend/Cargo.toml --locked`：通过；
-- `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings`：通过；
-- `cargo test --manifest-path backend/Cargo.toml --locked`：`539 passed、0 failed`；
-- Windows 跨 transport loopback 改由 OS 分配可绑定端口，原失败用例及全量回归通过；
+- 增量 `rustfmt`：`backend/src/observability.rs`、`backend/src/service.rs`；
+- 双输出失败、writer health 恢复、Service flush health 恢复和既有周期 flush：4 项定向测试通过；
 - `git diff --check`：通过。
 
-阶段 170 是阶段 152–169 的大阶段验收；实现进度不因单纯通过全量验证而增加。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
+阶段 171 未重复阶段 170 已通过的全量后端验收。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend-modules/*.md`。
 
 ## 5. v1 验收门槛
 
