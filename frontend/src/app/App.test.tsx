@@ -41,6 +41,30 @@ describe("application routes", () => {
     expect(window.sessionStorage.length).toBe(0);
   });
 
+  it("初始化并发冲突后刷新状态并返回登录页", async () => {
+    const user = userEvent.setup();
+    let setupState: "required" | "ready" = "required";
+    setMockSetupRequired(true);
+    server.use(
+      http.get("/api/v1/auth/setup", () => HttpResponse.json({ state: setupState })),
+      http.post("/api/v1/auth/setup", () => {
+        setupState = "ready";
+        return HttpResponse.json(
+          { code: "SETUP_ALREADY_COMPLETED", message: "setup already completed", request_id: "mock-setup-409", retryable: false },
+          { status: 409 },
+        );
+      }),
+    );
+    renderApp("/initialize");
+    expect(await screen.findByRole("heading", { name: "初始化 FluxDNS" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText("用户名"), "admin");
+    await user.type(screen.getByLabelText("密码"), "correct horse battery staple");
+    await user.type(screen.getByLabelText("确认密码"), "correct horse battery staple");
+    await user.click(screen.getByRole("button", { name: "创建管理账号" }));
+    expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
   it("未登录时保护所有业务路由", async () => {
     renderApp("/runtime");
     expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();
