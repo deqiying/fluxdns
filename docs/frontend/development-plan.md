@@ -12,7 +12,7 @@
 
 ## 1. 结论
 
-当前前端已完成 F0–F5 的代码实现：工程骨架、setup 初始化、鉴权、应用壳和只读页面已接入后端 Management API；类型检查、28 项组件/contract tests、生产构建和 `webui-embed` 静态资源测试已通过。真实浏览器同源 Network/Storage smoke 与双平台发布仍需在对应环境执行，因此文档不把 mock 或 handler 测试描述为真实端到端证据。
+当前前端已完成 F0–F5 的代码实现：工程骨架、setup 初始化、鉴权、应用壳和只读页面已接入后端 Management API；类型检查、29 项组件/contract tests、生产构建和 `webui-embed` 静态资源测试已通过。真实浏览器同源 Network/Storage smoke 与双平台发布仍需在对应环境执行，因此文档不把 mock 或 handler 测试描述为真实端到端证据。
 
 首版交付目标是一个通过同源 `/api/v1` 访问管理面的 React + TypeScript + Vite SPA，使用服务端 session Cookie，提供登录、Dashboard、Runtime、Health、Statistics、Queries、Resources 和 System 的只读视图。首版不把任何前端页面或请求接到 UDP/TCP/DoH 数据面，不读取 SQLite、配置文件或服务日志，也不新增配置编辑、reload/restart、缓存清理、资源刷新和 WebSocket/SSE。
 
@@ -289,7 +289,7 @@ pnpm run test
 pnpm run build
 ```
 
-2026-09-04 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、28 项 tests 通过；Vite 生产构建成功，生产 `dist/` 不包含 MSW worker；后端 `webui-embed` 测试覆盖 SPA fallback、HEAD、ETag 和静态响应头。MSW fixture smoke 覆盖 setup、初始化、登录、只读页面和登出，并断言未写入浏览器持久化存储；Windows `webui-embed` release binary 的真实 HTTP smoke 已覆盖 SPA 200、setup required、未认证 401、初始化后 session/overview 200 和重复 setup 409，且在临时移出 `frontend/dist/` 后仍能返回嵌入 SPA；in-app browser 已检查真实 `/initialize` 页面、表单校验和 Console。浏览器 Network/Storage 观察与 Linux target 发布尚未执行，不将这些边界写成已通过。
+2026-09-04 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、29 项 tests 通过（含初始化并发 `409` 后刷新 setup 状态并返回登录页）；Vite 生产构建成功，生产 `dist/` 不包含 MSW worker；后端 `webui-embed` 测试覆盖 SPA fallback、HEAD、ETag 和静态响应头。MSW fixture smoke 覆盖 setup、初始化、登录、只读页面和登出，并断言未写入浏览器持久化存储；Windows `webui-embed` release binary 的真实 HTTP smoke 已覆盖 SPA 200、setup required、未认证 401、初始化后 session/overview 200 和重复 setup 409，且在临时移出 `frontend/dist/` 后仍能返回嵌入 SPA；in-app browser 已检查真实 `/initialize` 页面、表单校验和 Console。浏览器 Network/Storage 观察与 Linux target 发布尚未执行，不将这些边界写成已通过。
 
 ### 10.2 Management API 集成验收
 
