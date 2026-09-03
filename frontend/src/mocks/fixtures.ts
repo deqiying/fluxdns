@@ -5,9 +5,13 @@ import type {
   ResourceSnapshot,
   RuntimeSnapshot,
   Session,
+  SetupStatus,
   StatisticsPage,
   SystemInfo,
 } from "@/shared/api/types";
+
+export const setupReadyFixture = { state: "ready" } satisfies SetupStatus;
+export const setupRequiredFixture = { state: "required" } satisfies SetupStatus;
 
 export const sessionFixture = {
   user: { name: "operator" },

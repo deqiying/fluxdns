@@ -129,3 +129,78 @@ fn empty_response(status: StatusCode) -> Response<Body> {
         .body(Body::empty())
         .expect("empty response is valid")
 }
+
+#[cfg(all(test, feature = "webui-embed"))]
+mod tests {
+    use axum::body::{Body, to_bytes};
+    use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH};
+    use axum::http::{Request, StatusCode};
+
+    use super::fallback;
+
+    #[tokio::test]
+    async fn serves_embedded_index_for_spa_route() {
+        let request = Request::builder()
+            .uri("/dashboard")
+            .header("accept", "text/html")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = fallback(request).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[CONTENT_TYPE], "text/html");
+        assert_eq!(response.headers()[CACHE_CONTROL], "no-cache");
+        let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+        assert!(
+            body.windows(b"<div id=\"root\"></div>".len())
+                .any(|window| { window == b"<div id=\"root\"></div>" })
+        );
+    }
+
+    #[tokio::test]
+    async fn supports_head_and_conditional_requests_without_body() {
+        let get_request = Request::builder()
+            .uri("/index.html")
+            .header("accept", "text/html")
+            .body(Body::empty())
+            .unwrap();
+        let get_response = fallback(get_request).await;
+        let etag = get_response.headers()[ETAG].clone();
+        let get_body = to_bytes(get_response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(!get_body.is_empty());
+
+        let head_request = Request::builder()
+            .method("HEAD")
+            .uri("/index.html")
+            .header("accept", "text/html")
+            .body(Body::empty())
+            .unwrap();
+        let head_response = fallback(head_request).await;
+        assert_eq!(head_response.status(), StatusCode::OK);
+        assert_eq!(head_response.headers()[CONTENT_TYPE], "text/html");
+        assert_eq!(
+            to_bytes(head_response.into_body(), 1024)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+
+        let conditional_request = Request::builder()
+            .uri("/index.html")
+            .header(IF_NONE_MATCH, etag)
+            .body(Body::empty())
+            .unwrap();
+        let conditional_response = fallback(conditional_request).await;
+        assert_eq!(conditional_response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            to_bytes(conditional_response.into_body(), 1024)
+                .await
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+}

@@ -123,9 +123,12 @@ function Get-ManagedProcessStatus {
         $actualBinaryPath = $process.Path
     }
     catch {
-        $actualBinaryPath = $null
+        return [pscustomobject]@{ Status = "unverifiable"; Process = $null; Reason = "无法读取进程可执行文件路径" }
     }
-    if (-not [string]::IsNullOrWhiteSpace($actualBinaryPath) -and -not (Test-SamePath -Left $actualBinaryPath -Right $State.BinaryPath)) {
+    if ([string]::IsNullOrWhiteSpace($actualBinaryPath)) {
+        return [pscustomobject]@{ Status = "unverifiable"; Process = $null; Reason = "进程可执行文件路径为空" }
+    }
+    if (-not (Test-SamePath -Left $actualBinaryPath -Right $State.BinaryPath)) {
         return [pscustomobject]@{ Status = "stale"; Process = $null; Reason = "PID 对应的可执行文件不匹配" }
     }
 

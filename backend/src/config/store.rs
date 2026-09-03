@@ -53,10 +53,11 @@ impl ConfigStore {
         name: &str,
         password_hash: &str,
     ) -> Result<InitialUserCommit, ConfigStoreError> {
-        let _transaction = self
-            .transaction
-            .lock()
-            .map_err(|_| ConfigStoreError::LockPoisoned)?;
+        // setup 请求不能无限等待另一笔事务；竞争时由 API 映射为有界冲突响应。
+        let _transaction = self.transaction.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::Poisoned(_) => ConfigStoreError::LockPoisoned,
+            std::sync::TryLockError::WouldBlock => ConfigStoreError::Busy,
+        })?;
         let _file_lock = ConfigFileLock::acquire(&lock_path(&self.source_path))?;
         let source = read_bounded(&self.source_path)?;
         let fingerprint = deterministic_hash(&source);
@@ -428,7 +429,9 @@ fn replace_file(stage: &Path, target: &Path) -> Result<(), ConfigStoreError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
     use std::sync::Arc;
+    use std::time::{Duration, Instant};
 
     use super::{ConfigStore, TransactionJournal};
     use crate::config::{ConfigLoader, LoadOptions};
@@ -503,5 +506,22 @@ mod tests {
         assert_eq!(std::fs::read(&snapshot_path).unwrap(), new);
         assert!(!super::journal_path(&source_path).exists());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_initial_user_returns_bounded_busy_error() {
+        let store = ConfigStore::new(
+            PathBuf::from("missing-source.yaml"),
+            PathBuf::from("missing-source.yaml"),
+            "fingerprint".to_owned(),
+        );
+        let _guard = store.transaction.lock().unwrap();
+        let started = Instant::now();
+
+        assert!(matches!(
+            store.create_initial_user("admin", "hash"),
+            Err(super::ConfigStoreError::Busy)
+        ));
+        assert!(started.elapsed() < Duration::from_millis(100));
     }
 }

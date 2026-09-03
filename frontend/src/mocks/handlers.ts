@@ -6,18 +6,27 @@ import {
   resourceFixture,
   runtimeFixture,
   sessionFixture,
+  setupReadyFixture,
+  setupRequiredFixture,
   statisticsFixture,
   systemFixture,
 } from "./fixtures";
 
 let authenticated = false;
+let setupRequired = false;
 
 export function setMockAuthenticated(value: boolean) {
   authenticated = value;
 }
 
+export function setMockSetupRequired(value: boolean) {
+  setupRequired = value;
+  if (value) authenticated = false;
+}
+
 export function resetMockState() {
   authenticated = false;
+  setupRequired = false;
 }
 
 function unauthorized() {
@@ -39,7 +48,26 @@ function readOnly<T extends object>(fixture: T) {
 }
 
 export const handlers = [
+  http.get("/api/v1/auth/setup", () => HttpResponse.json(setupRequired ? setupRequiredFixture : setupReadyFixture)),
   http.get("/api/v1/auth/session", () => (authenticated ? HttpResponse.json(sessionFixture) : unauthorized())),
+  http.post("/api/v1/auth/setup", async ({ request }) => {
+    if (!setupRequired) {
+      return HttpResponse.json(
+        { code: "SETUP_ALREADY_COMPLETED", message: "setup already completed", request_id: "mock-setup-409", retryable: false },
+        { status: 409 },
+      );
+    }
+    const body = (await request.json()) as { username?: string; password?: string };
+    if (!body.username || !body.password || body.password.length < 12) {
+      return HttpResponse.json(
+        { code: "VALIDATION_FAILED", message: "invalid setup credentials", request_id: "mock-setup-400", retryable: false },
+        { status: 400 },
+      );
+    }
+    setupRequired = false;
+    authenticated = true;
+    return HttpResponse.json({ ...sessionFixture, user: { name: body.username } }, { status: 201 });
+  }),
   http.post("/api/v1/auth/login", async ({ request }) => {
     const body = (await request.json()) as { username?: string; password?: string };
     if (!body.username || !body.password) {

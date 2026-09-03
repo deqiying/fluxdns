@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Alert, Button, Card, Form, Input, Space, Typography } from "antd";
+import { Alert, Button, Card, Form, Input, Space, Spin, Typography } from "antd";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import type { LoginRequest } from "@/shared/api/types";
 import { getSafeErrorMessage } from "@/shared/api/errors";
@@ -18,6 +18,26 @@ export function LoginPage() {
   const navigate = useNavigate();
   const location = useLocation();
   const state = location.state as LoginLocationState | null;
+
+  if (auth.isLoading) {
+    return (
+      <div className="fullscreen-state" aria-label="正在读取 WebUI 状态">
+        <Spin size="large" />
+      </div>
+    );
+  }
+
+  if (auth.error) {
+    return (
+      <div className="fullscreen-state">
+        <Alert type="error" showIcon message={getSafeErrorMessage(auth.error)} />
+      </div>
+    );
+  }
+
+  if (auth.setupRequired) {
+    return <Navigate to="/initialize" replace />;
+  }
 
   if (auth.session && !loginInProgress.current) {
     return <Navigate to="/dashboard" replace />;

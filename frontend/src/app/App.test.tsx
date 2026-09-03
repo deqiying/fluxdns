@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
-import { setMockAuthenticated } from "@/mocks/handlers";
+import { setMockAuthenticated, setMockSetupRequired } from "@/mocks/handlers";
 import { server } from "@/mocks/server";
 import { AppProviders } from "./providers";
 import { App } from "./App";
@@ -19,6 +19,28 @@ function renderApp(path: string) {
 }
 
 describe("application routes", () => {
+  it("未初始化时先进入初始化页且不请求受保护数据", async () => {
+    setMockSetupRequired(true);
+    renderApp("/dashboard");
+    expect(await screen.findByRole("heading", { name: "初始化 FluxDNS" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/initialize");
+  });
+
+  it("初始化成功后自动建立 session 并进入 Dashboard", async () => {
+    const user = userEvent.setup();
+    setMockSetupRequired(true);
+    renderApp("/initialize");
+    await screen.findByRole("heading", { name: "初始化 FluxDNS" });
+    await user.type(screen.getByLabelText("用户名"), "admin");
+    await user.type(screen.getByLabelText("密码"), "correct horse battery staple");
+    await user.type(screen.getByLabelText("确认密码"), "correct horse battery staple");
+    await user.click(screen.getByRole("button", { name: "创建管理账号" }));
+    expect(await screen.findByRole("heading", { name: "运行总览" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/dashboard");
+    expect(window.localStorage.length).toBe(0);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
   it("未登录时保护所有业务路由", async () => {
     renderApp("/runtime");
     expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();

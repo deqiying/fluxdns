@@ -7,6 +7,7 @@ const AppLayout = lazy(() => import("@/shared/components/AppLayout").then((modul
 const DashboardPage = lazy(() => import("@/modules/dashboard/DashboardPage").then((module) => ({ default: module.DashboardPage })));
 const HealthPage = lazy(() => import("@/modules/health/HealthPage").then((module) => ({ default: module.HealthPage })));
 const LoginPage = lazy(() => import("@/modules/auth/LoginPage").then((module) => ({ default: module.LoginPage })));
+const InitializePage = lazy(() => import("@/modules/auth/InitializePage").then((module) => ({ default: module.InitializePage })));
 const QueriesPage = lazy(() => import("@/modules/queries/QueriesPage").then((module) => ({ default: module.QueriesPage })));
 const ResourcesPage = lazy(() => import("@/modules/resources/ResourcesPage").then((module) => ({ default: module.ResourcesPage })));
 const RuntimePage = lazy(() => import("@/modules/runtime/RuntimePage").then((module) => ({ default: module.RuntimePage })));
@@ -19,6 +20,7 @@ export function App() {
     <Suspense fallback={<div className="fullscreen-state"><Spin size="large" /></div>}>
       <Routes>
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/initialize" element={<InitializePage />} />
         <Route element={<ProtectedRoute />}>
           <Route element={<AppLayout />}>
             <Route index element={<Navigate to="/dashboard" replace />} />

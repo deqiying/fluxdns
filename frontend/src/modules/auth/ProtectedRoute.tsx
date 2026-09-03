@@ -23,6 +23,10 @@ export function ProtectedRoute() {
     );
   }
 
+  if (auth.setupRequired) {
+    return <Navigate to="/initialize" replace state={{ from: location.pathname }} />;
+  }
+
   if (!auth.session) {
     return (
       <Navigate
