@@ -719,6 +719,34 @@ mod tests {
         assert_eq!(supervisor.task_count(), 0);
     }
 
+    /// 验证不合作 task 到达 deadline 后被 abort，并完整计入 shutdown 报告。
+    #[tokio::test]
+    async fn shutdown_aborts_uncooperative_tasks_at_deadline() {
+        let mut supervisor = Supervisor::new();
+        supervisor
+            .spawn(
+                spec("uncooperative"),
+                Box::pin(std::future::pending::<Result<(), TaskError>>()),
+            )
+            .unwrap();
+        let clock = FakeClock::new(Instant::now(), SystemTime::UNIX_EPOCH);
+
+        let report = supervisor
+            .shutdown(&clock, Deadline::new(clock.monotonic_now()))
+            .await;
+
+        assert_eq!(
+            report,
+            ShutdownReport {
+                aborted: 1,
+                deadline_expired: true,
+                ..ShutdownReport::default()
+            }
+        );
+        assert_eq!(report.task_count(), 1);
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
     #[tokio::test]
     async fn factory_restarts_transient_failures_within_the_configured_bound() {
         let mut supervisor = Supervisor::new();
