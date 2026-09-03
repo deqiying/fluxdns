@@ -1,6 +1,6 @@
 # Transport 模块设计
 
-> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter 与 Host cardinality 边界、forwarded header、PROXY v1/v2 首轮客户端地址恢复和 TLS terminate 首轮握手；坏 TLS 握手的连接级隔离已有真实 loopback 证据
+> 状态：v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter 与 Host cardinality 边界、forwarded header、PROXY v1/v2 首轮客户端地址恢复和 TLS terminate 首轮握手；TLS material 已有启动读取上限，坏 TLS 握手的连接级隔离已有真实 loopback 证据
 >
 > 更新日期：2026-09-03
 >
@@ -141,7 +141,7 @@ route template 负责提取可选 `client_id`，但日志不记录实际路径�
 
 `tls.mode=terminate` 在 endpoint 装配阶段：
 
-- 读取证书链和私钥；
+- 有界读取证书链和私钥，文件上限分别为 1 MiB 和 64 KiB；
 - 拒绝空链、无匹配 key、加密但无法解密的 key 和不支持算法；
 - 显式安装 Rustls crypto provider；
 - 将脱敏的 DER 材料交给 system socket，由其构造 `ServerConfig` 并在连接 session 内完成 stream upgrade。
@@ -240,6 +240,6 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 验证坏 TLS 握手只终止当前 DoH session，同一 listener 可继续服务后续正常连接；
 - [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、request-line/media type、Host authority/cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试通过；system socket Rustls loopback 验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163–168 验证 transient retry 上限、endpoint 故障隔离、空闲 listener、session 上限和 framing 资源边界；阶段 180 后端全量 `547 passed、0 failed`。阶段 182 新增 Host authority 与严格十进制 `Content-Length` 校验；阶段 185 补齐 DER 证书/私钥直接加载证据，DoH 23 项定向测试通过。真实 plain HTTP smoke 已验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
+阶段证据：DoH codec/session、request-line/media type、Host authority/cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试通过；system socket Rustls loopback 验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163–168 验证 transient retry 上限、endpoint 故障隔离、空闲 listener、session 上限和 framing 资源边界；阶段 190 后端全量 `555 passed、0 failed`。阶段 182 新增 Host authority 与严格十进制 `Content-Length` 校验；阶段 185 补齐 DER 证书/私钥直接加载证据；阶段 191 为证书链与私钥读取增加独立硬上限，DoH 24 项定向测试通过。真实 plain HTTP smoke 已验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
 
-当前实现进度：**89%**。
+当前实现进度：**90%**。

@@ -4,6 +4,7 @@
 //! endpoint's TLS material selection, HTTP envelope, and client address policy.
 
 use std::fmt;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
@@ -45,6 +46,8 @@ pub const MAX_PROXY_V2_BYTES: usize = 536;
 
 const MAX_HEADER_COUNT: usize = 64;
 const DOH_READ_CHUNK_BYTES: usize = 8 * 1024;
+const MAX_TLS_CERTIFICATE_FILE_BYTES: usize = 1024 * 1024;
+const MAX_TLS_PRIVATE_KEY_FILE_BYTES: usize = 64 * 1024;
 // request-line 与 header fields 分开计费，确保完整 GET wire 不会提前撞上 header 上限。
 const MAX_DOH_REQUEST_LINE_BYTES: usize = MAX_DOH_REQUEST_TARGET_BYTES + 32;
 const MAX_DOH_REQUEST_HEAD_BYTES: usize = MAX_DOH_REQUEST_LINE_BYTES + MAX_DOH_HEADER_BYTES;
@@ -312,8 +315,12 @@ pub enum DohAdapterError {
     EndpointNotFound { endpoint: String },
     #[error("DoH TLS certificate could not be loaded")]
     TlsCertificateLoad,
+    #[error("DoH TLS certificate exceeds the configured safety limit")]
+    TlsCertificateTooLarge,
     #[error("DoH TLS private key could not be loaded")]
     TlsPrivateKeyLoad,
+    #[error("DoH TLS private key exceeds the configured safety limit")]
+    TlsPrivateKeyTooLarge,
     #[error("DoH TLS material is invalid")]
     TlsInvalidMaterial,
     #[error("DoH route is invalid: {0}")]
@@ -326,8 +333,12 @@ fn load_tls_material(
 ) -> Result<TlsServerMaterial, DohAdapterError> {
     let certificate_file = certificate_file.ok_or(DohAdapterError::TlsInvalidMaterial)?;
     let private_key_file = private_key_file.ok_or(DohAdapterError::TlsInvalidMaterial)?;
-    let certificate_bytes =
-        std::fs::read(certificate_file).map_err(|_| DohAdapterError::TlsCertificateLoad)?;
+    let certificate_bytes = read_tls_file(
+        certificate_file,
+        MAX_TLS_CERTIFICATE_FILE_BYTES,
+        || DohAdapterError::TlsCertificateLoad,
+        DohAdapterError::TlsCertificateTooLarge,
+    )?;
     let mut certificate_chain = CertificateDer::pem_slice_iter(&certificate_bytes)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| DohAdapterError::TlsCertificateLoad)?
@@ -341,8 +352,12 @@ fn load_tls_material(
         return Err(DohAdapterError::TlsCertificateLoad);
     }
 
-    let private_key_bytes =
-        std::fs::read(private_key_file).map_err(|_| DohAdapterError::TlsPrivateKeyLoad)?;
+    let private_key_bytes = read_tls_file(
+        private_key_file,
+        MAX_TLS_PRIVATE_KEY_FILE_BYTES,
+        || DohAdapterError::TlsPrivateKeyLoad,
+        DohAdapterError::TlsPrivateKeyTooLarge,
+    )?;
     let private_key = match PrivateKeyDer::from_pem_slice(&private_key_bytes) {
         Ok(key) => key.secret_der().to_vec(),
         Err(_) => PrivateKeyDer::try_from(private_key_bytes)
@@ -359,6 +374,24 @@ fn load_tls_material(
     };
     validate_tls_material(&material)?;
     Ok(material)
+}
+
+/// 在启动装配阶段有界读取 TLS 文件，避免异常文件造成不受控内存分配。
+fn read_tls_file(
+    path: &Path,
+    max_bytes: usize,
+    load_error: fn() -> DohAdapterError,
+    too_large_error: DohAdapterError,
+) -> Result<Vec<u8>, DohAdapterError> {
+    let file = std::fs::File::open(path).map_err(|_| load_error())?;
+    let mut bytes = Vec::with_capacity(max_bytes.min(8 * 1024));
+    file.take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| load_error())?;
+    if bytes.len() > max_bytes {
+        return Err(too_large_error);
+    }
+    Ok(bytes)
 }
 
 fn validate_tls_material(material: &TlsServerMaterial) -> Result<(), DohAdapterError> {
@@ -1728,6 +1761,43 @@ mod tests {
         let material = load_tls_material(Some(&certificate_path), Some(&key_path)).unwrap();
         assert_eq!(material.certificate_chain, vec![certificate_der]);
         assert_eq!(material.private_key, private_key_der);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    /// 验证证书链和私钥文件在解析前受到独立字节上限保护。
+    #[test]
+    fn rejects_oversized_tls_material_files() {
+        let certified = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-doh-tls-limit-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let certificate_path = root.join("cert.pem");
+        let key_path = root.join("key.pem");
+        fs::write(&key_path, certified.signing_key.serialize_pem()).unwrap();
+
+        fs::write(
+            &certificate_path,
+            vec![0_u8; MAX_TLS_CERTIFICATE_FILE_BYTES + 1],
+        )
+        .unwrap();
+        assert!(matches!(
+            load_tls_material(Some(&certificate_path), Some(&key_path)),
+            Err(DohAdapterError::TlsCertificateTooLarge)
+        ));
+
+        fs::write(&certificate_path, certified.cert.pem()).unwrap();
+        fs::write(&key_path, vec![0_u8; MAX_TLS_PRIVATE_KEY_FILE_BYTES + 1]).unwrap();
+        assert!(matches!(
+            load_tls_material(Some(&certificate_path), Some(&key_path)),
+            Err(DohAdapterError::TlsPrivateKeyTooLarge)
+        ));
 
         let _ = fs::remove_dir_all(root);
     }
