@@ -107,7 +107,7 @@ MigrationStep {
 4. upstream/bootstrap/group、resource/proxy 等有向图循环；
 5. cache、TTL、ECS 继承与阈值；
 6. listener/endpoint 展开和 IPv4/IPv6 bind 冲突；
-7. WebUI v1 feature gate；
+7. WebUI `public_origin`、用户 hash 与 Management/DNS TCP bind 冲突；
 8. SecretRef scheme 与敏感值安全检查；
 9. 生成 `BindPlanInput`、`ResourcePlan`、`StoragePlan` 等 prepare 输入。
 

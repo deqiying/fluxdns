@@ -188,7 +188,7 @@ RawConfigVn
 
 ## 7. `webui`
 
-`webui` 描述独立于 DoH 的 Management Server 配置契约；当前配置基础阶段仍拒绝 `enable: true`，待 Management Server 接入服务生命周期后解除。FluxDNS 在该端口只提供 HTTP，不实现 TLS 终止，也不根据 `X-Forwarded-*` 推断浏览器 origin；公网部署应将监听限制在 loopback 或受保护的内网地址，并由 Nginx 等可信反向代理提供外部 HTTPS。
+`webui` 控制独立于 DoH 的 Management Server。FluxDNS 在该端口只提供 HTTP，不实现 TLS 终止，也不根据 `X-Forwarded-*` 推断浏览器 origin；公网部署应将监听限制在 loopback 或受保护的内网地址，并由 Nginx 等可信反向代理提供外部 HTTPS。
 
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
@@ -385,7 +385,7 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 ### 9.3 绑定校验
 
-`listener[].addresses` 和 `listener[type=doh].endpoints[].addresses` 展开后不得产生相同协议、地址、端口的冲突。v1 的 WebUI 不实例化，因此预留的 `webui.address`/`port` 不进入 bind 计划；未来允许 `webui.enable: true` 时必须将它纳入同一全局 TCP 绑定校验。IPv4/IPv6 双栈是否共享 socket、以及 v6-only 行为必须在运行时明确。
+`listener[].addresses`、`listener[type=doh].endpoints[].addresses` 与启用后的 `webui.address`/`port` 展开后不得产生相同协议、地址、端口的冲突；WebUI 只占用 TCP，不与同地址、同端口的 UDP listener 冲突。IPv4/IPv6 双栈是否共享 socket、以及 v6-only 行为必须在运行时明确。
 
 当前模板没有 `dot` 或 `doq` listener 字段；DoT/DoQ 应在协议、TLS/QUIC 材料和握手校验契约确定后再加入。
 
@@ -593,7 +593,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 2. 主动上游健康检查、熔断器和持久健康分数配置。
 3. 远程规则的 expected checksum、版本锁定和签名验证字段；v1 只记录内部 content hash/source fingerprint。
 4. 未来配置版本及 SQLite schema v2 之后的兼容窗口和 migration SQL；当前业务库升级链见 [Storage 模块](modules/storage.md)。
-5. WebUI 正式启用版本的管理 API、认证/session、CSRF、TLS/bind 及历史统计保留契约。
+5. WebUI 配置写操作、缓存清理、权限分级和更长期的历史统计保留策略。
 
 ## 18. 协议依据
 

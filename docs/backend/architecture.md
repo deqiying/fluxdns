@@ -23,7 +23,7 @@ v1 采用单进程、单 Rust binary、异步事件驱动架构：
 - 解析日志和聚合统计使用 `sqlx` + SQLite，并通过相互独立的有界 writer 与 DNS 数据面隔离；聚合统计默认开启，因此 `database` 是启动必需依赖；
 - 规则和 hosts 编译成按资源独立版本化的不可变 snapshot，资源注册表通过 `arc-swap` 原子发布，资源变化不再用全局 generation 直接清空缓存；
 - DNS 核心只依赖 canonical message、request context 和协议无关的 port，不直接依赖 UDP/TCP/DoH、HTTP client、SQLite 或 Moka；
-- WebUI 配置和 Web 模块边界保留，但 v1 不实现管理 UI、管理 API 或认证服务。
+- WebUI 使用独立的 HTTP Management listener 和 `axum` router，认证、session、首次初始化与内嵌静态资源不进入 DoH 或 DNS 数据面。
 
 仓库固定 `backend/` 与 `frontend/` 两个相互独立的代码主目录；根目录只承载仓库级文档、配置示例和工具配置，不作为任一端的工程目录。`backend/` 当前使用一个 binary crate，`frontend/` 当前仅保留目录边界，尚未初始化具体技术栈。v1 后端不建立多 crate workspace；等出现可独立复用或需要独立发布的组件后再拆 crate。
 
@@ -35,6 +35,7 @@ v1 采用单进程、单 Rust binary、异步事件驱动架构：
 | socket | `socket2` + Tokio socket | bind 前设置 IPv6 v6-only 等平台相关选项，再交给 Tokio |
 | DNS wire | `hickory-proto` | 低层 `Message`、RR、EDNS、ECS 和 DNS wire 编解码，不承担网关路由 |
 | HTTP/DoH server | 仓库内 HTTP/1.x session/parser | DoH routing、GET/POST/Host 校验、连接上下文、超时和有界 keep-alive；HTTP/2 后置 |
+| HTTP/Management server | `axum`、`tower` | 独立 HTTP/1.1 listener、API/router 边界、请求限制和优雅关闭；不终止 TLS |
 | TLS | `rustls`、`tokio-rustls` | DoH 入站 TLS 和上游 HTTPS；证书解析复用 `rustls` PEM API，并显式选择和验证 crypto provider |
 | DoH client | `reqwest` | `default-features = false`，显式启用 `rustls`、`http2`、`socks`；连接池、代理和 Host/SNI 保持 |
 | PROXY protocol | 仓库内有界 parser | 解析 PROXY v1/v2，并负责 TCP 分片、超时、最大长度、trusted proxy 和 required 语义 |
@@ -114,6 +115,12 @@ backend/src/
 │   ├── coordinator.rs      # ActiveRuntime CAS、资源合并和 drain
 │   ├── bind.rs             # BindPlan 与 listener 生命周期
 │   └── supervisor.rs       # task 监督、故障分级和优雅停机
+├── management/
+│   ├── server.rs           # 独立 HTTP listener 与 Supervisor task
+│   ├── router.rs           # API 路由、请求边界和认证 handler
+│   ├── auth.rs             # Argon2id/bcrypt 用户认证
+│   ├── session.rs          # 有界内存 session 与 Cookie 策略
+│   └── assets.rs           # 编译期资源、缓存和 SPA fallback
 ├── storage/
 │   ├── sqlite.rs
 │   ├── service.rs
@@ -123,7 +130,7 @@ backend/src/
 └── observability.rs
 ```
 
-不预先创建空的 `webui` 模块。v1 的 HTTP router 只挂载 DoH；未来实现 WebUI 时，在同一 transport 边界下增加独立 management router，不把管理逻辑混入 DNS handler。
+`management` 使用独立的 Tokio TCP listener 和 HTTP router，不复用 DoH parser、route、TLS 或端口。其 accept loop 由同一个 `Supervisor` 持有，但单个管理请求只访问显式注入的认证、配置和只读查询依赖。
 
 各顶层模块的职责、内部流程、并发/失败语义和验收项见 [后端开发计划](development-plan.md) 中的模块索引。`app.rs` 只负责进程级装配，task 监督、listener 生命周期和 drain 统一由 `runtime/*` 持有。
 
@@ -139,7 +146,7 @@ backend/src/
 | `work` | `config::load` | 路径归一化、工作目录创建、配置快照复制、资源文件基准 |
 | `database` | `config::validate` | `storage::sqlite` migration、聚合统计必需连接、解析明细和独立持久化边界 |
 | `logs` | `config::validate` | `observability` filter/输出；详细解析日志仍经有界 writer |
-| `webui` | `config::model`、`config::validate` | v1 仅严格解析和 feature gate，不创建 socket、router、session 或 auth |
+| `webui` | `config::model`、`config::validate`、`management` | 独立 HTTP Management listener、浏览器 origin、认证/session 和首次初始化配置事务 |
 | `dns.cache`、`ttl_override`、`edns_client_subnet`、`resolve_log` | `config::validate`、策略编译器 | `cache`、`dns::handler`、`storage`；分别处理三态缓存、TTL/ECS 继承、聚合统计和详情日志容量 |
 | `listener` | `config::validate`、bind planner | `transport::udp/tcp/doh`；展开地址、DoH routes/endpoints、入口 hosts 和默认 strategy |
 | `upstreams` | 引用图/循环校验 | `upstream` registry、DoH client、bootstrap、group 和 fallback |
@@ -149,16 +156,16 @@ backend/src/
 | `rule_set` | 文件/远程加载、格式解析、引用校验 | `resource` loader/compiler；首次 snapshot 阻止 bind，刷新失败保留旧版本 |
 | `clients` | id/IP 冲突和最长前缀校验 | `policy::client`；生成请求级 effective strategy/cache/TTL/ECS |
 
-配置解析固定为两阶段：第一阶段用 `yaml_serde` + Serde DTO 完成类型、未知字段和字段路径错误；第二阶段把 DTO 编译为 `ValidatedConfig`，执行 exactly-one-of、条件字段、引用/循环、继承、bind、SecretRef 和 v1 feature gate 校验。`webui` 在两阶段都必须经过处理，即使 `enable: false` 也不能走旁路或被丢弃。
+配置解析固定为两阶段：第一阶段用 `yaml_serde` + Serde DTO 完成类型、未知字段和字段路径错误；第二阶段把 DTO 编译为 `ValidatedConfig`，执行 exactly-one-of、条件字段、引用/循环、继承、bind 和 SecretRef 校验。`webui` 在两阶段都必须经过处理，即使 `enable: false` 也不能走旁路或被丢弃。
 
 请求热路径固定为 `InboundAdapter → DnsCore → ResponseEncoder`；`DnsCore` 内部再执行 `client matcher → effective policy → rule/hosts/upstream → cache → canonical response`。配置继承、优先级和 exactly-one-of 约束以 [configuration-reference.md](configuration-reference.md) 为唯一契约来源，运行时不得重新解释或隐式补默认值。
 
 ### 3.2 v1 范围与未来扩展边界
 
 - v1 实现范围：完整解析和校验 `version: 1` 配置（包括 `webui`）、UDP/TCP/DoH 入站、DoH 上游、策略分流、hosts/rule_set snapshot、缓存、SQLite 日志与基础统计。
-- WebUI：`webui.enable: false` 时只保留已校验配置，不实例化管理服务；设为 `true` 时在 prepare 阶段返回明确的 `unsupported-feature`，不得静默忽略。
+- WebUI：`webui.enable: false` 时不实例化管理服务；设为 `true` 时必须成功绑定独立 HTTP endpoint，并按 `public_origin` 执行同源和 Cookie 策略。
 - DoT/DoQ：v1 不增加 `dot`/`doq` schema、listener、bind 或依赖；未知 transport 类型继续按严格 schema 拒绝。未来只新增 transport adapter，让其产出同一 `RequestContext`/`DnsRequest` 并复用 `dns::handler`；DoT 可复用 TCP framing/TLS，DoQ 的 QUIC stream/datagram 生命周期需另行定稿，不能假设等同于 TCP。
-- 配置热加载、上游健康检查、远程版本锁定和 WebUI 管理 API/认证同样不属于本轮实现；在形成独立契约前不新增兼容字段。
+- 上游健康检查、远程版本锁定和管理写操作扩展仍需先形成独立契约，不新增推测性兼容字段。
 
 ### 3.3 依赖方向与可替换 SPI
 
@@ -372,14 +379,14 @@ struct RequestMeta {
 
 1. 读取 YAML，按 `version` 解析 `RawConfigVn`，拒绝未知字段；
 2. 执行显式配置迁移，再归一化路径、SecretRef、URL、CIDR、duration 和默认值，得到 `ResolvedConfig`；
-3. 执行引用、循环、条件字段、缓存阈值、WebUI feature gate 和 bind 计划校验；
+3. 执行引用、循环、条件字段、缓存阈值、WebUI origin 和统一 bind 冲突校验；
 4. 打开必需的 SQLite，执行 schema migration，并验证可写性；聚合统计默认开启，因此该步骤失败必须阻止启动；
 5. 构建日志/统计 writer、远程资源首次下载所需的 outbound connector、上游 connector registry 和 per-resource resource registry；
 6. 编译全部首个 hosts/rule snapshots，计算每个资源的版本、content hash 和来源状态；若未来 schema 增加 expected checksum/version pin，再在此处执行对应校验；
 7. 初始化 `CacheFacade`、内存/持久化 cache store、transport capabilities/profiles 和策略索引；持久化 cache 初始化失败只标记 degraded 并回退内存，不改变数据库统计的必需性；
 8. 生成无 socket 的 `RuntimeSnapshot`/`PreparedRuntime` candidate 并完成 preflight；
 9. 创建全部 socket，任何 bind 失败都关闭已创建 socket 并退出；成功后组合成包含 `bound_endpoints` 的 `ActiveRuntime`，再原子发布首个 runtime；
-10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，由 supervisor 启动 UDP、TCP、DoH、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务；`DnsService` 在等待退出信号时同时观察 task completion，UDP/TCP/DoH transport task 使用独立 scoped cancellation，显式 service reload 可将其切换到新的 active runtime。
+10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，由 supervisor 启动 UDP、TCP、DoH、Management、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务；`DnsService` 在等待退出信号时同时观察 task completion，网络 task 使用独立 scoped cancellation，显式 service reload 可将 DNS transport 切换到新的 active runtime。
 
 停止时先停止接收新请求，再取消后台 refresh/accept，等待正在处理的请求到 `grace deadline`；随后排空历史/当前 Runtime 的 cache finalizer 与 persistence writer，并发布安全计数，再 flush 统计、详情日志和 SQLite，最后关闭 Telemetry 后退出。后台任务必须由 supervisor 持有，不能 detach 后丢失 panic 或错误。
 
@@ -577,22 +584,22 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 
 运行中数据库 busy、磁盘满或连接断开时，DNS 继续服务；stats writer 保留进程内补偿计数并重试，状态标记为 `degraded`。在数据库恢复前进程崩溃会产生明确的 persistence gap，必须通过 metrics/structured log 暴露，而不能假装统计已持久化。详情 writer 的失败只影响详情，不影响 stats writer；两者也不能共享一个会因详情队列满而阻塞的单一队列。
 
-## 13. WebUI 预留
+## 13. WebUI Management Server
 
-v1 保留 `webui` schema，目的是避免未来新增顶层配置时破坏结构，但运行时执行 feature gate：
+- `enable: false`：不创建 management socket、router、session 或认证状态；
+- `enable: true`：绑定 `address:port` 的 HTTP/1.1 endpoint；绑定失败阻止启动，且不会静默降级；
+- `public_origin` 是浏览器 origin 的唯一事实来源。Management Server 不终止 TLS，也不使用 `X-Forwarded-*` 推断或放宽 origin；
+- 空 `users` 进入一次性 setup；成功后通过 source-preserving 配置事务写入 Argon2id hash，并同步工作目录 snapshot；
+- HTTPS origin 使用 `Secure` 的 `__Host-fluxdns_session`，HTTP origin 使用不带 `Secure` 的开发/可信内网 Cookie；session 仅存于有界进程内存；
+- `webui.users` 可热更新并撤销外部变更前的 session，`enable/address/port/public_origin` 变化要求重启。
 
-- `enable: false`：继续启动，不创建 socket、router、session 或认证状态；
-- `enable: true`：在 prepare 阶段返回明确的 unsupported-feature 错误；
-- `address`、`port`、`users` 仍做类型、安全和未知字段校验；
-- WebUI 不参与 v1 bind planner，也不会与 DoH 共享 router 或端口。
-
-前端已在 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 冻结首版只读 management API 的目标 schema；这不表示后端接口已经实现。后续启用 WebUI 时，应由独立 management router/adapter 对齐该 schema，补齐认证/session、同源请求校验、TLS/bind、权限模型、历史统计保留和 Rust contract tests，再解除 feature gate。生产静态文件由 management server 托管通过 `webui-embed` 编译期内嵌到单个 Rust binary；`frontend/dist` 仍是独立前端构建物，未知 SPA 路由回退 `index.html`，`/api/*` 不得回退为 HTML，也不与 DoH router 共享语义。双平台发布脚本和 `deploy/` 产物目录遵循[项目环境使用规范](../standards/environment-usage.md)，显式配置启动参数由 `script/dev.ps1 start` 强制执行，进程状态可通过同一脚本的 `status`/`stop` 动作管理。
+前端接口以 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 为权威。当前后端已实现 setup、login、logout、session、统一 request ID/错误 envelope、请求限制、Origin/Fetch Metadata、内嵌静态资源和 `/api/*` 隔离；只读 Runtime/Health/Storage query handler 在下一整合阶段接入。生产静态文件通过 `webui-embed` 编译进单个 binary；`frontend/dist` 仍是独立前端构建物。双平台发布与显式配置启动入口遵循[项目环境使用规范](../standards/environment-usage.md)。
 
 ## 14. 验证基线
 
 实现阶段至少覆盖：
 
-- 配置 golden tests：未知字段、互斥字段、引用环、cache tri-state、日志阈值、WebUI feature gate、`RawConfigVn → migrate → ResolvedConfig` 迁移和默认值矩阵；
+- 配置 golden tests：未知字段、互斥字段、引用环、cache tri-state、日志阈值、WebUI origin/bind、`RawConfigVn → migrate → ResolvedConfig` 迁移和默认值矩阵；
 - runtime tests：`PreparedRuntime` preflight 不发布半成品、`RuntimeSnapshot`/`ActiveRuntime` 原子切换、请求只捕获一次 revision、失败候选保留旧 runtime、并发资源更新 CAS 不丢变更；
 - adapter contract tests：UDP/TCP/DoH（以及 future adapter fake）都能产出同一 `DnsRequest`，验证 deadline、cancellation、connection/stream metadata、response encoder 关联和 transport capability 不泄漏；
 - DNS wire tests：UDP/TCP/DoH 一致性、ID 重写、NODATA/NXDOMAIN/SERVFAIL/TC 缓存、ECS key；
@@ -619,4 +626,4 @@ v1 保留 `webui` schema，目的是避免未来新增顶层配置时破坏结�
 9. 实现 SQLite migration、默认开启的按日/客户端聚合统计、可选 resolve_log 和独立 writer；
 10. 完成资源定时刷新、故障注入、协议 conformance 和压力验证。
 
-不在 v1 顺手实现 DoT、DoQ、WebUI、上游健康检查或新的配置字段；这些能力应先形成独立 adapter/config 契约。配置迁移框架、候选 runtime、原子激活和资源版本机制现在就定义并纳入 v1 基础边界，即使首版暂不提供热加载命令。
+不顺手实现 DoT、DoQ、上游健康检查或新的配置字段；这些能力应先形成独立 adapter/config 契约。配置迁移框架、候选 runtime、原子激活和资源版本机制继续作为基础边界。
