@@ -1,6 +1,6 @@
 # Observability 模块设计
 
-> 状态：v1 方案已完成，已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、health lifecycle 与 stale age 归一化、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown，正常停机和 fatal task 退出均已验证最终输出及 writer 关闭；typed final tracing layer、Storage/Telemetry/Supervisor/Resource refresh health、Cache persistence 停机 gap、详情 writer backpressure/recovery、Listener 跨 Runtime lifecycle，以及主输出与 fallback 同时失败后的 `Failed → Healthy` 闭环均已接入
+> 状态：v1 实现与验收已完成。已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、health lifecycle 与 stale age 归一化、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown，正常停机和 fatal task 退出均已验证最终输出及 writer 关闭；typed final tracing layer、Storage/Telemetry/Supervisor/Resource refresh health、Cache persistence 停机 gap、详情 writer backpressure/recovery、Listener 跨 Runtime lifecycle，以及主输出与 fallback 同时失败后的 `Failed → Healthy` 闭环均已接入
 >
 > 更新日期：2026-09-03
 >
@@ -218,7 +218,7 @@ TelemetryWriter 接入后的 shutdown 顺序为：
 
 阶段 133 在既有 StorageRuntime 受监督 shutdown 路径增加 `Stopping` health 和 `storage_shutdown_summary`，所有字段均为计数或布尔状态，并通过原有停机定向测试。
 
-阶段 151 补齐 `TelemetryWriter` 的 stale age 生命周期归一化，并由 Observability 20 项定向测试验证重复故障保留和健康恢复清零。
+阶段 151 补齐 `TelemetryWriter` 的 stale age 生命周期归一化，并由 Observability 定向测试验证重复故障保留和健康恢复清零。
 
 阶段 152 在 Cache finalizer 关闭后、Telemetry 关闭前发布仅含安全计数的停机摘要；失败、丢弃或 deadline 未完成会设置 Cache degraded/persistence gap，定向测试验证 retry 与 gap 字段。
 
@@ -232,4 +232,6 @@ TelemetryWriter 接入后的 shutdown 顺序为：
 
 阶段 171 验证主输出与 fallback 同时失败返回安全 `Unavailable`，Telemetry registry 记录 `Failed`/retry，后续完整 flush 恢复 `Healthy`；4 项定向测试通过。
 
-当前实现进度：**98%**。
+阶段 179 复核完整实现清单，Observability 21 项与 Service telemetry 2 项定向测试全部通过，v1 模块验收闭合。
+
+当前实现进度：**100%**。
