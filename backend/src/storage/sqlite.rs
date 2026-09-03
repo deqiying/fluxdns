@@ -417,6 +417,21 @@ impl SqliteStorageBackend {
         }
     }
 
+    /// 在 deadline 内取得串行 operation lock，避免数据库排队越过调用方预算。
+    async fn lock_operation(
+        &self,
+        deadline: Deadline,
+        operation: &'static str,
+    ) -> Result<tokio::sync::MutexGuard<'_, ()>, PortError> {
+        let now = Instant::now();
+        if deadline.is_expired(now) {
+            return Err(PortError::new(PortErrorClass::Timeout, operation));
+        }
+        tokio::time::timeout(deadline.remaining(now), self.operation_lock.lock())
+            .await
+            .map_err(|_| PortError::new(PortErrorClass::Timeout, operation))
+    }
+
     async fn migrate_now(
         &self,
         target: SchemaVersion,
@@ -430,7 +445,9 @@ impl SqliteStorageBackend {
                     .with_safe_context("unsupported schema version"),
             );
         }
-        let _guard = self.operation_lock.lock().await;
+        let _guard = self
+            .lock_operation(deadline, "sqlite_storage.migrate")
+            .await?;
         let row = sqlx::query("SELECT schema_version FROM storage_meta WHERE singleton = 1")
             .fetch_one(&self.pool)
             .await
@@ -461,7 +478,9 @@ impl SqliteStorageBackend {
                     .with_safe_context("empty transaction"),
             );
         }
-        let _guard = self.operation_lock.lock().await;
+        let _guard = self
+            .lock_operation(deadline, "sqlite_storage.execute")
+            .await?;
         let mut sql_transaction = self
             .pool
             .begin()
@@ -514,7 +533,9 @@ impl SqliteStorageBackend {
         if records.is_empty() {
             return Ok(SqliteResolveDetailFlushSummary::default());
         }
-        let _guard = self.operation_lock.lock().await;
+        let _guard = self
+            .lock_operation(deadline, "sqlite_storage.resolve_detail")
+            .await?;
         let mut transaction = self
             .pool
             .begin()
@@ -542,6 +563,9 @@ impl SqliteStorageBackend {
     async fn checkpoint_now(&self, deadline: Deadline) -> Result<(), PortError> {
         check_deadline(deadline, "sqlite_storage.checkpoint")?;
         self.available("sqlite_storage.checkpoint")?;
+        let _guard = self
+            .lock_operation(deadline, "sqlite_storage.checkpoint")
+            .await?;
         sqlx::query("PRAGMA wal_checkpoint(PASSIVE)")
             .execute(&self.pool)
             .await
@@ -686,7 +710,9 @@ impl StorageBackend for SqliteStorageBackend {
     ) -> PortFuture<'_, Result<StorageFlushSummary, PortError>> {
         Box::pin(async move {
             check_deadline(deadline, "sqlite_storage.shutdown")?;
-            let _guard = self.operation_lock.lock().await;
+            let _guard = self
+                .lock_operation(deadline, "sqlite_storage.shutdown")
+                .await?;
             if let Ok(mut state) = self.state.lock() {
                 if state.health == StorageHealth::Stopping {
                     return Ok(StorageFlushSummary::default());
@@ -1377,6 +1403,55 @@ mod tests {
             crate::ports::storage::StorageHealth::Healthy
         );
 
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    /// 验证业务 SQLite 操作和 shutdown 在等待串行锁时遵守 deadline。
+    #[tokio::test]
+    async fn operation_lock_wait_honors_deadline() {
+        let path = path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        let guard = backend.operation_lock.lock().await;
+
+        let batch = StatsBatch {
+            batch_id: 81,
+            max_event_sequence: 81,
+            counter_epoch: 0,
+            events: vec![StatsEvent::new(81, 20_260_902, vec![]).unwrap()],
+        };
+        let execute_deadline = Deadline::new(Instant::now() + Duration::from_millis(20));
+        let execute_error = backend
+            .execute(transaction(batch), execute_deadline)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            execute_error.class(),
+            crate::ports::PortErrorClass::Timeout
+        ));
+        assert_eq!(execute_error.operation(), "sqlite_storage.execute");
+
+        let shutdown_deadline = Deadline::new(Instant::now() + Duration::from_millis(20));
+        let shutdown_error = backend.shutdown(shutdown_deadline).await.unwrap_err();
+        assert!(matches!(
+            shutdown_error.class(),
+            crate::ports::PortErrorClass::Timeout
+        ));
+        assert_eq!(shutdown_error.operation(), "sqlite_storage.shutdown");
+
+        drop(guard);
+        let recovered_batch = StatsBatch {
+            batch_id: 82,
+            max_event_sequence: 82,
+            counter_epoch: 0,
+            events: vec![StatsEvent::new(82, 20_260_902, vec![]).unwrap()],
+        };
+        backend
+            .execute(transaction(recovered_batch), deadline())
+            .await
+            .unwrap();
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
