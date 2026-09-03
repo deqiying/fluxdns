@@ -6,7 +6,7 @@
 
 `frontend/` 是 FluxDNS 前端代码的独立主目录。
 
-当前已实现 React + TypeScript + Vite 的只读 WebUI 工程、Cookie session、应用壳、8 个页面路由、OpenAPI v1 类型和 MSW contract fixtures。后端 management API 与 `webui` feature gate 尚未实现，因此默认开发模式需要后端 `127.0.0.1:8080`，也可以显式启用本地 mock transport 独立查看页面。
+当前已实现 React + TypeScript + Vite 的只读 WebUI 工程、首次初始化、Cookie session、应用壳、页面路由、OpenAPI v1 类型和 MSW contract fixtures。后端 Management API 与 `webui-embed` 已接入；默认开发模式通过 Vite 将 `/api` 代理到 `127.0.0.1:8080`，也可以显式启用本地 mock transport 独立查看页面。
 
 架构边界和实施状态见[前端架构设计](../docs/frontend/architecture.md)与[前端开发方案](../docs/frontend/development-plan.md)，接口字段以 [`openapi/management-api-v1.yaml`](openapi/management-api-v1.yaml) 为权威。前端实现保持在本目录内，不把仓库根目录作为前端工程目录。
 
@@ -24,7 +24,7 @@ pnpm install --frozen-lockfile
 
 ## 开发
 
-连接未来的本地 management API：
+连接本地 Management API：
 
 ```powershell
 pnpm run dev
@@ -65,4 +65,4 @@ pnpm run build
 pwsh -File script/package-embedded.ps1
 ```
 
-该脚本随后将最终二进制复制到 `deploy/`；不会移动或重定向 `frontend/dist/`。management server 和 `webui-embed` feature 尚未完成前，脚本会明确停止，不生成未内嵌资源的发布物。发布二进制的启动、状态查看和停止入口及必填配置参数见[项目环境使用规范](../docs/standards/environment-usage.md)和[整合方案](../docs/plans/webui-v2-management-integration.md#103-开发服务管理脚本)。
+该脚本随后将最终二进制复制到 `deploy/`；不会移动或重定向 `frontend/dist/`。脚本会在缺少 `webui-embed`、前端产物或 Rust target/linker 时 fail fast，不生成未内嵌资源的发布物。发布二进制的启动、状态查看和停止入口及必填配置参数见[项目环境使用规范](../docs/standards/environment-usage.md)和[整合方案](../docs/plans/webui-v2-management-integration.md#103-开发服务管理脚本)。

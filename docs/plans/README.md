@@ -10,7 +10,7 @@
 
 | 方案 | 文档状态 | 实现状态 | 范围 |
 | --- | --- | --- | --- |
-| [FluxDNS v2 前后端整合与 WebUI Management Server 实施方案](webui-v2-management-integration.md) | 草案 | 部分实现 | management server、`/api/v1/*`、WebUI 静态资源内嵌、首次用户初始化与配置持久化 |
+| [FluxDNS v2 前后端整合与 WebUI Management Server 实施方案](webui-v2-management-integration.md) | 有效 | 已实施，环境验收待执行 | management server、`/api/v1/*`、WebUI 静态资源内嵌、首次用户初始化与配置持久化 |
 
 ## 维护要求
 

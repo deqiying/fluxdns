@@ -2,17 +2,17 @@
 
 > 文档状态：有效
 >
-> 实现状态：部分实现
+> 实现状态：已实现（真实浏览器与双平台发布验收待环境执行）
 >
 > 适用范围：FluxDNS 只读 WebUI 第一阶段的总体架构、技术栈、Management API 边界与实施顺序
 >
-> 最后核对：2026-09-03
+> 最后核对：2026-09-04
 >
 > 关联文档：[前端工程入口](../../frontend/README.md) · [后端架构设计](../backend/architecture.md)
 
 ## 1. 结论
 
-FluxDNS 前端已实现 **React + TypeScript + Vite 的独立 SPA**。当前 F1–F4 的工程、鉴权、应用壳和只读页面已能基于 contract fixture 构建与测试；后端 management API、`webui` feature gate 解除和真实同源联调尚未实现。生产发布目标是由未来的 FluxDNS management server 托管编译期内嵌到单个 Rust binary 的资源，浏览器通过同源的 `/api/v1` 访问后端 JSON API；`frontend/dist` 仍保留为独立前端构建物。
+FluxDNS 前端已实现 **React + TypeScript + Vite 的独立 SPA**，并已接入后端 Management Server 的 setup、登录、session、登出和只读查询 API。首次访问按 `setup -> session` 顺序判定，空用户配置进入 `/initialize`，完成初始化后使用服务端签发的 Cookie session；生产发布由 Management Server 将 `frontend/dist` 编译期内嵌到单个 Rust binary，浏览器通过同源 `/api/v1` 访问后端 JSON API。当前代码级构建、测试和 `webui-embed` 静态资源验收已通过，真实浏览器同源 Network/Storage smoke 与双平台发布仍需在对应环境执行。
 
 当前阶段的 WebUI 只负责：
 
@@ -37,9 +37,9 @@ FluxDNS 前端已实现 **React + TypeScript + Vite 的独立 SPA**。当前 F1�
 
 ### 2.2 后端边界
 
-FluxDNS 后端是单 Rust binary。当前 DoH 入站使用独立的 HTTP/1.x parser，WebUI 配置仍处于 feature gate 阶段；`webui.enable` 为 `true` 时当前版本应拒绝启动，不会实例化管理服务。[后端架构：WebUI 预留](../backend/architecture.md#13-webui-预留) [配置参考：`webui`](../backend/configuration-reference.md#7-webui)
+FluxDNS 后端是单 Rust binary。DoH 入站继续使用独立的 HTTP/1.x parser；Management Server 使用独立的 `axum` HTTP/1.1 listener、router、认证和静态资源 adapter。`webui.enable: true` 时创建管理 endpoint，`false` 时不创建 management listener、session 或认证状态。[后端架构：WebUI Management Server](../backend/architecture.md#13-webui-management-server) [配置参考：`webui`](../backend/configuration-reference.md#7-webui)
 
-后续启用 WebUI 时，管理 API 必须与 DoH router 和 DNS handler 分离。当前前端架构遵守这一边界：前端只访问 management API，不把现有 DoH 路由当作管理 API，也不承担 DNS 数据面的协议转换。
+管理 API 与 DoH router 和 DNS handler 保持分离。当前前端只访问 management API，不把现有 DoH 路由当作管理 API，也不承担 DNS 数据面的协议转换。
 
 ### 2.3 数据来源
 
@@ -162,6 +162,7 @@ frontend/
 
 ```text
 /login
+/initialize
 /
 ├── /dashboard
 ├── /runtime
@@ -172,8 +173,9 @@ frontend/
 └── /system
 ```
 
-- `/login` 不需要已认证 session；
-- 其余路由使用 `ProtectedRoute`，启动时先查询 `/api/v1/auth/session`；
+- `/login` 和 `/initialize` 不需要已认证 session；
+- 应用启动先查询 `/api/v1/auth/setup`，只有 `ready` 状态才继续查询 `/api/v1/auth/session`；
+- `required` 状态下受保护路由统一跳转 `/initialize`，初始化成功后自动进入 Dashboard；
 - 未认证时只跳转登录页，不在前端猜测或恢复失效 token；
 - 认证失败、session 过期或 API 返回 `401` 时清理本地会话并回到 `/login`；
 - `403`、`429`、`5xx` 和网络超时分别展示权限、限流、服务端和连接失败状态，不把失败伪装成空数据。
@@ -194,9 +196,11 @@ frontend/
 
 ### 7.1 接口分组
 
-首版接口、字段、参数枚举、分页上限和错误响应已在 [`management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 冻结。后端当前尚未实现这些接口；实现时不得由页面猜测兼容分支。
+首版接口、字段、参数枚举、分页上限和错误响应已在 [`management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 冻结，后端已按该契约接入；实现和页面均不得猜测兼容分支。
 
 ```text
+GET  /api/v1/auth/setup
+POST /api/v1/auth/setup
 POST /api/v1/auth/login
 POST /api/v1/auth/logout
 GET  /api/v1/auth/session
@@ -210,7 +214,7 @@ GET  /api/v1/resources
 GET  /api/v1/system
 ```
 
-除 `auth/login` 和 `auth/logout` 外，首版 management API 只提供 `GET` 查询接口。当前不创建配置写入、runtime command 或 DNS query endpoint。
+除 `auth/setup` 的一次性初始化写入、`auth/login` 和 `auth/logout` 外，首版 management API 只提供 `GET` 查询接口。当前不创建配置编辑、runtime command 或 DNS query endpoint。
 
 ### 7.2 数据契约
 
@@ -251,9 +255,9 @@ GET  /api/v1/system
 ### 8.1 Session
 
 - 使用服务端 session 和 `HttpOnly` Cookie；
-- Cookie 设置 `HttpOnly`、`Secure`、`SameSite=Strict` 并限制 Path/Domain；
+- Cookie 设置 `HttpOnly`、`SameSite=Strict` 并限制 Path/Domain；`public_origin` 为 HTTPS 时增加 `Secure`，直接 HTTP 仅用于 loopback/受信管理网络；
 - 前端不把长期 token、密码或 `password_hash` 写入 `localStorage`、IndexedDB、URL 或日志；
-- 登录表单只通过 HTTPS/同源 management API 提交，登录失败使用统一错误分类；
+- 登录和初始化表单只通过同源 management API 提交，登录失败使用统一错误分类；传输安全由 `public_origin` 与部署网络边界负责；
 - login 应实施服务端限速和失败计数，前端只展示安全的失败信息。
 
 ### 8.2 请求和展示
@@ -266,7 +270,7 @@ GET  /api/v1/system
 
 ### 8.3 后端集成约束
 
-后端应增加独立的 `management` adapter/router，并由现有 supervisor 管理其 listener/task 生命周期。管理服务的绑定地址和端口应进入全局 TCP bind 冲突校验，但不得与 DoH router 共享路由语义。管理 handler 通过只读的 Storage、Telemetry、Health 和 RuntimeCoordinator 入口读取数据，不直接操作 `DnsCore`、socket、SQLite connection 或具体 cache implementation。
+后端已提供独立的 `management` adapter/router，并由现有 supervisor 管理其 listener/task 生命周期。管理服务的绑定地址和端口进入全局 TCP bind 冲突校验，但不与 DoH router 共享路由语义。管理 handler 通过只读的 Storage、Telemetry、Health 和 RuntimeCoordinator 入口读取数据，不直接操作 `DnsCore`、socket、SQLite connection 或具体 cache implementation。
 
 现有 `webui.users[].password_hash` 只能在服务端用于密码验证；它不应作为 API 字段返回给前端。[配置参考：用户 hash](../backend/configuration-reference.md#7-webui)
 
@@ -298,7 +302,7 @@ vite build
 
 ## 10. 实施顺序和验收
 
-当前阶段 A–C 已基于 OpenAPI/MSW contract fixture 实现；阶段 D 的 typecheck、组件/contract tests、生产构建和 fixture 浏览器 smoke 已通过。真实同源 API、静态托管与真实响应的浏览器 Network/Storage 验收等待后端 management server 实现。
+当前阶段 A–D 已实现；`typecheck`、Vitest、生产构建以及 `webui-embed` 下的静态资源 fallback/HEAD/ETag 测试已通过。真实浏览器同源 API 的 Network/Storage smoke 和双平台发布需要在具备对应 target/linker 的环境中补做，不能以 mock 或 handler 测试替代。
 
 ### 阶段 A：工程初始化
 

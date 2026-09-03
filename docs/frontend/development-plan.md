@@ -2,44 +2,44 @@
 
 > 文档状态：有效
 >
-> 实现状态：部分实现
+> 实现状态：已实现（真实浏览器与双平台发布验收待环境执行）
 >
 > 适用范围：FluxDNS 只读 WebUI 首版从契约冻结、工程初始化到可交付验收的具体开发步骤；不负责配置写入、运行时控制或 DNS 数据面功能
 >
-> 最后核对：2026-09-03
+> 最后核对：2026-09-04
 >
 > 关联文档：[前端架构设计](architecture.md) · [前端工程入口](../../frontend/README.md) · [后端架构设计](../backend/architecture.md) · [后端开发计划](../backend/development-plan.md)
 
 ## 1. 结论
 
-当前前端已完成 F0 的前端契约与工程决策，以及 F1–F4 的工程骨架、鉴权、应用壳和只读页面；类型检查、26 项组件/contract tests、生产构建和 MSW fixture 浏览器 smoke 已通过。后端 `webui` 仍是严格校验的预留配置，`webui.enable: true` 会在配置校验阶段以 `UnsupportedFeature` 拒绝启动，仓库中仍没有 management API 或管理路由，因此 F5 的真实同源联调、静态托管和真实响应的浏览器 Network/Storage 验收尚未执行。
+当前前端已完成 F0–F5 的代码实现：工程骨架、setup 初始化、鉴权、应用壳和只读页面已接入后端 Management API；类型检查、28 项组件/contract tests、生产构建和 `webui-embed` 静态资源测试已通过。真实浏览器同源 Network/Storage smoke 与双平台发布仍需在对应环境执行，因此文档不把 mock 或 handler 测试描述为真实端到端证据。
 
 首版交付目标是一个通过同源 `/api/v1` 访问管理面的 React + TypeScript + Vite SPA，使用服务端 session Cookie，提供登录、Dashboard、Runtime、Health、Statistics、Queries、Resources 和 System 的只读视图。首版不把任何前端页面或请求接到 UDP/TCP/DoH 数据面，不读取 SQLite、配置文件或服务日志，也不新增配置编辑、reload/restart、缓存清理、资源刷新和 WebSocket/SSE。
 
-本方案确定前端实现顺序、模块边界、接口依赖和验收门槛；management API 的具体 JSON 字段、认证策略和静态文件托管目标已收敛到 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 和[前端架构设计](architecture.md)。当前实现不修改后端业务代码或配置契约，后端必须以独立阶段实现并验证该目标契约。
+本方案确定前端实现顺序、模块边界、接口依赖和验收门槛；Management API 的具体 JSON 字段、认证策略和静态文件托管目标已收敛到 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 和[前端架构设计](architecture.md)。前端通过稳定的同源 API client 消费后端契约，不复制后端配置、存储或 DNS 数据面逻辑。
 
 ### 1.1 当前实施进度
 
 | 阶段 | 状态 | 当前证据与边界 |
 | --- | --- | --- |
-| F0 | 部分完成 | Node.js 26.8.1、pnpm 11.25.0、OpenAPI v1、同源 session 和静态托管目标已冻结；Rust management contract test 等待后端实现。 |
+| F0 | 已完成 | Node.js 26.8.1、pnpm 11.25.0、OpenAPI v1、同源 session、setup 和静态托管契约已冻结。 |
 | F1 | 已完成 | React/TypeScript/Vite、strict typecheck、路径别名、`/api` proxy、QueryClient、错误边界和路由级代码拆分已实现。 |
 | F2 | 已完成 | 统一 fetch、超时/取消、错误 envelope、401、session/login/logout 和 `ProtectedRoute` 已实现并有测试。 |
 | F3 | 已完成 | 应用壳、Dashboard、Runtime、Health、System 与受控轮询已实现。 |
 | F4 | 已完成 | Statistics、Queries、Resources 的服务端参数、分页、筛选和安全摘要已实现。 |
-| F5 | 部分完成 | typecheck、fixtures、tests、production build 和 fixture 浏览器 smoke 已完成；真实 management API、静态托管和真实响应的浏览器安全验收等待后端。 |
+| F5 | 已完成代码 | setup -> session、真实 API client、静态托管契约和发布入口已接入；真实浏览器安全 smoke 与双平台 binary 仍待相应环境。 |
 
 ## 2. 当前基线和事实依据
 
 | 对象 | 已核对事实 | 对本方案的影响 |
 | --- | --- | --- |
 | `frontend/` 工程 | [前端工程入口](../../frontend/README.md) 维护已实现的 package manifest、构建/测试命令、OpenAPI 类型生成和 mock 预览入口。 | F1–F4 已完成；后续改动必须复用现有工程和模块边界。 |
-| WebUI 配置 | `WebUiDto`/`ResolvedWebUi` 已存在并保留 `enable`、监听地址、端口和用户 hash；`backend/src/config/validate.rs` 在 `enable=true` 时返回 unsupported。 | 前端开发不能以“启动 WebUI 已可用”为前提；启用管理服务是后端独立前置阶段。 |
+| WebUI 配置 | `WebUiDto`/`ResolvedWebUi` 保留 `enable`、监听地址、端口、origin 和用户 hash；`enable=true` 已启动独立 Management Server。 | 前端通过 setup -> session 顺序消费服务端状态；不得绕过 management API 读取配置或数据库。 |
 | Runtime 摘要 | `RuntimeSnapshot::summary()` 已提供 revision、normalized hash、listener/bind/resource 数量和 `has_policy_core`；`BindEntry` 还包含 transport、地址、端口、owner 和 `v6_only`。 | Runtime 页面应消费后端安全 DTO，不直接序列化 `ResolvedConfig` 或 socket 对象。 |
 | Resource 摘要 | `ResourceRegistrySnapshot::summary()` 只提供资源版本、来源类型、fallback 和 stale 状态；资源正文和编译结果不属于管理面。 | Resources 页面只显示元数据、版本和状态，不下载、解析或展示规则正文。 |
 | Storage 统计/详情 | 统计按 UTC 日和有限维度聚合；`resolve_log` 含解析详情和敏感字段，Storage 规定详情与统计分别受有界 writer/上限保护。 | Statistics 使用服务端聚合和分页查询；Queries 必须先定义脱敏 projection，不能把 SQLite 行原样返回浏览器。 |
 | Telemetry/Health | Telemetry 组件和 health 状态有固定枚举（`healthy`、`degraded`、`failed`、`stopping`），并记录时间、重试、stale/gap 等状态信息。 | Health 页面展示稳定状态和安全原因分类；不展示原始错误堆栈、SecretRef、原始 IP、完整 query 或 header。 |
-| Management API | 当前源码未发现 management router、session 服务或 `/api/v1` handler；前端 OpenAPI schema 已冻结目标接口。 | 前端按已冻结契约实现，后端状态仍标记为“未实现”，不得据此声称已能联调。 |
+| Management API | 后端已实现 setup、login/logout/session、七个只读查询、请求边界、错误 envelope 与静态资源 fallback；前端 API client 复用 OpenAPI 生成类型。 | setup、session 和只读页面可走同源 `/api/v1`；真实浏览器 smoke 仍需单独记录。 |
 
 核对依据包括 [`WebUiDto`](../../backend/src/config/model.rs)、[`validate_config`](../../backend/src/config/validate.rs)、[`RuntimeSnapshot`](../../backend/src/runtime/snapshot.rs)、[`ResourceSnapshot`](../../backend/src/resource/snapshot.rs)、[`Storage` 契约](../../backend/src/ports/storage.rs)、[`Telemetry` 契约](../../backend/src/ports/telemetry.rs) 和 SQLite migrations。具体跨模块边界仍以前端架构和后端架构为权威。
 
@@ -50,9 +50,10 @@
 - 初始化独立的 `frontend/` SPA 工程，依赖、构建物和测试产物不越过前端目录边界。
 - 建立统一 HTTP client、错误 envelope、查询缓存、session 状态和受保护路由。
 - 完成首版只读页面：登录、Dashboard、Runtime、Health、Statistics、Queries、Resources、System。
+- 完成首次初始化页面：空用户配置进入 `/initialize`，成功后自动创建 session 并进入 Dashboard。
 - 所有查询支持加载、空数据、服务端错误、超时、取消和 session 过期状态；分页和过滤由后端约束。
 - 生产构建输出 `frontend/dist`，静态路由回退到 `index.html`，`/api/*` 始终分流到 management API。
-- 以 API fixture/contract test 支撑前端独立开发；management API 就绪后再执行真实同源集成验证。
+- 以 API fixture/contract test 支撑前端独立开发；Management API 已就绪，真实同源浏览器集成验证作为环境验收单独记录。
 
 ### 3.2 首版明确不做
 
@@ -233,14 +234,15 @@ frontend/
 | 项目 | 内容 |
 | --- | --- |
 | 主要范围 | 与后端 management API 的最小垂直切片联调、静态托管、生产错误分流和浏览器 smoke。 |
-| 集成路径 | `webui` 后端阶段解除 feature gate 后，使用本地 `_fluxdns/` 配置启动 management API；前端通过同源 `/api/v1` 验证 login/session、一个健康接口、一个分页接口和静态路由回退。 |
-| 验证 | `typecheck`、组件/contract tests、`vite build`、静态服务器未知路由回退、`/api` 不被回退为 HTML、401 session 过期、Cookie 不落地、浏览器网络面无 DNS wire/SecretRef。 |
+| 集成路径 | 使用本地 `_fluxdns/` 配置启动 Management Server；前端通过同源 `/api/v1` 验证 setup/login/session、一个健康接口、一个分页接口和静态路由回退。 |
+| 验证 | `typecheck`、组件/contract tests、`vite build`、后端静态资源 fallback/HEAD/ETag、`/api` 不被回退为 HTML、setup/401 session 过期、Cookie 不落地、浏览器网络面无 DNS wire/SecretRef。 |
 | 退出条件 | 关键路径有可复现记录，所有未实现或未验证项单独列出；前端构建物、依赖、测试缓存和本地配置不进入 Git。 |
 
 ## 8. 页面和状态要求
 
 | 页面 | 主数据 | 必须处理的状态 | 首版交互边界 |
 | --- | --- | --- | --- |
+| `/initialize` | setup status + initialize | 首次加载、密码校验、并发 409、网络失败 | 仅创建首个用户；不保存密码或 token |
 | `/login` | session login | 首次加载、认证失败、限流、网络失败 | 仅登录；不注册、不改密码、不保存 token |
 | `/dashboard` | overview | 局部卡片失败、采样时间、轮询暂停 | 只读摘要和跳转入口 |
 | `/runtime` | runtime/bind | 无 listener、draining、revision 变化 | 只读 listener/bind 信息 |
@@ -287,7 +289,7 @@ pnpm run test
 pnpm run build
 ```
 
-2026-09-03 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、26 项 tests 通过；Vite 生产构建成功并经路由级代码拆分消除超大 chunk warning，生产 `dist/` 不包含 MSW worker；MSW fixture 浏览器 smoke 已覆盖登录、全部只读页面路由、登出、390 px 窄屏和 Console 检查，未发现横向溢出或 Console error/warning。真实 management API 联调、静态托管和真实响应的 Network/Storage 验收仍未执行，不因当前后端尚无 management API 而伪造真实联调结果。
+2026-09-04 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、28 项 tests 通过；Vite 生产构建成功，生产 `dist/` 不包含 MSW worker；后端 `webui-embed` 测试覆盖 SPA fallback、HEAD、ETag 和静态响应头。MSW fixture smoke 覆盖 setup、初始化、登录、只读页面和登出，并断言未写入浏览器持久化存储。真实浏览器同源 Network/Storage 验收和双平台发布尚未执行，不将这些边界写成已通过。
 
 ### 10.2 Management API 集成验收
 
@@ -306,18 +308,18 @@ pnpm run build
 - 新文档只使用仓库内相对链接，不写个人绝对路径、凭据或本地产物；
 - 执行 `git diff --check`、链接目标检查和 `git status --short`；
 - 若后续实现改变 API、配置或静态托管契约，同步更新前端架构、后端架构/配置文档和相关测试说明；
-- 未实施部分必须保持明确边界，不能因前端工程完成而将后端 management API 或真实同源联调标为已实现。
+- 未实施部分必须保持明确边界：后端 Management API 已实现，但真实浏览器同源联调与双平台发布验收仍不能以 mock、handler 或单平台构建替代。
 
 ## 11. 风险、决策门和后续拆分
 
 | 风险/未决项 | 影响 | 处理方式 |
 | --- | --- | --- |
-| 后端 management API 尚不存在 | 无法执行真实页面联调和端到端验收 | 先完成 F0 contract，再由后端独立阶段解除 `webui` gate；前端使用 fixture 并行开发。 |
+| 真实浏览器与双平台环境尚未执行 | 无法把 Cookie/CSP/静态托管和发布 binary 标记为最终验收通过 | 在具备本地 Management Server、浏览器和对应 Rust target/linker 的环境补做；保留当前 mock、handler 和 embed 测试作为代码级证据。 |
 | 项目级 Node/pnpm 基线 | 已解决；工具版本与缓存路径可复现 | `mise.toml` 固定 Node.js 26.8.1 / pnpm 11.25.0，前端 manifest、lockfile 与环境规范同步维护。 |
 | `resolve_log` 含敏感 qname | 错误 projection 可能泄露请求数据 | 默认只做安全摘要；后端 contract test 固定禁止字段，任何扩展需单独授权。 |
 | health/metrics 只有内部 registry | 页面可能直接依赖实现细节 | 后端增加只读 adapter/DTO；前端只依赖版本化 JSON。 |
 | 轮询增加管理面负载 | 多页面打开时触发限流 | 由 API 契约给出采样/限流边界；页面隐藏暂停，`429` 退避，避免各模块自定义无限重试。 |
-| 后端静态托管未实现 | 刷新深层路由可能返回 404 或将 API 错误回退成 HTML | 后端阶段按已冻结的 management server 职责实现 SPA fallback 和 `/api` 分流测试。 |
+| 发布环境 target/linker 不完整 | 无法生成双平台单 binary | `package-embedded.ps1` 在构建前检查 feature/target，缺失时 fail fast；不自动安装工具链。 |
 
 后续若增加配置写入或 runtime command，应另建独立方案，至少补充权限模型、CSRF、审计、revision conflict、幂等、确认交互和失败回滚；不得在本方案的只读模块中预留未定义的 command client。
 

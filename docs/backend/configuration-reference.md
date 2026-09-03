@@ -4,9 +4,9 @@
 >
 > 实现状态：部分实现
 >
-> 适用范围：本文与当前模板同步，描述配置契约和校验意图。运行时尚未实现时，本文没有定义的行为不应视为已支持。
+> 适用范围：本文与当前模板同步，描述配置契约、校验和已实现运行时边界；未定义行为不应视为已支持。
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
@@ -572,7 +572,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 2. 拒绝未知字段；每种 `type` 只允许自己的字段集合，条件字段满足 exactly-one-of/required-if 约束。
 3. 所有资源集合中的 `name` 唯一，所有引用存在、类型正确且无循环引用。
 4. `work.path` 非空；相对值可基于启动配置文件目录解析为绝对的 `resolved_work_path`，缺少来源目录时拒绝；目录不存在时创建，启动配置不在该目录时复制为 `<resolved_work_path>/config.yaml`。
-5. `webui.enable` 在 v1 必须为 `false`；普通 listener 和 DoH endpoint 地址展开后不存在 TCP/UDP bind 冲突，并明确 IPv6 v6-only 行为。
+5. `webui.enable` 为 `true` 时创建独立 Management Server，`false` 时不创建管理 listener；普通 listener、DoH endpoint 和 Management endpoint 地址展开后不存在 TCP/UDP bind 冲突，并明确 IPv6 v6-only 行为。
 6. `mode`、`format`、`type`、端口、CIDR、URL、duration、权重和内嵌内容格式合法；`parallel` 和 `failover` 成员权重固定为 `1`。
 7. `ttl_override` 与 `cache` 平级；策略/客户端 cache 对象存在时 `enabled` 必填，显式 `false` 不得回退到全局池。
 8. ECS 块未配置时继承，显式 `mode: disabled` 才停止继续传递。

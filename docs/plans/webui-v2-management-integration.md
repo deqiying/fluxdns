@@ -1,8 +1,8 @@
 # FluxDNS v2 前后端整合与 WebUI Management Server 实施方案
 
-> 文档状态：草案
+> 文档状态：有效
 >
-> 实现状态：部分实现
+> 实现状态：已实施（真实浏览器与双平台发布验收待环境执行）
 >
 > 适用范围：FluxDNS v2 management server、Management API、WebUI 静态资源打包、认证会话、首次用户初始化与配置持久化
 >
@@ -42,18 +42,20 @@ FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 managemen
 | 运行时数据 | Runtime snapshot、健康注册表、资源快照、统计与查询明细写入能力已存在 | [`runtime`](../../backend/src/runtime)、[`observability.rs`](../../backend/src/observability.rs)、[`storage`](../../backend/src/storage) |
 | 生命周期 | DNS listener、transport、resource、storage、telemetry 已由 `DnsService` 与 `Supervisor` 管理 | [`service.rs`](../../backend/src/service.rs) |
 
-### 2.2 尚未实现的边界
+### 2.2 实施前缺口（已关闭项与剩余验收）
+
+以下表格保留方案编写时的缺口基线；代码实施已关闭其中的后端、前端和脚本项，剩余环境验收以本文第 13 节及对应权威文档为准。
 
 | 缺口 | 当前表现 | 对 v2 的影响 |
 | --- | --- | --- |
-| WebUI feature gate | `webui.enable: true` 被配置校验拒绝 | management server 无法启动 |
-| management listener/router | bind plan 与 transport task 只有 UDP、TCP、DoH | 需要独立绑定、任务和关闭流程 |
+| WebUI feature gate | 已移除；`webui.enable: true` 可启动独立 Management Server | 保留为历史基线，不再是当前限制 |
+| management listener/router | 已有独立 HTTP listener、router、Supervisor task 和 graceful shutdown | 需在真实运行环境继续做故障矩阵验收 |
 | 通用 HTTP 能力 | `transport::doh` 是 DoH 专用的有界 HTTP/1.x codec | 不应把 JSON API 与静态文件混入 DoH adapter |
-| API handler | `/api/v1/*` 只有前端契约，没有后端实现 | 需要应用服务、DTO 映射和统一错误模型 |
-| 认证实现 | 尚无密码 hash 生成/验证库、SessionStore、Cookie 与登录限流 | 不能只依赖现有的 hash 字符串格式检查 |
-| 首次初始化 | 前端只有 `/login` 与 `ProtectedRoute`，没有初始化状态和页面 | `users: []` 时无法安全创建首个账号 |
-| 配置写入 | `ConfigLoader` 只读；配置 DTO 只实现 `Deserialize` | 需要专用、原子、可恢复且不泄密的 writer |
-| Storage 读取 port | `StorageBackend` 主要提供 migration、写入、健康、flush 与 shutdown | 统计和查询 handler 不能直接在路由层执行 SQL |
+| API handler | setup、auth 和七个只读 `/api/v1/*` handler 已实现 | 需补真实浏览器同源 smoke 记录 |
+| 认证实现 | Argon2id/bcrypt、SessionStore、Cookie、Origin/Fetch Metadata 和限流已实现 | 需在真实浏览器验证 Cookie/CSP 观察面 |
+| 首次初始化 | `/initialize`、setup query、一次性初始化和 409 竞争处理已实现 | 需在真实浏览器复核初始化跳转 |
+| 配置写入 | source-preserving writer、双文件 journal、指纹 CAS 和启动恢复已实现 | 需在对应平台补完整 crash/替换矩阵 |
+| Storage 读取 port | 独立 `ManagementStorageRead` port 与 SQLite read-only adapter 已实现 | 继续保持 handler 不直接依赖 SQLx |
 | 发布产物布局 | 前端 `frontend/dist/` 与后端 `backend/target/` 各自保留，`deploy/` 只存放发布二进制 | release 流程需要先构建前端，再将产物编译进两个目标平台的 Rust binary |
 
 ### 2.3 现有约束
@@ -65,7 +67,7 @@ FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 managemen
 - `webui.enable: true` 且 `users` 被省略或显式为 `[]` 都是合法的初始化状态，不再是启动错误；v2 模型需要为 `users` 增加空列表默认值，并拒绝 `null`。
 - 前端独立构建物固定保留在 `frontend/dist/`，后端 Cargo 构建物固定保留在 `backend/target/`；不得通过 `CARGO_TARGET_DIR` 或复制操作让两者改用 `deploy/`。
 - `script/package-embedded.ps1` 负责构建并复制 `Linux x86_64` 与 `Windows x86_64` 的内嵌资源二进制到 `deploy/`；`script/dev.ps1 start` 启动发布二进制时必须显式接收 `-ConfigPath`，不在脚本中预设配置文件路径，并由同一脚本提供 `status`/`stop` 生命周期管理。
-- 本方案只设计和拆分实施工作，不代表相应代码已经完成。
+- 本方案初始内容是实施拆分；当前代码状态以文档头部和第 12–13 节为准，历史基线表不应被解读为当前限制。
 
 ## 3. 目标与非目标
 
@@ -505,6 +507,8 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 
 ### 12.2 V2.1：Management Server 与静态资源
 
+实现状态：已完成代码与后端 `webui-embed` 定向测试。
+
 工作项：
 
 - 移除 v1 WebUI feature gate，增加 management endpoint 预检；
@@ -515,6 +519,8 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 退出条件：`webui.enable` 能正确控制 listener，单 binary 在没有外部 `dist` 时可打开 SPA，DoH 行为无变化。
 
 ### 12.3 V2.2：认证、Session 与首次初始化
+
+实现状态：已完成代码、配置事务恢复与定向测试。
 
 工作项：
 
@@ -540,16 +546,20 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 
 ### 12.5 V2.4：前端真实集成
 
+实现状态：已完成代码与 MSW contract 测试；真实浏览器同源 smoke 待环境执行。
+
 工作项：
 
 - 生成更新后的 API types；
 - 增加 setup query、`/initialize`、路由守卫与并发冲突处理；
 - 将 AuthProvider 启动顺序调整为 setup -> session；
-- 更新 MSW fixture、组件测试和真实同源集成测试。
+- 更新 MSW fixture 与组件测试；真实同源浏览器测试作为第 13.3 节环境验收，不以本地 mock 代替。
 
 退出条件：首次访问、初始化、自动登录、刷新恢复、退出、session 过期和已初始化竞争流程均符合契约。
 
 ### 12.6 V2.5：发布与文档收口
+
+实现状态：已完成脚本与文档同步；双平台 target/linker 和发布 binary 验收待环境执行。
 
 工作项：
 
@@ -634,12 +644,12 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 ## 16. 实施前评审清单
 
 - [x] 确认 Management Server 只提供 HTTP，不实现 TLS 终止；`public_origin` 接受 HTTP/HTTPS，并据此决定 Cookie `Secure` 策略。
-- [ ] 确认 session 绝对 TTL、空闲 TTL、Cookie 名称与容量上限。
-- [ ] 确认 setup 密码最小长度与最终 Argon2id 参数。
+- [x] 确认 session 绝对 TTL、空闲 TTL、Cookie 名称与容量上限。
+- [x] 确认 setup 密码最小长度与最终 Argon2id 参数。
 - [x] 通过 YAML source-preserving adapter spike；基于 CST 范围只替换 `webui.users`，不支持的表达明确失败。
-- [ ] 确认 source config 与 snapshot journal 的恢复点和跨平台替换语义。
-- [ ] 确认 management accept loop 失败触发进程优雅关闭。
-- [ ] 确认 `/queries` 的安全投影继续禁止 qname、client IP 与 DNS wire。
-- [ ] 确认 release feature、前端构建入口和缺失 `dist` 时的失败方式。
+- [x] 确认 source config 与 snapshot journal 的恢复点和跨平台替换语义。
+- [x] 确认 management accept loop 失败触发进程优雅关闭。
+- [x] 确认 `/queries` 的安全投影继续禁止 qname、client IP 与 DNS wire。
+- [x] 确认 release feature、前端构建入口和缺失 `dist` 时的失败方式。
 - [ ] 确认两个 Rust target/linker 的来源和 CI runner；确认 `frontend/dist/`、`backend/target/` 与 `deploy/` 的隔离及两个发布文件名。
 - [x] 确认 `dev.ps1 start` 的 `-ConfigPath` 必填行为，未传入时禁止启动且不回退默认路径；`status`/`stop` 保留 PID、启动时间和可执行文件身份校验。
