@@ -96,7 +96,7 @@ UDP adapter：
 - 完整响应超出限制时按 RR 边界截断并设置 TC；
 - 本地输出截断不覆盖缓存中的完整 canonical response。
 
-UDP 没有连接级响应确认；send error 作为 request-local 事件记录。
+UDP 没有连接级响应确认；send error 作为 request-local 事件记录。`recv_from` 无流量 deadline 只开始下一轮接收，不触发 endpoint retry。
 
 ## 6. TCP
 
@@ -108,13 +108,13 @@ TCP adapter：
 - 支持同连接连续请求；
 - v1 按读取顺序输出响应，避免乱序破坏简单客户端兼容性；
 - connection idle timeout、每连接 in-flight 和全局连接数使用固定 profile 上限；
-- shutdown 时停止 accept，允许已读完整 frame 在 grace deadline 内完成。
+- shutdown 时停止 accept，允许已读完整 frame 在 grace deadline 内完成；无连接的 accept deadline 只推进轮询。
 
 如果后续需要 TCP pipelining 乱序响应，应先修改 correlation 契约和测试，不在 v1 隐式开启。
 
 ## 7. DoH
 
-当前已实现 plain HTTP、TLS terminate 首轮握手和 forwarded header 首轮客户端地址恢复。DoH endpoint 只复用底层 TCP socket，不会被当作 raw DNS/TCP 服务；service 根据 `BindTransport::Doh` 构造独立 listener/session task，并由内部 `JoinSet` 管理连接。
+当前已实现 plain HTTP、TLS terminate 首轮握手和 forwarded header 首轮客户端地址恢复。DoH endpoint 只复用底层 TCP socket，不会被当作 raw DNS/TCP 服务；service 根据 `BindTransport::Doh` 构造独立 listener/session task，并由内部 `JoinSet` 管理连接；无连接的 accept deadline 只推进轮询。
 
 每条 route 同时支持 GET/POST：
 
@@ -213,6 +213,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - forwarded header 信任链、伪造 header、missing/invalid policy；
 - PROXY v1/v2 分片、未知 TLV、非法长度、不可信 peer；
 - admission control、client disconnect、shutdown cancellation；
+- UDP/TCP/DoH 多轮无流量 deadline 后继续服务且不消耗 endpoint retry；
 - wire codec 的 DNS ID 分离/恢复、canonicalization、输入输出尺寸上限和安全错误分类；
 - 所有 adapter 通过 Ports contract suite。
 
@@ -236,6 +237,6 @@ encoder 由 request correlation 持有并只能调用一次：
 - [x] 验证坏 TLS 握手只终止当前 DoH session，同一 listener 可继续服务后续正常连接；
 - [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
 
-阶段证据：DoH codec/session、request-line/media type、Host cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 19 项通过；system socket Rustls loopback 2 项验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163 验证 transport task 初次执行加三次 transient retry 后标记耗尽并升级 `FatalEndpoint`，阶段 165 验证同组 sibling 与旧 revision 不会被单 endpoint 耗尽误伤。真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
+阶段证据：DoH codec/session、request-line/media type、Host cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试 19 项通过；system socket Rustls loopback 2 项验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service 2 项 loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163 验证 transport task 初次执行加三次 transient retry 后标记耗尽并升级 `FatalEndpoint`，阶段 165 验证同组 sibling 与旧 revision 不会被单 endpoint 耗尽误伤，阶段 166 验证 UDP/TCP/DoH 多轮空闲 deadline 后仍可服务且 task 未重启。真实 plain HTTP smoke 在 `127.0.0.1:8355` 验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
 
-当前实现进度：**84%**。
+当前实现进度：**85%**。

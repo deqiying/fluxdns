@@ -388,7 +388,7 @@ supervisor 对 task 使用结构化生命周期和显式故障等级，不以“
 | 组件/故障 | v1 处理 | 对 DNS 数据面的影响 |
 | --- | --- | --- |
 | 启动/rebind 的 listener bind 失败 | `fatal-candidate`；拒绝候选并保留旧 `ActiveRuntime`（首启则退出） | 已运行实例继续服务；首启不对外提供服务 |
-| 运行中单个 endpoint 的 accept/socket 瞬时错误 | 有界退避重试；连续失败达到 endpoint restart limit 后标记该 endpoint failed；只有逻辑 listener 没有可用 endpoint 才升级为 `fatal` | 其他 endpoint 继续服务；无可用 endpoint 时停止该 listener/进程 |
+| 运行中单个 endpoint 的 accept/socket 瞬时错误 | 无流量 `Timeout` 作为正常 deadline 轮询；其他瞬时错误有界退避重试，达到 endpoint restart limit 后标记 failed；只有逻辑 listener 没有可用 endpoint 才升级为 `fatal` | 空闲不消耗重试预算；其他 endpoint 继续服务；无可用 endpoint 时停止进程 |
 | 单个请求解析、上游超时或客户端取消 | `request-local`；记录结构化原因并结束该请求 | 不影响其他请求 |
 | 单个资源刷新失败、内容校验不匹配或解析失败 | `degraded`；保留该资源最后有效 snapshot，指数退避并封顶重试；超过 stale horizon 只升级告警，不自动清空或替换为半成品 | 继续使用旧资源；无旧 snapshot 的引用请求 fail-closed；不清空缓存 |
 | 资源刷新产生乱序结果 | `stale-result`；按 per-resource epoch/CAS 丢弃旧结果 | 不改变当前 runtime |

@@ -1994,6 +1994,7 @@ async fn run_tcp_listener_loop(
                         session_cancellation.cancel(CancelReason::Shutdown);
                         break;
                     }
+                    Err(error) if is_listener_idle_timeout(&error) => continue,
                     Err(error) => {
                         tracing::error!(
                             event = "tcp_listener_failed",
@@ -2065,6 +2066,7 @@ async fn run_doh_listener_loop(
                         session_cancellation.cancel(CancelReason::Shutdown);
                         break;
                     }
+                    Err(error) if is_listener_idle_timeout(&error) => continue,
                     Err(error) => {
                         tracing::error!(
                             event = "doh_listener_failed",
@@ -2318,6 +2320,11 @@ fn is_cancelled_error(error: &crate::ports::PortError, cancellation: &Cancellati
     cancellation.is_cancelled() || matches!(error.class(), PortErrorClass::Cancelled(_))
 }
 
+/// 识别 listener 在无流量期间的正常 deadline 轮询，不把空闲误计为 endpoint 故障。
+fn is_listener_idle_timeout(error: &crate::ports::PortError) -> bool {
+    matches!(error.class(), PortErrorClass::Timeout)
+}
+
 async fn run_adapter_loop<A>(
     adapter: A,
     core: Arc<dyn DnsCore>,
@@ -2336,6 +2343,9 @@ where
                     || matches!(error.class(), PortErrorClass::Cancelled(_))
                 {
                     return Err(TaskError::Cancelled);
+                }
+                if is_listener_idle_timeout(&error) {
+                    continue;
                 }
                 return Err(TaskError::Transient);
             }
@@ -3628,6 +3638,54 @@ clients: []
             .await
             .unwrap();
         assert!(!report.deadline_expired);
+    }
+
+    /// 验证无流量 deadline 只触发 listener 轮询，不消耗 endpoint 重试预算。
+    #[tokio::test]
+    async fn idle_listener_deadlines_do_not_exhaust_transport_tasks() {
+        let base_port = 49_000 + (std::process::id() as u16 % 500) * 3;
+        let config = cross_transport_runtime_config(base_port, base_port + 1, base_port + 2);
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(3)).unwrap();
+        let factory = SystemSocketFactory::new();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let core = coordinator.load().snapshot().dns_core().unwrap();
+        let mut service = super::DnsService::start_with_coordinator(
+            Arc::clone(&coordinator),
+            core,
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        // 等待时间超过四轮 deadline；旧行为会在此期间耗尽三次重试。
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        let responses =
+            query_all_transports(base_port, 101, "transport.test.", RecordType::A).await;
+        assert_cross_transport_contract(
+            responses,
+            101,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+        assert_eq!(report.restarted, 0);
     }
 
     #[tokio::test]
