@@ -421,6 +421,11 @@ mod tests {
                 .expect("test response is valid");
         CacheEntry {
             response: Arc::new(response),
+            upstream:
+                crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                    "test-upstream",
+                )
+                .unwrap(),
             inserted_at: now,
             expires_at: now + expires_in,
             stale_until: stale_for.map(|duration| now + expires_in + duration),
@@ -428,7 +433,7 @@ mod tests {
             producer_revision: RuntimeRevision(1),
             quality,
             checksum: 1,
-            format_version: 1,
+            format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
         }
     }
 

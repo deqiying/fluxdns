@@ -6,7 +6,7 @@
 >
 > 适用范围：canonical DNS message、请求管线、缓存交互和上游结果处理
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联实现：`backend/src/dns/*`
 >
@@ -14,7 +14,7 @@
 
 ## 当前实现边界
 
-v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、基础 Cache fresh/miss/single-flight/CAS 接线、当前 snapshot-local optimistic refresh、SQLite cache non-blocking write/recovery 和低基数 resolution observation；Policy observation 已补充 client bucket，并拆分策略目标 upstream/group 与实际顶层 group member；配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR，fresh/stale cache response 已应用剩余 TTL 与 optimistic answer TTL；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入。
+v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联 hosts、Resource hosts index、Policy upstream path、Cache fresh/miss/single-flight/CAS、optimistic refresh、SQLite cache non-blocking write/recovery 和 resolution observation；observation 已拆分策略 target 与 actual upstream，cache entry 保存 producer upstream provenance，service 从最终逻辑响应提取有界 answer 并记录有效 client IP。配置选中的 TTL override 已在缓存写入后统一应用到 hosts、upstream 和 cache response 的全部 RR，fresh/stale cache response 已应用剩余 TTL 与 optimistic answer TTL；Runtime 已持有资源摘要并由 service 捕获同 revision core，Policy compiled resource live swap 和配置候选 reload 已接入。
 
 ## 1. 目标
 
@@ -88,7 +88,7 @@ Policy 返回完整 `ResolutionPlan`，至少包含：
 
 Core 不再次计算继承，也不把 rule 文本写入日志。
 
-当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 现在对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS 的基础路径，stale 命中时可在当前 immutable core 内先返回并通过有界 finalizer 进行 optimistic refresh，`hosts[]` 本地命中仍绕过 response cache；上游请求会按 plan 应用 `disabled`/`client`/`custom` ECS，group 可在更高优先级未覆盖时为每个 direct member 生成独立 query，并保留其他 EDNS option；普通请求以最终 ECS 隔离 cache key，成员 ECS group 当前绕过缓存；响应离开 Policy Core 前按当前 plan 对 answer/authority/additional RR 应用 TTL 上下界，缓存仍保存未覆写的 canonical response；`DnsCore::resolve_with_observation` 沿同一请求路径返回生效 strategy、策略目标 upstream/group、实际顶层 group member、matched rule/resource、answer source 和 cache status，供后续 stats/detail 使用。
+当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 对 upstream 请求执行 policy → cache lookup/single-flight → upstream → admission/CAS；stale 命中先返回并通过有界 finalizer refresh，`hosts[]` 本地命中绕过 response cache。`DnsCore::resolve_with_observation` 返回当前 strategy、target upstream/group、actual direct/顶层 member、matched rule/resource、answer source 和 cache status；fresh/stale/single-flight cache hit 从 entry provenance 恢复缓存生产 target/actual，不使用当前 plan 猜测来源。
 
 ## 6. Cache 交互
 
@@ -146,14 +146,15 @@ TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 
 一条请求只生成一个最终 resolve event：
 
 - request/trace ID 的脱敏形式；
-- listener/route/client bucket/strategy；
+- listener/route、配置 client bucket、有效 client IP 和 strategy；
 - source：hosts、cache 或 upstream；
-- final upstream/group ID；
+- target upstream/group 与实际产生结果的 direct/member；cache hit 为缓存生产来源；
+- canonical qname/qtype/qclass 与最终逻辑 response 的有界 answer；
 - RCODE、cache status、latency buckets；
 - cancellation/failure 分类；
 - runtime/resource revision 摘要。
 
-Policy Core 已提供首轮 `strategy`、策略目标 `upstream_id`、实际顶层 `upstream_member_id`、`source`（hosts/cache/upstream）、`cache_status`、配置 client bucket，以及 matched rule 的来源、资源 ID、typed `ResourceVersion` 和可选 ordinal。rule observation 不包含 matcher 或规则文本；client bucket/upstream/member/resource 仅使用已验证配置 ID，未知匹配或版本缺失时保持缺省，不记录原始 client ID/IP。
+Policy Core 提供 `strategy`、策略目标 `upstream_id`、无歧义的 `upstream_used_id`、`source`（hosts/cache/upstream）、`cache_status`、配置 client bucket，以及 matched rule/resource/version。service 在同一次完成回调中补充 canonical question、最终逻辑 response answer 和 `RequestContext.client.client_addr`。这些详情只进入启用的 bounded resolve log；rule matcher、request digest、DNS wire、header 和请求级值不会进入普通日志或 metrics。
 
 parallel 的多个 attempt 另发 attempt event，但不重复增加 total request。
 
@@ -184,7 +185,7 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 定义 canonical query/response 与验证器；
 - [x] 定义 RequestContext、deadline 与 cancellation；
 - [x] 通过 Core 终态、低基数 observation 与 `ResolveEvent` 组合定义完整 resolution result，包含 failure/timeout/cancelled/dropped 分类、取消原因和命中资源 revision；
-- [x] 提供可选低基数 observation，并传播 strategy/source/cache status/client bucket；策略目标 upstream/group、实际顶层 group member、matched rule/resource 及命中资源版本已拆分；
+- [x] 提供可选 observation，并传播 strategy/source/cache status/client bucket；策略 target、actual upstream、cache producer provenance、matched rule/resource 及命中资源版本已拆分；
 - [x] 实现固定响应的 transport 无关 handler；
 - [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
 - [x] 实现配置驱动的 client-visible TTL min/max 覆写，且不改变 cache admission 使用的 origin TTL；

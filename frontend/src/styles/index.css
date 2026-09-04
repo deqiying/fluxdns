@@ -201,6 +201,49 @@ select {
   width: 100%;
 }
 
+.query-record-card .ant-card-body {
+  padding: 0;
+}
+
+.query-cell {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.query-cell > .ant-typography {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.query-cell-secondary {
+  font-size: 12px;
+}
+
+.query-mono {
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.query-answer-data {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.query-details {
+  width: 100%;
+  padding: 10px 8px;
+}
+
+.query-details > .ant-space-item,
+.query-details .ant-table-wrapper {
+  width: 100%;
+}
+
+.query-answer-alert {
+  margin-bottom: 12px;
+}
+
 .login-page {
   display: grid;
   min-height: 100vh;

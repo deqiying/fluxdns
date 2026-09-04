@@ -9,8 +9,8 @@ use std::time::Instant;
 use crate::dns::{CancelReason, Cancellation, CanonicalResponse, RuntimeRevision};
 use crate::ports::cache::{
     CacheCondition, CacheKey, CacheLoadCompletion, CacheLoadFailure, CacheLoadLease,
-    CacheLoadReservation, CacheLoadWaiter, CacheRecord, CacheStore, CacheWriteOutcome,
-    PersistentCacheBatch,
+    CacheLoadReservation, CacheLoadWaiter, CacheRecord, CacheStore, CacheUpstreamProvenance,
+    CacheWriteOutcome, PersistentCacheBatch,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 use tokio::task::JoinSet;
@@ -374,9 +374,9 @@ pub struct CacheWriteRequest {
     pub key: CacheKey,
     pub condition: CacheCondition,
     pub response: Arc<CanonicalResponse>,
+    pub upstream: CacheUpstreamProvenance,
     pub now: Instant,
     pub producer_revision: RuntimeRevision,
-    pub format_version: u16,
     pub deadline: crate::dns::Deadline,
 }
 
@@ -548,9 +548,9 @@ impl CacheFacade {
             let entry = match admit_response(
                 self.options.admission,
                 request.response,
+                request.upstream,
                 request.now,
                 request.producer_revision,
-                request.format_version,
             )? {
                 CacheAdmissionOutcome::Accepted(entry) => entry,
                 CacheAdmissionOutcome::Rejected(rejection) => {
@@ -706,9 +706,13 @@ mod tests {
                 key: key(),
                 condition: CacheCondition::Absent,
                 response: Arc::new(response(ResponseCode::NXDomain)),
+                upstream:
+                    crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                        "test-upstream",
+                    )
+                    .unwrap(),
                 now: Instant::now(),
                 producer_revision: RuntimeRevision(1),
-                format_version: 1,
                 deadline: deadline(),
             })
             .await
@@ -737,6 +741,11 @@ mod tests {
         let now = Instant::now();
         let entry = Arc::new(crate::ports::cache::CacheEntry {
             response: Arc::new(response(ResponseCode::NXDomain)),
+            upstream:
+                crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                    "test-upstream",
+                )
+                .unwrap(),
             inserted_at: now - Duration::from_secs(10),
             expires_at: now - Duration::from_secs(1),
             stale_until: Some(now + Duration::from_secs(10)),
@@ -744,7 +753,7 @@ mod tests {
             producer_revision: RuntimeRevision(1),
             quality: crate::ports::cache::CacheQuality::Negative,
             checksum: 1,
-            format_version: 1,
+            format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
         });
         facade
             .store()
@@ -783,6 +792,10 @@ mod tests {
                 CacheCondition::Absent,
                 Arc::new(crate::ports::cache::CacheEntry {
                     response: Arc::new(response(ResponseCode::NXDomain)),
+                    upstream: crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                        "test-upstream",
+                    )
+                    .unwrap(),
                     inserted_at: now - Duration::from_secs(10),
                     expires_at: now - Duration::from_secs(1),
                     stale_until: Some(now + Duration::from_secs(10)),
@@ -790,7 +803,7 @@ mod tests {
                     producer_revision: RuntimeRevision(1),
                     quality: crate::ports::cache::CacheQuality::Negative,
                     checksum: 1,
-                    format_version: 1,
+                    format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
                 }),
                 deadline(),
             )
@@ -851,9 +864,12 @@ mod tests {
                     key: key(),
                     condition: CacheCondition::Absent,
                     response: Arc::new(response(ResponseCode::NXDomain)),
+                    upstream: crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                        "test-upstream",
+                    )
+                    .unwrap(),
                     now: Instant::now(),
                     producer_revision: RuntimeRevision(7),
-                    format_version: 1,
                     deadline: deadline(),
                 },
             )
@@ -876,9 +892,12 @@ mod tests {
                     key: key(),
                     condition: CacheCondition::Absent,
                     response: Arc::new(response(ResponseCode::NXDomain)),
+                    upstream: crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                        "test-upstream",
+                    )
+                    .unwrap(),
                     now: Instant::now(),
                     producer_revision: RuntimeRevision(8),
-                    format_version: 1,
                     deadline: deadline(),
                 },
             )

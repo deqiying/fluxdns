@@ -37,7 +37,7 @@
 | WebUI 配置 | `WebUiDto`/`ResolvedWebUi` 保留 `enable`、监听地址、端口、origin 和用户 hash；`enable=true` 已启动独立 Management Server。 | 前端通过 setup -> session 顺序消费服务端状态；不得绕过 management API 读取配置或数据库。 |
 | Runtime 摘要 | `RuntimeSnapshot::summary()` 已提供 revision、normalized hash、listener/bind/resource 数量和 `has_policy_core`；`BindEntry` 还包含 transport、地址、端口、owner 和 `v6_only`。 | Runtime 页面应消费后端安全 DTO，不直接序列化 `ResolvedConfig` 或 socket 对象。 |
 | Resource 摘要 | `ResourceRegistrySnapshot::summary()` 只提供资源版本、来源类型、fallback 和 stale 状态；资源正文和编译结果不属于管理面。 | Resources 页面只显示元数据、版本和状态，不下载、解析或展示规则正文。 |
-| Storage 统计/详情 | 统计按 UTC 日和有限维度聚合；`resolve_log` 含解析详情和敏感字段，Storage 规定详情与统计分别受有界 writer/上限保护。 | Statistics 使用服务端聚合和分页查询；Queries 必须先定义脱敏 projection，不能把 SQLite 行原样返回浏览器。 |
+| Storage 统计/详情 | 统计按 UTC 日和有限维度聚合；schema v4 的 `resolve_log` 保存 canonical qname、有效 client IP、配置 ID、cache producer upstream 和有界 answer。 | Statistics 使用服务端聚合；authenticated Queries 使用显式 DTO 和分页读取，不能把 SQLite 行原样返回浏览器。 |
 | Telemetry/Health | Telemetry 组件和 health 状态有固定枚举（`healthy`、`degraded`、`failed`、`stopping`），并记录时间、重试、stale/gap 等状态信息。 | Health 页面展示稳定状态和安全原因分类；不展示原始错误堆栈、SecretRef、原始 IP、完整 query 或 header。 |
 | Management API | 后端已实现 setup、login/logout/session、七个只读查询、请求边界、错误 envelope 与静态资源 fallback；前端 API client 复用 OpenAPI 生成类型。 | setup、session 和只读页面可走同源 `/api/v1`；真实浏览器 smoke 仍需单独记录。 |
 
@@ -78,7 +78,7 @@ Browser
           └─ same-origin /api/v1/*
               └─ Management API adapter
                   ├─ RuntimeSnapshot / BindPlan 摘要
-                  ├─ Storage 统计与脱敏详情 projection
+                  ├─ Storage 统计与 authenticated 详情 projection
                   ├─ ResourceSummary
                   └─ Telemetry/Health snapshot
 ```
@@ -100,7 +100,7 @@ Browser
 | Runtime | `GET /api/v1/runtime` | revision、listener/bind 和运行时摘要 | 前端 schema/fixture 已实现；后端未实现 |
 | Health | `GET /api/v1/health` | 组件状态、原因分类和更新时间 | 前端 schema/fixture 已实现；后端未实现 |
 | Statistics | `GET /api/v1/statistics` | 时间范围、维度聚合和分页/限制 | 前端 schema/fixture 已实现；后端未实现 |
-| Queries | `GET /api/v1/queries` | 脱敏解析详情的服务端分页 | 前端 schema/fixture 已实现；后端未实现 |
+| Queries | `GET /api/v1/queries` | 完整解析详情的服务端分页 | 前后端已实现；历史行以 `legacy_redacted` 区分 |
 | Resources | `GET /api/v1/resources` | 资源版本、来源、fallback、stale | 前端 schema/fixture 已实现；后端未实现 |
 | System | `GET /api/v1/system` | 版本、运行时间和只读能力摘要 | 前端 schema/fixture 已实现；后端未实现 |
 
@@ -114,11 +114,11 @@ Browser
 | Runtime | `RuntimeSnapshotSummary` + `BindEntry` | revision、hash 摘要、listener/bind 数量、transport、地址/端口、draining 状态（若契约提供） | socket handle、`ResolvedConfig` 全量、证书和私钥 |
 | Health | Telemetry/Storage/Runtime health snapshot | component、状态、first/last changed、last success、retry、stale/gap、稳定原因码 | 原始错误、SecretRef、完整内部路径 |
 | Statistics | `stats_daily_total`、`stats_daily_dimension` 的服务端聚合 | UTC 日期、total、有限 dimension kind/value、count | 任意域名、完整 client ID、原始 IP、未受限 group-by |
-| Queries | `resolve_log` 的后端安全 projection | 时间、耗时、transport、source、rcode、cache/outcome、策略/资源是否命中等摘要 | `canonical_qname`、request digest、原始 client/route 文本、DNS wire |
+| Queries | `resolve_log` 的 authenticated projection | canonical qname、qtype、有效 client IP、配置客户端/strategy、target/actual upstream、有界 answer 和既有结果摘要 | request digest、route 文本、DNS wire、header、SecretRef |
 | Resources | `ResourceSummary` 和受控 metadata | ID 的安全展示名、epoch/revision、source kind、fallback、stale | 规则正文、hosts 内容、远程 URL 凭据、编译对象 |
 | System | 后端显式提供的版本/能力 read model | 服务版本、运行时间、只读能力列表 | 配置文件路径、环境变量、凭据和内部诊断详情 |
 
-`resolve_log` 当前 schema 含 `canonical_qname`，但这不等于允许 management API 返回该字段。Queries 的字段投影、权限和保留期限必须在 F0 由后端安全契约明确；在契约冻结前，前端按“不展示原始 qname 和请求标识”实现。
+Queries 契约已确认：所有 authenticated WebUI 用户可读取 canonical qname、有效 client IP 和有界 answer；`dns.resolve_log.enable`、记录年龄与数量上限继续控制是否持久化及保留周期。其他接口不因此获得这些请求级字段。
 
 ### 5.3 通用响应和错误契约
 
@@ -127,7 +127,7 @@ Browser
 - `401` 清理内存 session 并跳转 `/login`；`403`、`429`、`5xx`、网络错误和超时分别展示权限、限流、服务端和连接失败状态。
 - 列表接口必须由服务端施加最大页大小、最大时间范围、允许的过滤字段和排序字段；前端控件只能选择契约声明的选项。
 - 变更 session 的请求遵循后端 CSRF 契约；前端不自行添加与后端不一致的 token/header 方案。
-- API 不得返回密码、`password_hash`、SecretRef 实际值、代理凭据、TLS material、原始 header、完整 IP 或未脱敏错误堆栈。
+- API 不得返回密码、`password_hash`、SecretRef 实际值、代理凭据、TLS material、原始 header 或未脱敏错误堆栈；有效 client IP 仅允许出现在 authenticated Queries DTO。
 
 ### 5.4 F0 退出条件
 
@@ -135,7 +135,7 @@ F0 未通过前不进入真实页面联调。退出条件为：
 
 1. 后端确认独立 management router/adapter 的生命周期、绑定方式和同源静态文件边界，不改写 DoH handler 语义；
 2. 每个接口的请求参数、响应 DTO、错误码、分页/时间限制、认证/CSRF 和脱敏字段有可审查的 schema 或 Rust contract test；
-3. 明确 `Queries` 是否允许任何 qname 展示；默认选择安全摘要；
+3. `Queries` 已明确允许 authenticated 用户读取 canonical qname、有效 client IP 和有界 answer，并以契约测试限制到该 endpoint；
 4. Node.js 26.8.1、pnpm 11.25.0、`frontend/pnpm-lock.yaml`、Vitest/Testing Library/MSW 已成为仓库基线，缓存固定在 `frontend/.cache/`；
 5. 生产发布由未来的 management server 托管通过 `webui-embed` 编译期内嵌到单个 Rust binary 的前端资源；`frontend/dist` 仍作为独立构建物保留，未知 SPA 路由回退 `index.html`，`/api/*` 始终交给 API router。
 
@@ -223,10 +223,10 @@ frontend/
 | 项目 | 内容 |
 | --- | --- |
 | 主要文件 | `src/modules/statistics/*`、`queries/*`、`resources/*`、`src/shared/formatters/*`。 |
-| 主要实现 | Statistics 的时间范围/维度选择和聚合展示；Queries 的服务端分页、有限过滤、排序、详情摘要；Resources 的版本、来源、fallback、stale 状态。 |
+| 主要实现 | Statistics 的时间范围/维度选择和聚合展示；Queries 的服务端分页、有限过滤、排序、五列主表和可展开详情；Resources 的版本、来源、fallback、stale 状态。 |
 | 数据边界 | 前端不全量加载解析记录，不在浏览器端聚合统计，不下载规则正文，不自行推导资源/策略语义；所有筛选和排序参数来自契约枚举。 |
 | 一致性 | query key 包含全部服务端参数；参数变化取消旧请求并重新查询；响应携带采样时间和 runtime revision 时在页面展示，避免把不同采样误拼成一个快照。 |
-| 验证 | 分页边界、空结果、非法参数被服务端拒绝、重复点击/快速切换取消、脱敏字段断言和确定性格式化测试。 |
+| 验证 | 分页边界、空结果、非法参数、query key、client 回退、direct/group/cache route、answer 截断、legacy 状态和字段白名单/deny-list。 |
 | 退出条件 | 三个页面均能在 mock contract 下独立运行；真实 API 只需替换 transport，不需改动页面业务逻辑。 |
 
 ### F5：同源集成、交付和回归
@@ -248,7 +248,7 @@ frontend/
 | `/runtime` | runtime/bind | 无 listener、draining、revision 变化 | 只读 listener/bind 信息 |
 | `/health` | component health | `healthy/degraded/failed/stopping`、stale/gap | 展示安全原因码；不提供修复动作 |
 | `/statistics` | daily total/dimension | 时间范围超限、空结果、聚合失败 | 服务端聚合；不导出、不自定义任意维度 |
-| `/queries` | paginated safe projection | 无详情、页边界、筛选/排序失败 | 不展示原始 qname、request digest 或 wire |
+| `/queries` | paginated authenticated projection | 无详情、legacy、页边界、筛选/排序失败 | 展示 canonical qname/client/answer；不展示 request digest、route 文本或 wire |
 | `/resources` | resource summary | stale、fallback、资源缺失 | 不刷新、不下载正文 |
 | `/system` | version/capability | 能力缺失、版本未知 | 只读版本和能力摘要 |
 
@@ -297,7 +297,7 @@ pnpm run build
 
 1. 登录、session 恢复、登出和 `401` 过期跳转；
 2. overview/runtime/health 中至少一条真实查询，确认 JSON content type、request ID 和采样时间；
-3. statistics 的时间范围/维度限制，以及 queries 的服务端分页和脱敏 projection；
+3. statistics 的时间范围/维度限制，以及 queries 的服务端分页和 authenticated projection；
 4. resources 的 resource version/fallback/stale 与 Runtime snapshot 一致；
 5. 同源静态路由回退、`/api` 分流和失败状态；
 6. 浏览器 Network、Storage 和 Console 检查无 token、密码、SecretRef、raw wire 或未脱敏错误。
@@ -316,7 +316,7 @@ pnpm run build
 | --- | --- | --- |
 | 真实浏览器与 Linux 原生环境尚未执行 | 无法把 Cookie/Storage 和 Linux 发布 binary 标记为最终验收通过 | 在具备浏览器能力和 Linux x86_64 原生 Rust toolchain 的环境补做；保留当前 mock、handler、embed 测试和 Windows 打包作为已有证据。 |
 | 项目级 Node/pnpm 基线 | 已解决；工具版本与缓存路径可复现 | `mise.toml` 固定 Node.js 26.8.1 / pnpm 11.25.0，前端 manifest、lockfile 与环境规范同步维护。 |
-| `resolve_log` 含敏感 qname | 错误 projection 可能泄露请求数据 | 默认只做安全摘要；后端 contract test 固定禁止字段，任何扩展需单独授权。 |
+| `resolve_log` 含敏感 qname 与 client IP | authenticated 会话或本地数据库权限失守会暴露请求数据 | 仅 Queries DTO 允许显式白名单字段；保持 session 保护、有界保留和数据库文件权限，contract test 固定其他 endpoint 和内部字段 deny-list。 |
 | health/metrics 只有内部 registry | 页面可能直接依赖实现细节 | 后端增加只读 adapter/DTO；前端只依赖版本化 JSON。 |
 | 轮询增加管理面负载 | 多页面打开时触发限流 | 由 API 契约给出采样/限流边界；页面隐藏暂停，`429` 退避，避免各模块自定义无限重试。 |
 | 当前平台 target/linker 不完整 | 无法生成该平台的内嵌 WebUI binary | `package-embedded.ps1` 先保留前后端独立构建物，再检查当前平台 feature/target 并 fail fast；不自动安装工具链，也不要求单个 runner 交叉构建另一平台。 |

@@ -31,7 +31,8 @@ use crate::policy::{ClientMatch, MatchedRuleKind, PolicyBuildError, PolicyIndex,
 use crate::ports::PortFuture;
 use crate::ports::cache::{
     CacheCondition, CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation, CacheQuality,
-    CacheRecoverySummary, CacheWriteOutcome, PersistentCacheStore,
+    CacheRecoverySummary, CacheUpstreamId, CacheUpstreamProvenance, CacheWriteOutcome,
+    PersistentCacheStore,
 };
 use crate::ports::exchange::{
     ConnectorId, DnsExchange, TransportFailure, TransportFailureClass, UpstreamOutcome,
@@ -486,8 +487,8 @@ struct PolicyLateResultSink {
     finalizer: Arc<LateCacheFinalizer>,
     runtime_cell: Arc<ArcSwap<RuntimeCoreCell>>,
     key: crate::ports::cache::CacheKey,
+    upstream_target_id: CacheUpstreamId,
     producer_revision: crate::dns::RuntimeRevision,
-    format_version: u16,
     deadline: Deadline,
 }
 
@@ -498,7 +499,12 @@ impl LateResultSink for PolicyLateResultSink {
         _context: crate::dns::RequestContext,
         attempt: UpstreamAttempt,
     ) {
-        let crate::ports::exchange::UpstreamOutcome::Response(response) = attempt.outcome else {
+        let UpstreamAttempt {
+            connector,
+            outcome: crate::ports::exchange::UpstreamOutcome::Response(response),
+            ..
+        } = attempt
+        else {
             return;
         };
         if !response.matches_query(&query) {
@@ -522,7 +528,13 @@ impl LateResultSink for PolicyLateResultSink {
             },
         );
         let key = self.key.clone();
-        let format_version = self.format_version;
+        let upstream = CacheUpstreamProvenance::new(
+            self.upstream_target_id.clone(),
+            Some(
+                CacheUpstreamId::from_validated_config_id(connector.as_str())
+                    .expect("connector ID must be a validated upstream ID"),
+            ),
+        );
         let deadline = self.deadline;
         let response = Arc::new(response);
         let _ = finalizer.submit_task(async move {
@@ -547,9 +559,9 @@ impl LateResultSink for PolicyLateResultSink {
                     key,
                     condition,
                     response,
+                    upstream,
                     now: Instant::now(),
                     producer_revision,
-                    format_version,
                     deadline,
                 })
                 .await;
@@ -585,7 +597,8 @@ impl DnsCore for PolicyDnsCore {
 
 struct PolicyUpstreamResult {
     outcome: UpstreamOutcome,
-    selected_upstream_id: Option<Arc<str>>,
+    upstream_target_id: Option<Arc<str>>,
+    upstream_used_id: Option<Arc<str>>,
     source: StatsSource,
     cache_status: CacheStatus,
 }
@@ -595,7 +608,8 @@ impl PolicyUpstreamResult {
     fn upstream(result: UpstreamExecutionResult, cache_status: CacheStatus) -> Self {
         Self {
             outcome: result.outcome,
-            selected_upstream_id: Some(result.upstream_id),
+            upstream_target_id: Some(result.target_id),
+            upstream_used_id: result.used_id,
             source: StatsSource::Upstream,
             cache_status,
         }
@@ -604,26 +618,48 @@ impl PolicyUpstreamResult {
     /// 保留一次上游执行已归因的 direct upstream 或顶层 group member ID。
     fn upstream_outcome(
         outcome: UpstreamOutcome,
-        selected_upstream_id: Arc<str>,
+        upstream_target_id: Arc<str>,
+        upstream_used_id: Option<Arc<str>>,
         cache_status: CacheStatus,
     ) -> Self {
         Self {
             outcome,
-            selected_upstream_id: Some(selected_upstream_id),
+            upstream_target_id: Some(upstream_target_id),
+            upstream_used_id,
             source: StatsSource::Upstream,
             cache_status,
         }
     }
 
-    /// 构造无法恢复原始 group member 归属的缓存结果。
-    fn cache(outcome: UpstreamOutcome, cache_status: CacheStatus) -> Self {
+    /// 从 cache entry 恢复产生该响应的 target 与实际 direct/member。
+    fn cache(
+        outcome: UpstreamOutcome,
+        record: &crate::ports::cache::CacheRecord,
+        cache_status: CacheStatus,
+    ) -> Self {
         Self {
             outcome,
-            selected_upstream_id: None,
+            upstream_target_id: Some(Arc::from(record.entry.upstream.target_id().as_str())),
+            upstream_used_id: record
+                .entry
+                .upstream
+                .used_id()
+                .map(|id| Arc::from(id.as_str())),
             source: StatsSource::Cache,
             cache_status,
         }
     }
+}
+
+/// 从已校验的策略与 connector ID 构造可持久化的缓存来源。
+fn cache_upstream_provenance(target_id: &str, used_id: Option<&str>) -> CacheUpstreamProvenance {
+    let target_id = CacheUpstreamId::from_validated_config_id(target_id)
+        .expect("resolved upstream target must be valid cache provenance");
+    let used_id = used_id.map(|used_id| {
+        CacheUpstreamId::from_validated_config_id(used_id)
+            .expect("selected connector must be valid cache provenance")
+    });
+    CacheUpstreamProvenance::new(target_id, used_id)
 }
 
 impl PolicyDnsCore {
@@ -705,6 +741,7 @@ impl PolicyDnsCore {
                     matched_rule,
                     upstream_id: None,
                     upstream_member_id: None,
+                    upstream_used_id: None,
                     source: StatsSource::Hosts,
                     cache_status: CacheStatus::Disabled,
                 }),
@@ -725,15 +762,17 @@ impl PolicyDnsCore {
                     matched_rule: matched_rule.clone(),
                     upstream_id: Some(Arc::from(plan.upstream.as_str())),
                     upstream_member_id: None,
+                    upstream_used_id: None,
                     source: StatsSource::Upstream,
                     cache_status: CacheStatus::StoreUnavailable,
                 }),
             );
         };
-        let upstream_id = Arc::<str>::from(plan.upstream.as_str());
-        let upstream_member_id = outcome
-            .selected_upstream_id
-            .filter(|selected| selected.as_ref() != upstream_id.as_ref());
+        let upstream_id = outcome.upstream_target_id.clone();
+        let upstream_used_id = outcome.upstream_used_id.clone();
+        let upstream_member_id = upstream_used_id
+            .clone()
+            .filter(|selected| upstream_id.as_deref() != Some(selected.as_ref()));
         let result = match outcome.outcome {
             UpstreamOutcome::Response(mut response) if response.matches_query(&request.query) => {
                 apply_ttl_override(&mut response, &plan.ttl_override);
@@ -750,8 +789,9 @@ impl PolicyDnsCore {
                 client_bucket,
                 strategy_id,
                 matched_rule,
-                upstream_id: Some(upstream_id),
+                upstream_id,
                 upstream_member_id,
+                upstream_used_id,
                 source: outcome.source,
                 cache_status: outcome.cache_status,
             }),
@@ -788,12 +828,13 @@ impl PolicyDnsCore {
                 .await
                 .map(|outcome| PolicyUpstreamResult::upstream(outcome, CacheStatus::Disabled));
         };
-        let late_sink = self.late_result_sink(&key, request);
+        let late_sink = self.late_result_sink(&key, request, &plan.upstream);
         let deadline = request.context.meta.deadline;
         match self.cache.lookup(&key, deadline).await {
             Ok(CacheLookup::Fresh(record)) => {
                 return Some(PolicyUpstreamResult::cache(
                     UpstreamOutcome::Response(fresh_cache_response(&record)),
+                    &record,
                     CacheStatus::Fresh,
                 ));
             }
@@ -814,6 +855,7 @@ impl PolicyDnsCore {
                     }
                     return Some(PolicyUpstreamResult::cache(
                         UpstreamOutcome::Response(stale_response),
+                        &record,
                         CacheStatus::Stale,
                     ));
                 }
@@ -851,12 +893,14 @@ impl PolicyDnsCore {
                 {
                     Ok(CacheLoadCompletion::Ready(record)) => Some(PolicyUpstreamResult::cache(
                         UpstreamOutcome::Response(fresh_cache_response(&record)),
+                        &record,
                         CacheStatus::Fresh,
                     )),
                     Ok(CacheLoadCompletion::Failed(CacheLoadFailure::Cancelled(reason))) => {
                         Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::Cancelled(reason),
                             Arc::from(plan.upstream.as_str()),
+                            None,
                             CacheStatus::Miss,
                         ))
                     }
@@ -896,7 +940,8 @@ impl PolicyDnsCore {
                 };
                 let UpstreamExecutionResult {
                     outcome,
-                    upstream_id,
+                    target_id,
+                    used_id,
                 } = outcome;
                 match outcome {
                     UpstreamOutcome::Response(response) => {
@@ -907,7 +952,8 @@ impl PolicyDnsCore {
                                 .await;
                             return Some(PolicyUpstreamResult::upstream_outcome(
                                 UpstreamOutcome::Response(response),
-                                upstream_id,
+                                target_id,
+                                used_id,
                                 CacheStatus::Miss,
                             ));
                         }
@@ -918,9 +964,12 @@ impl PolicyDnsCore {
                                 key: key.clone(),
                                 condition: crate::ports::cache::CacheCondition::Absent,
                                 response: response_for_cache,
+                                upstream: cache_upstream_provenance(
+                                    target_id.as_ref(),
+                                    used_id.as_deref(),
+                                ),
                                 now: Instant::now(),
                                 producer_revision: request.context.runtime_revision,
-                                format_version: key.format_version,
                                 deadline,
                             })
                             .await;
@@ -943,7 +992,8 @@ impl PolicyDnsCore {
                         let _ = self.cache.publish_load(lease, completion, deadline).await;
                         Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::Response(response),
-                            upstream_id,
+                            target_id,
+                            used_id,
                             cache_status,
                         ))
                     }
@@ -954,7 +1004,8 @@ impl PolicyDnsCore {
                             .await;
                         Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::Cancelled(reason),
-                            upstream_id,
+                            target_id,
+                            used_id,
                             CacheStatus::Miss,
                         ))
                     }
@@ -965,7 +1016,8 @@ impl PolicyDnsCore {
                             .await;
                         Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::TransportFailure(failure),
-                            upstream_id,
+                            target_id,
+                            used_id,
                             CacheStatus::Miss,
                         ))
                     }
@@ -1017,12 +1069,12 @@ impl PolicyDnsCore {
         {
             return;
         }
-        let format_version = key.format_version;
         let deadline = context.meta.deadline;
         let _ = finalizer.submit_task(async move {
             let Some(UpstreamExecutionResult {
                 outcome: UpstreamOutcome::Response(response),
-                ..
+                target_id,
+                used_id,
             }) = upstreams
                 .exchange(&upstream, &query, &context, None, None)
                 .await
@@ -1037,9 +1089,9 @@ impl PolicyDnsCore {
                     key,
                     condition,
                     response: Arc::new(response),
+                    upstream: cache_upstream_provenance(target_id.as_ref(), used_id.as_deref()),
                     now: Instant::now(),
                     producer_revision,
-                    format_version,
                     deadline,
                 })
                 .await;
@@ -1050,14 +1102,16 @@ impl PolicyDnsCore {
         &self,
         key: &crate::ports::cache::CacheKey,
         request: &DnsRequest,
+        upstream: &ConfigId,
     ) -> Arc<dyn LateResultSink> {
         Arc::new(PolicyLateResultSink {
             cache: Arc::clone(&self.cache),
             finalizer: Arc::clone(&self.late_cache_finalizer),
             runtime_cell: Arc::clone(&self.runtime_cell),
             key: key.clone(),
+            upstream_target_id: CacheUpstreamId::from_validated_config_id(upstream.as_str())
+                .expect("resolved upstream ID must be valid cache provenance"),
             producer_revision: request.context.runtime_revision,
-            format_version: key.format_version,
             deadline: Deadline::new(
                 Instant::now() + Duration::from_secs(OPTIMISTIC_REFRESH_TIMEOUT_SECS),
             ),
@@ -1335,7 +1389,8 @@ struct UpstreamRuntime {
 /// 一次上游执行的终态和实际选中的配置成员 ID。
 struct UpstreamExecutionResult {
     outcome: UpstreamOutcome,
-    upstream_id: Arc<str>,
+    target_id: Arc<str>,
+    used_id: Option<Arc<str>>,
 }
 
 impl fmt::Debug for UpstreamRuntime {
@@ -1480,7 +1535,8 @@ impl UpstreamRuntime {
         if let Some(exchange) = self.direct.get(upstream) {
             return Some(UpstreamExecutionResult {
                 outcome: exchange.exchange(query, context).await,
-                upstream_id: Arc::from(exchange.connector_id().as_str()),
+                target_id: Arc::from(upstream.as_str()),
+                used_id: Some(Arc::from(exchange.connector_id().as_str())),
             });
         }
         if let Some(executor) = self.groups.get(upstream) {
@@ -1496,15 +1552,16 @@ impl UpstreamRuntime {
             }?;
             let GroupExecutionResult { connector, outcome } = result;
             return Some(UpstreamExecutionResult {
-                upstream_id: connector
-                    .map_or_else(|| Arc::from(upstream.as_str()), |id| Arc::from(id.as_str())),
+                target_id: Arc::from(upstream.as_str()),
+                used_id: connector.map(|id| Arc::from(id.as_str())),
                 outcome,
             });
         }
         if let Some(exchange) = self.all.get(upstream) {
             return Some(UpstreamExecutionResult {
                 outcome: exchange.exchange(query, context).await,
-                upstream_id: Arc::from(exchange.connector_id().as_str()),
+                target_id: Arc::from(upstream.as_str()),
+                used_id: Some(Arc::from(exchange.connector_id().as_str())),
             });
         }
         None
@@ -1789,6 +1846,7 @@ mod tests {
         CoreOutcome, Deadline, DnsCore, DnsRequest, ListenerId, MatchedRuleSource, RequestContext,
         RequestId, RequestMeta, RuntimeRevision, TransportCapabilities, TransportClass,
     };
+    use crate::ports::cache::CacheUpstreamId;
     use crate::ports::exchange::{ConnectorId, UpstreamOutcome};
     use crate::ports::{PortError, PortFuture};
     use crate::resource::{
@@ -1803,7 +1861,7 @@ mod tests {
 
     use super::{
         PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, UpstreamRuntime, cache_key,
-        effective_upstream_query, stale_answer_ttl,
+        cache_upstream_provenance, effective_upstream_query, stale_answer_ttl,
     };
     use crate::upstream::UpstreamRegistry;
 
@@ -2381,6 +2439,7 @@ mod tests {
         assert_eq!(observation.strategy_id.as_deref(), Some("default"));
         assert_eq!(observation.upstream_id.as_deref(), Some("remote"));
         assert_eq!(observation.upstream_member_id, None);
+        assert_eq!(observation.upstream_used_id.as_deref(), Some("remote"));
         assert_eq!(
             observation.source,
             crate::ports::storage::StatsSource::Upstream
@@ -2409,6 +2468,7 @@ mod tests {
         let observation = observation.expect("cached policy core must report metadata");
         assert_eq!(observation.upstream_id.as_deref(), Some("remote"));
         assert_eq!(observation.upstream_member_id, None);
+        assert_eq!(observation.upstream_used_id.as_deref(), Some("remote"));
         assert_eq!(
             observation.source,
             crate::ports::storage::StatsSource::Cache
@@ -2541,6 +2601,7 @@ mod tests {
         let now = Instant::now();
         let fresh_entry = Arc::new(crate::ports::cache::CacheEntry {
             response: Arc::clone(&response),
+            upstream: cache_upstream_provenance("remote", Some("remote")),
             inserted_at: now - Duration::from_secs(20),
             expires_at: now + Duration::from_secs(100),
             stale_until: Some(now + Duration::from_secs(160)),
@@ -2548,7 +2609,7 @@ mod tests {
             producer_revision: RuntimeRevision(1),
             quality: crate::ports::cache::CacheQuality::Complete,
             checksum: 1,
-            format_version: key.format_version,
+            format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
         });
         let version = match core
             .cache()
@@ -2574,6 +2635,7 @@ mod tests {
         let stale_now = Instant::now();
         let stale_entry = Arc::new(crate::ports::cache::CacheEntry {
             response,
+            upstream: cache_upstream_provenance("remote", Some("remote")),
             inserted_at: stale_now - Duration::from_secs(121),
             expires_at: stale_now - Duration::from_secs(1),
             stale_until: Some(stale_now + Duration::from_secs(60)),
@@ -2581,7 +2643,7 @@ mod tests {
             producer_revision: RuntimeRevision(1),
             quality: crate::ports::cache::CacheQuality::Complete,
             checksum: 1,
-            format_version: key.format_version,
+            format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
         });
         core.cache()
             .store()
@@ -2648,6 +2710,7 @@ mod tests {
         let now = Instant::now();
         let stale_entry = crate::ports::cache::CacheEntry {
             response: Arc::clone(&record.entry.response),
+            upstream: record.entry.upstream.clone(),
             inserted_at: now - Duration::from_secs(1),
             expires_at: now - Duration::from_millis(1),
             stale_until: Some(now + Duration::from_secs(5)),
@@ -2749,6 +2812,7 @@ mod tests {
         let now = Instant::now();
         let stale_entry = crate::ports::cache::CacheEntry {
             response: Arc::clone(&record.entry.response),
+            upstream: record.entry.upstream.clone(),
             inserted_at: now - Duration::from_secs(1),
             expires_at: now - Duration::from_millis(1),
             stale_until: Some(now + Duration::from_secs(5)),
@@ -2830,7 +2894,7 @@ mod tests {
         let key = cache_key(&plan, &request).expect("cache must be enabled");
         let response =
             CanonicalResponse::empty_response(&request.query, ResponseCode::NoError).unwrap();
-        let sink = core.late_result_sink(&key, &request);
+        let sink = core.late_result_sink(&key, &request, &plan.upstream);
         sink.submit(
             request.query.clone(),
             request.context.clone(),
@@ -2856,6 +2920,14 @@ mod tests {
         assert!(
             stored,
             "late response should be published through the finalizer"
+        );
+        let CacheLookup::Fresh(record) = core.cache().lookup(&key, deadline).await.unwrap() else {
+            panic!("late response must remain cached");
+        };
+        assert_eq!(record.entry.upstream.target_id().as_str(), "remote");
+        assert_eq!(
+            record.entry.upstream.used_id().map(CacheUpstreamId::as_str),
+            Some("late")
         );
     }
 
@@ -2891,7 +2963,7 @@ mod tests {
                 if response.class() == crate::dns::ResponseClass::NoData
         ));
 
-        let sink = core.late_result_sink(&key, &request);
+        let sink = core.late_result_sink(&key, &request, &plan.upstream);
         let positive = CanonicalResponse::response_with_answers(
             &request.query,
             [Record::from_rdata(
@@ -2961,6 +3033,14 @@ mod tests {
             &expected_positive,
             "same or lower quality late response must not overwrite the promoted cache entry"
         );
+        assert_eq!(
+            final_record
+                .entry
+                .upstream
+                .used_id()
+                .map(CacheUpstreamId::as_str),
+            Some("late-positive")
+        );
     }
 
     #[tokio::test]
@@ -2995,7 +3075,7 @@ mod tests {
                 if response.class() == crate::dns::ResponseClass::NoData
         ));
 
-        let sink = core.late_result_sink(&key, &request);
+        let sink = core.late_result_sink(&key, &request, &plan.upstream);
         for (attempt_index, code) in [(1, ResponseCode::NXDomain), (2, ResponseCode::ServFail)] {
             let response = CanonicalResponse::empty_response(&request.query, code).unwrap();
             sink.submit(
@@ -3081,7 +3161,7 @@ mod tests {
             )],
         )
         .unwrap();
-        old.late_result_sink(&key, &request).submit(
+        old.late_result_sink(&key, &request, &plan.upstream).submit(
             request.query.clone(),
             request.context.clone(),
             UpstreamAttempt {
@@ -3105,6 +3185,15 @@ mod tests {
         assert!(
             routed,
             "late sink should publish into the latest Runtime cache"
+        );
+        let CacheLookup::Fresh(record) = latest.cache().lookup(&key, deadline).await.unwrap()
+        else {
+            panic!("latest runtime must retain routed response");
+        };
+        assert_eq!(record.entry.upstream.target_id().as_str(), "remote");
+        assert_eq!(
+            record.entry.upstream.used_id().map(CacheUpstreamId::as_str),
+            Some("late-latest")
         );
         assert!(matches!(
             old.cache().lookup(&key, deadline).await.unwrap(),
@@ -3708,7 +3797,9 @@ strategy:
 
     #[tokio::test]
     async fn policy_executes_group_with_supported_hosts_members() {
-        let core = PolicyDnsCore::from_config(group_config().as_ref(), 42).unwrap();
+        let mut config = Arc::try_unwrap(group_config()).unwrap();
+        config.dns.cache.enabled = true;
+        let core = PolicyDnsCore::from_config(&config, 42).unwrap();
         assert_eq!(core.host_resource_count(), 1);
         assert_eq!(core.upstream_count(), 3);
 
@@ -3724,6 +3815,26 @@ strategy:
         let observation = observation.expect("group response must include observation");
         assert_eq!(observation.upstream_id.as_deref(), Some("group"));
         assert_eq!(observation.upstream_member_id.as_deref(), Some("first"));
+        assert_eq!(observation.upstream_used_id.as_deref(), Some("first"));
+
+        let (_, cached_observation) = core
+            .resolve_with_observation(&request("group.example.", RecordType::A))
+            .await;
+        let cached_observation =
+            cached_observation.expect("cache hit must preserve group provenance");
+        assert_eq!(
+            cached_observation.source,
+            crate::ports::storage::StatsSource::Cache
+        );
+        assert_eq!(cached_observation.upstream_id.as_deref(), Some("group"));
+        assert_eq!(
+            cached_observation.upstream_member_id.as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            cached_observation.upstream_used_id.as_deref(),
+            Some("first")
+        );
     }
 
     #[tokio::test]
@@ -3770,7 +3881,8 @@ strategy:
             )
             .await
             .expect("nested group must resolve");
-        assert_eq!(outcome.upstream_id.as_ref(), "inner");
+        assert_eq!(outcome.target_id.as_ref(), "outer");
+        assert_eq!(outcome.used_id.as_deref(), Some("inner"));
         assert!(matches!(
             &outcome.outcome,
             UpstreamOutcome::Response(response)

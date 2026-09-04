@@ -75,7 +75,7 @@ pub struct SqliteResolveDetailRunSummary {
     pub failed_flushes: u64,
 }
 
-/// 将已脱敏的详情记录送入独立 SQLite writer channel。
+/// 将有界详情记录送入独立 SQLite writer channel。
 pub struct SqliteResolveDetailWriter {
     sender: mpsc::Sender<ResolveDetailRecord>,
 }
@@ -614,6 +614,10 @@ async fn migrate_storage_schema(pool: &SqlitePool) -> Result<(), SqliteStorageBa
                 3,
                 include_str!("../../migrations/0003_management_query_projection.sql"),
             ),
+            3 => (
+                4,
+                include_str!("../../migrations/0004_query_record_observability.sql"),
+            ),
             _ => return Err(SqliteStorageBackendBuildError::Schema),
         };
         apply_storage_migration(pool, version, next, migration).await?;
@@ -994,10 +998,12 @@ async fn apply_resolve_records_with_limits(
             "<absent>"
         };
         let route_id = record.has_route().then_some("<present>");
-        let client_bucket = record.has_client_bucket().then_some("<present>");
-        let strategy_id = record.has_strategy().then_some("<present>");
-        let upstream_id = record.has_upstream().then_some("<present>");
-        let upstream_member_id = record.has_upstream_member().then_some("<present>");
+        let client_ip = record.client_ip().map(|value| value.to_string());
+        let client_bucket = record.client_bucket();
+        let strategy_id = record.strategy_id();
+        let upstream_id = record.upstream_id();
+        let upstream_member_id = record.upstream_member_id();
+        let upstream_used_id = record.upstream_used_id();
         let matched_rule_source = record.matched_rule_source().map(resolve_rule_source_name);
         let matched_resource_id = record.has_matched_resource().then_some("<present>");
         let matched_rule_ordinal = record
@@ -1006,15 +1012,17 @@ async fn apply_resolve_records_with_limits(
         let resource_revision = record
             .resource_version()
             .map(|version| format!("{}:{}", version.epoch(), version.revision()));
-        let canonical_qname = format!("len:{}", record.qname_byte_len());
+        let answer_summary_json = serde_json::to_string(record.answers()).map_err(|_| {
+            PortError::new(PortErrorClass::InvalidInput, "sqlite_storage.resolve_batch")
+        })?;
         sqlx::query(
             "INSERT INTO resolve_log \
              (event_time_utc, duration_millis, request_id_digest, listener_id, route_id, \
                client_bucket, strategy_id, canonical_qname, qtype, qclass, source, upstream_id, \
                upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
                rcode, cache_status, failure_class, cancellation_reason, runtime_revision, resource_revision, \
-               transport) \
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               transport, client_ip, upstream_used_id, answer_count, answers_truncated, answer_summary_json) \
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(system_time_millis(record.occurred_at()))
         .bind(duration_millis)
@@ -1023,7 +1031,7 @@ async fn apply_resolve_records_with_limits(
         .bind(route_id)
         .bind(client_bucket)
         .bind(strategy_id)
-        .bind(canonical_qname)
+        .bind(record.qname())
         .bind(i64::from(record.qtype()))
         .bind(i64::from(record.qclass()))
         .bind(stats_source_name(record.source()))
@@ -1039,6 +1047,11 @@ async fn apply_resolve_records_with_limits(
         .bind(i64::try_from(record.runtime_revision().0).unwrap_or(i64::MAX))
         .bind(resource_revision.as_deref())
         .bind(transport_name(record.transport()))
+        .bind(client_ip.as_deref())
+        .bind(upstream_used_id)
+        .bind(i64::from(record.answer_count()))
+        .bind(record.answers_truncated())
+        .bind(answer_summary_json)
         .execute(&mut **transaction)
         .await
         .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_batch"))?;
@@ -1273,7 +1286,8 @@ mod tests {
         assert_eq!(version, i64::from(crate::storage::STORAGE_SCHEMA_VERSION.0));
         let row = sqlx::query(
             "SELECT upstream_member_id, matched_rule_source, matched_resource_id, \
-             matched_rule_ordinal, transport FROM resolve_log LIMIT 1",
+             matched_rule_ordinal, transport, client_ip, upstream_used_id, answer_count, \
+             answers_truncated, answer_summary_json FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
         .await
@@ -1291,6 +1305,14 @@ mod tests {
         assert_eq!(
             row.try_get::<Option<String>, _>("matched_resource_id")
                 .unwrap(),
+            None
+        );
+        for column in ["client_ip", "upstream_used_id", "answer_summary_json"] {
+            assert_eq!(row.try_get::<Option<String>, _>(column).unwrap(), None);
+        }
+        assert_eq!(row.try_get::<Option<i64>, _>("answer_count").unwrap(), None);
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("answers_truncated").unwrap(),
             None
         );
         assert_eq!(
@@ -1627,10 +1649,12 @@ mod tests {
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener"),
                 route_id: Some(Arc::from("route")),
+                client_ip: Some("192.0.2.10".parse().unwrap()),
                 client_bucket: None,
                 strategy_id: Some(Arc::from("strategy")),
                 upstream_id: Some(Arc::from("upstream")),
                 upstream_member_id: Some(Arc::from("member")),
+                upstream_used_id: Some(Arc::from("member")),
                 matched_rule_source: Some(ResolveRuleSource::RuleSet),
                 matched_resource_id: Some(Arc::from("rules")),
                 matched_rule_ordinal: Some(2),
@@ -1639,6 +1663,12 @@ mod tests {
                 qname: Arc::from("example.com."),
                 qtype: 1,
                 qclass: 1,
+                answers: vec![crate::ports::storage::ResolveAnswer {
+                    name: "example.com.".to_owned(),
+                    record_type: "A".to_owned(),
+                    data: "192.0.2.20".to_owned(),
+                    ttl: 60,
+                }],
                 rcode: 2,
                 cancellation_reason: Some(CancelReason::Shutdown),
                 outcome: OutcomeClass::Failure,
@@ -1657,7 +1687,7 @@ mod tests {
             "SELECT request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
              upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
              canonical_qname, source, rcode, failure_class, cancellation_reason, resource_revision, \
-             transport \
+             transport, client_ip, upstream_used_id, answer_count, answers_truncated, answer_summary_json \
              FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
@@ -1683,19 +1713,19 @@ mod tests {
             row.try_get::<Option<String>, _>("strategy_id")
                 .unwrap()
                 .as_deref(),
-            Some("<present>")
+            Some("strategy")
         );
         assert_eq!(
             row.try_get::<Option<String>, _>("upstream_id")
                 .unwrap()
                 .as_deref(),
-            Some("<present>")
+            Some("upstream")
         );
         assert_eq!(
             row.try_get::<Option<String>, _>("upstream_member_id")
                 .unwrap()
                 .as_deref(),
-            Some("<present>")
+            Some("member")
         );
         assert_eq!(
             row.try_get::<Option<String>, _>("matched_rule_source")
@@ -1716,7 +1746,7 @@ mod tests {
         );
         assert_eq!(
             row.try_get::<String, _>("canonical_qname").unwrap(),
-            "len:12"
+            "example.com."
         );
         assert_eq!(row.try_get::<String, _>("source").unwrap(), "upstream");
         assert_eq!(row.try_get::<i64, _>("rcode").unwrap(), 2);
@@ -1739,6 +1769,32 @@ mod tests {
             Some("2:1")
         );
         assert_eq!(row.try_get::<String, _>("transport").unwrap(), "udp");
+        assert_eq!(
+            row.try_get::<Option<String>, _>("client_ip")
+                .unwrap()
+                .as_deref(),
+            Some("192.0.2.10")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("upstream_used_id")
+                .unwrap()
+                .as_deref(),
+            Some("member")
+        );
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("answer_count").unwrap(),
+            Some(1)
+        );
+        assert_eq!(
+            row.try_get::<Option<bool>, _>("answers_truncated").unwrap(),
+            Some(false)
+        );
+        let answer_summary = row
+            .try_get::<Option<String>, _>("answer_summary_json")
+            .unwrap()
+            .unwrap();
+        let answer_summary: serde_json::Value = serde_json::from_str(&answer_summary).unwrap();
+        assert_eq!(answer_summary[0]["data"], "192.0.2.20");
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
@@ -1760,10 +1816,12 @@ mod tests {
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
+                    client_ip: None,
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
                     upstream_member_id: None,
+                    upstream_used_id: None,
                     matched_rule_source: None,
                     matched_resource_id: None,
                     matched_rule_ordinal: None,
@@ -1772,6 +1830,7 @@ mod tests {
                     qname: Arc::from("example.com."),
                     qtype: 1,
                     qclass: 1,
+                    answers: Vec::new(),
                     rcode: 0,
                     cancellation_reason: None,
                     outcome: OutcomeClass::Success,
@@ -1829,10 +1888,12 @@ mod tests {
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener"),
                 route_id: None,
+                client_ip: None,
                 client_bucket: None,
                 strategy_id: None,
                 upstream_id: None,
                 upstream_member_id: None,
+                upstream_used_id: None,
                 matched_rule_source: None,
                 matched_resource_id: None,
                 matched_rule_ordinal: None,
@@ -1841,6 +1902,7 @@ mod tests {
                 qname: Arc::from("example.com."),
                 qtype: 1,
                 qclass: 1,
+                answers: Vec::new(),
                 rcode: 0,
                 cancellation_reason: None,
                 outcome: OutcomeClass::Success,
@@ -1875,10 +1937,12 @@ mod tests {
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
+                    client_ip: None,
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
                     upstream_member_id: None,
+                    upstream_used_id: None,
                     matched_rule_source: None,
                     matched_resource_id: None,
                     matched_rule_ordinal: None,
@@ -1887,6 +1951,7 @@ mod tests {
                     qname: Arc::from("example.com."),
                     qtype: 1,
                     qclass: 1,
+                    answers: Vec::new(),
                     rcode: 0,
                     cancellation_reason: None,
                     outcome: OutcomeClass::Success,
@@ -1909,10 +1974,12 @@ mod tests {
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener-e"),
                 route_id: None,
+                client_ip: None,
                 client_bucket: None,
                 strategy_id: None,
                 upstream_id: None,
                 upstream_member_id: None,
+                upstream_used_id: None,
                 matched_rule_source: None,
                 matched_resource_id: None,
                 matched_rule_ordinal: None,
@@ -1921,6 +1988,7 @@ mod tests {
                 qname: Arc::from("example.com."),
                 qtype: 1,
                 qclass: 1,
+                answers: Vec::new(),
                 rcode: 0,
                 cancellation_reason: None,
                 outcome: OutcomeClass::Success,
@@ -1965,10 +2033,12 @@ mod tests {
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
+                    client_ip: None,
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
                     upstream_member_id: None,
+                    upstream_used_id: None,
                     matched_rule_source: None,
                     matched_resource_id: None,
                     matched_rule_ordinal: None,
@@ -1977,6 +2047,7 @@ mod tests {
                     qname: Arc::from("example.com."),
                     qtype: 1,
                     qclass: 1,
+                    answers: Vec::new(),
                     rcode: 0,
                     cancellation_reason: None,
                     outcome: OutcomeClass::Success,
@@ -2019,10 +2090,12 @@ mod tests {
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
+                    client_ip: None,
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
                     upstream_member_id: None,
+                    upstream_used_id: None,
                     matched_rule_source: None,
                     matched_resource_id: None,
                     matched_rule_ordinal: None,
@@ -2031,6 +2104,7 @@ mod tests {
                     qname: Arc::from("example.com."),
                     qtype: 1,
                     qclass: 1,
+                    answers: Vec::new(),
                     rcode: 0,
                     cancellation_reason: None,
                     outcome: OutcomeClass::Success,
@@ -2070,10 +2144,12 @@ mod tests {
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener"),
                 route_id: None,
+                client_ip: None,
                 client_bucket: None,
                 strategy_id: None,
                 upstream_id: None,
                 upstream_member_id: None,
+                upstream_used_id: None,
                 matched_rule_source: None,
                 matched_resource_id: None,
                 matched_rule_ordinal: None,
@@ -2082,6 +2158,7 @@ mod tests {
                 qname: Arc::from("example.com."),
                 qtype: 1,
                 qclass: 1,
+                answers: Vec::new(),
                 rcode: 0,
                 cancellation_reason: None,
                 outcome: OutcomeClass::Success,

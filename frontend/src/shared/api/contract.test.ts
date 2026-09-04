@@ -15,9 +15,7 @@ import { setMockAuthenticated } from "@/mocks/handlers";
 
 const forbiddenFields = new Set([
   "canonical_qname",
-  "qname",
   "request_digest",
-  "client_ip",
   "client_id",
   "secret_ref",
   "password_hash",
@@ -38,7 +36,7 @@ function collectKeys(value: unknown, result = new Set<string>()): Set<string> {
 }
 
 describe("management API fixtures", () => {
-  it("不包含契约禁止的敏感字段", () => {
+  it("所有投影都不包含契约禁止的内部字段", () => {
     const keys = collectKeys([
       overviewFixture,
       runtimeFixture,
@@ -49,6 +47,38 @@ describe("management API fixtures", () => {
       systemFixture,
     ]);
     forbiddenFields.forEach((field) => expect(keys.has(field), `${field} 不应出现在 fixture`).toBe(false));
+  });
+
+  it("只有 authenticated queries 投影包含完整查询详情", () => {
+    const nonQueryKeys = collectKeys([
+      overviewFixture,
+      runtimeFixture,
+      healthFixture,
+      statisticsFixture,
+      resourceFixture,
+      systemFixture,
+    ]);
+    ["qname", "client_ip", "answers"].forEach((field) => expect(nonQueryKeys.has(field)).toBe(false));
+
+    const available = queryPageFixture.items.find((item) => item.detail_status === "available");
+    expect(available).toMatchObject({
+      qname: "cached.example.",
+      client_name: "office",
+      client_ip: "192.0.2.10",
+      strategy_id: "default",
+      upstream_target_id: "public-dns",
+      upstream_used_id: "alidns",
+      answer_count: 2,
+      answers_truncated: false,
+    });
+    expect(available?.answers?.[0]).toEqual({
+      name: "cached.example.",
+      type: "CNAME",
+      ttl: 60,
+      data: "edge.example.",
+    });
+    const legacy = queryPageFixture.items.find((item) => item.detail_status === "legacy_redacted");
+    expect(legacy).toMatchObject({ qname: null, client_ip: null, answers: null });
   });
 
   it("query key 包含全部服务端参数", () => {

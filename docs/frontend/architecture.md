@@ -221,7 +221,7 @@ GET  /api/v1/system
 - 响应使用 JSON，时间统一为 UTC 的 RFC 3339 字符串；
 - ID、revision、resource version 等标识按 opaque string/number 处理，前端不从字符串中推断业务含义；
 - 统计和解析记录必须分页，服务端同时施加最大时间范围、页大小和过滤条件限制；
-- 解析记录查询默认返回脱敏摘要，需要明确字段契约后才展示更详细的内容；
+- authenticated 解析记录查询返回 canonical qname、有效 client IP、配置客户端/strategy、target/actual upstream 和有界 answer；历史脱敏行以 `legacy_redacted` 显式区分；
 - 响应不得包含密码、`password_hash`、SecretRef 实际值、代理凭据、完整认证头或未脱敏的内部路径；
 - 查询响应应带 `request_id` 和必要的 `runtime_revision`，便于页面展示数据采样时间和运行时一致性；
 - 资源和健康状态需要携带采样时间、状态和安全的原因分类，不能把后端原始错误堆栈直接返回浏览器。
@@ -320,7 +320,7 @@ vite build
 ### 阶段 C：只读查询页面
 
 - 按 API 契约实现 Dashboard、runtime、health、statistics、queries、resources 和 system；
-- 为解析记录实现服务端分页、筛选、排序和详情摘要；
+- 解析记录主表按“时间、请求、响应、路由、客户端”五列组织，小屏优先保留请求/响应/客户端，展开区展示完整有界 answer 与 target/actual upstream；cache 行明确标注为缓存生产来源；
 - 为统计和健康状态实现有界轮询，不引入实时推送；
 - 对每个模块补齐 API mock/fixture 和组件级测试。
 
@@ -329,7 +329,7 @@ vite build
 - `vite build` 成功并只产生 `frontend/dist`；
 - TypeScript 类型检查和组件测试通过；
 - 同源部署时静态路由回退、`/api` 分流和 `401` session 过期流程正确；
-- 查询接口的分页、时间范围、错误分类和敏感字段脱敏有后端契约测试；
+- 查询接口的分页、时间范围、错误分类、authenticated 详情白名单与内部字段 deny-list 有后端契约测试；
 - 浏览器不会向 DoH 路由发送管理查询，也不会在网络请求或本地存储中出现密码、token 或 SecretRef 实际值。
 
 配置写入和运行时控制不属于上述验收项。后续若启动该能力，应另行增加权限、审计、CSRF、并发 revision/conflict、命令幂等和失败回滚契约，再新增对应前端模块。

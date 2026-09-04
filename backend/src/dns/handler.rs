@@ -34,8 +34,10 @@ pub struct DnsResolutionObservation {
     pub matched_rule: Option<MatchedRuleObservation>,
     /// 策略选中的 direct upstream 或 group ID。该值只允许来自已校验配置。
     pub upstream_id: Option<Arc<str>>,
-    /// group 实际选中的顶层成员 ID；direct upstream 或 cache hit 时为空。
+    /// group 实际选中的顶层成员 ID；cache hit 时保留缓存生产请求的 member。
     pub upstream_member_id: Option<Arc<str>>,
+    /// 产生响应内容的 direct/member ID；cache hit 时表示缓存生产来源。
+    pub upstream_used_id: Option<Arc<str>>,
     pub source: StatsSource,
     pub cache_status: CacheStatus,
 }

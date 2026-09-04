@@ -97,7 +97,7 @@ describe("application routes", () => {
   it.each([
     ["/health", "健康状态"],
     ["/statistics", "解析统计"],
-    ["/queries", "解析详情"],
+    ["/queries", "解析记录"],
     ["/resources", "资源状态"],
     ["/system", "系统信息"],
   ])("有效 session 可加载只读页面 %s", async (path, heading) => {

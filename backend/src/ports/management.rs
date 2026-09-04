@@ -120,6 +120,32 @@ pub struct ResolveQueryRecord {
     pub cache: QueryCacheOutcome,
     pub policy_matched: bool,
     pub resource_matched: bool,
+    pub detail_status: QueryDetailStatus,
+    pub qname: Option<String>,
+    pub qtype: String,
+    pub client_name: Option<String>,
+    pub client_ip: Option<String>,
+    pub strategy_id: Option<String>,
+    pub upstream_target_id: Option<String>,
+    pub upstream_used_id: Option<String>,
+    pub answer_count: Option<u32>,
+    pub answers_truncated: Option<bool>,
+    pub answers: Option<Vec<QueryAnswer>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryDetailStatus {
+    Available,
+    LegacyRedacted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize)]
+pub struct QueryAnswer {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub ttl: u32,
+    pub data: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]

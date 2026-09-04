@@ -46,6 +46,10 @@ fn entry() -> Arc<CacheEntry> {
 
     Arc::new(CacheEntry {
         response: Arc::new(response),
+        upstream: crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+            "test-upstream",
+        )
+        .unwrap(),
         inserted_at: now,
         expires_at: now + Duration::from_secs(60),
         stale_until: None,
@@ -53,7 +57,7 @@ fn entry() -> Arc<CacheEntry> {
         producer_revision: crate::dns::RuntimeRevision(1),
         quality: CacheQuality::Complete,
         checksum: 1,
-        format_version: 1,
+        format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
     })
 }
 

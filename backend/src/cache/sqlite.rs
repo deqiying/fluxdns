@@ -20,7 +20,8 @@ use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
 const CACHE_SCHEMA_VERSION: u16 = 1;
-const CACHE_FORMAT_VERSION: u16 = 1;
+const CACHE_FORMAT_VERSION: u16 = 2;
+const LEGACY_CACHE_FORMAT_VERSION: u16 = 1;
 
 #[derive(Clone)]
 pub struct SqlitePersistentCacheStore {
@@ -152,10 +153,31 @@ impl SqlitePersistentCacheStore {
             let key_format_version = metadata
                 .try_get::<i64, _>("key_format_version")
                 .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
-            if schema_version != i64::from(CACHE_SCHEMA_VERSION)
-                || cache_format_version != i64::from(CACHE_FORMAT_VERSION)
-                || key_format_version != i64::from(CACHE_KEY_FORMAT_VERSION)
-            {
+            let current = schema_version == i64::from(CACHE_SCHEMA_VERSION)
+                && cache_format_version == i64::from(CACHE_FORMAT_VERSION)
+                && key_format_version == i64::from(CACHE_KEY_FORMAT_VERSION);
+            let provenance_upgrade = schema_version == i64::from(CACHE_SCHEMA_VERSION)
+                && cache_format_version == i64::from(LEGACY_CACHE_FORMAT_VERSION)
+                && key_format_version == i64::from(CACHE_KEY_FORMAT_VERSION);
+            if provenance_upgrade {
+                let mut transaction = pool
+                    .begin()
+                    .await
+                    .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+                sqlx::query("DELETE FROM cache_entries")
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+                sqlx::query("UPDATE cache_meta SET cache_format_version = ? WHERE singleton = 1")
+                    .bind(i64::from(CACHE_FORMAT_VERSION))
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
+            } else if !current {
                 pool.close().await;
                 return Err(SqlitePersistentCacheStoreBuildError::Schema);
             }
@@ -558,6 +580,11 @@ mod tests {
             version: CacheVersion(1),
             entry: Arc::new(CacheEntry {
                 response: Arc::new(response),
+                upstream:
+                    crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                        "test-upstream",
+                    )
+                    .unwrap(),
                 inserted_at: now,
                 expires_at: now + ttl,
                 stale_until: None,
@@ -565,7 +592,7 @@ mod tests {
                 producer_revision: RuntimeRevision(1),
                 quality: CacheQuality::Negative,
                 checksum,
-                format_version: 1,
+                format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
             }),
         }
     }
@@ -875,6 +902,48 @@ mod tests {
             .unwrap();
         drop(lock_connection);
         store.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn known_v1_cache_format_is_cleared_and_upgraded_for_provenance() {
+        let path = db_path();
+        let store = SqlitePersistentCacheStore::connect(&path, 16 * 1024)
+            .await
+            .unwrap();
+        store
+            .persist(
+                PersistentCacheBatch {
+                    records: vec![(key(b"legacy"), record(Duration::from_secs(60)))],
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cache_meta SET cache_format_version = 1 WHERE singleton = 1")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        store.shutdown(deadline()).await.unwrap();
+
+        let upgraded = SqlitePersistentCacheStore::connect(&path, 16 * 1024)
+            .await
+            .unwrap();
+        let format: i64 =
+            sqlx::query_scalar("SELECT cache_format_version FROM cache_meta WHERE singleton = 1")
+                .fetch_one(&upgraded.pool)
+                .await
+                .unwrap();
+        let entries: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_entries")
+            .fetch_one(&upgraded.pool)
+            .await
+            .unwrap();
+        assert_eq!(format, i64::from(CACHE_FORMAT_VERSION));
+        assert_eq!(entries, 0);
+
+        upgraded.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));

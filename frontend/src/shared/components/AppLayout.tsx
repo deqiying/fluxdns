@@ -11,7 +11,7 @@ const navigation = [
   { path: "/runtime", label: "运行时", short: "RT" },
   { path: "/health", label: "健康状态", short: "HL" },
   { path: "/statistics", label: "统计", short: "ST" },
-  { path: "/queries", label: "解析详情", short: "QY" },
+  { path: "/queries", label: "解析记录", short: "QY" },
   { path: "/resources", label: "资源", short: "RS" },
   { path: "/system", label: "系统", short: "SY" },
 ] as const;

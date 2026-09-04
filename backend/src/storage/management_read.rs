@@ -1,5 +1,6 @@
 //! Management API 使用的独立只读 SQLite adapter。
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -12,9 +13,10 @@ use thiserror::Error;
 
 use crate::dns::Deadline;
 use crate::ports::management::{
-    ManagementStorageRead, OverviewCounters, QueryCacheOutcome, QueryOutcome, QueryRcode,
-    QuerySort, QuerySource, QueryTransport, ResolveQuery, ResolveQueryRecord, ResolveQueryResult,
-    SortOrder, StatisticDimension, StatisticRecord, StatisticsQuery, StatisticsResult,
+    ManagementStorageRead, OverviewCounters, QueryAnswer, QueryCacheOutcome, QueryDetailStatus,
+    QueryOutcome, QueryRcode, QuerySort, QuerySource, QueryTransport, ResolveQuery,
+    ResolveQueryRecord, ResolveQueryResult, SortOrder, StatisticDimension, StatisticRecord,
+    StatisticsQuery, StatisticsResult,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -58,7 +60,9 @@ macro_rules! query_page_sql {
             "CASE cache_status WHEN 'fresh' THEN 'hit' WHEN 'stale' THEN 'stale' ",
             "WHEN 'miss' THEN 'miss' ELSE 'bypass' END AS cache, ",
             "CASE WHEN strategy_id IS NOT NULL OR matched_rule_source IS NOT NULL THEN 1 ELSE 0 END AS policy_matched, ",
-            "CASE WHEN matched_resource_id IS NOT NULL THEN 1 ELSE 0 END AS resource_matched ",
+            "CASE WHEN matched_resource_id IS NOT NULL THEN 1 ELSE 0 END AS resource_matched, ",
+            "canonical_qname, qtype, client_bucket, client_ip, strategy_id, upstream_id, ",
+            "upstream_used_id, answer_count, answers_truncated, answer_summary_json ",
             "FROM resolve_log WHERE transport IS NOT NULL AND source IN ('cache', 'hosts', 'rule_set', 'upstream') ",
             "AND (?1 IS NULL OR transport = ?1) AND (?2 IS NULL OR source = ?2) ",
             "AND (?3 IS NULL OR CASE rcode WHEN 0 THEN 'NOERROR' WHEN 1 THEN 'FORMERR' ",
@@ -243,6 +247,89 @@ impl SqliteManagementReadModel {
         let row_id = row
             .try_get::<i64, _>("id")
             .map_err(|_| read_error(operation))?;
+        let qtype = row
+            .try_get::<i64, _>("qtype")
+            .map_err(|_| read_error(operation))?;
+        let qtype = u16::try_from(qtype).map_err(|_| read_error(operation))?;
+        let persisted_answer_count = row
+            .try_get::<Option<i64>, _>("answer_count")
+            .map_err(|_| read_error(operation))?;
+        let (
+            detail_status,
+            qname,
+            client_name,
+            client_ip,
+            strategy_id,
+            upstream_target_id,
+            upstream_used_id,
+            answer_count,
+            answers_truncated,
+            answers,
+        ) = if let Some(answer_count) = persisted_answer_count {
+            let answer_count = u32::try_from(answer_count).map_err(|_| read_error(operation))?;
+            let qname = required_detail_text(row, "canonical_qname", operation)?;
+            if qname.starts_with("len:") {
+                return Err(read_error(operation));
+            }
+            let client_name = optional_detail_text(row, "client_bucket", operation)?;
+            let client_ip = optional_detail_text(row, "client_ip", operation)?
+                .map(|value| {
+                    value
+                        .parse::<IpAddr>()
+                        .map(|address| address.to_string())
+                        .map_err(|_| read_error(operation))
+                })
+                .transpose()?;
+            let strategy_id = optional_detail_text(row, "strategy_id", operation)?;
+            let upstream_target_id = optional_detail_text(row, "upstream_id", operation)?;
+            let upstream_used_id = optional_detail_text(row, "upstream_used_id", operation)?;
+            let answers_truncated = match row
+                .try_get::<Option<i64>, _>("answers_truncated")
+                .map_err(|_| read_error(operation))?
+            {
+                Some(0) => false,
+                Some(1) => true,
+                _ => return Err(read_error(operation)),
+            };
+            let answer_summary_json = required_detail_text(row, "answer_summary_json", operation)?;
+            if answer_summary_json.len() > 4_096 {
+                return Err(read_error(operation));
+            }
+            let answers = serde_json::from_str::<Vec<QueryAnswer>>(&answer_summary_json)
+                .map_err(|_| read_error(operation))?;
+            if answers.len() > 16
+                || answer_count < u32::try_from(answers.len()).unwrap_or(u32::MAX)
+                || (!answers_truncated
+                    && answer_count != u32::try_from(answers.len()).unwrap_or(u32::MAX))
+            {
+                return Err(read_error(operation));
+            }
+            (
+                QueryDetailStatus::Available,
+                Some(qname),
+                client_name,
+                client_ip,
+                strategy_id,
+                upstream_target_id,
+                upstream_used_id,
+                Some(answer_count),
+                Some(answers_truncated),
+                Some(answers),
+            )
+        } else {
+            (
+                QueryDetailStatus::LegacyRedacted,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
         Ok(ResolveQueryRecord {
             id: self.opaque_id(row_id),
             occurred_at_millis: row
@@ -277,6 +364,17 @@ impl SqliteManagementReadModel {
                 .try_get::<i64, _>("resource_matched")
                 .map_err(|_| read_error(operation))?
                 != 0,
+            detail_status,
+            qname,
+            qtype: query_type_name(qtype),
+            client_name,
+            client_ip,
+            strategy_id,
+            upstream_target_id,
+            upstream_used_id,
+            answer_count,
+            answers_truncated,
+            answers,
         })
     }
 }
@@ -414,6 +512,40 @@ fn outcome_name(value: QueryOutcome) -> &'static str {
     }
 }
 
+fn required_detail_text(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &'static str,
+    operation: &'static str,
+) -> Result<String, PortError> {
+    optional_detail_text(row, column, operation)?.ok_or_else(|| read_error(operation))
+}
+
+fn optional_detail_text(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &'static str,
+    operation: &'static str,
+) -> Result<Option<String>, PortError> {
+    let value = row
+        .try_get::<Option<String>, _>(column)
+        .map_err(|_| read_error(operation))?;
+    if value
+        .as_deref()
+        .is_some_and(|value| value.is_empty() || value == "<present>" || value == "<absent>")
+    {
+        return Err(read_error(operation));
+    }
+    Ok(value)
+}
+
+fn query_type_name(value: u16) -> String {
+    let record_type = hickory_proto::rr::RecordType::from(value);
+    if matches!(record_type, hickory_proto::rr::RecordType::Unknown(_)) {
+        format!("TYPE{value}")
+    } else {
+        record_type.to_string()
+    }
+}
+
 fn parse_transport(value: &str) -> Result<QueryTransport, PortError> {
     match value {
         "udp" => Ok(QueryTransport::Udp),
@@ -495,12 +627,13 @@ mod tests {
 
     use crate::dns::{CancelReason, Deadline, RuntimeRevision, TransportClass};
     use crate::ports::management::{
-        ManagementStorageRead, PageRequest, QueryCacheOutcome, QueryOutcome, QueryRcode, QuerySort,
-        QuerySource, QueryTransport, ResolveQuery, SortOrder, StatisticDimension, StatisticsQuery,
+        ManagementStorageRead, PageRequest, QueryCacheOutcome, QueryDetailStatus, QueryOutcome,
+        QueryRcode, QuerySort, QuerySource, QueryTransport, ResolveQuery, SortOrder,
+        StatisticDimension, StatisticsQuery,
     };
     use crate::ports::storage::{
-        ResolveEvent, ResolveRuleSource, StatsBatch, StatsDimension, StatsEvent, StatsSource,
-        StorageBackend, StorageOperation, StorageTransaction,
+        ResolveAnswer, ResolveEvent, ResolveRuleSource, StatsBatch, StatsDimension, StatsEvent,
+        StatsSource, StorageBackend, StorageOperation, StorageTransaction,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
     use crate::storage::{STORAGE_SCHEMA_VERSION, SqliteStorageBackend};
@@ -552,10 +685,12 @@ mod tests {
             request_digest: Arc::from("private-digest"),
             listener_id: Arc::from("doh-listener"),
             route_id: Some(Arc::from("private-route")),
+            client_ip: Some("192.0.2.25".parse().unwrap()),
             client_bucket: Some(Arc::from("private-client")),
             strategy_id: Some(Arc::from("default")),
             upstream_id: Some(Arc::from("remote")),
             upstream_member_id: None,
+            upstream_used_id: Some(Arc::from("remote")),
             matched_rule_source: Some(ResolveRuleSource::RuleSet),
             matched_resource_id: Some(Arc::from("geosite")),
             matched_rule_ordinal: Some(7),
@@ -564,6 +699,12 @@ mod tests {
             qname: Arc::from("private.example."),
             qtype: 1,
             qclass: 1,
+            answers: vec![ResolveAnswer {
+                name: "private.example.".to_owned(),
+                record_type: "A".to_owned(),
+                data: "192.0.2.80".to_owned(),
+                ttl: 60,
+            }],
             rcode: 2,
             cancellation_reason: Some(CancelReason::DeadlineExceeded),
             outcome: OutcomeClass::Timeout,
@@ -643,6 +784,17 @@ mod tests {
         assert_eq!(item.cache, QueryCacheOutcome::Bypass);
         assert!(item.policy_matched);
         assert!(item.resource_matched);
+        assert_eq!(item.detail_status, QueryDetailStatus::Available);
+        assert_eq!(item.qname.as_deref(), Some("private.example."));
+        assert_eq!(item.qtype, "A");
+        assert_eq!(item.client_name.as_deref(), Some("private-client"));
+        assert_eq!(item.client_ip.as_deref(), Some("192.0.2.25"));
+        assert_eq!(item.strategy_id.as_deref(), Some("default"));
+        assert_eq!(item.upstream_target_id.as_deref(), Some("remote"));
+        assert_eq!(item.upstream_used_id.as_deref(), Some("remote"));
+        assert_eq!(item.answer_count, Some(1));
+        assert_eq!(item.answers_truncated, Some(false));
+        assert_eq!(item.answers.as_ref().unwrap()[0].data, "192.0.2.80");
 
         read_model.pool.close().await;
         backend.shutdown(deadline()).await.unwrap();
@@ -664,6 +816,115 @@ mod tests {
                 .await
                 .is_err()
         );
+
+        read_model.pool.close().await;
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn pre_v4_detail_is_exposed_as_legacy_without_placeholders() {
+        let path = database_path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        backend
+            .migrate(STORAGE_SCHEMA_VERSION, deadline())
+            .await
+            .unwrap();
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&path);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO resolve_log \
+             (event_time_utc, duration_millis, request_id_digest, listener_id, client_bucket, \
+              strategy_id, canonical_qname, qtype, qclass, source, upstream_id, rcode, \
+              cache_status, runtime_revision, transport) \
+             VALUES ('0', 1, '<present>', 'listener', '<present>', '<present>', 'len:12', \
+                     28, 1, 'upstream', '<present>', 0, 'miss', 1, 'udp')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool.close().await;
+
+        let read_model = SqliteManagementReadModel::connect(&path).await.unwrap();
+        let result = read_model
+            .resolve_queries(
+                ResolveQuery {
+                    page: PageRequest {
+                        page: 1,
+                        page_size: 20,
+                    },
+                    transport: None,
+                    source: None,
+                    rcode: None,
+                    outcome: None,
+                    sort: QuerySort::OccurredAt,
+                    order: SortOrder::Desc,
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let item = &result.items[0];
+        assert_eq!(item.detail_status, QueryDetailStatus::LegacyRedacted);
+        assert_eq!(item.qtype, "AAAA");
+        assert_eq!(item.qname, None);
+        assert_eq!(item.client_name, None);
+        assert_eq!(item.client_ip, None);
+        assert_eq!(item.strategy_id, None);
+        assert_eq!(item.upstream_target_id, None);
+        assert_eq!(item.upstream_used_id, None);
+        assert_eq!(item.answers, None);
+
+        read_model.pool.close().await;
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn malformed_answer_json_fails_the_query_instead_of_faking_an_empty_result() {
+        let (path, backend, read_model) = seeded_database().await;
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(&path);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE resolve_log SET answer_summary_json = 'not-json'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let error = read_model
+            .resolve_queries(
+                ResolveQuery {
+                    page: PageRequest {
+                        page: 1,
+                        page_size: 20,
+                    },
+                    transport: None,
+                    source: None,
+                    rcode: None,
+                    outcome: None,
+                    sort: QuerySort::OccurredAt,
+                    order: SortOrder::Desc,
+                },
+                deadline(),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.class(),
+            crate::ports::PortErrorClass::Unavailable
+        ));
 
         read_model.pool.close().await;
         backend.shutdown(deadline()).await.unwrap();

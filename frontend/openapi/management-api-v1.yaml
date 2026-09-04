@@ -4,7 +4,8 @@ info:
   version: 1.0.0
   description: >-
     FluxDNS WebUI 的同源管理契约。除首次初始化、登录和登出外，首版接口均为只读查询；
-    API 不返回原始 qname、client IP、SecretRef、密码 hash、TLS material 或 DNS wire。
+    authenticated 查询记录包含 canonical qname、有效 client IP 和有界 answer 摘要，
+    API 仍不返回 SecretRef、密码 hash、TLS material 或 DNS wire。
 servers:
   - url: /api/v1
     description: 与 WebUI 同源的固定 API 前缀
@@ -244,8 +245,11 @@ paths:
     get:
       tags: [Queries]
       operationId: getQueries
-      summary: 读取脱敏解析详情
-      description: 返回安全投影，不包含 qname、request digest、client IP、route 文本或 DNS wire。
+      summary: 读取解析记录
+      description: >-
+        向 authenticated WebUI 用户返回完整 canonical qname、有效 client IP、配置 ID 与有界
+        answer 摘要；不包含 request digest、route 文本或 DNS wire。历史脱敏记录通过
+        detail_status=legacy_redacted 显式区分。
       parameters:
         - $ref: "#/components/parameters/Page"
         - $ref: "#/components/parameters/PageSize"
@@ -699,6 +703,23 @@ components:
     CacheOutcome:
       type: string
       enum: [hit, stale, miss, bypass]
+    QueryDetailStatus:
+      type: string
+      enum: [available, legacy_redacted]
+    QueryAnswer:
+      type: object
+      additionalProperties: false
+      required: [name, type, ttl, data]
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+        ttl:
+          type: integer
+          minimum: 0
+        data:
+          type: string
     QueryPage:
       allOf:
         - $ref: "#/components/schemas/PageMeta"
@@ -719,7 +740,9 @@ components:
       type: object
       additionalProperties: false
       required:
-        [id, occurred_at, duration_ms, transport, source, rcode, outcome, cache, policy_matched, resource_matched]
+        [id, occurred_at, duration_ms, transport, source, rcode, outcome, cache, policy_matched, resource_matched,
+         detail_status, qname, qtype, client_name, client_ip, strategy_id, upstream_target_id,
+         upstream_used_id, answer_count, answers_truncated, answers]
       properties:
         id:
           type: string
@@ -728,7 +751,7 @@ components:
           type: string
           format: date-time
         duration_ms:
-          type: number
+          type: integer
           minimum: 0
         transport:
           $ref: "#/components/schemas/Transport"
@@ -744,6 +767,38 @@ components:
           type: boolean
         resource_matched:
           type: boolean
+        detail_status:
+          $ref: "#/components/schemas/QueryDetailStatus"
+        qname:
+          type: [string, "null"]
+          description: canonical ASCII absolute name；历史脱敏记录为 null
+        qtype:
+          type: string
+          description: 标准 DNS 类型名；未知类型使用 TYPE####
+        client_name:
+          type: [string, "null"]
+          description: 命中的 clients 配置 ID
+        client_ip:
+          type: [string, "null"]
+          description: 按 listener/proxy 规则解析后的有效客户端 IPv4/IPv6，不含端口
+        strategy_id:
+          type: [string, "null"]
+        upstream_target_id:
+          type: [string, "null"]
+          description: live 请求的策略目标；cache hit 时为缓存生产请求的目标
+        upstream_used_id:
+          type: [string, "null"]
+          description: 实际产生响应的 direct/member；cache hit 时为缓存生产来源
+        answer_count:
+          type: [integer, "null"]
+          minimum: 0
+        answers_truncated:
+          type: [boolean, "null"]
+        answers:
+          type: [array, "null"]
+          maxItems: 16
+          items:
+            $ref: "#/components/schemas/QueryAnswer"
     ResourceSnapshot:
       type: object
       additionalProperties: false

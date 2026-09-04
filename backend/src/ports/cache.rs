@@ -9,6 +9,9 @@ use crate::dns::{CancelReason, Cancellation, CanonicalResponse, Deadline, Runtim
 
 use super::{PortError, PortFuture};
 
+/// 当前 cache entry payload 格式版本。
+pub const CACHE_ENTRY_FORMAT_VERSION: u16 = 2;
+
 /// 缓存策略的稳定标识。
 ///
 /// 该值只能来自配置编译后的受控标识，不能使用租户名、规则正文或其他自由文本。
@@ -109,6 +112,84 @@ impl fmt::Debug for CacheNamespace {
     }
 }
 
+/// 缓存来源使用的稳定 upstream 配置标识。
+///
+/// 该值只能由已经通过配置边界校验的 ID 构造，不能保存 URL、地址或 SecretRef。
+#[derive(Clone, Eq, Hash, PartialEq)]
+pub struct CacheUpstreamId(Arc<str>);
+
+impl CacheUpstreamId {
+    pub fn from_validated_config_id(value: &str) -> Result<Self, CacheUpstreamIdError> {
+        if value.is_empty() || value.len() > 128 {
+            return Err(CacheUpstreamIdError);
+        }
+        if !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!'))
+        {
+            return Err(CacheUpstreamIdError);
+        }
+        Ok(Self(Arc::from(value)))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for CacheUpstreamId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("CacheUpstreamId(REDACTED)")
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CacheUpstreamIdError;
+
+impl fmt::Display for CacheUpstreamIdError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("cache upstream id must be a validated configuration identifier")
+    }
+}
+
+impl std::error::Error for CacheUpstreamIdError {}
+
+/// 产生缓存响应的 upstream target 与实际 direct/member。
+#[derive(Clone, Eq, PartialEq)]
+pub struct CacheUpstreamProvenance {
+    target_id: CacheUpstreamId,
+    used_id: Option<CacheUpstreamId>,
+}
+
+impl CacheUpstreamProvenance {
+    pub fn new(target_id: CacheUpstreamId, used_id: Option<CacheUpstreamId>) -> Self {
+        Self { target_id, used_id }
+    }
+
+    pub fn direct_from_validated_config_id(value: &str) -> Result<Self, CacheUpstreamIdError> {
+        let id = CacheUpstreamId::from_validated_config_id(value)?;
+        Ok(Self::new(id.clone(), Some(id)))
+    }
+
+    pub fn target_id(&self) -> &CacheUpstreamId {
+        &self.target_id
+    }
+
+    pub fn used_id(&self) -> Option<&CacheUpstreamId> {
+        self.used_id.as_ref()
+    }
+}
+
+impl fmt::Debug for CacheUpstreamProvenance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CacheUpstreamProvenance")
+            .field("has_target", &true)
+            .field("has_used", &self.used_id.is_some())
+            .finish()
+    }
+}
+
 #[derive(Clone, Eq, Hash, PartialEq)]
 pub struct CacheKey {
     pub namespace: CacheNamespace,
@@ -146,6 +227,7 @@ pub enum CacheResponseClass {
 
 pub struct CacheEntry {
     pub response: Arc<CanonicalResponse>,
+    pub upstream: CacheUpstreamProvenance,
     pub inserted_at: Instant,
     pub expires_at: Instant,
     pub stale_until: Option<Instant>,
@@ -160,6 +242,7 @@ impl fmt::Debug for CacheEntry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CacheEntry")
+            .field("upstream", &self.upstream)
             .field("inserted_at", &self.inserted_at)
             .field("expires_at", &self.expires_at)
             .field("stale_until", &self.stale_until)
@@ -540,6 +623,8 @@ mod tests {
 
         CacheEntry {
             response: Arc::new(response),
+            upstream: CacheUpstreamProvenance::direct_from_validated_config_id("test-upstream")
+                .unwrap(),
             inserted_at: now,
             expires_at: now + std::time::Duration::from_secs(60),
             stale_until: None,
@@ -547,7 +632,7 @@ mod tests {
             producer_revision: RuntimeRevision(producer_revision),
             quality: CacheQuality::Complete,
             checksum: 1,
-            format_version: 1,
+            format_version: CACHE_ENTRY_FORMAT_VERSION,
         }
     }
 

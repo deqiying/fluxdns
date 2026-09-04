@@ -9,7 +9,7 @@ const capabilityLabels: Record<string, string> = {
   "read:runtime": "Runtime",
   "read:health": "健康状态",
   "read:statistics": "统计",
-  "read:queries": "解析详情",
+  "read:queries": "解析记录",
   "read:resources": "资源",
   "read:system": "系统",
 };

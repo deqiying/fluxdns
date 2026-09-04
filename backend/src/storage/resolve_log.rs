@@ -1,41 +1,55 @@
 use std::collections::VecDeque;
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::dns::{CancelReason, RuntimeRevision, TransportClass};
 use crate::ports::storage::{
-    ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource, StatsSource,
+    ResolveAnswer, ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource,
+    StatsSource,
 };
 use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 use crate::ports::{PortError, PortErrorClass};
 use crate::resource::ResourceVersion;
 
 const MAX_LISTENER_ID_BYTES: usize = 128;
+const MAX_CONFIGURED_ID_BYTES: usize = 128;
+const MAX_QNAME_BYTES: usize = 1_024;
+const MAX_ANSWER_NAME_BYTES: usize = 1_024;
+const MAX_ANSWER_TYPE_BYTES: usize = 32;
+const MAX_ANSWER_DATA_BYTES: usize = 512;
+const MAX_ANSWER_COUNT: usize = 16;
+const MAX_ANSWER_JSON_BYTES: usize = 4_096;
 
-/// 可持久化的解析详情摘要。
+/// 可持久化的解析详情记录。
 ///
-/// 只保留低基数标识和固定大小的请求摘要；原始域名、request digest、route/client/
-/// strategy 文本都不进入此结构，避免详情 writer 成为敏感数据的旁路。
+/// authenticated WebUI 需要展示完整查询上下文，因此保留 qname、有效 client IP、
+/// strategy/upstream ID 和有界 answer 摘要；`Debug` 仍不得打印这些请求级内容。
 #[derive(Clone)]
 pub struct ResolveDetailRecord {
     occurred_at: SystemTime,
     duration_millis: u64,
     listener_id: String,
     has_route: bool,
-    has_client_bucket: bool,
-    has_strategy: bool,
-    has_upstream: bool,
-    has_upstream_member: bool,
+    client_ip: Option<IpAddr>,
+    client_bucket: Option<String>,
+    strategy_id: Option<String>,
+    upstream_id: Option<String>,
+    upstream_member_id: Option<String>,
+    upstream_used_id: Option<String>,
     matched_rule_source: Option<ResolveRuleSource>,
     has_matched_resource: bool,
     matched_rule_ordinal: Option<u64>,
     resource_version: Option<ResourceVersion>,
     has_request_digest: bool,
     transport: TransportClass,
-    qname_byte_len: u16,
+    qname: String,
     qtype: u16,
     qclass: u16,
+    answers: Vec<ResolveAnswer>,
+    answer_count: u32,
+    answers_truncated: bool,
     rcode: u8,
     cancellation_reason: Option<CancelReason>,
     outcome: OutcomeClass,
@@ -47,6 +61,17 @@ pub struct ResolveDetailRecord {
 impl ResolveDetailRecord {
     pub(crate) fn from_event(event: ResolveEvent) -> Result<Self, PortError> {
         validate_listener_id(&event.listener_id)?;
+        validate_optional_configured_id(event.client_bucket.as_deref(), "client bucket")?;
+        validate_optional_configured_id(event.strategy_id.as_deref(), "strategy id")?;
+        validate_optional_configured_id(event.upstream_id.as_deref(), "upstream id")?;
+        validate_optional_configured_id(event.upstream_member_id.as_deref(), "upstream member id")?;
+        validate_optional_configured_id(event.upstream_used_id.as_deref(), "upstream used id")?;
+        if event.qname.is_empty() || event.qname.len() > MAX_QNAME_BYTES {
+            return Err(
+                PortError::new(PortErrorClass::InvalidInput, "resolve detail writer")
+                    .with_safe_context("invalid canonical qname"),
+            );
+        }
         if event.rcode > 0x0f {
             return Err(
                 PortError::new(PortErrorClass::InvalidInput, "resolve detail writer")
@@ -55,26 +80,32 @@ impl ResolveDetailRecord {
         }
         let duration_millis =
             u64::try_from(event.duration_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let qname_byte_len = u16::try_from(event.qname.len()).unwrap_or(u16::MAX);
+        let answer_count = u32::try_from(event.answers.len()).unwrap_or(u32::MAX);
+        let (answers, answers_truncated) = bounded_answers(event.answers)?;
 
         Ok(Self {
             occurred_at: event.occurred_at,
             duration_millis,
             listener_id: event.listener_id.to_string(),
             has_route: event.route_id.is_some(),
-            has_client_bucket: event.client_bucket.is_some(),
-            has_strategy: event.strategy_id.is_some(),
-            has_upstream: event.upstream_id.is_some(),
-            has_upstream_member: event.upstream_member_id.is_some(),
+            client_ip: event.client_ip,
+            client_bucket: event.client_bucket.map(|value| value.to_string()),
+            strategy_id: event.strategy_id.map(|value| value.to_string()),
+            upstream_id: event.upstream_id.map(|value| value.to_string()),
+            upstream_member_id: event.upstream_member_id.map(|value| value.to_string()),
+            upstream_used_id: event.upstream_used_id.map(|value| value.to_string()),
             matched_rule_source: event.matched_rule_source,
             has_matched_resource: event.matched_resource_id.is_some(),
             matched_rule_ordinal: event.matched_rule_ordinal,
             resource_version: event.resource_version,
             has_request_digest: !event.request_digest.is_empty(),
             transport: event.transport,
-            qname_byte_len,
+            qname: event.qname.to_string(),
             qtype: event.qtype,
             qclass: event.qclass,
+            answers,
+            answer_count,
+            answers_truncated,
             rcode: event.rcode,
             cancellation_reason: event.cancellation_reason,
             outcome: event.outcome,
@@ -100,20 +131,28 @@ impl ResolveDetailRecord {
         self.has_route
     }
 
-    pub const fn has_client_bucket(&self) -> bool {
-        self.has_client_bucket
+    pub const fn client_ip(&self) -> Option<IpAddr> {
+        self.client_ip
     }
 
-    pub const fn has_strategy(&self) -> bool {
-        self.has_strategy
+    pub fn client_bucket(&self) -> Option<&str> {
+        self.client_bucket.as_deref()
     }
 
-    pub const fn has_upstream(&self) -> bool {
-        self.has_upstream
+    pub fn strategy_id(&self) -> Option<&str> {
+        self.strategy_id.as_deref()
     }
 
-    pub const fn has_upstream_member(&self) -> bool {
-        self.has_upstream_member
+    pub fn upstream_id(&self) -> Option<&str> {
+        self.upstream_id.as_deref()
+    }
+
+    pub fn upstream_member_id(&self) -> Option<&str> {
+        self.upstream_member_id.as_deref()
+    }
+
+    pub fn upstream_used_id(&self) -> Option<&str> {
+        self.upstream_used_id.as_deref()
     }
 
     pub const fn matched_rule_source(&self) -> Option<ResolveRuleSource> {
@@ -141,8 +180,8 @@ impl ResolveDetailRecord {
         self.transport
     }
 
-    pub const fn qname_byte_len(&self) -> u16 {
-        self.qname_byte_len
+    pub fn qname(&self) -> &str {
+        &self.qname
     }
 
     pub const fn qtype(&self) -> u16 {
@@ -151,6 +190,18 @@ impl ResolveDetailRecord {
 
     pub const fn qclass(&self) -> u16 {
         self.qclass
+    }
+
+    pub fn answers(&self) -> &[ResolveAnswer] {
+        &self.answers
+    }
+
+    pub const fn answer_count(&self) -> u32 {
+        self.answer_count
+    }
+
+    pub const fn answers_truncated(&self) -> bool {
+        self.answers_truncated
     }
 
     pub const fn rcode(&self) -> u8 {
@@ -186,19 +237,24 @@ impl fmt::Debug for ResolveDetailRecord {
             .field("duration_millis", &self.duration_millis)
             .field("listener_id_byte_len", &self.listener_id.len())
             .field("has_route", &self.has_route)
-            .field("has_client_bucket", &self.has_client_bucket)
-            .field("has_strategy", &self.has_strategy)
-            .field("has_upstream", &self.has_upstream)
-            .field("has_upstream_member", &self.has_upstream_member)
+            .field("has_client_ip", &self.client_ip.is_some())
+            .field("has_client_bucket", &self.client_bucket.is_some())
+            .field("has_strategy", &self.strategy_id.is_some())
+            .field("has_upstream", &self.upstream_id.is_some())
+            .field("has_upstream_member", &self.upstream_member_id.is_some())
+            .field("has_upstream_used", &self.upstream_used_id.is_some())
             .field("matched_rule_source", &self.matched_rule_source)
             .field("has_matched_resource", &self.has_matched_resource)
             .field("matched_rule_ordinal", &self.matched_rule_ordinal)
             .field("resource_version", &self.resource_version)
             .field("has_request_digest", &self.has_request_digest)
             .field("transport", &self.transport)
-            .field("qname_byte_len", &self.qname_byte_len)
+            .field("qname_byte_len", &self.qname.len())
             .field("qtype", &self.qtype)
             .field("qclass", &self.qclass)
+            .field("answer_count", &self.answer_count)
+            .field("stored_answer_count", &self.answers.len())
+            .field("answers_truncated", &self.answers_truncated)
             .field("rcode", &self.rcode)
             .field("cancellation_reason", &self.cancellation_reason)
             .field("outcome", &self.outcome)
@@ -377,6 +433,60 @@ fn summary<W>(state: &ResolveLogState<W>, committed: u64) -> ResolveLogFlushSumm
     }
 }
 
+fn bounded_answers(source: Vec<ResolveAnswer>) -> Result<(Vec<ResolveAnswer>, bool), PortError> {
+    let source_len = source.len();
+    let mut truncated = source_len > MAX_ANSWER_COUNT;
+    let mut answers = Vec::with_capacity(source_len.min(MAX_ANSWER_COUNT));
+    for mut answer in source.into_iter().take(MAX_ANSWER_COUNT) {
+        truncated |= truncate_utf8(&mut answer.name, MAX_ANSWER_NAME_BYTES);
+        truncated |= truncate_utf8(&mut answer.record_type, MAX_ANSWER_TYPE_BYTES);
+        truncated |= truncate_utf8(&mut answer.data, MAX_ANSWER_DATA_BYTES);
+        answers.push(answer);
+        let json_len = serde_json::to_vec(&answers)
+            .map_err(|_| PortError::new(PortErrorClass::InvalidInput, "resolve detail writer"))?
+            .len();
+        if json_len > MAX_ANSWER_JSON_BYTES {
+            let _ = answers.pop();
+            truncated = true;
+            break;
+        }
+    }
+    Ok((answers, truncated))
+}
+
+fn truncate_utf8(value: &mut String, max_bytes: usize) -> bool {
+    if value.len() <= max_bytes {
+        return false;
+    }
+    let mut boundary = max_bytes;
+    while !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    true
+}
+
+fn validate_optional_configured_id(
+    value: Option<&str>,
+    field: &'static str,
+) -> Result<(), PortError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.is_empty()
+        || value.len() > MAX_CONFIGURED_ID_BYTES
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b'!'))
+    {
+        return Err(
+            PortError::new(PortErrorClass::InvalidInput, "resolve detail writer")
+                .with_safe_context(field),
+        );
+    }
+    Ok(())
+}
+
 fn validate_listener_id(listener_id: &str) -> Result<(), PortError> {
     if listener_id.is_empty()
         || listener_id.len() > MAX_LISTENER_ID_BYTES
@@ -400,7 +510,8 @@ mod tests {
 
     use crate::dns::{CancelReason, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
-        ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource, StatsSource,
+        ResolveAnswer, ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource,
+        StatsSource,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
     use crate::ports::{PortError, PortErrorClass};
@@ -456,10 +567,12 @@ mod tests {
             request_digest: Arc::from("request-digest-do-not-store"),
             listener_id: Arc::from(listener_id),
             route_id: Some(Arc::from("route-private-id")),
+            client_ip: Some("192.0.2.10".parse().unwrap()),
             client_bucket: Some(Arc::from("client-private-bucket")),
             strategy_id: Some(Arc::from("strategy-private-id")),
             upstream_id: Some(Arc::from("upstream-private-id")),
             upstream_member_id: Some(Arc::from("member-private-id")),
+            upstream_used_id: Some(Arc::from("used-private-id")),
             matched_rule_source: Some(ResolveRuleSource::RuleSet),
             matched_resource_id: Some(Arc::from("resource-private-id")),
             matched_rule_ordinal: Some(3),
@@ -468,6 +581,12 @@ mod tests {
             qname: Arc::from("private.example.test."),
             qtype: 1,
             qclass: 1,
+            answers: vec![ResolveAnswer {
+                name: "private.example.test.".to_owned(),
+                record_type: "A".to_owned(),
+                data: "192.0.2.20".to_owned(),
+                ttl: 60,
+            }],
             rcode: 2,
             cancellation_reason: Some(CancelReason::Shutdown),
             outcome: OutcomeClass::Success,
@@ -478,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn record_keeps_only_summary_fields_and_redacts_debug_output() {
+    fn record_keeps_query_details_and_redacts_debug_output() {
         let (sink, records) = CapturingWriter::new(0);
         let writer = ResolveLogWriter::new(true, 2, sink).unwrap();
         assert!(matches!(
@@ -489,12 +608,17 @@ mod tests {
 
         let record = records.lock().unwrap().pop().unwrap();
         assert_eq!(record.listener_id(), "listener-public");
-        assert_eq!(record.qname_byte_len(), 21);
+        assert_eq!(record.qname(), "private.example.test.");
         assert!(record.has_route());
-        assert!(record.has_client_bucket());
-        assert!(record.has_strategy());
-        assert!(record.has_upstream());
-        assert!(record.has_upstream_member());
+        assert_eq!(record.client_ip(), Some("192.0.2.10".parse().unwrap()));
+        assert_eq!(record.client_bucket(), Some("client-private-bucket"));
+        assert_eq!(record.strategy_id(), Some("strategy-private-id"));
+        assert_eq!(record.upstream_id(), Some("upstream-private-id"));
+        assert_eq!(record.upstream_member_id(), Some("member-private-id"));
+        assert_eq!(record.upstream_used_id(), Some("used-private-id"));
+        assert_eq!(record.answer_count(), 1);
+        assert!(!record.answers_truncated());
+        assert_eq!(record.answers()[0].data, "192.0.2.20");
         assert_eq!(
             record.matched_rule_source(),
             Some(ResolveRuleSource::RuleSet)
@@ -515,11 +639,40 @@ mod tests {
             "strategy-private-id",
             "upstream-private-id",
             "member-private-id",
+            "used-private-id",
             "resource-private-id",
             "private.example.test",
+            "192.0.2.10",
+            "192.0.2.20",
         ] {
             assert!(!debug.contains(sensitive));
         }
+    }
+
+    #[test]
+    fn answer_summary_preserves_total_and_enforces_entry_and_byte_limits() {
+        let mut detail = event("listener");
+        detail.answers = (0..17)
+            .map(|index| ResolveAnswer {
+                name: format!("answer-{index}.example."),
+                record_type: "TXT".to_owned(),
+                data: "界".repeat(300),
+                ttl: 60,
+            })
+            .collect();
+
+        let record = ResolveDetailRecord::from_event(detail).unwrap();
+        assert_eq!(record.answer_count(), 17);
+        assert!(record.answers_truncated());
+        assert!(!record.answers().is_empty());
+        assert!(record.answers().len() <= 16);
+        assert!(
+            record
+                .answers()
+                .iter()
+                .all(|answer| answer.data.len() <= 512)
+        );
+        assert!(serde_json::to_vec(record.answers()).unwrap().len() <= 4_096);
     }
 
     #[test]

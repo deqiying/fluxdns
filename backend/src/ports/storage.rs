@@ -1,6 +1,7 @@
 //! 业务存储、聚合统计和可选解析详情契约。
 
 use std::fmt;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
@@ -357,12 +358,16 @@ pub struct ResolveEvent {
     pub request_digest: Arc<str>,
     pub listener_id: Arc<str>,
     pub route_id: Option<Arc<str>>,
+    /// 已解析出的客户端 IP；是否命中已配置客户端由 `client_bucket` 区分。
+    pub client_ip: Option<IpAddr>,
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
     /// 策略选中的 direct upstream 或 group ID。
     pub upstream_id: Option<Arc<str>>,
     /// group 实际选中的顶层成员 ID。
     pub upstream_member_id: Option<Arc<str>>,
+    /// 实际产生响应内容的 direct/member ID；cache hit 时保留缓存生产来源。
+    pub upstream_used_id: Option<Arc<str>>,
     /// 命中规则的低基数来源，不包含 matcher 或规则文本。
     pub matched_rule_source: Option<ResolveRuleSource>,
     /// 命中 hosts/rule-set 的已验证资源 ID。
@@ -375,6 +380,8 @@ pub struct ResolveEvent {
     pub qname: Arc<str>,
     pub qtype: u16,
     pub qclass: u16,
+    /// 返回给客户端的 answer 摘要；持久化层负责执行有界裁剪。
+    pub answers: Vec<ResolveAnswer>,
     /// DNS header 的 4-bit RCODE；无 DNS response 时为 0，并由 outcome/failure 分类区分。
     pub rcode: u8,
     /// 请求结束时已记录的首个协作式取消原因。
@@ -383,6 +390,28 @@ pub struct ResolveEvent {
     pub source: StatsSource,
     pub cache_status: CacheStatus,
     pub runtime_revision: RuntimeRevision,
+}
+
+/// 一条可供查询记录展示的 DNS answer 摘要。
+#[derive(Clone, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ResolveAnswer {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub data: String,
+    pub ttl: u32,
+}
+
+impl fmt::Debug for ResolveAnswer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResolveAnswer")
+            .field("name_byte_len", &self.name.len())
+            .field("record_type", &self.record_type)
+            .field("data_byte_len", &self.data.len())
+            .field("ttl", &self.ttl)
+            .finish()
+    }
 }
 
 impl fmt::Debug for ResolveEvent {
@@ -394,10 +423,12 @@ impl fmt::Debug for ResolveEvent {
             .field("has_request_digest", &!self.request_digest.is_empty())
             .field("listener_id", &self.listener_id)
             .field("has_route_id", &self.route_id.is_some())
+            .field("has_client_ip", &self.client_ip.is_some())
             .field("has_client_bucket", &self.client_bucket.is_some())
             .field("has_strategy_id", &self.strategy_id.is_some())
             .field("has_upstream_id", &self.upstream_id.is_some())
             .field("has_upstream_member_id", &self.upstream_member_id.is_some())
+            .field("has_upstream_used_id", &self.upstream_used_id.is_some())
             .field("matched_rule_source", &self.matched_rule_source)
             .field(
                 "has_matched_resource_id",
@@ -409,6 +440,7 @@ impl fmt::Debug for ResolveEvent {
             .field("qname_byte_len", &self.qname.len())
             .field("qtype", &self.qtype)
             .field("qclass", &self.qclass)
+            .field("answer_count", &self.answers.len())
             .field("rcode", &self.rcode)
             .field("cancellation_reason", &self.cancellation_reason)
             .field("outcome", &self.outcome)
@@ -508,10 +540,12 @@ mod tests {
             request_digest: Arc::from("request-digest-do-not-log"),
             listener_id: Arc::from("listener-public-id"),
             route_id: Some(Arc::from("route-private-id")),
+            client_ip: Some("192.0.2.10".parse().unwrap()),
             client_bucket: Some(Arc::from("client-private-bucket")),
             strategy_id: Some(Arc::from("strategy-private-id")),
             upstream_id: Some(Arc::from("upstream-private-id")),
             upstream_member_id: Some(Arc::from("member-private-id")),
+            upstream_used_id: Some(Arc::from("used-private-id")),
             matched_rule_source: Some(ResolveRuleSource::RuleSet),
             matched_resource_id: Some(Arc::from("resource-private-id")),
             matched_rule_ordinal: Some(3),
@@ -520,6 +554,12 @@ mod tests {
             qname: Arc::from("private.example.test."),
             qtype: 1,
             qclass: 1,
+            answers: vec![ResolveAnswer {
+                name: "private.example.test.".to_owned(),
+                record_type: "A".to_owned(),
+                data: "192.0.2.20".to_owned(),
+                ttl: 60,
+            }],
             rcode: 5,
             cancellation_reason: Some(CancelReason::GroupPolicy),
             outcome: OutcomeClass::Success,
@@ -536,8 +576,11 @@ mod tests {
             "strategy-private-id",
             "upstream-private-id",
             "member-private-id",
+            "used-private-id",
             "resource-private-id",
             "private.example.test",
+            "192.0.2.10",
+            "192.0.2.20",
         ] {
             assert!(!debug.contains(sensitive));
         }

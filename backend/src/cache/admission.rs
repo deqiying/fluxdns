@@ -4,7 +4,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::dns::{CanonicalResponse, ResponseClass, RuntimeRevision};
-use crate::ports::cache::{CacheEntry, CacheQuality, CacheResponseClass};
+use crate::ports::cache::{
+    CACHE_ENTRY_FORMAT_VERSION, CacheEntry, CacheQuality, CacheResponseClass,
+    CacheUpstreamProvenance,
+};
 
 /// CacheStore 之外的准入参数；配置校验负责保证 failure TTL 为正数。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,9 +73,9 @@ pub fn canonical_checksum(response: &CanonicalResponse) -> Result<u64, CacheAdmi
 pub fn admit_response(
     policy: CacheAdmissionPolicy,
     response: Arc<CanonicalResponse>,
+    upstream: CacheUpstreamProvenance,
     now: Instant,
     producer_revision: RuntimeRevision,
-    format_version: u16,
 ) -> Result<CacheAdmissionOutcome, CacheAdmissionError> {
     let (response_class, quality, ttl) = match response.class() {
         ResponseClass::Positive => (
@@ -134,6 +137,7 @@ pub fn admit_response(
 
     Ok(CacheAdmissionOutcome::Accepted(Arc::new(CacheEntry {
         response,
+        upstream,
         inserted_at: now,
         expires_at,
         stale_until,
@@ -141,7 +145,7 @@ pub fn admit_response(
         producer_revision,
         quality,
         checksum,
-        format_version,
+        format_version: CACHE_ENTRY_FORMAT_VERSION,
     })))
 }
 
@@ -169,7 +173,7 @@ mod tests {
     use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
 
     use crate::dns::{CanonicalQuery, CanonicalResponse, RuntimeRevision};
-    use crate::ports::cache::{CacheQuality, CacheResponseClass};
+    use crate::ports::cache::{CacheQuality, CacheResponseClass, CacheUpstreamProvenance};
 
     use super::{
         CacheAdmissionOutcome, CacheAdmissionPolicy, CacheAdmissionRejection, admit_response,
@@ -199,6 +203,10 @@ mod tests {
         CanonicalResponse::response_with_answers(&query, [answer]).unwrap()
     }
 
+    fn upstream() -> CacheUpstreamProvenance {
+        CacheUpstreamProvenance::direct_from_validated_config_id("test-upstream").unwrap()
+    }
+
     #[test]
     fn admits_positive_with_origin_ttl_and_checksum() {
         let now = Instant::now();
@@ -207,9 +215,9 @@ mod tests {
         let outcome = admit_response(
             CacheAdmissionPolicy::default(),
             response,
+            upstream(),
             now,
             RuntimeRevision(7),
-            1,
         )
         .unwrap();
         let CacheAdmissionOutcome::Accepted(entry) = outcome else {
@@ -228,9 +236,9 @@ mod tests {
         let outcome = admit_response(
             CacheAdmissionPolicy::new(Duration::from_secs(7), Some(Duration::from_secs(20))),
             Arc::new(response_with_code(ResponseCode::NXDomain)),
+            upstream(),
             now,
             RuntimeRevision(1),
-            1,
         )
         .unwrap();
         let CacheAdmissionOutcome::Accepted(entry) = outcome else {
@@ -247,9 +255,9 @@ mod tests {
         let refused = admit_response(
             CacheAdmissionPolicy::default(),
             Arc::new(response_with_code(ResponseCode::Refused)),
+            upstream(),
             Instant::now(),
             RuntimeRevision(1),
-            1,
         )
         .unwrap();
         assert!(matches!(
@@ -266,9 +274,9 @@ mod tests {
         let zero_ttl = admit_response(
             CacheAdmissionPolicy::default(),
             Arc::new(CanonicalResponse::response_with_answers(&query, [answer]).unwrap()),
+            upstream(),
             Instant::now(),
             RuntimeRevision(1),
-            1,
         )
         .unwrap();
         assert!(matches!(

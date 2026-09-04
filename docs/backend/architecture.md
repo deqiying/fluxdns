@@ -231,7 +231,7 @@ enum UpstreamOutcome {
 | `CacheStore` | key/entry、TTL、CAS、single-flight 所需的最小操作；不因 resource revision 隐式全局失效 | Moka memory store |
 | `PersistentCacheStore` | cache format/version/checksum 校验，恢复失败只降级内存 | 独立 SQLite cache DB |
 | `StorageBackend` | migration、事务、健康状态、flush/shutdown | `sqlx` + SQLite |
-| `LogSink`/`ResolveEventSink` | 脱敏 structured event；详情可丢弃但必须可计数 | `tracing` + SQLite detail writer |
+| `LogSink`/`ResolveEventSink` | 服务日志保持脱敏；解析详情按显式开关保留受限字段，且可丢弃但必须可计数 | `tracing` + SQLite detail writer |
 | `StatsRecorder` | 有界维度、按日 upsert、checkpoint/补偿计数 | SQLite stats writer |
 | `MetricsSink` | 低基数 counter/gauge/histogram；exporter 可替换 | tracing/内存 metrics facade |
 
@@ -562,7 +562,7 @@ domain exact、suffix、regex、CIDR 等匹配结构在加载时编译，查询�
 
 `database.type`/`database.path` 是必填字段，即使 `dns.resolve_log.enable: false` 也必须打开数据库。v1 不提供关闭聚合统计的配置项：聚合统计默认开启，并且必须依赖该数据库持久化。prepare 阶段完成 SQLite 打开、schema migration、基本读写和目录权限检查；任何失败都是启动 `fatal`。
 
-storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 stats/detail/backend 生命周期顺序并暴露共享 recorder；`StorageRuntime` 已在 Application prepare 阶段按配置组装，并由 `DnsService` 注册受监督的周期 flush task，在 drain 后关闭 writer 和 backend。统计 pending batch/event 已有固定内存保护，超限时保留活动 epoch 并通过 Supervisor 升级 fatal；普通数据库不可用仍按 degraded 路径保留 pending 重试，SQLite 成功的有限操作可将状态恢复为 healthy，不可恢复 adapter 错误保持 failed。当前数据面已接入 transport/outcome 聚合及脱敏详情；Policy Core 通过可选 observation 同步提供 strategy/source/cache/client bucket、独立的策略目标 `upstream_id` 与实际顶层 `upstream_member_id`，以及不含规则文本和 matcher 的 matched rule/resource 摘要及 typed `ResourceVersion`。stats 继续优先聚合实际成员；SQLite schema v2 将目标、成员和规则资源摘要拆分落库，配置 ID 仍只保存存在性标记，资源版本在 SQLite 边界编码为 `epoch:revision`。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
+storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 stats/detail/backend 生命周期顺序并暴露共享 recorder；`StorageRuntime` 已在 Application prepare 阶段按配置组装，并由 `DnsService` 注册受监督的周期 flush task，在 drain 后关闭 writer 和 backend。统计 pending batch/event 已有固定内存保护，超限时保留活动 epoch 并通过 Supervisor 升级 fatal；普通数据库不可用仍按 degraded 路径保留 pending 重试，SQLite 成功的有限操作可将状态恢复为 healthy，不可恢复 adapter 错误保持 failed。当前数据面已接入 transport/outcome 聚合和可选解析详情；Policy Core 通过 observation 同步提供 strategy/source/cache/client bucket、策略目标 `upstream_id`、实际结果 `upstream_used_id` 及 matched rule/resource 摘要。cache hit 的 upstream 字段来自缓存生产请求保存的 provenance，而 strategy 始终表示当前请求。stats 只使用低基数维度；SQLite schema v4 在受限详情记录中保存 canonical qname、有效 client IP、真实配置 ID 和有界 answer JSON，资源版本仍编码为 `epoch:revision`。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
 
 Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `TelemetryWriter`：请求线程只做有界内存排队，低优先级日志可计数丢弃，warn/error 优先保留，输出失败按安全 `PortError` 分类并重排队，flush 遵守 deadline；`StructuredTelemetryOutput` 可将已脱敏事件写入真实文件或 stderr，Application 在启动配置校验后切换共享输出目标和 reloadable level filter。主输出和 fallback 同时失败时，writer 在进程内将 Telemetry health 置为 `Failed` 且不递归写故障输出；后续完整 flush 成功恢复 `Healthy`。typed final tracing subscriber、degraded health、Supervisor 周期 flush，以及正常/fatal task 退出的 final flush 均已接线。health registry 由进程级 Telemetry 持有，不随 Runtime revision 重建；Listener 在首启、endpoint 降级、成功 reload 和 shutdown 时依次发布 `Healthy`、`Degraded`、`Healthy` 和 `Stopping`。
 
@@ -578,7 +578,7 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 
 逻辑存储至少分为 `stats_daily`（按日/有界维度的聚合）、`stats_batch_ledger`（批次幂等与 checkpoint）和 `resolve_log`（可选详情）三类职责；物理表字段可随 SQLite schema version 演进，但不能把详情淘汰策略和统计批次 ledger 合并成一个不可区分的表。
 
-`resolve_log.enable` 只控制每次解析请求的详情记录。开启时由独立的有界 `ResolveLogWriter` 批量写入同一数据库，并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰；详情保存 DNS header RCODE、由 `OutcomeClass` 压缩的 failure class、首个协作式 cancellation reason，以及匹配时存在的资源 `epoch:revision`。队列满、数据库忙或硬上限命中时丢弃详情并递增 `dropped_detail_records`，DNS 和聚合统计都不能被拖慢；queue-full/sink 错误会限频发布 Storage degraded/gap，下一条 accepted 恢复 Healthy，主动策略丢弃不误报故障。关闭时不写详情表，但仍写聚合统计。
+`resolve_log.enable` 只控制每次解析请求的详情记录。开启时由独立的有界 `ResolveLogWriter` 批量写入同一数据库，并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰；详情保存 canonical qname、qtype/qclass、有效 client IP、配置客户端/strategy、upstream target/actual、最多 16 条且不超过 4096 bytes 的 answer 摘要，以及既有 RCODE、failure/cancellation 和资源 revision。队列满、数据库忙或硬上限命中时丢弃详情并递增 `dropped_detail_records`，DNS 和聚合统计都不能被拖慢；请求级内容不得进入 tracing 或 telemetry label。关闭时不写详情表，但仍写聚合统计。
 
 这里的“`resolve_log` 依赖数据库”表示详情的权威持久化后端是 `database`，不表示请求线程同步写库或在有界容量下承诺绝对无损；若未来要求无损审计，应另行定义持久化 spool/背压和磁盘配额，不能悄悄改变当前 `max_records` 语义。
 
@@ -593,7 +593,7 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 - HTTPS origin 使用 `Secure` 的 `__Host-fluxdns_session`，HTTP origin 使用不带 `Secure` 的开发/可信内网 Cookie；session 仅存于有界进程内存；
 - `webui.users` 可热更新并撤销外部变更前的 session，`enable/address/port/public_origin` 变化要求重启。
 
-前端接口以 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 为权威。当前后端已实现 setup、login、logout、session、统一 request ID/错误 envelope、请求限制、Origin/Fetch Metadata、内嵌静态资源和 `/api/*` 隔离，并通过注入的 Runtime/Telemetry snapshot 与 `ManagementStorageRead` port 提供 overview、runtime、health、statistics、queries、resources 和 system 七个只读端点。Management query handler 不引用 SQLx，SQLite adapter 使用独立只读 pool、绑定参数和固定查询模板；`/queries` 只返回 opaque ID 及枚举/布尔安全投影，不返回 qname、client IP、DNS wire 或配置路径。生产静态文件通过 `webui-embed` 编译进单个 binary；`frontend/dist` 仍是独立前端构建物。双平台发布与显式配置启动入口遵循[项目环境使用规范](../standards/environment-usage.md)。
+前端接口以 [`frontend/openapi/management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 为权威。当前后端已实现 setup、login、logout、session、统一 request ID/错误 envelope、请求限制、Origin/Fetch Metadata、内嵌静态资源和 `/api/*` 隔离，并通过注入的 Runtime/Telemetry snapshot 与 `ManagementStorageRead` port 提供 overview、runtime、health、statistics、queries、resources 和 system 七个只读端点。Management query handler 不引用 SQLx，SQLite adapter 使用独立只读 pool、绑定参数和固定查询模板；所有 authenticated WebUI 用户可从 `/queries` 读取 canonical qname、有效 client IP、配置客户端/strategy、upstream target/actual 和有界 answer，历史脱敏行以 `legacy_redacted` 返回空详情。接口仍不返回 request digest、route 文本、DNS wire、SecretRef 或配置路径。生产静态文件通过 `webui-embed` 编译进单个 binary；`frontend/dist` 仍是独立前端构建物。双平台发布与显式配置启动入口遵循[项目环境使用规范](../standards/environment-usage.md)。
 
 ## 14. 验证基线
 

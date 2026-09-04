@@ -18,9 +18,9 @@ use crate::config::BindTransport;
 use crate::dns::Deadline;
 use crate::observability::TelemetryWriter;
 use crate::ports::management::{
-    ManagementStorageRead, PageRequest, QueryCacheOutcome, QueryOutcome, QueryRcode, QuerySort,
-    QuerySource, QueryTransport, ResolveQuery, ResolveQueryRecord, SortOrder, StatisticDimension,
-    StatisticsQuery,
+    ManagementStorageRead, PageRequest, QueryCacheOutcome, QueryDetailStatus, QueryOutcome,
+    QueryRcode, QuerySort, QuerySource, QueryTransport, ResolveQuery, ResolveQueryRecord,
+    SortOrder, StatisticDimension, StatisticsQuery,
 };
 use crate::ports::telemetry::{Component as TelemetryComponent, ComponentHealthState};
 use crate::resource::{ResourceSourceKind, ResourceStaleStatus};
@@ -773,6 +773,26 @@ struct QueryRecord {
     cache: &'static str,
     policy_matched: bool,
     resource_matched: bool,
+    detail_status: &'static str,
+    qname: Option<String>,
+    qtype: String,
+    client_name: Option<String>,
+    client_ip: Option<String>,
+    strategy_id: Option<String>,
+    upstream_target_id: Option<String>,
+    upstream_used_id: Option<String>,
+    answer_count: Option<u32>,
+    answers_truncated: Option<bool>,
+    answers: Option<Vec<QueryAnswer>>,
+}
+
+#[derive(Serialize)]
+struct QueryAnswer {
+    name: String,
+    #[serde(rename = "type")]
+    record_type: String,
+    ttl: u32,
+    data: String,
 }
 
 #[derive(Serialize)]
@@ -854,6 +874,30 @@ fn query_record(value: ResolveQueryRecord) -> Result<QueryRecord, QueryError> {
         cache: query_cache_name(value.cache),
         policy_matched: value.policy_matched,
         resource_matched: value.resource_matched,
+        detail_status: match value.detail_status {
+            QueryDetailStatus::Available => "available",
+            QueryDetailStatus::LegacyRedacted => "legacy_redacted",
+        },
+        qname: value.qname,
+        qtype: value.qtype,
+        client_name: value.client_name,
+        client_ip: value.client_ip,
+        strategy_id: value.strategy_id,
+        upstream_target_id: value.upstream_target_id,
+        upstream_used_id: value.upstream_used_id,
+        answer_count: value.answer_count,
+        answers_truncated: value.answers_truncated,
+        answers: value.answers.map(|answers| {
+            answers
+                .into_iter()
+                .map(|answer| QueryAnswer {
+                    name: answer.name,
+                    record_type: answer.record_type,
+                    ttl: answer.ttl,
+                    data: answer.data,
+                })
+                .collect()
+        }),
     })
 }
 
@@ -1095,6 +1139,22 @@ mod tests {
                         cache: QueryCacheOutcome::Miss,
                         policy_matched: true,
                         resource_matched: false,
+                        detail_status: QueryDetailStatus::Available,
+                        qname: Some("example.test.".to_owned()),
+                        qtype: "A".to_owned(),
+                        client_name: Some("office".to_owned()),
+                        client_ip: Some("192.0.2.10".to_owned()),
+                        strategy_id: Some("default".to_owned()),
+                        upstream_target_id: Some("public-dns".to_owned()),
+                        upstream_used_id: Some("alidns".to_owned()),
+                        answer_count: Some(1),
+                        answers_truncated: Some(false),
+                        answers: Some(vec![crate::ports::management::QueryAnswer {
+                            name: "example.test.".to_owned(),
+                            record_type: "A".to_owned(),
+                            ttl: 60,
+                            data: "192.0.2.20".to_owned(),
+                        }]),
                     }],
                 })
             })
@@ -1237,14 +1297,34 @@ mod tests {
             cache: QueryCacheOutcome::Miss,
             policy_matched: true,
             resource_matched: false,
+            detail_status: QueryDetailStatus::Available,
+            qname: Some("example.test.".to_owned()),
+            qtype: "A".to_owned(),
+            client_name: Some("office".to_owned()),
+            client_ip: Some("192.0.2.10".to_owned()),
+            strategy_id: Some("default".to_owned()),
+            upstream_target_id: Some("public-dns".to_owned()),
+            upstream_used_id: Some("alidns".to_owned()),
+            answer_count: Some(1),
+            answers_truncated: Some(false),
+            answers: Some(vec![crate::ports::management::QueryAnswer {
+                name: "example.test.".to_owned(),
+                record_type: "A".to_owned(),
+                ttl: 60,
+                data: "192.0.2.20".to_owned(),
+            }]),
         })
         .unwrap();
         let value = serde_json::to_value(value).unwrap();
         assert_eq!(value["occurred_at"], "1970-01-01T00:00:00Z");
         assert_eq!(value["source"], "rule");
-        assert_eq!(value.as_object().unwrap().len(), 10);
+        assert_eq!(value.as_object().unwrap().len(), 21);
+        assert_eq!(value["detail_status"], "available");
+        assert_eq!(value["qname"], "example.test.");
+        assert_eq!(value["client_ip"], "192.0.2.10");
+        assert_eq!(value["upstream_used_id"], "alidns");
+        assert_eq!(value["answers"][0]["data"], "192.0.2.20");
         for forbidden in [
-            "qname",
             "canonical_qname",
             "client_bucket",
             "request_digest",
@@ -1284,7 +1364,6 @@ mod tests {
             assert!(body.is_object(), "{path}");
             let serialized = serde_json::to_string(&body).unwrap();
             for forbidden in [
-                "qname",
                 "canonical_qname",
                 "client_bucket",
                 "request_digest",
@@ -1293,6 +1372,11 @@ mod tests {
                 "secret_ref",
             ] {
                 assert!(!serialized.contains(forbidden), "{path}: {forbidden}");
+            }
+            if !path.starts_with("/api/v1/queries") {
+                for query_only in ["qname", "client_ip", "answers"] {
+                    assert!(!serialized.contains(query_only), "{path}: {query_only}");
+                }
             }
         }
 

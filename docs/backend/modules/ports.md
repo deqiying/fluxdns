@@ -109,7 +109,7 @@ DNS RCODE 不是 transport failure。`NXDOMAIN`、`REFUSED`、`SERVFAIL` 和 `TC
 - ResolveEventSink 接收可选详情，允许按明确策略丢弃并累计计数；
 - 两者不能共享会互相阻塞的单一 channel。
 
-`ManagementStorageRead` 只接受 UTC day、分页和有限 enum filter/sort，返回不含 qname、client identity、DNS wire、route 文本或数据库 row ID 的领域投影。HTTP handler 只依赖该 port；SQLite adapter 自行负责 opaque ID、固定 SQL 模板、绑定参数和 read-only 连接。
+`ManagementStorageRead` 只接受 UTC day、分页和有限 enum filter/sort。authenticated queries 投影允许返回 canonical qname、配置客户端名称、有效 client IP、strategy、target/actual upstream 与有界 answer；仍不返回 DNS wire、request digest、route 文本或数据库 row ID。HTTP handler 只依赖该 port；SQLite adapter 自行负责 opaque ID、固定 SQL 模板、绑定参数、历史 `legacy_redacted` 映射和 read-only 连接。
 
 ## 7. Telemetry 与副作用
 

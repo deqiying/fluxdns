@@ -6,7 +6,7 @@
 >
 > 适用范围：缓存 key、TTL、single-flight、memory adapter 和 persistence 生命周期
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联实现：`backend/src/cache/*`
 >
@@ -79,6 +79,7 @@ entry 包含：
 - 相关 resource fingerprints；
 - quality rank；
 - checksum 和 format version；
+- 缓存生产请求的 upstream target 与实际 direct/member provenance；
 - 上游 TC 时的 transport compatibility。
 
 resource fingerprint 用于诊断和显式清理，不是普通 lookup 的自动失效条件。
@@ -197,6 +198,7 @@ Moka adapter 复用上述 `CacheStore` contract，但把实际 entry 存储和�
 - `FilePersistentCacheStore` 通过 `PersistentCacheStore` port 暴露恢复、写入、容量维护和 shutdown；
 - 快照写入使用唯一临时文件、`sync_all` 和 `rename`，不在 DNS 请求路径执行；
 - 恢复验证 magic、format、record/payload/wire 大小、canonical response、checksum、response class 和过期时间；
+- entry format v2 在 payload 中保存已验证的 upstream target/used ID；文件快照中的 v1 entry 按 incompatible 隔离；
 - expired、corrupt、incompatible record 在 record 级隔离并计数；文件超出预算或整体 framing 损坏时拒绝恢复；
 - 超出 page budget 时按 inserted-at、version 和稳定 key 顺序淘汰最旧 entry。
 
@@ -206,6 +208,7 @@ Moka adapter 复用上述 `CacheStore` contract，但把实际 entry 存储和�
 
 - 使用独立 `SqlitePool`、独立 `cache_entries` schema 和 WAL/`synchronous=NORMAL` 初始化，不复用业务 Storage pool 或表；
 - `persist` 在单事务中合并已存在记录、复用 FDCP codec 做 canonical/checksum/expiry 校验、按 cache max-size budget 淘汰后重写 payload rows；
+- 已知 `schema=1/cache_format=1/key_format=1` 会事务化清空可再生旧 cache entry 并升级为 format 2；其他未知 metadata 组合继续拒绝打开；
 - `recover` 在 adapter 边界隔离过期、损坏和不兼容记录并返回 `CacheRecoverySummary`；
 - `recover`、`persist`、`maintain_capacity` 与 `shutdown` 复用同一串行 operation lock，完整数据库 future 和锁等待均受调用方 deadline 约束；数据库关闭后拒绝继续恢复/写入。
 
@@ -289,6 +292,7 @@ SQLite `cache_meta` 版本契约和主库/WAL/SHM `disk_usage()` 观测 API 已�
 - [x] 实现 Moka adapter；
 - [x] 实现独立 SQLite persistence 首轮 adapter；
 - [x] 在 SQLite cache DB 中记录并校验 schema/cache/key format metadata；
+- [x] 在 `CacheEntry` 中保存 producer upstream provenance，并贯通 miss、single-flight、fresh/stale、optimistic refresh、late result 和文件/SQLite persistence；
 - [x] 提供 SQLite 主库/WAL/SHM 磁盘占用观测 API；
 - [x] 实现有界 persistence writer 和有序 shutdown 生命周期；
 - [x] 验证 persistence adapter 停机阻塞超过 deadline 时 abort worker 并返回稳定 `Timeout`；

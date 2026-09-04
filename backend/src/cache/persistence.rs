@@ -15,8 +15,9 @@ use thiserror::Error;
 
 use crate::dns::{CanonicalQuery, CanonicalResponse, DnsMessageId, ResponseClass, RuntimeRevision};
 use crate::ports::cache::{
-    CacheEntry, CacheKey, CacheNamespace, CacheQuality, CacheRecord, CacheRecoverySummary,
-    CacheResponseClass, CacheVersion, PersistentCacheBatch, PersistentCacheStore,
+    CACHE_ENTRY_FORMAT_VERSION, CacheEntry, CacheKey, CacheNamespace, CacheQuality, CacheRecord,
+    CacheRecoverySummary, CacheResponseClass, CacheUpstreamId, CacheUpstreamProvenance,
+    CacheVersion, PersistentCacheBatch, PersistentCacheStore,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
@@ -25,6 +26,7 @@ const FORMAT_VERSION: u16 = 1;
 const MAX_RECORDS: u32 = 100_000;
 const MAX_RECORD_BYTES: u32 = 2 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u32 = 64 * 1024;
+const MAX_UPSTREAM_ID_BYTES: u32 = 128;
 const MAX_DNS_WIRE_BYTES: u32 = 65_535;
 const HEADER_BYTES: u64 = 10;
 
@@ -392,6 +394,22 @@ pub(super) fn encode_record(
         }
         _ => output.push(0),
     }
+    put_bytes(
+        &mut output,
+        record.entry.upstream.target_id().as_str().as_bytes(),
+        MAX_UPSTREAM_ID_BYTES,
+    )?;
+    match record.entry.upstream.used_id() {
+        Some(used_id) => {
+            output.push(1);
+            put_bytes(
+                &mut output,
+                used_id.as_str().as_bytes(),
+                MAX_UPSTREAM_ID_BYTES,
+            )?;
+        }
+        None => output.push(0),
+    }
     put_bytes(&mut output, &wire, MAX_DNS_WIRE_BYTES)?;
     Ok(output)
 }
@@ -457,7 +475,7 @@ pub(super) fn decode_record(
     let encoded = Arc::<[u8]>::from(reader.bytes(MAX_COMPONENT_BYTES)?.to_vec());
     let version = CacheVersion(reader.u64()?);
     let entry_format = reader.u16()?;
-    if entry_format != 1 {
+    if entry_format != CACHE_ENTRY_FORMAT_VERSION {
         return Err(CodecError::Incompatible);
     }
     let producer_revision = RuntimeRevision(reader.u64()?);
@@ -469,6 +487,12 @@ pub(super) fn decode_record(
     let stale_until = match reader.byte()? {
         0 => None,
         1 => Some(instant_from_unix_nanos(reader.u64()?, now).ok_or(CodecError::Corrupt)?),
+        _ => return Err(CodecError::Corrupt),
+    };
+    let target_id = decode_upstream_id(&mut reader)?;
+    let used_id = match reader.byte()? {
+        0 => None,
+        1 => Some(decode_upstream_id(&mut reader)?),
         _ => return Err(CodecError::Corrupt),
     };
     let wire = reader.bytes(MAX_DNS_WIRE_BYTES)?.to_vec();
@@ -503,6 +527,7 @@ pub(super) fn decode_record(
     };
     let entry = CacheEntry {
         response: Arc::new(response),
+        upstream: CacheUpstreamProvenance::new(target_id, used_id),
         inserted_at,
         expires_at,
         stale_until,
@@ -519,6 +544,12 @@ pub(super) fn decode_record(
             entry: Arc::new(entry),
         },
     ))
+}
+
+fn decode_upstream_id(reader: &mut Reader<'_>) -> Result<CacheUpstreamId, CodecError> {
+    let value = std::str::from_utf8(reader.bytes(MAX_UPSTREAM_ID_BYTES)?)
+        .map_err(|_| CodecError::Corrupt)?;
+    CacheUpstreamId::from_validated_config_id(value).map_err(|_| CodecError::Corrupt)
 }
 
 fn encode_namespace(output: &mut Vec<u8>, namespace: &CacheNamespace) -> Result<(), CodecError> {
@@ -758,6 +789,10 @@ mod tests {
         };
         let entry = CacheEntry {
             response,
+            upstream: CacheUpstreamProvenance::new(
+                CacheUpstreamId::from_validated_config_id("test-group").unwrap(),
+                Some(CacheUpstreamId::from_validated_config_id("test-member").unwrap()),
+            ),
             inserted_at: Instant::now(),
             expires_at,
             stale_until: None,
@@ -765,7 +800,7 @@ mod tests {
             producer_revision: RuntimeRevision(version),
             quality: CacheQuality::Negative,
             checksum,
-            format_version: 1,
+            format_version: CACHE_ENTRY_FORMAT_VERSION,
         };
         (
             key,
@@ -798,7 +833,33 @@ mod tests {
         assert_eq!(batch.records[0].0, item.0);
         assert_eq!(batch.records[0].1.version, item.1.version);
         assert_eq!(batch.records[0].1.entry.checksum, item.1.entry.checksum);
+        assert_eq!(
+            batch.records[0].1.entry.upstream.target_id().as_str(),
+            "test-group"
+        );
+        assert_eq!(
+            batch.records[0]
+                .1
+                .entry
+                .upstream
+                .used_id()
+                .map(CacheUpstreamId::as_str),
+            Some("test-member")
+        );
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn legacy_entry_without_upstream_provenance_is_incompatible() {
+        let now = Instant::now();
+        let item = record("legacy", 1, now + Duration::from_secs(30));
+        let mut payload = encode_record(&item.0, &item.1, now).unwrap();
+        let entry_format_offset = 1 + 2 + 4 + item.0.encoded.len() + 8;
+        payload[entry_format_offset..entry_format_offset + 2].copy_from_slice(&1_u16.to_be_bytes());
+        assert!(matches!(
+            decode_record(&payload, now),
+            Err(CodecError::Incompatible)
+        ));
     }
 
     #[tokio::test]

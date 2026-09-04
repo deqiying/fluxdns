@@ -257,7 +257,7 @@ SetupRequest:
 | `/runtime` | `RuntimeSnapshot::summary` 和安全的 bind 摘要 | 不返回 socket、文件句柄、凭据或完整配置 |
 | `/health` | `HealthRegistry` 与 management/storage 状态 | 只返回稳定组件名、状态和脱敏 message |
 | `/statistics` | `StorageReadModel` | 日期范围、维度和分页严格按 OpenAPI 上限校验 |
-| `/queries` | `StorageReadModel` 的安全投影 | 不返回 qname、client IP、DNS wire 或任意 SecretRef |
+| `/queries` | `StorageReadModel` 的 authenticated 投影 | 返回 canonical qname、有效 client IP、配置 ID 与有界 answer；不返回 request digest、route 文本、DNS wire 或 SecretRef |
 | `/resources` | `ResourceRegistrySnapshot::summary` | 不返回资源文件正文或远端凭据 |
 | `/system` | build metadata、启动时间、uptime、capabilities | 不返回进程环境变量和主机敏感路径 |
 
@@ -534,7 +534,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 
 ### 12.4 V2.3：只读 Management API
 
-实现状态：已完成。Runtime、Health、Resource 安全投影，Storage 只读 port/SQLite adapter，以及七个受 Session 保护的只读 handler 已接入；定向契约测试覆盖分页边界、日期上限、request ID 和敏感字段 deny-list。
+实现状态：已完成。Runtime、Health、Resource 安全投影，Storage 只读 port/SQLite adapter，以及七个受 Session 保护的只读 handler 已接入；Queries 已扩展为完整 authenticated 详情投影，并以 endpoint 字段白名单、全局内部字段 deny-list 和历史 `legacy_redacted` 测试约束边界。
 
 工作项：
 
@@ -650,7 +650,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 - [x] 通过 YAML source-preserving adapter spike；基于 CST 范围只替换 `webui.users`，不支持的表达明确失败。
 - [x] 确认 source config 与 snapshot journal 的恢复点和跨平台替换语义。
 - [x] 确认 management accept loop 失败触发进程优雅关闭。
-- [x] 确认 `/queries` 的安全投影继续禁止 qname、client IP 与 DNS wire。
+- [x] 确认 `/queries` 允许所有 authenticated WebUI 用户读取 canonical qname、有效 client IP 与有界 answer，仍禁止 DNS wire、request digest、route 文本和 SecretRef。
 - [x] 确认 release feature、前端构建入口和缺失 `dist` 时的失败方式。
 - [x] 确认 target/linker 来自当前平台原生 Rust toolchain，Windows/Linux x86_64 runner 分别执行；确认 `frontend/dist/`、默认 feature 后端 release、target-specific 内嵌构建物与 `deploy/` 的隔离及两个平台发布文件名。
 - [x] 确认 `dev.ps1 start` 的 `-ConfigPath` 必填行为，未传入时禁止启动且不回退默认路径；`status`/`stop` 保留 PID、启动时间和可执行文件身份校验。

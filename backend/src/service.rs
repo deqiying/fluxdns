@@ -22,7 +22,8 @@ use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
 use crate::ports::storage::{
-    ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource, StatsDimension,
+    ResolveAnswer, ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource,
+    StatsDimension,
 };
 use crate::ports::telemetry::{
     CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
@@ -1142,8 +1143,9 @@ impl ObservedDnsCore {
                             dimensions.push(dimension);
                         }
                         if let Some(upstream_id) = observation
-                            .upstream_member_id
+                            .upstream_used_id
                             .as_deref()
+                            .or(observation.upstream_member_id.as_deref())
                             .or(observation.upstream_id.as_deref())
                             .and_then(|id| {
                                 configured_id_from_validated(ConfiguredIdKind::Upstream, id)
@@ -1188,10 +1190,12 @@ impl ObservedDnsCore {
                 .route_id
                 .as_ref()
                 .map(|route| Arc::from(route.as_ref())),
+            client_ip: request.context.client.client_addr,
             client_bucket: observation.and_then(|value| value.client_bucket.clone()),
             strategy_id: observation.and_then(|value| value.strategy_id.clone()),
             upstream_id: observation.and_then(|value| value.upstream_id.clone()),
             upstream_member_id: observation.and_then(|value| value.upstream_member_id.clone()),
+            upstream_used_id: observation.and_then(|value| value.upstream_used_id.clone()),
             matched_rule_source: observation
                 .and_then(|value| value.matched_rule.as_ref())
                 .map(|matched| resolve_rule_source(matched.source)),
@@ -1208,6 +1212,7 @@ impl ObservedDnsCore {
             qname: Arc::from(question.name().to_ascii()),
             qtype: u16::from(question.query_type()),
             qclass: u16::from(question.query_class()),
+            answers: response_answers(result),
             rcode: response_header_rcode(result),
             cancellation_reason: request.context.meta.cancellation.reason(),
             outcome,
@@ -1269,6 +1274,24 @@ fn response_header_rcode(result: &Result<CoreOutcome, CoreError>) -> u8 {
     response_rcode(result)
         .map(|rcode| u8::try_from(rcode & 0x0f).expect("4-bit RCODE must fit u8"))
         .unwrap_or(0)
+}
+
+/// 从实际返回给客户端的 DNS message 提取 answer；有界裁剪由详情记录构造统一执行。
+fn response_answers(result: &Result<CoreOutcome, CoreError>) -> Vec<ResolveAnswer> {
+    let Ok(CoreOutcome::Response(response)) = result else {
+        return Vec::new();
+    };
+    response
+        .as_message()
+        .answers
+        .iter()
+        .map(|record| ResolveAnswer {
+            name: record.name.to_ascii(),
+            record_type: record.record_type().to_string(),
+            data: record.data.to_string(),
+            ttl: record.ttl,
+        })
+        .collect()
 }
 
 fn outcome_class(request: &DnsRequest, result: &Result<CoreOutcome, CoreError>) -> OutcomeClass {
@@ -2598,7 +2621,7 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RData, RecordType};
+    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpStream, UdpSocket};
 
@@ -2729,7 +2752,10 @@ mod tests {
                     route_id: None,
                     original_dns_id: Some(11),
                 },
-                client: ClientIdentity::default(),
+                client: ClientIdentity {
+                    client_addr: Some("192.0.2.10".parse().unwrap()),
+                    ..ClientIdentity::default()
+                },
                 transport: TransportCapabilities {
                     class: TransportClass::Datagram,
                     cache_compatibility: CacheCompatibilityKey(1),
@@ -2748,6 +2774,7 @@ mod tests {
             }),
             upstream_id: Some(Arc::from("primary")),
             upstream_member_id: None,
+            upstream_used_id: Some(Arc::from("primary")),
             source: StatsSource::Upstream,
             cache_status: CacheStatus::Miss,
         };
@@ -2760,7 +2787,16 @@ mod tests {
             resolve_detail_drops: Arc::new(ResolveDetailDropCounters::default()),
         };
 
-        let response = CanonicalResponse::empty_response(&query, ResponseCode::ServFail).unwrap();
+        let response = CanonicalResponse::response_with_code(
+            &query,
+            ResponseCode::ServFail,
+            [Record::from_rdata(
+                query.question().name().clone(),
+                60,
+                RData::A(A(Ipv4Addr::new(192, 0, 2, 20))),
+            )],
+        )
+        .unwrap();
         core.record(
             &request,
             &Ok(CoreOutcome::Response(response)),
@@ -2773,6 +2809,10 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].outcome, OutcomeClass::Failure);
         assert_eq!(events[0].rcode, 2);
+        assert_eq!(events[0].client_ip, Some("192.0.2.10".parse().unwrap()));
+        assert_eq!(events[0].upstream_used_id.as_deref(), Some("primary"));
+        assert_eq!(events[0].answers.len(), 1);
+        assert_eq!(events[0].answers[0].data, "192.0.2.20");
         assert_eq!(events[0].resource_version, Some(ResourceVersion::new(3, 5)));
         assert_eq!(events[1].outcome, OutcomeClass::Timeout);
         assert_eq!(
@@ -2780,6 +2820,7 @@ mod tests {
             Some(CancelReason::DeadlineExceeded)
         );
         assert_eq!(events[1].resource_version, Some(ResourceVersion::new(3, 5)));
+        assert!(events[1].answers.is_empty());
     }
 
     #[test]

@@ -161,8 +161,8 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * 读取脱敏解析详情
-         * @description 返回安全投影，不包含 qname、request digest、client IP、route 文本或 DNS wire。
+         * 读取解析记录
+         * @description 向 authenticated WebUI 用户返回完整 canonical qname、有效 client IP、配置 ID 与有界 answer 摘要；不包含 request digest、route 文本或 DNS wire。历史脱敏记录通过 detail_status=legacy_redacted 显式区分。
          */
         get: operations["getQueries"];
         put?: never;
@@ -325,6 +325,14 @@ export interface components {
         QueryOutcome: "answered" | "negative" | "timeout" | "rejected" | "failed";
         /** @enum {string} */
         CacheOutcome: "hit" | "stale" | "miss" | "bypass";
+        /** @enum {string} */
+        QueryDetailStatus: "available" | "legacy_redacted";
+        QueryAnswer: {
+            name: string;
+            type: string;
+            ttl: number;
+            data: string;
+        };
         QueryPage: components["schemas"]["PageMeta"] & {
             /** Format: date-time */
             sampled_at: string;
@@ -344,6 +352,23 @@ export interface components {
             cache: components["schemas"]["CacheOutcome"];
             policy_matched: boolean;
             resource_matched: boolean;
+            detail_status: components["schemas"]["QueryDetailStatus"];
+            /** @description canonical ASCII absolute name；历史脱敏记录为 null */
+            qname: string | null;
+            /** @description 标准 DNS 类型名；未知类型使用 TYPE#### */
+            qtype: string;
+            /** @description 命中的 clients 配置 ID */
+            client_name: string | null;
+            /** @description 按 listener/proxy 规则解析后的有效客户端 IPv4/IPv6，不含端口 */
+            client_ip: string | null;
+            strategy_id: string | null;
+            /** @description live 请求的策略目标；cache hit 时为缓存生产请求的目标 */
+            upstream_target_id: string | null;
+            /** @description 实际产生响应的 direct/member；cache hit 时为缓存生产来源 */
+            upstream_used_id: string | null;
+            answer_count: number | null;
+            answers_truncated: boolean | null;
+            answers: components["schemas"]["QueryAnswer"][] | null;
         };
         ResourceSnapshot: {
             /** Format: date-time */

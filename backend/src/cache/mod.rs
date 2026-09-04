@@ -90,6 +90,10 @@ mod persistence_contract_tests {
                 version: CacheVersion(version),
                 entry: Arc::new(CacheEntry {
                     response,
+                    upstream: crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                        "test-upstream",
+                    )
+                    .unwrap(),
                     inserted_at: Instant::now(),
                     expires_at,
                     stale_until: None,
@@ -97,7 +101,7 @@ mod persistence_contract_tests {
                     producer_revision: RuntimeRevision(version),
                     quality: CacheQuality::Negative,
                     checksum,
-                    format_version: 1,
+                    format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
                 }),
             },
         )
