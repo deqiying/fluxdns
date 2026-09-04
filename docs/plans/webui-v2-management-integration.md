@@ -12,7 +12,7 @@
 
 ## 1. 摘要
 
-FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 management server，并把前端产物与后端编译到同一个 Rust 可执行文件中。开发构建物继续分别保留在 `frontend/dist` 与 `backend/target`；发布脚本每次只将当前 Windows/Linux x86_64 平台带内嵌 WebUI 的一个二进制复制到 `deploy/`，双平台发布由两个原生 runner 分别执行。management server 独占 `webui.address:webui.port`，负责以下能力：
+FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 management server，并把前端产物与后端编译到同一个 Rust 可执行文件中。开发构建物继续分别保留在 `frontend/dist` 与 `backend/target`；本地发布脚本每次只将当前 Windows/Linux x86_64 平台带内嵌 WebUI 的一个二进制复制到 `deploy/`，自动 Release workflow 另由三个原生 runner 发布 Windows x86_64、Linux x86_64 与 macOS ARM64。management server 独占 `webui.address:webui.port`，负责以下能力：
 
 1. 路由并实现 `/api/v1/*` Management API；
 2. 托管编译后的 React SPA，且对非 API 的前端路由回退 `index.html`；
@@ -56,7 +56,7 @@ FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 managemen
 | 首次初始化 | `/initialize`、setup query、一次性初始化和 409 竞争处理已实现 | 需在真实浏览器复核初始化跳转 |
 | 配置写入 | source-preserving writer、双文件 journal、指纹 CAS 和启动恢复已实现 | 需在对应平台补完整 crash/替换矩阵 |
 | Storage 读取 port | 独立 `ManagementStorageRead` port 与 SQLite read-only adapter 已实现 | 继续保持 handler 不直接依赖 SQLx |
-| 发布产物布局 | 前端 `frontend/dist/`、默认 feature 后端 `backend/target/release/` 与当前平台内嵌构建物 `backend/target/<triple>/release/` 各自保留，`deploy/` 只存放发布二进制 | release 流程先构建前后端独立构建物，再将前端编译进当前平台 Rust binary；双平台由原生 runner 分别执行 |
+| 发布产物布局 | 前端 `frontend/dist/`、默认 feature 后端 `backend/target/release/` 与当前平台内嵌构建物 `backend/target/<triple>/release/` 各自保留，`deploy/` 只存放发布二进制 | 本地脚本生成 Windows/Linux 当前平台 binary；自动 Release workflow 在共享测试后由三个原生 runner 并行生成 Windows x86_64、Linux x86_64 与 macOS ARM64 binary |
 
 ### 2.3 现有约束
 
@@ -67,6 +67,7 @@ FluxDNS v2 应在不改变 DNS 数据面的前提下，引入独立的 managemen
 - `webui.enable: true` 且 `users` 被省略或显式为 `[]` 都是合法的初始化状态，不再是启动错误；v2 模型需要为 `users` 增加空列表默认值，并拒绝 `null`。
 - 前端独立构建物固定保留在 `frontend/dist/`，后端 Cargo 构建物固定保留在 `backend/target/`；不得通过 `CARGO_TARGET_DIR` 或复制操作让两者改用 `deploy/`。
 - `script/package-embedded.ps1` 每次只构建并复制当前 `Linux x86_64` 或 `Windows x86_64` 平台的一个内嵌资源二进制到 `deploy/`；双平台发布由对应原生 runner 各运行一次。`script/dev.ps1 start` 启动发布二进制时必须显式接收 `-ConfigPath`，不在脚本中预设配置文件路径，并由同一脚本提供 `status`/`stop` 生命周期管理。
+- `.github/workflows/release.yml` 只接受 `v*` tag；首个 job 验证 tag 提交属于 `main` 且版本一致，质量门禁通过后并行构建 Windows x86_64、Linux x86_64 与 macOS ARM64，最后统一创建 GitHub Release。
 - 本方案初始内容是实施拆分；当前代码状态以文档头部和第 12–13 节为准，历史基线表不应被解读为当前限制。
 
 ## 3. 目标与非目标
@@ -427,12 +428,13 @@ webui:
 | 内嵌 WebUI Cargo 构建物 | `backend/target/<triple>/release/` | 当前平台启用 `webui-embed` 的原生输出，保留完整 target 层级 |
 | Linux 发布二进制 | `deploy/fluxdns-linux-x86_64` | `x86_64-unknown-linux-gnu`，包含编译期内嵌 WebUI |
 | Windows 发布二进制 | `deploy/fluxdns-windows-x86_64.exe` | `x86_64-pc-windows-msvc`，包含编译期内嵌 WebUI |
+| 自动 Release 归档 | `deploy/fluxdns_<version>_<platform>_<arch>.<ext>` | workflow 生成 Windows x86_64 ZIP、Linux x86_64 tar.gz 和 macOS ARM64 tar.gz，归档内的二进制均包含编译期内嵌 WebUI |
 
-`deploy/` 只保存可分发的最终二进制，已由仓库 `.gitignore` 忽略；不提交其中的个人构建物。脚本每次只覆盖当前平台的最终文件，并使用同目录临时文件避免留下半成品；不会清理或移动 `frontend/dist/`、`backend/target/` 中的其他内容，也不会删除另一平台已经存在的发布物。
+`deploy/` 只保存可分发的最终二进制，已由仓库 `.gitignore` 忽略；不提交其中的个人构建物。本地脚本每次只覆盖当前平台的最终文件，并使用同目录临时文件避免留下半成品；自动 Release workflow 在各 runner 的临时工作区将目标文件放入 `deploy/` 后作为 artifact 汇总，不改变仓库中的本地产物。
 
 ### 10.2 一键打包脚本
 
-`script/package-embedded.ps1` 是仓库唯一的一键发布打包入口，使用 PowerShell 7，必须从仓库根目录或通过脚本绝对路径调用。脚本不安装额外工具，运行前应按[项目环境使用规范](../standards/environment-usage.md)准备 `pnpm`、当前 x86_64 平台 Rust target 及其原生 linker。双平台发布由 Windows 与 Linux 原生 runner 各运行一次，不要求单个 runner 准备跨平台 linker。
+`script/package-embedded.ps1` 是仓库的本地一键发布打包入口，使用 PowerShell 7，必须从仓库根目录或通过脚本绝对路径调用。脚本不安装额外工具，运行前应按[项目环境使用规范](../standards/environment-usage.md)准备 `pnpm`、当前 x86_64 平台 Rust target 及其原生 linker。双平台本地打包由 Windows 与 Linux 原生环境各运行一次，不要求单个环境准备跨平台 linker。
 
 release 构建顺序固定为：
 
@@ -443,7 +445,7 @@ release 构建顺序固定为：
 5. 对当前平台执行 `cargo build --locked --release --features webui-embed --target <triple>`；编译期检查 `index.html` 和 asset manifest 存在，并将整个 `dist` 作为只读字节嵌入 binary；
 6. 将当前平台 Cargo 输出原子复制为本节约定的一个 `deploy/` 文件名，保留前端、后端和内嵌 WebUI Cargo 构建物。
 
-脚本不得从 `build.rs` 隐式执行 `pnpm install` 或联网下载依赖，也不得自动安装 Rust target/linker。CI/发布流程在 Windows/Linux x86_64 原生 runner 上分别显式完成三阶段构建；这样依赖锁、失败位置、平台 toolchain 和缓存边界可审计。后端独立构建使用默认 feature，正式发布 profile 必须启用 `webui-embed`，并在缺少前端产物时失败。
+脚本不得从 `build.rs` 隐式执行 `pnpm install` 或联网下载依赖，也不得自动安装 Rust target/linker。自动 Release workflow 在 Ubuntu 共享质量门禁生成并测试 `frontend/dist`，随后由 Windows x86_64、Linux x86_64 与 macOS ARM64 原生 runner 显式构建 `webui-embed` release；这样依赖锁、失败位置、平台 toolchain 和缓存边界可审计。正式发布 profile 必须启用 `webui-embed`，并在缺少前端产物时失败。
 
 ### 10.3 开发服务管理脚本
 
@@ -560,7 +562,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 
 ### 12.6 V2.5：发布与文档收口
 
-实现状态：已完成脚本调整与 Windows 当前平台发布验收；Linux 原生发布与真实浏览器安全观察待环境执行。
+实现状态：已完成脚本调整、Windows 当前平台发布验收和三平台自动 Release workflow 配置；GitHub Actions 实跑、Linux/macOS 原生发布与真实浏览器安全观察待环境执行。
 
 工作项：
 
@@ -612,7 +614,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 | DNS 回归 | UDP、TCP、DoH 的既有 contract/smoke test 不受影响 |
 | shutdown | management 和 DNS 连接均在预算内 drain/终止，无悬挂任务 |
 
-2026-09-04 已在 Windows x86_64 实跑优化后的三阶段打包：`frontend/dist/`、`backend/target/release/fluxdns.exe`、`backend/target/x86_64-pc-windows-msvc/release/fluxdns.exe` 依次生成，最终只发布 `deploy/fluxdns-windows-x86_64.exe`；发布物与对应 target Cargo binary 的 SHA-256 一致，并已通过真实配置 `validate`。Windows release binary 的真实 HTTP smoke 已通过，并在临时移出 `frontend/dist/` 后确认嵌入 SPA 仍可用；使用显式 `-ConfigPath` 与 `-BinaryPath` 运行 `dev.ps1 start`、`status`、`stop`，已确认进程身份记录、Management API 可访问和停止后状态清理；真实 HTTP 响应已检查 SPA/API 的 CSP、`nosniff`、缓存策略、ETag，并验证 `If-None-Match` 返回 `304` 空 body；in-app browser 已检查 `/initialize` 深链接、表单必填校验和 Console。仍需在 Linux x86_64 原生 runner 补发布验收，并在支持的浏览器环境补充 Cookie 与 Network/Storage 观察；仅有 mock、handler 单测或 Windows 单平台构建不能作为这些待验项通过的依据。
+2026-09-04 已在 Windows x86_64 实跑优化后的三阶段打包：`frontend/dist/`、`backend/target/release/fluxdns.exe`、`backend/target/x86_64-pc-windows-msvc/release/fluxdns.exe` 依次生成，最终只发布 `deploy/fluxdns-windows-x86_64.exe`；发布物与对应 target Cargo binary 的 SHA-256 一致，并已通过真实配置 `validate`。Windows release binary 的真实 HTTP smoke 已通过，并在临时移出 `frontend/dist/` 后确认嵌入 SPA 仍可用；使用显式 `-ConfigPath` 与 `-BinaryPath` 运行 `dev.ps1 start`、`status`、`stop`，已确认进程身份记录、Management API 可访问和停止后状态清理；真实 HTTP 响应已检查 SPA/API 的 CSP、`nosniff`、缓存策略、ETag，并验证 `If-None-Match` 返回 `304` 空 body；in-app browser 已检查 `/initialize` 深链接、表单必填校验和 Console。三平台自动 Release workflow 已配置但尚未在 GitHub Actions 实跑；仍需补 Linux x86_64、macOS ARM64 原生发布验收，并在支持的浏览器环境补充 Cookie 与 Network/Storage 观察；仅有 mock、handler 单测、workflow 静态检查或 Windows 单平台构建不能作为这些待验项通过的依据。
 
 ## 14. 风险与控制
 
@@ -640,7 +642,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 7. 登录、session 恢复、退出、过期、Origin/Fetch Metadata、限流和 Cookie 属性通过真实浏览器验证。
 8. 所有只读 handler 经由稳定 query/snapshot 边界，不直接引用 SQLite 或 DNS transport 内部实现。
 9. 根 README、配置参考、后端/前端架构、模块文档、开发计划和示例已与真实实现同步。
-10. `script/package-embedded.ps1` 在 Windows/Linux x86_64 原生环境分别先保留前后端独立构建物，再生成当前平台一个内嵌 WebUI binary；两个 runner 的输出名称分别为 `deploy/fluxdns-windows-x86_64.exe` 和 `deploy/fluxdns-linux-x86_64`。`script/dev.ps1 start` 要求显式 `-ConfigPath`，并可通过 `status`/`stop` 管理已启动进程。
+10. `script/package-embedded.ps1` 在 Windows/Linux x86_64 原生环境分别先保留前后端独立构建物，再生成当前平台一个内嵌 WebUI binary；自动 Release workflow 在共享门禁后由 Windows x86_64、Linux x86_64 与 macOS ARM64 runner 并行生成发布物并统一创建 GitHub Release。`script/dev.ps1 start` 要求显式 `-ConfigPath`，并可通过 `status`/`stop` 管理已启动进程。
 
 ## 16. 实施前评审清单
 
@@ -652,5 +654,5 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 - [x] 确认 management accept loop 失败触发进程优雅关闭。
 - [x] 确认 `/queries` 允许所有 authenticated WebUI 用户读取 canonical qname、有效 client IP 与有界 answer，仍禁止 DNS wire、request digest、route 文本和 SecretRef。
 - [x] 确认 release feature、前端构建入口和缺失 `dist` 时的失败方式。
-- [x] 确认 target/linker 来自当前平台原生 Rust toolchain，Windows/Linux x86_64 runner 分别执行；确认 `frontend/dist/`、默认 feature 后端 release、target-specific 内嵌构建物与 `deploy/` 的隔离及两个平台发布文件名。
+- [x] 确认 target/linker 来自当前平台原生 Rust toolchain；本地脚本覆盖 Windows/Linux x86_64，自动 Release workflow 覆盖 Windows x86_64、Linux x86_64 与 macOS ARM64，并保持 `frontend/dist/`、target-specific 内嵌构建物与 `deploy/` 隔离。
 - [x] 确认 `dev.ps1 start` 的 `-ConfigPath` 必填行为，未传入时禁止启动且不回退默认路径；`status`/`stop` 保留 PID、启动时间和可执行文件身份校验。

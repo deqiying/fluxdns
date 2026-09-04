@@ -68,3 +68,5 @@ pwsh -File script/package-embedded.ps1
 脚本按三个阶段执行：先生成并保留 `frontend/dist/`，再使用默认 feature 生成 `backend/target/release/` 的后端独立构建物，最后只为当前 x86_64 平台构建 `webui-embed` binary，并复制为 `deploy/fluxdns-windows-x86_64.exe` 或 `deploy/fluxdns-linux-x86_64`。双平台发布由 Windows x86_64 与 Linux x86_64 runner 各执行一次，不要求单台开发机准备另一平台的 target/linker。
 
 `webui-embed` feature 与当前平台 target 的检查发生在前两阶段之后；检查或最终构建失败时，已经生成的前后端独立构建物仍会保留，但不会产生当前平台的新发布物。脚本不会移动或重定向 `frontend/dist/`、`backend/target/`，也不会自动安装 target/linker。发布二进制的启动、状态查看和停止入口及必填配置参数见[项目环境使用规范](../docs/standards/environment-usage.md)和[整合方案](../docs/plans/webui-v2-management-integration.md#103-开发服务管理脚本)。
+
+自动发布使用 [Release workflow](../.github/workflows/release.yml)：`main` 上的 `v*` tag 先经过前端测试/构建与 Rust 静态检查/测试，再由 Windows x86_64、Linux x86_64 和 macOS ARM64 runner 并行将同一份 `frontend/dist` 内嵌到三个发布二进制，最后统一创建带 SHA-256 校验文件的 GitHub Release。版本修改入口和 tag 推送顺序见[项目环境使用规范](../docs/standards/environment-usage.md)。

@@ -12,7 +12,7 @@
 
 ## 1. 结论
 
-当前前端已完成 F0–F5 的代码实现：工程骨架、setup 初始化、鉴权、应用壳和只读页面已接入后端 Management API；类型检查、29 项组件/contract tests、生产构建、`webui-embed` 静态资源测试和 Windows 当前平台打包已通过。真实浏览器同源 Network/Storage smoke 与 Linux 原生发布仍需在对应环境执行，因此文档不把 mock、handler 测试或 Windows 单平台构建描述为完整端到端证据。
+当前前端已完成 F0–F5 的代码实现：工程骨架、setup 初始化、鉴权、应用壳和只读页面已接入后端 Management API；类型检查、34 项组件/contract tests、生产构建、`webui-embed` 静态资源测试和 Windows 当前平台打包已通过，三平台自动 Release workflow 已配置。真实浏览器同源 Network/Storage smoke、GitHub Actions 发布与 Linux/macOS 原生发布仍需在对应环境执行，因此文档不把 mock、handler 测试、workflow 静态检查或 Windows 单平台构建描述为完整端到端证据。
 
 首版交付目标是一个通过同源 `/api/v1` 访问管理面的 React + TypeScript + Vite SPA，使用服务端 session Cookie，提供登录、Dashboard、Runtime、Health、Statistics、Queries、Resources 和 System 的只读视图。首版不把任何前端页面或请求接到 UDP/TCP/DoH 数据面，不读取 SQLite、配置文件或服务日志，也不新增配置编辑、reload/restart、缓存清理、资源刷新和 WebSocket/SSE。
 
@@ -289,7 +289,7 @@ pnpm run test
 pnpm run build
 ```
 
-2026-09-04 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、29 项 tests 通过（含初始化并发 `409` 后刷新 setup 状态并返回登录页）；Vite 生产构建成功，生产 `dist/` 不包含 MSW worker；后端 `webui-embed` 测试覆盖 SPA fallback、HEAD、ETag 和静态响应头。`package-embedded.ps1` 已在 Windows x86_64 按“前端独立构建 -> 默认 feature 后端 release -> 当前平台内嵌 WebUI release”顺序通过，`deploy/fluxdns-windows-x86_64.exe` 与对应 target Cargo binary 的 SHA-256 一致，并已通过真实配置 `validate`。MSW fixture smoke 覆盖 setup、初始化、登录、只读页面和登出，并断言未写入浏览器持久化存储；Windows release binary 的真实 HTTP smoke 已覆盖 SPA 200、setup required、未认证 401、初始化后 session/overview 200 和重复 setup 409，且在临时移出 `frontend/dist/` 后仍能返回嵌入 SPA；真实 HTTP 响应已检查 CSP、`nosniff`、缓存策略和 ETag/304 空 body；`dev.ps1` 已用显式 `-ConfigPath`/`-BinaryPath` 完成 `start`、`status`、`stop` 生命周期 smoke；in-app browser 已检查真实 `/initialize` 页面、表单校验和 Console。浏览器 Cookie/Network/Storage 观察与 Linux 原生发布尚未执行，不将这些边界写成已通过。
+2026-09-04 的当前证据为：`typecheck` 通过；Vitest 6 个 test files、34 项 tests 通过（含初始化并发 `409` 后刷新 setup 状态并返回登录页）；Vite 生产构建成功，生产 `dist/` 不包含 MSW worker；后端 `webui-embed` 测试覆盖 SPA fallback、HEAD、ETag 和静态响应头。`package-embedded.ps1` 已在 Windows x86_64 按“前端独立构建 -> 默认 feature 后端 release -> 当前平台内嵌 WebUI release”顺序通过，`deploy/fluxdns-windows-x86_64.exe` 与对应 target Cargo binary 的 SHA-256 一致，并已通过真实配置 `validate`。MSW fixture smoke 覆盖 setup、初始化、登录、只读页面和登出，并断言未写入浏览器持久化存储；Windows release binary 的真实 HTTP smoke 已覆盖 SPA 200、setup required、未认证 401、初始化后 session/overview 200 和重复 setup 409，且在临时移出 `frontend/dist/` 后仍能返回嵌入 SPA；真实 HTTP 响应已检查 CSP、`nosniff`、缓存策略和 ETag/304 空 body；`dev.ps1` 已用显式 `-ConfigPath`/`-BinaryPath` 完成 `start`、`status`、`stop` 生命周期 smoke；in-app browser 已检查真实 `/initialize` 页面、表单校验和 Console。Windows x86_64、Linux x86_64、macOS ARM64 自动 Release workflow 已配置但尚未在 GitHub Actions 实跑；浏览器 Cookie/Network/Storage 观察与 Linux/macOS 原生发布尚未执行，不将这些边界写成已通过。
 
 ### 10.2 Management API 集成验收
 
@@ -308,13 +308,13 @@ pnpm run build
 - 新文档只使用仓库内相对链接，不写个人绝对路径、凭据或本地产物；
 - 执行 `git diff --check`、链接目标检查和 `git status --short`；
 - 若后续实现改变 API、配置或静态托管契约，同步更新前端架构、后端架构/配置文档和相关测试说明；
-- 未实施部分必须保持明确边界：后端 Management API 已实现，但真实浏览器同源联调与 Linux 原生发布验收仍不能以 mock、handler 或 Windows 单平台构建替代。
+- 未实施部分必须保持明确边界：后端 Management API 已实现，但真实浏览器同源联调、GitHub Actions 发布与 Linux/macOS 原生发布验收仍不能以 mock、handler、workflow 静态检查或 Windows 单平台构建替代。
 
 ## 11. 风险、决策门和后续拆分
 
 | 风险/未决项 | 影响 | 处理方式 |
 | --- | --- | --- |
-| 真实浏览器与 Linux 原生环境尚未执行 | 无法把 Cookie/Storage 和 Linux 发布 binary 标记为最终验收通过 | 在具备浏览器能力和 Linux x86_64 原生 Rust toolchain 的环境补做；保留当前 mock、handler、embed 测试和 Windows 打包作为已有证据。 |
+| 真实浏览器、GitHub Actions 与 Linux/macOS 原生环境尚未执行 | 无法把 Cookie/Storage 和三平台自动发布标记为最终验收通过 | 推送满足条件的 release tag 实跑 workflow，并在 Linux x86_64、macOS ARM64 环境补做；保留当前 mock、handler、embed 测试和 Windows 打包作为已有证据。 |
 | 项目级 Node/pnpm 基线 | 已解决；工具版本与缓存路径可复现 | `mise.toml` 固定 Node.js 26.8.1 / pnpm 11.25.0，前端 manifest、lockfile 与环境规范同步维护。 |
 | `resolve_log` 含敏感 qname 与 client IP | authenticated 会话或本地数据库权限失守会暴露请求数据 | 仅 Queries DTO 允许显式白名单字段；保持 session 保护、有界保留和数据库文件权限，contract test 固定其他 endpoint 和内部字段 deny-list。 |
 | health/metrics 只有内部 registry | 页面可能直接依赖实现细节 | 后端增加只读 adapter/DTO；前端只依赖版本化 JSON。 |

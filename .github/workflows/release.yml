@@ -1,0 +1,299 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  quality:
+    name: Static checks and tests
+    runs-on: ubuntu-latest
+    outputs:
+      release_version: ${{ steps.release-version.outputs.release_version }}
+      rust_version: ${{ steps.tool-versions.outputs.rust_version }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Verify tagged commit belongs to main
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" "origin/main"; then
+            echo "Tag ${GITHUB_REF_NAME} does not point to a commit on main." >&2
+            exit 1
+          fi
+
+      - name: Read project tool versions
+        id: tool-versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          read_tool_version() {
+            awk -F '"' -v tool="$1" '$0 ~ "^" tool "[[:space:]]*=" { print $2; exit }' mise.toml
+          }
+
+          rust_version="$(read_tool_version rust)"
+          node_version="$(read_tool_version node)"
+          pnpm_version="$(read_tool_version pnpm)"
+          if [[ -z "${rust_version}" || -z "${node_version}" || -z "${pnpm_version}" ]]; then
+            echo "Cannot read Rust, Node.js, or pnpm version from mise.toml." >&2
+            exit 1
+          fi
+
+          echo "rust_version=${rust_version}" >> "${GITHUB_OUTPUT}"
+          echo "node_version=${node_version}" >> "${GITHUB_OUTPUT}"
+          echo "pnpm_version=${pnpm_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ steps.tool-versions.outputs.pnpm_version }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.tool-versions.outputs.node_version }}
+          package-manager-cache: false
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.tool-versions.outputs.rust_version }}
+          components: clippy, rustfmt
+          cache-workspaces: backend -> target
+          rustflags: ""
+
+      - name: Verify release version
+        id: release-version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_version="${GITHUB_REF_NAME#v}"
+          mapfile -t version_lines < VERSION
+          if [[ "${#version_lines[@]}" -ne 1 ]]; then
+            echo "VERSION must contain exactly one line." >&2
+            exit 1
+          fi
+          project_version="${version_lines[0]%$'\r'}"
+          if [[ ! "${project_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "VERSION must contain exactly one valid SemVer version." >&2
+            exit 1
+          fi
+          if [[ ! "${tag_version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag ${GITHUB_REF_NAME} must contain a valid SemVer version after the v prefix." >&2
+            exit 1
+          fi
+
+          metadata_file="${RUNNER_TEMP}/fluxdns-cargo-metadata.json"
+          cargo metadata --locked --no-deps --format-version 1 \
+            --manifest-path backend/Cargo.toml > "${metadata_file}"
+          cargo_version="$(node -e 'const fs = require("fs"); const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const pkg = metadata.packages.find((item) => item.name === "fluxdns"); if (!pkg) process.exit(2); process.stdout.write(pkg.version);' "${metadata_file}")"
+          frontend_version="$(node -p "require('./frontend/package.json').version")"
+
+          if [[ "${tag_version}" != "${project_version}" ]]; then
+            echo "Tag version ${tag_version} does not match VERSION ${project_version}." >&2
+            exit 1
+          fi
+          if [[ "${cargo_version}" != "${project_version}" ]]; then
+            echo "Backend package version ${cargo_version} does not match VERSION ${project_version}." >&2
+            exit 1
+          fi
+          if [[ "${frontend_version}" != "${project_version}" ]]; then
+            echo "Frontend package version ${frontend_version} does not match VERSION ${project_version}." >&2
+            exit 1
+          fi
+
+          echo "release_version=${project_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Check and test frontend
+        working-directory: frontend
+        run: |
+          pnpm run test
+          pnpm run build
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path backend/Cargo.toml -- --check
+
+      - name: Run Rust static checks
+        run: cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
+      - name: Test Rust backend
+        run: cargo test --manifest-path backend/Cargo.toml --locked --all-features
+
+      - name: Upload tested WebUI
+        uses: actions/upload-artifact@v6
+        with:
+          name: webui-dist
+          path: frontend/dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  build:
+    name: Build ${{ matrix.id }}
+    needs: quality
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            source_name: fluxdns.exe
+            platform_name: windows
+            architecture_name: x86_64
+            archive_extension: zip
+          - id: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            source_name: fluxdns
+            platform_name: linux
+            architecture_name: x86_64
+            archive_extension: tar.gz
+          - id: macos-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            source_name: fluxdns
+            platform_name: macos
+            architecture_name: arm64
+            archive_extension: tar.gz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.quality.outputs.rust_version }}
+          target: ${{ matrix.target }}
+          cache-workspaces: backend -> target
+          cache-key: ${{ matrix.id }}
+          rustflags: ""
+
+      - name: Download tested WebUI
+        uses: actions/download-artifact@v7
+        with:
+          name: webui-dist
+          path: frontend/dist
+
+      - name: Build embedded release binary
+        run: cargo build --manifest-path backend/Cargo.toml --locked --release --features webui-embed --target ${{ matrix.target }}
+
+      - name: Package and verify release binary
+        id: package
+        shell: pwsh
+        env:
+          ARCHITECTURE_NAME: ${{ matrix.architecture_name }}
+          ARCHIVE_EXTENSION: ${{ matrix.archive_extension }}
+          PLATFORM_NAME: ${{ matrix.platform_name }}
+          RELEASE_VERSION: ${{ needs.quality.outputs.release_version }}
+          SOURCE_NAME: ${{ matrix.source_name }}
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          $source = Join-Path "backend/target/$env:TARGET_TRIPLE/release" $env:SOURCE_NAME
+          if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+              throw "Release binary does not exist: $source"
+          }
+
+          $archiveBase = "fluxdns_$($env:RELEASE_VERSION)_$($env:PLATFORM_NAME)_$($env:ARCHITECTURE_NAME)"
+          $packageDirectory = Join-Path $env:RUNNER_TEMP "fluxdns-package/$archiveBase"
+          New-Item -ItemType Directory -Path $packageDirectory -Force | Out-Null
+          New-Item -ItemType Directory -Path deploy -Force | Out-Null
+          $destination = Join-Path $packageDirectory $env:SOURCE_NAME
+          Copy-Item -LiteralPath $source -Destination $destination -Force
+          Copy-Item -LiteralPath README.md -Destination $packageDirectory
+          Copy-Item -LiteralPath config-example.yaml -Destination $packageDirectory
+          if (Test-Path -LiteralPath LICENSE -PathType Leaf) {
+              Copy-Item -LiteralPath LICENSE -Destination $packageDirectory
+          }
+
+          if (-not $IsWindows) {
+              & chmod +x $destination
+              if ($LASTEXITCODE -ne 0) {
+                  throw "chmod failed with exit code $LASTEXITCODE"
+              }
+          }
+
+          $actualVersion = (& (Resolve-Path -LiteralPath $destination) --version | Out-String).Trim()
+          $expectedVersion = "fluxdns $env:RELEASE_VERSION"
+          if ($actualVersion -ne $expectedVersion) {
+              throw "Expected '$expectedVersion', got '$actualVersion'."
+          }
+
+          $assetPath = Join-Path deploy "$archiveBase.$env:ARCHIVE_EXTENSION"
+          if ($env:ARCHIVE_EXTENSION -eq "zip") {
+              Compress-Archive -Path (Join-Path $packageDirectory "*") -DestinationPath $assetPath -CompressionLevel Optimal
+          }
+          else {
+              & tar -C $packageDirectory -czf $assetPath .
+              if ($LASTEXITCODE -ne 0) {
+                  throw "tar failed with exit code $LASTEXITCODE"
+              }
+          }
+          if (-not (Test-Path -LiteralPath $assetPath -PathType Leaf)) {
+              throw "Release archive does not exist: $assetPath"
+          }
+          "asset_path=$assetPath" >> $env:GITHUB_OUTPUT
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: release-${{ matrix.id }}
+          path: ${{ steps.package.outputs.asset_path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v7
+        with:
+          pattern: release-*
+          path: deploy
+          merge-multiple: true
+
+      - name: Create checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd deploy && sha256sum fluxdns_*.zip fluxdns_*.tar.gz > checksums.txt)
+
+      - name: Create GitHub Release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${GITHUB_REF_NAME}" deploy/* \
+            --verify-tag \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

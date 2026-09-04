@@ -12,7 +12,7 @@
 
 ## 1. 结论
 
-FluxDNS 前端已实现 **React + TypeScript + Vite 的独立 SPA**，并已接入后端 Management Server 的 setup、登录、session、登出和只读查询 API。首次访问按 `setup -> session` 顺序判定，空用户配置进入 `/initialize`，完成初始化后使用服务端签发的 Cookie session；生产发布由 Management Server 将 `frontend/dist` 编译期内嵌到单个 Rust binary，浏览器通过同源 `/api/v1` 访问后端 JSON API。当前代码级构建、测试、`webui-embed` 静态资源验收和 Windows 当前平台打包已通过，真实浏览器同源 Network/Storage smoke 与 Linux 原生发布仍需在对应环境执行。
+FluxDNS 前端已实现 **React + TypeScript + Vite 的独立 SPA**，并已接入后端 Management Server 的 setup、登录、session、登出和只读查询 API。首次访问按 `setup -> session` 顺序判定，空用户配置进入 `/initialize`，完成初始化后使用服务端签发的 Cookie session；生产发布由 Management Server 将 `frontend/dist` 编译期内嵌到单个 Rust binary，浏览器通过同源 `/api/v1` 访问后端 JSON API。当前代码级构建、测试、`webui-embed` 静态资源验收和 Windows 当前平台打包已通过；三平台自动发布流程已配置，真实浏览器同源 Network/Storage smoke、GitHub Actions 发布与 Linux/macOS 原生发布仍需在对应环境执行。
 
 当前阶段的 WebUI 只负责：
 
@@ -84,7 +84,7 @@ FluxDNS 后端是单 Rust binary。DoH 入站继续使用独立的 HTTP/1.x pars
 - 开发环境由 Vite dev server 提供页面，并将 `/api` 代理到本地 management API；
 - 前端独立构建始终执行 `vite build`，生成并保留 `frontend/dist`；
 - 生产环境优先使用同源路径提供静态文件和 `/api/v1`，避免在浏览器中配置跨域 API 地址；
-- v2 发布由 `script/package-embedded.ps1` 先构建 `frontend/dist` 与默认 feature 的后端 release，再通过 `webui-embed` 将资源编译进当前平台的 Rust binary；一次调用只输出当前 Windows/Linux x86_64 平台的一个发布物，双平台由两个原生 runner 分别执行；
+- 本地 v2 发布由 `script/package-embedded.ps1` 先构建 `frontend/dist` 与默认 feature 的后端 release，再通过 `webui-embed` 将资源编译进当前 Windows/Linux x86_64 平台的 Rust binary；自动 Release workflow 复用共享质量门禁生成的同一份 `frontend/dist`，在 Windows x86_64、Linux x86_64 和 macOS ARM64 runner 并行构建；
 - `backend/target/release` 与 `backend/target/<triple>/release` 继续分别保留后端独立构建物和内嵌 WebUI Cargo 构建物，不与 `deploy/` 混用；
 - 生产环境不需要运行 Node.js 服务。
 
@@ -298,11 +298,11 @@ vite build
 
 静态资源使用带 hash 的文件名并设置长期缓存；`index.html` 使用短缓存或 no-cache。服务端需要为未知前端路由回退到 `index.html`，但 `/api/*` 请求必须交给 API router，不能回退成 HTML。
 
-发布采用“前端独立构建 -> 后端独立构建 -> 当前平台 `webui-embed` 编译期内嵌 -> `deploy/` 单个当前平台二进制”的方式；Windows/Linux x86_64 runner 分别执行后形成双平台发布。未知 SPA 路由回退 `index.html`，`/api/*` 始终交给 API router；开发阶段仍可直接使用 `frontend/dist` 做静态检查，但发布运行不依赖该目录或 Node.js。
+本地发布采用“前端独立构建 -> 后端独立构建 -> 当前平台 `webui-embed` 编译期内嵌 -> `deploy/` 单个当前平台二进制”的方式。自动 Release workflow 在共享测试通过后，将同一份已测试前端产物分别编译进 Windows x86_64、Linux x86_64 和 macOS ARM64 binary，再统一发布。未知 SPA 路由回退 `index.html`，`/api/*` 始终交给 API router；开发阶段仍可直接使用 `frontend/dist` 做静态检查，但发布运行不依赖该目录或 Node.js。
 
 ## 10. 实施顺序和验收
 
-当前阶段 A–D 已实现；`typecheck`、Vitest、生产构建、`webui-embed` 下的静态资源 fallback/HEAD/ETag 测试和 Windows 当前平台三阶段打包已通过。真实浏览器同源 API 的 Network/Storage smoke 和 Linux 原生发布需要在对应环境中补做，不能以 mock、handler 测试或 Windows 单平台构建替代。
+当前阶段 A–D 已实现；`typecheck`、Vitest、生产构建、`webui-embed` 下的静态资源 fallback/HEAD/ETag 测试和 Windows 当前平台三阶段打包已通过。三平台自动 Release workflow 已配置但尚未在 GitHub Actions 实跑；真实浏览器同源 API 的 Network/Storage smoke 与 Linux/macOS 原生发布需要在对应环境中补做，不能以 mock、handler 测试或 Windows 单平台构建替代。
 
 ### 阶段 A：工程初始化
 

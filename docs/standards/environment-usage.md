@@ -76,7 +76,7 @@ mise exec -- node --version
 | Rust 工具链缓存 | `backend/.cargo-home/` | 由 `mise.toml` 固定，已加入 `.gitignore` |
 | 前端依赖 | `frontend/node_modules/` | 已加入 `.gitignore` |
 | 前端构建物 | `frontend/dist/` | 已加入 `.gitignore` |
-| 发布二进制 | `deploy/` | 用于保存 `script/package-embedded.ps1` 生成的 Linux/Windows x86_64 内嵌资源二进制；已加入 `.gitignore` |
+| 发布二进制 | `deploy/` | 用于保存本地脚本或自动发布 workflow 生成的内嵌资源二进制；已加入 `.gitignore` |
 | Node 编译缓存 | `frontend/.cache/node-compile-cache/` | 由 `mise.toml` 固定，已加入 `.gitignore` |
 | npm 下载缓存 | `frontend/.cache/npm-cache/` | 由 `mise.toml` 固定，已加入 `.gitignore` |
 | pnpm metadata cache | `frontend/.cache/pnpm-cache/` | 由 `mise.toml` 与 `frontend/pnpm-workspace.yaml` 固定，已加入 `.gitignore` |
@@ -86,7 +86,13 @@ mise exec -- node --version
 
 前端和后端的独立构建物不得重定向到 `deploy/`：`frontend/dist/` 由 Vite 保留，使用默认 feature 的后端 release 保留在 `backend/target/release/`，带 `webui-embed` 的当前平台 Cargo 构建物保留在 `backend/target/<triple>/release/`。发布脚本只复制当前平台最终文件到 `deploy/`，不移动或清理上述目录。
 
-发布打包从仓库根目录执行 `pwsh -File script/package-embedded.ps1`。脚本先构建前端和默认 feature 的后端独立构建物，再检查 `webui-embed` feature 与当前 x86_64 平台 target，并生成一个内嵌 WebUI 的发布二进制；Windows 输出 `deploy/fluxdns-windows-x86_64.exe`，Linux 输出 `deploy/fluxdns-linux-x86_64`。双平台发布应在 Windows x86_64 与 Linux x86_64 原生 runner 上分别执行，不要求单次调用具备跨平台 target/linker；脚本不自动安装工具链。运行时使用 `pwsh -File script/dev.ps1 start -ConfigPath <path>`，配置路径为必填参数，不能省略或依赖脚本默认值；可用 `pwsh -File script/dev.ps1 status` 查看状态，或用 `pwsh -File script/dev.ps1 stop` 停止由脚本启动的进程。
+本地发布打包从仓库根目录执行 `pwsh -File script/package-embedded.ps1`。脚本先构建前端和默认 feature 的后端独立构建物，再检查 `webui-embed` feature 与当前 x86_64 平台 target，并生成一个内嵌 WebUI 的发布二进制；Windows 输出 `deploy/fluxdns-windows-x86_64.exe`，Linux 输出 `deploy/fluxdns-linux-x86_64`。两个平台应在各自原生环境执行，不要求单次调用具备跨平台 target/linker；脚本不自动安装工具链。
+
+自动发布由 `.github/workflows/release.yml` 负责，只接收 `v*` tag，并在首个 job 中确认 tag 对应提交属于 `main`，且 tag、Cargo package 与前端 package 版本均和根目录 `VERSION` 一致。共享质量门禁依次完成前端测试/生产构建、Rust format、Clippy 和全 feature 测试；通过后，Windows x86_64、Linux x86_64 与原生 macOS ARM64 runner 并行消费同一份已测试 `frontend/dist`，生成 `fluxdns_<version>_windows_x86_64.zip`、`fluxdns_<version>_linux_x86_64.tar.gz` 和 `fluxdns_<version>_macos_arm64.tar.gz`。归档内包含平台二进制、根 README 和配置示例，Unix 归档保留可执行权限；最后一个 job 汇总三个 artifact、生成 `checksums.txt` 并创建 GitHub Release。GitHub 的 tag trigger 不能直接与 branch filter 做 AND 组合，因此 `main` 归属检查是 workflow 的第一项发布门禁，非 `main` 提交上的 tag 不会进入测试、构建或发布阶段。
+
+根目录 `VERSION` 是项目当前发布版本的权威入口，仅保存一行不带 `v` 前缀的 SemVer。准备发布版本时，从 `main` 分支的仓库根目录执行 `pwsh -File script/set-version.ps1 <version>`。脚本接受 `0.2.0` 或 `v0.2.0` 形式，同步更新 `VERSION`、`backend/Cargo.toml`、`backend/Cargo.lock` 与 `frontend/package.json`，以 `chore(release): 发布 v<version>` 提交这四个文件，并为该提交创建本地 `v<version>` tag；已有同名 tag 或版本未变化时会在写入前停止。脚本默认检查 staged、unstaged 和 untracked 修改，只要工作树不干净，就会在写入前列出修改并停止。确认需要保留这些修改并继续时，显式传入 `-IgnoreUncommittedChanges`，例如 `pwsh -File script/set-version.ps1 0.2.0 -IgnoreUncommittedChanges`；该参数只跳过工作树保护，版本提交仍限定为上述四个路径，其他路径不会加入提交，但这四个文件中原有的修改会一并提交。脚本不会 push；检查提交和 tag 后，应依次推送 `main` 与对应的 `v<version>` tag，避免 tag workflow 在远端 `main` 尚未包含该提交时被门禁拒绝。
+
+运行时使用 `pwsh -File script/dev.ps1 start -ConfigPath <path>`，配置路径为必填参数，不能省略或依赖脚本默认值；可用 `pwsh -File script/dev.ps1 status` 查看状态，或用 `pwsh -File script/dev.ps1 stop` 停止由脚本启动的进程。
 
 ## 4. 工具安装边界
 

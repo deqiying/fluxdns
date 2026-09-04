@@ -85,7 +85,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 6 | DoH 安全与协议 | HTTP/2、TLS/PROXY/forwarded 完整矩阵 | 不可信输入 fail-closed；Host/SNI、GET/POST、错误分层有端到端证据 |
 | 7 | v1 最终验收 | conformance、基础压力、正常运行和完整 drain | 核心验收门槛有可复现记录；服务器宕机恢复不阻塞当前版本 |
 
-实施原则：坚持配置驱动，先完成正常运行主线和可用版本；小阶段只做增量改动和定向验证；大阶段结束时才做全量 `cargo fmt`、`cargo check`、`cargo clippy`、`cargo test`。WebUI Management Server 已作为独立 adapter 交付；Windows 当前平台发布已通过，后续只补充其真实浏览器、Linux 原生发布和故障矩阵验收，不把管理协议重新扩散到 DNS 数据面。DoT/DoQ、主动健康检查和外部 metrics exporter 仍属于后续范围。
+实施原则：坚持配置驱动，先完成正常运行主线和可用版本；小阶段只做增量改动和定向验证；大阶段结束时才做全量 `cargo fmt`、`cargo check`、`cargo clippy`、`cargo test`。WebUI Management Server 已作为独立 adapter 交付；Windows 当前平台发布已通过，三平台自动 Release workflow 已配置，后续补充真实 GitHub Actions 发布、浏览器、Linux/macOS 原生发布和故障矩阵验收，不把管理协议重新扩散到 DNS 数据面。DoT/DoQ、主动健康检查和外部 metrics exporter 仍属于后续范围。
 
 ## 4. 阶段摘要
 
