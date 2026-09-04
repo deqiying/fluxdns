@@ -20,7 +20,7 @@ v1 采用单进程、单 Rust binary、异步事件驱动架构：
 - DoH 入站当前使用仓库内有界 HTTP/1.x session/parser，TLS 使用 `rustls`；HTTP/2 adapter 后置；
 - DoH 上游使用 `reqwest` + `rustls`，按上游和 outbound 组合复用 client，并关闭默认 system proxy；
 - 内存缓存使用 `moka::sync::Cache`，持久化缓存使用独立 SQLite 文件；缓存通过 `CacheStore`/`PersistentCacheStore` 接口接入，具体后端可替换；
-- 解析日志和聚合统计使用 `sqlx` + SQLite，并通过相互独立的有界 writer 与 DNS 数据面隔离；聚合统计默认开启，因此 `database` 是启动必需依赖；
+- 解析完成事件先进入进程级统一有界 ingress，再由后台 dispatcher 分发给聚合统计、异步 cache commit 和可选详情投影；业务持久化使用 `sqlx` + SQLite，聚合统计默认开启，因此 `database` 是启动必需依赖；
 - 规则和 hosts 编译成按资源独立版本化的不可变 snapshot，资源注册表通过 `arc-swap` 原子发布，资源变化不再用全局 generation 直接清空缓存；
 - DNS 核心只依赖 canonical message、request context 和协议无关的 port，不直接依赖 UDP/TCP/DoH、HTTP client、SQLite 或 Moka；
 - WebUI 使用独立的 HTTP Management listener 和 `axum` router，认证、session、首次初始化与内嵌静态资源不进入 DoH 或 DNS 数据面。
@@ -83,6 +83,7 @@ backend/src/
 │   ├── inbound.rs          # 入站适配器与 response encoder 契约
 │   ├── exchange.rs         # 协议无关的上游 exchange/selection 契约
 │   ├── cache.rs            # cache store 与持久化 store 契约
+│   ├── observation.rs      # 单次解析完成事件与非阻塞发布契约
 │   ├── storage.rs          # resolve log、stats、migration 契约
 │   ├── telemetry.rs        # structured log、metrics 和 tracing facade 契约
 │   └── effects.rs          # clock、fetcher、secret、socket 等副作用
@@ -127,7 +128,8 @@ backend/src/
 │   ├── stats.rs
 │   ├── resolve_log.rs
 │   └── statistics.rs
-└── observability.rs
+├── observability.rs
+└── resolution.rs           # 进程级解析事件 dispatcher 与异步消费者
 ```
 
 `management` 使用独立的 Tokio TCP listener 和 HTTP router，不复用 DoH parser、route、TLS 或端口。其 accept loop 由同一个 `Supervisor` 持有，但单个管理请求只访问显式注入的认证、配置和只读查询依赖。
@@ -145,7 +147,7 @@ backend/src/
 | `version` | `config::model`、`config::validate` | schema version gate；不支持的版本直接拒绝启动 |
 | `work` | `config::load` | 路径归一化、工作目录创建、配置快照复制、资源文件基准 |
 | `database` | `config::validate` | `storage::sqlite` migration、聚合统计必需连接、解析明细和独立持久化边界 |
-| `logs` | `config::validate` | `observability` filter/输出；详细解析日志仍经有界 writer |
+| `logs` | `config::validate` | `observability` filter/输出；详细解析日志由统一解析事件异步投影 |
 | `webui` | `config::model`、`config::validate`、`management` | 独立 HTTP Management listener、浏览器 origin、认证/session 和首次初始化配置事务 |
 | `dns.cache`、`ttl_override`、`edns_client_subnet`、`resolve_log` | `config::validate`、策略编译器 | `cache`、`dns::handler`、`storage`；分别处理三态缓存、TTL/ECS 继承、聚合统计和详情日志容量 |
 | `listener` | `config::validate`、bind planner | `transport::udp/tcp/doh`；展开地址、DoH routes/endpoints、入口 hosts 和默认 strategy |
@@ -158,7 +160,7 @@ backend/src/
 
 配置解析固定为两阶段：第一阶段用 `yaml_serde` + Serde DTO 完成类型、未知字段和字段路径错误；第二阶段把 DTO 编译为 `ValidatedConfig`，执行 exactly-one-of、条件字段、引用/循环、继承、bind 和 SecretRef 校验。`webui` 在两阶段都必须经过处理，即使 `enable: false` 也不能走旁路或被丢弃。
 
-请求热路径固定为 `InboundAdapter → DnsCore → ResponseEncoder`；`DnsCore` 内部再执行 `client matcher → effective policy → rule/hosts/upstream → cache → canonical response`。配置继承、优先级和 exactly-one-of 约束以 [configuration-reference.md](configuration-reference.md) 为唯一契约来源，运行时不得重新解释或隐式补默认值。
+请求热路径固定为 `InboundAdapter → DnsCore → ResponseEncoder`；`DnsCore` 先生成不依赖逐规则匹配的 `PolicyContext` 并尝试 fast cache key v2，miss 后才执行 `RouteDecision`、hosts/upstream 和 resolved key 路径。Core 完成后在 transport 编码前至多无等待发布一个 `ResolutionEnvelope`。配置继承、优先级和 exactly-one-of 约束以 [configuration-reference.md](configuration-reference.md) 为唯一契约来源，运行时不得重新解释或隐式补默认值。
 
 ### 3.2 v1 范围与未来扩展边界
 
@@ -189,7 +191,7 @@ DNS 核心不得在公开接口中泄漏入站 HTTP parser、`reqwest`、`sqlx`�
 - `DnsExchange`/`UpstreamConnector`：发送 canonical query，返回结构化 `UpstreamOutcome`；
 - `SelectionPolicy`：实现 round-robin、parallel、failover 等成员选择，只持有协议无关的 connector handle/成员 ID，不持有具体 HTTP/QUIC client；
 - `CacheStore`/`PersistentCacheStore`：缓存读写、淘汰、恢复和显式清理；
-- `LogSink`/`ResolveEventSink`/`StatsRecorder`：服务事件、解析详情与聚合统计的写入端；
+- `LogSink`/`ResolutionEventSink`：服务事件与单次规范化解析完成事件的写入端；聚合统计和详情是后者的后台消费者；
 - `MetricsSink`：counter、gauge、histogram 等指标的记录端，exporter（Prometheus、OTel 或测试内存实现）不进入 DNS core；
 - `Clock`、`ResourceFetcher`、`SecretProvider`、`SocketFactory`：隔离时间、网络、秘密和系统 socket 副作用。
 
@@ -204,7 +206,7 @@ trait ResponseEncoder {
     async fn encode_response(
         &self,
         request: &DnsRequest,
-        response: CanonicalResponse,
+        response: Arc<CanonicalResponse>,
     ) -> Result<(), EncodeError>;
 }
 
@@ -231,8 +233,9 @@ enum UpstreamOutcome {
 | `CacheStore` | key/entry、TTL、CAS、single-flight 所需的最小操作；不因 resource revision 隐式全局失效 | Moka memory store |
 | `PersistentCacheStore` | cache format/version/checksum 校验，恢复失败只降级内存 | 独立 SQLite cache DB |
 | `StorageBackend` | migration、事务、健康状态、flush/shutdown | `sqlx` + SQLite |
-| `LogSink`/`ResolveEventSink` | 服务日志保持脱敏；解析详情按显式开关保留受限字段，且可丢弃但必须可计数 | `tracing` + SQLite detail writer |
-| `StatsRecorder` | 有界维度、按日 upsert、checkpoint/补偿计数 | SQLite stats writer |
+| `LogSink` | 服务日志保持脱敏，不接收原始 DNS wire 或请求级敏感内容 | `tracing` |
+| `ResolutionEventSink` | 每次请求至多一次有界 `try_publish`；队列满不阻塞 DNS，并显式累计 ingress gap | 进程级 resolution dispatcher |
+| `StatsRecorder` | 只由后台 dispatcher 更新有界维度，再按日 upsert、checkpoint/补偿计数 | SQLite stats writer |
 | `MetricsSink` | 低基数 counter/gauge/histogram；exporter 可替换 | tracing/内存 metrics facade |
 
 生产路径可以使用具体类型和静态分发；只在上述边界使用 trait object 或测试替身，避免为了“灵活”让每个 DNS 查询都承担动态分发成本。
@@ -386,9 +389,9 @@ struct RequestMeta {
 7. 初始化 `CacheFacade`、内存/持久化 cache store、transport capabilities/profiles 和策略索引；持久化 cache 初始化失败只标记 degraded 并回退内存，不改变数据库统计的必需性；
 8. 生成无 socket 的 `RuntimeSnapshot`/`PreparedRuntime` candidate 并完成 preflight；
 9. 创建全部 socket，任何 bind 失败都关闭已创建 socket 并退出；成功后组合成包含 `bound_endpoints` 的 `ActiveRuntime`，再原子发布首个 runtime；
-10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，由 supervisor 启动 UDP、TCP、DoH、Management、资源刷新、缓存持久化、统计 writer、详情日志 writer 和 telemetry 任务；`DnsService` 在等待退出信号时同时观察 task completion，网络 task 使用独立 scoped cancellation，显式 service reload 可将 DNS transport 切换到新的 active runtime。
+10. `Application` 将 `RuntimeCoordinator` 交给 `DnsService`，并启动进程级 resolution runtime；supervisor 启动 UDP、TCP、DoH、Management、资源刷新、缓存持久化、统计 writer、详情 SQLite writer 和 telemetry 任务。`DnsService` 在等待退出信号时同时观察 task completion，网络 task 使用独立 scoped cancellation，显式 service reload 可将 DNS transport 切换到新的 active runtime。
 
-停止时先停止接收新请求，再取消后台 refresh/accept，等待正在处理的请求到 `grace deadline`；随后排空历史/当前 Runtime 的 cache finalizer 与 persistence writer，并发布安全计数，再 flush 统计、详情日志和 SQLite，最后关闭 Telemetry 后退出。后台任务必须由 supervisor 持有，不能 detach 后丢失 panic 或错误。
+停止时先停止接收新请求，再取消后台 refresh/accept，等待正在处理的请求到 `grace deadline`；随后停止并排空 resolution ingress、cache commit 和详情 projection worker，释放未提交 single-flight lease，再排空历史/当前 Runtime 的 cache persistence finalizer，flush 统计与 SQLite，最后关闭 Telemetry 后退出。后台任务必须由 supervisor 或显式 process owner 持有，不能 detach 后丢失 panic 或错误。
 
 ### 5.1 supervisor 故障策略
 
@@ -401,7 +404,8 @@ supervisor 对 task 使用结构化生命周期和显式故障等级，不以“
 | 单个请求解析、上游超时或客户端取消 | `request-local`；记录结构化原因并结束该请求 | 不影响其他请求 |
 | 单个资源刷新失败、内容校验不匹配或解析失败 | `degraded`；保留该资源最后有效 snapshot，指数退避并封顶重试；超过 stale horizon 只升级告警，不自动清空或替换为半成品 | 继续使用旧资源；无旧 snapshot 的引用请求 fail-closed；不清空缓存 |
 | 资源刷新产生乱序结果 | `stale-result`；按 per-resource epoch/CAS 丢弃旧结果 | 不改变当前 runtime |
-| 详情 `resolve_log` writer 队列满/提交失败 | `degraded`；丢弃详情并累计计数，首次及 2 的幂次累计点发布 gap，下一条 accepted 恢复 Healthy | 不影响 DNS；不影响聚合统计 writer |
+| resolution ingress 队列满 | `degraded`；整条完成事件和 cache candidate 被丢弃，累计 `dropped` 并冻结首次 `gap_started_at` | 不影响 DNS 响应；该请求的 stats/detail 形成明确 gap，cache lease 由 RAII 释放 |
+| 详情 projection/SQLite writer 队列满或提交失败 | `degraded`；只累计 `detail_dropped`/`detail_failed` | 不影响 DNS、cache commit 或聚合统计 |
 | 聚合统计 writer 运行时数据库短暂不可写 | `degraded`；写入进程内补偿计数并重试，恢复后按序补写 | DNS 继续服务；进程崩溃前未落盘部分需报告为 persistence gap |
 | 聚合统计 pending batch/补偿计数达到固定内存保护上限 | `fatal`；停止接收新请求，执行有限 flush 后退出 | 避免数据库长期故障导致 OOM；退出前报告未持久化 gap |
 | cache persistence writer 失败或队列满 | `degraded`；失败批次计数后继续，队列满则丢弃本批，始终保留内存 cache；停机时汇总 persistence gap | 不影响 DNS；重启后可能丢失未持久化 cache |
@@ -421,22 +425,29 @@ DnsRequest { query: CanonicalQuery, context: RequestContext }
         │
 DnsCore：捕获当前 RuntimeSnapshot
         │
-client matcher → effective strategy → rule/hosts/upstream
-        ├─ hosts[] 本地命中 → canonical response（绕过 response cache）
-        └─ upstream target
+PolicyContext：client、strategy、namespace、ECS、policy/request fingerprint
         │
-选择唯一 cache namespace → CacheStore lookup
-        │ miss / optimistic refresh
-DnsExchange / group resolve → cache admission
+fast cache key v2 lookup ── fresh/stale hit ─────────┐
+        │ miss                                       │
+RouteDecision：rule / hosts / upstream target        │
+        ├─ hosts[] 本地回答（绕过 response cache）   │
+        └─ resolved key lookup / DnsExchange         │
+                       │ cache admission candidate   │
+                       └─────────────────────────────┤
         │
-canonical response → adapter-owned ResponseEncoder
+Arc<CanonicalResponse> + 一次 ResolutionEnvelope try_publish
         │
-返回客户端 + 独立的 ResolveEventSink / StatsRecorder
+adapter-owned ResponseEncoder → 返回客户端
+        └─ 后台 dispatcher → stats / cache commit / 可选 detail projection
 ```
+
+完整流程图见 [`dns-query-pipeline.svg`](dns-query-pipeline.svg)：
+
+![FluxDNS DNS 查询主链与异步观测流程](dns-query-pipeline.svg)
 
 UDP、TCP、DoH 只处理 framing 和传输限制；策略、缓存和上游逻辑只实现一次。TCP 使用两字节 DNS length framing。DoH 和 TCP 不受客户端 EDNS UDP payload size 限制；UDP 在发送时按当前请求重新编码并在必要时设置 TC。每个请求在进入 client matcher、策略和 cache lookup 之前只捕获一次当前 `RuntimeSnapshot`，避免同一个请求跨越多个不一致的资源组合。
 
-缓存命中不等于跳过策略计算：必须先按当前 snapshot 计算客户端身份、生效策略、ECS 和 cache namespace，再查找对应 entry。`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache；`upstreams[type=hosts]` 仍是 upstream connector，其结果按普通上游响应处理。普通上游缓存命中可以在 TTL 内继续返回旧答案；这属于显式接受的 TTL 内最终一致性，而不是使用旧策略重新匹配。group member ECS 只有在成员选择后才能确定，当前直接绕过缓存，不能用 group ID key 混用不同成员响应。
+fast lookup 只跳过逐规则 matcher，不跳过 client、strategy、namespace、ECS 和语义 fingerprint 计算。`PolicyContext` 的 policy fingerprint 覆盖会改变答案的已解析配置、hosts/rule 资源内容 hash 和选择安全性；日志、WebUI、database 等纯观测/管理字段不进入 key。相关策略或资源内容变化时，新请求自然使用新 key，旧 entry 不需要全局清空并按自身生命周期淘汰。`hosts[]` 的 listener/strategy 本地回答仍绕过 response cache；`upstreams[type=hosts]` 按普通上游响应处理。group member ECS 只有在成员选择后才能确定，当前回退完整 route/upstream 并继续绕过 response cache，避免用 group ID 混用不同成员响应。
 
 ## 7. 缓存实现
 
@@ -448,17 +459,19 @@ Moka 使用 `weigher` 计算 key、canonical wire、索引和元数据的计费�
 
 ### 7.2 entry 与过期
 
-缓存 entry 不保存客户端 DNS ID、HTTP header 或本地 UDP 截断 envelope，保存 canonical response、写入时间、TTL metadata、response class、产生该答案时的 `producer_revision` 以及各引用资源的版本指纹。版本字段用于诊断、命中解释和迁移，不直接成为命中失效条件。上游 TC entry 额外携带入口 transport，只允许同 transport 命中。正向/负向 TTL、`failure_ttl` 和 optimistic max age 由 per-entry expiry 实现；compare-and-replace 禁止 SERVFAIL/TC 覆盖未过期的完整回答。
+缓存 entry 不保存客户端 DNS ID、HTTP header 或本地 UDP 截断 envelope，保存共享的 canonical response、写入时间、TTL metadata、response class、产生该答案时的 `producer_revision` 和 upstream provenance。上游 TC entry 额外携带入口 transport，只允许同 transport 命中。正向/负向 TTL、`failure_ttl` 和 optimistic max age 由 per-entry expiry 实现；compare-and-replace 禁止 SERVFAIL/TC 覆盖未过期的完整回答。
 
-缓存 key 不包含全局 config generation、资源 generation 或整个 `RuntimeSnapshot` revision。除 pool namespace 外，key 至少包含规范化的 QNAME、QTYPE、QCLASS、会改变答案的 DNS flags、生效 ECS、策略标识和 transport compatibility。任一小规则或 hosts 资源变化都不会自动清空全部 cache；entry 按自身 TTL、负缓存 TTL、`failure_ttl` 和 optimistic `max_age` 自然淘汰。无法在 lookup 前确定的 group member ECS 不进入该 key，相关请求在当前版本绕过缓存。
+cache key format v2 显式区分 `Fast` 与 `Resolved`，两种模式不能 alias。共同维度包含 namespace、canonical query wire、transport compatibility，以及 opaque 的 policy/request/target/ECS fingerprint；不包含 DNS ID、原始 client 地址或整个 `RuntimeSnapshot` revision。`Fast` 在逐规则决策前使用稳定的 policy/request 语义，`Resolved` 可再携带最终 target/ECS。相关规则或 hosts 内容 hash 变化会切换 policy fingerprint，但不会扫描或清空全局 cache；旧 entry 按自身 TTL、负缓存 TTL、`failure_ttl` 和 optimistic `max_age` 自然淘汰。无法在 lookup 前安全确定的成员 ECS 请求不使用 fast key。
 
-每次请求仍必须先用最新 `RuntimeSnapshot` 完成 client matcher、策略/规则选择、hosts 判断、ECS 计算和 cache namespace 选择，然后才允许命中旧 entry。这样“规则变更不立即失效”和“后续上游请求必须使用最新策略”可以同时成立：普通 TTL 命中允许旧答案继续服务；miss、过期或明确刷新时一定重新按最新规则选择目标。
+每次请求仍必须先用最新 `RuntimeSnapshot` 完成 client matcher、生效 strategy、namespace、ECS 和 policy/request fingerprint 计算；fast miss 后才执行逐规则选择、hosts 判断和 upstream target 决策。这样 cache hit 可以省去 matcher 与上游工作，而配置/资源语义变化后的请求不会命中旧 fingerprint。
 
-这是一项明确的 TTL 内最终一致性取舍：如果某条策略变更要求立即停止旧答案，调用方必须显式执行 namespace/key/predicate 清理（未来由 WebUI 提供），不能依赖隐藏的全局 generation 或把所有缓存静默作废。
+旧 fingerprint 的 entry 不会被同步删除，因此仍占用容量直至自然淘汰；这是避免资源刷新扫描全库的空间换时间取舍。未来 WebUI 的“清除缓存”仍应调用 `CacheFacade::invalidate(namespace/key/predicate)`，而不是让普通资源刷新执行全局 clear。
 
-当 optimistic/stale 命中触发后台刷新时，刷新任务必须捕获刷新时刻的最新 snapshot，重新执行完整的 policy → rule/hosts → upstream selection → exchange 流程，不能复用 entry 中的旧上游、旧策略或旧资源指针。刷新写回使用 key + revision-independent CAS，并拒绝较旧的 `producer_revision` 覆盖较新的完整答案。未来 WebUI 的“清除缓存”应调用 `CacheFacade::invalidate(namespace/key/predicate)`，这是显式操作，不由普通资源刷新隐式触发。
+当 optimistic/stale 命中触发后台刷新时，刷新任务重新读取当前 `PolicyDnsCore` 的最新资源 snapshot，并执行完整的 context → route → upstream exchange，不能复用 entry 中的旧上游、旧规则或旧资源指针。刷新写回使用 key + revision-independent CAS，并拒绝较旧的 `producer_revision` 覆盖较新的完整答案。
 
-持久化缓存实现 `PersistentCacheStore`，使用 `dns.cache.persistence.path` 指定的独立 SQLite 文件，与解析日志数据库分离。`max_size_bytes` 转换为主数据库 page budget；WAL/SHM 的短时额外占用不计入该值。写入通过有界队列批量提交；超出预算或持久化失败只降级为内存缓存，不让 DNS 请求失败。恢复时必须重新检查 cache format version、entry checksum、expiry 和 key compatibility；资源版本指纹仅用于观测和清理策略，不作为全局恢复失效开关。
+上游结果先形成持有 single-flight lease 的 `CacheCommitCandidate`，与同一 `ResolutionEnvelope` 一次性移交后台 cache worker；客户端响应不等待 store CAS 或持久化入队。worker 使用独立的 100ms deadline 提交，按 `stored/rejected/conflict/unavailable/dropped` 计数；任意队列丢弃、取消或 candidate drop 都通过 RAII 发布失败终态并唤醒 waiter。由此 cache lookup 状态只描述响应完成前的命中结果，异步 write outcome 不伪装成当前请求的 `cache_status`。
+
+持久化缓存实现 `PersistentCacheStore`，使用 `dns.cache.persistence.path` 指定的独立 SQLite 文件，与解析日志数据库分离。`max_size_bytes` 转换为主数据库 page budget；WAL/SHM 的短时额外占用不计入该值。内存 commit 成功后的持久化仍通过有界队列批量提交；超出预算或持久化失败只降级为内存缓存，不让 DNS 请求失败。恢复时必须重新检查 cache format version、entry checksum、expiry 和 key format v2 compatibility；旧 key format 记录按不兼容隔离。
 
 ## 8. `parallel` 上游组
 
@@ -562,27 +575,28 @@ domain exact、suffix、regex、CIDR 等匹配结构在加载时编译，查询�
 
 `database.type`/`database.path` 是必填字段，即使 `dns.resolve_log.enable: false` 也必须打开数据库。v1 不提供关闭聚合统计的配置项：聚合统计默认开启，并且必须依赖该数据库持久化。prepare 阶段完成 SQLite 打开、schema migration、基本读写和目录权限检查；任何失败都是启动 `fatal`。
 
-storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 将无 await 的 `StatsRecorder` 热路径接入 epoch snapshot、batch ledger 和可重试事务，`StorageService` 负责 stats/detail/backend 生命周期顺序并暴露共享 recorder；`StorageRuntime` 已在 Application prepare 阶段按配置组装，并由 `DnsService` 注册受监督的周期 flush task，在 drain 后关闭 writer 和 backend。统计 pending batch/event 已有固定内存保护，超限时保留活动 epoch 并通过 Supervisor 升级 fatal；普通数据库不可用仍按 degraded 路径保留 pending 重试，SQLite 成功的有限操作可将状态恢复为 healthy，不可恢复 adapter 错误保持 failed。当前数据面已接入 transport/outcome 聚合和可选解析详情；Policy Core 通过 observation 同步提供 strategy/source/cache/client bucket、策略目标 `upstream_id`、实际结果 `upstream_used_id` 及 matched rule/resource 摘要。cache hit 的 upstream 字段来自缓存生产请求保存的 provenance，而 strategy 始终表示当前请求。stats 只使用低基数维度；SQLite schema v4 在受限详情记录中保存 canonical qname、有效 client IP、真实配置 ID 和有界 answer JSON，资源版本仍编码为 `epoch:revision`。`StatsRecorder` 与 `ResolveEventSink` 是两个独立 port，不能让详情日志的容量策略反向决定聚合统计是否记录。
+storage 通过可替换的 `StorageBackend` 接口提供 migration、事务、健康检查和 shutdown；默认 adapter 是 SQLite。`StatsPersistenceWorker` 维护 epoch snapshot、batch ledger 和可重试事务；`StorageRuntime` 在 Application prepare 阶段组装 stats worker、详情 SQLite writer 和 backend，并由 `DnsService` 注册受监督的周期 flush task。统计 pending batch/event 已有固定内存保护，超限时保留活动 epoch 并通过 Supervisor 升级 fatal；普通数据库不可用仍按 degraded 路径保留 pending 重试，SQLite 成功的有限操作可将状态恢复为 healthy，不可恢复 adapter 错误保持 failed。当前数据面只向 `ResolutionEventSink` 发布一次 typed 完成事件；后台 dispatcher 先更新低基数 stats，再独立尝试分发 cache candidate 与详情投影。cache hit 的 upstream 字段来自缓存生产请求保存的 provenance，而 strategy 始终表示当前请求。SQLite schema v4 在受限详情记录中保存 canonical qname、有效 client IP、真实配置 ID 和有界 answer JSON，资源版本仍编码为 `epoch:revision`。
 
 Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `TelemetryWriter`：请求线程只做有界内存排队，低优先级日志可计数丢弃，warn/error 优先保留，输出失败按安全 `PortError` 分类并重排队，flush 遵守 deadline；`StructuredTelemetryOutput` 可将已脱敏事件写入真实文件或 stderr，Application 在启动配置校验后切换共享输出目标和 reloadable level filter。主输出和 fallback 同时失败时，writer 在进程内将 Telemetry health 置为 `Failed` 且不递归写故障输出；后续完整 flush 成功恢复 `Healthy`。typed final tracing subscriber、degraded health、Supervisor 周期 flush，以及正常/fatal task 退出的 final flush 均已接线。health registry 由进程级 Telemetry 持有，不随 Runtime revision 重建；Listener 在首启、endpoint 降级、成功 reload 和 shutdown 时依次发布 `Healthy`、`Degraded`、`Healthy` 和 `Stopping`。
 
-解析请求线程不等待 SQLite：
+解析请求线程既不等待 SQLite，也不等待 cache commit：
 
-- 每次请求先更新进程内的 sharded/atomic 聚合计数；stats writer 周期性从这些计数做带 checkpoint 的 snapshot/ack，而不是为每个请求建立一个可能溢出的详情式队列；
+- 每次请求在 response 编码前只做一次有界、无等待的 `ResolutionEnvelope::try_publish`；ingress 满时响应仍继续，但该请求的 stats/detail/cache commit 会形成显式 gap；
+- dispatcher 在后台把事件转换为进程内 sharded/atomic 聚合计数；stats writer 周期性从这些计数做带 checkpoint 的 snapshot/ack；
 - 聚合维度固定且有界，包括 UTC 自然日、总请求数、配置中的 client bucket、transport class、strategy、source/upstream、实际 DNS response 的完整 RCODE、cache status 和 attempt outcome；`NoResponse`/Core error 不伪造 RCODE，也不使用域名、完整 `client_id` 或原始 IP 作为无界维度；
 - stats writer 周期性把增量批量 upsert 到数据库，恢复后按日和维度补写；统计数据默认开启，不因 `resolve_log` 关闭而停止。
 
-统计持久化采用 at-least-once + 幂等去重，而不是依赖“写库成功后再清零”的非原子 checkpoint：计数器使用 double-buffer/epoch swap，把新请求导向下一 epoch；每个批次有单调 `batch_id`/`max_event_seq`，SQLite 事务同时执行聚合 upsert 和 batch ledger 写入；提交成功后才 ack，重试同一批次由 ledger 去重。进程在计数尚未进入批次前崩溃，只会形成可观测的 in-memory persistence gap，不会造成已提交批次的重复累计。`day_utc` 在请求进入或完成时确定，跨午夜和延迟写入仍更新事件所属自然日。
+统计持久化采用 at-least-once + 幂等去重，而不是依赖“写库成功后再清零”的非原子 checkpoint：计数器使用 double-buffer/epoch swap，把新事件导向下一 epoch；每个批次有单调 `batch_id`/`max_event_seq`，SQLite 事务同时执行聚合 upsert 和 batch ledger 写入；提交成功后才 ack，重试同一批次由 ledger 去重。进程在计数尚未进入批次前崩溃只会形成可观测的 in-memory persistence gap，不会造成已提交批次的重复累计。resolution ingress 的 `accepted/dropped/gap_started_at_utc_millis` 由独立原子计数记录，并通过 Management overview 暴露，不能与数据库 persistence gap 混为一类。`day_utc` 在事件完成时确定，跨午夜和延迟写入仍更新事件所属自然日。
 
 一次请求只增加一次 `total_requests`。`source=cache`/`source=hosts` 的请求不伪造 upstream；经过上游后只把最终选中的成员/组计入 `source=upstream`，并可另记有界的 attempt/outcome counter。`parallel` 的多个尝试、late result 和取消不会把一条请求累计成多条请求统计。
 
 逻辑存储至少分为 `stats_daily`（按日/有界维度的聚合）、`stats_batch_ledger`（批次幂等与 checkpoint）和 `resolve_log`（可选详情）三类职责；物理表字段可随 SQLite schema version 演进，但不能把详情淘汰策略和统计批次 ledger 合并成一个不可区分的表。
 
-`resolve_log.enable` 只控制每次解析请求的详情记录。开启时由独立的有界 `ResolveLogWriter` 批量写入同一数据库，并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰；详情保存 canonical qname、qtype/qclass、有效 client IP、配置客户端/strategy、upstream target/actual、最多 16 条且不超过 4096 bytes 的 answer 摘要，以及既有 RCODE、failure/cancellation 和资源 revision。队列满、数据库忙或硬上限命中时丢弃详情并递增 `dropped_detail_records`，DNS 和聚合统计都不能被拖慢；请求级内容不得进入 tracing 或 telemetry label。关闭时不写详情表，但仍写聚合统计。
+`resolve_log.enable` 只控制每次解析请求的详情 payload 与投影。开启时 producer 在事件中附带 typed question 和共享 `Arc<CanonicalResponse>`，qname digest、canonical qname 和 answer JSON 的构造全部由后台 projector 完成，再通过 SQLite adapter 唯一的有界详情 channel 写库。SQLite worker 在达到 batch 上限时立即提交，低流量尾批最多等待 5 秒；并按 `max_record_age`、`eviction_threshold_records` 和 `max_records` 淘汰。详情保存 qtype/qclass、有效 client IP、配置客户端/strategy、upstream target/actual、最多 16 条且不超过 4096 bytes 的 answer 摘要，以及 RCODE、failure/cancellation 和资源 revision。projection/SQLite 队列满、数据库忙或硬上限命中时只递增 `detail_dropped`/`detail_failed`，DNS、cache commit 和聚合统计都不能被拖慢；请求级内容不得进入 tracing 或 telemetry label。关闭时不构造详情 payload，但仍发布同一个低基数完成事件。
 
 这里的“`resolve_log` 依赖数据库”表示详情的权威持久化后端是 `database`，不表示请求线程同步写库或在有界容量下承诺绝对无损；若未来要求无损审计，应另行定义持久化 spool/背压和磁盘配额，不能悄悄改变当前 `max_records` 语义。
 
-运行中数据库 busy、磁盘满或连接断开时，DNS 继续服务；stats writer 保留进程内补偿计数并重试，状态标记为 `degraded`。在数据库恢复前进程崩溃会产生明确的 persistence gap，必须通过 metrics/structured log 暴露，而不能假装统计已持久化。详情 writer 的失败只影响详情，不影响 stats writer；两者也不能共享一个会因详情队列满而阻塞的单一队列。
+运行中数据库 busy、磁盘满或连接断开时，DNS 继续服务；stats writer 保留进程内补偿计数并重试，状态标记为 `degraded`。在数据库恢复前进程崩溃会产生明确的 persistence gap，必须通过 metrics/structured log 暴露，而不能假装统计已持久化。详情 writer 的失败只影响详情，不影响 stats 或 cache worker；三者共享规范化事件来源，但使用彼此独立的下游队列和失败计数。
 
 ## 13. WebUI Management Server
 
@@ -606,10 +620,11 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 - DoH interoperability：GET/POST、媒体类型、65,535 字节边界、HTTP/DNS 错误分层；
 - PROXY tests：v1/v2、分片读取、未知 TLV、不可信 peer、缺失/非法 header；
 - outbound tests：协议无关 `UpstreamOutcome`、direct、bootstrap、connect_ip、SOCKS5、SOCKS5H、Host/SNI 保持和 SelectionPolicy 失败矩阵；
-- cache consistency tests：单资源规则变化不触发全局失效、普通 TTL 命中、optimistic refresh 使用最新 policy/resource、乱序 CAS 不覆盖新 entry、显式 namespace/key 清理；
+- cache consistency tests：fast/resolved key v2 不 alias、策略/资源语义变化切换 fingerprint、纯观测配置不影响 key、optimistic refresh 使用最新 policy/resource、异步 commit 唤醒 waiter、candidate drop 释放 lease、乱序 CAS 不覆盖新 entry；
 - resource tests：每资源 epoch/hash/parser version、首次失败阻止 bind、单资源刷新失败保留旧版本、乱序刷新丢弃旧结果、其他资源不受影响；
-- supervisor fault-injection：listener fatal、资源 degraded、stats DB outage、detail queue overflow、cache persistence fallback、shutdown deadline；
-- SQLite stress：统计和详情独立 writer、按日/客户端聚合 upsert、batch ledger 幂等重试、跨午夜和 late event、parallel/hosts/cache source 口径、软阈值淘汰、硬上限、busy/磁盘失败时 DNS 不受影响，并验证启动阶段数据库失败为 fatal。
+- supervisor fault-injection：listener fatal、资源 degraded、resolution ingress/detail/cache commit queue overflow、stats DB outage、cache persistence fallback、shutdown deadline；
+- SQLite stress：按日/客户端聚合 upsert、batch ledger 幂等重试、详情满批立即提交、跨午夜和 late event、parallel/hosts/cache source 口径、软阈值淘汰、硬上限、busy/磁盘失败时 DNS 不受影响，并验证启动阶段数据库失败为 fatal；
+- request hot-path profile：release 构建下分别覆盖 cache hit、hosts hit、固定本地 upstream miss 与 `resolve_log` off/on；本机 loopback 单并发数据只作为回归剖面，冻结目标硬件、QPS、并发和资源预算后的外部压测仍是发布验收边界。
 
 ## 15. 推荐实现顺序
 

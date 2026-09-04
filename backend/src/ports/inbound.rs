@@ -48,7 +48,7 @@ pub trait ResponseEncoder: Send + Sync {
     fn encode<'a>(
         &'a self,
         request: &'a DnsRequest,
-        response: CanonicalResponse,
+        response: Arc<CanonicalResponse>,
     ) -> PortFuture<'a, Result<(), PortError>>;
 }
 
@@ -184,7 +184,7 @@ impl ResponseHandle {
         ResponseState::from_raw(self.inner.state.load(Ordering::Acquire))
     }
 
-    pub async fn respond(&self, response: CanonicalResponse) -> Result<(), EncodeError> {
+    pub async fn respond(&self, response: Arc<CanonicalResponse>) -> Result<(), EncodeError> {
         if !response.matches_query(&self.inner.request.query) {
             return Err(EncodeError::question_mismatch());
         }
@@ -257,7 +257,7 @@ mod tests {
         fn encode<'a>(
             &'a self,
             _request: &'a DnsRequest,
-            _response: CanonicalResponse,
+            _response: Arc<CanonicalResponse>,
         ) -> PortFuture<'a, Result<(), PortError>> {
             Box::pin(async {
                 Err(PortError::new(
@@ -332,6 +332,7 @@ mod tests {
     #[tokio::test]
     async fn cloned_handles_encode_exactly_once() {
         let (request, response) = fixture();
+        let response = Arc::new(response);
         let encoder = Arc::new(FakeResponseEncoder::default());
         let inbound = InboundRequest::new(request, encoder.clone());
         let handle = inbound.response().clone();
@@ -352,6 +353,7 @@ mod tests {
     #[tokio::test]
     async fn terminal_non_response_state_rejects_encoding() {
         let (request, response) = fixture();
+        let response = Arc::new(response);
         let encoder = Arc::new(FakeResponseEncoder::default());
         let inbound = InboundRequest::new(request, encoder.clone());
         let cancellation = inbound.request().context.meta.cancellation.clone();
@@ -382,7 +384,7 @@ mod tests {
         fn encode<'a>(
             &'a self,
             request: &'a DnsRequest,
-            _response: CanonicalResponse,
+            _response: Arc<CanonicalResponse>,
         ) -> PortFuture<'a, Result<(), PortError>> {
             Box::pin(async move {
                 request.context.meta.cancellation.cancelled().await;
@@ -394,6 +396,7 @@ mod tests {
     #[tokio::test]
     async fn client_disconnect_reaches_an_in_flight_encoder() {
         let (request, response) = fixture();
+        let response = Arc::new(response);
         let cancellation = request.context.meta.cancellation.clone();
         let inbound = InboundRequest::new(request, Arc::new(WaitForCancellationEncoder));
         let handle = inbound.response().clone();
@@ -417,6 +420,7 @@ mod tests {
     #[tokio::test]
     async fn encoder_failure_consumes_response_right_without_retry() {
         let (request, response) = fixture();
+        let response = Arc::new(response);
         let inbound = InboundRequest::new(request, Arc::new(FailingEncoder));
         let handle = inbound.response().clone();
 
@@ -453,12 +457,12 @@ mod tests {
         let inbound = InboundRequest::new(request, encoder.clone());
         let handle = inbound.response().clone();
 
-        let mismatch = handle.respond(other_response).await.unwrap_err();
+        let mismatch = handle.respond(Arc::new(other_response)).await.unwrap_err();
         assert_eq!(mismatch.class(), EncodeErrorClass::QuestionMismatch);
         assert_eq!(handle.state(), ResponseState::Pending);
         assert_eq!(encoder.encoded_count(), 0);
 
-        handle.respond(correct_response).await.unwrap();
+        handle.respond(Arc::new(correct_response)).await.unwrap();
         assert_eq!(handle.state(), ResponseState::Responded);
         assert_eq!(encoder.encoded_count(), 1);
     }

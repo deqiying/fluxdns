@@ -18,6 +18,7 @@ use crate::config::store::ConfigStore;
 use crate::dns::Cancellation;
 use crate::observability::TelemetryWriter;
 use crate::ports::management::ManagementStorageRead;
+use crate::resolution::ResolutionPipelineMetrics;
 use crate::runtime::{RuntimeCoordinator, TaskError};
 use crate::storage::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
 
@@ -32,6 +33,7 @@ pub(crate) struct ManagementQueryDependencies {
     database_path: PathBuf,
     resolve_log_enabled: bool,
     telemetry: Option<Arc<TelemetryWriter>>,
+    resolution_metrics: Arc<ResolutionPipelineMetrics>,
 }
 
 impl ManagementQueryDependencies {
@@ -40,12 +42,14 @@ impl ManagementQueryDependencies {
         database_path: PathBuf,
         resolve_log_enabled: bool,
         telemetry: Option<Arc<TelemetryWriter>>,
+        resolution_metrics: Arc<ResolutionPipelineMetrics>,
     ) -> Self {
         Self {
             coordinator,
             database_path,
             resolve_log_enabled,
             telemetry,
+            resolution_metrics,
         }
     }
 }
@@ -80,6 +84,7 @@ impl ManagementService {
             read_model,
             dependencies.telemetry,
             dependencies.resolve_log_enabled,
+            dependencies.resolution_metrics,
         ));
         let services = Arc::new(AuthServices::new(
             Arc::clone(&auth),

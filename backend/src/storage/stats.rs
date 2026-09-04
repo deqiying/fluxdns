@@ -79,7 +79,7 @@ impl StatsPersistenceWorker {
         &self.accumulator
     }
 
-    /// 请求热路径入口；只执行内存统计，不 await 或访问数据库。
+    /// resolution dispatcher 入口；只执行内存统计，不 await 或访问数据库。
     pub fn record_request(
         &self,
         day_utc: i32,

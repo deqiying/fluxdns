@@ -23,6 +23,7 @@ use crate::ports::management::{
     SortOrder, StatisticDimension, StatisticsQuery,
 };
 use crate::ports::telemetry::{Component as TelemetryComponent, ComponentHealthState};
+use crate::resolution::{ResolutionPipelineMetrics, ResolutionPipelineSnapshot};
 use crate::resource::{ResourceSourceKind, ResourceStaleStatus};
 use crate::runtime::RuntimeCoordinator;
 
@@ -40,6 +41,7 @@ pub(crate) struct ManagementQueryService {
     started_at: SystemTime,
     started_instant: Instant,
     resolve_log_enabled: bool,
+    resolution_metrics: Arc<ResolutionPipelineMetrics>,
 }
 
 impl ManagementQueryService {
@@ -48,6 +50,7 @@ impl ManagementQueryService {
         storage: Arc<dyn ManagementStorageRead>,
         telemetry: Option<Arc<TelemetryWriter>>,
         resolve_log_enabled: bool,
+        resolution_metrics: Arc<ResolutionPipelineMetrics>,
     ) -> Self {
         Self {
             coordinator,
@@ -56,6 +59,7 @@ impl ManagementQueryService {
             started_at: SystemTime::now(),
             started_instant: Instant::now(),
             resolve_log_enabled,
+            resolution_metrics,
         }
     }
 
@@ -123,6 +127,7 @@ impl ManagementQueryService {
             runtime_revision: summary.revision.0.to_string(),
             overall_status: health.overall_status,
             cards,
+            resolution_pipeline: self.resolution_metrics.snapshot().into(),
         })
     }
 
@@ -635,6 +640,40 @@ struct Overview {
     runtime_revision: String,
     overall_status: &'static str,
     cards: Vec<OverviewCard>,
+    resolution_pipeline: ResolutionPipelineStatus,
+}
+
+#[derive(Serialize)]
+struct ResolutionPipelineStatus {
+    accepted: u64,
+    dropped: u64,
+    gap_started_at_utc_millis: Option<u64>,
+    cache_commit_stored: u64,
+    cache_commit_rejected: u64,
+    cache_commit_conflict: u64,
+    cache_commit_unavailable: u64,
+    cache_commit_dropped: u64,
+    detail_accepted: u64,
+    detail_dropped: u64,
+    detail_failed: u64,
+}
+
+impl From<ResolutionPipelineSnapshot> for ResolutionPipelineStatus {
+    fn from(snapshot: ResolutionPipelineSnapshot) -> Self {
+        Self {
+            accepted: snapshot.accepted,
+            dropped: snapshot.dropped,
+            gap_started_at_utc_millis: snapshot.gap_started_at_utc_millis,
+            cache_commit_stored: snapshot.cache_commit_stored,
+            cache_commit_rejected: snapshot.cache_commit_rejected,
+            cache_commit_conflict: snapshot.cache_commit_conflict,
+            cache_commit_unavailable: snapshot.cache_commit_unavailable,
+            cache_commit_dropped: snapshot.cache_commit_dropped,
+            detail_accepted: snapshot.detail_accepted,
+            detail_dropped: snapshot.detail_dropped,
+            detail_failed: snapshot.detail_failed,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -944,6 +983,7 @@ fn component_name(value: TelemetryComponent) -> &'static str {
         TelemetryComponent::Runtime => "runtime",
         TelemetryComponent::Listener => "listener",
         TelemetryComponent::Dns => "dns",
+        TelemetryComponent::Resolution => "resolution",
         TelemetryComponent::Policy => "policy",
         TelemetryComponent::Upstream => "upstream",
         TelemetryComponent::Cache => "cache",
@@ -1226,6 +1266,7 @@ mod tests {
             Arc::new(FakeReadModel),
             None,
             true,
+            Arc::new(ResolutionPipelineMetrics::default()),
         ));
         let root = work_path.with_extension("management-query-router");
         std::fs::create_dir_all(&root).unwrap();
@@ -1362,6 +1403,30 @@ mod tests {
             let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
             let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert!(body.is_object(), "{path}");
+            if path == "/api/v1/overview" {
+                let pipeline = body
+                    .get("resolution_pipeline")
+                    .and_then(serde_json::Value::as_object)
+                    .expect("overview must expose the low-cardinality resolution pipeline");
+                for counter in [
+                    "accepted",
+                    "dropped",
+                    "cache_commit_stored",
+                    "cache_commit_rejected",
+                    "cache_commit_conflict",
+                    "cache_commit_unavailable",
+                    "cache_commit_dropped",
+                    "detail_accepted",
+                    "detail_dropped",
+                    "detail_failed",
+                ] {
+                    assert_eq!(
+                        pipeline.get(counter).and_then(|value| value.as_u64()),
+                        Some(0)
+                    );
+                }
+                assert!(pipeline.contains_key("gap_started_at_utc_millis"));
+            }
             let serialized = serde_json::to_string(&body).unwrap();
             for forbidden in [
                 "canonical_qname",

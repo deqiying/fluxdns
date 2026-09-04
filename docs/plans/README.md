@@ -10,7 +10,6 @@
 
 | 方案 | 文档状态 | 实现状态 | 范围 |
 | --- | --- | --- | --- |
-| [DNS 查询主链异步观测重构方案](dns-query-pipeline-async-observation.md) | 草案 | 未实现 | `2ms` cache-hit SLO、fast cache key v2、异步 cache commit、统一解析事件、聚合统计与 `resolve_log` 异步消费 |
 | [FluxDNS v2 前后端整合与 WebUI Management Server 实施方案](webui-v2-management-integration.md) | 有效 | 部分实现，浏览器与 Linux 环境验收待执行 | management server、`/api/v1/*`、WebUI 静态资源内嵌、首次用户初始化与配置持久化 |
 
 ## 维护要求

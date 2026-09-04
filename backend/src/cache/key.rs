@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::dns::{CacheCompatibilityKey, CanonicalQuery};
 use crate::ports::cache::{CacheKey, CacheNamespace};
 
-pub const CACHE_KEY_FORMAT_VERSION: u16 = 1;
+pub const CACHE_KEY_FORMAT_VERSION: u16 = 2;
 
 /// 由 policy/resource 层产生的 opaque 32-byte fingerprint。
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -28,9 +28,19 @@ impl fmt::Debug for CacheFingerprint {
     }
 }
 
+/// v2 显式区分逐规则决策前的语义键与完整决策后的 resolved 键。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum CacheKeyMode {
+    Fast,
+    #[default]
+    Resolved,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CacheKeyDimensions {
+    pub mode: CacheKeyMode,
     pub policy: Option<CacheFingerprint>,
+    pub request: Option<CacheFingerprint>,
     pub target: Option<CacheFingerprint>,
     pub ecs: Option<CacheFingerprint>,
 }
@@ -57,7 +67,12 @@ pub fn build_cache_key(
     encoded.extend_from_slice(&CACHE_KEY_FORMAT_VERSION.to_be_bytes());
     encode_namespace(&mut encoded, &namespace)?;
     encoded.extend_from_slice(&transport.value().to_be_bytes());
+    encoded.push(match dimensions.mode {
+        CacheKeyMode::Fast => 0,
+        CacheKeyMode::Resolved => 1,
+    });
     encode_fingerprint(&mut encoded, dimensions.policy);
+    encode_fingerprint(&mut encoded, dimensions.request);
     encode_fingerprint(&mut encoded, dimensions.target);
     encode_fingerprint(&mut encoded, dimensions.ecs);
     encode_component(&mut encoded, &query_wire)?;
@@ -115,7 +130,10 @@ mod tests {
     use crate::dns::{CacheCompatibilityKey, CanonicalQuery};
     use crate::ports::cache::{CacheNamespace, CacheStrategyId, ClientCacheDigest};
 
-    use super::{CACHE_KEY_FORMAT_VERSION, CacheFingerprint, CacheKeyDimensions, build_cache_key};
+    use super::{
+        CACHE_KEY_FORMAT_VERSION, CacheFingerprint, CacheKeyDimensions, CacheKeyMode,
+        build_cache_key,
+    };
 
     fn query(id: u16) -> CanonicalQuery {
         let mut message = Message::new(id, MessageType::Query, OpCode::Query);
@@ -164,7 +182,9 @@ mod tests {
             &query(1),
             CacheCompatibilityKey(1),
             CacheKeyDimensions {
+                mode: CacheKeyMode::Fast,
                 policy: Some(CacheFingerprint::from_digest([0x22; 32])),
+                request: Some(CacheFingerprint::from_digest([0x23; 32])),
                 target: Some(CacheFingerprint::from_digest([0x33; 32])),
                 ecs: Some(CacheFingerprint::from_digest([0x44; 32])),
             },
@@ -179,6 +199,33 @@ mod tests {
         .unwrap();
         assert_ne!(base, client);
         assert_ne!(base, other_transport);
+    }
+
+    #[test]
+    fn fast_and_resolved_modes_cannot_alias() {
+        let fast = build_cache_key(
+            CacheNamespace::Global,
+            &query(1),
+            CacheCompatibilityKey(1),
+            CacheKeyDimensions {
+                mode: CacheKeyMode::Fast,
+                policy: Some(CacheFingerprint::from_digest([0x11; 32])),
+                ..CacheKeyDimensions::default()
+            },
+        )
+        .unwrap();
+        let resolved = build_cache_key(
+            CacheNamespace::Global,
+            &query(1),
+            CacheCompatibilityKey(1),
+            CacheKeyDimensions {
+                policy: Some(CacheFingerprint::from_digest([0x11; 32])),
+                ..CacheKeyDimensions::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(fast, resolved);
+        assert_eq!(fast.format_version, 2);
     }
 
     #[test]

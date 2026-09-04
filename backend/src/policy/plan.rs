@@ -169,6 +169,45 @@ pub struct ResolutionPlan {
     pub matched_rule: Option<MatchedRule>,
 }
 
+/// 与 qname matcher 无关、可在 fast-cache lookup 前冻结的请求策略上下文。
+#[derive(Clone, Debug)]
+pub struct PolicyContext {
+    pub listener_id: ConfigId,
+    pub route: Option<RouteMatch>,
+    pub client: ClientMatch,
+    pub strategy: Arc<ResolvedStrategy>,
+    pub cache: CacheDecision,
+    pub ttl_override: ResolvedTtlOverride,
+    pub(crate) routing: super::RouteSelection,
+    pub(crate) client_config: Option<Arc<ResolvedClient>>,
+}
+
+/// qname matcher 完成后得到的本地回答或上游路由决策。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteDecision {
+    pub upstream: ConfigId,
+    pub edns_client_subnet: ResolvedEcs,
+    pub hosts: Option<ConfigId>,
+    pub matched_rule: Option<MatchedRule>,
+}
+
+impl PolicyContext {
+    pub fn into_resolution_plan(self, decision: RouteDecision) -> ResolutionPlan {
+        ResolutionPlan {
+            listener_id: self.listener_id,
+            route: self.route,
+            client: self.client,
+            strategy: self.strategy,
+            upstream: decision.upstream,
+            cache: self.cache,
+            ttl_override: self.ttl_override,
+            edns_client_subnet: decision.edns_client_subnet,
+            hosts: decision.hosts,
+            matched_rule: decision.matched_rule,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PolicyIndex {
     routes: RouteIndex,
@@ -304,7 +343,11 @@ impl PolicyIndex {
         Ok(next)
     }
 
-    pub fn evaluate(&self, request: PolicyRequest<'_>) -> Result<ResolutionPlan, PolicyError> {
+    /// 只解析 route、client、effective strategy 与 cache namespace，不执行 qname matcher。
+    pub fn prepare_context(
+        &self,
+        request: &PolicyRequest<'_>,
+    ) -> Result<PolicyContext, PolicyError> {
         let routing = if let Some(path) = request.doh_path {
             self.routes
                 .select_doh(request.listener_id, path)
@@ -350,29 +393,48 @@ impl PolicyIndex {
             .filter(|client| client.ttl_override.source == ValueSource::Client)
             .map(|client| client.ttl_override.clone())
             .unwrap_or_else(|| strategy.ttl_override.clone());
-        let (hosts, matched_rule, upstream, strategy_ecs) = self.evaluate_rules(
-            &routing,
-            strategy.as_ref(),
-            request.qname,
-            strategy.edns_client_subnet.clone(),
-        )?;
-        let edns_client_subnet = select_ecs(
-            strategy_ecs,
-            client_config,
-            self.upstream_ecs.get(&upstream),
-        );
-        Ok(ResolutionPlan {
-            listener_id: routing.listener_id,
-            route: routing.route,
+        Ok(PolicyContext {
+            listener_id: routing.listener_id.clone(),
+            route: routing.route.clone(),
             client,
-            upstream,
             strategy,
             cache,
             ttl_override,
+            routing,
+            client_config: client_config.cloned(),
+        })
+    }
+
+    /// 在既有上下文上执行 listener hosts 与 ordered strategy rules。
+    pub fn evaluate_route(
+        &self,
+        context: &PolicyContext,
+        qname: Option<&CanonicalDomain>,
+    ) -> Result<RouteDecision, PolicyError> {
+        let (hosts, matched_rule, upstream, strategy_ecs) = self.evaluate_rules(
+            &context.routing,
+            context.strategy.as_ref(),
+            qname,
+            context.strategy.edns_client_subnet.clone(),
+        )?;
+        let edns_client_subnet = select_ecs(
+            strategy_ecs,
+            context.client_config.as_ref(),
+            self.upstream_ecs.get(&upstream),
+        );
+        Ok(RouteDecision {
+            upstream,
             edns_client_subnet,
             hosts,
             matched_rule,
         })
+    }
+
+    /// 保留原有一次性 facade，供不需要 fast-cache 的调用者使用。
+    pub fn evaluate(&self, request: PolicyRequest<'_>) -> Result<ResolutionPlan, PolicyError> {
+        let context = self.prepare_context(&request)?;
+        let decision = self.evaluate_route(&context, request.qname)?;
+        Ok(context.into_resolution_plan(decision))
     }
 
     fn evaluate_rules(

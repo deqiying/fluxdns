@@ -245,11 +245,11 @@ strategy[].cache.enabled == true  → 策略池
 strategy[].cache 整块缺失          → dns.cache.enabled 为 true 时使用全局池，否则不缓存
 ```
 
-缓存 key 除 pool namespace 外，至少包含规范化的 QNAME、QTYPE、QCLASS、会改变答案的 DNS flags、生效 ECS、策略标识和 transport compatibility；不包含整个配置 revision 或资源 generation。每个 entry 仍记录产生答案时的 `producer_revision` 和资源版本指纹，供诊断、命中解释和迁移使用，但资源快照替换不会因此自动使所有缓存失效。group member ECS 无法在成员选择前进入 key，因此该路径当前绕过缓存。
+cache key format v2 显式区分逐规则匹配前的 `Fast` 模式和完整决策后的 `Resolved` 模式，二者不能 alias。除 pool namespace 与 canonical query 外，key 包含 transport compatibility，以及 opaque 的 policy/request/target/ECS fingerprint；不包含 DNS ID、原始 client 地址、整个配置 revision 或资源 generation。policy fingerprint 只覆盖会改变答案的已解析配置、相关 hosts/rule 内容 hash 和选择安全性，不包含 `logs`、`webui`、`database` 等纯观测/管理配置。请求 fingerprint 对有效 ECS 使用规范化网段；没有 ECS 时只使用脱敏的客户端 `/24`（IPv4）或 `/56`（IPv6）网段。group member ECS 无法在成员选择前安全确定，因此该路径不使用 fast key，并继续绕过 response cache。
 
-规则或 hosts 的小范围变化默认不清空缓存。请求必须先按最新运行时 snapshot 重新计算客户端、策略、规则、ECS 和 cache namespace；`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache，只有产生 upstream target 的路径才执行 lookup。`upstreams[type=hosts]` 属于 upstream connector，其结果按普通上游响应处理。TTL 内的普通上游缓存命中可以继续返回旧答案，而 miss、过期或显式刷新一定按最新规则选择上游。启用 optimistic cache 时，后台刷新必须捕获刷新时刻的最新策略/规则资源并完整重跑匹配和上游选择，不能沿用旧 entry 的目标。后续 WebUI 的清除缓存功能属于显式 `namespace/key/predicate` 操作，不由普通资源刷新隐式触发。
+规则或 hosts 的变化不会扫描或清空缓存，但会改变 policy fingerprint，使后续请求不再命中旧语义 entry；旧 entry 继续占用容量并按自身 TTL/optimistic 生命周期淘汰。请求先按最新 runtime snapshot 计算客户端、生效策略、ECS、namespace 和 policy/request fingerprint，fast miss 后才执行 rules、hosts 和 upstream target 决策。`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache；`upstreams[type=hosts]` 属于 upstream connector，其结果按普通上游响应处理。启用 optimistic cache 时，后台刷新重新读取当前 Policy/资源 snapshot 并完整执行 route 与上游选择，不能沿用旧 entry 的目标。后续 WebUI 的清除缓存功能属于显式 `namespace/key/predicate` 操作，不由普通资源刷新隐式触发。
 
-这表示 TTL 内的最终一致性，而不是立即策略撤销保证；需要立即停止旧答案时必须显式清理相应 namespace/key/predicate，不能把规则变化偷偷转换成全局 cache invalidation。
+policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；它不是通用配置 revision，也不替代显式清理接口。旧格式 key 不能与 v2 恢复记录混用，持久化 adapter 将其按不兼容记录隔离。
 
 #### 响应缓存语义
 
@@ -260,7 +260,7 @@ strategy[].cache 整块缺失          → dns.cache.enabled 为 true 时使用�
 - 缓存保存不含客户端 DNS ID 和传输 envelope 的 canonical response。若本地 UDP 输出因本次客户端 advertised size 而截断，应保存完整 canonical response，并在每次发送时重新编码；只有上游本身返回的 `TC=1` 才保存截断条目。
 - 写入按响应质量做 compare-and-replace：完整 `NOERROR/TC=0` 可以提升并替换未过期的 NXDOMAIN/SERVFAIL/TC 条目，SERVFAIL/TC 不能覆盖未过期的完整回答；同质量条目在过期前不因后到竞态反复覆盖。
 - optimistic/stale 只适用于已经按上述规则准入的条目；缓存返回时按剩余 TTL 和当前请求重新生成响应。
-- 同一 key 的并发 miss/optimistic refresh 应通过 single-flight 合并，避免规则刷新或上游慢时放大请求；合并任务的取消只影响对应 waiter，不得取消仍有其他 waiter 的 exchange。
+- 同一 key 的并发 miss/optimistic refresh 通过 single-flight 合并。leader 得到可缓存结果后先形成持有 lease 的 `CacheCommitCandidate` 并返回共享响应；后台 worker 使用独立 100ms deadline 完成 admission/CAS/persistence enqueue 并唤醒 waiter。客户端响应不等待 commit；candidate 被队列丢弃、取消或直接 drop 时，RAII lease 必须发布失败终态，不能永久挂住 follower。
 
 ### 8.2 `dns.ttl_override`
 
@@ -292,11 +292,11 @@ strategy[].cache 整块缺失          → dns.cache.enabled 为 true 时使用�
 | `max_records` | integer | 详细记录的硬上限；不能因并发写入而突破。 |
 | `max_record_age` | duration | 记录最长保留时间，例如 `7d`。 |
 
-必须满足 `0 < eviction_threshold_records < max_records`。这两个字段都按详细记录条数计数，不是 SQLite 文件字节上限。详情由独立的有界 writer 串行提交；达到软阈值后先删除超过 `max_record_age` 的记录，再按时间删除最旧记录，直到回到软阈值以下。若队列已满、数据库忙或提交会突破硬上限，则丢弃新的详细记录，DNS 请求不得等待或失败。
+必须满足 `0 < eviction_threshold_records < max_records`。这两个字段都按详细记录条数计数，不是 SQLite 文件字节上限。请求任务只向统一 resolution ingress 附带 typed question 和共享 response，qname digest、canonical qname 与 answer JSON 在后台 detail projector 中生成，再进入 SQLite adapter 唯一的有界详情 channel；满批立即提交，低流量尾批最多等待 5 秒。达到软阈值后先删除超过 `max_record_age` 的记录，再按时间删除最旧记录，直到回到软阈值以下。若 projection/SQLite 队列已满、数据库忙或提交会突破硬上限，则丢弃新的详细记录，DNS 请求不得等待或失败。
 
-聚合统计默认开启且始终依赖 `database`：至少按 UTC 自然日记录总请求数，并按有界的 client bucket、transport class、strategy、source/upstream、RCODE 和 cache status 记录分项计数。未匹配客户端统一进入 `unknown` bucket；不能使用域名、完整客户端 ID 或原始 IP 作为无界维度。请求线程只更新进程内 sharded counters，独立 stats writer 周期性以带 `batch_id` 的 checkpoint 批量 upsert 到 SQLite，并用 batch ledger 幂等去重，因此详情队列溢出不会丢失聚合统计。一次请求只计一次 `total_requests`；cache/hosts 命中归入本地 source，parallel 的多个上游尝试不重复计请求。统计不能因为详情记录被丢弃或 `enable: false` 而停止。数据库运行中暂时不可写时继续维护进程内计数并报告 `degraded`/persistence gap；启动阶段数据库不可用则拒绝启动。
+聚合统计默认开启且始终依赖 `database`：至少按 UTC 自然日记录总请求数，并按有界的 client bucket、transport class、strategy、source/upstream、RCODE 和 cache lookup status 记录分项计数。未匹配客户端统一进入 `unknown` bucket；不能使用域名、完整客户端 ID 或原始 IP 作为无界维度。请求任务只做一次有界 `ResolutionEnvelope::try_publish`，后台 dispatcher 更新进程内 sharded counters，stats writer 周期性以带 `batch_id` 的 checkpoint 批量 upsert 到 SQLite，并用 batch ledger 幂等去重。detail 下游溢出不影响聚合统计；但统一 ingress 溢出会同时丢失该事件的 stats/detail/cache commit，因此必须累计 `dropped` 并冻结首次 `gap_started_at_utc_millis`。一次请求只计一次 `total_requests`；cache/hosts 命中归入本地 source，parallel 的多个上游尝试不重复计请求。统计不能因为详情记录被丢弃或 `enable: false` 而停止。数据库运行中暂时不可写时继续维护进程内计数并报告 `degraded`/persistence gap；启动阶段数据库不可用则拒绝启动。
 
-“依赖数据库”表示统计/详情的权威持久化后端是 `database`；请求线程不同步等待数据库。`resolve_log` 的详情在当前有界 `max_records` 契约下允许 best-effort 丢弃并计数，若未来需要无损审计需另行定义 spool、背压和磁盘配额。
+“依赖数据库”表示统计/详情的权威持久化后端是 `database`；请求线程不同步等待数据库。Management overview 的 `resolution_pipeline` 暴露 ingress accepted/dropped/首次 gap 时间、cache commit 各终态以及 detail accepted/dropped/failed。`resolve_log` 的详情在当前有界 `max_records` 契约下允许 best-effort 丢弃并计数，若未来需要无损审计需另行定义 spool、背压和磁盘配额。
 
 ## 9. `listener[]`
 
@@ -509,7 +509,7 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 文件型 hosts 的 `auto_update` 只表示本地文件重载，不表示远程同步。
 
-hosts 与 rule_set 使用相同的 per-resource snapshot 机制：本地文件变更只发布该 hosts 资源的新版本，保留其他资源版本；请求和 optimistic refresh 按最新资源重新进行 hosts/rule 匹配，但不因单资源变化全局清除缓存。
+hosts 与 rule_set 使用相同的 per-resource snapshot 机制：本地文件变更只发布该 hosts 资源的新版本，保留其他资源版本；发布时同步更新 Policy 使用的资源内容 hash，使后续 fast cache key 切换 fingerprint。请求和 optimistic refresh 按最新资源重新进行 hosts/rule 匹配，但不因单资源变化扫描或全局清除缓存。
 
 ## 13. `outbound[]`
 
@@ -525,7 +525,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 
 ## 14. `rule_set[]`
 
-规则集是策略匹配的数据源。资源可以内联、来自本地文件或从远程 URL 下载。运行时每个资源独立形成 `ResourceSnapshot`，拥有自己的 revision/epoch、content hash、来源 fingerprint 和 parser/compiler version；某个资源刷新不会要求其他资源同步刷新，也不会自动清空全局缓存。
+规则集是策略匹配的数据源。资源可以内联、来自本地文件或从远程 URL 下载。运行时每个资源独立形成 `ResourceSnapshot`，拥有自己的 revision/epoch、content hash、来源 fingerprint 和 parser/compiler version；某个资源刷新不会要求其他资源同步刷新或自动清空全局缓存，但新 content hash 会进入后续请求的 policy fingerprint。
 
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
@@ -583,7 +583,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 13. DoH 上游的 `bootstrap` 与 `connect_ip` 互斥；SecretRef 解析后的代理 scheme 合法，`socks5h://` 不得同时使用 `bootstrap`。
 14. `database.type`/`database.path` 始终存在且为受支持的 SQLite 配置；prepare 阶段数据库打开、migration 或基本写入检查失败必须阻止启动。
 15. 聚合统计默认开启，按日和有界 client/transport/strategy/upstream/RCODE/cache 维度持久化；`dns.resolve_log.enable` 只控制详情记录，且 `0 < eviction_threshold_records < max_records`。
-16. 所有配置资源在 bind 前形成有效首次 snapshot；任何首次读取、下载或校验失败都阻止启动，后续单资源刷新失败才保留该资源旧版本，不能触发全局 cache clear。
+16. 所有配置资源在 bind 前形成有效首次 snapshot；任何首次读取、下载或校验失败都阻止启动，后续单资源刷新失败才保留该资源旧版本；成功刷新更新 policy fingerprint，但不能触发全局 cache clear。
 
 ## 17. v1 范围外与版本化边界
 

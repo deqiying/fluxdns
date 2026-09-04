@@ -7,6 +7,7 @@ use hickory_proto::op::ResponseCode;
 use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A, rdata::AAAA, rdata::CNAME};
 use thiserror::Error;
 
+use crate::cache::CacheCommitCandidate;
 use crate::ports::PortFuture;
 use crate::ports::inbound::{EncodeErrorClass, InboundRequest};
 use crate::ports::storage::StatsSource;
@@ -18,8 +19,29 @@ use super::{CanonicalMessageError, CanonicalResponse, DnsRequest, HostsTable};
 /// Core 对一个入站请求的终态结果。
 #[derive(Debug, Eq, PartialEq)]
 pub enum CoreOutcome {
-    Response(CanonicalResponse),
+    Response(Arc<CanonicalResponse>),
     NoResponse,
+}
+
+/// Core 返回给进程级完成事件 publisher 的一次性结果。
+#[derive(Debug)]
+pub struct DnsCoreCompletion {
+    pub result: Result<CoreOutcome, CoreError>,
+    pub observation: Option<DnsResolutionObservation>,
+    /// 由 Core 内部取消路径给出的终态原因；可能不同于入站 request token 的状态。
+    pub cancellation_reason: Option<crate::dns::CancelReason>,
+    pub cache_commit: Option<CacheCommitCandidate>,
+}
+
+impl DnsCoreCompletion {
+    pub fn from_result(result: Result<CoreOutcome, CoreError>) -> Self {
+        Self {
+            result,
+            observation: None,
+            cancellation_reason: None,
+            cache_commit: None,
+        }
+    }
 }
 
 /// Core 在完成请求后可选提供的低基数解析元数据。
@@ -95,6 +117,15 @@ pub trait DnsCore: Send + Sync {
     ///
     /// 该默认实现保持既有 Core 的行为和对象安全性；需要观测的实现只需覆盖
     /// 此方法，调用方不会再从请求字段推测 cache/source/strategy。
+    fn resolve_with_completion<'a>(
+        &'a self,
+        request: &'a DnsRequest,
+    ) -> PortFuture<'a, DnsCoreCompletion> {
+        Box::pin(async move { DnsCoreCompletion::from_result(self.resolve(request).await) })
+    }
+
+    /// 兼容只关注策略观察值的单元测试；生产路径只使用一次性完成事件。
+    #[cfg(test)]
     fn resolve_with_observation<'a>(
         &'a self,
         request: &'a DnsRequest,
@@ -105,7 +136,15 @@ pub trait DnsCore: Send + Sync {
             Option<DnsResolutionObservation>,
         ),
     > {
-        Box::pin(async move { (self.resolve(request).await, None) })
+        Box::pin(async move {
+            let completion = self.resolve_with_completion(request).await;
+            if let Some(candidate) = completion.cache_commit {
+                let _ = candidate
+                    .commit(std::time::Duration::from_millis(100))
+                    .await;
+            }
+            (completion.result, completion.observation)
+        })
     }
 }
 
@@ -125,6 +164,7 @@ impl DnsCore for ServFailCore {
             }
 
             CanonicalResponse::empty_response(&request.query, ResponseCode::ServFail)
+                .map(Arc::new)
                 .map(CoreOutcome::Response)
                 .map_err(CoreError::ResponseConstruction)
         })
@@ -210,6 +250,7 @@ impl DnsCore for HostsCore {
                 CanonicalResponse::response_with_code(&request.query, code, answers)
             };
             response
+                .map(Arc::new)
                 .map(CoreOutcome::Response)
                 .map_err(CoreError::ResponseConstruction)
         })

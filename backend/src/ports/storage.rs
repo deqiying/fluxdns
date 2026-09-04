@@ -588,16 +588,3 @@ mod tests {
         assert!(debug.contains("qname_byte_len"));
     }
 }
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ResolveEventDisposition {
-    Accepted,
-    Disabled,
-    DroppedQueueFull,
-    DroppedByPolicy,
-}
-
-pub trait ResolveEventSink: Send + Sync {
-    /// 详情记录允许按明确策略丢弃，调用方必须根据返回值累计计数。
-    fn try_record(&self, event: ResolveEvent) -> Result<ResolveEventDisposition, PortError>;
-}

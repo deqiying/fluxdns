@@ -246,6 +246,50 @@ export interface components {
             runtime_revision: string;
             overall_status: components["schemas"]["HealthStatus"];
             cards: components["schemas"]["OverviewCard"][];
+            resolution_pipeline: components["schemas"]["ResolutionPipelineStatus"];
+        };
+        /** @description 进程生命周期内的 DNS 解析完成有界管线计数。cache lookup 状态属于查询完成事件， 异步 cache commit 结果单独计数。 */
+        ResolutionPipelineStatus: {
+            /**
+             * Format: int64
+             * @description 被统一 ingress 队列接收的完成事件数量。
+             */
+            accepted: number;
+            /**
+             * Format: int64
+             * @description 因统一 ingress 队列已满而丢弃的完成事件数量。
+             */
+            dropped: number;
+            /**
+             * Format: int64
+             * @description 首次 ingress 丢弃的 UTC epoch 毫秒；尚未发生 gap 时为 null。
+             */
+            gap_started_at_utc_millis: number | null;
+            /** Format: int64 */
+            cache_commit_stored: number;
+            /** Format: int64 */
+            cache_commit_rejected: number;
+            /** Format: int64 */
+            cache_commit_conflict: number;
+            /** Format: int64 */
+            cache_commit_unavailable: number;
+            /**
+             * Format: int64
+             * @description 在产生 commit 结果前被丢弃的 cache candidate 数量。
+             */
+            cache_commit_dropped: number;
+            /** Format: int64 */
+            detail_accepted: number;
+            /**
+             * Format: int64
+             * @description 被有界下游队列丢弃的详情投影数量。
+             */
+            detail_dropped: number;
+            /**
+             * Format: int64
+             * @description 被 SQLite writer 拒绝的详情投影数量。
+             */
+            detail_failed: number;
         };
         OverviewCard: {
             /** @enum {string} */

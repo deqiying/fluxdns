@@ -21,6 +21,8 @@ use crate::ports::cache::{
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
+use super::key::CACHE_KEY_FORMAT_VERSION;
+
 const MAGIC: &[u8; 4] = b"FDCP";
 const FORMAT_VERSION: u16 = 1;
 const MAX_RECORDS: u32 = 100_000;
@@ -469,7 +471,7 @@ pub(super) fn decode_record(
     let mut reader = Reader::new(payload);
     let namespace = decode_namespace(&mut reader)?;
     let key_format = reader.u16()?;
-    if key_format != 1 {
+    if key_format != CACHE_KEY_FORMAT_VERSION {
         return Err(CodecError::Incompatible);
     }
     let encoded = Arc::<[u8]>::from(reader.bytes(MAX_COMPONENT_BYTES)?.to_vec());
@@ -785,7 +787,7 @@ mod tests {
         let key = CacheKey {
             namespace: CacheNamespace::Global,
             encoded: Arc::from(key.as_bytes()),
-            format_version: 1,
+            format_version: CACHE_KEY_FORMAT_VERSION,
         };
         let entry = CacheEntry {
             response,

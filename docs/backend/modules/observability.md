@@ -14,7 +14,7 @@
 
 ## 当前实现边界
 
-v1 实现与验收已完成。已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、health lifecycle 与 stale age 归一化、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown，正常停机和 fatal task 退出均已验证最终输出及 writer 关闭；typed final tracing layer、Storage/Telemetry/Supervisor/Resource refresh health、Cache persistence 停机 gap、详情 writer backpressure/recovery、Listener 跨 Runtime lifecycle，以及主输出与 fallback 同时失败后的 `Failed → Healthy` 闭环均已接入。
+v1 实现与验收已完成。已实现有界低基数 metrics、health registry、retry/gap 计数、typed event 脱敏，以及面向稳定 telemetry ports 的有界 writer/backpressure、health lifecycle 与 stale age 归一化、deadline-aware flush、结构化文件/stderr 输出 adapter、主输出失败的 stderr fallback、Application 启动时输出目标和级别过滤切换；`TelemetryWriter` 已接入 `DnsService`/Supervisor 周期 flush 与 shutdown。Storage/Telemetry/Supervisor/Resource/Cache/Listener health 之外，进程级 `Component::Resolution` 现负责统一解析 ingress gap 的 degraded/recovery；详情与 cache 下游失败使用独立 counter，不把请求级内容写入 telemetry。
 
 ## 1. 职责与边界
 
@@ -153,6 +153,7 @@ redaction 在 typed event 构造时完成，不依赖 formatter 最后补救。
 - `upstream.attempt.complete`、`upstream.group.complete`；
 - `resource.refresh.*`；
 - `storage.stats_batch.*`、`storage.resolve_drop`；
+- `resolution_pipeline_shutdown_summary`；
 - `component.state_change`。
 
 事件名和字段变化视为内部观测 schema 变更，需更新 snapshot/golden tests。
@@ -164,7 +165,7 @@ redaction 在 typed event 构造时完成，不依赖 formatter 最后补救。
 - stats：Storage 中默认持久化的产品统计；
 - resolve log：Storage 中可选的单请求详情。
 
-四者分别实现，不能因为 `logs.enable=false` 或详情队列满而停止 stats。
+四者的持久化和容量边界分别实现；stats 与 resolve log 共享唯一的 typed resolution 完成事件来源，但使用独立下游队列。`logs.enable=false` 或详情队列满不能停止 stats；统一 resolution ingress 满则属于显式的整事件 gap。
 
 ## 11. Flush 与失败
 
@@ -212,7 +213,7 @@ TelemetryWriter 接入后的 shutdown 顺序为：
 - [x] 接入 Storage/Telemetry/Supervisor/Resource refresh 的首轮 degraded/failed/stopping health 发布；
 - [x] 在 Telemetry 关闭前记录 Storage 正常停机的提交、积压、失败和丢弃纯计数摘要；
 - [x] 在 Telemetry 关闭前发布 Cache persistence 停机计数、degraded health 和 gap；
-- [x] 限频发布详情 writer backpressure/sink 错误，并在后续 accepted 时恢复 Storage health；
+- [x] 以 `Component::Resolution` 发布统一 ingress backpressure/recovery，并保留首次 gap 时间；详情与 cache 下游使用独立计数；
 - [x] 在 `TelemetryWriter` 内归一化组件 health lifecycle 字段，保留首次时间、最近成功、累计重试和 gap 语义；
 - [x] 在 degraded/failed health 生命周期中传播 stale age，并在恢复 `Healthy` 时清零；
 - [x] 验证 Service 正常停机时最终输出 Storage/Telemetry `Stopping` health 并关闭 writer；
@@ -239,5 +240,7 @@ TelemetryWriter 接入后的 shutdown 顺序为：
 阶段 171 验证主输出与 fallback 同时失败返回安全 `Unavailable`，Telemetry registry 记录 `Failed`/retry，后续完整 flush 恢复 `Healthy`；4 项定向测试通过。
 
 阶段 179 复核完整实现清单，Observability 21 项与 Service telemetry 2 项定向测试全部通过，v1 模块验收闭合。
+
+阶段 199 增加 `Component::Resolution`，统一 ingress 首次 drop 发布 degraded、后续 accepted 恢复 Healthy；停机前输出只含 accepted/dropped、cache commit 与 detail 计数的安全摘要。Management overview 同步暴露这些进程级计数。
 
 当前实现进度：**100%**。

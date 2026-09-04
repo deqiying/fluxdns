@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
+  <title id="title">FluxDNS DNS 查询主链与异步观测流程</title>
+  <desc id="desc">展示请求经 PolicyContext、fast cache key v2、RouteDecision 和上游解析形成共享响应，并在 transport 编码前一次性非阻塞发布 ResolutionEnvelope，由后台分别处理统计、缓存提交和解析详情。</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
+    </marker>
+    <marker id="arrow-green" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#15803d"/>
+    </marker>
+    <marker id="arrow-amber" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b45309"/>
+    </marker>
+    <style>
+      .title { font: 700 30px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .subtitle { font: 400 16px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #475569; }
+      .section { font: 700 21px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #0f172a; }
+      .section-note { font: 400 14px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #64748b; }
+      .box-title { font: 700 15px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #172033; text-anchor: middle; }
+      .box-text { font: 400 13px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #475569; text-anchor: middle; }
+      .label { font: 600 13px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #475569; }
+      .label-green { font: 700 13px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #15803d; }
+      .label-amber { font: 700 13px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #b45309; }
+      .foot { font: 400 14px "Segoe UI", "Microsoft YaHei", sans-serif; fill: #475569; }
+      .panel { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1.5; rx: 10; }
+      .box { fill: #ffffff; stroke: #64748b; stroke-width: 1.5; rx: 7; }
+      .box-blue { fill: #eff6ff; stroke: #2563eb; stroke-width: 1.7; rx: 7; }
+      .box-green { fill: #f0fdf4; stroke: #16a34a; stroke-width: 1.7; rx: 7; }
+      .box-amber { fill: #fffbeb; stroke: #d97706; stroke-width: 1.7; rx: 7; }
+      .box-purple { fill: #faf5ff; stroke: #9333ea; stroke-width: 1.7; rx: 7; }
+      .flow { fill: none; stroke: #334155; stroke-width: 2; marker-end: url(#arrow); }
+      .hit { fill: none; stroke: #15803d; stroke-width: 2.3; marker-end: url(#arrow-green); }
+      .async { fill: none; stroke: #b45309; stroke-width: 2; stroke-dasharray: 8 6; marker-end: url(#arrow-amber); }
+      .divider { stroke: #cbd5e1; stroke-width: 1.2; stroke-dasharray: 5 5; }
+    </style>
+  </defs>
+
+  <rect width="1600" height="1080" fill="#ffffff"/>
+  <text class="title" x="48" y="52">FluxDNS DNS 查询主链与异步观测流程</text>
+  <text class="subtitle" x="48" y="82">当前实现：fast cache key v2 + 共享响应 + 单次有界发布；stats、cache commit 与 resolve_log 均不阻塞客户端响应</text>
+
+  <rect class="panel" x="32" y="112" width="1536" height="470"/>
+  <text class="section" x="56" y="150">请求任务：同步主链</text>
+  <text class="section-note" x="250" y="150">每个请求只捕获一次 RuntimeSnapshot；只有这里的实线节点位于响应关键路径</text>
+
+  <rect class="box" x="56" y="202" width="150" height="82"/>
+  <text class="box-title" x="131" y="232">Transport adapter</text>
+  <text class="box-text" x="131" y="256">wire / framing / client</text>
+  <text class="box-text" x="131" y="274">UDP · TCP · DoH</text>
+
+  <rect class="box-blue" x="246" y="202" width="150" height="82"/>
+  <text class="box-title" x="321" y="232">dispatch_inbound</text>
+  <text class="box-text" x="321" y="256">request admission</text>
+  <text class="box-text" x="321" y="274">capture revision</text>
+
+  <rect class="box" x="436" y="202" width="180" height="82"/>
+  <text class="box-title" x="526" y="226">PolicyContext</text>
+  <text class="box-text" x="526" y="250">client · strategy · namespace</text>
+  <text class="box-text" x="526" y="270">policy / request / ECS hash</text>
+
+  <rect class="box-green" x="656" y="202" width="170" height="82"/>
+  <text class="box-title" x="741" y="232">Fast cache lookup</text>
+  <text class="box-text" x="741" y="256">key format v2 · Fast</text>
+  <text class="box-text" x="741" y="274">fresh / stale / miss</text>
+
+  <rect class="box-green" x="1056" y="202" width="175" height="82"/>
+  <text class="box-title" x="1143" y="232">共享解析结果</text>
+  <text class="box-text" x="1143" y="256">Arc&lt;CanonicalResponse&gt;</text>
+  <text class="box-text" x="1143" y="274">terminal + observation</text>
+
+  <rect class="box-amber" x="1271" y="202" width="175" height="82"/>
+  <text class="box-title" x="1358" y="226">try_publish once</text>
+  <text class="box-text" x="1358" y="250">ResolutionEnvelope</text>
+  <text class="box-text" x="1358" y="270">bounded · no await · no I/O</text>
+
+  <rect class="box-blue" x="1486" y="202" width="58" height="82"/>
+  <text class="box-title" x="1515" y="234">响应</text>
+  <text class="box-text" x="1515" y="258">encode</text>
+  <text class="box-text" x="1515" y="276">send</text>
+
+  <path class="flow" d="M 206 243 H 238"/>
+  <path class="flow" d="M 396 243 H 428"/>
+  <path class="flow" d="M 616 243 H 648"/>
+  <path class="hit" d="M 826 243 H 1048"/>
+  <text class="label-green" x="909" y="230">fresh / stale hit</text>
+  <path class="flow" d="M 1231 243 H 1263"/>
+  <path class="flow" d="M 1446 243 H 1478"/>
+
+  <rect class="box" x="656" y="380" width="170" height="92"/>
+  <text class="box-title" x="741" y="407">RouteDecision</text>
+  <text class="box-text" x="741" y="431">rules · listener hosts</text>
+  <text class="box-text" x="741" y="451">target · member ECS</text>
+
+  <rect class="box-purple" x="866" y="380" width="170" height="92"/>
+  <text class="box-title" x="951" y="407">Resolved path</text>
+  <text class="box-text" x="951" y="431">resolved key lookup</text>
+  <text class="box-text" x="951" y="451">hosts / upstream exchange</text>
+
+  <path class="flow" d="M 741 284 V 372"/>
+  <text class="label" x="754" y="334">miss / fast ineligible</text>
+  <path class="flow" d="M 826 426 H 858"/>
+  <path class="flow" d="M 1036 426 H 1143 V 292"/>
+  <text class="label" x="1054" y="410">response + optional commit candidate</text>
+
+  <line class="divider" x1="56" y1="524" x2="1544" y2="524"/>
+  <text class="foot" x="56" y="554">安全边界：qname digest、answer JSON、SQLite 操作和 cache CAS 均不在请求任务中执行。</text>
+
+  <rect class="panel" x="32" y="612" width="1536" height="350"/>
+  <text class="section" x="56" y="650">进程级 ResolutionRuntime：异步消费</text>
+  <text class="section-note" x="430" y="650">三条下游队列独立失败；任何消费者拥塞都不会反向阻塞 DNS 响应</text>
+
+  <rect class="box-amber" x="618" y="696" width="364" height="78"/>
+  <text class="box-title" x="800" y="725">Resolution ingress + dispatcher</text>
+  <text class="box-text" x="800" y="749">capacity 1024 · accepted / dropped / first gap time</text>
+  <path class="async" d="M 1358 284 V 674 H 800 V 688"/>
+  <text class="label-amber" x="1372" y="486">有界异步移交</text>
+
+  <rect class="box-blue" x="96" y="838" width="300" height="86"/>
+  <text class="box-title" x="246" y="868">Stats consumer</text>
+  <text class="box-text" x="246" y="892">低基数 accumulator → epoch / batch ledger</text>
+  <text class="box-text" x="246" y="912">周期 flush 到 SQLite</text>
+
+  <rect class="box-green" x="650" y="838" width="300" height="86"/>
+  <text class="box-title" x="800" y="868">CacheCommitWorker</text>
+  <text class="box-text" x="800" y="892">独立 100ms deadline · admission / CAS</text>
+  <text class="box-text" x="800" y="912">RAII lease 完成并唤醒 follower</text>
+
+  <rect class="box-purple" x="1204" y="838" width="300" height="86"/>
+  <text class="box-title" x="1354" y="868">Detail projector + SQLite writer</text>
+  <text class="box-text" x="1354" y="892">后台生成 qname digest / answer JSON</text>
+  <text class="box-text" x="1354" y="912">满批立即提交 · 尾批最多等待 5s</text>
+
+  <path class="async" d="M 694 774 V 806 H 246 V 830"/>
+  <path class="async" d="M 800 774 V 830"/>
+  <path class="async" d="M 906 774 V 806 H 1354 V 830"/>
+
+  <rect x="32" y="992" width="1536" height="56" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1" rx="7"/>
+  <text class="foot" x="56" y="1026">降级语义：ingress 满会形成 stats/detail/cache 的显式 gap；下游满只影响对应消费者；Management overview 暴露全部计数。</text>
+</svg>

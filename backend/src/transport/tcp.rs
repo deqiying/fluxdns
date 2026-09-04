@@ -355,7 +355,7 @@ impl ResponseEncoder for TcpResponseEncoder {
     fn encode<'a>(
         &'a self,
         request: &'a DnsRequest,
-        response: crate::dns::CanonicalResponse,
+        response: Arc<crate::dns::CanonicalResponse>,
     ) -> PortFuture<'a, Result<(), PortError>> {
         Box::pin(async move {
             let id = request

@@ -20,7 +20,7 @@ use crate::ports::storage::{
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 use super::STORAGE_SCHEMA_VERSION;
-use super::resolve_log::{ResolveDetailRecord, ResolveDetailWriter};
+use super::resolve_log::ResolveDetailRecord;
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
 const INITIAL_STORAGE_SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
@@ -76,6 +76,7 @@ pub struct SqliteResolveDetailRunSummary {
 }
 
 /// 将有界详情记录送入独立 SQLite writer channel。
+#[derive(Clone)]
 pub struct SqliteResolveDetailWriter {
     sender: mpsc::Sender<ResolveDetailRecord>,
 }
@@ -129,23 +130,20 @@ impl SqliteResolveDetailWriter {
         worker.limits = Some(limits);
         Ok((writer, worker))
     }
-}
 
-impl ResolveDetailWriter for SqliteResolveDetailWriter {
-    fn append(&mut self, record: &ResolveDetailRecord) -> Result<(), PortError> {
-        self.sender
-            .try_send(record.clone())
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => PortError::new(
-                    PortErrorClass::ResourceExhausted,
-                    "sqlite_resolve_log.enqueue",
-                )
-                .with_safe_context("queue full"),
-                mpsc::error::TrySendError::Closed(_) => {
-                    PortError::new(PortErrorClass::Unavailable, "sqlite_resolve_log.enqueue")
-                        .with_safe_context("worker closed")
-                }
-            })
+    /// 由详情 projector 无等待提交一条已经完成校验和裁剪的记录。
+    pub(crate) fn try_write(&self, record: ResolveDetailRecord) -> Result<(), PortError> {
+        self.sender.try_send(record).map_err(|error| match error {
+            mpsc::error::TrySendError::Full(_) => PortError::new(
+                PortErrorClass::ResourceExhausted,
+                "sqlite_resolve_log.enqueue",
+            )
+            .with_safe_context("queue full"),
+            mpsc::error::TrySendError::Closed(_) => {
+                PortError::new(PortErrorClass::Unavailable, "sqlite_resolve_log.enqueue")
+                    .with_safe_context("worker closed")
+            }
+        })
     }
 }
 
@@ -212,24 +210,33 @@ impl SqliteResolveDetailWorker {
             );
         }
         let mut summary = SqliteResolveDetailRunSummary::default();
+        let mut interval = tokio::time::interval(flush_interval);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // `interval` 的首次 tick 立即完成；先消费它，避免 worker 启动时做一次空 flush。
+        interval.tick().await;
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => break,
-                _ = tokio::time::sleep(flush_interval) => {
-                    match self
-                        .flush(Deadline::new(Instant::now() + operation_timeout))
-                        .await
-                    {
-                        Ok(flush) => {
-                            summary.flush.committed = summary.flush.committed.saturating_add(flush.committed);
-                            summary.flush.evicted = summary.flush.evicted.saturating_add(flush.evicted);
-                            summary.flush.dropped = summary.flush.dropped.saturating_add(flush.dropped);
-                        }
-                        Err(_) => {
-                            summary.failed_flushes = summary.failed_flushes.saturating_add(1);
+                record = self.receiver.recv() => {
+                    let Some(record) = record else { break };
+                    self.pending.push_back(record);
+                    while self.pending.len() < self.max_batch {
+                        match self.receiver.try_recv() {
+                            Ok(record) => self.pending.push_back(record),
+                            Err(mpsc::error::TryRecvError::Empty | mpsc::error::TryRecvError::Disconnected) => break,
                         }
                     }
+                    if self.pending.len() >= self.max_batch {
+                        merge_detail_run_flush(
+                            &mut summary,
+                            self.flush(Deadline::new(Instant::now() + operation_timeout)).await,
+                        );
+                    }
                 }
+                _ = interval.tick() => merge_detail_run_flush(
+                    &mut summary,
+                    self.flush(Deadline::new(Instant::now() + operation_timeout)).await,
+                ),
             }
         }
         let final_flush = self
@@ -242,6 +249,20 @@ impl SqliteResolveDetailWorker {
         summary.flush.evicted = summary.flush.evicted.saturating_add(final_flush.evicted);
         summary.flush.dropped = summary.flush.dropped.saturating_add(final_flush.dropped);
         Ok(summary)
+    }
+}
+
+fn merge_detail_run_flush(
+    summary: &mut SqliteResolveDetailRunSummary,
+    flush: Result<SqliteResolveDetailFlushSummary, PortError>,
+) {
+    match flush {
+        Ok(flush) => {
+            summary.flush.committed = summary.flush.committed.saturating_add(flush.committed);
+            summary.flush.evicted = summary.flush.evicted.saturating_add(flush.evicted);
+            summary.flush.dropped = summary.flush.dropped.saturating_add(flush.dropped);
+        }
+        Err(_) => summary.failed_flushes = summary.failed_flushes.saturating_add(1),
     }
 }
 
@@ -1166,15 +1187,25 @@ mod tests {
     };
     use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision, TransportClass};
     use crate::ports::storage::{
-        ResolveEvent, ResolveEventSink, ResolveRuleSource, StatsBatch, StatsEvent, StatsSource,
-        StorageBackend, StorageOperation, StorageTransaction,
+        ResolveEvent, ResolveRuleSource, StatsBatch, StatsEvent, StatsSource, StorageBackend,
+        StorageOperation, StorageTransaction,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
     use crate::resource::ResourceVersion;
-    use crate::storage::ResolveLogWriter;
+    use crate::storage::ResolveDetailRecord;
     use sqlx::Row;
 
     static NEXT_TEST_DB: AtomicU64 = AtomicU64::new(0);
+
+    trait TestResolveEventWriter {
+        fn try_record(&self, event: ResolveEvent) -> Result<(), crate::ports::PortError>;
+    }
+
+    impl TestResolveEventWriter for SqliteResolveDetailWriter {
+        fn try_record(&self, event: ResolveEvent) -> Result<(), crate::ports::PortError> {
+            self.try_write(ResolveDetailRecord::from_event(event)?)
+        }
+    }
 
     fn path() -> std::path::PathBuf {
         let id = NEXT_TEST_DB.fetch_add(1, Ordering::Relaxed);
@@ -1807,7 +1838,7 @@ mod tests {
         let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
         let (sink, mut worker) =
             SqliteResolveDetailWriter::channel(Arc::clone(&backend), 2, 1).unwrap();
-        let writer = ResolveLogWriter::new(true, 2, sink).unwrap();
+        let writer = sink;
         for listener_id in ["listener-a", "listener-b"] {
             writer
                 .try_record(ResolveEvent {
@@ -1840,7 +1871,6 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(writer.flush().committed, 2);
         assert_eq!(worker.pending_len(), 2);
         assert_eq!(worker.flush(deadline()).await.unwrap().committed, 1);
         assert_eq!(worker.pending_len(), 1);
@@ -1880,7 +1910,7 @@ mod tests {
         let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
         let (sink, mut worker) =
             SqliteResolveDetailWriter::channel(Arc::clone(&backend), 1, 1).unwrap();
-        let writer = ResolveLogWriter::new(true, 1, sink).unwrap();
+        let writer = sink;
         writer
             .try_record(ResolveEvent {
                 occurred_at: SystemTime::now(),
@@ -1911,7 +1941,6 @@ mod tests {
                 runtime_revision: RuntimeRevision(1),
             })
             .unwrap();
-        assert_eq!(writer.flush().committed, 1);
         backend.shutdown(deadline()).await.unwrap();
         assert!(worker.flush(deadline()).await.is_err());
         assert_eq!(worker.pending_len(), 1);
@@ -1928,7 +1957,7 @@ mod tests {
         let (sink, mut worker) =
             SqliteResolveDetailWriter::channel_with_limits(Arc::clone(&backend), 4, 4, limits)
                 .unwrap();
-        let writer = ResolveLogWriter::new(true, 4, sink).unwrap();
+        let writer = sink;
         for listener_id in ["listener-a", "listener-b", "listener-c", "listener-d"] {
             writer
                 .try_record(ResolveEvent {
@@ -1961,7 +1990,6 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(writer.flush().committed, 4);
         let first = worker.flush(deadline()).await.unwrap();
         assert_eq!(first.committed, 3);
         assert_eq!(first.dropped, 1);
@@ -1997,7 +2025,6 @@ mod tests {
                 runtime_revision: RuntimeRevision(1),
             })
             .unwrap();
-        assert_eq!(writer.flush().committed, 1);
         let second = worker.flush(deadline()).await.unwrap();
         assert_eq!(second.committed, 1);
         assert_eq!(second.dropped, 0);
@@ -2021,7 +2048,7 @@ mod tests {
         let (sink, mut worker) =
             SqliteResolveDetailWriter::channel_with_limits(Arc::clone(&backend), 2, 2, limits)
                 .unwrap();
-        let writer = ResolveLogWriter::new(true, 2, sink).unwrap();
+        let writer = sink;
         for (listener_id, occurred_at) in [
             ("listener-old", SystemTime::UNIX_EPOCH),
             ("listener-new", SystemTime::now()),
@@ -2056,7 +2083,6 @@ mod tests {
                     runtime_revision: RuntimeRevision(1),
                 })
                 .unwrap();
-            assert_eq!(writer.flush().committed, 1);
             let summary = worker.flush(deadline()).await.unwrap();
             if occurred_at == SystemTime::UNIX_EPOCH {
                 assert_eq!(summary.evicted, 0);
@@ -2081,7 +2107,7 @@ mod tests {
         let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
         let (sink, worker) =
             SqliteResolveDetailWriter::channel(Arc::clone(&backend), 3, 2).unwrap();
-        let writer = ResolveLogWriter::new(true, 3, sink).unwrap();
+        let writer = sink;
         for listener_id in ["listener-a", "listener-b", "listener-c"] {
             writer
                 .try_record(ResolveEvent {
@@ -2114,7 +2140,6 @@ mod tests {
                 })
                 .unwrap();
         }
-        assert_eq!(writer.flush().committed, 3);
         let summary = worker.shutdown(deadline()).await.unwrap();
         assert_eq!(summary.committed, 3);
         assert_eq!(summary.evicted, 0);
@@ -2136,7 +2161,7 @@ mod tests {
         let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
         let (sink, worker) =
             SqliteResolveDetailWriter::channel(Arc::clone(&backend), 2, 2).unwrap();
-        let writer = ResolveLogWriter::new(true, 2, sink).unwrap();
+        let writer = sink;
         writer
             .try_record(ResolveEvent {
                 occurred_at: SystemTime::now(),
@@ -2167,7 +2192,6 @@ mod tests {
                 runtime_revision: RuntimeRevision(1),
             })
             .unwrap();
-        assert_eq!(writer.flush().committed, 1);
         let cancellation = Cancellation::new();
         let task = tokio::spawn(worker.run(
             cancellation.clone(),
@@ -2186,6 +2210,77 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count, 1);
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_detail_worker_flushes_a_full_batch_without_waiting_for_timer() {
+        let path = path();
+        let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
+        let (writer, worker) =
+            SqliteResolveDetailWriter::channel(Arc::clone(&backend), 2, 2).unwrap();
+        let cancellation = Cancellation::new();
+        let task = tokio::spawn(worker.run(
+            cancellation.clone(),
+            Duration::from_secs(60),
+            Duration::from_secs(5),
+        ));
+
+        for listener_id in ["listener-a", "listener-b"] {
+            writer
+                .try_record(ResolveEvent {
+                    occurred_at: SystemTime::now(),
+                    duration_started_at: Instant::now(),
+                    request_digest: Arc::from("digest"),
+                    listener_id: Arc::from(listener_id),
+                    route_id: None,
+                    client_ip: None,
+                    client_bucket: None,
+                    strategy_id: None,
+                    upstream_id: None,
+                    upstream_member_id: None,
+                    upstream_used_id: None,
+                    matched_rule_source: None,
+                    matched_resource_id: None,
+                    matched_rule_ordinal: None,
+                    resource_version: None,
+                    transport: TransportClass::Datagram,
+                    qname: Arc::from("example.com."),
+                    qtype: 1,
+                    qclass: 1,
+                    answers: Vec::new(),
+                    rcode: 0,
+                    cancellation_reason: None,
+                    outcome: OutcomeClass::Success,
+                    source: StatsSource::Upstream,
+                    cache_status: CacheStatus::Miss,
+                    runtime_revision: RuntimeRevision(1),
+                })
+                .unwrap();
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+                    .fetch_one(&backend.pool)
+                    .await
+                    .unwrap();
+                if count == 2 {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("full detail batch must commit before the 60 second timer");
+
+        cancellation.cancel(CancelReason::Shutdown);
+        let summary = task.await.unwrap().unwrap();
+        assert_eq!(summary.flush.committed, 2);
+        assert_eq!(summary.failed_flushes, 0);
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));

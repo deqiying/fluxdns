@@ -29,6 +29,19 @@ export const overviewFixture = {
     { key: "active_listeners", label: "活动 Listener", value: 3, unit: "count", status: "available" },
     { key: "resources", label: "已装配资源", value: 4, unit: "count", status: "available" },
   ],
+  resolution_pipeline: {
+    accepted: 284_913,
+    dropped: 2,
+    gap_started_at_utc_millis: 1_788_425_900_000,
+    cache_commit_stored: 37_412,
+    cache_commit_rejected: 19,
+    cache_commit_conflict: 3,
+    cache_commit_unavailable: 1,
+    cache_commit_dropped: 0,
+    detail_accepted: 284_911,
+    detail_dropped: 2,
+    detail_failed: 0,
+  },
 } satisfies Overview;
 
 export const runtimeFixture = {

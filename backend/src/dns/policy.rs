@@ -14,12 +14,13 @@ use std::time::{Duration, Instant};
 use arc_swap::{ArcSwap, ArcSwapOption};
 use hickory_proto::{op::ResponseCode, rr::rdata::opt::ClientSubnet};
 use ipnet::IpNet;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::cache::{
-    CacheAdmissionPolicy, CacheFacade, CacheFacadeOptions, CacheFingerprint, CacheKeyDimensions,
-    CacheLookup, CachePersistenceRuntime, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer,
-    MokaCacheStore, SqlitePersistentCacheStore, build_cache_key,
+    CacheAdmissionPolicy, CacheCommitCandidate, CacheFacade, CacheFacadeOptions, CacheFingerprint,
+    CacheKeyDimensions, CacheKeyMode, CacheLookup, CachePersistenceRuntime, CacheWriteRequest,
+    LateCacheFinalizer, MokaCacheStore, SqlitePersistentCacheStore, build_cache_key,
 };
 use crate::config::model::EcsMode;
 use crate::config::resolve::{
@@ -49,7 +50,8 @@ use crate::upstream::{
 
 use super::handler::resource_answers;
 use super::{
-    CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsRequest, DnsResolutionObservation,
+    CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsCoreCompletion, DnsRequest,
+    DnsResolutionObservation,
 };
 
 #[derive(Debug, Error)]
@@ -112,6 +114,53 @@ struct PolicyState {
     index: PolicyIndex,
     host_versions: BTreeMap<ConfigId, ResourceVersion>,
     rule_set_versions: BTreeMap<ConfigId, ResourceVersion>,
+    cache_semantics_base: [u8; 32],
+    host_content_hashes: BTreeMap<ConfigId, Arc<str>>,
+    rule_set_content_hashes: BTreeMap<ConfigId, Arc<str>>,
+    fast_cache_strategies: BTreeMap<ConfigId, bool>,
+}
+
+impl PolicyState {
+    /// 组合 prepare 阶段已经选定的上下文与预计算依赖摘要，不遍历规则或资源内容。
+    fn cache_semantics_fingerprint(
+        &self,
+        context: &crate::policy::PolicyContext,
+    ) -> CacheFingerprint {
+        let mut hasher = Sha256::new();
+        hasher.update(b"fluxdns/cache-semantics/v2\0");
+        hasher.update(self.cache_semantics_base);
+        update_fingerprint_component(&mut hasher, context.listener_id.as_str().as_bytes());
+        if let Some(route) = &context.route {
+            update_fingerprint_component(&mut hasher, route.route_id.as_ref().as_bytes());
+        } else {
+            update_fingerprint_component(&mut hasher, &[]);
+        }
+        update_fingerprint_component(&mut hasher, context.strategy.id.as_str().as_bytes());
+        match &context.client {
+            ClientMatch::Matched { client, .. } => {
+                update_fingerprint_component(&mut hasher, client.name.as_str().as_bytes());
+            }
+            ClientMatch::Unknown => update_fingerprint_component(&mut hasher, &[]),
+        }
+        for (id, content_hash) in &self.host_content_hashes {
+            update_fingerprint_component(&mut hasher, id.as_str().as_bytes());
+            update_fingerprint_component(&mut hasher, content_hash.as_bytes());
+        }
+        for (id, content_hash) in &self.rule_set_content_hashes {
+            update_fingerprint_component(&mut hasher, id.as_str().as_bytes());
+            update_fingerprint_component(&mut hasher, content_hash.as_bytes());
+        }
+        CacheFingerprint::from_digest(hasher.finalize().into())
+    }
+
+    fn fast_cache_eligible(&self, context: &crate::policy::PolicyContext) -> bool {
+        context.cache.is_enabled()
+            && self
+                .fast_cache_strategies
+                .get(&context.strategy.id)
+                .copied()
+                .unwrap_or(false)
+    }
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -255,6 +304,10 @@ impl PolicyDnsCore {
             index: policy,
             host_versions: resource_versions(&config.hosts),
             rule_set_versions: rule_set_versions(&config.rule_sets, rule_snapshots),
+            cache_semantics_base: cache_semantics_base(config),
+            host_content_hashes: host_content_hashes(&config.hosts, host_snapshots),
+            rule_set_content_hashes: rule_set_content_hashes(&config.rule_sets, rule_snapshots),
+            fast_cache_strategies: fast_cache_strategies(config, &upstreams),
         };
         Ok(Self {
             policy: Arc::new(ArcSwap::from_pointee(policy_state)),
@@ -392,10 +445,16 @@ impl PolicyDnsCore {
                 })?;
             let mut host_versions = current.host_versions.clone();
             host_versions.insert(resource.clone(), candidate);
+            let mut host_content_hashes = current.host_content_hashes.clone();
+            host_content_hashes.insert(resource.clone(), Arc::from(snapshot.content_hash()));
             let next = Arc::new(PolicyState {
                 index,
                 host_versions,
                 rule_set_versions: current.rule_set_versions.clone(),
+                cache_semantics_base: current.cache_semantics_base,
+                host_content_hashes,
+                rule_set_content_hashes: current.rule_set_content_hashes.clone(),
+                fast_cache_strategies: current.fast_cache_strategies.clone(),
             });
             let observed = self.policy.compare_and_swap(&current, next);
             if Arc::ptr_eq(&*observed, &current) {
@@ -433,10 +492,16 @@ impl PolicyDnsCore {
                 })?;
             let mut rule_set_versions = current.rule_set_versions.clone();
             rule_set_versions.insert(resource.clone(), candidate);
+            let mut rule_set_content_hashes = current.rule_set_content_hashes.clone();
+            rule_set_content_hashes.insert(resource.clone(), Arc::from(snapshot.content_hash()));
             let next = Arc::new(PolicyState {
                 index,
                 host_versions: current.host_versions.clone(),
                 rule_set_versions,
+                cache_semantics_base: current.cache_semantics_base,
+                host_content_hashes: current.host_content_hashes.clone(),
+                rule_set_content_hashes,
+                fast_cache_strategies: current.fast_cache_strategies.clone(),
             });
             let observed = self.policy.compare_and_swap(&current, next);
             if Arc::ptr_eq(&*observed, &current) {
@@ -478,6 +543,119 @@ fn rule_set_versions(
                     .map(ResourceSnapshot::version)
                     .unwrap_or_else(|| ResourceVersion::new(1, 1)),
             )
+        })
+        .collect()
+}
+
+/// 只覆盖会改变 DNS 路由或上游答案的已解析配置，排除日志、WebUI 与数据库路径。
+fn cache_semantics_base(config: &ResolvedConfig) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"fluxdns/cache-semantics-base/v2\0");
+    for material in [
+        format!("{:?}", config.listeners),
+        format!("{:?}", config.strategies),
+        format!("{:?}", config.clients),
+        format!("{:?}", config.upstreams),
+        format!("{:?}", config.outbounds),
+    ] {
+        update_fingerprint_component(&mut hasher, material.as_bytes());
+    }
+    for upstream in &config.upstreams {
+        if let ResolvedUpstream::Hosts { id, hosts, .. } = upstream {
+            update_fingerprint_component(&mut hasher, id.as_str().as_bytes());
+            update_fingerprint_component(&mut hasher, hosts.as_bytes());
+        }
+    }
+    hasher.finalize().into()
+}
+
+fn host_content_hashes(
+    resources: &[ResolvedHostsResource],
+    snapshots: &BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>>,
+) -> BTreeMap<ConfigId, Arc<str>> {
+    resources
+        .iter()
+        .map(|resource| {
+            let (id, fallback) = match resource {
+                ResolvedHostsResource::Const { id, hosts, .. } => {
+                    (id, stable_content_hash(hosts.as_bytes()))
+                }
+                ResolvedHostsResource::File { id, path, .. } => {
+                    let hash = std::fs::read(path)
+                        .map(|content| stable_content_hash(&content))
+                        .unwrap_or_else(|_| stable_content_hash(path.to_string_lossy().as_bytes()));
+                    (id, hash)
+                }
+            };
+            let hash = snapshots
+                .get(id)
+                .map(|snapshot| Arc::from(snapshot.content_hash()))
+                .unwrap_or(fallback);
+            (id.clone(), hash)
+        })
+        .collect()
+}
+
+fn rule_set_content_hashes(
+    resources: &[crate::config::resolve::ResolvedRuleSet],
+    snapshots: &BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
+) -> BTreeMap<ConfigId, Arc<str>> {
+    resources
+        .iter()
+        .map(|resource| {
+            let (id, fallback) = match resource {
+                crate::config::resolve::ResolvedRuleSet::Const { id, rule, .. } => {
+                    (id, stable_content_hash(rule.as_bytes()))
+                }
+                crate::config::resolve::ResolvedRuleSet::File { id, path, .. } => {
+                    let hash = std::fs::read(path)
+                        .map(|content| stable_content_hash(&content))
+                        .unwrap_or_else(|_| stable_content_hash(path.to_string_lossy().as_bytes()));
+                    (id, hash)
+                }
+                crate::config::resolve::ResolvedRuleSet::Remote { id, url, .. } => {
+                    (id, stable_content_hash(url.as_str().as_bytes()))
+                }
+            };
+            let hash = snapshots
+                .get(id)
+                .map(|snapshot| Arc::from(snapshot.content_hash()))
+                .unwrap_or(fallback);
+            (id.clone(), hash)
+        })
+        .collect()
+}
+
+fn stable_content_hash(content: &[u8]) -> Arc<str> {
+    Arc::from(format!("{:x}", Sha256::digest(content)))
+}
+
+fn update_fingerprint_component(hasher: &mut Sha256, component: &[u8]) {
+    hasher.update(
+        u64::try_from(component.len())
+            .unwrap_or(u64::MAX)
+            .to_be_bytes(),
+    );
+    hasher.update(component);
+}
+
+fn fast_cache_strategies(
+    config: &ResolvedConfig,
+    upstreams: &UpstreamRuntime,
+) -> BTreeMap<ConfigId, bool> {
+    config
+        .strategies
+        .iter()
+        .map(|strategy| {
+            let safe = std::iter::once(&strategy.default_upstream)
+                .chain(
+                    strategy
+                        .rules
+                        .iter()
+                        .filter_map(|rule| rule.upstream.as_ref()),
+                )
+                .all(|target| !upstreams.has_member_specific_ecs(target));
+            (strategy.id.clone(), safe)
         })
         .collect()
 }
@@ -578,40 +756,59 @@ impl DnsCore for PolicyDnsCore {
         &'a self,
         request: &'a DnsRequest,
     ) -> PortFuture<'a, Result<CoreOutcome, CoreError>> {
-        Box::pin(async move { self.resolve_with_metadata(request).await.0 })
+        Box::pin(async move {
+            let (result, _, _, cache_commit) = self.resolve_with_metadata(request).await;
+            // 直接调用 Policy core 时没有进程级 event worker，仍需完成 lease；服务生产路径
+            // 使用 `resolve_with_completion`，因此不会在请求主链等待这次提交。
+            if let Some(candidate) = cache_commit {
+                let _ = candidate.commit(Duration::from_millis(100)).await;
+            }
+            result
+        })
     }
 
-    fn resolve_with_observation<'a>(
+    fn resolve_with_completion<'a>(
         &'a self,
         request: &'a DnsRequest,
-    ) -> PortFuture<
-        'a,
-        (
-            Result<CoreOutcome, CoreError>,
-            Option<DnsResolutionObservation>,
-        ),
-    > {
-        Box::pin(async move { self.resolve_with_metadata(request).await })
+    ) -> PortFuture<'a, DnsCoreCompletion> {
+        Box::pin(async move {
+            let (result, observation, cancellation_reason, cache_commit) =
+                self.resolve_with_metadata(request).await;
+            DnsCoreCompletion {
+                result,
+                observation,
+                cancellation_reason,
+                cache_commit,
+            }
+        })
     }
 }
 
 struct PolicyUpstreamResult {
-    outcome: UpstreamOutcome,
+    outcome: PolicyUpstreamOutcome,
     upstream_target_id: Option<Arc<str>>,
     upstream_used_id: Option<Arc<str>>,
     source: StatsSource,
     cache_status: CacheStatus,
+    cache_commit: Option<CacheCommitCandidate>,
+}
+
+enum PolicyUpstreamOutcome {
+    Response(Arc<CanonicalResponse>),
+    TransportFailure,
+    Cancelled(crate::dns::CancelReason),
 }
 
 impl PolicyUpstreamResult {
     /// 将一次真实上游执行结果转换为策略层结果。
     fn upstream(result: UpstreamExecutionResult, cache_status: CacheStatus) -> Self {
         Self {
-            outcome: result.outcome,
+            outcome: policy_upstream_outcome(result.outcome),
             upstream_target_id: Some(result.target_id),
             upstream_used_id: result.used_id,
             source: StatsSource::Upstream,
             cache_status,
+            cache_commit: None,
         }
     }
 
@@ -623,11 +820,12 @@ impl PolicyUpstreamResult {
         cache_status: CacheStatus,
     ) -> Self {
         Self {
-            outcome,
+            outcome: policy_upstream_outcome(outcome),
             upstream_target_id: Some(upstream_target_id),
             upstream_used_id,
             source: StatsSource::Upstream,
             cache_status,
+            cache_commit: None,
         }
     }
 
@@ -638,7 +836,7 @@ impl PolicyUpstreamResult {
         cache_status: CacheStatus,
     ) -> Self {
         Self {
-            outcome,
+            outcome: policy_upstream_outcome(outcome),
             upstream_target_id: Some(Arc::from(record.entry.upstream.target_id().as_str())),
             upstream_used_id: record
                 .entry
@@ -647,7 +845,16 @@ impl PolicyUpstreamResult {
                 .map(|id| Arc::from(id.as_str())),
             source: StatsSource::Cache,
             cache_status,
+            cache_commit: None,
         }
+    }
+}
+
+fn policy_upstream_outcome(outcome: UpstreamOutcome) -> PolicyUpstreamOutcome {
+    match outcome {
+        UpstreamOutcome::Response(response) => PolicyUpstreamOutcome::Response(Arc::new(response)),
+        UpstreamOutcome::TransportFailure(_) => PolicyUpstreamOutcome::TransportFailure,
+        UpstreamOutcome::Cancelled(reason) => PolicyUpstreamOutcome::Cancelled(reason),
     }
 }
 
@@ -669,22 +876,29 @@ impl PolicyDnsCore {
     ) -> (
         Result<CoreOutcome, CoreError>,
         Option<DnsResolutionObservation>,
+        Option<crate::dns::CancelReason>,
+        Option<CacheCommitCandidate>,
     ) {
         let meta = &request.context.meta;
         if meta.cancellation.is_cancelled() || meta.deadline.is_expired(Instant::now()) {
-            return (Ok(CoreOutcome::NoResponse), None);
+            return (
+                Ok(CoreOutcome::NoResponse),
+                None,
+                meta.cancellation.reason(),
+                None,
+            );
         }
 
         let Some(listener_id) = ConfigId::new(meta.listener_id.as_ref().to_owned()).ok() else {
-            return (servfail(request), None);
+            return (servfail(request), None, None, None);
         };
         let qname = match CanonicalDomain::parse(&request.query.question().name().to_ascii()) {
             Ok(qname) => qname,
-            Err(_) => return (servfail(request), None),
+            Err(_) => return (servfail(request), None, None, None),
         };
         let policy = self.policy.load();
         let doh_path = reconstructed_doh_path(request);
-        let plan = match policy.index.evaluate(PolicyRequest {
+        let policy_request = PolicyRequest {
             listener_id: &listener_id,
             doh_path: doh_path.as_deref(),
             client_id: request
@@ -696,20 +910,72 @@ impl PolicyDnsCore {
             client_addr: request.context.client.client_addr,
             client_digest: None,
             qname: Some(&qname),
-        }) {
-            Ok(plan) => plan,
-            Err(_error) => return (servfail(request), None),
         };
-        let client_bucket = match &plan.client {
+        let context = match policy.index.prepare_context(&policy_request) {
+            Ok(context) => context,
+            Err(_error) => return (servfail(request), None, None, None),
+        };
+        let client_bucket = match &context.client {
             ClientMatch::Matched { client, .. } => Some(Arc::from(client.name.as_str())),
             ClientMatch::Unknown => None,
         };
-        let strategy_id = Some(Arc::from(plan.strategy.id.as_str()));
+        let strategy_id = Some(Arc::from(context.strategy.id.as_str()));
+        let fast_key = policy
+            .fast_cache_eligible(&context)
+            .then(|| fast_cache_key(&policy, &context, request))
+            .flatten();
+        let mut fast_lookup_completed = false;
+        if let Some(key) = &fast_key {
+            fast_lookup_completed = true;
+            match self.cache.lookup(key, meta.deadline).await {
+                Ok(CacheLookup::Fresh(record)) => {
+                    let response = fresh_cache_response(&record);
+                    return cached_completion(
+                        request,
+                        &context,
+                        record,
+                        response,
+                        CacheStatus::Fresh,
+                    );
+                }
+                Ok(CacheLookup::Stale { record, refresh }) => {
+                    if let Some(answer_ttl) =
+                        stale_answer_ttl(&context.cache, record.entry.expires_at, Instant::now())
+                    {
+                        let mut response = (*record.entry.response).clone();
+                        response.set_ttl(answer_ttl);
+                        if refresh.try_consume() {
+                            self.schedule_fast_optimistic_refresh(
+                                key.clone(),
+                                refresh.version(),
+                                request,
+                            );
+                        }
+                        return cached_completion(
+                            request,
+                            &context,
+                            record,
+                            response,
+                            CacheStatus::Stale,
+                        );
+                    }
+                }
+                Ok(CacheLookup::Disabled)
+                | Ok(CacheLookup::Miss)
+                | Ok(CacheLookup::StoreUnavailable)
+                | Err(_) => {}
+            }
+        }
+        let decision = match policy.index.evaluate_route(&context, Some(&qname)) {
+            Ok(decision) => decision,
+            Err(_error) => return (servfail(request), None, None, None),
+        };
+        let plan = context.into_resolution_plan(decision);
         let matched_rule = matched_rule_observation(&policy, plan.matched_rule.as_ref());
 
         if let Some(resource_id) = plan.hosts {
             let Some(index) = policy.index.hosts_index(&resource_id) else {
-                return (servfail(request), None);
+                return (servfail(request), None, None, None);
             };
             let (answers, known_name) = resource_answers(
                 std::slice::from_ref(index.as_ref()),
@@ -730,7 +996,7 @@ impl PolicyDnsCore {
             let result = response
                 .map(|mut response| {
                     apply_ttl_override(&mut response, &plan.ttl_override);
-                    CoreOutcome::Response(response)
+                    CoreOutcome::Response(Arc::new(response))
                 })
                 .map_err(CoreError::ResponseConstruction);
             return (
@@ -745,6 +1011,8 @@ impl PolicyDnsCore {
                     source: StatsSource::Hosts,
                     cache_status: CacheStatus::Disabled,
                 }),
+                None,
+                None,
             );
         }
 
@@ -753,7 +1021,16 @@ impl PolicyDnsCore {
             &plan.edns_client_subnet,
             request.context.client.client_addr,
         );
-        let Some(outcome) = self.resolve_upstream(request, &plan, &upstream_query).await else {
+        let Some(outcome) = self
+            .resolve_upstream(
+                request,
+                &plan,
+                &upstream_query,
+                fast_key,
+                fast_lookup_completed,
+            )
+            .await
+        else {
             return (
                 servfail(request),
                 Some(DnsResolutionObservation {
@@ -766,6 +1043,8 @@ impl PolicyDnsCore {
                     source: StatsSource::Upstream,
                     cache_status: CacheStatus::StoreUnavailable,
                 }),
+                None,
+                None,
             );
         };
         let upstream_id = outcome.upstream_target_id.clone();
@@ -773,13 +1052,19 @@ impl PolicyDnsCore {
         let upstream_member_id = upstream_used_id
             .clone()
             .filter(|selected| upstream_id.as_deref() != Some(selected.as_ref()));
+        let cancellation_reason = match &outcome.outcome {
+            PolicyUpstreamOutcome::Cancelled(reason) => Some(*reason),
+            PolicyUpstreamOutcome::Response(_) | PolicyUpstreamOutcome::TransportFailure => None,
+        };
         let result = match outcome.outcome {
-            UpstreamOutcome::Response(mut response) if response.matches_query(&request.query) => {
-                apply_ttl_override(&mut response, &plan.ttl_override);
+            PolicyUpstreamOutcome::Response(mut response)
+                if response.matches_query(&request.query) =>
+            {
+                apply_ttl_override(Arc::make_mut(&mut response), &plan.ttl_override);
                 Ok(CoreOutcome::Response(response))
             }
-            UpstreamOutcome::Cancelled(_) => Ok(CoreOutcome::NoResponse),
-            UpstreamOutcome::Response(_) | UpstreamOutcome::TransportFailure(_) => {
+            PolicyUpstreamOutcome::Cancelled(_) => Ok(CoreOutcome::NoResponse),
+            PolicyUpstreamOutcome::Response(_) | PolicyUpstreamOutcome::TransportFailure => {
                 servfail(request)
             }
         };
@@ -795,6 +1080,8 @@ impl PolicyDnsCore {
                 source: outcome.source,
                 cache_status: outcome.cache_status,
             }),
+            cancellation_reason,
+            outcome.cache_commit,
         )
     }
 
@@ -803,6 +1090,8 @@ impl PolicyDnsCore {
         request: &DnsRequest,
         plan: &crate::policy::ResolutionPlan,
         query: &crate::dns::CanonicalQuery,
+        prepared_key: Option<crate::ports::cache::CacheKey>,
+        lookup_completed: bool,
     ) -> Option<PolicyUpstreamResult> {
         let member_queries = self.upstreams.member_queries(
             &plan.upstream,
@@ -813,7 +1102,7 @@ impl PolicyDnsCore {
         let key = if member_queries.is_some() {
             None
         } else {
-            cache_key_for_query(plan, request, query)
+            prepared_key.or_else(|| cache_key_for_query(plan, request, query))
         };
         let Some(key) = key else {
             return self
@@ -830,40 +1119,42 @@ impl PolicyDnsCore {
         };
         let late_sink = self.late_result_sink(&key, request, &plan.upstream);
         let deadline = request.context.meta.deadline;
-        match self.cache.lookup(&key, deadline).await {
-            Ok(CacheLookup::Fresh(record)) => {
-                return Some(PolicyUpstreamResult::cache(
-                    UpstreamOutcome::Response(fresh_cache_response(&record)),
-                    &record,
-                    CacheStatus::Fresh,
-                ));
-            }
-            Ok(CacheLookup::Stale { record, refresh }) => {
-                if let Some(answer_ttl) =
-                    stale_answer_ttl(&plan.cache, record.entry.expires_at, Instant::now())
-                {
-                    let mut stale_response = (*record.entry.response).clone();
-                    stale_response.set_ttl(answer_ttl);
-                    if refresh.try_consume() {
-                        self.schedule_optimistic_refresh(
-                            key.clone(),
-                            refresh.version(),
-                            request,
-                            plan,
-                            query,
-                        );
-                    }
+        if !lookup_completed {
+            match self.cache.lookup(&key, deadline).await {
+                Ok(CacheLookup::Fresh(record)) => {
                     return Some(PolicyUpstreamResult::cache(
-                        UpstreamOutcome::Response(stale_response),
+                        UpstreamOutcome::Response(fresh_cache_response(&record)),
                         &record,
-                        CacheStatus::Stale,
+                        CacheStatus::Fresh,
                     ));
                 }
+                Ok(CacheLookup::Stale { record, refresh }) => {
+                    if let Some(answer_ttl) =
+                        stale_answer_ttl(&plan.cache, record.entry.expires_at, Instant::now())
+                    {
+                        let mut stale_response = (*record.entry.response).clone();
+                        stale_response.set_ttl(answer_ttl);
+                        if refresh.try_consume() {
+                            self.schedule_optimistic_refresh(
+                                key.clone(),
+                                refresh.version(),
+                                request,
+                                plan,
+                                query,
+                            );
+                        }
+                        return Some(PolicyUpstreamResult::cache(
+                            UpstreamOutcome::Response(stale_response),
+                            &record,
+                            CacheStatus::Stale,
+                        ));
+                    }
+                }
+                Ok(CacheLookup::Disabled)
+                | Ok(CacheLookup::Miss)
+                | Ok(CacheLookup::StoreUnavailable)
+                | Err(_) => {}
             }
-            Ok(CacheLookup::Disabled)
-            | Ok(CacheLookup::Miss)
-            | Ok(CacheLookup::StoreUnavailable)
-            | Err(_) => {}
         }
 
         let reservation = match self.cache.reserve_load(key.clone(), deadline).await {
@@ -932,10 +1223,7 @@ impl PolicyDnsCore {
                     )
                     .await
                 else {
-                    let _ = self
-                        .cache
-                        .abandon_load(lease, CacheLoadFailure::Internal, deadline)
-                        .await;
+                    drop(lease);
                     return None;
                 };
                 let UpstreamExecutionResult {
@@ -946,10 +1234,7 @@ impl PolicyDnsCore {
                 match outcome {
                     UpstreamOutcome::Response(response) => {
                         if !response.matches_query(query) {
-                            let _ = self
-                                .cache
-                                .publish_load(lease, CacheLoadCompletion::Miss, deadline)
-                                .await;
+                            drop(lease);
                             return Some(PolicyUpstreamResult::upstream_outcome(
                                 UpstreamOutcome::Response(response),
                                 target_id,
@@ -957,13 +1242,13 @@ impl PolicyDnsCore {
                                 CacheStatus::Miss,
                             ));
                         }
-                        let response_for_cache = Arc::new(response.clone());
-                        let write = self
-                            .cache
-                            .write_response(CacheWriteRequest {
+                        let response = Arc::new(response);
+                        let cache_commit = CacheCommitCandidate::new(
+                            Arc::clone(&self.cache),
+                            CacheWriteRequest {
                                 key: key.clone(),
                                 condition: crate::ports::cache::CacheCondition::Absent,
-                                response: response_for_cache,
+                                response: Arc::clone(&response),
                                 upstream: cache_upstream_provenance(
                                     target_id.as_ref(),
                                     used_id.as_deref(),
@@ -971,37 +1256,20 @@ impl PolicyDnsCore {
                                 now: Instant::now(),
                                 producer_revision: request.context.runtime_revision,
                                 deadline,
-                            })
-                            .await;
-                        let cache_status = match &write {
-                            Ok(CacheWriteResult::Stored(_)) => CacheStatus::Miss,
-                            Ok(CacheWriteResult::Rejected(_)) => CacheStatus::WriteRejected,
-                            Err(_) => CacheStatus::StoreUnavailable,
-                        };
-                        let completion = match write {
-                            Ok(CacheWriteResult::Stored(_)) => self
-                                .cache
-                                .store()
-                                .get(&key, deadline)
-                                .await
-                                .ok()
-                                .flatten()
-                                .map_or(CacheLoadCompletion::Miss, CacheLoadCompletion::Ready),
-                            Ok(CacheWriteResult::Rejected(_)) | Err(_) => CacheLoadCompletion::Miss,
-                        };
-                        let _ = self.cache.publish_load(lease, completion, deadline).await;
-                        Some(PolicyUpstreamResult::upstream_outcome(
-                            UpstreamOutcome::Response(response),
-                            target_id,
-                            used_id,
-                            cache_status,
-                        ))
+                            },
+                            lease,
+                        );
+                        Some(PolicyUpstreamResult {
+                            outcome: PolicyUpstreamOutcome::Response(response),
+                            upstream_target_id: Some(target_id),
+                            upstream_used_id: used_id,
+                            source: StatsSource::Upstream,
+                            cache_status: CacheStatus::Miss,
+                            cache_commit: Some(cache_commit),
+                        })
                     }
                     UpstreamOutcome::Cancelled(reason) => {
-                        let _ = self
-                            .cache
-                            .abandon_load(lease, CacheLoadFailure::Cancelled(reason), deadline)
-                            .await;
+                        drop(lease);
                         Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::Cancelled(reason),
                             target_id,
@@ -1010,10 +1278,7 @@ impl PolicyDnsCore {
                         ))
                     }
                     UpstreamOutcome::TransportFailure(failure) => {
-                        let _ = self
-                            .cache
-                            .abandon_load(lease, CacheLoadFailure::Unavailable, deadline)
-                            .await;
+                        drop(lease);
                         Some(PolicyUpstreamResult::upstream_outcome(
                             UpstreamOutcome::TransportFailure(failure),
                             target_id,
@@ -1024,6 +1289,123 @@ impl PolicyDnsCore {
                 }
             }
         }
+    }
+
+    /// fast stale hit 立即返回；后台任务用最新 Policy snapshot 重新完成完整规则决策。
+    fn schedule_fast_optimistic_refresh(
+        &self,
+        stale_key: crate::ports::cache::CacheKey,
+        stale_version: crate::ports::cache::CacheVersion,
+        request: &DnsRequest,
+    ) {
+        let (core, producer_revision, refreshes_same_store) =
+            self.latest_runtime_target().map_or_else(
+                || {
+                    (
+                        Arc::new(self.clone()),
+                        request.context.runtime_revision,
+                        true,
+                    )
+                },
+                |target| (Arc::clone(&target.core), target.revision, false),
+            );
+        let finalizer = Arc::clone(&core.late_cache_finalizer);
+        let mut request = request.clone();
+        request.context = optimistic_refresh_context(&request.context);
+        request.context.runtime_revision = producer_revision;
+        let _ = finalizer.submit_task(async move {
+            let Some(listener_id) =
+                ConfigId::new(request.context.meta.listener_id.as_ref().to_owned()).ok()
+            else {
+                return;
+            };
+            let Ok(qname) = CanonicalDomain::parse(&request.query.question().name().to_ascii())
+            else {
+                return;
+            };
+            let policy = core.policy.load();
+            let doh_path = reconstructed_doh_path(&request);
+            let policy_request = PolicyRequest {
+                listener_id: &listener_id,
+                doh_path: doh_path.as_deref(),
+                client_id: request
+                    .context
+                    .client
+                    .client_id
+                    .as_ref()
+                    .map(|client_id| client_id.as_str()),
+                client_addr: request.context.client.client_addr,
+                client_digest: None,
+                qname: Some(&qname),
+            };
+            let Ok(context) = policy.index.prepare_context(&policy_request) else {
+                return;
+            };
+            let fast_eligible = policy.fast_cache_eligible(&context);
+            let fast_key = fast_eligible.then(|| fast_cache_key(&policy, &context, &request));
+            let Ok(decision) = policy.index.evaluate_route(&context, Some(&qname)) else {
+                return;
+            };
+            if decision.hosts.is_some() {
+                return;
+            }
+            let plan = context.into_resolution_plan(decision);
+            let query = effective_upstream_query(
+                &request.query,
+                &plan.edns_client_subnet,
+                request.context.client.client_addr,
+            );
+            if core
+                .upstreams
+                .member_queries(
+                    &plan.upstream,
+                    &request.query,
+                    &plan.edns_client_subnet,
+                    request.context.client.client_addr,
+                )
+                .is_some()
+            {
+                return;
+            }
+            let Some(key) = fast_key
+                .flatten()
+                .or_else(|| cache_key_for_query(&plan, &request, &query))
+            else {
+                return;
+            };
+            let condition = if refreshes_same_store && key == stale_key {
+                CacheCondition::Version(stale_version)
+            } else {
+                CacheCondition::Absent
+            };
+            let deadline = request.context.meta.deadline;
+            let Some(UpstreamExecutionResult {
+                outcome: UpstreamOutcome::Response(response),
+                target_id,
+                used_id,
+            }) = core
+                .upstreams
+                .exchange(&plan.upstream, &query, &request.context, None, None)
+                .await
+            else {
+                return;
+            };
+            if !response.matches_query(&query) {
+                return;
+            }
+            let _ = core
+                .cache
+                .write_response(CacheWriteRequest {
+                    key,
+                    condition,
+                    response: Arc::new(response),
+                    upstream: cache_upstream_provenance(target_id.as_ref(), used_id.as_deref()),
+                    now: Instant::now(),
+                    producer_revision,
+                    deadline,
+                })
+                .await;
+        });
     }
 
     fn schedule_optimistic_refresh(
@@ -1167,6 +1549,54 @@ fn fresh_cache_response(record: &crate::ports::cache::CacheRecord) -> CanonicalR
     let mut response = (*record.entry.response).clone();
     response.age_ttl(Instant::now().saturating_duration_since(record.entry.inserted_at));
     response
+}
+
+fn cached_completion(
+    request: &DnsRequest,
+    context: &crate::policy::PolicyContext,
+    record: crate::ports::cache::CacheRecord,
+    mut response: CanonicalResponse,
+    cache_status: CacheStatus,
+) -> (
+    Result<CoreOutcome, CoreError>,
+    Option<DnsResolutionObservation>,
+    Option<crate::dns::CancelReason>,
+    Option<CacheCommitCandidate>,
+) {
+    let client_bucket = match &context.client {
+        ClientMatch::Matched { client, .. } => Some(Arc::from(client.name.as_str())),
+        ClientMatch::Unknown => None,
+    };
+    let upstream_id: Arc<str> = Arc::from(record.entry.upstream.target_id().as_str());
+    let upstream_used_id: Option<Arc<str>> = record
+        .entry
+        .upstream
+        .used_id()
+        .map(|id| Arc::from(id.as_str()));
+    let upstream_member_id = upstream_used_id
+        .clone()
+        .filter(|selected| upstream_id.as_ref() != selected.as_ref());
+    let result = if response.matches_query(&request.query) {
+        apply_ttl_override(&mut response, &context.ttl_override);
+        Ok(CoreOutcome::Response(Arc::new(response)))
+    } else {
+        servfail(request)
+    };
+    (
+        result,
+        Some(DnsResolutionObservation {
+            client_bucket,
+            strategy_id: Some(Arc::from(context.strategy.id.as_str())),
+            matched_rule: None,
+            upstream_id: Some(upstream_id),
+            upstream_member_id,
+            upstream_used_id,
+            source: StatsSource::Cache,
+            cache_status,
+        }),
+        None,
+        None,
+    )
 }
 
 /// 仅在当前 pool 的 optimistic max-age 内返回其 stale answer TTL。
@@ -1314,15 +1744,78 @@ fn optimistic_refresh_context(context: &crate::dns::RequestContext) -> crate::dn
 
 #[cfg(test)]
 fn cache_key(
+    core: &PolicyDnsCore,
     plan: &crate::policy::ResolutionPlan,
     request: &DnsRequest,
 ) -> Option<crate::ports::cache::CacheKey> {
+    let listener_id = ConfigId::new(request.context.meta.listener_id.as_ref().to_owned()).ok()?;
+    let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).ok()?;
+    let doh_path = reconstructed_doh_path(request);
+    let policy = core.policy.load();
+    let context = policy
+        .index
+        .prepare_context(&PolicyRequest {
+            listener_id: &listener_id,
+            doh_path: doh_path.as_deref(),
+            client_id: request
+                .context
+                .client
+                .client_id
+                .as_ref()
+                .map(|client_id| client_id.as_str()),
+            client_addr: request.context.client.client_addr,
+            client_digest: None,
+            qname: Some(&qname),
+        })
+        .ok()?;
+    if policy.fast_cache_eligible(&context) {
+        return fast_cache_key(&policy, &context, request);
+    }
     let query = effective_upstream_query(
         &request.query,
         &plan.edns_client_subnet,
         request.context.client.client_addr,
     );
     cache_key_for_query(plan, request, &query)
+}
+
+/// 构造逐规则匹配前可安全 lookup 的 v2 key；policy fingerprint 已覆盖全部规则与资源内容。
+fn fast_cache_key(
+    policy: &PolicyState,
+    context: &crate::policy::PolicyContext,
+    request: &DnsRequest,
+) -> Option<crate::ports::cache::CacheKey> {
+    let namespace = context.cache.namespace()?.clone();
+    let query = request.query.with_edns_client_subnet(None);
+    build_cache_key(
+        namespace,
+        &query,
+        request.context.transport.cache_compatibility,
+        CacheKeyDimensions {
+            mode: CacheKeyMode::Fast,
+            policy: Some(policy.cache_semantics_fingerprint(context)),
+            request: request_policy_fingerprint(request),
+            target: None,
+            ecs: None,
+        },
+    )
+    .ok()
+}
+
+/// 保守纳入可供任一 client-derived ECS 规则读取的规范化子网，不保留原始 IP。
+fn request_policy_fingerprint(request: &DnsRequest) -> Option<CacheFingerprint> {
+    request
+        .query
+        .edns_client_subnet()
+        .and_then(normalize_client_subnet)
+        .or_else(|| {
+            request
+                .context
+                .client
+                .client_addr
+                .map(client_address_subnet)
+        })
+        .map(subnet_cache_fingerprint)
 }
 
 /// 使用已应用最终 ECS 的 query 构造 cache key，避免不同客户端地址共享错误条目。
@@ -1337,7 +1830,9 @@ fn cache_key_for_query(
         query,
         request.context.transport.cache_compatibility,
         CacheKeyDimensions {
+            mode: CacheKeyMode::Resolved,
             policy: Some(cache_fingerprint(plan.strategy.id.as_str().as_bytes())),
+            request: None,
             target: Some(cache_fingerprint(plan.upstream.as_str().as_bytes())),
             ecs: ecs_cache_fingerprint(query),
         },
@@ -1347,7 +1842,10 @@ fn cache_key_for_query(
 
 /// 将最终 ECS 编码为不含明文的稳定 fingerprint。
 fn ecs_cache_fingerprint(query: &crate::dns::CanonicalQuery) -> Option<CacheFingerprint> {
-    let subnet = query.edns_client_subnet()?;
+    query.edns_client_subnet().map(subnet_cache_fingerprint)
+}
+
+fn subnet_cache_fingerprint(subnet: ClientSubnet) -> CacheFingerprint {
     let mut encoded = Vec::with_capacity(19);
     match subnet.addr() {
         IpAddr::V4(address) => {
@@ -1361,21 +1859,11 @@ fn ecs_cache_fingerprint(query: &crate::dns::CanonicalQuery) -> Option<CacheFing
     }
     encoded.push(subnet.source_prefix());
     encoded.push(subnet.scope_prefix());
-    Some(cache_fingerprint(&encoded))
+    cache_fingerprint(&encoded)
 }
 
 fn cache_fingerprint(input: &[u8]) -> CacheFingerprint {
-    let mut digest = [0_u8; 32];
-    for index in 0..4 {
-        let mut hash = 0xcbf29ce484222325_u64 ^ (index as u64);
-        for byte in input {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x100000001b3_u64);
-        }
-        let start = index * 8;
-        digest[start..start + 8].copy_from_slice(&hash.to_be_bytes());
-    }
-    CacheFingerprint::from_digest(digest)
+    CacheFingerprint::from_digest(Sha256::digest(input).into())
 }
 
 #[derive(Clone)]
@@ -1486,6 +1974,12 @@ impl UpstreamRuntime {
 
     fn len(&self) -> usize {
         self.direct.len() + self.groups.len()
+    }
+
+    fn has_member_specific_ecs(&self, upstream: &ConfigId) -> bool {
+        self.group_member_ecs
+            .get(upstream)
+            .is_some_and(|members| !members.is_empty())
     }
 
     /// 为 group 中显式配置 ECS 的 direct member 构造请求级 query。
@@ -1810,6 +2304,7 @@ fn reconstructed_doh_path(request: &DnsRequest) -> Option<String> {
 
 fn servfail(request: &DnsRequest) -> Result<CoreOutcome, CoreError> {
     CanonicalResponse::empty_response(&request.query, ResponseCode::ServFail)
+        .map(Arc::new)
         .map(CoreOutcome::Response)
         .map_err(CoreError::ResponseConstruction)
 }
@@ -2088,12 +2583,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(first_transport.calls.load(Ordering::Acquire), 1);
-        assert!(
-            first
-                .finalizer_owner()
-                .shutdown_until(deadline())
-                .await
-                .completed
+        let first_shutdown = first.finalizer_owner().shutdown_until(deadline()).await;
+        assert!(first_shutdown.completed, "shutdown: {first_shutdown:?}");
+        assert_eq!(
+            first_shutdown.persistence.persisted_batches, 1,
+            "shutdown: {first_shutdown:?}"
+        );
+        assert_eq!(
+            first_shutdown.persistence.capacity_removed, 0,
+            "shutdown: {first_shutdown:?}"
         );
 
         let second_transport = Arc::new(FakeDohTransport::new());
@@ -2108,7 +2606,10 @@ mod tests {
             .initialize_cache_persistence(&config, deadline())
             .await
             .unwrap();
-        assert_eq!(second_recovery.loaded, 1);
+        assert_eq!(
+            second_recovery.loaded, 1,
+            "unexpected recovery summary: {second_recovery:?}"
+        );
         second
             .resolve(&request("persistent-cache.example.", RecordType::A))
             .await
@@ -2547,7 +3048,7 @@ mod tests {
             matches!(second, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::NoData)
         );
         assert_eq!(transport.calls.load(Ordering::Acquire), 1);
-        assert_eq!(core.cache().store().stats().hits, 2);
+        assert_eq!(core.cache().store().stats().hits, 1);
     }
 
     #[tokio::test]
@@ -2586,7 +3087,7 @@ mod tests {
             ),
             None
         );
-        let key = cache_key(&plan, &request).unwrap();
+        let key = cache_key(&core, &plan, &request).unwrap();
         let response = Arc::new(
             CanonicalResponse::response_with_answers(
                 &request.query,
@@ -2692,7 +3193,7 @@ mod tests {
                 qname: Some(&qname),
             })
             .unwrap();
-        let key = cache_key(&plan, &first_request).unwrap();
+        let key = cache_key(&core, &plan, &first_request).unwrap();
         let first = core.resolve(&first_request).await.unwrap();
         assert!(
             matches!(first, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::NoData)
@@ -2798,7 +3299,7 @@ mod tests {
                 qname: Some(&qname),
             })
             .unwrap();
-        let key = cache_key(&plan, &first_request).unwrap();
+        let key = cache_key(&old, &plan, &first_request).unwrap();
         old.resolve(&first_request).await.unwrap();
         let record = match old
             .cache()
@@ -2891,7 +3392,7 @@ mod tests {
                 qname: Some(&qname),
             })
             .unwrap();
-        let key = cache_key(&plan, &request).expect("cache must be enabled");
+        let key = cache_key(&core, &plan, &request).expect("cache must be enabled");
         let response =
             CanonicalResponse::empty_response(&request.query, ResponseCode::NoError).unwrap();
         let sink = core.late_result_sink(&key, &request, &plan.upstream);
@@ -2955,7 +3456,7 @@ mod tests {
                 qname: Some(&qname),
             })
             .unwrap();
-        let key = cache_key(&plan, &request).expect("cache must be enabled");
+        let key = cache_key(&core, &plan, &request).expect("cache must be enabled");
         let early = core.resolve(&request).await.unwrap();
         assert!(matches!(
             early,
@@ -3067,7 +3568,7 @@ mod tests {
                 qname: Some(&qname),
             })
             .unwrap();
-        let key = cache_key(&plan, &request).expect("cache must be enabled");
+        let key = cache_key(&core, &plan, &request).expect("cache must be enabled");
         let early = core.resolve(&request).await.unwrap();
         assert!(matches!(
             early,
@@ -3142,7 +3643,7 @@ mod tests {
                 qname: Some(&qname),
             })
             .unwrap();
-        let key = cache_key(&plan, &request).expect("cache must be enabled");
+        let key = cache_key(&old, &plan, &request).expect("cache must be enabled");
 
         let cell = Arc::new(RuntimeCoreCell::default());
         old.attach_runtime_cell(Arc::clone(&cell));
@@ -3653,7 +4154,7 @@ strategy:
                 qname: Some(&qname),
             })
             .unwrap();
-        let key = cache_key(&plan, &upstream_request).unwrap();
+        let key = cache_key(&core, &plan, &upstream_request).unwrap();
         let CoreOutcome::Response(upstream) = core.resolve(&upstream_request).await.unwrap() else {
             panic!("expected upstream policy response");
         };
@@ -3745,7 +4246,18 @@ strategy:
 
     #[tokio::test]
     async fn policy_core_publishes_new_hosts_snapshot() {
-        let core = PolicyDnsCore::from_config(config().as_ref(), 42).unwrap();
+        let mut config = Arc::try_unwrap(config()).unwrap();
+        config.dns.cache.enabled = true;
+        let core = PolicyDnsCore::from_config(&config, 42).unwrap();
+        let CoreOutcome::Response(before_refresh) = core
+            .resolve(&request("updated.example.", RecordType::A))
+            .await
+            .unwrap()
+        else {
+            panic!("expected upstream response before hosts refresh");
+        };
+        assert_eq!(before_refresh.class(), crate::dns::ResponseClass::NxDomain);
+
         let index =
             crate::resource::HostsIndex::parse_hosts("192.0.2.20 updated.example\n").unwrap();
         let snapshot = ResourceSnapshot::new(
@@ -3771,6 +4283,11 @@ strategy:
             panic!("expected updated hosts response");
         };
         assert_eq!(updated.class(), crate::dns::ResponseClass::Positive);
+        assert_eq!(
+            core.cache().store().stats().hits,
+            0,
+            "hosts content refresh must change the fast key instead of reusing the old upstream entry"
+        );
 
         let CoreOutcome::Response(previous) = core
             .resolve(&request("local.example.", RecordType::A))
@@ -3780,6 +4297,30 @@ strategy:
             panic!("expected previous hosts response");
         };
         assert_eq!(previous.class(), crate::dns::ResponseClass::NxDomain);
+    }
+
+    #[test]
+    fn cache_semantics_base_excludes_observability_and_storage_configuration() {
+        let original = config();
+        let mut unrelated = Arc::try_unwrap(config()).unwrap();
+        unrelated.logs.enable = !unrelated.logs.enable;
+        unrelated.logs.path.push("other.log");
+        unrelated.database.path.push("other.sqlite3");
+        unrelated.webui.port = unrelated.webui.port.saturating_add(1);
+        assert_eq!(
+            super::cache_semantics_base(original.as_ref()),
+            super::cache_semantics_base(&unrelated)
+        );
+
+        let mut answer_dependency = Arc::try_unwrap(config()).unwrap();
+        let ResolvedUpstream::Hosts { hosts, .. } = &mut answer_dependency.upstreams[0] else {
+            panic!("fixture must contain a hosts upstream");
+        };
+        hosts.push_str("\n192.0.2.30 changed.example");
+        assert_ne!(
+            super::cache_semantics_base(original.as_ref()),
+            super::cache_semantics_base(&answer_dependency)
+        );
     }
 
     #[tokio::test]

@@ -3,7 +3,6 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -21,14 +20,16 @@ use crate::ports::PortErrorClass;
 use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
-use crate::ports::storage::{
-    ResolveAnswer, ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource,
-    StatsDimension,
+use crate::ports::observation::{
+    ResolutionDetailSource, ResolutionEnvelope, ResolutionEvent, ResolutionEventSink,
+    ResolutionTerminal,
 };
+use crate::ports::storage::ResolveRuleSource;
 use crate::ports::telemetry::{
     CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
-    ConfiguredIdKind, HealthSink, LogSink, OutcomeClass, configured_id_from_validated,
+    HealthSink, LogSink, OutcomeClass,
 };
+use crate::resolution::ResolutionRuntime;
 use crate::runtime::{
     ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
     BoundListenerSet, CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime,
@@ -36,9 +37,11 @@ use crate::runtime::{
     RuntimeReuseError, ShutdownPhaseStatus, ShutdownReport, Supervisor, SupervisorError,
     SystemClock, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec, bind_prepared,
 };
+#[cfg(test)]
+use crate::storage::StatsPersistenceWorker;
 use crate::storage::{
-    DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StatsPersistenceWorker,
-    StorageRuntime, StorageServiceError, StorageServiceFlushSummary, day_utc,
+    DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StorageRuntime,
+    StorageServiceError, StorageServiceFlushSummary,
 };
 use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
 use crate::transport::{
@@ -193,9 +196,10 @@ pub struct DnsService {
     resource_tasks: Vec<ResourceTask>,
     request_timeout: Duration,
     storage: Option<Arc<tokio::sync::Mutex<StorageRuntime>>>,
+    #[cfg(test)]
     stats_worker: Option<Arc<StatsPersistenceWorker>>,
-    resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
-    resolve_detail_drops: Arc<ResolveDetailDropCounters>,
+    resolution_runtime: Option<ResolutionRuntime>,
+    resolution_event_sink: Option<Arc<dyn ResolutionEventSink>>,
     telemetry: Option<Arc<TelemetryWriter>>,
     management: Option<Arc<ManagementRuntime>>,
     management_cancellation: Option<Cancellation>,
@@ -282,23 +286,33 @@ impl DnsService {
     ) -> Result<Self, ServiceStartError> {
         let runtime = coordinator.load();
         let mut supervisor = Supervisor::new();
-        let (storage, stats_worker, resolve_event_sink) = match storage {
+        let (storage, stats_worker, detail_writer, resolution_metrics) = match storage {
             Some(storage) => {
                 let stats_worker = storage.stats_worker();
-                let resolve_event_sink = storage.resolve_event_sink();
+                let detail_writer = storage.detail_writer();
+                let resolution_metrics = storage.resolution_metrics();
                 let storage = Arc::new(tokio::sync::Mutex::new(storage));
-                (Some(storage), Some(stats_worker), resolve_event_sink)
+                (
+                    Some(storage),
+                    Some(stats_worker),
+                    detail_writer,
+                    Some(resolution_metrics),
+                )
             }
-            None => (None, None, None),
+            None => (None, None, None, None),
         };
-        let resolve_detail_drops = Arc::new(ResolveDetailDropCounters::default());
-        let core = instrumented_core(
-            core,
-            stats_worker.clone(),
-            resolve_event_sink.clone(),
-            telemetry.clone(),
-            Arc::clone(&resolve_detail_drops),
-        );
+        let resolution_runtime = stats_worker.as_ref().map(|stats| {
+            ResolutionRuntime::start_with_metrics(
+                Arc::clone(stats),
+                detail_writer,
+                telemetry.clone(),
+                resolution_metrics.expect("storage-backed pipeline always has metrics"),
+            )
+        });
+        let resolution_event_sink = resolution_runtime
+            .as_ref()
+            .map(ResolutionRuntime::publisher);
+        let core = instrumented_core(core, resolution_event_sink.clone());
         if let Some(storage) = &storage {
             spawn_storage_task(&mut supervisor, Arc::clone(storage), telemetry.clone())?;
         }
@@ -369,9 +383,10 @@ impl DnsService {
             resource_tasks,
             request_timeout,
             storage,
+            #[cfg(test)]
             stats_worker,
-            resolve_event_sink,
-            resolve_detail_drops,
+            resolution_runtime,
+            resolution_event_sink,
             telemetry,
             management: None,
             management_cancellation: None,
@@ -671,13 +686,7 @@ impl DnsService {
     }
 
     fn instrument_core(&self, core: Arc<dyn DnsCore>) -> Arc<dyn DnsCore> {
-        instrumented_core(
-            core,
-            self.stats_worker.clone(),
-            self.resolve_event_sink.clone(),
-            self.telemetry.clone(),
-            Arc::clone(&self.resolve_detail_drops),
-        )
+        instrumented_core(core, self.resolution_event_sink.clone())
     }
 
     fn reconcile_management_users(&self, runtime: &ActiveRuntime) {
@@ -728,6 +737,28 @@ impl DnsService {
             report.request_drain = ShutdownPhaseStatus::Completed;
         } else {
             report.request_drain = ShutdownPhaseStatus::TimedOut;
+            report.deadline_expired = true;
+        }
+        let resolution_summary = match self.resolution_runtime.as_mut() {
+            Some(runtime) => runtime.shutdown(deadline).await,
+            None => crate::resolution::ResolutionPipelineShutdownSummary {
+                completed: true,
+                snapshot: crate::resolution::ResolutionPipelineSnapshot::default(),
+            },
+        };
+        tracing::info!(
+            event = "resolution_pipeline_shutdown_summary",
+            component = "resolution",
+            completed = resolution_summary.completed,
+            accepted = resolution_summary.snapshot.accepted,
+            dropped = resolution_summary.snapshot.dropped,
+            cache_commit_stored = resolution_summary.snapshot.cache_commit_stored,
+            cache_commit_dropped = resolution_summary.snapshot.cache_commit_dropped,
+            detail_dropped = resolution_summary.snapshot.detail_dropped,
+            detail_failed = resolution_summary.snapshot.detail_failed,
+            "resolution_pipeline_shutdown_summary"
+        );
+        if !resolution_summary.completed {
             report.deadline_expired = true;
         }
         let cache_summary = self.coordinator.shutdown_finalizers(deadline).await;
@@ -968,221 +999,72 @@ impl DnsService {
 
 fn instrumented_core(
     core: Arc<dyn DnsCore>,
-    stats_worker: Option<Arc<StatsPersistenceWorker>>,
-    resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
-    telemetry: Option<Arc<TelemetryWriter>>,
-    resolve_detail_drops: Arc<ResolveDetailDropCounters>,
+    resolution_event_sink: Option<Arc<dyn ResolutionEventSink>>,
 ) -> Arc<dyn DnsCore> {
-    if stats_worker.is_none() && resolve_event_sink.is_none() {
+    let Some(resolution_event_sink) = resolution_event_sink else {
         return core;
-    }
-    Arc::new(ObservedDnsCore {
+    };
+    Arc::new(EventPublishingDnsCore {
         inner: core,
-        stats_worker,
-        resolve_event_sink,
-        telemetry,
-        resolve_detail_drops,
+        resolution_event_sink,
     })
 }
 
-struct ObservedDnsCore {
+struct EventPublishingDnsCore {
     inner: Arc<dyn DnsCore>,
-    stats_worker: Option<Arc<StatsPersistenceWorker>>,
-    resolve_event_sink: Option<Arc<dyn ResolveEventSink>>,
-    telemetry: Option<Arc<TelemetryWriter>>,
-    resolve_detail_drops: Arc<ResolveDetailDropCounters>,
+    resolution_event_sink: Arc<dyn ResolutionEventSink>,
 }
 
-#[derive(Default)]
-struct ResolveDetailDropCounters {
-    queue_full: AtomicU64,
-    policy: AtomicU64,
-    failed: AtomicU64,
-    degraded: std::sync::atomic::AtomicBool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ResolveDetailHealthUpdate {
-    state: ComponentHealthState,
-    retry_count: u64,
-    safe_reason: Option<&'static str>,
-}
-
-impl ResolveDetailDropCounters {
-    /// 累计详情记录的明确丢弃，并按 2 的幂次输出限频状态事件。
-    fn record(&self, disposition: ResolveEventDisposition) -> Option<ResolveDetailHealthUpdate> {
-        if disposition == ResolveEventDisposition::Accepted {
-            return self.recover_if_needed();
-        }
-        let (reason, counter) = match disposition {
-            ResolveEventDisposition::DroppedQueueFull => ("queue_full", &self.queue_full),
-            ResolveEventDisposition::DroppedByPolicy => ("policy", &self.policy),
-            ResolveEventDisposition::Accepted | ResolveEventDisposition::Disabled => return None,
-        };
-        let dropped_total = counter.fetch_add(1, Ordering::Relaxed).saturating_add(1);
-        if dropped_total.is_power_of_two() {
-            tracing::warn!(
-                event = "resolve_detail_record_dropped",
-                component = "storage",
-                reason,
-                dropped_total,
-                "resolve_detail_record_dropped"
-            );
-        }
-        if disposition == ResolveEventDisposition::DroppedByPolicy {
-            return None;
-        }
-        self.degraded_update(
-            dropped_total.is_power_of_two(),
-            "resolve detail queue is full",
-        )
-    }
-
-    /// 累计详情 sink 错误，并以同一限频规则生成 degraded health 更新。
-    fn record_failure(&self) -> Option<ResolveDetailHealthUpdate> {
-        let failed_total = self
-            .failed
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        self.degraded_update(
-            failed_total.is_power_of_two(),
-            "resolve detail record failed",
-        )
-    }
-
-    /// 首次故障和 2 的幂次累计点发布更新，避免持续故障淹没有界 telemetry 队列。
-    fn degraded_update(
-        &self,
-        publish_counter_update: bool,
-        safe_reason: &'static str,
-    ) -> Option<ResolveDetailHealthUpdate> {
-        let was_degraded = self.degraded.swap(true, Ordering::AcqRel);
-        (!was_degraded || publish_counter_update).then(|| ResolveDetailHealthUpdate {
-            state: ComponentHealthState::Degraded,
-            retry_count: self.total_failures(),
-            safe_reason: Some(safe_reason),
-        })
-    }
-
-    /// 下一条成功接收的详情记录负责关闭本地 degraded 生命周期。
-    fn recover_if_needed(&self) -> Option<ResolveDetailHealthUpdate> {
-        self.degraded
-            .swap(false, Ordering::AcqRel)
-            .then(|| ResolveDetailHealthUpdate {
-                state: ComponentHealthState::Healthy,
-                retry_count: self.total_failures(),
-                safe_reason: None,
-            })
-    }
-
-    /// 返回队列溢出和 sink 错误的累计次数；主动策略丢弃不计入故障重试。
-    fn total_failures(&self) -> u64 {
-        self.queue_full
-            .load(Ordering::Relaxed)
-            .saturating_add(self.failed.load(Ordering::Relaxed))
-    }
-
-    #[cfg(test)]
-    fn load(&self, disposition: ResolveEventDisposition) -> u64 {
-        match disposition {
-            ResolveEventDisposition::DroppedQueueFull => self.queue_full.load(Ordering::Relaxed),
-            ResolveEventDisposition::DroppedByPolicy => self.policy.load(Ordering::Relaxed),
-            ResolveEventDisposition::Accepted | ResolveEventDisposition::Disabled => 0,
-        }
-    }
-}
-
-impl DnsCore for ObservedDnsCore {
+impl DnsCore for EventPublishingDnsCore {
     fn resolve<'a>(
         &'a self,
         request: &'a DnsRequest,
     ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
         Box::pin(async move {
-            let (result, observation) = self.inner.resolve_with_observation(request).await;
-            self.record(request, &result, observation.as_ref());
-            result
+            let completion = self.inner.resolve_with_completion(request).await;
+            self.publish(request, completion)
         })
     }
 }
 
-impl ObservedDnsCore {
-    fn record(
+impl EventPublishingDnsCore {
+    fn publish(
         &self,
         request: &DnsRequest,
-        result: &Result<CoreOutcome, CoreError>,
-        observation: Option<&crate::dns::DnsResolutionObservation>,
-    ) {
-        let outcome = outcome_class(request, result);
-        if let Some(worker) = &self.stats_worker {
-            match day_utc(request.context.meta.received_at_utc) {
-                Ok(day) => {
-                    let mut dimensions = vec![
-                        StatsDimension::transport(request.context.transport.class),
-                        StatsDimension::attempt_outcome(outcome),
-                    ];
-                    if let Some(rcode) = response_rcode(result) {
-                        dimensions.push(StatsDimension::rcode(rcode));
-                    }
-                    if let Some(observation) = observation {
-                        dimensions.push(StatsDimension::source(observation.source));
-                        dimensions.push(StatsDimension::cache_status(observation.cache_status));
-                        if let Some(client_bucket) =
-                            observation.client_bucket.as_deref().and_then(|id| {
-                                configured_id_from_validated(ConfiguredIdKind::ClientBucket, id)
-                            })
-                            && let Ok(dimension) = StatsDimension::client_bucket(client_bucket)
-                        {
-                            dimensions.push(dimension);
-                        }
-                        if let Some(strategy_id) =
-                            observation.strategy_id.as_deref().and_then(|id| {
-                                configured_id_from_validated(ConfiguredIdKind::Strategy, id)
-                            })
-                            && let Ok(dimension) = StatsDimension::strategy(strategy_id)
-                        {
-                            dimensions.push(dimension);
-                        }
-                        if let Some(upstream_id) = observation
-                            .upstream_used_id
-                            .as_deref()
-                            .or(observation.upstream_member_id.as_deref())
-                            .or(observation.upstream_id.as_deref())
-                            .and_then(|id| {
-                                configured_id_from_validated(ConfiguredIdKind::Upstream, id)
-                            })
-                            && let Ok(dimension) = StatsDimension::upstream(upstream_id)
-                        {
-                            dimensions.push(dimension);
-                        }
-                    }
-                    if let Err(_error) = worker.record_request(day, dimensions) {
-                        tracing::warn!(
-                            event = "stats_record_failed",
-                            component = "storage",
-                            class = "recording",
-                            "stats_record_failed"
-                        );
-                    }
-                }
-                Err(_error) => {
-                    tracing::warn!(
-                        event = "stats_record_failed",
-                        component = "storage",
-                        class = "recording",
-                        "stats_record_failed"
-                    );
-                }
-            }
-        }
-
-        let Some(sink) = &self.resolve_event_sink else {
-            return;
+        completion: crate::dns::DnsCoreCompletion,
+    ) -> Result<CoreOutcome, CoreError> {
+        let crate::dns::DnsCoreCompletion {
+            result,
+            observation,
+            cancellation_reason,
+            cache_commit,
+        } = completion;
+        let outcome = outcome_class(request, &result, cancellation_reason);
+        let terminal = match &result {
+            Ok(CoreOutcome::Response(response)) => ResolutionTerminal::Response {
+                class: response.class(),
+                rcode: u16::from(response.as_message().metadata.response_code),
+            },
+            Ok(CoreOutcome::NoResponse) => ResolutionTerminal::NoResponse {
+                reason: cancellation_reason.or_else(|| request.context.meta.cancellation.reason()),
+            },
+            Err(_) => ResolutionTerminal::CoreFailure,
         };
-        let question = request.query.question();
-        let event = ResolveEvent {
+        let detail = self
+            .resolution_event_sink
+            .detail_enabled()
+            .then(|| ResolutionDetailSource {
+                request_id: request.context.meta.request_id,
+                client_ip: request.context.client.client_addr,
+                question: request.query.question().clone(),
+                response: match &result {
+                    Ok(CoreOutcome::Response(response)) => Some(Arc::clone(response)),
+                    Ok(CoreOutcome::NoResponse) | Err(_) => None,
+                },
+            });
+        let event = ResolutionEvent {
             occurred_at: SystemTime::now(),
             duration_started_at: request.context.meta.received_at,
-            request_digest: Arc::from(format!("{:032x}", request.context.meta.request_id.0)),
             listener_id: Arc::from(request.context.meta.listener_id.as_ref()),
             route_id: request
                 .context
@@ -1190,63 +1072,56 @@ impl ObservedDnsCore {
                 .route_id
                 .as_ref()
                 .map(|route| Arc::from(route.as_ref())),
-            client_ip: request.context.client.client_addr,
-            client_bucket: observation.and_then(|value| value.client_bucket.clone()),
-            strategy_id: observation.and_then(|value| value.strategy_id.clone()),
-            upstream_id: observation.and_then(|value| value.upstream_id.clone()),
-            upstream_member_id: observation.and_then(|value| value.upstream_member_id.clone()),
-            upstream_used_id: observation.and_then(|value| value.upstream_used_id.clone()),
+            client_bucket: observation
+                .as_ref()
+                .and_then(|value| value.client_bucket.clone()),
+            strategy_id: observation
+                .as_ref()
+                .and_then(|value| value.strategy_id.clone()),
+            upstream_id: observation
+                .as_ref()
+                .and_then(|value| value.upstream_id.clone()),
+            upstream_member_id: observation
+                .as_ref()
+                .and_then(|value| value.upstream_member_id.clone()),
+            upstream_used_id: observation
+                .as_ref()
+                .and_then(|value| value.upstream_used_id.clone()),
             matched_rule_source: observation
+                .as_ref()
                 .and_then(|value| value.matched_rule.as_ref())
                 .map(|matched| resolve_rule_source(matched.source)),
             matched_resource_id: observation
+                .as_ref()
                 .and_then(|value| value.matched_rule.as_ref())
                 .map(|matched| Arc::clone(&matched.resource_id)),
             matched_rule_ordinal: observation
+                .as_ref()
                 .and_then(|value| value.matched_rule.as_ref())
                 .and_then(|matched| matched.ordinal),
             resource_version: observation
+                .as_ref()
                 .and_then(|value| value.matched_rule.as_ref())
                 .and_then(|matched| matched.resource_version),
             transport: request.context.transport.class,
-            qname: Arc::from(question.name().to_ascii()),
-            qtype: u16::from(question.query_type()),
-            qclass: u16::from(question.query_class()),
-            answers: response_answers(result),
-            rcode: response_header_rcode(result),
-            cancellation_reason: request.context.meta.cancellation.reason(),
+            terminal,
             outcome,
             source: observation
+                .as_ref()
                 .map(|value| value.source)
                 .unwrap_or(crate::ports::storage::StatsSource::Upstream),
-            cache_status: observation
+            cache_lookup_status: observation
+                .as_ref()
                 .map(|value| value.cache_status)
                 .unwrap_or(CacheStatus::Disabled),
             runtime_revision: request.context.runtime_revision,
+            detail,
         };
-        match sink.try_record(event) {
-            Ok(disposition) => {
-                if let Some(update) = self.resolve_detail_drops.record(disposition)
-                    && let Some(telemetry) = &self.telemetry
-                {
-                    publish_resolve_detail_health(telemetry, update);
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    event = "resolve_detail_record_failed",
-                    component = "storage",
-                    class = error.class().as_str(),
-                    operation = error.operation(),
-                    "resolve_detail_record_failed"
-                );
-                if let Some(update) = self.resolve_detail_drops.record_failure()
-                    && let Some(telemetry) = &self.telemetry
-                {
-                    publish_resolve_detail_health(telemetry, update);
-                }
-            }
-        }
+        let _ = self.resolution_event_sink.try_publish(ResolutionEnvelope {
+            event: Arc::new(event),
+            cache_commit,
+        });
+        result
     }
 }
 
@@ -1260,6 +1135,7 @@ fn resolve_rule_source(source: crate::dns::MatchedRuleSource) -> ResolveRuleSour
 }
 
 /// 仅从实际 DNS 响应提取完整 RCODE；无响应或 Core 错误不伪造统计值。
+#[cfg(test)]
 fn response_rcode(result: &Result<CoreOutcome, CoreError>) -> Option<u16> {
     match result {
         Ok(CoreOutcome::Response(response)) => {
@@ -1269,32 +1145,11 @@ fn response_rcode(result: &Result<CoreOutcome, CoreError>) -> Option<u16> {
     }
 }
 
-/// `resolve_log.rcode` 保持基础 DNS header 的 4-bit 契约；无响应时由 failure 分类区分。
-fn response_header_rcode(result: &Result<CoreOutcome, CoreError>) -> u8 {
-    response_rcode(result)
-        .map(|rcode| u8::try_from(rcode & 0x0f).expect("4-bit RCODE must fit u8"))
-        .unwrap_or(0)
-}
-
-/// 从实际返回给客户端的 DNS message 提取 answer；有界裁剪由详情记录构造统一执行。
-fn response_answers(result: &Result<CoreOutcome, CoreError>) -> Vec<ResolveAnswer> {
-    let Ok(CoreOutcome::Response(response)) = result else {
-        return Vec::new();
-    };
-    response
-        .as_message()
-        .answers
-        .iter()
-        .map(|record| ResolveAnswer {
-            name: record.name.to_ascii(),
-            record_type: record.record_type().to_string(),
-            data: record.data.to_string(),
-            ttl: record.ttl,
-        })
-        .collect()
-}
-
-fn outcome_class(request: &DnsRequest, result: &Result<CoreOutcome, CoreError>) -> OutcomeClass {
+fn outcome_class(
+    request: &DnsRequest,
+    result: &Result<CoreOutcome, CoreError>,
+    cancellation_reason: Option<CancelReason>,
+) -> OutcomeClass {
     match result {
         Ok(CoreOutcome::Response(response)) => match response.class() {
             ResponseClass::Positive | ResponseClass::NoData | ResponseClass::NxDomain => {
@@ -1306,9 +1161,9 @@ fn outcome_class(request: &DnsRequest, result: &Result<CoreOutcome, CoreError>) 
             }
         },
         Ok(CoreOutcome::NoResponse) => {
-            if request.context.meta.cancellation.is_cancelled() {
+            if cancellation_reason.is_some() || request.context.meta.cancellation.is_cancelled() {
                 if matches!(
-                    request.context.meta.cancellation.reason(),
+                    cancellation_reason.or_else(|| request.context.meta.cancellation.reason()),
                     Some(CancelReason::DeadlineExceeded)
                 ) {
                     OutcomeClass::Timeout
@@ -1369,33 +1224,6 @@ fn publish_component_health(
         tracing::debug!(
             event = "telemetry_health_publish_failed",
             component = ?component,
-            class = error.class().as_str(),
-            operation = error.operation(),
-            "telemetry_health_publish_failed"
-        );
-    }
-}
-
-/// 将详情 writer 的限频状态变化发布为低基数 Storage health 事件。
-fn publish_resolve_detail_health(telemetry: &TelemetryWriter, update: ResolveDetailHealthUpdate) {
-    let now = Instant::now();
-    if let Err(error) = HealthSink::update(
-        telemetry,
-        ComponentHealthEvent {
-            component: TelemetryComponent::Storage,
-            state: update.state,
-            first_seen: now,
-            last_changed: now,
-            last_success: (update.state == ComponentHealthState::Healthy).then_some(now),
-            retry_count: update.retry_count,
-            stale_age_micros: None,
-            persistence_gap: update.state != ComponentHealthState::Healthy,
-            safe_reason: update.safe_reason,
-        },
-    ) {
-        tracing::debug!(
-            event = "telemetry_health_publish_failed",
-            component = ?TelemetryComponent::Storage,
             class = error.class().as_str(),
             operation = error.operation(),
             "telemetry_health_publish_failed"
@@ -1476,11 +1304,6 @@ fn log_storage_shutdown_summary(summary: StorageServiceFlushSummary) {
         backend_details_committed = summary.storage.details_committed,
         backend_details_dropped = summary.storage.details_dropped,
         backend_persistence_gap = summary.storage.persistence_gap,
-        resolve_log_committed = summary.resolve_log.flush.committed,
-        resolve_log_pending = summary.resolve_log.flush.pending,
-        resolve_log_dropped_queue_full = summary.resolve_log.flush.dropped_queue_full,
-        resolve_log_sink_failures = summary.resolve_log.flush.sink_failures,
-        resolve_log_discarded_pending = summary.resolve_log.discarded_pending,
         detail_committed = summary.detail.committed,
         detail_evicted = summary.detail.evicted,
         detail_dropped = summary.detail.dropped,
@@ -2621,37 +2444,34 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime};
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
+    use hickory_proto::rr::{Name, RData, RecordType};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpStream, UdpSocket};
 
     use super::{
-        MAX_CONCURRENT_STREAM_SESSIONS, ObservedDnsCore, ResolveDetailDropCounters,
-        ResolveDetailHealthUpdate, ServiceError, TransportTask, can_accept_stream_session,
+        MAX_CONCURRENT_STREAM_SESSIONS, ServiceError, TransportTask, can_accept_stream_session,
         flush_telemetry_once, is_exhausted_endpoint, publish_cache_shutdown_health,
-        publish_component_health, publish_resolve_detail_health, response_header_rcode,
-        response_rcode, retire_current_transport_task, spawn_telemetry_task, spawn_transport_task,
-        task_failure, telemetry_component_for_task,
+        publish_component_health, response_rcode, retire_current_transport_task,
+        spawn_telemetry_task, spawn_transport_task, task_failure, telemetry_component_for_task,
     };
     use crate::cache::CachePersistenceRunSummary;
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, CanonicalResponse,
-        ClientIdentity, CoreError, CoreOutcome, Deadline, DnsCore, DnsMessageId, DnsRequest,
-        DnsResolutionObservation, ListenerId, MatchedRuleObservation, MatchedRuleSource,
-        RequestContext, RequestId, RequestMeta, ResponseClass, RuntimeRevision,
+        ClientIdentity, CoreError, CoreOutcome, Deadline, DnsCore, DnsCoreCompletion, DnsMessageId,
+        DnsRequest, DnsResolutionObservation, ListenerId, MatchedRuleObservation,
+        MatchedRuleSource, RequestContext, RequestId, RequestMeta, ResponseClass, RuntimeRevision,
         TransportCapabilities, TransportClass,
     };
     use crate::observability::{TelemetryOutput, TelemetryWriter};
-    use crate::ports::PortError;
-    use crate::ports::storage::{
-        ResolveEvent, ResolveEventDisposition, ResolveEventSink, StatsSource,
+    use crate::ports::observation::{
+        ResolutionEnvelope, ResolutionEvent, ResolutionEventSink, ResolutionPublishDisposition,
+        ResolutionTerminal,
     };
     use crate::ports::telemetry::{
         CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
-        LogEvent, LogLevel, MetricEvent, OutcomeClass,
+        LogEvent, LogLevel, MetricEvent,
     };
-    use crate::resource::ResourceVersion;
     use crate::runtime::{
         CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime, RestartPolicy,
         RuntimeCoordinator, ShutdownPhaseStatus, Supervisor, SystemClock, SystemSocketFactory,
@@ -2685,6 +2505,7 @@ mod tests {
                     record_type => panic!("unexpected error-contract record type: {record_type}"),
                 };
                 CanonicalResponse::empty_response(&request.query, code)
+                    .map(Arc::new)
                     .map(CoreOutcome::Response)
                     .map_err(CoreError::ResponseConstruction)
             })
@@ -2692,16 +2513,119 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct CapturingResolveEventSink {
-        events: Mutex<Vec<ResolveEvent>>,
+    struct CapturingResolutionSink {
+        events: Mutex<Vec<Arc<ResolutionEvent>>>,
     }
 
-    impl ResolveEventSink for CapturingResolveEventSink {
-        /// 保留完整事件，供测试核对同一次解析的终态分类与资源版本。
-        fn try_record(&self, event: ResolveEvent) -> Result<ResolveEventDisposition, PortError> {
-            self.events.lock().unwrap().push(event);
-            Ok(ResolveEventDisposition::Accepted)
+    impl ResolutionEventSink for CapturingResolutionSink {
+        fn try_publish(
+            &self,
+            envelope: ResolutionEnvelope,
+        ) -> Result<ResolutionPublishDisposition, crate::ports::PortError> {
+            self.events.lock().unwrap().push(envelope.event);
+            Ok(ResolutionPublishDisposition::Accepted)
         }
+
+        fn detail_enabled(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn event_publisher_emits_one_typed_completion_before_returning_response() {
+        let mut message = Message::new(7, MessageType::Query, OpCode::Query);
+        message.add_query(Query::query(
+            Name::from_ascii("private.example.test.").unwrap(),
+            RecordType::A,
+        ));
+        let query = CanonicalQuery::from_message(message).unwrap();
+        let received_at = Instant::now();
+        let request = DnsRequest {
+            query,
+            context: RequestContext {
+                meta: RequestMeta {
+                    request_id: RequestId(9),
+                    trace_id: None,
+                    received_at,
+                    received_at_utc: SystemTime::now(),
+                    deadline: Deadline::new(received_at + Duration::from_secs(1)),
+                    cancellation: Cancellation::new(),
+                    connection_id: None,
+                    stream_id: None,
+                    listener_id: ListenerId::from("dns"),
+                    route_id: Some(crate::dns::RouteId::from("route")),
+                    original_dns_id: Some(7),
+                },
+                client: ClientIdentity {
+                    peer_addr: None,
+                    client_addr: Some(Ipv4Addr::new(192, 0, 2, 10).into()),
+                    client_id: None,
+                },
+                transport: TransportCapabilities {
+                    class: TransportClass::Datagram,
+                    cache_compatibility: CacheCompatibilityKey(1),
+                },
+                runtime_revision: RuntimeRevision(3),
+            },
+        };
+        let response = Arc::new(
+            CanonicalResponse::empty_response(&request.query, ResponseCode::NoError).unwrap(),
+        );
+        let sink = Arc::new(CapturingResolutionSink::default());
+        let publisher = super::EventPublishingDnsCore {
+            inner: Arc::new(CrossTransportErrorCore),
+            resolution_event_sink: sink.clone(),
+        };
+
+        let outcome = publisher
+            .publish(
+                &request,
+                DnsCoreCompletion {
+                    result: Ok(CoreOutcome::Response(Arc::clone(&response))),
+                    observation: Some(DnsResolutionObservation {
+                        client_bucket: Some(Arc::from("client")),
+                        strategy_id: Some(Arc::from("strategy")),
+                        matched_rule: Some(MatchedRuleObservation {
+                            source: MatchedRuleSource::RuleSet,
+                            resource_id: Arc::from("rules"),
+                            resource_version: Some(crate::resource::ResourceVersion::new(2, 4)),
+                            ordinal: Some(1),
+                        }),
+                        upstream_id: Some(Arc::from("upstream")),
+                        upstream_member_id: None,
+                        upstream_used_id: Some(Arc::from("upstream")),
+                        source: crate::ports::storage::StatsSource::Upstream,
+                        cache_status: CacheStatus::Fresh,
+                    }),
+                    cancellation_reason: None,
+                    cache_commit: None,
+                },
+            )
+            .unwrap();
+        let CoreOutcome::Response(returned) = outcome else {
+            panic!("publisher must preserve the response outcome");
+        };
+        assert!(Arc::ptr_eq(&returned, &response));
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.listener_id.as_ref(), "dns");
+        assert_eq!(event.route_id.as_deref(), Some("route"));
+        assert_eq!(event.strategy_id.as_deref(), Some("strategy"));
+        assert_eq!(event.cache_lookup_status, CacheStatus::Fresh);
+        assert_eq!(event.runtime_revision, RuntimeRevision(3));
+        assert!(matches!(
+            event.terminal,
+            ResolutionTerminal::Response {
+                class: ResponseClass::NoData,
+                rcode: 0
+            }
+        ));
+        let detail = event.detail.as_ref().unwrap();
+        assert_eq!(detail.request_id, RequestId(9));
+        assert_eq!(detail.question.name().to_ascii(), "private.example.test.");
+        assert!(Arc::ptr_eq(detail.response.as_ref().unwrap(), &response));
     }
 
     #[test]
@@ -2715,149 +2639,10 @@ mod tests {
         let response = CanonicalResponse::empty_response(&query, ResponseCode::Refused).unwrap();
 
         assert_eq!(
-            response_rcode(&Ok(CoreOutcome::Response(response))),
+            response_rcode(&Ok(CoreOutcome::Response(Arc::new(response)))),
             Some(5)
         );
-        let response = CanonicalResponse::empty_response(&query, ResponseCode::Refused).unwrap();
-        assert_eq!(
-            response_header_rcode(&Ok(CoreOutcome::Response(response))),
-            5
-        );
         assert_eq!(response_rcode(&Ok(CoreOutcome::NoResponse)), None);
-        assert_eq!(response_header_rcode(&Ok(CoreOutcome::NoResponse)), 0);
-    }
-
-    #[test]
-    fn observed_core_records_failure_detail_and_resource_revision_together() {
-        let mut message = Message::new(11, MessageType::Query, OpCode::Query);
-        message.add_query(Query::query(
-            Name::from_ascii("resolution-result.example.").unwrap(),
-            RecordType::A,
-        ));
-        let query = CanonicalQuery::from_message(message).unwrap();
-        let cancellation = Cancellation::new();
-        let request = DnsRequest {
-            query: query.clone(),
-            context: RequestContext {
-                meta: RequestMeta {
-                    request_id: RequestId(11),
-                    trace_id: None,
-                    received_at: Instant::now(),
-                    received_at_utc: SystemTime::UNIX_EPOCH,
-                    deadline: Deadline::new(Instant::now() + Duration::from_secs(1)),
-                    cancellation: cancellation.clone(),
-                    connection_id: None,
-                    stream_id: None,
-                    listener_id: ListenerId::from("udp-main"),
-                    route_id: None,
-                    original_dns_id: Some(11),
-                },
-                client: ClientIdentity {
-                    client_addr: Some("192.0.2.10".parse().unwrap()),
-                    ..ClientIdentity::default()
-                },
-                transport: TransportCapabilities {
-                    class: TransportClass::Datagram,
-                    cache_compatibility: CacheCompatibilityKey(1),
-                },
-                runtime_revision: RuntimeRevision(7),
-            },
-        };
-        let observation = DnsResolutionObservation {
-            client_bucket: None,
-            strategy_id: Some(Arc::from("default")),
-            matched_rule: Some(MatchedRuleObservation {
-                source: MatchedRuleSource::RuleSet,
-                resource_id: Arc::from("blocked-domains"),
-                resource_version: Some(ResourceVersion::new(3, 5)),
-                ordinal: Some(2),
-            }),
-            upstream_id: Some(Arc::from("primary")),
-            upstream_member_id: None,
-            upstream_used_id: Some(Arc::from("primary")),
-            source: StatsSource::Upstream,
-            cache_status: CacheStatus::Miss,
-        };
-        let sink = Arc::new(CapturingResolveEventSink::default());
-        let core = ObservedDnsCore {
-            inner: Arc::new(CrossTransportErrorCore),
-            stats_worker: None,
-            resolve_event_sink: Some(Arc::clone(&sink) as Arc<dyn ResolveEventSink>),
-            telemetry: None,
-            resolve_detail_drops: Arc::new(ResolveDetailDropCounters::default()),
-        };
-
-        let response = CanonicalResponse::response_with_code(
-            &query,
-            ResponseCode::ServFail,
-            [Record::from_rdata(
-                query.question().name().clone(),
-                60,
-                RData::A(A(Ipv4Addr::new(192, 0, 2, 20))),
-            )],
-        )
-        .unwrap();
-        core.record(
-            &request,
-            &Ok(CoreOutcome::Response(response)),
-            Some(&observation),
-        );
-        cancellation.cancel(CancelReason::DeadlineExceeded);
-        core.record(&request, &Ok(CoreOutcome::NoResponse), Some(&observation));
-
-        let events = sink.events.lock().unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].outcome, OutcomeClass::Failure);
-        assert_eq!(events[0].rcode, 2);
-        assert_eq!(events[0].client_ip, Some("192.0.2.10".parse().unwrap()));
-        assert_eq!(events[0].upstream_used_id.as_deref(), Some("primary"));
-        assert_eq!(events[0].answers.len(), 1);
-        assert_eq!(events[0].answers[0].data, "192.0.2.20");
-        assert_eq!(events[0].resource_version, Some(ResourceVersion::new(3, 5)));
-        assert_eq!(events[1].outcome, OutcomeClass::Timeout);
-        assert_eq!(
-            events[1].cancellation_reason,
-            Some(CancelReason::DeadlineExceeded)
-        );
-        assert_eq!(events[1].resource_version, Some(ResourceVersion::new(3, 5)));
-        assert!(events[1].answers.is_empty());
-    }
-
-    #[test]
-    fn resolve_detail_drops_are_counted_by_reason() {
-        let counters = ResolveDetailDropCounters::default();
-
-        assert_eq!(counters.record(ResolveEventDisposition::Accepted), None);
-        assert_eq!(counters.record(ResolveEventDisposition::Disabled), None);
-        let first = counters
-            .record(ResolveEventDisposition::DroppedQueueFull)
-            .unwrap();
-        assert_eq!(first.state, ComponentHealthState::Degraded);
-        assert_eq!(first.retry_count, 1);
-        assert_eq!(first.safe_reason, Some("resolve detail queue is full"));
-        assert_eq!(
-            counters
-                .record(ResolveEventDisposition::DroppedQueueFull)
-                .unwrap()
-                .retry_count,
-            2
-        );
-        assert_eq!(
-            counters.record(ResolveEventDisposition::DroppedByPolicy),
-            None
-        );
-        let failed = counters.record_failure().unwrap();
-        assert_eq!(failed.retry_count, 3);
-        assert_eq!(failed.safe_reason, Some("resolve detail record failed"));
-        let recovered = counters.record(ResolveEventDisposition::Accepted).unwrap();
-        assert_eq!(recovered.state, ComponentHealthState::Healthy);
-        assert_eq!(recovered.retry_count, 3);
-        assert_eq!(recovered.safe_reason, None);
-        assert_eq!(counters.record(ResolveEventDisposition::Accepted), None);
-
-        assert_eq!(counters.load(ResolveEventDisposition::DroppedQueueFull), 2);
-        assert_eq!(counters.load(ResolveEventDisposition::DroppedByPolicy), 1);
-        assert_eq!(counters.load(ResolveEventDisposition::Accepted), 0);
     }
 
     impl TelemetryOutput for CountingTelemetryOutput {
@@ -3034,44 +2819,6 @@ mod tests {
             health_events[0].safe_reason,
             Some("cache persistence shutdown has gaps")
         );
-    }
-
-    #[tokio::test]
-    async fn resolve_detail_health_publishes_gap_and_recovery() {
-        let output = Arc::new(CountingTelemetryOutput::default());
-        let writer = TelemetryWriter::new(4, output.clone()).unwrap();
-        publish_resolve_detail_health(
-            &writer,
-            ResolveDetailHealthUpdate {
-                state: ComponentHealthState::Degraded,
-                retry_count: 2,
-                safe_reason: Some("resolve detail queue is full"),
-            },
-        );
-        publish_resolve_detail_health(
-            &writer,
-            ResolveDetailHealthUpdate {
-                state: ComponentHealthState::Healthy,
-                retry_count: 2,
-                safe_reason: None,
-            },
-        );
-
-        crate::ports::telemetry::LogSink::flush(
-            &writer,
-            Deadline::new(Instant::now() + Duration::from_secs(1)),
-        )
-        .await
-        .unwrap();
-        let health_events = output.health_events.lock().unwrap();
-        assert_eq!(health_events.len(), 2);
-        assert_eq!(health_events[0].component, TelemetryComponent::Storage);
-        assert_eq!(health_events[0].state, ComponentHealthState::Degraded);
-        assert!(health_events[0].persistence_gap);
-        assert_eq!(health_events[1].state, ComponentHealthState::Healthy);
-        assert_eq!(health_events[1].retry_count, 2);
-        assert!(!health_events[1].persistence_gap);
-        assert!(health_events[1].last_success.is_some());
     }
 
     fn completion(
@@ -3983,6 +3730,215 @@ clients: []
             .await
             .unwrap();
         assert!(!report.deadline_expired);
+    }
+
+    /// 本地手工性能 profile：固定单并发、复用 UDP socket，比较详情 off/on 的三个主路径。
+    ///
+    /// 计时包含 loopback client send/receive，因此只是服务端 SLO 的保守上界；发布验收仍需在
+    /// 冻结的目标硬件、QPS 和并发 profile 下使用外部压测器复核。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manual release performance profile"]
+    async fn benchmark_udp_resolution_observation_profile() {
+        const SAMPLES: usize = 1_000;
+        let ports = available_transport_ports();
+        for (detail_enabled, port) in [(false, ports[0]), (true, ports[1])] {
+            let work_path = crate::config::test_support::absolute_path(if detail_enabled {
+                "benchmark-resolution-detail-on"
+            } else {
+                "benchmark-resolution-detail-off"
+            });
+            let mut config = Arc::try_unwrap(runtime_config_at(&work_path, port)).unwrap();
+            config.dns.cache.enabled = true;
+            config.dns.resolve_log.enable = detail_enabled;
+            let config = Arc::new(config);
+            let storage = StorageRuntime::open(
+                &config,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+            let prepared =
+                PreparedRuntime::prepare_with_policy_core(Arc::clone(&config), RuntimeRevision(1))
+                    .unwrap();
+            let bound = crate::runtime::bind_prepared(
+                prepared,
+                &SystemSocketFactory::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+            let mut service = super::DnsService::with_default_timeout_from_coordinator_and_storage(
+                Arc::clone(&coordinator),
+                storage,
+            )
+            .unwrap();
+            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let cached = query_wire_with_type(1, "fallback.test.", RecordType::A);
+
+            for _ in 0..100 {
+                udp_round_trip(&socket, address, &cached).await;
+                if service
+                    .resolution_runtime
+                    .as_ref()
+                    .unwrap()
+                    .metrics()
+                    .snapshot()
+                    .cache_commit_stored
+                    > 0
+                {
+                    break;
+                }
+            }
+            assert!(
+                service
+                    .resolution_runtime
+                    .as_ref()
+                    .unwrap()
+                    .metrics()
+                    .snapshot()
+                    .cache_commit_stored
+                    > 0,
+                "warm-up must make the cache entry visible"
+            );
+
+            let cache_hit = udp_profile_repeated(&socket, address, &cached, SAMPLES).await;
+            let hosts = query_wire_with_type(2, "example.test.", RecordType::A);
+            let hosts_hit = udp_profile_repeated(&socket, address, &hosts, SAMPLES).await;
+            let upstream_miss_wires = (0..SAMPLES)
+                .map(|index| {
+                    query_wire_with_type(
+                        u16::try_from(index).unwrap_or(u16::MAX),
+                        &format!("miss-{index}.benchmark.test."),
+                        RecordType::A,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let upstream_miss = udp_profile_many(&socket, address, &upstream_miss_wires).await;
+            let snapshot = service
+                .resolution_runtime
+                .as_ref()
+                .unwrap()
+                .metrics()
+                .snapshot();
+            assert_eq!(
+                snapshot.dropped, 0,
+                "single-concurrency profile must not overload ingress"
+            );
+            print_latency_profile("cache-hit", detail_enabled, &cache_hit);
+            print_latency_profile("hosts-hit", detail_enabled, &hosts_hit);
+            print_latency_profile("upstream-miss", detail_enabled, &upstream_miss);
+            print_combined_throughput(
+                detail_enabled,
+                &[
+                    cache_hit.as_slice(),
+                    hosts_hit.as_slice(),
+                    upstream_miss.as_slice(),
+                ],
+            );
+            eprintln!(
+                "resolution_pipeline_profile detail={} accepted={} dropped={} detail_accepted={} detail_dropped={} detail_failed={}",
+                if detail_enabled { "on" } else { "off" },
+                snapshot.accepted,
+                snapshot.dropped,
+                snapshot.detail_accepted,
+                snapshot.detail_dropped,
+                snapshot.detail_failed,
+            );
+
+            let report = service
+                .shutdown(
+                    &SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(10)),
+                )
+                .await
+                .unwrap();
+            assert!(!report.deadline_expired);
+            let _ = std::fs::remove_dir_all(work_path);
+        }
+    }
+
+    async fn udp_profile_repeated(
+        socket: &UdpSocket,
+        address: SocketAddr,
+        wire: &[u8],
+        samples: usize,
+    ) -> Vec<u128> {
+        let mut elapsed = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            let started = Instant::now();
+            udp_round_trip(socket, address, wire).await;
+            elapsed.push(started.elapsed().as_nanos());
+        }
+        elapsed.sort_unstable();
+        elapsed
+    }
+
+    async fn udp_profile_many(
+        socket: &UdpSocket,
+        address: SocketAddr,
+        wires: &[Vec<u8>],
+    ) -> Vec<u128> {
+        let mut elapsed = Vec::with_capacity(wires.len());
+        for wire in wires {
+            let started = Instant::now();
+            udp_round_trip(socket, address, wire).await;
+            elapsed.push(started.elapsed().as_nanos());
+        }
+        elapsed.sort_unstable();
+        elapsed
+    }
+
+    async fn udp_round_trip(socket: &UdpSocket, address: SocketAddr, wire: &[u8]) {
+        socket.send_to(wire, address).await.unwrap();
+        let mut response = [0_u8; 4_096];
+        tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    fn print_latency_profile(scenario: &str, detail_enabled: bool, sorted_nanos: &[u128]) {
+        let percentile = |permille: usize| {
+            let index = (sorted_nanos.len() - 1).saturating_mul(permille) / 1_000;
+            sorted_nanos[index] as f64 / 1_000_000.0
+        };
+        let mean_nanos = sorted_nanos.iter().sum::<u128>() as f64 / sorted_nanos.len() as f64;
+        eprintln!(
+            "resolution_profile scenario={scenario} detail={} samples={} concurrency=1 profile={} os={} arch={} mean_ms={:.6} sequential_qps={:.0} p50_ms={:.6} p95_ms={:.6} p99_ms={:.6} p999_ms={:.6}",
+            if detail_enabled { "on" } else { "off" },
+            sorted_nanos.len(),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            mean_nanos / 1_000_000.0,
+            1_000_000_000.0 / mean_nanos,
+            percentile(500),
+            percentile(950),
+            percentile(990),
+            percentile(999),
+        );
+    }
+
+    fn print_combined_throughput(detail_enabled: bool, profiles: &[&[u128]]) {
+        let samples = profiles.iter().map(|profile| profile.len()).sum::<usize>();
+        let total_nanos = profiles
+            .iter()
+            .flat_map(|profile| profile.iter())
+            .sum::<u128>() as f64;
+        eprintln!(
+            "resolution_combined_profile detail={} samples={} concurrency=1 mean_ms={:.6} sequential_qps={:.0}",
+            if detail_enabled { "on" } else { "off" },
+            samples,
+            total_nanos / samples as f64 / 1_000_000.0,
+            samples as f64 * 1_000_000_000.0 / total_nanos,
+        );
     }
 
     #[tokio::test]

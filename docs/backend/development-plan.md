@@ -12,15 +12,16 @@
 
 ## 1. 当前结论
 
-MVP v0.1 已完成；当前已完成至阶段 198（`geosite.dat` protobuf selector）。后续优先补齐配置驱动的正常运行主线、协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
+MVP v0.1 已完成；当前已完成至阶段 199（DNS 查询主链异步观测与 fast cache key v2）。后续优先补齐协议组合和最终验收；暂不把服务器重启/宕机恢复或缓存、请求记录的绝对持久化作为阻塞项。
 
 ### 已交付
 
 - Config：`version: 1` strict load、路径/SecretRef 归一化、语义校验、迁移边界和快照安全边界。
 - Runtime/Application：`PreparedRuntime → BoundCandidate → ActiveRuntime`、revision CAS、Supervisor、受管 task、配置文件轮询 reload、listener 复用/rebind、graceful shutdown。
 - DNS 数据面：UDP、TCP、DoH plain HTTP/1.x；hosts、Policy、Cache、Upstream 主链路；资源首次加载和 auto-update refresh。
-- Storage：SQLite schema v4 migration、stats/detail transaction、authenticated qname/client/answer 投影、cache producer upstream provenance、规则/资源/组成员详情摘要、Management 独立只读 adapter、bounded writer、flush/shutdown、pending 内存保护、首轮 degraded/recovery 和 adapter-level Busy/DiskFull fault 注入。
-- Observability：低基数 metrics/health、typed event、typed final tracing layer、degraded health 发布、输出失败 stderr fallback、`TelemetryWriter` 有界队列、失败重排队、deadline-aware flush、真实文件/stderr output、启动时日志目标/级别切换，以及 `DnsService`/Supervisor 周期 flush 与 shutdown 接线。
+- Storage：SQLite schema v4 migration、stats/detail transaction、authenticated qname/client/answer 后台投影、cache producer upstream provenance、规则/资源/组成员详情摘要、Management 独立只读 adapter、唯一 bounded SQLite detail writer、满批/周期 flush、pending 内存保护和 fault injection。
+- Observability：低基数 metrics/health、typed event、typed final tracing layer、输出失败 stderr fallback、`TelemetryWriter` 有界队列、失败重排队、deadline-aware flush、真实文件/stderr output，以及进程级 resolution ingress 的 gap/recovery health。
+- DNS 主链：`PolicyContext`/`RouteDecision` 两阶段决策、fast/resolved cache key v2、共享 canonical response、异步 cache commit、统一 `ResolutionEnvelope` 和 stats/detail 后台消费；Management overview 暴露完整 pipeline 计数。
 - DoH 安全首轮：trusted forwarded header、PROXY v1/v2 地址恢复，TLS terminate 的 PEM/DER 证书加载、私钥匹配、TLS 1.2/1.3 握手；PROXY 前导先消费再升级 TLS。
 - WebUI Management 后端：独立纯 HTTP listener、认证/session/首次初始化、配置事务恢复、内嵌 SPA，以及通过稳定 query port 提供的七个只读 API；Queries 返回完整有界解析记录并区分历史脱敏行。
 
@@ -33,15 +34,16 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 - 具体 UDP/TCP/DoH adapter 瞬时错误的完整故障矩阵；
 - DoH HTTP/2、完整 HTTP/DNS 协议组合和证书/信任边界矩阵；
 - cache persistence 的 last-access、真实故障复现与请求记录的跨故障源 health/recovery；
-- v1 最终压力、长期运行、conformance，以及 shutdown 故障/超时矩阵验收。
+- v1 最终压力、长期运行、conformance，以及 shutdown 故障/超时矩阵验收；
+- 在冻结的目标硬件/QPS/并发下复核 cache-hit P99、`resolve_log` on/off 吞吐、CPU/allocation 与 60 秒无 ingress gap；当前本机单并发 profile 不能替代该门槛。
 
 ## 2. 进度总览
 
 | 口径 | 当前值 | 说明 |
 | --- | ---: | --- |
 | 模块方案覆盖率 | 100% | 12 个后端顶层模块均有独立方案文档 |
-| 后端代码实现进度 | **91.8%** | 以模块代码和验证证据计算，不因文档完成虚增 |
-| v1 交付总进度 | **92.6%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
+| 后端代码实现进度 | **93.3%** | 以模块代码和验证证据计算，不因文档完成虚增 |
+| v1 交付总进度 | **94.0%** | `10% × 设计完成度 + 90% × 后端代码实现进度` |
 | MVP v0.1 | **已完成** | 本地 loopback 和 plain DoH 主链路已验证 |
 
 模块进度：
@@ -49,14 +51,14 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 模块 | 实现状态 | 进度 | 权重 |
 | --- | --- | ---: | ---: |
 | Application | 实现中 | 76% | 4% |
-| Ports | 已实现待验证 | 74% | 8% |
+| Ports | 已实现待验证 | 80% | 8% |
 | Config | 已验证 | 100% | 10% |
 | Runtime | 实现中 | 94% | 12% |
 | Transport | 实现中 | 92% | 11% |
-| DNS Core | 实现中 | 86% | 10% |
-| Policy | 实现中 | 92% | 8% |
+| DNS Core | 实现中 | 90% | 10% |
+| Policy | 实现中 | 95% | 8% |
 | Upstream | 已验证 | 100% | 10% |
-| Cache | 实现中 | 87% | 9% |
+| Cache | 实现中 | 91% | 9% |
 | Resource | 已实现待验证 | 96% | 7% |
 | Storage | 已实现待验证 | 99% | 8% |
 | Observability | 已验证 | 100% | 3% |
@@ -64,9 +66,9 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 进度计算：
 
 ```text
-4%×76% + 8%×74% + 10%×100% + 12%×94% + 11%×92%
-+ 10%×86% + 8%×92% + 10%×100% + 9%×87% + 7%×96%
-+ 8%×99% + 3%×100% ≈ 91.8%
+4%×76% + 8%×80% + 10%×100% + 12%×94% + 11%×92%
++ 10%×90% + 8%×95% + 10%×100% + 9%×91% + 7%×96%
++ 8%×99% + 3%×100% ≈ 93.3%
 ```
 
 进度判定只接受可核验证据：50% 为 happy path + focused tests，70% 为真实跨模块链路，85% 为异常/取消/并发/资源限制，100% 为集成、故障注入、验收和文档回链全部完成。
@@ -101,7 +103,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 198 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 199 |
 
 ### 增量里程碑
 
@@ -144,19 +146,35 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 196 | 非法客户端 ECS 安全回退 | 非法 prefix 不进入上游/cache key；有 client address 时使用脱敏网段，否则移除 ECS |
 | 197 | UDP/TCP 非法 query 安全响应 | 可靠 header 的非法 query 返回 FORMERR/NOTIMP；不伪造 question 或 BADVERS OPT |
 | 198 | `geosite.dat` selector 主链 | V2Ray `GeoSiteList` protobuf 解析、四类 domain matcher、selector/Policy 选择、const/file/remote restore 和 PreparedRuntime bind 前编译；不新增二进制格式依赖 |
+| 199 | DNS 查询主链异步观测 | `PolicyContext`/`RouteDecision`、cache key v2 fast path、共享 response、异步 cache commit、统一有界解析事件、stats/detail 后台消费、Management pipeline 计数和最新 SVG 流程图 |
 
 ### 当前阶段验证
 
-- `cargo fmt --manifest-path backend/Cargo.toml -- --check`：通过；
-- `cargo check --manifest-path backend/Cargo.toml --locked`：通过；
-- `cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings`：通过；
-- `cargo test --manifest-path backend/Cargo.toml --locked resource::`：`58 passed、0 failed`；
-- `cargo test --manifest-path backend/Cargo.toml --locked policy::plan::tests`：`11 passed、0 failed`；
-- `cargo test --manifest-path backend/Cargo.toml --locked runtime::prepared::tests::async_prepare_compiles_file_dat_selector_before_bind`：`1 passed、0 failed`；
-- `cargo test --manifest-path backend/Cargo.toml --locked`：`569 passed、0 failed`；
+- `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过；
+- `cargo check --manifest-path backend/Cargo.toml --locked --tests`：通过；
+- `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings`：通过；
+- `cargo test --manifest-path backend/Cargo.toml --locked`：`598 passed、0 failed、1 ignored`；忽略项是手工 release 性能 profile；
+- `cargo test --manifest-path backend/Cargo.toml --locked --release service::tests::benchmark_udp_resolution_observation_profile -- --ignored --nocapture`：`1 passed、0 failed`；
+- `pnpm run generate:api`、`pnpm run build`：通过；
+- `pnpm test`：`33 passed、0 failed`；
 - `git diff --check`：通过。
 
-阶段 198 完成 `geosite.dat` selector 主链；服务器重启/宕机恢复、缓存/请求记录绝对持久化、HTTP/2 和长期压力仍按计划不作为本阶段阻塞项。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend/modules/*.md`。
+阶段 199 的本机手工 profile 使用 Windows x86_64 release、Tokio 4 worker、单并发、每场景 1000 次并复用 UDP loopback socket，结果如下；计时包含本机 client send/receive，因此只作为保守回归剖面：
+
+| 场景 | `resolve_log` | mean | P99 | 单并发 QPS |
+| --- | --- | ---: | ---: | ---: |
+| cache hit | off | 0.035668ms | 0.112900ms | 28,037 |
+| cache hit | on | 0.042719ms | 0.105300ms | 23,409 |
+| hosts hit | off | 0.037049ms | 0.113000ms | 26,991 |
+| hosts hit | on | 0.042090ms | 0.097600ms | 23,759 |
+| fixed local upstream miss | off | 0.043166ms | 0.143500ms | 23,166 |
+| fixed local upstream miss | on | 0.047490ms | 0.111100ms | 21,057 |
+| 三场景合并 | off | 0.038628ms | — | 25,888 |
+| 三场景合并 | on | 0.044100ms | — | 22,676 |
+
+两组均为 resolution ingress `0 dropped`；详情开启组为 `3002 accepted、0 dropped、0 failed`。该 profile 的 P99 低于 2ms，但详情 on/off 合并吞吐差约 12.4%，且未测 CPU、allocation、高并发、目标 QPS 或 60 秒稳态，所以**不能**作为发布 SLO 或 5% 回退门槛已通过的证据。冻结目标部署硬件与负载后的外部高并发压测仍归入 v1 最终验收。
+
+阶段 199 完成 DNS 查询主链异步观测的代码与稳定文档收敛；服务器重启/宕机恢复、缓存/请求记录绝对持久化、HTTP/2、目标环境性能和长期压力仍按计划不作为本阶段代码交付阻塞项。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend/modules/*.md`。
 
 ## 5. v1 验收门槛
 

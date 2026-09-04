@@ -4,7 +4,7 @@ use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::dns::{CancelReason, Cancellation, CanonicalResponse, RuntimeRevision};
 use crate::ports::cache::{
@@ -380,6 +380,88 @@ pub struct CacheWriteRequest {
     pub deadline: crate::dns::Deadline,
 }
 
+/// 可从 DNS 请求任务一次性移交给后台 worker 的 cache commit。
+///
+/// candidate 持有 single-flight leader lease；若事件或 commit 队列丢弃它，lease 的
+/// RAII guard 会立即释放 follower，避免过载路径形成永久等待。
+pub struct CacheCommitCandidate {
+    facade: Arc<CacheFacade>,
+    request: CacheWriteRequest,
+    lease: CacheLoadLease,
+}
+
+impl fmt::Debug for CacheCommitCandidate {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CacheCommitCandidate")
+            .field("key", &self.request.key)
+            .field("condition", &self.request.condition)
+            .field("producer_revision", &self.request.producer_revision)
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CacheCommitOutcome {
+    Stored,
+    Rejected,
+    Conflict,
+    Unavailable,
+    Dropped,
+}
+
+impl CacheCommitCandidate {
+    pub fn new(
+        facade: Arc<CacheFacade>,
+        request: CacheWriteRequest,
+        lease: CacheLoadLease,
+    ) -> Self {
+        Self {
+            facade,
+            request,
+            lease,
+        }
+    }
+
+    /// 使用独立短 deadline 完成内存提交并发布 single-flight 终态。
+    ///
+    /// TTL 的起算时间保留 producer 写入 request 的 `now`，不会因 worker 排队而延后。
+    pub async fn commit(mut self, timeout: Duration) -> CacheCommitOutcome {
+        let deadline = crate::dns::Deadline::new(Instant::now() + timeout);
+        self.request.deadline = deadline;
+        let write = self.facade.write_response(self.request).await;
+        let (outcome, completion) = match write {
+            Ok(CacheWriteResult::Stored {
+                outcome: CacheWriteOutcome::Inserted(_) | CacheWriteOutcome::Replaced(_),
+                record: Some(record),
+            }) if record.entry.expires_at > Instant::now() => (
+                CacheCommitOutcome::Stored,
+                CacheLoadCompletion::Ready(record),
+            ),
+            Ok(CacheWriteResult::Stored {
+                outcome: CacheWriteOutcome::Conflict(_),
+                ..
+            }) => (CacheCommitOutcome::Conflict, CacheLoadCompletion::Miss),
+            Ok(CacheWriteResult::Stored { .. }) | Ok(CacheWriteResult::Rejected(_)) => {
+                (CacheCommitOutcome::Rejected, CacheLoadCompletion::Miss)
+            }
+            Err(_) => (
+                CacheCommitOutcome::Unavailable,
+                CacheLoadCompletion::Failed(CacheLoadFailure::Unavailable),
+            ),
+        };
+        if self
+            .facade
+            .publish_load(self.lease, completion, deadline)
+            .await
+            .is_err()
+        {
+            return CacheCommitOutcome::Unavailable;
+        }
+        outcome
+    }
+}
+
 #[derive(Clone)]
 pub struct CacheRefreshPermit {
     key: CacheKey,
@@ -426,7 +508,11 @@ impl CacheRefreshPermit {
 
 #[derive(Debug)]
 pub enum CacheWriteResult {
-    Stored(CacheWriteOutcome),
+    Stored {
+        outcome: CacheWriteOutcome,
+        /// Insert/replace 时直接复用本次生成的 record，避免 single-flight 再次读取 store。
+        record: Option<CacheRecord>,
+    },
     Rejected(CacheAdmissionRejection),
 }
 
@@ -568,19 +654,24 @@ impl CacheFacade {
                 )
                 .await
                 .map_err(CacheFacadeError::Store)?;
-            if let CacheWriteOutcome::Inserted(version) | CacheWriteOutcome::Replaced(version) =
-                outcome
-                && let Some(writer) = self
-                    .persistence
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .clone()
-            {
-                let _ = writer.enqueue(PersistentCacheBatch {
-                    records: vec![(key, CacheRecord { version, entry })],
-                });
-            }
-            Ok(CacheWriteResult::Stored(outcome))
+            let record = match outcome {
+                CacheWriteOutcome::Inserted(version) | CacheWriteOutcome::Replaced(version) => {
+                    let record = CacheRecord { version, entry };
+                    if let Some(writer) = self
+                        .persistence
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .clone()
+                    {
+                        let _ = writer.enqueue(PersistentCacheBatch {
+                            records: vec![(key, record.clone())],
+                        });
+                    }
+                    Some(record)
+                }
+                CacheWriteOutcome::Conflict(_) | CacheWriteOutcome::RejectedQuality => None,
+            };
+            Ok(CacheWriteResult::Stored { outcome, record })
         })
     }
 
@@ -656,12 +747,16 @@ mod tests {
     use hickory_proto::rr::{Name, RecordType};
 
     use crate::cache::{
-        CacheAdmissionPolicy, CacheFacade, CacheFacadeBuildError, CacheFacadeOptions, CacheLookup,
-        CachePersistenceRunSummary, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer,
-        LateCacheFinalizerBuildError, LateCacheFinalizerSubmitError, MemoryCacheStore,
+        CacheAdmissionPolicy, CacheCommitCandidate, CacheCommitOutcome, CacheFacade,
+        CacheFacadeBuildError, CacheFacadeOptions, CacheLookup, CachePersistenceRunSummary,
+        CacheWriteRequest, CacheWriteResult, LateCacheFinalizer, LateCacheFinalizerBuildError,
+        LateCacheFinalizerSubmitError, MemoryCacheStore,
     };
-    use crate::dns::{CanonicalQuery, CanonicalResponse, Deadline, RuntimeRevision};
-    use crate::ports::cache::{CacheCondition, CacheKey, CacheNamespace, CacheStore};
+    use crate::dns::{Cancellation, CanonicalQuery, CanonicalResponse, Deadline, RuntimeRevision};
+    use crate::ports::cache::{
+        CacheCondition, CacheKey, CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation,
+        CacheNamespace, CacheStore,
+    };
 
     fn key() -> CacheKey {
         CacheKey {
@@ -683,6 +778,79 @@ mod tests {
 
     fn deadline() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(30))
+    }
+
+    fn write_request() -> CacheWriteRequest {
+        CacheWriteRequest {
+            key: key(),
+            condition: CacheCondition::Absent,
+            response: Arc::new(response(ResponseCode::NXDomain)),
+            upstream:
+                crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                    "test-upstream",
+                )
+                .unwrap(),
+            now: Instant::now(),
+            producer_revision: RuntimeRevision(1),
+            deadline: deadline(),
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_commit_candidate_publishes_ready_to_followers() {
+        let facade = Arc::new(CacheFacade::new(
+            Arc::new(MemoryCacheStore::default()),
+            CacheFacadeOptions::default(),
+        ));
+        let lease = match facade.reserve_load(key(), deadline()).await.unwrap() {
+            CacheLoadReservation::Leader(lease) => lease,
+            CacheLoadReservation::Follower(_) => panic!("first reservation must be leader"),
+        };
+        let waiter = match facade.reserve_load(key(), deadline()).await.unwrap() {
+            CacheLoadReservation::Follower(waiter) => waiter,
+            CacheLoadReservation::Leader(_) => panic!("second reservation must be follower"),
+        };
+
+        let outcome = CacheCommitCandidate::new(Arc::clone(&facade), write_request(), lease)
+            .commit(Duration::from_secs(1))
+            .await;
+        assert_eq!(outcome, CacheCommitOutcome::Stored);
+        assert!(matches!(
+            facade
+                .wait_load(waiter, deadline(), &Cancellation::new())
+                .await
+                .unwrap(),
+            CacheLoadCompletion::Ready(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn dropping_cache_commit_candidate_releases_followers() {
+        let facade = Arc::new(CacheFacade::new(
+            Arc::new(MemoryCacheStore::default()),
+            CacheFacadeOptions::default(),
+        ));
+        let lease = match facade.reserve_load(key(), deadline()).await.unwrap() {
+            CacheLoadReservation::Leader(lease) => lease,
+            CacheLoadReservation::Follower(_) => panic!("first reservation must be leader"),
+        };
+        let waiter = match facade.reserve_load(key(), deadline()).await.unwrap() {
+            CacheLoadReservation::Follower(waiter) => waiter,
+            CacheLoadReservation::Leader(_) => panic!("second reservation must be follower"),
+        };
+
+        drop(CacheCommitCandidate::new(
+            facade.clone(),
+            write_request(),
+            lease,
+        ));
+        assert!(matches!(
+            facade
+                .wait_load(waiter, deadline(), &Cancellation::new())
+                .await
+                .unwrap(),
+            CacheLoadCompletion::Failed(CacheLoadFailure::Abandoned)
+        ));
     }
 
     #[tokio::test]
@@ -717,7 +885,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(matches!(write, CacheWriteResult::Stored(_)));
+        assert!(matches!(write, CacheWriteResult::Stored { .. }));
         assert!(matches!(
             facade.lookup(&key(), deadline()).await.unwrap(),
             CacheLookup::Fresh(_)

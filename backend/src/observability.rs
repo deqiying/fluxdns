@@ -1387,6 +1387,7 @@ fn telemetry_component(value: &str) -> TelemetryComponent {
         "runtime" => TelemetryComponent::Runtime,
         "listener" => TelemetryComponent::Listener,
         "dns" => TelemetryComponent::Dns,
+        "resolution" => TelemetryComponent::Resolution,
         "policy" => TelemetryComponent::Policy,
         "upstream" => TelemetryComponent::Upstream,
         "cache" => TelemetryComponent::Cache,

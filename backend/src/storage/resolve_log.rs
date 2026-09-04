@@ -1,14 +1,10 @@
-use std::collections::VecDeque;
 use std::fmt;
 use std::net::IpAddr;
-use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::dns::{CancelReason, RuntimeRevision, TransportClass};
-use crate::ports::storage::{
-    ResolveAnswer, ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource,
-    StatsSource,
-};
+use crate::ports::observation::{ResolutionEvent, ResolutionTerminal};
+use crate::ports::storage::{ResolveAnswer, ResolveEvent, ResolveRuleSource, StatsSource};
 use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 use crate::ports::{PortError, PortErrorClass};
 use crate::resource::ResourceVersion;
@@ -59,6 +55,63 @@ pub struct ResolveDetailRecord {
 }
 
 impl ResolveDetailRecord {
+    /// 在详情 worker 内把共享解析事件投影为可持久化记录。
+    pub(crate) fn from_resolution_event(event: &ResolutionEvent) -> Result<Self, PortError> {
+        let detail = event.detail.as_ref().ok_or_else(|| {
+            PortError::new(PortErrorClass::InvalidInput, "resolve detail projector")
+                .with_safe_context("detail source is disabled")
+        })?;
+        let answers = detail.response.as_ref().map_or_else(Vec::new, |response| {
+            response
+                .as_message()
+                .answers
+                .iter()
+                .map(|record| ResolveAnswer {
+                    name: record.name.to_ascii(),
+                    record_type: record.record_type().to_string(),
+                    data: record.data.to_string(),
+                    ttl: record.ttl,
+                })
+                .collect()
+        });
+        let (rcode, cancellation_reason) = match event.terminal {
+            ResolutionTerminal::Response { rcode, .. } => (
+                u8::try_from(rcode & 0x0f).expect("4-bit RCODE must fit u8"),
+                None,
+            ),
+            ResolutionTerminal::NoResponse { reason } => (0, reason),
+            ResolutionTerminal::CoreFailure => (0, None),
+        };
+        Self::from_event(ResolveEvent {
+            occurred_at: event.occurred_at,
+            duration_started_at: event.duration_started_at,
+            request_digest: std::sync::Arc::from(format!("{:032x}", detail.request_id.0)),
+            listener_id: std::sync::Arc::clone(&event.listener_id),
+            route_id: event.route_id.clone(),
+            client_ip: detail.client_ip,
+            client_bucket: event.client_bucket.clone(),
+            strategy_id: event.strategy_id.clone(),
+            upstream_id: event.upstream_id.clone(),
+            upstream_member_id: event.upstream_member_id.clone(),
+            upstream_used_id: event.upstream_used_id.clone(),
+            matched_rule_source: event.matched_rule_source,
+            matched_resource_id: event.matched_resource_id.clone(),
+            matched_rule_ordinal: event.matched_rule_ordinal,
+            resource_version: event.resource_version,
+            transport: event.transport,
+            qname: std::sync::Arc::from(detail.question.name().to_ascii()),
+            qtype: u16::from(detail.question.query_type()),
+            qclass: u16::from(detail.question.query_class()),
+            answers,
+            rcode,
+            cancellation_reason,
+            outcome: event.outcome,
+            source: event.source,
+            cache_status: event.cache_lookup_status,
+            runtime_revision: event.runtime_revision,
+        })
+    }
+
     pub(crate) fn from_event(event: ResolveEvent) -> Result<Self, PortError> {
         validate_listener_id(&event.listener_id)?;
         validate_optional_configured_id(event.client_bucket.as_deref(), "client bucket")?;
@@ -265,174 +318,6 @@ impl fmt::Debug for ResolveDetailRecord {
     }
 }
 
-/// writer adapter 的最小输出端；失败时不得吞掉 pending record。
-pub trait ResolveDetailWriter: Send {
-    fn append(&mut self, record: &ResolveDetailRecord) -> Result<(), PortError>;
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum ResolveLogBuildError {
-    #[error("resolve log queue capacity must be greater than zero")]
-    ZeroCapacity,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ResolveLogFlushSummary {
-    /// 本次 flush 成功写入的记录数。
-    pub committed: u64,
-    /// flush 后仍等待重试的记录数。
-    pub pending: usize,
-    /// 生命周期内因队列满而丢弃的记录数。
-    pub dropped_queue_full: u64,
-    /// 生命周期内 sink 返回失败的次数。
-    pub sink_failures: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct ResolveLogShutdownSummary {
-    pub flush: ResolveLogFlushSummary,
-    /// shutdown flush 后仍无法提交、因此明确丢弃的记录数。
-    pub discarded_pending: u64,
-}
-
-struct ResolveLogState<W> {
-    writer: W,
-    pending: VecDeque<ResolveDetailRecord>,
-    accepting: bool,
-    dropped_queue_full: u64,
-    sink_failures: u64,
-}
-
-/// 详情日志的纯内存、有界 writer 前端。
-///
-/// 队列满时丢弃新记录并累计计数。sink 失败保留队首供后续 flush 重试，失败不会增加
-/// 队列容量；shutdown 会先 flush 一次，然后显式清点并丢弃剩余记录。
-pub struct ResolveLogWriter<W> {
-    enabled: bool,
-    capacity: usize,
-    state: Mutex<ResolveLogState<W>>,
-}
-
-impl<W> ResolveLogWriter<W>
-where
-    W: ResolveDetailWriter,
-{
-    pub fn new(enabled: bool, capacity: usize, writer: W) -> Result<Self, ResolveLogBuildError> {
-        if capacity == 0 {
-            return Err(ResolveLogBuildError::ZeroCapacity);
-        }
-        Ok(Self {
-            enabled,
-            capacity,
-            state: Mutex::new(ResolveLogState {
-                writer,
-                pending: VecDeque::with_capacity(capacity),
-                accepting: true,
-                dropped_queue_full: 0,
-                sink_failures: 0,
-            }),
-        })
-    }
-
-    pub const fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    pub const fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    pub fn pending_len(&self) -> usize {
-        self.state
-            .lock()
-            .expect("resolve log state lock poisoned")
-            .pending
-            .len()
-    }
-
-    pub fn flush(&self) -> ResolveLogFlushSummary {
-        let mut state = self.state.lock().expect("resolve log state lock poisoned");
-        let mut committed = 0;
-        while let Some(record) = state.pending.front().cloned() {
-            match state.writer.append(&record) {
-                Ok(()) => {
-                    state.pending.pop_front();
-                    committed += 1;
-                }
-                Err(_) => {
-                    state.sink_failures = state.sink_failures.saturating_add(1);
-                    break;
-                }
-            }
-        }
-        summary(&state, committed)
-    }
-
-    pub fn shutdown(&self) -> ResolveLogShutdownSummary {
-        let mut state = self.state.lock().expect("resolve log state lock poisoned");
-        state.accepting = false;
-
-        let mut committed = 0;
-        while let Some(record) = state.pending.front().cloned() {
-            match state.writer.append(&record) {
-                Ok(()) => {
-                    state.pending.pop_front();
-                    committed += 1;
-                }
-                Err(_) => {
-                    state.sink_failures = state.sink_failures.saturating_add(1);
-                    break;
-                }
-            }
-        }
-
-        let discarded_pending = state.pending.len() as u64;
-        state.pending.clear();
-        ResolveLogShutdownSummary {
-            flush: summary(&state, committed),
-            discarded_pending,
-        }
-    }
-
-    fn try_record_inner(&self, event: ResolveEvent) -> Result<ResolveEventDisposition, PortError> {
-        if !self.enabled {
-            return Ok(ResolveEventDisposition::Disabled);
-        }
-        let record = ResolveDetailRecord::from_event(event)?;
-        let mut state = self.state.lock().expect("resolve log state lock poisoned");
-        if !state.accepting {
-            return Err(
-                PortError::new(PortErrorClass::Unavailable, "resolve detail writer")
-                    .with_safe_context("shutdown"),
-            );
-        }
-        if state.pending.len() == self.capacity {
-            state.dropped_queue_full = state.dropped_queue_full.saturating_add(1);
-            return Ok(ResolveEventDisposition::DroppedQueueFull);
-        }
-        state.pending.push_back(record);
-        Ok(ResolveEventDisposition::Accepted)
-    }
-}
-
-impl<W> ResolveEventSink for ResolveLogWriter<W>
-where
-    W: ResolveDetailWriter,
-{
-    fn try_record(&self, event: ResolveEvent) -> Result<ResolveEventDisposition, PortError> {
-        self.try_record_inner(event)
-    }
-}
-
-fn summary<W>(state: &ResolveLogState<W>, committed: u64) -> ResolveLogFlushSummary {
-    ResolveLogFlushSummary {
-        committed,
-        pending: state.pending.len(),
-        dropped_queue_full: state.dropped_queue_full,
-        sink_failures: state.sink_failures,
-    }
-}
-
 fn bounded_answers(source: Vec<ResolveAnswer>) -> Result<(Vec<ResolveAnswer>, bool), PortError> {
     let source_len = source.len();
     let mut truncated = source_len > MAX_ANSWER_COUNT;
@@ -504,61 +389,16 @@ fn validate_listener_id(listener_id: &str) -> Result<(), PortError> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::{Instant, SystemTime};
 
     use crate::dns::{CancelReason, RuntimeRevision, TransportClass};
-    use crate::ports::storage::{
-        ResolveAnswer, ResolveEvent, ResolveEventDisposition, ResolveEventSink, ResolveRuleSource,
-        StatsSource,
-    };
+    use crate::ports::PortErrorClass;
+    use crate::ports::storage::{ResolveAnswer, ResolveEvent, ResolveRuleSource, StatsSource};
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
-    use crate::ports::{PortError, PortErrorClass};
     use crate::resource::ResourceVersion;
 
-    use super::{ResolveDetailRecord, ResolveDetailWriter, ResolveLogBuildError, ResolveLogWriter};
-
-    #[derive(Clone)]
-    struct CapturingWriter {
-        records: Arc<Mutex<Vec<ResolveDetailRecord>>>,
-        failures_remaining: Arc<AtomicUsize>,
-    }
-
-    impl CapturingWriter {
-        fn new(failures: usize) -> (Self, Arc<Mutex<Vec<ResolveDetailRecord>>>) {
-            let records = Arc::new(Mutex::new(Vec::new()));
-            (
-                Self {
-                    records: Arc::clone(&records),
-                    failures_remaining: Arc::new(AtomicUsize::new(failures)),
-                },
-                records,
-            )
-        }
-    }
-
-    impl ResolveDetailWriter for CapturingWriter {
-        fn append(&mut self, record: &ResolveDetailRecord) -> Result<(), PortError> {
-            if self
-                .failures_remaining
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
-                    remaining.checked_sub(1)
-                })
-                .is_ok()
-            {
-                return Err(PortError::new(
-                    PortErrorClass::Unavailable,
-                    "test resolve detail sink",
-                ));
-            }
-            self.records
-                .lock()
-                .expect("test records lock poisoned")
-                .push(record.clone());
-            Ok(())
-        }
-    }
+    use super::ResolveDetailRecord;
 
     fn event(listener_id: &str) -> ResolveEvent {
         ResolveEvent {
@@ -598,15 +438,7 @@ mod tests {
 
     #[test]
     fn record_keeps_query_details_and_redacts_debug_output() {
-        let (sink, records) = CapturingWriter::new(0);
-        let writer = ResolveLogWriter::new(true, 2, sink).unwrap();
-        assert!(matches!(
-            writer.try_record(event("listener-public")),
-            Ok(ResolveEventDisposition::Accepted)
-        ));
-        assert_eq!(writer.flush().committed, 1);
-
-        let record = records.lock().unwrap().pop().unwrap();
+        let record = ResolveDetailRecord::from_event(event("listener-public")).unwrap();
         assert_eq!(record.listener_id(), "listener-public");
         assert_eq!(record.qname(), "private.example.test.");
         assert!(record.has_route());
@@ -676,99 +508,16 @@ mod tests {
     }
 
     #[test]
-    fn full_queue_drops_new_records_and_reports_total() {
-        let (sink, records) = CapturingWriter::new(0);
-        let writer = ResolveLogWriter::new(true, 1, sink).unwrap();
+    fn listener_id_and_rcode_are_validated() {
         assert!(matches!(
-            writer.try_record(event("listener")),
-            Ok(ResolveEventDisposition::Accepted)
-        ));
-        assert!(matches!(
-            writer.try_record(event("listener")),
-            Ok(ResolveEventDisposition::DroppedQueueFull)
-        ));
-        assert_eq!(writer.pending_len(), 1);
-
-        let flushed = writer.flush();
-        assert_eq!(flushed.committed, 1);
-        assert_eq!(flushed.pending, 0);
-        assert_eq!(flushed.dropped_queue_full, 1);
-        assert_eq!(records.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn sink_failure_keeps_pending_record_for_retry_without_growing_queue() {
-        let (sink, records) = CapturingWriter::new(1);
-        let writer = ResolveLogWriter::new(true, 1, sink).unwrap();
-        writer.try_record(event("listener")).unwrap();
-
-        let first = writer.flush();
-        assert_eq!(first.committed, 0);
-        assert_eq!(first.pending, 1);
-        assert_eq!(first.sink_failures, 1);
-        assert!(matches!(
-            writer.try_record(event("listener")),
-            Ok(ResolveEventDisposition::DroppedQueueFull)
-        ));
-
-        let second = writer.flush();
-        assert_eq!(second.committed, 1);
-        assert_eq!(second.pending, 0);
-        assert_eq!(second.dropped_queue_full, 1);
-        assert_eq!(records.lock().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn shutdown_flushes_then_discards_remaining_records_and_closes_sink() {
-        let (sink, _) = CapturingWriter::new(1);
-        let writer = ResolveLogWriter::new(true, 2, sink).unwrap();
-        writer.try_record(event("listener")).unwrap();
-        writer.try_record(event("listener")).unwrap();
-
-        let summary = writer.shutdown();
-        assert_eq!(summary.flush.committed, 0);
-        assert_eq!(summary.flush.pending, 0);
-        assert_eq!(summary.flush.sink_failures, 1);
-        assert_eq!(summary.discarded_pending, 2);
-        assert_eq!(writer.pending_len(), 0);
-        assert!(matches!(
-            writer.try_record(event("listener")),
-            Err(error) if matches!(error.class(), PortErrorClass::Unavailable)
-        ));
-        assert_eq!(writer.shutdown().discarded_pending, 0);
-    }
-
-    #[test]
-    fn disabled_writer_short_circuits_without_record_validation() {
-        let (sink, records) = CapturingWriter::new(0);
-        let writer = ResolveLogWriter::new(false, 1, sink).unwrap();
-        assert!(matches!(
-            writer.try_record(event("bad listener value")),
-            Ok(ResolveEventDisposition::Disabled)
-        ));
-        assert_eq!(writer.pending_len(), 0);
-        assert!(records.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn zero_capacity_is_rejected_and_listener_id_is_validated() {
-        let (sink, _) = CapturingWriter::new(0);
-        assert!(matches!(
-            ResolveLogWriter::new(true, 0, sink),
-            Err(ResolveLogBuildError::ZeroCapacity)
-        ));
-
-        let (sink, _) = CapturingWriter::new(0);
-        let writer = ResolveLogWriter::new(true, 1, sink).unwrap();
-        assert!(matches!(
-            writer.try_record(event("bad listener value")),
+            ResolveDetailRecord::from_event(event("bad listener value")),
             Err(error) if matches!(error.class(), PortErrorClass::InvalidInput)
         ));
 
         let mut invalid_rcode = event("listener");
         invalid_rcode.rcode = 16;
         assert!(matches!(
-            writer.try_record(invalid_rcode),
+            ResolveDetailRecord::from_event(invalid_rcode),
             Err(error) if matches!(error.class(), PortErrorClass::InvalidInput)
         ));
     }

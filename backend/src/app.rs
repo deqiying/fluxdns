@@ -523,6 +523,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             )
             .await
             .map_err(map_storage_prepare_error)?;
+            let resolution_metrics = storage.resolution_metrics();
             let candidate = crate::runtime::bind_prepared(
                 prepared,
                 &socket_factory,
@@ -551,6 +552,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                             database_path,
                             resolve_log_enabled,
                             telemetry.clone(),
+                            resolution_metrics,
                         ),
                     )
                     .await

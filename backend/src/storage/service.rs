@@ -5,16 +5,15 @@ use std::time::Duration;
 
 use crate::config::model::DatabaseType;
 use crate::config::resolve::ResolvedConfig;
-use crate::dns::Deadline;
+use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::PortError;
-use crate::ports::storage::{ResolveEventSink, StatsRecorder, StorageBackend, StorageFlushSummary};
+use crate::ports::storage::{StatsRecorder, StorageBackend, StorageFlushSummary};
 
 use super::{
-    ResolveLogBuildError, ResolveLogShutdownSummary, ResolveLogWriter, STORAGE_SCHEMA_VERSION,
-    SqliteResolveDetailFlushSummary, SqliteResolveDetailLimits, SqliteResolveDetailWorker,
-    SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError, SqliteStorageBackend,
-    SqliteStorageBackendBuildError, StatsPersistenceError, StatsPersistenceFlushSummary,
-    StatsPersistenceWorker,
+    STORAGE_SCHEMA_VERSION, SqliteResolveDetailFlushSummary, SqliteResolveDetailLimits,
+    SqliteResolveDetailRunSummary, SqliteResolveDetailWorker, SqliteResolveDetailWriter,
+    SqliteResolveDetailWriterBuildError, SqliteStorageBackend, SqliteStorageBackendBuildError,
+    StatsPersistenceError, StatsPersistenceFlushSummary, StatsPersistenceWorker,
 };
 
 pub const DEFAULT_STORAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
@@ -27,8 +26,6 @@ pub const DEFAULT_RESOLVE_LOG_BATCH_SIZE: usize = 128;
 pub struct StorageServiceFlushSummary {
     pub stats: StatsPersistenceFlushSummary,
     pub storage: StorageFlushSummary,
-    /// 详情前端队列的提交、丢弃和 sink 失败摘要。
-    pub resolve_log: ResolveLogShutdownSummary,
     pub detail: SqliteResolveDetailFlushSummary,
 }
 
@@ -114,7 +111,10 @@ impl StorageServiceError {
 /// 由已解析配置创建的业务存储运行时；持有数据面 sink 和 writer 生命周期。
 pub struct StorageRuntime {
     service: StorageService,
-    resolve_log: Option<Arc<ResolveLogWriter<SqliteResolveDetailWriter>>>,
+    detail_writer: Option<SqliteResolveDetailWriter>,
+    resolution_metrics: Arc<crate::resolution::ResolutionPipelineMetrics>,
+    detail_cancellation: Option<Cancellation>,
+    detail_task: Option<tokio::task::JoinHandle<Result<SqliteResolveDetailRunSummary, PortError>>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -129,8 +129,6 @@ pub enum StorageRuntimeBuildError {
     DetailLimits(#[source] SqliteResolveDetailWriterBuildError),
     #[error("resolve detail channel could not be created: {0}")]
     DetailChannel(#[source] SqliteResolveDetailWriterBuildError),
-    #[error("resolve detail writer could not be created: {0}")]
-    DetailWriter(#[source] ResolveLogBuildError),
 }
 
 /// 业务 Storage 的统一 flush/shutdown facade。
@@ -170,7 +168,7 @@ impl StorageService {
         self.detail_worker.is_some()
     }
 
-    /// 返回可由请求热路径共享的同步 stats recorder。
+    /// 返回由 resolution dispatcher 共享的同步 stats recorder。
     pub fn stats_recorder(&self) -> Option<Arc<dyn StatsRecorder>> {
         self.stats_worker
             .as_ref()
@@ -208,7 +206,6 @@ impl StorageService {
         Ok(StorageServiceFlushSummary {
             stats,
             storage,
-            resolve_log: ResolveLogShutdownSummary::default(),
             detail,
         })
     }
@@ -232,7 +229,6 @@ impl StorageService {
             (Ok(stats), Ok(detail), Ok(storage)) => Ok(StorageServiceFlushSummary {
                 stats,
                 storage,
-                resolve_log: ResolveLogShutdownSummary::default(),
                 detail,
             }),
             (Err(stats), Err(detail), Err(backend)) => Err(StorageServiceError::All {
@@ -276,8 +272,10 @@ impl StorageRuntime {
             .map_err(StorageRuntimeBuildError::Migration)?;
 
         let stats_worker = Arc::new(StatsPersistenceWorker::new(backend.clone()));
-        let mut service = StorageService::new(backend.clone()).with_stats_worker(stats_worker);
-        let resolve_log = if config.dns.resolve_log.enable {
+        let service = StorageService::new(backend.clone()).with_stats_worker(stats_worker);
+        let mut detail_cancellation = None;
+        let mut detail_task = None;
+        let detail_writer = if config.dns.resolve_log.enable {
             let limits = SqliteResolveDetailLimits::new(
                 config.dns.resolve_log.eviction_threshold_records,
                 config.dns.resolve_log.max_records,
@@ -291,19 +289,24 @@ impl StorageRuntime {
                 limits,
             )
             .map_err(StorageRuntimeBuildError::DetailChannel)?;
-            let sink = Arc::new(
-                ResolveLogWriter::new(true, DEFAULT_RESOLVE_LOG_QUEUE_CAPACITY, writer)
-                    .map_err(StorageRuntimeBuildError::DetailWriter)?,
-            );
-            service = service.with_detail_worker(worker);
-            Some(sink)
+            let cancellation = Cancellation::new();
+            detail_task = Some(tokio::spawn(worker.run(
+                cancellation.clone(),
+                DEFAULT_STORAGE_FLUSH_INTERVAL,
+                DEFAULT_STORAGE_OPERATION_TIMEOUT,
+            )));
+            detail_cancellation = Some(cancellation);
+            Some(writer)
         } else {
             None
         };
 
         Ok(Self {
             service,
-            resolve_log,
+            detail_writer,
+            resolution_metrics: Arc::new(crate::resolution::ResolutionPipelineMetrics::default()),
+            detail_cancellation,
+            detail_task,
         })
     }
 
@@ -319,43 +322,75 @@ impl StorageRuntime {
             .expect("storage runtime always owns a stats recorder")
     }
 
-    pub fn resolve_event_sink(&self) -> Option<Arc<dyn ResolveEventSink>> {
-        self.resolve_log
-            .as_ref()
-            .map(|sink| Arc::clone(sink) as Arc<dyn ResolveEventSink>)
+    pub(crate) fn detail_writer(&self) -> Option<SqliteResolveDetailWriter> {
+        self.detail_writer.clone()
     }
 
-    /// 将详情前端队列交给 worker 后，统一提交当前存储批次并返回完整摘要。
+    pub(crate) fn resolution_metrics(&self) -> Arc<crate::resolution::ResolutionPipelineMetrics> {
+        Arc::clone(&self.resolution_metrics)
+    }
+
+    /// 提交当前统计和存储批次并返回完整摘要。
     pub async fn flush(
         &mut self,
         deadline: Deadline,
     ) -> Result<StorageServiceFlushSummary, StorageServiceError> {
-        let resolve_log =
-            self.resolve_log
-                .as_ref()
-                .map_or_else(ResolveLogShutdownSummary::default, |sink| {
-                    ResolveLogShutdownSummary {
-                        flush: sink.flush(),
-                        discarded_pending: 0,
-                    }
-                });
-        let mut summary = self.service.flush(deadline).await?;
-        summary.resolve_log = resolve_log;
-        Ok(summary)
+        self.service.flush(deadline).await
     }
 
-    /// 停止详情前端接收并返回最终丢弃数，再按既定顺序关闭存储 worker。
+    /// 停止详情接收并按既定顺序关闭详情、统计和存储 worker。
     pub async fn shutdown(
         &mut self,
         deadline: Deadline,
     ) -> Result<StorageServiceFlushSummary, StorageServiceError> {
-        let resolve_log = self
-            .resolve_log
-            .as_ref()
-            .map_or_else(ResolveLogShutdownSummary::default, |sink| sink.shutdown());
-        let mut summary = self.service.shutdown(deadline).await?;
-        summary.resolve_log = resolve_log;
-        Ok(summary)
+        self.detail_writer = None;
+        if let Some(cancellation) = self.detail_cancellation.take() {
+            cancellation.cancel(CancelReason::Shutdown);
+        }
+        let detail = match self.detail_task.take() {
+            Some(mut task) => {
+                match tokio::time::timeout(deadline.remaining(std::time::Instant::now()), &mut task)
+                    .await
+                {
+                    Ok(Ok(result)) => result,
+                    Ok(Err(_)) => Err(PortError::new(
+                        crate::ports::PortErrorClass::Internal,
+                        "sqlite_resolve_log.worker",
+                    )),
+                    Err(_) => {
+                        task.abort();
+                        Err(PortError::new(
+                            crate::ports::PortErrorClass::Timeout,
+                            "sqlite_resolve_log.shutdown",
+                        ))
+                    }
+                }
+            }
+            None => Ok(SqliteResolveDetailRunSummary::default()),
+        };
+        let service = self.service.shutdown(deadline).await;
+        match (detail, service) {
+            (Ok(detail), Ok(mut summary)) => {
+                summary.detail = detail.flush;
+                Ok(summary)
+            }
+            (Err(detail), Ok(_)) => Err(StorageServiceError::Detail(detail)),
+            (Ok(_), Err(service)) => Err(service),
+            (Err(detail), Err(StorageServiceError::Stats(stats))) => {
+                Err(StorageServiceError::StatsAndDetail { stats, detail })
+            }
+            (Err(detail), Err(StorageServiceError::Backend(backend))) => {
+                Err(StorageServiceError::Both { detail, backend })
+            }
+            (Err(detail), Err(StorageServiceError::StatsAndBackend { stats, backend })) => {
+                Err(StorageServiceError::All {
+                    stats,
+                    detail,
+                    backend,
+                })
+            }
+            (Err(_), Err(service)) => Err(service),
+        }
     }
 }
 
@@ -379,8 +414,8 @@ mod tests {
     use crate::dns::Deadline;
     use crate::ports::PortFuture;
     use crate::ports::storage::{
-        ResolveEvent, ResolveEventDisposition, SchemaVersion, StatsSource, StorageBackend,
-        StorageFlushSummary, StorageHealth, StorageTransaction,
+        ResolveEvent, SchemaVersion, StatsSource, StorageBackend, StorageFlushSummary,
+        StorageHealth, StorageTransaction,
     };
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 
@@ -516,50 +551,49 @@ mod tests {
 
         let _stats_recorder = runtime.stats_recorder();
         assert_eq!(runtime.stats_worker().pending_batch_count(), 0);
-        let sink = runtime
-            .resolve_event_sink()
-            .expect("resolved fixture enables detail sink");
-        let disposition = sink
-            .try_record(ResolveEvent {
-                occurred_at: SystemTime::now(),
-                duration_started_at: Instant::now(),
-                request_digest: std::sync::Arc::from("request-digest"),
-                listener_id: std::sync::Arc::from("udp-main"),
-                route_id: None,
-                client_ip: None,
-                client_bucket: None,
-                strategy_id: None,
-                upstream_id: None,
-                upstream_member_id: None,
-                upstream_used_id: None,
-                matched_rule_source: None,
-                matched_resource_id: None,
-                matched_rule_ordinal: None,
-                resource_version: None,
-                transport: crate::dns::TransportClass::Datagram,
-                qname: std::sync::Arc::from("example.test."),
-                qtype: 1,
-                qclass: 1,
-                answers: Vec::new(),
-                rcode: 0,
-                cancellation_reason: None,
-                outcome: OutcomeClass::Success,
-                source: StatsSource::Upstream,
-                cache_status: CacheStatus::Miss,
-                runtime_revision: crate::dns::RuntimeRevision(1),
-            })
-            .expect("detail event must be accepted");
-        assert_eq!(disposition, ResolveEventDisposition::Accepted);
+        let writer = runtime
+            .detail_writer()
+            .expect("resolved fixture enables detail writer");
+        let record = crate::storage::ResolveDetailRecord::from_event(ResolveEvent {
+            occurred_at: SystemTime::now(),
+            duration_started_at: Instant::now(),
+            request_digest: std::sync::Arc::from("request-digest"),
+            listener_id: std::sync::Arc::from("udp-main"),
+            route_id: None,
+            client_ip: None,
+            client_bucket: None,
+            strategy_id: None,
+            upstream_id: None,
+            upstream_member_id: None,
+            upstream_used_id: None,
+            matched_rule_source: None,
+            matched_resource_id: None,
+            matched_rule_ordinal: None,
+            resource_version: None,
+            transport: crate::dns::TransportClass::Datagram,
+            qname: std::sync::Arc::from("example.test."),
+            qtype: 1,
+            qclass: 1,
+            answers: Vec::new(),
+            rcode: 0,
+            cancellation_reason: None,
+            outcome: OutcomeClass::Success,
+            source: StatsSource::Upstream,
+            cache_status: CacheStatus::Miss,
+            runtime_revision: crate::dns::RuntimeRevision(1),
+        })
+        .expect("detail event must be valid");
+        writer
+            .try_write(record)
+            .expect("detail record must be accepted");
 
         let flush = runtime.flush(deadline()).await.unwrap();
-        assert_eq!(flush.resolve_log.flush.committed, 1);
-        assert_eq!(flush.resolve_log.discarded_pending, 0);
-        assert_eq!(flush.detail.committed, 1);
+        assert_eq!(flush.detail.committed, 0);
         let shutdown = runtime
             .shutdown(deadline())
             .await
             .expect("storage runtime shutdown must drain configured writers");
-        assert_eq!(shutdown.resolve_log.discarded_pending, 0);
+        assert_eq!(shutdown.detail.committed, 1);
         let _ = std::fs::remove_dir_all(work_path);
     }
 

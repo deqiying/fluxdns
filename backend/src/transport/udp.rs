@@ -202,7 +202,7 @@ impl ResponseEncoder for UdpResponseEncoder {
     fn encode<'a>(
         &'a self,
         request: &'a DnsRequest,
-        response: crate::dns::CanonicalResponse,
+        response: Arc<crate::dns::CanonicalResponse>,
     ) -> PortFuture<'a, Result<(), PortError>> {
         Box::pin(async move {
             let id = request
@@ -429,7 +429,11 @@ mod tests {
         });
         let response = CanonicalResponse::response_with_answers(&query, answers).unwrap();
 
-        inbound.response().respond(response).await.unwrap();
+        inbound
+            .response()
+            .respond(Arc::new(response))
+            .await
+            .unwrap();
 
         let sent = socket.sent();
         assert_eq!(sent.len(), 1);

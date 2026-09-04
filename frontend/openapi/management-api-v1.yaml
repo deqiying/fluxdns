@@ -526,7 +526,7 @@ components:
     Overview:
       type: object
       additionalProperties: false
-      required: [sampled_at, runtime_revision, overall_status, cards]
+      required: [sampled_at, runtime_revision, overall_status, cards, resolution_pipeline]
       properties:
         sampled_at:
           type: string
@@ -540,6 +540,77 @@ components:
           maxItems: 16
           items:
             $ref: "#/components/schemas/OverviewCard"
+        resolution_pipeline:
+          $ref: "#/components/schemas/ResolutionPipelineStatus"
+    ResolutionPipelineStatus:
+      type: object
+      description: >-
+        进程生命周期内的 DNS 解析完成有界管线计数。cache lookup 状态属于查询完成事件，
+        异步 cache commit 结果单独计数。
+      additionalProperties: false
+      required:
+        - accepted
+        - dropped
+        - gap_started_at_utc_millis
+        - cache_commit_stored
+        - cache_commit_rejected
+        - cache_commit_conflict
+        - cache_commit_unavailable
+        - cache_commit_dropped
+        - detail_accepted
+        - detail_dropped
+        - detail_failed
+      properties:
+        accepted:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 被统一 ingress 队列接收的完成事件数量。
+        dropped:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 因统一 ingress 队列已满而丢弃的完成事件数量。
+        gap_started_at_utc_millis:
+          type: [integer, "null"]
+          format: int64
+          minimum: 0
+          description: 首次 ingress 丢弃的 UTC epoch 毫秒；尚未发生 gap 时为 null。
+        cache_commit_stored:
+          type: integer
+          format: int64
+          minimum: 0
+        cache_commit_rejected:
+          type: integer
+          format: int64
+          minimum: 0
+        cache_commit_conflict:
+          type: integer
+          format: int64
+          minimum: 0
+        cache_commit_unavailable:
+          type: integer
+          format: int64
+          minimum: 0
+        cache_commit_dropped:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 在产生 commit 结果前被丢弃的 cache candidate 数量。
+        detail_accepted:
+          type: integer
+          format: int64
+          minimum: 0
+        detail_dropped:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 被有界下游队列丢弃的详情投影数量。
+        detail_failed:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 被 SQLite writer 拒绝的详情投影数量。
     OverviewCard:
       type: object
       additionalProperties: false

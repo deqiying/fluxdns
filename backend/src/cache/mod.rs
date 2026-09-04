@@ -14,7 +14,8 @@ pub use admission::{
     admit_response, canonical_checksum,
 };
 pub use key::{
-    CACHE_KEY_FORMAT_VERSION, CacheFingerprint, CacheKeyDimensions, CacheKeyError, build_cache_key,
+    CACHE_KEY_FORMAT_VERSION, CacheFingerprint, CacheKeyDimensions, CacheKeyError, CacheKeyMode,
+    build_cache_key,
 };
 pub use memory::{MemoryCacheStore, MemoryCacheStoreBuildError};
 pub use moka::{MokaCacheStore, MokaCacheStoreBuildError};
@@ -24,9 +25,10 @@ pub use runtime::{
     CachePersistenceRuntimeBuildError, CachePersistenceWriter,
 };
 pub use service::{
-    CacheFacade, CacheFacadeBuildError, CacheFacadeError, CacheFacadeOptions, CacheLookup,
-    CacheRefreshPermit, CacheWriteRequest, CacheWriteResult, LateCacheFinalizer,
-    LateCacheFinalizerBuildError, LateCacheFinalizerShutdownSummary, LateCacheFinalizerSubmitError,
+    CacheCommitCandidate, CacheCommitOutcome, CacheFacade, CacheFacadeBuildError, CacheFacadeError,
+    CacheFacadeOptions, CacheLookup, CacheRefreshPermit, CacheWriteRequest, CacheWriteResult,
+    LateCacheFinalizer, LateCacheFinalizerBuildError, LateCacheFinalizerShutdownSummary,
+    LateCacheFinalizerSubmitError,
 };
 pub use sqlite::{
     SqliteCacheDiskUsage, SqlitePersistentCacheStore, SqlitePersistentCacheStoreBuildError,
@@ -44,7 +46,10 @@ mod persistence_contract_tests {
     use hickory_proto::op::{Message, MessageType, OpCode, Query};
     use hickory_proto::rr::{Name, RecordType};
 
-    use super::{FilePersistentCacheStore, SqlitePersistentCacheStore, canonical_checksum};
+    use super::{
+        CACHE_KEY_FORMAT_VERSION, FilePersistentCacheStore, SqlitePersistentCacheStore,
+        canonical_checksum,
+    };
     use crate::dns::{CanonicalQuery, CanonicalResponse, Deadline, DnsMessageId, RuntimeRevision};
     use crate::ports::cache::{
         CacheEntry, CacheKey, CacheNamespace, CacheQuality, CacheRecord, CacheResponseClass,
@@ -84,7 +89,7 @@ mod persistence_contract_tests {
             CacheKey {
                 namespace: CacheNamespace::Global,
                 encoded: Arc::from(key.as_bytes()),
-                format_version: 1,
+                format_version: CACHE_KEY_FORMAT_VERSION,
             },
             CacheRecord {
                 version: CacheVersion(version),

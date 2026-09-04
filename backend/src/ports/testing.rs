@@ -233,7 +233,7 @@ impl InboundAdapter for FakeInboundAdapter {
 /// 记录实际进入 encoder 的 response，用于验证 correlation exactly-once。
 #[derive(Default)]
 pub struct FakeResponseEncoder {
-    responses: Mutex<Vec<crate::dns::CanonicalResponse>>,
+    responses: Mutex<Vec<Arc<crate::dns::CanonicalResponse>>>,
 }
 
 impl FakeResponseEncoder {
@@ -249,7 +249,7 @@ impl ResponseEncoder for FakeResponseEncoder {
     fn encode<'a>(
         &'a self,
         _request: &'a crate::dns::DnsRequest,
-        response: crate::dns::CanonicalResponse,
+        response: Arc<crate::dns::CanonicalResponse>,
     ) -> PortFuture<'a, Result<(), PortError>> {
         Box::pin(async move {
             lock(&self.responses, "fake_response_encoder.encode")?.push(response);

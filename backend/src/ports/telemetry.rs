@@ -16,6 +16,7 @@ pub enum Component {
     Runtime,
     Listener,
     Dns,
+    Resolution,
     Policy,
     Upstream,
     Cache,

@@ -559,7 +559,7 @@ mod tests {
         CacheKey {
             namespace: CacheNamespace::Global,
             encoded: Arc::from(value),
-            format_version: 1,
+            format_version: CACHE_KEY_FORMAT_VERSION,
         }
     }
 

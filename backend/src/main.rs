@@ -8,6 +8,7 @@ pub mod management;
 pub mod observability;
 pub mod policy;
 pub mod ports;
+pub mod resolution;
 pub mod resource;
 pub mod runtime;
 pub mod service;

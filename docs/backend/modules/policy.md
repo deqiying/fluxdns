@@ -4,9 +4,9 @@
 >
 > 实现状态：已实现
 >
-> 适用范围：client、strategy、rule、resource matcher 和 `ResolutionPlan`
+> 适用范围：client、strategy、rule、resource matcher、`PolicyContext` 与 `RouteDecision`
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联实现：`backend/src/policy/*`
 >
@@ -14,11 +14,11 @@
 
 ## 当前实现边界
 
-v1 主链已完成，client/strategy/route immutable index、resource snapshot、ResolutionPlan、cache/TTL/ECS、direct/group upstream、late candidate、`geosite.dat` selector 和配置 reload 均已接线并有跨 transport/cross-adapter 证据。
+v1 主链已完成，client/strategy/route immutable index、resource snapshot、`PolicyContext`/`RouteDecision` 两阶段决策、cache/TTL/ECS、fast cache 语义 fingerprint、direct/group upstream、late candidate、`geosite.dat` selector 和配置 reload 均已接线并有跨 transport/cross-adapter 证据。
 
 ## 1. 职责
 
-Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引，并为每个请求生成唯一 `ResolutionPlan`。
+Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引，并将每个请求的决策拆为可安全提前计算的 `PolicyContext` 与按需执行的 `RouteDecision`。
 
 它负责：
 
@@ -38,7 +38,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 | `client.rs` | client ID map、CIDR trie 和冲突检测结果 |
 | `strategy.rs` | strategy、覆盖值和默认 upstream |
 | `route.rs` | listener/DoH route 到基础策略的映射 |
-| `plan.rs` | client override、cache/TTL/ECS 生效值与请求级 ResolutionPlan 组合 |
+| `plan.rs` | client override、cache/TTL/ECS 生效值，以及请求级 `PolicyContext`/`RouteDecision` 组合 |
 
 规则数据结构由 Resource 模块编译，Policy 只持有不可变 matcher handle。
 
@@ -53,6 +53,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 - hosts/rule resource handle；
 - typed upstream handle；
 - 每层 cache/TTL/ECS override；
+- 会改变答案的策略语义摘要输入与 fast-path safety；
 - 用于观测的稳定、低基数 ID。
 
 编译发生在 prepare/resource update，不在请求时解析字符串引用。
@@ -62,11 +63,13 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 - `ClientIndex`：exact client ID 优先，未命中时按 IPv4/IPv6 最长 CIDR 前缀匹配，最后进入 `Unknown`；重复 ID/CIDR 和空规则在构建时拒绝；
 - `StrategyIndex`：将已解析策略编译为不可变 `BTreeMap<ConfigId, Arc<ResolvedStrategy>>`，重复策略 ID 在构建时拒绝；
 - `RouteIndex`：编译 stream listener 与 DoH route，校验 `{client_id}` segment 模板并保留 typed listener/route 选择结果；
-- `PolicyIndex::evaluate`：组合 client strategy override、cache tri-state、TTL/ECS effective value 和 upstream target，输出不可变 `ResolutionPlan`；
+- `PolicyIndex::prepare_context`：组合 client strategy override、cache tri-state、TTL/ECS effective value 和 namespace，输出不执行逐规则 matcher 的不可变 `PolicyContext`；
+- `PolicyIndex::evaluate_route`：在 fast miss 后执行 listener hosts 与 strategy rules，输出 local answer 或 upstream target、matched resource 和最终 ECS；兼容入口 `evaluate` 组合这两个阶段；
 - `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash/`geosite.dat` rule-set；remote 资源和缺失资源在普通同步构造边界返回显式错误；`from_config_with_resource_indexes` 可消费 prepare 阶段已编译的 file/remote snapshot；`dat` selector 在 prepare 阶段校验存在，运行时只读取已编译 selector matcher；
 - rule/hosts 执行：固定 listener hosts → strategy rule 顺序，输出不含原文的 matched-rule 摘要，并覆盖 local hosts、rule-set upstream 与 rule ECS；
 - `PolicyDnsCore::UpstreamRuntime`：direct hosts/plain HTTP DoH connector 统一由 `UpstreamRegistry` 构造，Unsupported DoH 能力在 prepare 边界向上游构建错误传播；
-- `PolicyDnsCore::resolve_with_observation`：复用同一次 `PolicyIndex::evaluate` 的结果，输出配置 client bucket、策略目标 upstream/group、实际顶层 group member、matched rule/resource 以及 strategy/source/cache 首轮元数据，不泄露原始 client ID/IP、matcher 或规则文本；
+- `PolicyDnsCore::resolve_with_completion`：先根据 `PolicyContext` 尝试 fast cache，miss 后再执行 `RouteDecision`；输出配置 client bucket、策略目标 upstream/group、实际顶层 group member、matched rule/resource、strategy/source/cache lookup 元数据和可选 cache commit candidate，不泄露原始 client ID/IP、matcher 或规则文本；
+- `PolicyState`：预计算不含观测/管理配置的 policy semantics base，并在资源 CAS 发布时同步更新 matcher 与 hosts/rule content hash；请求级 SHA-256 fingerprint 只编码 typed 稳定字段；
 - 这些索引只持有已解析 typed 值，不在请求路径读取 YAML 或执行网络 I/O。
 
 ## 4. 域名规范化
@@ -145,26 +148,32 @@ ECS：
 rule → strategy → client → upstream → global
 ```
 
-`disabled` 是明确结果，不继续继承。`custom` 必须已有合法 CIDR。group 在 rule/strategy/client 未显式覆盖时，把 direct member 的 upstream ECS 应用到该成员 query；成员 ECS 优先于 global。由于成员选择发生在 cache lookup 之后，此类 group 当前直接绕过缓存，避免不同成员 ECS 共用错误响应。
+`disabled` 是明确结果，不继续继承。`custom` 必须已有合法 CIDR。group 在 rule/strategy/client 未显式覆盖时，把 direct member 的 upstream ECS 应用到该成员 query；成员 ECS 优先于 global。由于成员选择发生在 fast cache lookup 之后，此类 group 不使用 fast key，并继续绕过 response cache，避免不同成员 ECS 共用错误响应。
 
-## 9. ResolutionPlan
+## 9. `PolicyContext` 与 `RouteDecision`
 
-输出为不可变值，包含：
+`PolicyContext` 是 fast cache lookup 的前置结果，包含：
 
 - client bucket 和 identity digest；
-- strategy、matched rule/resource IDs；
-- `LocalAnswer` 或 typed `UpstreamTarget`；
-- effective ECS；
+- strategy 与 route identity；
 - `CacheDecision`：disabled 或唯一 namespace；
 - effective TTL override；
-- runtime/resource revision 摘要；
-- 决策 trace 的安全 ID。
+- 可在 matcher 前确定的 effective ECS；
+- fast-path eligibility 与 policy/request fingerprint 输入。
 
-Plan 不含原始配置字符串、regex 文本、SecretRef、HTTP URL 或具体 connector。
+`RouteDecision` 仅在 fast miss 或不安全时计算，包含 matched rule/resource、`LocalAnswer` 或 typed `UpstreamTarget`、最终 ECS、resource revision 摘要和安全 decision trace IDs。兼容的 `ResolutionPlan` 只是两阶段结果的组合视图，不是请求热路径必须先完整构造的单体。
+
+两类结果都不含原始配置字符串、regex 文本、SecretRef、HTTP URL 或具体 connector。
+
+### 9.1 fast cache 语义 fingerprint
+
+policy fingerprint 覆盖会改变答案的已解析 typed 配置、strategy/upstream/hosts/rule 语义、资源 content hash 和选择安全性；`logs`、`webui`、`database` 等纯观测/管理字段明确排除。request fingerprint 使用规范化 ECS；无 ECS 时只编码 client address 的 `/24`（IPv4）或 `/56`（IPv6）网段，不把原始地址写入 key 或 `Debug`。最终 target/ECS 只有在 resolved mode 中加入。
+
+资源成功刷新时，matcher/index 与对应 content hash 在同一次 Policy 状态发布中生效；因此新请求会切换 fast key，旧 entry 不必全局清理。成员特有 ECS 或其他不能在 matcher 前证明安全的路径必须标记 fast ineligible。
 
 ## 10. 一致性
 
-一次 evaluate 使用请求捕获的同一个 `RuntimeSnapshot` 和其中同一个 ResourceRegistrySnapshot。资源刷新后，新请求使用新索引；已开始请求继续使用旧 `Arc`，不加全局读锁。
+一次 `prepare_context`/`evaluate_route` 使用请求捕获的同一个 `RuntimeSnapshot` 和同一次加载的 Policy 资源状态。资源刷新后，新请求使用新 matcher 与 content hash；已开始请求继续使用旧 `Arc`，不加全局读锁。
 
 PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发布，不能单独替换到互不匹配的 revision。
 
@@ -185,8 +194,10 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - exact/suffix/wildcard/regex 优先级；
 - `resource:selector` 解析和不存在错误；
 - cache tri-state、TTL 和 ECS 全覆盖矩阵；
+- `prepare_context` 不执行逐规则 matcher，fast miss 才进入 `evaluate_route`；
+- policy/request/target/ECS fingerprint 的稳定性、模式隔离和敏感字段排除；
 - 同一 snapshot 下决策确定性；
-- 资源 swap 后新旧请求各自保持一致。
+- 资源 swap 后 matcher 与 hash 同步切换，新旧请求各自保持一致。
 
 ## 13. 实现检查清单
 
@@ -194,7 +205,7 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 建立 strategy immutable lookup index；
 - [x] 实现 strategy/route 编译；
 - [x] 实现 rule/hosts/resource matcher 编排；
-- [x] 实现覆盖矩阵与 ResolutionPlan（首轮 cache/TTL/ECS/client override）；
+- [x] 实现覆盖矩阵与 `PolicyContext`/`RouteDecision` 两阶段决策（cache/TTL/ECS/client override）；
 - [x] 在 `CacheDecision` 中保留所选缓存池的 optimistic answer TTL/max-age，供 stale response 使用；
 - [x] 客户端未显式配置 TTL override 时继承实际选中的 strategy，并在 Policy Core 返回前应用；
 - [x] 按 rule/strategy/client/upstream/global 来源选择最终 ECS；未显式覆盖的 client 不再遮蔽所选 strategy，显式 direct upstream 与 group member ECS 已接入真实 query；成员 ECS group 当前安全绕过缓存；
@@ -206,11 +217,15 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - [x] 提供 client bucket/strategy/source/cache/selected upstream 低基数 observation；`upstream_id`、实际顶层 `upstream_member_id` 和 matched rule/resource 摘要已拆分。
 - [x] `PolicyLateResultSink` 按当前 `CacheEntry.quality` 使用 `CacheCondition::Version` 更新候选，允许更优 late Positive 替换早期 Negative，并拒绝同级 Negative/Positive 或更低 Failure 覆盖；hosts/DoH cross-adapter 并发候选已有回归；
 - [x] 实现 `dat selector` 的 V2Ray `GeoSiteList` protobuf 资源解析和 selector matcher；复用现有代码，不新增二进制格式依赖。
+- [x] 实现 cache key v2 所需的 policy/request/target/ECS fingerprint，排除观测/管理配置，并在资源发布时原子更新 content hash；
+- [x] 对成员特有 ECS 等不安全路径禁用 fast lookup，并继续绕过 response cache。
 
-阶段证据：`policy::client::tests` 4 项、`policy::plan::tests` 11 项通过，覆盖实际命中身份摘要、client pool namespace、TTL/strategy 继承、cache 显式启停/回退、ECS 优先级矩阵和 `dat` selector；`dns::policy::tests` 35 项通过，覆盖 strategy/client cache、身份隔离、hosts/rule-set/group/DoH、optimistic refresh/late sink、TTL、ECS 和 SQLite cache 恢复；Service 的真实 UDP/TCP/plain DoH 成功与错误契约测试均通过；阶段 176 补齐 hosts/DoH cross-adapter 并发候选。阶段 198 的 Resource/Policy/PreparedRuntime 定向测试验证 V2Ray `GeoSiteList` protobuf、四类 domain type、selector 选择和 bind 前编译。最近一次大阶段 backend 全量测试为 569 passed、0 failed。
+阶段证据：`policy::client::tests` 与 `policy::plan::tests` 覆盖实际命中身份摘要、client pool namespace、TTL/strategy 继承、cache 显式启停/回退、ECS 优先级矩阵、两阶段决策和 `dat` selector；`dns::policy::tests` 当前 37 项通过，覆盖 strategy/client cache、身份隔离、hosts/rule-set/group/DoH、optimistic refresh/late sink、TTL、ECS、SQLite cache 恢复、语义摘要的 include/exclude 边界和 hosts refresh 后 fast key 切换；Service 的真实 UDP/TCP/plain DoH 成功与错误契约测试均通过。阶段 199 后端全量 `598 passed、0 failed、1 ignored`。
 
 阶段 178 复核 Policy plan 10 项、Policy Core 35 项及 UDP/TCP/plain DoH 两条真实契约，确认原文中的 cross-adapter 与跨 transport 缺口已闭合；未执行全量后端测试。
 
 阶段 198 增加 `geosite.dat` V2Ray protobuf selector 解析、`Plain`/`Regex`/`RootDomain`/`Full` matcher、重复/截断/限额错误，以及 Policy/PreparedRuntime 的选择和 bind 前编译证据。
 
-当前实现进度：**92%**（v1 配置驱动主链、资源 live snapshot、cache/TTL/ECS、观测、协议组合和 `dat selector` 已完成；剩余为长期压力与最终验收矩阵）。
+阶段 199 将单体 `ResolutionPlan` 热路径拆为 `PolicyContext`/`RouteDecision`，并以 typed SHA-256 semantics/resource fingerprint 支撑 cache key v2 fast lookup；资源刷新不清空全局 cache，但后续请求不会命中旧语义 key。
+
+当前实现进度：**95%**（v1 配置驱动主链、两阶段 Policy、资源 live snapshot、cache/TTL/ECS、观测、协议组合和 `dat selector` 已完成；剩余为长期压力与最终验收矩阵）。

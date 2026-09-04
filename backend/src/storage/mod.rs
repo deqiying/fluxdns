@@ -16,10 +16,7 @@ mod backend_contract_tests;
 
 pub use ledger::{BatchDecision, BatchLedger, BatchLedgerError, BatchReceipt, PendingStatsBatch};
 pub use management_read::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
-pub use resolve_log::{
-    ResolveDetailRecord, ResolveDetailWriter, ResolveLogBuildError, ResolveLogFlushSummary,
-    ResolveLogShutdownSummary, ResolveLogWriter,
-};
+pub use resolve_log::ResolveDetailRecord;
 pub use service::{
     DEFAULT_RESOLVE_LOG_BATCH_SIZE, DEFAULT_RESOLVE_LOG_QUEUE_CAPACITY,
     DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StorageRuntime,
