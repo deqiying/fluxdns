@@ -10,6 +10,7 @@ use crate::config::resolve::{
     ResolvedHostsResource, ResolvedRuleSet, ResolvedStrategy, ResolvedTtlOverride,
     ResolvedUpstream, ValueSource,
 };
+use crate::dns::RouteId;
 use crate::ports::cache::{CacheNamespace, CacheStrategyId, ClientCacheDigest};
 use crate::resource::{
     CanonicalDomain, HostsIndex, HostsLimits, HostsParseError, ResourceLoadError, RuleIndex,
@@ -83,7 +84,7 @@ pub enum PolicyError {
 #[derive(Clone, Debug)]
 pub struct PolicyRequest<'a> {
     pub listener_id: &'a ConfigId,
-    pub doh_path: Option<&'a str>,
+    pub doh_route_id: Option<&'a RouteId>,
     pub client_id: Option<&'a str>,
     pub client_addr: Option<IpAddr>,
     pub client_digest: Option<ClientCacheDigest>,
@@ -348,12 +349,12 @@ impl PolicyIndex {
         &self,
         request: &PolicyRequest<'_>,
     ) -> Result<PolicyContext, PolicyError> {
-        let routing = if let Some(path) = request.doh_path {
+        let routing = if let Some(route_id) = request.doh_route_id {
             self.routes
-                .select_doh(request.listener_id, path)
+                .select_doh(request.listener_id, route_id)
                 .ok_or_else(|| PolicyError::RouteNotFound {
                     listener: request.listener_id.clone(),
-                    path: Some(path.to_owned()),
+                    path: Some(route_id.as_ref().to_owned()),
                 })?
         } else {
             self.routes
@@ -918,9 +919,9 @@ mod tests {
     }
 
     fn dat_fixture() -> Vec<u8> {
-        let mut bytes = vec![
-            0x0a, 0x16, 0x0a, 0x02, b'C', b'N', 0x12, 0x10, 0x08, 0x03, 0x12, 0x0c,
-        ];
+        let mut bytes = vec![0x0a, 0x23, 0x0a, 0x0f];
+        bytes.extend_from_slice(b"GEOLOCATION-!CN");
+        bytes.extend_from_slice(&[0x12, 0x10, 0x08, 0x03, 0x12, 0x0c]);
         bytes.extend_from_slice(b"example.test");
         bytes
     }
@@ -956,7 +957,7 @@ mod tests {
             let plan = index
                 .evaluate(PolicyRequest {
                     listener_id: &listener_id,
-                    doh_path: None,
+                    doh_route_id: None,
                     client_id: Some("alice"),
                     client_addr: None,
                     client_digest: None,
@@ -1027,7 +1028,7 @@ mod tests {
         let plan = index
             .evaluate(PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: Some("alice"),
                 client_addr: Some(IpAddr::from([192, 0, 2, 10])),
                 client_digest: None,
@@ -1076,7 +1077,7 @@ mod tests {
         let plan = index
             .evaluate(PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: Some("alice"),
                 client_addr: Some(IpAddr::from([192, 0, 2, 10])),
                 client_digest: None,
@@ -1114,7 +1115,7 @@ mod tests {
         let plan = index
             .evaluate(PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: Some("alice"),
                 client_addr: Some(IpAddr::from([192, 0, 2, 10])),
                 client_digest: None,
@@ -1142,7 +1143,7 @@ mod tests {
         let plan = index
             .evaluate(PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: None,
                 client_digest: None,
@@ -1165,7 +1166,7 @@ mod tests {
         let plan = index
             .evaluate(PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: Some("alice"),
                 client_addr: None,
                 client_digest: None,
@@ -1233,7 +1234,7 @@ mod tests {
         let listener_plan = index
             .evaluate(PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: None,
                 client_digest: None,
@@ -1251,7 +1252,7 @@ mod tests {
         let shared_plan = index
             .evaluate(PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: None,
                 client_digest: None,
@@ -1265,7 +1266,7 @@ mod tests {
         let rule_plan = index
             .evaluate(PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: None,
                 client_digest: None,
@@ -1287,7 +1288,7 @@ mod tests {
             vec![ResolvedStrategyRule {
                 rule_set: Some(ResolvedRuleSetRef {
                     resource: resource.clone(),
-                    selector: Some("cn".to_owned()),
+                    selector: Some("geolocation-!cn".to_owned()),
                 }),
                 hosts: None,
                 upstream: Some(ConfigId::new("selected").unwrap()),
@@ -1314,7 +1315,7 @@ mod tests {
         let plan = index
             .evaluate(PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: None,
                 client_digest: None,
@@ -1352,7 +1353,7 @@ mod tests {
         let qname = CanonicalDomain::parse("missing.example").unwrap();
         let result = index.evaluate(PolicyRequest {
             listener_id: &listener_id,
-            doh_path: None,
+            doh_route_id: None,
             client_id: None,
             client_addr: None,
             client_digest: None,

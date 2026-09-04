@@ -103,7 +103,7 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 7 | 已完成 | Policy/Resource index、snapshot/CAS、refresh worker、Core 接线 | policy/resource focused tests |
 | 8 | 已完成 | DoH plain HTTP/1.x、HTTP/DNS 错误分层、出站 TLS | DoH/session/client-IP tests；HTTP/2 后置 |
 | 9 | 已完成首轮 | SQLite stats/detail、StorageRuntime、TelemetryWriter、typed tracing layer、真实 output、启动日志切换、policy 首轮观测元数据、首轮 health publish/lifecycle | storage/observability/policy focused tests；OS/SQLite 真实故障后置 |
-| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 200 |
+| 10 | 进行中 | 资源刷新、配置 reload、安全边界和最终验收持续补齐 | 当前最新小阶段为 201 |
 
 ### 增量里程碑
 
@@ -148,13 +148,14 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 | 198 | `geosite.dat` selector 主链 | V2Ray `GeoSiteList` protobuf 解析、四类 domain matcher、selector/Policy 选择、const/file/remote restore 和 PreparedRuntime bind 前编译；不新增二进制格式依赖 |
 | 199 | DNS 查询主链异步观测 | `PolicyContext`/`RouteDecision`、cache key v2 fast path、共享 response、异步 cache commit、统一有界解析事件、stats/detail 后台消费、Management pipeline 计数和最新 SVG 流程图 |
 | 200 | 服务端解析双耗时观测 | core 完成时冻结 transport→core 总耗时与 `DnsCore::resolve_with_completion` 主链耗时；schema v5 持久化微秒精度主链值，Management API/WebUI 并列展示，历史行返回 `null` |
+| 201 | 配置、规则集与 DoH 路由兼容 | group member 缺省 `weight: 1`；sing-box source 四类域名字段投影并忽略其他 rule 字段；`geolocation-!cn` selector canonicalization；尾部 `{client_id}` 裸路径与 canonical route ID 单次匹配 |
 
 ### 当前阶段验证
 
 - `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过；
 - `cargo check --manifest-path backend/Cargo.toml --locked --tests`：通过；
 - `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings`：通过；
-- `cargo test --manifest-path backend/Cargo.toml --locked`：`599 passed、0 failed、1 ignored`；忽略项是手工 release 性能 profile；
+- `cargo test --manifest-path backend/Cargo.toml --locked`：`609 passed、0 failed、1 ignored`；忽略项是手工 release 性能 profile；
 - 阶段 199 既有 `cargo test --manifest-path backend/Cargo.toml --locked --release service::tests::benchmark_udp_resolution_observation_profile -- --ignored --nocapture`：`1 passed、0 failed`；
 - `pnpm run generate:api`、`pnpm run build`：通过；
 - `pnpm run typecheck`：通过；
@@ -177,6 +178,8 @@ MVP v0.1 已完成，要求 strict config、UDP/TCP/plain DoH、hosts/Policy/Cac
 两组均为 resolution ingress `0 dropped`；详情开启组为 `3002 accepted、0 dropped、0 failed`。该 profile 的 P99 低于 2ms，但详情 on/off 合并吞吐差约 12.4%，且未测 CPU、allocation、高并发、目标 QPS 或 60 秒稳态，所以**不能**作为发布 SLO 或 5% 回退门槛已通过的证据。冻结目标部署硬件与负载后的外部高并发压测仍归入 v1 最终验收。
 
 阶段 200 在阶段 199 的异步 observation 边界上补齐双耗时；旧的 projector `elapsed()` 被移除，队列与 SQLite 延迟不再污染服务端耗时。服务器重启/宕机恢复、缓存/请求记录绝对持久化、HTTP/2、目标环境性能和长期压力仍按计划不作为本阶段代码交付阻塞项。详细命令和输出保留在对应提交，模块级证据保留在 `docs/backend/modules/*.md`。
+
+阶段 201 在配置输入、Resource parser、Transport 和 Policy 之间建立共享规范化边界：缺失 group member weight 在 DTO 层归一化；sing-box source 仅投影四类域名字段并明确忽略其他 rule 字段；dat selector 在资源加载时统一编译缓存；DoH 实际路径只由 Transport 匹配一次，Policy 使用模板 route ID。Windows Rust 1.98.0 已完成 fmt、check、Clippy 和全量测试；目标 Linux 的真实配置、网络、证书、监听端口和远程规则下载仍需部署机验收。
 
 ## 5. v1 验收门槛
 

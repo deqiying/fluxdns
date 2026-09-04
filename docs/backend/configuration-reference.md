@@ -332,10 +332,12 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `path` | string | HTTP 路径，可使用 `{client_id}` 占位符。 |
+| `path` | string | HTTP 路径，可使用一次完整路径段形式的 `{client_id}` 占位符。 |
 | `strategy` | string | 路由命中的策略，引用 `strategy[].name`。 |
 
-模板示例使用 `/dns/inner/{client_id}` 和 `/dns/outside/{client_id}`。`/dns-quer/inner*` 与 `/dns-quer/outside*` 是服务保留路径，不能作为自定义路由；它们与示例中的 `/dns/...` 前缀不是同一组路径。
+模板示例使用 `/dns/inner/{client_id}` 和 `/dns/outside/{client_id}`。当 `{client_id}` 位于模板末尾时，单条模板同时匹配裸路径 `/dns/inner` 和带一个非空路径段的 `/dns/inner/<client_id>`；裸路径不产生 client ID，`/dns/inner/` 和额外多段路径不匹配。占位符位于中间时仍必须提供对应的非空路径段。不同 route 不能命中同一个实际 HTTP path，例如 `/dns/inner`、`/dns/inner/client-a` 都会与 `/dns/inner/{client_id}` 产生语义重叠并在配置加载时拒绝。
+
+Transport 只对实际 HTTP path 匹配一次，并把配置模板作为稳定 route ID 传给 Policy；route ID 不包含真实 client ID。`/dns-quer/inner*` 与 `/dns-quer/outside*` 是服务保留路径，不能作为自定义路由；它们与示例中的 `/dns/...` 前缀不是同一组路径。
 
 每条路由固定同时支持 DoH GET 和 POST，不增加方法开关：
 
@@ -432,16 +434,16 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
-| `upstreams` | array[object] | 必填 | 主成员列表，每项为 `{name, weight}`。 |
+| `upstreams` | array[object] | 必填 | 主成员列表；每项的 `name` 必填，`weight` 可选。 |
 | `upstream_mode` | enum | 必填 | `parallel`、`round-robin`、`load-balance` 或 `failover`。 |
 | `timeout` | duration | 必填 | 主组总超时时间。 |
-| `fallbacks` | array[object] | 可选 | 主组在 timeout 内没有终态 DNS 响应时使用的回退成员，每项同样为 `{name, weight}`。 |
+| `fallbacks` | array[object] | 可选 | 主组在 timeout 内没有终态 DNS 响应时使用的回退成员，字段约束与主成员相同。 |
 | `fallback_upstream_mode` | enum | 有 `fallbacks` 时必填 | 回退成员选择模式。 |
 | `fallback_timeout` | duration | 有 `fallbacks` 时必填 | 回退组总超时时间。 |
 | `upstreams[].name` / `fallbacks[].name` | string | 必填 | 成员上游名称。 |
-| `upstreams[].weight` / `fallbacks[].weight` | positive integer | 必填 | 正整数权重。 |
+| `upstreams[].weight` / `fallbacks[].weight` | positive integer | 可选，默认 `1` | 正整数权重；省略后在 DTO 边界归一化为 `1`。 |
 
-组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。精确算法见 [Upstream 模块方案](modules/upstream.md)：`round-robin` 使用 smooth weighted round-robin，`load-balance` 使用按 weight 归一化的 least-in-flight，`failover` 严格按配置顺序且 weight 必须为 1。三种模式都只在 transport failure 时尝试其他成员，任意终态 DNS 响应都会结束当前组；主组完全没有终态响应时才进入 fallback。
+组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。精确算法见 [Upstream 模块方案](modules/upstream.md)：`round-robin` 使用 smooth weighted round-robin，`load-balance` 使用按 weight 归一化的 least-in-flight，`failover` 严格按配置顺序且 weight 只能省略或显式设为 `1`。三种模式都只在 transport failure 时尝试其他成员，任意终态 DNS 响应都会结束当前组；主组完全没有终态响应时才进入 fallback。
 
 `parallel` 的 v1 语义固定如下：
 
@@ -449,7 +451,7 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 2. 若首个终态响应是完整的 `NOERROR/TC=0`，按缓存准入规则写入并取消其余请求；若首个响应是 `NXDOMAIN`、`REFUSED`、`SERVFAIL` 或 `TC=1`，已经发出的其他主组请求继续到各自完成或组 `timeout`，但不改变已经返回给当前客户端的响应，也不触发 fallback。
 3. 对上一条继续运行的后台窗口，收集到全部成员完成或 `timeout` 后再定稿缓存：先从完整的 `NOERROR/TC=0` 响应中按成员配置顺序选择；若没有，再从允许缓存的其他终态响应中按成员配置顺序选择。`REFUSED` 不缓存。这样迟到有效答案仍能写缓存，但缓存结果不由并发完成顺序决定。
 4. 主组只有在 `timeout` 内完全没有终态 DNS 响应时才进入 `fallbacks`；fallback 组使用同样的响应和缓存语义。
-5. `parallel` 不使用权重；该模式下所有成员的 `weight` 必须为 `1`，避免配置暗示不存在的优先级。
+5. `parallel` 不使用权重；该模式下成员应省略 `weight` 或显式设为 `1`，非 `1` 值会被拒绝，避免配置暗示不存在的优先级。
 
 ## 11. `strategy[]`
 
@@ -543,9 +545,16 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 
 `format: clash` 表示 Clash 行格式，不是标准 YAML。监听器绑定前，所有已配置的 `const`、`file` 和 `remote` 资源都必须形成有效的首次内存快照；解析、读取、下载、代理或格式校验失败均拒绝启动。远程资源可先尝试加载 `work.rules_path` 中上一轮已成功校验并原子落盘的快照；没有有效快照且本次下载失败时必须拒绝启动。
 
+`format: json` 接受两种 JSON dialect：
+
+- FluxDNS legacy JSON：顶层只允许 `domain`、`domain_suffix`、`domain_keyword`、`domain_regex`，各字段接受单个 string 或 string array；
+- sing-box source JSON：顶层为 `version` 和 `rules`，当前接受 `version: 1..=5`。每个 `rules[]` 只投影与 legacy JSON 同名的四个域名字段；`type`、`invert`、`network`、`ip_cidr`、端口、客户端条件、嵌套 logical rule 等其他 rule 字段全部忽略，即使忽略会改变原 sing-box 匹配语义。没有上述四个字段的单条 rule 被跳过，整份文档最终没有产生任何域名 matcher 时拒绝该资源。
+
+该行为是面向域名集合文件的部分兼容，不是完整 sing-box source 语义兼容；使用者必须确保输入文件本身适合按四类域名字段做并集投影。sing-box 二进制 `.srs` 不支持。legacy JSON 和 sing-box 顶层结构不能混合，未知顶层字段继续拒绝。规则 parser/compiler 版本已提升为 `rule-index-v2`，旧 parser version 的远程 manifest 不作为可恢复 snapshot，启动时需要重新获取并校验资源。
+
 进程启动后的刷新只有在下载/读取、完整解析和内容校验都成功后才能原子替换当前快照；失败时保留上一份有效快照并记录带字段路径的错误。`auto_update` 只控制启动后的刷新，不降低首次快照要求；重试采用指数退避并封顶 5 分钟，连续三次计划刷新失败或超过 `3 × update_interval` 未成功时标记资源 `stale`，但仍可使用上一份有效快照。没有旧快照的资源引用必须 fail-closed。模板暂未提供远程版本锁定或 expected checksum 字段，当前仅记录内部 content hash/source fingerprint，生产部署的固定版本策略需后续定稿。
 
-`geosite:cn` 这类写法表示引用 V2Ray `GeoSiteList` protobuf `dat` 地理规则集中的命名子集。解析时先尝试完整资源名；完整名不存在时再按第一个 `:` 拆分。资源名大小写敏感，selector 必须是非空 ASCII 标识并归一化为小写；格式不支持 selector 或 selector 不存在时在 prepare 阶段失败。`dat` 内容按二进制 protobuf 读取，不先转换为 UTF-8。
+`geosite:cn` 这类写法表示引用 V2Ray `GeoSiteList` protobuf `dat` 地理规则集中的命名子集。解析时先尝试完整资源名；完整名不存在时再按第一个 `:` 拆分。资源名大小写敏感；selector 必须非空、不超过 128 bytes，且只包含不含空白的可打印 ASCII，保留拒绝 `:` 分隔符和 `@` attribute 语法，并归一化为小写。因此 `geosite:geolocation-!cn` 可直接引用。格式不支持 selector 或 selector 不存在时在 prepare 阶段失败。`dat` 加载或刷新时一次性解析、校验并编译所有 selector，查询热路径只查当前 rule 引用的 canonical selector 和既有 matcher，不会重新解析 dat 或逐个校验全部 selector。`dat` 内容按二进制 protobuf 读取，不先转换为 UTF-8。
 
 ## 15. `clients[]`
 
@@ -575,12 +584,12 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 3. 所有资源集合中的 `name` 唯一，所有引用存在、类型正确且无循环引用。
 4. `work.path` 非空；相对值可基于启动配置文件目录解析为绝对的 `resolved_work_path`，缺少来源目录时拒绝；目录不存在时创建，启动配置不在该目录时复制为 `<resolved_work_path>/config.yaml`。
 5. `webui.enable` 为 `true` 时创建独立 Management Server，`false` 时不创建管理 listener；普通 listener、DoH endpoint 和 Management endpoint 地址展开后不存在 TCP/UDP bind 冲突，并明确 IPv6 v6-only 行为。
-6. `mode`、`format`、`type`、端口、CIDR、URL、duration、权重和内嵌内容格式合法；`parallel` 和 `failover` 成员权重固定为 `1`。
+6. `mode`、`format`、`type`、端口、CIDR、URL、duration、权重和内嵌内容格式合法；group 成员缺省权重为 `1`，`parallel` 和 `failover` 的显式权重只能为 `1`。
 7. `ttl_override` 与 `cache` 平级；策略/客户端 cache 对象存在时 `enabled` 必填，显式 `false` 不得回退到全局池。
 8. ECS 块未配置时继承，显式 `mode: disabled` 才停止继续传递。
 9. `webui.users[].password_hash` 必须是受支持算法生成的单向 hash，禁止明文 `password` 字段。
 10. `dns.cache.memory.max_size_bytes` 和 `persistence.max_size_bytes` 为正数，`failure_ttl` 在 `1s..=5m`。
-11. DoH endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段；GET/POST wire、Content-Type 和固定消息上限合法。
+11. DoH route 的 path 模板合法且彼此不存在语义重叠；endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段；GET/POST wire、Content-Type 和固定消息上限合法。
 12. `forwarded_header`/`proxy_protocol` 必须配置 `trusted_proxies`，且可信范围只覆盖反代对端；PROXY v1/v2 前导头缺失、未知或非法时拒绝。
 13. DoH 上游的 `bootstrap` 与 `connect_ip` 互斥；SecretRef 解析后的代理 scheme 合法，`socks5h://` 不得同时使用 `bootstrap`。
 14. `database.type`/`database.path` 始终存在且为受支持的 SQLite 配置；prepare 阶段数据库打开、migration 或基本写入检查失败必须阻止启动。

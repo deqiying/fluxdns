@@ -8,7 +8,9 @@ use serde::Deserialize;
 use thiserror::Error;
 
 use super::hosts::CanonicalDomain;
-use crate::config::model::RuleSetFormat;
+use crate::config::model::{
+    MAX_RULE_SET_SELECTOR_BYTES, RuleSetFormat, normalize_rule_set_selector,
+};
 
 const DEFAULT_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_RULES: usize = 131_072;
@@ -16,7 +18,6 @@ const DEFAULT_MAX_RULE_BYTES: usize = 4 * 1024;
 const DEFAULT_MAX_REGEX_BYTES: usize = 2 * 1024;
 const DEFAULT_MAX_REGEX_PROGRAM: usize = 4_096;
 const DEFAULT_MAX_SELECTORS: usize = 4_096;
-const DEFAULT_MAX_SELECTOR_BYTES: usize = 128;
 const WIRE_VARINT: u8 = 0;
 const WIRE_I64: u8 = 1;
 const WIRE_LEN_DELIM: u8 = 2;
@@ -42,7 +43,7 @@ impl Default for RuleLimits {
             max_regex_bytes: DEFAULT_MAX_REGEX_BYTES,
             max_regex_program: DEFAULT_MAX_REGEX_PROGRAM,
             max_selectors: DEFAULT_MAX_SELECTORS,
-            max_selector_bytes: DEFAULT_MAX_SELECTOR_BYTES,
+            max_selector_bytes: MAX_RULE_SET_SELECTOR_BYTES,
         }
     }
 }
@@ -61,6 +62,8 @@ pub enum RuleParseError {
     InvalidJson,
     #[error("rule JSON does not contain a supported rule field")]
     MissingRuleField,
+    #[error("sing-box rule-set version is unsupported")]
+    UnsupportedSingBoxVersion,
     #[error("rule line {line} is empty")]
     EmptyRule { line: usize },
     #[error("rule line {line} has an invalid field count")]
@@ -69,6 +72,8 @@ pub enum RuleParseError {
     UnknownRuleType { line: usize },
     #[error("rule line {line} contains an invalid domain")]
     InvalidDomain { line: usize },
+    #[error("rule resource contains an invalid domain keyword")]
+    InvalidKeyword,
     #[error("rule line {line} contains an invalid regex")]
     InvalidRegex { line: usize },
     #[error("rule line {line} contains an unsupported regex construct")]
@@ -222,29 +227,26 @@ impl RuleIndex {
             return Err(RuleParseError::InputTooLarge);
         }
         let document: JsonRuleDocument =
-            yaml_serde::from_str(input).map_err(|_| RuleParseError::InvalidJson)?;
+            serde_json::from_str(input).map_err(|_| RuleParseError::InvalidJson)?;
         let mut index = Self::empty();
-        let mut found = false;
-        if let Some(values) = document.domain {
-            found = true;
-            for value in values.into_values() {
-                index.add_domain(RuleKind::Exact, &value, 0, limits)?;
+        match document {
+            JsonRuleDocument::Legacy(fields) => {
+                if !fields.has_supported_field() {
+                    return Err(RuleParseError::MissingRuleField);
+                }
+                index.add_json_fields(fields, limits)?;
             }
-        }
-        if let Some(values) = document.domain_suffix {
-            found = true;
-            for value in values.into_values() {
-                index.add_domain(RuleKind::Suffix, &value, 0, limits)?;
+            JsonRuleDocument::SingBox(document) => {
+                if !(1..=5).contains(&document.version) {
+                    return Err(RuleParseError::UnsupportedSingBoxVersion);
+                }
+                for fields in document.rules {
+                    index.add_json_fields(fields.into(), limits)?;
+                }
+                if index.rule_count == 0 {
+                    return Err(RuleParseError::MissingRuleField);
+                }
             }
-        }
-        if let Some(values) = document.domain_regex {
-            found = true;
-            for value in values.into_values() {
-                index.add_regex(&value, 0, limits)?;
-            }
-        }
-        if !found {
-            return Err(RuleParseError::MissingRuleField);
         }
         Ok(index)
     }
@@ -410,11 +412,39 @@ impl RuleIndex {
 
     fn add_keyword(&mut self, value: &str, limits: RuleLimits) -> Result<(), RuleParseError> {
         if value.len() > limits.max_rule_bytes || value.is_empty() {
-            return Err(RuleParseError::InvalidDat);
+            return Err(RuleParseError::InvalidKeyword);
         }
         let value = value.to_ascii_lowercase();
         if self.keywords.insert(value) {
             self.bump_rule_count(limits)?;
+        }
+        Ok(())
+    }
+
+    fn add_json_fields(
+        &mut self,
+        fields: JsonRuleFields,
+        limits: RuleLimits,
+    ) -> Result<(), RuleParseError> {
+        if let Some(values) = fields.domain {
+            for value in values.into_values() {
+                self.add_domain(RuleKind::Exact, &value, 0, limits)?;
+            }
+        }
+        if let Some(values) = fields.domain_suffix {
+            for value in values.into_values() {
+                self.add_domain(RuleKind::Suffix, &value, 0, limits)?;
+            }
+        }
+        if let Some(values) = fields.domain_keyword {
+            for value in values.into_values() {
+                self.add_keyword(&value, limits)?;
+            }
+        }
+        if let Some(values) = fields.domain_regex {
+            for value in values.into_values() {
+                self.add_regex(&value, 0, limits)?;
+            }
         }
         Ok(())
     }
@@ -451,14 +481,62 @@ impl JsonValues {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(untagged)]
+enum JsonRuleDocument {
+    Legacy(JsonRuleFields),
+    SingBox(SingBoxRuleDocument),
+}
+
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct JsonRuleDocument {
+struct JsonRuleFields {
     #[serde(default)]
     domain: Option<JsonValues>,
     #[serde(default)]
     domain_suffix: Option<JsonValues>,
     #[serde(default)]
+    domain_keyword: Option<JsonValues>,
+    #[serde(default)]
     domain_regex: Option<JsonValues>,
+}
+
+impl JsonRuleFields {
+    fn has_supported_field(&self) -> bool {
+        self.domain.is_some()
+            || self.domain_suffix.is_some()
+            || self.domain_keyword.is_some()
+            || self.domain_regex.is_some()
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SingBoxRuleDocument {
+    version: u8,
+    rules: Vec<SingBoxRuleFields>,
+}
+
+#[derive(Clone, Deserialize)]
+struct SingBoxRuleFields {
+    #[serde(default)]
+    domain: Option<JsonValues>,
+    #[serde(default)]
+    domain_suffix: Option<JsonValues>,
+    #[serde(default)]
+    domain_keyword: Option<JsonValues>,
+    #[serde(default)]
+    domain_regex: Option<JsonValues>,
+}
+
+impl From<SingBoxRuleFields> for JsonRuleFields {
+    fn from(fields: SingBoxRuleFields) -> Self {
+        Self {
+            domain: fields.domain,
+            domain_suffix: fields.domain_suffix,
+            domain_keyword: fields.domain_keyword,
+            domain_regex: fields.domain_regex,
+        }
+    }
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -885,15 +963,8 @@ fn normalize_dat_selector(selector: &str, limits: RuleLimits) -> Result<String, 
     if selector.len() > limits.max_selector_bytes {
         return Err(RuleParseError::DatSelectorTooLong);
     }
-    let selector = selector.to_ascii_lowercase();
-    if !selector.is_ascii()
-        || !selector.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
-    {
-        return Err(RuleParseError::InvalidDatSelector);
-    }
-    Ok(selector)
+    normalize_rule_set_selector(selector, limits.max_selector_bytes)
+        .ok_or(RuleParseError::InvalidDatSelector)
 }
 
 #[cfg(test)]
@@ -907,11 +978,11 @@ mod tests {
     #[test]
     fn parses_json_and_applies_exact_suffix_regex_priority() {
         let index = RuleIndex::parse_json(
-            r#"{"domain":"WWW.Example.COM.","domain_suffix":["example.com"],"domain_regex":"^api\\.test\\.com$"}"#,
+            r#"{"domain":"WWW.Example.COM.","domain_suffix":["example.com"],"domain_keyword":"keyword","domain_regex":"^api\\.test\\.com$"}"#,
         )
         .expect("valid JSON rules");
 
-        assert_eq!(index.rule_count(), 3);
+        assert_eq!(index.rule_count(), 4);
         assert_eq!(
             index.matches(&domain("www.example.com")),
             Some(RuleMatch::Exact)
@@ -924,6 +995,72 @@ mod tests {
             index.matches(&domain("api.test.com")),
             Some(RuleMatch::Regex { ordinal: 0 })
         );
+        assert_eq!(
+            index.matches(&domain("has-keyword.test")),
+            Some(RuleMatch::Keyword { ordinal: 0 })
+        );
+        assert_eq!(
+            RuleIndex::parse_json(r#"{"domain":[]}"#)
+                .expect("legacy empty rule lists remain valid")
+                .rule_count(),
+            0
+        );
+    }
+
+    #[test]
+    fn parses_sing_box_source_domain_projection_and_ignores_other_rule_fields() {
+        let index = RuleIndex::parse_json(
+            r#"{
+                "version": 2,
+                "rules": [
+                    {
+                        "domain": "exact.example",
+                        "domain_suffix": ["suffix.example"],
+                        "network": "tcp",
+                        "invert": true
+                    },
+                    {
+                        "domain_keyword": "keyword",
+                        "domain_regex": "^api[0-9]+\\.example$",
+                        "query_type": ["A"]
+                    },
+                    {
+                        "ip_cidr": ["192.0.2.0/24"]
+                    }
+                ]
+            }"#,
+        )
+        .expect("supported sing-box domain fields should be projected");
+
+        assert_eq!(index.rule_count(), 4);
+        assert_eq!(
+            index.matches(&domain("exact.example")),
+            Some(RuleMatch::Exact)
+        );
+        assert_eq!(
+            index.matches(&domain("www.suffix.example")),
+            Some(RuleMatch::Suffix { label_count: 2 })
+        );
+        assert_eq!(
+            index.matches(&domain("has-keyword.example")),
+            Some(RuleMatch::Keyword { ordinal: 0 })
+        );
+        assert_eq!(
+            index.matches(&domain("api12.example")),
+            Some(RuleMatch::Regex { ordinal: 0 })
+        );
+    }
+
+    #[test]
+    fn sing_box_source_requires_known_version_and_at_least_one_domain_rule() {
+        assert!(matches!(
+            RuleIndex::parse_json(r#"{"version":6,"rules":[{"domain":"example.test"}]}"#),
+            Err(RuleParseError::UnsupportedSingBoxVersion)
+        ));
+        assert!(matches!(
+            RuleIndex::parse_json(r#"{"version":2,"rules":[{"ip_cidr":"192.0.2.0/24"}]}"#),
+            Err(RuleParseError::MissingRuleField)
+        ));
     }
 
     #[test]
@@ -1049,7 +1186,7 @@ mod tests {
                 (3, "exact.example"),
             ],
         );
-        input.extend(dat_site("private", &[(3, "internal.example")]));
+        input.extend(dat_site("GEOLOCATION-!CN", &[(3, "external.example")]));
 
         let index = RuleIndex::parse_dat(&input).expect("valid geosite.dat payload");
         assert_eq!(index.selector_count(), 2);
@@ -1070,9 +1207,9 @@ mod tests {
         assert_eq!(cn.matches(&domain("exact.example")), Some(RuleMatch::Exact));
         assert_eq!(
             index
-                .selector("private")
+                .selector("geolocation-!cn")
                 .unwrap()
-                .matches(&domain("internal.example")),
+                .matches(&domain("external.example")),
             Some(RuleMatch::Exact)
         );
         assert!(!format!("{index:?}").contains("suffix.example"));

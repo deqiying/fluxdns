@@ -6,7 +6,7 @@
 >
 > 适用范围：upstream connector、bootstrap、outbound、group、并发选择和故障回退
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联实现：`backend/src/upstream/*`
 >
@@ -137,6 +137,8 @@ group deadline 为请求剩余 deadline 与 `timeout` 的较小值。任何合�
 
 fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。进入 fallback 后不再回到主组。
 
+主成员和 fallback 成员的 `weight` 都可省略，并在配置输入边界归一化为 `1`。`round-robin` 与 `load-balance` 消费权重；`parallel` 与 `failover` 不消费权重，显式非 `1` 值在配置校验阶段拒绝。
+
 一次 attempt 结果：
 
 - terminal response：立即按模式规则结束或进入 parallel late window；
@@ -147,7 +149,7 @@ fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。�
 
 ### parallel
 
-- 同时发起全部成员，weight 必须为 1；
+- 同时发起全部成员，weight 省略或为 1；
 - 第一个 terminal response 立即返回；
 - 首响应为完整 NOERROR/TC=0 时取消其他成员；
 - 首响应为 NXDOMAIN/REFUSED/SERVFAIL/TC 时，其余已发请求继续到完成或 timeout，只用于确定 cache candidate；
@@ -173,7 +175,7 @@ fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。�
 ### failover
 
 - 严格按配置顺序串行尝试；
-- weight 在该模式必须为 1，避免暗示不存在的流量权重；
+- weight 省略或为 1，避免暗示不存在的流量权重；
 - transport failure 才尝试下一成员；
 - 任意 terminal response 都停止，不因 SERVFAIL/NXDOMAIN 继续切换；
 - 全部成员失败后进入 fallback。

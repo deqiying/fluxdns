@@ -14,7 +14,8 @@ use super::migrate::deterministic_hash;
 use super::model::{
     CacheOverrideDto, ClientDto, ClientIpDto, ClientIpSource, ConfigDto, DatabaseType, EcsDto,
     EcsMode, ForwardedDisposition, ForwardedHeader, GlobalCacheDto, HostsResourceDto, ListenerDto,
-    LogLevelDto, OptimisticDto, OutboundDto, RuleSetDto, StrategyDto, TlsMode, UpstreamDto,
+    LogLevelDto, MAX_RULE_SET_SELECTOR_BYTES, OptimisticDto, OutboundDto, RuleSetDto, StrategyDto,
+    TlsMode, UpstreamDto, normalize_rule_set_selector,
 };
 use super::validate::{
     BindPlan, ConfigError, ConfigErrorKind, ConfigErrorReport, DohBindingRef, build_bind_plan,
@@ -1127,11 +1128,18 @@ fn resolve_strategy(
 }
 
 fn resolve_rule_set_ref(value: &str) -> ResolvedRuleSetRef {
-    let (resource, selector) = value
-        .split_once(':')
-        .map_or((value, None), |(resource, selector)| {
-            (resource, Some(selector.to_owned()))
-        });
+    let (resource, selector) =
+        value
+            .split_once(':')
+            .map_or((value, None), |(resource, selector)| {
+                (
+                    resource,
+                    Some(
+                        normalize_rule_set_selector(selector, MAX_RULE_SET_SELECTOR_BYTES)
+                            .expect("validated rule_set selector"),
+                    ),
+                )
+            });
     ResolvedRuleSetRef {
         resource: ConfigId::new(resource.to_owned()).expect("validated rule_set reference"),
         selector,

@@ -15,7 +15,7 @@ use super::{HostsIndex, HostsLimits, HostsParseError, RuleIndex, RuleLimits, Rul
 
 const MAX_STABLE_READ_ATTEMPTS: usize = 2;
 const HOSTS_PARSER_VERSION: &str = "hosts-index-v1";
-const RULE_PARSER_VERSION: &str = "rule-index-v1";
+const RULE_PARSER_VERSION: &str = "rule-index-v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FileFingerprint {
@@ -502,12 +502,13 @@ mod tests {
         let inline = ResolvedRuleSet::Const {
             id: id("inline-rules"),
             format: RuleSetFormat::Json,
-            rule: r#"{"domain":"example.test"}"#.to_owned(),
+            rule: r#"{"version":2,"rules":[{"domain":"example.test","invert":true}]}"#.to_owned(),
         };
         let loaded = load_rule_set(&inline, super::RuleLimits::default()).unwrap();
         assert_eq!(loaded.id().as_str(), "inline-rules");
         assert_eq!(loaded.source(), &ResourceSource::Const);
         assert_eq!(loaded.index().rule_count(), 1);
+        assert_eq!(loaded.parser_version(), "rule-index-v2");
         assert!(!format!("{:?}", loaded.index()).contains("example.test"));
 
         let path = std::env::temp_dir().join(format!(

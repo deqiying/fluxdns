@@ -6,7 +6,7 @@
 >
 > 适用范围：配置加载、迁移、归一化、校验、引用图和安全快照
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联实现：`backend/src/config/*`
 >
@@ -14,7 +14,7 @@
 
 ## 当前实现边界
 
-v1 方案和阶段 2 实现已完成；既有基线已验证，相对 `work.path` 增量待 Rust 1.98 环境复验。
+v1 配置主链已实现；当前覆盖 strict DTO、相对路径、group member 缺省权重、dat selector canonicalization、DoH route 共享模板校验和安全配置快照。
 
 ## 1. 职责
 
@@ -35,6 +35,7 @@ Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 pre
 
 | 文件 | 职责 |
 | --- | --- |
+| `doh_route.rs` | DoH path 模板的共享编译、匹配和语义重叠检测 |
 | `model.rs` | 当前 schema DTO、按 `type` 区分的 tagged model |
 | `load.rs` | 文件读取、大小/编码检查、字段路径解析、版本迁移和安全配置快照 |
 | `migrate.rs` | `MigrationStep` 注册表和 `MigrationReport` |
@@ -90,6 +91,8 @@ MigrationStep {
 - 先以启动配置文件所在目录解析相对 `work.path`，得到绝对的 `resolved_work_path`；
 - 再以 `resolved_work_path` 为唯一基准，将其他相对项目路径规范化为绝对路径；
 - duration、URL、CIDR 和枚举转换为强类型；
+- group member 缺失的 `weight` 在 DTO 输入边界归一化为 `1`；
+- `resource:selector` 引用中的 selector 使用与 Resource dat parser 相同的规则规范化为 lowercase canonical key；
 - cache、TTL、ECS 的缺失/显式禁用/字段继承；
 - client、strategy、route、resource 和 upstream 名称转换为 typed ID；
 - SecretRef source 归一化为 env/file 引用；实际值不会在普通 YAML load 中读取，只能由后续 adapter 通过 `ResolvedSecretRef::resolve` 或 `resolve_proxy_url` 等显式 accessor 请求，并包装为不可 Debug、不可 Serialize 的 secret 类型；
@@ -109,7 +112,8 @@ MigrationStep {
 6. listener/endpoint 展开和 IPv4/IPv6 bind 冲突；
 7. WebUI `public_origin`、用户 hash 与 Management/DNS TCP bind 冲突；
 8. SecretRef scheme 与敏感值安全检查；
-9. 生成 `BindPlanInput`、`ResourcePlan`、`StoragePlan` 等 prepare 输入。
+9. DoH path 模板语法与可能命中同一实际 path 的 route 重叠；
+10. 生成 `BindPlanInput`、`ResourcePlan`、`StoragePlan` 等 prepare 输入。
 
 同一轮可以报告多个互不依赖的配置错误；依赖前置解析成功的 pass 在前置失败后跳过，并记录“未执行”而不是产生级联噪声。
 
@@ -181,6 +185,9 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - 所有 exactly-one-of 和 required-if；
 - 名称重复、缺失引用、类型错误和最短环；
 - cache/TTL/ECS 全继承矩阵；
+- group member 缺省 `weight: 1` 及各 mode 的显式权重约束；
+- 包含 `!` 等可打印 ASCII 的 dat selector canonicalization；
+- DoH 尾部 `{client_id}` 裸路径和 route 语义重叠拒绝；
 - IPv4/IPv6 bind 冲突；
 - SecretRef env/file、缺失、空值、非法 scheme 和脱敏；
 - migration golden test、空链幂等和有损 warning 边界；

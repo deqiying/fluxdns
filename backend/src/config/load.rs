@@ -774,6 +774,27 @@ mod tests {
         assert_eq!(output.resolved.version, 1);
         assert_eq!(output.resolved.listeners.len(), 3);
         assert_eq!(output.resolved.upstreams.len(), 7);
+        let defaulted_members = output
+            .resolved
+            .upstreams
+            .iter()
+            .find_map(|upstream| match upstream {
+                super::super::resolve::ResolvedUpstream::Group {
+                    id,
+                    upstreams,
+                    fallbacks,
+                    ..
+                } if id.as_str() == "inner-group" => Some((upstreams, fallbacks)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            defaulted_members
+                .0
+                .iter()
+                .chain(defaulted_members.1)
+                .all(|member| member.weight == 1)
+        );
         assert!(!output.resolved.normalized_hash.is_empty());
         assert_eq!(output.resolved.work.rules_path, work.join("rules"));
         let inner = output
@@ -802,6 +823,47 @@ mod tests {
         assert_eq!(doh[1].client_ip.trusted_proxies.as_ref().unwrap().len(), 2);
         assert_eq!(doh[0].binding.listener_id, "doh");
         assert_eq!(doh[0].binding.endpoint_id, doh[0].id.as_str());
+    }
+
+    #[test]
+    fn dat_selector_accepts_special_ascii_and_is_canonicalized() {
+        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let (source, _) = crate::config::test_support::portable_example();
+        let source = source.replace("geosite:cn", "geosite:GEOLOCATION-!CN");
+        let output = loader.load_str(&source).unwrap();
+        let inner = output
+            .resolved
+            .strategies
+            .iter()
+            .find(|strategy| strategy.id.as_str() == "inner")
+            .unwrap();
+
+        assert_eq!(
+            inner.rules[0]
+                .rule_set
+                .as_ref()
+                .unwrap()
+                .selector
+                .as_deref(),
+            Some("geolocation-!cn")
+        );
+    }
+
+    #[test]
+    fn overlapping_doh_routes_are_rejected() {
+        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let (source, _) = crate::config::test_support::portable_example();
+        let source = source.replace("path: /dns/outside/{client_id}", "path: /dns/inner");
+        let error = loader.load_str(&source).unwrap_err();
+
+        let super::ConfigLoadError::Validation(report) = error else {
+            panic!("expected route overlap validation error");
+        };
+        assert!(report.errors.iter().any(|error| {
+            error.kind == crate::config::ConfigErrorKind::Constraint
+                && error.path == "listener[2].routes[1].path"
+                && error.message.contains("overlaps")
+        }));
     }
 
     #[test]

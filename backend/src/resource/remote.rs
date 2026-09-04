@@ -28,7 +28,7 @@ use crate::ports::effects::{
 use super::{ResourceSnapshot, ResourceSourceKind, ResourceStaleStatus, RuleIndex, RuleLimits};
 
 const MANIFEST_VERSION: u32 = 1;
-const PARSER_VERSION: &str = "rule-index-v1";
+const PARSER_VERSION: &str = "rule-index-v2";
 const MAX_MANIFEST_BYTES: usize = 64 * 1024;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -617,13 +617,16 @@ mod tests {
             TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         ));
         let calls = Arc::new(AtomicUsize::new(0));
+        let body: Arc<[u8]> = Arc::from(
+            &b"{\"version\":2,\"rules\":[{\"domain_suffix\":\"example.test\",\"invert\":true}]}"[..],
+        );
         let fetcher = FakeFetcher {
-            body: Arc::from(&b"DOMAIN-SUFFIX,example.test\n"[..]),
+            body: Arc::clone(&body),
             calls: Arc::clone(&calls),
         };
         let loaded = fetch_remote_rule_set(
             &fetcher,
-            &remote(RuleSetFormat::Clash, "https://rules.example.test/private"),
+            &remote(RuleSetFormat::Json, "https://rules.example.test/private"),
             options(&root),
         )
         .await
@@ -631,10 +634,12 @@ mod tests {
 
         assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(loaded.index().suffix_count(), 1);
-        assert_eq!(loaded.manifest().byte_len(), 27);
-        assert_eq!(fs::read(root.join("rules.txt")).unwrap().len(), 27);
+        assert_eq!(loaded.manifest().byte_len(), body.len());
+        assert_eq!(fs::read(root.join("rules.txt")).unwrap().len(), body.len());
+        assert_eq!(loaded.manifest().parser_version(), "rule-index-v2");
         let manifest = fs::read_to_string(root.join("rules.manifest")).unwrap();
         assert!(manifest.contains("manifest_version: 1"));
+        assert!(manifest.contains("parser_version: rule-index-v2"));
         assert!(manifest.contains("content_hash:"));
         assert!(!manifest.contains("rules.example.test"));
         assert!(!format!("{loaded:?}").contains("example.test"));

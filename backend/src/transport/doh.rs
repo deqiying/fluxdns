@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 
 use ipnet::IpNet;
 
+use crate::config::doh_route::{DohPathPattern, DohPathPatternError};
 use crate::config::model::{ClientIpSource, ForwardedDisposition, ForwardedHeader, TlsMode};
 use crate::config::resolve::ResolvedListener;
 use crate::config::{BindProtocol, BindTransport, DohBindingRef, ResolvedConfig};
@@ -183,9 +184,8 @@ enum ProxyHeaderParse {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DohRoutePattern {
-    template: String,
+    path: DohPathPattern,
     strategy: String,
-    placeholder: Option<(usize, usize)>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -229,44 +229,19 @@ impl DohRoutePattern {
     ) -> Result<Self, DohRouteError> {
         let template = template.into();
         let strategy = strategy.into();
-        if template.is_empty()
-            || !template.starts_with('/')
-            || template.contains('?')
-            || template.contains('#')
-            || template
-                .as_bytes()
-                .iter()
-                .any(|byte| *byte < 0x20 || *byte == 0x7f)
-        {
-            return Err(DohRouteError::InvalidPath);
-        }
+        let path = DohPathPattern::new(template).map_err(|error| match error {
+            DohPathPatternError::InvalidPath => DohRouteError::InvalidPath,
+            DohPathPatternError::InvalidPlaceholder => DohRouteError::InvalidPlaceholder,
+        })?;
         if strategy.trim().is_empty() {
             return Err(DohRouteError::EmptyStrategy);
         }
 
-        let marker = "{client_id}";
-        let first = template.find(marker);
-        if first.is_some_and(|index| template[index + marker.len()..].contains(marker)) {
-            return Err(DohRouteError::InvalidPlaceholder);
-        }
-        let placeholder = first.map(|start| (start, start + marker.len()));
-        if let Some((start, end)) = placeholder {
-            let is_segment_start = start == 0 || template.as_bytes()[start - 1] == b'/';
-            let is_segment_end = end == template.len() || template.as_bytes()[end] == b'/';
-            if !is_segment_start || !is_segment_end {
-                return Err(DohRouteError::InvalidPlaceholder);
-            }
-        }
-
-        Ok(Self {
-            template,
-            strategy,
-            placeholder,
-        })
+        Ok(Self { path, strategy })
     }
 
     pub fn template(&self) -> &str {
-        &self.template
+        self.path.template()
     }
 
     pub fn strategy(&self) -> &str {
@@ -274,27 +249,13 @@ impl DohRoutePattern {
     }
 
     pub fn matches(&self, path: &str) -> Option<DohRouteMatch> {
-        let client_id = match self.placeholder {
-            None if path == self.template => None,
-            Some((start, end)) => {
-                if !path.starts_with(&self.template[..start])
-                    || !path.ends_with(&self.template[end..])
-                {
-                    return None;
-                }
-                let value_end = path.len().checked_sub(self.template.len() - end)?;
-                let value = &path[start..value_end];
-                if value.is_empty() || value.contains('/') || value.contains('?') {
-                    return None;
-                }
-                Some(ClientId::new(value.to_owned()))
-            }
-            _ => return None,
-        };
+        let matched = self.path.matches(path)?;
         Some(DohRouteMatch {
-            template: self.template.clone(),
+            template: self.path.template().to_owned(),
             strategy: self.strategy.clone(),
-            client_id,
+            client_id: matched
+                .client_id
+                .map(|value| ClientId::new(value.to_owned())),
         })
     }
 }
@@ -2397,6 +2358,8 @@ mod tests {
         let matched = templated.matches("/dns/abc-123").unwrap();
         assert_eq!(matched.strategy, "inner");
         assert_eq!(matched.client_id.unwrap().as_str(), "abc-123");
+        assert_eq!(templated.matches("/dns").unwrap().client_id, None);
+        assert!(templated.matches("/dns/").is_none());
         assert!(templated.matches("/dns/a/b").is_none());
     }
 
@@ -2499,7 +2462,7 @@ mod tests {
         let wire = wire();
         let request = request(
             "POST",
-            "/dns/client",
+            "/dns",
             &format!(
                 "Content-Type: application/dns-message\r\nContent-Length: {}\r\n",
                 wire.len()
@@ -2545,16 +2508,17 @@ mod tests {
             inbound.request().context.meta.connection_id,
             Some(ConnectionId(1))
         );
+        assert!(inbound.request().context.client.client_id.is_none());
         assert_eq!(
             inbound
                 .request()
                 .context
-                .client
-                .client_id
+                .meta
+                .route_id
                 .as_ref()
                 .unwrap()
-                .as_str(),
-            "client"
+                .as_ref(),
+            "/dns/{client_id}"
         );
         assert_eq!(
             dispatch_inbound(&ServFailCore, inbound).await.unwrap(),

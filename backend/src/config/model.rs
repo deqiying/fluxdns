@@ -592,7 +592,25 @@ impl UpstreamDto {
 #[serde(deny_unknown_fields)]
 pub struct UpstreamMemberDto {
     pub name: String,
+    #[serde(default = "default_upstream_member_weight")]
     pub weight: u32,
+}
+
+const fn default_upstream_member_weight() -> u32 {
+    1
+}
+
+pub(crate) const MAX_RULE_SET_SELECTOR_BYTES: usize = 128;
+
+/// 将 dat selector 规范化为配置引用和资源索引共用的 canonical key。
+pub(crate) fn normalize_rule_set_selector(value: &str, max_bytes: usize) -> Option<String> {
+    if value.is_empty() || value.len() > max_bytes || !value.is_ascii() {
+        return None;
+    }
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_graphic() && !matches!(byte, b':' | b'@'))
+        .then(|| value.to_ascii_lowercase())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]

@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::config::doh_route::{DohPathPattern, DohPathPatternError};
 use crate::config::resolve::{ConfigId, ResolvedConfig, ResolvedListener, ResolvedStrategy};
 use crate::dns::{ClientId, RouteId};
 
@@ -17,14 +18,17 @@ pub enum RouteBuildError {
         listener: ConfigId,
         strategy: ConfigId,
     },
+    DuplicateRoute {
+        listener: ConfigId,
+        route: RouteId,
+    },
     InvalidPath,
     InvalidPlaceholder,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RoutePattern {
-    template: String,
-    placeholder: Option<(usize, usize)>,
+    path: DohPathPattern,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -64,68 +68,30 @@ enum ListenerRoutes {
         hosts: Option<ConfigId>,
     },
     Doh {
-        routes: Vec<(RoutePattern, ConfigId)>,
+        routes: BTreeMap<RouteId, ConfigId>,
     },
 }
 
 impl RoutePattern {
     pub fn new(template: impl Into<String>) -> Result<Self, RouteBuildError> {
-        let template = template.into();
-        if template.is_empty()
-            || !template.starts_with('/')
-            || template.contains('?')
-            || template.contains('#')
-            || template
-                .as_bytes()
-                .iter()
-                .any(|byte| *byte < 0x20 || *byte == 0x7f)
-        {
-            return Err(RouteBuildError::InvalidPath);
-        }
-        let marker = "{client_id}";
-        let first = template.find(marker);
-        if first.is_some_and(|index| template[index + marker.len()..].contains(marker)) {
-            return Err(RouteBuildError::InvalidPlaceholder);
-        }
-        let placeholder = first.map(|start| (start, start + marker.len()));
-        if let Some((start, end)) = placeholder {
-            let segment_start = start == 0 || template.as_bytes()[start - 1] == b'/';
-            let segment_end = end == template.len() || template.as_bytes()[end] == b'/';
-            if !segment_start || !segment_end {
-                return Err(RouteBuildError::InvalidPlaceholder);
-            }
-        }
-        Ok(Self {
-            template,
-            placeholder,
-        })
+        let path = DohPathPattern::new(template).map_err(|error| match error {
+            DohPathPatternError::InvalidPath => RouteBuildError::InvalidPath,
+            DohPathPatternError::InvalidPlaceholder => RouteBuildError::InvalidPlaceholder,
+        })?;
+        Ok(Self { path })
     }
 
     pub fn template(&self) -> &str {
-        &self.template
+        self.path.template()
     }
 
     pub fn matches(&self, path: &str) -> Option<RouteMatch> {
-        let client_id = match self.placeholder {
-            None if path == self.template => None,
-            Some((start, end)) => {
-                if !path.starts_with(&self.template[..start])
-                    || !path.ends_with(&self.template[end..])
-                {
-                    return None;
-                }
-                let value_end = path.len().checked_sub(self.template.len() - end)?;
-                let value = &path[start..value_end];
-                if value.is_empty() || value.contains('/') || value.contains('?') {
-                    return None;
-                }
-                Some(ClientId::new(value.to_owned()))
-            }
-            _ => return None,
-        };
+        let matched = self.path.matches(path)?;
         Some(RouteMatch {
-            route_id: RouteId::from(self.template.clone()),
-            client_id,
+            route_id: RouteId::from(self.path.template().to_owned()),
+            client_id: matched
+                .client_id
+                .map(|value| ClientId::new(value.to_owned())),
         })
     }
 }
@@ -158,11 +124,17 @@ impl RouteIndex {
                     (id, ListenerRoutes::Stream { strategy, hosts })
                 }
                 ResolvedListener::Doh { id, routes, .. } => {
-                    let mut compiled = Vec::with_capacity(routes.len());
+                    let mut compiled = BTreeMap::new();
                     for route in routes {
                         ensure_strategy(&index.strategies, &id, &route.strategy)?;
                         let pattern = RoutePattern::new(route.path)?;
-                        compiled.push((pattern, route.strategy));
+                        let route_id = RouteId::from(pattern.template().to_owned());
+                        if compiled.insert(route_id.clone(), route.strategy).is_some() {
+                            return Err(RouteBuildError::DuplicateRoute {
+                                listener: id,
+                                route: route_id,
+                            });
+                        }
                     }
                     (id, ListenerRoutes::Doh { routes: compiled })
                 }
@@ -209,19 +181,20 @@ impl RouteIndex {
         })
     }
 
-    pub fn select_doh(&self, listener_id: &ConfigId, path: &str) -> Option<RouteSelection> {
+    pub fn select_doh(&self, listener_id: &ConfigId, route_id: &RouteId) -> Option<RouteSelection> {
         let ListenerRoutes::Doh { routes } = self.listeners.get(listener_id)? else {
             return None;
         };
-        routes.iter().find_map(|(pattern, strategy)| {
-            let route = pattern.matches(path)?;
-            let strategy_value = self.strategies.get(strategy)?;
-            Some(RouteSelection {
-                listener_id: listener_id.clone(),
-                route: Some(route),
-                strategy: strategy_value,
-                listener_hosts: None,
-            })
+        let strategy = routes.get(route_id)?;
+        let strategy_value = self.strategies.get(strategy)?;
+        Some(RouteSelection {
+            listener_id: listener_id.clone(),
+            route: Some(RouteMatch {
+                route_id: route_id.clone(),
+                client_id: None,
+            }),
+            strategy: strategy_value,
+            listener_hosts: None,
         })
     }
 }
@@ -248,6 +221,7 @@ mod tests {
     use crate::config::resolve::{
         ConfigId, ResolvedEcs, ResolvedListener, ResolvedStrategy, ResolvedTtlOverride, ValueSource,
     };
+    use crate::dns::RouteId;
 
     use super::{RouteBuildError, RouteIndex, RoutePattern};
 
@@ -308,12 +282,15 @@ mod tests {
         assert_eq!(stream.strategy.id.as_str(), "default");
         assert!(
             index
-                .select_doh(&ConfigId::new("doh").unwrap(), "/clients/alice")
+                .select_doh(
+                    &ConfigId::new("doh").unwrap(),
+                    &RouteId::from("/clients/{client_id}"),
+                )
                 .is_some()
         );
         assert!(
             index
-                .select_doh(&ConfigId::new("doh").unwrap(), "/unknown")
+                .select_doh(&ConfigId::new("doh").unwrap(), &RouteId::from("/unknown"),)
                 .is_none()
         );
     }
@@ -327,5 +304,14 @@ mod tests {
             RoutePattern::new("/clients/{client_id}/bad/{client_id}"),
             Err(RouteBuildError::InvalidPlaceholder)
         ));
+    }
+
+    #[test]
+    fn terminal_client_id_pattern_includes_bare_path() {
+        let pattern = RoutePattern::new("/clients/{client_id}").unwrap();
+
+        let bare = pattern.matches("/clients").unwrap();
+        assert_eq!(bare.route_id.as_ref(), "/clients/{client_id}");
+        assert!(bare.client_id.is_none());
     }
 }

@@ -7,9 +7,11 @@ use std::time::Duration;
 
 use ipnet::IpNet;
 
+use super::doh_route::{DohPathPattern, DohPathPatternError};
 use super::model::{
-    ClientIpSource, ConfigDto, EcsDto, EcsMode, HostsResourceDto, ListenerDto, OutboundDto,
-    RuleSetDto, StrategyDto, TlsMode, UpstreamDto, UpstreamMode, is_non_empty_path,
+    ClientIpSource, ConfigDto, EcsDto, EcsMode, HostsResourceDto, ListenerDto,
+    MAX_RULE_SET_SELECTOR_BYTES, OutboundDto, RuleSetDto, StrategyDto, TlsMode, UpstreamDto,
+    UpstreamMode, is_non_empty_path, normalize_rule_set_selector,
 };
 
 /// Stable categories used by callers and tests; messages are deliberately non-sensitive.
@@ -467,15 +469,9 @@ fn validate_collections(config: &ConfigDto, report: &mut ConfigErrorReport) {
                     ));
                 }
                 let mut route_paths = BTreeSet::new();
+                let mut compiled_paths = Vec::new();
                 for (route_index, route) in routes.iter().enumerate() {
                     let route_path = format!("{path}.routes[{route_index}]");
-                    if route.path.trim().is_empty() || !route.path.starts_with('/') {
-                        report.push(ConfigError::new(
-                            ConfigErrorKind::InvalidValue,
-                            format!("{route_path}.path"),
-                            "route path must be a non-empty absolute HTTP path",
-                        ));
-                    }
                     if route.path.starts_with("/dns-quer/inner")
                         || route.path.starts_with("/dns-quer/outside")
                     {
@@ -485,12 +481,43 @@ fn validate_collections(config: &ConfigDto, report: &mut ConfigErrorReport) {
                             "path is reserved by the service",
                         ));
                     }
-                    if !route_paths.insert(route.path.clone()) {
+                    let is_unique = route_paths.insert(route.path.clone());
+                    if !is_unique {
                         report.push(ConfigError::new(
                             ConfigErrorKind::Duplicate,
                             format!("{route_path}.path"),
                             "route path is duplicated",
                         ));
+                    }
+                    match DohPathPattern::new(route.path.clone()) {
+                        Ok(pattern) if is_unique => {
+                            if let Some((other_index, _)) = compiled_paths
+                                .iter()
+                                .find(|(_, other)| pattern.overlaps(other))
+                            {
+                                report.push(ConfigError::new(
+                                    ConfigErrorKind::Constraint,
+                                    format!("{route_path}.path"),
+                                    format!(
+                                        "route path overlaps with {path}.routes[{other_index}].path"
+                                    ),
+                                ));
+                            }
+                            compiled_paths.push((route_index, pattern));
+                        }
+                        Ok(_) => {}
+                        Err(error) => report.push(ConfigError::new(
+                            ConfigErrorKind::InvalidValue,
+                            format!("{route_path}.path"),
+                            match error {
+                                DohPathPatternError::InvalidPath => {
+                                    "route path must be a non-empty absolute HTTP path without query, fragment, or control characters"
+                                }
+                                DohPathPatternError::InvalidPlaceholder => {
+                                    "client_id placeholder must appear at most once as a complete path segment"
+                                }
+                            },
+                        )),
                     }
                     if route.strategy.trim().is_empty() {
                         report.push(ConfigError::new(
@@ -1444,17 +1471,11 @@ fn check_rule_set_selector(
                 "rule_set selector base does not exist",
             ));
         }
-        if selector.is_empty()
-            || !selector.is_ascii()
-            || selector != selector.to_ascii_lowercase()
-            || !selector.bytes().all(|byte| {
-                byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-            })
-        {
+        if normalize_rule_set_selector(selector, MAX_RULE_SET_SELECTOR_BYTES).is_none() {
             report.push(ConfigError::new(
                 ConfigErrorKind::InvalidValue,
                 format!("{path}.rule_set"),
-                "rule_set selector must be non-empty lowercase ASCII",
+                "rule_set selector must be non-empty printable ASCII without ':' or '@'",
             ));
         }
     } else {

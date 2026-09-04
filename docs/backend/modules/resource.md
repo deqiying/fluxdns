@@ -6,7 +6,7 @@
 >
 > 适用范围：hosts/rule 解析、加载、snapshot、持久化和刷新发布
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联实现：`backend/src/resource/*`
 >
@@ -107,17 +107,18 @@ v1 本地回答支持 A、AAAA 和 CNAME：
 
 ## 6. Rule 格式
 
-当前实现覆盖 JSON 与 Clash 的 exact/suffix/受限 regex matcher，并解析 V2Ray `geosite.dat` protobuf 的 selector map。`Full`/`RootDomain`/`Regex`/`Plain` 四种 domain type 分别映射到 exact/suffix/受限 regex/keyword matcher；未知 protobuf 字段按 wire type 跳过，输入、selector 和规则数量均受有界限制。
+当前实现覆盖 JSON 与 Clash 的 exact/suffix/keyword/受限 regex matcher，并解析 V2Ray `geosite.dat` protobuf 的 selector map。`Full`/`RootDomain`/`Regex`/`Plain` 四种 domain type 分别映射到 exact/suffix/受限 regex/keyword matcher；未知 protobuf 字段按 wire type 跳过，输入、selector 和规则数量均受有界限制。当前规则 parser/compiler 标识为 `rule-index-v2`。
 
 ### JSON
 
-支持明确字段：
+FluxDNS legacy JSON 顶层支持明确字段：
 
 - `domain`：exact；
 - `domain_suffix`：apex 与所有子域；
+- `domain_keyword`：substring keyword；
 - `domain_regex`：受限 regex 列表或单值。
 
-未知字段拒绝。regex 在加载时编译，并限制数量、长度和总 program size。
+legacy 顶层未知字段拒绝。相同的 `format: json` 还可读取 `version + rules[]` 结构的 sing-box source JSON，当前接受 version 1 到 5；每个 rule 只读取上述四个直接域名字段，其他字段一律忽略。没有四个字段的 rule 跳过，最终未生成任何 matcher 的文档拒绝。该投影可能丢弃 `invert`、network、IP、port 或 logical 等组合语义，因此只属于面向域名集合文件的部分兼容，不表示完整实现 sing-box rule-set。regex 在加载时编译，并限制数量、长度和总 program size。
 
 ### Clash
 
@@ -125,7 +126,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 
 ### dat（geosite.dat）
 
-目标契约为 selector → domain matcher map，采用 V2Ray `GeoSiteList` protobuf schema。selector 必须是非空 ASCII 标识，加载时统一转为小写；大小写归一化后重复的 selector 报错。`geosite:cn` 先解析大小写敏感的资源名 `geosite`，再查 canonical selector `cn`。解析器只依赖现有代码，拒绝截断、非法 wire type、未知 domain type、超限 selector 和超限规则；Policy 在 prepare 阶段校验 selector 存在，查询热路径只使用已编译 matcher。
+目标契约为 selector → domain matcher map，采用 V2Ray `GeoSiteList` protobuf schema。selector 必须非空、不超过 128 bytes，且仅含除 `:`、`@` 外的不含空白可打印 ASCII；加载时统一转为小写，大小写归一化后重复的 selector 报错。该规则允许 `geolocation-!cn`。`geosite:cn` 先解析大小写敏感的资源名 `geosite`，再查 canonical selector `cn`。解析器只依赖现有代码，拒绝截断、非法 wire type、未知 domain type、超限 selector 和超限规则；所有 selector 在资源加载或刷新时一次性校验并编译到不可变 map，Policy 在 prepare 阶段校验引用存在，查询热路径只查当前引用的 matcher。
 
 ## 7. Matcher
 
@@ -192,6 +193,7 @@ content 与 manifest 各自原子替换，但不构成跨文件事务；恢复�
 
 - hosts JSON/line、A/AAAA/CNAME、wildcard/exact；
 - JSON/Clash rule、`geosite.dat` protobuf selector 及其稳定错误边界；
+- sing-box source 四类域名字段投影、其他 rule 字段忽略、无可用域名规则和未知 version；
 - canonical domain、重复、冲突和 regex 限制；
 - const/file/remote 首次加载；
 - ETag/304、body limit、重定向、代理 failure；

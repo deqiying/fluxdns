@@ -6,7 +6,7 @@
 >
 > 适用范围：DNS wire、UDP、TCP、DoH、TLS、client IP 恢复和响应编码
 >
-> 最后核对：待核对
+> 最后核对：2026-09-04
 >
 > 关联实现：`backend/src/transport/*`
 >
@@ -142,7 +142,7 @@ TCP adapter：
 
 首轮实现边界：`tls.mode=terminate` 在 endpoint 装配阶段加载 PEM/DER 证书链和私钥，system socket 显式使用 ring provider 完成 TLS 1.2/1.3 握手；`tls.mode=external` 不读取证书材料。启用 PROXY 时，DoH session 先以单字节有界读取消费可信前导，再升级同一连接到 TLS。TLS 握手失败只关闭当前 session，listener 继续接收后续连接。`client_ip.source=forwarded_header` 已支持三个配置 header、trusted proxy CIDR、右向左链解析及 missing/invalid 的 `reject`/`use_peer` 策略；`client_ip.source=proxy_protocol` 已支持可信 peer、PROXY v1/v2、TCP4/TCP6、分片读取和长度上限，未知 v2 TLV 在长度合法时跳过；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2、证书热加载和完整握手/故障矩阵验收。
 
-route template 负责提取可选 `client_id`，但日志不记录实际路径参数或 query string。
+route template 由 Config 提供的共享 compiler 校验和匹配。末尾 `/{client_id}` 同时接受去掉该段后的裸路径与带一个非空 client ID 的路径：裸路径不产生 `client_id`，尾斜杠和额外路径段不匹配；非末尾占位符仍要求对应段存在。Transport 对真实 HTTP path 只匹配一次，将配置模板写入稳定 `route_id` 并把可选值写入客户端身份；Policy 只按 route ID 查表，不重建或二次匹配路径。日志不记录实际路径参数或 query string。
 
 ## 8. TLS
 
@@ -217,6 +217,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - UDP/TCP canonical equivalence、ID 恢复和 UDP TC；
 - TCP length 分片、半包、EOF、idle timeout 和顺序响应；
 - DoH GET/POST、request-line、Host authority/cardinality、媒体类型、严格十进制 `Content-Length`、`Expect` 拒绝、body framing、header 数量/字节、方法、65,535/87,380 边界、最大 request-target 独立计费和 HTTP/DNS 分层；
+- DoH 精确 route、尾部 client ID route 的裸路径/带 ID/尾斜杠/多段边界，以及 canonical route ID；
 - TLS PEM/DER 证书/key 组合、handshake timeout 与坏连接隔离；
 - forwarded header 信任链、伪造 header、missing/invalid policy；
 - PROXY v1/v2 分片、未知 TLV、非法长度、不可信 peer；

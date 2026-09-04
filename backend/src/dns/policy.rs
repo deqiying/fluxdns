@@ -897,10 +897,9 @@ impl PolicyDnsCore {
             Err(_) => return (servfail(request), None, None, None),
         };
         let policy = self.policy.load();
-        let doh_path = reconstructed_doh_path(request);
         let policy_request = PolicyRequest {
             listener_id: &listener_id,
-            doh_path: doh_path.as_deref(),
+            doh_route_id: request.context.meta.route_id.as_ref(),
             client_id: request
                 .context
                 .client
@@ -1324,10 +1323,9 @@ impl PolicyDnsCore {
                 return;
             };
             let policy = core.policy.load();
-            let doh_path = reconstructed_doh_path(&request);
             let policy_request = PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: doh_path.as_deref(),
+                doh_route_id: request.context.meta.route_id.as_ref(),
                 client_id: request
                     .context
                     .client
@@ -1750,13 +1748,12 @@ fn cache_key(
 ) -> Option<crate::ports::cache::CacheKey> {
     let listener_id = ConfigId::new(request.context.meta.listener_id.as_ref().to_owned()).ok()?;
     let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).ok()?;
-    let doh_path = reconstructed_doh_path(request);
     let policy = core.policy.load();
     let context = policy
         .index
         .prepare_context(&PolicyRequest {
             listener_id: &listener_id,
-            doh_path: doh_path.as_deref(),
+            doh_route_id: request.context.meta.route_id.as_ref(),
             client_id: request
                 .context
                 .client
@@ -2290,16 +2287,6 @@ fn registry_build_error(error: RegistryError) -> UpstreamRuntimeBuildError {
         upstream,
         reason: error.to_string(),
     }
-}
-
-fn reconstructed_doh_path(request: &DnsRequest) -> Option<String> {
-    let route = request.context.meta.route_id.as_ref()?;
-    let mut path = route.as_ref().to_owned();
-    if path.contains("{client_id}") {
-        let client_id = request.context.client.client_id.as_ref()?;
-        path = path.replace("{client_id}", client_id.as_str());
-    }
-    Some(path)
 }
 
 fn servfail(request: &DnsRequest) -> Result<CoreOutcome, CoreError> {
@@ -3071,7 +3058,7 @@ mod tests {
             .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: request.context.client.client_addr,
                 client_digest: None,
@@ -3186,7 +3173,7 @@ mod tests {
             .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: first_request.context.client.client_addr,
                 client_digest: None,
@@ -3292,7 +3279,7 @@ mod tests {
             .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: first_request.context.client.client_addr,
                 client_digest: None,
@@ -3385,7 +3372,7 @@ mod tests {
             .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: request.context.client.client_addr,
                 client_digest: None,
@@ -3449,7 +3436,7 @@ mod tests {
             .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: request.context.client.client_addr,
                 client_digest: None,
@@ -3561,7 +3548,7 @@ mod tests {
             .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: request.context.client.client_addr,
                 client_digest: None,
@@ -3636,7 +3623,7 @@ mod tests {
             .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &listener_id,
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: request.context.client.client_addr,
                 client_digest: None,
@@ -4147,7 +4134,7 @@ strategy:
             .policy()
             .evaluate(crate::policy::PolicyRequest {
                 listener_id: &ConfigId::new("dns").unwrap(),
-                doh_path: None,
+                doh_route_id: None,
                 client_id: None,
                 client_addr: upstream_request.context.client.client_addr,
                 client_digest: None,
@@ -4184,7 +4171,7 @@ strategy:
             core.policy()
                 .evaluate(crate::policy::PolicyRequest {
                     listener_id: &ConfigId::new("dns").unwrap(),
-                    doh_path: None,
+                    doh_route_id: None,
                     client_id: None,
                     client_addr: request.context.client.client_addr,
                     client_digest: None,

@@ -1,5 +1,6 @@
 //! Versioned configuration loading, normalization and semantic validation.
 
+pub(crate) mod doh_route;
 pub mod load;
 pub mod migrate;
 pub mod model;

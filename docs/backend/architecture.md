@@ -68,6 +68,7 @@ backend/src/
 ├── main.rs                 # 进程入口、退出码
 ├── app.rs                  # 启动编排、进程信号、错误和退出码
 ├── config/
+│   ├── doh_route.rs         # DoH path 模板共享编译、匹配和冲突检测
 │   ├── model.rs            # 与 version: 1 对应的 serde DTO
 │   ├── load.rs             # YAML、SecretRef、路径解析
 │   ├── migrate.rs          # MigrationStep、MigrationReport、版本链
@@ -160,7 +161,7 @@ backend/src/
 
 配置解析固定为两阶段：第一阶段用 `yaml_serde` + Serde DTO 完成类型、未知字段和字段路径错误；第二阶段把 DTO 编译为 `ValidatedConfig`，执行 exactly-one-of、条件字段、引用/循环、继承、bind 和 SecretRef 校验。`webui` 在两阶段都必须经过处理，即使 `enable: false` 也不能走旁路或被丢弃。
 
-请求热路径固定为 `InboundAdapter → DnsCore → ResponseEncoder`；`DnsCore` 先生成不依赖逐规则匹配的 `PolicyContext` 并尝试 fast cache key v2，miss 后才执行 `RouteDecision`、hosts/upstream 和 resolved key 路径。Core 完成后在 transport 编码前至多无等待发布一个 `ResolutionEnvelope`。配置继承、优先级和 exactly-one-of 约束以 [configuration-reference.md](configuration-reference.md) 为唯一契约来源，运行时不得重新解释或隐式补默认值。
+请求热路径固定为 `InboundAdapter → DnsCore → ResponseEncoder`；DoH adapter 使用 Config 共享的 route compiler 对真实 HTTP path 匹配一次，再把配置模板的 typed route ID 和可选 client ID 写入请求上下文，Policy 仅按 route ID 查表。`DnsCore` 先生成不依赖逐规则匹配的 `PolicyContext` 并尝试 fast cache key v2，miss 后才执行 `RouteDecision`、hosts/upstream 和 resolved key 路径。Core 完成后在 transport 编码前至多无等待发布一个 `ResolutionEnvelope`。配置继承、优先级和 exactly-one-of 约束以 [configuration-reference.md](configuration-reference.md) 为唯一契约来源，运行时不得重新解释或隐式补默认值。
 
 ### 3.2 v1 范围与未来扩展边界
 
@@ -372,7 +373,7 @@ struct RequestMeta {
 }
 ```
 
-`peer_addr`、`client_addr` 和 `client_id` 放在 `ClientIdentity` 中并允许缺省；`listener_id`/`route_id` 用于策略和聚合统计的有界维度，不能把原始 URL、完整 query string 或敏感 header 放入 context。DoQ/HTTP2 的连接与 stream 生命周期不能被压缩成单一 `Transport` 枚举。`TransportCapabilities` 只包含核心确实需要的协议无关事实（例如 `datagram/stream/multiplexed` class 和 opaque `cache_compatibility`）；framing、最大 wire、HTTP status、UDP 截断和 DNS ID 重写留在 adapter-owned `TransportProfile`/`ResponseEncoder`。`DnsCore` 只接收 canonical request 和 context。
+`peer_addr`、`client_addr` 和 `client_id` 放在 `ClientIdentity` 中并允许缺省；`listener_id`/`route_id` 用于策略和聚合统计的有界维度，不能把原始 URL、完整 query string 或敏感 header 放入 context。DoH `route_id` 固定使用配置模板，不含实际 client ID；裸路径命中尾部 `{client_id}` 模板时 `client_id` 为 `None`。DoQ/HTTP2 的连接与 stream 生命周期不能被压缩成单一 `Transport` 枚举。`TransportCapabilities` 只包含核心确实需要的协议无关事实（例如 `datagram/stream/multiplexed` class 和 opaque `cache_compatibility`）；framing、最大 wire、HTTP status、UDP 截断和 DNS ID 重写留在 adapter-owned `TransportProfile`/`ResponseEncoder`。`DnsCore` 只接收 canonical request 和 context。
 
 元数据生命周期也要由 port 契约固定：`request_id` 在 ingress 生成且全链路只读，`trace_id` 缺失时可由观测 facade 生成；`received_at`/`received_at_utc`/`deadline` 使用可注入的 `Clock`，deadline 只能向下游缩短不能延长；客户端断开、stream 关闭、进程 shutdown 或上游取消都会传播 `CancellationToken`。UDP 请求没有 connection/stream ID 时使用 `None`，HTTP/2/未来 QUIC 则分别填充 connection 与 stream ID。所有日志和 metrics 只使用脱敏后的 ID、listener/route 名称和低基数标签。
 

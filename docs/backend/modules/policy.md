@@ -62,7 +62,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 
 - `ClientIndex`：exact client ID 优先，未命中时按 IPv4/IPv6 最长 CIDR 前缀匹配，最后进入 `Unknown`；重复 ID/CIDR 和空规则在构建时拒绝；
 - `StrategyIndex`：将已解析策略编译为不可变 `BTreeMap<ConfigId, Arc<ResolvedStrategy>>`，重复策略 ID 在构建时拒绝；
-- `RouteIndex`：编译 stream listener 与 DoH route，校验 `{client_id}` segment 模板并保留 typed listener/route 选择结果；
+- `RouteIndex`：编译 stream listener，并将 DoH 配置模板形成的 typed route ID 映射到基础 strategy；真实 HTTP path 与可选 client ID 只在 Transport 匹配一次，Policy 不重建路径；
 - `PolicyIndex::prepare_context`：组合 client strategy override、cache tri-state、TTL/ECS effective value 和 namespace，输出不执行逐规则 matcher 的不可变 `PolicyContext`；
 - `PolicyIndex::evaluate_route`：在 fast miss 后执行 listener hosts 与 strategy rules，输出 local answer 或 upstream target、matched resource 和最终 ECS；兼容入口 `evaluate` 组合这两个阶段；
 - `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash/`geosite.dat` rule-set；remote 资源和缺失资源在普通同步构造边界返回显式错误；`from_config_with_resource_indexes` 可消费 prepare 阶段已编译的 file/remote snapshot；`dat` selector 在 prepare 阶段校验存在，运行时只读取已编译 selector matcher；
@@ -119,7 +119,7 @@ base strategy from listener/route
 
 first-match 只指 rule 顺序；单个 matcher 内部使用 exact → most-specific suffix/wildcard → regex 的固定优先级。
 
-`rule_set` 引用先尝试完整资源名；完整名不存在且包含 `:` 时，才按第一个 `:` 解释为 `resource:selector`。资源名大小写敏感；selector 必须是非空 ASCII 标识并归一化为小写。selector 只对支持子集的格式有效，不存在或格式不支持时在 prepare 阶段失败。
+`rule_set` 引用先尝试完整资源名；完整名不存在且包含 `:` 时，才按第一个 `:` 解释为 `resource:selector`。资源名大小写敏感；selector 使用 Config/Resource 共用规则归一化为小写，允许 `!` 等不产生分隔歧义的可打印 ASCII。selector 只对支持子集的格式有效，不存在或格式不支持时在 prepare 阶段失败。Resource 已在加载或刷新时编译并缓存所有 selector matcher；查询热路径只对当前 strategy rule 执行一次 map lookup，不逐个重新校验 selector。
 
 ## 8. 覆盖与继承
 
@@ -190,6 +190,7 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - ID 优先于 CIDR、IPv4/IPv6 最长前缀、unknown；
 - 冲突在 prepare 阶段拒绝；
 - base strategy 与 client override；
+- DoH canonical route ID 选择，尾部 `{client_id}` 的裸路径不依赖 client ID 重建；
 - listener hosts、strategy first-match、default upstream；
 - exact/suffix/wildcard/regex 优先级；
 - `resource:selector` 解析和不存在错误；
