@@ -142,11 +142,13 @@ TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 
 - source：hosts、cache 或 upstream；
 - target upstream/group 与实际产生结果的 direct/member；cache hit 为缓存生产来源；
 - typed canonical question，以及仅在 `resolve_log` 开启时附带的共享 `Arc<CanonicalResponse>`；
-- RCODE、cache status、latency buckets；
+- RCODE、cache status、latency buckets，以及在 core 返回时冻结的服务端总耗时和 DNS 主链耗时；
 - cancellation/failure 分类；
 - runtime/resource revision 摘要。
 
 Policy Core 提供 `strategy`、策略目标 `upstream_id`、无歧义的 `upstream_used_id`、`source`（hosts/cache/upstream）、lookup `cache_status`、配置 client bucket，以及 matched rule/resource/version。service 补充 typed canonical question、共享逻辑 response 和 `RequestContext.client.client_addr`，但不在请求任务中生成 request digest、qname/answer 字符串或 JSON。后台 dispatcher 更新 stats、提交 cache candidate，并仅在启用时把事件交给 detail projector；rule matcher、request digest、DNS wire、header 和请求级值不会进入普通日志或 metrics。
+
+service 紧贴 `DnsCore::resolve_with_completion` 调用前后记录主链耗时，并以 transport 提供的 `received_at` 计算截至同一完成时刻的服务端总耗时。两个值作为数值跨越异步 observation 边界，不传递 `Instant`，因此 dispatcher 排队、detail projector 和 SQLite 写入不会污染请求耗时。
 
 resolution ingress 满时 DNS 响应照常编码，但整个 envelope 被丢弃并累计 `dropped` 与首次 gap 时间；cache candidate drop 通过 RAII 释放 single-flight follower。detail 与 cache 下游队列失败只影响各自消费者。cache lookup 状态只表示响应完成前已知的 hit/miss/stale，异步 commit 结果以独立 counter 记录。
 
@@ -195,7 +197,7 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - [x] 完成 UDP/TCP/plain DoH 的 Positive/NODATA/NXDOMAIN、DNS ID、canonical response 和 UDP TC 首轮真实 loopback contract；
 - [x] 完成 SERVFAIL/REFUSED 错误响应的跨 transport contract tests。
 
-阶段证据：`dns::message::tests` 覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 37 项通过，新增覆盖 policy 语义 hash 排除 observability/storage 配置、hosts 内容刷新切换 fast key，以及既有 strategy/client cache、剩余/stale TTL、ECS、provenance、matched resource 和 SQLite cache 恢复。Service 定向测试验证每个请求只发布一次 typed completion 且 response `Arc` 复用；Cache 定向测试验证 commit candidate 成功/丢弃都能结束 single-flight；UDP/TCP/plain DoH 的 canonical response、DNS ID 和 UDP TC 契约保持通过。阶段 199 后端全量 `598 passed、0 failed、1 ignored`，忽略项是手工 release 性能 profile。
+阶段证据：`dns::message::tests` 覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 37 项通过，新增覆盖 policy 语义 hash 排除 observability/storage 配置、hosts 内容刷新切换 fast key，以及既有 strategy/client cache、剩余/stale TTL、ECS、provenance、matched resource 和 SQLite cache 恢复。Service 定向测试验证每个请求只发布一次 typed completion 且 response `Arc` 复用；Cache 定向测试验证 commit candidate 成功/丢弃都能结束 single-flight；UDP/TCP/plain DoH 的 canonical response、DNS ID 和 UDP TC 契约保持通过。阶段 200 新增 core 完成时冻结双耗时的确定性测试，后端全量 `599 passed、0 failed、1 ignored`，忽略项是手工 release 性能 profile。
 
 阶段 142 将同一 observation 的策略目标、实际组成员和 matched rule/resource 摘要接入 `ResolveEvent` 与 SQLite schema v2；阶段 148 继续从当前 Policy snapshot 传播命中资源的 epoch/revision。Policy 35 项及存储层聚焦测试通过，未重复大阶段全量测试。
 

@@ -37,7 +37,7 @@
 | WebUI 配置 | `WebUiDto`/`ResolvedWebUi` 保留 `enable`、监听地址、端口、origin 和用户 hash；`enable=true` 已启动独立 Management Server。 | 前端通过 setup -> session 顺序消费服务端状态；不得绕过 management API 读取配置或数据库。 |
 | Runtime 摘要 | `RuntimeSnapshot::summary()` 已提供 revision、normalized hash、listener/bind/resource 数量和 `has_policy_core`；`BindEntry` 还包含 transport、地址、端口、owner 和 `v6_only`。 | Runtime 页面应消费后端安全 DTO，不直接序列化 `ResolvedConfig` 或 socket 对象。 |
 | Resource 摘要 | `ResourceRegistrySnapshot::summary()` 只提供资源版本、来源类型、fallback 和 stale 状态；资源正文和编译结果不属于管理面。 | Resources 页面只显示元数据、版本和状态，不下载、解析或展示规则正文。 |
-| Storage 统计/详情 | 统计按 UTC 日和有限维度聚合；schema v4 的 `resolve_log` 保存 canonical qname、有效 client IP、配置 ID、cache producer upstream 和有界 answer。 | Statistics 使用服务端聚合；authenticated Queries 使用显式 DTO 和分页读取，不能把 SQLite 行原样返回浏览器。 |
+| Storage 统计/详情 | 统计按 UTC 日和有限维度聚合；schema v5 的 `resolve_log` 保存 canonical qname、有效 client IP、配置 ID、cache producer upstream、有界 answer 和 DNS 主链耗时。 | Statistics 使用服务端聚合；authenticated Queries 使用显式 DTO 和分页读取，并列显示服务端总耗时与主链耗时，不能把 SQLite 行原样返回浏览器。 |
 | Telemetry/Health | Telemetry 组件和 health 状态有固定枚举（`healthy`、`degraded`、`failed`、`stopping`），并记录时间、重试、stale/gap 等状态信息。 | Health 页面展示稳定状态和安全原因分类；不展示原始错误堆栈、SecretRef、原始 IP、完整 query 或 header。 |
 | Management API | 后端已实现 setup、login/logout/session、七个只读查询、请求边界、错误 envelope 与静态资源 fallback；前端 API client 复用 OpenAPI 生成类型。 | setup、session 和只读页面可走同源 `/api/v1`；真实浏览器 smoke 仍需单独记录。 |
 
@@ -114,11 +114,11 @@ Browser
 | Runtime | `RuntimeSnapshotSummary` + `BindEntry` | revision、hash 摘要、listener/bind 数量、transport、地址/端口、draining 状态（若契约提供） | socket handle、`ResolvedConfig` 全量、证书和私钥 |
 | Health | Telemetry/Storage/Runtime health snapshot | component、状态、first/last changed、last success、retry、stale/gap、稳定原因码 | 原始错误、SecretRef、完整内部路径 |
 | Statistics | `stats_daily_total`、`stats_daily_dimension` 的服务端聚合 | UTC 日期、total、有限 dimension kind/value、count | 任意域名、完整 client ID、原始 IP、未受限 group-by |
-| Queries | `resolve_log` 的 authenticated projection | canonical qname、qtype、有效 client IP、配置客户端/strategy、target/actual upstream、有界 answer 和既有结果摘要 | request digest、route 文本、DNS wire、header、SecretRef |
+| Queries | `resolve_log` 的 authenticated projection | canonical qname、qtype、有效 client IP、配置客户端/strategy、target/actual upstream、服务端总耗时、DNS 主链耗时、有界 answer 和既有结果摘要 | request digest、route 文本、DNS wire、header、SecretRef |
 | Resources | `ResourceSummary` 和受控 metadata | ID 的安全展示名、epoch/revision、source kind、fallback、stale | 规则正文、hosts 内容、远程 URL 凭据、编译对象 |
 | System | 后端显式提供的版本/能力 read model | 服务版本、运行时间、只读能力列表 | 配置文件路径、环境变量、凭据和内部诊断详情 |
 
-Queries 契约已确认：所有 authenticated WebUI 用户可读取 canonical qname、有效 client IP 和有界 answer；`dns.resolve_log.enable`、记录年龄与数量上限继续控制是否持久化及保留周期。其他接口不因此获得这些请求级字段。
+Queries 契约已确认：所有 authenticated WebUI 用户可读取 canonical qname、有效 client IP、服务端总耗时、DNS 主链耗时和有界 answer；总耗时截至 DNS core 完成，主链耗时只覆盖 `DnsCore::resolve_with_completion`，都不包含异步投影/SQLite。`dns.resolve_log.enable`、记录年龄与数量上限继续控制是否持久化及保留周期。其他接口不因此获得这些请求级字段。
 
 ### 5.3 通用响应和错误契约
 

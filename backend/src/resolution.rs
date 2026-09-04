@@ -431,7 +431,7 @@ fn publish_health(
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicBool;
-    use std::time::{Instant, SystemTime};
+    use std::time::SystemTime;
 
     use tokio::sync::mpsc;
 
@@ -449,7 +449,8 @@ mod tests {
     fn event() -> Arc<ResolutionEvent> {
         Arc::new(ResolutionEvent {
             occurred_at: SystemTime::now(),
-            duration_started_at: Instant::now(),
+            duration_millis: 8,
+            dns_core_duration_micros: 250,
             listener_id: Arc::from("dns"),
             route_id: None,
             client_bucket: None,

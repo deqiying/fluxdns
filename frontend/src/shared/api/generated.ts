@@ -388,7 +388,13 @@ export interface components {
             id: string;
             /** Format: date-time */
             occurred_at: string;
+            /** @description 从 transport 接入计时点到 DNS core 完成的服务端总耗时；不含异步观测和 SQLite 写入 */
             duration_ms: number;
+            /**
+             * Format: double
+             * @description 仅覆盖服务端 DnsCore 主链的耗时，保留毫秒小数；schema v5 之前的历史记录为 null
+             */
+            dns_core_duration_ms: number | null;
             transport: components["schemas"]["Transport"];
             source: components["schemas"]["QuerySource"];
             rcode: components["schemas"]["Rcode"];

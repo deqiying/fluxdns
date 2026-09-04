@@ -805,6 +805,7 @@ struct QueryRecord {
     id: String,
     occurred_at: String,
     duration_ms: u64,
+    dns_core_duration_ms: Option<f64>,
     transport: &'static str,
     source: &'static str,
     rcode: &'static str,
@@ -906,6 +907,9 @@ fn query_record(value: ResolveQueryRecord) -> Result<QueryRecord, QueryError> {
         id: value.id,
         occurred_at: format_time(occurred_at),
         duration_ms: value.duration_millis,
+        dns_core_duration_ms: value
+            .dns_core_duration_micros
+            .map(|micros| Duration::from_micros(micros).as_secs_f64() * 1_000.0),
         transport: query_transport_name(value.transport),
         source: query_source_name(value.source),
         rcode: query_rcode_name(value.rcode),
@@ -1172,6 +1176,7 @@ mod tests {
                         id: "qry_opaque".to_owned(),
                         occurred_at_millis: 0,
                         duration_millis: 8,
+                        dns_core_duration_micros: Some(345),
                         transport: QueryTransport::Doh,
                         source: QuerySource::Rule,
                         rcode: QueryRcode::NoError,
@@ -1331,6 +1336,7 @@ mod tests {
             id: "qry_opaque".to_owned(),
             occurred_at_millis: 0,
             duration_millis: 8,
+            dns_core_duration_micros: Some(345),
             transport: QueryTransport::Doh,
             source: QuerySource::Rule,
             rcode: QueryRcode::NoError,
@@ -1358,8 +1364,10 @@ mod tests {
         .unwrap();
         let value = serde_json::to_value(value).unwrap();
         assert_eq!(value["occurred_at"], "1970-01-01T00:00:00Z");
+        assert_eq!(value["duration_ms"], 8);
+        assert_eq!(value["dns_core_duration_ms"], 0.345);
         assert_eq!(value["source"], "rule");
-        assert_eq!(value.as_object().unwrap().len(), 21);
+        assert_eq!(value.as_object().unwrap().len(), 22);
         assert_eq!(value["detail_status"], "available");
         assert_eq!(value["qname"], "example.test.");
         assert_eq!(value["client_ip"], "192.0.2.10");

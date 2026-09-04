@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { queryPageFixture } from "@/mocks/fixtures";
-import { formatClient, formatResponseSummary, formatRoute } from "./QueriesPage";
+import { formatClient, formatDurationSummary, formatResponseSummary, formatRoute } from "./QueriesPage";
 
 describe("QueriesPage 展示语义", () => {
   const [cache, direct, timeout, legacy] = queryPageFixture.items;
@@ -25,5 +25,10 @@ describe("QueriesPage 展示语义", () => {
     });
     expect(formatResponseSummary(timeout)).toEqual({ primary: "SERVFAIL · timeout", meta: "0 条结果" });
     expect(formatResponseSummary(legacy)).toEqual({ primary: "NOERROR · answered", meta: "结果未保留" });
+  });
+
+  it("同时显示服务端总耗时与 DNS 主链耗时", () => {
+    expect(formatDurationSummary(cache)).toEqual({ total: "总耗时 1 ms", dnsCore: "主链 0.08 ms" });
+    expect(formatDurationSummary(legacy)).toEqual({ total: "总耗时 4 ms", dnsCore: "主链 —" });
   });
 });

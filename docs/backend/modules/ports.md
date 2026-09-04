@@ -102,11 +102,13 @@ single-flight producer 的写入责任由不可 clone 的 `CacheCommitCandidate`
 `ResolutionEventSink::try_publish` 是 producer 唯一可见的 resolution 事件入口：
 
 - 每个请求在 transport encode 前至多调用一次，使用有界、无等待语义；
-- `ResolutionEvent` 保存低基数终态、cache lookup status 和可选 `ResolutionDetailSource`；
+- `ResolutionEvent` 保存低基数终态、cache lookup status、在 core 完成时冻结的总耗时/主链耗时和可选 `ResolutionDetailSource`；
 - 详情 source 只保存 typed question、有效 client IP 与共享 response，qname digest/answer JSON 必须在后台生成；
 - `ResolutionEnvelope` 一次性携带事件与可选 `CacheCommitCandidate`，避免两个独立发布路径产生部分成功；
 - ingress 满时返回 `DroppedQueueFull`，DNS 响应继续，系统累计 dropped 与首次 gap 时间；关闭后返回 `Disabled`/稳定错误；
 - `detail_enabled()` 是进程启动时冻结的 interest gate，关闭详情时 producer 不构造请求级详情 payload。
+
+耗时跨 port 时只传递非负整数数值，不传递 `Instant`。总耗时从 transport 计时点到 DNS core 完成，主链耗时只覆盖 `DnsCore::resolve_with_completion`；后台 dispatcher/detail/SQLite 的排队与执行时间不得进入两者。
 
 stats、cache commit 和 detail projection 是 dispatcher 的三个独立消费者。cache lookup status 只描述响应完成前的 hit/miss/stale；异步 commit outcome 单独计数。
 
@@ -203,6 +205,6 @@ Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
 - [x] 增加 bounded TCP byte-stream capability，区分 data/clean EOF 并覆盖 deadline/cancellation。
 - [x] 增加脱敏 TLS server material、listener accept 和连接升级 capability，不向 Ports 泄漏 Rustls/Tokio 类型。
 
-阶段 1/3 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。系统 socket bounded byte-stream 与 TLS loopback 握手测试保持通过。阶段 194/195 的共享 conformance 分别覆盖双 `StorageBackend` 与双 `CacheStore` adapter。阶段 199 新增 capturing observation sink，验证每个请求只发布一个 typed event 且 detail 与 transport 共享同一 response `Arc`；cache candidate 定向测试覆盖 commit 成功唤醒和 drop 释放 follower；后端全量 `598 passed、0 failed、1 ignored`。
+阶段 1/3 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。系统 socket bounded byte-stream 与 TLS loopback 握手测试保持通过。阶段 194/195 的共享 conformance 分别覆盖双 `StorageBackend` 与双 `CacheStore` adapter。阶段 199 新增 capturing observation sink，验证每个请求只发布一个 typed event 且 detail 与 transport 共享同一 response `Arc`；cache candidate 定向测试覆盖 commit 成功唤醒和 drop 释放 follower。阶段 200 将两个冻结耗时作为数值跨越 observation/storage port，后端全量 `599 passed、0 failed、1 ignored`。
 
 当前实现进度：**80%**。typed contract、fake kit、统一 resolution port、主要生产 adapter 接线，以及双 CacheStore/StorageBackend adapter 共享契约已有真实证据；完整 adapter 故障/conformance 矩阵尚未完成。

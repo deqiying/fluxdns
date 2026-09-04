@@ -639,6 +639,10 @@ async fn migrate_storage_schema(pool: &SqlitePool) -> Result<(), SqliteStorageBa
                 4,
                 include_str!("../../migrations/0004_query_record_observability.sql"),
             ),
+            4 => (
+                5,
+                include_str!("../../migrations/0005_dns_core_duration.sql"),
+            ),
             _ => return Err(SqliteStorageBackendBuildError::Schema),
         };
         apply_storage_migration(pool, version, next, migration).await?;
@@ -1013,6 +1017,8 @@ async fn apply_resolve_records_with_limits(
         .min(usize::try_from(available).unwrap_or(usize::MAX));
     for record in records.iter().take(accepted_len) {
         let duration_millis = i64::try_from(record.duration_millis()).unwrap_or(i64::MAX);
+        let dns_core_duration_micros =
+            i64::try_from(record.dns_core_duration_micros()).unwrap_or(i64::MAX);
         let request_digest = if record.has_request_digest() {
             "<present>"
         } else {
@@ -1038,15 +1044,16 @@ async fn apply_resolve_records_with_limits(
         })?;
         sqlx::query(
             "INSERT INTO resolve_log \
-             (event_time_utc, duration_millis, request_id_digest, listener_id, route_id, \
+             (event_time_utc, duration_millis, dns_core_duration_micros, request_id_digest, listener_id, route_id, \
                client_bucket, strategy_id, canonical_qname, qtype, qclass, source, upstream_id, \
                upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
                rcode, cache_status, failure_class, cancellation_reason, runtime_revision, resource_revision, \
                transport, client_ip, upstream_used_id, answer_count, answers_truncated, answer_summary_json) \
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(system_time_millis(record.occurred_at()))
         .bind(duration_millis)
+        .bind(dns_core_duration_micros)
         .bind(request_digest)
         .bind(record.listener_id())
         .bind(route_id)
@@ -1317,8 +1324,9 @@ mod tests {
         assert_eq!(version, i64::from(crate::storage::STORAGE_SCHEMA_VERSION.0));
         let row = sqlx::query(
             "SELECT upstream_member_id, matched_rule_source, matched_resource_id, \
-             matched_rule_ordinal, transport, client_ip, upstream_used_id, answer_count, \
-             answers_truncated, answer_summary_json FROM resolve_log LIMIT 1",
+              matched_rule_ordinal, transport, client_ip, upstream_used_id, answer_count, \
+              answers_truncated, answer_summary_json, dns_core_duration_micros \
+              FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
         .await
@@ -1352,6 +1360,11 @@ mod tests {
             None
         );
         assert_eq!(row.try_get::<Option<String>, _>("transport").unwrap(), None);
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("dns_core_duration_micros")
+                .unwrap(),
+            None
+        );
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
@@ -1676,7 +1689,8 @@ mod tests {
             idempotency_key: "detail-batch".into(),
             operations: vec![StorageOperation::ResolveBatch(vec![ResolveEvent {
                 occurred_at: SystemTime::now(),
-                duration_started_at: Instant::now(),
+                duration_millis: 8,
+                dns_core_duration_micros: 250,
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener"),
                 route_id: Some(Arc::from("route")),
@@ -1715,7 +1729,7 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         let row = sqlx::query(
-            "SELECT request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
+            "SELECT duration_millis, dns_core_duration_micros, request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
              upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
              canonical_qname, source, rcode, failure_class, cancellation_reason, resource_revision, \
              transport, client_ip, upstream_used_id, answer_count, answers_truncated, answer_summary_json \
@@ -1724,6 +1738,12 @@ mod tests {
         .fetch_one(&backend.pool)
         .await
         .unwrap();
+        assert_eq!(row.try_get::<i64, _>("duration_millis").unwrap(), 8);
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("dns_core_duration_micros")
+                .unwrap(),
+            Some(250)
+        );
         assert_eq!(
             row.try_get::<String, _>("request_id_digest").unwrap(),
             "<present>"
@@ -1843,7 +1863,8 @@ mod tests {
             writer
                 .try_record(ResolveEvent {
                     occurred_at: SystemTime::now(),
-                    duration_started_at: Instant::now(),
+                    duration_millis: 8,
+                    dns_core_duration_micros: 250,
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
@@ -1914,7 +1935,8 @@ mod tests {
         writer
             .try_record(ResolveEvent {
                 occurred_at: SystemTime::now(),
-                duration_started_at: Instant::now(),
+                duration_millis: 8,
+                dns_core_duration_micros: 250,
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener"),
                 route_id: None,
@@ -1962,7 +1984,8 @@ mod tests {
             writer
                 .try_record(ResolveEvent {
                     occurred_at: SystemTime::now(),
-                    duration_started_at: Instant::now(),
+                    duration_millis: 8,
+                    dns_core_duration_micros: 250,
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
@@ -1998,7 +2021,8 @@ mod tests {
         writer
             .try_record(ResolveEvent {
                 occurred_at: SystemTime::now(),
-                duration_started_at: Instant::now(),
+                duration_millis: 8,
+                dns_core_duration_micros: 250,
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener-e"),
                 route_id: None,
@@ -2056,7 +2080,8 @@ mod tests {
             writer
                 .try_record(ResolveEvent {
                     occurred_at,
-                    duration_started_at: Instant::now(),
+                    duration_millis: 8,
+                    dns_core_duration_micros: 250,
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
@@ -2112,7 +2137,8 @@ mod tests {
             writer
                 .try_record(ResolveEvent {
                     occurred_at: SystemTime::now(),
-                    duration_started_at: Instant::now(),
+                    duration_millis: 8,
+                    dns_core_duration_micros: 250,
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
@@ -2165,7 +2191,8 @@ mod tests {
         writer
             .try_record(ResolveEvent {
                 occurred_at: SystemTime::now(),
-                duration_started_at: Instant::now(),
+                duration_millis: 8,
+                dns_core_duration_micros: 250,
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener"),
                 route_id: None,
@@ -2233,7 +2260,8 @@ mod tests {
             writer
                 .try_record(ResolveEvent {
                     occurred_at: SystemTime::now(),
-                    duration_started_at: Instant::now(),
+                    duration_millis: 8,
+                    dns_core_duration_micros: 250,
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,

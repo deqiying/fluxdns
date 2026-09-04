@@ -113,6 +113,8 @@ pub struct ResolveQueryRecord {
     pub id: String,
     pub occurred_at_millis: i64,
     pub duration_millis: u64,
+    /// schema v5 之前的历史解析记录没有该值。
+    pub dns_core_duration_micros: Option<u64>,
     pub transport: QueryTransport,
     pub source: QuerySource,
     pub rcode: QueryRcode,

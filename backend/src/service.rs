@@ -1021,8 +1021,20 @@ impl DnsCore for EventPublishingDnsCore {
         request: &'a DnsRequest,
     ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
         Box::pin(async move {
+            let dns_core_started_at = Instant::now();
             let completion = self.inner.resolve_with_completion(request).await;
-            self.publish(request, completion)
+            let completed_at = Instant::now();
+            let (duration_millis, dns_core_duration_micros) = frozen_resolution_durations(
+                request.context.meta.received_at,
+                dns_core_started_at,
+                completed_at,
+            );
+            self.publish(
+                request,
+                completion,
+                duration_millis,
+                dns_core_duration_micros,
+            )
         })
     }
 }
@@ -1032,6 +1044,8 @@ impl EventPublishingDnsCore {
         &self,
         request: &DnsRequest,
         completion: crate::dns::DnsCoreCompletion,
+        duration_millis: u64,
+        dns_core_duration_micros: u64,
     ) -> Result<CoreOutcome, CoreError> {
         let crate::dns::DnsCoreCompletion {
             result,
@@ -1064,7 +1078,8 @@ impl EventPublishingDnsCore {
             });
         let event = ResolutionEvent {
             occurred_at: SystemTime::now(),
-            duration_started_at: request.context.meta.received_at,
+            duration_millis,
+            dns_core_duration_micros,
             listener_id: Arc::from(request.context.meta.listener_id.as_ref()),
             route_id: request
                 .context
@@ -1123,6 +1138,25 @@ impl EventPublishingDnsCore {
         });
         result
     }
+}
+
+fn bounded_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn bounded_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn frozen_resolution_durations(
+    received_at: Instant,
+    dns_core_started_at: Instant,
+    completed_at: Instant,
+) -> (u64, u64) {
+    (
+        bounded_millis(completed_at.saturating_duration_since(received_at)),
+        bounded_micros(completed_at.saturating_duration_since(dns_core_started_at)),
+    )
 }
 
 /// 将 DNS policy 的规则来源映射为稳定的存储契约，避免存储层依赖 policy 内部类型。
@@ -2532,6 +2566,18 @@ mod tests {
     }
 
     #[test]
+    fn resolution_durations_are_frozen_at_core_completion() {
+        let received_at = Instant::now();
+        let dns_core_started_at = received_at + Duration::from_millis(12);
+        let completed_at = dns_core_started_at + Duration::from_micros(345);
+
+        assert_eq!(
+            super::frozen_resolution_durations(received_at, dns_core_started_at, completed_at,),
+            (12, 345)
+        );
+    }
+
+    #[test]
     fn event_publisher_emits_one_typed_completion_before_returning_response() {
         let mut message = Message::new(7, MessageType::Query, OpCode::Query);
         message.add_query(Query::query(
@@ -2600,6 +2646,8 @@ mod tests {
                     cancellation_reason: None,
                     cache_commit: None,
                 },
+                12,
+                345,
             )
             .unwrap();
         let CoreOutcome::Response(returned) = outcome else {
@@ -2615,6 +2663,8 @@ mod tests {
         assert_eq!(event.strategy_id.as_deref(), Some("strategy"));
         assert_eq!(event.cache_lookup_status, CacheStatus::Fresh);
         assert_eq!(event.runtime_revision, RuntimeRevision(3));
+        assert_eq!(event.duration_millis, 12);
+        assert_eq!(event.dns_core_duration_micros, 345);
         assert!(matches!(
             event.terminal,
             ResolutionTerminal::Response {

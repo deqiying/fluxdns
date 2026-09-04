@@ -107,7 +107,7 @@ export function QueriesPage() {
   return (
     <PageFrame
       title="解析记录"
-      description="查看域名、逻辑响应、实际路由与有效客户端；查询详情仅向已认证 WebUI 用户提供。"
+      description="查看域名、逻辑响应、服务端总耗时、DNS 主链耗时、实际路由与有效客户端；查询详情仅向已认证 WebUI 用户提供。"
       meta={records ? <SnapshotMeta sampledAt={records.sampled_at} revision={records.runtime_revision} /> : undefined}
     >
       <Card className="data-card table-toolbar">
@@ -178,12 +178,14 @@ function TimeCell({ value }: { value: string }) {
 function ResponseCell({ record }: { record: QueryRecord }) {
   const answer = record.answers?.[0];
   const summary = formatResponseSummary(record);
+  const durations = formatDurationSummary(record);
   return (
     <CellStack
       primary={summary.primary}
       secondary={
         <Space size={6} wrap>
-          <span>{formatDuration(record.duration_ms)}</span>
+          <span title="从 transport 接入计时点到 DNS core 完成">{durations.total}</span>
+          <span title="仅覆盖 DnsCore::resolve_with_completion 主链">{durations.dnsCore}</span>
           <span>{summary.meta}</span>
           <Tag color={record.source === "cache" ? "green" : "blue"}>{sourceLabel(record)}</Tag>
         </Space>
@@ -204,7 +206,8 @@ function QueryDetails({ record }: { record: QueryRecord }) {
         <Descriptions.Item label="发生时间">{formatDateTime(record.occurred_at)}</Descriptions.Item>
         <Descriptions.Item label="响应">{record.rcode} / {record.outcome}</Descriptions.Item>
         <Descriptions.Item label="来源 / 缓存">{record.source} / {record.cache}</Descriptions.Item>
-        <Descriptions.Item label="耗时">{formatDuration(record.duration_ms)}</Descriptions.Item>
+        <Descriptions.Item label="总耗时">{formatDuration(record.duration_ms)}</Descriptions.Item>
+        <Descriptions.Item label="服务端 DNS 主链耗时">{formatDuration(record.dns_core_duration_ms)}</Descriptions.Item>
         <Descriptions.Item label="当前 strategy">{record.strategy_id ?? "无"}</Descriptions.Item>
         <Descriptions.Item label="upstream target">{record.upstream_target_id ?? "无"}</Descriptions.Item>
         <Descriptions.Item label="actual upstream">{record.upstream_used_id ?? "未确定"}</Descriptions.Item>
@@ -242,6 +245,13 @@ function QueryDetails({ record }: { record: QueryRecord }) {
       ) : null}
     </Space>
   );
+}
+
+export function formatDurationSummary(record: QueryRecord): { total: string; dnsCore: string } {
+  return {
+    total: `总耗时 ${formatDuration(record.duration_ms)}`,
+    dnsCore: `主链 ${formatDuration(record.dns_core_duration_ms)}`,
+  };
 }
 
 export function formatRoute(record: QueryRecord): string {

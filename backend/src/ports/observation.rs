@@ -3,7 +3,7 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use crate::cache::CacheCommitCandidate;
 use crate::dns::{
@@ -52,7 +52,10 @@ pub enum ResolutionTerminal {
 #[derive(Clone)]
 pub struct ResolutionEvent {
     pub occurred_at: SystemTime,
-    pub duration_started_at: Instant,
+    /// 从 transport 接入计时点到 DNS core 完成的服务端总耗时。
+    pub duration_millis: u64,
+    /// 仅覆盖 `DnsCore::resolve_with_completion` 的主链耗时，保留微秒精度供 WebUI 展示。
+    pub dns_core_duration_micros: u64,
     pub listener_id: Arc<str>,
     pub route_id: Option<Arc<str>>,
     pub client_bucket: Option<Arc<str>>,
@@ -79,7 +82,8 @@ impl fmt::Debug for ResolutionEvent {
         formatter
             .debug_struct("ResolutionEvent")
             .field("occurred_at", &self.occurred_at)
-            .field("duration_started_at", &self.duration_started_at)
+            .field("duration_millis", &self.duration_millis)
+            .field("dns_core_duration_micros", &self.dns_core_duration_micros)
             .field("listener_id", &self.listener_id)
             .field("has_route_id", &self.route_id.is_some())
             .field("has_client_bucket", &self.client_bucket.is_some())

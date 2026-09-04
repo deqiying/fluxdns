@@ -50,7 +50,7 @@ const QUERY_COUNT_SQL: &str = "SELECT COUNT(*) FROM resolve_log WHERE transport 
 macro_rules! query_page_sql {
     ($order_by:literal) => {
         concat!(
-            "SELECT id, CAST(event_time_utc AS INTEGER) AS occurred_at_millis, duration_millis, ",
+            "SELECT id, CAST(event_time_utc AS INTEGER) AS occurred_at_millis, duration_millis, dns_core_duration_micros, ",
             "transport, CASE source WHEN 'rule_set' THEN 'rule' ELSE source END AS source, ",
             "CASE rcode WHEN 0 THEN 'NOERROR' WHEN 1 THEN 'FORMERR' WHEN 2 THEN 'SERVFAIL' ",
             "WHEN 3 THEN 'NXDOMAIN' WHEN 4 THEN 'NOTIMP' WHEN 5 THEN 'REFUSED' ELSE 'OTHER' END AS rcode, ",
@@ -336,6 +336,11 @@ impl SqliteManagementReadModel {
                 .try_get("occurred_at_millis")
                 .map_err(|_| read_error(operation))?,
             duration_millis: nonnegative_u64(row, "duration_millis", operation)?,
+            dns_core_duration_micros: optional_nonnegative_u64(
+                row,
+                "dns_core_duration_micros",
+                operation,
+            )?,
             transport: parse_transport(
                 &row.try_get::<String, _>("transport")
                     .map_err(|_| read_error(operation))?,
@@ -611,6 +616,17 @@ fn nonnegative_u64(
     to_u64(value, operation)
 }
 
+fn optional_nonnegative_u64(
+    row: &sqlx::sqlite::SqliteRow,
+    column: &str,
+    operation: &'static str,
+) -> Result<Option<u64>, PortError> {
+    row.try_get::<Option<i64>, _>(column)
+        .map_err(|_| read_error(operation))?
+        .map(|value| to_u64(value, operation))
+        .transpose()
+}
+
 fn to_u64(value: i64, operation: &'static str) -> Result<u64, PortError> {
     u64::try_from(value).map_err(|_| read_error(operation))
 }
@@ -679,9 +695,8 @@ mod tests {
         .unwrap();
         let detail = ResolveEvent {
             occurred_at: SystemTime::now(),
-            duration_started_at: Instant::now()
-                .checked_sub(Duration::from_millis(25))
-                .unwrap(),
+            duration_millis: 25,
+            dns_core_duration_micros: 3_250,
             request_digest: Arc::from("private-digest"),
             listener_id: Arc::from("doh-listener"),
             route_id: Some(Arc::from("private-route")),
@@ -785,6 +800,8 @@ mod tests {
         assert!(item.policy_matched);
         assert!(item.resource_matched);
         assert_eq!(item.detail_status, QueryDetailStatus::Available);
+        assert_eq!(item.duration_millis, 25);
+        assert_eq!(item.dns_core_duration_micros, Some(3_250));
         assert_eq!(item.qname.as_deref(), Some("private.example."));
         assert_eq!(item.qtype, "A");
         assert_eq!(item.client_name.as_deref(), Some("private-client"));
@@ -872,6 +889,7 @@ mod tests {
             .unwrap();
         let item = &result.items[0];
         assert_eq!(item.detail_status, QueryDetailStatus::LegacyRedacted);
+        assert_eq!(item.dns_core_duration_micros, None);
         assert_eq!(item.qtype, "AAAA");
         assert_eq!(item.qname, None);
         assert_eq!(item.client_name, None);

@@ -556,7 +556,8 @@ mod tests {
             .expect("resolved fixture enables detail writer");
         let record = crate::storage::ResolveDetailRecord::from_event(ResolveEvent {
             occurred_at: SystemTime::now(),
-            duration_started_at: Instant::now(),
+            duration_millis: 8,
+            dns_core_duration_micros: 250,
             request_digest: std::sync::Arc::from("request-digest"),
             listener_id: std::sync::Arc::from("udp-main"),
             route_id: None,

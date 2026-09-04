@@ -26,6 +26,7 @@ const MAX_ANSWER_JSON_BYTES: usize = 4_096;
 pub struct ResolveDetailRecord {
     occurred_at: SystemTime,
     duration_millis: u64,
+    dns_core_duration_micros: u64,
     listener_id: String,
     has_route: bool,
     client_ip: Option<IpAddr>,
@@ -84,7 +85,8 @@ impl ResolveDetailRecord {
         };
         Self::from_event(ResolveEvent {
             occurred_at: event.occurred_at,
-            duration_started_at: event.duration_started_at,
+            duration_millis: event.duration_millis,
+            dns_core_duration_micros: event.dns_core_duration_micros,
             request_digest: std::sync::Arc::from(format!("{:032x}", detail.request_id.0)),
             listener_id: std::sync::Arc::clone(&event.listener_id),
             route_id: event.route_id.clone(),
@@ -131,14 +133,13 @@ impl ResolveDetailRecord {
                     .with_safe_context("invalid DNS header RCODE"),
             );
         }
-        let duration_millis =
-            u64::try_from(event.duration_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let answer_count = u32::try_from(event.answers.len()).unwrap_or(u32::MAX);
         let (answers, answers_truncated) = bounded_answers(event.answers)?;
 
         Ok(Self {
             occurred_at: event.occurred_at,
-            duration_millis,
+            duration_millis: event.duration_millis,
+            dns_core_duration_micros: event.dns_core_duration_micros,
             listener_id: event.listener_id.to_string(),
             has_route: event.route_id.is_some(),
             client_ip: event.client_ip,
@@ -174,6 +175,10 @@ impl ResolveDetailRecord {
 
     pub const fn duration_millis(&self) -> u64 {
         self.duration_millis
+    }
+
+    pub const fn dns_core_duration_micros(&self) -> u64 {
+        self.dns_core_duration_micros
     }
 
     pub fn listener_id(&self) -> &str {
@@ -288,6 +293,7 @@ impl fmt::Debug for ResolveDetailRecord {
             .debug_struct("ResolveDetailRecord")
             .field("occurred_at", &self.occurred_at)
             .field("duration_millis", &self.duration_millis)
+            .field("dns_core_duration_micros", &self.dns_core_duration_micros)
             .field("listener_id_byte_len", &self.listener_id.len())
             .field("has_route", &self.has_route)
             .field("has_client_ip", &self.client_ip.is_some())
@@ -390,7 +396,7 @@ fn validate_listener_id(listener_id: &str) -> Result<(), PortError> {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
-    use std::time::{Instant, SystemTime};
+    use std::time::SystemTime;
 
     use crate::dns::{CancelReason, RuntimeRevision, TransportClass};
     use crate::ports::PortErrorClass;
@@ -403,7 +409,8 @@ mod tests {
     fn event(listener_id: &str) -> ResolveEvent {
         ResolveEvent {
             occurred_at: SystemTime::UNIX_EPOCH,
-            duration_started_at: Instant::now(),
+            duration_millis: 8,
+            dns_core_duration_micros: 250,
             request_digest: Arc::from("request-digest-do-not-store"),
             listener_id: Arc::from(listener_id),
             route_id: Some(Arc::from("route-private-id")),
@@ -440,6 +447,8 @@ mod tests {
     fn record_keeps_query_details_and_redacts_debug_output() {
         let record = ResolveDetailRecord::from_event(event("listener-public")).unwrap();
         assert_eq!(record.listener_id(), "listener-public");
+        assert_eq!(record.duration_millis(), 8);
+        assert_eq!(record.dns_core_duration_micros(), 250);
         assert_eq!(record.qname(), "private.example.test.");
         assert!(record.has_route());
         assert_eq!(record.client_ip(), Some("192.0.2.10".parse().unwrap()));

@@ -167,6 +167,8 @@ redaction 在 typed event 构造时完成，不依赖 formatter 最后补救。
 
 四者的持久化和容量边界分别实现；stats 与 resolve log 共享唯一的 typed resolution 完成事件来源，但使用独立下游队列。`logs.enable=false` 或详情队列满不能停止 stats；统一 resolution ingress 满则属于显式的整事件 gap。
 
+resolve log 的服务端总耗时和 DNS 主链耗时在 core 完成时冻结，异步队列和持久化不改变其数值。它们是 authenticated 请求详情字段，不作为 metrics label，避免把高精度请求值引入无界指标维度。
+
 ## 11. Flush 与失败
 
 当前 writer 的 `flush(deadline)` 在 deadline 内逐项调用 `TelemetryOutput`，成功项计入 emitted，输出失败项放回队首并保留 pending；deadline 到期返回 timeout，不会静默丢失队列。`shutdown(deadline)` 先关闭新事件，再复用同一 flush 边界。生产 `DnsService` 通过 Supervisor 每 5 秒执行一次 bounded flush；服务 shutdown 先停止该 task，再在统一 deadline 内执行最终 `TelemetryWriter::shutdown`。

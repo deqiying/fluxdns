@@ -3,7 +3,7 @@
 use std::fmt;
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime};
+use std::time::SystemTime;
 
 use crate::dns::{CancelReason, Deadline, RuntimeRevision, TransportClass};
 use crate::resource::ResourceVersion;
@@ -354,7 +354,8 @@ pub trait StatsRecorder: Send + Sync {
 #[derive(Clone)]
 pub struct ResolveEvent {
     pub occurred_at: SystemTime,
-    pub duration_started_at: Instant,
+    pub duration_millis: u64,
+    pub dns_core_duration_micros: u64,
     pub request_digest: Arc<str>,
     pub listener_id: Arc<str>,
     pub route_id: Option<Arc<str>>,
@@ -419,7 +420,8 @@ impl fmt::Debug for ResolveEvent {
         formatter
             .debug_struct("ResolveEvent")
             .field("occurred_at", &self.occurred_at)
-            .field("duration_started_at", &self.duration_started_at)
+            .field("duration_millis", &self.duration_millis)
+            .field("dns_core_duration_micros", &self.dns_core_duration_micros)
             .field("has_request_digest", &!self.request_digest.is_empty())
             .field("listener_id", &self.listener_id)
             .field("has_route_id", &self.route_id.is_some())
@@ -536,7 +538,8 @@ mod tests {
     fn resolve_event_debug_does_not_expose_qname_or_client_details() {
         let event = ResolveEvent {
             occurred_at: SystemTime::UNIX_EPOCH,
-            duration_started_at: Instant::now(),
+            duration_millis: 8,
+            dns_core_duration_micros: 250,
             request_digest: Arc::from("request-digest-do-not-log"),
             listener_id: Arc::from("listener-public-id"),
             route_id: Some(Arc::from("route-private-id")),
