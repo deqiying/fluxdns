@@ -41,6 +41,29 @@ $frontendDistDirectory = Join-Path $frontendDirectory "dist"
 $backendManifest = Join-Path $repositoryRoot "backend/Cargo.toml"
 $deployDirectory = Join-Path $repositoryRoot "deploy"
 
+$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+if ($architecture -ne [System.Runtime.InteropServices.Architecture]::X64) {
+    throw "当前打包脚本只支持 x86_64，检测到架构：$architecture。"
+}
+
+$target = if ($IsWindows) {
+    [pscustomobject]@{
+        Triple = "x86_64-pc-windows-msvc"
+        SourceName = "fluxdns.exe"
+        DestinationName = "fluxdns-windows-x86_64.exe"
+    }
+}
+elseif ($IsLinux) {
+    [pscustomobject]@{
+        Triple = "x86_64-unknown-linux-gnu"
+        SourceName = "fluxdns"
+        DestinationName = "fluxdns-linux-x86_64"
+    }
+}
+else {
+    throw "当前打包脚本只支持 Windows x86_64 与 Linux x86_64。"
+}
+
 Require-Command -Name "pnpm"
 Require-Command -Name "cargo"
 
@@ -48,49 +71,7 @@ if (-not (Test-Path -LiteralPath $backendManifest -PathType Leaf)) {
     throw "后端 manifest 不存在：$backendManifest"
 }
 
-# 先确认发布 feature，避免在前端构建后才发现只能生成未内嵌资源的普通 binary。
-Write-Host "检查 webui-embed feature..."
-$metadataOutput = & cargo metadata --locked --no-deps --format-version 1 --manifest-path $backendManifest
-if ($LASTEXITCODE -ne 0) {
-    throw "无法读取 Cargo metadata，无法确认 webui-embed feature。"
-}
-$metadata = $metadataOutput | ConvertFrom-Json
-$package = @($metadata.packages | Where-Object { $_.name -eq "fluxdns" }) | Select-Object -First 1
-$featureNames = if ($null -eq $package -or $null -eq $package.features) {
-    @()
-} else {
-    @($package.features.PSObject.Properties | ForEach-Object { $_.Name })
-}
-if ($featureNames -notcontains "webui-embed") {
-    throw "backend/Cargo.toml 尚未声明 webui-embed feature；为避免生成未内嵌前端资源的发布物，打包已停止。"
-}
-
-$targets = @(
-    [pscustomobject]@{
-        Triple = "x86_64-unknown-linux-gnu"
-        SourceName = "fluxdns"
-        DestinationName = "fluxdns-linux-x86_64"
-    },
-    [pscustomobject]@{
-        Triple = "x86_64-pc-windows-msvc"
-        SourceName = "fluxdns.exe"
-        DestinationName = "fluxdns-windows-x86_64.exe"
-    }
-)
-
-if ($null -ne (Get-Command "rustup" -ErrorAction SilentlyContinue)) {
-    $installedTargets = @(rustup target list --installed)
-    if ($LASTEXITCODE -ne 0) {
-        throw "无法读取 Rust target 列表；请确认 rustup/toolchain 可用。"
-    }
-    foreach ($target in $targets) {
-        if ($installedTargets -notcontains $target.Triple) {
-            throw "Rust target $($target.Triple) 未安装；请在运行脚本前准备该 target 和对应 linker。脚本不会自动安装工具链。"
-        }
-    }
-}
-
-Write-Host "构建前端（产物保留在 frontend/dist）..."
+Write-Host "阶段 1/3：构建前端独立构建物（frontend/dist）..."
 Push-Location $frontendDirectory
 try {
     Invoke-CheckedCommand -Name "pnpm" -Arguments @("install", "--frozen-lockfile")
@@ -105,45 +86,80 @@ if (-not (Test-Path -LiteralPath $frontendEntry -PathType Leaf)) {
     throw "前端构建完成但缺少 frontend/dist/index.html。"
 }
 
+Write-Host "阶段 2/3：构建后端独立构建物（默认 feature）..."
+Invoke-CheckedCommand -Name "cargo" -Arguments @(
+    "build",
+    "--manifest-path", $backendManifest,
+    "--locked",
+    "--release"
+)
+$backendBinary = Join-Path $repositoryRoot "backend/target/release/$($target.SourceName)"
+if (-not (Test-Path -LiteralPath $backendBinary -PathType Leaf)) {
+    throw "后端构建完成但未找到独立构建物：$backendBinary"
+}
+
+# 独立构建物完成后再检查内嵌发布能力；目标平台缺失不应阻止前两阶段产物落地。
+Write-Host "阶段 3/3：检查 webui-embed feature 与 $($target.Triple) target..."
+$metadataOutput = & cargo metadata --locked --no-deps --format-version 1 --manifest-path $backendManifest
+if ($LASTEXITCODE -ne 0) {
+    throw "无法读取 Cargo metadata，无法确认 webui-embed feature。"
+}
+$metadata = $metadataOutput | ConvertFrom-Json
+$package = @($metadata.packages | Where-Object { $_.name -eq "fluxdns" }) | Select-Object -First 1
+$featureNames = if ($null -eq $package -or $null -eq $package.features) {
+    @()
+} else {
+    @($package.features.PSObject.Properties | ForEach-Object { $_.Name })
+}
+if ($featureNames -notcontains "webui-embed") {
+    throw "backend/Cargo.toml 尚未声明 webui-embed feature；前后端独立构建物已保留，未生成发布物。"
+}
+
+if ($null -ne (Get-Command "rustup" -ErrorAction SilentlyContinue)) {
+    $installedTargets = @(rustup target list --installed)
+    if ($LASTEXITCODE -ne 0) {
+        throw "无法读取 Rust target 列表；请确认 rustup/toolchain 可用。"
+    }
+    if ($installedTargets -notcontains $target.Triple) {
+        throw "Rust target $($target.Triple) 未安装；前后端独立构建物已保留，请准备当前平台 target 和 linker 后重试。脚本不会自动安装工具链。"
+    }
+}
+
+Write-Host "构建内嵌 WebUI 的单一发布物（$($target.Triple)）..."
+Invoke-CheckedCommand -Name "cargo" -Arguments @(
+    "build",
+    "--manifest-path", $backendManifest,
+    "--locked",
+    "--release",
+    "--features", "webui-embed",
+    "--target", $target.Triple
+)
+
+$embeddedBinary = Join-Path $repositoryRoot "backend/target/$($target.Triple)/release/$($target.SourceName)"
+if (-not (Test-Path -LiteralPath $embeddedBinary -PathType Leaf)) {
+    throw "内嵌 WebUI 构建完成但未找到目标文件：$embeddedBinary"
+}
+
+# Cargo target 目录保留原生构建物；deploy 每次只接收当前平台的最终发布文件。
 New-Item -ItemType Directory -Path $deployDirectory -Force | Out-Null
-$temporaryOutputs = [System.Collections.Generic.List[string]]::new()
+$destinationBinary = Join-Path $deployDirectory $target.DestinationName
+$temporaryBinary = "$destinationBinary.partial-$PID"
 try {
-    foreach ($target in $targets) {
-        Write-Host "构建 $($target.Triple)（Cargo 产物保留在 backend/target）..."
-        Invoke-CheckedCommand -Name "cargo" -Arguments @(
-            "build",
-            "--manifest-path", $backendManifest,
-            "--locked",
-            "--release",
-            "--features", "webui-embed",
-            "--target", $target.Triple
-        )
+    Copy-Item -LiteralPath $embeddedBinary -Destination $temporaryBinary -Force
+    Move-Item -LiteralPath $temporaryBinary -Destination $destinationBinary -Force
 
-        $sourceBinary = Join-Path $repositoryRoot "backend/target/$($target.Triple)/release/$($target.SourceName)"
-        if (-not (Test-Path -LiteralPath $sourceBinary -PathType Leaf)) {
-            throw "Cargo 构建成功但未找到目标文件：$sourceBinary"
-        }
-
-        # Cargo target 目录保留原生构建物；deploy 只接收最终发布文件。
-        $destinationBinary = Join-Path $deployDirectory $target.DestinationName
-        $temporaryBinary = "$destinationBinary.partial-$PID"
-        $temporaryOutputs.Add($temporaryBinary)
-        Copy-Item -LiteralPath $sourceBinary -Destination $temporaryBinary -Force
-        Move-Item -LiteralPath $temporaryBinary -Destination $destinationBinary -Force
-        $temporaryOutputs.Remove($temporaryBinary) | Out-Null
-
-        if ($IsLinux) {
-            Invoke-CheckedCommand -Name "chmod" -Arguments @("+x", $destinationBinary)
-        }
-        Write-Host "已输出：$destinationBinary"
+    if ($IsLinux) {
+        Invoke-CheckedCommand -Name "chmod" -Arguments @("+x", $destinationBinary)
     }
 }
 finally {
-    foreach ($temporaryBinary in $temporaryOutputs) {
-        if (Test-Path -LiteralPath $temporaryBinary) {
-            Remove-Item -LiteralPath $temporaryBinary -Force
-        }
+    if (Test-Path -LiteralPath $temporaryBinary -PathType Leaf) {
+        Remove-Item -LiteralPath $temporaryBinary -Force
     }
 }
 
-Write-Host "打包完成。前端独立产物：$frontendDistDirectory；后端 Cargo 产物：$(Join-Path $repositoryRoot 'backend/target')；发布二进制：$deployDirectory。"
+Write-Host "打包完成。"
+Write-Host "前端独立构建物：$frontendDistDirectory"
+Write-Host "后端独立构建物：$backendBinary"
+Write-Host "内嵌 WebUI Cargo 构建物：$embeddedBinary"
+Write-Host "当前平台发布物：$destinationBinary"
