@@ -84,9 +84,9 @@ mise exec -- node --version
 
 新增前端技术栈或测试框架后，如产生其他固定目录，应在提交代码前同步补充 `.gitignore` 和本规范；不要通过 `git add -f` 强行提交构建物。个人配置、数据库、日志和本地测试运行时文件统一放在 `_fluxdns/`，其目录规则见[本地测试规范](local-testing.md)。
 
-前端和后端的独立构建物不得重定向到 `deploy/`：`frontend/dist/` 由 Vite 保留，`backend/target/` 由 Cargo 保留。发布脚本只在两个目标构建成功后复制最终文件到 `deploy/`，不移动或清理上述目录。
+前端和后端的独立构建物不得重定向到 `deploy/`：`frontend/dist/` 由 Vite 保留，使用默认 feature 的后端 release 保留在 `backend/target/release/`，带 `webui-embed` 的当前平台 Cargo 构建物保留在 `backend/target/<triple>/release/`。发布脚本只复制当前平台最终文件到 `deploy/`，不移动或清理上述目录。
 
-双平台发布打包从仓库根目录执行 `pwsh -File script/package-embedded.ps1`；脚本要求 `webui-embed` feature、两个 Rust target 及对应 linker 已提前准备，不自动安装工具链。运行时使用 `pwsh -File script/dev.ps1 start -ConfigPath <path>`，配置路径为必填参数，不能省略或依赖脚本默认值；可用 `pwsh -File script/dev.ps1 status` 查看状态，或用 `pwsh -File script/dev.ps1 stop` 停止由脚本启动的进程。
+发布打包从仓库根目录执行 `pwsh -File script/package-embedded.ps1`。脚本先构建前端和默认 feature 的后端独立构建物，再检查 `webui-embed` feature 与当前 x86_64 平台 target，并生成一个内嵌 WebUI 的发布二进制；Windows 输出 `deploy/fluxdns-windows-x86_64.exe`，Linux 输出 `deploy/fluxdns-linux-x86_64`。双平台发布应在 Windows x86_64 与 Linux x86_64 原生 runner 上分别执行，不要求单次调用具备跨平台 target/linker；脚本不自动安装工具链。运行时使用 `pwsh -File script/dev.ps1 start -ConfigPath <path>`，配置路径为必填参数，不能省略或依赖脚本默认值；可用 `pwsh -File script/dev.ps1 status` 查看状态，或用 `pwsh -File script/dev.ps1 stop` 停止由脚本启动的进程。
 
 ## 4. 工具安装边界
 

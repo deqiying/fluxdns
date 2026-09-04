@@ -2,7 +2,7 @@
 
 > 文档状态：有效
 >
-> 实现状态：已实现（真实浏览器与双平台发布验收待环境执行）
+> 实现状态：已实现
 >
 > 适用范围：FluxDNS 只读 WebUI 首版从契约冻结、工程初始化到可交付验收的具体开发步骤；不负责配置写入、运行时控制或 DNS 数据面功能
 >
@@ -12,7 +12,7 @@
 
 ## 1. 结论
 
-当前前端已完成 F0–F5 的代码实现：工程骨架、setup 初始化、鉴权、应用壳和只读页面已接入后端 Management API；类型检查、29 项组件/contract tests、生产构建和 `webui-embed` 静态资源测试已通过。真实浏览器同源 Network/Storage smoke 与双平台发布仍需在对应环境执行，因此文档不把 mock 或 handler 测试描述为真实端到端证据。
+当前前端已完成 F0–F5 的代码实现：工程骨架、setup 初始化、鉴权、应用壳和只读页面已接入后端 Management API；类型检查、29 项组件/contract tests、生产构建、`webui-embed` 静态资源测试和 Windows 当前平台打包已通过。真实浏览器同源 Network/Storage smoke 与 Linux 原生发布仍需在对应环境执行，因此文档不把 mock、handler 测试或 Windows 单平台构建描述为完整端到端证据。
 
 首版交付目标是一个通过同源 `/api/v1` 访问管理面的 React + TypeScript + Vite SPA，使用服务端 session Cookie，提供登录、Dashboard、Runtime、Health、Statistics、Queries、Resources 和 System 的只读视图。首版不把任何前端页面或请求接到 UDP/TCP/DoH 数据面，不读取 SQLite、配置文件或服务日志，也不新增配置编辑、reload/restart、缓存清理、资源刷新和 WebSocket/SSE。
 
@@ -27,7 +27,7 @@
 | F2 | 已完成 | 统一 fetch、超时/取消、错误 envelope、401、session/login/logout 和 `ProtectedRoute` 已实现并有测试。 |
 | F3 | 已完成 | 应用壳、Dashboard、Runtime、Health、System 与受控轮询已实现。 |
 | F4 | 已完成 | Statistics、Queries、Resources 的服务端参数、分页、筛选和安全摘要已实现。 |
-| F5 | 已完成代码 | setup -> session、真实 API client、静态托管契约和发布入口已接入；真实浏览器安全 smoke 与双平台 binary 仍待相应环境。 |
+| F5 | 已完成代码 | setup -> session、真实 API client、静态托管契约和当前平台单 binary 发布入口已接入；真实浏览器安全 smoke 与 Linux binary 仍待相应环境。 |
 
 ## 2. 当前基线和事实依据
 
@@ -91,7 +91,7 @@ Browser
 
 ### 5.1 接口分组
 
-下表汇总已由 [`management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 冻结的前端目标契约；后端接口仍未实现：
+下表汇总已由 [`management-api-v1.yaml`](../../frontend/openapi/management-api-v1.yaml) 冻结并由 Management Server 实现的前端目标契约：
 
 | 分组 | 目标接口 | 前端用途 | 当前状态 |
 | --- | --- | --- | --- |
@@ -289,7 +289,7 @@ pnpm run test
 pnpm run build
 ```
 
-2026-09-04 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、29 项 tests 通过（含初始化并发 `409` 后刷新 setup 状态并返回登录页）；Vite 生产构建成功，生产 `dist/` 不包含 MSW worker；后端 `webui-embed` 测试覆盖 SPA fallback、HEAD、ETag 和静态响应头。MSW fixture smoke 覆盖 setup、初始化、登录、只读页面和登出，并断言未写入浏览器持久化存储；Windows `webui-embed` release binary 的真实 HTTP smoke 已覆盖 SPA 200、setup required、未认证 401、初始化后 session/overview 200 和重复 setup 409，且在临时移出 `frontend/dist/` 后仍能返回嵌入 SPA；真实 HTTP 响应已检查 CSP、`nosniff`、缓存策略和 ETag/304 空 body；`dev.ps1` 已用显式 `-ConfigPath`/`-BinaryPath` 完成 `start`、`status`、`stop` 生命周期 smoke；in-app browser 已检查真实 `/initialize` 页面、表单校验和 Console。浏览器 Cookie/Network/Storage 观察与 Linux target 发布尚未执行，不将这些边界写成已通过。
+2026-09-04 的当前证据为：`typecheck` 通过；Vitest 5 个 test files、29 项 tests 通过（含初始化并发 `409` 后刷新 setup 状态并返回登录页）；Vite 生产构建成功，生产 `dist/` 不包含 MSW worker；后端 `webui-embed` 测试覆盖 SPA fallback、HEAD、ETag 和静态响应头。`package-embedded.ps1` 已在 Windows x86_64 按“前端独立构建 -> 默认 feature 后端 release -> 当前平台内嵌 WebUI release”顺序通过，`deploy/fluxdns-windows-x86_64.exe` 与对应 target Cargo binary 的 SHA-256 一致，并已通过真实配置 `validate`。MSW fixture smoke 覆盖 setup、初始化、登录、只读页面和登出，并断言未写入浏览器持久化存储；Windows release binary 的真实 HTTP smoke 已覆盖 SPA 200、setup required、未认证 401、初始化后 session/overview 200 和重复 setup 409，且在临时移出 `frontend/dist/` 后仍能返回嵌入 SPA；真实 HTTP 响应已检查 CSP、`nosniff`、缓存策略和 ETag/304 空 body；`dev.ps1` 已用显式 `-ConfigPath`/`-BinaryPath` 完成 `start`、`status`、`stop` 生命周期 smoke；in-app browser 已检查真实 `/initialize` 页面、表单校验和 Console。浏览器 Cookie/Network/Storage 观察与 Linux 原生发布尚未执行，不将这些边界写成已通过。
 
 ### 10.2 Management API 集成验收
 
@@ -308,18 +308,18 @@ pnpm run build
 - 新文档只使用仓库内相对链接，不写个人绝对路径、凭据或本地产物；
 - 执行 `git diff --check`、链接目标检查和 `git status --short`；
 - 若后续实现改变 API、配置或静态托管契约，同步更新前端架构、后端架构/配置文档和相关测试说明；
-- 未实施部分必须保持明确边界：后端 Management API 已实现，但真实浏览器同源联调与双平台发布验收仍不能以 mock、handler 或单平台构建替代。
+- 未实施部分必须保持明确边界：后端 Management API 已实现，但真实浏览器同源联调与 Linux 原生发布验收仍不能以 mock、handler 或 Windows 单平台构建替代。
 
 ## 11. 风险、决策门和后续拆分
 
 | 风险/未决项 | 影响 | 处理方式 |
 | --- | --- | --- |
-| 真实浏览器与双平台环境尚未执行 | 无法把 Cookie/CSP/静态托管和发布 binary 标记为最终验收通过 | 在具备本地 Management Server、浏览器和对应 Rust target/linker 的环境补做；保留当前 mock、handler 和 embed 测试作为代码级证据。 |
+| 真实浏览器与 Linux 原生环境尚未执行 | 无法把 Cookie/Storage 和 Linux 发布 binary 标记为最终验收通过 | 在具备浏览器能力和 Linux x86_64 原生 Rust toolchain 的环境补做；保留当前 mock、handler、embed 测试和 Windows 打包作为已有证据。 |
 | 项目级 Node/pnpm 基线 | 已解决；工具版本与缓存路径可复现 | `mise.toml` 固定 Node.js 26.8.1 / pnpm 11.25.0，前端 manifest、lockfile 与环境规范同步维护。 |
 | `resolve_log` 含敏感 qname | 错误 projection 可能泄露请求数据 | 默认只做安全摘要；后端 contract test 固定禁止字段，任何扩展需单独授权。 |
 | health/metrics 只有内部 registry | 页面可能直接依赖实现细节 | 后端增加只读 adapter/DTO；前端只依赖版本化 JSON。 |
 | 轮询增加管理面负载 | 多页面打开时触发限流 | 由 API 契约给出采样/限流边界；页面隐藏暂停，`429` 退避，避免各模块自定义无限重试。 |
-| 发布环境 target/linker 不完整 | 无法生成双平台单 binary | `package-embedded.ps1` 在构建前检查 feature/target，缺失时 fail fast；不自动安装工具链。 |
+| 当前平台 target/linker 不完整 | 无法生成该平台的内嵌 WebUI binary | `package-embedded.ps1` 先保留前后端独立构建物，再检查当前平台 feature/target 并 fail fast；不自动安装工具链，也不要求单个 runner 交叉构建另一平台。 |
 
 后续若增加配置写入或 runtime command，应另建独立方案，至少补充权限模型、CSRF、审计、revision conflict、幂等、确认交互和失败回滚；不得在本方案的只读模块中预留未定义的 command client。
 

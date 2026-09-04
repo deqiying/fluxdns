@@ -10,7 +10,7 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 ## 项目状态
 
-后端总体架构和 12 个模块方案已经完成，核心配置、Runtime、DNS 数据面、Storage、Observability 与 WebUI Management Server 已按阶段实现；更完整的后端进度和未完成项见[后端开发计划](docs/backend/development-plan.md)。本轮 v2 已接入独立 Management HTTP listener、setup/login/session、配置事务恢复、内嵌 SPA、七个只读 API 及前端 `/initialize` 集成。Windows release binary HTTP smoke 与 in-app browser DOM/Console smoke 已完成，浏览器 Network/Storage 观察和双平台发布仍需在对应环境执行。
+后端总体架构和 12 个模块方案已经完成，核心配置、Runtime、DNS 数据面、Storage、Observability 与 WebUI Management Server 已按阶段实现；更完整的后端进度和未完成项见[后端开发计划](docs/backend/development-plan.md)。本轮 v2 已接入独立 Management HTTP listener、setup/login/session、配置事务恢复、内嵌 SPA、七个只读 API 及前端 `/initialize` 集成。Windows 当前平台打包和 release binary HTTP smoke、in-app browser DOM/Console smoke 已完成，浏览器 Network/Storage 观察和 Linux 原生发布仍需在对应环境执行。
 
 当前 `run` 已能通过真实系统 socket 启动 UDP/TCP/DoH plain HTTP 服务，支持内联和 Resource hosts 响应、同一 TCP 连接连续 frame、DoH GET/POST 和 Ctrl-C 优雅停机。DoH 首轮只接受 `tls.mode: external` 与 `client_ip.source: peer`，TLS terminate、forwarded header、PROXY protocol 会在 service 装配阶段明确拒绝，不会误接到 raw DNS/TCP。upstream 当前具备内联 hosts connector、纯选择器和 outcome/fallback 判定，但尚未执行真实出站 I/O 或接入 DNS Core。cache 当前具备内存 adapter 的 lookup、质量 CAS、失效、single-flight、响应准入/TTL、key builder、CacheFacade 和共享容量淘汰，optimistic refresh 与持久化仍未完成；policy 当前具备 client ID/CIDR、strategy、listener/DoH route、const/file resource loader 和 rule/hosts 请求级 plan 首轮组合；resource 当前具备 hosts/rule parser、受限 regex、const/file loader 和 snapshot/CAS；storage 当前具备内存 stats epoch/ledger；observability 当前具备有界 metrics/health registry。Runtime snapshot 资源原子接线、remote refresh、DoH outbound/bootstrap、Moka/SQLite persistence、详情/final writer 和完整 DNS Core→Policy→Cache→Upstream 管线仍未完成。SecretRef 实际值不会由普通 YAML load 读取，仅由后续 adapter 通过显式 accessor 请求。
 
@@ -18,7 +18,7 @@ FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析�
 
 - `backend/`：Rust 后端的独立主目录，包含 `Cargo.toml`、`Cargo.lock` 与 `src/`；
 - `frontend/`：React + TypeScript + Vite 的只读 WebUI 工程；支持真实 Management API 和 contract fixture 独立开发；
-- `script/`：双平台内嵌 WebUI 发布打包与开发服务生命周期脚本；`package-embedded.ps1` 生成发布二进制，`dev.ps1` 提供显式配置启动、状态查看和停止；脚本会检查 `webui-embed`、前端产物和 Rust target，linker 在对应 Cargo 构建阶段校验；
+- `script/`：内嵌 WebUI 发布打包与开发服务生命周期脚本；`package-embedded.ps1` 依次生成前端、后端独立构建物和当前平台的单个发布二进制，双平台由 Windows/Linux x86_64 runner 分别执行；`dev.ps1` 提供显式配置启动、状态查看和停止；
 - `deploy/`：用于存放打包脚本生成的发布二进制，目录及内容已加入 `.gitignore`；
 - `docs/`：仓库级技术文档，入口见 [docs/README.md](docs/README.md)；
 - `config-example.yaml`：仓库级配置示例；
