@@ -1,0 +1,421 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+<title id="title">FluxDNS · 服务状态 · 深色模式</title>
+<desc id="desc">管理后台视觉规划效果图。全部数值、地址和配置均为演示内容，不代表当前产品已实现的功能。</desc>
+<metadata id="icon-license">ISC License
+
+Copyright (c) 2026 Lucide Icons and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+---
+
+The following Lucide icons are derived from the Feather project:
+
+airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+
+The MIT License (MIT) (for the icons listed above)
+
+Copyright (c) 2013-present Cole Bemis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</metadata>
+<defs>
+<style>text { font-family: 'Segoe UI Variable Text','Segoe UI','Microsoft YaHei UI','Microsoft YaHei',sans-serif; letter-spacing:0; } .numeric { font-variant-numeric:tabular-nums; } .mono { font-family:'SFMono-Regular',Consolas,'Microsoft YaHei UI',monospace; }</style>
+<filter id="modal-shadow" x="-15%" y="-15%" width="130%" height="145%">
+<feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#102039" flood-opacity=".2"/>
+</filter>
+<filter id="small-shadow" x="-10%" y="-20%" width="120%" height="150%">
+<feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#000" flood-opacity=".06"/>
+</filter>
+<g id="icon-Network">
+<rect x="16" y="16" width="6" height="6" rx="1"/>
+<rect x="2" y="16" width="6" height="6" rx="1"/>
+<rect x="9" y="2" width="6" height="6" rx="1"/>
+<path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/>
+<path d="M12 12V8"/>
+</g>
+<g id="icon-ChevronsUpDown">
+<path d="m7 15 5 5 5-5"/>
+<path d="m7 9 5-5 5 5"/>
+</g>
+<g id="icon-Activity">
+<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>
+</g>
+<g id="icon-ListFilter">
+<path d="M2 5h20"/>
+<path d="M6 12h12"/>
+<path d="M9 19h6"/>
+</g>
+<g id="icon-Radio">
+<path d="M16.247 7.761a6 6 0 0 1 0 8.478"/>
+<path d="M19.075 4.933a10 10 0 0 1 0 14.134"/>
+<path d="M4.925 19.067a10 10 0 0 1 0-14.134"/>
+<path d="M7.753 16.239a6 6 0 0 1 0-8.478"/>
+<circle cx="12" cy="12" r="2"/>
+</g>
+<g id="icon-SlidersHorizontal">
+<path d="M10 5H3"/>
+<path d="M12 19H3"/>
+<path d="M14 3v4"/>
+<path d="M16 17v4"/>
+<path d="M21 12h-9"/>
+<path d="M21 19h-5"/>
+<path d="M21 5h-7"/>
+<path d="M8 10v4"/>
+<path d="M8 12H3"/>
+</g>
+<g id="icon-Workflow">
+<rect width="8" height="8" x="3" y="3" rx="2"/>
+<path d="M7 11v4a2 2 0 0 0 2 2h4"/>
+<rect width="8" height="8" x="13" y="13" rx="2"/>
+</g>
+<g id="icon-FileCode2">
+<path d="M4 12.15V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2h-3.35"/>
+<path d="M14 2v5a1 1 0 0 0 1 1h5"/>
+<path d="m5 16-3 3 3 3"/>
+<path d="m9 22 3-3-3-3"/>
+</g>
+<g id="icon-Layers">
+<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/>
+<path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/>
+<path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/>
+</g>
+<g id="icon-Laptop">
+<path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"/>
+<path d="M20.054 15.987H3.946"/>
+</g>
+<g id="icon-Waypoints">
+<path d="m10.586 5.414-5.172 5.172"/>
+<path d="m18.586 13.414-5.172 5.172"/>
+<path d="M6 12h12"/>
+<circle cx="12" cy="20" r="2"/>
+<circle cx="12" cy="4" r="2"/>
+<circle cx="20" cy="12" r="2"/>
+<circle cx="4" cy="12" r="2"/>
+</g>
+<g id="icon-Settings2">
+<path d="M14 17H5"/>
+<path d="M19 7h-9"/>
+<circle cx="17" cy="17" r="3"/>
+<circle cx="7" cy="7" r="3"/>
+</g>
+<g id="icon-Gauge">
+<path d="m12 14 4-4"/>
+<path d="M3.34 19a10 10 0 1 1 17.32 0"/>
+</g>
+<g id="icon-LogOut">
+<path d="m16 17 5-5-5-5"/>
+<path d="M21 12H9"/>
+<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+</g>
+<g id="icon-PanelLeft">
+<rect width="18" height="18" x="3" y="3" rx="2"/>
+<path d="M9 3v18"/>
+</g>
+<g id="icon-ChevronRight">
+<path d="m9 18 6-6-6-6"/>
+</g>
+<g id="icon-Bell">
+<path d="M10.268 21a2 2 0 0 0 3.464 0"/>
+<path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>
+</g>
+<g id="icon-RefreshCw">
+<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+<path d="M21 3v5h-5"/>
+<path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+<path d="M8 16H3v5"/>
+</g>
+<g id="icon-MemoryStick">
+<path d="M12 12v-2"/>
+<path d="M12 18v-2"/>
+<path d="M16 12v-2"/>
+<path d="M16 18v-2"/>
+<path d="M2 11h1.5"/>
+<path d="M20 18v-2"/>
+<path d="M20.5 11H22"/>
+<path d="M4 18v-2"/>
+<path d="M8 12v-2"/>
+<path d="M8 18v-2"/>
+<rect x="2" y="6" width="20" height="10" rx="2"/>
+</g>
+<g id="icon-ChartNoAxesColumnIncreasing">
+<path d="M5 21v-6"/>
+<path d="M12 21V9"/>
+<path d="M19 21V3"/>
+</g>
+<g id="icon-Cable">
+<path d="M17 19a1 1 0 0 1-1-1v-2a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2a1 1 0 0 1-1 1z"/>
+<path d="M17 21v-2"/>
+<path d="M19 14V6.5a1 1 0 0 0-7 0v11a1 1 0 0 1-7 0V10"/>
+<path d="M21 21v-2"/>
+<path d="M3 5V3"/>
+<path d="M4 10a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2a2 2 0 0 1-2 2z"/>
+<path d="M7 5V3"/>
+</g>
+<g id="icon-ArrowUpRight">
+<path d="M7 7h10v10"/>
+<path d="M7 17 17 7"/>
+</g>
+<g id="icon-Plus">
+<path d="M5 12h14"/>
+<path d="M12 5v14"/>
+</g>
+<g id="icon-Search">
+<path d="m21 21-4.34-4.34"/>
+<circle cx="11" cy="11" r="8"/>
+</g>
+<g id="icon-ChevronDown">
+<path d="m6 9 6 6 6-6"/>
+</g>
+<g id="icon-Globe2">
+<path d="M21.54 15H17a2 2 0 0 0-2 2v4.54"/>
+<path d="M7 3.34V5a3 3 0 0 0 3 3a2 2 0 0 1 2 2c0 1.1.9 2 2 2a2 2 0 0 0 2-2c0-1.1.9-2 2-2h3.17"/>
+<path d="M11 21.95V18a2 2 0 0 0-2-2a2 2 0 0 1-2-2v-1a2 2 0 0 0-2-2H2.05"/>
+<circle cx="12" cy="12" r="10"/>
+</g>
+<g id="icon-Pencil">
+<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>
+<path d="m15 5 4 4"/>
+</g>
+<g id="icon-Ellipsis">
+<circle cx="12" cy="12" r="1"/>
+<circle cx="19" cy="12" r="1"/>
+<circle cx="5" cy="12" r="1"/>
+</g>
+<g id="icon-ChevronLeft">
+<path d="m15 18-6-6 6-6"/>
+</g>
+<g id="icon-X">
+<path d="M18 6 6 18"/>
+<path d="m6 6 12 12"/>
+</g>
+<g id="icon-LockKeyhole">
+<circle cx="12" cy="16" r="1"/>
+<rect x="3" y="10" width="18" height="12" rx="2"/>
+<path d="M7 10V7a5 5 0 0 1 10 0v3"/>
+</g>
+<g id="icon-Check">
+<path d="M20 6 9 17l-5-5"/>
+</g>
+</defs>
+<rect x="0" y="0" width="1600" height="1040" rx="0" fill="#1C1C1E" stroke="none" />
+<rect x="0" y="0" width="244" height="1040" rx="0" fill="#242426" stroke="none" />
+<line x1="244" y1="0" x2="244" y2="1040" stroke="#3A3A3D" />
+<rect x="24" y="29" width="34" height="34" rx="8" fill="#5AA6FF" stroke="none" />
+<svg x="31" y="36" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Network"/>
+</svg>
+<text x="70" y="54" font-size="23" fill="#F5F5F7" font-weight="650" data-max-width="148" >FluxDNS</text>
+<rect x="18" y="86" width="208" height="35" rx="6" fill="#303033" stroke="none" />
+<circle cx="34" cy="104" r="3.5" fill="#72CC99" />
+<text x="47" y="109" font-size="13" fill="#B4B4BD" font-weight="500" data-max-width="135" >主实例</text>
+<svg x="201" y="97" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#B4B4BD" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronsUpDown"/>
+</svg>
+<text x="29" y="145" font-size="11.5" fill="#96969F" font-weight="500" data-max-width="180" >监控</text>
+<rect x="16" y="161" width="212" height="37" rx="6" fill="#293B52" stroke="none" />
+<svg x="29" y="170" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#81B8FF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Activity"/>
+</svg>
+<text x="61" y="186" font-size="14.5" fill="#91C2FF" font-weight="600" data-max-width="151" >服务状态</text>
+<svg x="29" y="213" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ListFilter"/>
+</svg>
+<text x="61" y="229" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >解析记录</text>
+<circle cx="207" cy="222" r="3.5" fill="#5AA6FF" />
+<text x="29" y="295" font-size="11.5" fill="#96969F" font-weight="500" data-max-width="180" >DNS 管理</text>
+<svg x="29" y="320" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Radio"/>
+</svg>
+<text x="61" y="336" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >监听入口</text>
+<svg x="29" y="363" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Network"/>
+</svg>
+<text x="61" y="379" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >DNS 上游</text>
+<svg x="29" y="406" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-SlidersHorizontal"/>
+</svg>
+<text x="61" y="422" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >DNS 配置</text>
+<svg x="29" y="449" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Workflow"/>
+</svg>
+<text x="61" y="465" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >DNS 分流策略</text>
+<svg x="29" y="492" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-FileCode2"/>
+</svg>
+<text x="61" y="508" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >Hosts 配置</text>
+<svg x="29" y="535" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Layers"/>
+</svg>
+<text x="61" y="551" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >规则集</text>
+<svg x="29" y="578" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Laptop"/>
+</svg>
+<text x="61" y="594" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >客户端配置</text>
+<svg x="29" y="621" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Waypoints"/>
+</svg>
+<text x="61" y="637" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >代理配置</text>
+<text x="29" y="723" font-size="11.5" fill="#96969F" font-weight="500" data-max-width="180" >系统</text>
+<svg x="29" y="748" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Settings2"/>
+</svg>
+<text x="61" y="764" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >系统配置</text>
+<svg x="29" y="791" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#A1A1AB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Gauge"/>
+</svg>
+<text x="61" y="807" font-size="14.5" fill="#D1D1D8" font-weight="400" data-max-width="151" >系统运行状态</text>
+<line x1="23" y1="924" x2="221" y2="924" stroke="#3A3A3D" />
+<circle cx="32" cy="949" r="3.5" fill="#72CC99" />
+<text x="45" y="954" font-size="12.5" fill="#B4B4BD" font-weight="400" data-max-width="168" >所有服务正常</text>
+<circle cx="38" cy="990" r="15" fill="#3A3A40" />
+<text x="32" y="995" font-size="12" fill="#CBCBD3" font-weight="650" data-max-width="14" >A</text>
+<text x="62" y="987" font-size="12.5" fill="#F5F5F7" font-weight="500" data-max-width="140" >Administrator</text>
+<text x="62" y="1006" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="140" >管理员</text>
+<g aria-label="退出登录">
+<title>退出登录</title>
+<svg x="204" y="981" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#B4B4BD" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-LogOut"/>
+</svg>
+</g>
+<line x1="244" y1="74" x2="1600" y2="74" stroke="#38383C" />
+<svg x="283" y="26" width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#A6A6AF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-PanelLeft"/>
+</svg>
+<line x1="325" y1="25" x2="325" y2="48" stroke="#38383C" />
+<text x="347" y="45" font-size="13" fill="#96969F" font-weight="400" data-max-width="70" >监控</text>
+<svg x="411" y="30" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#777780" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronRight"/>
+</svg>
+<text x="439" y="45" font-size="13" fill="#B4B4BD" font-weight="500" data-max-width="250" >服务状态</text>
+<rect x="1371" y="25" width="79" height="25" rx="5" fill="#2E2E32" stroke="none" />
+<text x="1380" y="42" font-size="12.5" fill="#B2B2BC" font-weight="500" data-max-width="63" >演示数据</text>
+<line x1="1471" y1="27" x2="1471" y2="47" stroke="#38383C" />
+<g aria-label="通知">
+<title>通知</title>
+<svg x="1490" y="28" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#B4B4BD" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Bell"/>
+</svg>
+</g>
+<circle cx="1546" cy="37" r="15" fill="#35353A" />
+<text x="1540" y="42" font-size="12" fill="#CDCDD6" font-weight="650" data-max-width="16" >A</text>
+<text x="285" y="140" font-size="30" fill="#F5F5F7" font-weight="650" data-max-width="650" >服务状态</text>
+<text x="286" y="173" font-size="13.5" fill="#B4B4BD" font-weight="400" data-max-width="800" >主实例 · DNS 服务</text>
+<rect x="424" y="116" width="91" height="27" rx="5" fill="#253E30"/>
+<circle cx="436" cy="129.5" r="3.5" fill="#72CC99"/>
+<text x="447" y="134" font-size="12.5" fill="#72CC99" font-weight="500" data-max-width="62" >运行正常</text>
+<g aria-label="刷新状态"><title>刷新状态</title>
+<svg x="1528" y="119" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#B4B4BD" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-RefreshCw"/></svg>
+</g>
+<line x1="284" y1="213" x2="1557" y2="213" stroke="#38383C" />
+<line x1="284" y1="356" x2="1557" y2="356" stroke="#38383C" />
+<svg x="285" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5AA6FF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-MemoryStick"/></svg>
+<text x="313" y="251" font-size="13" fill="#B4B4BD" font-weight="400" data-max-width="240" >内存占用</text>
+<text x="285" y="301" font-size="34" fill="#F5F5F7" font-weight="600" data-max-width="178" class="numeric">186.4</text>
+<text x="385" y="300" font-size="13" fill="#96969F" font-weight="400" data-max-width="60" >MB</text>
+<text x="285" y="332" font-size="12" fill="#96969F" font-weight="400" data-max-width="280" >进程驻留内存</text>
+<line x1="585" y1="238" x2="585" y2="333" stroke="#38383C" />
+<svg x="609" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#5AA6FF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Activity"/></svg>
+<text x="637" y="251" font-size="13" fill="#B4B4BD" font-weight="400" data-max-width="240" >平均 QPS</text>
+<text x="609" y="301" font-size="34" fill="#F5F5F7" font-weight="600" data-max-width="178" class="numeric">128.6</text>
+<text x="709" y="300" font-size="13" fill="#96969F" font-weight="400" data-max-width="60" >/s</text>
+<text x="609" y="332" font-size="12" fill="#96969F" font-weight="400" data-max-width="280" >最近 1 分钟</text>
+<line x1="909" y1="238" x2="909" y2="333" stroke="#38383C" />
+<svg x="933" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#59CFC0" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Activity"/></svg>
+<text x="961" y="251" font-size="13" fill="#B4B4BD" font-weight="400" data-max-width="240" >平均 RPM</text>
+<text x="933" y="301" font-size="34" fill="#F5F5F7" font-weight="600" data-max-width="178" class="numeric">7,779</text>
+<text x="1033" y="300" font-size="13" fill="#96969F" font-weight="400" data-max-width="60" >/min</text>
+<text x="933" y="332" font-size="12" fill="#96969F" font-weight="400" data-max-width="280" >最近 10 分钟</text>
+<line x1="1233" y1="238" x2="1233" y2="333" stroke="#38383C" />
+<svg x="1257" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#BEA8E6" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Laptop"/></svg>
+<text x="1285" y="251" font-size="13" fill="#B4B4BD" font-weight="400" data-max-width="240" >在线客户端</text>
+<text x="1257" y="301" font-size="34" fill="#F5F5F7" font-weight="600" data-max-width="178" class="numeric">24</text>
+<text x="1314" y="300" font-size="13" fill="#96969F" font-weight="400" data-max-width="60" >个</text>
+<text x="1257" y="332" font-size="12" fill="#96969F" font-weight="400" data-max-width="280" >最近 1 分钟有请求</text>
+<g id="request-chart" role="group" aria-labelledby="chart-title chart-description">
+<title id="chart-title">QPS 与 RPM 请求趋势</title>
+<desc id="chart-description">最近 10 分钟的演示数据。左轴为每秒请求量，右轴为每分钟请求量，两轴均从零开始。蓝色面积曲线为 QPS，青绿色细线为 RPM。选中 14:29:00 时 QPS 为 125.0，RPM 为 9,250。图中浮层仅为读数交互的静态示意。</desc>
+<defs>
+<linearGradient id="qps-fill" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#5AA6FF" stop-opacity=".18"/>
+<stop offset=".65" stop-color="#5AA6FF" stop-opacity=".055"/>
+<stop offset="1" stop-color="#5AA6FF" stop-opacity="0"/>
+</linearGradient>
+<filter id="chart-popover-shadow" x="-20%" y="-25%" width="140%" height="160%"><feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity=".08"/></filter>
+</defs>
+<text x="285" y="401" font-size="17.5" fill="#F5F5F7" font-weight="600" data-max-width="260" >请求趋势</text>
+<text x="1555" y="401" font-size="12.5" fill="#B4B4BD" font-weight="400" data-max-width="200" text-anchor="end">最近 10 分钟</text>
+<circle cx="292" cy="440" r="4" fill="#5AA6FF"/>
+<text x="306" y="445" font-size="13" fill="#B4B4BD" font-weight="500" data-max-width="150" >QPS · 请求/秒</text>
+<path d="M499,435 L504,440 L499,445 L494,440 Z" fill="#59CFC0"/>
+<text x="513" y="445" font-size="13" fill="#B4B4BD" font-weight="500" data-max-width="170" >RPM · 请求/分钟</text>
+<text x="318" y="488" font-size="11.5" fill="#96969F" font-weight="500" data-max-width="42" text-anchor="end">QPS</text>
+<text x="1494" y="488" font-size="11.5" fill="#96969F" font-weight="500" data-max-width="60" >RPM</text>
+<line x1="336" y1="520" x2="1474" y2="520" stroke="#353538" stroke-width="1"/>
+<text x="318" y="524" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="42" text-anchor="end">200</text>
+<text x="1494" y="524" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="60" >12k</text>
+<line x1="336" y1="595" x2="1474" y2="595" stroke="#353538" stroke-width="1"/>
+<text x="318" y="599" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="42" text-anchor="end">150</text>
+<text x="1494" y="599" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="60" >9k</text>
+<line x1="336" y1="670" x2="1474" y2="670" stroke="#353538" stroke-width="1"/>
+<text x="318" y="674" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="42" text-anchor="end">100</text>
+<text x="1494" y="674" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="60" >6k</text>
+<line x1="336" y1="745" x2="1474" y2="745" stroke="#353538" stroke-width="1"/>
+<text x="318" y="749" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="42" text-anchor="end">50</text>
+<text x="1494" y="749" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="60" >3k</text>
+<line x1="336" y1="820" x2="1474" y2="820" stroke="#353538" stroke-width="1"/>
+<text x="318" y="824" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="42" text-anchor="end">0</text>
+<text x="1494" y="824" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="60" >0</text>
+<path id="qps-area" d="M336,697 C342.32,697 348.64,697 354.97,697 C361.29,697 367.61,695.33 373.93,694 C380.26,692.67 386.58,688 392.9,688 C399.22,688 405.54,689.57 411.87,691 C418.19,692.43 424.51,697.07 430.83,698.5 C437.16,699.93 443.48,701.5 449.8,701.5 C456.12,701.5 462.44,700.89 468.77,700 C475.09,699.11 481.41,693.22 487.73,688 C494.06,682.78 500.38,672.74 506.7,665.5 C513.02,658.26 519.34,646.25 525.67,644.5 C531.99,642.75 538.31,641.5 544.63,641.5 C550.96,641.5 557.28,648.5 563.6,652 C569.92,655.5 576.24,659.58 582.57,662.5 C588.89,665.42 595.21,670 601.53,670 C607.86,670 614.18,665.2 620.5,661 C626.82,656.8 633.14,648.84 639.47,640 C645.79,631.16 652.11,614.29 658.43,604 C664.76,593.71 671.08,582.54 677.4,577 C683.72,571.46 690.04,565 696.37,565 C702.69,565 709.01,570.25 715.33,574 C721.66,577.75 727.98,583.76 734.3,589 C740.62,594.24 746.94,600.87 753.27,605.5 C759.59,610.13 765.91,617.5 772.23,617.5 C778.56,617.5 784.88,615.36 791.2,613 C797.52,610.64 803.84,603.02 810.17,596.5 C816.49,589.98 822.81,579.97 829.13,572.5 C835.46,565.03 841.78,558.5 848.1,551.5 C854.42,544.5 860.74,530.5 867.07,530.5 C873.39,530.5 879.71,533.5 886.03,536.5 C892.36,539.5 898.68,547.47 905,554.5 C911.32,561.53 917.64,572.03 923.97,580 C930.29,587.97 936.61,595.54 942.93,602.5 C949.26,609.46 955.58,617.89 961.9,622 C968.22,626.11 974.54,631 980.87,631 C987.19,631 993.51,628.86 999.83,626.5 C1006.16,624.14 1012.48,616.35 1018.8,610 C1025.12,603.65 1031.44,594.46 1037.77,587.5 C1044.09,580.54 1050.41,570.44 1056.73,568 C1063.06,565.56 1069.38,563.5 1075.7,563.5 C1082.02,563.5 1088.34,571 1094.67,577 C1100.99,583 1107.31,594.76 1113.63,604 C1119.96,613.24 1126.28,624.44 1132.6,632.5 C1138.92,640.56 1145.24,648.02 1151.57,653.5 C1157.89,658.98 1164.21,667 1170.53,667 C1176.86,667 1183.18,662 1189.5,658 C1195.82,654 1202.14,644 1208.47,640 C1214.79,636 1221.11,631 1227.43,631 C1233.76,631 1240.08,636.4 1246.4,640 C1252.72,643.6 1259.04,651.86 1265.37,653.5 C1271.69,655.14 1278.01,656.5 1284.33,656.5 C1290.66,656.5 1296.98,650.42 1303.3,646 C1309.62,641.58 1315.94,634.24 1322.27,628 C1328.59,621.76 1334.91,612.11 1341.23,608.5 C1347.56,604.89 1353.88,601 1360.2,601 C1366.52,601 1372.84,610.9 1379.17,614.5 C1385.49,618.1 1391.81,619.9 1398.13,623.5 C1404.46,627.1 1410.78,635.36 1417.1,637 C1423.42,638.64 1429.74,640 1436.07,640 C1442.39,640 1448.71,631.29 1455.03,628 C1461.36,624.71 1467.68,622.4 1474,619.6 L1474,820 L336,820 Z" fill="url(#qps-fill)"/>
+<path id="qps-line" d="M336,697 C342.32,697 348.64,697 354.97,697 C361.29,697 367.61,695.33 373.93,694 C380.26,692.67 386.58,688 392.9,688 C399.22,688 405.54,689.57 411.87,691 C418.19,692.43 424.51,697.07 430.83,698.5 C437.16,699.93 443.48,701.5 449.8,701.5 C456.12,701.5 462.44,700.89 468.77,700 C475.09,699.11 481.41,693.22 487.73,688 C494.06,682.78 500.38,672.74 506.7,665.5 C513.02,658.26 519.34,646.25 525.67,644.5 C531.99,642.75 538.31,641.5 544.63,641.5 C550.96,641.5 557.28,648.5 563.6,652 C569.92,655.5 576.24,659.58 582.57,662.5 C588.89,665.42 595.21,670 601.53,670 C607.86,670 614.18,665.2 620.5,661 C626.82,656.8 633.14,648.84 639.47,640 C645.79,631.16 652.11,614.29 658.43,604 C664.76,593.71 671.08,582.54 677.4,577 C683.72,571.46 690.04,565 696.37,565 C702.69,565 709.01,570.25 715.33,574 C721.66,577.75 727.98,583.76 734.3,589 C740.62,594.24 746.94,600.87 753.27,605.5 C759.59,610.13 765.91,617.5 772.23,617.5 C778.56,617.5 784.88,615.36 791.2,613 C797.52,610.64 803.84,603.02 810.17,596.5 C816.49,589.98 822.81,579.97 829.13,572.5 C835.46,565.03 841.78,558.5 848.1,551.5 C854.42,544.5 860.74,530.5 867.07,530.5 C873.39,530.5 879.71,533.5 886.03,536.5 C892.36,539.5 898.68,547.47 905,554.5 C911.32,561.53 917.64,572.03 923.97,580 C930.29,587.97 936.61,595.54 942.93,602.5 C949.26,609.46 955.58,617.89 961.9,622 C968.22,626.11 974.54,631 980.87,631 C987.19,631 993.51,628.86 999.83,626.5 C1006.16,624.14 1012.48,616.35 1018.8,610 C1025.12,603.65 1031.44,594.46 1037.77,587.5 C1044.09,580.54 1050.41,570.44 1056.73,568 C1063.06,565.56 1069.38,563.5 1075.7,563.5 C1082.02,563.5 1088.34,571 1094.67,577 C1100.99,583 1107.31,594.76 1113.63,604 C1119.96,613.24 1126.28,624.44 1132.6,632.5 C1138.92,640.56 1145.24,648.02 1151.57,653.5 C1157.89,658.98 1164.21,667 1170.53,667 C1176.86,667 1183.18,662 1189.5,658 C1195.82,654 1202.14,644 1208.47,640 C1214.79,636 1221.11,631 1227.43,631 C1233.76,631 1240.08,636.4 1246.4,640 C1252.72,643.6 1259.04,651.86 1265.37,653.5 C1271.69,655.14 1278.01,656.5 1284.33,656.5 C1290.66,656.5 1296.98,650.42 1303.3,646 C1309.62,641.58 1315.94,634.24 1322.27,628 C1328.59,621.76 1334.91,612.11 1341.23,608.5 C1347.56,604.89 1353.88,601 1360.2,601 C1366.52,601 1372.84,610.9 1379.17,614.5 C1385.49,618.1 1391.81,619.9 1398.13,623.5 C1404.46,627.1 1410.78,635.36 1417.1,637 C1423.42,638.64 1429.74,640 1436.07,640 C1442.39,640 1448.71,631.29 1455.03,628 C1461.36,624.71 1467.68,622.4 1474,619.6" fill="none" stroke="#5AA6FF" stroke-width="2.8" stroke-linejoin="round" stroke-linecap="round"/>
+<path id="rpm-line" d="M449.8,695 C487.73,685.08 525.67,675.12 563.6,665.25 C601.53,655.38 639.47,647.27 677.4,635.75 C715.33,624.23 753.27,607.08 791.2,594 C829.13,580.92 867.07,557 905,557 C942.93,557 980.87,612 1018.8,612 C1056.73,612 1094.67,588.75 1132.6,588.75 C1170.53,588.75 1208.47,648.25 1246.4,648.25 C1284.33,648.25 1322.27,634.85 1360.2,632.25 C1398.13,629.65 1436.07,628.82 1474,627.1" fill="none" stroke="#59CFC0" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<g id="chart-inspection" aria-label="14:29:00，QPS 125.0，RPM 9250">
+<line x1="1132.6" y1="516" x2="1132.6" y2="820" stroke="#71717A" stroke-width="1" stroke-opacity=".65"/>
+<circle cx="1132.6" cy="632.5" r="5" fill="#1C1C1E" stroke="#5AA6FF" stroke-width="2.5"/>
+<path d="M1132.6,583.75 L1137.6,588.75 L1132.6,593.75 L1127.6,588.75 Z" fill="#1C1C1E" stroke="#59CFC0" stroke-width="2"/>
+<rect x="1160" y="472" width="218" height="108" rx="8" fill="#303033" stroke="#48484D" filter="url(#chart-popover-shadow)"/>
+<text x="1177" y="496" font-size="12" fill="#B4B4BD" font-weight="500" data-max-width="180" >14:29:00</text>
+<circle cx="1181" cy="523" r="3.5" fill="#5AA6FF"/>
+<text x="1194" y="528" font-size="12.5" fill="#B4B4BD" font-weight="500" data-max-width="58" >QPS</text>
+<text x="1360" y="528" font-size="14" fill="#F5F5F7" font-weight="600" data-max-width="94" text-anchor="end">125.0</text>
+<path d="M1181,544 L1185,548 L1181,552 L1177,548 Z" fill="#59CFC0"/>
+<text x="1194" y="553" font-size="12.5" fill="#B4B4BD" font-weight="500" data-max-width="58" >RPM</text>
+<text x="1360" y="553" font-size="14" fill="#F5F5F7" font-weight="600" data-max-width="94" text-anchor="end">9,250</text>
+</g>
+<text x="336" y="850" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="86" text-anchor="start">14:22</text>
+<text x="563.6" y="850" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="86" text-anchor="middle">14:24</text>
+<text x="791.2" y="850" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="86" text-anchor="middle">14:26</text>
+<text x="1018.8" y="850" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="86" text-anchor="middle">14:28</text>
+<text x="1246.4" y="850" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="86" text-anchor="middle">14:30</text>
+<text x="1474" y="850" font-size="11.5" fill="#96969F" font-weight="400" data-max-width="86" text-anchor="end">14:32</text>
+</g>
+<line x1="284" y1="891" x2="1557" y2="891" stroke="#38383C"/>
+<text x="1555" y="920" font-size="12" fill="#96969F" font-weight="400" data-max-width="300" text-anchor="end">最近更新 14:32:08</text>
+</svg>

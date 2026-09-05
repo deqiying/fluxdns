@@ -327,157 +327,95 @@ SOFTWARE.
 <circle cx="1546" cy="37" r="15" fill="#EAECEF" />
 <text x="1540" y="42" font-size="12" fill="#66707F" font-weight="650" data-max-width="16" >A</text>
 <text x="285" y="140" font-size="30" fill="#202124" font-weight="650" data-max-width="650" >服务状态</text>
-<text x="286" y="173" font-size="13.5" fill="#63666D" font-weight="400" data-max-width="800" >主实例 · 已运行 12 天 08 小时</text>
-<rect x="424" y="116" width="91" height="27" rx="5" fill="#EBF6EF" stroke="none" />
-<circle cx="436" cy="129.5" r="3.5" fill="#20824E" />
+<text x="286" y="173" font-size="13.5" fill="#63666D" font-weight="400" data-max-width="800" >主实例 · DNS 服务</text>
+<rect x="424" y="116" width="91" height="27" rx="5" fill="#EBF6EF"/>
+<circle cx="436" cy="129.5" r="3.5" fill="#20824E"/>
 <text x="447" y="134" font-size="12.5" fill="#20824E" font-weight="500" data-max-width="62" >运行正常</text>
-<circle cx="1356" cy="130" r="3.5" fill="#20824E" />
-<text x="1369" y="135" font-size="13" fill="#20824E" font-weight="500" data-max-width="113" >实时更新</text>
-<g aria-label="刷新状态">
-<title>刷新状态</title>
-<svg x="1528" y="119" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-RefreshCw"/>
-</svg>
+<g aria-label="刷新状态"><title>刷新状态</title>
+<svg x="1528" y="119" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-RefreshCw"/></svg>
 </g>
 <line x1="284" y1="213" x2="1557" y2="213" stroke="#E8E9EC" />
 <line x1="284" y1="356" x2="1557" y2="356" stroke="#E8E9EC" />
-<svg x="285" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-MemoryStick"/>
-</svg>
-<text x="313" y="251" font-size="13" fill="#63666D" font-weight="400" data-max-width="177" >内存占用</text>
+<svg x="285" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-MemoryStick"/></svg>
+<text x="313" y="251" font-size="13" fill="#63666D" font-weight="400" data-max-width="240" >内存占用</text>
 <text x="285" y="301" font-size="34" fill="#202124" font-weight="600" data-max-width="178" class="numeric">186.4</text>
-<text x="385" y="300" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="54" >MB</text>
-<text x="285" y="332" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" >进程驻留内存</text>
-<line x1="520" y1="238" x2="520" y2="333" stroke="#E8E9EC" />
-<svg x="543" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Activity"/>
-</svg>
-<text x="571" y="251" font-size="13" fill="#63666D" font-weight="400" data-max-width="177" >平均 QPS</text>
-<text x="543" y="301" font-size="34" fill="#202124" font-weight="600" data-max-width="178" class="numeric">128.6</text>
-<text x="645" y="300" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="54" >/s</text>
-<text x="543" y="332" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" >最近 1 分钟</text>
-<line x1="778" y1="238" x2="778" y2="333" stroke="#E8E9EC" />
-<svg x="801" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#29978F" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-ChartNoAxesColumnIncreasing"/>
-</svg>
-<text x="829" y="251" font-size="13" fill="#63666D" font-weight="400" data-max-width="177" >请求速率</text>
-<text x="801" y="301" font-size="34" fill="#202124" font-weight="600" data-max-width="178" class="numeric">7,716</text>
-<text x="910" y="300" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="54" >/min</text>
-<text x="801" y="332" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" >最近 10 分钟</text>
-<line x1="1036" y1="238" x2="1036" y2="333" stroke="#E8E9EC" />
-<svg x="1059" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8065B5" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Laptop"/>
-</svg>
-<text x="1087" y="251" font-size="13" fill="#63666D" font-weight="400" data-max-width="177" >在线客户端</text>
-<text x="1059" y="301" font-size="34" fill="#202124" font-weight="600" data-max-width="178" class="numeric">24</text>
-<text x="1108" y="300" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="54" >个</text>
-<text x="1059" y="332" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" >最近 1 分钟有请求</text>
-<line x1="1294" y1="238" x2="1294" y2="333" stroke="#E8E9EC" />
-<svg x="1317" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#20824E" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Cable"/>
-</svg>
-<text x="1345" y="251" font-size="13" fill="#63666D" font-weight="400" data-max-width="177" >WebSocket</text>
-<text x="1317" y="301" font-size="34" fill="#202124" font-weight="600" data-max-width="178" class="numeric">2</text>
-<text x="1348" y="300" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="54" >连接</text>
-<circle cx="1320" cy="328" r="3.5" fill="#20824E" />
-<text x="1330" y="332" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" >推送正常</text>
-<text x="285" y="401" font-size="17" fill="#202124" font-weight="600" data-max-width="450" >每秒查询量</text>
-<text x="915" y="401" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="190" text-anchor="end">最近 1 分钟</text>
-<text x="999" y="401" font-size="17" fill="#202124" font-weight="600" data-max-width="360" >每分钟请求量</text>
-<text x="1554" y="401" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="160" text-anchor="end">最近 10 分钟</text>
-<line x1="960" y1="390" x2="960" y2="666" stroke="#E8E9EC" />
-<text x="288" y="444" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="33" >180</text>
-<line x1="329" y1="440" x2="919" y2="440" stroke="#EBEDF0" stroke-dasharray="3 5"/>
-<text x="1000" y="444" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="29" >9k</text>
-<line x1="1034" y1="440" x2="1555" y2="440" stroke="#EBEDF0" stroke-dasharray="3 5"/>
-<text x="288" y="503" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="33" >120</text>
-<line x1="329" y1="499" x2="919" y2="499" stroke="#EBEDF0" stroke-dasharray="3 5"/>
-<text x="1000" y="503" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="29" >6k</text>
-<line x1="1034" y1="499" x2="1555" y2="499" stroke="#EBEDF0" stroke-dasharray="3 5"/>
-<text x="288" y="562" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="33" >60</text>
-<line x1="329" y1="558" x2="919" y2="558" stroke="#EBEDF0" stroke-dasharray="3 5"/>
-<text x="1000" y="562" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="29" >3k</text>
-<line x1="1034" y1="558" x2="1555" y2="558" stroke="#EBEDF0" stroke-dasharray="3 5"/>
-<text x="288" y="621" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="33" >0</text>
-<line x1="329" y1="617" x2="919" y2="617" stroke="#EBEDF0" stroke-dasharray="3 5"/>
-<text x="1000" y="621" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="29" >0</text>
-<line x1="1034" y1="617" x2="1555" y2="617" stroke="#EBEDF0" stroke-dasharray="3 5"/>
-<path d="M329.0,539.3 L339.0,532.4 L349.0,539.3 L359.0,517.7 L369.0,527.5 L379.0,532.4 L389.0,522.6 L399.0,502.9 L409.0,509.8 L419.0,517.7 L429.0,527.5 L439.0,516.7 L449.0,499.0 L459.0,487.2 L469.0,500.0 L479.0,493.1 L489.0,506.9 L499.0,499.0 L509.0,471.5 L519.0,486.2 L529.0,490.1 L539.0,482.3 L549.0,494.1 L559.0,486.2 L569.0,463.6 L579.0,474.4 L589.0,491.1 L599.0,478.4 L609.0,482.3 L619.0,475.4 L629.0,490.1 L639.0,484.3 L649.0,489.2 L659.0,471.5 L669.0,480.3 L679.0,485.2 L689.0,479.3 L699.0,489.2 L709.0,491.1 L719.0,487.2 L729.0,497.0 L739.0,486.2 L749.0,479.3 L759.0,493.1 L769.0,481.3 L779.0,490.1 L789.0,491.1 L799.0,480.3 L809.0,474.4 L819.0,486.2 L829.0,490.1 L839.0,481.3 L849.0,468.5 L859.0,476.4 L869.0,480.3 L879.0,491.1 L889.0,484.3 L899.0,479.3 L909.0,485.2 L919.0,491.1 L919,617 L329,617 Z" fill="#007AFF" fill-opacity=".055"/>
-<path d="M329.0,539.3 L339.0,532.4 L349.0,539.3 L359.0,517.7 L369.0,527.5 L379.0,532.4 L389.0,522.6 L399.0,502.9 L409.0,509.8 L419.0,517.7 L429.0,527.5 L439.0,516.7 L449.0,499.0 L459.0,487.2 L469.0,500.0 L479.0,493.1 L489.0,506.9 L499.0,499.0 L509.0,471.5 L519.0,486.2 L529.0,490.1 L539.0,482.3 L549.0,494.1 L559.0,486.2 L569.0,463.6 L579.0,474.4 L589.0,491.1 L599.0,478.4 L609.0,482.3 L619.0,475.4 L629.0,490.1 L639.0,484.3 L649.0,489.2 L659.0,471.5 L669.0,480.3 L679.0,485.2 L689.0,479.3 L699.0,489.2 L709.0,491.1 L719.0,487.2 L729.0,497.0 L739.0,486.2 L749.0,479.3 L759.0,493.1 L769.0,481.3 L779.0,490.1 L789.0,491.1 L799.0,480.3 L809.0,474.4 L819.0,486.2 L829.0,490.1 L839.0,481.3 L849.0,468.5 L859.0,476.4 L869.0,480.3 L879.0,491.1 L889.0,484.3 L899.0,479.3 L909.0,485.2 L919.0,491.1" fill="none" stroke="#007AFF" stroke-width="2.3" stroke-linejoin="round"/>
-<circle cx="919" cy="491.1333333333333" r="4" fill="#FFFFFF" stroke="#007AFF" stroke-width="2"/>
-<text x="329" y="645" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="84" text-anchor="start">14:31:08</text>
-<text x="476.5" y="645" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="84" text-anchor="middle">14:31:23</text>
-<text x="624" y="645" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="84" text-anchor="middle">14:31:38</text>
-<text x="771.5" y="645" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="84" text-anchor="middle">14:31:53</text>
-<text x="919" y="645" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="84" text-anchor="end">14:32:08</text>
-<rect x="1044" y="499.3933333333333" width="27" height="117.60666666666665" rx="3" fill="#BBDEDA" stroke="none" />
-<text x="1057.5" y="645" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="57" text-anchor="middle">14:23</text>
-<rect x="1096" y="495.46000000000004" width="27" height="121.53999999999999" rx="3" fill="#BBDEDA" stroke="none" />
-<rect x="1148" y="482.2833333333333" width="27" height="134.71666666666667" rx="3" fill="#BBDEDA" stroke="none" />
-<rect x="1200" y="489.1666666666667" width="27" height="127.83333333333333" rx="3" fill="#BBDEDA" stroke="none" />
-<text x="1213.5" y="645" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="57" text-anchor="middle">14:26</text>
-<rect x="1252" y="480.90666666666664" width="27" height="136.09333333333333" rx="3" fill="#BBDEDA" stroke="none" />
-<rect x="1304" y="473.03999999999996" width="27" height="143.96" rx="3" fill="#BBDEDA" stroke="none" />
-<rect x="1356" y="466.74666666666667" width="27" height="150.25333333333333" rx="3" fill="#BBDEDA" stroke="none" />
-<text x="1369.5" y="645" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="57" text-anchor="middle">14:29</text>
-<rect x="1408" y="476.18666666666667" width="27" height="140.81333333333333" rx="3" fill="#BBDEDA" stroke="none" />
-<rect x="1460" y="469.69666666666666" width="27" height="147.30333333333334" rx="3" fill="#BBDEDA" stroke="none" />
-<rect x="1512" y="465.252" width="27" height="151.748" rx="3" fill="#26978F" stroke="none" />
-<text x="1525.5" y="645" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="57" text-anchor="middle">14:32</text>
-<line x1="284" y1="688" x2="1557" y2="688" stroke="#E8E9EC" />
-<text x="285" y="733" font-size="17" fill="#202124" font-weight="600" data-max-width="350" >监听入口</text>
-<text x="846" y="733" font-size="12" fill="#007AFF" font-weight="500" data-max-width="74" >查看全部</text>
-<svg x="914" y="720" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-ArrowUpRight"/>
-</svg>
-<text x="285" y="777" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="330" >名称 / 入口</text>
-<text x="619" y="777" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="170" >策略</text>
-<text x="834" y="777" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="90" >状态</text>
-<line x1="284" y1="792" x2="927" y2="792" stroke="#E8E9EC" />
-<svg x="286" y="814" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6B92BC" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Radio"/>
-</svg>
-<text x="319" y="820" font-size="13" fill="#202124" font-weight="500" data-max-width="265" >public-doh</text>
-<text x="319" y="839" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="267" >/dns-query</text>
-<text x="619" y="824" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="180" >default</text>
-<circle cx="838" cy="819" r="3.5" fill="#20824E" />
-<text x="851" y="824" font-size="12" fill="#20824E" font-weight="500" data-max-width="76" >已启用</text>
-<line x1="284" y1="854" x2="927" y2="854" stroke="#F0F1F3" />
-<svg x="286" y="870" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#6B92BC" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Radio"/>
-</svg>
-<text x="319" y="876" font-size="13" fill="#202124" font-weight="500" data-max-width="265" >private-doh</text>
-<text x="319" y="895" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="267" >/private-query</text>
-<text x="619" y="880" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="180" >internal</text>
-<circle cx="838" cy="875" r="3.5" fill="#20824E" />
-<text x="851" y="880" font-size="12" fill="#20824E" font-weight="500" data-max-width="76" >已启用</text>
-<line x1="284" y1="910" x2="927" y2="910" stroke="#F0F1F3" />
-<svg x="286" y="926" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B8F98" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Radio"/>
-</svg>
-<text x="319" y="932" font-size="13" fill="#202124" font-weight="500" data-max-width="265" >backup-doh</text>
-<text x="319" y="951" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="267" >/backup-query</text>
-<text x="619" y="936" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="180" >fallback</text>
-<circle cx="838" cy="931" r="3.5" fill="#8B8F98" />
-<text x="851" y="936" font-size="12" fill="#8B8F98" font-weight="500" data-max-width="76" >未启用</text>
-<line x1="960" y1="715" x2="960" y2="952" stroke="#E8E9EC" />
-<text x="999" y="733" font-size="17" fill="#202124" font-weight="600" data-max-width="250" >实时推送</text>
-<rect x="1462" y="714" width="93" height="26" rx="5" fill="#EBF6EF" stroke="none" />
-<circle cx="1474" cy="727" r="3.5" fill="#20824E" />
-<text x="1485" y="731.5" font-size="12.5" fill="#20824E" font-weight="500" data-max-width="64" >连接正常</text>
-<text x="1000" y="786" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="220" >传输通道</text>
-<text x="1554" y="786" font-size="13" fill="#63666D" font-weight="500" data-max-width="300" text-anchor="end">WebSocket</text>
-<line x1="999" y1="802" x2="1555" y2="802" stroke="#F0F1F3" />
-<text x="1000" y="828" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="220" >服务状态</text>
-<text x="1554" y="828" font-size="13" fill="#20824E" font-weight="500" data-max-width="300" text-anchor="end">正在推送</text>
-<line x1="999" y1="844" x2="1555" y2="844" stroke="#F0F1F3" />
-<text x="1000" y="870" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="220" >最新消息</text>
-<text x="1554" y="870" font-size="13" fill="#63666D" font-weight="500" data-max-width="300" text-anchor="end">14:32:08</text>
-<line x1="999" y1="886" x2="1555" y2="886" stroke="#F0F1F3" />
-<text x="1000" y="912" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="220" >连接时长</text>
-<text x="1554" y="912" font-size="13" fill="#63666D" font-weight="500" data-max-width="300" text-anchor="end">00:18:42</text>
-<line x1="284" y1="988" x2="1557" y2="988" stroke="#E8E9EC" />
-<circle cx="288" cy="1013" r="3.5" fill="#20824E" />
-<text x="302" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" >已连接至主实例</text>
-<text x="1556" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="450" text-anchor="end">最新推送 14:32:08</text>
+<text x="385" y="300" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="60" >MB</text>
+<text x="285" y="332" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="280" >进程驻留内存</text>
+<line x1="585" y1="238" x2="585" y2="333" stroke="#E8E9EC" />
+<svg x="609" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Activity"/></svg>
+<text x="637" y="251" font-size="13" fill="#63666D" font-weight="400" data-max-width="240" >平均 QPS</text>
+<text x="609" y="301" font-size="34" fill="#202124" font-weight="600" data-max-width="178" class="numeric">128.6</text>
+<text x="709" y="300" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="60" >/s</text>
+<text x="609" y="332" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="280" >最近 1 分钟</text>
+<line x1="909" y1="238" x2="909" y2="333" stroke="#E8E9EC" />
+<svg x="933" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#17857D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Activity"/></svg>
+<text x="961" y="251" font-size="13" fill="#63666D" font-weight="400" data-max-width="240" >平均 RPM</text>
+<text x="933" y="301" font-size="34" fill="#202124" font-weight="600" data-max-width="178" class="numeric">7,779</text>
+<text x="1033" y="300" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="60" >/min</text>
+<text x="933" y="332" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="280" >最近 10 分钟</text>
+<line x1="1233" y1="238" x2="1233" y2="333" stroke="#E8E9EC" />
+<svg x="1257" y="237" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8065B5" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Laptop"/></svg>
+<text x="1285" y="251" font-size="13" fill="#63666D" font-weight="400" data-max-width="240" >在线客户端</text>
+<text x="1257" y="301" font-size="34" fill="#202124" font-weight="600" data-max-width="178" class="numeric">24</text>
+<text x="1314" y="300" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="60" >个</text>
+<text x="1257" y="332" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="280" >最近 1 分钟有请求</text>
+<g id="request-chart" role="group" aria-labelledby="chart-title chart-description">
+<title id="chart-title">QPS 与 RPM 请求趋势</title>
+<desc id="chart-description">最近 10 分钟的演示数据。左轴为每秒请求量，右轴为每分钟请求量，两轴均从零开始。蓝色面积曲线为 QPS，青绿色细线为 RPM。选中 14:29:00 时 QPS 为 125.0，RPM 为 9,250。图中浮层仅为读数交互的静态示意。</desc>
+<defs>
+<linearGradient id="qps-fill" x1="0" y1="0" x2="0" y2="1">
+<stop offset="0" stop-color="#007AFF" stop-opacity=".18"/>
+<stop offset=".65" stop-color="#007AFF" stop-opacity=".055"/>
+<stop offset="1" stop-color="#007AFF" stop-opacity="0"/>
+</linearGradient>
+<filter id="chart-popover-shadow" x="-20%" y="-25%" width="140%" height="160%"><feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#000000" flood-opacity=".08"/></filter>
+</defs>
+<text x="285" y="401" font-size="17.5" fill="#202124" font-weight="600" data-max-width="260" >请求趋势</text>
+<text x="1555" y="401" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="200" text-anchor="end">最近 10 分钟</text>
+<circle cx="292" cy="440" r="4" fill="#007AFF"/>
+<text x="306" y="445" font-size="13" fill="#63666D" font-weight="500" data-max-width="150" >QPS · 请求/秒</text>
+<path d="M499,435 L504,440 L499,445 L494,440 Z" fill="#168F82"/>
+<text x="513" y="445" font-size="13" fill="#63666D" font-weight="500" data-max-width="170" >RPM · 请求/分钟</text>
+<text x="318" y="488" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="42" text-anchor="end">QPS</text>
+<text x="1494" y="488" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="60" >RPM</text>
+<line x1="336" y1="520" x2="1474" y2="520" stroke="#EAECF0" stroke-width="1"/>
+<text x="318" y="524" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="42" text-anchor="end">200</text>
+<text x="1494" y="524" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="60" >12k</text>
+<line x1="336" y1="595" x2="1474" y2="595" stroke="#EAECF0" stroke-width="1"/>
+<text x="318" y="599" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="42" text-anchor="end">150</text>
+<text x="1494" y="599" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="60" >9k</text>
+<line x1="336" y1="670" x2="1474" y2="670" stroke="#EAECF0" stroke-width="1"/>
+<text x="318" y="674" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="42" text-anchor="end">100</text>
+<text x="1494" y="674" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="60" >6k</text>
+<line x1="336" y1="745" x2="1474" y2="745" stroke="#EAECF0" stroke-width="1"/>
+<text x="318" y="749" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="42" text-anchor="end">50</text>
+<text x="1494" y="749" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="60" >3k</text>
+<line x1="336" y1="820" x2="1474" y2="820" stroke="#EAECF0" stroke-width="1"/>
+<text x="318" y="824" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="42" text-anchor="end">0</text>
+<text x="1494" y="824" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="60" >0</text>
+<path id="qps-area" d="M336,697 C342.32,697 348.64,697 354.97,697 C361.29,697 367.61,695.33 373.93,694 C380.26,692.67 386.58,688 392.9,688 C399.22,688 405.54,689.57 411.87,691 C418.19,692.43 424.51,697.07 430.83,698.5 C437.16,699.93 443.48,701.5 449.8,701.5 C456.12,701.5 462.44,700.89 468.77,700 C475.09,699.11 481.41,693.22 487.73,688 C494.06,682.78 500.38,672.74 506.7,665.5 C513.02,658.26 519.34,646.25 525.67,644.5 C531.99,642.75 538.31,641.5 544.63,641.5 C550.96,641.5 557.28,648.5 563.6,652 C569.92,655.5 576.24,659.58 582.57,662.5 C588.89,665.42 595.21,670 601.53,670 C607.86,670 614.18,665.2 620.5,661 C626.82,656.8 633.14,648.84 639.47,640 C645.79,631.16 652.11,614.29 658.43,604 C664.76,593.71 671.08,582.54 677.4,577 C683.72,571.46 690.04,565 696.37,565 C702.69,565 709.01,570.25 715.33,574 C721.66,577.75 727.98,583.76 734.3,589 C740.62,594.24 746.94,600.87 753.27,605.5 C759.59,610.13 765.91,617.5 772.23,617.5 C778.56,617.5 784.88,615.36 791.2,613 C797.52,610.64 803.84,603.02 810.17,596.5 C816.49,589.98 822.81,579.97 829.13,572.5 C835.46,565.03 841.78,558.5 848.1,551.5 C854.42,544.5 860.74,530.5 867.07,530.5 C873.39,530.5 879.71,533.5 886.03,536.5 C892.36,539.5 898.68,547.47 905,554.5 C911.32,561.53 917.64,572.03 923.97,580 C930.29,587.97 936.61,595.54 942.93,602.5 C949.26,609.46 955.58,617.89 961.9,622 C968.22,626.11 974.54,631 980.87,631 C987.19,631 993.51,628.86 999.83,626.5 C1006.16,624.14 1012.48,616.35 1018.8,610 C1025.12,603.65 1031.44,594.46 1037.77,587.5 C1044.09,580.54 1050.41,570.44 1056.73,568 C1063.06,565.56 1069.38,563.5 1075.7,563.5 C1082.02,563.5 1088.34,571 1094.67,577 C1100.99,583 1107.31,594.76 1113.63,604 C1119.96,613.24 1126.28,624.44 1132.6,632.5 C1138.92,640.56 1145.24,648.02 1151.57,653.5 C1157.89,658.98 1164.21,667 1170.53,667 C1176.86,667 1183.18,662 1189.5,658 C1195.82,654 1202.14,644 1208.47,640 C1214.79,636 1221.11,631 1227.43,631 C1233.76,631 1240.08,636.4 1246.4,640 C1252.72,643.6 1259.04,651.86 1265.37,653.5 C1271.69,655.14 1278.01,656.5 1284.33,656.5 C1290.66,656.5 1296.98,650.42 1303.3,646 C1309.62,641.58 1315.94,634.24 1322.27,628 C1328.59,621.76 1334.91,612.11 1341.23,608.5 C1347.56,604.89 1353.88,601 1360.2,601 C1366.52,601 1372.84,610.9 1379.17,614.5 C1385.49,618.1 1391.81,619.9 1398.13,623.5 C1404.46,627.1 1410.78,635.36 1417.1,637 C1423.42,638.64 1429.74,640 1436.07,640 C1442.39,640 1448.71,631.29 1455.03,628 C1461.36,624.71 1467.68,622.4 1474,619.6 L1474,820 L336,820 Z" fill="url(#qps-fill)"/>
+<path id="qps-line" d="M336,697 C342.32,697 348.64,697 354.97,697 C361.29,697 367.61,695.33 373.93,694 C380.26,692.67 386.58,688 392.9,688 C399.22,688 405.54,689.57 411.87,691 C418.19,692.43 424.51,697.07 430.83,698.5 C437.16,699.93 443.48,701.5 449.8,701.5 C456.12,701.5 462.44,700.89 468.77,700 C475.09,699.11 481.41,693.22 487.73,688 C494.06,682.78 500.38,672.74 506.7,665.5 C513.02,658.26 519.34,646.25 525.67,644.5 C531.99,642.75 538.31,641.5 544.63,641.5 C550.96,641.5 557.28,648.5 563.6,652 C569.92,655.5 576.24,659.58 582.57,662.5 C588.89,665.42 595.21,670 601.53,670 C607.86,670 614.18,665.2 620.5,661 C626.82,656.8 633.14,648.84 639.47,640 C645.79,631.16 652.11,614.29 658.43,604 C664.76,593.71 671.08,582.54 677.4,577 C683.72,571.46 690.04,565 696.37,565 C702.69,565 709.01,570.25 715.33,574 C721.66,577.75 727.98,583.76 734.3,589 C740.62,594.24 746.94,600.87 753.27,605.5 C759.59,610.13 765.91,617.5 772.23,617.5 C778.56,617.5 784.88,615.36 791.2,613 C797.52,610.64 803.84,603.02 810.17,596.5 C816.49,589.98 822.81,579.97 829.13,572.5 C835.46,565.03 841.78,558.5 848.1,551.5 C854.42,544.5 860.74,530.5 867.07,530.5 C873.39,530.5 879.71,533.5 886.03,536.5 C892.36,539.5 898.68,547.47 905,554.5 C911.32,561.53 917.64,572.03 923.97,580 C930.29,587.97 936.61,595.54 942.93,602.5 C949.26,609.46 955.58,617.89 961.9,622 C968.22,626.11 974.54,631 980.87,631 C987.19,631 993.51,628.86 999.83,626.5 C1006.16,624.14 1012.48,616.35 1018.8,610 C1025.12,603.65 1031.44,594.46 1037.77,587.5 C1044.09,580.54 1050.41,570.44 1056.73,568 C1063.06,565.56 1069.38,563.5 1075.7,563.5 C1082.02,563.5 1088.34,571 1094.67,577 C1100.99,583 1107.31,594.76 1113.63,604 C1119.96,613.24 1126.28,624.44 1132.6,632.5 C1138.92,640.56 1145.24,648.02 1151.57,653.5 C1157.89,658.98 1164.21,667 1170.53,667 C1176.86,667 1183.18,662 1189.5,658 C1195.82,654 1202.14,644 1208.47,640 C1214.79,636 1221.11,631 1227.43,631 C1233.76,631 1240.08,636.4 1246.4,640 C1252.72,643.6 1259.04,651.86 1265.37,653.5 C1271.69,655.14 1278.01,656.5 1284.33,656.5 C1290.66,656.5 1296.98,650.42 1303.3,646 C1309.62,641.58 1315.94,634.24 1322.27,628 C1328.59,621.76 1334.91,612.11 1341.23,608.5 C1347.56,604.89 1353.88,601 1360.2,601 C1366.52,601 1372.84,610.9 1379.17,614.5 C1385.49,618.1 1391.81,619.9 1398.13,623.5 C1404.46,627.1 1410.78,635.36 1417.1,637 C1423.42,638.64 1429.74,640 1436.07,640 C1442.39,640 1448.71,631.29 1455.03,628 C1461.36,624.71 1467.68,622.4 1474,619.6" fill="none" stroke="#007AFF" stroke-width="2.8" stroke-linejoin="round" stroke-linecap="round"/>
+<path id="rpm-line" d="M449.8,695 C487.73,685.08 525.67,675.12 563.6,665.25 C601.53,655.38 639.47,647.27 677.4,635.75 C715.33,624.23 753.27,607.08 791.2,594 C829.13,580.92 867.07,557 905,557 C942.93,557 980.87,612 1018.8,612 C1056.73,612 1094.67,588.75 1132.6,588.75 C1170.53,588.75 1208.47,648.25 1246.4,648.25 C1284.33,648.25 1322.27,634.85 1360.2,632.25 C1398.13,629.65 1436.07,628.82 1474,627.1" fill="none" stroke="#168F82" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<g id="chart-inspection" aria-label="14:29:00，QPS 125.0，RPM 9250">
+<line x1="1132.6" y1="516" x2="1132.6" y2="820" stroke="#B3B7C0" stroke-width="1" stroke-opacity=".65"/>
+<circle cx="1132.6" cy="632.5" r="5" fill="#FFFFFF" stroke="#007AFF" stroke-width="2.5"/>
+<path d="M1132.6,583.75 L1137.6,588.75 L1132.6,593.75 L1127.6,588.75 Z" fill="#FFFFFF" stroke="#168F82" stroke-width="2"/>
+<rect x="1160" y="472" width="218" height="108" rx="8" fill="#FFFFFF" stroke="#E5E7EB" filter="url(#chart-popover-shadow)"/>
+<text x="1177" y="496" font-size="12" fill="#63666D" font-weight="500" data-max-width="180" >14:29:00</text>
+<circle cx="1181" cy="523" r="3.5" fill="#007AFF"/>
+<text x="1194" y="528" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="58" >QPS</text>
+<text x="1360" y="528" font-size="14" fill="#202124" font-weight="600" data-max-width="94" text-anchor="end">125.0</text>
+<path d="M1181,544 L1185,548 L1181,552 L1177,548 Z" fill="#168F82"/>
+<text x="1194" y="553" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="58" >RPM</text>
+<text x="1360" y="553" font-size="14" fill="#202124" font-weight="600" data-max-width="94" text-anchor="end">9,250</text>
+</g>
+<text x="336" y="850" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="86" text-anchor="start">14:22</text>
+<text x="563.6" y="850" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="86" text-anchor="middle">14:24</text>
+<text x="791.2" y="850" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="86" text-anchor="middle">14:26</text>
+<text x="1018.8" y="850" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="86" text-anchor="middle">14:28</text>
+<text x="1246.4" y="850" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="86" text-anchor="middle">14:30</text>
+<text x="1474" y="850" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="86" text-anchor="end">14:32</text>
+</g>
+<line x1="284" y1="891" x2="1557" y2="891" stroke="#E8E9EC"/>
+<text x="1555" y="920" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="300" text-anchor="end">最近更新 14:32:08</text>
 </svg>

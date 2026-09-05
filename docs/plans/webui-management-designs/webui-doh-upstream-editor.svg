@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
-<title id="title">FluxDNS · DoH 上游编辑弹窗</title>
+<title id="title">FluxDNS · DNS 上游编辑弹窗</title>
 <desc id="desc">管理后台视觉规划效果图。全部数值、地址和配置均为演示内容，不代表当前产品已实现的功能。</desc>
 <metadata id="icon-license">ISC License
 
@@ -612,8 +612,8 @@ SOFTWARE.
 <svg x="484" y="155" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 <use href="#icon-Globe2"/>
 </svg>
-<text x="530" y="166" font-size="23" fill="#202124" font-weight="600" data-max-width="675" >编辑 DoH 上游</text>
-<text x="531" y="191" font-size="12.5" fill="#8B8F98" font-weight="400" data-max-width="570" >edge-primary</text>
+<text x="530" y="166" font-size="23" fill="#202124" font-weight="600" data-max-width="675" >编辑 DNS 上游</text>
+<text x="531" y="191" font-size="12.5" fill="#8B8F98" font-weight="400" data-max-width="570" >原名称：edge-primary</text>
 <g aria-label="关闭编辑弹窗">
 <title>关闭编辑弹窗</title>
 <svg x="1287" y="148" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -623,16 +623,16 @@ SOFTWARE.
 <line x1="438" y1="222" x2="1342" y2="222" stroke="#E8E9EC" />
 <text x="474" y="266" font-size="15" fill="#202124" font-weight="600" data-max-width="832" >基本信息</text>
 <text x="474" y="299" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="396" >名称</text>
-<rect x="474" y="312" width="396" height="43" rx="6" fill="#FFFFFF" stroke="#D9DDE3" />
-<text x="488" y="339" font-size="13" fill="#202124" font-weight="400" data-max-width="369" >edge-primary</text>
+<rect x="474" y="312" width="396" height="43" rx="6" fill="#FFFFFF" stroke="#007AFF" stroke-width="1.8"/>
+<text x="488" y="339" font-size="13" fill="#202124" font-weight="400" data-max-width="369" >edge-main</text>
 <text x="892" y="299" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="414" >类型</text>
-<rect x="892" y="312" width="414" height="43" rx="6" fill="#F5F6F8" stroke="#D9DDE3" />
-<text x="906" y="339" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="362" >DNS over HTTPS</text>
-<svg x="1277" y="326" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#9299A3" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-LockKeyhole"/>
+<rect x="892" y="312" width="414" height="43" rx="6" fill="#FFFFFF" stroke="#D9DDE3" />
+<text x="906" y="339" font-size="13" fill="#202124" font-weight="400" data-max-width="362" >DNS over HTTPS</text>
+<svg x="1277" y="326" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#7A828E" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronDown"/>
 </svg>
 <text x="474" y="385" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="832" >服务地址</text>
-<rect x="474" y="398" width="832" height="43" rx="6" fill="#FFFFFF" stroke="#007AFF" stroke-width="1.8"/>
+<rect x="474" y="398" width="832" height="43" rx="6" fill="#FFFFFF" stroke="#D9DDE3" />
 <text x="488" y="425" font-size="13" fill="#202124" font-weight="400" data-max-width="805" class="mono">https://dns.edge.example/dns-query</text>
 <line x1="474" y1="467" x2="1306" y2="467" stroke="#E8E9EC" />
 <text x="474" y="502" font-size="15" fill="#202124" font-weight="600" data-max-width="832" >连接设置</text>
