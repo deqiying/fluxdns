@@ -8,7 +8,7 @@
 
 当前已实现 React + TypeScript + Vite 的只读 WebUI 工程、首次初始化、Cookie session、应用壳、页面路由、OpenAPI v1 类型和 MSW contract fixtures。后端 Management API 与 `webui-embed` 已接入；默认开发模式通过 Vite 将 `/api` 代理到 `127.0.0.1:8080`，也可以显式启用本地 mock transport 独立查看页面。
 
-架构边界和实施状态见[前端架构设计](../docs/frontend/architecture.md)与[前端开发方案](../docs/frontend/development-plan.md)，接口字段以 [`openapi/management-api-v1.yaml`](openapi/management-api-v1.yaml) 为权威。前端实现保持在本目录内，不把仓库根目录作为前端工程目录。
+架构边界和实施状态见[前端架构设计](../docs/frontend/architecture.md)，接口字段以 [`openapi/management-api-v1.yaml`](openapi/management-api-v1.yaml) 为权威。前端实现保持在本目录内，不把仓库根目录作为前端工程目录。
 
 ## 环境和缓存
 

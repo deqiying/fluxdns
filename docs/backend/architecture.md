@@ -8,7 +8,7 @@
 >
 > 最后核对：2026-09-04
 >
-> 关联文档：[配置字段参考](configuration-reference.md) · [后端开发计划](development-plan.md)
+> 关联文档：[配置字段参考](configuration-reference.md) · [后端模块文档索引](modules/README.md)
 
 ## 1. 结论
 
@@ -135,7 +135,7 @@ backend/src/
 
 `management` 使用独立的 Tokio TCP listener 和 HTTP router，不复用 DoH parser、route、TLS 或端口。其 accept loop 由同一个 `Supervisor` 持有，但单个管理请求只访问显式注入的认证、配置和只读查询依赖。
 
-各顶层模块的职责、内部流程、并发/失败语义和验收项见 [后端开发计划](development-plan.md) 中的模块索引。`app.rs` 只负责进程级装配，task 监督、listener 生命周期和 drain 统一由 `runtime/*` 持有。
+各顶层模块的职责、内部流程、并发/失败语义和验收项见[后端模块文档索引](modules/README.md)。`app.rs` 只负责进程级装配，task 监督、listener 生命周期和 drain 统一由 `runtime/*` 持有。
 
 业务 SQLite 的 SQLx migration 存放在 `backend/migrations/*`，由 `backend/src/storage/sqlite.rs` 在 prepare 阶段嵌入并执行；缓存持久化使用独立 schema，不复用该目录中的业务表。
 
@@ -630,8 +630,6 @@ Observability 已提供面向 `LogSink`、`MetricsSink` 和 `HealthSink` 的 `Te
 - request hot-path profile：release 构建下分别覆盖 cache hit、hosts hit、固定本地 upstream miss 与 `resolve_log` off/on；本机 loopback 单并发数据只作为回归剖面，冻结目标硬件、QPS、并发和资源预算后的外部压测仍是发布验收边界。
 
 ## 15. 推荐实现顺序
-
-阶段状态、模块权重和当前进度以 [后端开发计划](development-plan.md) 为准。
 
 1. 定义 domain/ports：canonical message、`RequestContext`、`TransportCapabilities`/adapter profile、`DnsExchange`、cache/storage/telemetry seams；
 2. 实现 versioned config DTO、迁移链、严格校验、默认值矩阵和 `ResolvedConfig`；

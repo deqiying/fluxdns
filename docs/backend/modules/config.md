@@ -10,7 +10,7 @@
 >
 > 关联实现：`backend/src/config/*`
 >
-> 关联文档：[配置字段参考](../configuration-reference.md) · [后端架构](../architecture.md) · [后端开发计划](../development-plan.md)
+> 关联文档：[配置字段参考](../configuration-reference.md) · [后端架构](../architecture.md)
 
 ## 当前实现边界
 

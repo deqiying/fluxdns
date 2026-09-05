@@ -8,7 +8,7 @@
 >
 > 最后核对：2026-09-04
 >
-> 关联文档：[后端总体架构](../backend/architecture.md) · [配置参考](../backend/configuration-reference.md) · [前端总体架构](../frontend/architecture.md) · [前端开发计划](../frontend/development-plan.md) · [Management API OpenAPI](../../frontend/openapi/management-api-v1.yaml)
+> 关联文档：[后端总体架构](../backend/architecture.md) · [配置参考](../backend/configuration-reference.md) · [前端总体架构](../frontend/architecture.md) · [Management API OpenAPI](../../frontend/openapi/management-api-v1.yaml)
 
 ## 1. 摘要
 
@@ -569,7 +569,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 - 固化 `script/package-embedded.ps1` 的 frontend build -> 默认 feature 后端 release -> 当前平台 Rust embed -> 单一当前平台发布物步骤，以及 `script/dev.ps1 start -ConfigPath <path>`、`status`、`stop` 生命周期入口；
 - 在 Windows/Linux x86_64 原生 runner 分别验证 `frontend/dist/`、`backend/target/` 独立保留，单次调用只生成当前平台约定命名的发布二进制；
 - 运行 DNS 与 management 端到端回归；
-- 更新根 README、后端/前端架构、配置参考、模块文档、开发计划和示例；
+- 更新根 README、后端/前端架构、配置参考、模块文档和示例；
 - 将本方案中的稳定事实迁移到权威文档，确认无保留价值后删除本方案与对应索引项。
 
 退出条件：Windows/Linux x86_64 原生 runner 均可用同一脚本复现各自平台的单 binary；不依赖外部 `frontend/dist/` 或 Node.js 运行；启动脚本没有配置路径默认值；权威文档只描述真实已实现行为，不再保留 v1 WebUI feature gate 结论。
@@ -641,7 +641,7 @@ v2 实施时应同步更新配置模型、示例与权威参考：
 6. 配置写入具备并发冲突检测、权限控制、严格回读和 crash recovery 证据。
 7. 登录、session 恢复、退出、过期、Origin/Fetch Metadata、限流和 Cookie 属性通过真实浏览器验证。
 8. 所有只读 handler 经由稳定 query/snapshot 边界，不直接引用 SQLite 或 DNS transport 内部实现。
-9. 根 README、配置参考、后端/前端架构、模块文档、开发计划和示例已与真实实现同步。
+9. 根 README、配置参考、后端/前端架构、模块文档和示例已与真实实现同步。
 10. `script/package-embedded.ps1` 在 Windows/Linux x86_64 原生环境分别先保留前后端独立构建物，再生成当前平台一个内嵌 WebUI binary；自动 Release workflow 在共享门禁后由 Windows x86_64、Linux x86_64 与 macOS ARM64 runner 并行生成发布物并统一创建 GitHub Release。`script/dev.ps1 start` 要求显式 `-ConfigPath`，并可通过 `status`/`stop` 管理已启动进程。
 
 ## 16. 实施前评审清单

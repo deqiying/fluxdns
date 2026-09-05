@@ -20,7 +20,7 @@ metadata:
 3. `docs/standards/documentation-maintenance.md`，确认完整规范、维护信息格式和验证清单。
 4. 与任务直接相关的权威文档：
    - 跨领域规范：`docs/standards/README.md` 及对应规范；
-   - 后端：`docs/backend/README.md`、`architecture.md`、`configuration-reference.md`、`development-plan.md` 或 `modules/<module>.md`；
+   - 后端：`docs/backend/README.md`、`architecture.md`、`configuration-reference.md` 或 `modules/<module>.md`；
    - 前端：`docs/frontend/README.md`、`docs/frontend/architecture.md`，以及工程入口 `frontend/README.md`；
    - 本地测试、工具链和构建物：`docs/standards/local-testing.md`、`environment-usage.md`。
 
@@ -55,10 +55,9 @@ metadata:
 | --- | --- | --- |
 | 文档总导航、一级目录职责 | `docs/README.md` | 一级路由变化时检查 `AGENTS.md` |
 | 跨模块、可执行的开发/协作/验证规则 | `docs/standards/<standard>.md` | 更新 `docs/standards/README.md` 和 `AGENTS.md` 路由 |
-| 后端跨模块架构与契约 | `docs/backend/architecture.md` | 联动受影响模块文档和开发计划（如有里程碑变化） |
+| 后端跨模块架构与契约 | `docs/backend/architecture.md` | 联动受影响模块文档 |
 | 后端配置公共契约 | `docs/backend/configuration-reference.md` | 联动 `config-example.yaml`、配置模型、校验和测试说明 |
 | 单一后端模块实现边界 | `docs/backend/modules/<module>.md` | 新增模块时更新 `modules/README.md` 和架构映射 |
-| 后端阶段、进度、验收门槛 | `docs/backend/development-plan.md` | 仅在项目状态明显变化时更新根 `README.md` 摘要 |
 | 前端总体架构或实施边界 | `docs/frontend/architecture.md` | 工程命令/目录变化时联动 `frontend/README.md` |
 | 前端工程入口、命令和目录说明 | `frontend/README.md` | 仅在入口或工程约定变化时联动相关索引 |
 | 一次性调查、原始日志、个人笔记 | 不进入长期文档 | 本地运行资料按 `local-testing.md` 放入 `_fluxdns/` |

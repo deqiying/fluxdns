@@ -10,7 +10,7 @@
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
-> 关联文档：[后端开发计划](development-plan.md)
+> 关联文档：[后端架构](architecture.md)
 
 ## 1. 配置模型概览
 

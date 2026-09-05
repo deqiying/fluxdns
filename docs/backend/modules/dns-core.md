@@ -10,7 +10,7 @@
 >
 > 关联实现：`backend/src/dns/*`
 >
-> 关联文档：[后端架构](../architecture.md) · [后端开发计划](../development-plan.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
+> 关联文档：[后端架构](../architecture.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
 
 ## 当前实现边界
 

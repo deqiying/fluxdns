@@ -27,7 +27,6 @@
 | 文档导航和目录职责 | [`docs/README.md`](../README.md) | 一级文档或目录变化时同步更新 |
 | 后端总体架构和跨模块契约 | [`backend/architecture.md`](../backend/architecture.md) | 模块文档不得单独改变跨模块契约 |
 | 后端模块内部设计和实现边界 | [`backend/modules/*.md`](../backend/modules/README.md) | 源码行为变化时更新对应模块文档 |
-| 后端阶段、总体进度和验收门槛 | [`backend/development-plan.md`](../backend/development-plan.md) | 只记录里程碑级进度与证据摘要，不承载详细设计 |
 | 配置字段、路径、校验和迁移 | [`backend/configuration-reference.md`](../backend/configuration-reference.md) | 必须与 `config-example.yaml`、配置模型、校验和测试同步 |
 | 前端总体架构和实施边界 | [`frontend/architecture.md`](../frontend/architecture.md) | 前端目录入口由 [`frontend/README.md`](../../frontend/README.md) 维护；项目工具链和命令调用由 [`standards/environment-usage.md`](environment-usage.md) 维护 |
 | 面向使用者的项目概览和入口 | 根 [`README.md`](../../README.md) | 只保留高层摘要，详细内容链接到 `docs/` 权威文档 |
@@ -39,7 +38,7 @@
 同一事实只在一个权威文档中完整展开。例如：
 
 - 配置字段的默认值和校验规则只在 `backend/configuration-reference.md` 完整定义；架构与模块文档只说明使用方式并链接过去；
-- 总体完成比例、当前阶段和下一步只在 `backend/development-plan.md` 维护；根 `README.md` 只保留面向读者的阶段摘要；
+- 根 `README.md` 只保留面向读者的项目状态摘要，实现边界在对应架构和模块文档维护；
 - 模块内部数据结构和失败语义在对应模块文档维护；跨模块依赖方向在 `backend/architecture.md` 维护。
 
 发现重复内容时，保留权威文档中的完整版本，将其他位置收敛为必要摘要和相对链接。不得通过复制整段内容解决“入口不明显”的问题，应补索引或链接。
@@ -59,7 +58,6 @@ docs/
 ├── backend/
 │   ├── README.md                 # 后端文档索引
 │   ├── architecture.md           # 后端总体架构与跨模块契约
-│   ├── development-plan.md       # 后端阶段、进度与验收
 │   ├── configuration-reference.md # 配置公共契约
 │   └── modules/
 │       ├── README.md             # 后端模块文档索引
@@ -86,9 +84,8 @@ docs/
 1. 跨模块且可执行的协作、开发或验证规则放入 `docs/standards/`。
 2. 配置公共契约直接更新 `docs/backend/configuration-reference.md`，不为单个配置块另建平行参考文档。
 3. 后端跨模块架构直接更新 `docs/backend/architecture.md`；单模块设计放入 `docs/backend/modules/`。
-4. 后端阶段、进度、后续任务或总体验收更新 `docs/backend/development-plan.md`。
-5. 前端跨模块方案更新 `docs/frontend/architecture.md`；仅与前端工程使用相关的入口和命令更新 `frontend/README.md`。
-6. 无法形成长期维护价值的调查记录、命令原始输出、一次性检查清单和个人笔记不进入 `docs/`。本地测试产物按[本地测试规范](local-testing.md)放入 `_fluxdns/`，任务证据可保留在提交或评审记录中。
+4. 前端跨模块方案更新 `docs/frontend/architecture.md`；仅与前端工程使用相关的入口和命令更新 `frontend/README.md`。
+5. 无法形成长期维护价值的调查记录、命令原始输出、一次性检查清单和个人笔记不进入 `docs/`。本地测试产物按[本地测试规范](local-testing.md)放入 `_fluxdns/`，任务证据可保留在提交或评审记录中。
 
 确需在仓库中评审尚未实施的独立技术方案时，可以在首次需要时创建 `docs/plans/`，并同时创建该目录的 `README.md`。方案必须写明实现状态和退出条件；实施完成后，将长期有效的契约迁入对应权威文档，再删除已无独立价值的方案。不得为保存旧副本而创建 `archive/`、`history/` 或按日期堆叠的归档目录；Git 历史承担版本追溯职责。确有审计或发布留档要求时，应另行定义专用产物和保留策略。
 
@@ -167,10 +164,9 @@ docs/
 
 | 变更类型 | 必查文档 | 条件性同步 |
 | --- | --- | --- |
-| 配置字段、默认值、路径、校验或迁移 | `backend/configuration-reference.md`、`config-example.yaml`、Config 模块文档 | 影响跨模块装配时更新后端架构；形成里程碑时更新开发计划 |
-| 跨模块依赖、请求管线或生命周期 | `backend/architecture.md` 与受影响模块文档 | 形成里程碑或改变验收门槛时更新开发计划和根 README 摘要 |
+| 配置字段、默认值、路径、校验或迁移 | `backend/configuration-reference.md`、`config-example.yaml`、Config 模块文档 | 影响跨模块装配时更新后端架构 |
+| 跨模块依赖、请求管线或生命周期 | `backend/architecture.md` 与受影响模块文档 | 面向使用者的项目状态发生明显变化时更新根 README 摘要 |
 | 单一后端模块行为、失败语义或模块测试 | 对应 `backend/modules/*.md` | 改变公共配置或跨模块契约时更新对应权威文档 |
-| 阶段完成、优先级或总体进度 | `backend/development-plan.md` | 只有面向使用者的项目状态发生明显变化时更新根 README |
 | 前端技术栈、边界或 Management API 设计 | `frontend/architecture.md` | 工程命令或目录变化时更新 `frontend/README.md`；后端契约变化时更新后端架构或对应模块文档 |
 | 项目工具链、构建物、依赖目录、缓存或安装边界 | `standards/environment-usage.md` | 更新 `AGENTS.md` 中的强制入口或高层规则 |
 | 本地测试目录、测试方法或结果记录要求 | `standards/local-testing.md` | 更新 `AGENTS.md` 中的强制入口或高层规则 |
@@ -194,7 +190,7 @@ docs/
 - 行为与文档在同一变更中更新，避免先合并实现、以后再补文档。
 - 修改标题或锚点前先搜索引用；移动文件时同步修正相对链接。
 - 总结性文档只更新摘要和入口，详细事实留在其权威文档。
-- 变更计划已实施完成时，将长期有效信息收敛到架构、配置、模块或规范文档，并更新总体进度；不再需要的临时方案应删除。
+- 变更计划已实施完成时，将长期有效信息收敛到架构、配置、模块或规范文档；不再需要的临时方案应删除。
 
 ### 7.3 废弃或删除
 
