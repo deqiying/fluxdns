@@ -24,7 +24,7 @@
 | 首用户写回 | ConfigStore + source-preserving editor | setup，run 前恢复 journal | 本轮静态 | loader 为 8 MiB，writer 为 4 MiB；可加载不等于可写回 |
 | 热重载 | `process_owned_reload_change` | service-aware watcher | 本轮核对 guard | database、logs、webui enable/address/port/public_origin、dns.resolve_log 改变需重启；users 可动态更新 |
 
-本轮未执行 Cargo 或配置 validate。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)。规范中的目标要求与代码冲突时，按[差距计划](../plans/backend-contract-gaps.md)处理，不仅修改字段说明来掩盖实现缺口。
+本轮未执行 Cargo 或配置 validate。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)，后续矩阵见[契约验证开发计划](../plans/backend-contract-validation.md)。既定契约与代码冲突时须保留复现证据并明确修复边界，不仅修改字段说明来掩盖实现缺口。
 
 ## 1. 配置模型概览
 
@@ -237,7 +237,7 @@ RawConfigVn
 
 `memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS。`persistence.max_size_bytes` 保留 [`prepare_snapshot`](../../backend/src/cache/persistence.rs) 的计费语义：10 字节快照头，加每条 payload 长度及 4 字节 framing；[`SQLite adapter`](../../backend/src/cache/sqlite.rs) 使用增量 upsert 与编码大小索引维护同一预算，没有据此设置 `max_page_count` 或物理文件收缩。主库页/freelist/索引及 `-wal`/`-shm` 均可能使实际磁盘占用超过这个值，不能据此规划硬磁盘配额。
 
-任一逻辑缓存池启用时，production async prepare 从独立 SQLite 恢复可用记录；内存 CAS 成功后通过有界队列 best-effort 持久化，有序 shutdown 排空已入队批次。超出编码预算时按 entry 插入时间淘汰旧项，不按访问热度；队列满或持久化失败不改变 DNS 响应。原物理容量与近似 LRU 要求见[差距计划](../plans/backend-contract-gaps.md)，本次只校正文档，没有更改字段或代码。
+任一逻辑缓存池启用时，production async prepare 从独立 SQLite 恢复可用记录；内存 CAS 成功后通过有界队列 best-effort 持久化，有序 shutdown 排空已入队批次。超出编码预算时按 entry 插入时间淘汰旧项，不按访问热度；队列满或持久化失败不改变 DNS 响应。已接受的编码预算与插入时间淘汰约束见[Cache 设计](../architecture/backend/modules/cache.md)；物理硬配额与 LRU 不是后续验收待办。
 
 策略级和客户端级 `cache` 只允许 `enabled` 与 `optimistic` 子对象，不包含 `memory`、`failure_ttl` 或 `persistence`。只要出现策略级或客户端级 `cache` 对象，`enabled` 就必须显式提供；整个对象缺失才表示继续向较低优先级选择。
 

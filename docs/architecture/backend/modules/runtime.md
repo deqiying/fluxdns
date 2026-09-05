@@ -162,7 +162,7 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 使用独立 
 
 stats、resolve log、SQLite checkpoint 和 Telemetry flush 都必须纳入进程 drain。cache persistence 由 finalizer owner 有序关闭，安全摘要在 Telemetry 关闭前发布；未完成关闭与持久化失败/drop 分别记录，不能混成同一 timeout。实际 owner 和 task 接线见[后台服务](../../../implementation/backend/background-services.md)。
 
-所有阶段共享调用方给定的总 deadline，阶段结果分别记录；不是每一步独立重置预算。更强的“已读请求必须完成”语义和完整故障矩阵见[差距计划](../../../plans/backend-contract-gaps.md)。
+所有阶段共享调用方给定的总 deadline，阶段结果分别记录；不是每一步独立重置预算。“已读请求必须完成”不属于已接受的停机契约；后续并发、故障与 Unix 信号证据按[契约验证开发计划](../../../plans/backend-contract-validation.md)补齐，不借验收改为等待所有响应完成。
 
 ## 11. 契约验证要求
 

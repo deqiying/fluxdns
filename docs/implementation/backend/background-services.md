@@ -110,4 +110,4 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 | 关闭 telemetry | 12,000 | 0.143020 / 0.126200 / 0.255300 / 0.322900 | source accepted 12,100（含预热），0 series，无 telemetry 任务 |
 | 开启 telemetry | 12,000 | 0.153684 / 0.133200 / 0.255100 / 0.331400 | 同样 accepted 12,100，16 series，最终队列 0，输出 77 项，rejected_metrics 0 |
 
-本次不修改 Storage 积压预算，不把短时 profile 外推为稳定压力通过；积压保护继续在[契约差距计划](../../plans/backend-contract-gaps.md)验收。真实远程、真实磁盘满/权限/介质故障、Unix 信号、发布硬件 SLO 和长期 RSS/CPU 压测均未执行；SQLite 写锁和 trigger 故障只证明已列出的本地分支。
+本次不修改 Storage 积压预算，不把短时 profile 外推为稳定压力通过；积压保护与长期恢复的后续证据由[契约验证开发计划](../../plans/backend-contract-validation.md)的 V9/V10 跟踪。真实远程、真实磁盘满/权限/介质故障、Unix 信号、发布硬件 SLO 和长期 RSS/CPU 压测均未执行；SQLite 写锁和 trigger 故障只证明已列出的本地分支。

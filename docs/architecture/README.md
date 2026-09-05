@@ -13,4 +13,4 @@
 | [Management 设计](management.md) | 认证、同源保护、只读查询和内嵌 SPA |
 | [前端设计](frontend.md) | 分层、查询状态、路由与呈现约束 |
 
-代码入口和能力限制见[当前实现](../implementation/README.md)。已接受设计与代码之间未闭合的差距见[后端契约核对计划](../plans/backend-contract-gaps.md)；文档移动不等于完成设计重审。
+代码入口和能力限制见[当前实现](../implementation/README.md)。已验收 D1-D9 的后续组合、环境与长期负载验证见[后端契约验证开发计划](../plans/backend-contract-validation.md)；这些证据缺口不等同功能未接线，文档移动也不等于完成设计重审。

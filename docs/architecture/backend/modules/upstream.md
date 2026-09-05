@@ -206,7 +206,7 @@ TransportFailure 分类至少包括 connect、DNS bootstrap、proxy、TLS、HTTP
 
 v1 不实现主动健康检查、熔断器或持久健康分数。load-balance 只使用 primary lease 计数，不应在文档或指标中称为 health。当前也没有完整的独立 attempt telemetry 生产链路，见 [DNS Core](dns-core.md)。
 
-实际 adapter 和正式接线见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)；真实 TLS、proxy、bootstrap 与跨 adapter 故障证据按[契约核对计划](../../../plans/backend-contract-gaps.md)补齐，不由本设计推断。
+实际 adapter 和正式接线见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)；真实 TLS、proxy、bootstrap 与跨 adapter 故障证据按[契约验证开发计划](../../../plans/backend-contract-validation.md)的 V3/V6/V7 补齐，不由本设计推断。
 
 ## 10. 契约验证要求
 

@@ -210,4 +210,4 @@ encoder 由 request correlation 持有并只能调用一次：
 - UDP/TCP/DoH 多轮无流量 deadline 后继续服务且不消耗 endpoint retry；
 - wire codec 的 DNS ID 分离/恢复、canonicalization、输入输出尺寸上限和安全错误分类；
 - UDP/TCP 在 header 可靠时对非法 question/解码返回 FORMERR、对非 QUERY opcode 返回 NOTIMP；短 header 和需要 OPT 的 BADVERS 不猜测响应；
-- 共享 fake 与各 adapter 本地用例覆盖相关契约；完整 TLS/proxy/取消/资源上限矩阵仍见[差距计划](../../../plans/backend-contract-gaps.md)，不宣称已通过统一 conformance 门禁。
+- 共享 fake 与各 adapter 本地用例覆盖相关契约；TLS/proxy/取消/资源上限的后续矩阵见[契约验证开发计划](../../../plans/backend-contract-validation.md)的 V3/V6/V9，不宣称已通过统一 conformance 门禁。

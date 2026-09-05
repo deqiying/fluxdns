@@ -65,6 +65,6 @@ DoH route 在 adapter 用共享模板匹配一次，Policy 按 typed route ID �
 
 ## 验证约束与现状入口
 
-模块中的“契约验证要求”是应证明的行为，不是测试通过记录。跨 adapter conformance、真实磁盘故障、Unix 进程信号及目标负载压力的未闭合项保留在[契约核对计划](../../plans/backend-contract-gaps.md)。不以本机 loopback、fake 或静态接线替代目标环境验收。
+模块中的“契约验证要求”是应证明的行为，不是测试通过记录。跨 adapter conformance、真实磁盘故障、Unix 进程信号及目标负载压力的后续证据由[契约验证开发计划](../../plans/backend-contract-validation.md)独立跟踪，不重新打开已验收 D1-D9 的设计选择。不以本机 loopback、fake 或静态接线替代目标环境验收。
 
 [生命周期](../../implementation/backend/lifecycle.md) · [DNS 管线](../../implementation/backend/dns-pipeline.md) · [后台服务](../../implementation/backend/background-services.md) · [管理端](../../implementation/backend/management.md)

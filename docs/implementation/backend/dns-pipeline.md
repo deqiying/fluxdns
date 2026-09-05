@@ -72,7 +72,7 @@ parallel 的上述择优不依赖 sink 是否存在。Positive 提前返回时�
 | --- | --- | --- | --- | --- |
 | UDP/TCP/DoH | `transport/udp.rs`、`tcp.rs`、`doh.rs` | service 的 typed binding 与 session loop | 本次完整测试包含跨 UDP/TCP/DoH GET/POST 用例 | 本地 loopback，不是远程矩阵；DoH 入站非 HTTP/2 |
 | TLS / 客户端地址 | system socket TLS、DoH forwarded/PROXY parser | DoH accept 后先可信 PROXY、再 TLS、再 HTTP | 本轮核对生产分支 | 真实代理、证书和故障组合仍需环境验收 |
-| Moka / SQLite cache | `build_cache_facade`、`initialize_cache_persistence`、增量 SQLite writer | async prepare 默认构造 | schema v1 升级、增量写触发器、失败回滚与已有 adapter 契约测试 | 保留插入时间淘汰；真实 disk-full 与组合 late-window 验收见[计划](../../plans/backend-contract-gaps.md) |
+| Moka / SQLite cache | `build_cache_facade`、`initialize_cache_persistence`、增量 SQLite writer | async prepare 默认构造 | schema v1 升级、增量写触发器、失败回滚与已有 adapter 契约测试 | 保留插入时间淘汰；真实 disk-full 与组合 late-window 的后续证据见[契约验证开发计划](../../plans/backend-contract-validation.md) |
 | Policy -> 出站 | core -> registry -> protocol-independent connector | 正式配置构造支持真实 HTTP/代理路径 | 本轮静态，无远程请求 | 不等同所有 SOCKS/Host/SNI 组合已实测 |
 | 单次完成事件 | service instrumented core、resolution publisher | core 返回后、编码前无等待移交 | 本轮核对调用位置 | ingress 满会出现可观测 gap，不能承诺零丢失 |
 | bootstrap 地址缓存 | 配置绑定 resolver、绝对到期点、查填许可 | 两个配置工厂均装配，direct/HTTPS/SOCKS5 共用 | [address_cache_tests.rs](../../../backend/src/upstream/address_cache_tests.rs)；registry 的正式 hosts bootstrap/代理测试 | 单 connector 单项；不缓存 system lookup、负答案或过期地址 |

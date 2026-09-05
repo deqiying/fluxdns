@@ -62,7 +62,7 @@ single-flight key 与 cache key 一致：
 
 只有 optimistic 开启、未超过 stale-until、transport compatible、响应类允许且 refresh admission 有容量时才可先返回 stale。共享 store 可按启用池中最大 max_age 保留候选，实际返回仍按当前所选池的 max_age 与 answer TTL 限制，再应用输出 TTL override。
 
-refresh 应捕获启动时最新可用 RuntimeSnapshot，完整重跑 client/policy/resource/upstream，不复用 entry 中的旧 connector/rule pointer。写回按 key、quality 和 producer revision CAS，旧 producer 不能覆盖新完整答案。资源更新与跨 revision finalizer 的实际接线见[DNS 管线](../../../implementation/backend/dns-pipeline.md)；完整 late-window 场景仍由[差距计划](../../../plans/backend-contract-gaps.md)跟踪，不以设计句子宣称验收完成。
+refresh 应捕获启动时最新可用 RuntimeSnapshot，完整重跑 client/policy/resource/upstream，不复用 entry 中的旧 connector/rule pointer。写回按 key、quality 和 producer revision CAS，旧 producer 不能覆盖新完整答案。资源更新与跨 revision finalizer 的实际接线见[DNS 管线](../../../implementation/backend/dns-pipeline.md)；late-window 组合证据由[契约验证开发计划](../../../plans/backend-contract-validation.md)的 V2 跟踪，不以设计句子宣称全部组合验收完成。
 
 finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明确拒绝；shutdown 取消并等待已接收任务，晚到结果不改变已返回客户端的 response。exchange、question mismatch 或 CAS 失败只放弃刷新，不延长旧 entry 的 stale 窗口。
 

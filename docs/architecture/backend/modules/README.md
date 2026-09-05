@@ -27,6 +27,6 @@
 
 本轮以当前源码为事实基准，直接修订已有模块正文，而非仅刷新日期。各模块“关联实现”提供核对入口；其中类型、算法、owner 和支持范围描述当前代码，不将未接线的原语或旧设计草图当成正式能力。
 
-模块设计保留职责、不变量与取舍，完整字段和运行链路继续由 configuration/implementation 维护，不机械派生 12 份实现文档。本次按已批准的 D1-D9 更新契约并保留配置语义与异步主链；真实运行及组合验收仍登记在[差距计划](../../../plans/backend-contract-gaps.md)，不以文档对齐替代运行证据。
+模块设计保留职责、不变量与取舍，完整字段和运行链路继续由 configuration/implementation 维护，不机械派生 12 份实现文档。已验收 D1-D9 保留配置语义与异步主链；后续环境、组合及长期负载证据由[契约验证开发计划](../../../plans/backend-contract-validation.md)独立跟踪，不以文档对齐替代运行证据。
 
 各文档末尾的“契约验证要求”仍是完整检查范围，不是全部通过记录。本次 Cargo、SQLite、loopback 与手动 profile 的实际结果统一见[后台服务验证](../../../implementation/backend/background-services.md#本次验证)；未将本机测试外推为远程、Unix 或长期压力验收。
