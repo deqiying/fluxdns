@@ -4,9 +4,9 @@
 >
 > 适用范围：hosts/rule 解析、加载、snapshot、持久化和刷新发布
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/resource/*`
+> 关联实现：[loader.rs](../../../../backend/src/resource/loader.rs)、[fetcher.rs](../../../../backend/src/resource/fetcher.rs)、[remote.rs](../../../../backend/src/resource/remote.rs)、[rules.rs](../../../../backend/src/resource/rules.rs)、[hosts.rs](../../../../backend/src/resource/hosts.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Policy](policy.md) · [Runtime](runtime.md) · [Upstream](upstream.md)
 
@@ -24,6 +24,8 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 | `orchestrator.rs` | schedule、refresh coordinator、due/backoff、CAS publish 和 stop 语义的 Runtime-facing 纯逻辑编排 |
 | `snapshot.rs` | metadata、revision、registry 和 publish input |
 | `remote.rs` | remote fetch、manifest/content 原子落盘与恢复校验 |
+| `fetcher.rs` | Reqwest HTTP(S)/proxy、deadline、body 限额 |
+| `scheduler.rs` / `refresh.rs` | 周期/backoff、reservation、file/remote 刷新 worker |
 
 查询热路径只读取编译后的不可变索引，不访问文件、网络或 parser。
 
@@ -34,9 +36,9 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 - typed resource ID/name；
 - monotonically increasing epoch/revision；
 - content hash；
-- source fingerprint：file metadata、ETag/Last-Modified 等；
+- source fingerprint：file 长度/mtime 等元数据，remote 为内容 checksum/长度摘要；当前不是 ETag/Last-Modified 条件验证器；
 - parser/compiler version；
-- fetched/compiled time；
+- `fetched_at`，没有独立 `compiled_at` 字段；
 - source kind 与脱敏位置；
 - 是否使用已落盘 fallback；
 - stale/degraded 状态；
@@ -78,10 +80,10 @@ bounded read/fetch
 ### remote
 
 - 通过已绑定 ResourceFetcher/outbound 下载；
-- 使用 deadline、重定向上限、body 大小上限和 HTTPS 校验；
-- 可发送 `If-None-Match`/`If-Modified-Since`；
-- 304 只更新时间状态，不创建新 content revision；
-- response body 先写临时文件并计算 hash，再解析；
+- 使用 deadline、body 大小上限和 HTTPS 校验，显式禁用环境代理和自动重定向；
+- 每次发起普通 GET；`ResourceFetchRequest` 没有条件请求字段，不发送 `If-None-Match`/`If-Modified-Since`；
+- 只接受 HTTP 2xx，304 当前作为非成功状态失败，`modified_at` 返回 `None`；
+- body 先有界读入内存、计算 hash 并完成解析，再落盘；不是边下载边写临时文件；
 - v1 没有 expected checksum 配置，不把内部 hash 宣称为来源真实性校验。
 
 ## 5. Hosts 格式
@@ -124,15 +126,15 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 
 ## 7. Matcher
 
-编译索引：
+当前编译索引：
 
-- exact hash set；
-- reversed-label suffix trie；
-- wildcard suffix trie；
-- 预编译 regex set；
-- `dat selector` map（V2Ray `GeoSiteList` protobuf）。
+- `HostsIndex` 的 exact/wildcard 使用 `BTreeMap`，wildcard 按域名 label 逐级查最长后缀；
+- `RuleIndex` 的 exact/suffix 使用 `BTreeSet`，suffix 逐级枚举查询，不是 reversed-label trie；
+- keyword 使用有序列表，按 first-match 返回；
+- regex 使用有界的自有 `CompiledRegex` token 列表，支持受限原子和量词，拒绝分组/分支等语法，不是外部 RegexSet；
+- dat selector 使用不可变 map，值为已编译 `Arc<RuleIndex>`。
 
-匹配优先级由 Policy 固定。matcher 无内部 mutable cache，保证 snapshot 可跨线程共享。
+Hosts 为 exact → 最长 wildcard；rules 为 exact → 最长 suffix → keyword → regex。matcher 无内部 mutable cache，snapshot 可跨线程共享。
 
 ## 8. 首次启动与 fallback
 
@@ -145,7 +147,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 5. 获取成功使用新内容；
 6. 两者都不可用则 prepare 失败。
 
-落盘 manifest 包含 hash、parser version、source fingerprint 和成功时间；版本不兼容时不使用。
+落盘 manifest 包含资源 ID、format、byte length、checksum/content hash、parser version 和可选 modified time；不保存 URL、ETag 或独立的成功抓取时间。当前 fetcher 不返回 modified time，恢复生成的 `fetched_at` 不能视为已持久化的远端更新时间。版本不兼容时不使用。
 
 ## 9. 刷新与发布
 
@@ -161,7 +163,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 
 失败退避指数增长并封顶 5 分钟。连续三次计划刷新失败或超过 `3 × update_interval` 无成功时标记 stale，但继续使用旧 snapshot。
 
-刷新协调器只组合 schedule、reservation、per-resource single-flight、epoch/CAS、backoff、cancel 与 shutdown，不自己执行 I/O。worker 在 reservation 内完成有界读取/抓取、hash、parse/persist，再发布候选。资源内容更新不创建完整 Runtime candidate，Policy 与 metadata 应一起保持版本一致。真实 fetcher、auto-update task 与 prepare 接线见[后台服务实现](../../../implementation/backend/background-services.md)。
+刷新协调器只组合 schedule、reservation、per-resource single-flight、epoch/CAS、backoff、cancel 与 shutdown，不自己执行 I/O。worker 在 reservation 内完成有界读取/抓取、hash、parse/persist，再发布候选。资源内容更新不创建完整 Runtime candidate；Policy 内部 matcher/version/hash 一起发布，再更新 Runtime metadata，不构成跨两个对象的原子事务。真实 fetcher、auto-update task 与 prepare 接线见[后台服务实现](../../../implementation/backend/background-services.md)。
 
 ## 10. 原子落盘
 
@@ -190,7 +192,7 @@ content 与 manifest 各自原子替换，但不构成跨文件事务；恢复�
 - sing-box source 四类域名字段投影、其他 rule 字段忽略、无可用域名规则和未知 version；
 - canonical domain、重复、冲突和 regex 限制；
 - const/file/remote 首次加载；
-- ETag/304、body limit、重定向、代理 failure；
+- 普通 GET、body limit、拒绝重定向/304 和代理 failure；条件请求属于[未接线差距](../../../plans/backend-contract-gaps.md)，不是现有用例通过项；
 - fallback manifest/hash/version；
 - 单资源刷新失败保留旧版本；
 - epoch 乱序、并发不同资源 CAS 不丢更新；

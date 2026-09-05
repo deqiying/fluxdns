@@ -6,7 +6,7 @@
 >
 > 最后核对：2026-09-05（构造入口、关键分支与异步移交静态核对）
 >
-> 核对基线：`0f18d5b2ddf67625121fd7e0662e21723362565f`
+> 核对基线：`8223d819efb83fed642900e6b121825083e8c1dd`
 
 ## 入口与调用链
 
@@ -30,15 +30,17 @@ SystemSocketFactory / typed binding
 
 ## Policy 与实际 core
 
-正式 async prepare 在 [`dns/policy.rs`](../../../backend/src/dns/policy.rs) 构造 `PolicyDnsCore::from_config_with_resource_snapshots`；不是 [`ConfiguredDnsCore`](../../../backend/src/dns/configured.rs) 的较窄构造路径。`PolicyContext` 先选 client/strategy/cache namespace 和稳定 fingerprint，fast miss 后再求 `RouteDecision`，调用 [`policy`](../../../backend/src/policy) 的 client/strategy/route 逻辑。
+正式 async prepare 在 [`dns/policy.rs`](../../../backend/src/dns/policy.rs) 构造 `PolicyDnsCore::from_config_with_resource_snapshots`；不是 [`ConfiguredDnsCore`](../../../backend/src/dns/configured.rs) 的较窄构造路径。`PolicyContext` 先选 client/strategy/cache namespace，Core 再结合 PolicyState 计算 ECS、eligibility 和 fingerprint；fast miss 后再求 `RouteDecision`，调用 [`policy`](../../../backend/src/policy) 的 client/strategy/route 逻辑。
 
 配置 route 由 [`config/doh_route.rs`](../../../backend/src/config/doh_route.rs) 共享编译，DoH adapter 匹配真实路径后传 typed route ID，Policy 不重新匹配 URL。资源-only publish 更新 core 内的资源 snapshot，后续请求使用新 hash；不依靠全局 cache clear。
 
 `dns/policy.rs` 同时含具体 adapter 的构造代码，包括 `UpstreamRegistry`、Moka 和 SQLite cache；解析方法通过 port 使用它们。不能把设计中的“公共接口不泄漏 adapter 类型”扩大为“整个 dns 源目录不 import adapter”。
 
+client CIDR 按前缀长度降序扫描；hosts 使用 BTreeMap，rule exact/suffix 使用 BTreeSet，随后依次匹配 keyword/受限 regex。当前没有 CIDR/suffix trie。PolicyState 的 matcher/version/hash 一起发布，Runtime metadata 随后更新，不是跨两个 ArcSwap 的事务。
+
 ## Cache 与 TTL
 
-`build_cache_facade` 的生产默认是 [`MokaCacheStore::with_max_weight`](../../../backend/src/cache/moka.rs)，不是测试用 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs)。共享 store 通过 namespace 形成逻辑池；`cache/key.rs` 的 v2 编码隔离 Fast/Resolved，相关 policy/resource 语义变化导致新 key，纯观测或整个 runtime revision 不直接作为全局失效维度。
+`build_cache_facade` 的生产默认是 [`MokaCacheStore::with_max_weight`](../../../backend/src/cache/moka.rs)，不是测试用 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs)。共享 store 通过 namespace 形成逻辑池；`cache/key.rs` 的 v2 编码隔离 Fast/Resolved。当前 fingerprint 包含 PolicyState 中全部 hosts/rule-set hash，不仅限于本请求依赖的资源；纯观测或整个 runtime revision 不直接作为全局失效维度。
 
 - listener/strategy hosts 本地回答绕过 response cache；upstream hosts 按普通上游响应处理。
 - group member ECS 在选择前不确定且无上层覆盖时，绕过 lookup、single-flight 和写入，避免只按 group ID 混用响应。
@@ -53,6 +55,8 @@ SystemSocketFactory / typed binding
 [`UpstreamRegistry::from_resolved_with_outbounds`](../../../backend/src/upstream/registry.rs) 在 core 构造时装配真实 connector；HTTPS 使用 [`ReqwestDohHttpTransport`](../../../backend/src/upstream/reqwest_http.rs)。[`tokio_outbound.rs`](../../../backend/src/upstream/tokio_outbound.rs)、[`socks5.rs`](../../../backend/src/upstream/socks5.rs)、[`bootstrap.rs`](../../../backend/src/upstream/bootstrap.rs) 提供系统 TCP、代理协商和 bootstrap 解析，Host/SNI 与连接目标保持各自语义。不是只有选择器或 fake、没有真实 I/O 的状态。
 
 [`group.rs`](../../../backend/src/upstream/group.rs) / [`executor.rs`](../../../backend/src/upstream/executor.rs) 分离成员选择、首个 terminal response、fallback 与 late cache candidate。只有无 terminal response 才 fallback；late result 不改变已返回响应。主动健康检查和持久健康分数没有接入。
+
+[`TokioDohAddressResolver`](../../../backend/src/upstream/http.rs) 每次 bootstrap resolve 发起 A/AAAA，未使用 `AddressResolutionState` 的 TTL cache。parallel 有 late sink 时将剩余任务移交 drain，Positive 首响应也不必然取消它们；无 sink 时非 Positive 终态不能保证立即返回。load-balance 统计 primary lease，失败后按配置顺序重试，不等同逐 attempt least-in-flight。具体语义见 [Upstream](../../architecture/backend/modules/upstream.md)。
 
 ## 能力与证据
 

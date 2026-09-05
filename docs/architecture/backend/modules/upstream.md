@@ -4,9 +4,9 @@
 >
 > 适用范围：upstream connector、bootstrap、outbound、group、并发选择和故障回退
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/upstream/*`
+> 关联实现：[registry.rs](../../../../backend/src/upstream/registry.rs)、[executor.rs](../../../../backend/src/upstream/executor.rs)、[group.rs](../../../../backend/src/upstream/group.rs)、[http.rs](../../../../backend/src/upstream/http.rs)、[reqwest_http.rs](../../../../backend/src/upstream/reqwest_http.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md)
 
@@ -21,7 +21,9 @@ Upstream 模块把 typed upstream 配置编译为 `UpstreamRegistry` 和可复�
 | `doh.rs` | DoH connector、HTTP/TLS/DNS response validation |
 | `http.rs` | plain HTTP/1.1 与独立 SOCKS5/SOCKS5H adapter |
 | `reqwest_http.rs` | direct/proxy HTTP/HTTPS、TLS、地址覆盖和有界 client pool |
-| `group.rs` | parallel、round-robin、load-balance、failover、fallback |
+| `group.rs` | weighted round-robin、primary load-balance 和确定性候选顺序 |
+| `executor.rs` / `outcome.rs` | group/fallback 执行、terminal 分类、parallel task 与 late drain |
+| `registry.rs` / `hosts.rs` | direct connector 注册与内存 hosts exchange |
 | `bootstrap.rs` | 上游主机名解析与地址 override |
 | `outbound.rs` | direct、SOCKS5、SOCKS5H profile 和 SecretRef |
 
@@ -72,12 +74,12 @@ HTTP、TLS、解析和协议错误统一为 `TransportFailure`，不能伪造 SE
 
 ## 4. Bootstrap 与 connect_ip
 
-目标地址顺序：
+目标地址选择是互斥分支，不是失败后逐项 fallback：
 
-1. 显式 `connect_ip`；
-2. 已配置 `bootstrap` connector；
-3. 系统 resolver；
-4. `socks5h://` 且无 connect_ip 时由代理解析。
+1. 显式 `connect_ip` 直接使用该 IP；
+2. `socks5h://` 且无 connect_ip 时交给代理解析，同时禁止 bootstrap；
+3. 其他模式有 bootstrap 时调用指定 connector；
+4. 没有以上选择时才使用 system resolver。
 
 `connect_ip` 只替换网络连接目标，不改变 URL host、Host header 或 SNI。
 
@@ -88,10 +90,11 @@ bootstrap：
 - 默认 `UpstreamRegistry::from_resolved` 将 hosts/DoH connector 登记到共享 bootstrap registry，`TokioDohAddressResolver` 把地址转换为请求端口并交给 HTTP adapter；
 - 只接受完整、合法地址答案；
 - `bootstrap_answer_from_response` 只提取与 question owner 匹配的 A/AAAA，并按地址记录的最低 TTL 建立答案；
-- 地址按 DNS TTL 缓存，并设置实现级最小/最大 refresh 边界；
-- 刷新失败时可在未过期窗口内继续使用旧地址并标记 degraded；
+- 正式 `TokioDohAddressResolver` 每次 bootstrap resolve 都发起 A/AAAA，只取地址交给 HTTP adapter，没有保存答案 TTL；
 - 无可用地址时本次 exchange 失败；
 - dependency cycle 在 Config 阶段拒绝。
+
+`bootstrap.rs` 的 `AddressResolutionState` / `AddressCachePolicy` 已提供 TTL 缓存和旧地址降级原语，但生产 resolver 未使用，不能宣称正式链路已经按 TTL 缓存地址或失败时复用旧地址。HTTP client pool 复用连接也不等同 DNS 地址 TTL 缓存。这一接线差距见[核对计划](../../../plans/backend-contract-gaps.md)。
 
 系统 resolver 只在未配置 bootstrap/connect_ip/proxy remote resolve 时使用，不作为任何失败路径的隐式 fallback。
 
@@ -144,15 +147,15 @@ fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。�
 ### parallel
 
 - 同时发起全部成员，weight 省略或为 1；
-- 第一个 terminal response 立即返回；
-- 首响应为完整 NOERROR/TC=0 时取消其他成员；
-- 首响应为 NXDOMAIN/REFUSED/SERVFAIL/TC 时，其余已发请求继续到完成或 timeout，只用于确定 cache candidate；
+- 带 `LateResultSink` 时，第一个 terminal response 即可返回，剩余 JoinSet 移交 sink drain；当前完整 Positive 首响应也走此移交，并非必然取消其他成员；
+- 无 late sink 时，Positive 可提前返回并 abort 剩余任务，其他终态继续收集成员结果后再由结果选择器决策；
+- 因此“立即返回首个非完整终态”依赖 late sink 接线，不能外推到所有 executor 调用方式；
 - late window 按配置顺序选择完整 NOERROR，再选择其他可缓存终态；
 - 主组完全没有 terminal response 才进入 fallback。
 
 ### round-robin
 
-- 使用 per-group 原子游标和 smooth weighted round-robin；
+- 使用 per-group `Mutex<SmoothState>` 实现 smooth weighted round-robin，不是原子游标算法；
 - weight 决定长期被选为 primary 的频率；
 - primary transport failure 后，按本次计算的确定性候选顺序尝试尚未使用成员；
 - 遇到第一个 terminal response 即结束；
@@ -162,8 +165,8 @@ fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。�
 
 - 选择 `in_flight / weight` 最小的成员；
 - 相同比值时使用轮转游标打破平局，避免永久偏向首项；
-- 只统计该 connector 当前受监督的活动 exchange，不建立主动健康状态；
-- primary transport failure 后选择下一个未尝试成员；
+- executor 用 `SelectionLease` 给本次 primary 加一，lease 覆盖整段 ordered execution；重试成员不另加自己的 in-flight，因此这是 primary 占用估计，不是每个 connector 的真实活动 exchange 数；
+- primary transport failure 后按配置顺序尝试其余成员，不在每次失败后重新计算 least-in-flight；
 - terminal response 与 fallback 规则同上。
 
 ### failover
@@ -176,7 +179,7 @@ fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。�
 
 ## 8. 并发与取消
 
-每个 attempt 都是 supervisor 可追踪的子任务。Group aggregator 持有：
+顺序模式直接 await exchange；parallel 模式由 executor 的 `JoinSet` 持有 attempt task，已移交的 drain 由 `LateCacheFinalizer` owner 管理，不逐项注册 Runtime Supervisor。Group aggregator 持有：
 
 - group deadline；
 - child cancellation tokens；
@@ -197,7 +200,7 @@ TransportFailure 分类至少包括 connect、DNS bootstrap、proxy、TLS、HTTP
 
 观测字段使用 upstream/group ID、outbound kind、attempt ordinal、outcome 和 latency bucket，不记录完整 URL、credential、query domain 或目标原始 IP。
 
-v1 不实现主动健康检查、熔断器或持久健康分数。load-balance 只使用实时 in-flight，不应在文档或指标中称为 health。
+v1 不实现主动健康检查、熔断器或持久健康分数。load-balance 只使用 primary lease 计数，不应在文档或指标中称为 health。当前也没有完整的独立 attempt telemetry 生产链路，见 [DNS Core](dns-core.md)。
 
 实际 adapter 和正式接线见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)；真实 TLS、proxy、bootstrap 与跨 adapter 故障证据按[契约核对计划](../../../plans/backend-contract-gaps.md)补齐，不由本设计推断。
 
@@ -208,7 +211,7 @@ v1 不实现主动健康检查、熔断器或持久健康分数。load-balance �
 - HTTP status/media/body/wire/question validation；
 - parallel 快速 SERVFAIL/TC/REFUSED 与慢速完整回答；
 - smooth weighted round-robin 长期分布和并发游标；
-- weighted least-in-flight 的选择和平局；
+- weighted primary lease 的选择和平局、失败后确定性顺序，以及与真实逐 attempt in-flight 的区别；
 - failover 只在 transport failure 切换；
 - fallback 只在主组无 terminal response 时进入；
 - request/group/fallback deadline 与 cancellation；

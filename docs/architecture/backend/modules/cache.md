@@ -4,7 +4,9 @@
 >
 > 适用范围：缓存 key、TTL、single-flight、memory adapter 和 persistence 生命周期
 >
-> 最后评审：待核对（本次分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
+>
+> 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[sqlite.rs](../../../../backend/src/cache/sqlite.rs)、[persistence.rs](../../../../backend/src/cache/persistence.rs)
 >
 > 关联文档：[后端设计](../overview.md) · [配置参考](../../../implementation/configuration.md) · [DNS 管线](../../../implementation/backend/dns-pipeline.md) · [后台服务](../../../implementation/backend/background-services.md)
 
@@ -28,7 +30,7 @@ namespace 使用稳定 typed components，不拼接可伪造原始 client ID。c
 
 key format v2 包含 namespace、canonical query wire、opaque transport compatibility、Fast/Resolved mode byte、可选的 policy/request/target/ECS 32-byte fingerprint 与版本。不得包含客户端 DNS ID、整个 runtime revision、全局 resource generation、HTTP header/URL 或原始 client address。
 
-Fast 在逐规则 matcher 前构造，fingerprint 覆盖改变答案的策略与相关 hosts/rule content hash；Resolved 在完整决策后加入 target/final ECS。两种编码不能 alias。资源变化切换 key 而不扫描清空全库；旧项继续占容量到自然过期/淘汰，这是避免全库扫描的取舍。
+Fast 在逐规则 matcher 前构造，fingerprint 覆盖策略语义与当前 PolicyState 中全部 hosts/rule-set content hash；Resolved 在完整决策后加入 target/final ECS。两种编码不能 alias。资源变化切换 key 而不主动扫描清空全库；旧项继续占容量到自然过期/淘汰。当前失效粒度可能大于实际依赖资源集合，见 [Policy](policy.md)。
 
 group member ECS 在选择后才确定且无上层覆盖时，必须绕过不安全的 lookup、single-flight 和写入，不能仅按 group ID 复用不同成员答案。
 
@@ -79,11 +81,13 @@ finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明�
 
 ## 7. Persistence
 
-独立 SQLite cache DB 保存 schema/cache/key format、entry、namespace/key 索引、checksum 与 expiry。codec 应保证 canonical wire 和格式校验的一致性；旧版本只能按显式兼容策略隔离/迁移，不能混读。
+独立 SQLite cache DB 使用 `cache_meta` 保存 schema/cache/key format，`cache_entries(id, payload)` 保存 codec 编码记录。namespace、key、checksum、expiry 等在 payload 内，不是独立 SQL 列，也没有 namespace/key 数据库索引。恢复时经 codec 校验后构造内存 map，旧版本按显式兼容策略处理，不能混读。
 
-写入通过有界队列批量事务提交。recover、persist、maintain_capacity 和 shutdown 串行化，锁等待和完整数据库 future 都受调用者 deadline 约束。关闭后拒绝操作。超过 page budget 先清 expired/corrupt/incompatible 数据；WAL/SHM 不计入主库预算，但必须分别可观测。
+写入通过有界队列提交给单 writer。SQLite `persist` 每批读取并解码现有记录、合并新批次、裁剪，再在事务内删除并重写保留集，不是按 key 增量 upsert。recover、persist、maintain_capacity 和 shutdown 共用 operation lock 和调用者 deadline；关闭后拒绝操作。
 
-既有设计要求持久化 last-access bucket，并按近似 LRU 淘汰。**该要求尚未由当前 writer 实现**；保留于[差距计划](../../../plans/backend-contract-gaps.md)评审，不把现有写入顺序淘汰改称 LRU。
+`max_size_bytes` 当前约束 `prepare_snapshot` 计算的编码快照字节数，不是 SQLite `max_page_count` 或实际文件硬上限。过期/损坏/不兼容记录在解码时过滤，超出编码预算再淘汰；数据库页、freelist、索引及 WAL/SHM 会额外占用空间。`disk_usage()` 可读取主库与 sidecar 大小，但不据此触发 page-budget checkpoint/收缩。物理容量要求的差距见[核对计划](../../../plans/backend-contract-gaps.md)。
+
+容量裁剪按 entry 的 `inserted_at` 从旧到新淘汰，同值按 record version、encoded key 稳定排序。没有 last-access bucket，也不是按 SQLite row ID 或最近访问时间淘汰。既有近似 LRU 要求尚未实现，保留于[差距计划](../../../plans/backend-contract-gaps.md)评审。
 
 启动恢复依次检查 schema/format、checksum、expiry/compatibility，再注入 memory store。无法恢复只禁用 persistence 并标记 degraded，不阻止 DNS 启动。内存 CAS 成功后的 enqueue 不等待磁盘；队列满、DB busy、disk full 均保持内存服务并记录 gap。
 
@@ -99,7 +103,7 @@ Facade 提供 exact key、namespace、typed predicate 和 all 失效。普通资
 - 正/负/failure TTL、REFUSED 拒绝、质量 CAS、并发乱序和 client-visible TTL 隔离。
 - 多 waiter 取消、candidate drop、commit 终态、占位上限和关闭后拒绝。
 - optimistic 最新资源/目标、跨 runtime late-window、独立 deadline 和失败不延长 stale。
-- Moka weight/expiry、替代 adapter 一致性、format/checksum/recovery/page budget。
+- Moka weight/expiry、替代 adapter 一致性、format/checksum/recovery、编码快照预算与实际磁盘占用的区别。
 - 真实 Busy/disk-full 与恢复不破坏旧数据、不阻塞 DNS；测试 hook 不替代真实介质。
 - 显式失效范围、历史 owner drain、失败摘要和秘密不进入日志。
 

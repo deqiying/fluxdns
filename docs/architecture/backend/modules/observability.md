@@ -4,9 +4,9 @@
 >
 > 适用范围：tracing、metrics、health、脱敏、backpressure 和 telemetry 生命周期
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/observability.rs`
+> 关联实现：[observability.rs](../../../../backend/src/observability.rs)、[ports/telemetry.rs](../../../../backend/src/ports/telemetry.rs)、[resolution.rs](../../../../backend/src/resolution.rs)、[service.rs](../../../../backend/src/service.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Ports](ports.md) · [Runtime](runtime.md) · [Storage](storage.md)
 
@@ -16,10 +16,10 @@ Observability 模块实现 Ports 定义的 telemetry/metrics 契约，提供：
 
 - bootstrap 与正式 tracing subscriber；
 - 结构化服务事件；
-- 低基数内存 metrics；
+- 低基数 typed metrics 事件与运行计数；
 - component health/degraded 状态；
-- request/attempt span 关联；
-- redaction、限流、flush。
+- tracing event 到 typed log 的安全投影；
+- redaction、有界队列、flush。
 
 `ports/telemetry.rs` 定义可记录的数据契约；本模块选择 tracing 和具体 writer。Storage 的 resolve log 是业务详情存储，不等同于服务日志。
 
@@ -36,53 +36,23 @@ v1 日志级别固定接受 `trace`、`debug`、`info`、`warn`、`error`，大�
 
 ## 3. 日志格式
 
-正式日志使用一行一个 JSON event，至少包含：
+正式输出区分 `kind=log/metric/health` 的单行 JSON。log 字段是 `occurred_at_ms`、level、event、component、`has_request_digest`、`has_configured_id`、outcome、runtime_revision 和安全 message；digest/configured ID 在此输出为存在性，而非实际值。metric 输出受校验的 name/labels/value，health 输出组件、状态、retry_count、stale_age_micros 和 persistence_gap。
 
-- UTC timestamp；
-- level；
-- event name；
-- component；
-- request/trace digest；
-- listener/route/upstream/resource 等 typed ID；
-- outcome/failure class；
-- latency/size bucket；
-- runtime revision；
-- message。
+`TypedTracingLayer::on_event` 只消费受支持字段，忽略任意 Debug payload；实际 LogEvent 的 request_digest/configured_id 在该桥接路径中均为 `None`。tracing 中出现了某个字段，不代表最终 JSON 会保留它。
 
 字段集合由 typed event 构造，不允许业务代码随意添加任意 key。v1 不实现内建日志轮转；文件配额和轮转交给部署层，模块需正确处理写入失败并进入 degraded。
 
-## 4. Span 模型
+## 4. 请求关联边界
 
-```text
-process
-  └─ runtime revision
-      ├─ listener / endpoint
-      │   └─ dns request
-      │       ├─ policy decision
-      │       ├─ cache lookup/refresh
-      │       └─ upstream group
-      │           └─ attempt
-      └─ background task
-          ├─ resource refresh
-          ├─ stats batch
-          └─ cache persistence batch
-```
+当前通过 typed request ID、resolution completion 与有限配置 ID 关联业务观测。源码没有接通原设计中的 process → runtime → request → policy/cache/group/attempt span 树；`TypedTracingLayer` 处理 event，不读取 span hierarchy。
 
-span ID 用于内部关联。请求量大时，不要求每个低级步骤都输出日志；采样不能影响聚合统计。
+独立 upstream attempt telemetry 同样未形成生产事件流；不得把 executor 的 attempt 列表、请求终态统计或早期测试类型当成完整 tracing。是否落实这些旧要求见[核对计划](../../../plans/backend-contract-gaps.md)，与请求统计是否已持久化是两件事。
 
 ## 5. Metrics
 
-v1 默认是进程内低基数 atomics/histogram facade，不暴露 HTTP exporter。至少记录：
+生产 `TelemetryWriter::record` 校验 `MetricEvent` 后入队，由 output 写出；不是统一的原子 histogram 聚合器，也没有 HTTP exporter。Resolution 管线、Cache 和 Storage 各自持有实际计数与摘要，Management overview 读取其受限投影。
 
-- requests total、active、cancelled、failed；
-- latency buckets；
-- cache hit/miss/stale/write/reject；
-- upstream attempt/outcome/latency；
-- listener connection/admission/error；
-- resource refresh success/failure/stale age；
-- stats/detail/cache writer queue、drop、retry、gap；
-- runtime revision、active/draining request；
-- component health state。
+同文件保留的 `ObservabilityRegistry` / `EventWriter` 提供内存 counter/gauge、health registry 和有界同步事件缓冲及测试，但正式 app/service 没有构造这套对象。不能从这些类型或 `MetricName` 枚举存在，推断所有 request/attempt/latency/admission 指标均已生产接线。
 
 标签只能来自有限枚举或配置定义 ID。禁止 qname、完整 client ID、原始 IP、URL、header 或 error message 作为 label。
 
@@ -95,9 +65,9 @@ v1 默认是进程内低基数 atomics/histogram facade，不暴露 HTTP exporte
 - `failed`；
 - `stopping`。
 
-状态记录 first_seen、last_changed、last_success、retry_count、stale_age、gap flag 和安全原因分类。重复相同错误只更新 counter/last_seen，按时间窗口限流日志，防止故障风暴。
+`TelemetryWriter` 的 health record 保存 first_seen、last_changed、last_success、retry_count、stale_age 和 persistence_gap；重复状态保留首次/最后变化时间及最大 stale age，Healthy 恢复时清除 stale age。它不保存通用 last_seen/原因字符串，也没有自动按时间窗口合并全部重复日志；该能力不能从早期 registry 实现外推。
 
-Runtime supervisor 是状态生命周期的权威；Observability 只存储和输出状态，不自行重启组件。
+Service、各 worker 和输出失败/恢复路径发布自身状态，Supervisor 决定其直接任务的重试/致命升级。Observability 保存并输出状态，不自行重启组件。
 
 ## 7. Redaction
 
@@ -138,17 +108,7 @@ redaction 在 typed event 构造时完成，不依赖 formatter 最后补救。
 
 ## 9. 事件分类
 
-建议固定 event name：
-
-- `runtime.prepare.*`、`runtime.activate`、`runtime.shutdown.*`；
-- `listener.bind.*`、`listener.accept_error`；
-- `dns.request.complete`；
-- `cache.lookup`、`cache.refresh.*`、`cache.persistence.*`；
-- `upstream.attempt.complete`、`upstream.group.complete`；
-- `resource.refresh.*`；
-- `storage.stats_batch.*`、`storage.resolve_drop`；
-- `resolution_pipeline_shutdown_summary`；
-- `component.state_change`。
+event name 以实际调用点为准，例如 `configuration_validated`、`runtime_prepared`、`tcp_listener_failed`、`resolution_pipeline_shutdown_summary` 和 `service_shutdown`。不要将旧设计的 `runtime.prepare.*` / `upstream.attempt.complete` 等命名表视为已实现事件目录；完成事件也不意味着每个请求都写一条 service log。
 
 事件名和字段变化视为内部观测 schema 变更，需更新 snapshot/golden tests。
 
@@ -184,8 +144,8 @@ shutdown 依赖顺序为：
 - typed JSON event schema；
 - secret、client、URL、header、wire redaction；
 - high-cardinality label 拒绝；
-- health 状态、重复错误限流和恢复事件；
+- health 状态、重复状态归一化、恢复事件与输出失败；
 - queue saturation、writer failure、stderr fallback；
-- request/group/attempt span 关联；
+- typed completion 关联；完整 request/group/attempt span 另列差距，不写成已有测试通过项；
 - logs/metrics/stats/resolve log 相互独立；
 - shutdown flush 和 dropped summary。

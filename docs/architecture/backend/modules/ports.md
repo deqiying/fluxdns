@@ -4,9 +4,9 @@
 >
 > 适用范围：DNS Core 与 adapter 之间的稳定接口、错误语义和 contract test
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/ports/*`
+> 关联实现：[ports/mod.rs](../../../../backend/src/ports/mod.rs)、[inbound.rs](../../../../backend/src/ports/inbound.rs)、[effects.rs](../../../../backend/src/ports/effects.rs)、[testing.rs](../../../../backend/src/ports/testing.rs)
 >
 > 关联文档：[后端架构](../overview.md)
 
@@ -34,8 +34,8 @@ Ports 不包含具体 adapter，也不成为“所有类型都抽象成 trait”
 - 热路径数据结构保持小而不可变，优先静态分发；
 - 只有需要运行时注册或测试替换的边界使用 `Arc<dyn ...>`；
 - port 不暴露第三方 crate 的 request、response、connection 或 error 类型；
-- 每个异步操作都接收或继承 deadline 与 cancellation；
-- 所有错误先按行为分类，再保留安全的 adapter source；
+- 异步 I/O 按具体签名接收或继承 deadline/cancellation；storage/cache 部分操作只有 deadline，同步 `try_publish`/`emit` 不另加异步预算；
+- 所有 port 错误先按行为分类，仅保留静态 operation 和可选安全上下文，不携带 adapter 原始错误文本；
 - request/response 关联只能完成一次。
 
 ## 3. 入站契约
@@ -121,27 +121,27 @@ stats、cache commit 和 detail projection 是 dispatcher 的三个独立消费�
 
 ## 8. Telemetry 与副作用
 
-`LogSink`/`MetricsSink` 只接受已经脱敏、标签集合受限的事件。Observability 模块实现这些 port；Ports 只定义字段与语义。组件健康状态通过同一 telemetry facade 写入结构化状态事件和低基数 gauge，不另设含义重叠的泛化 sink。
+`LogSink`/`MetricsSink` 只接受已经脱敏、标签集合受限的事件；`HealthSink` 接收 `ComponentHealthEvent`。三个 trait 均由 `TelemetryWriter` 实现，Ports 只定义字段与语义。Health 有独立事件与状态记录，不能把每次 health 更新等同于已写入某个 metrics gauge。
 
 `effects.rs` 提供：
 
 - `Clock`：monotonic time、UTC time、sleep/timer；
 - `ResourceFetcher`：受 deadline、proxy profile 和最大体积约束的资源读取；
-- `SecretProvider`：按 env/file 读取 secret，返回不可 Debug/Serialize 的包装类型；
+- `SecretProvider`：secret 读取契约及脱敏包装；当前生产路径直接调用 Config 的 `ResolvedSecretRef` accessor，没有具体 `SecretProvider` adapter 接线；
 - `SocketFactory`：创建未激活 socket，供 BindPlan 统一提交。
 
 `SocketSpec` 同时携带 `kind`、目标地址、`reuse_port` 和 IPv6 `v6_only` 选择；Runtime 在 bind 阶段只通过该契约传递平台相关选项，不向 DNS Core 泄漏 socket 类型。
 
 文件系统和网络 I/O 不通过“万能 effects trait”合并，避免接口失去约束。
 
-v1 adapter 所有权固定为：
+当前 adapter 所有权为：
 
 | Port | Adapter 所有者 |
 | --- | --- |
 | `Clock` | Runtime 的 system clock/timer adapter |
-| `ResourceFetcher` | Resource loader，复用 Upstream 提供的 outbound profile |
-| `SecretProvider` | Config loader |
-| `SocketFactory` | Runtime `bind.rs`，基于 `socket2` 创建 socket |
+| `ResourceFetcher` | Resource 的 `ReqwestResourceFetcher`，复用 Upstream outbound profile |
+| `SecretProvider` | 仅有 port 定义；Config accessor 是实际 env/file 读取路径 |
+| `SocketFactory` | Runtime `SystemSocketFactory`，由 `bind.rs` 编排，基于 `socket2` 创建 socket |
 
 ## 9. Deadline 与取消
 
@@ -168,11 +168,11 @@ port error 至少包含：
 - `CorruptData`；
 - `Internal`。
 
-adapter 可以保留 source error，但 core 只能匹配稳定分类。错误格式化必须经过脱敏。
+`PortError` 只存 `PortErrorClass`、`&'static str` operation 和可选 `&'static str` safe_context；Core 匹配稳定分类。外围 typed error 可以包裹安全 `PortError`，但不能借 source chain 重新暴露原始 URL、wire 或 credential。
 
 ## 11. Contract test kit
 
-Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
+`testing.rs` 提供 FakeClock、FakeExchange、FakeInboundAdapter、FakeResponseEncoder、FakeCacheStore、FakeTelemetry 等共享夹具；缓存和存储另有 `backend_contract_tests.rs`。以下是跨 adapter 应覆盖的行为：
 
 - 给定 canonical query，所有 inbound adapter 产出等价 context；
 - response encoder 只能完成一次；
@@ -182,4 +182,4 @@ Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
 - fake telemetry 能拒绝高基数或敏感字段。
 - capturing observation sink 能验证 exactly-once、typed payload、共享 response identity 和 queue-full disposition。
 
-每个 adapter 只有通过相应 contract suite 才能接入 Runtime。
+生产 Runtime 不执行 contract suite，也没有统一的 conformance 注册门禁。测试夹具存在不等于每个 adapter 的所有组合都已验收；已覆盖用例与剩余矩阵须按[差距计划](../../../plans/backend-contract-gaps.md)分别核验。

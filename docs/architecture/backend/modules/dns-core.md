@@ -4,9 +4,9 @@
 >
 > 适用范围：canonical DNS message、请求管线、缓存交互和上游结果处理
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/dns/*`
+> 关联实现：[policy.rs](../../../../backend/src/dns/policy.rs)、[handler.rs](../../../../backend/src/dns/handler.rs)、[service.rs](../../../../backend/src/service.rs)、[resolution.rs](../../../../backend/src/resolution.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
 
@@ -14,7 +14,9 @@
 
 DNS Core 是 transport 无关的请求编排器。输入是 canonical query 和 request context，输出是 canonical response 或明确的“无需再响应”结果。
 
-Core 不读取配置文件，不持有 socket/HTTP client/SQLite/Moka，也不根据具体 UDP/TCP/DoH 类型分支。当前 `ConfiguredDnsCore` 在已解析配置中选择内联 hosts；未形成完整 Policy/Upstream 链路时使用确定性的 `ServFailCore` fallback。transport 差异通过 capability 和 response encoder 处理。
+公开 `DnsCore` 契约不暴露 socket/HTTP/SQLite/Moka，不根据具体 UDP/TCP/DoH 类型分支；transport 差异通过 capability 和 response encoder 处理。正式启动由 async prepare 构造 `PolicyDnsCore`，Policy、资源、Cache、Upstream 和后台完成事件链路已经接通。
+
+`dns/policy.rs` 同时承担部分组合根职责：构造具体 Upstream registry、Moka facade，并在显式 prepare 中初始化 SQLite cache persistence；不能把“公共接口隔离”写成整个文件不依赖 adapter。`ConfiguredDnsCore`/`HostsCore`/`ServFailCore` 是仍保留的简化构造路径，不代表正式服务只支持 hosts 或仍等待上游接线。
 
 ## 2. 内部结构
 
@@ -22,7 +24,10 @@ Core 不读取配置文件，不持有 socket/HTTP client/SQLite/Moka，也不�
 | --- | --- |
 | `message.rs` | canonical query/response、DNS validation 和 response class |
 | `context.rs` | request meta、client identity、deadline/cancellation |
-| `handler.rs` | 请求管线、port 编排和最终事件 |
+| `handler.rs` | `DnsCore`、completion/observation、简化 Core 与 `dispatch_inbound` |
+| `policy.rs` | 正式策略、资源状态、Fast/Resolved 缓存、上游、刷新与 adapter 装配 |
+| `configured.rs` / `hosts.rs` | 简化配置 Core 与兼容 hosts 数据结构 |
+| `service.rs` / `resolution.rs`（模块外） | completion 计时/发布和后台 stats/cache/detail 分发 |
 
 可将纯函数拆成私有子模块，但不为每个 stage 创建空抽象层。
 
@@ -58,12 +63,13 @@ capture one RuntimeSnapshot
   → validate and classify response
   → create optional CacheCommitCandidate
   → apply client-visible TTL
-  → try_publish one ResolutionEnvelope
-  → return canonical response
+  → return DnsCoreCompletion
+  → service freezes timing and try_publish one ResolutionEnvelope
+  → transport encodes canonical response
   → background: stats / cache commit / optional detail projection
 ```
 
-每个 stage 检查 cancellation 和剩余 deadline。deadline 不足时直接产生 timeout 结果，不启动明知无法完成的新 I/O。
+Core 入口、cache/exchange 与 response correlation 按各自边界检查 cancellation/deadline；并非每个纯内存 stage 都有独立检查。下游 exchange 不能延长请求预算，后台 cache commit/optimistic refresh 使用明确的独立窗口。
 
 ## 5. Policy 结果
 
@@ -131,12 +137,11 @@ TTL override 作用于输出副本，不能污染 origin cache candidate 或延�
 
 一条请求在 transport 编码前至多生成并无等待发布一个 `ResolutionEnvelope`。其中 `ResolutionEvent` 只保存冻结的终态与低基数/typed 数据：
 
-- request/trace ID 的脱敏形式；
-- listener/route、配置 client bucket、有效 client IP 和 strategy；
+- 进程内 request ID、listener/route、配置 client bucket 和 strategy；
 - source：hosts、cache 或 upstream；
 - target upstream/group 与实际产生结果的 direct/member；cache hit 为缓存生产来源；
-- typed canonical question，以及仅在 `resolve_log` 开启时附带的共享 `Arc<CanonicalResponse>`；
-- RCODE、cache status、latency buckets，以及在 core 返回时冻结的服务端总耗时和 DNS 主链耗时；
+- 仅在 `resolve_log` 开启时附带的 typed canonical question、有效 client IP 和共享 `Arc<CanonicalResponse>`；
+- 终态、RCODE、cache status，以及在 core 返回时冻结的服务端总耗时和 DNS 主链耗时；
 - cancellation/failure 分类；
 - runtime/resource revision 摘要。
 
@@ -146,7 +151,7 @@ service 紧贴 `DnsCore::resolve_with_completion` 调用前后记录主链耗时
 
 resolution ingress 满时 DNS 响应照常编码，但整个 envelope 被丢弃并累计 `dropped` 与首次 gap 时间；cache candidate drop 通过 RAII 释放 single-flight follower。detail 与 cache 下游队列失败只影响各自消费者。cache lookup 状态只表示响应完成前已知的 hit/miss/stale，异步 commit 结果以独立 counter 记录。
 
-parallel 的多个 attempt 另发 attempt event，但不重复增加 total request。
+当前 dispatcher 从这条完成事件生成一次 total 和各统计维度；名为 `attempt_outcome` 的维度也使用请求终态，不是逐 upstream attempt 计数。executor 的 attempt 列表和 late candidate 尚未形成独立的生产 attempt 事件流，不能用字段名称推断已有完整 attempt telemetry。
 
 ## 11. 错误语义
 

@@ -4,9 +4,9 @@
 >
 > 适用范围：client、strategy、rule、resource matcher、`PolicyContext` 与 `RouteDecision`
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/policy/*`
+> 关联实现：[client.rs](../../../../backend/src/policy/client.rs)、[plan.rs](../../../../backend/src/policy/plan.rs)、[dns/policy.rs](../../../../backend/src/dns/policy.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [DNS Core](dns-core.md) · [Resource](resource.md) · [Upstream](upstream.md)
 
@@ -29,7 +29,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 
 | 文件 | 职责 |
 | --- | --- |
-| `client.rs` | client ID map、CIDR trie 和冲突检测结果 |
+| `client.rs` | exact client ID map、按前缀长度排序的 CIDR 列表和冲突检测 |
 | `strategy.rs` | strategy、覆盖值和默认 upstream |
 | `route.rs` | listener/DoH route 到基础策略的映射 |
 | `plan.rs` | client override、cache/TTL/ECS 生效值，以及请求级 `PolicyContext`/`RouteDecision` 组合 |
@@ -38,16 +38,16 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 
 ## 3. 编译产物
 
-`PolicyIndex` 至少包含：
+`PolicyIndex` 编译 client、strategy、route 与 hosts/rule 资源索引，语义上提供：
 
 - exact client ID map；
-- IPv4/IPv6 longest-prefix trie；
+- IPv4/IPv6 CIDR 列表，按 prefix length 降序扫描实现最长前缀匹配，并非 trie；
 - strategy ID → compiled strategy；
 - listener/route → base strategy；
 - hosts/rule resource handle；
 - typed upstream handle；
 - 每层 cache/TTL/ECS override；
-- 会改变答案的策略语义摘要输入与 fast-path safety；
+- 会改变答案的 typed 决策输入；cache 摘要与 fast-path safety 由外层 `PolicyState` 保存；
 - 用于观测的稳定、低基数 ID。
 
 编译发生在 prepare/resource update，不在请求时解析字符串引用。
@@ -101,7 +101,7 @@ base strategy from listener/route
 4. `rule_set` 命中则选择该 rule 的 upstream；
 5. 没有 rule 命中则使用 `default_upstream`。
 
-first-match 只指 rule 顺序；单个 matcher 内部使用 exact → most-specific suffix/wildcard → regex 的固定优先级。
+first-match 指 strategy rule 顺序。HostsIndex 内部为 exact → 最长 wildcard suffix；RuleIndex 内部为 exact → 最长 domain suffix（含 apex）→ keyword → regex。不能混成一个包含 wildcard 的通用规则 matcher，也不能省略 keyword 的优先级。
 
 `rule_set` 引用先尝试完整资源名；完整名不存在且包含 `:` 时，才按第一个 `:` 解释为 `resource:selector`。资源名大小写敏感；selector 使用 Config/Resource 共用规则归一化为小写，允许 `!` 等不产生分隔歧义的可打印 ASCII。selector 只对支持子集的格式有效，不存在或格式不支持时在 prepare 阶段失败。Resource 已在加载或刷新时编译并缓存所有 selector matcher；查询热路径只对当前 strategy rule 执行一次 map lookup，不逐个重新校验 selector。
 
@@ -136,22 +136,17 @@ rule → strategy → client → upstream → global
 
 ## 9. `PolicyContext` 与 `RouteDecision`
 
-`PolicyContext` 是 fast cache lookup 的前置结果，包含：
+`PolicyContext` 的实际字段是 listener_id、可选 route、ClientMatch、`Arc<ResolvedStrategy>`、CacheDecision 和 TTL override。Core 结合这份上下文与 PolicyState 计算提前可确定的 ECS、fast eligibility 和 fingerprint，不把这些衍生值误列为 context 的直接字段。
 
-- client bucket 和 identity digest；
-- strategy 与 route identity；
-- `CacheDecision`：disabled 或唯一 namespace；
-- effective TTL override；
-- 可在 matcher 前确定的 effective ECS；
-- fast-path eligibility 与 policy/request fingerprint 输入。
+`RouteDecision` 仅在 fast miss 或不安全时计算，包含 upstream `ConfigId`、生效 ECS、可选 hosts `ConfigId` 和 MatchedRule；并没有独立 `LocalAnswer` / `UpstreamTarget` 返回类型。资源版本与缓存 provenance 由 Core 组合为 completion observation。`ResolutionPlan` 是两阶段结果的组合视图，不是热路径必须先完整构造的单体。
 
-`RouteDecision` 仅在 fast miss 或不安全时计算，包含 matched rule/resource、`LocalAnswer` 或 typed `UpstreamTarget`、最终 ECS、resource revision 摘要和安全 decision trace IDs。兼容的 `ResolutionPlan` 只是两阶段结果的组合视图，不是请求热路径必须先完整构造的单体。
-
-两类结果都不含原始配置字符串、regex 文本、SecretRef、HTTP URL 或具体 connector。
+两类结果不持有 SecretRef、HTTP client 或具体 connector；其中的配置 handle 和 matcher 引用来自 prepare，不能把“typed”解释为所有字段都不含字符串。
 
 ### 9.1 fast cache 语义 fingerprint
 
-policy fingerprint 覆盖会改变答案的已解析 typed 配置、strategy/upstream/hosts/rule 语义、资源 content hash 和选择安全性；`logs`、`webui`、`database` 等纯观测/管理字段明确排除。request fingerprint 使用规范化 ECS；无 ECS 时只编码 client address 的 `/24`（IPv4）或 `/56`（IPv6）网段，不把原始地址写入 key 或 `Debug`。最终 target/ECS 只有在 resolved mode 中加入。
+`dns/policy.rs` 的 `PolicyState` 负责 cache fingerprint 与 fast-path eligibility，不是 `PolicyIndex` 自身的字段。fingerprint 覆盖已解析 typed 配置、strategy/upstream/hosts/rule 语义、资源 content hash 和选择安全性；`logs`、`webui`、`database` 等纯观测/管理字段明确排除。当前会遍历状态中全部 hosts/rule-set content hash，不仅限于本请求引用的资源，因此不相关资源更新也可能切换 key；这仍不是全库 clear。
+
+request fingerprint 使用规范化 ECS；无 ECS 时只编码 client address 的 `/24`（IPv4）或 `/56`（IPv6）网段，不把原始地址写入 key 或 `Debug`。最终 target/ECS 只有在 resolved mode 中加入。
 
 资源成功刷新时，matcher/index 与对应 content hash 在同一次 Policy 状态发布中生效；因此新请求会切换 fast key，旧 entry 不必全局清理。成员特有 ECS 或其他不能在 matcher 前证明安全的路径必须标记 fast ineligible。
 
@@ -159,7 +154,7 @@ policy fingerprint 覆盖会改变答案的已解析 typed 配置、strategy/ups
 
 一次 `prepare_context`/`evaluate_route` 使用请求捕获的同一个 `RuntimeSnapshot` 和同一次加载的 Policy 资源状态。资源刷新后，新请求使用新 matcher 与 content hash；已开始请求继续使用旧 `Arc`，不加全局读锁。
 
-PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发布，不能单独替换到互不匹配的 revision。
+请求决策使用同一次加载的 `Arc<PolicyState>`，其中 matcher、版本和 content hash 一起 CAS 发布。Runtime 的 `ResourceRegistrySnapshot<()>` 是另一份观测 metadata：`PreparedRuntime::refresh_resource` 先发布 Policy，再更新 metadata，并非两个 `ArcSwap` 的跨对象原子事务。请求决策不通过这份 metadata 重建 matcher；两者一致性不能被描述为“所有读者同时看到同一份原子组合”。
 
 ## 11. 错误语义
 

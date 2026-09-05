@@ -4,7 +4,7 @@
 >
 > 适用范围：后端跨模块依赖、运行时所有权、请求与副作用边界
 >
-> 最后评审：2026-09-05（跨模块边界复核；各模块沿用独立评审状态）
+> 最后评审：2026-09-05（以当前源码静态校正跨模块边界；范围与基线见[模块索引](modules/README.md)，不含运行验收）
 
 ## 职责与依赖
 
@@ -32,9 +32,9 @@ RawConfigVn -> migration / strict parse -> ResolvedConfig
 
 - `ResolvedConfig` 表达已归一化的配置语义，不等于可服务 runtime。
 - prepare 完成引用图、策略、connector、资源初始 snapshot 和缓存恢复准备；首次必需资源失败不进入 bind。
-- `RuntimeSnapshot` 保存请求所需稳定配置/索引与能力，不持有 socket、HTTP connection 或数据库连接。
+- `RuntimeSnapshot` 直接保存 resolved config、可选 PolicyDnsCore 和资源 metadata；socket 属于 ActiveRuntime，core 内部可间接持有 adapter/pool/cache owner，公共请求接口不暴露这些对象。
 - `ActiveRuntime` 持有已绑定入口和共享能力；配置候选完整准备后通过 revision CAS 切换，旧实例进入 drain。
-- 资源刷新使用 per-resource epoch/hash/parser version 与 CAS。旧 runtime 或旧 epoch 的刷新结果不得覆盖新实例或其他资源；资源-only publish 不重绑 listener。
+- 资源刷新使用 per-resource epoch/hash/parser version 与 CAS。Policy 内 matcher/version/hash 一起发布，再更新独立 runtime metadata；不是跨对象原子事务。旧 runtime/epoch 结果不得覆盖新实例或其他资源；资源-only publish 不重绑 listener。
 - Storage、Telemetry 和解析事件管线按进程管理，reload 重用其 sink；历史/当前 finalizer owner 都必须参与有界 shutdown。
 
 配置字段和 restart-required 范围见[配置参考](../../implementation/configuration.md)，实际顺序见[生命周期](../../implementation/backend/lifecycle.md)。
@@ -60,7 +60,7 @@ DoH route 在 adapter 用共享模板匹配一次，Policy 按 typed route ID �
 - 核心返回后、transport 编码前，最多无等待发布一次完成事件。ingress、cache commit 与详情队列的 gap 分别计数，不把丢失伪装为已落库。
 - Stats 使用有界维度、UTC day、epoch snapshot 和 batch ledger；同一批重试幂等，一次请求只增加一次请求数，parallel attempt 不扩成多条请求。
 - 启动时统计数据库打开/migration 失败为 fatal；缓存恢复失败可降级为纯内存。运行期普通数据库错误保留 pending 重试，超过内存保护或不可恢复错误升级处理。
-- 服务任务由 Supervisor 注册，区分可降级组件与致命入口；重试、取消和 drain 受 deadline 限制，不能无界等待。
+- Supervisor 注册入口、刷新和周期 flush 任务；Resolution、SQLite detail、cache finalizer 等内部任务由各自 owner 回收。request drain、后台排空与最终 flush 共用总 deadline；当前取消可中止正在处理的请求，不承诺已读请求必然完成响应。
 - 一般日志和 metrics 不记录 qname、原始 IP、Secret 或高基数内容；受保护的查询详情属于独立受限数据集，见 [Management](../management.md) 与 [Storage](modules/storage.md)。
 
 ## 验证约束与现状入口

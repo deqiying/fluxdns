@@ -6,7 +6,7 @@
 >
 > 最后核对：2026-09-05（入口与所有权静态追踪）
 >
-> 核对基线：`0f18d5b2ddf67625121fd7e0662e21723362565f`
+> 核对基线：`8223d819efb83fed642900e6b121825083e8c1dd`
 
 ## 正式入口
 
@@ -40,7 +40,9 @@ Storage/Telemetry 和解析统计 sink 由进程持有，reload 为候选 core �
 
 ## Shutdown 与错误
 
-[`service.rs`](../../../backend/src/service.rs) 的 `wait_for_termination_signal` 覆盖 Ctrl-C 和 Unix `SIGTERM`；`shutdown` 先停止 Management，再取消任务、标记 drain、等待连接/请求、关闭历史与当前 finalizer、flush 进程服务。阶段共用 deadline，错误保留已完成阶段报告；第二终止信号可快速结束等待。
+[`service.rs`](../../../backend/src/service.rs) 的 `wait_for_termination_signal` 覆盖 Ctrl-C 和 Unix `SIGTERM`；`shutdown` 先停止 Management，再标记当前/历史 runtime draining、取消任务、回收 Supervisor 并等待请求；随后关闭 Resolution、历史/当前 finalizer、Storage，最后关闭 Telemetry。阶段共用 deadline，错误保留已完成阶段报告；第二终止信号可快速结束等待。
+
+TCP/DoH 和 UDP dispatch 都可能被 service cancellation 中止，因此 5 秒 grace 是回收总预算，不等于保证已读请求一定响应。`RuntimeSnapshot` 持有 core，而内部 Resolution/Storage detail/finalizer task 分别由 owner 管理；不能把 Supervisor 的单独 drain 视为全部后台服务已关闭。
 
 入口和 task 错误由 `AppErrorKind` / `ServiceError` 分类，不能把 runtime fatal 或超时映射为成功。详细设计见 [Application](../../architecture/backend/modules/application.md) 与 [Runtime](../../architecture/backend/modules/runtime.md)。
 

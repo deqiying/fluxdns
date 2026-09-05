@@ -4,9 +4,9 @@
 >
 > 适用范围：本文与当前模板同步，描述配置契约、校验和已实现运行时边界；未定义行为不应视为已支持。
 >
-> 最后核对：2026-09-05（加载入口、路径与运行支持边界；字段明细沿用原文 2026-09-04 记录，本轮未逐字段复验）
+> 最后核对：2026-09-05（加载入口、路径、运行支持与缓存容量计费边界；其余字段明细沿用原文 2026-09-04 记录，未逐字段复验）
 >
-> 核对基线：`0f18d5b2ddf67625121fd7e0662e21723362565f`
+> 核对基线：`8223d819efb83fed642900e6b121825083e8c1dd`
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
@@ -233,9 +233,11 @@ RawConfigVn
 | `dns.cache.optimistic.answer_ttl` | duration | 乐观缓存应答使用的 TTL。 |
 | `dns.cache.optimistic.max_age` | duration | 记录过期后仍可乐观返回的最长时间。 |
 | `dns.cache.persistence.path` | string | 持久化缓存文件路径；相对路径以 `work.path` 为基准。 |
-| `dns.cache.persistence.max_size_bytes` | integer | 持久化缓存文件最大大小，单位为字节。 |
+| `dns.cache.persistence.max_size_bytes` | integer | 当前实现为持久化编码快照的容量预算，单位为字节；不是 SQLite 文件物理硬上限。 |
 
-`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS；`persistence.max_size_bytes` 只限制持久化缓存主数据库的 page budget。任一逻辑缓存池启用时，production async prepare 会从独立 SQLite 恢复可用记录；内存 CAS 成功后通过有界队列 best-effort 持久化，并在有序 shutdown 时排空已入队批次。SQLite 的临时 `-wal`/`-shm` 文件可能短时产生额外占用，超过预算时停止新的持久化写入并优先 checkpoint/淘汰；队列满或持久化失败只降级为内存缓存，不能影响 DNS 解析。两者使用相同字段名，但作用域不同。
+`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS。`persistence.max_size_bytes` 当前传给 [`prepare_snapshot`](../../backend/src/cache/persistence.rs)，限制编码记录连同快照 framing 的总字节数；[`SQLite adapter`](../../backend/src/cache/sqlite.rs) 没有据此设置 `max_page_count` 或物理文件收缩。主库页/freelist/索引及 `-wal`/`-shm` 均可能使实际磁盘占用超过这个值，不能据此规划硬磁盘配额。
+
+任一逻辑缓存池启用时，production async prepare 从独立 SQLite 恢复可用记录；内存 CAS 成功后通过有界队列 best-effort 持久化，有序 shutdown 排空已入队批次。超出编码预算时按 entry 插入时间淘汰旧项，不按访问热度；队列满或持久化失败不改变 DNS 响应。原物理容量与近似 LRU 要求见[差距计划](../plans/backend-contract-gaps.md)，本次只校正文档，没有更改字段或代码。
 
 策略级和客户端级 `cache` 只允许 `enabled` 与 `optimistic` 子对象，不包含 `memory`、`failure_ttl` 或 `persistence`。只要出现策略级或客户端级 `cache` 对象，`enabled` 就必须显式提供；整个对象缺失才表示继续向较低优先级选择。
 

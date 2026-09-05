@@ -4,9 +4,9 @@
 >
 > 适用范围：配置加载、迁移、归一化、校验、引用图和安全快照
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/config/*`
+> 关联实现：[load.rs](../../../../backend/src/config/load.rs)、[resolve.rs](../../../../backend/src/config/resolve.rs)、[validate.rs](../../../../backend/src/config/validate.rs)、[store.rs](../../../../backend/src/config/store.rs)
 >
 > 关联文档：[配置字段参考](../../../implementation/configuration.md) · [后端架构](../overview.md)
 
@@ -35,6 +35,8 @@ Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 pre
 | `migrate.rs` | `MigrationStep` 注册表和 `MigrationReport` |
 | `resolve.rs` | 默认值、三态、继承和来源信息归一化 |
 | `validate.rs` | 名称、引用图、循环、条件字段和 bind |
+| `store.rs` | 首用户配置事务、fingerprint 冲突、journal 与恢复 |
+| `source_edit.rs` | 保留源 YAML 表达的定向 users 编辑 |
 
 DTO、ValidatedConfig 和 ResolvedConfig 必须是不同类型，不能用布尔字段表示“也许已校验”。
 
@@ -45,9 +47,9 @@ read bounded UTF-8 bytes
   → parse minimal version header
   → run ordered migration chain
   → deserialize current strict DTO
-  → resolve config_dir and work.path
+  → validate DTO values, references, cycles and bind conflicts
+  → resolve config_dir and work.path, build BindPlan
   → normalize project paths, SecretRef sources and inheritance
-  → semantic validation passes
   → build immutable ResolvedConfig + reports
   → optionally create a safe work-directory config snapshot
 ```
@@ -89,27 +91,18 @@ MigrationStep {
 - `resource:selector` 引用中的 selector 使用与 Resource dat parser 相同的规则规范化为 lowercase canonical key；
 - cache、TTL、ECS 的缺失/显式禁用/字段继承；
 - client、strategy、route、resource 和 upstream 名称转换为 typed ID；
-- SecretRef source 归一化为 env/file 引用；实际值不会在普通 YAML load 中读取，只能由后续 adapter 通过 `ResolvedSecretRef::resolve` 或 `resolve_proxy_url` 等显式 accessor 请求，并包装为不可 Debug、不可 Serialize 的 secret 类型；
-- 每个生效值保留来源层级，便于错误和诊断。
+- SecretRef source 归一化为 env/file 引用；实际值不会在普通 YAML load 中读取，只能由后续 adapter 通过 `ResolvedSecretRef::resolve` 或 `resolve_proxy_url` 等显式 accessor 请求，并包装为 Debug/Display 脱敏、不可 Serialize 的 secret 类型；
+- cache/TTL/ECS 等继承相关值保留 `ValueSource`；不是所有字段都有完整来源追踪。
 
 请求热路径禁止再次读取 YAML、解析 duration 或计算继承。loader 不负责资源内容首次加载和 `ResourceSnapshot` 发布。
 
 ## 6. 校验顺序
 
-语义校验分 pass 执行，错误按字段路径聚合后一次返回：
+`resolve_config_with_base_dir` 先调用 `validate_config`，再解析工作目录、构造 `BindPlan` 和归一化模型。`validate_config` 聚合基础值、集合、引用、upstream cycle 与 bind 校验错误；严格反序列化或这轮语义校验失败后，不继续生成 `ResolvedConfig`。
 
-1. 基础值：端口、duration、URL、CIDR、大小和枚举；
-2. 条件字段：exactly-one-of、required-if、forbidden-if；
-3. 集合唯一性和 typed reference；
-4. upstream/bootstrap/group、resource/proxy 等有向图循环；
-5. cache、TTL、ECS 继承与阈值；
-6. listener/endpoint 展开和 IPv4/IPv6 bind 冲突；
-7. WebUI `public_origin`、用户 hash 与 Management/DNS TCP bind 冲突；
-8. SecretRef scheme 与敏感值安全检查；
-9. DoH path 模板语法与可能命中同一实际 path 的 route 重叠；
-10. 生成 `BindPlanInput`、`ResourcePlan`、`StoragePlan` 等 prepare 输入。
+检查内容包括 exactly-one-of/required-if、cache/TTL/ECS 阈值、WebUI origin/users、SecretRef source、DoH 模板重叠，以及 IPv4/IPv6 和 Management/DNS TCP 地址冲突。实际输出是 `ValidatedConfig { resolved: Arc<ResolvedConfig> }`，其中含 `BindPlan`；没有独立的 `BindPlanInput`、`ResourcePlan`、`StoragePlan` 类型，也没有通用“跳过 pass”报告。
 
-同一轮可以报告多个互不依赖的配置错误；依赖前置解析成功的 pass 在前置失败后跳过，并记录“未执行”而不是产生级联噪声。
+资源内容和 dat selector 是否存在，以及 SecretRef 解析后的代理组合是否合法，仍须在后续 Resource/Upstream prepare 或显式 SecretRef 检查中确认，不能由 YAML 校验成功推断。
 
 ## 7. 引用图
 
@@ -121,7 +114,7 @@ MigrationStep {
 - cycle；
 - unsupported selector。
 
-循环报告应给出完整最短环，例如 `upstreams.a.bootstrap → upstreams.b → upstreams.a`，而不是只报“存在循环”。
+当前循环检测覆盖 DoH bootstrap 与 group 主成员/fallback 的 upstream 依赖图；对节点和边排序后用 DFS 输出发现的闭环路径，不承诺图论上的最短环。outbound/resource 引用另行检查，不存在另一套统一依赖图。
 
 ## 8. 工作目录与配置快照
 
@@ -154,7 +147,7 @@ MigrationStep {
 - 资源级默认值和字段继承已展开；client/strategy 的请求级优先级由后续 Policy prepare 在 typed `Resolved*` 上组合，不重新解析 YAML；
 - 路径、URL、CIDR、duration 已强类型化；
 - secret 只能通过受控 accessor 使用；普通 YAML load 不读取实际值，读取动作留给后续 adapter 边界；
-- 保留 source span/path 与 normalized hash；
+- `ResolvedConfig` 保留 `input_hash`、`normalized_hash`，loader 输出保留源路径；错误携带字段路径及可用行列，不提供覆盖所有 resolved 字段的 source span map；
 - 可安全输出 redacted view，但不能直接 Serialize 原对象。
 
 Runtime 只能接收 `Arc<ResolvedConfig>` 和 prepare plans，不能接收原始 YAML DTO。
@@ -177,7 +170,7 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - 当前示例配置可离线严格解析并得到稳定 normalized snapshot；其中远程规则、本地资源和代理 SecretRef 只做配置级校验，不执行网络或资源首次 snapshot；
 - 未知字段、错误 variant 字段、空/`null`/缺失差异；
 - 所有 exactly-one-of 和 required-if；
-- 名称重复、缺失引用、类型错误和最短环；
+- 名称重复、缺失引用、类型错误和确定性的闭环路径；
 - cache/TTL/ECS 全继承矩阵；
 - group member 缺省 `weight: 1` 及各 mode 的显式权重约束；
 - 包含 `!` 等可打印 ASCII 的 dat selector canonicalization；

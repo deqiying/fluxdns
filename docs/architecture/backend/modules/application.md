@@ -4,9 +4,9 @@
 >
 > 适用范围：进程入口、依赖装配、信号、退出和服务生命周期
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/main.rs`、`backend/src/app.rs`
+> 关联实现：[main.rs](../../../../backend/src/main.rs)、[app.rs](../../../../backend/src/app.rs)、[service.rs](../../../../backend/src/service.rs)
 >
 > 关联文档：[后端架构](../overview.md)
 
@@ -22,7 +22,7 @@ Application 模块是进程边界和依赖装配入口，负责把 Config、Runt
 - 把进程信号转换为统一 shutdown 请求；
 - 在运行期间轮询配置文件 fingerprint，并把稳定变更交给统一 reload 入口；
 - 将结构化错误映射为面向操作者的消息和稳定退出码；
-- 保证所有服务任务都交由 Runtime supervisor 管理。
+- 通过 `DnsService` 装配 Supervisor 与进程级服务 owner，保证运行任务有明确的关闭边界。
 
 它不负责：
 
@@ -31,16 +31,16 @@ Application 模块是进程边界和依赖装配入口，负责把 Config、Runt
 - 自行读写 SQLite、资源文件或远程 URL；
 - 在 CLI 层重新解释配置默认值或继承规则。
 
-`app.rs` 只编排用例，`runtime/*` 持有长期运行状态。这样避免 application 与 supervisor 同时拥有 task。
+`app.rs` 编排用例，`runtime/*` 管理候选、活动实例与监督原语，`service.rs` 的 `DnsService` 持有实际 Supervisor、transport/resource task 注册信息及 Storage/Resolution/Telemetry/Management。这些服务的内部 worker 可以由各自 owner 持有，不要求每个 task 都直接登记到 Supervisor。
 
 ## 2. 进程入口
 
 `main.rs` 保持薄层：
 
-1. 读取命令行和进程环境；
-2. 初始化只写 stderr 的 bootstrap subscriber；
-3. 创建 Tokio multi-thread runtime；
-4. 调用 `app::run`；
+1. 由 `#[tokio::main(flavor = "multi_thread")]` 建立 Tokio runtime；
+2. 在异步 `main` 中初始化只写 stderr 的 bootstrap subscriber；
+3. 调用 `app::run`，由 Application 读取和解析命令行；
+4. 执行 `run`、`validate` 或 help/version 输出；
 5. 输出一条脱敏后的最终错误；
 6. 返回对应退出码。
 
@@ -52,7 +52,7 @@ Application 提供“启动服务”和“只读校验配置”两类用例，�
 
 - 配置路径可以显式指定；
 - 未指定时只使用文档约定的默认 `config.yaml`，不遍历目录猜测；
-- 校验用例停在 bind 之前，不创建对外 listener；
+- `validate` 只走严格配置加载，关闭 snapshot 写入，不恢复 ConfigStore journal，也不解析 SecretRef 实际值、不准备资源、不打开数据库或绑定 listener；
 - 任何会覆盖、迁移或回滚配置文件的命令在拥有独立交互契约前不启用；
 - stdout 用于机器可读或明确请求的结果，诊断默认写 stderr。
 
@@ -82,15 +82,15 @@ bootstrap telemetry
 `SIGINT`/Unix `SIGTERM` 或运行期 Supervisor 致命任务终止应进入同一有界停机流程：
 
 1. 撤销 WebUI session，并先取消 Management accept；
-2. 通过 `Supervisor` cancellation 停止其他 accept/receive，再把 `ActiveRuntime` 标记为 draining；
+2. `RuntimeCoordinator::begin_drain` 标记当前及历史 runtime，再取消 transport/resource task 和 Supervisor；
 3. 在固定 5 秒 grace deadline 内回收 UDP loop、TCP listener、DoH listener 和连接 session；
 4. 由 `RuntimeCoordinator` 在同一 grace deadline 内等待当前及旧 Runtime 的 request guard drain；
-5. 关闭 `RuntimeCoordinator` 持有的历史/当前 `LateCacheFinalizer` owner；
-6. 返回成功或 shutdown timeout 错误。
+5. 停止并排空进程级 Resolution 管线，再关闭历史/当前 `LateCacheFinalizer` 及缓存持久化 owner；
+6. 关闭 Storage，最后 flush/shutdown Telemetry，返回阶段报告或失败。
 
 运行期 task 完成时，Degraded 组件可以记录失败后继续服务；endpoint 耗尽先按逻辑 listener 的可用 sibling 聚合，致命升级和 task panic 进入统一 drain 并返回非零错误。显式 reload 与瞬时 task 重试不能形成两套竞争的 listener ownership。
 
-第二个终止信号允许快速退出剩余等待。cache persistence、Storage 和 Telemetry 的有限 flush 均受总预算约束；配置文件轮询只是内部事件源，不构成外部管理写 API。实际接线和 Unix smoke 边界见[生命周期实现](../../../implementation/backend/lifecycle.md)。
+第二个终止信号结束剩余等待并返回非零错误。各阶段共用同一个 5 秒总 deadline，不是每阶段重新获得 5 秒。当前 TCP/DoH session 会随停机 cancellation 中止进行中的 dispatch，并不保证已读完整请求一定写回；与旧优雅停机要求的差距见[核对计划](../../../plans/backend-contract-gaps.md)。配置文件轮询只是内部事件源，不构成外部管理写 API。实际接线和 Unix smoke 边界见[生命周期实现](../../../implementation/backend/lifecycle.md)。
 
 退出码分类契约：
 

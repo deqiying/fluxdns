@@ -4,15 +4,15 @@
 >
 > 适用范围：Runtime 状态、listener 生命周期、后台任务监督、原子激活和 shutdown
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/runtime/*`
+> 关联实现：[snapshot.rs](../../../../backend/src/runtime/snapshot.rs)、[prepared.rs](../../../../backend/src/runtime/prepared.rs)、[coordinator.rs](../../../../backend/src/runtime/coordinator.rs)、[supervisor.rs](../../../../backend/src/runtime/supervisor.rs)、[service.rs](../../../../backend/src/service.rs)
 >
 > 关联文档：[后端架构](../overview.md)
 
 ## 1. 职责
 
-Runtime 模块拥有可服务状态、listener 生命周期、后台任务监督和原子激活。Application 只发起 prepare/serve/shutdown，不能直接持有服务 task。
+Runtime 模块提供可服务状态、listener 生命周期、后台任务监督和原子激活原语。`DnsService` 是实际运行 owner，负责把这些原语与 Storage/Resolution/Telemetry/Management 组合；Application 调用它，不另建一套 task tree。
 
 内部文件：
 
@@ -24,58 +24,45 @@ Runtime 模块拥有可服务状态、listener 生命周期、后台任务监督
 | `bind.rs` | `BindPlan`、socket 预创建、提交或回滚 |
 | `supervisor.rs` | task tree、故障等级、重试与 shutdown |
 | `system_socket.rs` | `socket2`/Tokio 系统 socket adapter 与不透明 I/O capability |
+| `system_clock.rs` | `Clock` 的真实时间与 timer adapter |
 
 ## 2. 状态模型
 
-状态严格分层：
+类型与生命周期分层如下，括号部分是状态而非独立 Rust 类型：
 
 ```text
 ResolvedConfig
   → PreparedRuntime
   → BoundCandidate
   → ActiveRuntime
-  → DrainingRuntime
-  → Closed
+  → ActiveRuntime（draining flag）
+  → owner shutdown / handles released
 ```
 
 - `RuntimeSnapshot`：请求热路径读取的不可变配置、策略、资源摘要、上游和 cache semantics；
 - `PreparedRuntime`：已完成所有非 bind 准备，但不对外可见；
 - `BoundCandidate`：全部目标 socket 已成功创建，尚未接收请求；
-- `ActiveRuntime`：唯一对外服务实例；
-- `DrainingRuntime`：不再接收新请求，只等待存量请求和 flush。
+- `ActiveRuntime`：coordinator 的当前指针指向它，旧实例可因存量请求与 owner 引用继续存在；
+- draining：同一 `ActiveRuntime` 的 admission flag 拒绝新 guard，不存在 `DrainingRuntime`/`Closed` 包装类型。
 
-类型转换消耗前一状态的所有权，避免把“半准备”对象误发布。
+bind/activate 使用候选所有权和 CAS 区分准备与发布；listener 复用和资源合并仍会克隆共享句柄，不是全流程只进不出的线性类型状态机。
 
 ## 3. RuntimeSnapshot
 
-snapshot 只持有请求所需的不可变 handle：
+`RuntimeSnapshot` 的直接字段是 revision、`Arc<ResolvedConfig>`、可选 `Arc<PolicyDnsCore>` 与 `Arc<ArcSwap<ResourceRegistrySnapshot<()>>>`。它没有独立的 upstream/cache/transport registry 字段。
 
-- revision 与 normalized config hash；
-- policy index；
-- per-resource registry snapshot（由 `ArcSwap` 持有资源元数据摘要，compiled payload 仍由 `PolicyDnsCore` 持有）；
-- upstream connector registry；
-- cache semantics；
-- transport capabilities registry。
-
-snapshot 不包含：
-
-- listening socket；
-- HTTP connection；
-- SQLx pool；
-- Moka store；
-- writer channel 的发送端实现细节；
-- mutable retry/backoff state。
+compiled matcher、资源版本/hash 在 `PolicyDnsCore` 的 `ArcSwap<PolicyState>` 中；UpstreamRuntime、CacheFacade、LateCacheFinalizer 也由 core 持有。因此 snapshot 不直接暴露 socket/SQLx/Moka，但其 core 对象图可间接持有连接池、cache store 和后台 owner，不能宣称整个对象图只有纯数据。
 
 service task 与请求入口必须使用同一 RuntimeRevision；transport 持有固定 runtime 句柄，显式 reload 才换代。resource worker 通过 coordinator 查询当前实例；Storage/Telemetry 按进程复用；历史和当前 finalizer owner 都受停机管理。Management listener 与用户 reload 边界遵循[管理面设计](../../management.md)，正式构造与调用顺序见[生命周期实现](../../../implementation/backend/lifecycle.md)。
 
-每个请求在 ingress 后只捕获一次 `Arc<RuntimeSnapshot>`。同一请求不能在策略、缓存和上游阶段分别读取不同 revision。
+正式 transport task 固定持有 `Arc<ActiveRuntime>` 及相同 revision 的 core；每个请求取得该 runtime 的 request guard，Policy core 再捕获一次 `Arc<PolicyState>`。它不是每请求重新读取 coordinator 当前指针；显式 reload 重建 transport task 后才换代。后台 optimistic refresh 可以通过 runtime core cell 选择最新 core，这是明确的独立执行窗口。
 
 ## 4. PreparedRuntime 构建
 
 启动准备必须在 bind 前满足以下前置条件；这些职责由 Application、PreparedRuntime 和进程服务共同承担，不表示全部位于同一个构造器或严格按本表顺序执行：
 
 1. 接收 `ResolvedConfig` 和各类 prepare plan；
-2. 打开必需业务数据库并执行 migration/可写性检查；
+2. 打开必需业务数据库并执行 migration；当前没有额外的显式写入/回滚探针；
 3. 创建 storage、telemetry、cache 等 shared service；
 4. 创建远程资源首次加载所需的 outbound/connector；
 5. 对 remote rule-set 恢复已校验的落盘 pair，必要时下载、解析并原子持久化，再编译所有首次 resource snapshot；
@@ -88,14 +75,7 @@ service task 与请求入口必须使用同一 RuntimeRevision；transport 持�
 
 ## 5. BindPlan
 
-`BindPlan` 是经过 Config 校验后的显式 endpoint 列表，记录：
-
-- listener/endpoint ID；
-- 底层 UDP/TCP socket 协议、应用层 transport 类型和 bind address；
-- IPv6 v6-only 选择；
-- transport profile；
-- TLS/client IP profile 的引用；
-- accept task 的故障策略。
+Config 的 `BindPlan` 是经过校验的 `BindEntry` 列表，记录底层 UDP/TCP protocol、应用 transport、可选 `DohBindingRef`、address/port、owner 和 v6_only。TLS/client IP/route 配置不内嵌到 BindEntry；service 按 endpoint 引用构造 adapter，TaskSpec 另行定义故障策略。
 
 绑定采用“全部成功再提交”：
 
@@ -121,29 +101,21 @@ service task 与请求入口必须使用同一 RuntimeRevision；transport 持�
 
 ## 7. Supervisor
 
-supervisor 持有完整 task tree：
+实际所有权分为 Supervisor 直接任务和独立服务内部任务：
 
 ```text
-Supervisor
-  ├─ listener groups
-  │   ├─ UDP receive loops
-  │   ├─ TCP accept task（内部持有 connection JoinSet）
-  │   └─ DoH accept/connections
-  ├─ resource refresh workers
-  ├─ stats writer
-  ├─ resolve-log writer
-  ├─ cache persistence writer
-  └─ telemetry flush worker
+DnsService
+  ├─ Supervisor
+  │   ├─ UDP loop / TCP、DoH accept（内部 connection JoinSet）
+  │   ├─ resource refresh / Storage periodic flush / Telemetry flush
+  │   └─ Management server
+  ├─ ResolutionRuntime（dispatcher / cache commit / detail projector）
+  ├─ StorageRuntime（SQLite detail worker）
+  └─ RuntimeCoordinator
+      └─ current / historical LateCacheFinalizer（late JoinSet / persistence owner）
 ```
 
-禁止使用无人持有的 `tokio::spawn`。每个 task 注册：
-
-- task ID 与组件；
-- cancellation token；
-- restart policy；
-- fatal/degraded 分类；
-- 最近启动、失败和重试时间；
-- shutdown hook。
+Supervisor 的 `TaskSpec` 只含 task ID、组件、restart policy 和 fault level；cancellation、JoinSet 及 restart count 由 Supervisor 运行状态持有。它没有通用的最近启动时间或逐 task shutdown-hook 字段。内部 worker 的 JoinHandle/JoinSet 由各自 owner 显式关闭，不等同于所有 panic 都会立即作为 Supervisor completion 上报。
 
 一次性 task 与可重建 factory 分开注册；只有明确为 Transient 且未收到 shutdown cancellation 时才有界重试，每次创建新 future。reload 的 scoped token 仍属于全局 task tree。JoinSet task ID 必须映射完整 TaskSpec，panic/abort 按真实组件归因，不按注册顺序猜测；completion 和 shutdown report 保留重试次数。
 
@@ -161,7 +133,7 @@ Supervisor
 
 聚合统计数据库故障最初按 degraded 处理；pending batch 和补偿计数使用 v1 固定内存保护上限。达到上限时升级 fatal，停止接收新请求并在有限 flush 后退出，避免长期故障演变为 OOM。
 
-瞬时重试采用带 jitter 的指数退避并有上限。只有设计明确为瞬时的 task 可自动重启；逻辑错误、schema 错误和 panic 不无限重启。
+Supervisor 瞬时重试采用确定性的指数退避：1ms 起、封顶 1,024ms，没有 jitter；重试次数受 `RestartPolicy::Transient` 限制。资源刷新使用自身 scheduler backoff，不复用这一数值。逻辑错误、schema 错误和 panic 不无限重启。
 
 ## 9. 请求计数与 drain
 
@@ -171,24 +143,26 @@ Supervisor
 - response 完成、客户端断开或取消时释放；
 - 进入 drain 后拒绝新 guard；
 - guard 归零即完成 drain；
-- grace deadline 到期后取消剩余请求并记录数量。
+- task cancellation 可在等待 grace deadline 之前中止 dispatch；总 deadline 用于限制回收等待，不保证所有存量响应完成。
 
-UDP 无连接请求同样受 guard 约束。后台 cache finalizer 如果已脱离客户端响应，但仍在允许窗口内，计入 runtime 后台 guard。
+UDP 无连接请求同样受 guard 约束。后台 cache finalizer 使用独立 semaphore、task 计数和 JoinSet，不增加 `ActiveRuntime` 的 request guard；coordinator 单独登记历史/当前 finalizer owner。request guard 的 Capacity 仅防计数溢出，不是全局并发配额。
 
 ## 10. Shutdown
 
 顺序固定：
 
-1. `RuntimeCoordinator::begin_drain` 标记当前及历史 Runtime draining；
-2. supervisor cancellation 停止 accept/receive 新请求；
-3. TCP listener 取消并 join 内部 connection `JoinSet`；
-4. supervisor 确认当前 task tree 清空；
-5. `RuntimeCoordinator` 在 grace deadline 内等待当前及旧 Runtime 的请求 guard 归零；
-6. 由 `RuntimeCoordinator` 统一登记的各 Runtime `PolicyDnsCore` owner 在同一 grace deadline 内关闭 `LateCacheFinalizer`，排空 cache persistence writer，并合并安全停机计数。
+1. Management 撤销 session 并取消 accept；
+2. `RuntimeCoordinator::begin_drain` 标记当前及历史 runtime，随后取消 transport/resource task；
+3. Supervisor 取消并回收直接任务；TCP/DoH listener 取消并 join connection JoinSet；
+4. coordinator 等待当前及旧 runtime 的 request guard 归零；
+5. ResolutionRuntime 关闭 ingress 并依次排空 dispatcher/cache/detail；
+6. coordinator 关闭历史/当前 LateCacheFinalizer 及其缓存持久化，合并安全计数；
+7. StorageRuntime 关闭详情 worker、flush stats 并关闭业务数据库；
+8. 最后关闭 Telemetry。
 
 stats、resolve log、SQLite checkpoint 和 Telemetry flush 都必须纳入进程 drain。cache persistence 由 finalizer owner 有序关闭，安全摘要在 Telemetry 关闭前发布；未完成关闭与持久化失败/drop 分别记录，不能混成同一 timeout。实际 owner 和 task 接线见[后台服务](../../../implementation/backend/background-services.md)。
 
-每一步有独立 deadline 和结果，最终报告不能只返回模糊的“shutdown failed”。
+所有阶段共享调用方给定的总 deadline，阶段结果分别记录；不是每一步独立重置预算。更强的“已读请求必须完成”语义和完整故障矩阵见[差距计划](../../../plans/backend-contract-gaps.md)。
 
 ## 11. 契约验证要求
 
@@ -200,4 +174,4 @@ stats、resolve log、SQLite checkpoint 和 Telemetry flush 都必须纳入进�
 - rebind 失败保留旧 runtime；
 - endpoint 重试、degraded、fatal 升级符合矩阵；
 - drain 等待、deadline 取消和 flush 顺序可确定性验证；
-- task panic 被 supervisor 捕获且没有 detached task。
+- Supervisor 注册任务的 panic 可归因；内部 worker 的失败由相应 owner 回收，需分别验证，不以一类 task 的测试替代全部 owner。

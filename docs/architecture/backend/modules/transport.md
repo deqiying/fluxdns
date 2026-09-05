@@ -4,9 +4,9 @@
 >
 > 适用范围：DNS wire、UDP、TCP、DoH、TLS、client IP 恢复和响应编码
 >
-> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
+> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
-> 关联实现：`backend/src/transport/*`
+> 关联实现：[udp.rs](../../../../backend/src/transport/udp.rs)、[tcp.rs](../../../../backend/src/transport/tcp.rs)、[doh.rs](../../../../backend/src/transport/doh.rs)、[service.rs](../../../../backend/src/service.rs)、[system_socket.rs](../../../../backend/src/runtime/system_socket.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Ports 模块](ports.md) · [DNS Core 模块](dns-core.md)
 
@@ -48,20 +48,11 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 
 forwarded header 和 PROXY 前导解析均限定在 `doh.rs` 的 typed 边界内，不能复用未经验证的任意 header 字符串。
 
-## 3. TransportProfile
+## 3. Endpoint 装配
 
-Config/Runtime 为每个 endpoint 编译 immutable `TransportProfile`：
+当前没有统一 `TransportProfile` 类型。Config 的 `BindEntry` 表达 socket/transport/DoH endpoint 引用；`DnsService::prepare_transport_plans` 把它与 resolved 配置组合为 UDP/TCP/DoH adapter 和 `TransportTaskPlan`。TLS/client IP/route 参数由各 adapter 持有，request correlation 持有 encoder。
 
-- protocol class：datagram、stream 或 multiplexed；
-- listener/route ID；
-- framing 和固定上限；
-- TLS mode 与已加载的 server config；
-- client IP source 与 trusted proxy matcher；
-- response encoder；
-- admission-control handle；
-- opaque cache compatibility key。
-
-DNS Core 只看到 `TransportCapabilities`，不看到 address、certificate、HTTP method 或 proxy header。
+请求将 protocol class、UDP payload 能力和 opaque cache compatibility 等表示为 `TransportCapabilities`；Core 不读取 certificate、HTTP method 或 proxy header。有效 client address 则通过 `RequestContext.client` 提供给策略和 ECS，不等同 socket/HTTP 对象泄漏。
 
 ## 4. 统一入站流程
 
@@ -76,20 +67,20 @@ receive / accept
   → ResponseEncoder
 ```
 
-每个入口都有有界连接/请求预算。达到预算时：
+实际并发边界是：
 
-- UDP 可丢弃并增加 `admission_dropped`；
-- TCP/DoH 在形成请求前拒绝或关闭连接；
-- 已进入 Core 的请求不因新请求拥塞被抢占；
-- 预算值在 v1 作为有测试的实现常量，不新增未定稿配置字段。
+- 每个 UDP socket 的 service loop 顺序 receive → dispatch → encode，不为每个 datagram 新建 task；
+- 每个 TCP/DoH listener 最多 1,024 个 session，满时暂停 accept；每个 session 顺序处理请求；
+- `ActiveRuntime::try_acquire` 用于 drain 计数，`Capacity` 只是 `usize::MAX` 溢出防护，不是可配置的全局请求限流器；
+- 当前没有统一 admission-control handle 或 UDP `admission_dropped` 专用 counter，不能把设计中的通用资源预算写成已接线限流。
 
 ## 5. UDP
 
 UDP adapter：
 
 - 每个 bind socket 一个受监督 receive loop；
-- 使用可复用 buffer pool，但每次解析只暴露本请求 slice；
-- datagram 大于 65,535 字节或无法解析时丢弃并计数；
+- system socket 每次 receive 分配有界 `Vec<u8>`，尚无 buffer pool；
+- adapter 以 65,535 字节上限接收；非法 wire 在 header 可靠时尝试安全错误响应，否则忽略，不承诺每类丢弃都有独立 counter；
 - `peer_addr` 同时作为默认 `client_addr`；
 - query DNS ID 从 canonical query 分离，响应时恢复；
 - 输出按客户端 EDNS advertised UDP size 重新编码；
@@ -102,13 +93,13 @@ UDP 没有连接级响应确认；send error 作为 request-local 事件记录�
 
 TCP adapter：
 
-- accept loop 与 connection task 都由 supervisor 持有；
+- Supervisor 持有 accept task，其内部 JoinSet 持有 connection task；
 - 每个 DNS frame 使用两字节网络序长度；
 - 长度 0、超过 65,535、半包超时或 EOF 中断都关闭连接；
 - 支持同连接连续请求；
 - v1 按读取顺序输出响应，避免乱序破坏简单客户端兼容性；
-- connection idle timeout 和每连接 in-flight 使用固定 profile 上限；每个 TCP listener 最多持有 1,024 个 active session，达到上限时暂停 accept；
-- shutdown 时停止 accept，允许已读完整 frame 在 grace deadline 内完成；无连接的 accept deadline 只推进轮询。
+- frame read 使用 adapter request timeout，单连接一次只处理一个请求；每个 TCP listener 最多持有 1,024 个 active session，达到上限时暂停 accept；
+- shutdown 时取消 accept 及 session，正在进行的 dispatch 可被取消并关闭连接，不保证已读完整 frame 最终响应；无连接的 accept deadline 只推进轮询。
 
 如果后续需要 TCP pipelining 乱序响应，应先修改 correlation 契约和测试，不在 v1 隐式开启。
 
@@ -147,7 +138,7 @@ route template 由 Config 提供的共享 compiler 校验和匹配。末尾 `/{c
 - 显式安装 Rustls crypto provider；
 - 将脱敏的 DER 材料交给 system socket，由其构造 `ServerConfig` 并在连接 session 内完成 stream upgrade。
 
-`tls.mode=external` 不读取证书材料。v1 不实现证书热加载；证书变化需要新 candidate/rebind。
+`tls.mode=external` 不读取证书材料。v1 没有证书文件 watcher；需要触发配置 candidate/endpoint adapter 重建才重新读证书，单独修改 PEM 文件并不保证触发 reload。底层 listener 是否 rebind 由 BindPlan 复用判定，不等同 TLS 材料是否重建。
 
 TLS handshake 受 endpoint request timeout 和 cancellation 约束，失败不进入 HTTP router 且只关闭当前 session；必须证明同一 listener 仍能服务后续连接。v1 不新增独立 TLS timeout 或证书热加载。
 
@@ -219,4 +210,4 @@ encoder 由 request correlation 持有并只能调用一次：
 - UDP/TCP/DoH 多轮无流量 deadline 后继续服务且不消耗 endpoint retry；
 - wire codec 的 DNS ID 分离/恢复、canonicalization、输入输出尺寸上限和安全错误分类；
 - UDP/TCP 在 header 可靠时对非法 question/解码返回 FORMERR、对非 QUERY opcode 返回 NOTIMP；短 header 和需要 OPT 的 BADVERS 不猜测响应；
-- 所有 adapter 通过 Ports contract suite。
+- 共享 fake 与各 adapter 本地用例覆盖相关契约；完整 TLS/proxy/取消/资源上限矩阵仍见[差距计划](../../../plans/backend-contract-gaps.md)，不宣称已通过统一 conformance 门禁。
