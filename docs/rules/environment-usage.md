@@ -30,6 +30,12 @@
 
 ### Rust
 
+Rustup 工具链和 Cargo 可执行文件使用用户级共享安装目录：`MISE_RUSTUP_HOME = "~/.rustup"`、`MISE_CARGO_HOME = "~/.cargo"`。项目仍由 `mise.toml` 固定 Rust 版本，不在项目目录内重复安装工具链。
+
+Cargo 依赖缓存保留在 `backend/.cargo-home/`，通过 `CARGO_HOME = { value = "{{config_root}}/backend/.cargo-home", tools = true }` 在 mise 完成工具解析后设置。共享安装目录必须显式固定，且 `CARGO_HOME` 必须保留 `tools = true`；只设置普通 `CARGO_HOME`，或只延后设置而不固定共享安装目录，都可能让重复激活时的 Rust 代理目录判定与共享安装记录不一致，产生 `missing: rust@...` 警告。
+
+这一区分允许沙盒读取已安装的共享工具链，并在项目内写入依赖缓存和构建产物；安装工具链、添加 Rust 组件以及网络访问仍受各自的权限和审批规则约束。
+
 Rust 后端命令从仓库根目录执行，并通过 `--manifest-path backend/Cargo.toml` 指定 manifest：
 
 ```powershell
@@ -73,7 +79,7 @@ mise exec -- node --version
 | 类型 | 本地目录 | 维护约定 |
 | --- | --- | --- |
 | Rust 后端构建物 | `backend/target/` | 已加入 `.gitignore` |
-| Rust 工具链缓存 | `backend/.cargo-home/` | 由 `mise.toml` 固定，已加入 `.gitignore` |
+| Cargo 依赖缓存 | `backend/.cargo-home/` | 由 `mise.toml` 在工具解析后设置，已加入 `.gitignore` |
 | 前端依赖 | `frontend/node_modules/` | 已加入 `.gitignore` |
 | 前端构建物 | `frontend/dist/` | 已加入 `.gitignore` |
 | 发布二进制 | `deploy/` | 用于保存本地脚本或自动发布 workflow 生成的内嵌资源二进制；已加入 `.gitignore` |

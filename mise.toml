@@ -6,8 +6,11 @@ pnpm = "11.25.0"
 rust = "1.98.0"
 
 [env]
-MISE_RUSTUP_HOME = "{{config_root}}/backend/.rustup"
-MISE_CARGO_HOME = "{{config_root}}/backend/.cargo-home"
+# 固定共享安装目录，避免项目缓存路径改变 mise 的 Rust 代理判定。
+MISE_RUSTUP_HOME = "~/.rustup"
+MISE_CARGO_HOME = "~/.cargo"
+# 工具解析完成后再设置 Cargo 依赖缓存，保持沙盒内的项目目录可写。
+CARGO_HOME = { value = "{{config_root}}/backend/.cargo-home", tools = true }
 NODE_COMPILE_CACHE = "{{config_root}}/frontend/.cache/node-compile-cache"
 npm_config_cache = "{{config_root}}/frontend/.cache/npm-cache"
 npm_config_cache_dir = "{{config_root}}/frontend/.cache/pnpm-cache"
