@@ -23,12 +23,12 @@
 
 | 内容 | 权威来源 | 同步要求 |
 | --- | --- | --- |
-| 项目协作、工具和变更边界 | 根 [`AGENTS.md`](../../AGENTS.md) 与 `docs/standards/*.md` | 具体规范不得与 `AGENTS.md` 冲突；新增规范必须补齐路由 |
+| 项目协作、工具和变更边界 | 根 [`AGENTS.md`](../../AGENTS.md) 与 `docs/rules/*.md` | 具体规范不得与 `AGENTS.md` 冲突；新增规范必须补齐路由 |
 | 文档导航和目录职责 | [`docs/README.md`](../README.md) | 一级文档或目录变化时同步更新 |
 | 后端总体架构和跨模块契约 | [`backend/architecture.md`](../backend/architecture.md) | 模块文档不得单独改变跨模块契约 |
 | 后端模块内部设计和实现边界 | [`backend/modules/*.md`](../backend/modules/README.md) | 源码行为变化时更新对应模块文档 |
 | 配置字段、路径、校验和迁移 | [`backend/configuration-reference.md`](../backend/configuration-reference.md) | 必须与 `config-example.yaml`、配置模型、校验和测试同步 |
-| 前端总体架构和实施边界 | [`frontend/architecture.md`](../frontend/architecture.md) | 前端目录入口由 [`frontend/README.md`](../../frontend/README.md) 维护；项目工具链和命令调用由 [`standards/environment-usage.md`](environment-usage.md) 维护 |
+| 前端总体架构和实施边界 | [`frontend/architecture.md`](../frontend/architecture.md) | 前端目录入口由 [`frontend/README.md`](../../frontend/README.md) 维护；项目工具链和命令调用由 [`rules/environment-usage.md`](environment-usage.md) 维护 |
 | 面向使用者的项目概览和入口 | 根 [`README.md`](../../README.md) | 只保留高层摘要，详细内容链接到 `docs/` 权威文档 |
 
 源码、测试、schema 和实际命令结果是“当前实现是否如此”的验证依据；文档是项目接受的设计、契约和维护入口。两者冲突时不得按更新时间直接选择一方，也不得只修改其中一边：应先确认预期契约，再在同一任务中对齐实现、测试、示例和权威文档，或明确记录尚未实现的边界。
@@ -65,7 +65,7 @@ docs/
 ├── frontend/
 │   ├── README.md                 # 前端文档索引
 │   └── architecture.md           # 前端总体架构与实施边界
-├── standards/
+├── rules/
 │   ├── README.md                 # 跨模块规范索引
 │   └── <standard>.md             # 可执行的开发、协作或验证规范
 └── plans/                        # 可选；仅存放需要仓库内评审的未实施方案
@@ -75,13 +75,13 @@ docs/
 
 `docs/plans/` 是按需创建的可选目录，当前没有方案时不创建空目录。除根 `README.md`、`AGENTS.md` 和代码主目录自己的 `README.md` 外，长期技术文档统一放入 `docs/`，不得散落到源码目录或仓库根目录。
 
-一级目录职责必须互斥且稳定。`backend/`、`frontend/` 按代码领域组织长期技术文档，`standards/` 存放跨领域规范，`plans/` 仅存放需要仓库内评审的跨领域未实施方案。仅当新目录对应稳定代码领域，或现有权威文档无法承载且同类文档已经形成明确集合时，才新增一级子目录；普通单一主题默认更新现有权威文档，不为一个文件创建主题目录。不得按作者、日期、任务编号或版本建立长期目录层级，也不得预建空目录等待未来内容。
+一级目录职责必须互斥且稳定。`backend/`、`frontend/` 按代码领域组织长期技术文档，`rules/` 存放跨领域规范，`plans/` 仅存放需要仓库内评审的跨领域未实施方案。仅当新目录对应稳定代码领域，或现有权威文档无法承载且同类文档已经形成明确集合时，才新增一级子目录；普通单一主题默认更新现有权威文档，不为一个文件创建主题目录。不得按作者、日期、任务编号或版本建立长期目录层级，也不得预建空目录等待未来内容。
 
 ### 3.2 文档选址
 
 新增文档前按以下顺序判断位置：
 
-1. 跨模块且可执行的协作、开发或验证规则放入 `docs/standards/`。
+1. 跨模块且可执行的协作、开发或验证规则放入 `docs/rules/`。
 2. 配置公共契约直接更新 `docs/backend/configuration-reference.md`，不为单个配置块另建平行参考文档。
 3. 后端跨模块架构直接更新 `docs/backend/architecture.md`；单模块设计放入 `docs/backend/modules/`。
 4. 前端跨模块方案更新 `docs/frontend/architecture.md`；仅与前端工程使用相关的入口和命令更新 `frontend/README.md`。
@@ -116,7 +116,7 @@ docs/
 - `docs/README.md` 是文档总入口，维护一级文档与子目录的权威路由。
 - 含多个长期文档的一级子目录必须提供 `README.md`，列出文档、职责和上位权威。
 - 新增、重命名、移动或删除文档时，必须在同一变更中更新对应目录索引和所有入站链接。
-- 新增规范文档时，还必须更新 `docs/standards/README.md` 和根 `AGENTS.md` 的文档路由。
+- 新增规范文档时，还必须更新 `docs/rules/README.md` 和根 `AGENTS.md` 的文档路由。
 - 新增后端模块文档时，还必须更新 `docs/backend/modules/README.md` 和后端架构中的模块映射。
 
 ## 5. 状态与内容格式
@@ -168,9 +168,9 @@ docs/
 | 跨模块依赖、请求管线或生命周期 | `backend/architecture.md` 与受影响模块文档 | 面向使用者的项目状态发生明显变化时更新根 README 摘要 |
 | 单一后端模块行为、失败语义或模块测试 | 对应 `backend/modules/*.md` | 改变公共配置或跨模块契约时更新对应权威文档 |
 | 前端技术栈、边界或 Management API 设计 | `frontend/architecture.md` | 工程命令或目录变化时更新 `frontend/README.md`；后端契约变化时更新后端架构或对应模块文档 |
-| 项目工具链、构建物、依赖目录、缓存或安装边界 | `standards/environment-usage.md` | 更新 `AGENTS.md` 中的强制入口或高层规则 |
-| 本地测试目录、测试方法或结果记录要求 | `standards/local-testing.md` | 更新 `AGENTS.md` 中的强制入口或高层规则 |
-| 新增或修改跨模块规范 | 对应 `standards/*.md`、`standards/README.md`、根 `AGENTS.md` | 影响文档导航时更新 `docs/README.md` 和相关模块入口 |
+| 项目工具链、构建物、依赖目录、缓存或安装边界 | `rules/environment-usage.md` | 更新 `AGENTS.md` 中的强制入口或高层规则 |
+| 本地测试目录、测试方法或结果记录要求 | `rules/local-testing.md` | 更新 `AGENTS.md` 中的强制入口或高层规则 |
+| 新增或修改跨模块规范 | 对应 `rules/*.md`、`rules/README.md`、根 `AGENTS.md` | 影响文档导航时更新 `docs/README.md` 和相关模块入口 |
 | 文档新增、移动、重命名或删除 | 所在目录 `README.md`、全部入站链接 | 改变一级路由或目录职责时更新 `docs/README.md`；改变协作读取路径时更新根 `AGENTS.md` |
 
 纯内部重构、错字修正或排版调整若不改变行为和契约，可以不更新其他文档，但仍需检查是否暴露了已有文档错误。

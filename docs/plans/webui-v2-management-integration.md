@@ -434,7 +434,7 @@ webui:
 
 ### 10.2 一键打包脚本
 
-`script/package-embedded.ps1` 是仓库的本地一键发布打包入口，使用 PowerShell 7，必须从仓库根目录或通过脚本绝对路径调用。脚本不安装额外工具，运行前应按[项目环境使用规范](../standards/environment-usage.md)准备 `pnpm`、当前 x86_64 平台 Rust target 及其原生 linker。双平台本地打包由 Windows 与 Linux 原生环境各运行一次，不要求单个环境准备跨平台 linker。
+`script/package-embedded.ps1` 是仓库的本地一键发布打包入口，使用 PowerShell 7，必须从仓库根目录或通过脚本绝对路径调用。脚本不安装额外工具，运行前应按[项目环境使用规范](../rules/environment-usage.md)准备 `pnpm`、当前 x86_64 平台 Rust target 及其原生 linker。双平台本地打包由 Windows 与 Linux 原生环境各运行一次，不要求单个环境准备跨平台 linker。
 
 release 构建顺序固定为：
 
@@ -468,7 +468,7 @@ pwsh -File script/dev.ps1 status
 pwsh -File script/dev.ps1 stop
 ```
 
-脚本启动后将 PID、二进制路径、配置路径和启动时间写入 `_fluxdns/dev-process.json`，并将标准输出/标准错误重定向到 `_fluxdns/logs/dev.stdout.log` 与 `_fluxdns/logs/dev.stderr.log`。`status`/`stop` 会同时校验 PID、进程启动时间和可执行文件路径，避免 PID 被复用时误报或误停；检测到失效状态文件时会清理，状态无法安全核验或 JSON 损坏时则拒绝操作并保留文件供人工诊断。`stop` 等待进程退出后删除状态文件；没有状态文件时停止动作幂等返回。脚本不复制、修改或生成配置；配置相对路径的解析仍遵循[本地测试规范](../standards/local-testing.md)和后端 CLI 契约。
+脚本启动后将 PID、二进制路径、配置路径和启动时间写入 `_fluxdns/dev-process.json`，并将标准输出/标准错误重定向到 `_fluxdns/logs/dev.stdout.log` 与 `_fluxdns/logs/dev.stderr.log`。`status`/`stop` 会同时校验 PID、进程启动时间和可执行文件路径，避免 PID 被复用时误报或误停；检测到失效状态文件时会清理，状态无法安全核验或 JSON 损坏时则拒绝操作并保留文件供人工诊断。`stop` 等待进程退出后删除状态文件；没有状态文件时停止动作幂等返回。脚本不复制、修改或生成配置；配置相对路径的解析仍遵循[本地测试规范](../rules/local-testing.md)和后端 CLI 契约。
 
 ### 10.4 静态响应契约
 

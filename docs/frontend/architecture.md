@@ -33,7 +33,7 @@ FluxDNS 前端已实现 **React + TypeScript + Vite 的独立 SPA**，并已接�
 
 ### 2.1 仓库边界
 
-`frontend/` 是独立的前端主目录，已包含 package manifest、pnpm lockfile、Vite/Vitest 配置、OpenAPI schema 和源码。前端实现不得把仓库根目录作为工程目录，也不得把构建物、依赖或 `.cache/` 提交到仓库。相关构建物、依赖和缓存目录约定见[项目环境使用规范](../standards/environment-usage.md)，本地测试运行时文件见[本地测试规范](../standards/local-testing.md)。
+`frontend/` 是独立的前端主目录，已包含 package manifest、pnpm lockfile、Vite/Vitest 配置、OpenAPI schema 和源码。前端实现不得把仓库根目录作为工程目录，也不得把构建物、依赖或 `.cache/` 提交到仓库。相关构建物、依赖和缓存目录约定见[项目环境使用规范](../rules/environment-usage.md)，本地测试运行时文件见[本地测试规范](../rules/local-testing.md)。
 
 ### 2.2 后端边界
 

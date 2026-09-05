@@ -17,12 +17,12 @@ metadata:
 
 1. 根目录 `AGENTS.md`，确认项目协作基线和强制路由。
 2. `docs/README.md`，确认一级目录职责和文档总入口。
-3. `docs/standards/documentation-maintenance.md`，确认完整规范、维护信息格式和验证清单。
+3. `docs/rules/documentation-maintenance.md`，确认完整规范、维护信息格式和验证清单。
 4. 与任务直接相关的权威文档：
-   - 跨领域规范：`docs/standards/README.md` 及对应规范；
+   - 跨领域规范：`docs/rules/README.md` 及对应规范；
    - 后端：`docs/backend/README.md`、`architecture.md`、`configuration-reference.md` 或 `modules/<module>.md`；
    - 前端：`docs/frontend/README.md`、`docs/frontend/architecture.md`，以及工程入口 `frontend/README.md`；
-   - 本地测试、工具链和构建物：`docs/standards/local-testing.md`、`environment-usage.md`。
+   - 本地测试、工具链和构建物：`docs/rules/local-testing.md`、`environment-usage.md`。
 
 源码、测试、配置、schema 和实际命令输出用于核对“当前实现是否如此”；文档用于表达项目接受的设计、契约和维护入口。发现实现、测试和文档冲突时，先确认预期契约并记录未决边界，不得按更新时间猜测，也不得只改文档掩盖实现问题。
 
@@ -54,7 +54,7 @@ metadata:
 | 内容 | 维护位置 | 典型联动 |
 | --- | --- | --- |
 | 文档总导航、一级目录职责 | `docs/README.md` | 一级路由变化时检查 `AGENTS.md` |
-| 跨模块、可执行的开发/协作/验证规则 | `docs/standards/<standard>.md` | 更新 `docs/standards/README.md` 和 `AGENTS.md` 路由 |
+| 跨模块、可执行的开发/协作/验证规则 | `docs/rules/<standard>.md` | 更新 `docs/rules/README.md` 和 `AGENTS.md` 路由 |
 | 后端跨模块架构与契约 | `docs/backend/architecture.md` | 联动受影响模块文档 |
 | 后端配置公共契约 | `docs/backend/configuration-reference.md` | 联动 `config-example.yaml`、配置模型、校验和测试说明 |
 | 单一后端模块实现边界 | `docs/backend/modules/<module>.md` | 新增模块时更新 `modules/README.md` 和架构映射 |
