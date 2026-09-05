@@ -1,8 +1,7 @@
-//! 时间、资源、secret 与 socket 准备等受约束副作用。
+//! 时间、资源与 socket 准备等受约束副作用。
 
 use std::fmt;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
@@ -95,46 +94,6 @@ pub trait ResourceFetcher: Send + Sync {
         &self,
         request: ResourceFetchRequest,
     ) -> PortFuture<'_, Result<ResourceFetchResult, PortError>>;
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum SecretReference {
-    Environment(Arc<str>),
-    File(PathBuf),
-}
-
-/// secret 值的 `Debug`/`Display` 固定脱敏，且不实现序列化 trait。
-pub struct SecretValue(Box<[u8]>);
-
-impl SecretValue {
-    pub fn new(value: impl Into<Box<[u8]>>) -> Self {
-        Self(value.into())
-    }
-
-    pub fn expose(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl fmt::Debug for SecretValue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("SecretValue([REDACTED])")
-    }
-}
-
-impl fmt::Display for SecretValue {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("[REDACTED]")
-    }
-}
-
-pub trait SecretProvider: Send + Sync {
-    fn resolve<'a>(
-        &'a self,
-        reference: &'a SecretReference,
-        deadline: Deadline,
-        cancellation: &'a Cancellation,
-    ) -> PortFuture<'a, Result<SecretValue, PortError>>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -412,18 +371,7 @@ mod tests {
 
     use crate::dns::{Cancellation, Deadline};
 
-    use super::{
-        ProxyProfileId, ResourceFetchRequest, ResourceFetchResult, ResourceLocation, SecretValue,
-    };
-
-    #[test]
-    fn secret_value_debug_and_display_are_redacted() {
-        let secret = SecretValue::new(Vec::from("do-not-leak").into_boxed_slice());
-
-        assert_eq!(format!("{secret}"), "[REDACTED]");
-        assert_eq!(format!("{secret:?}"), "SecretValue([REDACTED])");
-        assert!(!format!("{secret:?}").contains("do-not-leak"));
-    }
+    use super::{ProxyProfileId, ResourceFetchRequest, ResourceFetchResult, ResourceLocation};
 
     #[test]
     fn resource_fetch_debug_only_contains_safe_metadata() {

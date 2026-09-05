@@ -91,7 +91,7 @@ impl ReqwestDohHttpTransport {
     }
 
     #[cfg(test)]
-    fn with_test_root_certificate(
+    pub(crate) fn with_test_root_certificate(
         resolver: Arc<dyn DohAddressResolver>,
         der: &[u8],
     ) -> Result<Self, ReqwestDohHttpTransportBuildError> {

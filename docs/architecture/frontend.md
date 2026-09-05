@@ -49,4 +49,4 @@ Cookie、密码、Origin 与会话安全唯一维护于 [Management 设计](mana
 
 开发代理和 mock 只是工程模式，生产浏览器始终访问同源 `/api/v1`。SPA 通过 `webui-embed` 可内嵌发布，API 与静态 fallback 独立分流；操作步骤见[交付实现](../implementation/delivery.md)。
 
-组件测试、schema 类型生成和 mock 不能替代真实浏览器的 Cookie、Network/Storage、初始化跳转和安全观察。剩余验收见[v2 计划](../plans/webui-v2-management-integration.md)，页面与查询接线见[页面实现](../implementation/frontend/pages.md)。
+组件测试、schema 类型生成和 mock 不能替代真实浏览器的 Cookie、Network/Storage、初始化跳转和安全观察。验证边界见[交付实现](../implementation/delivery.md)，页面与查询接线见[页面实现](../implementation/frontend/pages.md)。

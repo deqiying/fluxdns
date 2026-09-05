@@ -9,7 +9,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock, Weak};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use hickory_proto::{
     op::{Message, MessageType, OpCode, Query},
@@ -23,7 +23,9 @@ use crate::dns::{
     ClientIdentity, Deadline, ListenerId, RequestContext, RequestId, RequestMeta, ResponseClass,
     RuntimeRevision, TransportCapabilities, TransportClass, TtlMetadata,
 };
+use crate::ports::effects::Clock;
 use crate::ports::exchange::{ConnectorId, DnsExchange, TransportFailureClass, UpstreamOutcome};
+use crate::runtime::SystemClock;
 
 /// Bootstrap TTL 的默认实现边界。
 pub const DEFAULT_BOOTSTRAP_MIN_TTL: Duration = Duration::from_secs(5);
@@ -73,6 +75,8 @@ pub struct CachePolicyError;
 pub struct BootstrapAnswer {
     addresses: Arc<[IpAddr]>,
     ttl: Duration,
+    /// 已接收答案的最早到期时间，不能在等待另一族或写入缓存时重新起算。
+    valid_until: Option<Instant>,
 }
 
 impl fmt::Debug for BootstrapAnswer {
@@ -88,7 +92,11 @@ impl fmt::Debug for BootstrapAnswer {
 impl BootstrapAnswer {
     pub fn new(addresses: Vec<IpAddr>, ttl: Duration) -> Result<Self, AnswerError> {
         let addresses = normalize_addresses(addresses)?;
-        Ok(Self { addresses, ttl })
+        Ok(Self {
+            addresses,
+            ttl,
+            valid_until: None,
+        })
     }
 
     pub fn from_ttl_metadata(
@@ -222,14 +230,15 @@ impl BootstrapResolver {
         host: &str,
         deadline: Deadline,
         cancellation: &Cancellation,
+        clock: &dyn Clock,
     ) -> Result<BootstrapAnswer, BootstrapResolverError> {
-        let now = Instant::now();
+        let now = clock.monotonic_now();
         let context = RequestContext {
             meta: RequestMeta {
                 request_id: RequestId(0),
                 trace_id: None,
                 received_at: now,
-                received_at_utc: SystemTime::now(),
+                received_at_utc: clock.utc_now(),
                 deadline,
                 cancellation: cancellation.clone(),
                 connection_id: None,
@@ -245,7 +254,7 @@ impl BootstrapResolver {
             },
             runtime_revision: RuntimeRevision(0),
         };
-        self.resolve(host, &context).await
+        self.resolve_with_clock(host, &context, clock).await
     }
 
     /// 顺序查询 A、AAAA，并合并所有合法地址；取消会立即终止本次解析。
@@ -253,6 +262,16 @@ impl BootstrapResolver {
         &self,
         host: &str,
         context: &RequestContext,
+    ) -> Result<BootstrapAnswer, BootstrapResolverError> {
+        self.resolve_with_clock(host, context, &SystemClock::new())
+            .await
+    }
+
+    async fn resolve_with_clock(
+        &self,
+        host: &str,
+        context: &RequestContext,
+        clock: &dyn Clock,
     ) -> Result<BootstrapAnswer, BootstrapResolverError> {
         let queries = [
             bootstrap_query(host, RecordType::A)?,
@@ -266,7 +285,8 @@ impl BootstrapResolver {
             match self.connector.exchange(query, context).await {
                 UpstreamOutcome::Response(response) => {
                     if let Ok(answer) = bootstrap_answer_from_response(&response) {
-                        answers.push(answer);
+                        let received_at = clock.monotonic_now();
+                        answers.push((answer, received_at));
                     }
                 }
                 UpstreamOutcome::TransportFailure(failure) => {
@@ -283,18 +303,29 @@ impl BootstrapResolver {
         if !answers.is_empty() {
             let ttl = answers
                 .iter()
-                .map(BootstrapAnswer::ttl)
+                .map(|(answer, _)| answer.ttl())
                 .min()
                 .expect("non-empty bootstrap answer list has a minimum TTL");
             let addresses = answers
                 .iter()
-                .flat_map(|answer| answer.addresses().iter().copied())
+                .flat_map(|(answer, _)| answer.addresses().iter().copied())
                 .collect();
-            return BootstrapAnswer::new(addresses, ttl).map_err(|_| {
-                BootstrapResolverError::NoAddress {
+            let valid_until = answers
+                .iter()
+                .map(|(answer, received_at)| {
+                    received_at
+                        .checked_add(answer.ttl())
+                        .unwrap_or(*received_at)
+                })
+                .min();
+            return BootstrapAnswer::new(addresses, ttl)
+                .map(|mut answer| {
+                    answer.valid_until = valid_until;
+                    answer
+                })
+                .map_err(|_| BootstrapResolverError::NoAddress {
                     connector: connector.clone(),
-                }
-            });
+                });
         }
 
         if let Some(class) = transport_failure {
@@ -602,14 +633,21 @@ impl AddressResolutionState {
         match resolution {
             BootstrapResolution::Answer(answer) => {
                 let ttl = self.policy.bound(answer.ttl());
-                let expires_at = now.checked_add(ttl).unwrap_or(now);
-                self.cache.insert(
-                    request.upstream_id.clone(),
-                    CachedAddresses {
-                        addresses: answer.addresses.clone(),
-                        expires_at,
-                    },
-                );
+                let bounded_expiry = now.checked_add(ttl).unwrap_or(now);
+                let expires_at = answer
+                    .valid_until
+                    .map_or(bounded_expiry, |expiry| expiry.min(bounded_expiry));
+                if expires_at > now {
+                    self.cache.insert(
+                        request.upstream_id.clone(),
+                        CachedAddresses {
+                            addresses: answer.addresses.clone(),
+                            expires_at,
+                        },
+                    );
+                } else {
+                    self.cache.remove(&request.upstream_id);
+                }
                 Ok(ResolvedAddresses {
                     addresses: answer.addresses,
                     source: AddressSource::Bootstrap(bootstrap_id.clone()),

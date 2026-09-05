@@ -40,4 +40,4 @@
 | 退出数据清理 | `performLogout` finally | AppLayout 使用 auth logout | 本轮核对实际分支 | 401 与 logout 清理行为不同，不能混写 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
 
-本轮未运行 pnpm、浏览器或 Network/Storage 观察。历史浏览器只覆盖 DOM/Console 的记录见[交付证据](../delivery.md)，剩余真实集成见[v2 计划](../../plans/webui-v2-management-integration.md)。
+本轮未运行 pnpm、浏览器或 Network/Storage 观察。历史浏览器只覆盖 DOM/Console 的记录与尚无运行证据的环境边界见[交付证据](../delivery.md)；不再以已移除的 v2 计划作为当前实现来源。

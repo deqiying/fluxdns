@@ -4,9 +4,9 @@
 >
 > 适用范围：资源刷新、解析完成事件、统计/详情、缓存持久化和观测的实际所有权
 >
-> 最后核对：2026-09-05（构造与数据流静态核对）
+> 最后核对：2026-09-05（telemetry 聚合、后台采样接线与本地验证）
 >
-> 核对基线：`8223d819efb83fed642900e6b121825083e8c1dd`
+> 核对基线：`faace61e2d1e27f77812ead89bf42a9a83bec2f5` 加本次 bootstrap/telemetry 接入工作树
 
 ## 资源准备与刷新
 
@@ -50,10 +50,18 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 
 [`observability.rs`](../../../backend/src/observability.rs) 的 `TelemetryWriter`、`StructuredTelemetryOutput` 和 health registry 使用低基数、有界内存与安全 typed event；Application 在配置校验后切换正式日志目标和过滤器。`logs.enable` 影响运行 telemetry 的创建，不应从设计存在推断任意配置都启用全部观测。
 
-[`service.rs`](../../../backend/src/service.rs) 注册周期 flush 并执行最终 flush。主输出失败可走 stderr fallback，双输出失败在进程内更新 health；成功 flush 可以恢复状态。resolution ingress gap、详情丢弃、cache commit outcome 与数据库 persistence gap 是不同指标，不合并为一个“写入成功率”。
+[`service.rs`](../../../backend/src/service.rs) 为启用的 writer 创建 `TelemetrySampler`，在既有 5 秒周期 flush 前采样：
 
-正式链路使用 TelemetryWriter 队列和自身 health record；同文件的 ObservabilityRegistry/EventWriter 是未在 app/service 构造的另一套原语。TypedTracingLayer 只处理受支持的 event 字段，不建立完整 request/group/attempt span 树；log JSON 对 request digest/configured ID 只输出存在性。完整指标枚举不等于全部已有调用点。
+- 从同一个 `ResolutionPipelineMetrics` Arc 读取 accepted，将与共享游标的差值记录为 `ResolutionEventsAccepted`；仅成功后推进游标。重复采样、reload 与最终采样不会重复累计，源倒退/溢出明确报错。
+- 将采样时的事件队列长度覆盖为 `WriterQueueDepth`。无 Resolution owner 只生成这一项；`logs.enable=false` 不构造运行 writer、sampler 或额外任务。
 
+`TelemetryWriter` 持有 [registry.rs](../../../backend/src/observability/registry.rs) 的有界 counter/gauge 聚合器，不再入事件队列；首期仅允许上述两个固定 Component 标签的 series，最多 2 项，registry 另有 128 项硬上限。未知描述符、错误类型/标签、溢出及关闭后的 record 被拒绝并增加 `rejected_metrics`，不递归写故障事件。duration 样本仍是有界逐事件输入，不冒充 histogram。
+
+周期 flush 处理开始时的有限事件批次，再输出最新聚合快照；输出中的 Counter 是 writer 实例内累计值、Gauge 是瞬时值。失败保留内存聚合，下次允许重复输出同一累计值，消费者不能把快照直接相加。快照和事件输出不持有 registry/state 锁，正在输出的事件预留容量，失败重新入队不突破事件上限。正式 health 只有 `TelemetryHealthRecord` 一套，旧 `EventWriter`/旧事件与重复 health 模型已删除。
+
+最终 shutdown 在 Resolution、Cache finalizer、Storage 回收后再次采样，随后关闭 writer 输入、排空事件并输出最终累计值；所有步骤使用既有总预算。主输出失败可走 stderr fallback，双输出失败在进程内更新 health，完整 flush 成功可恢复状态。同步底层 Write 无强制中断保证；resolution ingress gap、详情丢弃、cache commit outcome 和数据库 persistence gap 也仍分别计量。
+
+请求 instrumented core、Resolution publisher/dispatcher 均未新增聚合调用；`f732cd64` 的异步观测与缓存移交保持不变。`accepted` 仅代表 ingress 成功接收的完成事件，不是所有 DNS 请求或持久化成功数。TypedTracingLayer 仍不建立完整 request/group/attempt span 树；完整指标枚举不代表全部已有调用点。
 ## 能力与证据
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
@@ -61,6 +69,23 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 | remote/file 刷新 | fetcher、snapshot、epoch/CAS、scheduler | async prepare + service resource task | 本轮静态；存在 `running_service_observes_published_resource_refresh` | 未执行真实远程/代理组合 |
 | stats/detail | StorageRuntime、ResolutionRuntime、writer | app 打开，service 持有并复用 sink | 本轮追踪构造与队列 | ingress/pending/数据库故障可能产生明确 gap |
 | cache 恢复/后台写 | SQLite adapter、CachePersistenceRuntime | core prepare + commit worker + finalizer shutdown | 本轮静态；存在跨 adapter、Busy/DiskFull hook 测试 | 测试注入不等价真实 disk-full；last-access 未实现 |
-| telemetry lifecycle | typed writer、health、output fallback | 启用日志时 app/service 接线 | 本轮静态，未重新执行 flush 测试 | 不证明所有输出/权限/磁盘故障环境已验收 |
+| telemetry lifecycle / 聚合 | typed writer、唯一 health、registry、sampler | 启用日志时 app/service 周期及最终 flush | 本次执行并发、拥塞、输出重试、health、reload、关闭测试 | 没有 histogram/exporter；不证明所有输出/权限/磁盘故障环境已验收 |
 
-遗留验收和设计差距见[后端契约核对计划](../../plans/backend-contract-gaps.md)。本轮不重新背书原文历史测试总数，未运行 Cargo、真实数据库故障或长期压力测试。
+## 本次验证
+
+2026-09-05 在 Windows x86_64 使用项目 mise 管理的 Rust/Cargo 1.98.0；命令从仓库根执行，`CARGO_HOME=backend/.cargo-home`、构建物在 `backend/target`。测试使用代码内嵌配置，临时 `work.path`、数据库与证书由测试夹具在 `_fluxdns/test-temp` 下产生，端口为动态 loopback，不使用个人配置或远程服务。
+
+完整测试命令为 `cargo test --manifest-path backend/Cargo.toml --locked --quiet`，运行前将 TEMP/TMP 指向 `_fluxdns/test-temp`；结果为 612 通过、0 失败、2 个手动 profile 默认忽略。覆盖地址缓存 TTL/取消/换代、HTTP/HTTPS/SOCKS5、聚合容量/并发/溢出/重试、health 与跨 UDP/TCP/DoH 的 Service reload/最终采样。`telemetry_samples_the_shared_source_across_transports_reload_and_shutdown` 验证源计数和导出累计值一致、重复采样不重复计数、record 失败不推进游标；`shutdown_snapshot_contains_every_accepted_concurrent_metric` 验证关闭竞态。
+
+`cargo check --manifest-path backend/Cargo.toml --locked` 无警告通过；`cargo fmt --manifest-path backend/Cargo.toml -- --check`、`pwsh -File .agents/skills/project-doc-maintenance/scripts/check-docs.ps1` 与 `git diff --check` 通过。文档检查覆盖 41 个 Markdown、512 个链接/引用，不验证外链网络或产品语义。
+
+本机性能对比入口为 `cargo test --manifest-path backend/Cargo.toml --locked service::tests::benchmark_udp_telemetry_sampling_profile -- --ignored --nocapture`。它使用 debug 构建、4 个 runtime worker、单 UDP client，每秒一批 1,000 次 hosts 查询，至少覆盖两个 5 秒采样周期；保留真实 Resolution/SQLite 后台任务，JSON 输出写 sink，不测磁盘日志吞吐。延迟只统计实际请求，不含批次间等待，输出的 sequential_qps 不能视为整段负载吞吐。
+
+该手动 profile 本次单独运行通过；旧的 `benchmark_udp_resolution_observation_profile` 未执行。本次单轮样本如下，不从此推断发布性能提升或稳定回归百分比：
+
+| 模式 | 计时样本 | 平均 / p50 / p95 / p99（ms） | 最终资源状态 |
+| --- | --- | --- | --- |
+| 关闭 telemetry | 12,000 | 0.137608 / 0.126000 / 0.226900 / 0.306600 | source accepted 12,100（含预热），0 series，无 telemetry 任务 |
+| 开启 telemetry | 12,000 | 0.147002 / 0.128000 / 0.236300 / 0.323200 | 同样 accepted 12,100，2 series，最终队列 0，输出 21 项，rejected_metrics 0 |
+
+初次无节流版本在约 83,100 个完成事件后触发既有 Storage `max_pending_events=65,536`，shutdown 返回 `PendingLimitExceeded`；不是成功样本。本次不修改 Storage 预算或扩大性能结论，稳定压力与积压保护继续在[契约差距计划](../../plans/backend-contract-gaps.md)验收。真实远程、真实数据库故障、Unix 信号、发布硬件 SLO 和长期 RSS/CPU 压测均未执行。

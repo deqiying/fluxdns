@@ -36,4 +36,4 @@ pnpm run test
 pnpm run build
 ```
 
-生成类型不手工修改。上述为操作命令，不是通过记录。内嵌打包、显式配置启动、版本与自动发布的唯一说明见[交付实现](../docs/implementation/delivery.md)，剩余浏览器/原生平台验收见[v2 计划](../docs/plans/webui-v2-management-integration.md)。
+生成类型不手工修改。上述为操作命令，不是通过记录。内嵌打包、显式配置启动、版本与自动发布，以及浏览器/原生平台的现有验收边界，统一见[交付实现](../docs/implementation/delivery.md)。

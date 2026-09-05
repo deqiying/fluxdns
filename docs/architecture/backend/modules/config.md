@@ -202,4 +202,4 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 
 source-preserving 验收至少覆盖注释、键序、未知字段拒绝、块/流格式、引号、锚点/别名与不支持语法、SecretRef 原样保留、路径表达不变、双路径竞争、journal 损坏和中断恢复。无法安全修改的输入必须显式拒绝。
 
-真实入口、writer 与 loader 大小上限差异见[管理端实现](../../../implementation/backend/management.md)；完整故障验收继续由[v2 计划](../../../plans/webui-v2-management-integration.md)跟踪。
+真实入口、writer 与 loader 大小上限差异及故障验证边界见[管理端实现](../../../implementation/backend/management.md)。

@@ -78,6 +78,6 @@ pwsh -File script/dev.ps1 stop
 | 显式启动/身份检查 | dev start/status/stop | 本地发布 binary | 本轮静态 | 未启动或停止服务 |
 | 版本提交/三平台发布 | set-version、release.yml | main + tag gates | 本轮静态 | 未创建提交/tag、push、Actions 或 Release |
 
-历史记录：迁移前 v2 方案在 2026-09-04 报告 Windows x86_64 三阶段打包、发布物 SHA-256 对齐 target binary、配置 validate、移出外部 dist 后的 SPA/API HTTP smoke、dev start/status/stop、CSP/nosniff/cache/ETag/304，以及 in-app browser 的初始化深链接/表单/Console 检查。**这是原文报告，本轮未复核**；测试所用源码提交未完整记录，不能把本页核对基线视为当时测试基线。原文可从 Git 基线中的 `docs/plans/webui-v2-management-integration.md` 追溯。
+历史记录：迁移前 v2 方案在 2026-09-04 报告 Windows x86_64 三阶段打包、发布物 SHA-256 对齐 target binary、配置 validate、移出外部 dist 后的 SPA/API HTTP smoke、dev start/status/stop、CSP/nosniff/cache/ETag/304，以及 in-app browser 的初始化深链接/表单/Console 检查。**这是原文报告，本轮未复核**；测试所用源码提交未完整记录，不能把本页核对基线视为当时测试基线。过时的 v2 方案已按用户要求移除，历史原文由 Git 追溯。
 
-真实浏览器 Cookie/Network/Storage、GitHub Actions 实跑、Linux/macOS 原生发布与故障矩阵仍由[v2 验收计划](../plans/webui-v2-management-integration.md)跟踪。
+本页没有真实浏览器 Cookie/Network/Storage、GitHub Actions 实跑、Linux/macOS 原生发布与完整故障矩阵的新执行证据；删除过时计划不等于这些场景已经验证通过。

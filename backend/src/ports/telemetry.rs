@@ -202,8 +202,10 @@ pub trait LogSink: Send + Sync {
     -> PortFuture<'_, Result<TelemetryFlushSummary, PortError>>;
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub enum MetricName {
+    /// 成功进入 resolution ingress 的完成事件，不等同全部 DNS 请求数。
+    ResolutionEventsAccepted,
     RequestsTotal,
     RequestsActive,
     RequestsCancelled,
@@ -326,7 +328,7 @@ impl MetricLabel {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MetricValue {
     Counter(u64),
     Gauge(i64),

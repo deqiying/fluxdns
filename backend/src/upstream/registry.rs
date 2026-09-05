@@ -88,14 +88,32 @@ impl fmt::Debug for UpstreamRegistry {
 impl UpstreamRegistry {
     pub fn from_resolved(upstreams: &[ResolvedUpstream]) -> Result<Self, RegistryError> {
         let bootstrap_registry = Arc::new(BootstrapConnectorRegistry::default());
-        let resolver = Arc::new(TokioDohAddressResolver::with_bootstrap_registry(
-            bootstrap_registry.clone(),
-        ));
-        let transport = Arc::new(TokioDohHttpTransport::with_resolver(resolver));
-        Self::from_resolved_with_doh_transport_and_bootstrap_registry(
+        Self::build_connectors(
             upstreams,
-            transport,
-            Some(bootstrap_registry),
+            Some(bootstrap_registry.clone()),
+            |upstream, id| {
+                if matches!(upstream, ResolvedUpstream::Doh { proxy: Some(_), .. }) {
+                    return Err(RegistryError::UnsupportedUpstream {
+                        upstream: id.as_str().to_owned(),
+                        kind: "doh_proxy",
+                    });
+                }
+                if matches!(upstream, ResolvedUpstream::Doh { address, .. } if address.scheme() == "https")
+                {
+                    return Err(RegistryError::UnsupportedUpstream {
+                        upstream: id.as_str().to_owned(),
+                        kind: "doh_https",
+                    });
+                }
+                let resolver =
+                    TokioDohAddressResolver::for_upstream(upstream, bootstrap_registry.clone())
+                        .map_err(|_| RegistryError::InvalidDohTransport {
+                            upstream: id.as_str().to_owned(),
+                        })?;
+                Ok(Arc::new(TokioDohHttpTransport::with_resolver(Arc::new(
+                    resolver,
+                ))))
+            },
         )
     }
 
@@ -104,9 +122,6 @@ impl UpstreamRegistry {
         outbounds: &[ResolvedOutbound],
     ) -> Result<Self, RegistryError> {
         let bootstrap_registry = Arc::new(BootstrapConnectorRegistry::default());
-        let target_resolver = Arc::new(TokioDohAddressResolver::with_bootstrap_registry(
-            bootstrap_registry.clone(),
-        ));
         let proxy_resolver = Arc::new(TokioOutboundAddressResolver::new());
         let dialer = Arc::new(TokioOutboundDialer::new());
         let mut profiles = std::collections::HashMap::new();
@@ -136,10 +151,16 @@ impl UpstreamRegistry {
                     ..
                 } = upstream
                 else {
-                    return Ok(Arc::new(ConfiguredDohTransport::Direct(
-                        TokioDohHttpTransport::with_resolver(target_resolver.clone()),
-                    )));
+                    return Err(RegistryError::InvalidDoh {
+                        upstream: _id.as_str().to_owned(),
+                    });
                 };
+                let target_resolver = Arc::new(
+                    TokioDohAddressResolver::for_upstream(upstream, bootstrap_registry.clone())
+                        .map_err(|_| RegistryError::InvalidDohTransport {
+                            upstream: id.as_str().to_owned(),
+                        })?,
+                );
                 if address.scheme() == "https" {
                     let transport = if let Some(proxy_id) = proxy {
                         let Some(profile) = profiles.get(proxy_id) else {
@@ -196,7 +217,11 @@ impl UpstreamRegistry {
                 )))
             };
 
-        Self::build_connectors(upstreams, Some(bootstrap_registry), transport_factory)
+        Self::build_connectors(
+            upstreams,
+            Some(bootstrap_registry.clone()),
+            transport_factory,
+        )
     }
 
     pub fn from_resolved_with_doh_transport<T>(

@@ -5,28 +5,36 @@
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, lookup_host};
+use tokio::sync::Semaphore;
 use url::Url;
 
-use crate::config::resolve::ConfigId;
+use crate::config::resolve::{ConfigId, ResolvedUpstream};
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::effects::{
-    OutboundAddressResolver, OutboundDialer, OutboundStream, TcpReadChunkResult,
+    Clock, OutboundAddressResolver, OutboundDialer, OutboundStream, TcpReadChunkResult,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
+use crate::runtime::SystemClock;
 
 use super::{
-    BootstrapConnectorRegistry, BootstrapResolver, BootstrapResolverError, DOH_MEDIA_TYPE,
-    DohHttpRequest, DohHttpResponseOwned, DohHttpTransport, MAX_DOH_RESPONSE_BODY_BYTES,
-    NameResolution, OutboundProfile, Socks5ConnectError, Socks5Connector, Socks5HandshakeError,
+    AddressCachePolicy, AddressResolutionRequest, AddressResolutionState,
+    BootstrapConnectorRegistry, BootstrapResolution, BootstrapResolver, BootstrapResolverError,
+    DEFAULT_BOOTSTRAP_MAX_TTL, DOH_MEDIA_TYPE, DohHttpRequest, DohHttpResponseOwned,
+    DohHttpTransport, MAX_DOH_RESPONSE_BODY_BYTES, NameResolution, OutboundProfile,
+    Socks5ConnectError, Socks5Connector, Socks5HandshakeError, SystemResolverResolution,
 };
 
 const MAX_HTTP_HEADER_BYTES: usize = 32 * 1024;
 const READ_CHUNK_BYTES: usize = 8 * 1024;
+
+#[cfg(test)]
+#[path = "address_cache_tests.rs"]
+mod address_cache_tests;
 
 /// DoH HTTP adapter 交给地址解析 port 的安全请求元数据。
 #[derive(Clone, Eq, PartialEq)]
@@ -71,8 +79,8 @@ impl DohAddressRequest {
 
 /// DoH HTTP adapter 使用的地址解析 port。
 ///
-/// `connect_ip` 由调用方显式提供时不会调用该 port；后续 bootstrap
-/// resolver 可以在不改变 HTTP/DNS 协议边界的情况下替换默认实现。
+/// `connect_ip` 由调用方显式提供时不会调用该 port；配置绑定的 resolver
+/// 在此边界缓存 bootstrap 地址，不改变 HTTP/DNS 协议身份。
 pub trait DohAddressResolver: Send + Sync {
     fn resolve<'a>(
         &'a self,
@@ -85,6 +93,41 @@ pub trait DohAddressResolver: Send + Sync {
 #[derive(Clone)]
 pub struct TokioDohAddressResolver {
     bootstrap: Option<Arc<BootstrapConnectorRegistry>>,
+    binding: Option<Arc<BoundAddressCache>>,
+    clock: Arc<dyn Clock>,
+}
+
+struct BoundAddressCache {
+    expected: DohAddressRequest,
+    request: AddressResolutionRequest,
+    state: Mutex<AddressResolutionState>,
+    fill: Semaphore,
+}
+
+impl BoundAddressCache {
+    fn cached(&self, now: Instant, failed: bool) -> Option<Vec<SocketAddr>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .resolve(
+                &self.request,
+                if failed {
+                    BootstrapResolution::Failed
+                } else {
+                    BootstrapResolution::NotAttempted
+                },
+                SystemResolverResolution::Failed,
+                now,
+            )
+            .ok()
+            .map(|answer| {
+                answer
+                    .addresses()
+                    .iter()
+                    .map(|ip| SocketAddr::new(*ip, self.expected.port()))
+                    .collect()
+            })
+    }
 }
 
 impl std::fmt::Debug for TokioDohAddressResolver {
@@ -92,6 +135,7 @@ impl std::fmt::Debug for TokioDohAddressResolver {
         formatter
             .debug_struct("TokioDohAddressResolver")
             .field("has_bootstrap_registry", &self.bootstrap.is_some())
+            .field("has_config_binding", &self.binding.is_some())
             .finish()
     }
 }
@@ -104,13 +148,76 @@ impl Default for TokioDohAddressResolver {
 
 impl TokioDohAddressResolver {
     pub fn new() -> Self {
-        Self { bootstrap: None }
+        Self {
+            bootstrap: None,
+            binding: None,
+            clock: Arc::new(SystemClock::new()),
+        }
     }
 
+    #[cfg(test)]
     pub(crate) fn with_bootstrap_registry(bootstrap: Arc<BootstrapConnectorRegistry>) -> Self {
         Self {
             bootstrap: Some(bootstrap),
+            ..Self::new()
         }
+    }
+
+    /// 每个 connector 绑定一份配置身份与缓存，配置换代不能复用旧地址状态。
+    pub(crate) fn for_upstream(
+        upstream: &ResolvedUpstream,
+        bootstrap: Arc<BootstrapConnectorRegistry>,
+    ) -> Result<Self, PortError> {
+        let invalid = || {
+            PortError::new(
+                PortErrorClass::InvalidInput,
+                "doh_http_transport.bind_resolver",
+            )
+        };
+        let ResolvedUpstream::Doh {
+            address,
+            bootstrap: bootstrap_id,
+            ..
+        } = upstream
+        else {
+            return Err(invalid());
+        };
+        let host = address.host_str().ok_or_else(invalid)?;
+        let port = address.port_or_known_default().ok_or_else(invalid)?;
+        let request = AddressResolutionRequest::from_resolved(upstream).map_err(|_| invalid())?;
+        Ok(Self {
+            bootstrap: Some(bootstrap),
+            binding: Some(Arc::new(BoundAddressCache {
+                expected: DohAddressRequest::new(host, port, bootstrap_id.clone()),
+                request,
+                state: Mutex::new(AddressResolutionState::new(
+                    AddressCachePolicy::new(Duration::ZERO, DEFAULT_BOOTSTRAP_MAX_TTL)
+                        .expect("production bootstrap TTL bounds are valid"),
+                )),
+                fill: Semaphore::new(1),
+            })),
+            clock: Arc::new(SystemClock::new()),
+        })
+    }
+
+    fn check_budget(
+        &self,
+        deadline: Deadline,
+        cancellation: &Cancellation,
+    ) -> Result<(), PortError> {
+        if let Some(reason) = cancellation.reason() {
+            return Err(PortError::new(
+                PortErrorClass::Cancelled(reason),
+                "doh_http_transport.resolve",
+            ));
+        }
+        if deadline.is_expired(self.clock.monotonic_now()) {
+            return Err(PortError::new(
+                PortErrorClass::Timeout,
+                "doh_http_transport.resolve",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -122,7 +229,43 @@ impl DohAddressResolver for TokioDohAddressResolver {
         cancellation: &'a Cancellation,
     ) -> PortFuture<'a, Result<Vec<SocketAddr>, PortError>> {
         Box::pin(async move {
+            self.check_budget(deadline, cancellation)?;
+            if self
+                .binding
+                .as_ref()
+                .is_some_and(|binding| binding.expected != request)
+            {
+                return Err(PortError::new(
+                    PortErrorClass::InvalidInput,
+                    "doh_http_transport.resolve",
+                )
+                .with_safe_context("address request does not match connector configuration"));
+            }
             if let Some(bootstrap_id) = request.bootstrap() {
+                if let Some(addresses) = self
+                    .binding
+                    .as_ref()
+                    .and_then(|binding| binding.cached(self.clock.monotonic_now(), false))
+                {
+                    self.check_budget(deadline, cancellation)?;
+                    return Ok(addresses);
+                }
+                // 许可只串行化缓存查填；取消/drop 自动释放，状态锁绝不跨网络等待。
+                let _permit = if let Some(binding) = &self.binding {
+                    let permit = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => return Err(PortError::new(PortErrorClass::Cancelled(cancellation.reason().unwrap_or(CancelReason::UpstreamCancelled)), "doh_http_transport.resolve")),
+                        _ = self.clock.sleep_until(deadline) => return Err(PortError::new(PortErrorClass::Timeout, "doh_http_transport.resolve")),
+                        permit = binding.fill.acquire() => permit.map_err(|_| PortError::new(PortErrorClass::Unavailable, "doh_http_transport.resolve"))?,
+                    };
+                    self.check_budget(deadline, cancellation)?;
+                    if let Some(addresses) = binding.cached(self.clock.monotonic_now(), false) {
+                        return Ok(addresses);
+                    }
+                    Some(permit)
+                } else {
+                    None
+                };
                 let Some(registry) = self.bootstrap.as_ref() else {
                     return Err(PortError::new(
                         PortErrorClass::Unavailable,
@@ -137,10 +280,53 @@ impl DohAddressResolver for TokioDohAddressResolver {
                     )
                     .with_safe_context("bootstrap connector is not registered"));
                 };
-                let answer = BootstrapResolver::new(connector)
-                    .resolve_with_budget(request.host(), deadline, cancellation)
-                    .await
-                    .map_err(map_bootstrap_error)?;
+                let resolver = BootstrapResolver::new(connector);
+                let result = tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => return Err(PortError::new(PortErrorClass::Cancelled(cancellation.reason().unwrap_or(CancelReason::UpstreamCancelled)), "doh_http_transport.resolve")),
+                    _ = self.clock.sleep_until(deadline) => return Err(PortError::new(PortErrorClass::Timeout, "doh_http_transport.resolve")),
+                    answer = resolver.resolve_with_budget(request.host(), deadline, cancellation, self.clock.as_ref()) => answer.map_err(map_bootstrap_error),
+                };
+                self.check_budget(deadline, cancellation)?;
+                let answer = match result {
+                    Ok(answer) => answer,
+                    Err(error) => {
+                        if !matches!(
+                            error.class(),
+                            PortErrorClass::Timeout | PortErrorClass::Cancelled(_)
+                        ) && let Some(addresses) = self
+                            .binding
+                            .as_ref()
+                            .and_then(|binding| binding.cached(self.clock.monotonic_now(), true))
+                        {
+                            return Ok(addresses);
+                        }
+                        return Err(error);
+                    }
+                };
+                if let Some(binding) = &self.binding {
+                    let answer = binding
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .resolve(
+                            &binding.request,
+                            BootstrapResolution::Answer(answer),
+                            SystemResolverResolution::Failed,
+                            self.clock.monotonic_now(),
+                        )
+                        .map_err(|_| {
+                            PortError::new(
+                                PortErrorClass::Unavailable,
+                                "doh_http_transport.resolve",
+                            )
+                        })?;
+                    return Ok(answer
+                        .addresses()
+                        .iter()
+                        .map(|ip| SocketAddr::new(*ip, request.port()))
+                        .collect());
+                }
                 return Ok(answer
                     .addresses()
                     .iter()

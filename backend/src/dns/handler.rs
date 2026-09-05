@@ -148,7 +148,7 @@ pub trait DnsCore: Send + Sync {
     }
 }
 
-/// 在真实策略、hosts 和 upstream 接线前使用的确定性安全默认 handler。
+/// 用于 dispatch 与 Transport 契约测试的确定性 SERVFAIL handler。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ServFailCore;
 
@@ -188,6 +188,7 @@ impl HostsCore {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_resource_indexes(indexes: Vec<HostsIndex>, ttl: u32) -> Self {
         Self {
             table: Arc::new(HostsTable::parse("").expect("empty hosts table is valid")),

@@ -43,7 +43,7 @@ users empty -> setup_required
 - 同源判断不能根据 `X-Forwarded-Proto` 或 `X-Forwarded-Host` 放宽。Origin/Fetch Metadata、限流、大小/并发/超时保护必须在统一边界实施。
 - 前端不能把密码、hash、token 存入 URL、localStorage、sessionStorage 或查询缓存。未经另行评审不增加通用写 API 或自定义 token 方案。
 
-HTTP 直连不提供传输加密，只适用于 loopback/可信隔离管理网；真实浏览器与反向代理观察仍按[验收计划](../plans/webui-v2-management-integration.md)执行。
+HTTP 直连不提供传输加密，只适用于 loopback/可信隔离管理网；真实浏览器与反向代理观察的证据边界见[管理端实现](../implementation/backend/management.md)。
 
 ## 路由、数据与静态文件
 

@@ -1,13 +1,11 @@
 //! Transport 无关的 DNS 核心契约。
 
-mod configured;
 mod context;
 mod handler;
 mod hosts;
 mod message;
 mod policy;
 
-pub use configured::{ConfiguredDnsCore, CoreBuildError, DEFAULT_LOCAL_TTL};
 pub use context::{
     CacheCompatibilityKey, CancelReason, Cancellation, ClientId, ClientIdentity, ConnectionId,
     Deadline, DnsRequest, ListenerId, RequestContext, RequestId, RequestMeta, RouteId,
@@ -25,3 +23,6 @@ pub use message::{
 };
 pub use policy::{PolicyCoreBuildError, PolicyDnsCore, PolicyResourcePublishError};
 pub(crate) use policy::{RuntimeCoreCell, RuntimeCoreTarget};
+
+/// 本地 hosts 响应与 hosts upstream 共用的默认 TTL，单位为秒。
+pub const DEFAULT_LOCAL_TTL: u32 = 60;

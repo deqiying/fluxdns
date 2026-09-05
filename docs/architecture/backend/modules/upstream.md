@@ -4,7 +4,7 @@
 >
 > 适用范围：upstream connector、bootstrap、outbound、group、并发选择和故障回退
 >
-> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
+> 最后评审：2026-09-05（bootstrap 地址缓存接入；其他边界沿用[模块索引](README.md)基线，运行证据见[DNS 管线](../../../implementation/backend/dns-pipeline.md)）
 >
 > 关联实现：[registry.rs](../../../../backend/src/upstream/registry.rs)、[executor.rs](../../../../backend/src/upstream/executor.rs)、[group.rs](../../../../backend/src/upstream/group.rs)、[http.rs](../../../../backend/src/upstream/http.rs)、[reqwest_http.rs](../../../../backend/src/upstream/reqwest_http.rs)
 >
@@ -87,14 +87,18 @@ bootstrap：
 
 - 通过引用 connector 查询 A/AAAA；
 - `BootstrapResolver` 通过注入的 `DnsExchange` 顺序执行 A、AAAA 查询，合并合法地址并取最低 TTL；
-- 默认 `UpstreamRegistry::from_resolved` 将 hosts/DoH connector 登记到共享 bootstrap registry，`TokioDohAddressResolver` 把地址转换为请求端口并交给 HTTP adapter；
+- Registry 将 hosts/DoH connector 登记到仅持 Weak 引用的共享 bootstrap registry，并为每个 DoH connector 创建配置绑定的 `TokioDohAddressResolver`；
 - 只接受完整、合法地址答案；
 - `bootstrap_answer_from_response` 只提取与 question owner 匹配的 A/AAAA，并按地址记录的最低 TTL 建立答案；
-- 正式 `TokioDohAddressResolver` 每次 bootstrap resolve 都发起 A/AAAA，只取地址交给 HTTP adapter，没有保存答案 TTL；
+- resolver 复用 `AddressResolutionState` / `AddressCachePolicy` 保存最多一项地址答案，命中时直接转换为请求端口，不再查询 A/AAAA；
 - 无可用地址时本次 exchange 失败；
 - dependency cycle 在 Config 阶段拒绝。
 
-`bootstrap.rs` 的 `AddressResolutionState` / `AddressCachePolicy` 已提供 TTL 缓存和旧地址降级原语，但生产 resolver 未使用，不能宣称正式链路已经按 TTL 缓存地址或失败时复用旧地址。HTTP client pool 复用连接也不等同 DNS 地址 TTL 缓存。这一接线差距见[核对计划](../../../plans/backend-contract-gaps.md)。
+生产 TTL 下限为 0，上限为 3,600 秒，不沿用纯状态原语默认的 5 秒下限。答案记录单调时钟到期点，A 等待 AAAA 和写入状态的时间不能续长 A 的权威 TTL；零 TTL 或汇总时已过期的成功答案只供本次使用。`now >= expires_at` 即过期，不提供过期地址、负缓存或 system fallback。
+
+每个 resolver 固定 upstream ID、host/port/bootstrap，拒绝运行时身份错配。并发 miss 通过一个异步许可串行查填，持有者完成后等待者复查缓存；Mutex 只保护短状态操作，不跨网络 await。等待和查询共用调用者原 deadline/cancellation，命中也不能掩盖超时/取消；持有者取消、超时或 drop 会释放许可，但后续请求可能重新查询。失败分支仅允许复用仍有效的旧地址，不延期。
+
+transport clone 共用绑定 resolver，其他 connector 与重新 prepare 的候选均使用独立空缓存；旧请求只能更新旧状态。资源-only publish 复用原 connector 时保留其缓存。HTTP client pool 是另一层复用，其 key 包含目标地址列表；TTL 到期取得新地址后选用对应 client，而 Host/SNI 始终取 endpoint。显式 `connect_ip`、无 bootstrap 和 SOCKS5H 分支不缓存目标解析；无配置绑定的测试 resolver 维持无缓存语义。
 
 系统 resolver 只在未配置 bootstrap/connect_ip/proxy remote resolve 时使用，不作为任何失败路径的隐式 fallback。
 

@@ -123,16 +123,19 @@ stats、cache commit 和 detail projection 是 dispatcher 的三个独立消费�
 
 `LogSink`/`MetricsSink` 只接受已经脱敏、标签集合受限的事件；`HealthSink` 接收 `ComponentHealthEvent`。三个 trait 均由 `TelemetryWriter` 实现，Ports 只定义字段与语义。Health 有独立事件与状态记录，不能把每次 health 更新等同于已写入某个 metrics gauge。
 
+`MetricsSink::record` 对已注册 Counter/Gauge 表示内存聚合接受，不是逐次输出：Counter 输入增量，Gauge 输入当前值；duration 仍是受限的原始样本队列。描述符、错误、采样来源与 cumulative/instantaneous 快照契约见 [Observability](observability.md)，不从 `MetricName` 枚举存在推断生产调用点。
+
 `effects.rs` 提供：
 
 - `Clock`：monotonic time、UTC time、sleep/timer；
 - `ResourceFetcher`：受 deadline、proxy profile 和最大体积约束的资源读取；
-- `SecretProvider`：secret 读取契约及脱敏包装；当前生产路径直接调用 Config 的 `ResolvedSecretRef` accessor，没有具体 `SecretProvider` adapter 接线；
 - `SocketFactory`：创建未激活 socket，供 BindPlan 统一提交。
 
 `SocketSpec` 同时携带 `kind`、目标地址、`reuse_port` 和 IPv6 `v6_only` 选择；Runtime 在 bind 阶段只通过该契约传递平台相关选项，不向 DNS Core 泄漏 socket 类型。
 
 文件系统和网络 I/O 不通过“万能 effects trait”合并，避免接口失去约束。
+
+secret 读取由 Config 的 `ResolvedSecretRef` accessor 负责，复用其限额、校验和 `ResolvedSecretValue` 脱敏包装，不另设未被调用的 secret port。
 
 当前 adapter 所有权为：
 
@@ -140,7 +143,6 @@ stats、cache commit 和 detail projection 是 dispatcher 的三个独立消费�
 | --- | --- |
 | `Clock` | Runtime 的 system clock/timer adapter |
 | `ResourceFetcher` | Resource 的 `ReqwestResourceFetcher`，复用 Upstream outbound profile |
-| `SecretProvider` | 仅有 port 定义；Config accessor 是实际 env/file 读取路径 |
 | `SocketFactory` | Runtime `SystemSocketFactory`，由 `bind.rs` 编排，基于 `socket2` 创建 socket |
 
 ## 9. Deadline 与取消

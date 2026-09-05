@@ -16,7 +16,7 @@ DNS Core 是 transport 无关的请求编排器。输入是 canonical query 和 
 
 公开 `DnsCore` 契约不暴露 socket/HTTP/SQLite/Moka，不根据具体 UDP/TCP/DoH 类型分支；transport 差异通过 capability 和 response encoder 处理。正式启动由 async prepare 构造 `PolicyDnsCore`，Policy、资源、Cache、Upstream 和后台完成事件链路已经接通。
 
-`dns/policy.rs` 同时承担部分组合根职责：构造具体 Upstream registry、Moka facade，并在显式 prepare 中初始化 SQLite cache persistence；不能把“公共接口隔离”写成整个文件不依赖 adapter。`ConfiguredDnsCore`/`HostsCore`/`ServFailCore` 是仍保留的简化构造路径，不代表正式服务只支持 hosts 或仍等待上游接线。
+`dns/policy.rs` 同时承担部分组合根职责：构造具体 Upstream registry、Moka facade，并在显式 prepare 中初始化 SQLite cache persistence；不能把“公共接口隔离”写成整个文件不依赖 adapter。`HostsCore`/`ServFailCore` 保留为简化解析与契约测试实现；配置装配统一使用 `PolicyDnsCore`，不维护另一套仅处理 hosts 的配置装配层。
 
 ## 2. 内部结构
 

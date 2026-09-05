@@ -6,9 +6,9 @@
 >
 > 适用范围：12 个后端模块按当前源码核对后，仍需决策的契约差距与非 v2 运行验收
 >
-> 代码基线：`8223d819efb83fed642900e6b121825083e8c1dd`
+> 代码基线：`faace61e2d1e27f77812ead89bf42a9a83bec2f5` 加本次 bootstrap/telemetry 接入及旧代码清理工作树
 >
-> 最后核对：2026-09-05（源码、schema、正式装配及测试定义；未执行产品测试）
+> 最后核对：2026-09-05（源码与正式装配；本次测试记录见[后台服务](../implementation/backend/background-services.md#本次验证)，不等于关闭环境验收）
 
 ## 问题与依据
 
@@ -25,30 +25,24 @@
 | 安全 panic 输出 | 明确未实现 | [main.rs](../../backend/src/main.rs) 使用默认 panic hook；源树无 `set_hook`。旧 Application 要求的 payload 脱敏没有专门实现 | 确认允许的 panic 字段与退出契约，实施安全 hook 或明确修订要求；不能宣称默认输出已安全 |
 | 缓存物理容量 | 明确未实现 | [sqlite.rs](../../backend/src/cache/sqlite.rs) 将预算交给 [prepare_snapshot](../../backend/src/cache/persistence.rs)，只限制编码快照；没有 `max_page_count`、按实际主库大小 checkpoint/收缩的路径 | 先确定编码预算还是物理容量契约，评估页/sidecar/重写空间后再实施；当前不能据此承诺磁盘硬限额 |
 | 缓存访问热度及写放大 | 明确未实现 | `prepare_snapshot` 按 inserted_at/version/key 淘汰；SQLite 每批全量解码、合并、事务重写。没有 last-access bucket、近似 LRU 或 SQL key/namespace 索引 | 评审原近似 LRU 与增量持久化要求是否仍需要，量化写放大后决定；现有行为不改称 LRU |
-| bootstrap TTL 缓存 | 原语存在、生产未接线 | [bootstrap.rs](../../backend/src/upstream/bootstrap.rs) 有 AddressResolutionState/AddressCachePolicy；[TokioDohAddressResolver](../../backend/src/upstream/http.rs) 每次查询 A/AAAA 后仅返回地址，没有使用该状态 | 确定 TTL/失败复用/地址池失效边界，再决定接入；client pool 复用不替代地址缓存 |
 | 资源条件请求 | 明确未实现 | [fetcher.rs](../../backend/src/resource/fetcher.rs) 无条件 GET、禁重定向、只收 2xx，modified_at=None；[fetch port](../../backend/src/ports/effects.rs) 无 validator 字段。旧 ETag/304 描述未落实 | 确认是否保留条件请求要求，再设计 validator、304 和快照刷新语义 |
 | group 执行语义 | 需确认行为契约 | [executor.rs](../../backend/src/upstream/executor.rs) 有 late sink 时 Positive 也移交剩余任务 drain；无 sink 的非 Positive 可能等待全组。load-balance 只占用 primary lease，重试按配置顺序，非逐 attempt least-in-flight | 明确首响应/剩余任务取消、sink 可选路径及 primary 计数口径；不得直接宣称满足旧的完整语义 |
 | 进行中请求的停机响应 | 需确认行为契约 | [service.rs](../../backend/src/service.rs) 的 UDP/TCP/DoH dispatch 与 cancellation 竞争，停止时可以直接取消并关闭；5 秒仅为回收总预算，不保证已读完整请求最终写回 | 决定保留立即取消还是要求 drain 已读请求，补充三协议时序测试后再修改 |
 | Storage 启动探针与预算 | 明确未实现 | [StorageRuntime::open](../../backend/src/storage/service.rs) 调用 [connect](../../backend/src/storage/sqlite.rs) 建库/升级，再核对版本；没有独立写入/回滚探针，connect 未整体包裹 open deadline | 确认写入探针和完整启动预算要求，覆盖已有库及 I/O 卡住场景 |
 | Storage 停机优先级 | 需确认行为契约 | 生产 StorageRuntime 先等独立 detail task，再调用 StorageService flush stats；内联 facade 才是 stats → detail → backend，不满足笼统的“stats 始终优先” | 确认共享 deadline 下 stats/detail 优先级，验证慢 detail 是否耗尽 stats flush 时间 |
-| 完整 span/attempt/聚合 metrics | 部分原语存在、生产未接线 | [observability.rs](../../backend/src/observability.rs) 正式使用 TelemetryWriter + event layer；ObservabilityRegistry/EventWriter 未在 app/service 构造，无完整 span 树。[resolution.rs](../../backend/src/resolution.rs) 的 attempt_outcome 是请求终态维度，非逐 attempt 流 | 先确认需要保留的观测能力与成本；不把指标枚举、测试 registry 或存在性字段写成全部已接线 |
+| 完整 span/attempt/histogram | 明确未实现 | 正式 TelemetryWriter 已有两个后台采样 counter/gauge，但无完整 span 树、逐 attempt 流或 histogram。[resolution.rs](../../backend/src/resolution.rs) 的 attempt_outcome 仍是请求终态维度 | 评审是否需要完整链路及采样/容量契约；不能因聚合器接入而宣称全部指标已接线 |
 
-## 现有原语的接入可行性
+## 现有原语的处置
 
-这部分是接入评估，不表示本轮已经实施。优先复用现有生产链路，不因原语存在就并列启用两套状态或 writer。
+已获批的两类接入不再作为本计划缺口：bootstrap 地址状态已接入配置绑定 resolver，详见 [DNS 管线](../implementation/backend/dns-pipeline.md)；有限 counter/gauge 聚合已接入正式 writer 和后台采样，旧事件/health 模型已收口，详见[后台服务](../implementation/backend/background-services.md)。对应已完成方案按文档规则删除，不保留第二份长期设计。
 
-| 对象 | 能否接入 | 接入前必须解决的边界 |
-| --- | --- | --- |
-| AddressResolutionState / AddressCachePolicy | 可以复用，是明确的生产能力候选 | 状态以 upstream ConfigId 为 key，而 DohAddressRequest 只有 host/port/bootstrap；需在 registry/connector/resolver 边界对齐稳定身份。还需定义并发查填、取消与 deadline、容量、TTL 下限、配置换代清理及地址变化后的 HTTP pool 选择；不能持锁跨网络 await |
-| ObservabilityRegistry / EventWriter | 计数/状态原语可复用，不适合整套直接挂到现有服务旁边 | 旧 Component/MetricName/TypedEvent 与 ports telemetry 模型不同，health 仅固定四类组件；EventWriter 默认 flush 使用 NoopSink。应先统一到现有 TelemetryWriter/HealthSink 的模型与 owner，避免双队列、双健康状态和重复计数；span/attempt 生产者仍需开发 |
-| SecretProvider | 只有 trait，不能当作完整 adapter 接入 | 实际 env/file 读取已由 ResolvedSecretRef accessor 承担；如为可替换 I/O 引入 adapter，需复用现有校验、限额与脱敏，不重复实现配置读取。不是当前功能缺失的阻塞项 |
-| MemoryCacheStore、文件 persistence、ConfiguredDnsCore、fake | 不应为了“接上代码”替换生产默认 | 它们承担替代实现、简化构造或测试职责；当前默认 PolicyDnsCore + Moka + SQLite 已接线。只有明确的产品需要才改变默认装配 |
+无调用方的 secret port 和旧 hosts-only Core 装配已清理；有效 Ports、测试参考实现及文件 cache codec 仍保留。职责分别见 [Ports](../architecture/backend/modules/ports.md)、[DNS 管线](../implementation/backend/dns-pipeline.md)和[后台服务](../implementation/backend/background-services.md)，不能把测试 fake 的存在当成主链冗余或性能优化。
 
 资源 ETag/304、完整 tracing span/attempt 流、安全 panic hook 不属于“已有完整实现、只缺调用点”：需要补充契约或实现，再接入并验证。
 
 ## 已实现但未完成运行验收
 
-下表“已有证据”仅指本轮读到的源码和测试定义，不表示本轮运行通过。
+下表保留环境和组合验收缺口。相关单测已随本次完整后端测试执行，但不能替代最后一列要求的真实环境、长期压力或更完整组合。
 
 | 范围 | 已有实现 / 测试入口 | 尚缺的证据 |
 | --- | --- | --- |
@@ -73,4 +67,4 @@
 3. 按批准范围实施与定向验证，同批更新 implementation；契约确实改变才更新 architecture。
 4. 所有登记项有实现/验收证据或明确的范围决策后收口；确认新逻辑已沉淀到对应 implementation、改变的设计已同步到 architecture，再删除本计划与索引项。
 
-风险是把缺验收写成未实现，或把已有缺陷通过文档改成合法行为。本轮完成设计正文对齐与静态差距分类，没有执行产品修复、Cargo、故障注入或性能测试；[v2 专属验收](webui-v2-management-integration.md)独立管理。计划仍为待评审，不因本轮文档交付而关闭。
+风险是把缺验收写成未实现，或把已有缺陷通过文档改成合法行为。具体执行检查以交付记录为准；过时的 v2 计划已按用户要求移除，既有环境证据边界见[交付实现](../implementation/delivery.md)。本计划仍为待评审，不因个别原语接入或文档清理而关闭。

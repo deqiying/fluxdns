@@ -4,9 +4,9 @@
 >
 > 适用范围：正式 transport、Policy、Cache、Upstream 与单次完成事件链路
 >
-> 最后核对：2026-09-05（构造入口、关键分支与异步移交静态核对）
+> 最后核对：2026-09-05（bootstrap 缓存接线及本地测试；其他链路沿用静态核对）
 >
-> 核对基线：`8223d819efb83fed642900e6b121825083e8c1dd`
+> 核对基线：`faace61e2d1e27f77812ead89bf42a9a83bec2f5` 加本次 bootstrap/telemetry 接入工作树
 
 ## 入口与调用链
 
@@ -30,11 +30,13 @@ SystemSocketFactory / typed binding
 
 ## Policy 与实际 core
 
-正式 async prepare 在 [`dns/policy.rs`](../../../backend/src/dns/policy.rs) 构造 `PolicyDnsCore::from_config_with_resource_snapshots`；不是 [`ConfiguredDnsCore`](../../../backend/src/dns/configured.rs) 的较窄构造路径。`PolicyContext` 先选 client/strategy/cache namespace，Core 再结合 PolicyState 计算 ECS、eligibility 和 fingerprint；fast miss 后再求 `RouteDecision`，调用 [`policy`](../../../backend/src/policy) 的 client/strategy/route 逻辑。
+正式 async prepare 在 [`dns/policy.rs`](../../../backend/src/dns/policy.rs) 构造 `PolicyDnsCore::from_config_with_resource_snapshots`；不另设仅处理 hosts 的配置装配层。`PolicyContext` 先选 client/strategy/cache namespace，Core 再结合 PolicyState 计算 ECS、eligibility 和 fingerprint；fast miss 后再求 `RouteDecision`，调用 [`policy`](../../../backend/src/policy) 的 client/strategy/route 逻辑。
 
 配置 route 由 [`config/doh_route.rs`](../../../backend/src/config/doh_route.rs) 共享编译，DoH adapter 匹配真实路径后传 typed route ID，Policy 不重新匹配 URL。资源-only publish 更新 core 内的资源 snapshot，后续请求使用新 hash；不依靠全局 cache clear。
 
 `dns/policy.rs` 同时含具体 adapter 的构造代码，包括 `UpstreamRegistry`、Moka 和 SQLite cache；解析方法通过 port 使用它们。不能把设计中的“公共接口不泄漏 adapter 类型”扩大为“整个 dns 源目录不 import adapter”。
+
+`MemoryCacheStore`、`InMemoryStorageBackend` 和 `HostsCore`/`ServFailCore` 不在正式请求装配中。前两者用于与 Moka/SQLite 共用的 adapter 契约测试；后两者用于简化解析、dispatch/Transport 测试。它们不是查询性能优化，也不应为了清理名称相似的代码而删除生产 `MokaCacheStore`、`SqliteStorageBackend`、`PolicyDnsCore` 或 hosts upstream 使用的 `HostsTable`。
 
 client CIDR 按前缀长度降序扫描；hosts 使用 BTreeMap，rule exact/suffix 使用 BTreeSet，随后依次匹配 keyword/受限 regex。当前没有 CIDR/suffix trie。PolicyState 的 matcher/version/hash 一起发布，Runtime metadata 随后更新，不是跨两个 ArcSwap 的事务。
 
@@ -56,16 +58,23 @@ client CIDR 按前缀长度降序扫描；hosts 使用 BTreeMap，rule exact/suf
 
 [`group.rs`](../../../backend/src/upstream/group.rs) / [`executor.rs`](../../../backend/src/upstream/executor.rs) 分离成员选择、首个 terminal response、fallback 与 late cache candidate。只有无 terminal response 才 fallback；late result 不改变已返回响应。主动健康检查和持久健康分数没有接入。
 
-[`TokioDohAddressResolver`](../../../backend/src/upstream/http.rs) 每次 bootstrap resolve 发起 A/AAAA，未使用 `AddressResolutionState` 的 TTL cache。parallel 有 late sink 时将剩余任务移交 drain，Positive 首响应也不必然取消它们；无 sink 时非 Positive 终态不能保证立即返回。load-balance 统计 primary lease，失败后按配置顺序重试，不等同逐 attempt least-in-flight。具体语义见 [Upstream](../../architecture/backend/modules/upstream.md)。
+`from_resolved` 和正式 `from_resolved_with_outbounds` 都为每个 DoH connector 创建 [`TokioDohAddressResolver::for_upstream`](../../../backend/src/upstream/http.rs)，绑定 host/port/bootstrap 与 upstream ID。resolver 内通过 `AddressResolutionState` 查填最多一项地址答案，TTL 内不重复查询 A/AAAA；它不是 Moka response cache，也不接 Storage。
+
+[`BootstrapResolver`](../../../backend/src/upstream/bootstrap.rs) 在每族合法回答收到时记录单调时间到期点，汇总及填状态不延长较早答案。生产 TTL 采用 0..3,600 秒，精确到期失效；零 TTL/汇总已过期的答案只供当前请求。异步 Semaphore 串行查填，等待者取得许可后复查状态；取消、超时或 drop 不泄漏许可。所有等待与查询沿用原调用者预算，命中也检查预算。错误不隐式回退 system resolver，不服务过期地址。
+
+connector clone 共享同一 resolver；重新 prepare 创建新状态，即使配置 ID 相同也不会接收旧请求写回。Reqwest 按新地址列表选择 client pool key，Tokio direct/SOCKS5 则将新 IP 交给连接层，HTTP Host/TLS SNI 不变。connect_ip、SOCKS5H、无 bootstrap 维持原分支；未绑定配置的基础 resolver 仍不缓存。详细不变量见 [Upstream](../../architecture/backend/modules/upstream.md)。
+
+group 行为不在本次变更范围：parallel 有 late sink 时将剩余任务移交 drain，Positive 首响应也不必然取消它们；无 sink 时非 Positive 终态不能保证立即返回。load-balance 统计 primary lease，失败后按配置顺序重试，不等同逐 attempt least-in-flight。
 
 ## 能力与证据
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| UDP/TCP/DoH | `transport/udp.rs`、`tcp.rs`、`doh.rs` | service 的 typed binding 与 session loop | 本轮静态；存在 `udp_tcp_and_plain_doh_follow_the_same_dns_contract` | 未重跑协议/真实网络矩阵；DoH 入站非 HTTP/2 |
+| UDP/TCP/DoH | `transport/udp.rs`、`tcp.rs`、`doh.rs` | service 的 typed binding 与 session loop | 本次完整测试包含跨 UDP/TCP/DoH GET/POST 用例 | 本地 loopback，不是远程矩阵；DoH 入站非 HTTP/2 |
 | TLS / 客户端地址 | system socket TLS、DoH forwarded/PROXY parser | DoH accept 后先可信 PROXY、再 TLS、再 HTTP | 本轮核对生产分支 | 真实代理、证书和故障组合仍需环境验收 |
 | Moka / SQLite cache | `build_cache_facade`、`initialize_cache_persistence` | async prepare 默认构造 | 本轮静态；测试构造与生产构造已区分 | last-access bucket、真实 disk-full 与部分 late-window 差距见[计划](../../plans/backend-contract-gaps.md) |
 | Policy -> 出站 | core -> registry -> protocol-independent connector | 正式配置构造支持真实 HTTP/代理路径 | 本轮静态，无远程请求 | 不等同所有 SOCKS/Host/SNI 组合已实测 |
 | 单次完成事件 | service instrumented core、resolution publisher | core 返回后、编码前无等待移交 | 本轮核对调用位置 | ingress 满会出现可观测 gap，不能承诺零丢失 |
+| bootstrap 地址缓存 | 配置绑定 resolver、绝对到期点、查填许可 | 两个配置工厂均装配，direct/HTTPS/SOCKS5 共用 | [address_cache_tests.rs](../../../backend/src/upstream/address_cache_tests.rs)；registry 的正式 hosts bootstrap/代理测试 | 单 connector 单项；不缓存 system lookup、负答案或过期地址 |
 
-源码中的单测/fake/本机 profile 只作为后续验证入口。本轮没有运行 Cargo、DNS smoke 或压力测试；性能不能引用旧阶段数字为新结果。
+2026-09-05 的完整测试及命令记录统一见[后台服务验证](background-services.md#本次验证)。地址缓存用可控 Clock 验证 TTL 0/1 秒/上限、A/AAAA 时间差、并发查填、各方取消/超时/drop、配置代际隔离；真实 loopback HTTP/HTTPS 检查地址更新与 Host/SNI，SOCKS5 检查 CONNECT 中的新目标 IP。没有执行真实远程 DoH、代理服务或 bootstrap 长期性能压测。

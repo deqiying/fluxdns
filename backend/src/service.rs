@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
@@ -16,7 +16,6 @@ use crate::dns::{
 };
 use crate::management::{ManagementRuntime, ManagementService};
 use crate::observability::TelemetryWriter;
-use crate::ports::PortErrorClass;
 use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
 use crate::ports::inbound::InboundAdapter;
@@ -27,9 +26,11 @@ use crate::ports::observation::{
 use crate::ports::storage::ResolveRuleSource;
 use crate::ports::telemetry::{
     CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
-    HealthSink, LogSink, OutcomeClass,
+    HealthSink, LogSink, MetricEvent, MetricLabel, MetricLabelKey, MetricLabelValue, MetricName,
+    MetricValue, MetricsSink, OutcomeClass,
 };
-use crate::resolution::ResolutionRuntime;
+use crate::ports::{PortError, PortErrorClass};
+use crate::resolution::{ResolutionPipelineMetrics, ResolutionRuntime};
 use crate::runtime::{
     ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
     BoundListenerSet, CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime,
@@ -201,6 +202,7 @@ pub struct DnsService {
     resolution_runtime: Option<ResolutionRuntime>,
     resolution_event_sink: Option<Arc<dyn ResolutionEventSink>>,
     telemetry: Option<Arc<TelemetryWriter>>,
+    telemetry_sampler: Option<Arc<TelemetrySampler>>,
     management: Option<Arc<ManagementRuntime>>,
     management_cancellation: Option<Cancellation>,
 }
@@ -313,6 +315,11 @@ impl DnsService {
             .as_ref()
             .map(ResolutionRuntime::publisher);
         let core = instrumented_core(core, resolution_event_sink.clone());
+        let telemetry_sampler = telemetry.as_ref().map(|_| {
+            Arc::new(TelemetrySampler::new(
+                resolution_runtime.as_ref().map(ResolutionRuntime::metrics),
+            ))
+        });
         if let Some(storage) = &storage {
             spawn_storage_task(&mut supervisor, Arc::clone(storage), telemetry.clone())?;
         }
@@ -331,7 +338,11 @@ impl DnsService {
                     None,
                 );
             }
-            spawn_telemetry_task(&mut supervisor, Arc::clone(telemetry))?;
+            spawn_telemetry_task(
+                &mut supervisor,
+                Arc::clone(telemetry),
+                telemetry_sampler.as_ref().unwrap().clone(),
+            )?;
         }
         let transport_plans = prepare_transport_plans(
             runtime.listeners(),
@@ -388,6 +399,7 @@ impl DnsService {
             resolution_runtime,
             resolution_event_sink,
             telemetry,
+            telemetry_sampler,
             management: None,
             management_cancellation: None,
         })
@@ -813,7 +825,13 @@ impl DnsService {
                     ComponentHealthState::Stopping,
                     None,
                 );
-                match telemetry.shutdown(deadline) {
+                let sampled = self
+                    .telemetry_sampler
+                    .as_ref()
+                    .map_or(Ok(()), |sampler| sampler.sample(&telemetry));
+                // 即使采样失败仍关闭并排空 writer；不延长共享停机 deadline。
+                let flushed = telemetry.shutdown(deadline);
+                match flushed.and_then(|summary| sampled.map(|()| summary)) {
                     Ok(_summary) => {
                         report.telemetry = ShutdownPhaseStatus::Completed;
                         None
@@ -1431,8 +1449,69 @@ fn spawn_storage_task(
         .map_err(ServiceStartError::Task)
 }
 
+/// 后台采样复用唯一计数源，周期与最终 flush 共用游标；不改变 DNS producer。
+struct TelemetrySampler {
+    resolution: Option<Arc<ResolutionPipelineMetrics>>,
+    accepted: Mutex<Option<u64>>,
+}
+
+impl TelemetrySampler {
+    fn new(resolution: Option<Arc<ResolutionPipelineMetrics>>) -> Self {
+        Self {
+            resolution,
+            accepted: Mutex::new(None),
+        }
+    }
+
+    fn sample(&self, telemetry: &TelemetryWriter) -> Result<(), PortError> {
+        let mut accepted = self
+            .accepted
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(resolution) = &self.resolution {
+            let current = resolution.snapshot().accepted;
+            let delta = current.checked_sub(accepted.unwrap_or(0)).ok_or_else(|| {
+                telemetry.record_metric_rejection();
+                PortError::new(PortErrorClass::InvalidInput, "telemetry.sample")
+                    .with_safe_context("resolution counter moved backwards")
+            })?;
+            if accepted.is_none() || delta != 0 {
+                telemetry.record(sampled_metric(
+                    MetricName::ResolutionEventsAccepted,
+                    TelemetryComponent::Resolution,
+                    MetricValue::Counter(delta),
+                ))?;
+                *accepted = Some(current);
+            }
+        }
+        let pending = i64::try_from(telemetry.stats().pending()).map_err(|_| {
+            telemetry.record_metric_rejection();
+            PortError::new(PortErrorClass::ResourceExhausted, "telemetry.sample")
+        })?;
+        telemetry.record(sampled_metric(
+            MetricName::WriterQueueDepth,
+            TelemetryComponent::Telemetry,
+            MetricValue::Gauge(pending),
+        ))
+    }
+}
+
+fn sampled_metric(
+    name: MetricName,
+    component: TelemetryComponent,
+    value: MetricValue,
+) -> MetricEvent {
+    let label = MetricLabel::new(
+        MetricLabelKey::Component,
+        MetricLabelValue::Component(component),
+    )
+    .expect("fixed metric component label is valid");
+    MetricEvent::new(name, vec![label], value).expect("fixed metric descriptor is valid")
+}
+
 async fn telemetry_flush_task(
     telemetry: Arc<TelemetryWriter>,
+    sampler: Arc<TelemetrySampler>,
     cancellation: Cancellation,
 ) -> Result<(), TaskError> {
     let mut interval = tokio::time::interval(TELEMETRY_FLUSH_INTERVAL);
@@ -1441,16 +1520,18 @@ async fn telemetry_flush_task(
         tokio::select! {
             _ = cancellation.cancelled() => return Ok(()),
             _ = interval.tick() => {
-                flush_telemetry_once(&telemetry).await;
+                flush_telemetry_once(&telemetry, Some(&sampler)).await;
             }
         }
     }
 }
 
 /// 执行一次有界 Telemetry flush，并把当前输出结果映射为 health 生命周期。
-async fn flush_telemetry_once(telemetry: &TelemetryWriter) {
+async fn flush_telemetry_once(telemetry: &TelemetryWriter, sampler: Option<&TelemetrySampler>) {
     let deadline = Deadline::new(Instant::now() + TELEMETRY_OPERATION_TIMEOUT);
-    match LogSink::flush(telemetry, deadline).await {
+    let sampled = sampler.map_or(Ok(()), |sampler| sampler.sample(telemetry));
+    let flushed = LogSink::flush(telemetry, deadline).await;
+    match flushed.and_then(|summary| sampled.map(|()| summary)) {
         Ok(_) => publish_component_health(
             telemetry,
             TelemetryComponent::Telemetry,
@@ -1478,6 +1559,7 @@ async fn flush_telemetry_once(telemetry: &TelemetryWriter) {
 fn spawn_telemetry_task(
     supervisor: &mut Supervisor,
     telemetry: Arc<TelemetryWriter>,
+    sampler: Arc<TelemetrySampler>,
 ) -> Result<Cancellation, ServiceStartError> {
     let spec = TaskSpec::new(
         "telemetry.flush",
@@ -1492,7 +1574,7 @@ fn spawn_telemetry_task(
     })?;
     supervisor
         .spawn_scoped(spec, move |cancellation| {
-            Box::pin(telemetry_flush_task(telemetry, cancellation))
+            Box::pin(telemetry_flush_task(telemetry, sampler, cancellation))
         })
         .map_err(ServiceStartError::Task)
 }
@@ -2521,6 +2603,7 @@ mod tests {
         metrics: AtomicUsize,
         health: AtomicUsize,
         health_events: Mutex<Vec<ComponentHealthEvent>>,
+        snapshots: Mutex<Vec<crate::observability::MetricSnapshot>>,
     }
 
     /// 为真实跨 transport 测试生成稳定的 SERVFAIL/REFUSED 响应。
@@ -2696,6 +2779,16 @@ mod tests {
     }
 
     impl TelemetryOutput for CountingTelemetryOutput {
+        fn write_metric_snapshot(
+            &self,
+            _instance: &str,
+            metric: &crate::observability::MetricSnapshot,
+        ) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.metric_snapshot")?;
+            self.snapshots.lock().unwrap().push(*metric);
+            Ok(())
+        }
+
         fn write_log(&self, _event: &LogEvent) -> Result<(), crate::ports::PortError> {
             self.check("test.telemetry.log")?;
             self.logs.fetch_add(1, Ordering::Relaxed);
@@ -2754,7 +2847,12 @@ mod tests {
         crate::ports::telemetry::LogSink::emit(writer.as_ref(), telemetry_log()).unwrap();
 
         let mut supervisor = Supervisor::new();
-        let cancellation = spawn_telemetry_task(&mut supervisor, writer).unwrap();
+        let cancellation = spawn_telemetry_task(
+            &mut supervisor,
+            writer,
+            Arc::new(super::TelemetrySampler::new(None)),
+        )
+        .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert_eq!(output.logs.load(Ordering::Relaxed), 1);
 
@@ -2776,10 +2874,10 @@ mod tests {
         crate::ports::telemetry::LogSink::emit(&writer, telemetry_log()).unwrap();
         output.fail.store(true, Ordering::Release);
 
-        flush_telemetry_once(&writer).await;
+        flush_telemetry_once(&writer, None).await;
         assert_eq!(writer.stats().failed(), 1);
         output.fail.store(false, Ordering::Release);
-        flush_telemetry_once(&writer).await;
+        flush_telemetry_once(&writer, None).await;
         crate::ports::telemetry::LogSink::flush(
             &writer,
             Deadline::new(Instant::now() + Duration::from_secs(1)),
@@ -3782,6 +3880,240 @@ clients: []
         assert!(!report.deadline_expired);
     }
 
+    #[tokio::test]
+    async fn telemetry_samples_the_shared_source_across_transports_reload_and_shutdown() {
+        use crate::ports::telemetry::{MetricName, MetricValue, MetricsSink};
+        let ports = available_transport_ports();
+        let mut config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
+        Arc::get_mut(&mut config).unwrap().logs.enable = true;
+        let work_path = config.work.path.clone();
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config.clone(), RuntimeRevision(1)).unwrap();
+        let factory = SystemSocketFactory::new();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let storage = StorageRuntime::open(
+            &config,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = Arc::new(TelemetryWriter::new(32, output.clone()).unwrap());
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                coordinator,
+                storage,
+                writer.clone(),
+            )
+            .unwrap();
+        let sampler = service.telemetry_sampler.as_ref().unwrap().clone();
+        let source = sampler.resolution.as_ref().unwrap().clone();
+        query_all_transports(ports, 81, "transport.test.", RecordType::A).await;
+        assert_eq!(source.snapshot().accepted, 4);
+        sampler.sample(&writer).unwrap();
+        sampler.sample(&writer).unwrap();
+        assert!(
+            writer
+                .metric_snapshot()
+                .iter()
+                .any(|metric| metric.value == MetricValue::Counter(4))
+        );
+
+        // 聚合拒绝时不推进游标，换到可接收的 writer 后仍完整采到同一源。
+        let retry_sampler = super::TelemetrySampler::new(Some(source.clone()));
+        let exhausted =
+            TelemetryWriter::new(1, Arc::new(CountingTelemetryOutput::default())).unwrap();
+        exhausted
+            .record(super::sampled_metric(
+                MetricName::ResolutionEventsAccepted,
+                TelemetryComponent::Resolution,
+                MetricValue::Counter(u64::MAX),
+            ))
+            .unwrap();
+        assert!(retry_sampler.sample(&exhausted).is_err());
+        assert_eq!(*retry_sampler.accepted.lock().unwrap(), None);
+        let retry_writer =
+            TelemetryWriter::new(1, Arc::new(CountingTelemetryOutput::default())).unwrap();
+        retry_sampler.sample(&retry_writer).unwrap();
+        retry_sampler.sample(&retry_writer).unwrap();
+        assert!(
+            retry_writer
+                .metric_snapshot()
+                .iter()
+                .any(|metric| metric.value == MetricValue::Counter(4))
+        );
+        *retry_sampler.accepted.lock().unwrap() = Some(5);
+        assert!(retry_sampler.sample(&retry_writer).is_err());
+        assert_eq!(retry_writer.stats().rejected_metrics(), 1);
+
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(2)).unwrap();
+        service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            service.telemetry_sampler.as_ref().unwrap(),
+            &sampler
+        ));
+        assert!(Arc::ptr_eq(
+            &service.resolution_runtime.as_ref().unwrap().metrics(),
+            &source
+        ));
+        query_all_transports(ports, 91, "transport.test.", RecordType::A).await;
+        service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(source.snapshot().accepted, 8);
+        assert_eq!(
+            output
+                .snapshots
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|metric| metric.name == MetricName::ResolutionEventsAccepted)
+                .unwrap()
+                .value,
+            MetricValue::Counter(8)
+        );
+        assert!(writer.stats().closed());
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    #[test]
+    fn telemetry_without_resolution_only_samples_queue_depth() {
+        let writer = TelemetryWriter::new(1, Arc::new(CountingTelemetryOutput::default())).unwrap();
+        super::TelemetrySampler::new(None).sample(&writer).unwrap();
+        let snapshot = writer.metric_snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            snapshot[0].name,
+            crate::ports::telemetry::MetricName::WriterQueueDepth
+        );
+    }
+
+    /// 本机 loopback 对比，每秒一批避免触发 Storage 积压上限；不评估极限 QPS/磁盘性能。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manual telemetry sampling performance profile"]
+    async fn benchmark_udp_telemetry_sampling_profile() {
+        for enabled in [false, true] {
+            let port = available_transport_ports()[0];
+            let work_path = crate::config::test_support::absolute_path(if enabled {
+                "telemetry-profile-on"
+            } else {
+                "telemetry-profile-off"
+            });
+            let config = runtime_config_at(&work_path, port);
+            let storage = StorageRuntime::open(
+                &config,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+            let prepared =
+                PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(1)).unwrap();
+            let bound = crate::runtime::bind_prepared(
+                prepared,
+                &SystemSocketFactory::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+            let writer = Arc::new(
+                TelemetryWriter::new(
+                    32,
+                    Arc::new(
+                        crate::observability::StructuredTelemetryOutput::from_writer(Box::new(
+                            std::io::sink(),
+                        )),
+                    ),
+                )
+                .unwrap(),
+            );
+            let mut service = if enabled {
+                super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                    coordinator,
+                    storage,
+                    writer.clone(),
+                )
+                .unwrap()
+            } else {
+                super::DnsService::with_default_timeout_from_coordinator_and_storage(
+                    coordinator,
+                    storage,
+                )
+                .unwrap()
+            };
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let wire = query_wire_with_type(1, "example.test.", RecordType::A);
+            for _ in 0..100 {
+                udp_round_trip(&socket, address, &wire).await;
+            }
+            let started = Instant::now();
+            let mut elapsed = Vec::new();
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            while started.elapsed() < Duration::from_secs(11) {
+                interval.tick().await;
+                elapsed.extend(udp_profile_repeated(&socket, address, &wire, 1000).await);
+            }
+            elapsed.sort_unstable();
+            print_latency_profile(
+                if enabled {
+                    "telemetry-on-hosts"
+                } else {
+                    "telemetry-off-hosts"
+                },
+                false,
+                &elapsed,
+            );
+            let source = service
+                .resolution_runtime
+                .as_ref()
+                .unwrap()
+                .metrics()
+                .snapshot();
+            assert_eq!(source.dropped, 0);
+            service
+                .shutdown(
+                    &SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                )
+                .await
+                .unwrap();
+            eprintln!(
+                "telemetry_profile enabled={enabled} batch_per_second=1000 accepted={} series={} queue_pending={} emitted={} rejected_metrics={}",
+                source.accepted,
+                writer.metric_snapshot().len(),
+                writer.stats().pending(),
+                writer.stats().emitted(),
+                writer.stats().rejected_metrics(),
+            );
+            let _ = std::fs::remove_dir_all(work_path);
+        }
+    }
+
     /// 本地手工性能 profile：固定单并发、复用 UDP socket，比较详情 off/on 的三个主路径。
     ///
     /// 计时包含 loopback client send/receive，因此只是服务端 SLO 的保守上界；发布验收仍需在
@@ -4264,6 +4596,10 @@ clients: []
         assert_eq!(report.storage, ShutdownPhaseStatus::Completed);
         assert_eq!(report.telemetry, ShutdownPhaseStatus::Completed);
         assert!(telemetry_probe.stats().closed());
+        assert!(output.snapshots.lock().unwrap().iter().any(|metric| {
+            metric.name == crate::ports::telemetry::MetricName::ResolutionEventsAccepted
+                && metric.value == crate::ports::telemetry::MetricValue::Counter(1)
+        }));
         {
             let health_events = output.health_events.lock().unwrap();
             assert!(health_events.iter().any(|event| {

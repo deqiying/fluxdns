@@ -69,4 +69,4 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 | 七个只读 API | ManagementQueryService + StorageRead port | app 注入真实 coordinator/DB/telemetry | 本轮核对 handler 不持有 SQLx | 未执行全端点真实 HTTP 与浏览器 smoke |
 | 内嵌 SPA | assets + build feature | bind 前 ensure_available | 静态；历史证据单独标注于交付文档 | Actions/Linux/macOS 发布未由静态代码证明 |
 
-本轮未运行后端测试、服务或浏览器；剩余工作统一由[v2 验收计划](../../plans/webui-v2-management-integration.md)管理。
+本页原核对仅有静态证据，未包含服务或真实浏览器观察。过时的 v2 计划已移除；现有测试定义不等于 Cookie/Network/Storage、反向代理或完整配置事务故障矩阵均已验证。

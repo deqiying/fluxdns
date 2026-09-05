@@ -4,7 +4,7 @@
 >
 > 适用范围：tracing、metrics、health、脱敏、backpressure 和 telemetry 生命周期
 >
-> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
+> 最后评审：2026-09-05（有界指标聚合与后台采样接入；运行证据见[后台服务](../../../implementation/backend/background-services.md)）
 >
 > 关联实现：[observability.rs](../../../../backend/src/observability.rs)、[ports/telemetry.rs](../../../../backend/src/ports/telemetry.rs)、[resolution.rs](../../../../backend/src/resolution.rs)、[service.rs](../../../../backend/src/service.rs)
 >
@@ -36,7 +36,7 @@ v1 日志级别固定接受 `trace`、`debug`、`info`、`warn`、`error`，大�
 
 ## 3. 日志格式
 
-正式输出区分 `kind=log/metric/health` 的单行 JSON。log 字段是 `occurred_at_ms`、level、event、component、`has_request_digest`、`has_configured_id`、outcome、runtime_revision 和安全 message；digest/configured ID 在此输出为存在性，而非实际值。metric 输出受校验的 name/labels/value，health 输出组件、状态、retry_count、stale_age_micros 和 persistence_gap。
+正式输出区分 `kind=log/metric/health` 的单行 JSON。log 字段是 `occurred_at_ms`、level、event、component、`has_request_digest`、`has_configured_id`、outcome、runtime_revision 和安全 message；digest/configured ID 在此输出为存在性，而非实际值。metric 输出受校验的 name/labels/value；聚合快照另带 writer_instance、occurred_at_ms 和 temporality，Counter 为 cumulative，Gauge 为 instantaneous。health 输出组件、状态、retry_count、stale_age_micros 和 persistence_gap。
 
 `TypedTracingLayer::on_event` 只消费受支持字段，忽略任意 Debug payload；实际 LogEvent 的 request_digest/configured_id 在该桥接路径中均为 `None`。tracing 中出现了某个字段，不代表最终 JSON 会保留它。
 
@@ -50,11 +50,22 @@ v1 日志级别固定接受 `trace`、`debug`、`info`、`warn`、`error`，大�
 
 ## 5. Metrics
 
-生产 `TelemetryWriter::record` 校验 `MetricEvent` 后入队，由 output 写出；不是统一的原子 histogram 聚合器，也没有 HTTP exporter。Resolution 管线、Cache 和 Storage 各自持有实际计数与摘要，Management overview 读取其受限投影。
+生产 `TelemetryWriter` 持有 [ObservabilityRegistry](../../../../backend/src/observability/registry.rs)，复用有界 series、原子 counter/gauge 与 checked add；不再保留独立 `EventWriter`、旧事件模型或第二份 health。`MetricsSink::record` 成功表示内存聚合已接受更新，不表示已经写入输出。Counter 接收增量，Gauge 覆盖当前值。
 
-同文件保留的 `ObservabilityRegistry` / `EventWriter` 提供内存 counter/gauge、health registry 和有界同步事件缓冲及测试，但正式 app/service 没有构造这套对象。不能从这些类型或 `MetricName` 枚举存在，推断所有 request/attempt/latency/admission 指标均已生产接线。
+首期仅开放两个聚合描述符：
 
-标签只能来自有限枚举或配置定义 ID。禁止 qname、完整 client ID、原始 IP、URL、header 或 error message 作为 label。
+| 指标 | 类型与唯一标签 | 来源与口径 |
+| --- | --- | --- |
+| `ResolutionEventsAccepted` | Counter；`Component::Resolution` | `ResolutionPipelineMetrics.accepted`，是完成事件 ingress 接收数，不是所有 DNS 请求，也不等于持久化成功数 |
+| `WriterQueueDepth` | Gauge；`Component::Telemetry` | flush 前 writer 的排队事件数，不含聚合 series |
+
+Service 在既有 5 秒 flush 周期中采样，复用进程级 Source Arc 和共享游标；只在增量成功记录后推进游标，重复/最终采样不重复累计，源倒退明确报错。请求包装层、Resolution publisher 与 dispatcher 不新增同步观测调用；没有 Resolution owner 时只采样队列深度。`logs.enable=false` 不构造 writer/sampler，也不新增文件或任务。
+
+series key 是 name 与唯一 Component 的规范化 typed 组合。描述符之外的名称、额外/重复标签、错误 value kind、溢出与容量耗尽明确拒绝，并增加固定的 `rejected_metrics` 诊断计数；不递归记录诊断事件。实现硬上限为 128 series，当前白名单最多生成 2 项。所有快照 I/O 均在状态/registry 锁外执行。
+
+输出重试可能再次写出相同累计值，消费者应按 writer 实例读取最新快照或求差，不能将周期快照相加。实例标识仅是输出元数据，不作为 label。输出失败保留聚合状态，下次只重试最新快照，不累积待发快照队列；Gauge 中间样本允许合并。
+
+`RequestLatency` / `UpstreamLatency` 的 `DurationMicros` 仍走有界逐事件队列，尚无生产采样点、histogram 或 HTTP exporter。完整 span/attempt 等未实现要求仍见[契约差距](../../../plans/backend-contract-gaps.md)。受限原始事件只允许 typed 标签；禁止 qname、完整 client ID、原始 IP、URL、header 或 error message 作为 label。
 
 ## 6. Health registry
 
@@ -100,11 +111,15 @@ redaction 在 typed event 构造时完成，不依赖 formatter 最后补救。
 
 - debug/info 拥塞时可丢弃并计数；
 - warn/error 优先淘汰已排队的低优先级日志；没有可淘汰项时返回明确的 `resource_exhausted`；
-- metrics/health 不等待输出端，队列已满时返回明确的容量错误；
+- 聚合 counter/gauge 不占事件队列，日志队列满时仍可更新；原始 duration/health 仍受事件队列容量约束；
 - DNS 请求线程不等待磁盘；
 - writer failure 保留失败事件并重新排队，返回安全分类错误供上层标记 degraded；
 - telemetry/log writer 失败不影响 DNS response；
 - telemetry 自身错误不递归写日志，具体 stderr/file fallback 由 output adapter 提供。
+
+周期 flush 只处理开始时的有限事件批次，然后尝试聚合快照，避免持续入队饿死指标；正在输出的事件预留队列容量，失败重新入队不突破上限。日志输出失败可以提前终止该次 flush，但不会清除累计指标。同步输出前后检查同一 deadline，不承诺可强制中断已经阻塞的底层 Write。
+
+shutdown 在 Resolution/Cache/Storage 回收后最后采样，再关闭 writer 输入、排空事件并输出最终聚合快照；已接受的 metric 更新必须包含在最终快照中，关闭后明确拒绝。周期与最终 flush 串行化并共用原有停机预算，不因重试延长 deadline。
 
 ## 9. 事件分类
 

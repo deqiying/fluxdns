@@ -441,6 +441,8 @@ Transport 只对实际 HTTP path 匹配一次，并把配置模板作为稳定 r
 
 `bootstrap` 和 `connect_ip` 解决的是连接建立路径：前者引用上游完成域名解析，后者直接指定连接 IP。二者互斥，均不改变远程服务的 HTTP `Host` 或 TLS SNI。
 
+正式 bootstrap resolver 按 connector 缓存地址，TTL 下限为 0、上限为 3,600 秒；零 TTL 不复用，重新 prepare 不继承旧缓存。没有新增配置字段；并发、过期和失败边界见 [Upstream 设计](../architecture/backend/modules/upstream.md)。
+
 未配置代理时，优先使用 `connect_ip`，其次使用 `bootstrap`，两者都没有时使用系统解析器。配置 `proxy` 时，先解析对应 SecretRef 的 URL scheme：
 
 - `socks5://`：主机名在 FluxDNS 本地解析；顺序仍为 `connect_ip` → `bootstrap` → 系统解析器，再把 IP 交给代理；
