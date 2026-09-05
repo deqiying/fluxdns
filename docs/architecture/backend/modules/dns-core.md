@@ -2,19 +2,13 @@
 
 > 文档状态：有效
 >
-> 实现状态：已实现
->
 > 适用范围：canonical DNS message、请求管线、缓存交互和上游结果处理
 >
-> 最后核对：2026-09-04
+> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
 >
 > 关联实现：`backend/src/dns/*`
 >
-> 关联文档：[后端架构](../architecture.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
-
-## 当前实现边界
-
-v1 方案已完成，已实现 canonical message、固定 SERVFAIL、内联/Resource hosts、Policy upstream path、fast/resolved cache key v2、fresh/miss/single-flight、异步 cache commit、optimistic refresh、SQLite cache non-blocking persistence 和统一 resolution observation。`CoreOutcome` 与详情事件共享 `Arc<CanonicalResponse>`；service 在 transport 编码前至多发布一个 `ResolutionEnvelope`，请求任务不构造 qname digest/answer JSON、不更新聚合 map，也不等待 cache CAS 或 SQLite。配置选中的 TTL override 仍在 origin cache candidate 形成后统一应用到 hosts、upstream 和 cache response 的全部 RR；Runtime 捕获、资源 live swap 和配置候选 reload 语义保持不变。
+> 关联文档：[后端架构](../overview.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
 
 ## 1. 目标
 
@@ -131,7 +125,7 @@ NXDOMAIN、REFUSED、SERVFAIL、TC 都是有效 DNS response，不转换成 adap
 - cache expiry TTL：用于 entry 生命周期；
 - client-visible TTL：按当前 override 和剩余 TTL 生成。
 
-TTL override 在 cache admission/CAS 后应用，因此不会延长缓存 entry 的实际过期时间。当前已实现全部 RR 的配置 min/max 覆写；fresh cache response 按 `inserted_at` 后经过的整秒递减全部 RR TTL，stale response 先检查所选缓存池的 `optimistic.max_age` 并统一使用其 `answer_ttl`，再应用当前请求的 TTL override。
+TTL override 作用于输出副本，不能污染 origin cache candidate 或延长 entry expiry。fresh response 按 `inserted_at` 后经过的整秒递减 RR TTL；stale response 先满足所选池的 max_age 并使用其 answer TTL，再应用当前请求的 min/max override。异步 CAS 与客户端输出之间没有必须等待写回的时序要求。
 
 ## 10. 事件
 
@@ -163,7 +157,7 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - resolution ingress、telemetry 或 detail 写入失败：不改变 DNS 结果，并以独立 gap/counter 暴露；
 - cache/store 失败：按 Cache 降级语义继续上游或返回已得到响应。
 
-## 12. 测试
+## 12. 契约验证要求
 
 - opcode、question count、EDNS version 和 canonical normalization；
 - 同一 query 经 UDP/TCP/DoH 得到同一 Core 决策；
@@ -179,32 +173,3 @@ parallel 的多个 attempt 另发 attempt event，但不重复增加 total reque
 - 一请求只记录一次 total stats。
 - 一请求只发布一次 typed completion，响应对象与详情 source 共享同一 `Arc`；
 - resolution ingress/detail/cache commit 有界队列的丢弃与独立计数。
-
-## 13. 实现检查清单
-
-- [x] 定义 canonical query/response 与验证器；
-- [x] 定义 RequestContext、deadline 与 cancellation；
-- [x] 通过 `DnsCoreCompletion`、`ResolutionEvent` 与一次性 `ResolutionEnvelope` 定义完整 resolution result，包含 failure/timeout/cancelled 分类、取消原因和命中资源 revision；
-- [x] 提供统一非阻塞 observation port，并传播 strategy/source/cache lookup/client bucket；策略 target、actual upstream、cache producer provenance、matched rule/resource 及命中资源版本已拆分；
-- [x] 使用共享 `Arc<CanonicalResponse>` 避免 response 与详情复制，并把字符串化/JSON 投影移入后台 worker；
-- [x] 实现 fast/resolved cache key v2、资源内容 hash 驱动的 policy fingerprint 和异步 cache commit；
-- [x] 实现固定响应的 transport 无关 handler；
-- [x] 接入 Policy、Cache、Upstream ports；（基础 upstream/cache 请求路径已完成）
-- [x] 实现配置驱动的 client-visible TTL min/max 覆写，且不改变 cache admission 使用的 origin TTL；
-- [x] fresh cache response 应用剩余 TTL，stale response 应用当前缓存池的 optimistic answer TTL；
-- [x] 实现 rule/strategy/client/global ECS 正常路径、canonical query 替换及最终 ECS cache key；
-- [x] 完成显式 direct upstream/group member ECS；非法客户端 ECS 会被丢弃并按可用 client address 安全回退；
-- [x] 完成 UDP/TCP/plain DoH 的 Positive/NODATA/NXDOMAIN、DNS ID、canonical response 和 UDP TC 首轮真实 loopback contract；
-- [x] 完成 SERVFAIL/REFUSED 错误响应的跨 transport contract tests。
-
-阶段证据：`dns::message::tests` 覆盖 TTL 上下界、cache age/stale TTL、ECS 替换/删除及其他 EDNS 内容保留；`dns::policy::tests` 当前 37 项通过，新增覆盖 policy 语义 hash 排除 observability/storage 配置、hosts 内容刷新切换 fast key，以及既有 strategy/client cache、剩余/stale TTL、ECS、provenance、matched resource 和 SQLite cache 恢复。Service 定向测试验证每个请求只发布一次 typed completion 且 response `Arc` 复用；Cache 定向测试验证 commit candidate 成功/丢弃都能结束 single-flight；UDP/TCP/plain DoH 的 canonical response、DNS ID 和 UDP TC 契约保持通过。阶段 200 新增 core 完成时冻结双耗时的确定性测试，后端全量 `599 passed、0 failed、1 ignored`，忽略项是手工 release 性能 profile。
-
-阶段 142 将同一 observation 的策略目标、实际组成员和 matched rule/resource 摘要接入 `ResolveEvent` 与 SQLite schema v2；阶段 148 继续从当前 Policy snapshot 传播命中资源的 epoch/revision。Policy 35 项及存储层聚焦测试通过，未重复大阶段全量测试。
-
-阶段 175 增加同一次解析结果的端到端契约测试，验证 SERVFAIL、deadline cancellation 分别稳定归类为 failure/timeout，并与 matched resource revision 一同进入 `ResolveEvent`；不为已有组合契约新增平行 `ResolutionResult` 抽象。
-
-阶段 196 验证非法客户端 ECS 不会进入上游或 cache key：存在客户端地址时回退到脱敏网段，不存在时移除 ECS。阶段 197 在共享 wire 边界生成 header-only FORMERR/NOTIMP，UDP 回应后继续收包，TCP 回应后关闭当前 session；wire/UDP/TCP 定向测试分别 `7/5/12 passed`。
-
-阶段 199 完成 DNS 查询主链异步观测重构：`PolicyContext`/`RouteDecision` 分阶段、cache key v2 fast path、共享 response、异步 cache commit、统一完成事件和后台详情投影均已接入生产生命周期；本机 release loopback profile 覆盖 cache/hosts/upstream 与详情 off/on，但目标硬件高并发压力仍属于 v1 最终验收。
-
-当前实现进度：**90%**。

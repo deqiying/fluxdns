@@ -16,24 +16,29 @@
 | 项目工具链、构建物、缓存、命令调用和工具安装边界 | [`docs/rules/environment-usage.md`](docs/rules/environment-usage.md) |
 | 本地测试配置、运行时文件、DoH smoke test 和测试结果记录 | [`docs/rules/local-testing.md`](docs/rules/local-testing.md) |
 | 规范文档索引及新增规范的存放位置 | [`docs/rules/README.md`](docs/rules/README.md) |
-| 配置字段、路径解析、校验和迁移 | [`docs/backend/configuration-reference.md`](docs/backend/configuration-reference.md) |
-| 后端总体架构、运行时边界和跨模块契约 | [`docs/backend/architecture.md`](docs/backend/architecture.md) |
-| 后端模块实现 | 对应的 [`docs/backend/modules/`](docs/backend/modules/) 文档 |
-| 前端目录和前端工程约定 | [`frontend/README.md`](frontend/README.md) |
+| 活动需求、实施步骤和剩余验收 | [`docs/plans/README.md`](docs/plans/README.md) 及对应计划 |
+| 系统、管理面和前端架构 | [`docs/architecture/README.md`](docs/architecture/README.md) 及对应设计 |
+| 配置字段、路径解析、校验和迁移 | [`docs/implementation/configuration.md`](docs/implementation/configuration.md)，设计约束见 [`Config`](docs/architecture/backend/modules/config.md) |
+| 后端总体架构、运行时边界和跨模块契约 | [`docs/architecture/backend/overview.md`](docs/architecture/backend/overview.md) 及对应的 [`模块设计`](docs/architecture/backend/modules/README.md) |
+| 后端实现、调用链和能力边界 | [`docs/implementation/backend/README.md`](docs/implementation/backend/README.md) 及对应链路文档 |
+| 前端实现、页面和查询状态 | [`docs/implementation/frontend/README.md`](docs/implementation/frontend/README.md)；最短工程命令见 [`frontend/README.md`](frontend/README.md) |
+| 构建、开发进程、版本与发布脚本行为 | [`docs/implementation/delivery.md`](docs/implementation/delivery.md)，并遵守环境/本地测试规则 |
 
-`docs/README.md` 是文档总入口，`docs/rules/` 用于存放跨模块、可执行的项目规范。文档目录、职责和生命周期遵循 `docs/rules/documentation-maintenance.md`；新增规范文档时，应同步更新该目录的索引和本表，避免只新增文件而没有路由入口。
+`docs/README.md` 是文档总入口；`plans/` 管理活动变更，`architecture/` 保存接受的设计，`implementation/` 记录源码事实与证据，`rules/` 保存可执行项目规则，不是 DNS 规则集。文档目录、职责和生命周期遵循 `docs/rules/documentation-maintenance.md`；新增规则时同步索引和本表。
+
+方案执行完成后，按文档维护规则将新逻辑沉淀到对应 `docs/implementation/` 文档；若改变原有设计，同步更新对应 `docs/architecture/` 文档，然后在同一交付批次删除方案及索引项。不得保留已完成方案作为长期实现或设计来源。
 
 ## 本地文件与路径
 
 - 本地测试配置、规则、数据库、日志、临时证书及其他运行时文件统一放在仓库根目录的 `_fluxdns/`，不得散落到仓库根目录或源码目录；项目工具链缓存按 [`docs/rules/environment-usage.md`](docs/rules/environment-usage.md) 管理。
 - `_fluxdns/` 是本地专用目录，已加入 `.gitignore`，不得提交其中的个人配置或运行数据。
-- 配置路径遵循两级基准：相对 `work.path` 以启动配置文件所在目录为基准；其他配置中的相对路径以解析后的 `work.path` 为基准。具体规则以 `docs/backend/configuration-reference.md` 为准。
+- 配置路径遵循两级基准：相对 `work.path` 以启动配置文件所在目录为基准；其他配置中的相对路径以解析后的 `work.path` 为基准。具体规则以 `docs/implementation/configuration.md` 为准。
 
 ## 构建与验证
 
 - 后端命令从仓库根目录执行，并通过 `--manifest-path backend/Cargo.toml` 指定 Rust manifest；项目 Rust、Node、pnpm 工具链调用、构建物、缓存和安装边界遵循 [`docs/rules/environment-usage.md`](docs/rules/environment-usage.md)。
 - 本地测试配置、DoH 工具和测试结果记录遵循 [`docs/rules/local-testing.md`](docs/rules/local-testing.md)。构建物和依赖目录必须由 `.gitignore` 覆盖；提交前检查 `git status --short`，不要使用 `git add -f` 提交本地产物。
-- 文档或规则修改后至少检查 `git diff --check`，并按受影响范围执行最小充分验证；不要把未执行的测试描述为已通过。
+- 文档或规则修改后执行 `pwsh -File .agents/skills/project-doc-maintenance/scripts/check-docs.ps1` 和 `git diff --check`；检查器由该技能维护，并按改动范围追加最小充分验证，不维护独立测试版本。不要把未执行的测试描述为已通过。
 
 ## 代码注释
 

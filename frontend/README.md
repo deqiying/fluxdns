@@ -2,71 +2,38 @@
 
 > 文档状态：有效
 >
-> 适用范围：`frontend/` 工程入口、目录边界与前端开发导航
+> 适用范围：前端工程最短开发入口与导航
 
-`frontend/` 是 FluxDNS 前端代码的独立主目录。
-
-当前已实现 React + TypeScript + Vite 的只读 WebUI 工程、首次初始化、Cookie session、应用壳、页面路由、OpenAPI v1 类型和 MSW contract fixtures。后端 Management API 与 `webui-embed` 已接入；默认开发模式通过 Vite 将 `/api` 代理到 `127.0.0.1:8080`，也可以显式启用本地 mock transport 独立查看页面。
-
-架构边界和实施状态见[前端架构设计](../docs/frontend/architecture.md)，接口字段以 [`openapi/management-api-v1.yaml`](openapi/management-api-v1.yaml) 为权威。前端实现保持在本目录内，不把仓库根目录作为前端工程目录。
-
-## 环境和缓存
-
-仓库根 `mise.toml` 固定 Node.js 26.8.1 和 pnpm 11.25.0。依赖、构建物和缓存分别位于 `node_modules/`、`dist/`、`.cache/`，均已由仓库 `.gitignore` 忽略；详细约定见[项目环境使用规范](../docs/rules/environment-usage.md)。
-
-```powershell
-mise install
-Set-Location frontend
-node --version
-pnpm --version
-pnpm install --frozen-lockfile
-```
+React + TypeScript + Vite WebUI。实际认证、路由和页面接线见[前端实现](../docs/implementation/frontend/README.md)，设计见[前端架构](../docs/architecture/frontend.md)，字段以 [OpenAPI](openapi/management-api-v1.yaml) 为准。
 
 ## 开发
 
-连接本地 Management API：
+先按[环境规则](../docs/rules/environment-usage.md)确认项目 Node.js/pnpm 已就绪，不在本入口自动安装工具链。以下命令从仓库根目录进入前端后执行：
 
 ```powershell
+Set-Location frontend
+pnpm install --frozen-lockfile
 pnpm run dev
 ```
 
-使用受跟踪的 contract fixtures 独立预览；mock 仅在 Vite development mode 生效，生产构建不会复制 `mockServiceWorker.js`：
+开发代理指向本地 `127.0.0.1:8080` Management 服务；要使用契约 fixture，在启动 dev 前显式设置：
 
 ```powershell
 $env:VITE_USE_MOCK_API = "true"
 pnpm run dev
 ```
 
-开发代理固定将 `/api/*` 转发到 `http://127.0.0.1:8080`；浏览器代码始终使用同源相对路径，不读取任意生产 `baseURL`。
+该变量只用于 DEV，mock 不等价于真实后端验收。
 
 ## 生成与验证
 
-修改 OpenAPI schema 后重新生成 TypeScript 类型：
+在 `frontend/` 内，修改 OpenAPI 后生成类型，再执行所需检查：
 
 ```powershell
 pnpm run generate:api
-```
-
-提交前执行：
-
-```powershell
 pnpm run typecheck
 pnpm run test
 pnpm run build
 ```
 
-`pnpm run test` 使用 Node 26 时可能输出 Node experimental localStorage warning；测试环境会用内存 `Storage` polyfill 隔离该能力，并断言应用未写入 `localStorage` 或 `sessionStorage`。
-
-## 发布打包
-
-从仓库根目录执行打包脚本：
-
-```powershell
-pwsh -File script/package-embedded.ps1
-```
-
-脚本按三个阶段执行：先生成并保留 `frontend/dist/`，再使用默认 feature 生成 `backend/target/release/` 的后端独立构建物，最后只为当前 x86_64 平台构建 `webui-embed` binary，并复制为 `deploy/fluxdns-windows-x86_64.exe` 或 `deploy/fluxdns-linux-x86_64`。双平台发布由 Windows x86_64 与 Linux x86_64 runner 各执行一次，不要求单台开发机准备另一平台的 target/linker。
-
-`webui-embed` feature 与当前平台 target 的检查发生在前两阶段之后；检查或最终构建失败时，已经生成的前后端独立构建物仍会保留，但不会产生当前平台的新发布物。脚本不会移动或重定向 `frontend/dist/`、`backend/target/`，也不会自动安装 target/linker。发布二进制的启动、状态查看和停止入口及必填配置参数见[项目环境使用规范](../docs/rules/environment-usage.md)和[整合方案](../docs/plans/webui-v2-management-integration.md#103-开发服务管理脚本)。
-
-自动发布使用 [Release workflow](../.github/workflows/release.yml)：`main` 上的 `v*` tag 先经过前端测试/构建与 Rust 静态检查/测试，再由 Windows x86_64、Linux x86_64 和 macOS ARM64 runner 并行将同一份 `frontend/dist` 内嵌到三个发布二进制，最后统一创建带 SHA-256 校验文件的 GitHub Release。版本修改入口和 tag 推送顺序见[项目环境使用规范](../docs/rules/environment-usage.md)。
+生成类型不手工修改。上述为操作命令，不是通过记录。内嵌打包、显式配置启动、版本与自动发布的唯一说明见[交付实现](../docs/implementation/delivery.md)，剩余浏览器/原生平台验收见[v2 计划](../docs/plans/webui-v2-management-integration.md)。

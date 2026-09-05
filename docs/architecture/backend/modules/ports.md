@@ -2,19 +2,13 @@
 
 > 文档状态：有效
 >
-> 实现状态：已实现
->
 > 适用范围：DNS Core 与 adapter 之间的稳定接口、错误语义和 contract test
 >
-> 最后核对：2026-09-04
+> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
 >
 > 关联实现：`backend/src/ports/*`
 >
-> 关联文档：[后端架构](../architecture.md)
-
-## 当前实现边界
-
-v1 方案已完成，公共契约、UDP/TCP socket capability、TCP EOF/session、bounded byte-stream 和首轮 TLS accept 语义已实现；`ResolutionEventSink` 已作为 DNS producer 唯一的完成事件入口，Memory/Moka CacheStore 与内存/SQLite StorageBackend 已接入共享 conformance 测试，Management overview/statistics/queries 通过独立的只读 port 与 HTTP adapter 解耦。
+> 关联文档：[后端架构](../overview.md)
 
 ## 1. 目标
 
@@ -189,22 +183,3 @@ Ports 模块提供共享测试夹具，而不是只测试某个 adapter：
 - capturing observation sink 能验证 exactly-once、typed payload、共享 response identity 和 queue-full disposition。
 
 每个 adapter 只有通过相应 contract suite 才能接入 Runtime。
-
-## 12. 实现检查清单
-
-- [x] 定义 canonical port types 与稳定错误分类；
-- [x] 定义 inbound/response correlation 契约；
-- [x] 定义 exchange、cache、storage、telemetry 和 effects port；
-- [x] 定义统一 `ResolutionEventSink`、一次性 `ResolutionEnvelope` 与启动时冻结的详情 interest gate；
-- [x] 定义不可 clone 的 `CacheCommitCandidate`，以 RAII lease 覆盖成功、丢弃和取消终态；
-- [x] 定义 Management 只读查询 port 与安全投影；
-- [x] 建立 deadline/cancellation 统一辅助函数；
-- [x] 建立 fake 和 contract test kit；
-- [x] 检查公共接口未泄漏 adapter crate 类型。
-- [x] 定义 UDP/TCP 不透明 socket capability，统一传递 deadline/cancellation 并保留安全错误分类；TCP exact-read 明确 clean EOF/partial EOF。
-- [x] 增加 bounded TCP byte-stream capability，区分 data/clean EOF 并覆盖 deadline/cancellation。
-- [x] 增加脱敏 TLS server material、listener accept 和连接升级 capability，不向 Ports 泄漏 Rustls/Tokio 类型。
-
-阶段 1/3 证据：contract tests 覆盖 response exactly-once、encoder 进行中仍传播 client disconnect、accept-loop cancellation、exchange 三态、cache CAS/predicate、single-flight 单 leader/多 follower、waiter 独立取消与 producer abandon/drop 清理、可控 Clock、typed stats/metrics 与敏感字段拒绝；公共 API 未出现 `axum`、`reqwest`、`sqlx`、`moka`、socket 或 YAML DTO 类型。系统 socket bounded byte-stream 与 TLS loopback 握手测试保持通过。阶段 194/195 的共享 conformance 分别覆盖双 `StorageBackend` 与双 `CacheStore` adapter。阶段 199 新增 capturing observation sink，验证每个请求只发布一个 typed event 且 detail 与 transport 共享同一 response `Arc`；cache candidate 定向测试覆盖 commit 成功唤醒和 drop 释放 follower。阶段 200 将两个冻结耗时作为数值跨越 observation/storage port，后端全量 `599 passed、0 failed、1 ignored`。
-
-当前实现进度：**80%**。typed contract、fake kit、统一 resolution port、主要生产 adapter 接线，以及双 CacheStore/StorageBackend adapter 共享契约已有真实证据；完整 adapter 故障/conformance 矩阵尚未完成。

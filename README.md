@@ -2,51 +2,34 @@
 
 > 文档状态：有效
 >
-> 适用范围：FluxDNS 项目概览、仓库入口与面向使用者的状态摘要
+> 适用范围：项目概览、使用入口与仓库导航
 
-面向策略分流的 DNS 服务。
+面向策略分流的 DNS 服务，采用 Rust 后端与 React WebUI，可将管理界面内嵌为单个发布二进制。
 
-FluxDNS 计划为 DNS 请求提供基于域名、客户端和规则集的解析决策，并支持常见的 DNS 传输方式；主动上游健康检查属于后续版本能力。
+正式后端入口已连接 UDP/TCP/DoH、Policy、真实上游 connector、Moka/SQLite 缓存、资源刷新、聚合统计和可选解析详情。独立 Management HTTP 服务提供首次初始化、Cookie session、七个只读 API 与 SPA。上述为源码接线摘要，不表示所有平台、故障或浏览器场景已经验收。
 
-## 项目状态
+能力与证据见[当前实现](docs/implementation/README.md)，剩余差距见[活动计划](docs/plans/README.md)。DoT/DoQ、主动上游健康检查和通用配置编辑不属于当前已接线能力。
 
-后端总体架构和 12 个模块方案已经完成，核心配置、Runtime、DNS 数据面、Storage、Observability 与 WebUI Management Server 已按阶段实现；实现边界见[后端架构](docs/backend/architecture.md)和[模块文档索引](docs/backend/modules/README.md)。本轮 v2 已接入独立 Management HTTP listener、setup/login/session、配置事务恢复、内嵌 SPA、七个只读 API 及前端 `/initialize` 集成。Windows 当前平台打包和 release binary HTTP smoke、in-app browser DOM/Console smoke 已完成；Windows x86_64、Linux x86_64、macOS ARM64 自动发布流程已配置，真实 GitHub Actions 发布、浏览器 Network/Storage 观察和 Linux/macOS 原生发布验收仍需在对应环境执行。
+## 使用入口
 
-当前 `run` 已能通过真实系统 socket 启动 UDP/TCP/DoH plain HTTP 服务，支持内联和 Resource hosts 响应、同一 TCP 连接连续 frame、DoH GET/POST 和 Ctrl-C 优雅停机。DoH 首轮只接受 `tls.mode: external` 与 `client_ip.source: peer`，TLS terminate、forwarded header、PROXY protocol 会在 service 装配阶段明确拒绝，不会误接到 raw DNS/TCP。upstream 当前具备内联 hosts connector、纯选择器和 outcome/fallback 判定，但尚未执行真实出站 I/O 或接入 DNS Core。cache 当前具备内存 adapter 的 lookup、质量 CAS、失效、single-flight、响应准入/TTL、key builder、CacheFacade 和共享容量淘汰，optimistic refresh 与持久化仍未完成；policy 当前具备 client ID/CIDR、strategy、listener/DoH route、const/file resource loader 和 rule/hosts 请求级 plan 首轮组合；resource 当前具备 hosts/rule parser、受限 regex、const/file loader 和 snapshot/CAS；storage 当前具备内存 stats epoch/ledger；observability 当前具备有界 metrics/health registry。Runtime snapshot 资源原子接线、remote refresh、DoH outbound/bootstrap、Moka/SQLite persistence、详情/final writer 和完整 DNS Core→Policy→Cache→Upstream 管线仍未完成。SecretRef 实际值不会由普通 YAML load 读取，仅由后续 adapter 通过显式 accessor 请求。
+- 配置格式：[配置参考](docs/implementation/configuration.md) 与 [config-example.yaml](config-example.yaml)。示例值不能直接作为受保护的生产配置。
+- 构建、内嵌打包和显式配置启动：[交付实现](docs/implementation/delivery.md)。
+- 前端开发：[frontend/README.md](frontend/README.md)。
+- 工具来源和版本：[环境规则](docs/rules/environment-usage.md)；本地配置与运行数据：[本地测试规则](docs/rules/local-testing.md)。
+
+本地测试文件统一放在忽略的 `_fluxdns/`；凭据、真实账号/hash、数据库和日志不得提交。CLI 默认配置与开发脚本显式配置参数的区别见交付文档。
 
 ## 仓库布局
 
-- `backend/`：Rust 后端的独立主目录，包含 `Cargo.toml`、`Cargo.lock` 与 `src/`；
-- `frontend/`：React + TypeScript + Vite 的只读 WebUI 工程；支持真实 Management API 和 contract fixture 独立开发；
-- `VERSION`：项目当前发布版本的权威入口；`script/set-version.ps1` 负责同步根版本文件、Cargo package 与前端 package 版本，创建限定路径的版本提交和本地 tag；
-- `script/`：内嵌 WebUI 发布打包、版本同步与开发服务生命周期脚本；`package-embedded.ps1` 依次生成前端、后端独立构建物和当前平台的单个发布二进制，`set-version.ps1` 同步项目发布版本，`dev.ps1` 提供显式配置启动、状态查看和停止；
-- `.github/workflows/release.yml`：校验 `main` 上的 `v*` tag，通过共享静态检查与测试后并行构建 Windows x86_64、Linux x86_64 和 macOS ARM64 内嵌 WebUI 二进制，并发布 GitHub Release；
-- `deploy/`：用于存放打包脚本生成的发布二进制，目录及内容已加入 `.gitignore`；
-- `docs/`：仓库级技术文档，入口见 [docs/README.md](docs/README.md)；
-- `config-example.yaml`：仓库级配置示例；
-- `_fluxdns/`：本地测试配置、运行数据和日志目录，仅供本机使用，不提交到 Git。
+| 路径 | 职责 |
+| --- | --- |
+| `backend/` | Rust binary crate；从根目录用 `--manifest-path backend/Cargo.toml` 调用 |
+| `frontend/` | 独立 WebUI、OpenAPI、生成类型与契约 fixtures |
+| `docs/` | [plans、architecture、implementation、rules](docs/README.md) |
+| `script/` | 本地打包、版本与进程管理入口 |
+| `.agents/skills/project-doc-maintenance/` | 文档维护技能与检查器 |
+| `.github/workflows/release.yml` | tag 门禁与三平台发布流程 |
+| `VERSION` | 发布版本的唯一入口 |
+| `deploy/`、`_fluxdns/` | 忽略的发布物与本地运行数据 |
 
-仓库根目录不作为前端或后端的代码主目录。后端验证命令从根目录执行时使用 `--manifest-path backend/Cargo.toml`。
-
-## 目标
-
-- 提供传统 DNS 和 DNS over HTTPS（DoH）服务；DNS over TLS（DoT）和 DNS over QUIC（DoQ）是后续版本目标。
-- 根据域名、客户端与规则集，将请求分流到合适的解析策略和上游。
-- 支持本地与远程规则集、缓存、上游组与故障回退。
-- 保持配置清晰，并在策略或上游不可用时提供可诊断的失败信息。
-
-## 配置
-
-[config-example.yaml](config-example.yaml) 是配置草案。本地运行时应复制为 `_fluxdns/config.yaml` 后按测试环境调整；本地测试配置、规则文件、运行数据与日志放在 `_fluxdns/` 下，不提交到 Git。项目工具链缓存和构建物按[项目环境使用规范](docs/rules/environment-usage.md)管理。
-
-完整文档入口见 [docs/README.md](docs/README.md)。字段语义见 [docs/backend/configuration-reference.md](docs/backend/configuration-reference.md)，项目环境约定见 [docs/rules/environment-usage.md](docs/rules/environment-usage.md)，本地测试约定见 [docs/rules/local-testing.md](docs/rules/local-testing.md)，项目协作规则见 [AGENTS.md](AGENTS.md)，Rust 后端总体方案见 [docs/backend/architecture.md](docs/backend/architecture.md)，模块方案见 [docs/backend/modules/README.md](docs/backend/modules/README.md)。
-
-Config 阶段 2 记录起点为 69 tests；2026-09-04 后端全 feature 验证为 601 passed、0 failed、1 ignored，`clippy --all-targets --all-features -- -D warnings` 和 `fmt --check` 均已通过。真实 smoke 使用临时配置在 UDP `127.0.0.1:8353`、TCP `127.0.0.1:8354` 和 DoH `127.0.0.1:8355` 验证 hosts 响应、同连接双 frame、DoH GET/POST 的 DNS ID/RCODE 和 `SIGINT` 停机；端口仅用于本机验证，不改变配置契约。阶段 5 的 hosts/group/outcome 定向测试覆盖格式解析、DNS outcome、取消/超时、registry fail-closed、选择器并发 lease、terminal/fallback 判定和 connector 去重；阶段 6 的内存 cache 定向测试覆盖 fresh/stale/expiry、质量 CAS、显式失效、single-flight cancellation/abandon、shutdown、响应分类、TTL、stale 窗口、checksum、容量淘汰，key/facade 定向测试覆盖稳定编码和 lookup/write 状态；阶段 7 的 Resource/DNS/Policy 定向测试覆盖 hosts/rule parser、受限 regex、const/file loader、snapshot/CAS、CNAME/wildcard、listener hosts 优先、strategy rule 顺序、缺失资源和 file 接线。阶段 9 的 Storage/Observability 定向测试覆盖 UTC day、epoch swap、幂等 ledger、persistence gap、有界 metrics、health recovery、retry/gap 和 typed event 脱敏。阶段 2 的配置示例校验不访问远程资源、不执行资源首次 snapshot。
-
-配置中的示例地址、账号、密码和客户端标识仅用于说明格式，部署前必须替换为实际且受保护的配置。
-
-## 命名约定
-
-- 项目与仓库目录：`FluxDNS`
-- 二进制与服务标识：`fluxdns`
-- 项目描述：`A policy-driven DNS server`
+设计取舍见[架构入口](docs/architecture/README.md)，变更协作从 [AGENTS.md](AGENTS.md) 开始。项目名使用 `FluxDNS`，binary/服务标识使用 `fluxdns`。

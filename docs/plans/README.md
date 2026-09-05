@@ -1,20 +1,14 @@
-# FluxDNS 方案文档索引
+# 活动计划
 
 > 文档状态：有效
 >
-> 适用范围：跨领域、尚未完成实施的技术方案导航
+> 适用范围：尚需实施、决策或验收的独立变更
 
-本目录只保存需要在仓库内评审、且尚未完成实施的跨领域方案。方案完成后，应将稳定事实迁移到对应权威文档；没有继续保留价值的实施方案按[文档维护规范](../rules/documentation-maintenance.md)删除，不在本目录建立归档区。
-
-## 当前方案
-
-| 方案 | 文档状态 | 实现状态 | 范围 |
+| 计划 | 文档状态 | 计划状态 | 剩余范围 |
 | --- | --- | --- | --- |
-| [FluxDNS 文档结构与维护机制调整方案](documentation-structure-and-maintenance.md) | 草案 | 部分实现，规则目录已迁移，其余待评审 | plan、架构设计、当前实现的职责拆分与文档维护机制 |
-| [FluxDNS v2 前后端整合与 WebUI Management Server 实施方案](webui-v2-management-integration.md) | 有效 | 部分实现，浏览器与 Linux 环境验收待执行 | management server、`/api/v1/*`、WebUI 静态资源内嵌、首次用户初始化与配置持久化 |
+| [WebUI v2 集成验收](webui-v2-management-integration.md) | 有效 | 待验收 | 真实浏览器、Actions、原生平台与故障证据 |
+| [后端契约差距核对](backend-contract-gaps.md) | 草案 | 待评审 | 保留既有设计与源码差距，确认修复/验收范围 |
 
-## 维护要求
+计划以问题、相对当前基线的变化、步骤、风险和退出条件为中心。长期设计和实现分别放入 [architecture](../architecture/README.md) 与 [implementation](../implementation/README.md)，不保留已完成的阶段清单或总体进度文档。
 
-- 本目录不是架构和配置事实的长期权威来源；已实现行为以对应的 `docs/backend/`、`docs/frontend/` 和 `docs/rules/` 文档为准。
-- 方案状态、实现状态或适用范围变化时，应同步更新本索引。
-- 新增、迁移、废弃或删除方案时，遵循[文档维护规范](../rules/documentation-maintenance.md)。
+代码完成但必要验收未完成时保留“待验收”。方案执行完成后，新逻辑必须沉淀到对应 implementation；若改变原有设计，同步更新对应 architecture，然后删除方案文档与索引项，不建立 archive/history。取消方案只保留已实际发生的变更与有效决策，不把未实施内容写成现状。具体流程见[文档维护规则](../rules/documentation-maintenance.md)。

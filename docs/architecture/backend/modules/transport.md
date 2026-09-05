@@ -2,19 +2,13 @@
 
 > 文档状态：有效
 >
-> 实现状态：部分实现
->
 > 适用范围：DNS wire、UDP、TCP、DoH、TLS、client IP 恢复和响应编码
 >
-> 最后核对：2026-09-04
+> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
 >
 > 关联实现：`backend/src/transport/*`
 >
-> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [Ports 模块](ports.md) · [DNS Core 模块](dns-core.md)
-
-## 当前实现边界
-
-v1 方案已完成，已实现 wire、UDP/TCP adapter、TCP 持久 session、DoH plain HTTP adapter 与 Host cardinality 边界、forwarded header、PROXY v1/v2 首轮客户端地址恢复和 TLS terminate 首轮握手；TLS material 已有启动读取上限，坏 TLS 握手的连接级隔离已有真实 loopback 证据。DoH/TLS 资源限制、安全和协议测试尚未全部完成。
+> 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Ports 模块](ports.md) · [DNS Core 模块](dns-core.md)
 
 ## 1. 职责与边界
 
@@ -30,10 +24,10 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 | --- | --- |
 | `udp.rs` | datagram receive/send、EDNS 尺寸和截断 |
 | `tcp.rs` | accept、两字节 length framing、连接内请求 |
-| `doh.rs` | plain HTTP route、GET/POST、HTTP/DNS 错误分层、forwarded header/PROXY 首轮恢复和 session |
+| `doh.rs` | HTTP route、GET/POST、HTTP/DNS 错误分层、客户端身份恢复和 session |
 | `runtime/system_socket.rs` | 系统 TCP listener、Rustls `ServerConfig` 和 TLS stream upgrade |
 
-### 3.1 当前已实现：共享 DNS wire codec
+### 2.1 共享 DNS wire codec
 
 `wire.rs` 提供 transport 共用的 DNS message 边界：
 
@@ -44,7 +38,7 @@ Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。
 
 该 codec 只处理 DNS message 本身，不负责 UDP/TCP framing、策略、上游或 socket 生命周期。
 
-### 3.2 当前已实现：UDP/TCP 入站
+### 2.2 UDP/TCP 入站
 
 - UDP adapter 从 opaque socket 接收 datagram，构造统一 `RequestContext`，响应时恢复 DNS ID；完整响应超出客户端尺寸时按 RR 边界截断并设置 `TC`。
 - TCP adapter 使用两字节网络序 length framing；`TcpSession` 为每个 accepted connection 固定 `ConnectionId`，连续 frame 递增 `StreamId`，连接内按读取顺序完成 Core 和 response write。
@@ -120,7 +114,7 @@ TCP adapter：
 
 ## 7. DoH
 
-当前已实现 plain HTTP、TLS terminate 首轮握手和 forwarded header 首轮客户端地址恢复。DoH endpoint 只复用底层 TCP socket，不会被当作 raw DNS/TCP 服务；service 根据 `BindTransport::Doh` 构造独立 listener/session task，并由内部 `JoinSet` 管理连接；每个 listener 最多持有 1,024 个 active session，达到上限时暂停 accept；无连接的 accept deadline 只推进轮询。
+DoH endpoint 只复用底层 TCP socket，不能被当作 raw DNS/TCP 服务。typed binding 必须创建独立 listener/session task，并由 owner 持有连接；每个 listener 最多 1,024 个 active session，达到上限时暂停 accept；无连接的 accept deadline 只推进轮询。
 
 每条 route 同时支持 GET/POST：
 
@@ -140,7 +134,7 @@ TCP adapter：
 - 已形成 DNS transaction 后，NXDOMAIN/REFUSED/SERVFAIL 等使用 HTTP 2xx；
 - 成功响应 Content-Type 为 `application/dns-message`，Cache-Control 固定 `no-store`。
 
-首轮实现边界：`tls.mode=terminate` 在 endpoint 装配阶段加载 PEM/DER 证书链和私钥，system socket 显式使用 ring provider 完成 TLS 1.2/1.3 握手；`tls.mode=external` 不读取证书材料。启用 PROXY 时，DoH session 先以单字节有界读取消费可信前导，再升级同一连接到 TLS。TLS 握手失败只关闭当前 session，listener 继续接收后续连接。`client_ip.source=forwarded_header` 已支持三个配置 header、trusted proxy CIDR、右向左链解析及 missing/invalid 的 `reject`/`use_peer` 策略；`client_ip.source=proxy_protocol` 已支持可信 peer、PROXY v1/v2、TCP4/TCP6、分片读取和长度上限，未知 v2 TLV 在长度合法时跳过；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive，尚未实现 HTTP/2、证书热加载和完整握手/故障矩阵验收。
+TLS、forwarded header 与 PROXY 的约束见下节；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive。本设计不提供入站 HTTP/2 或证书热加载契约，实际支持和握手/故障验证边界见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)。
 
 route template 由 Config 提供的共享 compiler 校验和匹配。末尾 `/{client_id}` 同时接受去掉该段后的裸路径与带一个非空 client ID 的路径：裸路径不产生 `client_id`，尾斜杠和额外路径段不匹配；非末尾占位符仍要求对应段存在。Transport 对真实 HTTP path 只匹配一次，将配置模板写入稳定 `route_id` 并把可选值写入客户端身份；Policy 只按 route ID 查表，不重建或二次匹配路径。日志不记录实际路径参数或 query string。
 
@@ -155,7 +149,7 @@ route template 由 Config 提供的共享 compiler 校验和匹配。末尾 `/{c
 
 `tls.mode=external` 不读取证书材料。v1 不实现证书热加载；证书变化需要新 candidate/rebind。
 
-TLS handshake 受 endpoint request timeout 和 cancellation 约束，失败不进入 HTTP router且不影响 listener；真实 loopback 已验证坏握手后同一 listener 仍可完成下一条 TLS DoH 请求。v1 暂不实现独立 TLS timeout 或证书热加载。
+TLS handshake 受 endpoint request timeout 和 cancellation 约束，失败不进入 HTTP router 且只关闭当前 session；必须证明同一 listener 仍能服务后续连接。v1 不新增独立 TLS timeout 或证书热加载。
 
 ## 9. Client IP 恢复
 
@@ -212,7 +206,7 @@ encoder 由 request correlation 持有并只能调用一次：
 
 允许的低基数字段包括 listener、endpoint、route template、transport class、method、结果分类和 wire size bucket。
 
-## 12. 测试
+## 12. 契约验证要求
 
 - UDP/TCP canonical equivalence、ID 恢复和 UDP TC；
 - TCP length 分片、半包、EOF、idle timeout 和顺序响应；
@@ -226,30 +220,3 @@ encoder 由 request correlation 持有并只能调用一次：
 - wire codec 的 DNS ID 分离/恢复、canonicalization、输入输出尺寸上限和安全错误分类；
 - UDP/TCP 在 header 可靠时对非法 question/解码返回 FORMERR、对非 QUERY opcode 返回 NOTIMP；短 header 和需要 OPT 的 BADVERS 不猜测响应；
 - 所有 adapter 通过 Ports contract suite。
-
-## 13. 实现检查清单
-
-- [x] 实现 v1 固定 profile/capabilities 映射，并由 transport 模块统一提供；
-- [x] 实现 UDP、TCP adapter；
-- [x] 实现 DoH plain HTTP GET/POST；
-- [x] 按 HTTP/1.1 契约拒绝缺失、重复或非法 authority 的 `Host`，并保留 HTTP/1.0 兼容路径；
-- [x] 分离 DoH request-target、header fields 和 POST body 上限，确保完整 GET wire 不被 header 预算提前拒绝；
-- [x] 拒绝重复 `Content-Length`、`Transfer-Encoding`、超过 64 个 header 和超过 16 KiB header fields；
-- [x] 严格校验 request-line，并按 HTTP 媒体类型规则接受 `application/dns-message` 大小写变体；
-- [x] 实现 TLS terminate 首轮证书加载和握手；
-- [x] 实现 forwarded header 首轮 client IP 恢复；
-- [x] 实现 PROXY v1/v2 首轮 client IP 恢复；
-- [x] 实现 UDP/TCP response correlation/encoder；
-- [x] 建立共享 DNS wire decode/encode boundary 和尺寸/错误分类测试；
-- [x] 在不伪造 question 的前提下，为 UDP/TCP 具有可靠 header 的非法 query 返回 FORMERR/NOTIMP；
-- [x] 完成 UDP/TCP framing、尺寸、EOF、取消和顺序响应测试；
-- [x] 完成 UDP/TCP/plain DoH 的真实 loopback response contract，统一验证 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED、DNS ID 和 canonical response，并验证大响应下 UDP TC、TCP/DoH 完整响应；
-- [x] 验证 transport task 的三次 transient retry 上限和 `FatalEndpoint` 耗尽升级；
-- [x] 同一逻辑 listener 的单 endpoint 耗尽只降级，保留 sibling endpoint 继续服务；
-- [x] 限制每个 TCP/DoH listener 的 active session 数，达到边界时暂停 accept；
-- [x] 验证坏 TLS 握手只终止当前 DoH session，同一 listener 可继续服务后续正常连接；
-- [ ] 完成 DoH/TLS 资源限制、安全和协议测试。
-
-阶段证据：DoH codec/session、request-line/media type、Host authority/cardinality、request-target/header/body 独立上限、forwarded trust chain、PROXY v1/v2、TLS 材料加载、PROXY 前导后升级和客户端地址恢复定向测试通过；system socket Rustls loopback 验证成功握手、peer 保留、deadline 和 cancellation；阶段 164 新增真实 TLS loopback，验证坏握手后同一 listener 仍可接受正常 TLS DoH 请求；Service loopback 定向测试验证真实 UDP、DNS-over-TCP framing 和 plain DoH GET/POST 返回一致的 Positive/NODATA/NXDOMAIN/SERVFAIL/REFUSED canonical response 和各自 DNS ID，并验证 64 条 A 记录下 UDP 截断而 TCP/DoH GET/POST 保持完整；capability 定向测试验证 Datagram/Stream/Multiplexed 由 transport 模块稳定映射到 v1 cache compatibility；阶段 163–168 验证 transient retry 上限、endpoint 故障隔离、空闲 listener、session 上限和 framing 资源边界；阶段 190 后端全量 `555 passed、0 failed`。阶段 182 新增 Host authority 与严格十进制 `Content-Length` 校验；阶段 185 补齐 DER 证书/私钥直接加载证据；阶段 191 为证书链与私钥读取增加独立硬上限；阶段 193 对未实现的 `Expect` interim response 立即返回 417；阶段 197 为 UDP/TCP 安全 header 增加 FORMERR/NOTIMP 响应，wire/UDP/TCP 定向测试分别 `7/5/12 passed`。真实 plain HTTP smoke 已验证 GET/POST、DNS ID/RCODE 和 SIGINT 停机。未测试 nginx、特权端口或 HTTP/2。
-
-当前实现进度：**92%**。

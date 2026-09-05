@@ -2,23 +2,17 @@
 
 > 文档状态：有效
 >
-> 实现状态：已实现
->
 > 适用范围：配置加载、迁移、归一化、校验、引用图和安全快照
 >
-> 最后核对：2026-09-04
+> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
 >
 > 关联实现：`backend/src/config/*`
 >
-> 关联文档：[配置字段参考](../configuration-reference.md) · [后端架构](../architecture.md)
-
-## 当前实现边界
-
-v1 配置主链已实现；当前覆盖 strict DTO、相对路径、group member 缺省权重、dat selector canonicalization、DoH route 共享模板校验和安全配置快照。
+> 关联文档：[配置字段参考](../../../implementation/configuration.md) · [后端架构](../overview.md)
 
 ## 1. 职责
 
-Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 prepare 的 `ResolvedConfig`。当前实现覆盖配置边界本身；资源网络首次 snapshot、Runtime 接线和 App 启动闭环属于后续阶段。
+Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 prepare 的 `ResolvedConfig`。资源内容首次 snapshot 与 listener 装配属于 Resource/Runtime/Application，不是 YAML loader 的职责。
 
 它负责：
 
@@ -29,7 +23,7 @@ Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 pre
 - 生成配置摘要、来源信息和 migration report；
 - 安全地维护工作目录中的 `config.yaml` 快照。
 
-字段含义和默认值只在 [configuration-reference.md](../configuration-reference.md) 定义，本模块文档只说明实现方式。
+字段含义和默认值只在[配置参考](../../../implementation/configuration.md)定义，本模块文档说明解析、信任边界和写入不变量。
 
 ## 2. 内部结构
 
@@ -98,7 +92,7 @@ MigrationStep {
 - SecretRef source 归一化为 env/file 引用；实际值不会在普通 YAML load 中读取，只能由后续 adapter 通过 `ResolvedSecretRef::resolve` 或 `resolve_proxy_url` 等显式 accessor 请求，并包装为不可 Debug、不可 Serialize 的 secret 类型；
 - 每个生效值保留来源层级，便于错误和诊断。
 
-请求热路径禁止再次读取 YAML、解析 duration 或计算继承。阶段 2 不负责远程/本地资源内容的首次加载和 `ResourceSnapshot` 发布。
+请求热路径禁止再次读取 YAML、解析 duration 或计算继承。loader 不负责资源内容首次加载和 `ResourceSnapshot` 发布。
 
 ## 6. 校验顺序
 
@@ -178,7 +172,7 @@ Runtime 只能接收 `Arc<ResolvedConfig>` 和 prepare plans，不能接收原�
 
 SecretRef 的实际值、proxy credential、password hash 全文和证书私钥不出现在 Debug、Display、日志或 migration report 中。
 
-## 11. 测试
+## 11. 契约验证要求
 
 - 当前示例配置可离线严格解析并得到稳定 normalized snapshot；其中远程规则、本地资源和代理 SecretRef 只做配置级校验，不执行网络或资源首次 snapshot；
 - 未知字段、错误 variant 字段、空/`null`/缺失差异；
@@ -194,21 +188,25 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - 配置快照创建、相同内容 no-op、不同内容拒绝覆盖、并发 no-replace、symlink 防护、目录同步和临时文件不污染目标。
 - 路径解析矩阵：配置文件参数为绝对/相对路径，`work.path` 为绝对/`.`/含 `..` 的相对路径，项目路径为绝对/相对路径，以及无来源 bytes/string 加载时的错误边界。
 
-阶段 2 当前基线验证（测试数量可能随后续阶段增量）：
+实际加载与支持边界见[配置参考](../../../implementation/configuration.md)；本节是验证要求，不代表本次执行结果。
 
-- 阶段 2 记录起点为 69 tests；既有工作树基线为 99 tests。2026-09-01 新增路径解析测试后，需在可用 Rust 1.98 toolchain 下重新运行 `cargo test --manifest-path backend/Cargo.toml --locked -- --test-threads=1`；
-- `cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings`：通过；
-- `cargo fmt --manifest-path backend/Cargo.toml --all -- --check`：通过。
+## 12. 首用户配置写入
 
-## 12. 实现检查清单
+`ConfigStore` 只修改 CLI 源 YAML 的 `webui.users`，不序列化 ResolvedConfig；后者已丢失原始路径/SecretRef 表达。源文件之外的 `<work.path>/config.yaml` 是派生 snapshot，写入时必须同步，否则下次启动会被 no-replace 冲突保护拒绝。
 
-- [x] 建立 version 1 strict DTO；
-- [x] 完成 v1 空 migration registry/report；
-- [x] 完成 normalize 和来源跟踪，SecretRef 实际读取保留在显式 accessor/后续 adapter 边界；
-- [x] 完成分 pass 校验、typed reference graph、cycle 和 bind plan；
-- [x] 完成安全配置快照；
-- [x] 建立 strict example、migration、SecretRef、snapshot、继承和 bind matrix tests；property tests 与最终全量复核仍可在后续验证中补充；
-- [x] 生成独立 `ValidatedConfig`/`ResolvedConfig` 和 prepare 输入边界；Runtime 实际消费与 App 启动接线属于阶段 3。
-- [x] 将配置来源目录传入归一化流程，按两级基准支持相对 `work.path`，并补齐快照与路径矩阵测试。
+写入不变量：
 
-当前阶段 2 Config 实现进度：**100%**；相对 `work.path` 契约已纳入加载、归一化、快照和路径矩阵测试，新增测试尚待 Rust 1.98 环境复验。资源网络首次 snapshot、Runtime/App 启动闭环不计入本阶段。
+1. 获取进程内排他锁与跨进程 lock，竞争有界失败，不无限等待。
+2. 重读源配置和 snapshot，比较预期 fingerprint；拒绝覆盖外部编辑，确认 users 仍为空。
+3. 使用 source-preserving YAML adapter 只替换/新增 users；不支持的表达明确失败，不能退回整份 resolved 序列化。
+4. 候选重新走同一严格 parser/validator，验证用户与其他配置语义未被意外改变。
+5. 在目标同目录创建受限临时文件，write/flush/fsync；写入并同步 journal 后再替换两个目标。
+6. 只有文件提交完成才发布认证快照、内部 fingerprint 和新 session。
+
+两个目录的两次 rename 不是整体原子事务。journal 必须记录旧/新 fingerprint、目标与 staged candidate，启动加载前恢复：都已是新内容则清理；只完成一个目标则验证 staged 内容后补完；出现未知内容或损坏 journal 时 fail-closed，不猜测或覆盖外部修改。
+
+源与 snapshot 是同一文件时去重，不生成虚假的双文件事务。临时文件、journal 和最终文件不得放宽原权限；Unix/Windows 替换、目录同步、权限和 crash point 需要各自的验证证据。
+
+source-preserving 验收至少覆盖注释、键序、未知字段拒绝、块/流格式、引号、锚点/别名与不支持语法、SecretRef 原样保留、路径表达不变、双路径竞争、journal 损坏和中断恢复。无法安全修改的输入必须显式拒绝。
+
+真实入口、writer 与 loader 大小上限差异见[管理端实现](../../../implementation/backend/management.md)；完整故障验收继续由[v2 计划](../../../plans/webui-v2-management-integration.md)跟踪。

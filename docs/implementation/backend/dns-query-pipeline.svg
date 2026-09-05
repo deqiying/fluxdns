@@ -108,7 +108,7 @@
 
   <rect class="panel" x="32" y="612" width="1536" height="350"/>
   <text class="section" x="56" y="650">进程级 ResolutionRuntime：异步消费</text>
-  <text class="section-note" x="430" y="650">三条下游队列独立失败；任何消费者拥塞都不会反向阻塞 DNS 响应</text>
+  <text class="section-note" x="430" y="650">统计累加、缓存提交与详情投影三个消费分支；后台拥塞不反向阻塞 DNS 响应</text>
 
   <rect class="box-amber" x="618" y="696" width="364" height="78"/>
   <text class="box-title" x="800" y="725">Resolution ingress + dispatcher</text>

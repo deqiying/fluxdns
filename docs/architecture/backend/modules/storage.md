@@ -2,19 +2,13 @@
 
 > 文档状态：有效
 >
-> 实现状态：部分实现
->
 > 适用范围：SQLite、统计、解析记录、migration、容量边界和存储生命周期
 >
-> 最后核对：2026-09-04
+> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
 >
 > 关联实现：`backend/src/storage/*`、`backend/migrations/*`
 >
-> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [Ports](ports.md) · [Observability](observability.md) · [Cache](cache.md)
-
-## 当前实现边界
-
-v1 方案已完成，已实现纯内存统计 epoch/batch ledger、业务 schema v5 migration、SQLx SQLite storage adapter、Management 独立只读 adapter、`StatsPersistenceWorker`、authenticated 查询详情投影、cache upstream provenance、bounded answer 摘要、group member、matched rule/resource、RCODE、failure 与 cancellation 摘要列、唯一的 bounded SQLite detail writer channel、后台 typed detail projector、满批立即提交/低流量定时提交、详情丢弃分类计数、年龄/软阈值/硬上限策略、worker shutdown drain、`StorageRuntime`/`DnsService` 生产接线、pending 内存保护/fatal 边界、degraded/recovery 状态转换和 fault injection。DNS 请求不再直接调用 stats/detail sink；两者由进程级 resolution dispatcher 消费同一个完成事件。真实 OS disk-full 复现、migration 压力与故障测试和跨故障源 telemetry 闭环尚未完成。
+> 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Ports](ports.md) · [Observability](observability.md) · [Cache](cache.md)
 
 ## 1. 职责与边界
 
@@ -208,13 +202,11 @@ stats 优先级高于 detail。deadline 不足时先保证 ledger 一致性。
 - migration 失败保留原库并阻止启动；
 - backup/rollback CLI 属于后续独立契约。
 
-`backend/migrations/0001_storage.sql` 固定基础表；`0002_resolution_metadata.sql` 补充 group member 和 matched rule/resource；`0003_management_query_projection.sql` 补充 transport；`0004_query_record_observability.sql` 新增有效 client IP、`upstream_used_id`、answer count/truncated/JSON；`0005_dns_core_duration.sql` 新增 `dns_core_duration_micros`。`SqliteStorageBackend` 在 prepare 后逐版本自动执行 v1→v5 migration；schema v5 之前的主链耗时不回填，新列保持 `NULL`。v4 之前的请求详情同样不回填，并由 read model 标记为 `legacy_redacted`。新库走相同升级链。adapter 使用 WAL、`synchronous=NORMAL`、busy timeout 和单 operation lock；`InMemoryStorageBackend` 继续作为无外部依赖的 contract baseline。
+新库与旧库走同一前向升级链。新增可空详情字段不补造历史事实；历史脱敏记录由 read model 明确标为 legacy_redacted，缺失主链耗时保持 null。实际 migration 文件和 schema 版本见[后台服务实现](../../../implementation/backend/background-services.md)，不在设计中重复逐版本清单。
 
-SQLite adapter 的 `execute` 在一个事务内处理 stats batch 与 resolve detail batch：stats 通过 ledger payload hash 做幂等重试/冲突拒绝，详情先由 `ResolveDetailRecord` 校验 qname、配置 ID、IP 并裁剪 answer，再使用绑定参数落库；`Debug` 只输出存在性、长度和计数。`SqliteResolveDetailWriter` 是进入 SQLite detail worker 的唯一 bounded `mpsc`，支持 clone 后由 projector 非阻塞 `try_write`；worker 满批立即提交，失败时保留 pending，低流量尾批由 5 秒周期 flush。年龄淘汰、软阈值、硬上限、shutdown drain、健康恢复和 deadline 语义保持不变。
+只读 Management pool 必须在业务 migration 完成后创建，通过 ManagementStorageRead 使用固定 filter/sort 模板与参数绑定。返回 opaque ID，不暴露数据库 row ID、wire、request digest 或内部脱敏占位符。详情校验/裁剪在受限 projector/writer 边界完成，Debug 只展示存在性、长度和计数。
 
-`SqliteManagementReadModel` 在业务写库完成 migration 后以 read-only 模式另建小型 pool，通过 `ManagementStorageRead` 提供 overview、统计和 authenticated 解析详情投影。filter 与 sort 只从编译期固定模板选择，值全部绑定；v5 行返回 opaque ID、canonical qname、qtype、client name/IP、strategy、target/actual upstream、有界 answer 和主链耗时。v5 前记录的 `dns_core_duration_ms` 返回 `null`；v4 前仍可查询的脱敏行不会返回 `len:*`/`<present>`，而是以 `detail_status=legacy_redacted` 和 nullable 详情字段显式表示不可恢复。
-
-## 12. 测试
+## 12. 契约验证要求
 
 - 新库、旧版本库、重复启动 migration；
 - stats total/dimension upsert；
@@ -227,44 +219,3 @@ SQLite adapter 的 `execute` 在一个事务内处理 stats batch 与 resolve de
 - shutdown deadline 和 gap summary；
 - 业务 DB 与 cache DB 完全隔离。
 - Management read-only pool、分页/filter/sort、opaque ID 和敏感字段安全投影。
-
-## 13. 实现检查清单
-
-- [x] 建立 SQLx pool/migration 首轮 adapter；
-- [x] 建立业务 migration schema 与可替换 stats writer contract；
-- [x] 实现内存 stats counters/checkpoint/epoch/ledger 领域边界；
-- [x] 实现 stats SQLite schema/upsert/checkpoint writer 首轮 adapter；
-- [x] 实现唯一的 SQLite resolve-detail writer channel、后台投影与满批/周期 flush；
-- [x] 实现详情年龄淘汰、软阈值和硬上限首轮策略；
-- [x] 提供 stats/backend/detail 统一 flush/shutdown facade，并固定 stats 提交、detail drain 均在 backend shutdown 之前；
-- [x] 实现 StatsPersistenceWorker 的 epoch snapshot、BatchLedger 顺序提交和失败保留；
-- [x] 实现 `StorageRuntime`、Supervisor 注册和 DnsService 首轮生产装配；
-- [x] 配置 reload 后复用进程级 stats worker，并由新 Runtime core 延续统计累计；
-- [x] Supervisor fatal task 返回错误前执行 Storage 有界 shutdown，保留最终提交机会；
-- [x] 实现 stats pending batch/event 内存保护上限与 fatal 分类；
-- [x] 实现 SQLite 首轮 degraded/recovery 状态转换；
-- [x] 完成受 `cfg(test)` 限定的 Busy/DiskFull adapter fault 注入、Unavailable→Degraded 分类和成功恢复测试；
-- [x] 接入 Policy Core 的 source/cache/strategy/client bucket/selected upstream observation，并仅为实际 DNS response 聚合完整 RCODE；
-- [x] 由统一 resolution dispatcher 更新 stats 并独立分发详情；请求任务不再直接调用 storage sink；
-- [x] 将 qname digest、canonical qname、answer JSON 与字段裁剪移动到后台 detail projector；
-- [x] 以 resolution ingress gap 和 detail downstream failure 两组独立计数暴露 backpressure；
-- [x] 在 telemetry 关闭前发布 Storage `Stopping` health 和纯计数 shutdown 摘要；
-- [x] 通过 schema v2 拆分 `upstream_id`/`upstream_member_id`，并持久化 matched rule/resource 摘要；
-- [x] 通过 schema v3 增加 Management 查询的 transport 投影，并建立独立 read-only SQLite adapter；
-- [x] 通过 schema v4 保存 canonical qname、有效 client IP、真实配置 ID、cache producer upstream provenance 和有界 answer，并兼容读取历史脱敏行；
-- [x] 通过 schema v5 保存 DNS core 主链耗时，并对历史行返回 `null`；
-- [x] 写入 DNS header RCODE，并从既有 outcome/cancellation 契约生成低基数失败和取消摘要；
-- [x] 将命中资源的 typed `ResourceVersion` 传播至详情，并在 SQLite 边界写入 `epoch:revision`；
-- [x] 完成真实 SQLite 写锁 Busy 故障复现及恢复；
-- [x] 完成业务 SQLite 串行 operation lock 的 deadline 与 shutdown 超时测试；
-- [x] 完成连接池耗尽时完整数据库 future 的 deadline 测试；
-- [x] 以内存和 SQLite adapter 共用测试验证 `StorageBackend` 可观测行为契约；
-- [ ] 完成真实 OS disk-full 故障复现；
-- [x] 完成当前 stats/ledger、跨午夜、幂等重试和 persistence gap 测试；
-- [ ] 完成 migration、压力和故障测试。
-
-阶段证据：Storage focused tests 覆盖 migration schema 表/维度约束、stats batch 原子 upsert、幂等重试、payload 冲突和失败回滚；`storage::sqlite::tests` 覆盖新库升级链、历史详情不回填、stats batch 幂等重试/reopen、RCODE/failure/cancellation、resource revision、bounded writer、容量/年龄淘汰、事务回滚、health/shutdown 及 adapter fault 注入恢复；`storage::resolve_log::tests` 覆盖从 typed resolution event 的摘要转换和脱敏。阶段 199 新增 60 秒 timer 下“详情 batch 满即提交”的定向测试，1 秒内完成 SQLite commit；统一 pipeline 测试覆盖 stats 与 detail 下游隔离。阶段 200 补充 schema v5 主链耗时写入/读取、历史 `NULL` 和投影边界，后端全量 `599 passed、0 failed、1 ignored`。
-
-阶段 133 复用受监督 StorageRuntime 停机测试，验证 service drain 后可正常取得统一摘要；生产路径会在 Telemetry 关闭前输出 resolution/stats/backend/detail 的安全计数，不记录请求内容。阶段 140–148 拆分并落库策略目标、实际顶层成员、matched rule/resource、RCODE、failure/cancellation 和资源版本；阶段 159–161 验证 Runtime reload 复用进程级 stats worker，并在正常/fatal 停机前最终提交。阶段 199 删除旧的独立详情发布前端，统一由 resolution dispatcher 投影到 SQLite writer。
-
-当前实现进度：**99%**（已完成内存 stats/ledger、schema v5、SQLite stats/detail transaction、幂等提交、authenticated 查询详情、统一 resolution 事件消费、后台详情投影、唯一 bounded SQLite writer、跨 Runtime worker 复用、有序 shutdown、pending 内存保护、adapter-level Busy/DiskFull 注入、真实 SQLite Busy 复现和完整数据库 future deadline；真实 OS disk-full 和故障压力测试仍未完成）。

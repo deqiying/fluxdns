@@ -2,19 +2,13 @@
 
 > 文档状态：有效
 >
-> 实现状态：已实现
->
 > 适用范围：hosts/rule 解析、加载、snapshot、持久化和刷新发布
 >
-> 最后核对：2026-09-04
+> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
 >
 > 关联实现：`backend/src/resource/*`
 >
-> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [Policy](policy.md) · [Runtime](runtime.md) · [Upstream](upstream.md)
-
-## 当前实现边界
-
-v1 方案已完成，已实现 hosts/rule parser、immutable matcher、const/file loader、`geosite.dat` protobuf selector 解析、remote manifest 原子持久化与恢复、资源版本 CAS 及 scheduler/coordinator 的 Runtime-facing 编排边界；已实现一次性 `ResourceRefreshWorker` 的 remote fetch/parse/persist reservation 接线，并由 `ReqwestResourceFetcher` 提供 direct HTTP/HTTPS 与 SOCKS5/SOCKS5H 生产读取；async `PreparedRuntime` 已在 bind 前完成 remote rule-set restore-or-fetch、file hosts/rule-set snapshot 加载和 typed Policy 构造；`auto_update=true` 的 remote、file rule-set、file hosts 均由 service Supervisor 持有长期 refresh task，并在同一 ActiveRuntime 原子更新 Policy 与资源摘要；`ResourceRegistrySnapshot` 已提供按资源过滤的更高版本合并原语，`ResourceRefreshRuntime` 现可迁移已发布 registry 版本和稳定 schedule/backoff 状态，供配置候选 Runtime 合并使用；service reload 现按资源 ID 增量复用未变化 worker、取消移除 worker；资源内容刷新不创建新 Runtime 或重绑 listener。
+> 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Policy](policy.md) · [Runtime](runtime.md) · [Upstream](upstream.md)
 
 ## 1. 职责
 
@@ -50,7 +44,7 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 
 顶层 ResourceRegistrySnapshot 是资源名到 `Arc<ResourceSnapshot>` 的不可变 map。
 
-候选 Runtime 以自身 registry 为基准合并旧 Runtime 的资源结果时，只允许定义兼容的资源进入合并集合，并且仅接收严格更高的 `ResourceVersion`；同版本内容保留候选自身的值，避免旧 Runtime 覆盖新配置候选。该原语只处理 immutable registry，不负责 Policy、worker schedule 或 Runtime metadata 的同步，后续由 Runtime prepare 边界统一接线。
+候选 Runtime 以自身 registry 为基准合并旧 Runtime 的资源结果时，只允许定义兼容的资源进入合并集合，并且仅接收严格更高的 `ResourceVersion`；同版本内容保留候选自身的值，避免旧 Runtime 覆盖新配置候选。该原语只处理 immutable registry；Policy、worker schedule 与 Runtime metadata 的同步由 Runtime 边界统一协调。
 
 ## 3. 加载流水线
 
@@ -107,7 +101,7 @@ v1 本地回答支持 A、AAAA 和 CNAME：
 
 ## 6. Rule 格式
 
-当前实现覆盖 JSON 与 Clash 的 exact/suffix/keyword/受限 regex matcher，并解析 V2Ray `geosite.dat` protobuf 的 selector map。`Full`/`RootDomain`/`Regex`/`Plain` 四种 domain type 分别映射到 exact/suffix/受限 regex/keyword matcher；未知 protobuf 字段按 wire type 跳过，输入、selector 和规则数量均受有界限制。当前规则 parser/compiler 标识为 `rule-index-v2`。
+规则格式包括 JSON、Clash 与 V2Ray `geosite.dat` protobuf selector map。`Full`/`RootDomain`/`Regex`/`Plain` 分别映射 exact/suffix/受限 regex/keyword；未知 protobuf 字段按 wire type 跳过，输入、selector 和规则数量必须有界。parser/compiler 标识用于持久化兼容性检查，实际版本以[配置参考](../../../implementation/configuration.md)和源码为准。
 
 ### JSON
 
@@ -167,7 +161,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 
 失败退避指数增长并封顶 5 分钟。连续三次计划刷新失败或超过 `3 × update_interval` 无成功时标记 stale，但继续使用旧 snapshot。
 
-当前已实现 `ResourceRefreshRuntime`：它为 registry 中的资源建立 schedule，将 due 检查与 `ResourceRefreshCoordinator` 的 per-resource single-flight、epoch reservation、CAS publish、failure backoff、cancel 和 shutdown 组合起来。该 facade 不执行网络、磁盘或 parser I/O；remote `ResourceRefreshWorker` 在 reservation 生命周期内调用 `ResourceFetcher`，完成 bounded fetch/parse/persist、epoch 重绑定和 CAS publish；file hosts/rule-set worker 复用同一 reservation 边界执行稳定读取、hash、解析和 CAS publish。生产 `ReqwestResourceFetcher` 在 prepare 边界装配 direct HTTP/HTTPS 与配置驱动 SOCKS5/SOCKS5H client，固定 `no_proxy`、禁止重定向、响应体上限、deadline/cancellation 和安全 URL 边界。async `PreparedRuntime` 首次构造会为 file 资源加载 typed snapshot，为 remote rule-set 恢复已校验的 content/manifest pair，恢复失败后才执行本次 fetch，并把 compiled snapshot 交给 Policy 初始索引；service 为三类 `auto_update=true` 资源注册受 Supervisor 持有的长期 task，按 due/backoff 触发 worker，并把成功候选提交到同一 ActiveRuntime 的 Policy CAS 和 Runtime 元数据 CAS。资源内容更新不创建 Runtime candidate；跨配置候选合并和长期压力验收由 Runtime 边界负责。
+刷新协调器只组合 schedule、reservation、per-resource single-flight、epoch/CAS、backoff、cancel 与 shutdown，不自己执行 I/O。worker 在 reservation 内完成有界读取/抓取、hash、parse/persist，再发布候选。资源内容更新不创建完整 Runtime candidate，Policy 与 metadata 应一起保持版本一致。真实 fetcher、auto-update task 与 prepare 接线见[后台服务实现](../../../implementation/backend/background-services.md)。
 
 ## 10. 原子落盘
 
@@ -202,24 +196,3 @@ content 与 manifest 各自原子替换，但不构成跨文件事务；恢复�
 - epoch 乱序、并发不同资源 CAS 不丢更新；
 - 原子落盘中断恢复；
 - 刷新不触发全局 cache invalidation。
-
-## 13. 实现检查清单
-
-- [x] 实现 hosts/rule parser；
-- [x] 实现 canonical matcher/index；
-- [x] 实现 const/file loader；
-- [x] 实现资源版本 snapshot/CAS publish；
-- [x] 实现 remote loader、snapshot manifest、原子落盘与 content/manifest 恢复校验；
-- [x] 实现纯逻辑 refresh/single-flight scheduler/stale policy 与 Runtime-facing 编排边界；
-- [x] 接入一次性 `ResourceRefreshWorker`，完成 remote fetch/parse/persist、epoch 绑定和 CAS publish；
-- [x] 接入生产 `ReqwestResourceFetcher`，验证 direct HTTP、HTTPS TLS、SOCKS5H、body limit、取消和安全错误边界；
-- [x] 在 async `PreparedRuntime` 中接入 remote rule-set 首次 restore-or-fetch、解析和原子持久化，并在 bind 前构造 compiled Policy snapshot；
-- [x] 接入 Runtime supervisor 的长期 remote 调度和资源 I/O task；
-- [x] 接入当前 ActiveRuntime 的 file/hosts 长期刷新、Policy live publish 和 Runtime 元数据 CAS；
-- [x] 接入候选 Runtime 的兼容 snapshot/registry 合并和稳定 worker schedule 迁移，并与 revision CAS 绑定；
-- [x] 完成当前解析、安全边界、文件稳定读取和并发 CAS 测试；
-- [x] 完成当前 MVP 范围的 remote 恢复、原子落盘、`dat` selector 和长期刷新定向测试；宕机中断与长期压力验收后置。
-
-阶段证据：hosts/rule focused tests、loader const/file/symlink/UTF-8/size/`dat` tests、snapshot epoch/CAS tests、remote fetch/restore/mismatch tests 和 DNS/Policy 资源接线 tests 均通过；`resource::fetcher::tests` 覆盖 direct HTTP、HTTPS TLS handshake、SOCKS5H proxy、body limit、非 2xx、取消、未知 proxy、SecretRef 脱敏和 prepare 错误；reqwest 与项目 `ring` provider 的初始化顺序已统一；async PreparedRuntime restore/fetch 与 file snapshot 测试验证 bind 前资源准备，ResourceRefreshWorker focused tests 验证 remote/file worker 的 due/reservation、CAS publish、backoff、cancel 和 shutdown；service 已为 remote/file rule-set/hosts 注册长期 refresh task，成功候选经 Policy CAS 和 Runtime metadata CAS 发布；跨 Runtime 合并测试验证更高资源版本、compiled Policy、metadata 和 worker schedule 状态迁移，service 增量测试验证 reload 时 unchanged worker 复用与 removed worker 取消；Policy 定向测试验证命中结果携带当前 hosts/rule-set 的 typed `ResourceVersion`。阶段 181 复核 Resource 56 项及候选合并、运行中刷新、reload worker 生命周期 4 项定向测试，共 `60 passed、0 failed`；阶段 198 增加 `geosite.dat` protobuf selector、四类 domain type、边界/远程恢复和 PreparedRuntime 接线测试；后续仅剩长期压力与宕机中断验收。
-
-当前实现进度：**96%**。

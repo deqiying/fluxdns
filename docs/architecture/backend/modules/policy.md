@@ -2,19 +2,13 @@
 
 > 文档状态：有效
 >
-> 实现状态：已实现
->
 > 适用范围：client、strategy、rule、resource matcher、`PolicyContext` 与 `RouteDecision`
 >
-> 最后核对：2026-09-04
+> 最后评审：待核对（本次仅分类与边界复核，不等同完整契约重审）
 >
 > 关联实现：`backend/src/policy/*`
 >
-> 关联文档：[后端架构](../architecture.md) · [配置字段参考](../configuration-reference.md) · [DNS Core](dns-core.md) · [Resource](resource.md) · [Upstream](upstream.md)
-
-## 当前实现边界
-
-v1 主链已完成，client/strategy/route immutable index、resource snapshot、`PolicyContext`/`RouteDecision` 两阶段决策、cache/TTL/ECS、fast cache 语义 fingerprint、direct/group upstream、late candidate、`geosite.dat` selector 和配置 reload 均已接线并有跨 transport/cross-adapter 证据。
+> 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [DNS Core](dns-core.md) · [Resource](resource.md) · [Upstream](upstream.md)
 
 ## 1. 职责
 
@@ -58,19 +52,9 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 
 编译发生在 prepare/resource update，不在请求时解析字符串引用。
 
-当前首轮实现已经提供：
+索引只持有已解析 typed 值。client、strategy、route 分别编译，重复名称、空 matcher 和引用错误在构造时拒绝。resource prepare 交付已编译 snapshot；同步测试构造器不等同完整资源准备入口。
 
-- `ClientIndex`：exact client ID 优先，未命中时按 IPv4/IPv6 最长 CIDR 前缀匹配，最后进入 `Unknown`；重复 ID/CIDR 和空规则在构建时拒绝；
-- `StrategyIndex`：将已解析策略编译为不可变 `BTreeMap<ConfigId, Arc<ResolvedStrategy>>`，重复策略 ID 在构建时拒绝；
-- `RouteIndex`：编译 stream listener，并将 DoH 配置模板形成的 typed route ID 映射到基础 strategy；真实 HTTP path 与可选 client ID 只在 Transport 匹配一次，Policy 不重建路径；
-- `PolicyIndex::prepare_context`：组合 client strategy override、cache tri-state、TTL/ECS effective value 和 namespace，输出不执行逐规则 matcher 的不可变 `PolicyContext`；
-- `PolicyIndex::evaluate_route`：在 fast miss 后执行 listener hosts 与 strategy rules，输出 local answer 或 upstream target、matched resource 和最终 ECS；兼容入口 `evaluate` 组合这两个阶段；
-- `PolicyIndex::from_config`：通过 Resource loader 编译 const/file hosts 与 JSON/Clash/`geosite.dat` rule-set；remote 资源和缺失资源在普通同步构造边界返回显式错误；`from_config_with_resource_indexes` 可消费 prepare 阶段已编译的 file/remote snapshot；`dat` selector 在 prepare 阶段校验存在，运行时只读取已编译 selector matcher；
-- rule/hosts 执行：固定 listener hosts → strategy rule 顺序，输出不含原文的 matched-rule 摘要，并覆盖 local hosts、rule-set upstream 与 rule ECS；
-- `PolicyDnsCore::UpstreamRuntime`：direct hosts/plain HTTP DoH connector 统一由 `UpstreamRegistry` 构造，Unsupported DoH 能力在 prepare 边界向上游构建错误传播；
-- `PolicyDnsCore::resolve_with_completion`：先根据 `PolicyContext` 尝试 fast cache，miss 后再执行 `RouteDecision`；输出配置 client bucket、策略目标 upstream/group、实际顶层 group member、matched rule/resource、strategy/source/cache lookup 元数据和可选 cache commit candidate，不泄露原始 client ID/IP、matcher 或规则文本；
-- `PolicyState`：预计算不含观测/管理配置的 policy semantics base，并在资源 CAS 发布时同步更新 matcher 与 hosts/rule content hash；请求级 SHA-256 fingerprint 只编码 typed 稳定字段；
-- 这些索引只持有已解析 typed 值，不在请求路径读取 YAML 或执行网络 I/O。
+PolicyContext 在逐规则 matcher 前产生 cache/TTL/ECS/namespace；fast miss 后 RouteDecision 才执行 listener hosts 与有序 strategy rule。规则结果只输出 typed target、resource/version 和安全摘要。PolicyState 预计算不含观测/管理配置的语义基底，资源 CAS 同步更新 matcher 与 content hash，请求 fingerprint 只编码稳定字段。具体 core/registry 构造器见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)。
 
 ## 4. 域名规范化
 
@@ -185,7 +169,7 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - regex 或 matcher 不得在热路径产生 panic；
 - client 信息缺失不是错误，进入 `unknown`。
 
-## 12. 测试
+## 12. 契约验证要求
 
 - ID 优先于 CIDR、IPv4/IPv6 最长前缀、unknown；
 - 冲突在 prepare 阶段拒绝；
@@ -199,34 +183,3 @@ PolicyIndex 与 ResourceRegistrySnapshot 的组合由 Runtime 构建并原子发
 - policy/request/target/ECS fingerprint 的稳定性、模式隔离和敏感字段排除；
 - 同一 snapshot 下决策确定性；
 - 资源 swap 后 matcher 与 hash 同步切换，新旧请求各自保持一致。
-
-## 13. 实现检查清单
-
-- [x] 实现 client ID/CIDR 索引；
-- [x] 建立 strategy immutable lookup index；
-- [x] 实现 strategy/route 编译；
-- [x] 实现 rule/hosts/resource matcher 编排；
-- [x] 实现覆盖矩阵与 `PolicyContext`/`RouteDecision` 两阶段决策（cache/TTL/ECS/client override）；
-- [x] 在 `CacheDecision` 中保留所选缓存池的 optimistic answer TTL/max-age，供 stale response 使用；
-- [x] 客户端未显式配置 TTL override 时继承实际选中的 strategy，并在 Policy Core 返回前应用；
-- [x] 按 rule/strategy/client/upstream/global 来源选择最终 ECS；未显式覆盖的 client 不再遮蔽所选 strategy，显式 direct upstream 与 group member ECS 已接入真实 query；成员 ECS group 当前安全绕过缓存；
-- [x] 将 direct hosts/plain HTTP DoH connector 通过 `UpstreamRegistry` 接入 `PolicyDnsCore`；
-- [x] 提供 protocol-neutral registry 注入入口并验证 DoH request path；
-- [x] 接入 Runtime snapshot 原子发布；
-- [x] 完成冲突、优先级、未知资源和 file loader 测试；
-- [x] 完成 Policy compiled resource snapshot 的版本化 atomic swap，并支持 supplied compiled file/remote hosts/rule-set snapshot 的初始构造及跨 transport contract；
-- [x] 提供 client bucket/strategy/source/cache/selected upstream 低基数 observation；`upstream_id`、实际顶层 `upstream_member_id` 和 matched rule/resource 摘要已拆分。
-- [x] `PolicyLateResultSink` 按当前 `CacheEntry.quality` 使用 `CacheCondition::Version` 更新候选，允许更优 late Positive 替换早期 Negative，并拒绝同级 Negative/Positive 或更低 Failure 覆盖；hosts/DoH cross-adapter 并发候选已有回归；
-- [x] 实现 `dat selector` 的 V2Ray `GeoSiteList` protobuf 资源解析和 selector matcher；复用现有代码，不新增二进制格式依赖。
-- [x] 实现 cache key v2 所需的 policy/request/target/ECS fingerprint，排除观测/管理配置，并在资源发布时原子更新 content hash；
-- [x] 对成员特有 ECS 等不安全路径禁用 fast lookup，并继续绕过 response cache。
-
-阶段证据：`policy::client::tests` 与 `policy::plan::tests` 覆盖实际命中身份摘要、client pool namespace、TTL/strategy 继承、cache 显式启停/回退、ECS 优先级矩阵、两阶段决策和 `dat` selector；`dns::policy::tests` 当前 37 项通过，覆盖 strategy/client cache、身份隔离、hosts/rule-set/group/DoH、optimistic refresh/late sink、TTL、ECS、SQLite cache 恢复、语义摘要的 include/exclude 边界和 hosts refresh 后 fast key 切换；Service 的真实 UDP/TCP/plain DoH 成功与错误契约测试均通过。阶段 199 后端全量 `598 passed、0 failed、1 ignored`。
-
-阶段 178 复核 Policy plan 10 项、Policy Core 35 项及 UDP/TCP/plain DoH 两条真实契约，确认原文中的 cross-adapter 与跨 transport 缺口已闭合；未执行全量后端测试。
-
-阶段 198 增加 `geosite.dat` V2Ray protobuf selector 解析、`Plain`/`Regex`/`RootDomain`/`Full` matcher、重复/截断/限额错误，以及 Policy/PreparedRuntime 的选择和 bind 前编译证据。
-
-阶段 199 将单体 `ResolutionPlan` 热路径拆为 `PolicyContext`/`RouteDecision`，并以 typed SHA-256 semantics/resource fingerprint 支撑 cache key v2 fast lookup；资源刷新不清空全局 cache，但后续请求不会命中旧语义 key。
-
-当前实现进度：**95%**（v1 配置驱动主链、两阶段 Policy、资源 live snapshot、cache/TTL/ECS、观测、协议组合和 `dat selector` 已完成；剩余为长期压力与最终验收矩阵）。

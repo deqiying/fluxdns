@@ -2,15 +2,29 @@
 
 > 文档状态：有效
 >
-> 实现状态：部分实现
->
 > 适用范围：本文与当前模板同步，描述配置契约、校验和已实现运行时边界；未定义行为不应视为已支持。
 >
-> 最后核对：2026-09-04
+> 最后核对：2026-09-05（加载入口、路径与运行支持边界；字段明细沿用原文 2026-09-04 记录，本轮未逐字段复验）
+>
+> 核对基线：`0f18d5b2ddf67625121fd7e0662e21723362565f`
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
-> 关联文档：[后端架构](architecture.md)
+> 关联文档：[后端架构](../architecture/backend/overview.md)
+
+## 加载与支持边界
+
+正式入口是 [`app::run_command`](../../backend/src/app.rs) -> [`ConfigLoader::load_from_path`](../../backend/src/config/load.rs) -> [model](../../backend/src/config/model.rs) / [migrate](../../backend/src/config/migrate.rs) / [resolve](../../backend/src/config/resolve.rs) / [validate](../../backend/src/config/validate.rs)。普通 loader 不读取 SecretRef 实际值；run 在 prepare 前执行 accessor 校验，validate 不写 snapshot、不做资源/数据库/网络可用性检查。
+
+| 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
+| --- | --- | --- | --- | --- |
+| 严格配置与路径 | ConfigLoader、ResolvedConfig、validate | run/validate 共用加载 | 本轮静态追踪，字段表继承来源如头部所示 | 未运行配置矩阵或重新核对每一字段 |
+| 资源与缓存 | async PreparedRuntime、PolicyDnsCore | run 加载后 prepare | 本轮核对生产接线 | 能解析不表示网络/文件/SQLite 已成功打开 |
+| WebUI | webui model + ManagementService | enable 时创建服务 | 本轮静态 | origin、DB 与 bind 必须可用；默认 binary 可仅提供 API，SPA 需要 embed feature，详见[管理端](backend/management.md) |
+| 首用户写回 | ConfigStore + source-preserving editor | setup，run 前恢复 journal | 本轮静态 | loader 为 8 MiB，writer 为 4 MiB；可加载不等于可写回 |
+| 热重载 | `process_owned_reload_change` | service-aware watcher | 本轮核对 guard | database、logs、webui enable/address/port/public_origin、dns.resolve_log 改变需重启；users 可动态更新 |
+
+本轮未执行 Cargo 或配置 validate。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)。规范中的目标要求与代码冲突时，按[差距计划](../plans/backend-contract-gaps.md)处理，不仅修改字段说明来掩盖实现缺口。
 
 ## 1. 配置模型概览
 
@@ -57,7 +71,7 @@ listener
 
 启动时若配置文件所在目录不是 `resolved_work_path`，程序将配置复制到 `<resolved_work_path>/config.yaml`，固定文件名为 `config.yaml`。该文件是工作目录中的配置快照；启动流程负责创建工作目录和所需父目录。
 
-配置副本按 [Config 模块方案](modules/config.md) 原子创建：目标不存在时在同目录写临时文件并以 no-replace 方式发布，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
+配置副本按 [Config 模块方案](../architecture/backend/modules/config.md) 原子创建：目标不存在时在同目录写临时文件并以 no-replace 方式发布，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
 
 ### 2.3 命名与引用
 
@@ -443,7 +457,7 @@ Transport 只对实际 HTTP path 匹配一次，并把配置模板作为稳定 r
 | `upstreams[].name` / `fallbacks[].name` | string | 必填 | 成员上游名称。 |
 | `upstreams[].weight` / `fallbacks[].weight` | positive integer | 可选，默认 `1` | 正整数权重；省略后在 DTO 边界归一化为 `1`。 |
 
-组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。精确算法见 [Upstream 模块方案](modules/upstream.md)：`round-robin` 使用 smooth weighted round-robin，`load-balance` 使用按 weight 归一化的 least-in-flight，`failover` 严格按配置顺序且 weight 只能省略或显式设为 `1`。三种模式都只在 transport failure 时尝试其他成员，任意终态 DNS 响应都会结束当前组；主组完全没有终态响应时才进入 fallback。
+组成员使用对象而不是 `name:weight` 字符串，避免字符串解析歧义。精确算法见 [Upstream 模块方案](../architecture/backend/modules/upstream.md)：`round-robin` 使用 smooth weighted round-robin，`load-balance` 使用按 weight 归一化的 least-in-flight，`failover` 严格按配置顺序且 weight 只能省略或显式设为 `1`。三种模式都只在 transport failure 时尝试其他成员，任意终态 DNS 响应都会结束当前组；主组完全没有终态响应时才进入 fallback。
 
 `parallel` 的 v1 语义固定如下：
 
@@ -603,7 +617,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 1. `dot`/`doq` listener 的字段、TLS/QUIC 材料来源和协议特有校验。
 2. 主动上游健康检查、熔断器和持久健康分数配置。
 3. 远程规则的 expected checksum、版本锁定和签名验证字段；v1 只记录内部 content hash/source fingerprint。
-4. 未来配置版本及 SQLite schema v5 之后的兼容窗口和 migration SQL；当前业务库升级链见 [Storage 模块](modules/storage.md)。
+4. 未来配置版本及 SQLite schema v5 之后的兼容窗口和 migration SQL；当前业务库升级链见 [Storage 模块](../architecture/backend/modules/storage.md)。
 5. WebUI 配置写操作、缓存清理、权限分级和更长期的历史统计保留策略。
 
 ## 18. 协议依据

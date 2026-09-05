@@ -36,21 +36,11 @@ Copy-Item config-example.yaml _fluxdns/config.yaml
 2. 相对 `work.path` 再相对于 `config_dir` 解析，得到 `resolved_work_path`。
 3. 其他配置中的相对路径统一相对于 `resolved_work_path` 解析。
 
-因此，配置文件为 `_fluxdns/config.yaml` 且 `work.path: ./` 时，`resolved_work_path` 是 `_fluxdns`；`database.path: ./data/fluxdns.sqlite3` 的实际路径是 `_fluxdns/data/fluxdns.sqlite3`，而不是进程当前目录下的 `data/fluxdns.sqlite3`。完整字段规则见 [配置参考](../backend/configuration-reference.md)。
+因此，配置文件为 `_fluxdns/config.yaml` 且 `work.path: ./` 时，`resolved_work_path` 是 `_fluxdns`；`database.path: ./data/fluxdns.sqlite3` 的实际路径是 `_fluxdns/data/fluxdns.sqlite3`，而不是进程当前目录下的 `data/fluxdns.sqlite3`。完整字段规则见[配置参考](../implementation/configuration.md)。
 
-`_fluxdns/config.yaml` 只是本地测试示例，不是发布启动脚本的默认路径；使用 `script/dev.ps1 start` 时必须通过 `-ConfigPath` 显式传入实际配置文件。`script/dev.ps1 status` 可查看由脚本管理的进程是否仍在运行，`script/dev.ps1 stop` 可停止该进程；脚本将 PID 和进程身份信息记录在 `_fluxdns/dev-process.json`，标准输出和标准错误分别记录到 `_fluxdns/logs/dev.stdout.log` 与 `_fluxdns/logs/dev.stderr.log`。
+`_fluxdns/config.yaml` 只是本地测试示例，不是启动脚本默认路径。测试内嵌 binary 时必须显式传入配置，启动/status/stop、状态码和 PID 身份保护的完整说明见[交付实现](../implementation/delivery.md)。
 
-脚本状态码约定为：`status` 返回 `0` 表示服务运行中，返回 `3` 表示未运行；参数错误、状态文件损坏或无法安全核验进程时返回非零错误码。
-
-测试内嵌 WebUI 的发布二进制时，如测试场景需要且 `deploy/` 中已存在当前平台的构建物，可以从仓库根目录使用 `_fluxdns/config.yaml` 启动：
-
-```powershell
-pwsh -File script/dev.ps1 start -ConfigPath ./_fluxdns/config.yaml
-pwsh -File script/dev.ps1 status
-pwsh -File script/dev.ps1 stop
-```
-
-`_fluxdns/config.yaml` 是本地测试配置，可以根据当前测试场景修改 listener、端口、资源路径及其他配置；修改后应继续确保运行时文件位于 `_fluxdns/`，避免占用生产端口，也不得把本地配置或敏感值提交到 Git。该用法仍是显式传参，不构成启动脚本的默认配置路径。
+测试配置可按场景修改 listener、端口和资源路径，但运行时文件继续限制在 `_fluxdns/`，避免生产端口。状态、stdout/stderr 与临时报告也留在该目录，不提交本地配置或敏感值。
 
 `_fluxdns/` 已加入 `.gitignore`，其中内容默认不应被提交。需要长期维护、可复现并纳入版本控制的测试夹具，应放在专门的受跟踪目录中，不要依赖个人 `_fluxdns/` 内容。
 
