@@ -253,6 +253,7 @@ mod tests {
     struct FakeState {
         batches: usize,
         fail_next: bool,
+        panic_next: bool,
         block_shutdown: bool,
         shutdown: bool,
     }
@@ -279,6 +280,10 @@ mod tests {
             _deadline: Deadline,
         ) -> PortFuture<'_, Result<(), PortError>> {
             Box::pin(async move {
+                let panic_next = std::mem::take(&mut self.state.lock().unwrap().panic_next);
+                if panic_next {
+                    panic!("synthetic private adapter panic payload");
+                }
                 let mut state = self.state.lock().unwrap();
                 if state.fail_next {
                     state.fail_next = false;
@@ -309,6 +314,38 @@ mod tests {
         PersistentCacheBatch {
             records: Vec::new(),
         }
+    }
+
+    /// V1-O02：内部持久化 worker panic 由 owner 回收，返回稳定分类而非原始 payload。
+    #[tokio::test]
+    async fn contract_v1_persistence_worker_panic_is_reclaimed_and_sanitized() {
+        let store = Arc::new(FakePersistentStore::default());
+        store.state.lock().unwrap().panic_next = true;
+        let runtime =
+            CachePersistenceRuntime::start(store.clone(), 2, Duration::from_secs(1)).unwrap();
+        let writer = runtime.writer();
+        assert!(writer.enqueue(empty_batch()).is_ok());
+        tokio::time::timeout(Duration::from_secs(5), writer.sender.closed())
+            .await
+            .unwrap();
+        let error = runtime
+            .shutdown(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.class(),
+            crate::ports::PortErrorClass::Internal
+        ));
+        assert_eq!(error.operation(), "cache_persistence.worker");
+        assert!(!format!("{error:?}").contains("private adapter"));
+        assert!(runtime.task.lock().unwrap().is_none());
+        assert!(writer.enqueue(empty_batch()).is_err());
+        // 不把 panic 当作自动恢复；真实 store 的关闭由测试明确补做。
+        assert!(!store.state.lock().unwrap().shutdown);
+        store
+            .shutdown(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .await
+            .unwrap();
     }
 
     #[test]

@@ -284,6 +284,17 @@ pub struct SqliteStorageBackend {
     operation_lock: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
     injected_fault: Arc<Mutex<Option<InjectedSqliteFault>>>,
+    #[cfg(test)]
+    detail_test_gate:
+        Arc<Mutex<Option<(DetailSqlTestStage, Arc<crate::ports::testing::TestGate>)>>>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DetailSqlTestStage {
+    BeforeSql,
+    BeforeCommit,
+    AfterCommit,
 }
 
 #[derive(Clone, Copy)]
@@ -434,7 +445,37 @@ impl SqliteStorageBackend {
             operation_lock: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             injected_fault: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            detail_test_gate: Arc::new(Mutex::new(None)),
         })
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_detail_test_gate(
+        &self,
+        stage: DetailSqlTestStage,
+        gate: Arc<crate::ports::testing::TestGate>,
+    ) {
+        *self.detail_test_gate.lock().unwrap() = Some((stage, gate));
+    }
+
+    /// 只暂停当前实例的首个匹配批次，后续 shutdown drain 不重复进入同步点。
+    #[cfg(test)]
+    async fn pause_detail_for_test(&self, stage: DetailSqlTestStage) {
+        let gate = {
+            let mut slot = self.detail_test_gate.lock().unwrap();
+            if slot
+                .as_ref()
+                .is_some_and(|(expected, _)| *expected == stage)
+            {
+                slot.take().map(|(_, gate)| gate)
+            } else {
+                None
+            }
+        };
+        if let Some(gate) = gate {
+            gate.pause().await;
+        }
     }
 
     /// 在真实目标库执行最小元数据写入并回滚；不产生伪造业务记录或持久化探针数据。
@@ -646,6 +687,9 @@ impl SqliteStorageBackend {
             let _guard = self
                 .lock_operation(deadline, "sqlite_storage.resolve_detail")
                 .await?;
+            #[cfg(test)]
+            self.pause_detail_for_test(DetailSqlTestStage::BeforeSql)
+                .await;
             let mut transaction = self
                 .pool
                 .begin()
@@ -661,12 +705,18 @@ impl SqliteStorageBackend {
                         return Err(error);
                     }
                 };
+            #[cfg(test)]
+            self.pause_detail_for_test(DetailSqlTestStage::BeforeCommit)
+                .await;
             check_deadline(deadline, "sqlite_storage.resolve_detail")?;
             transaction
                 .commit()
                 .await
                 .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
             self.mark_healthy();
+            #[cfg(test)]
+            self.pause_detail_for_test(DetailSqlTestStage::AfterCommit)
+                .await;
             Ok(summary)
         })
         .await
@@ -1474,6 +1524,12 @@ mod tests {
     }
 
     async fn legacy_v5_database() -> (std::path::PathBuf, sqlx::SqlitePool) {
+        legacy_database(5).await
+    }
+
+    // V4-M：直接复用历史 migration；不得用当前 schema 倒推旧库。
+    async fn legacy_database(version: usize) -> (std::path::PathBuf, sqlx::SqlitePool) {
+        assert!((1..=5).contains(&version));
         let path = path();
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
@@ -1490,7 +1546,10 @@ mod tests {
             include_str!("../../migrations/0003_management_query_projection.sql"),
             include_str!("../../migrations/0004_query_record_observability.sql"),
             include_str!("../../migrations/0005_dns_core_duration.sql"),
-        ] {
+        ]
+        .into_iter()
+        .take(version)
+        {
             for statement in migration
                 .split(';')
                 .map(str::trim)
@@ -1500,12 +1559,360 @@ mod tests {
             }
         }
         sqlx::query(
-            "INSERT INTO storage_meta VALUES (1, 5, 'timestamp-migration-test', '1000', '2000')",
+            "INSERT INTO storage_meta VALUES (1, ?, 'timestamp-migration-test', '1000', '2000')",
         )
+        .bind(version as i64)
         .execute(&pool)
         .await
         .unwrap();
         (path, pool)
+    }
+
+    // V4-M01：每个起点分别覆盖空库/有数据，重开后对照所有字段与自增高水位。
+    #[tokio::test]
+    async fn contract_v4_all_legacy_versions_preserve_rows_and_nulls_on_reopen() {
+        for version in 1..=5 {
+            for populated in [false, true] {
+                let (path, pool) = legacy_database(version).await;
+                if populated {
+                    sqlx::query(
+                        "INSERT INTO resolve_log \
+                         (id, event_time_utc, duration_millis, request_id_digest, listener_id, \
+                          canonical_qname, qtype, qclass, rcode, cache_status, runtime_revision) \
+                         VALUES (17, '999', 7, 'digest', 'dns', 'legacy.test.', 1, 1, 3, 'miss', 9), \
+                                (81, '1000', 8, 'deleted', 'dns', 'deleted.test.', 1, 1, 0, 'hit', 10)",
+                    ).execute(&pool).await.unwrap();
+                    sqlx::query("DELETE FROM resolve_log WHERE id=81")
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                    sqlx::query("INSERT INTO stats_daily_total VALUES (20000, 13)")
+                        .execute(&pool)
+                        .await
+                        .unwrap();
+                    sqlx::query(
+                        "INSERT INTO stats_daily_dimension VALUES (20000, 'source', 'upstream', 13)",
+                    ).execute(&pool).await.unwrap();
+                    sqlx::query(
+                        "INSERT INTO stats_batch_ledger VALUES (7, 19, 3, '1000', X'01020304')",
+                    )
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                }
+                pool.close().await;
+
+                for _ in 0..2 {
+                    let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+                    let meta: (i64, String, i64, String, String) = sqlx::query_as(
+                        "SELECT schema_version, database_id, created_at_utc_millis, \
+                         typeof(created_at_utc_millis), typeof(migrated_at_utc_millis) FROM storage_meta",
+                    ).fetch_one(&backend.pool).await.unwrap();
+                    assert_eq!(
+                        meta,
+                        (
+                            6,
+                            "timestamp-migration-test".into(),
+                            1000,
+                            "integer".into(),
+                            "integer".into()
+                        ),
+                        "start v{version}"
+                    );
+                    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+                        .fetch_one(&backend.pool)
+                        .await
+                        .unwrap();
+                    assert_eq!(count, i64::from(populated));
+                    if populated {
+                        let row = sqlx::query("SELECT * FROM resolve_log")
+                            .fetch_one(&backend.pool)
+                            .await
+                            .unwrap();
+                        for (column, value) in [
+                            ("id", 17),
+                            ("event_time_utc_millis", 999),
+                            ("duration_millis", 7),
+                            ("qtype", 1),
+                            ("qclass", 1),
+                            ("rcode", 3),
+                            ("runtime_revision", 9),
+                        ] {
+                            assert_eq!(row.get::<i64, _>(column), value, "v{version}: {column}");
+                        }
+                        for (column, value) in [
+                            ("request_id_digest", "digest"),
+                            ("listener_id", "dns"),
+                            ("canonical_qname", "legacy.test."),
+                            ("cache_status", "miss"),
+                        ] {
+                            assert_eq!(row.get::<String, _>(column), value, "v{version}: {column}");
+                        }
+                        for column in [
+                            "route_id",
+                            "client_bucket",
+                            "strategy_id",
+                            "source",
+                            "upstream_id",
+                            "failure_class",
+                            "cancellation_reason",
+                            "resource_revision",
+                            "upstream_member_id",
+                            "matched_rule_source",
+                            "matched_resource_id",
+                            "transport",
+                            "client_ip",
+                            "upstream_used_id",
+                            "answer_summary_json",
+                        ] {
+                            assert_eq!(
+                                row.get::<Option<String>, _>(column),
+                                None,
+                                "v{version}: {column}"
+                            );
+                        }
+                        for column in [
+                            "matched_rule_ordinal",
+                            "answer_count",
+                            "answers_truncated",
+                            "dns_core_duration_micros",
+                        ] {
+                            assert_eq!(
+                                row.get::<Option<i64>, _>(column),
+                                None,
+                                "v{version}: {column}"
+                            );
+                        }
+                        let totals: (i64, i64) = sqlx::query_as("SELECT * FROM stats_daily_total")
+                            .fetch_one(&backend.pool)
+                            .await
+                            .unwrap();
+                        assert_eq!(totals, (20000, 13));
+                        let dimensions: (i64, String, String, i64) =
+                            sqlx::query_as("SELECT * FROM stats_daily_dimension")
+                                .fetch_one(&backend.pool)
+                                .await
+                                .unwrap();
+                        assert_eq!(dimensions, (20000, "source".into(), "upstream".into(), 13));
+                        let ledger: (i64, i64, i64, i64, Vec<u8>, String) = sqlx::query_as(
+                            "SELECT *, typeof(committed_at_utc_millis) FROM stats_batch_ledger",
+                        )
+                        .fetch_one(&backend.pool)
+                        .await
+                        .unwrap();
+                        assert_eq!(ledger, (7, 19, 3, 1000, vec![1, 2, 3, 4], "integer".into()));
+                        let sequence: i64 = sqlx::query_scalar(
+                            "SELECT seq FROM sqlite_sequence WHERE name='resolve_log'",
+                        )
+                        .fetch_one(&backend.pool)
+                        .await
+                        .unwrap();
+                        assert_eq!(sequence, 81);
+                    }
+                    let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+                        .fetch_one(&backend.pool)
+                        .await
+                        .unwrap();
+                    assert_eq!(integrity, "ok");
+                    backend.shutdown(deadline()).await.unwrap();
+                }
+            }
+        }
+    }
+
+    // V4-M02：中间步骤失败只回滚该步，之前已经提交的 migration 必须保留。
+    #[tokio::test]
+    async fn contract_v4_each_migration_failure_preserves_last_committed_step() {
+        for failing_version in 2..=6 {
+            let (path, pool) = legacy_database(1).await;
+            // v6 会重建 metadata，改用实际非法时间让该步失败。
+            if failing_version == 6 {
+                sqlx::query("UPDATE storage_meta SET created_at_utc='invalid'")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            } else {
+                sqlx::query("CREATE TABLE contract_failure (version INTEGER NOT NULL)")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query("INSERT INTO contract_failure VALUES (?)")
+                    .bind(failing_version)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                sqlx::query(
+                    "CREATE TRIGGER reject_migration BEFORE UPDATE ON storage_meta \
+                     WHEN NEW.schema_version = (SELECT version FROM contract_failure) \
+                     BEGIN SELECT RAISE(ABORT, 'contract migration failure'); END",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            assert!(matches!(
+                SqliteStorageBackend::connect(&path).await,
+                Err(super::SqliteStorageBackendBuildError::Schema)
+            ));
+            let version: i64 = sqlx::query_scalar("SELECT schema_version FROM storage_meta")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(version, failing_version - 1);
+            let columns: Vec<String> =
+                sqlx::query_scalar("SELECT name FROM pragma_table_info('resolve_log')")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            for (introduced, name) in [
+                (2, "upstream_member_id"),
+                (3, "transport"),
+                (4, "client_ip"),
+                (5, "dns_core_duration_micros"),
+                (6, "event_time_utc_millis"),
+            ] {
+                assert_eq!(
+                    columns.iter().any(|column| column == name),
+                    introduced < failing_version,
+                    "migration {failing_version}: {name}"
+                );
+            }
+            if failing_version == 6 {
+                sqlx::query("UPDATE storage_meta SET created_at_utc='1000'")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            } else {
+                sqlx::query("DROP TRIGGER reject_migration")
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            pool.close().await;
+            let recovered = SqliteStorageBackend::connect(&path).await.unwrap();
+            recovered.shutdown(deadline()).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn contract_v4_newer_schema_is_rejected_without_mutation() {
+        let backend = SqliteStorageBackend::connect(path()).await.unwrap();
+        sqlx::query("UPDATE storage_meta SET schema_version=7")
+            .execute(&backend.pool)
+            .await
+            .unwrap();
+        let before: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(&backend.pool)
+        .await
+        .unwrap();
+        assert!(matches!(
+            SqliteStorageBackend::connect(backend.path.as_ref()).await,
+            Err(super::SqliteStorageBackendBuildError::Schema)
+        ));
+        let after: Vec<(String, String)> = sqlx::query_as(
+            "SELECT name, sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY name",
+        )
+        .fetch_all(&backend.pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        let version: i64 = sqlx::query_scalar("SELECT schema_version FROM storage_meta")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(version, 7);
+        backend.shutdown(deadline()).await.unwrap();
+    }
+
+    // V4-S01 / V9-S-local：三轮真实 SQLite 事务失败/恢复，UTC 午夜、late event 与重试去重。
+    #[tokio::test]
+    async fn contract_v4_midnight_late_events_and_repeated_sqlite_recovery() {
+        use crate::storage::{PersistenceGapState, StatsPersistenceWorker, day_utc};
+        let backend = Arc::new(SqliteStorageBackend::connect(path()).await.unwrap());
+        let worker = StatsPersistenceWorker::new(backend.clone());
+        let midnight = std::time::UNIX_EPOCH + Duration::from_secs(20_001 * 86_400);
+        let previous_day = day_utc(midnight - Duration::from_millis(1)).unwrap();
+        let current_day = day_utc(midnight).unwrap();
+        assert_eq!((previous_day, current_day), (20_000, 20_001));
+        for cycle in 0..3 {
+            worker.record_request(current_day, vec![]).unwrap();
+            worker.record_request(previous_day, vec![]).unwrap();
+            sqlx::query(
+                "CREATE TRIGGER reject_contract_stats BEFORE INSERT ON stats_daily_total \
+                 BEGIN SELECT RAISE(ABORT, 'contract stats failure'); END",
+            )
+            .execute(&backend.pool)
+            .await
+            .unwrap();
+            assert!(worker.flush(deadline()).await.is_err());
+            assert_eq!(worker.pending_batch_count(), 1);
+            let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stats_batch_ledger")
+                .fetch_one(&backend.pool)
+                .await
+                .unwrap();
+            assert_eq!(ledger_count, cycle * 2);
+            // 新 epoch 收到前一天的晚到事件；不能用 flush 当天覆盖事件日。
+            worker.record_request(previous_day, vec![]).unwrap();
+            assert!(matches!(
+                worker.persistence_gap(),
+                PersistenceGapState::ActiveAndPending {
+                    batch_count: 1,
+                    active_event_count: 1,
+                    pending_event_count: 2,
+                    ..
+                }
+            ));
+            sqlx::query("DROP TRIGGER reject_contract_stats")
+                .execute(&backend.pool)
+                .await
+                .unwrap();
+            let summary = worker.flush(deadline()).await.unwrap();
+            assert_eq!(summary.events_committed, 3);
+            assert_eq!(summary.batches_committed, 2);
+            assert_eq!(worker.pending_batch_count(), 0);
+            assert!(matches!(
+                worker.persistence_gap(),
+                PersistenceGapState::Clear
+            ));
+            worker.flush(deadline()).await.unwrap();
+            let totals: Vec<(i64, i64)> =
+                sqlx::query_as("SELECT * FROM stats_daily_total ORDER BY day_utc")
+                    .fetch_all(&backend.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(totals, vec![(20_000, (cycle + 1) * 2), (20_001, cycle + 1)]);
+        }
+        let ledger: Vec<(i64, i64)> = sqlx::query_as(
+            "SELECT batch_id, max_event_seq FROM stats_batch_ledger ORDER BY batch_id",
+        )
+        .fetch_all(&backend.pool)
+        .await
+        .unwrap();
+        assert_eq!(ledger.len(), 6);
+        assert_eq!(ledger.last().unwrap().1, 9);
+        assert!(
+            ledger
+                .windows(2)
+                .all(|rows| rows[0].0 < rows[1].0 && rows[0].1 < rows[1].1)
+        );
+        let path = backend.path.as_ref().clone();
+        backend.shutdown(deadline()).await.unwrap();
+        drop(worker);
+        drop(backend);
+        let reopened = SqliteStorageBackend::connect(path).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT SUM(total_requests) FROM stats_daily_total")
+            .fetch_one(&reopened.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 9);
+        let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_one(&reopened.pool)
+            .await
+            .unwrap();
+        assert_eq!(integrity, "ok");
+        reopened.shutdown(deadline()).await.unwrap();
     }
 
     async fn insert_legacy_detail(pool: &sqlx::SqlitePool, id: i64, timestamp: &str) {

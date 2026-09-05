@@ -344,4 +344,73 @@ strategy:
         assert!(snapshot.dns_core().is_none());
         assert!(format!("{snapshot:?}").contains("RuntimeSnapshot"));
     }
+
+    // V1-P02：两个资源反复同时进入 metadata CAS，迟到的同资源版本不能回退或丢失兄弟项。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn contract_v1_concurrent_metadata_cas_keeps_both_resources_monotonic() {
+        use crate::config::resolve::ConfigId;
+        use crate::resource::{
+            ResourceSnapshot, ResourceSourceKind, ResourceStaleStatus, ResourceVersion,
+        };
+        use std::time::{Duration, UNIX_EPOCH};
+        let snapshot = Arc::new(RuntimeSnapshot::new(RuntimeRevision(1), config()));
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut tasks = tokio::task::JoinSet::new();
+        for name in ["left", "right"] {
+            let snapshot = Arc::clone(&snapshot);
+            let barrier = Arc::clone(&barrier);
+            tasks.spawn(async move {
+                let id = ConfigId::new(name).unwrap();
+                for epoch in 2..=33 {
+                    let resource = ResourceSnapshot::new(
+                        id.clone(),
+                        epoch,
+                        1,
+                        format!("{name}-{epoch}"),
+                        "source",
+                        "parser",
+                        UNIX_EPOCH,
+                        ResourceSourceKind::File,
+                        false,
+                        ResourceStaleStatus::Fresh,
+                        (),
+                    );
+                    barrier.wait().await;
+                    snapshot.publish_resource(&resource).unwrap();
+                    let stale = ResourceSnapshot::new(
+                        id.clone(),
+                        epoch - 1,
+                        1,
+                        "stale",
+                        "source",
+                        "parser",
+                        UNIX_EPOCH,
+                        ResourceSourceKind::File,
+                        false,
+                        ResourceStaleStatus::Fresh,
+                        (),
+                    );
+                    snapshot.publish_resource(&stale).unwrap();
+                    assert_eq!(
+                        snapshot.resources().lookup(&id).unwrap().version(),
+                        ResourceVersion::new(epoch, 1)
+                    );
+                }
+            });
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while let Some(task) = tasks.join_next().await {
+                task.unwrap();
+            }
+        })
+        .await
+        .expect("metadata CAS watchdog expired");
+        for name in ["left", "right"] {
+            let resources = snapshot.resources();
+            let resource = resources.lookup(&ConfigId::new(name).unwrap()).unwrap();
+            assert_eq!(resource.version(), ResourceVersion::new(33, 1));
+            assert_eq!(resource.content_hash(), format!("{name}-33"));
+        }
+        assert_eq!(snapshot.revision(), RuntimeRevision(1));
+    }
 }

@@ -4,9 +4,9 @@
 >
 > 适用范围：正式 CLI 启动、资源准备、bind、reload 与 shutdown 接线
 >
-> 最后核对：2026-09-05（启动探针、统计优先停机与安全 panic hook 接线及本地测试）
+> 最后核对：2026-09-05（UTC；启动/停机、刷新/reload 竞争与 owner 本机契约验证）
 >
-> 核对基线：`19c3c81e4fdbea9424d522620ad81462c6d22eb1` 加本次后端契约实施工作树
+> 核对基线：`f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 加本次契约验证工作树
 
 ## 正式入口
 
@@ -62,3 +62,27 @@ Storage 停机先关闭 detail 输入并回收当前正在提交的 batch，不�
 | 安全 panic hook | 固定分类、受限源码位置、backtrace 状态 | 异步 `main` 第一项安装 `std::panic::set_hook` | 独立子进程验证主线程/worker panic 不泄漏 payload、线程名或完整栈 | 不改变内部 task owner 的失败升级策略；安装前异常不覆盖 |
 
 2026-09-05 的完整 Cargo 测试与 loopback 验证见[后台服务](background-services.md#本次验证)；没有真实 Unix 信号或外部部署 smoke 证据。
+
+## 契约验证补充
+
+以下是 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 之后工作树的测试实现；运行结果与可重复入口统一见[契约验证运行入口](background-services.md#契约验证运行入口)。不覆盖真实 Unix 进程信号，也不把内部 worker 回收等同于 Supervisor 的失败升级。
+
+| 用例 | 入口与同步点 | 断言与证据边界 |
+| --- | --- | --- |
+| V1-P01 | `prepared::tests::contract_v1_split_publication_keeps_resources_and_generations_isolated`；在 Policy 发布后用实例级 `TestGate` 暂停 metadata | 观察合法分步状态，叠加另一资源更新和新 candidate 激活，旧 metadata 仅更新旧 snapshot；这是 `ActiveRuntime::refresh_resource` / `activate` 底层交错，不冒充 service 串行 mutation 的整条 reload 流程 |
+| V1-P02 | `snapshot::tests::contract_v1_concurrent_metadata_cas_keeps_both_resources_monotonic`；两个 worker 在 32 轮 barrier 后发布 | 两个资源均保留最高版本，同资源迟到版本不回退，runtime revision 不变 |
+| V1-R01 | `service::tests::contract_v1_service_reload_serializes_refresh_and_reclaims_both_owners`；真实 UDP service、file refresh 与 Policy/metadata 同步点 | 复用和 rebind 均等待旧刷新，合并已发布版本；20ms reload 不能越过原预算，超时/失败绑定保留旧 runtime，后续正常 reload 仍成功；当前/历史 finalizer panic 后 active 归零，最终停机关闭 owner 并释放端口 |
+| V1-T01 | `supervisor::tests::contract_v1_retry_timer_is_separate_from_clock_and_cancellable` | `FakeClock` 推进不触发 Tokio retry；显式推进 Tokio timer 后进入第二次 backoff，scoped cancellation 结束任务且不取消 Supervisor |
+| V1-T02 | `supervisor::tests::contract_v1_shutdown_deadline_is_owned_by_injected_clock` | Tokio 时间推进不耗尽注入 Clock 的停机预算；只推进该 Clock 至原 deadline，回收不合作任务并报告 abort |
+| V1-O02 | `cache::runtime::tests::contract_v1_persistence_worker_panic_is_reclaimed_and_sanitized`；测试 store 在实际 persistence worker 调用中 panic | owner join 返回 `Internal / cache_persistence.worker`，关闭 channel、回收句柄，错误不包含 panic payload；不会自动重启 worker |
+| V1-O03 | `storage::service::tests::contract_v1_detail_owner_panic_preserves_stats_and_safe_error` | 在真实 detail worker 返回后模拟 join panic，仍提交统计并关闭 backend；错误为 `Internal / sqlite_resolve_log.worker`，可重开数据库，不包含 payload |
+| V1-O04 | `resolution::tests::contract_v1_resolution_owner_join_panics_report_incomplete` | 分别在 dispatcher/cache/detail worker 返回后模拟 join panic；shutdown 明确 `completed=false`，收齐三个句柄、停止 publisher，不把回收当作运行成功 |
+| V2-O01 | `coordinator::tests::contract_v2_expired_shutdown_reclaims_unpolled_historical_and_current_tasks` | 当前与历史 finalizer 的任务尚未 poll 就被过期 deadline abort；报告未完成，但 active 必须归零、owner 关闭并拒绝新任务 |
+
+`TestGate` 位于 [`ports/testing.rs`](../../../backend/src/ports/testing.rs)，只有 `cfg(test)` 构建存在；到达和放行用不同 Semaphore，观察同步点有 5 秒 watchdog。`PreparedRuntime` 的暂停点只属于测试实例，没有全局开关、生产配置或正式运行额外 await。Tokio `test-util` 仅在 dev-dependencies 中启用，暂停时间只用于纯调度测试；真实 socket、TLS 和 SQLite 用实时钟。
+
+V2-O01 曾在修复前稳定复现 active 为 1 而非 0：[`LateCacheFinalizer::submit_task`](../../../backend/src/cache/service.rs) 原来在 async task 第一次 poll 时才构造 guard。现改为提交前构造、由 future 捕获；首次 poll 前 abort/drop 也释放计数和 semaphore permit。没有修改容量、响应时序、late-result 窗口、失败升级或停机 deadline。`wait_idle_for_test` 只等待现有 idle 通知，不通过取消任务伪造正常完成。
+
+V1-R01 还复现了 service reload 等待 mutation gate 不受调用方 deadline 限制：20ms 预算一直等到 200ms 测试 watchdog。[`DnsService::reload_prepared`](../../../backend/src/service.rs) 现在在 listener 复用和 rebind 的 activation 等待外使用原 deadline，超时返回 `ServiceReloadError::Timeout`，不发布候选、不增加重试、不改变旧 runtime。此边界不承诺强行抢占已经进入 OS 的调用或同步 activation。
+
+现有 serialized activation CAS、旧 scoped task 退出、Supervisor panic 归因以及进程 panic hook 测试由全量回归复用。上述 owner 用例区分 adapter panic 与 worker 返回后的 join panic，未引入统一自动恢复策略；真实 Unix 首/双信号及其在途组合仍按[活动计划](../../plans/backend-contract-validation.md)保留。

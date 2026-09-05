@@ -2354,6 +2354,42 @@ mod tests {
 
     struct ServFailDohTransport;
 
+    struct GatedPositiveDohTransport {
+        gate: Arc<crate::ports::testing::TestGate>,
+    }
+
+    impl DohHttpTransport for GatedPositiveDohTransport {
+        fn post<'a>(
+            &'a self,
+            request: DohHttpRequest,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<DohHttpResponseOwned, PortError>> {
+            Box::pin(async move {
+                self.gate.pause().await;
+                let message = Message::from_vec(request.body()).unwrap();
+                let query = CanonicalQuery::from_message(message.clone()).unwrap();
+                let mut response = CanonicalResponse::response_with_answers(
+                    &query,
+                    [Record::from_rdata(
+                        query.question().name().clone(),
+                        30,
+                        RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, 20))),
+                    )],
+                )
+                .unwrap()
+                .as_message()
+                .clone();
+                response.metadata.id = message.metadata.id;
+                Ok(DohHttpResponseOwned {
+                    status: 200,
+                    content_type: Some("application/dns-message".into()),
+                    body: response.to_vec().unwrap(),
+                })
+            })
+        }
+    }
+
     impl DohHttpTransport for ServFailDohTransport {
         fn post<'a>(
             &'a self,
@@ -3687,6 +3723,221 @@ mod tests {
             old.cache().lookup(&key, deadline).await.unwrap(),
             CacheLookup::Miss
         ));
+    }
+
+    // V2-L01：primary lease 提交/丢弃、单 follower 取消、同代/换代与 shutdown 的交错。
+    #[tokio::test]
+    async fn contract_v2_nested_positive_reload_and_shutdown_keep_response_immutable() {
+        use crate::ports::cache::{CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation};
+
+        for commit_primary in [false, true] {
+            for switch_revision in [false, true] {
+                for shutdown_before_late in [false, true] {
+                    let mut config = Arc::try_unwrap(doh_config()).unwrap();
+                    config.dns.cache.enabled = true;
+                    route_doh_through_nested_single_member_group(&mut config);
+                    config.upstreams.push(ResolvedUpstream::Hosts {
+                        id: ConfigId::new("fast").unwrap(),
+                        format: "hosts".into(),
+                        hosts: "192.0.2.10 race.test".into(),
+                    });
+                    let ResolvedUpstream::Group {
+                        upstreams,
+                        upstream_mode,
+                        timeout,
+                        ..
+                    } = &mut config.upstreams[1]
+                    else {
+                        panic!("inner group must exist");
+                    };
+                    *upstream_mode = crate::config::model::UpstreamMode::Parallel;
+                    *timeout = Duration::from_secs(5);
+                    upstreams.push(ResolvedUpstreamMember {
+                        name: ConfigId::new("fast").unwrap(),
+                        weight: 1,
+                    });
+                    let gate = Arc::new(crate::ports::testing::TestGate::new());
+                    let transport = Arc::new(GatedPositiveDohTransport {
+                        gate: Arc::clone(&gate),
+                    });
+                    let old_registry = UpstreamRegistry::from_resolved_with_doh_transport(
+                        &super::direct_upstreams(&config.upstreams),
+                        transport,
+                    )
+                    .unwrap();
+                    let latest_registry = UpstreamRegistry::from_resolved_with_doh_transport(
+                        &super::direct_upstreams(&config.upstreams),
+                        Arc::new(FakeDohTransport::new()),
+                    )
+                    .unwrap();
+                    let old = Arc::new(
+                        PolicyDnsCore::from_config_with_registry(&config, 42, old_registry)
+                            .unwrap(),
+                    );
+                    let latest = Arc::new(
+                        PolicyDnsCore::from_config_with_registry(&config, 42, latest_registry)
+                            .unwrap(),
+                    );
+                    let cell = Arc::new(RuntimeCoreCell::default());
+                    old.attach_runtime_cell(Arc::clone(&cell));
+                    latest.attach_runtime_cell(Arc::clone(&cell));
+                    cell.publish(Some(Arc::new(RuntimeCoreTarget {
+                        core: Arc::clone(&old),
+                        revision: RuntimeRevision(1),
+                    })));
+                    let mut request = request("race.test.", RecordType::A);
+                    request.context.runtime_revision = RuntimeRevision(1);
+                    let completed = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        old.resolve_with_completion(&request),
+                    )
+                    .await
+                    .unwrap();
+                    gate.wait_reached().await;
+                    let CoreOutcome::Response(response) = completed.result.unwrap() else {
+                        panic!("expected response")
+                    };
+                    let frozen = response.as_message().clone();
+                    assert!(frozen.answers.iter().any(|record| matches!(&record.data,
+                RData::A(address) if address.0 == std::net::Ipv4Addr::new(192, 0, 2, 10))));
+                    let qname = CanonicalDomain::parse("race.test.").unwrap();
+                    let listener = ConfigId::new("dns").unwrap();
+                    let plan = old
+                        .policy()
+                        .evaluate(crate::policy::PolicyRequest {
+                            listener_id: &listener,
+                            doh_route_id: None,
+                            client_id: None,
+                            client_addr: request.context.client.client_addr,
+                            client_digest: None,
+                            qname: Some(&qname),
+                        })
+                        .unwrap();
+                    let key = cache_key(&old, &plan, &request).unwrap();
+                    let budget = Deadline::new(Instant::now() + Duration::from_secs(5));
+                    let CacheLoadReservation::Follower(waiter) =
+                        old.cache().reserve_load(key.clone(), budget).await.unwrap()
+                    else {
+                        panic!("primary response handoff must still own the single-flight lease");
+                    };
+                    let CacheLoadReservation::Follower(cancelled_waiter) =
+                        old.cache().reserve_load(key.clone(), budget).await.unwrap()
+                    else {
+                        panic!("second follower must share the same producer");
+                    };
+                    let follower_cancellation = Cancellation::new();
+                    let mut cancelled_wait =
+                        old.cache()
+                            .wait_load(cancelled_waiter, budget, &follower_cancellation);
+                    std::future::poll_fn(|cx| {
+                        assert!(cancelled_wait.as_mut().poll(cx).is_pending());
+                        std::task::Poll::Ready(())
+                    })
+                    .await;
+                    follower_cancellation.cancel(crate::dns::CancelReason::ClientDisconnected);
+                    let error = cancelled_wait.await.unwrap_err();
+                    assert!(matches!(error,
+                crate::cache::CacheFacadeError::Store(error)
+                if matches!(error.class(), crate::ports::PortErrorClass::Cancelled(crate::dns::CancelReason::ClientDisconnected))));
+                    let candidate = completed
+                        .cache_commit
+                        .expect("primary lease must be handed off");
+                    if commit_primary {
+                        assert_eq!(
+                            candidate.commit(Duration::from_secs(1)).await,
+                            crate::cache::CacheCommitOutcome::Stored
+                        );
+                    } else {
+                        drop(candidate);
+                    }
+                    let completion = old
+                        .cache()
+                        .wait_load(waiter, budget, &Cancellation::new())
+                        .await
+                        .unwrap();
+                    if commit_primary {
+                        assert!(matches!(completion, CacheLoadCompletion::Ready(_)));
+                    } else {
+                        assert!(matches!(
+                            completion,
+                            CacheLoadCompletion::Failed(CacheLoadFailure::Abandoned)
+                        ));
+                    }
+                    // late drain 仍被 gate 持有，但 primary lease 已结束，不能延长 single-flight 口径。
+                    let CacheLoadReservation::Leader(fresh_lease) =
+                        old.cache().reserve_load(key.clone(), budget).await.unwrap()
+                    else {
+                        panic!("late collection must not retain primary lease");
+                    };
+                    drop(fresh_lease);
+                    let target = if switch_revision { &latest } else { &old };
+                    if switch_revision {
+                        cell.publish(Some(Arc::new(RuntimeCoreTarget {
+                            core: Arc::clone(&latest),
+                            revision: RuntimeRevision(2),
+                        })));
+                    }
+                    if shutdown_before_late {
+                        assert!(old.finalizer_owner().shutdown_until(budget).await.completed);
+                        assert!(
+                            latest
+                                .finalizer_owner()
+                                .shutdown_until(budget)
+                                .await
+                                .completed
+                        );
+                        gate.release();
+                        let lookup = target.cache().lookup(&key, budget).await.unwrap();
+                        if !switch_revision && commit_primary {
+                            assert!(matches!(lookup, CacheLookup::Fresh(record)
+                        if record.entry.upstream.used_id().unwrap().as_str() == "inner"));
+                        } else {
+                            assert!(matches!(lookup, CacheLookup::Miss));
+                        }
+                    } else {
+                        gate.release();
+                        old.finalizer_owner().wait_idle_for_test().await;
+                        latest.finalizer_owner().wait_idle_for_test().await;
+                        let CacheLookup::Fresh(record) =
+                            target.cache().lookup(&key, budget).await.unwrap()
+                        else {
+                            panic!("late candidate must reach latest cache");
+                        };
+                        let keep_primary = !switch_revision && commit_primary;
+                        assert_eq!(
+                            record.entry.producer_revision,
+                            RuntimeRevision(if switch_revision { 2 } else { 1 })
+                        );
+                        // primary 保存顶层 group member；late attempt 保留实际 connector，不扩成逐 attempt trace。
+                        assert_eq!(
+                            record.entry.upstream.used_id().unwrap().as_str(),
+                            if keep_primary { "inner" } else { "remote" }
+                        );
+                        assert!(
+                    record
+                        .entry
+                        .response
+                        .as_message()
+                        .answers
+                        .iter()
+                        .any(|record| matches!(&record.data,
+                    RData::A(address) if address.0 == std::net::Ipv4Addr::new(192, 0, 2, if keep_primary { 10 } else { 20 })))
+                );
+                        assert!(old.finalizer_owner().shutdown_until(budget).await.completed);
+                        assert!(
+                            latest
+                                .finalizer_owner()
+                                .shutdown_until(budget)
+                                .await
+                                .completed
+                        );
+                    }
+                    assert_eq!(response.as_message(), &frozen);
+                    assert_eq!(old.finalizer_owner().active_tasks(), 0);
+                    assert_eq!(latest.finalizer_owner().active_tasks(), 0);
+                }
+            }
+        }
     }
 
     fn config() -> std::sync::Arc<crate::config::ResolvedConfig> {

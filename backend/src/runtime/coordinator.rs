@@ -1206,6 +1206,37 @@ outbound: []
         assert_eq!(summary.persistence, CachePersistenceRunSummary::default());
     }
 
+    // V2-O01：旧/新 revision 已接收但尚未 poll 的任务，也必须在过期停机后释放 owner。
+    #[tokio::test]
+    async fn contract_v2_expired_shutdown_reclaims_unpolled_historical_and_current_tasks() {
+        let coordinator = RuntimeCoordinator::new(policy_candidate(1));
+        let old = coordinator.load();
+        let old_owner = old.finalizer_owner().unwrap();
+        old_owner.submit_task(std::future::pending::<()>()).unwrap();
+        coordinator.activate(policy_candidate(2));
+        let current_owner = coordinator.load().finalizer_owner().unwrap();
+        current_owner
+            .submit_task(std::future::pending::<()>())
+            .unwrap();
+        assert_eq!(old_owner.active_tasks(), 1);
+        assert_eq!(current_owner.active_tasks(), 1);
+        let summary = tokio::time::timeout(
+            Duration::from_secs(5),
+            coordinator.shutdown_finalizers(Deadline::new(Instant::now())),
+        )
+        .await
+        .unwrap();
+        assert!(!summary.completed);
+        assert_eq!(summary.owners, 2);
+        assert_eq!(old_owner.active_tasks(), 0);
+        assert_eq!(current_owner.active_tasks(), 0);
+        assert!(old_owner.is_shutdown());
+        assert!(current_owner.is_shutdown());
+        assert!(old_owner.submit_task(async {}).is_err());
+        assert!(current_owner.submit_task(async {}).is_err());
+        assert_eq!(old.active_requests(), 0);
+    }
+
     #[tokio::test]
     async fn bind_and_activate_publishes_a_prepared_candidate_after_binding() {
         let coordinator = RuntimeCoordinator::new(candidate(1));

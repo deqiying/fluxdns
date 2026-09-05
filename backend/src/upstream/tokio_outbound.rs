@@ -229,3 +229,107 @@ where
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::net::TcpListener;
+
+    fn deadline() -> Deadline {
+        Deadline::new(Instant::now() + Duration::from_secs(5))
+    }
+
+    // V3-O01：真实 dialer/stream 的地址、分段读取、双向写入及 EOF 契约。
+    #[tokio::test]
+    async fn contract_v3_loopback_outbound_preserves_bytes_bounds_and_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let cancellation = Cancellation::new();
+        let mut client = TokioOutboundDialer
+            .connect(address, deadline(), &cancellation)
+            .await
+            .unwrap();
+        let (mut server, _) = listener.accept().await.unwrap();
+        assert_eq!(server.local_addr().unwrap(), address);
+        client
+            .write_all(vec![1, 2, 3], deadline(), &cancellation)
+            .await
+            .unwrap();
+        let mut bytes = [0; 3];
+        tokio::time::timeout(Duration::from_secs(5), server.read_exact(&mut bytes))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, [1, 2, 3]);
+        server.write_all(&[4, 5, 6]).await.unwrap();
+        let chunk = client
+            .read_chunk(1, deadline(), &cancellation)
+            .await
+            .unwrap();
+        assert_eq!(chunk, TcpReadChunkResult::Data(vec![4]));
+        assert_eq!(
+            client
+                .read_exact(2, deadline(), &cancellation)
+                .await
+                .unwrap(),
+            TcpReadResult::Complete(vec![5, 6])
+        );
+        server.shutdown().await.unwrap();
+        assert_eq!(
+            client
+                .read_chunk(8, deadline(), &cancellation)
+                .await
+                .unwrap(),
+            TcpReadChunkResult::CleanEof
+        );
+        client.shutdown().await.unwrap();
+    }
+
+    // V3-O02：在真实 read 已 poll 为 Pending 后取消，不用先取消代替在途取消。
+    #[tokio::test]
+    async fn contract_v3_outbound_inflight_cancel_and_expired_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cancellation = Cancellation::new();
+        let mut client = TokioOutboundDialer
+            .connect(listener.local_addr().unwrap(), deadline(), &cancellation)
+            .await
+            .unwrap();
+        let (_server, _) = listener.accept().await.unwrap();
+        let read = client.read_exact(1, deadline(), &cancellation);
+        tokio::pin!(read);
+        std::future::poll_fn(|cx| {
+            assert!(read.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        cancellation.cancel(CancelReason::Shutdown);
+        let error = tokio::time::timeout(Duration::from_secs(5), &mut read)
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(
+            error.class(),
+            PortErrorClass::Cancelled(CancelReason::Shutdown)
+        ));
+        assert_eq!(error.operation(), "outbound.tcp_read");
+
+        let expired = Deadline::new(Instant::now());
+        let fresh = Cancellation::new();
+        let error = match TokioOutboundDialer
+            .connect(listener.local_addr().unwrap(), expired, &fresh)
+            .await
+        {
+            Ok(_) => panic!("expired connect must fail"),
+            Err(error) => error,
+        };
+        assert!(matches!(error.class(), PortErrorClass::Timeout));
+        for (host, port) in [("", 53), ("bad\r\nhost", 53), ("localhost", 0)] {
+            let error = TokioOutboundAddressResolver
+                .resolve(host, port, deadline(), &fresh)
+                .await
+                .unwrap_err();
+            assert!(matches!(error.class(), PortErrorClass::InvalidInput));
+        }
+    }
+}

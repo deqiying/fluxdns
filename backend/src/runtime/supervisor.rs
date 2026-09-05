@@ -539,6 +539,79 @@ mod tests {
         TaskSpec::new(id, "test", FaultLevel::Degraded, RestartPolicy::Never).unwrap()
     }
 
+    // V1-T01：FakeClock 不推进 Tokio retry timer；取消必须打断真实的 backoff 分支。
+    #[tokio::test(start_paused = true)]
+    async fn contract_v1_retry_timer_is_separate_from_clock_and_cancellable() {
+        let clock = FakeClock::default();
+        let mut supervisor = Supervisor::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let observed = Arc::clone(&attempts);
+        let cancellation = supervisor
+            .spawn_scoped_with_factory(
+                TaskSpec::new(
+                    "contract-retry",
+                    "contract",
+                    FaultLevel::FatalEndpoint,
+                    RestartPolicy::Transient { max_restarts: 3 },
+                )
+                .unwrap(),
+                move |_| {
+                    observed.fetch_add(1, Ordering::AcqRel);
+                    Box::pin(async { Err(TaskError::Transient) })
+                },
+            )
+            .unwrap();
+        // 当前线程显式交还一次控制权，让工厂失败并进入第一个 backoff。
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        clock.advance(Duration::from_secs(60));
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::Acquire), 1);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        cancellation.cancel(CancelReason::Shutdown);
+        let completion = tokio::time::timeout(Duration::from_secs(1), supervisor.join_next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(completion.restart_count, 2);
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert_eq!(attempts.load(Ordering::Acquire), 2);
+        assert_eq!(supervisor.task_count(), 0);
+        assert!(!supervisor.cancellation().is_cancelled());
+    }
+
+    // V1-T02：重复推进 Tokio 时间不能消耗注入 Clock 的 shutdown budget。
+    #[tokio::test(start_paused = true)]
+    async fn contract_v1_shutdown_deadline_is_owned_by_injected_clock() {
+        let clock = FakeClock::default();
+        let deadline = Deadline::new(clock.monotonic_now() + Duration::from_secs(5));
+        let mut supervisor = Supervisor::new();
+        supervisor
+            .spawn(
+                spec("uncooperative-contract"),
+                Box::pin(std::future::pending()),
+            )
+            .unwrap();
+        let shutdown = supervisor.shutdown(&clock, deadline);
+        tokio::pin!(shutdown);
+        std::future::poll_fn(|cx| {
+            assert!(shutdown.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        tokio::time::advance(Duration::from_secs(100)).await;
+        assert!(!deadline.is_expired(clock.monotonic_now()));
+        clock.advance(Duration::from_secs(5));
+        let report = tokio::time::timeout(Duration::from_secs(1), &mut shutdown)
+            .await
+            .unwrap();
+        assert!(report.deadline_expired);
+        assert_eq!(report.aborted, 1);
+    }
+
     #[tokio::test]
     async fn supervisor_owns_tasks_and_reports_outcomes() {
         let mut supervisor = Supervisor::new();

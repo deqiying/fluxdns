@@ -1,5 +1,40 @@
 //! Adapter contract test 可复用的确定性 fake。
 
+/// 单次测试同步点；到达与放行分离，避免用 sleep 推测任务所在阶段。
+#[cfg(test)]
+pub(crate) struct TestGate {
+    reached: tokio::sync::Semaphore,
+    release: tokio::sync::Semaphore,
+}
+
+#[cfg(test)]
+impl TestGate {
+    pub(crate) fn new() -> Self {
+        Self {
+            reached: tokio::sync::Semaphore::new(0),
+            release: tokio::sync::Semaphore::new(0),
+        }
+    }
+
+    pub(crate) async fn pause(&self) {
+        self.reached.add_permits(1);
+        self.release.acquire().await.unwrap().forget();
+    }
+
+    /// 测试 watchdog 与生产 deadline 分开；遗漏同步点必须失败，不能永久等待。
+    pub(crate) async fn wait_reached(&self) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), self.reached.acquire())
+            .await
+            .expect("test gate watchdog expired")
+            .unwrap()
+            .forget();
+    }
+
+    pub(crate) fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
 use std::collections::{HashMap, VecDeque};
 use std::future::poll_fn;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

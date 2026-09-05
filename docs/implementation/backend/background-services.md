@@ -4,9 +4,9 @@
 >
 > 适用范围：资源刷新、解析完成事件、统计/详情、缓存持久化和观测的实际所有权
 >
-> 最后核对：2026-09-05（业务时间整数迁移、写入/管理读取和定向回归；其他后台契约沿用已提交核对）
+> 最后核对：2026-09-05（UTC；业务时间、升级矩阵、SQL/flush 停机交错与本机契约验证）
 >
-> 核对基线：`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加本次业务时间迁移工作树
+> 核对基线：`f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 加本次契约验证工作树
 
 ## 资源准备与刷新
 
@@ -95,6 +95,8 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 
 ## 本次验证
 
+本节保留时间整数迁移批次的既有结果。后续契约验证工作树的入口、证据类别和运行结果见[契约验证运行入口](#契约验证运行入口)，不要把两个工作树的计数或性能样本拼接为同一轮。
+
 2026-09-05 在 Windows x86_64 使用项目 mise 管理的 Rust/Cargo 1.98.0；命令从仓库根执行，`CARGO_HOME=backend/.cargo-home`、构建物在 `backend/target`。测试使用代码内嵌配置，临时 `work.path`、数据库与证书由测试夹具在 `_fluxdns/test-temp` 下产生，端口为动态 loopback，不使用个人配置或远程服务。
 
 完整测试命令为 `cargo test --manifest-path backend/Cargo.toml --locked --quiet -- --test-threads=4`，运行前将 TEMP/TMP 指向 `_fluxdns/test-temp`；结果为 642 通过、0 失败、2 个手动 profile 默认忽略。缓存/Storage/资源夹具也使用 `_fluxdns/tests/`。本次新增时间转换边界、v5→v6 数据/ledger/自增序列保留与重开、删空后的高水位、四类异常时间回滚、新值 INTEGER 约束、数字排序/范围/清理和时间索引用例；v1 升级和实际 writer 类型读取同样回归通过。前次获批契约的异步主链、late-result、bootstrap、资源条件请求、指标与 panic 安全测试继续通过。
@@ -111,3 +113,42 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 | 开启 telemetry | 12,000 | 0.153684 / 0.133200 / 0.255100 / 0.331400 | 同样 accepted 12,100，16 series，最终队列 0，输出 77 项，rejected_metrics 0 |
 
 本次不修改 Storage 积压预算，不把短时 profile 外推为稳定压力通过；积压保护与长期恢复的后续证据由[契约验证开发计划](../../plans/backend-contract-validation.md)的 V9/V10 跟踪。真实远程、真实磁盘满/权限/介质故障、Unix 信号、发布硬件 SLO 和长期 RSS/CPU 压测均未执行；SQLite 写锁和 trigger 故障只证明已列出的本地分支。
+
+## 契约验证运行入口
+
+[`script/test-backend-contracts.ps1`](../../../script/test-backend-contracts.ps1) 是显式本机验证与证据收集入口，不安装工具、不改变用户配置，不运行真实磁盘故障、远程请求、Unix 信号或长期性能实验。从仓库根目录执行：
+
+```powershell
+pwsh -File script/test-backend-contracts.ps1 -Suite Local -Repeat 3
+pwsh -File script/test-backend-contracts.ps1 -Suite Connections -Repeat 3
+```
+
+`Local` 先执行 fmt/check，再重复 `contract_v` 定向用例，最后执行默认全量回归；`Connections` 只显式选择 V6-C01。两种入口不能互相替代，默认全量测试仍忽略容量实验与两个手动 profile。`-Repeat` 为 1–20 次，`-TimeoutSeconds` 为每个子命令 watchdog（默认 300 秒）；测试内部保留各自业务 deadline 和更短 watchdog。
+
+输出统一写入 `_fluxdns/contract-validation/<UTC-run-id>/`：每条命令有 stdout/stderr，`report.json` 保存模式、命令、实际可执行文件、Rust/Cargo、OS、源码 HEAD、含未提交源码的前后指纹、lockfile hash、elapsed、退出码及 watchdog kill。测试 TEMP/TMP/TMPDIR 固定到 `_fluxdns/test-temp`。非零退出、watchdog kill、空测试筛选或运行期间源码变化均失败，不生成虚假通过记录；中间失败日志保留。连接、task 与数据库清理由用例断言，原始数据库夹具允许留在忽略目录，不声称脚本已逐个删除文件。
+
+### Storage 用例
+
+| 用例 | 前置与故障点 | 断言与边界 |
+| --- | --- | --- |
+| V4-M01 | `sqlite::tests::contract_v4_all_legacy_versions_preserve_rows_and_nulls_on_reopen`；用原 migration 构造 v1–v5，各自空库/含数据 | 每个起点升级后两次打开，对照 metadata、全部详情字段/历史 NULL、统计总数/维度、ledger hash/序号、删除后的自增高水位和 integrity check；不重写旧 migration |
+| V4-M02 | `contract_v4_each_migration_failure_preserves_last_committed_step`；从 v1 出发，分别让 v2–v5 metadata update trigger 失败及 v6 时间转换失败 | schema version 和已提交字段保留在失败前一步，该步新增列不残留；解除故障后可升级。v1 建库失败另复用原 DDL 回滚测试 |
+| V4-M03 | `contract_v4_newer_schema_is_rejected_without_mutation` | v7 被拒绝，schema SQL 与版本保持原样；不自动降级 |
+| V4-S01 / V9-S-local | `contract_v4_midnight_late_events_and_repeated_sqlite_recovery`；真实 SQLite，三轮事务 trigger 失败/解除/重试 | `day_utc` 从午夜两侧事件时间计算日桶；乱序与 late event 分属两个 epoch，失败不写 ledger，恢复后无重复总数，pending/gap 清除，重开及 integrity check 通过。trigger 不等价 disk-full 或介质 I/O 故障 |
+| V4-S02 | `stats::tests::contract_v4_pending_event_limit_preserves_active_epoch`；内存 backend 拒绝提交 | 分别达到 65,535/65,536 pending events，再产生两条 active event，保护错误保留 pending 与 active；batch 数上限继续复用原 64-batch 用例 |
+| V4-S03 | `storage::service::tests::contract_v4_sql_stages_share_shutdown_budget_and_reclaim_owner`；正式 StorageRuntime、真实 SQLite，SQL 前/已 INSERT 未提交/已提交待回收 × 放行/截止超时 | 当前详情先回收，统计不能抢占它；正常释放后 stats/detail 均完成，超时报告失败且不延长预算。未提交详情回滚、已提交详情保留，pending 统计可在显式新预算下幂等恢复；channel 关闭、句柄回收及 integrity check 均断言 |
+| V4-S04 | `stats::tests::contract_v4_concurrent_flush_wait_preserves_deadline_and_active_epoch`；显式持有上一轮 flush 的串行锁 | 新调用的 20ms 预算耗尽即返回 Timeout，未提前交换 active epoch；放锁后可且仅可提交一次 |
+
+历史 v5 的完整非 NULL 字段、异常时间/INTEGER 约束、自增删除高水位及时间排序/索引用例继续复用。SQLite operation lock/pool wait、同批幂等提交、详情软/硬容量/年龄清理、满批/尾批和 stats-first shutdown 由既有定向 suite 与全量回归覆盖。V4-S03 的暂停点仅在 `cfg(test)` 的单个 backend 实例启用，分别位于真实 SQL 前、commit 前和 commit 后；不把同步点或 Tokio future 取消描述为可强制抢占 SQLite 系统调用。
+
+V4-S04 在修复前等待至 200ms watchdog，而没有在 20ms 调用预算内结束。[`StatsPersistenceWorker::flush`](../../../backend/src/storage/stats.rs) 现对 `flush_lock` 的排队使用原 deadline，超时返回 `Timeout / stats_persistence.flush_lock`；拿锁后的 epoch、pending、ledger 与提交顺序保持不变，没有增加重试、持久化主链或内存上限。
+
+### 环境与结果边界
+
+当前实施环境为 Windows x86_64，mise 解析 Rust 1.98.0，HEAD 为 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c`，验证包含本次未提交工作树；最终源码指纹和实际命令以本地报告为准。使用合成配置、动态 loopback 与本地 SQLite，不读取个人配置、凭据、共享数据库或任意公网端点。
+
+2026-09-05（UTC）的 Local runner 实际结果：27 项新增默认测试重复 3 次均通过；完整回归 **669 通过、0 失败、3 忽略**（两个既有手动 profile 和新 V6-C01）。`cargo fmt --check` 与 `cargo check --locked` 同轮通过。Connections 模式另行重复 3 次通过，两个协议每轮均记录 accepted 1,023/1,024、超额等待 1、恢复 1、停机请求数 0 和端口重绑成功；这是独立重复运行，不是连续长期容量结论。
+
+本轮原始输出位于 `_fluxdns/contract-validation/20260905T161832928Z-43588/`（Local）及 `20260905T162144439Z-28988/`（Connections）。两个报告的源码前后 SHA-256 指纹均为 `5C3A2860385D2541F66B2C1EFE77CAC08C46F31039BC45235D835CA8A6E5F838`；源码未在两组验证间变化。修复前的复现错误与最小修复分别记录于本节和[生命周期](lifecycle.md#契约验证补充)，不拼接不同源码状态宣称最终通过。
+
+真实 Unix 主机、可控远程资源端点、获授权可丢弃故障介质和已冻结的长期负载/SLO 尚未提供；没有为补齐证据安装代理、驱动或工具。V5/V7/V8/V9/V10 以及 V6 external 的目标环境验收保持开放。已有 loopback 条件资源测试不代替远程验证，三个 SQLite trigger 周期不代替容量/故障恢复压测。

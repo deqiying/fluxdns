@@ -27,6 +27,8 @@ pub struct PreparedRuntime {
     resource_snapshots: BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
     host_resource_snapshots: BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>>,
     resource_workers: BTreeMap<ConfigId, PreparedResourceWorker>,
+    #[cfg(test)]
+    policy_published_gate: Option<(ConfigId, Arc<crate::ports::testing::TestGate>)>,
 }
 
 #[derive(Clone)]
@@ -103,6 +105,15 @@ impl RefreshedResourceSnapshot {
 }
 
 impl PreparedRuntime {
+    #[cfg(test)]
+    pub(crate) fn set_policy_published_gate_for_test(
+        &mut self,
+        resource: ConfigId,
+        gate: Arc<crate::ports::testing::TestGate>,
+    ) {
+        self.policy_published_gate = Some((resource, gate));
+    }
+
     /// 只接收 Config 阶段已经生成的 immutable `ResolvedConfig`，不重新读取 YAML。
     pub fn prepare(
         config: Arc<ResolvedConfig>,
@@ -117,6 +128,8 @@ impl PreparedRuntime {
             resource_snapshots: BTreeMap::new(),
             host_resource_snapshots: BTreeMap::new(),
             resource_workers: BTreeMap::new(),
+            #[cfg(test)]
+            policy_published_gate: None,
         })
     }
 
@@ -148,6 +161,8 @@ impl PreparedRuntime {
             resource_snapshots: BTreeMap::new(),
             host_resource_snapshots: BTreeMap::new(),
             resource_workers: BTreeMap::new(),
+            #[cfg(test)]
+            policy_published_gate: None,
         })
     }
 
@@ -243,6 +258,8 @@ impl PreparedRuntime {
             resource_snapshots: rule_snapshots,
             host_resource_snapshots: host_snapshots,
             resource_workers,
+            #[cfg(test)]
+            policy_published_gate: None,
         })
     }
 
@@ -489,6 +506,13 @@ impl PreparedRuntime {
                     resource: resource.as_str().to_owned(),
                     reason: error.to_string(),
                 })?,
+        }
+        // 仅测试可停在两个发布点之间；正式构建没有额外等待或配置。
+        #[cfg(test)]
+        if let Some((target, gate)) = &self.policy_published_gate
+            && target == resource
+        {
+            gate.pause().await;
         }
         let metadata_result = match &refreshed {
             RefreshedResourceSnapshot::Hosts(snapshot) => self.snapshot.publish_resource(snapshot),
@@ -1441,6 +1465,174 @@ clients: []
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    // V1-P01：Policy 已发布、metadata 未发布时叠加另一资源和 candidate 换代。
+    #[tokio::test]
+    async fn contract_v1_split_publication_keeps_resources_and_generations_isolated() {
+        use crate::ports::testing::TestGate;
+        use crate::resource::{CanonicalDomain, ResourceVersion};
+        use crate::runtime::RuntimeCoordinator;
+
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-publication-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let first = ConfigId::new("local-hosts").unwrap();
+        let second = ConfigId::new("other-hosts").unwrap();
+        let mut source = Arc::try_unwrap(config()).unwrap();
+        source.hosts = [first.clone(), second.clone()]
+            .into_iter()
+            .map(|id| {
+                let path = root.join(format!("{}.hosts", id.as_str()));
+                std::fs::write(&path, "192.0.2.10 old.example\n").unwrap();
+                ResolvedHostsResource::File {
+                    id,
+                    format: crate::config::model::HostsFormat::Hosts,
+                    path,
+                    auto_update: true,
+                    update_interval: Some(Duration::from_secs(1)),
+                }
+            })
+            .collect();
+        let source = Arc::new(source);
+        let budget = Deadline::new(Instant::now() + Duration::from_secs(5));
+        let mut old = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            Arc::clone(&source),
+            RuntimeRevision(1),
+            budget,
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let candidate = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            source,
+            RuntimeRevision(2),
+            budget,
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let gate = Arc::new(TestGate::new());
+        old.policy_published_gate = Some((first.clone(), Arc::clone(&gate)));
+        let coordinator = RuntimeCoordinator::new(super::super::bind::test_candidate(old));
+        let previous = coordinator.load();
+        let refresh_runtime = Arc::clone(&previous);
+        let refresh_id = first.clone();
+        std::fs::write(
+            root.join("local-hosts.hosts"),
+            "192.0.2.11 first-new.example\n",
+        )
+        .unwrap();
+        let refresh = tokio::spawn(async move {
+            refresh_runtime
+                .refresh_resource(&refresh_id, u64::MAX, budget, Cancellation::new())
+                .await
+        });
+        gate.wait_reached().await;
+        let first_name = CanonicalDomain::parse("first-new.example").unwrap();
+        assert!(
+            previous
+                .snapshot()
+                .policy_core()
+                .unwrap()
+                .policy()
+                .hosts_index(&first)
+                .unwrap()
+                .lookup(&first_name)
+                .is_some()
+        );
+        assert_eq!(
+            previous
+                .snapshot()
+                .resources()
+                .lookup(&first)
+                .unwrap()
+                .version(),
+            ResourceVersion::new(1, 1)
+        );
+
+        std::fs::write(
+            root.join("other-hosts.hosts"),
+            "192.0.2.12 second-new.example\n",
+        )
+        .unwrap();
+        previous
+            .refresh_resource(&second, u64::MAX, budget, Cancellation::new())
+            .await
+            .unwrap();
+        assert_eq!(
+            previous
+                .snapshot()
+                .resources()
+                .lookup(&second)
+                .unwrap()
+                .version(),
+            ResourceVersion::new(2, 0)
+        );
+        coordinator.activate(super::super::bind::test_candidate(candidate));
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), refresh)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+
+        // 迟到的旧 metadata 只更新旧 snapshot，不能覆盖新实例。
+        assert_eq!(
+            previous
+                .snapshot()
+                .resources()
+                .lookup(&first)
+                .unwrap()
+                .version(),
+            ResourceVersion::new(2, 0)
+        );
+        assert_eq!(
+            previous
+                .snapshot()
+                .resources()
+                .lookup(&second)
+                .unwrap()
+                .version(),
+            ResourceVersion::new(2, 0)
+        );
+        let current = coordinator.load();
+        assert_eq!(current.snapshot().revision(), RuntimeRevision(2));
+        assert_eq!(
+            current
+                .snapshot()
+                .resources()
+                .lookup(&first)
+                .unwrap()
+                .version(),
+            ResourceVersion::new(1, 1)
+        );
+        assert!(
+            current
+                .snapshot()
+                .policy_core()
+                .unwrap()
+                .policy()
+                .hosts_index(&first)
+                .unwrap()
+                .lookup(&first_name)
+                .is_none()
+        );
+        assert!(previous.is_draining());
+        assert_eq!(previous.active_requests(), 0);
+        coordinator.begin_drain();
+        assert!(coordinator.wait_for_drain(budget).await);
+        assert!(coordinator.shutdown_finalizers(budget).await.completed);
+        drop(previous);
+        drop(current);
+        drop(coordinator);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

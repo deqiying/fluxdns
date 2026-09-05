@@ -660,6 +660,316 @@ mod tests {
         (profile, root)
     }
 
+    fn tls_fixture() -> (Vec<u8>, TlsAcceptor) {
+        let certified =
+            rcgen::generate_simple_self_signed(vec!["resolver.example.test".to_owned()]).unwrap();
+        let der = certified.cert.der().to_vec();
+        let mut config = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![CertificateDer::from(der.clone())],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                    certified.signing_key.serialize_der(),
+                )),
+            )
+            .unwrap();
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        (der, TlsAcceptor::from(Arc::new(config)))
+    }
+
+    // V3-H01：真实 HTTP/HTTPS × SOCKS5 本地 bootstrap / SOCKS5H 域名 / 显式 IP。
+    #[tokio::test]
+    async fn contract_v3_proxy_target_host_sni_and_tls_order_matrix() {
+        for tls in [false, true] {
+            for mode in ["local-bootstrap", "remote-domain", "explicit-ip"] {
+                let (der, acceptor) = tls_fixture();
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut greeting = [0; 3];
+                    stream.read_exact(&mut greeting).await.unwrap();
+                    assert_eq!(greeting, [5, 1, 0]);
+                    stream.write_all(&[5, 0]).await.unwrap();
+                    let mut prefix = [0; 4];
+                    stream.read_exact(&mut prefix).await.unwrap();
+                    assert_eq!(&prefix[..3], &[5, 1, 0]);
+                    if mode == "remote-domain" {
+                        assert_eq!(prefix[3], 3);
+                        let length = stream.read_u8().await.unwrap();
+                        let mut host = vec![0; usize::from(length)];
+                        stream.read_exact(&mut host).await.unwrap();
+                        assert_eq!(host, b"resolver.example.test");
+                    } else {
+                        assert_eq!(prefix[3], 1);
+                        let mut ip = [0; 4];
+                        stream.read_exact(&mut ip).await.unwrap();
+                        assert_eq!(ip, [127, 0, 0, 2]);
+                    }
+                    assert_eq!(stream.read_u16().await.unwrap(), 8443);
+                    stream
+                        .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                        .await
+                        .unwrap();
+                    let response = b"HTTP/1.1 200 OK\r\nContent-Type: application/dns-message\r\nContent-Length: 3\r\nConnection: close\r\n\r\nabc";
+                    let (headers, body) = if tls {
+                        let mut stream = acceptor.accept(stream).await.unwrap();
+                        assert_eq!(
+                            stream.get_ref().1.server_name(),
+                            Some("resolver.example.test")
+                        );
+                        let request = read_request(&mut stream).await;
+                        stream.write_all(response).await.unwrap();
+                        request
+                    } else {
+                        let request = read_request(&mut stream).await;
+                        stream.write_all(response).await.unwrap();
+                        request
+                    };
+                    assert!(
+                        headers
+                            .to_ascii_lowercase()
+                            .contains("host: resolver.example.test:8443")
+                    );
+                    assert_eq!(body, [1, 2, 3, 4]);
+                });
+                let scheme = if mode == "local-bootstrap" {
+                    "socks5"
+                } else {
+                    "socks5h"
+                };
+                let (profile, root) = proxy_profile(&format!("{scheme}://{address}"));
+                let resolver = Arc::new(Resolver::new("127.0.0.2:8443".parse().unwrap()));
+                let transport = ReqwestDohHttpTransport::build(
+                    resolver.clone(),
+                    Some(profile),
+                    Some(Arc::new(
+                        crate::upstream::TokioOutboundAddressResolver::new(),
+                    )),
+                    Some(reqwest::Certificate::from_der(&der).unwrap()),
+                )
+                .unwrap();
+                let scheme = if tls { "https" } else { "http" };
+                let request = request(
+                    Url::parse(&format!("{scheme}://resolver.example.test:8443/dns-query"))
+                        .unwrap(),
+                    (mode == "explicit-ip").then(|| "127.0.0.2".parse().unwrap()),
+                    (mode == "local-bootstrap").then(|| ConfigId::new("bootstrap").unwrap()),
+                );
+                let response = transport
+                    .post(
+                        request,
+                        Deadline::new(Instant::now() + Duration::from_secs(10)),
+                        &Cancellation::new(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status, 200);
+                assert_eq!(response.body, b"abc");
+                assert_eq!(
+                    *resolver.calls.lock().unwrap(),
+                    usize::from(mode == "local-bootstrap")
+                );
+                tokio::time::timeout(Duration::from_secs(5), server)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                drop(transport);
+                fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
+    // V3-H02：connect_ip 不替代证书域名；不受信证书与身份不匹配均不得产出 HTTP 成功。
+    #[tokio::test]
+    async fn contract_v3_tls_rejects_untrusted_or_mismatched_identity() {
+        for trusted in [false, true] {
+            let (der, acceptor) = tls_fixture();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                assert!(acceptor.accept(stream).await.is_err());
+            });
+            let transport = ReqwestDohHttpTransport::build(
+                Arc::new(TokioDohAddressResolver::new()),
+                None,
+                None,
+                trusted.then(|| reqwest::Certificate::from_der(&der).unwrap()),
+            )
+            .unwrap();
+            let host = if trusted {
+                "wrong.example.test"
+            } else {
+                "resolver.example.test"
+            };
+            let request = request(
+                Url::parse(&format!("https://{host}:{}/dns-query", address.port())).unwrap(),
+                Some(address.ip()),
+                None,
+            );
+            let error = transport
+                .post(
+                    request,
+                    Deadline::new(Instant::now() + Duration::from_secs(10)),
+                    &Cancellation::new(),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error.class(), PortErrorClass::Unavailable));
+            tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
+    // V3-H03：真实 HTTP body 已进入 Pending 后取消，以及截断 body 的失败分类。
+    /// V3-D01：TLS ClientHello/完整 HTTP 请求已到达后才取消或耗尽原始预算。
+    #[tokio::test]
+    async fn contract_v3_tls_and_headers_wait_share_original_deadline() {
+        for tls in [false, true] {
+            for cancel in [false, true] {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let gate = Arc::new(crate::ports::testing::TestGate::new());
+                let server_gate = gate.clone();
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    if tls {
+                        let mut first = [0_u8; 1];
+                        assert_eq!(stream.peek(&mut first).await.unwrap(), 1);
+                        assert_eq!(first[0], 22, "TLS handshake record");
+                    } else {
+                        let (_, body) = read_request(&mut stream).await;
+                        assert_eq!(body, vec![1, 2, 3, 4]);
+                    }
+                    server_gate.pause().await;
+                });
+                let transport =
+                    ReqwestDohHttpTransport::new(Arc::new(TokioDohAddressResolver::new())).unwrap();
+                let request = request(
+                    Url::parse(&format!(
+                        "{}://resolver.example.test:{}/dns-query",
+                        if tls { "https" } else { "http" },
+                        address.port()
+                    ))
+                    .unwrap(),
+                    Some(address.ip()),
+                    None,
+                );
+                let cancellation = Cancellation::new();
+                let request_cancellation = cancellation.clone();
+                let budget = Deadline::new(Instant::now() + Duration::from_secs(1));
+                let exchange = tokio::spawn(async move {
+                    transport.post(request, budget, &request_cancellation).await
+                });
+                gate.wait_reached().await;
+                assert!(!exchange.is_finished());
+                if cancel {
+                    cancellation.cancel(CancelReason::Shutdown);
+                }
+                let error = tokio::time::timeout(Duration::from_secs(3), exchange)
+                    .await
+                    .expect("HTTP phase watchdog")
+                    .unwrap()
+                    .unwrap_err();
+                assert_eq!(error.operation(), "reqwest_doh_transport.send");
+                if cancel {
+                    assert!(matches!(
+                        error.class(),
+                        PortErrorClass::Cancelled(CancelReason::Shutdown)
+                    ));
+                } else {
+                    assert!(matches!(error.class(), PortErrorClass::Timeout));
+                    assert!(budget.is_expired(Instant::now()));
+                }
+                gate.release();
+                tokio::time::timeout(Duration::from_secs(3), server)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn contract_v3_partial_body_cancel_and_eof_do_not_report_success() {
+        for (cancel, expire) in [(false, false), (true, false), (false, true)] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let gate = Arc::new(crate::ports::testing::TestGate::new());
+            let server_gate = Arc::clone(&gate);
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_request(&mut stream).await;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nx",
+                    )
+                    .await
+                    .unwrap();
+                if cancel || expire {
+                    server_gate.pause().await;
+                }
+            });
+            let transport =
+                ReqwestDohHttpTransport::new(Arc::new(TokioDohAddressResolver::new())).unwrap();
+            let request = request(
+                Url::parse(&format!("http://{address}/dns-query")).unwrap(),
+                None,
+                None,
+            );
+            let budget = Deadline::new(Instant::now() + Duration::from_secs(1));
+            let cancellation = Cancellation::new();
+            let client = transport
+                .client_for_request(&request, budget, &cancellation)
+                .await
+                .unwrap();
+            let response = send_request(&client, &request, budget, &cancellation)
+                .await
+                .unwrap();
+            let body = read_response(response, budget, &cancellation);
+            tokio::pin!(body);
+            if cancel || expire {
+                gate.wait_reached().await;
+                std::future::poll_fn(|cx| {
+                    assert!(body.as_mut().poll(cx).is_pending());
+                    std::task::Poll::Ready(())
+                })
+                .await;
+                if cancel {
+                    cancellation.cancel(CancelReason::ClientDisconnected);
+                }
+            }
+            let error = tokio::time::timeout(Duration::from_secs(5), &mut body)
+                .await
+                .unwrap()
+                .unwrap_err();
+            assert_eq!(error.operation(), "reqwest_doh_transport.read");
+            if cancel {
+                assert!(matches!(
+                    error.class(),
+                    PortErrorClass::Cancelled(CancelReason::ClientDisconnected)
+                ));
+            } else if expire {
+                assert!(matches!(error.class(), PortErrorClass::Timeout));
+                assert!(budget.is_expired(Instant::now()));
+            } else {
+                // 锁定版本的 Response::chunk 将断流包装为 decode；现有 adapter 映射为
+                // Internal（不可重试）。这里只记录现状，不借测试变更失败/重试策略。
+                assert!(matches!(error.class(), PortErrorClass::Internal));
+            }
+            if cancel || expire {
+                gate.release();
+            }
+            tokio::time::timeout(Duration::from_secs(5), server)
+                .await
+                .unwrap()
+                .unwrap();
+        }
+    }
+
     #[tokio::test]
     async fn posts_with_connect_ip_and_preserves_http_envelope() {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))

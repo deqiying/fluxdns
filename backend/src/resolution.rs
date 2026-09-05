@@ -478,6 +478,195 @@ mod tests {
         })
     }
 
+    /// V1-O04：分别在三个正式 worker 返回后模拟 join panic，owner 必须报告未完成并收齐句柄。
+    #[tokio::test]
+    async fn contract_v1_resolution_owner_join_panics_report_incomplete() {
+        use crate::config::{ConfigLoader, LoadOptions};
+        use crate::dns::Deadline;
+        use std::time::{Duration, Instant};
+
+        for owner in ["dispatcher", "cache", "detail"] {
+            let (source, work_path) = crate::config::test_support::portable_example();
+            let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+                .load_str(&source)
+                .unwrap()
+                .resolved;
+            let budget = Deadline::new(Instant::now() + Duration::from_secs(5));
+            let mut storage = crate::storage::StorageRuntime::open(config.as_ref(), budget)
+                .await
+                .unwrap();
+            let mut runtime = super::ResolutionRuntime::start(
+                storage.stats_worker(),
+                storage.detail_writer(),
+                None,
+            );
+            let slot = match owner {
+                "dispatcher" => &mut runtime.dispatcher,
+                "cache" => &mut runtime.cache_worker,
+                "detail" => &mut runtime.detail_worker,
+                _ => unreachable!(),
+            };
+            let worker = slot.take().unwrap();
+            *slot = Some(tokio::spawn(async move {
+                worker.await.unwrap();
+                panic!("synthetic private resolution panic payload");
+            }));
+            let summary = tokio::time::timeout(Duration::from_secs(5), runtime.shutdown(budget))
+                .await
+                .unwrap();
+            assert!(!summary.completed, "{owner}");
+            assert!(runtime.dispatcher.is_none());
+            assert!(runtime.cache_worker.is_none());
+            assert!(runtime.detail_worker.is_none());
+            assert!(!format!("{summary:?}").contains("private resolution"));
+            assert_eq!(
+                runtime
+                    .publisher()
+                    .try_publish(ResolutionEnvelope {
+                        event: event(),
+                        cache_commit: None,
+                    })
+                    .unwrap(),
+                ResolutionPublishDisposition::Disabled
+            );
+            storage.shutdown(budget).await.unwrap();
+            drop((runtime, storage));
+            std::fs::remove_dir_all(work_path).unwrap();
+        }
+    }
+
+    // V2-Q01：真实 publisher 满/关闭/停止后丢弃 producer，两个 revision 的 waiter 都结束。
+    #[tokio::test]
+    async fn contract_v2_rejected_envelope_releases_followers_and_accounts_queue_gap() {
+        use crate::cache::{
+            CacheCommitCandidate, CacheFacade, CacheFacadeOptions, CacheWriteRequest,
+            MokaCacheStore,
+        };
+        use crate::dns::{Cancellation, CanonicalQuery, CanonicalResponse, Deadline};
+        use crate::ports::cache::{
+            CacheCondition, CacheKey, CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation,
+            CacheNamespace, CacheUpstreamProvenance,
+        };
+        use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+        use hickory_proto::rr::{Name, RecordType};
+        use std::time::{Duration, Instant};
+
+        for state in ["full", "closed", "stopped"] {
+            for revision in [1, 2] {
+                let budget = Deadline::new(Instant::now() + Duration::from_secs(5));
+                let facade = Arc::new(CacheFacade::new(
+                    Arc::new(MokaCacheStore::default()),
+                    CacheFacadeOptions::default(),
+                ));
+                let key = CacheKey {
+                    namespace: CacheNamespace::Global,
+                    encoded: Arc::from(&b"queue-contract"[..]),
+                    format_version: 1,
+                };
+                let CacheLoadReservation::Leader(lease) =
+                    facade.reserve_load(key.clone(), budget).await.unwrap()
+                else {
+                    panic!("first reservation must lead");
+                };
+                let mut waiters = Vec::new();
+                for _ in 0..2 {
+                    let CacheLoadReservation::Follower(waiter) =
+                        facade.reserve_load(key.clone(), budget).await.unwrap()
+                    else {
+                        panic!("in-flight producer must be shared");
+                    };
+                    waiters.push(waiter);
+                }
+                let mut message = Message::new(1, MessageType::Query, OpCode::Query);
+                message.add_query(Query::query(
+                    Name::from_ascii("queue.test.").unwrap(),
+                    RecordType::A,
+                ));
+                let query = CanonicalQuery::from_message(message).unwrap();
+                let commit = CacheCommitCandidate::new(
+                    Arc::clone(&facade),
+                    CacheWriteRequest {
+                        key: key.clone(),
+                        condition: CacheCondition::Absent,
+                        response: Arc::new(
+                            CanonicalResponse::empty_response(&query, ResponseCode::NXDomain)
+                                .unwrap(),
+                        ),
+                        upstream: CacheUpstreamProvenance::direct_from_validated_config_id(
+                            "upstream",
+                        )
+                        .unwrap(),
+                        now: Instant::now(),
+                        producer_revision: RuntimeRevision(revision),
+                        deadline: budget,
+                    },
+                    lease,
+                );
+                let (sender, mut receiver) = mpsc::channel(1);
+                let metrics = Arc::new(ResolutionPipelineMetrics::default());
+                let publisher = ResolutionPublisher {
+                    sender,
+                    accepting: AtomicBool::new(true),
+                    detail_enabled: false,
+                    metrics: Arc::clone(&metrics),
+                };
+                match state {
+                    "full" => {
+                        publisher
+                            .try_publish(ResolutionEnvelope {
+                                event: event(),
+                                cache_commit: None,
+                            })
+                            .unwrap();
+                    }
+                    "closed" => receiver.close(),
+                    "stopped" => publisher.stop(),
+                    _ => unreachable!(),
+                }
+                let mut resolution = event();
+                Arc::get_mut(&mut resolution).unwrap().runtime_revision = RuntimeRevision(revision);
+                let result = publisher.try_publish(ResolutionEnvelope {
+                    event: resolution,
+                    cache_commit: Some(commit),
+                });
+                match state {
+                    "full" => {
+                        assert_eq!(
+                            result.unwrap(),
+                            ResolutionPublishDisposition::DroppedQueueFull
+                        );
+                        let snapshot = metrics.snapshot();
+                        assert_eq!(snapshot.dropped, 1);
+                        assert_eq!(snapshot.cache_commit_dropped, 1);
+                        assert!(snapshot.gap_started_at_utc_millis.is_some());
+                    }
+                    "closed" => assert!(result.is_err()),
+                    "stopped" => {
+                        assert_eq!(result.unwrap(), ResolutionPublishDisposition::Disabled)
+                    }
+                    _ => unreachable!(),
+                }
+                for waiter in waiters {
+                    let completion = tokio::time::timeout(
+                        Duration::from_secs(5),
+                        facade.wait_load(waiter, budget, &Cancellation::new()),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                    assert!(matches!(
+                        completion,
+                        CacheLoadCompletion::Failed(CacheLoadFailure::Abandoned)
+                    ));
+                }
+                assert!(matches!(
+                    facade.reserve_load(key, budget).await.unwrap(),
+                    CacheLoadReservation::Leader(_)
+                ));
+            }
+        }
+    }
+
     #[tokio::test]
     async fn dispatcher_aggregates_bounded_latency_and_results_without_detail_collection() {
         use crate::dns::Deadline;

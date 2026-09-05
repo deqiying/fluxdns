@@ -815,6 +815,7 @@ mod tests {
         connector: ConnectorId,
         delay: Duration,
         outcome: Mutex<Option<UpstreamOutcome>>,
+        gate: Option<Arc<crate::ports::testing::TestGate>>,
     }
 
     /// 为跨 adapter 并发测试返回与请求 ID 关联的延迟 DoH 响应。
@@ -868,6 +869,7 @@ mod tests {
                 connector,
                 delay,
                 outcome: Mutex::new(Some(outcome)),
+                gate: None,
             }
         }
     }
@@ -885,6 +887,9 @@ mod tests {
             let delay = self.delay;
             let outcome = self.outcome.lock().unwrap().take();
             Box::pin(async move {
+                if let Some(gate) = &self.gate {
+                    gate.pause().await;
+                }
                 tokio::time::sleep(delay).await;
                 outcome.expect("delayed exchange must be called once")
             })
@@ -1110,6 +1115,74 @@ mod tests {
                     UpstreamOutcome::Response(response) if response.class() == ResponseClass::Positive
                 ));
                 assert!(sink.results().is_empty());
+            }
+        }
+    }
+
+    /// V2-L02：正常负答案先到、另一 primary 已在途时取消，不能启动 fallback 或遗留选择 lease。
+    #[tokio::test]
+    async fn contract_v2_cancel_after_negative_stops_pending_primary_without_fallback() {
+        use crate::dns::CancelReason;
+        use crate::ports::testing::TestGate;
+
+        for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+            for reason in [CancelReason::ClientDisconnected, CancelReason::Shutdown] {
+                let query = query();
+                let early = exchange("early");
+                early.push(response(&query, code)).unwrap();
+                let gate = Arc::new(TestGate::new());
+                let slow = Arc::new(DelayedExchange {
+                    connector: ConnectorId::new("slow").unwrap(),
+                    delay: Duration::ZERO,
+                    outcome: Mutex::new(Some(positive_response(&query))),
+                    gate: Some(gate.clone()),
+                });
+                let fallback = exchange("fallback");
+                fallback.push(positive_response(&query)).unwrap();
+                let executor = Arc::new(
+                    UpstreamGroupExecutor::new_with_fallback(
+                        crate::upstream::GroupSelector::new(
+                            SelectionPolicy::Parallel,
+                            vec![member("early"), member("slow")],
+                        )
+                        .unwrap(),
+                        vec![early.clone(), slow],
+                        Duration::from_secs(1),
+                        crate::upstream::GroupSelector::new(
+                            SelectionPolicy::Failover,
+                            vec![member("fallback")],
+                        )
+                        .unwrap(),
+                        vec![fallback.clone()],
+                        Duration::from_secs(1),
+                    )
+                    .unwrap(),
+                );
+                let context = context();
+                let cancellation = context.meta.cancellation.clone();
+                let task_executor = executor.clone();
+                let task = tokio::spawn(async move {
+                    task_executor
+                        .execute_with_late_sink(
+                            &query,
+                            &context,
+                            Arc::new(LateCollector::default()),
+                        )
+                        .await
+                });
+                gate.wait_reached().await;
+                assert_eq!(early.calls(), 1);
+                assert!(!task.is_finished());
+                cancellation.cancel(reason);
+                let outcome = tokio::time::timeout(Duration::from_secs(5), task)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                assert!(matches!(outcome, UpstreamOutcome::Cancelled(actual) if actual == reason));
+                assert_eq!(fallback.calls(), 0);
+                assert_eq!(executor.selector().in_flight(0).unwrap(), 0);
+                assert_eq!(executor.selector().in_flight(1).unwrap(), 0);
             }
         }
     }

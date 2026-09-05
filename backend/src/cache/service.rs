@@ -134,6 +134,24 @@ impl LateCacheFinalizer {
         self.state.active.load(Ordering::Acquire)
     }
 
+    /// 测试专用完成屏障；不会取消任务，也不改变生产 deadline。
+    #[cfg(test)]
+    pub(crate) async fn wait_idle_for_test(&self) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let notified = self.state.idle.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.active_tasks() == 0 {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("finalizer idle watchdog expired");
+    }
+
     pub fn is_shutdown(&self) -> bool {
         self.state.cancellation.is_cancelled()
     }
@@ -172,12 +190,14 @@ impl LateCacheFinalizer {
             .map_err(|_| LateCacheFinalizerSubmitError::Capacity)?;
         self.state.active.fetch_add(1, Ordering::AcqRel);
         let state = Arc::clone(&self.state);
+        // guard 必须随 future 一起创建；首次 poll 前被 abort 也要释放 active 和许可。
+        let task_guard = FinalizerTaskGuard {
+            state: Arc::clone(&state),
+            _permit: permit,
+        };
         while tasks.try_join_next().is_some() {}
         tasks.spawn(async move {
-            let _task_guard = FinalizerTaskGuard {
-                state: Arc::clone(&state),
-                _permit: permit,
-            };
+            let _task_guard = task_guard;
             tokio::select! {
                 biased;
                 _ = state.cancellation.cancelled() => {}
@@ -853,6 +873,94 @@ mod tests {
         ));
     }
 
+    // V2-O02：production Moka + finalizer，容量拒绝/停机/panic/丢弃都结束 leader lease。
+    #[tokio::test]
+    async fn contract_v2_finalizer_terminal_matrix_releases_moka_waiters() {
+        for terminal in [
+            "capacity", "shutdown", "panic", "drop", "success", "rejected",
+        ] {
+            let facade = Arc::new(CacheFacade::new(
+                Arc::new(crate::cache::MokaCacheStore::new()),
+                CacheFacadeOptions::default(),
+            ));
+            let CacheLoadReservation::Leader(lease) =
+                facade.reserve_load(key(), deadline()).await.unwrap()
+            else {
+                panic!("first reservation must lead");
+            };
+            let CacheLoadReservation::Follower(waiter) =
+                facade.reserve_load(key(), deadline()).await.unwrap()
+            else {
+                panic!("second reservation must follow");
+            };
+            let mut request = write_request();
+            if terminal == "rejected" {
+                request.response = Arc::new(response(ResponseCode::Refused));
+            }
+            let candidate = CacheCommitCandidate::new(Arc::clone(&facade), request, lease);
+            let finalizer = LateCacheFinalizer::new(1).unwrap();
+            match terminal {
+                "capacity" => {
+                    finalizer.submit_task(std::future::pending()).unwrap();
+                    assert_eq!(
+                        finalizer.submit_task(async move { drop(candidate) }),
+                        Err(LateCacheFinalizerSubmitError::Capacity)
+                    );
+                }
+                "shutdown" => {
+                    finalizer.shutdown().await;
+                    assert_eq!(
+                        finalizer.submit_task(async move { drop(candidate) }),
+                        Err(LateCacheFinalizerSubmitError::Shutdown)
+                    );
+                }
+                "panic" => {
+                    finalizer
+                        .submit_task(async move {
+                            let _candidate = candidate;
+                            panic!("synthetic contract owner panic");
+                        })
+                        .unwrap();
+                    finalizer.wait_idle_for_test().await;
+                }
+                "drop" => drop(candidate),
+                "success" | "rejected" => {
+                    let outcome = candidate.commit(Duration::from_secs(1)).await;
+                    assert_eq!(
+                        outcome,
+                        if terminal == "success" {
+                            CacheCommitOutcome::Stored
+                        } else {
+                            CacheCommitOutcome::Rejected
+                        }
+                    );
+                }
+                _ => unreachable!(),
+            }
+            let completion = tokio::time::timeout(
+                Duration::from_secs(5),
+                facade.wait_load(waiter, deadline(), &Cancellation::new()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            match terminal {
+                "success" => assert!(matches!(completion, CacheLoadCompletion::Ready(_))),
+                "rejected" => assert!(matches!(completion, CacheLoadCompletion::Miss)),
+                _ => assert!(matches!(
+                    completion,
+                    CacheLoadCompletion::Failed(CacheLoadFailure::Abandoned)
+                )),
+            }
+            // shutdown 的 completed 表示回收完成，不把内部 panic 当作自动恢复。
+            assert!(finalizer.shutdown_until(deadline()).await.completed);
+            assert_eq!(finalizer.active_tasks(), 0);
+            assert!(matches!(
+                facade.reserve_load(key(), deadline()).await.unwrap(),
+                CacheLoadReservation::Leader(_)
+            ));
+        }
+    }
     #[tokio::test]
     async fn lookup_reports_disabled_and_fresh_states() {
         let store = Arc::new(MemoryCacheStore::default());

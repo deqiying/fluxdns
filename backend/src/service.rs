@@ -71,6 +71,8 @@ pub enum ServiceStartError {
 
 #[derive(Debug, Error)]
 pub enum ServiceReloadError {
+    #[error("runtime reload activation deadline exceeded")]
+    Timeout,
     #[error("runtime reload bind failed: {0}")]
     Bind(#[source] BindError),
     #[error("runtime reload activation failed: {0}")]
@@ -580,7 +582,7 @@ impl DnsService {
     ///
     /// 资源 refresh task 会按新 Runtime 的 worker ID 集合重建，旧集合在新 task
     /// 注册成功后通过 scoped cancellation 退出。进程级资源配置发生变化时拒绝切换，
-    /// 由调用方保留旧 Runtime 并要求重启进程。
+    /// 由调用方保留旧 Runtime 并要求重启进程；等待刷新让出 activation 时共享原 deadline。
     pub async fn reload_prepared(
         &mut self,
         prepared: PreparedRuntime,
@@ -588,6 +590,9 @@ impl DnsService {
         deadline: Deadline,
         cancellation: Cancellation,
     ) -> Result<Arc<ActiveRuntime>, ServiceReloadError> {
+        if deadline.is_expired(Instant::now()) {
+            return Err(ServiceReloadError::Timeout);
+        }
         let expected = self.coordinator.current_revision();
         let actual = prepared.snapshot().revision();
         let expected_next = expected
@@ -615,11 +620,14 @@ impl DnsService {
                 .dns_core()
                 .ok_or(ServiceReloadError::MissingDnsCore)?;
             let core = self.instrument_core(core);
-            let runtime = self
-                .coordinator
-                .activate_prepared_reusing_listeners(expected, prepared)
-                .await
-                .map_err(ServiceReloadError::Reuse)?;
+            let runtime = tokio::time::timeout(
+                deadline.remaining(Instant::now()),
+                self.coordinator
+                    .activate_prepared_reusing_listeners(expected, prepared),
+            )
+            .await
+            .map_err(|_| ServiceReloadError::Timeout)?
+            .map_err(ServiceReloadError::Reuse)?;
             let transport_tasks = spawn_transport_plans(
                 &mut self.supervisor,
                 transport_plans,
@@ -663,10 +671,14 @@ impl DnsService {
             .ok_or(ServiceReloadError::MissingDnsCore)?;
         let core = self.instrument_core(core);
 
-        self.coordinator
-            .compare_and_activate_serialized(expected, candidate)
-            .await
-            .map_err(ServiceReloadError::Activation)?;
+        tokio::time::timeout(
+            deadline.remaining(Instant::now()),
+            self.coordinator
+                .compare_and_activate_serialized(expected, candidate),
+        )
+        .await
+        .map_err(|_| ServiceReloadError::Timeout)?
+        .map_err(ServiceReloadError::Activation)?;
         let runtime = self.coordinator.load();
         let transport_tasks = spawn_transport_plans(
             &mut self.supervisor,
@@ -3880,6 +3892,119 @@ clients: []
         assert!(!report.deadline_expired);
     }
 
+    struct ContractSessionCore {
+        accepted: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl DnsCore for ContractSessionCore {
+        fn resolve<'a>(
+            &'a self,
+            request: &'a DnsRequest,
+        ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
+            Box::pin(async move {
+                let (release, wait) = tokio::sync::oneshot::channel();
+                self.accepted
+                    .send(release)
+                    .expect("session observer must be alive");
+                tokio::time::timeout(
+                    request.context.meta.deadline.remaining(Instant::now()),
+                    wait,
+                )
+                .await
+                .expect("session fixture exceeded the original request budget")
+                .expect("session release sender must be alive");
+                Ok(CoreOutcome::Response(Arc::new(
+                    CanonicalResponse::empty_response(&request.query, ResponseCode::NoError)
+                        .unwrap(),
+                )))
+            })
+        }
+    }
+
+    // V6-C01：真实连接建立与 session accept 分开观察；不要求超额 TCP connect 失败。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "explicit local TCP/DoH 1024-session capacity and recovery test"]
+    async fn contract_v6_real_session_capacity_releases_and_recovers() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            for doh in [false, true] {
+                let ports = available_transport_ports();
+                let config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
+                let prepared = PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(1)).unwrap();
+                let bound = crate::runtime::bind_prepared(prepared, &SystemSocketFactory::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)), &Cancellation::new(),
+                ).await.unwrap();
+                let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+                let runtime = coordinator.load();
+                let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+                let core = Arc::new(ContractSessionCore { accepted });
+                let mut service = super::DnsService::start_with_coordinator(
+                    Arc::clone(&coordinator), core, crate::transport::DEFAULT_REQUEST_TIMEOUT,
+                ).unwrap();
+                let address = SocketAddr::from((Ipv4Addr::LOCALHOST, ports[if doh { 2 } else { 1 }]));
+                let query = query_wire_with_type(42, "transport.test.", RecordType::A);
+                let mut wire = if doh {
+                    format!("POST /dns HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", query.len()).into_bytes()
+                } else {
+                    (query.len() as u16).to_be_bytes().to_vec()
+                };
+                wire.extend_from_slice(&query);
+                let mut connections = Vec::new();
+                let mut releases = Vec::new();
+                assert_eq!(MAX_CONCURRENT_STREAM_SESSIONS, 1024);
+                for index in 0..MAX_CONCURRENT_STREAM_SESSIONS {
+                    let mut connection = TcpStream::connect(address).await.unwrap();
+                    connection.write_all(&wire).await.unwrap();
+                    let release = tokio::time::timeout(Duration::from_secs(2), sessions.recv()).await.unwrap().unwrap();
+                    connections.push(connection);
+                    releases.push(Some(release));
+                    if index == 1022 || index == 1023 {
+                        assert_eq!(runtime.active_requests(), index + 1);
+                    }
+                }
+                let mut queued = TcpStream::connect(address).await.unwrap();
+                queued.write_all(&wire).await.unwrap();
+                assert!(tokio::time::timeout(Duration::from_millis(30), sessions.recv()).await.is_err(),
+                    "request beyond session capacity must remain outside the core");
+                assert_eq!(runtime.active_requests(), 1024);
+                // 精确释放一个已确认进入 core 的连接，不把 backlog 当作已 accept 的 session。
+                releases[0].take().unwrap().send(()).unwrap();
+                connections[0].shutdown().await.unwrap();
+                let queued_release = tokio::time::timeout(Duration::from_secs(2), sessions.recv()).await.unwrap().unwrap();
+                assert_eq!(runtime.active_requests(), 1024);
+                queued_release.send(()).unwrap();
+                let mut response = Vec::new();
+                if doh {
+                    tokio::time::timeout(Duration::from_secs(2), queued.read_to_end(&mut response)).await.unwrap().unwrap();
+                    let split = response.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap();
+                    assert!(response.starts_with(b"HTTP/1.1 200"));
+                    response = response[split + 4..].to_vec();
+                } else {
+                    let length = tokio::time::timeout(Duration::from_secs(2), queued.read_u16()).await.unwrap().unwrap();
+                    response.resize(usize::from(length), 0);
+                    queued.read_exact(&mut response).await.unwrap();
+                }
+                let response = Message::from_vec(&response).unwrap();
+                assert_eq!(response.metadata.id, 42);
+                assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+                let report = service.shutdown(&SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                ).await.unwrap();
+                assert!(!report.deadline_expired);
+                assert_eq!(runtime.active_requests(), 0);
+                assert_eq!(service.supervisor.task_count(), 0);
+                drop(releases);
+                drop(connections);
+                drop(queued);
+                drop(service);
+                drop(runtime);
+                drop(coordinator);
+                let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+                drop(listener);
+                println!("V6-C01 protocol={} accepted=1023,1024 backlog=1 recovered=1 requests_after_shutdown=0 port_rebound=true",
+                    if doh { "plain-doh" } else { "tcp" });
+            }
+        }).await.expect("connection-capacity watchdog expired");
+    }
     #[tokio::test]
     async fn telemetry_samples_the_shared_source_across_transports_reload_and_shutdown() {
         use crate::ports::telemetry::{MetricName, MetricValue, MetricsSink};
@@ -5049,6 +5174,220 @@ clients: []
             super::process_owned_reload_change(&current, &changed_origin),
             Some("webui")
         );
+    }
+
+    /// V1-R01：正式 service reload 与刷新共享 mutation gate；owner panic 不遗留 task。
+    #[tokio::test]
+    async fn contract_v1_service_reload_serializes_refresh_and_reclaims_both_owners() {
+        use crate::ports::testing::TestGate;
+        use crate::resource::ResourceVersion;
+
+        for rebind in [false, true] {
+            let (_, root) = crate::config::test_support::portable_example();
+            std::fs::create_dir_all(&root).unwrap();
+            let resource_path = root.join("contract-hosts.txt");
+            std::fs::write(&resource_path, "192.0.2.10 old.example\n").unwrap();
+            let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let port = reservation.local_addr().unwrap().port();
+            drop(reservation);
+            let factory = crate::runtime::SystemSocketFactory::new();
+            let budget = Deadline::new(Instant::now() + Duration::from_secs(5));
+            let resource = crate::config::resolve::ConfigId::new("local-hosts").unwrap();
+            let publication = Arc::new(TestGate::new());
+            let mut initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, port, true),
+                RuntimeRevision(1),
+                budget,
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            initial.set_policy_published_gate_for_test(resource.clone(), publication.clone());
+            let old_owner = initial.snapshot().policy_core().unwrap().finalizer_owner();
+            let old_panic = Arc::new(TestGate::new());
+            let task_gate = old_panic.clone();
+            old_owner
+                .submit_task(async move {
+                    task_gate.pause().await;
+                    panic!("synthetic historical finalizer panic");
+                })
+                .unwrap();
+            let initial =
+                crate::runtime::bind_prepared(initial, &factory, budget, &Cancellation::new())
+                    .await
+                    .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+            let previous = coordinator.load();
+            let mut service =
+                super::DnsService::with_default_timeout_from_coordinator(coordinator.clone())
+                    .unwrap();
+            let next_reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let next_port = if rebind {
+                next_reservation.local_addr().unwrap().port()
+            } else {
+                port
+            };
+            drop(next_reservation);
+            let candidate = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, next_port, true),
+                RuntimeRevision(2),
+                budget,
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let short_candidate = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, next_port, true),
+                RuntimeRevision(2),
+                budget,
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let new_owner = candidate
+                .snapshot()
+                .policy_core()
+                .unwrap()
+                .finalizer_owner();
+            let new_panic = Arc::new(TestGate::new());
+            let task_gate = new_panic.clone();
+            new_owner
+                .submit_task(async move {
+                    task_gate.pause().await;
+                    panic!("synthetic current finalizer panic");
+                })
+                .unwrap();
+            std::fs::write(&resource_path, "192.0.2.11 new.example\n").unwrap();
+            let task_coordinator = coordinator.clone();
+            let expected = previous.clone();
+            let task_resource = resource.clone();
+            let refresh = tokio::spawn(async move {
+                task_coordinator
+                    .refresh_resource_if_current(
+                        &expected,
+                        &task_resource,
+                        u64::MAX,
+                        budget,
+                        Cancellation::new(),
+                    )
+                    .await
+            });
+            publication.wait_reached().await;
+            assert_eq!(
+                previous
+                    .snapshot()
+                    .resources()
+                    .lookup(&resource)
+                    .unwrap()
+                    .version(),
+                ResourceVersion::new(1, 1)
+            );
+            let short_budget = Deadline::new(Instant::now() + Duration::from_millis(20));
+            let timed_out = tokio::time::timeout(
+                Duration::from_millis(200),
+                service.reload_prepared(
+                    short_candidate,
+                    &factory,
+                    short_budget,
+                    Cancellation::new(),
+                ),
+            )
+            .await
+            .expect("reload mutation wait exceeded its original deadline");
+            assert!(matches!(timed_out, Err(super::ServiceReloadError::Timeout)));
+            assert!(Arc::ptr_eq(&coordinator.load(), &previous));
+            // 手动 poll 真实 reload 到等待点，不用 sleep 猜测是否已尝试 activation。
+            let mut reload =
+                Box::pin(service.reload_prepared(candidate, &factory, budget, Cancellation::new()));
+            std::future::poll_fn(|cx| {
+                assert!(reload.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert!(Arc::ptr_eq(&coordinator.load(), &previous));
+            publication.release();
+            let refreshed = tokio::time::timeout(Duration::from_secs(5), refresh)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(refreshed.epoch(), 2);
+            let active = tokio::time::timeout(Duration::from_secs(5), &mut reload)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(reload);
+            assert_eq!(active.revision(), RuntimeRevision(2));
+            assert_eq!(
+                active
+                    .snapshot()
+                    .resources()
+                    .lookup(&resource)
+                    .unwrap()
+                    .version(),
+                ResourceVersion::new(2, 0)
+            );
+            assert!(
+                coordinator
+                    .refresh_resource_if_current(
+                        &previous,
+                        &resource,
+                        u64::MAX,
+                        budget,
+                        Cancellation::new(),
+                    )
+                    .await
+                    .is_err()
+            );
+            let response = udp_query(
+                SocketAddr::from(([127, 0, 0, 1], next_port)),
+                941,
+                "new.example",
+            )
+            .await;
+            assert_eq!(response.response_code, ResponseCode::NoError);
+            assert_eq!(response.answers.len(), 1);
+
+            old_panic.wait_reached().await;
+            new_panic.wait_reached().await;
+            old_panic.release();
+            new_panic.release();
+            old_owner.wait_idle_for_test().await;
+            new_owner.wait_idle_for_test().await;
+            assert_eq!(old_owner.active_tasks(), 0);
+            assert_eq!(new_owner.active_tasks(), 0);
+            assert!(!old_owner.is_shutdown());
+            assert!(!new_owner.is_shutdown());
+
+            // 绑定失败不能替换刚发布的有效 runtime，也不能关闭它的资源 worker。
+            let occupied = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let failed = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(
+                    &root,
+                    &resource_path,
+                    occupied.local_addr().unwrap().port(),
+                    true,
+                ),
+                RuntimeRevision(3),
+                budget,
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let result = service
+                .reload_prepared(failed, &factory, budget, Cancellation::new())
+                .await;
+            assert!(matches!(result, Err(super::ServiceReloadError::Bind(_))));
+            assert!(Arc::ptr_eq(&coordinator.load(), &active));
+            let report = service.shutdown(&SystemClock::new(), budget).await.unwrap();
+            assert!(!report.deadline_expired);
+            assert!(old_owner.is_shutdown());
+            assert!(new_owner.is_shutdown());
+            drop((service, active, previous, coordinator, occupied));
+            let rebound = std::net::UdpSocket::bind(("127.0.0.1", next_port)).unwrap();
+            drop(rebound);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[tokio::test]

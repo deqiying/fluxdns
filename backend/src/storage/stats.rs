@@ -100,12 +100,22 @@ impl StatsPersistenceWorker {
         self.accumulator.persistence_gap(&ledger)
     }
 
-    /// 原子冻结当前 epoch，并按 batch ID 顺序提交所有 pending stats batch。
+    /// 等待其他 flush 时共享调用方 deadline，再按既有 epoch/batch 顺序提交。
     pub async fn flush(
         &self,
         deadline: Deadline,
     ) -> Result<StatsPersistenceFlushSummary, StatsPersistenceError> {
-        let _flush = self.flush_lock.lock().await;
+        let _flush = tokio::time::timeout(
+            deadline.remaining(std::time::Instant::now()),
+            self.flush_lock.lock(),
+        )
+        .await
+        .map_err(|_| {
+            StatsPersistenceError::Backend(PortError::new(
+                PortErrorClass::Timeout,
+                "stats_persistence.flush_lock",
+            ))
+        })?;
         let (pending_batches, pending_events) = {
             let ledger = self.ledger.lock().expect("stats ledger lock poisoned");
             (ledger.pending_count(), ledger.pending_event_count())
@@ -222,6 +232,34 @@ mod tests {
         Deadline::new(std::time::Instant::now() + Duration::from_secs(30))
     }
 
+    /// V4-S04：上一轮 flush 持锁时，新调用只能消耗自己的预算，不能提前交换 active epoch。
+    #[tokio::test]
+    async fn contract_v4_concurrent_flush_wait_preserves_deadline_and_active_epoch() {
+        let backend = std::sync::Arc::new(InMemoryStorageBackend::new());
+        backend
+            .migrate(STORAGE_SCHEMA_VERSION, deadline())
+            .await
+            .unwrap();
+        let worker = StatsPersistenceWorker::new(backend.clone());
+        worker.record_request(20_260_905, Vec::new()).unwrap();
+        let held = worker.flush_lock.lock().await;
+        let budget = Deadline::new(std::time::Instant::now() + Duration::from_millis(20));
+        let error = tokio::time::timeout(Duration::from_millis(200), worker.flush(budget))
+            .await
+            .expect("flush lock wait exceeded the caller deadline")
+            .unwrap_err();
+        assert!(matches!(error, StatsPersistenceError::Backend(source)
+            if matches!(source.class(), crate::ports::PortErrorClass::Timeout)));
+        assert_eq!(worker.pending_batch_count(), 0);
+        assert_eq!(worker.accumulator().active_event_count(), 1);
+        assert_eq!(backend.total_for_day(20_260_905), 0);
+        drop(held);
+        assert_eq!(worker.flush(deadline()).await.unwrap().events_committed, 1);
+        assert_eq!(worker.flush(deadline()).await.unwrap().events_committed, 0);
+        assert_eq!(backend.total_for_day(20_260_905), 1);
+        backend.shutdown(deadline()).await.unwrap();
+    }
+
     #[tokio::test]
     async fn flushes_epoch_to_backend_and_clears_pending_gap() {
         let backend = std::sync::Arc::new(InMemoryStorageBackend::new());
@@ -336,5 +374,41 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    // V4-S02：事件数保护与 batch 数保护独立，超限时不得交换/丢弃活动 epoch。
+    #[tokio::test]
+    async fn contract_v4_pending_event_limit_preserves_active_epoch() {
+        for pending_events in [
+            super::MAX_PENDING_STATS_EVENTS - 1,
+            super::MAX_PENDING_STATS_EVENTS,
+        ] {
+            let backend = std::sync::Arc::new(InMemoryStorageBackend::new());
+            backend
+                .migrate(STORAGE_SCHEMA_VERSION, deadline())
+                .await
+                .unwrap();
+            backend.shutdown(deadline()).await.unwrap();
+            let worker = StatsPersistenceWorker::new(backend);
+            for _ in 0..pending_events {
+                worker.record_request(20_000, vec![]).unwrap();
+            }
+            assert!(matches!(
+                worker.flush(deadline()).await,
+                Err(StatsPersistenceError::Backend(_))
+            ));
+            worker.record_request(20_001, vec![]).unwrap();
+            worker.record_request(20_000, vec![]).unwrap();
+            assert!(matches!(worker.flush(deadline()).await,
+                Err(StatsPersistenceError::PendingLimitExceeded(limit))
+                if limit.pending_events == pending_events && limit.active_events == 2 && limit.pending_batches == 1
+            ));
+            assert_eq!(worker.accumulator().active_event_count(), 2);
+            assert!(
+                matches!(worker.persistence_gap(), PersistenceGapState::ActiveAndPending {
+                active_event_count: 2, pending_event_count, batch_count: 1, ..
+            } if pending_event_count == pending_events)
+            );
+        }
     }
 }

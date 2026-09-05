@@ -43,6 +43,8 @@ pwsh -File script/package-embedded.ps1
 
 ## 开发进程管理
 
+后端本机契约验证使用 [`test-backend-contracts.ps1`](../../script/test-backend-contracts.ps1)，不通过 `dev.ps1` 启停个人实例。该入口的 Local/Connections 模式、watchdog、证据目录及实际运行边界唯一维护于[后台服务](backend/background-services.md#契约验证运行入口)；不是构建/发布或目标环境性能验收入口。
+
 [`dev.ps1`](../../script/dev.ps1) 的 `start` 必须显式提供 `-ConfigPath`，可用 `-BinaryPath` 指定 binary；不回退到 `_fluxdns/config.yaml` 或 CLI 默认配置。以下示例要求本地配置和当前平台发布物已经存在：
 
 ```powershell

@@ -561,6 +561,146 @@ mod tests {
         writes: Vec<Vec<u8>>,
     }
 
+    /// 保留真实 TCP I/O，只在测试端核对每段 handshake 收到同一个绝对 deadline。
+    struct BudgetCheckedStream {
+        inner: Box<dyn OutboundStream>,
+        deadline: Deadline,
+        reads: usize,
+        writes: usize,
+    }
+
+    impl OutboundStream for BudgetCheckedStream {
+        fn read_exact<'a>(
+            &'a mut self,
+            length: usize,
+            deadline: Deadline,
+            cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<TcpReadResult, PortError>> {
+            assert_eq!(deadline.at(), self.deadline.at());
+            self.reads += 1;
+            self.inner.read_exact(length, deadline, cancellation)
+        }
+
+        fn write_all<'a>(
+            &'a mut self,
+            payload: Vec<u8>,
+            deadline: Deadline,
+            cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<(), PortError>> {
+            assert_eq!(deadline.at(), self.deadline.at());
+            self.writes += 1;
+            self.inner.write_all(payload, deadline, cancellation)
+        }
+
+        fn shutdown(&mut self) -> PortFuture<'_, Result<(), PortError>> {
+            self.inner.shutdown()
+        }
+    }
+
+    /// V3-D02：真实 dial 后依次卡住 method/userpass/CONNECT，保留共享预算和取消原因。
+    #[tokio::test]
+    async fn contract_v3_socks_stages_preserve_dial_budget_and_cancellation() {
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        use crate::ports::PortErrorClass;
+        use crate::ports::effects::OutboundDialer;
+        use crate::ports::testing::TestGate;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for stage in 0..3 {
+            for cancel in [false, true] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let target = Socks5Address::Domain(Arc::from(&b"resolver.example.test"[..]));
+                let frames = [
+                    (encode_method_request(true), vec![5, 2]),
+                    (
+                        encode_userpass_request(b"user", b"pass").unwrap(),
+                        vec![1, 0],
+                    ),
+                    (
+                        encode_connect_request(&target, 443).unwrap(),
+                        vec![5, 0, 0, 1, 127, 0, 0, 1, 0, 53],
+                    ),
+                ];
+                let gate = Arc::new(TestGate::new());
+                let server_gate = gate.clone();
+                let server = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    for (index, (expected, response)) in frames.into_iter().enumerate() {
+                        let mut actual = vec![0; expected.len()];
+                        stream.read_exact(&mut actual).await.unwrap();
+                        assert_eq!(actual, expected);
+                        if index == stage {
+                            server_gate.pause().await;
+                            return;
+                        }
+                        stream.write_all(&response).await.unwrap();
+                    }
+                });
+                let cancellation = Cancellation::new();
+                let budget = Deadline::new(Instant::now() + Duration::from_secs(1));
+                let inner = crate::upstream::TokioOutboundDialer::new()
+                    .connect(address, budget, &cancellation)
+                    .await
+                    .unwrap();
+                let mut stream = BudgetCheckedStream {
+                    inner,
+                    deadline: budget,
+                    reads: 0,
+                    writes: 0,
+                };
+                let task_cancel = cancellation.clone();
+                let handshake = tokio::spawn(async move {
+                    let result = perform_handshake(
+                        &mut stream,
+                        &target,
+                        443,
+                        Some(super::Socks5Credentials {
+                            username: b"user",
+                            password: b"pass",
+                        }),
+                        budget,
+                        &task_cancel,
+                    )
+                    .await;
+                    (result, stream.reads, stream.writes)
+                });
+                gate.wait_reached().await;
+                assert!(!handshake.is_finished());
+                if cancel {
+                    cancellation.cancel(crate::dns::CancelReason::Shutdown);
+                }
+                let (result, reads, writes) =
+                    tokio::time::timeout(Duration::from_secs(3), handshake)
+                        .await
+                        .expect("SOCKS phase watchdog")
+                        .unwrap();
+                assert_eq!(reads, stage + 1);
+                assert_eq!(writes, stage + 1);
+                let Socks5HandshakeError::Transport(error) = result.unwrap_err() else {
+                    panic!("expected transport cancellation or timeout");
+                };
+                assert_eq!(error.operation(), "outbound.tcp_read");
+                if cancel {
+                    assert!(matches!(
+                        error.class(),
+                        PortErrorClass::Cancelled(crate::dns::CancelReason::Shutdown)
+                    ));
+                } else {
+                    assert!(matches!(error.class(), PortErrorClass::Timeout));
+                    assert!(budget.is_expired(Instant::now()));
+                }
+                gate.release();
+                tokio::time::timeout(Duration::from_secs(3), server)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+    }
+
     impl FakeStream {
         fn new(reads: impl IntoIterator<Item = TcpReadResult>) -> Self {
             Self {

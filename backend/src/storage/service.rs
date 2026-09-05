@@ -111,6 +111,8 @@ impl StorageServiceError {
 /// 由已解析配置创建的业务存储运行时；持有数据面 sink 和 writer 生命周期。
 pub struct StorageRuntime {
     service: StorageService,
+    #[cfg(test)]
+    backend_for_test: Arc<SqliteStorageBackend>,
     detail_writer: Option<SqliteResolveDetailWriter>,
     resolution_metrics: Arc<crate::resolution::ResolutionPipelineMetrics>,
     detail_cancellation: Option<Cancellation>,
@@ -288,6 +290,8 @@ impl StorageRuntime {
 
         let stats_worker = Arc::new(StatsPersistenceWorker::new(backend.clone()));
         let service = StorageService::new(backend.clone()).with_stats_worker(stats_worker);
+        #[cfg(test)]
+        let backend_for_test = Arc::clone(&backend);
         let mut detail_cancellation = None;
         let mut detail_task = None;
         let detail_writer = if config.dns.resolve_log.enable {
@@ -318,6 +322,8 @@ impl StorageRuntime {
 
         Ok(Self {
             service,
+            #[cfg(test)]
+            backend_for_test,
             detail_writer,
             resolution_metrics: Arc::new(crate::resolution::ResolutionPipelineMetrics::default()),
             detail_cancellation,
@@ -451,6 +457,212 @@ mod tests {
 
     fn deadline() -> Deadline {
         Deadline::new(Instant::now() + Duration::from_secs(1))
+    }
+
+    fn detail_record() -> crate::storage::ResolveDetailRecord {
+        crate::storage::ResolveDetailRecord::from_event(ResolveEvent {
+            occurred_at: SystemTime::now(),
+            duration_millis: 8,
+            dns_core_duration_micros: 250,
+            request_digest: std::sync::Arc::from("request-digest"),
+            listener_id: std::sync::Arc::from("udp-main"),
+            route_id: None,
+            client_ip: None,
+            client_bucket: None,
+            strategy_id: None,
+            upstream_id: None,
+            upstream_member_id: None,
+            upstream_used_id: None,
+            matched_rule_source: None,
+            matched_resource_id: None,
+            matched_rule_ordinal: None,
+            resource_version: None,
+            transport: crate::dns::TransportClass::Datagram,
+            qname: std::sync::Arc::from("example.test."),
+            qtype: 1,
+            qclass: 1,
+            answers: Vec::new(),
+            rcode: 0,
+            cancellation_reason: None,
+            outcome: OutcomeClass::Success,
+            source: StatsSource::Upstream,
+            cache_status: CacheStatus::Miss,
+            runtime_revision: crate::dns::RuntimeRevision(1),
+        })
+        .expect("detail event must be valid")
+    }
+
+    /// V1-O03：真实 detail worker 已返回后模拟 owner join panic，不泄露 payload 或跳过统计。
+    #[tokio::test]
+    async fn contract_v1_detail_owner_panic_preserves_stats_and_safe_error() {
+        let (source, work_path) = crate::config::test_support::portable_example();
+        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .unwrap()
+            .resolved;
+        let mut runtime = StorageRuntime::open(config.as_ref(), deadline())
+            .await
+            .unwrap();
+        let writer = runtime.detail_writer().unwrap();
+        runtime
+            .stats_worker()
+            .record_request(20_260_905, Vec::new())
+            .unwrap();
+        let worker = runtime.detail_task.take().unwrap();
+        runtime.detail_task = Some(tokio::spawn(async move {
+            let _completed = worker.await.unwrap().unwrap();
+            panic!("synthetic private detail panic payload");
+        }));
+        let error = tokio::time::timeout(Duration::from_secs(5), runtime.shutdown(deadline()))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(matches!(&error, StorageServiceError::Detail(source)
+            if source.operation() == "sqlite_resolve_log.worker"
+                && matches!(source.class(), crate::ports::PortErrorClass::Internal)));
+        assert!(!format!("{error:?}").contains("private detail"));
+        assert!(runtime.detail_task.is_none());
+        assert!(writer.try_write(detail_record()).is_err());
+        let reopened = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&config.database.path))
+            .await
+            .unwrap();
+        let total: i64 = sqlx::query_scalar("SELECT SUM(total_requests) FROM stats_daily_total")
+            .fetch_one(&reopened)
+            .await
+            .unwrap();
+        assert_eq!(total, 1);
+        reopened.close().await;
+        drop((runtime, writer));
+        std::fs::remove_dir_all(work_path).unwrap();
+    }
+
+    /// V4-S03：真实 SQLite 的当前事务不被统计抢占；超时与已提交数据分别断言。
+    #[tokio::test]
+    async fn contract_v4_sql_stages_share_shutdown_budget_and_reclaim_owner() {
+        use std::sync::Arc;
+
+        use crate::ports::testing::TestGate;
+        use crate::storage::sqlite::DetailSqlTestStage;
+
+        for stage in [
+            DetailSqlTestStage::BeforeSql,
+            DetailSqlTestStage::BeforeCommit,
+            DetailSqlTestStage::AfterCommit,
+        ] {
+            for expire in [false, true] {
+                let (source, work_path) = crate::config::test_support::portable_example();
+                let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+                    .load_str(&source)
+                    .unwrap()
+                    .resolved;
+                let mut runtime = StorageRuntime::open(config.as_ref(), deadline())
+                    .await
+                    .unwrap();
+                let backend = runtime.backend_for_test.clone();
+                let stats = runtime.stats_worker();
+                let writer = runtime.detail_writer().unwrap();
+                let cancelled = runtime.detail_cancellation.as_ref().unwrap().clone();
+                let gate = Arc::new(TestGate::new());
+                backend.set_detail_test_gate(stage, gate.clone());
+                let verification = sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(
+                        sqlx::sqlite::SqliteConnectOptions::new().filename(&config.database.path),
+                    )
+                    .await
+                    .unwrap();
+                stats.record_request(20_260_905, Vec::new()).unwrap();
+                for _ in 0..super::DEFAULT_RESOLVE_LOG_BATCH_SIZE {
+                    writer.try_write(detail_record()).unwrap();
+                }
+                gate.wait_reached().await;
+                let visible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+                    .fetch_one(&verification)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    visible,
+                    if stage == DetailSqlTestStage::AfterCommit {
+                        128
+                    } else {
+                        0
+                    },
+                    "{stage:?}"
+                );
+                let budget = Deadline::new(
+                    Instant::now()
+                        + if expire {
+                            Duration::from_millis(30)
+                        } else {
+                            Duration::from_secs(1)
+                        },
+                );
+                let shutdown = tokio::spawn(async move {
+                    let result = runtime.shutdown(budget).await;
+                    (runtime, result)
+                });
+                tokio::time::timeout(Duration::from_secs(5), cancelled.cancelled())
+                    .await
+                    .unwrap();
+                // 取消已送达但当前详情仍持有 operation lock，统计尚不能提交。
+                assert!(!shutdown.is_finished());
+                assert_eq!(stats.pending_batch_count(), 0);
+                if !expire {
+                    gate.release();
+                }
+                let (runtime, result) = tokio::time::timeout(Duration::from_secs(5), shutdown)
+                    .await
+                    .expect("shutdown watchdog")
+                    .unwrap();
+                assert!(runtime.detail_task.is_none());
+                assert!(runtime.detail_cancellation.is_none());
+                assert!(writer.try_write(detail_record()).is_err());
+                if expire {
+                    let error = result.unwrap_err();
+                    assert!(error.is_timeout(), "{stage:?}: {error:?}");
+                    assert!(matches!(error, StorageServiceError::All { .. }));
+                    assert!(budget.is_expired(Instant::now()));
+                    assert_eq!(stats.pending_batch_count(), 1);
+                    // 这里只是显式清理与幂等恢复，不把新预算算作原 shutdown 成功。
+                    assert_eq!(stats.flush(deadline()).await.unwrap().events_committed, 1);
+                    assert_eq!(stats.flush(deadline()).await.unwrap().events_committed, 0);
+                    backend.shutdown(deadline()).await.unwrap();
+                } else {
+                    let summary = result.unwrap();
+                    assert_eq!(summary.stats.events_committed, 1);
+                    assert_eq!(summary.detail.committed, 128);
+                }
+                let details: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+                    .fetch_one(&verification)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    details,
+                    if !expire || stage == DetailSqlTestStage::AfterCommit {
+                        128
+                    } else {
+                        0
+                    },
+                    "{stage:?}, expire={expire}"
+                );
+                let total: i64 =
+                    sqlx::query_scalar("SELECT SUM(total_requests) FROM stats_daily_total")
+                        .fetch_one(&verification)
+                        .await
+                        .unwrap();
+                assert_eq!(total, 1);
+                let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
+                    .fetch_one(&verification)
+                    .await
+                    .unwrap();
+                assert_eq!(integrity, "ok");
+                verification.close().await;
+                drop((runtime, backend, stats, writer));
+                std::fs::remove_dir_all(work_path).unwrap();
+            }
+        }
     }
 
     struct RecordingBackend {
@@ -596,36 +808,7 @@ mod tests {
         let writer = runtime
             .detail_writer()
             .expect("resolved fixture enables detail writer");
-        let record = crate::storage::ResolveDetailRecord::from_event(ResolveEvent {
-            occurred_at: SystemTime::now(),
-            duration_millis: 8,
-            dns_core_duration_micros: 250,
-            request_digest: std::sync::Arc::from("request-digest"),
-            listener_id: std::sync::Arc::from("udp-main"),
-            route_id: None,
-            client_ip: None,
-            client_bucket: None,
-            strategy_id: None,
-            upstream_id: None,
-            upstream_member_id: None,
-            upstream_used_id: None,
-            matched_rule_source: None,
-            matched_resource_id: None,
-            matched_rule_ordinal: None,
-            resource_version: None,
-            transport: crate::dns::TransportClass::Datagram,
-            qname: std::sync::Arc::from("example.test."),
-            qtype: 1,
-            qclass: 1,
-            answers: Vec::new(),
-            rcode: 0,
-            cancellation_reason: None,
-            outcome: OutcomeClass::Success,
-            source: StatsSource::Upstream,
-            cache_status: CacheStatus::Miss,
-            runtime_revision: crate::dns::RuntimeRevision(1),
-        })
-        .expect("detail event must be valid");
+        let record = detail_record();
         for _ in 0..300 {
             writer
                 .try_write(record.clone())
