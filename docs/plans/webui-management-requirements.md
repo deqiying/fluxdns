@@ -81,7 +81,7 @@
 
 ## 7. 视觉草案
 
-以下六张 SVG 沿用同一套界面风格：浅色图使用浅灰侧栏、白色工作区、蓝色主操作和克制的状态色；服务状态另提供布局与演示数据完全一致的深色图，以中性炭灰底色、分层灰度及适配深色背景的蓝色和青绿色评审深色风格。当前用于评审视觉方向，不是最终页面设计；源文件统一存放在[视觉草案目录](webui-management-designs/README.md)。
+以下 28 张 SVG 覆盖 12 个一级模块，沿用同一套界面风格：浅色图使用浅灰侧栏、白色工作区、蓝色主操作和克制的状态色；服务状态另提供布局与演示数据完全一致的深色图，以中性炭灰底色、分层灰度及适配深色背景的蓝色和青绿色评审深色风格。当前用于评审视觉方向，不是最终页面设计；源文件统一存放在[视觉草案目录](webui-management-designs/README.md)，可通过[本地评审总览](webui-management-designs/review.html)按模块查看并打开原图，无需启动服务。
 
 图中指标、地址、分组和配置均为演示数据；按钮、筛选和表单为静态示意，不代表交互或接口已实现。
 
@@ -130,3 +130,69 @@
 详情只展示后端实际保留的字段；现有响应是有界 Answer 摘要，不代表完整 DNS wire。`answers_truncated` 为真时明确展示已保留数与总数；`legacy_redacted`、空 Answer 和缺失耗时分别显示原因或未保留状态，不构造缺失内容。缓存命中/过期缓存的上游信息必须标为缓存生产来源，不能暗示本次请求调用了该上游。本图展示可用详情正常态，加载、获取失败、超长内容和触屏交互仍需后续详细设计与验证。
 
 ![解析记录悬浮详情视觉草案](webui-management-designs/webui-query-record-details.svg)
+
+### 7.7 监听入口
+
+[入口列表](webui-management-designs/webui-listeners.svg)区分逻辑入口、展开的监听地址和 DoH 共享路由；[UDP/TCP 编辑](webui-management-designs/webui-listener-editor.svg)展示地址、端口、策略和可选 Hosts，[DoH 编辑](webui-management-designs/webui-doh-listener-editor.svg)展示共享路由与端点列表，不把 DoH 扁平化为单地址、单策略。
+
+ECS 展示配置层面的策略继承结果，不表示每次请求最终的 ECS；客户端和规则级覆盖仍可改变结果。当前 `ListenerDto` 没有独立的 `enable` 或 ECS 字段：图中“已启用”示意已配置且生效的入口，启停状态的数据来源及独立启停契约仍需后续设计，不能据此添加不存在的配置键。端点详情中的 TLS 材料、客户端 IP 来源、可信代理与错误策略，以及路由编辑的展开态未在本轮单独出图，仍按现有配置约束继续细化。
+
+### 7.8 DNS 配置
+
+[全局概览](webui-management-designs/webui-dns-settings.svg)分为缓存、TTL 与 ECS、解析详情记录三个无外框分区，分别对应[缓存编辑](webui-management-designs/webui-dns-cache-editor.svg)、[TTL 与 ECS 编辑](webui-management-designs/webui-dns-policy-editor.svg)和[解析记录配置](webui-management-designs/webui-dns-recording-editor.svg)。容量使用 MiB、时长使用带单位输入，保存时转换为契约要求的字节数和 duration。
+
+全局缓存池开关不是所有策略池或客户端池的总开关；内存与持久化编码预算由全部逻辑池共享，不能标成进程内存或 SQLite 文件硬上限。详情记录和聚合统计分别展示；详情关闭不等于关闭聚合统计。当前修改 `dns.resolve_log` 需要重启，图中保留生效提示，不提供未经设计的自动重启操作。
+
+### 7.9 DNS 分流策略
+
+[策略列表](webui-management-designs/webui-dns-strategies.svg)展示规则数量、默认上游和缓存/ECS 覆盖；[策略编辑](webui-management-designs/webui-strategy-editor.svg)以有序表格突出第一条命中即停止的匹配关系，保留顺序调整、添加和单条编辑入口。
+
+Hosts 规则展示“本地回答”，不要求上游；规则集规则展示上游引用，二者不能同时配置。策略级缓存、TTL 和 ECS 单独表达继承关系，不能把“未配置”保存为显式禁用。单条规则与覆盖项展开后的完整编辑态仍需详细设计。
+
+### 7.10 Hosts 配置
+
+[Hosts 列表](webui-management-designs/webui-hosts.svg)区分内联和本地文件；[内联编辑](webui-management-designs/webui-hosts-editor.svg)以域名/IP 映射表替代整份配置文本编辑。图中同一域名的多条 IP 在保存时聚合为合法的 JSON 映射。
+
+切换文件来源后需展示路径、自动重载及间隔，不能保留内联内容作为有效提交字段；文件自动重载不代表远程同步。本轮以 JSON 内联编辑为示例，文件来源和 Hosts 文本格式的编辑态尚未展开。
+
+### 7.11 规则集
+
+[规则集列表](webui-management-designs/webui-rule-sets.svg)展示来源、格式、刷新计划和快照状态；[远程规则编辑](webui-management-designs/webui-rule-set-editor.svg)展示 URL、下载代理、格式和定时更新。陈旧状态使用低饱和警示色，并明确仍使用有效旧版，不能把刷新失败误画成资源已被删除或首次加载成功。
+
+切换内联、本地或远程来源时按类型展示并提交对应字段；`clash` 是行格式而非 YAML，`dat` 是二进制，不能统一塞进 JSON 编辑器。本轮没有新增版本锁定、校验和或主动刷新 API 的承诺；内联与文件编辑态留待细化。
+
+### 7.12 客户端配置
+
+[客户端列表](webui-management-designs/webui-clients.svg)分别展示标识/CIDR、策略和覆盖状态；[客户端编辑](webui-management-designs/webui-client-editor.svg)通过分段控件区分缓存继承、独立池与禁用，并单独设置乐观缓存、TTL 和 ECS。
+
+标识与 IP 输入对应数组，至少一项有效；空白示意值“未设置”不是提交值。匹配顺序仍为精确 ID 优先、CIDR 最长前缀优先，不增加列表拖动排序。客户端独立池按实际客户端身份和生效策略隔离，不按客户端规则名称共享。自定义 ECS 网段、TTL 边界和乐观缓存时效的展开字段仍需后续设计。
+
+### 7.13 代理配置
+
+[代理列表](webui-management-designs/webui-proxies.svg)展示 SOCKS5 协议族、SecretRef 来源和资源引用；[代理编辑](webui-management-designs/webui-proxy-editor.svg)在环境变量与文件引用间二选一，不显示或提交解析后的真实代理 URL、用户名、密码或令牌。
+
+不将 SecretRef 来源当作代理可用性检测结果。`socks5`/`socks5h` 的目标解析差异仍由引用内容中的 scheme 决定，不增加与真实 URL 冲突的独立解析模式开关。
+
+### 7.14 系统配置
+
+[系统配置概览](webui-management-designs/webui-system-settings.svg)仅为日志保留编辑入口，数据库、WebUI 与工作目录使用锁形只读标记，不用禁用输入框暗示这些字段可以解锁修改。[日志编辑](webui-management-designs/webui-logs-editor.svg)只包含日志开关、级别和路径，并提示当前需要重启生效。
+
+WebUI 公开 Origin 与 HTTP 监听分别展示，不能暗示管理服务本身终止 TLS。密码 hash 和凭据不进入图稿。只读限制必须在后端落实；本轮不设计系统重启按钮或其他系统写操作。
+
+### 7.15 系统运行状态
+
+[进程概览](webui-management-designs/webui-system-runtime.svg)展示运行时长、常驻内存、线程数、启动时间和版本，以简洁读数与信息行呈现，不重复服务状态的 QPS/RPM 图。页面不添加重启、停止或日志配置操作。
+
+内存读数与服务状态保持相同演示值和口径。当前 `SystemInfo` 仅包含版本、启动时间、运行时长及管理能力，内存和线程数属于待补充查询能力；拿不到读数时应显示不可用而非零值。图中的采样时间、配置摘要、引用数量和状态同样不意味着已有对应 API。
+
+### 7.16 上游组
+
+[上游组列表](webui-management-designs/webui-upstream-groups.svg)补齐 DNS 上游页的“上游组”标签；[上游组编辑](webui-management-designs/webui-upstream-group-editor.svg)沿用可编辑名称和类型，分别组织主成员与回退成员、选择模式和超时，编辑会话同样保留旧名称。
+
+并行与失败转移模式不展示可编辑权重；轮询和负载均衡模式才展开权重输入。回退仅在主组没有终态 DNS 响应时使用，不把 `NXDOMAIN`、`REFUSED` 或 `SERVFAIL` 当作必然触发回退的传输失败。成员选择、类型切换和空回退列表的完整编辑态仍需后续细化。
+
+### 7.17 本轮覆盖与边界
+
+本轮新增 22 张图稿：9 个剩余一级页面、1 个上游组标签页和 12 张编辑视图；此前 6 张图稿保留。新增图稿于 2026-09-05 静态核对 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 下的 [配置模型](../../backend/src/config/model.rs)、[配置参考](../implementation/configuration.md)和 [OpenAPI](../../frontend/openapi/management-api-v1.yaml)，只用于限定图中字段和状态的含义，不修改本文原始页面入口核对基线。
+
+全部图稿均为 1600 × 1040 桌面评审态。类型切换后的所有分支、添加/删除确认、字段错误、保存失败、空列表、权限不足、窄屏布局和键盘操作仍需在后续详细设计中补齐。本轮没有实现配置写入、交互组件或后端数据接口，也不把 SVG 栅格化与文档检查当作功能或运行验收。

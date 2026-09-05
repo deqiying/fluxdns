@@ -1,0 +1,600 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
+<title id="title">FluxDNS · 编辑分流策略</title>
+<desc id="desc">管理后台视觉规划效果图。全部数值、地址和配置均为演示内容，不代表当前产品已实现的功能。</desc>
+<metadata id="icon-license">ISC License
+
+Copyright (c) 2026 Lucide Icons and Contributors
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted, provided that the above
+copyright notice and this permission notice appear in all copies.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot; AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+
+---
+
+The following Lucide icons are derived from the Feather project:
+
+airplay, alert-circle, alert-octagon, alert-triangle, aperture, arrow-down-circle, arrow-down-left, arrow-down-right, arrow-down, arrow-left-circle, arrow-left, arrow-right-circle, arrow-right, arrow-up-circle, arrow-up-left, arrow-up-right, arrow-up, at-sign, calendar, cast, check, chevron-down, chevron-left, chevron-right, chevron-up, chevrons-down, chevrons-left, chevrons-right, chevrons-up, circle, clipboard, clock, code, columns, command, compass, corner-down-left, corner-down-right, corner-left-down, corner-left-up, corner-right-down, corner-right-up, corner-up-left, corner-up-right, crosshair, database, divide-circle, divide-square, dollar-sign, download, external-link, feather, frown, hash, headphones, help-circle, info, italic, key, layout, life-buoy, link-2, link, loader, lock, log-in, log-out, maximize, meh, minimize, minimize-2, minus-circle, minus-square, minus, monitor, moon, more-horizontal, more-vertical, move, music, navigation-2, navigation, octagon, pause-circle, percent, plus-circle, plus-square, plus, power, radio, rss, search, server, share, shopping-bag, sidebar, smartphone, smile, square, table-2, tablet, target, terminal, trash-2, trash, triangle, tv, type, upload, x-circle, x-octagon, x-square, x, zoom-in, zoom-out
+
+The MIT License (MIT) (for the icons listed above)
+
+Copyright (c) 2013-present Cole Bemis
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the &quot;Software&quot;), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED &quot;AS IS&quot;, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+</metadata>
+<defs>
+<style>text { font-family: 'Segoe UI Variable Text','Segoe UI','Microsoft YaHei UI','Microsoft YaHei',sans-serif; letter-spacing:0; } .numeric { font-variant-numeric:tabular-nums; } .mono { font-family:'SFMono-Regular',Consolas,'Microsoft YaHei UI',monospace; }</style>
+<filter id="modal-shadow" x="-15%" y="-15%" width="130%" height="145%">
+<feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#102039" flood-opacity=".2"/>
+</filter>
+<filter id="small-shadow" x="-10%" y="-20%" width="120%" height="150%">
+<feDropShadow dx="0" dy="1" stdDeviation="1.2" flood-color="#000" flood-opacity=".06"/>
+</filter>
+<g id="icon-Network">
+<rect x="16" y="16" width="6" height="6" rx="1"/>
+<rect x="2" y="16" width="6" height="6" rx="1"/>
+<rect x="9" y="2" width="6" height="6" rx="1"/>
+<path d="M5 16v-3a1 1 0 0 1 1-1h12a1 1 0 0 1 1 1v3"/>
+<path d="M12 12V8"/>
+</g>
+<g id="icon-ChevronsUpDown">
+<path d="m7 15 5 5 5-5"/>
+<path d="m7 9 5-5 5 5"/>
+</g>
+<g id="icon-Activity">
+<path d="M22 12h-2.48a2 2 0 0 0-1.93 1.46l-2.35 8.36a.25.25 0 0 1-.48 0L9.24 2.18a.25.25 0 0 0-.48 0l-2.35 8.36A2 2 0 0 1 4.49 12H2"/>
+</g>
+<g id="icon-ListFilter">
+<path d="M2 5h20"/>
+<path d="M6 12h12"/>
+<path d="M9 19h6"/>
+</g>
+<g id="icon-Radio">
+<path d="M16.247 7.761a6 6 0 0 1 0 8.478"/>
+<path d="M19.075 4.933a10 10 0 0 1 0 14.134"/>
+<path d="M4.925 19.067a10 10 0 0 1 0-14.134"/>
+<path d="M7.753 16.239a6 6 0 0 1 0-8.478"/>
+<circle cx="12" cy="12" r="2"/>
+</g>
+<g id="icon-SlidersHorizontal">
+<path d="M10 5H3"/>
+<path d="M12 19H3"/>
+<path d="M14 3v4"/>
+<path d="M16 17v4"/>
+<path d="M21 12h-9"/>
+<path d="M21 19h-5"/>
+<path d="M21 5h-7"/>
+<path d="M8 10v4"/>
+<path d="M8 12H3"/>
+</g>
+<g id="icon-Workflow">
+<rect width="8" height="8" x="3" y="3" rx="2"/>
+<path d="M7 11v4a2 2 0 0 0 2 2h4"/>
+<rect width="8" height="8" x="13" y="13" rx="2"/>
+</g>
+<g id="icon-FileCode2">
+<path d="M4 12.15V4a2 2 0 0 1 2-2h8a2.4 2.4 0 0 1 1.706.706l3.588 3.588A2.4 2.4 0 0 1 20 8v12a2 2 0 0 1-2 2h-3.35"/>
+<path d="M14 2v5a1 1 0 0 0 1 1h5"/>
+<path d="m5 16-3 3 3 3"/>
+<path d="m9 22 3-3-3-3"/>
+</g>
+<g id="icon-Layers">
+<path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/>
+<path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/>
+<path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/>
+</g>
+<g id="icon-Laptop">
+<path d="M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z"/>
+<path d="M20.054 15.987H3.946"/>
+</g>
+<g id="icon-Waypoints">
+<path d="m10.586 5.414-5.172 5.172"/>
+<path d="m18.586 13.414-5.172 5.172"/>
+<path d="M6 12h12"/>
+<circle cx="12" cy="20" r="2"/>
+<circle cx="12" cy="4" r="2"/>
+<circle cx="20" cy="12" r="2"/>
+<circle cx="4" cy="12" r="2"/>
+</g>
+<g id="icon-Settings2">
+<path d="M14 17H5"/>
+<path d="M19 7h-9"/>
+<circle cx="17" cy="17" r="3"/>
+<circle cx="7" cy="7" r="3"/>
+</g>
+<g id="icon-Gauge">
+<path d="m12 14 4-4"/>
+<path d="M3.34 19a10 10 0 1 1 17.32 0"/>
+</g>
+<g id="icon-LogOut">
+<path d="m16 17 5-5-5-5"/>
+<path d="M21 12H9"/>
+<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/>
+</g>
+<g id="icon-PanelLeft">
+<rect width="18" height="18" x="3" y="3" rx="2"/>
+<path d="M9 3v18"/>
+</g>
+<g id="icon-ChevronRight">
+<path d="m9 18 6-6-6-6"/>
+</g>
+<g id="icon-Bell">
+<path d="M10.268 21a2 2 0 0 0 3.464 0"/>
+<path d="M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326"/>
+</g>
+<g id="icon-RefreshCw">
+<path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/>
+<path d="M21 3v5h-5"/>
+<path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/>
+<path d="M8 16H3v5"/>
+</g>
+<g id="icon-MemoryStick">
+<path d="M12 12v-2"/>
+<path d="M12 18v-2"/>
+<path d="M16 12v-2"/>
+<path d="M16 18v-2"/>
+<path d="M2 11h1.5"/>
+<path d="M20 18v-2"/>
+<path d="M20.5 11H22"/>
+<path d="M4 18v-2"/>
+<path d="M8 12v-2"/>
+<path d="M8 18v-2"/>
+<rect x="2" y="6" width="20" height="10" rx="2"/>
+</g>
+<g id="icon-ChartNoAxesColumnIncreasing">
+<path d="M5 21v-6"/>
+<path d="M12 21V9"/>
+<path d="M19 21V3"/>
+</g>
+<g id="icon-Cable">
+<path d="M17 19a1 1 0 0 1-1-1v-2a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2a1 1 0 0 1-1 1z"/>
+<path d="M17 21v-2"/>
+<path d="M19 14V6.5a1 1 0 0 0-7 0v11a1 1 0 0 1-7 0V10"/>
+<path d="M21 21v-2"/>
+<path d="M3 5V3"/>
+<path d="M4 10a2 2 0 0 1-2-2V6a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2a2 2 0 0 1-2 2z"/>
+<path d="M7 5V3"/>
+</g>
+<g id="icon-ArrowUpRight">
+<path d="M7 7h10v10"/>
+<path d="M7 17 17 7"/>
+</g>
+<g id="icon-Plus">
+<path d="M5 12h14"/>
+<path d="M12 5v14"/>
+</g>
+<g id="icon-Search">
+<path d="m21 21-4.34-4.34"/>
+<circle cx="11" cy="11" r="8"/>
+</g>
+<g id="icon-ChevronDown">
+<path d="m6 9 6 6 6-6"/>
+</g>
+<g id="icon-Globe2">
+<path d="M21.54 15H17a2 2 0 0 0-2 2v4.54"/>
+<path d="M7 3.34V5a3 3 0 0 0 3 3a2 2 0 0 1 2 2c0 1.1.9 2 2 2a2 2 0 0 0 2-2c0-1.1.9-2 2-2h3.17"/>
+<path d="M11 21.95V18a2 2 0 0 0-2-2a2 2 0 0 1-2-2v-1a2 2 0 0 0-2-2H2.05"/>
+<circle cx="12" cy="12" r="10"/>
+</g>
+<g id="icon-Pencil">
+<path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/>
+<path d="m15 5 4 4"/>
+</g>
+<g id="icon-Ellipsis">
+<circle cx="12" cy="12" r="1"/>
+<circle cx="19" cy="12" r="1"/>
+<circle cx="5" cy="12" r="1"/>
+</g>
+<g id="icon-ChevronLeft">
+<path d="m15 18-6-6 6-6"/>
+</g>
+<g id="icon-X">
+<path d="M18 6 6 18"/>
+<path d="m6 6 12 12"/>
+</g>
+<g id="icon-LockKeyhole">
+<circle cx="12" cy="16" r="1"/>
+<rect x="3" y="10" width="18" height="12" rx="2"/>
+<path d="M7 10V7a5 5 0 0 1 10 0v3"/>
+</g>
+<g id="icon-Check">
+<path d="M20 6 9 17l-5-5"/>
+</g>
+</defs>
+<rect x="0" y="0" width="1600" height="1040" rx="0" fill="#FFFFFF" stroke="none" />
+<rect x="0" y="0" width="244" height="1040" rx="0" fill="#F5F5F7" stroke="none" />
+<line x1="244" y1="0" x2="244" y2="1040" stroke="#E0E2E6" />
+<rect x="24" y="29" width="34" height="34" rx="8" fill="#007AFF" stroke="none" />
+<svg x="31" y="36" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Network"/>
+</svg>
+<text x="70" y="54" font-size="23" fill="#202124" font-weight="650" data-max-width="148" >FluxDNS</text>
+<rect x="18" y="86" width="208" height="35" rx="6" fill="#ECEDEF" stroke="none" />
+<circle cx="34" cy="104" r="3.5" fill="#20824E" />
+<text x="47" y="109" font-size="13" fill="#63666D" font-weight="500" data-max-width="135" >主实例</text>
+<svg x="201" y="97" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronsUpDown"/>
+</svg>
+<text x="29" y="145" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="180" >监控</text>
+<svg x="29" y="170" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Activity"/>
+</svg>
+<text x="61" y="186" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >服务状态</text>
+<svg x="29" y="213" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ListFilter"/>
+</svg>
+<text x="61" y="229" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >解析记录</text>
+<circle cx="207" cy="222" r="3.5" fill="#007AFF" />
+<text x="29" y="295" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="180" >DNS 管理</text>
+<svg x="29" y="320" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Radio"/>
+</svg>
+<text x="61" y="336" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >监听入口</text>
+<svg x="29" y="363" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Network"/>
+</svg>
+<text x="61" y="379" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >DNS 上游</text>
+<svg x="29" y="406" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-SlidersHorizontal"/>
+</svg>
+<text x="61" y="422" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >DNS 配置</text>
+<rect x="16" y="440" width="212" height="37" rx="6" fill="#DEEBFD" stroke="none" />
+<svg x="29" y="449" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#0875E5" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Workflow"/>
+</svg>
+<text x="61" y="465" font-size="14.5" fill="#066BCC" font-weight="600" data-max-width="151" >DNS 分流策略</text>
+<svg x="29" y="492" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-FileCode2"/>
+</svg>
+<text x="61" y="508" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >Hosts 配置</text>
+<svg x="29" y="535" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Layers"/>
+</svg>
+<text x="61" y="551" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >规则集</text>
+<svg x="29" y="578" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Laptop"/>
+</svg>
+<text x="61" y="594" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >客户端配置</text>
+<svg x="29" y="621" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Waypoints"/>
+</svg>
+<text x="61" y="637" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >代理配置</text>
+<text x="29" y="723" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="180" >系统</text>
+<svg x="29" y="748" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Settings2"/>
+</svg>
+<text x="61" y="764" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >系统配置</text>
+<svg x="29" y="791" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#6B7079" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Gauge"/>
+</svg>
+<text x="61" y="807" font-size="14.5" fill="#45484F" font-weight="400" data-max-width="151" >系统运行状态</text>
+<line x1="23" y1="924" x2="221" y2="924" stroke="#E0E2E6" />
+<circle cx="32" cy="949" r="3.5" fill="#20824E" />
+<text x="45" y="954" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="168" >所有服务正常</text>
+<circle cx="38" cy="990" r="15" fill="#DFE3EA" />
+<text x="32" y="995" font-size="12" fill="#586273" font-weight="650" data-max-width="14" >A</text>
+<text x="62" y="987" font-size="12.5" fill="#202124" font-weight="500" data-max-width="140" >Administrator</text>
+<text x="62" y="1006" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="140" >管理员</text>
+<g aria-label="退出登录">
+<title>退出登录</title>
+<svg x="204" y="981" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-LogOut"/>
+</svg>
+</g>
+<line x1="244" y1="74" x2="1600" y2="74" stroke="#E8E9EC" />
+<svg x="283" y="26" width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="#777D86" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-PanelLeft"/>
+</svg>
+<line x1="325" y1="25" x2="325" y2="48" stroke="#E8E9EC" />
+<text x="347" y="45" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="70" >DNS 管理</text>
+<svg x="411" y="30" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#B0B4BB" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronRight"/>
+</svg>
+<text x="439" y="45" font-size="13" fill="#63666D" font-weight="500" data-max-width="250" >DNS 分流策略</text>
+<rect x="1371" y="25" width="79" height="25" rx="5" fill="#F3F4F6" stroke="none" />
+<text x="1380" y="42" font-size="12.5" fill="#737A85" font-weight="500" data-max-width="63" >演示数据</text>
+<line x1="1471" y1="27" x2="1471" y2="47" stroke="#E8E9EC" />
+<g aria-label="通知">
+<title>通知</title>
+<svg x="1490" y="28" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Bell"/>
+</svg>
+</g>
+<circle cx="1546" cy="37" r="15" fill="#EAECEF" />
+<text x="1540" y="42" font-size="12" fill="#66707F" font-weight="650" data-max-width="16" >A</text>
+
+<text x="285" y="140" font-size="30" fill="#202124" font-weight="650" data-max-width="950" >DNS 分流策略</text>
+<text x="286" y="173" font-size="13.5" fill="#63666D" font-weight="400" data-max-width="900" >主实例 · 策略与有序匹配规则</text>
+<rect x="1428" y="113" width="128" height="38" rx="6" fill="#007AFF" stroke="none" />
+<svg x="1441" y="123" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Plus"/>
+</svg>
+<text x="1467" y="138" font-size="13" fill="#FFFFFF" font-weight="500" data-max-width="79" >添加策略</text>
+<rect x="285" y="215" width="385" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<svg x="298" y="225" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B8F98" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Search"/>
+</svg>
+<text x="326" y="240" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="330" >搜索策略名称</text>
+<rect x="684" y="215" width="142" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="697" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="99" >全部默认上游</text>
+<svg x="798" y="227" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronDown"/>
+</svg>
+<rect x="284" y="285" width="1273" height="40" rx="0" fill="#F7F8FA" stroke="none" />
+<text x="303" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="232" >名称</text>
+<text x="569" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="245" >匹配规则</text>
+<text x="855" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="240" >默认上游</text>
+<text x="1131" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="129" >缓存</text>
+<text x="1310" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="139" >ECS</text>
+<g id="data-row-0">
+<text x="303" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="244" >default</text>
+<text x="303" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="244" >2 个入口 · 1 个客户端规则</text>
+<text x="569" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="250" >3 条规则</text>
+<text x="569" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="250" >Hosts → 域名集合</text>
+<text x="855" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="240" >secure-group</text>
+<text x="855" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >上游组 · 并行</text>
+<text x="1131" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="160" >继承全局</text>
+<text x="1131" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="160" >乐观缓存开启</text>
+<text x="1310" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="140" >客户端网段</text>
+<text x="1310" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="140" >继承全局</text>
+<g aria-label="编辑">
+<title>编辑</title>
+<svg x="1475" y="360" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Pencil"/>
+</svg>
+</g>
+<g aria-label="更多操作">
+<title>更多操作</title>
+<svg x="1521" y="360" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Ellipsis"/>
+</svg>
+</g>
+<line x1="284" y1="413" x2="1557" y2="413" stroke="#E8E9EC"/>
+</g>
+<g id="data-row-1">
+<text x="303" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="244" >privacy</text>
+<text x="303" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="244" >1 条 DoH 路由</text>
+<text x="569" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="250" >2 条规则</text>
+<text x="569" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="250" >域名集合</text>
+<text x="855" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="240" >privacy-doh</text>
+<text x="855" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >DoH 上游</text>
+<text x="1131" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="160" >策略独立池</text>
+<text x="1131" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="160" >乐观缓存开启</text>
+<text x="1310" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="140" >禁用</text>
+<text x="1310" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="140" >策略覆盖</text>
+<g aria-label="编辑">
+<title>编辑</title>
+<svg x="1475" y="448" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Pencil"/>
+</svg>
+</g>
+<g aria-label="更多操作">
+<title>更多操作</title>
+<svg x="1521" y="448" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Ellipsis"/>
+</svg>
+</g>
+<line x1="284" y1="501" x2="1557" y2="501" stroke="#E8E9EC"/>
+</g>
+<g id="data-row-2">
+<text x="303" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="244" >direct</text>
+<text x="303" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="244" >1 个客户端规则</text>
+<text x="569" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="250" >1 条规则</text>
+<text x="569" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="250" >Hosts</text>
+<text x="855" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="240" >edge-primary</text>
+<text x="855" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >DoH 上游</text>
+<text x="1131" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="160" >继承全局</text>
+<text x="1131" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="160" >乐观缓存开启</text>
+<text x="1310" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="140" >继承全局</text>
+<text x="1310" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="140" >客户端网段</text>
+<g aria-label="编辑">
+<title>编辑</title>
+<svg x="1475" y="536" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Pencil"/>
+</svg>
+</g>
+<g aria-label="更多操作">
+<title>更多操作</title>
+<svg x="1521" y="536" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Ellipsis"/>
+</svg>
+</g>
+<line x1="284" y1="589" x2="1557" y2="589" stroke="#E8E9EC"/>
+</g>
+<g id="data-row-3">
+<text x="303" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="244" >no-cache</text>
+<text x="303" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="244" >未引用</text>
+<text x="569" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="250" >0 条规则</text>
+<text x="569" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="250" >仅默认上游</text>
+<text x="855" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="240" >secure-group</text>
+<text x="855" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >上游组 · 并行</text>
+<text x="1131" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="160" >禁用</text>
+<text x="1131" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="160" >不使用缓存</text>
+<text x="1310" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="140" >禁用</text>
+<text x="1310" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="140" >策略覆盖</text>
+<g aria-label="编辑">
+<title>编辑</title>
+<svg x="1475" y="624" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Pencil"/>
+</svg>
+</g>
+<g aria-label="更多操作">
+<title>更多操作</title>
+<svg x="1521" y="624" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Ellipsis"/>
+</svg>
+</g>
+<line x1="284" y1="677" x2="1557" y2="677" stroke="#E8E9EC"/>
+</g>
+<text x="286" y="952" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="450" >共 4 个策略</text>
+<rect x="1351" y="929" width="116" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="1364" y="954" font-size="13" fill="#63666D" font-weight="400" data-max-width="73" >20 / 页</text>
+<svg x="1439" y="941" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronDown"/>
+</svg>
+<g aria-label="上一页">
+<title>上一页</title>
+<svg x="1489" y="939" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronLeft"/>
+</svg>
+</g>
+<g aria-label="下一页">
+<title>下一页</title>
+<svg x="1527" y="939" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronRight"/>
+</svg>
+</g>
+<line x1="284" y1="988" x2="1557" y2="988" stroke="#E8E9EC"/>
+<circle cx="290" cy="1013" r="3" fill="#20824E"/>
+<text x="302" y="1018" font-size="12" fill="#63666D" font-weight="400" data-max-width="600" >配置已同步</text>
+<text x="1556" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="250" text-anchor="end">更新于 14:32:08</text>
+<rect x="0" y="0" width="1600" height="1040" rx="0" fill="#1F2734" stroke="none" opacity=".24"/>
+<g id="editor-layer">
+<rect x="416" y="96" width="952" height="848" rx="8" fill="#FFFFFF" stroke="#DBDDE1" filter="url(#modal-shadow)"/>
+<rect x="452" y="126" width="40" height="40" rx="8" fill="#EAF3FF" stroke="none" />
+<svg x="462" y="136" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Workflow"/>
+</svg>
+<text x="508" y="145" font-size="23" fill="#202124" font-weight="650" data-max-width="700" >编辑分流策略</text>
+<text x="509" y="172" font-size="12.5" fill="#8B8F98" font-weight="400" data-max-width="700" >default · 按规则顺序匹配</text>
+<g aria-label="关闭">
+<title>关闭</title>
+<svg x="1311" y="131" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-X"/>
+</svg>
+</g>
+<line x1="416" y1="199" x2="1368" y2="199" stroke="#E8E9EC"/>
+<text x="452" y="237" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="422" >名称</text>
+<rect x="452" y="249" width="422" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
+<text x="465" y="276" font-size="14" fill="#202124" font-weight="400" data-max-width="396" >default</text>
+<text x="908" y="237" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="422" >默认上游</text>
+<rect x="908" y="249" width="422" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
+<text x="921" y="276" font-size="14" fill="#202124" font-weight="400" data-max-width="375" >secure-group</text>
+<svg x="1302" y="263" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronDown"/>
+</svg>
+<line x1="452" y1="314" x2="1330" y2="314" stroke="#E8E9EC"/>
+<text x="452" y="343" font-size="15" fill="#202124" font-weight="600" data-max-width="698" >匹配规则</text>
+<text x="1330" y="343" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="190" text-anchor="end">3 条规则</text>
+<rect x="452" y="363" width="878" height="33" rx="0" fill="#F7F8FA" stroke="none" />
+<text x="465" y="385" font-size="12" fill="#63666D" font-weight="500" data-max-width="67" >顺序</text>
+<text x="552" y="385" font-size="12" fill="#63666D" font-weight="500" data-max-width="361" >匹配资源</text>
+<text x="931" y="385" font-size="12" fill="#63666D" font-weight="500" data-max-width="219" >目标</text>
+<text x="1181" y="385" font-size="12" fill="#63666D" font-weight="500" data-max-width="96" >ECS</text>
+<g aria-label="调整匹配顺序">
+<title>调整匹配顺序</title>
+<svg x="465" y="417" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronsUpDown"/>
+</svg>
+</g>
+<text x="499" y="433" font-size="13" fill="#8B8F98" font-weight="500" data-max-width="30" >1</text>
+<text x="552" y="421" font-size="13" fill="#202124" font-weight="500" data-max-width="352" >hosts-local</text>
+<text x="552" y="443" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="352" >Hosts</text>
+<text x="931" y="433" font-size="13" fill="#202124" font-weight="400" data-max-width="219" >本地回答</text>
+<text x="1181" y="433" font-size="12" fill="#63666D" font-weight="400" data-max-width="103" >继承</text>
+<g aria-label="编辑匹配规则">
+<title>编辑匹配规则</title>
+<svg x="1297" y="418" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Pencil"/>
+</svg>
+</g>
+<line x1="452" y1="458" x2="1330" y2="458" stroke="#E8E9EC"/>
+<g aria-label="调整匹配顺序">
+<title>调整匹配顺序</title>
+<svg x="465" y="479" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronsUpDown"/>
+</svg>
+</g>
+<text x="499" y="495" font-size="13" fill="#8B8F98" font-weight="500" data-max-width="30" >2</text>
+<text x="552" y="483" font-size="13" fill="#202124" font-weight="500" data-max-width="352" >domains-primary</text>
+<text x="552" y="505" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="352" >规则集</text>
+<text x="931" y="495" font-size="13" fill="#202124" font-weight="400" data-max-width="219" >edge-primary</text>
+<text x="1181" y="495" font-size="12" fill="#63666D" font-weight="400" data-max-width="103" >客户端网段</text>
+<g aria-label="编辑匹配规则">
+<title>编辑匹配规则</title>
+<svg x="1297" y="480" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Pencil"/>
+</svg>
+</g>
+<line x1="452" y1="520" x2="1330" y2="520" stroke="#E8E9EC"/>
+<g aria-label="调整匹配顺序">
+<title>调整匹配顺序</title>
+<svg x="465" y="541" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronsUpDown"/>
+</svg>
+</g>
+<text x="499" y="557" font-size="13" fill="#8B8F98" font-weight="500" data-max-width="30" >3</text>
+<text x="552" y="545" font-size="13" fill="#202124" font-weight="500" data-max-width="352" >geosite:geolocation-!cn</text>
+<text x="552" y="567" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="352" >规则集子集</text>
+<text x="931" y="557" font-size="13" fill="#202124" font-weight="400" data-max-width="219" >privacy-doh</text>
+<text x="1181" y="557" font-size="12" fill="#63666D" font-weight="400" data-max-width="103" >禁用</text>
+<g aria-label="编辑匹配规则">
+<title>编辑匹配规则</title>
+<svg x="1297" y="542" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Pencil"/>
+</svg>
+</g>
+<line x1="452" y1="582" x2="1330" y2="582" stroke="#E8E9EC"/>
+<g aria-label="添加规则">
+<title>添加规则</title>
+<svg x="454" y="599" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Plus"/>
+</svg>
+</g>
+<text x="480" y="614" font-size="12" fill="#007AFF" font-weight="500" data-max-width="200" >添加规则</text>
+<line x1="452" y1="643" x2="1330" y2="643" stroke="#E8E9EC"/>
+<text x="452" y="672" font-size="15" fill="#202124" font-weight="600" data-max-width="698" >策略覆盖</text>
+<text x="452" y="711" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="268" >缓存</text>
+<rect x="452" y="723" width="268" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
+<text x="465" y="750" font-size="14" fill="#202124" font-weight="400" data-max-width="221" >继承全局</text>
+<svg x="692" y="737" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronDown"/>
+</svg>
+<text x="757" y="711" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="268" >TTL 覆写</text>
+<rect x="757" y="723" width="268" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
+<text x="770" y="750" font-size="14" fill="#202124" font-weight="400" data-max-width="221" >继承全局</text>
+<svg x="997" y="737" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronDown"/>
+</svg>
+<text x="1062" y="711" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="268" >ECS</text>
+<rect x="1062" y="723" width="268" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
+<text x="1075" y="750" font-size="14" fill="#202124" font-weight="400" data-max-width="221" >继承全局</text>
+<svg x="1302" y="737" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-ChevronDown"/>
+</svg>
+<line x1="416" y1="862" x2="1368" y2="862" stroke="#E8E9EC"/>
+<circle cx="459" cy="905" r="3" fill="#9E6A17"/>
+<text x="473" y="910" font-size="12" fill="#63666D" font-weight="400" data-max-width="540" >未保存更改</text>
+<rect x="1101" y="883" width="91" height="40" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="1146.5" y="909" font-size="13" fill="#63666D" font-weight="500" data-max-width="64" text-anchor="middle">取消</text>
+<rect x="1206" y="884" width="128" height="38" rx="6" fill="#007AFF" stroke="none" />
+<svg x="1219" y="894" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+<use href="#icon-Check"/>
+</svg>
+<text x="1245" y="909" font-size="13" fill="#FFFFFF" font-weight="500" data-max-width="79" >保存更改</text>
+</g>
+</svg>
