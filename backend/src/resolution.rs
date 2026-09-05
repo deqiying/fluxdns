@@ -289,6 +289,9 @@ async fn run_dispatcher(
             metrics.record_commit(CacheCommitOutcome::Dropped);
         }
         record_stats(&stats, &event);
+        if let Some(telemetry) = &telemetry {
+            telemetry.record_resolution(&event);
+        }
         if let Some(detail) = &detail
             && event.detail.is_some()
         {
@@ -473,6 +476,144 @@ mod tests {
             runtime_revision: RuntimeRevision(1),
             detail: None,
         })
+    }
+
+    #[tokio::test]
+    async fn dispatcher_aggregates_bounded_latency_and_results_without_detail_collection() {
+        use crate::dns::Deadline;
+        use crate::observability::{StructuredTelemetryOutput, TelemetryWriter};
+        use crate::ports::telemetry::{
+            Component, EventName, LogEvent, LogLevel, LogSink, MetricName, MetricValue,
+        };
+        use std::time::{Duration, Instant};
+        struct Capture(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let output = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let stats = Arc::new(crate::storage::StatsPersistenceWorker::new(Arc::new(
+            crate::storage::InMemoryStorageBackend::new(),
+        )));
+        let writer = Arc::new(
+            TelemetryWriter::new(
+                1,
+                Arc::new(StructuredTelemetryOutput::from_writer(Box::new(Capture(
+                    Arc::clone(&output),
+                )))),
+            )
+            .unwrap(),
+        );
+        let mut runtime = super::ResolutionRuntime::start(stats, None, Some(Arc::clone(&writer)));
+        let publisher = runtime.publisher();
+        assert!(!publisher.detail_enabled());
+        writer
+            .emit(LogEvent {
+                occurred_at: SystemTime::now(),
+                level: LogLevel::Warn,
+                name: EventName::parse("test_congestion").unwrap(),
+                component: Component::Resolution,
+                request_digest: None,
+                configured_id: None,
+                outcome: OutcomeClass::Success,
+                runtime_revision: None,
+                message: "test",
+            })
+            .unwrap();
+        for (duration, outcome, cache) in [
+            (0, OutcomeClass::Success, CacheStatus::Fresh),
+            (5, OutcomeClass::Timeout, CacheStatus::Miss),
+            (50, OutcomeClass::Success, CacheStatus::Miss),
+        ] {
+            let mut event = (*event()).clone();
+            event.duration_millis = duration;
+            event.outcome = outcome;
+            event.cache_lookup_status = cache;
+            event.listener_id = Arc::from("private-listener");
+            event.client_bucket = Some(Arc::from("private-client"));
+            assert_eq!(
+                publisher
+                    .try_publish(ResolutionEnvelope {
+                        event: Arc::new(event),
+                        cache_commit: None
+                    })
+                    .unwrap(),
+                ResolutionPublishDisposition::Accepted
+            );
+        }
+        let summary = runtime
+            .shutdown(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .await;
+        assert!(summary.completed);
+        assert_eq!(summary.snapshot.accepted, 3);
+        assert_eq!(summary.snapshot.detail_accepted, 0);
+        let snapshot = writer.metric_snapshot();
+        assert_eq!(snapshot.len(), 14);
+        let histogram = snapshot
+            .iter()
+            .find(|item| item.name == MetricName::RequestLatency)
+            .unwrap()
+            .histogram
+            .unwrap();
+        assert_eq!(histogram.count, 3);
+        assert_eq!(histogram.sum_micros, 55_000);
+        assert_eq!(histogram.buckets[0], 1);
+        assert_eq!(histogram.buckets[1], 2);
+        assert_eq!(histogram.buckets[4], 3);
+        assert_eq!(histogram.buckets[11], 3);
+        assert!(
+            snapshot
+                .iter()
+                .any(|item| item.name == MetricName::RequestsTotal
+                    && item.outcome == Some(OutcomeClass::Timeout)
+                    && item.value == MetricValue::Counter(1))
+        );
+        assert!(
+            snapshot
+                .iter()
+                .any(|item| item.name == MetricName::CacheOperations
+                    && item.cache_status == Some(CacheStatus::Miss)
+                    && item.value == MetricValue::Counter(2))
+        );
+        assert!(!format!("{snapshot:?}").contains("private"));
+        assert_eq!(
+            writer.stats().pending(),
+            1,
+            "request metrics must not join the full log queue"
+        );
+        let mut overflowing = (*event()).clone();
+        overflowing.dns_core_duration_micros = u64::MAX;
+        writer.record_resolution(&overflowing);
+        assert_eq!(
+            writer.metric_snapshot(),
+            snapshot,
+            "a rejected event must not partially update other counters"
+        );
+        writer
+            .shutdown(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .unwrap();
+        writer.record_resolution(&event());
+        assert_eq!(writer.metric_snapshot(), snapshot);
+        assert_eq!(writer.stats().rejected_metrics(), 2);
+        let encoded = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+        assert!(!encoded.contains("private"));
+        let json: Vec<serde_json::Value> = encoded
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let metric = json
+            .iter()
+            .find(|item| item["name"] == "requestlatency")
+            .unwrap();
+        assert_eq!(metric["temporality"], "cumulative");
+        assert_eq!(metric["histogram"]["count"], 3);
+        assert_eq!(metric["histogram"]["sum"], 55_000);
+        assert_eq!(metric["histogram"]["buckets"][11]["le"], "+Inf");
     }
 
     #[test]

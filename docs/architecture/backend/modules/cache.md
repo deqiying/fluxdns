@@ -4,7 +4,7 @@
 >
 > 适用范围：缓存 key、TTL、single-flight、memory adapter 和 persistence 生命周期
 >
-> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
+> 最后评审：2026-09-05（增量持久化、原编码预算与插入时间淘汰；基线见[模块索引](README.md)，本地证据见[后台服务](../../../implementation/backend/background-services.md#本次验证)）
 >
 > 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[sqlite.rs](../../../../backend/src/cache/sqlite.rs)、[persistence.rs](../../../../backend/src/cache/persistence.rs)
 >
@@ -81,13 +81,15 @@ finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明�
 
 ## 7. Persistence
 
-独立 SQLite cache DB 使用 `cache_meta` 保存 schema/cache/key format，`cache_entries(id, payload)` 保存 codec 编码记录。namespace、key、checksum、expiry 等在 payload 内，不是独立 SQL 列，也没有 namespace/key 数据库索引。恢复时经 codec 校验后构造内存 map，旧版本按显式兼容策略处理，不能混读。
+独立 SQLite cache DB 使用 `cache_meta` 保存 schema/cache/key format。schema v2 的 `cache_entries` 保留原 `id/payload`，增加完整 namespace/key 编码的唯一索引、编码大小、插入时间、可见截止时间和稳定淘汰排序列；不使用仅 hash 的 key 身份。时间索引使用 Unix 纳秒 `INTEGER`，恢复时转换回单调时钟语义。
 
-写入通过有界队列提交给单 writer。SQLite `persist` 每批读取并解码现有记录、合并新批次、裁剪，再在事务内删除并重写保留集，不是按 key 增量 upsert。recover、persist、maintain_capacity 和 shutdown 共用 operation lock 和调用者 deadline；关闭后拒绝操作。
+写入通过有界队列提交给单 writer。SQLite `persist` 在单事务中按 key 增量 upsert 当前批次，清理已发现的坏行、过期项并裁剪容量；未变化 payload 不重新解码或写入。容量合计与裁剪仍会扫描索引元数据，不宣称整个操作仅与本批大小相关。recover、persist、maintain_capacity 和 shutdown 共用 operation lock 和调用者 deadline；关闭后拒绝操作。
 
-`max_size_bytes` 当前约束 `prepare_snapshot` 计算的编码快照字节数，不是 SQLite `max_page_count` 或实际文件硬上限。过期/损坏/不兼容记录在解码时过滤，超出编码预算再淘汰；数据库页、freelist、索引及 WAL/SHM 会额外占用空间。`disk_usage()` 可读取主库与 sidecar 大小，但不据此触发 page-budget checkpoint/收缩。物理容量要求的差距见[核对计划](../../../plans/backend-contract-gaps.md)。
+`max_size_bytes` 保留与 codec `prepare_snapshot` 一致的编码预算：10 字节头，加每条 payload 长度及 4 字节 framing。它不是 SQLite `max_page_count` 或实际文件硬上限。数据库页、freelist、索引及 WAL/SHM 会额外占用空间；`disk_usage()` 可读取主库与 sidecar 大小，但不据此触发收缩。本轮明确不新增物理配额。
 
-容量裁剪按 entry 的 `inserted_at` 从旧到新淘汰，同值按 record version、encoded key 稳定排序。没有 last-access bucket，也不是按 SQLite row ID 或最近访问时间淘汰。既有近似 LRU 要求尚未实现，保留于[差距计划](../../../plans/backend-contract-gaps.md)评审。
+容量裁剪按 entry 的 `inserted_at` 从旧到新淘汰，同值按 record version、encoded key 稳定排序，完整存储 key 最终破平局。已决定保留插入时间口径，不新增 last-access bucket 或近似 LRU；增量写不因其他 key 更新而刷新旧项插入时间。
+
+schema v1 在事务内一次性解码并回填索引，保持兼容 payload 与 row ID；重复 key 保留最后一条，与旧恢复语义一致。损坏/不兼容项在恢复中计数，后续事务维护移除，不通过全库清空完成迁移。未知 schema/cache/key format 明确拒绝；普通批写失败回滚，不破坏旧有效批次。
 
 启动恢复依次检查 schema/format、checksum、expiry/compatibility，再注入 memory store。无法恢复只禁用 persistence 并标记 degraded，不阻止 DNS 启动。内存 CAS 成功后的 enqueue 不等待磁盘；队列满、DB busy、disk full 均保持内存服务并记录 gap。
 

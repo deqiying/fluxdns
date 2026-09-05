@@ -619,11 +619,14 @@ mod tests {
             self.calls.fetch_add(1, Ordering::Relaxed);
             let body = Arc::clone(&self.body);
             Box::pin(async move {
-                Ok(ResourceFetchResult {
-                    body,
-                    checksum: 42,
-                    modified_at: Some(SystemTime::UNIX_EPOCH),
-                })
+                Ok(ResourceFetchResult::Modified(
+                    crate::ports::effects::ResourceContent {
+                        body,
+                        checksum: 42,
+                        modified_at: Some(SystemTime::UNIX_EPOCH),
+                        validators: Default::default(),
+                    },
+                ))
             })
         }
     }

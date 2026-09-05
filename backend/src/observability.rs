@@ -21,7 +21,7 @@ use tracing::Subscriber;
 use tracing_subscriber::layer::{Context, Layer};
 
 mod registry;
-pub use registry::MetricSnapshot;
+pub use registry::{LatencyHistogram, MetricSnapshot, REQUEST_LATENCY_BUCKETS_MICROS};
 use registry::{ObservabilityRegistry, RegistryError};
 
 static NEXT_WRITER_INSTANCE: AtomicU64 = AtomicU64::new(0);
@@ -384,14 +384,31 @@ impl TelemetryOutput for StructuredTelemetryOutput {
             MetricValue::Gauge(_) => "instantaneous",
             MetricValue::DurationMicros(_) => unreachable!("duration events are not aggregated"),
         };
+        let mut labels =
+            vec![serde_json::json!({"key": "component", "value": enum_name(metric.component)})];
+        if let Some(outcome) = metric.outcome {
+            labels.push(serde_json::json!({"key": "outcome", "value": enum_name(outcome)}));
+        }
+        if let Some(cache) = metric.cache_status {
+            labels.push(serde_json::json!({"key": "cache_status", "value": enum_name(cache)}));
+        }
+        let histogram = metric.histogram.map(|value| serde_json::json!({
+            "unit": "microseconds",
+            "count": value.count,
+            "sum": value.sum_micros,
+            "buckets": REQUEST_LATENCY_BUCKETS_MICROS.into_iter().zip(value.buckets).map(|(upper, count)| {
+                serde_json::json!({"le": if upper == u64::MAX { serde_json::json!("+Inf") } else { serde_json::json!(upper) }, "count": count})
+            }).collect::<Vec<_>>(),
+        }));
         self.write_line(
             &serde_json::json!({
                 "kind": "metric",
                 "writer_instance": instance,
                 "occurred_at_ms": system_time_millis(SystemTime::now()),
                 "name": enum_name(metric.name),
-                "labels": [{"key": "component", "value": enum_name(metric.component)}],
+                "labels": labels,
                 "value": format!("{:?}", metric.value),
+                "histogram": histogram,
                 "temporality": temporality,
             })
             .to_string(),
@@ -610,6 +627,14 @@ impl TelemetryWriter {
 
     pub(crate) fn metric_snapshot(&self) -> Vec<MetricSnapshot> {
         self.metrics.snapshot()
+    }
+
+    /// 后台完成事件聚合与 shutdown 共用接收边界；失败只增加固定诊断计数。
+    pub(crate) fn record_resolution(&self, event: &crate::ports::observation::ResolutionEvent) {
+        let mut state = lock_unpoisoned(&self.state);
+        if state.closed || self.metrics.record_resolution(event).is_err() {
+            state.rejected_metrics = state.rejected_metrics.saturating_add(1);
+        }
     }
 
     /// 采样失败只更新固定诊断计数，不通过故障中的指标/日志路径递归发布。

@@ -506,14 +506,14 @@ impl UpstreamGroupExecutor {
                 UpstreamOutcome::Response(response)
                     if response.class() == crate::dns::ResponseClass::Positive
             );
-            let terminal_response = matches!(&outcome, UpstreamOutcome::Response(_))
-                && matches!(assess(&outcome).fallback, FallbackDecision::Stop);
             attempts.push(UpstreamAttempt {
                 attempt_index: index,
                 connector,
                 outcome,
             });
-            if complete_response || (terminal_response && late_sink.is_some()) {
+            // 正常负响应只阻止进入下一阶段 fallback，不终止本组已启动的候选择优。
+            // Positive 可立即返回，其余尝试仍交给既有 late owner 有界收集。
+            if complete_response {
                 if let Some(sink) = late_sink {
                     let drain = late_attempt_drain(
                         tasks,
@@ -1079,44 +1079,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn parallel_returns_terminal_nodata_while_draining_late_positive() {
+    async fn parallel_waits_for_positive_after_terminal_negative_with_or_without_sink() {
+        for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+            for collect_late in [false, true] {
+                let query = query();
+                let early = exchange("early");
+                early.push(response(&query, code)).unwrap();
+                let late = Arc::new(DelayedExchange::new(
+                    ConnectorId::new("late").unwrap(),
+                    Duration::from_millis(20),
+                    positive_response(&query),
+                ));
+                let selector = crate::upstream::GroupSelector::new(
+                    SelectionPolicy::Parallel,
+                    vec![member("early"), member("late")],
+                )
+                .unwrap();
+                let executor = UpstreamGroupExecutor::new(selector, vec![early, late]).unwrap();
+                let sink = Arc::new(LateCollector::default());
+                let result = if collect_late {
+                    executor
+                        .execute_with_late_sink(&query, &context(), sink.clone())
+                        .await
+                } else {
+                    executor.execute(&query, &context()).await
+                }
+                .unwrap();
+                assert!(matches!(
+                    result,
+                    UpstreamOutcome::Response(response) if response.class() == ResponseClass::Positive
+                ));
+                assert!(sink.results().is_empty());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_negative_blocks_fallback_even_when_other_primary_times_out() {
         let query = query();
         let early = exchange("early");
-        early.push(response(&query, ResponseCode::NoError)).unwrap();
-        let late = Arc::new(DelayedExchange::new(
-            ConnectorId::new("late").unwrap(),
-            Duration::from_millis(250),
+        early
+            .push(response(&query, ResponseCode::NXDomain))
+            .unwrap();
+        let slow = Arc::new(DelayedExchange::new(
+            ConnectorId::new("slow").unwrap(),
+            Duration::from_secs(30),
             positive_response(&query),
         ));
         let selector = crate::upstream::GroupSelector::new(
             SelectionPolicy::Parallel,
-            vec![member("early"), member("late")],
+            vec![member("early"), member("slow")],
         )
         .unwrap();
-        let executor = UpstreamGroupExecutor::new(selector, vec![early, late]).unwrap();
+        let fallback = exchange("fallback");
+        fallback.push(positive_response(&query)).unwrap();
+        let fallback_selector = crate::upstream::GroupSelector::new(
+            SelectionPolicy::Failover,
+            vec![member("fallback")],
+        )
+        .unwrap();
+        let executor = UpstreamGroupExecutor::new_with_fallback(
+            selector,
+            vec![early, slow],
+            Duration::from_millis(20),
+            fallback_selector,
+            vec![fallback.clone()],
+            Duration::from_secs(30),
+        )
+        .unwrap();
         let sink = Arc::new(LateCollector::default());
-        let started = Instant::now();
-        let result = executor
-            .execute_with_late_sink(&query, &context(), sink.clone())
-            .await
-            .unwrap();
-        assert!(started.elapsed() < Duration::from_millis(200));
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            executor.execute_with_late_sink(&query, &context(), sink.clone()),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         assert!(matches!(
             result,
-            UpstreamOutcome::Response(response) if response.class() == ResponseClass::NoData
+            UpstreamOutcome::Response(response) if response.class() == ResponseClass::NxDomain
         ));
+        assert_eq!(fallback.calls(), 0);
+    }
 
-        for _ in 0..300 {
-            if sink.results().iter().any(|(_, connector, class)| {
-                connector == "late" && *class == ResponseClass::Positive
-            }) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-        assert!(sink.results().iter().any(|(_, connector, class)| {
-            connector == "late" && *class == ResponseClass::Positive
-        }));
+    #[tokio::test]
+    async fn parallel_non_retryable_member_failure_cannot_hide_another_positive() {
+        let query = query();
+        let failed = exchange("failed");
+        failed.push(timeout(&failed, false)).unwrap();
+        let good = Arc::new(DelayedExchange::new(
+            ConnectorId::new("good").unwrap(),
+            Duration::from_millis(10),
+            positive_response(&query),
+        ));
+        let selector = crate::upstream::GroupSelector::new(
+            SelectionPolicy::Parallel,
+            vec![member("failed"), member("good")],
+        )
+        .unwrap();
+        let executor = UpstreamGroupExecutor::new(selector, vec![failed, good]).unwrap();
+        let result = executor
+            .execute_with_late_sink(&query, &context(), Arc::new(LateCollector::default()))
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, UpstreamOutcome::Response(response) if response.class() == ResponseClass::Positive)
+        );
     }
 
     #[tokio::test]

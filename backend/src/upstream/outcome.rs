@@ -183,7 +183,8 @@ pub(super) fn aggregate_with_connector(
                     cancellation = Some(prefer_cancel(cancellation, attempt.connector, reason));
                 }
                 UpstreamOutcome::TransportFailure(failure) => {
-                    fallback_blocked |= !failure.retryable;
+                    // 不可重试失败阻止顺序尝试继续，却不能屏蔽同一并行批次其他成员的答案。
+                    fallback_blocked |= mode != SelectionPolicy::Parallel && !failure.retryable;
                 }
             },
         }

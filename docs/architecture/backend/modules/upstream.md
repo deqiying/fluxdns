@@ -4,7 +4,7 @@
 >
 > 适用范围：upstream connector、bootstrap、outbound、group、并发选择和故障回退
 >
-> 最后评审：2026-09-05（bootstrap 地址缓存接入；其他边界沿用[模块索引](README.md)基线，运行证据见[DNS 管线](../../../implementation/backend/dns-pipeline.md)）
+> 最后评审：2026-09-05（parallel 择优、正常响应阻止 fallback、保留 late-result 与 primary lease；基线见[模块索引](README.md)，证据见[DNS 管线](../../../implementation/backend/dns-pipeline.md)）
 >
 > 关联实现：[registry.rs](../../../../backend/src/upstream/registry.rs)、[executor.rs](../../../../backend/src/upstream/executor.rs)、[group.rs](../../../../backend/src/upstream/group.rs)、[http.rs](../../../../backend/src/upstream/http.rs)、[reqwest_http.rs](../../../../backend/src/upstream/reqwest_http.rs)
 >
@@ -134,7 +134,7 @@ Secret 变化在 v1 需要构建新 candidate，不对现有 client 原地修改
 
 ## 6. Group 总体语义
 
-group deadline 为请求剩余 deadline 与 `timeout` 的较小值。任何合法 DNS response 都是 terminal response；只有全部 attempt 都没有 terminal response 时才进入 fallback。
+group deadline 为请求剩余 deadline 与 `timeout` 的较小值。正常 DNS response（包括 NXDOMAIN/NODATA、REFUSED 和其他非 SERVFAIL/TC 回答）是 terminal response，阻止进入 fallback；SERVFAIL、TC 与可重试 transport failure 仍沿用下一成员/fallback 规则。
 
 fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。进入 fallback 后不再回到主组。
 
@@ -142,8 +142,8 @@ fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。�
 
 一次 attempt 结果：
 
-- terminal response：立即按模式规则结束或进入 parallel late window；
-- transport failure：该成员失败，可继续其他成员；
+- terminal response：按模式规则立即返回或等待已启动的同阶段成员，不为等待更好答案另启 fallback；
+- transport failure：可重试时继续候选；不可重试时顺序模式终止，parallel 中不屏蔽其他已启动成员的有效响应；
 - cancelled：依据原因终止本组或单 attempt。
 
 ## 7. 选择算法
@@ -151,9 +151,9 @@ fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。�
 ### parallel
 
 - 同时发起全部成员，weight 省略或为 1；
-- 带 `LateResultSink` 时，第一个 terminal response 即可返回，剩余 JoinSet 移交 sink drain；当前完整 Positive 首响应也走此移交，并非必然取消其他成员；
-- 无 late sink 时，Positive 可提前返回并 abort 剩余任务，其他终态继续收集成员结果后再由结果选择器决策；
-- 因此“立即返回首个非完整终态”依赖 late sink 接线，不能外推到所有 executor 调用方式；
+- 无论是否带 `LateResultSink`，正常负答案都等待已启动的同阶段成员完成或阶段 deadline，允许更好的 Positive 胜出；已经收到正常回答时不启动 fallback；
+- Positive 可以提前返回：带 sink 时移交剩余 JoinSet 继续收集，保留生产 late-result 能力；无 sink 的调用仍 abort 剩余任务；
+- 成员不可重试失败不能遮蔽其他 parallel 成员已经取得的有效响应；不改变顺序模式的失败终止契约；
 - late window 按配置顺序选择完整 NOERROR，再选择其他可缓存终态；
 - 主组完全没有 terminal response 才进入 fallback。
 
@@ -177,8 +177,8 @@ fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。�
 
 - 严格按配置顺序串行尝试；
 - weight 省略或为 1，避免暗示不存在的流量权重；
-- transport failure 才尝试下一成员；
-- 任意 terminal response 都停止，不因 SERVFAIL/NXDOMAIN 继续切换；
+- 可重试 transport failure、SERVFAIL 或 TC 才尝试下一成员；
+- 正常 terminal response 都停止，包括 NXDOMAIN；不可重试 failure 也停止；
 - 全部成员失败后进入 fallback。
 
 ## 8. 并发与取消
@@ -194,7 +194,7 @@ fallback 使用独立 `fallback_timeout`，但不能超过请求总 deadline。�
 客户端取消时：
 
 - 没有 cache finalizer 价值的 attempt 立即取消；
-- parallel 已返回非完整终态且仍可能得到可缓存完整答案时，可在 group deadline 内继续；
+- 已移交的 parallel late drain 可在既有预算内继续收集，Positive 首响应也保留该能力；不是为负答案额外延长 group deadline；
 - shutdown 取消所有 late finalizer；
 - late result 不能修改已返回客户端的 response。
 

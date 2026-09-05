@@ -4,22 +4,24 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
-use sqlx::{Row, SqlitePool};
+use sqlx::{Row, Sqlite, SqlitePool};
 use thiserror::Error;
 
 use super::key::CACHE_KEY_FORMAT_VERSION;
-use super::persistence::{CodecError, decode_record, encode_record, prepare_snapshot};
+use super::persistence::{
+    CodecError, HEADER_BYTES, decode_record, encode_record, encode_storage_key,
+};
 use crate::dns::Deadline;
 use crate::ports::cache::{
-    CacheRecord, CacheRecoverySummary, PersistentCacheBatch, PersistentCacheStore,
+    CacheKey, CacheRecord, CacheRecoverySummary, PersistentCacheBatch, PersistentCacheStore,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
-const CACHE_SCHEMA_VERSION: u16 = 1;
+const CACHE_SCHEMA_VERSION: u16 = 2;
 const CACHE_FORMAT_VERSION: u16 = 2;
 const LEGACY_CACHE_FORMAT_VERSION: u16 = 1;
 
@@ -52,6 +54,7 @@ impl SqliteCacheDiskUsage {
 #[derive(Default)]
 struct SqliteState {
     shutting_down: bool,
+    invalid_rows: Vec<i64>,
 }
 
 #[cfg(test)]
@@ -153,10 +156,12 @@ impl SqlitePersistentCacheStore {
             let key_format_version = metadata
                 .try_get::<i64, _>("key_format_version")
                 .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
-            let current = schema_version == i64::from(CACHE_SCHEMA_VERSION)
+            let supported_schema =
+                schema_version == 1 || schema_version == i64::from(CACHE_SCHEMA_VERSION);
+            let current = supported_schema
                 && cache_format_version == i64::from(CACHE_FORMAT_VERSION)
                 && key_format_version == i64::from(CACHE_KEY_FORMAT_VERSION);
-            let provenance_upgrade = schema_version == i64::from(CACHE_SCHEMA_VERSION)
+            let provenance_upgrade = supported_schema
                 && cache_format_version == i64::from(LEGACY_CACHE_FORMAT_VERSION)
                 && key_format_version == i64::from(CACHE_KEY_FORMAT_VERSION);
             if provenance_upgrade {
@@ -187,13 +192,14 @@ impl SqlitePersistentCacheStore {
                  (singleton, schema_version, cache_format_version, key_format_version) \
                  VALUES (1, ?, ?, ?)",
             )
-            .bind(i64::from(CACHE_SCHEMA_VERSION))
+            .bind(1_i64)
             .bind(i64::from(CACHE_FORMAT_VERSION))
             .bind(i64::from(CACHE_KEY_FORMAT_VERSION))
             .execute(&pool)
             .await
             .map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)?;
         }
+        migrate_incremental_schema(&pool).await?;
         Ok(Self {
             pool,
             path: Arc::new(path),
@@ -277,18 +283,33 @@ impl SqlitePersistentCacheStore {
         now: Instant,
         operation: &'static str,
     ) -> Result<DecodedRows, PortError> {
-        let rows = sqlx::query("SELECT payload FROM cache_entries ORDER BY id")
+        let rows = sqlx::query("SELECT id, payload, inserted_at FROM cache_entries ORDER BY id")
             .fetch_all(&self.pool)
             .await
             .map_err(|error| database_error(error, operation))?;
         let mut records = HashMap::with_capacity(rows.len());
+        let wall_now = unix_now_nanos();
         let mut recovery = CacheRecoverySummary::default();
+        let mut invalid_rows = Vec::new();
         for row in rows {
             let payload = row
                 .try_get::<Vec<u8>, _>("payload")
                 .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?;
             match decode_record(&payload, now) {
-                Ok((key, record)) if visible(&record, now) => {
+                Ok((key, mut record)) if visible(&record, now) => {
+                    if let Some(inserted_at) = row
+                        .try_get::<Option<i64>, _>("inserted_at")
+                        .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?
+                    {
+                        // 增量写不会刷新旧 payload 的 age，恢复时以独立绝对时间保持原插入年龄。
+                        if let Some(entry) = Arc::get_mut(&mut record.entry) {
+                            entry.inserted_at = now
+                                .checked_sub(Duration::from_nanos(
+                                    wall_now.saturating_sub(inserted_at).max(0) as u64,
+                                ))
+                                .unwrap_or(now);
+                        }
+                    }
                     recovery.loaded = recovery.loaded.saturating_add(1);
                     records.insert(key, record);
                 }
@@ -297,18 +318,25 @@ impl SqlitePersistentCacheStore {
                 }
                 Err(CodecError::Incompatible) => {
                     recovery.incompatible = recovery.incompatible.saturating_add(1);
+                    invalid_rows.push(row.get::<i64, _>("id"));
                 }
                 Err(_) => {
                     recovery.corrupt = recovery.corrupt.saturating_add(1);
+                    invalid_rows.push(row.get::<i64, _>("id"));
                 }
             }
         }
+        self.state
+            .lock()
+            .map_err(|_| PortError::new(PortErrorClass::Internal, operation))?
+            .invalid_rows = invalid_rows;
         Ok(DecodedRows { records, recovery })
     }
 
+    /// 一个批次的 upsert、失效清理和预算淘汰属于同一事务；失败不覆盖上一批有效内容。
     async fn write_records(
         &self,
-        records: &HashMap<crate::ports::cache::CacheKey, CacheRecord>,
+        records: Vec<(CacheKey, CacheRecord)>,
         now: Instant,
         operation: &'static str,
     ) -> Result<(), PortError> {
@@ -317,45 +345,216 @@ impl SqlitePersistentCacheStore {
             return Err(PortError::new(PortErrorClass::Unavailable, operation)
                 .with_safe_context(fault.safe_context()));
         }
-        let mut payloads = records
-            .iter()
-            .map(|(key, record)| encode_record(key, record, now))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| codec_error(error, operation))?;
-        payloads.sort();
+        let wall_now = unix_now_nanos();
         let mut transaction = self
             .pool
             .begin()
             .await
             .map_err(|error| database_error(error, operation))?;
-        sqlx::query("DELETE FROM cache_entries")
-            .execute(&mut *transaction)
-            .await
+        self.remove_known_invalid(&mut transaction, operation)
+            .await?;
+        // 同一批的重复 key 与原 HashMap 合并一致，最后一个值有效。
+        for (key, record) in records.into_iter().collect::<HashMap<_, _>>() {
+            let storage_key =
+                encode_storage_key(&key).map_err(|error| codec_error(error, operation))?;
+            if !visible(&record, now) {
+                sqlx::query("DELETE FROM cache_entries WHERE entry_key = ?")
+                    .bind(storage_key)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|error| database_error(error, operation))?;
+                continue;
+            }
+            let payload =
+                encode_record(&key, &record, now).map_err(|error| codec_error(error, operation))?;
+            let size = payload.len() as u64 + 4;
+            if size.saturating_add(HEADER_BYTES) > self.max_size_bytes {
+                return Err(PortError::new(PortErrorClass::ResourceExhausted, operation));
+            }
+            sqlx::query(
+                "INSERT INTO cache_entries (entry_key, payload, encoded_size, inserted_at, \
+                 visible_until, version, sort_key) VALUES (?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(entry_key) DO UPDATE SET payload=excluded.payload, \
+                 encoded_size=excluded.encoded_size, inserted_at=excluded.inserted_at, \
+                 visible_until=excluded.visible_until, version=excluded.version, sort_key=excluded.sort_key",
+            )
+            .bind(storage_key).bind(payload).bind(size as i64)
+            .bind(wall_from_instant(record.entry.inserted_at, now, wall_now))
+            .bind(wall_from_instant(visible_until(&record), now, wall_now))
+            .bind(record.version.0.to_be_bytes().to_vec())
+            .bind(key.encoded.as_ref())
+            .execute(&mut *transaction).await
             .map_err(|error| database_error(error, operation))?;
-        for payload in payloads {
-            sqlx::query("INSERT INTO cache_entries (payload) VALUES (?)")
-                .bind(payload)
-                .execute(&mut *transaction)
-                .await
-                .map_err(|error| database_error(error, operation))?;
         }
+        trim_records(&mut transaction, self.max_size_bytes, wall_now, operation).await?;
         transaction
             .commit()
             .await
-            .map_err(|error| database_error(error, operation))
+            .map_err(|error| database_error(error, operation))?;
+        self.state
+            .lock()
+            .map_err(|_| PortError::new(PortErrorClass::Internal, operation))?
+            .invalid_rows
+            .clear();
+        Ok(())
     }
 
-    async fn prepare_records(
+    async fn remove_known_invalid(
         &self,
-        mut records: HashMap<crate::ports::cache::CacheKey, CacheRecord>,
-        now: Instant,
+        transaction: &mut sqlx::Transaction<'_, Sqlite>,
         operation: &'static str,
-    ) -> Result<HashMap<crate::ports::cache::CacheKey, CacheRecord>, PortError> {
-        let (kept, _snapshot) =
-            prepare_snapshot(std::mem::take(&mut records), self.max_size_bytes, now)
-                .map_err(|error| codec_error(error, operation))?;
-        Ok(kept)
+    ) -> Result<u64, PortError> {
+        let invalid = self
+            .state
+            .lock()
+            .map_err(|_| PortError::new(PortErrorClass::Internal, operation))?
+            .invalid_rows
+            .clone();
+        let mut removed = 0;
+        for id in invalid {
+            removed += sqlx::query("DELETE FROM cache_entries WHERE id = ?")
+                .bind(id)
+                .execute(&mut **transaction)
+                .await
+                .map_err(|error| database_error(error, operation))?
+                .rows_affected();
+        }
+        Ok(removed)
     }
+}
+
+/// schema 1 仅有 payload。一次性事务回填索引，保留有效记录及原 id；未知格式不猜测。
+async fn migrate_incremental_schema(
+    pool: &SqlitePool,
+) -> Result<(), SqlitePersistentCacheStoreBuildError> {
+    let result = async {
+        let mut transaction = pool.begin().await?;
+        let schema: i64 = sqlx::query_scalar("SELECT schema_version FROM cache_meta WHERE singleton = 1")
+            .fetch_one(&mut *transaction).await?;
+        if schema == i64::from(CACHE_SCHEMA_VERSION) {
+            return Ok::<(), sqlx::Error>(());
+        }
+        for statement in [
+            "ALTER TABLE cache_entries ADD COLUMN entry_key BLOB",
+            "ALTER TABLE cache_entries ADD COLUMN encoded_size INTEGER",
+            "ALTER TABLE cache_entries ADD COLUMN inserted_at INTEGER",
+            "ALTER TABLE cache_entries ADD COLUMN visible_until INTEGER",
+            "ALTER TABLE cache_entries ADD COLUMN version BLOB",
+            "ALTER TABLE cache_entries ADD COLUMN sort_key BLOB",
+            "CREATE UNIQUE INDEX cache_entry_key ON cache_entries(entry_key)",
+            "CREATE INDEX cache_entry_expiry ON cache_entries(visible_until)",
+            "CREATE INDEX cache_entry_eviction ON cache_entries(inserted_at, version, sort_key, entry_key, encoded_size)",
+        ] {
+            sqlx::query(statement).execute(&mut *transaction).await?;
+        }
+        let now = Instant::now();
+        let wall_now = unix_now_nanos();
+        let rows = sqlx::query("SELECT id, payload FROM cache_entries ORDER BY id")
+            .fetch_all(&mut *transaction).await?;
+        for row in rows {
+            let id: i64 = row.try_get("id")?;
+            let payload: Vec<u8> = row.try_get("payload")?;
+            let Ok((key, record)) = decode_record(&payload, now) else {
+                // 损坏项留给 recover 计数和 maintain 清理，不伪装成有效缓存。
+                continue;
+            };
+            let storage_key = encode_storage_key(&key).map_err(|_| sqlx::Error::Protocol("invalid cache key".into()))?;
+            // 与旧 recover 的 ORDER BY id + HashMap 覆盖保持一致，重复 key 保留最后一条。
+            sqlx::query("DELETE FROM cache_entries WHERE entry_key = ?")
+                .bind(&storage_key).execute(&mut *transaction).await?;
+            sqlx::query(
+                "UPDATE cache_entries SET entry_key=?, encoded_size=?, inserted_at=?, \
+                 visible_until=?, version=?, sort_key=? WHERE id=?",
+            )
+            .bind(storage_key).bind(payload.len() as i64 + 4)
+            .bind(wall_from_instant(record.entry.inserted_at, now, wall_now))
+            .bind(wall_from_instant(visible_until(&record), now, wall_now))
+            .bind(record.version.0.to_be_bytes().to_vec()).bind(key.encoded.as_ref()).bind(id)
+            .execute(&mut *transaction).await?;
+        }
+        sqlx::query("UPDATE cache_meta SET schema_version = ? WHERE singleton = 1")
+            .bind(i64::from(CACHE_SCHEMA_VERSION)).execute(&mut *transaction).await?;
+        transaction.commit().await
+    }.await;
+    result.map_err(|_| SqlitePersistentCacheStoreBuildError::Schema)
+}
+
+fn unix_now_nanos() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        .min(i64::MAX as u128) as i64
+}
+
+fn wall_from_instant(value: Instant, now: Instant, wall_now: i64) -> i64 {
+    if value >= now {
+        wall_now.saturating_add(value.duration_since(now).as_nanos().min(i64::MAX as u128) as i64)
+    } else {
+        wall_now.saturating_sub(now.duration_since(value).as_nanos().min(i64::MAX as u128) as i64)
+    }
+}
+
+fn visible_until(record: &CacheRecord) -> Instant {
+    record
+        .entry
+        .stale_until
+        .unwrap_or(record.entry.expires_at)
+        .max(record.entry.expires_at)
+}
+
+/// 常规批次只扫描小型容量索引，不读取/解码未变化 payload；超额时有界读取最旧元数据。
+async fn trim_records(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+    max_size_bytes: u64,
+    wall_now: i64,
+    operation: &'static str,
+) -> Result<u64, PortError> {
+    let mut removed =
+        sqlx::query("DELETE FROM cache_entries WHERE entry_key IS NULL OR visible_until <= ?")
+            .bind(wall_now)
+            .execute(&mut **transaction)
+            .await
+            .map_err(|error| database_error(error, operation))?
+            .rows_affected();
+    let size: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(encoded_size), 0) FROM cache_entries INDEXED BY cache_entry_eviction",
+    )
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(|error| database_error(error, operation))?;
+    let mut total = (size as u64).saturating_add(HEADER_BYTES);
+    while total > max_size_bytes {
+        let rows = sqlx::query(
+            "SELECT entry_key, encoded_size FROM cache_entries \
+             ORDER BY inserted_at, version, sort_key, entry_key LIMIT 256",
+        )
+        .fetch_all(&mut **transaction)
+        .await
+        .map_err(|error| database_error(error, operation))?;
+        if rows.is_empty() {
+            break;
+        }
+        for row in rows {
+            let key: Vec<u8> = row
+                .try_get("entry_key")
+                .map_err(|error| database_error(error, operation))?;
+            let size: i64 = row
+                .try_get("encoded_size")
+                .map_err(|error| database_error(error, operation))?;
+            removed += sqlx::query("DELETE FROM cache_entries WHERE entry_key = ?")
+                .bind(key)
+                .execute(&mut **transaction)
+                .await
+                .map_err(|error| database_error(error, operation))?
+                .rows_affected();
+            total = total.saturating_sub(size as u64);
+            if total <= max_size_bytes {
+                break;
+            }
+        }
+    }
+    Ok(removed)
 }
 
 fn sidecar_path(path: &Path, suffix: &str) -> PathBuf {
@@ -467,12 +666,8 @@ impl PersistentCacheStore for SqlitePersistentCacheStore {
                     .lock_operation(deadline, "sqlite_cache.persist")
                     .await?;
                 let now = Instant::now();
-                let mut records = self.read_rows(now, "sqlite_cache.persist").await?.records;
-                records.extend(batch.records);
-                let kept = self
-                    .prepare_records(records, now, "sqlite_cache.persist")
-                    .await?;
-                self.write_records(&kept, now, "sqlite_cache.persist").await
+                self.write_records(batch.records, now, "sqlite_cache.persist")
+                    .await
             },
         ))
     }
@@ -486,23 +681,32 @@ impl PersistentCacheStore for SqlitePersistentCacheStore {
                 let _guard = self
                     .lock_operation(deadline, "sqlite_cache.maintain_capacity")
                     .await?;
-                let now = Instant::now();
-                let decoded = self
-                    .read_rows(now, "sqlite_cache.maintain_capacity")
+                let operation = "sqlite_cache.maintain_capacity";
+                let mut transaction = self
+                    .pool
+                    .begin()
+                    .await
+                    .map_err(|error| database_error(error, operation))?;
+                let corrupt = self
+                    .remove_known_invalid(&mut transaction, operation)
                     .await?;
-                let before = (decoded.records.len() as u64)
-                    .saturating_add(decoded.recovery.expired)
-                    .saturating_add(decoded.recovery.corrupt)
-                    .saturating_add(decoded.recovery.incompatible);
-                let kept = self
-                    .prepare_records(decoded.records, now, "sqlite_cache.maintain_capacity")
-                    .await?;
-                let removed = before.saturating_sub(kept.len() as u64);
-                if removed > 0 {
-                    self.write_records(&kept, now, "sqlite_cache.maintain_capacity")
-                        .await?;
-                }
-                Ok(removed)
+                let removed = trim_records(
+                    &mut transaction,
+                    self.max_size_bytes,
+                    unix_now_nanos(),
+                    operation,
+                )
+                .await?;
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|error| database_error(error, operation))?;
+                self.state
+                    .lock()
+                    .map_err(|_| PortError::new(PortErrorClass::Internal, operation))?
+                    .invalid_rows
+                    .clear();
+                Ok(removed.saturating_add(corrupt))
             },
         ))
     }
@@ -552,7 +756,234 @@ mod tests {
 
     fn db_path() -> std::path::PathBuf {
         let id = NEXT_TEST_DB.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("fluxdns-cache-{id}-{}.sqlite3", std::process::id()))
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_fluxdns/tests/cache");
+        std::fs::create_dir_all(&root).unwrap();
+        root.join(format!("fluxdns-cache-{id}-{}.sqlite3", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn incremental_batch_preserves_unchanged_rows_and_only_writes_changed_keys() {
+        let store = SqlitePersistentCacheStore::connect(db_path(), 128 * 1024)
+            .await
+            .unwrap();
+        let records = (0..50)
+            .map(|index| {
+                (
+                    key(format!("entry-{index:02}").as_bytes()),
+                    record(Duration::from_secs(60)),
+                )
+            })
+            .collect();
+        store
+            .persist(PersistentCacheBatch { records }, deadline())
+            .await
+            .unwrap();
+        let untouched_key = super::encode_storage_key(&key(b"entry-00")).unwrap();
+        let before: (i64, Vec<u8>) =
+            sqlx::query_as("SELECT id, payload FROM cache_entries WHERE entry_key=?")
+                .bind(&untouched_key)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        sqlx::query("CREATE TABLE write_audit (kind TEXT)")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        for sql in [
+            "CREATE TRIGGER audit_insert AFTER INSERT ON cache_entries BEGIN INSERT INTO write_audit VALUES ('INSERT'); END",
+            "CREATE TRIGGER audit_update AFTER UPDATE ON cache_entries BEGIN INSERT INTO write_audit VALUES ('UPDATE'); END",
+            "CREATE TRIGGER audit_delete AFTER DELETE ON cache_entries BEGIN INSERT INTO write_audit VALUES ('DELETE'); END",
+        ] {
+            sqlx::query(sql).execute(&store.pool).await.unwrap();
+        }
+        let mut changed = record(Duration::from_secs(60));
+        changed.version = CacheVersion(2);
+        store
+            .persist(
+                PersistentCacheBatch {
+                    records: vec![
+                        (key(b"entry-01"), changed.clone()),
+                        (key(b"entry-50"), changed),
+                    ],
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let after: (i64, Vec<u8>) =
+            sqlx::query_as("SELECT id, payload FROM cache_entries WHERE entry_key=?")
+                .bind(&untouched_key)
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            before, after,
+            "unchanged payload and row id must not be rewritten"
+        );
+        let writes: Vec<(String, i64)> =
+            sqlx::query_as("SELECT kind, COUNT(*) FROM write_audit GROUP BY kind ORDER BY kind")
+                .fetch_all(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            writes,
+            vec![("INSERT".to_owned(), 1), ("UPDATE".to_owned(), 1)]
+        );
+        assert_eq!(store.recover(deadline()).await.unwrap().1.loaded, 51);
+        assert_eq!(store.maintain_capacity(deadline()).await.unwrap(), 0);
+        let writes_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM write_audit")
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(writes_after, 2);
+        store.shutdown(deadline()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn schema_one_upgrade_preserves_payload_and_last_duplicate_without_clearing_cache() {
+        let path = db_path();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE cache_entries (id INTEGER PRIMARY KEY AUTOINCREMENT, payload BLOB NOT NULL)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("CREATE TABLE cache_meta (singleton INTEGER PRIMARY KEY, schema_version INTEGER, cache_format_version INTEGER, key_format_version INTEGER)")
+            .execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cache_meta VALUES (1, 1, ?, ?)")
+            .bind(i64::from(CACHE_FORMAT_VERSION))
+            .bind(i64::from(CACHE_KEY_FORMAT_VERSION))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let key = key(b"old-format");
+        let mut record = record(Duration::from_secs(60));
+        let first = super::encode_record(&key, &record, Instant::now()).unwrap();
+        record.version = CacheVersion(2);
+        let latest = super::encode_record(&key, &record, Instant::now()).unwrap();
+        for payload in [&first, &latest, &vec![99_u8]] {
+            sqlx::query("INSERT INTO cache_entries(payload) VALUES (?)")
+                .bind(payload)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        pool.close().await;
+        let store = SqlitePersistentCacheStore::connect(&path, 16 * 1024)
+            .await
+            .unwrap();
+        let (batch, summary) = store.recover(deadline()).await.unwrap();
+        assert_eq!(summary.loaded, 1);
+        assert_eq!(summary.corrupt, 1);
+        assert_eq!(batch.records[0].1.version, CacheVersion(2));
+        let row: (i64, Vec<u8>) =
+            sqlx::query_as("SELECT id, payload FROM cache_entries WHERE entry_key IS NOT NULL")
+                .fetch_one(&store.pool)
+                .await
+                .unwrap();
+        assert_eq!(row, (2, latest));
+        assert_eq!(store.maintain_capacity(deadline()).await.unwrap(), 1);
+        store.shutdown(deadline()).await.unwrap();
+        let reopened = SqlitePersistentCacheStore::connect(&path, 16 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(reopened.recover(deadline()).await.unwrap().1.loaded, 1);
+        reopened.shutdown(deadline()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_incremental_write_rolls_back_and_recovered_corruption_is_removed() {
+        let store = SqlitePersistentCacheStore::connect(db_path(), 16 * 1024)
+            .await
+            .unwrap();
+        store
+            .persist(
+                PersistentCacheBatch {
+                    records: vec![(key(b"baseline"), record(Duration::from_secs(60)))],
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+        sqlx::query("CREATE TRIGGER reject_insert BEFORE INSERT ON cache_entries BEGIN SELECT RAISE(ABORT, 'test failure'); END")
+            .execute(&store.pool).await.unwrap();
+        assert!(
+            store
+                .persist(
+                    PersistentCacheBatch {
+                        records: vec![(key(b"new"), record(Duration::from_secs(60)))]
+                    },
+                    deadline()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(store.recover(deadline()).await.unwrap().1.loaded, 1);
+        sqlx::query("DROP TRIGGER reject_insert")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cache_entries SET payload = X'63'")
+            .execute(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(store.recover(deadline()).await.unwrap().1.corrupt, 1);
+        assert_eq!(store.maintain_capacity(deadline()).await.unwrap(), 1);
+        store.shutdown(deadline()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn incremental_keys_keep_namespaces_distinct_and_restore_absolute_insertion_age() {
+        let store = SqlitePersistentCacheStore::connect(db_path(), 16 * 1024)
+            .await
+            .unwrap();
+        let global = key(b"same-wire");
+        let mut strategy = global.clone();
+        strategy.namespace = CacheNamespace::Strategy(
+            crate::ports::cache::CacheStrategyId::from_validated_config_id("strategy").unwrap(),
+        );
+        store
+            .persist(
+                PersistentCacheBatch {
+                    records: vec![
+                        (global.clone(), record(Duration::from_secs(60))),
+                        (strategy.clone(), record(Duration::from_secs(60))),
+                    ],
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+        // 只推进索引中的绝对年龄，证明恢复不再使用未改写 payload 的静态 age。
+        sqlx::query(
+            "UPDATE cache_entries SET inserted_at = inserted_at - 5000000000 WHERE entry_key = ?",
+        )
+        .bind(super::encode_storage_key(&global).unwrap())
+        .execute(&store.pool)
+        .await
+        .unwrap();
+        let (restored, summary) = store.recover(deadline()).await.unwrap();
+        assert_eq!(summary.loaded, 2);
+        let old = restored
+            .records
+            .iter()
+            .find(|(key, _)| key == &global)
+            .unwrap();
+        let other = restored
+            .records
+            .iter()
+            .find(|(key, _)| key == &strategy)
+            .unwrap();
+        assert!(other.1.entry.inserted_at > old.1.entry.inserted_at + Duration::from_secs(4));
+        store.shutdown(deadline()).await.unwrap();
     }
 
     fn key(value: &[u8]) -> CacheKey {

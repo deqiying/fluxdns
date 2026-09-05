@@ -62,7 +62,7 @@ service task 与请求入口必须使用同一 RuntimeRevision；transport 持�
 启动准备必须在 bind 前满足以下前置条件；这些职责由 Application、PreparedRuntime 和进程服务共同承担，不表示全部位于同一个构造器或严格按本表顺序执行：
 
 1. 接收 `ResolvedConfig` 和各类 prepare plan；
-2. 打开必需业务数据库并执行 migration；当前没有额外的显式写入/回滚探针；
+2. 由 `StorageRuntime::open` 在共享 deadline 内打开必需业务数据库、执行 migration 及实际写入/回滚探针，见 [Storage](storage.md)；
 3. 创建 storage、telemetry、cache 等 shared service；
 4. 创建远程资源首次加载所需的 outbound/connector；
 5. 对 remote rule-set 恢复已校验的落盘 pair，必要时下载、解析并原子持久化，再编译所有首次 resource snapshot；

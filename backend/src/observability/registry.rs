@@ -4,13 +4,82 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::ports::observation::ResolutionEvent;
 use crate::ports::telemetry::{
-    Component, MetricEvent, MetricLabelKey, MetricLabelValue, MetricName, MetricValue,
+    CacheStatus, Component, MetricEvent, MetricLabelKey, MetricLabelValue, MetricName, MetricValue,
+    OutcomeClass,
 };
 
 use super::lock_unpoisoned;
 
 const MAX_METRIC_SERIES: usize = 128;
+const REQUEST_SERIES: usize = 14;
+const OUTCOMES: [OutcomeClass; 6] = [
+    OutcomeClass::Success,
+    OutcomeClass::Failure,
+    OutcomeClass::Timeout,
+    OutcomeClass::Cancelled,
+    OutcomeClass::Rejected,
+    OutcomeClass::Dropped,
+];
+const CACHE_STATUSES: [CacheStatus; 6] = [
+    CacheStatus::Disabled,
+    CacheStatus::Miss,
+    CacheStatus::Fresh,
+    CacheStatus::Stale,
+    CacheStatus::StoreUnavailable,
+    CacheStatus::WriteRejected,
+];
+
+/// 固定微秒上界，最后一桶为 +Inf；没有按请求字段创建 series 的入口。
+pub const REQUEST_LATENCY_BUCKETS_MICROS: [u64; 12] = [
+    1_000,
+    5_000,
+    10_000,
+    25_000,
+    50_000,
+    100_000,
+    250_000,
+    500_000,
+    1_000_000,
+    2_500_000,
+    5_000_000,
+    u64::MAX,
+];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LatencyHistogram {
+    pub buckets: [u64; 12],
+    pub count: u64,
+    pub sum_micros: u64,
+}
+
+impl LatencyHistogram {
+    fn observe(&mut self, micros: u64) -> Result<(), RegistryError> {
+        self.count = self
+            .count
+            .checked_add(1)
+            .ok_or(RegistryError::CounterOverflow)?;
+        self.sum_micros = self
+            .sum_micros
+            .checked_add(micros)
+            .ok_or(RegistryError::CounterOverflow)?;
+        for (count, upper) in self.buckets.iter_mut().zip(REQUEST_LATENCY_BUCKETS_MICROS) {
+            if micros <= upper {
+                *count = count.checked_add(1).ok_or(RegistryError::CounterOverflow)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct RequestMetrics {
+    latency: LatencyHistogram,
+    core_latency: LatencyHistogram,
+    outcomes: [u64; 6],
+    cache: [u64; 6],
+}
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct MetricKey {
@@ -24,6 +93,9 @@ pub struct MetricSnapshot {
     pub name: MetricName,
     pub component: Component,
     pub value: MetricValue,
+    pub outcome: Option<OutcomeClass>,
+    pub cache_status: Option<CacheStatus>,
+    pub histogram: Option<LatencyHistogram>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
@@ -58,6 +130,7 @@ impl MetricCell {
 pub(super) struct ObservabilityRegistry {
     max_metric_series: usize,
     metrics: Mutex<BTreeMap<MetricKey, Arc<MetricCell>>>,
+    requests: Mutex<Option<RequestMetrics>>,
 }
 
 impl ObservabilityRegistry {
@@ -72,6 +145,7 @@ impl ObservabilityRegistry {
         Ok(Self {
             max_metric_series: capacity,
             metrics: Mutex::new(BTreeMap::new()),
+            requests: Mutex::new(None),
         })
     }
 
@@ -105,7 +179,12 @@ impl ObservabilityRegistry {
             if let Some(cell) = metrics.get(&key) {
                 cell.clone()
             } else {
-                if metrics.len() >= self.max_metric_series {
+                let reserved = if lock_unpoisoned(&self.requests).is_some() {
+                    REQUEST_SERIES
+                } else {
+                    0
+                };
+                if metrics.len() + reserved >= self.max_metric_series {
                     return Err(RegistryError::MetricCapacityExhausted);
                 }
                 let cell = Arc::new(if counter {
@@ -132,15 +211,89 @@ impl ObservabilityRegistry {
         }
     }
 
+    /// 仅由 resolution 后台 dispatcher 调用，直接使用已冻结字段，不进入日志事件队列。
+    pub(super) fn record_resolution(&self, event: &ResolutionEvent) -> Result<(), RegistryError> {
+        let metrics = lock_unpoisoned(&self.metrics);
+        let mut requests = lock_unpoisoned(&self.requests);
+        if requests.is_none() && metrics.len() + REQUEST_SERIES > self.max_metric_series {
+            return Err(RegistryError::MetricCapacityExhausted);
+        }
+        drop(metrics);
+        // 一次完成事件同时更新各维度，任一溢出都不发布部分聚合结果。
+        let mut next = requests.unwrap_or_default();
+        next.latency.observe(
+            event
+                .duration_millis
+                .checked_mul(1_000)
+                .ok_or(RegistryError::CounterOverflow)?,
+        )?;
+        next.core_latency.observe(event.dns_core_duration_micros)?;
+        let outcome = OUTCOMES
+            .iter()
+            .position(|value| *value == event.outcome)
+            .ok_or(RegistryError::InvalidMetric)?;
+        let cache = CACHE_STATUSES
+            .iter()
+            .position(|value| *value == event.cache_lookup_status)
+            .ok_or(RegistryError::InvalidMetric)?;
+        next.outcomes[outcome] = next.outcomes[outcome]
+            .checked_add(1)
+            .ok_or(RegistryError::CounterOverflow)?;
+        next.cache[cache] = next.cache[cache]
+            .checked_add(1)
+            .ok_or(RegistryError::CounterOverflow)?;
+        *requests = Some(next);
+        Ok(())
+    }
+
     pub(super) fn snapshot(&self) -> Vec<MetricSnapshot> {
-        lock_unpoisoned(&self.metrics)
+        let mut snapshot: Vec<_> = lock_unpoisoned(&self.metrics)
             .iter()
             .map(|(key, cell)| MetricSnapshot {
                 name: key.name,
                 component: key.component,
                 value: cell.value(),
+                outcome: None,
+                cache_status: None,
+                histogram: None,
             })
-            .collect()
+            .collect();
+        if let Some(requests) = *lock_unpoisoned(&self.requests) {
+            for (name, histogram) in [
+                (MetricName::RequestLatency, requests.latency),
+                (MetricName::DnsCoreLatency, requests.core_latency),
+            ] {
+                snapshot.push(MetricSnapshot {
+                    name,
+                    component: Component::Resolution,
+                    value: MetricValue::Counter(histogram.count),
+                    outcome: None,
+                    cache_status: None,
+                    histogram: Some(histogram),
+                });
+            }
+            for (outcome, count) in OUTCOMES.into_iter().zip(requests.outcomes) {
+                snapshot.push(MetricSnapshot {
+                    name: MetricName::RequestsTotal,
+                    component: Component::Resolution,
+                    value: MetricValue::Counter(count),
+                    outcome: Some(outcome),
+                    cache_status: None,
+                    histogram: None,
+                });
+            }
+            for (cache, count) in CACHE_STATUSES.into_iter().zip(requests.cache) {
+                snapshot.push(MetricSnapshot {
+                    name: MetricName::CacheOperations,
+                    component: Component::Resolution,
+                    value: MetricValue::Counter(count),
+                    outcome: None,
+                    cache_status: Some(cache),
+                    histogram: None,
+                });
+            }
+        }
+        snapshot
     }
 }
 

@@ -4,9 +4,9 @@
 >
 > 适用范围：正式 transport、Policy、Cache、Upstream 与单次完成事件链路
 >
-> 最后核对：2026-09-05（bootstrap 缓存接线及本地测试；其他链路沿用静态核对）
+> 最后核对：2026-09-05（parallel 响应择优、late-result 保留及缓存增量持久化；其他链路沿用既有核对）
 >
-> 核对基线：`faace61e2d1e27f77812ead89bf42a9a83bec2f5` 加本次 bootstrap/telemetry 接入工作树
+> 核对基线：`19c3c81e4fdbea9424d522620ad81462c6d22eb1` 加本次后端契约实施工作树
 
 ## 入口与调用链
 
@@ -56,7 +56,7 @@ client CIDR 按前缀长度降序扫描；hosts 使用 BTreeMap，rule exact/suf
 
 [`UpstreamRegistry::from_resolved_with_outbounds`](../../../backend/src/upstream/registry.rs) 在 core 构造时装配真实 connector；HTTPS 使用 [`ReqwestDohHttpTransport`](../../../backend/src/upstream/reqwest_http.rs)。[`tokio_outbound.rs`](../../../backend/src/upstream/tokio_outbound.rs)、[`socks5.rs`](../../../backend/src/upstream/socks5.rs)、[`bootstrap.rs`](../../../backend/src/upstream/bootstrap.rs) 提供系统 TCP、代理协商和 bootstrap 解析，Host/SNI 与连接目标保持各自语义。不是只有选择器或 fake、没有真实 I/O 的状态。
 
-[`group.rs`](../../../backend/src/upstream/group.rs) / [`executor.rs`](../../../backend/src/upstream/executor.rs) 分离成员选择、首个 terminal response、fallback 与 late cache candidate。只有无 terminal response 才 fallback；late result 不改变已返回响应。主动健康检查和持久健康分数没有接入。
+[`group.rs`](../../../backend/src/upstream/group.rs) / [`executor.rs`](../../../backend/src/upstream/executor.rs) 分离成员选择、响应择优、fallback 与 late cache candidate。正常回答（包括 NXDOMAIN）阻止 fallback；SERVFAIL/TC 与可重试失败沿用既有继续规则。parallel 在已启动的主成员中等待更好的 Positive，到阶段结束/超时后使用已收到的正常回答，不为了择优启动 fallback。late result 不改变已返回响应；主动健康检查和持久健康分数没有接入。
 
 `from_resolved` 和正式 `from_resolved_with_outbounds` 都为每个 DoH connector 创建 [`TokioDohAddressResolver::for_upstream`](../../../backend/src/upstream/http.rs)，绑定 host/port/bootstrap 与 upstream ID。resolver 内通过 `AddressResolutionState` 查填最多一项地址答案，TTL 内不重复查询 A/AAAA；它不是 Moka response cache，也不接 Storage。
 
@@ -64,7 +64,7 @@ client CIDR 按前缀长度降序扫描；hosts 使用 BTreeMap，rule exact/suf
 
 connector clone 共享同一 resolver；重新 prepare 创建新状态，即使配置 ID 相同也不会接收旧请求写回。Reqwest 按新地址列表选择 client pool key，Tokio direct/SOCKS5 则将新 IP 交给连接层，HTTP Host/TLS SNI 不变。connect_ip、SOCKS5H、无 bootstrap 维持原分支；未绑定配置的基础 resolver 仍不缓存。详细不变量见 [Upstream](../../architecture/backend/modules/upstream.md)。
 
-group 行为不在本次变更范围：parallel 有 late sink 时将剩余任务移交 drain，Positive 首响应也不必然取消它们；无 sink 时非 Positive 终态不能保证立即返回。load-balance 统计 primary lease，失败后按配置顺序重试，不等同逐 attempt least-in-flight。
+parallel 的上述择优不依赖 sink 是否存在。Positive 提前返回时，有 late sink 就把剩余任务移交 drain，保留生产 late-result 收集；无 sink 则 abort 剩余任务。不可重试的某个 parallel 成员失败不能遮蔽其他成员有效响应，顺序模式的终止契约不变。load-balance 继续统计 primary lease，失败后按配置顺序重试，不等同逐 attempt least-in-flight。
 
 ## 能力与证据
 
@@ -72,7 +72,7 @@ group 行为不在本次变更范围：parallel 有 late sink 时将剩余任务
 | --- | --- | --- | --- | --- |
 | UDP/TCP/DoH | `transport/udp.rs`、`tcp.rs`、`doh.rs` | service 的 typed binding 与 session loop | 本次完整测试包含跨 UDP/TCP/DoH GET/POST 用例 | 本地 loopback，不是远程矩阵；DoH 入站非 HTTP/2 |
 | TLS / 客户端地址 | system socket TLS、DoH forwarded/PROXY parser | DoH accept 后先可信 PROXY、再 TLS、再 HTTP | 本轮核对生产分支 | 真实代理、证书和故障组合仍需环境验收 |
-| Moka / SQLite cache | `build_cache_facade`、`initialize_cache_persistence` | async prepare 默认构造 | 本轮静态；测试构造与生产构造已区分 | last-access bucket、真实 disk-full 与部分 late-window 差距见[计划](../../plans/backend-contract-gaps.md) |
+| Moka / SQLite cache | `build_cache_facade`、`initialize_cache_persistence`、增量 SQLite writer | async prepare 默认构造 | schema v1 升级、增量写触发器、失败回滚与已有 adapter 契约测试 | 保留插入时间淘汰；真实 disk-full 与组合 late-window 验收见[计划](../../plans/backend-contract-gaps.md) |
 | Policy -> 出站 | core -> registry -> protocol-independent connector | 正式配置构造支持真实 HTTP/代理路径 | 本轮静态，无远程请求 | 不等同所有 SOCKS/Host/SNI 组合已实测 |
 | 单次完成事件 | service instrumented core、resolution publisher | core 返回后、编码前无等待移交 | 本轮核对调用位置 | ingress 满会出现可观测 gap，不能承诺零丢失 |
 | bootstrap 地址缓存 | 配置绑定 resolver、绝对到期点、查填许可 | 两个配置工厂均装配，direct/HTTPS/SOCKS5 共用 | [address_cache_tests.rs](../../../backend/src/upstream/address_cache_tests.rs)；registry 的正式 hosts bootstrap/代理测试 | 单 connector 单项；不缓存 system lookup、负答案或过期地址 |

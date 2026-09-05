@@ -1,7 +1,6 @@
 //! 业务 SQLite `StorageBackend` 首轮 adapter。
 
 use std::collections::{HashSet, VecDeque};
-use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -187,6 +186,7 @@ impl SqliteResolveDetailWorker {
         mut self,
         deadline: Deadline,
     ) -> Result<SqliteResolveDetailFlushSummary, PortError> {
+        self.receiver.close();
         let mut total = SqliteResolveDetailFlushSummary::default();
         while self.pending_len() > 0 {
             let summary = self.flush(deadline).await?;
@@ -198,11 +198,28 @@ impl SqliteResolveDetailWorker {
     }
 
     pub async fn run(
-        mut self,
+        self,
         cancellation: crate::dns::Cancellation,
         flush_interval: Duration,
         operation_timeout: Duration,
     ) -> Result<SqliteResolveDetailRunSummary, PortError> {
+        let (worker, mut summary) = self
+            .run_until_stopped(cancellation, flush_interval, operation_timeout)
+            .await?;
+        let final_flush = worker
+            .shutdown(Deadline::new(Instant::now() + operation_timeout))
+            .await?;
+        merge_detail_run_flush(&mut summary, Ok(final_flush));
+        Ok(summary)
+    }
+
+    /// 取消时只结束当前批次并关闭接收端，将剩余队列交还 owner；不抢先排空详情。
+    pub(crate) async fn run_until_stopped(
+        mut self,
+        cancellation: crate::dns::Cancellation,
+        flush_interval: Duration,
+        operation_timeout: Duration,
+    ) -> Result<(Self, SqliteResolveDetailRunSummary), PortError> {
         if flush_interval.is_zero() || operation_timeout.is_zero() {
             return Err(
                 PortError::new(PortErrorClass::InvalidInput, "sqlite_resolve_log.run")
@@ -216,6 +233,7 @@ impl SqliteResolveDetailWorker {
         interval.tick().await;
         loop {
             tokio::select! {
+                biased;
                 _ = cancellation.cancelled() => break,
                 record = self.receiver.recv() => {
                     let Some(record) = record else { break };
@@ -239,16 +257,8 @@ impl SqliteResolveDetailWorker {
                 ),
             }
         }
-        let final_flush = self
-            .shutdown(Deadline::new(Instant::now() + operation_timeout))
-            .await?;
-        summary.flush.committed = summary
-            .flush
-            .committed
-            .saturating_add(final_flush.committed);
-        summary.flush.evicted = summary.flush.evicted.saturating_add(final_flush.evicted);
-        summary.flush.dropped = summary.flush.dropped.saturating_add(final_flush.dropped);
-        Ok(summary)
+        self.receiver.close();
+        Ok((self, summary))
     }
 }
 
@@ -308,6 +318,8 @@ impl Default for SqliteStorageState {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum SqliteStorageBackendBuildError {
+    #[error("sqlite storage startup deadline exceeded")]
+    Timeout,
     #[error("sqlite storage directory could not be prepared")]
     Directory,
     #[error("sqlite storage database could not be opened")]
@@ -319,28 +331,65 @@ pub enum SqliteStorageBackendBuildError {
 impl SqliteStorageBackend {
     /// 打开业务 SQLite，并执行当前版本 migration。
     pub async fn connect(path: impl Into<PathBuf>) -> Result<Self, SqliteStorageBackendBuildError> {
-        let path = path.into();
+        Self::connect_with_deadline(
+            path,
+            Deadline::new(Instant::now() + super::service::DEFAULT_STORAGE_OPERATION_TIMEOUT),
+        )
+        .await
+    }
+
+    /// 连接、首次建库和升级共享启动预算；成功前不创建任何业务 writer。
+    pub async fn connect_with_deadline(
+        path: impl Into<PathBuf>,
+        deadline: Deadline,
+    ) -> Result<Self, SqliteStorageBackendBuildError> {
+        if deadline.is_expired(Instant::now()) {
+            return Err(SqliteStorageBackendBuildError::Timeout);
+        }
+        tokio::time::timeout(
+            deadline.remaining(Instant::now()),
+            Self::connect_within_budget(path.into(), deadline),
+        )
+        .await
+        .map_err(|_| SqliteStorageBackendBuildError::Timeout)?
+    }
+
+    async fn connect_within_budget(
+        path: PathBuf,
+        deadline: Deadline,
+    ) -> Result<Self, SqliteStorageBackendBuildError> {
         if let Some(parent) = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
         {
-            fs::create_dir_all(parent).map_err(|_| SqliteStorageBackendBuildError::Directory)?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|_| SqliteStorageBackendBuildError::Directory)?;
         }
         let options = SqliteConnectOptions::new()
             .filename(&path)
             .create_if_missing(true)
             .journal_mode(SqliteJournalMode::Wal)
             .synchronous(SqliteSynchronous::Normal)
-            .busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS));
+            .busy_timeout(
+                Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS)
+                    .min(deadline.remaining(Instant::now())),
+            );
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
+            .acquire_timeout(deadline.remaining(Instant::now()))
             .connect_with(options)
             .await
             .map_err(|_| SqliteStorageBackendBuildError::Connect)?;
+        // 首次建表与 metadata 属于一个事务，避免共享启动预算中断后留下半套 schema。
+        let mut initialization = pool
+            .begin()
+            .await
+            .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
         let has_meta = sqlx::query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'storage_meta' LIMIT 1",
         )
-        .fetch_optional(&pool)
+        .fetch_optional(&mut *initialization)
         .await
         .map_err(|_| SqliteStorageBackendBuildError::Schema)?
         .is_some();
@@ -349,7 +398,7 @@ impl SqliteStorageBackend {
                 let statement = statement.trim();
                 if !statement.is_empty() {
                     sqlx::query(statement)
-                        .execute(&pool)
+                        .execute(&mut *initialization)
                         .await
                         .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
                 }
@@ -364,9 +413,13 @@ impl SqliteStorageBackend {
         .bind(format!("fluxdns-{}", std::process::id()))
         .bind(unix_millis())
         .bind(unix_millis())
-        .execute(&pool)
+        .execute(&mut *initialization)
         .await
         .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+        initialization
+            .commit()
+            .await
+            .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
         migrate_storage_schema(&pool).await?;
         Ok(Self {
             pool,
@@ -376,6 +429,34 @@ impl SqliteStorageBackend {
             #[cfg(test)]
             injected_fault: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// 在真实目标库执行最小元数据写入并回滚；不产生伪造业务记录或持久化探针数据。
+    pub(crate) async fn startup_write_probe(&self, deadline: Deadline) -> Result<(), PortError> {
+        let operation = "sqlite_storage.startup_write_probe";
+        run_with_deadline(deadline, operation, async {
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| self.database_error(error, operation))?;
+            let changed = sqlx::query(
+                "UPDATE storage_meta SET migrated_at_utc = migrated_at_utc + 1 WHERE singleton = 1",
+            )
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            if changed.rows_affected() != 1 {
+                return Err(PortError::new(PortErrorClass::CorruptData, operation)
+                    .with_safe_context("startup metadata row missing"));
+            }
+            transaction
+                .rollback()
+                .await
+                .map_err(|error| self.database_error(error, operation))
+        })
+        .await
     }
 
     pub fn path(&self) -> &Path {
@@ -1216,10 +1297,137 @@ mod tests {
 
     fn path() -> std::path::PathBuf {
         let id = NEXT_TEST_DB.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_fluxdns/tests/storage");
+        std::fs::create_dir_all(&root).unwrap();
+        root.join(format!(
             "fluxdns-storage-{id}-{}.sqlite3",
             std::process::id()
         ))
+    }
+
+    #[tokio::test]
+    async fn startup_deadline_rejects_before_creating_database() {
+        let path = path();
+        let result =
+            SqliteStorageBackend::connect_with_deadline(&path, Deadline::new(Instant::now())).await;
+        assert!(matches!(
+            result,
+            Err(super::SqliteStorageBackendBuildError::Timeout)
+        ));
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn failed_initial_schema_creation_rolls_back_preceding_tables() {
+        let path = path();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        // 后续建表冲突用于触发真实 DDL 失败，前面的 storage_meta 不得残留。
+        sqlx::query("CREATE TABLE stats_daily_total (marker INTEGER)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            SqliteStorageBackend::connect(&path).await,
+            Err(super::SqliteStorageBackendBuildError::Schema)
+        ));
+        let meta_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='storage_meta'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(meta_tables, 0);
+        let original_tables: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='stats_daily_total'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(original_tables, 1);
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn startup_probe_rolls_back_real_write_and_reports_write_failure() {
+        let backend = SqliteStorageBackend::connect(path()).await.unwrap();
+        let before: (i64, String) = sqlx::query_as(
+            "SELECT schema_version, migrated_at_utc FROM storage_meta WHERE singleton=1",
+        )
+        .fetch_one(&backend.pool)
+        .await
+        .unwrap();
+        backend.startup_write_probe(deadline()).await.unwrap();
+        let after: (i64, String) = sqlx::query_as(
+            "SELECT schema_version, migrated_at_utc FROM storage_meta WHERE singleton=1",
+        )
+        .fetch_one(&backend.pool)
+        .await
+        .unwrap();
+        assert_eq!(before, after);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stats_daily_total")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        sqlx::query("CREATE TRIGGER reject_probe BEFORE UPDATE ON storage_meta BEGIN SELECT RAISE(ABORT, 'test probe failure'); END")
+            .execute(&backend.pool).await.unwrap();
+        let error = backend.startup_write_probe(deadline()).await.unwrap_err();
+        assert_eq!(error.operation(), "sqlite_storage.startup_write_probe");
+        assert!(matches!(
+            error.class(),
+            crate::ports::PortErrorClass::Unavailable
+        ));
+        sqlx::query("DROP TRIGGER reject_probe")
+            .execute(&backend.pool)
+            .await
+            .unwrap();
+        backend.startup_write_probe(deadline()).await.unwrap();
+        backend.shutdown(deadline()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn startup_and_write_probe_obey_shared_budget_under_real_sqlite_lock() {
+        let path = path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        let mut connection = backend.pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        let started = Instant::now();
+        let result = SqliteStorageBackend::connect_with_deadline(
+            &path,
+            Deadline::new(started + Duration::from_millis(30)),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let error = backend
+            .startup_write_probe(Deadline::new(Instant::now() + Duration::from_millis(20)))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error.class(),
+            crate::ports::PortErrorClass::Timeout
+        ));
+        sqlx::query("ROLLBACK")
+            .execute(&mut *connection)
+            .await
+            .unwrap();
+        drop(connection);
+        backend.startup_write_probe(deadline()).await.unwrap();
+        backend.shutdown(deadline()).await.unwrap();
     }
 
     fn deadline() -> Deadline {

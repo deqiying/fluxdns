@@ -128,7 +128,7 @@ stats、cache commit 和 detail projection 是 dispatcher 的三个独立消费�
 `effects.rs` 提供：
 
 - `Clock`：monotonic time、UTC time、sleep/timer；
-- `ResourceFetcher`：受 deadline、proxy profile 和最大体积约束的资源读取；
+- `ResourceFetcher`：受 deadline、proxy profile 和最大体积约束的资源读取；请求携带有界不透明验证器，结果区分 `Modified(ResourceContent)` 与 `NotModified(ResourceValidators)`；可选 `validator_scope` 隔离 adapter 配置代际，默认无 scope 不复用条件标记，详见 [Resource](resource.md)；
 - `SocketFactory`：创建未激活 socket，供 BindPlan 统一提交。
 
 `SocketSpec` 同时携带 `kind`、目标地址、`reuse_port` 和 IPv6 `v6_only` 选择；Runtime 在 bind 阶段只通过该契约传递平台相关选项，不向 DNS Core 泄漏 socket 类型。

@@ -30,7 +30,7 @@ const MAX_RECORD_BYTES: u32 = 2 * 1024 * 1024;
 const MAX_COMPONENT_BYTES: u32 = 64 * 1024;
 const MAX_UPSTREAM_ID_BYTES: u32 = 128;
 const MAX_DNS_WIRE_BYTES: u32 = 65_535;
-const HEADER_BYTES: u64 = 10;
+pub(super) const HEADER_BYTES: u64 = 10;
 
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(0);
 
@@ -413,6 +413,15 @@ pub(super) fn encode_record(
         None => output.push(0),
     }
     put_bytes(&mut output, &wire, MAX_DNS_WIRE_BYTES)?;
+    Ok(output)
+}
+
+/// SQLite 主键复用 codec 的 namespace、格式与完整 key，不以摘要替代缓存身份。
+pub(super) fn encode_storage_key(key: &CacheKey) -> Result<Vec<u8>, CodecError> {
+    let mut output = Vec::new();
+    encode_namespace(&mut output, &key.namespace)?;
+    put_u16(&mut output, key.format_version);
+    put_bytes(&mut output, &key.encoded, MAX_COMPONENT_BYTES)?;
     Ok(output)
 }
 

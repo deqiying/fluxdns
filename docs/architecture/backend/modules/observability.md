@@ -4,7 +4,7 @@
 >
 > 适用范围：tracing、metrics、health、脱敏、backpressure 和 telemetry 生命周期
 >
-> 最后评审：2026-09-05（有界指标聚合与后台采样接入；运行证据见[后台服务](../../../implementation/backend/background-services.md)）
+> 最后评审：2026-09-05（完成事件后台 histogram/outcome/cache status 聚合；运行证据见[后台服务](../../../implementation/backend/background-services.md)）
 >
 > 关联实现：[observability.rs](../../../../backend/src/observability.rs)、[ports/telemetry.rs](../../../../backend/src/ports/telemetry.rs)、[resolution.rs](../../../../backend/src/resolution.rs)、[service.rs](../../../../backend/src/service.rs)
 >
@@ -46,26 +46,32 @@ v1 日志级别固定接受 `trace`、`debug`、`info`、`warn`、`error`，大�
 
 当前通过 typed request ID、resolution completion 与有限配置 ID 关联业务观测。源码没有接通原设计中的 process → runtime → request → policy/cache/group/attempt span 树；`TypedTracingLayer` 处理 event，不读取 span hierarchy。
 
-独立 upstream attempt telemetry 同样未形成生产事件流；不得把 executor 的 attempt 列表、请求终态统计或早期测试类型当成完整 tracing。是否落实这些旧要求见[核对计划](../../../plans/backend-contract-gaps.md)，与请求统计是否已持久化是两件事。
+独立 upstream attempt telemetry 同样未形成生产事件流；不得把 executor 的 attempt 列表、请求终态统计或早期测试类型当成完整 tracing。已决定本轮只扩展既有完成事件的后台指标，完整 span/attempt 诊断另案，不增加请求热路径同步调用。
 
 ## 5. Metrics
 
 生产 `TelemetryWriter` 持有 [ObservabilityRegistry](../../../../backend/src/observability/registry.rs)，复用有界 series、原子 counter/gauge 与 checked add；不再保留独立 `EventWriter`、旧事件模型或第二份 health。`MetricsSink::record` 成功表示内存聚合已接受更新，不表示已经写入输出。Counter 接收增量，Gauge 覆盖当前值。
 
-首期仅开放两个聚合描述符：
+周期采样保留两个聚合描述符：
 
 | 指标 | 类型与唯一标签 | 来源与口径 |
 | --- | --- | --- |
 | `ResolutionEventsAccepted` | Counter；`Component::Resolution` | `ResolutionPipelineMetrics.accepted`，是完成事件 ingress 接收数，不是所有 DNS 请求，也不等于持久化成功数 |
 | `WriterQueueDepth` | Gauge；`Component::Telemetry` | flush 前 writer 的排队事件数，不含聚合 series |
 
-Service 在既有 5 秒 flush 周期中采样，复用进程级 Source Arc 和共享游标；只在增量成功记录后推进游标，重复/最终采样不重复累计，源倒退明确报错。请求包装层、Resolution publisher 与 dispatcher 不新增同步观测调用；没有 Resolution owner 时只采样队列深度。`logs.enable=false` 不构造 writer/sampler，也不新增文件或任务。
+Service 在既有 5 秒 flush 周期中采样，复用进程级 Source Arc 和共享游标；只在增量成功记录后推进游标，重复/最终采样不重复累计，源倒退明确报错。没有 Resolution owner 时只采样队列深度。`logs.enable=false` 不构造 writer/sampler，也不新增文件或任务。
 
-series key 是 name 与唯一 Component 的规范化 typed 组合。描述符之外的名称、额外/重复标签、错误 value kind、溢出与容量耗尽明确拒绝，并增加固定的 `rejected_metrics` 诊断计数；不递归记录诊断事件。实现硬上限为 128 series，当前白名单最多生成 2 项。所有快照 I/O 均在状态/registry 锁外执行。
+后台 `ResolutionRuntime` dispatcher 在更新 stats 后，将同一完成事件交给 `TelemetryWriter::record_resolution`，增加固定 14 个 series：`RequestLatency`、`DnsCoreLatency` 两个 histogram，`RequestsTotal` 六种 outcome 与 `CacheOperations` 六种 cache status 计数。每项只使用固定 Component 和枚举标签，不为配置 ID、请求字段或逐 attempt 创建维度。请求包装层与 publisher 仍只有原有无等待移交；关闭详情不影响这些指标。
+
+histogram 统一以微秒累计 count/sum，桶上界为 1/5/10/25/50/100/250/500/1000/2500/5000ms 与 `+Inf`。`RequestLatency` 来自既有毫秒字段，不因此提高采样精度；`DnsCoreLatency` 来自既有微秒字段。累计桶包含所有小于等于上界的样本。结构化快照增加 outcome/cache_status 与 histogram 的 unit/count/sum/buckets，temporality 为 cumulative，不导出原始样本。
+
+两类聚合共享 128 series 硬上限，当前已接线的集合最多 16 项。`MetricsSink::record` 的通用入口仍仅开放上述两个周期采样描述符，完成事件使用专用 typed 入口。未知名称、错误类型/标签、溢出和容量耗尽明确拒绝，并增加固定 `rejected_metrics`；单个完成事件的多项更新全部成功才提交，不产生部分 histogram/count。所有快照 I/O 均在状态/registry 锁外执行。
 
 输出重试可能再次写出相同累计值，消费者应按 writer 实例读取最新快照或求差，不能将周期快照相加。实例标识仅是输出元数据，不作为 label。输出失败保留聚合状态，下次只重试最新快照，不累积待发快照队列；Gauge 中间样本允许合并。
 
-`RequestLatency` / `UpstreamLatency` 的 `DurationMicros` 仍走有界逐事件队列，尚无生产采样点、histogram 或 HTTP exporter。完整 span/attempt 等未实现要求仍见[契约差距](../../../plans/backend-contract-gaps.md)。受限原始事件只允许 typed 标签；禁止 qname、完整 client ID、原始 IP、URL、header 或 error message 作为 label。
+原有 `RequestLatency` / `UpstreamLatency` 的 `DurationMicros` port 输入仍走有界逐事件队列，与正式完成事件 histogram 是不同入口；没有独立 upstream attempt 采样或 HTTP exporter。聚合指标不占日志事件队列，队列满仍可更新。禁止 qname、完整 client ID、原始 IP、URL、header 或 error message 作为 label。
+
+完成事件 histogram 统计 dispatcher 实际消费且指标接受的请求；`ResolutionEventsAccepted` 统计 ingress 入队，因此运行中可有排队差，关闭/溢出时也不能把二者强行当成相等或当成数据库成功数。
 
 ## 6. Health registry
 

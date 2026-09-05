@@ -4,7 +4,7 @@
 >
 > 适用范围：进程入口、依赖装配、信号、退出和服务生命周期
 >
-> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
+> 最后评审：2026-09-05（安全 panic hook 与已接受的快速取消停机契约；基线见[模块索引](README.md)，证据见[生命周期](../../../implementation/backend/lifecycle.md)）
 >
 > 关联实现：[main.rs](../../../../backend/src/main.rs)、[app.rs](../../../../backend/src/app.rs)、[service.rs](../../../../backend/src/service.rs)
 >
@@ -38,13 +38,13 @@ Application 模块是进程边界和依赖装配入口，负责把 Config、Runt
 `main.rs` 保持薄层：
 
 1. 由 `#[tokio::main(flavor = "multi_thread")]` 建立 Tokio runtime；
-2. 在异步 `main` 中初始化只写 stderr 的 bootstrap subscriber；
+2. 在异步 `main` 中先安装安全 panic hook，再初始化只写 stderr 的 bootstrap subscriber；
 3. 调用 `app::run`，由 Application 读取和解析命令行；
 4. 执行 `run`、`validate` 或 help/version 输出；
 5. 输出一条脱敏后的最终错误；
 6. 返回对应退出码。
 
-panic hook 的设计要求是只记录 panic 分类、位置和 backtrace 是否可用，不记录配置内容、DNS wire 或 secret。进程致命 panic 不能被伪装为普通成功退出。当前没有自定义 hook 接线，这一差距保留于[后端契约核对计划](../../../plans/backend-contract-gaps.md)，不能据此宣称默认 panic 输出已经脱敏。
+[panic_safety.rs](../../../../backend/src/panic_safety.rs) 的进程 hook 只向 stderr 输出固定 panic 分类、经限制的源码文件名/行列和 backtrace 可用状态，不输出 panic payload、线程名、路径或栈内容。它不依赖可能正在失败的 telemetry writer，也不改变 unwind、owner 回收或既有 fatal 升级策略。安装点位于 Tokio runtime 构建后的异步 `main`，不覆盖此前的 runtime 构建失败；进程致命 panic 不得被伪装为成功。
 
 ## 3. 启动输入与命令边界
 
@@ -90,7 +90,7 @@ bootstrap telemetry
 
 运行期 task 完成时，Degraded 组件可以记录失败后继续服务；endpoint 耗尽先按逻辑 listener 的可用 sibling 聚合，致命升级和 task panic 进入统一 drain 并返回非零错误。显式 reload 与瞬时 task 重试不能形成两套竞争的 listener ownership。
 
-第二个终止信号结束剩余等待并返回非零错误。各阶段共用同一个 5 秒总 deadline，不是每阶段重新获得 5 秒。当前 TCP/DoH session 会随停机 cancellation 中止进行中的 dispatch，并不保证已读完整请求一定写回；与旧优雅停机要求的差距见[核对计划](../../../plans/backend-contract-gaps.md)。配置文件轮询只是内部事件源，不构成外部管理写 API。实际接线和 Unix smoke 边界见[生命周期实现](../../../implementation/backend/lifecycle.md)。
+第二个终止信号结束剩余等待并返回非零错误。各阶段共用同一个 5 秒总 deadline，不是每阶段重新获得 5 秒。已确认停机请求尽快取消，TCP/DoH/UDP dispatch 可以被 cancellation 中止，不保证已读完整请求一定写回，不新增响应优先 drain。Storage 按统计优先、详情使用剩余时间关闭，见 [Storage](storage.md)。配置文件轮询只是内部事件源，不构成外部管理写 API。实际接线和 Unix smoke 边界见[生命周期实现](../../../implementation/backend/lifecycle.md)。
 
 退出码分类契约：
 

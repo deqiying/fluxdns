@@ -4,7 +4,7 @@
 >
 > 适用范围：hosts/rule 解析、加载、snapshot、持久化和刷新发布
 >
-> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
+> 最后评审：2026-09-05（条件请求、manifest 身份/代际与安全 304；基线见[模块索引](README.md)，本地证据见[后台服务](../../../implementation/backend/background-services.md#本次验证)）
 >
 > 关联实现：[loader.rs](../../../../backend/src/resource/loader.rs)、[fetcher.rs](../../../../backend/src/resource/fetcher.rs)、[remote.rs](../../../../backend/src/resource/remote.rs)、[rules.rs](../../../../backend/src/resource/rules.rs)、[hosts.rs](../../../../backend/src/resource/hosts.rs)
 >
@@ -81,8 +81,8 @@ bounded read/fetch
 
 - 通过已绑定 ResourceFetcher/outbound 下载；
 - 使用 deadline、body 大小上限和 HTTPS 校验，显式禁用环境代理和自动重定向；
-- 每次发起普通 GET；`ResourceFetchRequest` 没有条件请求字段，不发送 `If-None-Match`/`If-Modified-Since`；
-- 只接受 HTTP 2xx，304 当前作为非成功状态失败，`modified_at` 返回 `None`；
+- 本地 content/manifest pair 校验通过且资源身份、fetcher 代际一致时，发送有界 `If-None-Match`/`If-Modified-Since`；否则无条件 GET；
+- `ResourceFetchResult` 区分 2xx `Modified` 与 304 `NotModified`；ETag/Last-Modified 作为不透明验证器保存，`modified_at` 仍为 `None`，不解析 HTTP 日期；
 - body 先有界读入内存、计算 hash 并完成解析，再落盘；不是边下载边写临时文件；
 - v1 没有 expected checksum 配置，不把内部 hash 宣称为来源真实性校验。
 
@@ -147,7 +147,9 @@ Hosts 为 exact → 最长 wildcard；rules 为 exact → 最长 suffix → keyw
 5. 获取成功使用新内容；
 6. 两者都不可用则 prepare 失败。
 
-落盘 manifest 包含资源 ID、format、byte length、checksum/content hash、parser version 和可选 modified time；不保存 URL、ETag 或独立的成功抓取时间。当前 fetcher 不返回 modified time，恢复生成的 `fetched_at` 不能视为已持久化的远端更新时间。版本不兼容时不使用。
+manifest v2 包含资源 ID、format、byte length、checksum/content hash、parser version、可选 modified time、源身份 digest、fetcher scope 与 ETag/Last-Modified。源身份覆盖资源 ID、URL、proxy ID、格式和 parser 版本，不持久化原始 URL；scope 在每次构建 fetcher 时重建，代理配置/凭据变化或 Runtime 换代不会复用旧验证器。验证器限制长度并拒绝控制字符，Debug 只输出存在性。
+
+兼容 manifest v1 的有效内容恢复，但缺少身份绑定的旧验证器不能用于条件请求。v2 必须具备匹配的源身份。当前不持久化独立的成功抓取时间，恢复生成的 `fetched_at` 不能视为远端更新时间。
 
 ## 9. 刷新与发布
 
@@ -163,6 +165,8 @@ Hosts 为 exact → 最长 wildcard；rules 为 exact → 最长 suffix → keyw
 
 失败退避指数增长并封顶 5 分钟。连续三次计划刷新失败或超过 `3 × update_interval` 无成功时标记 stale，但继续使用旧 snapshot。
 
+收到 304 后再次校验本地 pair 与请求前的 hash/身份/验证器；有效时只更新 manifest、刷新成功时间并沿用内容 hash，不重写 body，也不把 fallback 误标为新内容。条件基础缺失、损坏或在请求中变化时，在同一 deadline/cancellation 内最多补发一次无条件请求；再次 304 明确失败。坏 2xx body 不替换有效文件或 snapshot。当前仍会读取并解析本地内容以验证，不承诺消除 parser 成本。
+
 刷新协调器只组合 schedule、reservation、per-resource single-flight、epoch/CAS、backoff、cancel 与 shutdown，不自己执行 I/O。worker 在 reservation 内完成有界读取/抓取、hash、parse/persist，再发布候选。资源内容更新不创建完整 Runtime candidate；Policy 内部 matcher/version/hash 一起发布，再更新 Runtime metadata，不构成跨两个对象的原子事务。真实 fetcher、auto-update task 与 prepare 接线见[后台服务实现](../../../implementation/backend/background-services.md)。
 
 ## 10. 原子落盘
@@ -175,7 +179,7 @@ remote 有效内容与 manifest：
 4. 写入、`sync_all` 并原子 rename manifest；
 5. 当前操作失败时清理本次临时文件。
 
-content 与 manifest 各自原子替换，但不构成跨文件事务；恢复时只有 resource id、format、parser version、byte length 和 content hash 均一致的 pair 才可使用。校验失败不会产生 fallback snapshot，服务器宕机时的跨文件绝对持久化不作为当前 MVP 阻塞项。
+content 与 manifest 各自原子替换，但不构成跨文件事务；恢复时只有 resource id、format、parser version、byte length、content hash 及 v2 源身份均一致的 pair 才可使用。校验失败不会产生 fallback snapshot，服务器宕机时的跨文件绝对持久化不作为当前 MVP 阻塞项。
 
 ## 11. 安全与观测
 
@@ -192,7 +196,8 @@ content 与 manifest 各自原子替换，但不构成跨文件事务；恢复�
 - sing-box source 四类域名字段投影、其他 rule 字段忽略、无可用域名规则和未知 version；
 - canonical domain、重复、冲突和 regex 限制；
 - const/file/remote 首次加载；
-- 普通 GET、body limit、拒绝重定向/304 和代理 failure；条件请求属于[未接线差距](../../../plans/backend-contract-gaps.md)，不是现有用例通过项；
+- 普通/条件 GET、ETag/Last-Modified、重复 304、body limit、重定向拒绝和代理 failure；
+- 本地 pair 缺失/损坏、源或 fetcher 换代、旧 manifest、同预算无条件重试及坏响应保留有效内容；
 - fallback manifest/hash/version；
 - 单资源刷新失败保留旧版本；
 - epoch 乱序、并发不同资源 CAS 不丢更新；

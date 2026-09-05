@@ -4,7 +4,7 @@
 >
 > 适用范围：SQLite、统计、解析记录、migration、容量边界和存储生命周期
 >
-> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
+> 最后评审：2026-09-05（启动共享预算、写探针与统计优先停机；基线见[模块索引](README.md)，本地证据见[后台服务](../../../implementation/backend/background-services.md#本次验证)）
 >
 > 关联实现：[sqlite.rs](../../../../backend/src/storage/sqlite.rs)、[service.rs](../../../../backend/src/storage/service.rs)、[statistics.rs](../../../../backend/src/storage/statistics.rs)、[ledger.rs](../../../../backend/src/storage/ledger.rs)、[migrations](../../../../backend/migrations)
 >
@@ -39,14 +39,14 @@ prepare 阶段：
 
 1. 创建数据库父目录；
 2. 以读写/创建模式打开文件；
-3. 显式设置 WAL、2 秒 busy timeout，连接池最多 4 个连接；
+3. 显式设置 WAL，busy timeout 取 2 秒与剩余启动预算的较小值，连接池最多 4 个连接；
 4. 使用 `synchronous=NORMAL` 作为吞吐与崩溃恢复折中；
-5. 通过 `include_str!` 内嵌 SQL 手动创建基础表，再按 `storage_meta.schema_version` 执行前向 migration；不是 `sqlx::migrate!`/SQLx Migrator；
-6. `StorageRuntime::open` 调用 `migrate` 核对当前 schema version，没有单独的写入/回滚探针；
+5. 通过 `include_str!` 内嵌 SQL 在同一事务创建基础表和 metadata，再按 `storage_meta.schema_version` 执行前向 migration；不是 `sqlx::migrate!`/SQLx Migrator；
+6. `StorageRuntime::open` 调用 `migrate` 核对当前 schema version，在独立事务内更新 singleton metadata 并显式回滚，验证真实写入路径；
 7. 建立 stats worker 和唯一的 SQLite detail writer channel；
 8. 返回 `StorageRuntime`。
 
-connect/schema/migration 失败属于启动 fatal；已有库能打开和通过版本核对不等于已执行专门的写入可用性测试。当前 connect/migration 本身未整体包裹调用方 deadline，后续 port 操作才使用该预算；启动探针和总预算差距见[核对计划](../../../plans/backend-contract-gaps.md)。
+建目录、connect/schema/migration、写探针共用调用方 deadline，不逐阶段重置。探针不提交业务统计或详情，也不永久修改 metadata；失败或预算耗尽不创建可服务的 Storage owner，并作为启动错误返回。deadline 限制异步等待与后续步骤，不承诺强制中断已进入 OS/SQLite worker 的操作；真实介质故障仍需环境验收。
 
 ## 3. Schema 职责
 
@@ -184,14 +184,14 @@ Policy Core 通过 `DnsCore::resolve_with_completion` 提供已经完成策略�
 
 shutdown：
 
-1. `DnsService` 先停止接收新请求并完成 request drain；
+1. `DnsService` 停止接收新请求、尽快取消在途 dispatch 并回收 request guard，不保证已读请求一定写回；
 2. 停止并排空 resolution ingress、cache commit 和 detail projection worker；
-3. `StorageRuntime` 停止 SQLite detail worker，使其提交最终 batch；
-4. 冻结最后一个 stats epoch，在 deadline 内提交 pending stats batch；
-5. WAL checkpoint 并关闭 pool；
+3. `StorageRuntime` 关闭 detail 输入，等待当前正在写入的 batch 结束，取回尚未排空的 worker；
+4. 冻结最后一个 stats epoch，优先提交 pending stats batch；
+5. 详情只使用剩余预算排空，再执行 WAL checkpoint 和 pool 关闭；
 6. 返回 resolution、stats、detail 和可能 gap 的独立摘要。
 
-生产 `StorageRuntime` 先等待独立 detail task，再调用 `StorageService::shutdown` flush stats/backend；用于内联 worker 的 StorageService facade 才是 stats → detail → backend。不能把后者的顺序描述为生产停机始终“stats 优先”；总预算不足时这一差异仍需验收。幂等 ledger 必须在各自事务内保持一致。
+生产 owner 与 `StorageService::shutdown` 统一采用 stats → 剩余 detail → backend；回收独立 task 不再先排空全部详情队列。已执行的 SQLite 写入仍需先结束，可能消耗剩余预算，因此“统计优先”不等于抢占正在进行的 SQL 或保证零丢失。全部阶段共享同一 deadline，超时/失败显式报告，幂等 ledger 在各自事务内保持一致。
 
 ## 11. Migration
 

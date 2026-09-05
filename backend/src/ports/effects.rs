@@ -56,6 +56,7 @@ pub struct ResourceFetchRequest {
     pub max_bytes: usize,
     pub deadline: Deadline,
     pub cancellation: Cancellation,
+    pub validators: ResourceValidators,
 }
 
 impl fmt::Debug for ResourceFetchRequest {
@@ -67,29 +68,85 @@ impl fmt::Debug for ResourceFetchRequest {
             .field("max_bytes", &self.max_bytes)
             .field("deadline", &self.deadline)
             .field("cancelled", &self.cancellation.is_cancelled())
+            .field("validators", &self.validators)
             .finish()
     }
 }
 
+/// 远端验证标记是受限不透明字段，Debug 不能回显服务端提供的原文。
+#[derive(Clone, Default, Eq, PartialEq)]
+pub struct ResourceValidators {
+    pub etag: Option<Arc<str>>,
+    pub last_modified: Option<Arc<str>>,
+}
+
+impl ResourceValidators {
+    pub fn is_empty(&self) -> bool {
+        self.etag.is_none() && self.last_modified.is_none()
+    }
+
+    /// 拒绝超长或可注入额外 HTTP header 的标记；不自行猜测 ETag 的内容含义。
+    pub fn validate(&self) -> Result<(), PortError> {
+        for value in [self.etag.as_ref(), self.last_modified.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if value.is_empty()
+                || value.len() > 4096
+                || !value.bytes().all(|byte| (0x20..=0x7e).contains(&byte))
+            {
+                return Err(PortError::new(
+                    super::PortErrorClass::ProtocolViolation,
+                    "resource_fetch.validator",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for ResourceValidators {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ResourceValidators")
+            .field("has_etag", &self.etag.is_some())
+            .field("has_last_modified", &self.last_modified.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ResourceFetchResult {
+    Modified(ResourceContent),
+    NotModified(ResourceValidators),
+}
+
 #[derive(Clone)]
-pub struct ResourceFetchResult {
+pub struct ResourceContent {
     pub body: Arc<[u8]>,
     pub checksum: u64,
     pub modified_at: Option<SystemTime>,
+    pub validators: ResourceValidators,
 }
 
-impl fmt::Debug for ResourceFetchResult {
+impl fmt::Debug for ResourceContent {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ResourceFetchResult")
+            .debug_struct("ResourceContent")
             .field("body_len", &self.body.len())
             .field("checksum", &self.checksum)
             .field("modified_at", &self.modified_at)
+            .field("validators", &self.validators)
             .finish()
     }
 }
 
 pub trait ResourceFetcher: Send + Sync {
+    /// 配置/代理解析实例的私有代际；没有代际的 adapter 不跨调用复用条件请求标记。
+    fn validator_scope(&self) -> Option<&str> {
+        None
+    }
+
     fn fetch(
         &self,
         request: ResourceFetchRequest,
@@ -371,7 +428,10 @@ mod tests {
 
     use crate::dns::{Cancellation, Deadline};
 
-    use super::{ProxyProfileId, ResourceFetchRequest, ResourceFetchResult, ResourceLocation};
+    use super::{
+        ProxyProfileId, ResourceContent, ResourceFetchRequest, ResourceFetchResult,
+        ResourceLocation, ResourceValidators,
+    };
 
     #[test]
     fn resource_fetch_debug_only_contains_safe_metadata() {
@@ -385,12 +445,17 @@ mod tests {
             max_bytes: 8 * 1024,
             deadline: Deadline::new(Instant::now()),
             cancellation: Cancellation::new(),
+            validators: ResourceValidators {
+                etag: Some(Arc::from("private-validator")),
+                last_modified: None,
+            },
         };
-        let result = ResourceFetchResult {
+        let result = ResourceFetchResult::Modified(ResourceContent {
             body: Arc::from(&b"domain example.com\nprivate-rule-body"[..]),
             checksum: 42,
             modified_at: None,
-        };
+            validators: request.validators.clone(),
+        });
 
         let location_debug = format!("{location:?}");
         let request_debug = format!("{request:?}");
@@ -405,6 +470,7 @@ mod tests {
             "private-proxy",
             "example.com",
             "private-rule-body",
+            "private-validator",
         ] {
             assert!(!location_debug.contains(secret));
             assert!(!request_debug.contains(secret));

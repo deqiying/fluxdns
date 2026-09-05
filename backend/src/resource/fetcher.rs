@@ -15,7 +15,8 @@ use crate::config::migrate::deterministic_hash;
 use crate::config::resolve::ResolvedOutbound;
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::effects::{
-    ProxyProfileId, ResourceFetchRequest, ResourceFetchResult, ResourceFetcher,
+    ProxyProfileId, ResourceContent, ResourceFetchRequest, ResourceFetchResult, ResourceFetcher,
+    ResourceValidators,
 };
 use crate::ports::{PortError, PortErrorClass, PortFuture};
 use crate::upstream::{OutboundProfile, OutboundProfileError};
@@ -34,12 +35,15 @@ pub enum ResourceFetcherBuildError {
     Client,
     #[error("resource proxy client could not be built")]
     Proxy,
+    #[error("resource validator scope could not be initialized")]
+    ValidatorScope,
 }
 
 /// 使用已解析 outbound profile 的有界 remote resource fetcher。
 pub struct ReqwestResourceFetcher {
     direct: reqwest::Client,
     proxies: HashMap<String, reqwest::Client>,
+    validator_scope: String,
 }
 
 impl fmt::Debug for ReqwestResourceFetcher {
@@ -93,7 +97,14 @@ impl ReqwestResourceFetcher {
             let client = build_client(Some(&profile), root_certificate.clone())?;
             proxies.insert(outbound.id.as_str().to_owned(), client);
         }
-        Ok(Self { direct, proxies })
+        let mut scope = [0_u8; 16];
+        getrandom::fill(&mut scope).map_err(|_| ResourceFetcherBuildError::ValidatorScope)?;
+        let validator_scope = scope.iter().map(|byte| format!("{byte:02x}")).collect();
+        Ok(Self {
+            direct,
+            proxies,
+            validator_scope,
+        })
     }
 
     fn client_for(&self, profile: Option<&ProxyProfileId>) -> Result<reqwest::Client, PortError> {
@@ -112,6 +123,10 @@ impl ReqwestResourceFetcher {
 }
 
 impl ResourceFetcher for ReqwestResourceFetcher {
+    fn validator_scope(&self) -> Option<&str> {
+        Some(&self.validator_scope)
+    }
+
     fn fetch<'a>(
         &'a self,
         request: ResourceFetchRequest,
@@ -178,12 +193,20 @@ async fn fetch_with_client(
         "resource_fetch.send",
     )?;
 
+    request.validators.validate()?;
+    let mut builder = client.get(url);
+    if let Some(etag) = &request.validators.etag {
+        builder = builder.header(reqwest::header::IF_NONE_MATCH, etag.as_ref());
+    }
+    if let Some(modified) = &request.validators.last_modified {
+        builder = builder.header(reqwest::header::IF_MODIFIED_SINCE, modified.as_ref());
+    }
     let response = tokio::select! {
         biased;
         _ = request.cancellation.cancelled() => {
             return Err(cancelled_error(&request.cancellation, "resource_fetch.send"));
         }
-        result = tokio::time::timeout(request.deadline.remaining(Instant::now()), client.get(url).send()) => {
+        result = tokio::time::timeout(request.deadline.remaining(Instant::now()), builder.send()) => {
             match result {
                 Ok(Ok(response)) => response,
                 Ok(Err(error)) => return Err(map_reqwest_error(error, "resource_fetch.send")),
@@ -192,6 +215,14 @@ async fn fetch_with_client(
         }
     };
 
+    let validators = ResourceValidators {
+        etag: response_header(&response, reqwest::header::ETAG)?,
+        last_modified: response_header(&response, reqwest::header::LAST_MODIFIED)?,
+    };
+    validators.validate()?;
+    if response.status() == reqwest::StatusCode::NOT_MODIFIED {
+        return Ok(ResourceFetchResult::NotModified(validators));
+    }
     if !response.status().is_success() {
         return Err(
             PortError::new(PortErrorClass::ProtocolViolation, "resource_fetch.status")
@@ -243,11 +274,30 @@ async fn fetch_with_client(
     }
 
     let checksum = u64::from_str_radix(&deterministic_hash(&body), 16).unwrap_or_default();
-    Ok(ResourceFetchResult {
+    Ok(ResourceFetchResult::Modified(ResourceContent {
         body: Arc::from(body.into_boxed_slice()),
         checksum,
         modified_at,
-    })
+        validators,
+    }))
+}
+
+fn response_header(
+    response: &reqwest::Response,
+    name: reqwest::header::HeaderName,
+) -> Result<Option<Arc<str>>, PortError> {
+    response
+        .headers()
+        .get(name)
+        .map(|value| {
+            value.to_str().map(Arc::from).map_err(|_| {
+                PortError::new(
+                    PortErrorClass::ProtocolViolation,
+                    "resource_fetch.validator",
+                )
+            })
+        })
+        .transpose()
 }
 
 fn check_budget(
@@ -315,6 +365,7 @@ mod tests {
             max_bytes,
             deadline: Deadline::new(Instant::now() + Duration::from_secs(2)),
             cancellation: Cancellation::new(),
+            validators: ResourceValidators::default(),
         }
     }
 
@@ -356,6 +407,59 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn conditional_headers_and_304_use_typed_results_without_a_body() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let task = tokio::spawn(async move {
+            for conditional in [false, true] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let headers = read_headers(&mut stream).await.to_ascii_lowercase();
+                if conditional {
+                    assert!(headers.contains("if-none-match: \"version-one\""));
+                    assert!(headers.contains("if-modified-since: sat, 05 sep 2026 00:00:00 gmt"));
+                    stream.write_all(b"HTTP/1.1 304 Not Modified\r\nETag: \"version-two\"\r\nConnection: close\r\n\r\n").await.unwrap();
+                } else {
+                    assert!(!headers.contains("if-none-match"));
+                    stream.write_all(b"HTTP/1.1 200 OK\r\nETag: \"version-one\"\r\nLast-Modified: Sat, 05 Sep 2026 00:00:00 GMT\r\nContent-Length: 4\r\nConnection: close\r\n\r\nrule").await.unwrap();
+                }
+            }
+        });
+        let fetcher = ReqwestResourceFetcher::from_resolved(&[], 1024).unwrap();
+        let mut request = request(&format!("http://{address}/rules"), 1024);
+        let ResourceFetchResult::Modified(content) = fetcher.fetch(request.clone()).await.unwrap()
+        else {
+            panic!("expected body")
+        };
+        assert_eq!(content.body.as_ref(), b"rule");
+        request.validators = content.validators;
+        let ResourceFetchResult::NotModified(validators) = fetcher.fetch(request).await.unwrap()
+        else {
+            panic!("expected 304")
+        };
+        assert_eq!(validators.etag.as_deref(), Some("\"version-two\""));
+        task.await.unwrap();
+        assert_ne!(
+            fetcher.validator_scope(),
+            ReqwestResourceFetcher::from_resolved(&[], 1024)
+                .unwrap()
+                .validator_scope()
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_validators_are_rejected_before_network() {
+        let fetcher = ReqwestResourceFetcher::from_resolved(&[], 1024).unwrap();
+        for etag in ["bad\r\nInjected: secret".to_owned(), "x".repeat(4097)] {
+            let mut request = request("http://127.0.0.1:9/rules", 1024);
+            request.validators.etag = Some(Arc::from(etag));
+            let error = fetcher.fetch(request).await.unwrap_err();
+            assert_eq!(error.operation(), "resource_fetch.validator");
+        }
+    }
+
     fn proxy_outbound(url: &str) -> (ResolvedOutbound, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "fluxdns-resource-fetcher-{}-{}",
@@ -389,6 +493,9 @@ mod tests {
             ))
             .await
             .unwrap();
+        let ResourceFetchResult::Modified(result) = result else {
+            panic!("expected body")
+        };
         assert_eq!(&*result.body, b"DOMAIN-SUFFIX,example.test\n");
         assert_eq!(
             result.checksum,
@@ -437,6 +544,9 @@ mod tests {
         // Windows 本地 Rustls 冷启动可能超过 2s；该预算只用于握手测试，不改变生产配置。
         request.deadline = Deadline::new(Instant::now() + Duration::from_secs(10));
         let result = fetcher.fetch(request).await.unwrap();
+        let ResourceFetchResult::Modified(result) = result else {
+            panic!("expected body")
+        };
         assert_eq!(&*result.body, b"tls-rule");
         task.await.unwrap();
     }
@@ -485,6 +595,9 @@ mod tests {
         let mut resource = request("http://rules.example.test/rules", 1024);
         resource.proxy_profile = Some(ProxyProfileId(Arc::from("proxy")));
         let result = fetcher.fetch(resource).await.unwrap();
+        let ResourceFetchResult::Modified(result) = result else {
+            panic!("expected body")
+        };
         assert_eq!(&*result.body, b"proxy-rule");
         task.await.unwrap();
         let _ = std::fs::remove_dir_all(root);

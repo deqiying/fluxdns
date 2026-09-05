@@ -114,7 +114,11 @@ pub struct StorageRuntime {
     detail_writer: Option<SqliteResolveDetailWriter>,
     resolution_metrics: Arc<crate::resolution::ResolutionPipelineMetrics>,
     detail_cancellation: Option<Cancellation>,
-    detail_task: Option<tokio::task::JoinHandle<Result<SqliteResolveDetailRunSummary, PortError>>>,
+    detail_task: Option<
+        tokio::task::JoinHandle<
+            Result<(SqliteResolveDetailWorker, SqliteResolveDetailRunSummary), PortError>,
+        >,
+    >,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -125,6 +129,8 @@ pub enum StorageRuntimeBuildError {
     Connect(#[source] SqliteStorageBackendBuildError),
     #[error("sqlite storage migration failed: {0}")]
     Migration(#[source] PortError),
+    #[error("sqlite storage startup write probe failed: {0}")]
+    WriteProbe(#[source] PortError),
     #[error("resolve detail limits are invalid: {0}")]
     DetailLimits(#[source] SqliteResolveDetailWriterBuildError),
     #[error("resolve detail channel could not be created: {0}")]
@@ -262,7 +268,7 @@ impl StorageRuntime {
             return Err(StorageRuntimeBuildError::DatabaseType);
         }
         let backend = Arc::new(
-            SqliteStorageBackend::connect(config.database.path.clone())
+            SqliteStorageBackend::connect_with_deadline(config.database.path.clone(), deadline)
                 .await
                 .map_err(StorageRuntimeBuildError::Connect)?,
         );
@@ -270,6 +276,15 @@ impl StorageRuntime {
             .migrate(STORAGE_SCHEMA_VERSION, deadline)
             .await
             .map_err(StorageRuntimeBuildError::Migration)?;
+        backend
+            .startup_write_probe(deadline)
+            .await
+            .map_err(StorageRuntimeBuildError::WriteProbe)?;
+        if deadline.is_expired(std::time::Instant::now()) {
+            return Err(StorageRuntimeBuildError::Connect(
+                SqliteStorageBackendBuildError::Timeout,
+            ));
+        }
 
         let stats_worker = Arc::new(StatsPersistenceWorker::new(backend.clone()));
         let service = StorageService::new(backend.clone()).with_stats_worker(stats_worker);
@@ -290,7 +305,7 @@ impl StorageRuntime {
             )
             .map_err(StorageRuntimeBuildError::DetailChannel)?;
             let cancellation = Cancellation::new();
-            detail_task = Some(tokio::spawn(worker.run(
+            detail_task = Some(tokio::spawn(worker.run_until_stopped(
                 cancellation.clone(),
                 DEFAULT_STORAGE_FLUSH_INTERVAL,
                 DEFAULT_STORAGE_OPERATION_TIMEOUT,
@@ -338,7 +353,7 @@ impl StorageRuntime {
         self.service.flush(deadline).await
     }
 
-    /// 停止详情接收并按既定顺序关闭详情、统计和存储 worker。
+    /// 停止详情的新输入并回收当前批次，先保存统计，再用同一 deadline 的余量排空详情。
     pub async fn shutdown(
         &mut self,
         deadline: Deadline,
@@ -352,13 +367,19 @@ impl StorageRuntime {
                 match tokio::time::timeout(deadline.remaining(std::time::Instant::now()), &mut task)
                     .await
                 {
-                    Ok(Ok(result)) => result,
+                    Ok(Ok(Ok((worker, summary)))) => {
+                        self.service.detail_worker = Some(worker);
+                        Ok(summary)
+                    }
+                    Ok(Ok(Err(error))) => Err(error),
                     Ok(Err(_)) => Err(PortError::new(
                         crate::ports::PortErrorClass::Internal,
                         "sqlite_resolve_log.worker",
                     )),
                     Err(_) => {
                         task.abort();
+                        // 等待 Rust task 释放 transaction；底层 SQL 回滚仍由连接队列顺序保证。
+                        let _ = task.await;
                         Err(PortError::new(
                             crate::ports::PortErrorClass::Timeout,
                             "sqlite_resolve_log.shutdown",
@@ -371,7 +392,14 @@ impl StorageRuntime {
         let service = self.service.shutdown(deadline).await;
         match (detail, service) {
             (Ok(detail), Ok(mut summary)) => {
-                summary.detail = detail.flush;
+                summary.detail.committed = summary
+                    .detail
+                    .committed
+                    .saturating_add(detail.flush.committed);
+                summary.detail.evicted =
+                    summary.detail.evicted.saturating_add(detail.flush.evicted);
+                summary.detail.dropped =
+                    summary.detail.dropped.saturating_add(detail.flush.dropped);
                 Ok(summary)
             }
             (Err(detail), Ok(_)) => Err(StorageServiceError::Detail(detail)),
@@ -539,7 +567,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_runtime_opens_from_resolved_config_with_detail_sink() {
+    async fn storage_runtime_flushes_stats_before_draining_multiple_detail_batches() {
         let (source, work_path) = crate::config::test_support::portable_example();
         let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
@@ -548,6 +576,20 @@ mod tests {
         let mut runtime = StorageRuntime::open(config.as_ref(), deadline())
             .await
             .expect("storage runtime must open configured sqlite");
+        let verification = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&config.database.path))
+            .await
+            .unwrap();
+        // 让真实详情写入以统计已落盘为前提，避免只凭 facade 调用顺序判断正式 owner。
+        sqlx::query(
+            "CREATE TRIGGER require_stats BEFORE INSERT ON resolve_log \
+             WHEN NOT EXISTS (SELECT 1 FROM stats_daily_total WHERE total_requests > 0) \
+             BEGIN SELECT RAISE(ABORT, 'stats must be committed first'); END",
+        )
+        .execute(&verification)
+        .await
+        .unwrap();
 
         let _stats_recorder = runtime.stats_recorder();
         assert_eq!(runtime.stats_worker().pending_batch_count(), 0);
@@ -584,17 +626,23 @@ mod tests {
             runtime_revision: crate::dns::RuntimeRevision(1),
         })
         .expect("detail event must be valid");
-        writer
-            .try_write(record)
-            .expect("detail record must be accepted");
-
-        let flush = runtime.flush(deadline()).await.unwrap();
-        assert_eq!(flush.detail.committed, 0);
+        for _ in 0..300 {
+            writer
+                .try_write(record.clone())
+                .expect("detail record must be accepted");
+        }
+        runtime
+            .stats_worker()
+            .record_request(20_260_905, Vec::new())
+            .unwrap();
         let shutdown = runtime
             .shutdown(deadline())
             .await
             .expect("storage runtime shutdown must drain configured writers");
-        assert_eq!(shutdown.detail.committed, 1);
+        assert_eq!(shutdown.stats.events_committed, 1);
+        assert_eq!(shutdown.detail.committed, 300);
+        assert!(writer.try_write(record).is_err());
+        verification.close().await;
         let _ = std::fs::remove_dir_all(work_path);
     }
 

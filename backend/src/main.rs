@@ -6,6 +6,7 @@ pub mod config;
 pub mod dns;
 pub mod management;
 pub mod observability;
+mod panic_safety;
 pub mod policy;
 pub mod ports;
 pub mod resolution;
@@ -25,6 +26,7 @@ pub(crate) fn ensure_rustls_crypto_provider() {
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
+    panic_safety::install();
     if observability::init_bootstrap().is_err() {
         return report_error(&app::AppError::new(
             app::AppErrorKind::RuntimeFatal,

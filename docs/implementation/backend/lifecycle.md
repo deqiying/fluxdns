@@ -4,20 +4,20 @@
 >
 > 适用范围：正式 CLI 启动、资源准备、bind、reload 与 shutdown 接线
 >
-> 最后核对：2026-09-05（入口与所有权静态追踪）
+> 最后核对：2026-09-05（启动探针、统计优先停机与安全 panic hook 接线及本地测试）
 >
-> 核对基线：`8223d819efb83fed642900e6b121825083e8c1dd`
+> 核对基线：`19c3c81e4fdbea9424d522620ad81462c6d22eb1` 加本次后端契约实施工作树
 
 ## 正式入口
 
-[`main.rs`](../../../backend/src/main.rs) 的异步 `main` 初始化 bootstrap telemetry 后调用 [`app.rs`](../../../backend/src/app.rs) 的 `run` / `run_with_args` / `run_command`。CLI 由 `parse_args` 解析，`run` 与 `validate` 共用严格配置加载；未指定 CLI 配置时使用 `config.yaml`。这与要求显式 `-ConfigPath` 的[开发服务脚本](../delivery.md)不是同一参数边界。
+[`main.rs`](../../../backend/src/main.rs) 的异步 `main` 先安装 [`panic_safety`](../../../backend/src/panic_safety.rs) hook，再初始化 bootstrap telemetry 并调用 [`app.rs`](../../../backend/src/app.rs) 的 `run` / `run_with_args` / `run_command`。CLI 由 `parse_args` 解析，`run` 与 `validate` 共用严格配置加载；未指定 CLI 配置时使用 `config.yaml`。这与要求显式 `-ConfigPath` 的[开发服务脚本](../delivery.md)不是同一参数边界。
 
 `run_command` 的顺序是：
 
 1. 仅 `run` 先执行 `recover_pending_transaction`；`validate` 关闭 snapshot 写入，不恢复写事务。
 2. `ConfigLoader::load_from_path` 加载配置；`run` 再解析检查 SecretRef 并配置正式日志输出。
 3. 调用 `PreparedRuntime::prepare_with_policy_core_and_remote_resources`，准备资源、Policy core、upstream 和启用的缓存恢复。
-4. `StorageRuntime::open` 打开统计/详情数据库并迁移；失败映射为 prepare 错误。
+4. `StorageRuntime::open` 在共享 deadline 内建目录、打开统计/详情数据库、迁移并执行独立事务写入/回滚探针；失败映射为 prepare 错误，不创建服务 owner。
 5. `bind_prepared` 使用 `SystemSocketFactory` 绑定 DNS endpoint，构造 `RuntimeCoordinator`。
 6. WebUI 启用时 `ManagementService::bind` 注入 coordinator、数据库路径、详情开关、telemetry 与 resolution metrics。
 7. 构造 `DnsService`，通过 `attach_management` 注册管理服务；进入信号、Supervisor 和配置 watcher 等待。
@@ -46,6 +46,8 @@ TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于�
 
 TCP/DoH 和 UDP dispatch 都可能被 service cancellation 中止，因此 5 秒 grace 是回收总预算，不等于保证已读请求一定响应。`RuntimeSnapshot` 持有 core，而内部 Resolution/Storage detail/finalizer task 分别由 owner 管理；不能把 Supervisor 的单独 drain 视为全部后台服务已关闭。
 
+Storage 停机先关闭 detail 输入并回收当前正在提交的 batch，不预先排空其余队列；然后提交 stats，详情使用同一 deadline 的剩余时间，最后关闭数据库。正在执行的 SQL 可能消耗预算，超时按失败报告，不承诺强制抢占 SQL 或无损停机。
+
 最后关闭 Telemetry 前再次采样已回收 Resolution owner 的 accepted 与事件队列深度，复用周期游标；再关闭 writer 输入、排空事件并输出最终累计快照。采样失败也必须关闭 writer，并将错误保留到 shutdown report，不延长总预算。
 
 入口和 task 错误由 `AppErrorKind` / `ServiceError` 分类，不能把 runtime fatal 或超时映射为成功。详细设计见 [Application](../../architecture/backend/modules/application.md) 与 [Runtime](../../architecture/backend/modules/runtime.md)。
@@ -54,9 +56,9 @@ TCP/DoH 和 UDP dispatch 都可能被 service cancellation 中止，因此 5 秒
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| 完整启动 | `run_command`、async prepare、bind、StorageRuntime | `main -> app -> DnsService` | 本轮静态追踪；源码有 `async_prepare_attaches_cache_persistence_before_bind` 等测试，本轮未运行 | 不证明环境资源/端口可用 |
-| 配置切换 | `reload_service_from_path`、`reload_prepared` | watcher 调用，复用进程服务 | 本轮核对调用点；存在 reload/rebind/failure 测试 | 不宣称所有平台组合已验收 |
-| 有界停机 | `shutdown`、signal wait、finalizer owner | 正常信号及 fatal task 路径 | 本轮核对分支；存在 shutdown timeout/flush 测试 | Unix 双信号真实进程 smoke 尚无本轮证据 |
-| 安全 panic hook | 设计要求仅输出安全信息 | 未找到 `std::panic::set_hook` 的进程接线 | 本轮搜索入口与源树 | 不能据设计宣称默认 panic 输出已脱敏，见[差距计划](../../plans/backend-contract-gaps.md) |
+| 完整启动 | `run_command`、async prepare、StorageRuntime deadline/probe | `main -> app -> DnsService` | 过期预算不建库、真实 SQLite 写锁与写入拒绝/回滚测试 | 不证明真实磁盘满或权限故障全部可恢复 |
+| 配置切换 | `reload_service_from_path`、`reload_prepared` | watcher 调用，复用进程服务 | 完整测试包含 reload/rebind/failure 用例 | 不宣称所有平台组合已验收 |
+| 有界停机 | `shutdown`、finalizer owner、stats-first | 正常信号及 fatal task 路径 | SQLite trigger 验证 stats 提交先于 300 条多批详情排空 | 已执行 SQL 无强制抢占保证；Unix 双信号 smoke 未执行 |
+| 安全 panic hook | 固定分类、受限源码位置、backtrace 状态 | 异步 `main` 第一项安装 `std::panic::set_hook` | 独立子进程验证主线程/worker panic 不泄漏 payload、线程名或完整栈 | 不改变内部 task owner 的失败升级策略；安装前异常不覆盖 |
 
-上表描述原始静态审计范围。2026-09-05 的完整 Cargo 测试与新增 reload/最终采样 loopback 验证见[后台服务](background-services.md#本次验证)；没有真实信号或外部部署 smoke 证据。
+2026-09-05 的完整 Cargo 测试与 loopback 验证见[后台服务](background-services.md#本次验证)；没有真实 Unix 信号或外部部署 smoke 证据。

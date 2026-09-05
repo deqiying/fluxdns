@@ -211,6 +211,7 @@ pub enum MetricName {
     RequestsCancelled,
     RequestsFailed,
     RequestLatency,
+    DnsCoreLatency,
     CacheOperations,
     UpstreamAttempts,
     UpstreamLatency,
