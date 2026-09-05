@@ -6,7 +6,7 @@
 >
 > 适用范围：获批 D1-D9 的实施收口与剩余组合、环境验收
 >
-> 代码基线：`19c3c81e4fdbea9424d522620ad81462c6d22eb1` 加本次后端契约实施工作树
+> 代码基线：D1-D9 已提交于 `43671f1685edcaf271d8e62c184a7f72f5a2cefe`；本次工作树另落实用户批准的业务时间整数迁移
 >
 > 最后核对：2026-09-05，实际命令及结果见[后台服务验证](../implementation/backend/background-services.md#本次验证)
 
@@ -17,7 +17,7 @@
 1. 保留现有配置语义，`dns.cache.persistence.max_size_bytes` 仍是编码内容加 framing 的预算，不改变为 SQLite 主库/WAL/SHM 的物理硬配额。
 2. 保留异步主链：请求完成后单次无等待移交，缓存提交、统计、请求指标和详情投影由后台处理；不把 SQLite I/O 或同步指标聚合移回响应路径。既有 bootstrap 地址缓存与后台采样不回退。
 3. 不新增配置项、DoT/DoQ、主动健康检查、物理缓存配额、访问热度淘汰或完整 span/attempt 事件流；不为旧类型草图新增抽象。
-4. 本轮不迁移业务 Storage 的旧时间字段类型。metadata 现为 Unix 毫秒字符串，缓存新增时间索引为纳秒整数；统一业务时间类型须另行明确迁移范围。
+4. 用户后续已批准业务时间统一整数类型：Storage schema v6 将四个绝对时间字段迁移为 `_utc_millis` 整数毫秒，缓存独立纳秒索引、耗时和日桶精度不变，详见[业务时间存储](../implementation/backend/background-services.md#业务时间存储)。此变更不关闭下表环境验收缺口。
 
 ## 决策与交付入口
 

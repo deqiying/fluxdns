@@ -403,19 +403,25 @@ impl SqliteStorageBackend {
                         .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
                 }
             }
+            sqlx::query(
+                "INSERT INTO storage_meta \
+                 (singleton, schema_version, database_id, created_at_utc, migrated_at_utc) \
+                 VALUES (1, ?, ?, ?, ?)",
+            )
+            .bind(i64::from(INITIAL_STORAGE_SCHEMA_VERSION.0))
+            .bind(format!("fluxdns-{}", std::process::id()))
+            .bind(
+                system_time_utc_millis(SystemTime::now(), "sqlite_storage.initialize")
+                    .map_err(|_| SqliteStorageBackendBuildError::Schema)?,
+            )
+            .bind(
+                system_time_utc_millis(SystemTime::now(), "sqlite_storage.initialize")
+                    .map_err(|_| SqliteStorageBackendBuildError::Schema)?,
+            )
+            .execute(&mut *initialization)
+            .await
+            .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
         }
-        sqlx::query(
-            "INSERT OR IGNORE INTO storage_meta \
-             (singleton, schema_version, database_id, created_at_utc, migrated_at_utc) \
-             VALUES (1, ?, ?, ?, ?)",
-        )
-        .bind(i64::from(INITIAL_STORAGE_SCHEMA_VERSION.0))
-        .bind(format!("fluxdns-{}", std::process::id()))
-        .bind(unix_millis())
-        .bind(unix_millis())
-        .execute(&mut *initialization)
-        .await
-        .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
         initialization
             .commit()
             .await
@@ -442,7 +448,9 @@ impl SqliteStorageBackend {
                 .await
                 .map_err(|error| self.database_error(error, operation))?;
             let changed = sqlx::query(
-                "UPDATE storage_meta SET migrated_at_utc = migrated_at_utc + 1 WHERE singleton = 1",
+                "UPDATE storage_meta SET migrated_at_utc_millis = \
+                 CASE WHEN migrated_at_utc_millis = 0 THEN 1 ELSE migrated_at_utc_millis - 1 END \
+                 WHERE singleton = 1",
             )
             .execute(&mut *transaction)
             .await
@@ -724,6 +732,10 @@ async fn migrate_storage_schema(pool: &SqlitePool) -> Result<(), SqliteStorageBa
                 5,
                 include_str!("../../migrations/0005_dns_core_duration.sql"),
             ),
+            5 => (
+                6,
+                include_str!("../../migrations/0006_integer_business_timestamps.sql"),
+            ),
             _ => return Err(SqliteStorageBackendBuildError::Schema),
         };
         apply_storage_migration(pool, version, next, migration).await?;
@@ -755,16 +767,24 @@ async fn apply_storage_migration(
                 .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
         }
     }
-    let update = sqlx::query(
+    // v6 重建了 metadata 时间列，旧版本之间仍使用历史列名完成前向升级。
+    let update_sql = if to >= 6 {
+        "UPDATE storage_meta SET schema_version = ?, migrated_at_utc_millis = ? \
+         WHERE singleton = 1 AND schema_version = ?"
+    } else {
         "UPDATE storage_meta SET schema_version = ?, migrated_at_utc = ? \
-         WHERE singleton = 1 AND schema_version = ?",
-    )
-    .bind(i64::from(to))
-    .bind(unix_millis())
-    .bind(i64::from(from))
-    .execute(&mut *transaction)
-    .await
-    .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+         WHERE singleton = 1 AND schema_version = ?"
+    };
+    let update = sqlx::query(update_sql)
+        .bind(i64::from(to))
+        .bind(
+            system_time_utc_millis(SystemTime::now(), "sqlite_storage.migrate")
+                .map_err(|_| SqliteStorageBackendBuildError::Schema)?,
+        )
+        .bind(i64::from(from))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
     if update.rows_affected() != 1 {
         return Err(SqliteStorageBackendBuildError::Schema);
     }
@@ -989,7 +1009,7 @@ async fn apply_stats_batch(
     }
     sqlx::query(
         "INSERT INTO stats_batch_ledger \
-         (batch_id, max_event_seq, counter_epoch, committed_at_utc, payload_hash) \
+         (batch_id, max_event_seq, counter_epoch, committed_at_utc_millis, payload_hash) \
          VALUES (?, ?, ?, ?, ?)",
     )
     .bind(i64::try_from(batch.batch_id).map_err(|_| {
@@ -1010,7 +1030,10 @@ async fn apply_stats_batch(
             "sqlite_storage.stats_batch",
         )
     })?)
-    .bind(unix_millis())
+    .bind(system_time_utc_millis(
+        SystemTime::now(),
+        "sqlite_storage.stats_batch",
+    )?)
     .bind(fingerprint.to_be_bytes().to_vec())
     .execute(&mut **transaction)
     .await
@@ -1047,8 +1070,11 @@ async fn apply_resolve_records_with_limits(
         let cutoff = SystemTime::now()
             .checked_sub(limits.max_record_age)
             .unwrap_or(UNIX_EPOCH);
-        let age_result = sqlx::query("DELETE FROM resolve_log WHERE event_time_utc < ?")
-            .bind(system_time_millis(cutoff))
+        let age_result = sqlx::query("DELETE FROM resolve_log WHERE event_time_utc_millis < ?")
+            .bind(system_time_utc_millis(
+                cutoff,
+                "sqlite_storage.resolve_detail",
+            )?)
             .execute(&mut **transaction)
             .await
             .map_err(|_| {
@@ -1069,7 +1095,7 @@ async fn apply_resolve_records_with_limits(
             if delete_count > 0 {
                 let result = sqlx::query(
                     "DELETE FROM resolve_log WHERE id IN (\
-                     SELECT id FROM resolve_log ORDER BY event_time_utc ASC, id ASC LIMIT ?)",
+                     SELECT id FROM resolve_log ORDER BY event_time_utc_millis ASC, id ASC LIMIT ?)",
                 )
                 .bind(i64::try_from(delete_count).unwrap_or(i64::MAX))
                 .execute(&mut **transaction)
@@ -1125,14 +1151,17 @@ async fn apply_resolve_records_with_limits(
         })?;
         sqlx::query(
             "INSERT INTO resolve_log \
-             (event_time_utc, duration_millis, dns_core_duration_micros, request_id_digest, listener_id, route_id, \
+             (event_time_utc_millis, duration_millis, dns_core_duration_micros, request_id_digest, listener_id, route_id, \
                client_bucket, strategy_id, canonical_qname, qtype, qclass, source, upstream_id, \
                upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
                rcode, cache_status, failure_class, cancellation_reason, runtime_revision, resource_revision, \
                transport, client_ip, upstream_used_id, answer_count, answers_truncated, answer_summary_json) \
               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
-        .bind(system_time_millis(record.occurred_at()))
+        .bind(system_time_utc_millis(
+            record.occurred_at(),
+            "sqlite_storage.resolve_batch",
+        )?)
         .bind(duration_millis)
         .bind(dns_core_duration_micros)
         .bind(request_digest)
@@ -1253,14 +1282,16 @@ fn check_deadline(deadline: Deadline, operation: &'static str) -> Result<(), Por
     }
 }
 
-fn unix_millis() -> String {
-    system_time_millis(SystemTime::now())
-}
-
-fn system_time_millis(time: SystemTime) -> String {
-    time.duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().to_string())
-        .unwrap_or_else(|_| "0".to_owned())
+/// SQLite 业务绝对时间统一为 UTC 毫秒整数，亚毫秒截断，epoch 前仍沿用旧契约归零。
+fn system_time_utc_millis(time: SystemTime, operation: &'static str) -> Result<i64, PortError> {
+    let millis = time
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    i64::try_from(millis).map_err(|_| {
+        PortError::new(PortErrorClass::InvalidInput, operation)
+            .with_safe_context("UTC millisecond timestamp exceeds signed 64-bit storage")
+    })
 }
 
 #[cfg(test)]
@@ -1361,15 +1392,15 @@ mod tests {
     #[tokio::test]
     async fn startup_probe_rolls_back_real_write_and_reports_write_failure() {
         let backend = SqliteStorageBackend::connect(path()).await.unwrap();
-        let before: (i64, String) = sqlx::query_as(
-            "SELECT schema_version, migrated_at_utc FROM storage_meta WHERE singleton=1",
+        let before: (i64, i64) = sqlx::query_as(
+            "SELECT schema_version, migrated_at_utc_millis FROM storage_meta WHERE singleton=1",
         )
         .fetch_one(&backend.pool)
         .await
         .unwrap();
         backend.startup_write_probe(deadline()).await.unwrap();
-        let after: (i64, String) = sqlx::query_as(
-            "SELECT schema_version, migrated_at_utc FROM storage_meta WHERE singleton=1",
+        let after: (i64, i64) = sqlx::query_as(
+            "SELECT schema_version, migrated_at_utc_millis FROM storage_meta WHERE singleton=1",
         )
         .fetch_one(&backend.pool)
         .await
@@ -1406,12 +1437,12 @@ mod tests {
             .await
             .unwrap();
         let started = Instant::now();
-        let result = SqliteStorageBackend::connect_with_deadline(
-            &path,
-            Deadline::new(started + Duration::from_millis(30)),
-        )
-        .await;
-        assert!(result.is_err());
+        let startup_deadline = Deadline::new(started + Duration::from_millis(30));
+        let opened = SqliteStorageBackend::connect_with_deadline(&path, startup_deadline)
+            .await
+            .unwrap();
+        // 当前版本的只读核对可以打开库，可写性仍由同预算内的真实写探针保证。
+        assert!(opened.startup_write_probe(startup_deadline).await.is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
         let error = backend
             .startup_write_probe(Deadline::new(Instant::now() + Duration::from_millis(20)))
@@ -1426,6 +1457,7 @@ mod tests {
             .await
             .unwrap();
         drop(connection);
+        opened.shutdown(deadline()).await.unwrap();
         backend.startup_write_probe(deadline()).await.unwrap();
         backend.shutdown(deadline()).await.unwrap();
     }
@@ -1439,6 +1471,379 @@ mod tests {
             idempotency_key: "test-batch".into(),
             operations: vec![StorageOperation::StatsBatch(batch)],
         }
+    }
+
+    async fn legacy_v5_database() -> (std::path::PathBuf, sqlx::SqlitePool) {
+        let path = path();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&path)
+                    .create_if_missing(true),
+            )
+            .await
+            .unwrap();
+        for migration in [
+            include_str!("../../migrations/0001_storage.sql"),
+            include_str!("../../migrations/0002_resolution_metadata.sql"),
+            include_str!("../../migrations/0003_management_query_projection.sql"),
+            include_str!("../../migrations/0004_query_record_observability.sql"),
+            include_str!("../../migrations/0005_dns_core_duration.sql"),
+        ] {
+            for statement in migration
+                .split(';')
+                .map(str::trim)
+                .filter(|sql| !sql.is_empty())
+            {
+                sqlx::query(statement).execute(&pool).await.unwrap();
+            }
+        }
+        sqlx::query(
+            "INSERT INTO storage_meta VALUES (1, 5, 'timestamp-migration-test', '1000', '2000')",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        (path, pool)
+    }
+
+    async fn insert_legacy_detail(pool: &sqlx::SqlitePool, id: i64, timestamp: &str) {
+        sqlx::query(
+            "INSERT INTO resolve_log \
+             (id, event_time_utc, duration_millis, request_id_digest, listener_id, route_id, \
+              client_bucket, strategy_id, canonical_qname, qtype, qclass, source, upstream_id, \
+              rcode, cache_status, runtime_revision, resource_revision, upstream_member_id, \
+              matched_rule_source, matched_resource_id, matched_rule_ordinal, transport, client_ip, \
+              upstream_used_id, answer_count, answers_truncated, answer_summary_json, dns_core_duration_micros) \
+             VALUES (?, ?, 8, '<present>', 'listener', 'route', 'client', 'strategy', \
+              'example.test.', 1, 1, 'upstream', 'group', 0, 'miss', 7, '2:3', 'member', \
+              'rule_set', 'resource', 2, 'udp', '192.0.2.1', 'member', 0, 0, '[]', 250)",
+        )
+        .bind(id).bind(timestamp).execute(pool).await.unwrap();
+    }
+
+    #[test]
+    fn business_timestamp_conversion_uses_utc_millis_and_preserves_epoch_boundary() {
+        let convert = |time| super::system_time_utc_millis(time, "test.timestamp").unwrap();
+        assert_eq!(convert(SystemTime::UNIX_EPOCH), 0);
+        assert_eq!(
+            convert(SystemTime::UNIX_EPOCH + Duration::from_nanos(1_234_567_890)),
+            1_234,
+        );
+        assert_eq!(
+            convert(SystemTime::UNIX_EPOCH - Duration::from_millis(1)),
+            0
+        );
+        if let Some(overflow) =
+            SystemTime::UNIX_EPOCH.checked_add(Duration::from_millis(i64::MAX as u64 + 1))
+        {
+            assert!(super::system_time_utc_millis(overflow, "test.timestamp").is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn v6_migration_preserves_data_ledger_integer_times_and_sequence_on_reopen() {
+        let (path, pool) = legacy_v5_database().await;
+        let batch = StatsBatch {
+            batch_id: 7,
+            max_event_sequence: 1,
+            counter_epoch: 2,
+            events: vec![StatsEvent::new(1, 20_000, vec![]).unwrap()],
+        };
+        sqlx::query("INSERT INTO stats_daily_total VALUES (20000, 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO stats_daily_dimension VALUES (20000, 'source', 'upstream', 1)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO stats_batch_ledger VALUES (7, 1, 2, '9223372036854775807', ?)")
+            .bind(super::stats_fingerprint(&batch).to_be_bytes().to_vec())
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (id, millis) in [
+            (1, "0"),
+            (2, "999"),
+            (3, "1000"),
+            (4, "10000000000000"),
+            (100, "1"),
+        ] {
+            insert_legacy_detail(&pool, id, millis).await;
+        }
+        sqlx::query("DELETE FROM resolve_log WHERE id = 100")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        let meta: (i64, String, i64, i64, String, String) = sqlx::query_as(
+            "SELECT schema_version, database_id, created_at_utc_millis, migrated_at_utc_millis, \
+             typeof(created_at_utc_millis), typeof(migrated_at_utc_millis) FROM storage_meta",
+        )
+        .fetch_one(&backend.pool)
+        .await
+        .unwrap();
+        assert_eq!(meta.0, 6);
+        assert_eq!(meta.1, "timestamp-migration-test");
+        assert_eq!(meta.2, 1000);
+        assert!(meta.3 > 2000);
+        assert_eq!((meta.4.as_str(), meta.5.as_str()), ("integer", "integer"));
+        let times: Vec<(i64, i64, String)> = sqlx::query_as(
+            "SELECT id, event_time_utc_millis, typeof(event_time_utc_millis) FROM resolve_log ORDER BY id",
+        ).fetch_all(&backend.pool).await.unwrap();
+        assert_eq!(
+            times,
+            vec![
+                (1, 0, "integer".into()),
+                (2, 999, "integer".into()),
+                (3, 1000, "integer".into()),
+                (4, 10_000_000_000_000, "integer".into())
+            ],
+        );
+        let detail = sqlx::query("SELECT * FROM resolve_log WHERE id = 1")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        for (column, expected) in [
+            ("route_id", "route"),
+            ("client_bucket", "client"),
+            ("strategy_id", "strategy"),
+            ("canonical_qname", "example.test."),
+            ("upstream_id", "group"),
+            ("resource_revision", "2:3"),
+            ("upstream_member_id", "member"),
+            ("matched_rule_source", "rule_set"),
+            ("matched_resource_id", "resource"),
+            ("transport", "udp"),
+            ("client_ip", "192.0.2.1"),
+            ("upstream_used_id", "member"),
+            ("answer_summary_json", "[]"),
+        ] {
+            assert_eq!(detail.get::<String, _>(column), expected, "{column}");
+        }
+        for (column, expected) in [
+            ("duration_millis", 8),
+            ("dns_core_duration_micros", 250),
+            ("runtime_revision", 7),
+            ("matched_rule_ordinal", 2),
+            ("answer_count", 0),
+            ("answers_truncated", 0),
+        ] {
+            assert_eq!(detail.get::<i64, _>(column), expected, "{column}");
+        }
+        let ledger: (i64, String, i64, i64) = sqlx::query_as(
+            "SELECT committed_at_utc_millis, typeof(committed_at_utc_millis), max_event_seq, \
+             counter_epoch FROM stats_batch_ledger WHERE batch_id = 7",
+        )
+        .fetch_one(&backend.pool)
+        .await
+        .unwrap();
+        assert_eq!(ledger, (i64::MAX, "integer".into(), 1, 2));
+        backend
+            .execute(transaction(batch), deadline())
+            .await
+            .unwrap();
+        let total: i64 = sqlx::query_scalar("SELECT total_requests FROM stats_daily_total")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(total, 1, "migrated ledger must keep retries idempotent");
+        let dimension: i64 = sqlx::query_scalar("SELECT count FROM stats_daily_dimension")
+            .fetch_one(&backend.pool)
+            .await
+            .unwrap();
+        assert_eq!(dimension, 1);
+        let sequence: i64 =
+            sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name='resolve_log'")
+                .fetch_one(&backend.pool)
+                .await
+                .unwrap();
+        assert_eq!(sequence, 100);
+        backend.startup_write_probe(deadline()).await.unwrap();
+        backend.shutdown(deadline()).await.unwrap();
+
+        let reopened = SqliteStorageBackend::connect(&path).await.unwrap();
+        let migration_time: i64 =
+            sqlx::query_scalar("SELECT migrated_at_utc_millis FROM storage_meta")
+                .fetch_one(&reopened.pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            migration_time, meta.3,
+            "reopen and probe must not change migration time"
+        );
+        let inserted = sqlx::query(
+            "INSERT INTO resolve_log (event_time_utc_millis, duration_millis, request_id_digest, \
+             listener_id, canonical_qname, qtype, qclass, rcode, cache_status, runtime_revision) \
+             VALUES (1001, 0, '<absent>', 'listener', 'example.test.', 1, 1, 0, 'miss', 1)",
+        )
+        .execute(&reopened.pool)
+        .await
+        .unwrap();
+        assert_eq!(inserted.last_insert_rowid(), 101);
+        reopened.shutdown(deadline()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn v6_migration_keeps_sequence_when_all_details_were_deleted() {
+        let (path, pool) = legacy_v5_database().await;
+        insert_legacy_detail(&pool, 77, "1000").await;
+        sqlx::query("DELETE FROM resolve_log")
+            .execute(&pool)
+            .await
+            .unwrap();
+        pool.close().await;
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        let sequence: i64 =
+            sqlx::query_scalar("SELECT seq FROM sqlite_sequence WHERE name='resolve_log'")
+                .fetch_one(&backend.pool)
+                .await
+                .unwrap();
+        assert_eq!(sequence, 77);
+        backend.shutdown(deadline()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_legacy_timestamps_roll_back_all_v6_schema_changes() {
+        for invalid in ["", "not-time", "1.5", "1e3", "9223372036854775808", "-1"] {
+            let (path, pool) = legacy_v5_database().await;
+            insert_legacy_detail(&pool, 9, invalid).await;
+            assert!(matches!(
+                SqliteStorageBackend::connect(&path).await,
+                Err(super::SqliteStorageBackendBuildError::Schema),
+            ));
+            let meta: (i64, String, String) = sqlx::query_as(
+                "SELECT schema_version, created_at_utc, migrated_at_utc FROM storage_meta",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(meta, (5, "1000".into(), "2000".into()));
+            let preserved: String =
+                sqlx::query_scalar("SELECT event_time_utc FROM resolve_log WHERE id=9")
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(preserved, invalid);
+            let artifacts: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name IN \
+                 ('storage_meta_v6', 'stats_batch_ledger_v6', 'resolve_log_v6')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(artifacts, 0);
+            let index_sql: String = sqlx::query_scalar(
+                "SELECT sql FROM sqlite_master WHERE name='resolve_log_event_time_idx'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(!index_sql.contains("millis"));
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn invalid_legacy_metadata_or_ledger_time_cannot_be_silently_coerced() {
+        for statement in [
+            "UPDATE storage_meta SET created_at_utc = 'bad'",
+            "UPDATE storage_meta SET migrated_at_utc = '9223372036854775808'",
+            "INSERT INTO stats_batch_ledger VALUES (1, 1, 1, '1.5', X'01')",
+        ] {
+            let (path, pool) = legacy_v5_database().await;
+            sqlx::query(statement).execute(&pool).await.unwrap();
+            let before: (i64, String, String) = sqlx::query_as(
+                "SELECT schema_version, created_at_utc, migrated_at_utc FROM storage_meta",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert!(matches!(
+                SqliteStorageBackend::connect(&path).await,
+                Err(super::SqliteStorageBackendBuildError::Schema),
+            ));
+            let after: (i64, String, String) = sqlx::query_as(
+                "SELECT schema_version, created_at_utc, migrated_at_utc FROM storage_meta",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(before, after);
+            let ledger: Vec<String> =
+                sqlx::query_scalar("SELECT committed_at_utc FROM stats_batch_ledger")
+                    .fetch_all(&pool)
+                    .await
+                    .unwrap();
+            assert!(ledger.is_empty() || ledger == ["1.5"]);
+            pool.close().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn integer_timestamp_constraints_and_numeric_retention_are_enforced() {
+        let backend = SqliteStorageBackend::connect(path()).await.unwrap();
+        for invalid in ["bad", "1.5", "-1", "9223372036854775808"] {
+            assert!(
+                sqlx::query("UPDATE storage_meta SET created_at_utc_millis = ?")
+                    .bind(invalid)
+                    .execute(&backend.pool)
+                    .await
+                    .is_err()
+            );
+        }
+        let rows = sqlx::query("PRAGMA table_info(storage_meta)")
+            .fetch_all(&backend.pool)
+            .await
+            .unwrap();
+        for name in ["created_at_utc_millis", "migrated_at_utc_millis"] {
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.get::<String, _>("name") == name)
+                    .unwrap()
+                    .get::<String, _>("type"),
+                "INTEGER",
+            );
+        }
+        for millis in [1000_i64, 999, 10_000_000_000_000] {
+            sqlx::query(
+                "INSERT INTO resolve_log (event_time_utc_millis, duration_millis, request_id_digest, \
+                 listener_id, canonical_qname, qtype, qclass, rcode, cache_status, runtime_revision) \
+                 VALUES (?, 0, '<absent>', 'listener', 'example.test.', 1, 1, 0, 'miss', 1)",
+            ).bind(millis).execute(&backend.pool).await.unwrap();
+        }
+        let limits = SqliteResolveDetailLimits::new(3, 4, Duration::from_secs(u64::MAX)).unwrap();
+        let mut transaction = backend.pool.begin().await.unwrap();
+        let summary = super::apply_resolve_records_with_limits(&mut transaction, &[], Some(limits))
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        assert_eq!(summary.evicted, 1);
+        let remaining: Vec<i64> = sqlx::query_scalar(
+            "SELECT event_time_utc_millis FROM resolve_log ORDER BY event_time_utc_millis",
+        )
+        .fetch_all(&backend.pool)
+        .await
+        .unwrap();
+        assert_eq!(remaining, vec![1000, 10_000_000_000_000]);
+        let limits = SqliteResolveDetailLimits::new(10, 20, Duration::from_secs(1)).unwrap();
+        let mut transaction = backend.pool.begin().await.unwrap();
+        let summary = super::apply_resolve_records_with_limits(&mut transaction, &[], Some(limits))
+            .await
+            .unwrap();
+        transaction.commit().await.unwrap();
+        assert_eq!(summary.evicted, 1);
+        let remaining: Vec<i64> =
+            sqlx::query_scalar("SELECT event_time_utc_millis FROM resolve_log")
+                .fetch_all(&backend.pool)
+                .await
+                .unwrap();
+        assert_eq!(remaining, vec![10_000_000_000_000]);
+        backend.shutdown(deadline()).await.unwrap();
     }
 
     #[tokio::test]
@@ -1476,6 +1881,19 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(total, 2);
+        let times: (String, String, String, i64) = sqlx::query_as(
+            "SELECT typeof(created_at_utc_millis), typeof(migrated_at_utc_millis), \
+             typeof(committed_at_utc_millis), committed_at_utc_millis \
+             FROM storage_meta CROSS JOIN stats_batch_ledger",
+        )
+        .fetch_one(&backend.pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            (times.0.as_str(), times.1.as_str(), times.2.as_str()),
+            ("integer", "integer", "integer")
+        );
+        assert!(times.3 > 0);
         backend.shutdown(deadline()).await.unwrap();
         let reopened = SqliteStorageBackend::connect(&path).await.unwrap();
         let health = reopened.health_probe(deadline()).await.unwrap();
@@ -1896,7 +2314,7 @@ mod tests {
         let transaction = StorageTransaction {
             idempotency_key: "detail-batch".into(),
             operations: vec![StorageOperation::ResolveBatch(vec![ResolveEvent {
-                occurred_at: SystemTime::now(),
+                occurred_at: SystemTime::UNIX_EPOCH + Duration::from_micros(1_234_567),
                 duration_millis: 8,
                 dns_core_duration_micros: 250,
                 request_digest: Arc::from("digest"),
@@ -1937,7 +2355,8 @@ mod tests {
             .unwrap();
         assert_eq!(count, 1);
         let row = sqlx::query(
-            "SELECT duration_millis, dns_core_duration_micros, request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
+            "SELECT event_time_utc_millis, typeof(event_time_utc_millis) AS event_time_type, \
+             duration_millis, dns_core_duration_micros, request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
              upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
              canonical_qname, source, rcode, failure_class, cancellation_reason, resource_revision, \
              transport, client_ip, upstream_used_id, answer_count, answers_truncated, answer_summary_json \
@@ -1946,6 +2365,8 @@ mod tests {
         .fetch_one(&backend.pool)
         .await
         .unwrap();
+        assert_eq!(row.get::<i64, _>("event_time_utc_millis"), 1234);
+        assert_eq!(row.get::<String, _>("event_time_type"), "integer");
         assert_eq!(row.try_get::<i64, _>("duration_millis").unwrap(), 8);
         assert_eq!(
             row.try_get::<Option<i64>, _>("dns_core_duration_micros")

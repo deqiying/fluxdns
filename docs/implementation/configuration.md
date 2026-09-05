@@ -312,6 +312,8 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 
 详情中的 `duration_ms` 从 transport 接入计时点计到 DNS core 完成，`dns_core_duration_ms` 只计算 `DnsCore::resolve_with_completion` 主链；两者均在主链返回时冻结，不包含后台观测排队和 SQLite 写入。DoH 的 `duration_ms` 包含入站 TLS/HTTP 处理，但不包含响应编码和网络写回。schema v5 之前的历史记录无法回填主链耗时，Management API 返回 `null`。
 
+业务 schema v6 将数据库创建/迁移、批次提交和解析发生时间统一为带 `_utc_millis` 单位的 `INTEGER` Unix UTC 毫秒列；配置没有新增单位开关，API 时间格式与两种耗时精度不变。字段、前向迁移及失败边界见[业务时间存储](backend/background-services.md#业务时间存储)。
+
 聚合统计默认开启且始终依赖 `database`：至少按 UTC 自然日记录总请求数，并按有界的 client bucket、transport class、strategy、source/upstream、RCODE 和 cache lookup status 记录分项计数。未匹配客户端统一进入 `unknown` bucket；不能使用域名、完整客户端 ID 或原始 IP 作为无界维度。请求任务只做一次有界 `ResolutionEnvelope::try_publish`，后台 dispatcher 更新进程内 sharded counters，stats writer 周期性以带 `batch_id` 的 checkpoint 批量 upsert 到 SQLite，并用 batch ledger 幂等去重。detail 下游溢出不影响聚合统计；但统一 ingress 溢出会同时丢失该事件的 stats/detail/cache commit，因此必须累计 `dropped` 并冻结首次 `gap_started_at_utc_millis`。一次请求只计一次 `total_requests`；cache/hosts 命中归入本地 source，parallel 的多个上游尝试不重复计请求。统计不能因为详情记录被丢弃或 `enable: false` 而停止。数据库运行中暂时不可写时继续维护进程内计数并报告 `degraded`/persistence gap；启动阶段数据库不可用则拒绝启动。
 
 “依赖数据库”表示统计/详情的权威持久化后端是 `database`；请求线程不同步等待数据库。Management overview 的 `resolution_pipeline` 暴露 ingress accepted/dropped/首次 gap 时间、cache commit 各终态以及 detail accepted/dropped/failed。`resolve_log` 的详情在当前有界 `max_records` 契约下允许 best-effort 丢弃并计数，若未来需要无损审计需另行定义 spool、背压和磁盘配额。
@@ -621,7 +623,7 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 1. `dot`/`doq` listener 的字段、TLS/QUIC 材料来源和协议特有校验。
 2. 主动上游健康检查、熔断器和持久健康分数配置。
 3. 远程规则的 expected checksum、版本锁定和签名验证字段；v1 只记录内部 content hash/source fingerprint。
-4. 未来配置版本及 SQLite schema v5 之后的兼容窗口和 migration SQL；当前业务库升级链见 [Storage 模块](../architecture/backend/modules/storage.md)。
+4. 未来配置版本及 SQLite schema v6 之后的兼容窗口和 migration SQL；当前业务库升级链见 [Storage 模块](../architecture/backend/modules/storage.md)。
 5. WebUI 配置写操作、缓存清理、权限分级和更长期的历史统计保留策略。
 
 ## 18. 协议依据

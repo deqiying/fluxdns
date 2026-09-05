@@ -7,6 +7,8 @@
 > 最后核对：2026-09-05（构造、路由、配置事务和查询边界静态核对）
 >
 > 核对基线：`0f18d5b2ddf67625121fd7e0662e21723362565f`
+>
+> 时间存储补充核对：2026-09-05，`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加业务时间迁移工作树；不扩大其他管理功能审计范围
 
 ## 入口与生命周期
 
@@ -54,6 +56,8 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 
 [`ports/management.rs`](../../../backend/src/ports/management.rs) 定义领域读口；[`SqliteManagementReadModel`](../../../backend/src/storage/management_read.rs) 使用独立只读 pool、绑定参数和固定 SQL。query service 固定 5 秒 deadline、默认 20/最大 100 行分页和最长 31 天统计窗口。
 
+业务 schema v6 直接读取 `event_time_utc_millis` 为 `i64`，overview 范围比较和查询时间排序不再逐行 `CAST`；同毫秒仍以 ID 确定顺序，升降序保持对称。读口的 `occurred_at_millis` 仍为 UTC Unix 毫秒，query service 继续输出原日期格式，不更改 OpenAPI/前端类型。迁移及字段单位见[业务时间存储](background-services.md#业务时间存储)。
+
 查询详情可供所有已认证用户读取 qname、有效 client IP、配置标识、upstream provenance 与有界 answer；DNS wire、request digest、route 文本和 SecretRef 不进入 API。core duration 的历史缺失值不会补造。
 
 ## 静态资源与证据
@@ -70,3 +74,5 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 | 内嵌 SPA | assets + build feature | bind 前 ensure_available | 静态；历史证据单独标注于交付文档 | Actions/Linux/macOS 发布未由静态代码证明 |
 
 本页原核对仅有静态证据，未包含服务或真实浏览器观察。过时的 v2 计划已移除；现有测试定义不等于 Cookie/Network/Storage、反向代理或完整配置事务故障矩阵均已验证。
+
+本次时间改型补充了真实 SQLite 定向用例：跨位数升降序、同时间 ID 顺序、overview 包含边界和查询计划中的时间索引。完整 Cargo 结果见[后台服务验证](background-services.md#本次验证)，不等价浏览器 smoke。

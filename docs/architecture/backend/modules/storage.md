@@ -4,7 +4,7 @@
 >
 > 适用范围：SQLite、统计、解析记录、migration、容量边界和存储生命周期
 >
-> 最后评审：2026-09-05（启动共享预算、写探针与统计优先停机；基线见[模块索引](README.md)，本地证据见[后台服务](../../../implementation/backend/background-services.md#本次验证)）
+> 最后评审：2026-09-05（在已提交的启动/停机契约上统一业务时间为整数毫秒；基线为 `43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加本次时间迁移工作树，本地证据见[后台服务](../../../implementation/backend/background-services.md#本次验证)）
 >
 > 关联实现：[sqlite.rs](../../../../backend/src/storage/sqlite.rs)、[service.rs](../../../../backend/src/storage/service.rs)、[statistics.rs](../../../../backend/src/storage/statistics.rs)、[ledger.rs](../../../../backend/src/storage/ledger.rs)、[migrations](../../../../backend/migrations)
 >
@@ -50,7 +50,9 @@ prepare 阶段：
 
 ## 3. Schema 职责
 
-具体 SQL 放入 migration，逻辑表至少包括：
+具体 SQL 放入 migration，逻辑表至少包括以下几类。业务绝对时间统一为 Unix epoch 起算的 UTC 毫秒 `INTEGER`，列名以 `_utc_millis` 明确单位；writer 绑定 `i64`，数据库约束非负且实际存储类型为 integer。亚毫秒截断、epoch 前归零沿用旧写入边界，超过 `i64` 上限明确拒绝，不静默截断为其他时间。
+
+时间戳与耗时/日桶分开：`day_utc` 仍是 epoch 起算的 UTC 自然日编号，不是毫秒或 `YYYYMMDD`；`duration_millis`/`dns_core_duration_micros` 保留各自精度。API 展示层继续格式化日期，不因数据库改型改变 OpenAPI 时间字段。具体列清单见[后台服务实现](../../../implementation/backend/background-services.md#业务时间存储)。
 
 ### `storage_meta`
 
@@ -202,13 +204,16 @@ shutdown：
 - migration 失败保留原库并阻止启动；
 - backup/rollback CLI 属于后续独立契约。
 
-新库与旧库走同一前向升级链。新增可空详情字段不补造历史事实；历史脱敏记录由 read model 明确标为 legacy_redacted，缺失主链耗时保持 null。实际 migration 文件和 schema 版本见[后台服务实现](../../../implementation/backend/background-services.md)，不在设计中重复逐版本清单。
+新库与旧库走同一前向升级链。业务时间改型通过新表复制、校验、替换，在单事务中保留详情 ID、已删除记录留下的自增高水位、统计与 ledger；合法旧毫秒字符串只改存储类型，不换算单位。拒绝不能无损转换的旧值，失败保留该步迁移前的表、数据和版本，不通过清库或造时间继续启动。
 
-只读 Management pool 必须在业务 migration 完成后创建，通过 ManagementStorageRead 使用固定 filter/sort 模板与参数绑定。返回 opaque ID，不暴露数据库 row ID、wire、request digest 或内部脱敏占位符。详情校验/裁剪在受限 projector/writer 边界完成，Debug 只展示存在性、长度和计数。
+新增可空详情字段不补造历史事实；历史脱敏记录由 read model 明确标为 legacy_redacted，缺失主链耗时保持 null。升级会一次性复制相关表并重建时间索引，需要额外临时空间，仍使用原启动 deadline；不擅自延长预算。旧 binary 不支持新 schema，不自动 down。实际 migration 文件和 schema 版本见[后台服务实现](../../../implementation/backend/background-services.md)，不在设计中重复逐版本清单。
+
+只读 Management pool 必须在业务 migration 完成后创建，通过 ManagementStorageRead 使用固定 filter/sort 模板与参数绑定。范围过滤、时间排序和详情清理直接比较整数时间列，不再依赖逐行 `CAST` 或文本字典序。返回 opaque ID，不暴露数据库 row ID、wire、request digest 或内部脱敏占位符。详情校验/裁剪在受限 projector/writer 边界完成，Debug 只展示存在性、长度和计数。
 
 ## 12. 契约验证要求
 
 - 新库、旧版本库、重复启动 migration；
+- 时间改型无损复制、异常值回滚、实际 INTEGER 类型、自增高水位、跨位数排序/范围/清理与索引使用；
 - stats total/dimension upsert；
 - batch commit 后崩溃与 retry 去重；
 - event 跨午夜、late write；

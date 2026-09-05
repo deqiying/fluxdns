@@ -111,6 +111,7 @@ pub struct ResolveQuery {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolveQueryRecord {
     pub id: String,
+    /// Unix epoch 起算的 UTC 毫秒整数，API 展示层负责日期格式化。
     pub occurred_at_millis: i64,
     pub duration_millis: u64,
     /// schema v5 之前的历史解析记录没有该值。

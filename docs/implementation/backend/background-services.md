@@ -4,9 +4,9 @@
 >
 > 适用范围：资源刷新、解析完成事件、统计/详情、缓存持久化和观测的实际所有权
 >
-> 最后核对：2026-09-05（获批 D1-D9 的后台契约接线及本地验证）
+> 最后核对：2026-09-05（业务时间整数迁移、写入/管理读取和定向回归；其他后台契约沿用已提交核对）
 >
-> 核对基线：`19c3c81e4fdbea9424d522620ad81462c6d22eb1` 加本次后端契约实施工作树
+> 核对基线：`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加本次业务时间迁移工作树
 
 ## 资源准备与刷新
 
@@ -34,11 +34,27 @@ service 在 core 返回时冻结 port 字段 `duration_millis` 和 `dns_core_dur
 
 详情由 [`resolve_log.rs`](../../../backend/src/storage/resolve_log.rs) 投影，再交 [`sqlite.rs`](../../../backend/src/storage/sqlite.rs) 的唯一有界 detail worker 批写，满批立即提交，低流量尾批由周期 flush 处理；`writer.rs` 是内存 contract 实现，不是正式 SQLite writer。管理查询使用 [`SqliteManagementReadModel`](../../../backend/src/storage/management_read.rs) 独立只读 pool，不复用请求写入链路。
 
-[迁移目录](../../../backend/migrations)的前向链是 0001 基础表、0002 resolution metadata、0003 management query projection、0004 query record observability、0005 DNS core duration。v5 前的主链耗时为 null；v4 前的脱敏详情标记为 legacy_redacted，不回填丢失内容。新库也执行同一链。SQLite 使用 WAL、NORMAL synchronous、busy timeout 和串行 operation lock；内存 adapter 是契约基线，不替代正式数据库。
+[迁移目录](../../../backend/migrations)的前向链是 0001 基础表、0002 resolution metadata、0003 management query projection、0004 query record observability、0005 DNS core duration、0006 integer business timestamps。当前业务 schema 为 v6；v5 前的主链耗时仍为 null，v4 前的脱敏详情仍标记为 legacy_redacted，不回填丢失内容。新库也执行同一链。SQLite 使用 WAL、NORMAL synchronous、busy timeout 和串行 operation lock；内存 adapter 是契约基线，不替代正式数据库。
 
-升级由 adapter 手动执行 `include_str!` SQL 并更新 `storage_meta`，不是 SQLx Migrator。`connect_with_deadline` 将建目录、连接和迁移纳入 open 的同一预算；随后 `startup_write_probe` 在独立事务中实际更新 metadata 并回滚，不提交统计或详情。失败/超时不产生可服务 owner。旧业务 schema 的 metadata 时间仍为 Unix 毫秒字符串，本轮不变更业务时间类型。
+升级由 adapter 手动执行 `include_str!` SQL 并更新 `storage_meta`，不是 SQLx Migrator。`connect_with_deadline` 将建目录、连接和迁移纳入 open 的同一预算；随后 `startup_write_probe` 在独立事务中实际更新 metadata 并回滚，不提交统计或详情。失败/超时不产生可服务 owner。已有 metadata 只读取核对，不再执行使用旧时间列的 `INSERT OR IGNORE`；不存在 metadata 行不作为自动修复场景。
 
 停机时 `run_until_stopped` 关闭详情输入并将剩余 worker/队列交回 owner；正在执行的批次先结束，其余详情不抢先排空。`StorageService::shutdown` 先提交统计，再用剩余时间排空详情，最后关闭 pool。启动/停机 deadline 不重置，但不能强制中断已进入 OS/SQLite worker 的操作；超时不伪装为成功或零丢失。
+
+### 业务时间存储
+
+| 表 | 当前字段 | 类型与单位 |
+| --- | --- | --- |
+| `storage_meta` | `created_at_utc_millis`、`migrated_at_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64` |
+| `stats_batch_ledger` | `committed_at_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64` |
+| `resolve_log` | `event_time_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64` |
+| `stats_daily_total` / `stats_daily_dimension` | `day_utc` | `INTEGER`，epoch 起算的 UTC 自然日编号，语义不变 |
+| `resolve_log` | `duration_millis`、`dns_core_duration_micros` | `INTEGER` 耗时，分别为毫秒/微秒；历史主链耗时可为空 |
+
+[`0006_integer_business_timestamps.sql`](../../../backend/migrations/0006_integer_business_timestamps.sql) 只迁移原四个绝对时间字段，不修改 0001–0005。它在同一事务中创建目标表、按完整字段复制、检查时间无损往返、替换表并重建 `(event_time_utc_millis, id)` 索引；stats 日表不重写，ledger hash/序号、详情 ID/其他字段/空值和 AUTOINCREMENT 历史高水位保留。最后才推进 schema version，并将 migrated time 更新为本次升级时间；重开和写探针不刷新该时间。
+
+旧 writer 产生的规范非负十进制毫秒字符串可无损转换。空串、非数字、小数、指数格式、负值和超出 `i64` 的值不静默 `CAST` 成零或饱和值，迁移失败并回滚该步全部变更；不删除坏行或推测历史时间。新写入由 `system_time_utc_millis` 转为 `i64`，亚毫秒截断、epoch 前归零保留旧行为，溢出显式错误。新列有 `typeof(...)='integer'` 与非负约束，不能保存不合法 TEXT/REAL 值。
+
+管理 overview/查询排序和 writer 的 age/容量清理都直接使用整数列；对外仍返回原 OpenAPI 日期格式。此变更不影响独立缓存 DB 的纳秒索引、Duration 精度、配置或异步队列。迁移在启动时一次性复制相关表，需要额外空间；大库迁移耗时受原启动预算限制，尚无生产规模数据证明。运行新 binary 会前向升级，旧 binary 不支持 v6，不提供自动降级。
 
 ## Cache persistence
 
@@ -73,7 +89,7 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | remote/file 刷新 | 条件 fetch、manifest v2、epoch/CAS、scheduler | async prepare + service resource task | loopback 200/304 与真实条件头；重复 304、坏 pair/响应、旧 manifest、换代及同预算重试 | 未执行真实远程/代理组合 |
-| stats/detail | 启动 deadline/probe、StorageRuntime、ResolutionRuntime | app 打开，service 持有并复用 sink；stats-first shutdown | 真实 SQLite 锁/写入拒绝/回滚；trigger 验证统计先于 300 条多批详情 | ingress/pending/数据库故障仍可产生明确 gap |
+| stats/detail | schema v6 整数时间、启动 deadline/probe、StorageRuntime、ResolutionRuntime | app 打开，service 持有并复用 sink；stats-first shutdown | 新库/v1/v5 升级、时间类型/排序/范围/清理、索引、高水位与异常值回滚；原 SQLite 锁/探针和 stats-first 回归 | ingress/pending/数据库故障仍可产生明确 gap；未验证生产规模迁移成本 |
 | cache 恢复/后台写 | schema v2、增量 upsert、CachePersistenceRuntime | core prepare + commit worker + finalizer shutdown | v1 升级保留 payload/重复 key；trigger 证明仅改动行写入；失败回滚、坏行清理、原 Busy/DiskFull 用例 | 注入不等价真实 disk-full；保留插入时间淘汰 |
 | telemetry lifecycle / 聚合 | histogram、typed writer、registry、sampler | dispatcher + app/service 周期及最终 flush | 固定桶/标签、溢出原子性、拥塞下聚合、关闭详情、输出重试、reload 与最终快照 | 没有 exporter/逐 attempt 流；长期负载与全部输出故障未验收 |
 
@@ -81,13 +97,13 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 
 2026-09-05 在 Windows x86_64 使用项目 mise 管理的 Rust/Cargo 1.98.0；命令从仓库根执行，`CARGO_HOME=backend/.cargo-home`、构建物在 `backend/target`。测试使用代码内嵌配置，临时 `work.path`、数据库与证书由测试夹具在 `_fluxdns/test-temp` 下产生，端口为动态 loopback，不使用个人配置或远程服务。
 
-完整测试命令为 `cargo test --manifest-path backend/Cargo.toml --locked --quiet -- --test-threads=4`，运行前将 TEMP/TMP 指向 `_fluxdns/test-temp`；结果为 635 通过、0 失败、2 个手动 profile 默认忽略。新增缓存/Storage/资源夹具也使用 `_fluxdns/tests/`。覆盖上表定向用例、namespace/插入年龄恢复、基础建表失败回滚、304 后取消不重试、parallel 负答案等待 Positive/超时不启动 fallback、非重试成员失败不遮蔽其他有效回答，以及独立子进程 panic 脱敏。既有地址缓存 TTL/换代、HTTP/HTTPS/SOCKS5、跨 UDP/TCP/DoH reload 与最终采样回归仍通过。
+完整测试命令为 `cargo test --manifest-path backend/Cargo.toml --locked --quiet -- --test-threads=4`，运行前将 TEMP/TMP 指向 `_fluxdns/test-temp`；结果为 642 通过、0 失败、2 个手动 profile 默认忽略。缓存/Storage/资源夹具也使用 `_fluxdns/tests/`。本次新增时间转换边界、v5→v6 数据/ledger/自增序列保留与重开、删空后的高水位、四类异常时间回滚、新值 INTEGER 约束、数字排序/范围/清理和时间索引用例；v1 升级和实际 writer 类型读取同样回归通过。前次获批契约的异步主链、late-result、bootstrap、资源条件请求、指标与 panic 安全测试继续通过。
 
-`cargo check --manifest-path backend/Cargo.toml --locked` 无警告通过；`cargo fmt --manifest-path backend/Cargo.toml -- --check`、`pwsh -File .agents/skills/project-doc-maintenance/scripts/check-docs.ps1` 与 `git diff --check` 均通过。文档检查覆盖 42 个 Markdown、517 个链接/引用，不验证外链网络或产品语义。
+交付静态检查 `cargo check --manifest-path backend/Cargo.toml --locked`、`cargo fmt --manifest-path backend/Cargo.toml -- --check`、`pwsh -File .agents/skills/project-doc-maintenance/scripts/check-docs.ps1` 与 `git diff --check` 均通过；文档检查覆盖 42 份 Markdown、522 处链接与引用，不验证外链网络或产品语义。
 
 本机性能对比入口为 `cargo test --manifest-path backend/Cargo.toml --locked service::tests::benchmark_udp_telemetry_sampling_profile -- --ignored --nocapture`。它使用 debug 构建、4 个 runtime worker、单 UDP client，每秒一批 1,000 次 hosts 查询，至少覆盖两个 5 秒采样周期；保留真实 Resolution/SQLite 后台任务，JSON 输出写 sink，不测磁盘日志吞吐。延迟只统计实际请求，不含批次间等待，输出的 sequential_qps 不能视为整段负载吞吐。
 
-该手动 profile 本次单独运行通过；旧的 `benchmark_udp_resolution_observation_profile` 未执行。本次单轮样本如下，不从此推断发布性能提升或稳定回归百分比：
+下列手动 profile 是本次时间迁移前、已提交 `43671f1` 的单轮样本；本轮未重跑两个手动 profile，不从旧样本推断 v6 迁移成本、发布性能提升或稳定回归百分比：
 
 | 模式 | 计时样本 | 平均 / p50 / p95 / p99（ms） | 最终资源状态 |
 | --- | --- | --- | --- |

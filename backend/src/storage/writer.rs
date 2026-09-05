@@ -17,7 +17,7 @@ use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 use super::BatchReceipt;
 
-pub const STORAGE_SCHEMA_VERSION: SchemaVersion = SchemaVersion(5);
+pub const STORAGE_SCHEMA_VERSION: SchemaVersion = SchemaVersion(6);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct CommittedBatch {

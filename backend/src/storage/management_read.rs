@@ -26,7 +26,7 @@ const OVERVIEW_SQL: &str = "SELECT COUNT(*) AS queries, \
      COALESCE(SUM(CASE WHEN failure_class IS NOT NULL OR rcode = 2 THEN 1 ELSE 0 END), 0) AS failed, \
      COALESCE(SUM(CASE WHEN cache_status IN ('fresh', 'stale') THEN 1 ELSE 0 END), 0) AS cache_hits \
      FROM resolve_log \
-     WHERE transport IS NOT NULL AND CAST(event_time_utc AS INTEGER) >= ?";
+     WHERE transport IS NOT NULL AND event_time_utc_millis >= ?";
 const TOTAL_COUNT_SQL: &str =
     "SELECT COUNT(*) FROM stats_daily_total WHERE day_utc BETWEEN ? AND ?";
 const TOTAL_PAGE_SQL: &str = "SELECT day_utc, total_requests AS count FROM stats_daily_total \
@@ -50,7 +50,7 @@ const QUERY_COUNT_SQL: &str = "SELECT COUNT(*) FROM resolve_log WHERE transport 
 macro_rules! query_page_sql {
     ($order_by:literal) => {
         concat!(
-            "SELECT id, CAST(event_time_utc AS INTEGER) AS occurred_at_millis, duration_millis, dns_core_duration_micros, ",
+            "SELECT id, event_time_utc_millis AS occurred_at_millis, duration_millis, dns_core_duration_micros, ",
             "transport, CASE source WHEN 'rule_set' THEN 'rule' ELSE source END AS source, ",
             "CASE rcode WHEN 0 THEN 'NOERROR' WHEN 1 THEN 'FORMERR' WHEN 2 THEN 'SERVFAIL' ",
             "WHEN 3 THEN 'NXDOMAIN' WHEN 4 THEN 'NOTIMP' WHEN 5 THEN 'REFUSED' ELSE 'OTHER' END AS rcode, ",
@@ -79,10 +79,9 @@ macro_rules! query_page_sql {
 }
 
 // 排序只从四个编译期模板中选择，不接受用户提供的 SQL 片段。
-const QUERY_OCCURRED_ASC_SQL: &str =
-    query_page_sql!("ORDER BY CAST(event_time_utc AS INTEGER) ASC, id ASC");
+const QUERY_OCCURRED_ASC_SQL: &str = query_page_sql!("ORDER BY event_time_utc_millis ASC, id ASC");
 const QUERY_OCCURRED_DESC_SQL: &str =
-    query_page_sql!("ORDER BY CAST(event_time_utc AS INTEGER) DESC, id DESC");
+    query_page_sql!("ORDER BY event_time_utc_millis DESC, id DESC");
 const QUERY_DURATION_ASC_SQL: &str = query_page_sql!("ORDER BY duration_millis ASC, id ASC");
 const QUERY_DURATION_DESC_SQL: &str = query_page_sql!("ORDER BY duration_millis DESC, id DESC");
 
@@ -857,10 +856,10 @@ mod tests {
             .unwrap();
         sqlx::query(
             "INSERT INTO resolve_log \
-             (event_time_utc, duration_millis, request_id_digest, listener_id, client_bucket, \
+             (event_time_utc_millis, duration_millis, request_id_digest, listener_id, client_bucket, \
               strategy_id, canonical_qname, qtype, qclass, source, upstream_id, rcode, \
               cache_status, runtime_revision, transport) \
-             VALUES ('0', 1, '<present>', 'listener', '<present>', '<present>', 'len:12', \
+             VALUES (0, 1, '<present>', 'listener', '<present>', '<present>', 'len:12', \
                      28, 1, 'upstream', '<present>', 0, 'miss', 1, 'udp')",
         )
         .execute(&pool)
@@ -904,6 +903,94 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[tokio::test]
+    async fn integer_time_queries_use_numeric_order_boundaries_and_the_time_index() {
+        let path = database_path();
+        let backend = SqliteStorageBackend::connect(&path).await.unwrap();
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&path))
+            .await
+            .unwrap();
+        for millis in [1000_i64, 999, 10_000_000_000_000, 1000] {
+            sqlx::query(
+                "INSERT INTO resolve_log (event_time_utc_millis, duration_millis, request_id_digest, \
+                 listener_id, canonical_qname, qtype, qclass, source, rcode, cache_status, \
+                 runtime_revision, transport) \
+                 VALUES (?, 1, '<absent>', 'listener', 'example.test.', 1, 1, 'upstream', \
+                 0, 'miss', 1, 'udp')",
+            )
+            .bind(millis).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+        let read_model = SqliteManagementReadModel::connect(&path).await.unwrap();
+        let mut query = ResolveQuery {
+            page: PageRequest {
+                page: 1,
+                page_size: 20,
+            },
+            transport: None,
+            source: None,
+            rcode: None,
+            outcome: None,
+            sort: QuerySort::OccurredAt,
+            order: SortOrder::Asc,
+        };
+        let asc = read_model.resolve_queries(query, deadline()).await.unwrap();
+        assert_eq!(
+            asc.items
+                .iter()
+                .map(|item| item.occurred_at_millis)
+                .collect::<Vec<_>>(),
+            vec![999, 1000, 1000, 10_000_000_000_000],
+        );
+        assert_eq!(asc.items[1].id, read_model.opaque_id(1));
+        assert_eq!(asc.items[2].id, read_model.opaque_id(4));
+        query.order = SortOrder::Desc;
+        let desc = read_model.resolve_queries(query, deadline()).await.unwrap();
+        assert_eq!(
+            desc.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            asc.items
+                .iter()
+                .rev()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+        );
+        for (since, count) in [
+            (999, 4),
+            (1000, 3),
+            (10_000_000_000_000, 1),
+            (10_000_000_000_001, 0),
+        ] {
+            assert_eq!(
+                read_model
+                    .overview(since, deadline())
+                    .await
+                    .unwrap()
+                    .queries,
+                count
+            );
+        }
+        let plan: Vec<(i64, i64, i64, String)> = sqlx::query_as(
+            "EXPLAIN QUERY PLAN SELECT id FROM resolve_log \
+             WHERE event_time_utc_millis >= ? ORDER BY event_time_utc_millis ASC, id ASC",
+        )
+        .bind(1000_i64)
+        .fetch_all(&read_model.pool)
+        .await
+        .unwrap();
+        assert!(
+            plan.iter()
+                .any(|row| row.3.contains("resolve_log_event_time_idx"))
+        );
+        assert!(!plan.iter().any(|row| row.3.contains("TEMP B-TREE")));
+        read_model.pool.close().await;
+        backend.shutdown(deadline()).await.unwrap();
     }
 
     #[tokio::test]
