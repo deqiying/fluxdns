@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
-<title id="title">FluxDNS · 解析记录</title>
+<title id="title">FluxDNS · 解析详情 · IP 匹配</title>
 <desc id="desc">管理后台视觉规划效果图。全部数值、地址和配置均为演示内容，不代表当前产品已实现的功能。</desc>
 <metadata id="icon-license">ISC License
 
@@ -46,7 +46,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 </metadata>
-<defs>
+<defs><filter id="detail-shadow" x="-15%" y="-15%" width="130%" height="145%"><feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#172337" flood-opacity=".14"/></filter>
 <style>text { font-family: 'Segoe UI Variable Text','Segoe UI','Microsoft YaHei UI','Microsoft YaHei',sans-serif; letter-spacing:0; } .numeric { font-variant-numeric:tabular-nums; } .mono { font-family:'SFMono-Regular',Consolas,'Microsoft YaHei UI',monospace; }</style>
 <filter id="modal-shadow" x="-15%" y="-15%" width="130%" height="145%">
 <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#102039" flood-opacity=".2"/>
@@ -352,7 +352,10 @@ SOFTWARE.
 <g aria-label="刷新记录"><title>刷新记录</title><svg x="1528" y="225" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-RefreshCw"/></svg>
 </g>
 <text x="285" y="291" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="600" >共 12,480 条记录</text>
-<rect x="284" y="310" width="1273" height="42" rx="0" fill="#F7F8FA" stroke="none" />
+<g id="query-pending-records"><rect x="1385" y="271" width="171" height="31" rx="5" fill="#EBF3FF" stroke="none" />
+<svg x="1397" y="280" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-RefreshCw"/></svg>
+<text x="1420" y="292" font-size="12" fill="#007AFF" font-weight="500" data-max-width="125" >查看 8 条新记录</text>
+</g><rect x="284" y="310" width="1273" height="42" rx="0" fill="#F7F8FA" stroke="none" />
 <text x="303" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >时间</text>
 <text x="446" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >请求</text>
 <text x="750" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="185" >当时匹配 / 当前名称</text>
@@ -379,6 +382,7 @@ SOFTWARE.
 <line x1="284" y1="408" x2="1557" y2="408" stroke="#E8E9EC"/>
 </g>
 <g id="query-row-1">
+<rect x="284" y="408" width="1273" height="56" rx="0" fill="#F5F9FF" stroke="none" />
 <text x="303" y="431" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:07</text>
 <text x="303" y="452" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
 <text x="446" y="431" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >assets.example.net.</text>
@@ -388,7 +392,8 @@ SOFTWARE.
 <rect x="905" y="415" width="29" height="23" rx="4" fill="#EAF6F3" stroke="none" />
 <text x="919.5" y="431" font-size="11.5" fill="#17857D" font-weight="500" data-max-width="17" text-anchor="middle">IP</text>
 <g><title>当前名称：手机；请求 IP：192.0.2.102</title><text x="750" y="452" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >手机 · 192.0.2.102</text>
-</g><g id="query-result-1" aria-label="查看解析详情"><text x="955" y="431" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">2001:db8::42</text>
+</g><g id="query-result-1" aria-label="查看解析详情"><rect x="945" y="412" width="304" height="48" rx="5" fill="#EAF3FF" stroke="none" />
+<text x="955" y="431" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">2001:db8::42</text>
 <text x="955" y="452" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >NOERROR · 2 条记录</text>
 </g><circle cx="1268" cy="426" r="3" fill="#20824E"/>
 <text x="1280" y="431" font-size="12" fill="#20824E" font-weight="400" data-max-width="133" >缓存命中</text>
@@ -558,4 +563,62 @@ SOFTWARE.
 <circle cx="290" cy="1013" r="3" fill="#20824E"/>
 <text x="302" y="1018" font-size="12" fill="#63666D" font-weight="400" data-max-width="600" >推送连接正常</text>
 <text x="1556" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" text-anchor="end">更新于 14:32:08</text>
+<g id="query-detail-popover">
+<rect x="820" y="479" width="736" height="537" rx="8" fill="#FFFFFF" stroke="#DADEE5" filter="url(#detail-shadow)"/>
+<path d="M1036 480 L1047 469 L1058 480" fill="#FFFFFF" stroke="#DADEE5"/>
+<text x="844" y="511" font-size="19" fill="#202124" font-weight="650" data-max-width="450" >解析详情</text>
+<rect x="1391" y="495" width="102" height="23" rx="4" fill="#EBF6EF" stroke="none" />
+<text x="1442" y="511" font-size="11.5" fill="#20824E" font-weight="500" data-max-width="90" text-anchor="middle">NOERROR</text>
+<g aria-label="关闭解析详情"><title>关闭解析详情</title><svg x="1522" y="502" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-X"/></svg>
+</g>
+<text x="844" y="541" font-size="13" fill="#63666D" font-weight="400" data-max-width="650" class="mono">assets.example.net.</text>
+<line x1="820" y1="558" x2="1556" y2="558" stroke="#E8E9EC"/>
+<text x="844" y="585" font-size="13" fill="#202124" font-weight="600" data-max-width="650" >请求事实</text>
+<text x="844" y="613" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >原始客户端 ID</text>
+<text x="945" y="613" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >未传入</text>
+<text x="1192" y="613" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >请求 IP</text>
+<text x="1293" y="613" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >192.0.2.102</text>
+<text x="844" y="639" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >类型 / 协议</text>
+<text x="945" y="639" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >AAAA · UDP</text>
+<text x="1192" y="639" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >总耗时 / 主链</text>
+<text x="1293" y="639" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >1 ms / 0.32 ms</text>
+<line x1="844" y1="656" x2="1532" y2="656" stroke="#E8E9EC"/>
+<text x="844" y="683" font-size="13" fill="#202124" font-weight="600" data-max-width="650" >当时策略匹配</text>
+<text x="844" y="711" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >匹配客户端 ID</text>
+<text x="945" y="711" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >phone</text>
+<text x="1192" y="711" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >匹配来源</text>
+<text x="1293" y="711" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >IP 匹配</text>
+<text x="844" y="737" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >当前名称</text>
+<text x="945" y="737" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >手机</text>
+<text x="1192" y="737" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >生效策略</text>
+<text x="1293" y="737" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >default</text>
+<text x="844" y="763" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >响应来源</text>
+<text x="945" y="763" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >缓存命中</text>
+<text x="1192" y="763" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >缓存生产上游</text>
+<text x="1293" y="763" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >edge-primary</text>
+<text x="844" y="789" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >目标上游</text>
+<text x="945" y="789" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >secure-group</text>
+<text x="1192" y="789" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >配置状态</text>
+<text x="1293" y="789" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >当前存在</text>
+<line x1="844" y1="808" x2="1532" y2="808" stroke="#E8E9EC"/>
+<text x="844" y="836" font-size="13" fill="#202124" font-weight="600" data-max-width="600" >响应记录</text>
+<text x="1532" y="836" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="100" text-anchor="end">2 条记录</text>
+<rect x="844" y="852" width="688" height="30" rx="0" fill="#F7F8FA" stroke="none" />
+<text x="856" y="873" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="200" >类型</text>
+<text x="938" y="873" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="200" >名称</text>
+<text x="1168" y="873" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="200" >结果</text>
+<text x="1520" y="873" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="62" text-anchor="end">TTL (s)</text>
+<text x="856" y="908" font-size="11" fill="#007AFF" font-weight="500" data-max-width="70" >AAAA</text>
+<text x="938" y="908" font-size="11" fill="#63666D" font-weight="400" data-max-width="219" class="mono">assets.example.net.</text>
+<text x="1168" y="908" font-size="11" fill="#202124" font-weight="400" data-max-width="272" class="mono">2001:db8::42</text>
+<text x="1520" y="908" font-size="11" fill="#63666D" font-weight="400" data-max-width="61" text-anchor="end">218</text>
+<line x1="844" y1="925" x2="1532" y2="925" stroke="#E8E9EC"/>
+<text x="856" y="948" font-size="11" fill="#007AFF" font-weight="500" data-max-width="70" >AAAA</text>
+<text x="938" y="948" font-size="11" fill="#63666D" font-weight="400" data-max-width="219" class="mono">assets.example.net.</text>
+<text x="1168" y="948" font-size="11" fill="#202124" font-weight="400" data-max-width="272" class="mono">2001:db8::43</text>
+<text x="1520" y="948" font-size="11" fill="#63666D" font-weight="400" data-max-width="61" text-anchor="end">218</text>
+<line x1="844" y1="965" x2="1532" y2="965" stroke="#E8E9EC"/>
+<text x="844" y="995" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="235" >2026-09-07 14:32:07.316</text>
+<text x="1532" y="995" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="260" text-anchor="end">记录 ID · demo-query-1</text>
+</g>
 </svg>

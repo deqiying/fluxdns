@@ -357,8 +357,10 @@ SOFTWARE.
 <text x="1498" y="434" font-size="12" fill="#8B8F98" font-weight="500" data-max-width="60" >只读</text>
 <text x="322" y="475" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >类型</text>
 <text x="322" y="505" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >SQLite</text>
-<text x="722" y="475" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >数据库文件</text>
+<text x="722" y="475" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >统计数据库</text>
 <text x="722" y="505" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >./data/fluxdns.sqlite3</text>
+<text x="1122" y="475" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365">详情日分片目录</text>
+<text x="1122" y="505" font-size="15" fill="#202124" font-weight="500" data-max-width="365">./data/queries</text>
 <line x1="284" y1="571" x2="1557" y2="571" stroke="#E8E9EC"/>
 <svg x="287" y="598" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
 <use href="#icon-PanelLeft"/>

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
-<title id="title">FluxDNS · 编辑解析详情记录</title>
+<title id="title">FluxDNS · 统计与数据保留</title>
 <desc id="desc">管理后台视觉规划效果图。全部数值、地址和配置均为演示内容，不代表当前产品已实现的功能。</desc>
 <metadata id="icon-license">ISC License
 
@@ -327,128 +327,125 @@ SOFTWARE.
 <circle cx="1546" cy="37" r="15" fill="#EAECEF" />
 <text x="1540" y="42" font-size="12" fill="#66707F" font-weight="650" data-max-width="16" >A</text>
 
-<text x="285" y="140" font-size="30" fill="#202124" font-weight="650" data-max-width="950" >DNS 配置</text>
-<text x="286" y="173" font-size="13.5" fill="#63666D" font-weight="400" data-max-width="900" >主实例 · 全局解析默认值</text>
-<line x1="284" y1="213" x2="1557" y2="213" stroke="#E8E9EC"/>
-<svg x="287" y="240" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-MemoryStick"/>
-</svg>
-<text x="322" y="256" font-size="17" fill="#202124" font-weight="600" data-max-width="330" >缓存</text>
-<g aria-label="编辑缓存">
-<title>编辑缓存</title>
-<svg x="1520" y="241" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Pencil"/>
-</svg>
+<text x="285" y="140" font-size="30" fill="#202124" font-weight="650" data-max-width="920" >DNS 配置</text>
+<text x="286" y="173" font-size="13.5" fill="#63666D" font-weight="400" data-max-width="980" >主实例 · 全局解析与数据保留</text>
+<line x1="284" y1="212" x2="1557" y2="212" stroke="#E8E9EC"/>
+<svg x="287" y="229" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-MemoryStick"/></svg>
+<text x="322" y="245" font-size="17" fill="#202124" font-weight="600" data-max-width="700" >DNS 缓存</text>
+<g aria-label="编辑DNS 缓存"><title>编辑DNS 缓存</title><svg x="1520" y="230" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Pencil"/></svg>
 </g>
-<text x="322" y="296" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >全局缓存池</text>
-<text x="322" y="326" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >开启</text>
-<text x="722" y="296" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >共享内存容量</text>
-<text x="722" y="326" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >8 MiB</text>
-<text x="1122" y="296" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >短期失败 TTL</text>
-<text x="1122" y="326" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >10 秒</text>
-<text x="322" y="371" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >乐观缓存</text>
-<text x="322" y="401" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >开启 · 应答 TTL 10 秒</text>
-<text x="722" y="371" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >最长过期可用时间</text>
-<text x="722" y="401" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >24 小时</text>
-<text x="1122" y="371" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >持久化编码预算</text>
-<text x="1122" y="401" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >64 MiB</text>
-<text x="322" y="454" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="200" >持久化路径</text>
-<text x="482" y="454" font-size="13" fill="#63666D" font-weight="400" data-max-width="650" class="mono">./data/dns-cache.sqlite3</text>
-<line x1="284" y1="488" x2="1557" y2="488" stroke="#E8E9EC"/>
-<svg x="287" y="515" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-SlidersHorizontal"/>
-</svg>
-<text x="322" y="531" font-size="17" fill="#202124" font-weight="600" data-max-width="330" >TTL 与 ECS</text>
-<g aria-label="编辑TTL 与 ECS">
-<title>编辑TTL 与 ECS</title>
-<svg x="1520" y="516" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Pencil"/>
-</svg>
+<text x="322" y="285" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >全局缓存池</text>
+<text x="322" y="314" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >开启</text>
+<text x="722" y="285" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >共享内存预算</text>
+<text x="722" y="314" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >8 MiB</text>
+<text x="1122" y="285" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >乐观缓存</text>
+<text x="1122" y="314" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >开启 · 最长 24 小时</text>
+<text x="322" y="359" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >缓存快照</text>
+<text x="322" y="388" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >开启 · 每 5 分钟覆盖</text>
+<text x="722" y="359" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >快照文件</text>
+<text x="722" y="388" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >./data/dns-cache.db</text>
+<text x="1122" y="359" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >最近快照</text>
+<text x="1122" y="388" font-size="15" fill="#20824E" font-weight="500" data-max-width="360" >14:30:00 · 成功</text>
+<line x1="284" y1="425" x2="1557" y2="425" stroke="#E8E9EC"/>
+<svg x="287" y="442" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-SlidersHorizontal"/></svg>
+<text x="322" y="458" font-size="17" fill="#202124" font-weight="600" data-max-width="700" >TTL 与 ECS</text>
+<g aria-label="编辑TTL 与 ECS"><title>编辑TTL 与 ECS</title><svg x="1520" y="443" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Pencil"/></svg>
 </g>
-<text x="322" y="571" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >TTL 覆写</text>
-<text x="322" y="601" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >开启</text>
-<text x="722" y="571" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >TTL 范围</text>
-<text x="722" y="601" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >60 秒至 1 小时</text>
-<text x="1122" y="571" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >ECS 模式</text>
-<text x="1122" y="601" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >客户端网段</text>
-<line x1="284" y1="669" x2="1557" y2="669" stroke="#E8E9EC"/>
-<svg x="287" y="696" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-ListFilter"/>
-</svg>
-<text x="322" y="712" font-size="17" fill="#202124" font-weight="600" data-max-width="330" >解析详情记录</text>
-<g aria-label="编辑解析详情记录">
-<title>编辑解析详情记录</title>
-<svg x="1520" y="697" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Pencil"/>
-</svg>
+<text x="322" y="498" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >TTL 覆写</text>
+<text x="322" y="527" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >开启</text>
+<text x="722" y="498" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >TTL 范围</text>
+<text x="722" y="527" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >60 秒至 1 小时</text>
+<text x="1122" y="498" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >ECS 模式</text>
+<text x="1122" y="527" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >客户端网段</text>
+<line x1="284" y1="574" x2="1557" y2="574" stroke="#E8E9EC"/>
+<svg x="287" y="591" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChartNoAxesColumnIncreasing"/></svg>
+<text x="322" y="607" font-size="17" fill="#202124" font-weight="600" data-max-width="700" >统计数据</text>
+<g aria-label="编辑统计数据"><title>编辑统计数据</title><svg x="1520" y="592" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Pencil"/></svg>
 </g>
-<text x="322" y="752" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >详情记录</text>
-<text x="322" y="782" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >开启</text>
-<text x="722" y="752" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >最长保留时间</text>
-<text x="722" y="782" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >7 天</text>
-<text x="1122" y="752" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >最大记录数</text>
-<text x="1122" y="782" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >1,000,000 条</text>
-<text x="322" y="827" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >后台淘汰阈值</text>
-<text x="322" y="857" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >800,000 条</text>
-<text x="722" y="827" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >聚合统计</text>
-<text x="722" y="857" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >持续记录</text>
-<text x="1122" y="827" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="365" >持久化位置</text>
-<text x="1122" y="857" font-size="15" fill="#202124" font-weight="500" data-max-width="365" >系统数据库</text>
+<text x="322" y="649" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >统计时间范围</text>
+<text x="322" y="678" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >7 天</text>
+<text x="722" y="649" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >额外宽限期</text>
+<text x="722" y="678" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >3 天</text>
+<text x="1122" y="649" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >详情文件参考大小</text>
+<text x="1122" y="678" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >1 GiB</text>
+<text x="322" y="723" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >当前详情文件</text>
+<text x="322" y="752" font-size="15" fill="#17857D" font-weight="500" data-max-width="360" >426 MiB · 低于参考大小</text>
+<text x="722" y="723" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >当前目标保留天数</text>
+<text x="722" y="752" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >10 天（7 + 3）· UTC 自然日</text>
+<text x="1122" y="723" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" >定时清理</text>
+<text x="1122" y="752" font-size="15" fill="#202124" font-weight="500" data-max-width="360" >每日 01:00 · Asia/Hong_Kong</text>
+<line x1="284" y1="806" x2="1557" y2="806" stroke="#E8E9EC"/>
+<svg x="287" y="823" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ListFilter"/></svg>
+<text x="322" y="839" font-size="17" fill="#202124" font-weight="600" data-max-width="700" >解析详情记录</text>
+<rect x="1512" y="819" width="36" height="21" rx="11" fill="#20824E" stroke="none" />
+<circle cx="1537" cy="829.5" r="8" fill="#FFFFFF"/>
+<text x="322" y="883" font-size="14" fill="#202124" font-weight="500" data-max-width="600" >记录新请求详情</text>
+<rect x="450" y="866" width="65" height="23" rx="4" fill="#EBF6EF" stroke="none" />
+<text x="482.5" y="882" font-size="11.5" fill="#20824E" font-weight="500" data-max-width="53" text-anchor="middle">已开启</text>
+<text x="322" y="922" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" >保留配置</text>
+<text x="482" y="922" font-size="13" fill="#63666D" font-weight="400" data-max-width="600" >跟随统计数据</text>
 <line x1="284" y1="988" x2="1557" y2="988" stroke="#E8E9EC"/>
 <circle cx="290" cy="1013" r="3" fill="#20824E"/>
 <text x="302" y="1018" font-size="12" fill="#63666D" font-weight="400" data-max-width="600" >配置已同步</text>
-<text x="1556" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="250" text-anchor="end">更新于 14:32:08</text>
+<text x="1556" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" text-anchor="end">更新于 14:32:08</text>
 <rect x="0" y="0" width="1600" height="1040" rx="0" fill="#1F2734" stroke="none" opacity=".24"/>
 <g id="editor-layer">
 <rect x="416" y="96" width="952" height="848" rx="8" fill="#FFFFFF" stroke="#DBDDE1" filter="url(#modal-shadow)"/>
-<rect x="452" y="126" width="40" height="40" rx="8" fill="#EAF3FF" stroke="none" />
-<svg x="462" y="136" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-ListFilter"/>
-</svg>
-<text x="508" y="145" font-size="23" fill="#202124" font-weight="650" data-max-width="700" >编辑解析详情记录</text>
-<text x="509" y="172" font-size="12.5" fill="#8B8F98" font-weight="400" data-max-width="700" >记录保留与容量限制</text>
-<g aria-label="关闭">
-<title>关闭</title>
-<svg x="1311" y="131" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-X"/>
-</svg>
+<rect x="452" y="126" width="40" height="40" rx="6" fill="#EAF3FF" stroke="none" />
+<svg x="463" y="137" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChartNoAxesColumnIncreasing"/></svg>
+<text x="508" y="145" font-size="23" fill="#202124" font-weight="650" data-max-width="750" >统计与数据保留</text>
+<text x="509" y="172" font-size="12.5" fill="#8B8F98" font-weight="400" data-max-width="780" >统计数据及解析详情的统一保留策略</text>
+<g aria-label="关闭编辑"><title>关闭编辑</title><svg x="1311" y="131" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-X"/></svg>
 </g>
 <line x1="416" y1="199" x2="1368" y2="199" stroke="#E8E9EC"/>
-<text x="452" y="245" font-size="15" fill="#202124" font-weight="600" data-max-width="720" >记录解析详情</text>
-<rect x="1294" y="227" width="36" height="21" rx="11" fill="#20824E" stroke="none" />
-<circle cx="1319.5" cy="237.5" r="8" fill="#FFFFFF"/>
-<line x1="452" y1="318" x2="1330" y2="318" stroke="#E8E9EC"/>
-<text x="452" y="347" font-size="15" fill="#202124" font-weight="600" data-max-width="698" >保留策略</text>
-<text x="452" y="394" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="422" >最长保留时间</text>
-<rect x="452" y="406" width="422" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
-<text x="465" y="433" font-size="14" fill="#202124" font-weight="400" data-max-width="347" >7</text>
-<text x="861" y="433" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="58" text-anchor="end">天</text>
-<text x="452" y="491" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="422" >后台淘汰阈值</text>
-<rect x="452" y="503" width="422" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
-<text x="465" y="530" font-size="14" fill="#202124" font-weight="400" data-max-width="347" >800000</text>
-<text x="861" y="530" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="58" text-anchor="end">条</text>
-<text x="908" y="491" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="422" >最大记录数</text>
-<rect x="908" y="503" width="422" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
-<text x="921" y="530" font-size="14" fill="#202124" font-weight="400" data-max-width="347" >1000000</text>
-<text x="1317" y="530" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="58" text-anchor="end">条</text>
-<line x1="452" y1="604" x2="1330" y2="604" stroke="#E8E9EC"/>
-<text x="452" y="650" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="410" >聚合统计</text>
-<text x="452" y="679" font-size="14" fill="#202124" font-weight="500" data-max-width="410" >持续记录</text>
-<text x="908" y="650" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="410" >数据库</text>
-<text x="908" y="679" font-size="14" fill="#202124" font-weight="500" data-max-width="410" >./data/fluxdns.sqlite3</text>
-<rect x="452" y="745" width="80" height="24" rx="5" fill="#FBF3E5" stroke="none" />
-<text x="462" y="761" font-size="12" fill="#9E6A17" font-weight="500" data-max-width="60" >需重启生效</text>
+<text x="452" y="242" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="878" >统计时间范围</text>
+<rect x="452" y="254" width="878" height="38" rx="6" fill="#F0F1F3" stroke="none" />
+<rect x="803.8" y="257" width="174.4" height="32" rx="5" fill="#FFFFFF" stroke="none" filter="url(#small-shadow)"/>
+<text x="542.2" y="279" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="156.4" text-anchor="middle">1 天</text>
+<text x="716.6" y="279" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="156.4" text-anchor="middle">3 天</text>
+<text x="891" y="279" font-size="12.5" fill="#202124" font-weight="600" data-max-width="156.4" text-anchor="middle">7 天</text>
+<text x="1065.4" y="279" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="156.4" text-anchor="middle">30 天</text>
+<text x="1239.8000000000002" y="279" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="156.4" text-anchor="middle">自定义</text>
+<text x="452" y="338" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="422" >额外宽限期</text>
+<rect x="452" y="350" width="422" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
+<text x="465" y="377" font-size="14" fill="#202124" font-weight="400" data-max-width="337" >3</text>
+<text x="860" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="56" text-anchor="end">天</text>
+<text x="908" y="338" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="422" >详情文件参考大小</text>
+<rect x="908" y="350" width="422" height="42" rx="6" fill="#FFFFFF" stroke="#DCE0E5" />
+<text x="921" y="377" font-size="14" fill="#202124" font-weight="400" data-max-width="337" >1</text>
+<text x="1316" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="56" text-anchor="end">GiB</text>
+<line x1="452" y1="421" x2="1330" y2="421" stroke="#E8E9EC"/>
+<text x="452" y="453" font-size="15" fill="#202124" font-weight="600" data-max-width="600" >当前文件状态</text>
+<rect x="1230" y="434" width="100" height="23" rx="4" fill="#EAF6F3" stroke="none" />
+<text x="1280" y="450" font-size="11.5" fill="#17857D" font-weight="500" data-max-width="88" text-anchor="middle">低于参考大小</text>
+<text x="452" y="489" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="422" >详情文件合计</text>
+<text x="452" y="518" font-size="15" fill="#202124" font-weight="500" data-max-width="422" >426 MiB</text>
+<text x="908" y="489" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="422" >参考阈值</text>
+<text x="908" y="518" font-size="15" fill="#202124" font-weight="500" data-max-width="422" >1 GiB</text>
+<rect x="452" y="548" width="878" height="4" rx="2" fill="#EEF0F3" stroke="none" />
+<rect x="452" y="548" width="365" height="4" rx="2" fill="#55A08C" stroke="none" />
+<text x="452" y="583" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="422" >426 MiB / 1 GiB</text>
+<text x="1330" y="583" font-size="12" fill="#63666D" font-weight="400" data-max-width="422" text-anchor="end">统计与详情使用同一截止日期</text>
+<rect x="452" y="613" width="878" height="33" rx="0" fill="#F7F8FA" stroke="none" />
+<text x="465" y="635" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="395" >清理时的详情文件大小</text>
+<text x="916" y="635" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="395" >目标保留天数（含当日）</text>
+<text x="465" y="674" font-size="13" fill="#202124" font-weight="500" data-max-width="395" >大于 1 GiB</text>
+<text x="916" y="674" font-size="13" fill="#202124" font-weight="500" data-max-width="395" >最近 7 天</text>
+<line x1="452" y1="690" x2="1330" y2="690" stroke="#E8E9EC"/>
+<text x="465" y="719" font-size="13" fill="#202124" font-weight="500" data-max-width="395" >不超过 1 GiB</text>
+<text x="916" y="719" font-size="13" fill="#17857D" font-weight="500" data-max-width="395" >最近 10 天（7 + 3）</text>
+<line x1="452" y1="738" x2="1330" y2="738" stroke="#E8E9EC"/>
+<text x="452" y="770" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="422" >定时清理 · 服务器时区</text>
+<text x="452" y="799" font-size="15" fill="#202124" font-weight="500" data-max-width="422" >每日 01:00 · Asia/Hong_Kong</text>
+<text x="908" y="770" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="422" >统计 / 详情日期边界</text>
+<text x="908" y="799" font-size="15" fill="#202124" font-weight="500" data-max-width="422" >UTC 自然日</text>
 <line x1="416" y1="862" x2="1368" y2="862" stroke="#E8E9EC"/>
-<svg x="452" y="896" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9E6A17" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-RefreshCw"/>
-</svg>
-<text x="473" y="910" font-size="12" fill="#9E6A17" font-weight="400" data-max-width="540" >修改解析详情配置后需重启服务</text>
+<circle cx="459" cy="905" r="3" fill="#9E6A17"/>
+<text x="473" y="910" font-size="12" fill="#63666D" font-weight="400" data-max-width="540" >未保存更改</text>
 <rect x="1101" y="883" width="91" height="40" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
 <text x="1146.5" y="909" font-size="13" fill="#63666D" font-weight="500" data-max-width="64" text-anchor="middle">取消</text>
 <rect x="1206" y="884" width="128" height="38" rx="6" fill="#007AFF" stroke="none" />
-<svg x="1219" y="894" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Check"/>
-</svg>
-<text x="1245" y="909" font-size="13" fill="#FFFFFF" font-weight="500" data-max-width="79" >保存更改</text>
+<svg x="1219" y="894" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Check"/></svg>
+<text x="1245" y="909" font-size="13" fill="#FFFFFF" font-weight="500" data-max-width="80" >保存更改</text>
 </g>
 </svg>

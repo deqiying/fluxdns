@@ -327,149 +327,120 @@ SOFTWARE.
 <circle cx="1546" cy="37" r="15" fill="#EAECEF" />
 <text x="1540" y="42" font-size="12" fill="#66707F" font-weight="650" data-max-width="16" >A</text>
 
-<text x="285" y="140" font-size="30" fill="#202124" font-weight="650" data-max-width="950" >客户端配置</text>
-<text x="286" y="173" font-size="13.5" fill="#63666D" font-weight="400" data-max-width="900" >主实例 · 客户端匹配与解析覆盖</text>
+<text x="285" y="140" font-size="30" fill="#202124" font-weight="650" data-max-width="920" >客户端配置</text>
+<text x="286" y="173" font-size="13.5" fill="#63666D" font-weight="400" data-max-width="980" >主实例 · 客户端身份与解析策略</text>
 <rect x="1428" y="113" width="128" height="38" rx="6" fill="#007AFF" stroke="none" />
-<svg x="1441" y="123" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Plus"/>
-</svg>
-<text x="1467" y="138" font-size="13" fill="#FFFFFF" font-weight="500" data-max-width="79" >添加客户端</text>
+<svg x="1441" y="123" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#FFFFFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Plus"/></svg>
+<text x="1467" y="138" font-size="13" fill="#FFFFFF" font-weight="500" data-max-width="80" >添加客户端</text>
 <rect x="285" y="215" width="385" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
-<svg x="298" y="225" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B8F98" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Search"/>
-</svg>
-<text x="326" y="240" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="330" >搜索名称、标识或网段</text>
-<rect x="684" y="215" width="131" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
-<text x="697" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="88" >全部策略</text>
-<svg x="787" y="227" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-ChevronDown"/>
-</svg>
-<rect x="284" y="285" width="1273" height="40" rx="0" fill="#F7F8FA" stroke="none" />
-<text x="303" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="226" >名称</text>
-<text x="558" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="390" >匹配条件</text>
-<text x="989" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="180" >策略</text>
-<text x="1200" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="130" >缓存</text>
-<text x="1360" y="310" font-size="12" fill="#63666D" font-weight="500" data-max-width="100" >ECS</text>
-<g id="data-row-0">
-<text x="303" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="226" >workstation</text>
-<text x="303" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="226" >精确标识</text>
-<text x="558" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="389" >workstation</text>
-<text x="558" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="389" >ID</text>
-<text x="989" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="180" >default</text>
-<text x="989" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="180" >显式指定</text>
-<text x="1200" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="144" >独立池</text>
-<text x="1200" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="144" >客户端 + 策略</text>
-<text x="1360" y="355" font-size="14" fill="#202124" font-weight="500" data-max-width="98" >继承</text>
-<text x="1360" y="377" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="98" >策略优先</text>
-<g aria-label="编辑">
-<title>编辑</title>
-<svg x="1475" y="360" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Pencil"/>
-</svg>
+<svg x="298" y="225" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B8F98" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Search"/></svg>
+<text x="326" y="240" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="332" >搜索客户端 ID、名称或 IP / CIDR</text>
+<rect x="684" y="215" width="132" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="697" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="92" >全部策略</text>
+<svg x="790" y="228" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
+<text x="285" y="291" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="600" >6 个客户端</text>
+<text x="1556" y="291" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="360" text-anchor="end">ID 优先 · IP 最长前缀匹配</text>
+<rect x="284" y="309" width="1273" height="42" rx="0" fill="#F7F8FA" stroke="none" />
+<text x="303" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="285" >客户端 ID / 显示名称</text>
+<text x="624" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="200" >IP / CIDR 匹配</text>
+<text x="988" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="200" >策略</text>
+<text x="1199" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="200" >缓存</text>
+<text x="1360" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="200" >ECS</text>
+<rect x="284" y="351" width="1273" height="84" rx="0" fill="#F9FBFE" stroke="none" />
+<text x="303" y="380" font-size="14" fill="#202124" font-weight="550" data-max-width="286" class="mono">workstation</text>
+<text x="303" y="404" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="280" >工作站</text>
+<text x="624" y="380" font-size="13.5" fill="#202124" font-weight="400" data-max-width="338" class="mono">192.0.2.101</text>
+<text x="624" y="404" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="320" >单地址 · IPv4</text>
+<text x="988" y="380" font-size="13.5" fill="#202124" font-weight="400" data-max-width="187" >default</text>
+<text x="988" y="404" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="186" >显式指定</text>
+<text x="1199" y="380" font-size="13.5" fill="#202124" font-weight="400" data-max-width="132" >独立池</text>
+<text x="1199" y="404" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="135" >客户端 + 策略</text>
+<text x="1360" y="380" font-size="13.5" fill="#202124" font-weight="400" data-max-width="90" >继承</text>
+<g aria-label="编辑客户端"><title>编辑客户端</title><svg x="1476" y="384" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Pencil"/></svg>
 </g>
-<g aria-label="更多操作">
-<title>更多操作</title>
-<svg x="1521" y="360" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Ellipsis"/>
-</svg>
+<g aria-label="更多客户端操作"><title>更多客户端操作</title><svg x="1521" y="384" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Ellipsis"/></svg>
 </g>
-<line x1="284" y1="413" x2="1557" y2="413" stroke="#E8E9EC"/>
+<line x1="284" y1="435" x2="1557" y2="435" stroke="#E8E9EC"/>
+<text x="303" y="464" font-size="14" fill="#202124" font-weight="550" data-max-width="286" class="mono">phone</text>
+<text x="303" y="488" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="280" >手机</text>
+<text x="624" y="464" font-size="13.5" fill="#202124" font-weight="400" data-max-width="338" class="mono">192.0.2.102</text>
+<text x="624" y="488" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="320" >单地址 · IPv4</text>
+<text x="988" y="464" font-size="13.5" fill="#202124" font-weight="400" data-max-width="187" >default</text>
+<text x="988" y="488" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="186" >显式指定</text>
+<text x="1199" y="464" font-size="13.5" fill="#202124" font-weight="400" data-max-width="132" >继承</text>
+<text x="1199" y="488" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="135" >策略 / 全局</text>
+<text x="1360" y="464" font-size="13.5" fill="#202124" font-weight="400" data-max-width="90" >继承</text>
+<g aria-label="编辑客户端"><title>编辑客户端</title><svg x="1476" y="468" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Pencil"/></svg>
 </g>
-<g id="data-row-1">
-<text x="303" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="226" >test-network</text>
-<text x="303" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="226" >网段</text>
-<text x="558" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="389" >192.0.2.0/24</text>
-<text x="558" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="389" >IPv4 CIDR</text>
-<text x="989" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="180" >direct</text>
-<text x="989" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="180" >显式指定</text>
-<text x="1200" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="144" >继承</text>
-<text x="1200" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="144" >策略 / 全局</text>
-<text x="1360" y="443" font-size="14" fill="#202124" font-weight="500" data-max-width="98" >禁用</text>
-<text x="1360" y="465" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="98" >客户端覆盖</text>
-<g aria-label="编辑">
-<title>编辑</title>
-<svg x="1475" y="448" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Pencil"/>
-</svg>
+<g aria-label="更多客户端操作"><title>更多客户端操作</title><svg x="1521" y="468" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Ellipsis"/></svg>
 </g>
-<g aria-label="更多操作">
-<title>更多操作</title>
-<svg x="1521" y="448" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Ellipsis"/>
-</svg>
+<line x1="284" y1="519" x2="1557" y2="519" stroke="#E8E9EC"/>
+<text x="303" y="548" font-size="14" fill="#202124" font-weight="550" data-max-width="286" class="mono">tablet</text>
+<text x="303" y="572" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="280" >平板</text>
+<text x="624" y="548" font-size="13.5" fill="#202124" font-weight="400" data-max-width="338" class="mono">未设置</text>
+<text x="624" y="572" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="320" >仅 ID 匹配</text>
+<text x="988" y="548" font-size="13.5" fill="#202124" font-weight="400" data-max-width="187" >privacy</text>
+<text x="988" y="572" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="186" >显式指定</text>
+<text x="1199" y="548" font-size="13.5" fill="#202124" font-weight="400" data-max-width="132" >继承</text>
+<text x="1199" y="572" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="135" >策略独立池</text>
+<text x="1360" y="548" font-size="13.5" fill="#202124" font-weight="400" data-max-width="90" >继承</text>
+<g aria-label="编辑客户端"><title>编辑客户端</title><svg x="1476" y="552" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Pencil"/></svg>
 </g>
-<line x1="284" y1="501" x2="1557" y2="501" stroke="#E8E9EC"/>
+<g aria-label="更多客户端操作"><title>更多客户端操作</title><svg x="1521" y="552" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Ellipsis"/></svg>
 </g>
-<g id="data-row-2">
-<text x="303" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="226" >private-client</text>
-<text x="303" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="226" >精确标识</text>
-<text x="558" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="389" >private-client</text>
-<text x="558" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="389" >ID</text>
-<text x="989" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="180" >privacy</text>
-<text x="989" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="180" >显式指定</text>
-<text x="1200" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="144" >继承</text>
-<text x="1200" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="144" >策略独立池</text>
-<text x="1360" y="531" font-size="14" fill="#202124" font-weight="500" data-max-width="98" >继承</text>
-<text x="1360" y="553" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="98" >策略优先</text>
-<g aria-label="编辑">
-<title>编辑</title>
-<svg x="1475" y="536" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Pencil"/>
-</svg>
+<line x1="284" y1="603" x2="1557" y2="603" stroke="#E8E9EC"/>
+<text x="303" y="632" font-size="14" fill="#202124" font-weight="550" data-max-width="286" class="mono">test-network</text>
+<text x="303" y="656" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="280" >测试网络</text>
+<text x="624" y="632" font-size="13.5" fill="#202124" font-weight="400" data-max-width="338" class="mono">192.0.2.0/24</text>
+<text x="624" y="656" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="320" >网段 · IPv4</text>
+<text x="988" y="632" font-size="13.5" fill="#202124" font-weight="400" data-max-width="187" >direct</text>
+<text x="988" y="656" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="186" >显式指定</text>
+<text x="1199" y="632" font-size="13.5" fill="#202124" font-weight="400" data-max-width="132" >继承</text>
+<text x="1199" y="656" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="135" >策略 / 全局</text>
+<text x="1360" y="632" font-size="13.5" fill="#202124" font-weight="400" data-max-width="90" >禁用</text>
+<g aria-label="编辑客户端"><title>编辑客户端</title><svg x="1476" y="636" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Pencil"/></svg>
 </g>
-<g aria-label="更多操作">
-<title>更多操作</title>
-<svg x="1521" y="536" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Ellipsis"/>
-</svg>
+<g aria-label="更多客户端操作"><title>更多客户端操作</title><svg x="1521" y="636" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Ellipsis"/></svg>
 </g>
-<line x1="284" y1="589" x2="1557" y2="589" stroke="#E8E9EC"/>
+<line x1="284" y1="687" x2="1557" y2="687" stroke="#E8E9EC"/>
+<text x="303" y="716" font-size="14" fill="#202124" font-weight="550" data-max-width="286" class="mono">private-client</text>
+<text x="303" y="740" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="280" >工作站</text>
+<text x="624" y="716" font-size="13.5" fill="#202124" font-weight="400" data-max-width="338" class="mono">未设置</text>
+<text x="624" y="740" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="320" >仅 ID 匹配</text>
+<text x="988" y="716" font-size="13.5" fill="#202124" font-weight="400" data-max-width="187" >privacy</text>
+<text x="988" y="740" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="186" >显式指定</text>
+<text x="1199" y="716" font-size="13.5" fill="#202124" font-weight="400" data-max-width="132" >继承</text>
+<text x="1199" y="740" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="135" >策略独立池</text>
+<text x="1360" y="716" font-size="13.5" fill="#202124" font-weight="400" data-max-width="90" >继承</text>
+<g aria-label="编辑客户端"><title>编辑客户端</title><svg x="1476" y="720" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Pencil"/></svg>
 </g>
-<g id="data-row-3">
-<text x="303" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="226" >test-ipv6</text>
-<text x="303" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="226" >网段</text>
-<text x="558" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="389" >2001:db8:1200::/48</text>
-<text x="558" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="389" >IPv6 CIDR</text>
-<text x="989" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="180" >继承入口</text>
-<text x="989" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="180" >未指定策略</text>
-<text x="1200" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="144" >禁用</text>
-<text x="1200" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="144" >不使用缓存</text>
-<text x="1360" y="619" font-size="14" fill="#202124" font-weight="500" data-max-width="98" >继承</text>
-<text x="1360" y="641" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="98" >策略优先</text>
-<g aria-label="编辑">
-<title>编辑</title>
-<svg x="1475" y="624" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Pencil"/>
-</svg>
+<g aria-label="更多客户端操作"><title>更多客户端操作</title><svg x="1521" y="720" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Ellipsis"/></svg>
 </g>
-<g aria-label="更多操作">
-<title>更多操作</title>
-<svg x="1521" y="624" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-Ellipsis"/>
-</svg>
+<line x1="284" y1="771" x2="1557" y2="771" stroke="#E8E9EC"/>
+<text x="303" y="800" font-size="14" fill="#202124" font-weight="550" data-max-width="286" class="mono">test-ipv6</text>
+<text x="303" y="824" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="280" >IPv6 测试</text>
+<text x="624" y="800" font-size="13.5" fill="#202124" font-weight="400" data-max-width="338" class="mono">2001:db8:1200::/48</text>
+<text x="624" y="824" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="320" >网段 · IPv6</text>
+<text x="988" y="800" font-size="13.5" fill="#202124" font-weight="400" data-max-width="187" >继承入口</text>
+<text x="988" y="824" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="186" >未指定策略</text>
+<text x="1199" y="800" font-size="13.5" fill="#202124" font-weight="400" data-max-width="132" >禁用</text>
+<text x="1199" y="824" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="135" >不使用缓存</text>
+<text x="1360" y="800" font-size="13.5" fill="#202124" font-weight="400" data-max-width="90" >继承</text>
+<g aria-label="编辑客户端"><title>编辑客户端</title><svg x="1476" y="804" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Pencil"/></svg>
 </g>
-<line x1="284" y1="677" x2="1557" y2="677" stroke="#E8E9EC"/>
+<g aria-label="更多客户端操作"><title>更多客户端操作</title><svg x="1521" y="804" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Ellipsis"/></svg>
 </g>
-<text x="286" y="952" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="450" >共 4 个客户端规则</text>
+<line x1="284" y1="855" x2="1557" y2="855" stroke="#E8E9EC"/>
+<text x="285" y="953" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="600" >共 6 个客户端</text>
 <rect x="1351" y="929" width="116" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
-<text x="1364" y="954" font-size="13" fill="#63666D" font-weight="400" data-max-width="73" >20 / 页</text>
-<svg x="1439" y="941" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-ChevronDown"/>
-</svg>
-<g aria-label="上一页">
-<title>上一页</title>
-<svg x="1489" y="939" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-ChevronLeft"/>
-</svg>
+<text x="1364" y="954" font-size="13" fill="#63666D" font-weight="400" data-max-width="76" >20 / 页</text>
+<svg x="1441" y="942" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
+<g aria-label="上一页"><title>上一页</title><svg x="1490" y="938" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronLeft"/></svg>
 </g>
-<g aria-label="下一页">
-<title>下一页</title>
-<svg x="1527" y="939" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-<use href="#icon-ChevronRight"/>
-</svg>
+<g aria-label="下一页"><title>下一页</title><svg x="1528" y="938" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronRight"/></svg>
 </g>
 <line x1="284" y1="988" x2="1557" y2="988" stroke="#E8E9EC"/>
 <circle cx="290" cy="1013" r="3" fill="#20824E"/>
 <text x="302" y="1018" font-size="12" fill="#63666D" font-weight="400" data-max-width="600" >配置已同步</text>
-<text x="1556" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="250" text-anchor="end">更新于 14:32:08</text>
+<text x="1556" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" text-anchor="end">更新于 14:32:08</text>
 </svg>

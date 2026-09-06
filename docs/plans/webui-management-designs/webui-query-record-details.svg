@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1040" viewBox="0 0 1600 1040" role="img" aria-labelledby="title desc">
-<title id="title">FluxDNS · 解析记录 · 悬浮详情</title>
+<title id="title">FluxDNS · 解析详情 · ID 匹配</title>
 <desc id="desc">管理后台视觉规划效果图。全部数值、地址和配置均为演示内容，不代表当前产品已实现的功能。</desc>
 <metadata id="icon-license">ISC License
 
@@ -46,7 +46,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 </metadata>
-<defs>
+<defs><filter id="detail-shadow" x="-15%" y="-15%" width="130%" height="145%"><feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#172337" flood-opacity=".14"/></filter>
 <style>text { font-family: 'Segoe UI Variable Text','Segoe UI','Microsoft YaHei UI','Microsoft YaHei',sans-serif; letter-spacing:0; } .numeric { font-variant-numeric:tabular-nums; } .mono { font-family:'SFMono-Regular',Consolas,'Microsoft YaHei UI',monospace; }</style>
 <filter id="modal-shadow" x="-15%" y="-15%" width="130%" height="145%">
 <feDropShadow dx="0" dy="18" stdDeviation="22" flood-color="#102039" flood-opacity=".2"/>
@@ -325,296 +325,305 @@ SOFTWARE.
 </g>
 <circle cx="1546" cy="37" r="15" fill="#EAECEF" />
 <text x="1540" y="42" font-size="12" fill="#66707F" font-weight="650" data-max-width="16" >A</text>
-<g id="query-page">
-<text x="285" y="140" font-size="30" fill="#202124" font-weight="650" data-max-width="650" >解析记录</text>
-<text x="286" y="173" font-size="13.5" fill="#63666D" font-weight="400" data-max-width="650" >主实例 · 解析历史</text>
-<text x="1410" y="138" font-size="13.5" fill="#63666D" font-weight="500" data-max-width="100" text-anchor="end">自动刷新</text>
-<g aria-label="自动刷新已开启"><title>自动刷新已开启</title><rect x="1427" y="119" width="44" height="25" rx="12.5" fill="#34A56F" stroke="none" /><circle cx="1458.5" cy="131.5" r="9.5" fill="#FFFFFF"/></g>
-<rect x="285" y="215" width="388" height="38" rx="6" fill="#F7F8FA" stroke="#E4E6E9" />
+<text x="285" y="140" font-size="30" fill="#202124" font-weight="650" data-max-width="920" >解析记录</text>
+<text x="286" y="173" font-size="13.5" fill="#63666D" font-weight="400" data-max-width="980" >主实例 · 解析历史</text>
+<text x="1356" y="139" font-size="13" fill="#63666D" font-weight="400" data-max-width="70" >自动刷新</text>
+<rect x="1435" y="120" width="36" height="21" rx="11" fill="#20824E" stroke="none" />
+<circle cx="1460" cy="130.5" r="8" fill="#FFFFFF"/>
+<rect x="285" y="215" width="385" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
 <svg x="298" y="225" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B8F98" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-Search"/></svg>
-<text x="329" y="240" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="320" >搜索域名或客户端</text>
-<rect x="687" y="215" width="135" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
-<text x="701" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="89" >全部协议</text>
-<svg x="795" y="227" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
-<rect x="836" y="215" width="142" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
-<text x="850" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="96" >全部来源</text>
-<svg x="951" y="227" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
-<rect x="992" y="215" width="152" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
-<text x="1006" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="106" >全部响应码</text>
-<svg x="1117" y="227" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
-<rect x="1158" y="215" width="142" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
-<text x="1172" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="96" >全部状态</text>
-<svg x="1273" y="227" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
-<g aria-label="刷新解析记录"><title>刷新解析记录</title><rect x="1518" y="215" width="38" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" /><svg x="1527" y="225" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-RefreshCw"/></svg></g>
-<text x="286" y="293" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="280" >共 12,480 条记录</text>
-<g id="query-pending-records"><g aria-label="查看 8 条新记录"><title>查看 8 条新记录</title><rect x="1385" y="272" width="171" height="31" rx="5" fill="#EBF3FF" stroke="none" /><svg x="1397" y="281" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#1676D2" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-RefreshCw"/></svg><text x="1420" y="293" font-size="12.5" fill="#1676D2" font-weight="500" data-max-width="124" >查看 8 条新记录</text></g></g>
-<rect x="285" y="310" width="1271" height="42" rx="0" fill="#F7F8FA" stroke="none" />
-<text x="303" y="336" font-size="12" fill="#8B8F98" font-weight="500" data-max-width="100" >时间</text>
-<text x="446" y="336" font-size="12" fill="#8B8F98" font-weight="500" data-max-width="278" >请求</text>
-<text x="750" y="336" font-size="12" fill="#8B8F98" font-weight="500" data-max-width="170" >客户端</text>
-<text x="955" y="336" font-size="12" fill="#8B8F98" font-weight="500" data-max-width="277" >结果</text>
-<text x="1264" y="336" font-size="12" fill="#8B8F98" font-weight="500" data-max-width="148" >来源</text>
-<svg x="342" y="323" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#8B8F98" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
-<text x="1540" y="336" font-size="12" fill="#8B8F98" font-weight="500" data-max-width="110" text-anchor="end">耗时</text>
-<g id="query-row-0" data-record-id="demo-query-0">
-<g id="query-hover-highlight"><rect x="285" y="352" width="1271" height="56" rx="0" fill="#F5F9FF" stroke="none" /><rect x="946" y="356" width="304" height="48" rx="5" fill="#EBF3FF" stroke="none" /></g>
-<text x="303" y="375" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">14:32:08</text>
-<text x="303" y="395" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-05</text>
-<text x="446" y="375" font-size="14" fill="#202124" font-weight="500" data-max-width="278" >www.example.com.</text>
-<text x="446" y="395" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >A</text>
-<text x="502" y="395" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >DoH</text>
-<text x="750" y="375" font-size="13" fill="#45484F" font-weight="500" data-max-width="174" >workstation</text>
-<text x="750" y="395" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" class="mono">192.0.2.101</text>
-<g id="query-result-0" aria-label="www.example.com.的解析详情"><title>www.example.com.的解析详情</title>
-<text x="955" y="375" font-size="12.5" fill="#1676D2" font-weight="500" data-max-width="290" class="mono">CNAME  edge.example.net.</text>
-<text x="955" y="395" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="290" >NOERROR · 3 条记录</text>
+<text x="326" y="240" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="332" >搜索域名</text>
+<rect x="684" y="215" width="155" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="697" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="115" >匹配客户端</text>
+<svg x="813" y="228" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
+<rect x="852" y="215" width="145" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="865" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="105" >原始 ID / IP</text>
+<svg x="971" y="228" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
+<rect x="1010" y="215" width="138" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="1023" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="98" >全部协议</text>
+<svg x="1122" y="228" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
+<rect x="1161" y="215" width="139" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="1174" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="99" >全部来源</text>
+<svg x="1274" y="228" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
+<rect x="1313" y="215" width="166" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="1326" y="240" font-size="13" fill="#63666D" font-weight="400" data-max-width="126" >最近 7 天</text>
+<svg x="1453" y="228" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
+<rect x="1518" y="215" width="38" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<g aria-label="刷新记录"><title>刷新记录</title><svg x="1528" y="225" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-RefreshCw"/></svg>
 </g>
-<circle cx="1268" cy="370" r="3" fill="#007AFF"/>
-<text x="1280" y="375" font-size="12.5" fill="#007AFF" font-weight="500" data-max-width="133" >上游</text>
-<text x="1264" y="395" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >edge-primary</text>
-<text x="1540" y="375" font-size="13.5" fill="#45484F" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">28 ms</text>
-<text x="1540" y="395" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链 27.42 ms</text>
-<line x1="285" y1="408" x2="1556" y2="408" stroke="#ECEEF1" />
+<text x="285" y="291" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="600" >共 12,480 条记录</text>
+<g id="query-pending-records"><rect x="1385" y="271" width="171" height="31" rx="5" fill="#EBF3FF" stroke="none" />
+<svg x="1397" y="280" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#007AFF" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-RefreshCw"/></svg>
+<text x="1420" y="292" font-size="12" fill="#007AFF" font-weight="500" data-max-width="125" >查看 8 条新记录</text>
+</g><rect x="284" y="310" width="1273" height="42" rx="0" fill="#F7F8FA" stroke="none" />
+<text x="303" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >时间</text>
+<text x="446" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >请求</text>
+<text x="750" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="185" >当时匹配 / 当前名称</text>
+<text x="955" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >结果</text>
+<text x="1264" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="240" >来源</text>
+<text x="1540" y="336" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="115" text-anchor="end">耗时</text>
+<g id="query-row-0">
+<rect x="284" y="352" width="1273" height="56" rx="0" fill="#F5F9FF" stroke="none" />
+<text x="303" y="375" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:08</text>
+<text x="303" y="396" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
+<text x="446" y="375" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >www.example.com.</text>
+<text x="446" y="396" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >A</text>
+<text x="502" y="396" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >DoH</text>
+<text x="750" y="375" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="144" class="mono">workstation</text>
+<rect x="905" y="359" width="29" height="23" rx="4" fill="#EDF4FF" stroke="none" />
+<text x="919.5" y="375" font-size="11.5" fill="#007AFF" font-weight="500" data-max-width="17" text-anchor="middle">ID</text>
+<g><title>当前名称：工作站；请求 IP：192.0.2.101</title><text x="750" y="396" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >工作站 · 192.0.2.101</text>
+</g><g id="query-result-0" aria-label="查看解析详情"><rect x="945" y="356" width="304" height="48" rx="5" fill="#EAF3FF" stroke="none" />
+<text x="955" y="375" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">CNAME edge.example.net.</text>
+<text x="955" y="396" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >NOERROR · 3 条记录</text>
+</g><circle cx="1268" cy="370" r="3" fill="#007AFF"/>
+<text x="1280" y="375" font-size="12" fill="#007AFF" font-weight="400" data-max-width="133" >上游</text>
+<text x="1264" y="396" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >edge-primary</text>
+<text x="1540" y="375" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">28 ms</text>
+<text x="1540" y="396" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链 27.42 ms</text>
+<line x1="284" y1="408" x2="1557" y2="408" stroke="#E8E9EC"/>
 </g>
-<g id="query-row-1" data-record-id="demo-query-1">
-<text x="303" y="431" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">14:32:07</text>
-<text x="303" y="451" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-05</text>
-<text x="446" y="431" font-size="14" fill="#202124" font-weight="500" data-max-width="278" >assets.example.net.</text>
-<text x="446" y="451" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >AAAA</text>
-<text x="502" y="451" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >DoH</text>
-<text x="750" y="431" font-size="13" fill="#45484F" font-weight="500" data-max-width="174" >phone</text>
-<text x="750" y="451" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" class="mono">192.0.2.102</text>
-<g id="query-result-1" aria-label="assets.example.net.的解析详情"><title>assets.example.net.的解析详情</title>
-<text x="955" y="431" font-size="12.5" fill="#1676D2" font-weight="500" data-max-width="290" class="mono">AAAA  2001:db8::42</text>
-<text x="955" y="451" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="290" >NOERROR · 2 条记录</text>
+<g id="query-row-1">
+<text x="303" y="431" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:07</text>
+<text x="303" y="452" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
+<text x="446" y="431" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >assets.example.net.</text>
+<text x="446" y="452" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >AAAA</text>
+<text x="502" y="452" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >UDP</text>
+<text x="750" y="431" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="144" class="mono">phone</text>
+<rect x="905" y="415" width="29" height="23" rx="4" fill="#EAF6F3" stroke="none" />
+<text x="919.5" y="431" font-size="11.5" fill="#17857D" font-weight="500" data-max-width="17" text-anchor="middle">IP</text>
+<g><title>当前名称：手机；请求 IP：192.0.2.102</title><text x="750" y="452" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >手机 · 192.0.2.102</text>
+</g><g id="query-result-1" aria-label="查看解析详情"><text x="955" y="431" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">2001:db8::42</text>
+<text x="955" y="452" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >NOERROR · 2 条记录</text>
+</g><circle cx="1268" cy="426" r="3" fill="#20824E"/>
+<text x="1280" y="431" font-size="12" fill="#20824E" font-weight="400" data-max-width="133" >缓存命中</text>
+<text x="1264" y="452" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >edge-primary</text>
+<text x="1540" y="431" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">1 ms</text>
+<text x="1540" y="452" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链 0.32 ms</text>
+<line x1="284" y1="464" x2="1557" y2="464" stroke="#E8E9EC"/>
 </g>
-<circle cx="1268" cy="426" r="3" fill="#20824E"/>
-<text x="1280" y="431" font-size="12.5" fill="#20824E" font-weight="500" data-max-width="133" >缓存命中</text>
-<text x="1264" y="451" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >edge-primary</text>
-<text x="1540" y="431" font-size="13.5" fill="#45484F" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">1 ms</text>
-<text x="1540" y="451" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链 0.38 ms</text>
-<line x1="285" y1="464" x2="1556" y2="464" stroke="#ECEEF1" />
+<g id="query-row-2">
+<text x="303" y="487" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:06</text>
+<text x="303" y="508" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
+<text x="446" y="487" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >api.example.org.</text>
+<text x="446" y="508" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >A</text>
+<text x="502" y="508" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >DoH</text>
+<text x="750" y="487" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="144" class="mono">tablet</text>
+<rect x="905" y="471" width="29" height="23" rx="4" fill="#EDF4FF" stroke="none" />
+<text x="919.5" y="487" font-size="11.5" fill="#007AFF" font-weight="500" data-max-width="17" text-anchor="middle">ID</text>
+<g><title>当前名称：平板；请求 IP：192.0.2.103</title><text x="750" y="508" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >平板 · 192.0.2.103</text>
+</g><g id="query-result-2" aria-label="查看解析详情"><text x="955" y="487" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">192.0.2.31</text>
+<text x="955" y="508" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >NOERROR · 1 条记录</text>
+</g><circle cx="1268" cy="482" r="3" fill="#007AFF"/>
+<text x="1280" y="487" font-size="12" fill="#007AFF" font-weight="400" data-max-width="133" >上游</text>
+<text x="1264" y="508" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >privacy-doh</text>
+<text x="1540" y="487" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">36 ms</text>
+<text x="1540" y="508" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链 35.61 ms</text>
+<line x1="284" y1="520" x2="1557" y2="520" stroke="#E8E9EC"/>
 </g>
-<g id="query-row-2" data-record-id="demo-query-2">
-<text x="303" y="487" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">14:32:06</text>
-<text x="303" y="507" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-05</text>
-<text x="446" y="487" font-size="14" fill="#202124" font-weight="500" data-max-width="278" >api.example.org.</text>
-<text x="446" y="507" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >A</text>
-<text x="502" y="507" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >DoH</text>
-<text x="750" y="487" font-size="13" fill="#45484F" font-weight="500" data-max-width="174" >tablet</text>
-<text x="750" y="507" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" class="mono">192.0.2.103</text>
-<g id="query-result-2" aria-label="api.example.org.的解析详情"><title>api.example.org.的解析详情</title>
-<text x="955" y="487" font-size="12.5" fill="#1676D2" font-weight="500" data-max-width="290" class="mono">A  198.51.100.18</text>
-<text x="955" y="507" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="290" >NOERROR · 1 条记录</text>
+<g id="query-row-3">
+<text x="303" y="543" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:05</text>
+<text x="303" y="564" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
+<text x="446" y="543" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >printer.example.</text>
+<text x="446" y="564" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >A</text>
+<text x="502" y="564" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >UDP</text>
+<text x="750" y="543" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="144" class="mono">workstation</text>
+<rect x="905" y="527" width="29" height="23" rx="4" fill="#EAF6F3" stroke="none" />
+<text x="919.5" y="543" font-size="11.5" fill="#17857D" font-weight="500" data-max-width="17" text-anchor="middle">IP</text>
+<g><title>当前名称：工作站；请求 IP：192.0.2.101</title><text x="750" y="564" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >工作站 · 192.0.2.101</text>
+</g><g id="query-result-3" aria-label="查看解析详情"><text x="955" y="543" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">192.0.2.50</text>
+<text x="955" y="564" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >NOERROR · 1 条记录</text>
+</g><circle cx="1268" cy="538" r="3" fill="#8065B5"/>
+<text x="1280" y="543" font-size="12" fill="#8065B5" font-weight="400" data-max-width="133" >Hosts</text>
+<text x="1264" y="564" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >local-hosts</text>
+<text x="1540" y="543" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">1 ms</text>
+<text x="1540" y="564" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链 0.24 ms</text>
+<line x1="284" y1="576" x2="1557" y2="576" stroke="#E8E9EC"/>
 </g>
-<circle cx="1268" cy="482" r="3" fill="#007AFF"/>
-<text x="1280" y="487" font-size="12.5" fill="#007AFF" font-weight="500" data-max-width="133" >上游</text>
-<text x="1264" y="507" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >privacy-doh</text>
-<text x="1540" y="487" font-size="13.5" fill="#45484F" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">39 ms</text>
-<text x="1540" y="507" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链 38.72 ms</text>
-<line x1="285" y1="520" x2="1556" y2="520" stroke="#ECEEF1" />
+<g id="query-row-4">
+<text x="303" y="599" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:04</text>
+<text x="303" y="620" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
+<text x="446" y="599" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >ads.example.net.</text>
+<text x="446" y="620" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >A</text>
+<text x="502" y="620" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >DoH</text>
+<text x="750" y="599" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="144" class="mono">phone</text>
+<rect x="905" y="583" width="29" height="23" rx="4" fill="#EDF4FF" stroke="none" />
+<text x="919.5" y="599" font-size="11.5" fill="#007AFF" font-weight="500" data-max-width="17" text-anchor="middle">ID</text>
+<g><title>当前名称：手机；请求 IP：192.0.2.102</title><text x="750" y="620" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >手机 · 192.0.2.102</text>
+</g><g id="query-result-4" aria-label="查看解析详情"><text x="955" y="599" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">NXDOMAIN</text>
+<text x="955" y="620" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >空 Answer · 域名不存在</text>
+</g><circle cx="1268" cy="594" r="3" fill="#007AFF"/>
+<text x="1280" y="599" font-size="12" fill="#007AFF" font-weight="400" data-max-width="133" >规则</text>
+<text x="1264" y="620" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >block-ads</text>
+<text x="1540" y="599" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">1 ms</text>
+<text x="1540" y="620" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链 0.41 ms</text>
+<line x1="284" y1="632" x2="1557" y2="632" stroke="#E8E9EC"/>
 </g>
-<g id="query-row-3" data-record-id="demo-query-3">
-<text x="303" y="543" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">14:32:05</text>
-<text x="303" y="563" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-05</text>
-<text x="446" y="543" font-size="14" fill="#202124" font-weight="500" data-max-width="278" >printer.example.</text>
-<text x="446" y="563" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >A</text>
-<text x="502" y="563" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >UDP</text>
-<text x="750" y="543" font-size="13" fill="#45484F" font-weight="500" data-max-width="174" >workstation</text>
-<text x="750" y="563" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" class="mono">192.0.2.101</text>
-<g id="query-result-3" aria-label="printer.example.的解析详情"><title>printer.example.的解析详情</title>
-<text x="955" y="543" font-size="12.5" fill="#1676D2" font-weight="500" data-max-width="290" class="mono">A  192.0.2.80</text>
-<text x="955" y="563" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="290" >NOERROR · 1 条记录</text>
+<g id="query-row-5">
+<text x="303" y="655" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:03</text>
+<text x="303" y="676" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
+<text x="446" y="655" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >slow.example.org.</text>
+<text x="446" y="676" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >A</text>
+<text x="502" y="676" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >DoH</text>
+<text x="750" y="655" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="184" >未匹配客户端</text>
+<text x="750" y="676" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >198.51.100.104</text>
+<g id="query-result-5" aria-label="查看解析详情"><text x="955" y="655" font-size="11.5" fill="#9E6A17" font-weight="400" data-max-width="288" class="mono">SERVFAIL</text>
+<text x="955" y="676" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >上游超时 · 无响应记录</text>
+</g><circle cx="1268" cy="650" r="3" fill="#9E6A17"/>
+<text x="1280" y="655" font-size="12" fill="#9E6A17" font-weight="400" data-max-width="133" >上游超时</text>
+<text x="1264" y="676" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >privacy-doh</text>
+<text x="1540" y="655" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">2000 ms</text>
+<text x="1540" y="676" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链 1999.74 ms</text>
+<line x1="284" y1="688" x2="1557" y2="688" stroke="#E8E9EC"/>
 </g>
-<circle cx="1268" cy="538" r="3" fill="#17857D"/>
-<text x="1280" y="543" font-size="12.5" fill="#17857D" font-weight="500" data-max-width="133" >Hosts</text>
-<text x="1264" y="563" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >本地响应</text>
-<text x="1540" y="543" font-size="13.5" fill="#45484F" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">1 ms</text>
-<text x="1540" y="563" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链 0.24 ms</text>
-<line x1="285" y1="576" x2="1556" y2="576" stroke="#ECEEF1" />
+<g id="query-row-6">
+<text x="303" y="711" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:02</text>
+<text x="303" y="732" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
+<text x="446" y="711" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >policy.example.net.</text>
+<text x="446" y="732" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >TXT</text>
+<text x="502" y="732" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >TCP</text>
+<text x="750" y="711" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="144" class="mono">workstation</text>
+<rect x="905" y="695" width="29" height="23" rx="4" fill="#EAF6F3" stroke="none" />
+<text x="919.5" y="711" font-size="11.5" fill="#17857D" font-weight="500" data-max-width="17" text-anchor="middle">IP</text>
+<g><title>当前名称：工作站；请求 IP：192.0.2.101</title><text x="750" y="732" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >工作站 · 192.0.2.101</text>
+</g><g id="query-result-6" aria-label="查看解析详情"><text x="955" y="711" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">&quot;v=policy1; ...&quot;</text>
+<text x="955" y="732" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >NOERROR · 保留 16 / 20 条</text>
+</g><circle cx="1268" cy="706" r="3" fill="#007AFF"/>
+<text x="1280" y="711" font-size="12" fill="#007AFF" font-weight="400" data-max-width="133" >上游</text>
+<text x="1264" y="732" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >edge-primary</text>
+<text x="1540" y="711" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">24 ms</text>
+<text x="1540" y="732" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链 23.54 ms</text>
+<line x1="284" y1="744" x2="1557" y2="744" stroke="#E8E9EC"/>
 </g>
-<g id="query-row-4" data-record-id="demo-query-4">
-<text x="303" y="599" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">14:32:04</text>
-<text x="303" y="619" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-05</text>
-<text x="446" y="599" font-size="14" fill="#202124" font-weight="500" data-max-width="278" >ads.example.net.</text>
-<text x="446" y="619" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >A</text>
-<text x="502" y="619" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >DoH</text>
-<text x="750" y="599" font-size="13" fill="#45484F" font-weight="500" data-max-width="174" >phone</text>
-<text x="750" y="619" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" class="mono">192.0.2.102</text>
-<g id="query-result-4" aria-label="ads.example.net.的解析详情"><title>ads.example.net.的解析详情</title>
-<text x="955" y="599" font-size="12.5" fill="#9E6A17" font-weight="500" data-max-width="290" class="mono">NXDOMAIN</text>
-<text x="955" y="619" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="290" >域名不存在 · 无 Answer</text>
+<g id="query-row-7">
+<text x="303" y="767" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:01</text>
+<text x="303" y="788" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
+<text x="446" y="767" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >images.example.com.</text>
+<text x="446" y="788" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >A</text>
+<text x="502" y="788" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >DoH</text>
+<text x="750" y="767" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="144" class="mono">phone</text>
+<rect x="905" y="751" width="29" height="23" rx="4" fill="#EDF4FF" stroke="none" />
+<text x="919.5" y="767" font-size="11.5" fill="#007AFF" font-weight="500" data-max-width="17" text-anchor="middle">ID</text>
+<g><title>当前名称：手机；请求 IP：192.0.2.102</title><text x="750" y="788" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >手机 · 192.0.2.102</text>
+</g><g id="query-result-7" aria-label="查看解析详情"><text x="955" y="767" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">192.0.2.42</text>
+<text x="955" y="788" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >NOERROR · 1 条记录</text>
+</g><circle cx="1268" cy="762" r="3" fill="#9E6A17"/>
+<text x="1280" y="767" font-size="12" fill="#9E6A17" font-weight="400" data-max-width="133" >过期缓存</text>
+<text x="1264" y="788" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >privacy-doh</text>
+<text x="1540" y="767" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">1 ms</text>
+<text x="1540" y="788" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链 0.19 ms</text>
+<line x1="284" y1="800" x2="1557" y2="800" stroke="#E8E9EC"/>
 </g>
-<circle cx="1268" cy="594" r="3" fill="#8065B5"/>
-<text x="1280" y="599" font-size="12.5" fill="#8065B5" font-weight="500" data-max-width="133" >规则响应</text>
-<text x="1264" y="619" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >block-ads</text>
-<text x="1540" y="599" font-size="13.5" fill="#45484F" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">1 ms</text>
-<text x="1540" y="619" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链 0.42 ms</text>
-<line x1="285" y1="632" x2="1556" y2="632" stroke="#ECEEF1" />
+<g id="query-row-8">
+<text x="303" y="823" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >14:32:00</text>
+<text x="303" y="844" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-07</text>
+<text x="446" y="823" font-size="13" fill="#202124" font-weight="400" data-max-width="288" >mail.example.org.</text>
+<text x="446" y="844" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >MX</text>
+<text x="502" y="844" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >TCP</text>
+<text x="750" y="823" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="144" class="mono">workstation</text>
+<rect x="905" y="807" width="29" height="23" rx="4" fill="#EAF6F3" stroke="none" />
+<text x="919.5" y="823" font-size="11.5" fill="#17857D" font-weight="500" data-max-width="17" text-anchor="middle">IP</text>
+<g><title>当前名称：工作站；请求 IP：192.0.2.101</title><text x="750" y="844" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >工作站 · 192.0.2.101</text>
+</g><g id="query-result-8" aria-label="查看解析详情"><text x="955" y="823" font-size="11.5" fill="#007AFF" font-weight="400" data-max-width="288" class="mono">10 mail.example.org.</text>
+<text x="955" y="844" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >NOERROR · 1 条记录</text>
+</g><circle cx="1268" cy="818" r="3" fill="#007AFF"/>
+<text x="1280" y="823" font-size="12" fill="#007AFF" font-weight="400" data-max-width="133" >上游</text>
+<text x="1264" y="844" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >edge-primary</text>
+<text x="1540" y="823" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">32 ms</text>
+<text x="1540" y="844" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链 31.66 ms</text>
+<line x1="284" y1="856" x2="1557" y2="856" stroke="#E8E9EC"/>
 </g>
-<g id="query-row-5" data-record-id="demo-query-5">
-<text x="303" y="655" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">14:32:03</text>
-<text x="303" y="675" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-05</text>
-<text x="446" y="655" font-size="14" fill="#202124" font-weight="500" data-max-width="278" >slow.example.org.</text>
-<text x="446" y="675" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >A</text>
-<text x="502" y="675" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >DoH</text>
-<text x="750" y="655" font-size="13" fill="#45484F" font-weight="500" data-max-width="174" >tablet</text>
-<text x="750" y="675" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" class="mono">192.0.2.103</text>
-<g id="query-result-5" aria-label="slow.example.org.的解析详情"><title>slow.example.org.的解析详情</title>
-<text x="955" y="655" font-size="12.5" fill="#C13D42" font-weight="500" data-max-width="290" class="mono">SERVFAIL</text>
-<text x="955" y="675" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="290" >解析超时 · 无 Answer</text>
+<g id="query-row-9">
+<text x="303" y="879" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="125" >10:18:42</text>
+<text x="303" y="900" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="125" >2026-09-01</text>
+<text x="446" y="879" font-size="13" fill="#8B8F98" font-weight="400" data-max-width="288" >记录产生时未保留域名</text>
+<text x="446" y="900" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="46" >A</text>
+<text x="502" y="900" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="56" >DoH</text>
+<text x="750" y="879" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="184" >匹配信息未保留</text>
+<text x="750" y="900" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="184" >历史身份未保留</text>
+<g id="query-result-9" aria-label="查看解析详情"><text x="955" y="879" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="288" class="mono">历史详情未保留</text>
+<text x="955" y="900" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="288" >Answer 未保留</text>
+</g><circle cx="1268" cy="874" r="3" fill="#007AFF"/>
+<text x="1280" y="879" font-size="12" fill="#007AFF" font-weight="400" data-max-width="133" >上游未保留</text>
+<text x="1264" y="900" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="154" >历史记录</text>
+<text x="1540" y="879" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="114" text-anchor="end">16 ms</text>
+<text x="1540" y="900" font-size="10" fill="#8B8F98" font-weight="400" data-max-width="119" text-anchor="end">主链未保留</text>
+<line x1="284" y1="912" x2="1557" y2="912" stroke="#E8E9EC"/>
 </g>
-<circle cx="1268" cy="650" r="3" fill="#007AFF"/>
-<text x="1280" y="655" font-size="12.5" fill="#007AFF" font-weight="500" data-max-width="133" >上游</text>
-<text x="1264" y="675" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >实际上游未确定</text>
-<text x="1540" y="655" font-size="13.5" fill="#C13D42" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">2,000 ms</text>
-<text x="1540" y="675" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链 1,999.62 ms</text>
-<line x1="285" y1="688" x2="1556" y2="688" stroke="#ECEEF1" />
+<text x="285" y="952" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="600" >第 1–10 条，共 12,480 条</text>
+<rect x="1272" y="926" width="110" height="38" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
+<text x="1285" y="951" font-size="13" fill="#63666D" font-weight="400" data-max-width="70" >10 条/页</text>
+<svg x="1356" y="939" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
+<g aria-label="上一页"><title>上一页</title><svg x="1405" y="935" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronLeft"/></svg>
 </g>
-<g id="query-row-6" data-record-id="demo-query-6">
-<text x="303" y="711" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">14:32:02</text>
-<text x="303" y="731" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-05</text>
-<text x="446" y="711" font-size="14" fill="#202124" font-weight="500" data-max-width="278" >policy.example.net.</text>
-<text x="446" y="731" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >TXT</text>
-<text x="502" y="731" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >TCP</text>
-<text x="750" y="711" font-size="13" fill="#45484F" font-weight="500" data-max-width="174" >workstation</text>
-<text x="750" y="731" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" class="mono">192.0.2.101</text>
-<g id="query-result-6" aria-label="policy.example.net.的解析详情"><title>policy.example.net.的解析详情</title>
-<text x="955" y="711" font-size="12.5" fill="#1676D2" font-weight="500" data-max-width="290" class="mono">TXT  "v=example1; p=none"</text>
-<text x="955" y="731" font-size="11.5" fill="#9E6A17" font-weight="400" data-max-width="290" >仅保留 16 条，共 20 条</text>
+<text x="1481" y="951" font-size="12" fill="#63666D" font-weight="400" data-max-width="81" text-anchor="middle">1 / 1,248</text>
+<g aria-label="下一页"><title>下一页</title><svg x="1533" y="935" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronRight"/></svg>
 </g>
-<circle cx="1268" cy="706" r="3" fill="#007AFF"/>
-<text x="1280" y="711" font-size="12.5" fill="#007AFF" font-weight="500" data-max-width="133" >上游</text>
-<text x="1264" y="731" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >edge-primary</text>
-<text x="1540" y="711" font-size="13.5" fill="#45484F" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">24 ms</text>
-<text x="1540" y="731" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链 23.54 ms</text>
-<line x1="285" y1="744" x2="1556" y2="744" stroke="#ECEEF1" />
+<line x1="284" y1="988" x2="1557" y2="988" stroke="#E8E9EC"/>
+<circle cx="290" cy="1013" r="3" fill="#20824E"/>
+<text x="302" y="1018" font-size="12" fill="#63666D" font-weight="400" data-max-width="600" >推送连接正常</text>
+<text x="1556" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="220" text-anchor="end">更新于 14:32:08</text>
+<g id="query-detail-popover">
+<rect x="820" y="423" width="736" height="577" rx="8" fill="#FFFFFF" stroke="#DADEE5" filter="url(#detail-shadow)"/>
+<path d="M1036 424 L1047 413 L1058 424" fill="#FFFFFF" stroke="#DADEE5"/>
+<text x="844" y="455" font-size="19" fill="#202124" font-weight="650" data-max-width="450" >解析详情</text>
+<rect x="1391" y="439" width="102" height="23" rx="4" fill="#EBF6EF" stroke="none" />
+<text x="1442" y="455" font-size="11.5" fill="#20824E" font-weight="500" data-max-width="90" text-anchor="middle">NOERROR</text>
+<g aria-label="关闭解析详情"><title>关闭解析详情</title><svg x="1522" y="446" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-X"/></svg>
 </g>
-<g id="query-row-7" data-record-id="demo-query-7">
-<text x="303" y="767" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">14:32:01</text>
-<text x="303" y="787" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-05</text>
-<text x="446" y="767" font-size="14" fill="#202124" font-weight="500" data-max-width="278" >images.example.com.</text>
-<text x="446" y="787" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >A</text>
-<text x="502" y="787" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >DoH</text>
-<text x="750" y="767" font-size="13" fill="#45484F" font-weight="500" data-max-width="174" >phone</text>
-<text x="750" y="787" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" class="mono">192.0.2.102</text>
-<g id="query-result-7" aria-label="images.example.com.的解析详情"><title>images.example.com.的解析详情</title>
-<text x="955" y="767" font-size="12.5" fill="#1676D2" font-weight="500" data-max-width="290" class="mono">A  203.0.113.36</text>
-<text x="955" y="787" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="290" >NOERROR · 2 条记录</text>
-</g>
-<circle cx="1268" cy="762" r="3" fill="#9E6A17"/>
-<text x="1280" y="767" font-size="12.5" fill="#9E6A17" font-weight="500" data-max-width="133" >过期缓存</text>
-<text x="1264" y="787" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >privacy-doh</text>
-<text x="1540" y="767" font-size="13.5" fill="#45484F" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">1 ms</text>
-<text x="1540" y="787" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链 0.48 ms</text>
-<line x1="285" y1="800" x2="1556" y2="800" stroke="#ECEEF1" />
-</g>
-<g id="query-row-8" data-record-id="demo-query-8">
-<text x="303" y="823" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">14:32:00</text>
-<text x="303" y="843" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-05</text>
-<text x="446" y="823" font-size="14" fill="#202124" font-weight="500" data-max-width="278" >mail.example.org.</text>
-<text x="446" y="843" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >MX</text>
-<text x="502" y="843" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >TCP</text>
-<text x="750" y="823" font-size="13" fill="#45484F" font-weight="500" data-max-width="174" >workstation</text>
-<text x="750" y="843" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" class="mono">192.0.2.101</text>
-<g id="query-result-8" aria-label="mail.example.org.的解析详情"><title>mail.example.org.的解析详情</title>
-<text x="955" y="823" font-size="12.5" fill="#1676D2" font-weight="500" data-max-width="290" class="mono">MX  10 mx.example.org.</text>
-<text x="955" y="843" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="290" >NOERROR · 1 条记录</text>
-</g>
-<circle cx="1268" cy="818" r="3" fill="#007AFF"/>
-<text x="1280" y="823" font-size="12.5" fill="#007AFF" font-weight="500" data-max-width="133" >上游</text>
-<text x="1264" y="843" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >edge-primary</text>
-<text x="1540" y="823" font-size="13.5" fill="#45484F" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">32 ms</text>
-<text x="1540" y="843" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链 31.66 ms</text>
-<line x1="285" y1="856" x2="1556" y2="856" stroke="#ECEEF1" />
-</g>
-<g id="query-row-9" data-record-id="demo-query-9">
-<text x="303" y="879" font-size="13" fill="#45484F" font-weight="500" data-max-width="119" class="numeric">10:18:42</text>
-<text x="303" y="899" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="119" >2026-09-01</text>
-<text x="446" y="879" font-size="14" fill="#8B8F98" font-weight="400" data-max-width="278" >记录产生时未保留域名</text>
-<text x="446" y="899" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="80" >A</text>
-<text x="502" y="899" font-size="11.5" fill="#737A85" font-weight="400" data-max-width="70" >DoH</text>
-<text x="750" y="879" font-size="13" fill="#8B8F98" font-weight="500" data-max-width="174" >客户端未保留</text>
-<text x="750" y="899" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="174" >历史脱敏记录</text>
-<g id="query-result-9" aria-label="记录产生时未保留域名的解析详情"><title>记录产生时未保留域名的解析详情</title>
-<text x="955" y="879" font-size="12.5" fill="#8B8F98" font-weight="500" data-max-width="290" >结果未保留</text>
-<text x="955" y="899" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="290" >NOERROR · 历史脱敏记录</text>
-</g>
-<circle cx="1268" cy="874" r="3" fill="#8B8F98"/>
-<text x="1280" y="879" font-size="12.5" fill="#8B8F98" font-weight="500" data-max-width="133" >上游</text>
-<text x="1264" y="899" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="149" >路由未保留</text>
-<text x="1540" y="879" font-size="13.5" fill="#45484F" font-weight="500" data-max-width="117" text-anchor="end" class="numeric">16 ms</text>
-<text x="1540" y="899" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="117" text-anchor="end">主链耗时未保留</text>
-<line x1="285" y1="912" x2="1556" y2="912" stroke="#ECEEF1" />
-</g>
-<text x="286" y="950" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="320" >第 1–10 条，共 12,480 条</text>
-<rect x="1272" y="926" width="109" height="34" rx="6" fill="#FFFFFF" stroke="#DBDEE3" />
-<text x="1285" y="948" font-size="12.5" fill="#63666D" font-weight="400" data-max-width="66" >10 条/页</text>
-<svg x="1354" y="936" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronDown"/></svg>
-<g aria-label="上一页"><title>上一页</title><svg x="1405" y="934" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#C4C9D0" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronLeft"/></svg></g>
-<text x="1482" y="948" font-size="12.5" fill="#63666D" font-weight="500" data-max-width="96" text-anchor="middle">1 / 1,248</text>
-<g aria-label="下一页"><title>下一页</title><svg x="1533" y="934" width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="#63666D" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-ChevronRight"/></svg></g>
-<line x1="284" y1="988" x2="1557" y2="988" stroke="#E8E9EC" />
-<circle cx="288" cy="1013" r="3.5" fill="#20824E"/>
-<text x="302" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="280" >推送连接正常</text>
-<text x="1556" y="1018" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="450" text-anchor="end">最近更新 14:32:08</text>
-</g>
-<g id="query-detail-popover" role="group" aria-labelledby="detail-title detail-desc">
-<title id="detail-title">www.example.com. 的解析详情</title>
-<desc id="detail-desc">鼠标悬浮第一条记录的结果单元格，显示与触发项相连的非模态浮层，背景不变暗。该请求为 DoH A 查询，客户端 workstation，NOERROR，总耗时 28 毫秒，DNS 主链耗时 27.42 毫秒；返回一个 CNAME 与两个 A 记录。查看期间不插入新行，工具栏显示 8 条待更新记录。本图为静态交互示意。</desc>
-<defs><filter id="query-popover-shadow" x="-12%" y="-12%" width="124%" height="132%"><feDropShadow dx="0" dy="9" stdDeviation="16" flood-color="#202124" flood-opacity=".13"/></filter></defs>
-<g filter="url(#query-popover-shadow)">
-<rect x="820" y="423" width="736" height="492" rx="8" fill="#FFFFFF" stroke="#DDE1E7" />
-<path d="M1038,423 L1048,413 L1058,423" fill="#FFFFFF" stroke="#DDE1E7" stroke-linejoin="round"/>
-<line x1="1039" y1="423" x2="1057" y2="423" stroke="#FFFFFF" stroke-width="2"/>
-</g>
-<text x="844" y="455" font-size="17.5" fill="#202124" font-weight="600" data-max-width="370" >解析详情</text>
-<text x="844" y="484" font-size="14" fill="#45484F" font-weight="500" data-max-width="470" class="mono">www.example.com.</text>
-<rect x="1391" y="439" width="102" height="27" rx="5" fill="#EBF6EF" stroke="none" />
-<circle cx="1405" cy="452.5" r="3" fill="#20824E"/>
-<text x="1416" y="457" font-size="12" fill="#20824E" font-weight="500" data-max-width="72" >NOERROR</text>
-<g aria-label="关闭解析详情"><title>关闭解析详情</title><svg x="1522" y="443" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#8B8F98" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><use href="#icon-X"/></svg></g>
-<line x1="820" y1="503" x2="1556" y2="503" stroke="#E8E9EC" />
-<text x="844" y="532" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="77" >客户端</text>
-<text x="933" y="532" font-size="12.5" fill="#45484F" font-weight="500" data-max-width="245" >workstation</text>
-<text x="1200" y="532" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="80" >类型 / 协议</text>
-<text x="1292" y="532" font-size="12.5" fill="#45484F" font-weight="500" data-max-width="240" >A · DoH</text>
-<text x="844" y="562" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="77" >客户端 IP</text>
-<text x="933" y="562" font-size="12.5" fill="#45484F" font-weight="500" data-max-width="245" >192.0.2.101</text>
-<text x="1200" y="562" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="80" >响应来源</text>
-<text x="1292" y="562" font-size="12.5" fill="#45484F" font-weight="500" data-max-width="240" >上游 · 缓存未命中</text>
-<text x="844" y="592" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="77" >匹配策略</text>
-<text x="933" y="592" font-size="12.5" fill="#45484F" font-weight="500" data-max-width="245" >default</text>
-<text x="1200" y="592" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="80" >实际上游</text>
-<text x="1292" y="592" font-size="12.5" fill="#45484F" font-weight="500" data-max-width="240" >edge-primary</text>
-<text x="844" y="622" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="77" >目标上游</text>
-<text x="933" y="622" font-size="12.5" fill="#45484F" font-weight="500" data-max-width="245" >secure-group</text>
-<text x="1200" y="622" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="80" >耗时</text>
-<text x="1292" y="622" font-size="12.5" fill="#45484F" font-weight="500" data-max-width="240" >28 ms · 主链 27.42 ms</text>
-<line x1="844" y1="645" x2="1532" y2="645" stroke="#E8E9EC" />
-<text x="844" y="675" font-size="14" fill="#202124" font-weight="600" data-max-width="270" >响应记录</text>
-<text x="1532" y="675" font-size="12" fill="#8B8F98" font-weight="400" data-max-width="150" text-anchor="end">3 条记录</text>
-<rect x="844" y="690" width="688" height="32" rx="0" fill="#F7F8FA" stroke="none" />
-<text x="856" y="711" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="60" >类型</text>
-<text x="938" y="711" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="206" >名称</text>
-<text x="1174" y="711" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="234" >结果</text>
-<text x="1520" y="711" font-size="11.5" fill="#8B8F98" font-weight="500" data-max-width="75" text-anchor="end">TTL (s)</text>
-<text x="856" y="748" font-size="11.5" fill="#8065B5" font-weight="600" data-max-width="60" >CNAME</text>
-<text x="938" y="748" font-size="12" fill="#63666D" font-weight="400" data-max-width="208" class="mono">www.example.com.</text>
-<text x="1174" y="748" font-size="12" fill="#202124" font-weight="500" data-max-width="234" class="mono">edge.example.net.</text>
-<text x="1520" y="748" font-size="12" fill="#63666D" font-weight="400" data-max-width="72" text-anchor="end" class="numeric">300</text>
-<line x1="844" y1="764" x2="1532" y2="764" stroke="#ECEEF1" />
-<text x="856" y="790" font-size="11.5" fill="#1676D2" font-weight="600" data-max-width="60" >A</text>
-<text x="938" y="790" font-size="12" fill="#63666D" font-weight="400" data-max-width="208" class="mono">edge.example.net.</text>
-<text x="1174" y="790" font-size="12" fill="#202124" font-weight="500" data-max-width="234" class="mono">192.0.2.24</text>
-<text x="1520" y="790" font-size="12" fill="#63666D" font-weight="400" data-max-width="72" text-anchor="end" class="numeric">240</text>
-<line x1="844" y1="806" x2="1532" y2="806" stroke="#ECEEF1" />
-<text x="856" y="832" font-size="11.5" fill="#1676D2" font-weight="600" data-max-width="60" >A</text>
-<text x="938" y="832" font-size="12" fill="#63666D" font-weight="400" data-max-width="208" class="mono">edge.example.net.</text>
-<text x="1174" y="832" font-size="12" fill="#202124" font-weight="500" data-max-width="234" class="mono">192.0.2.25</text>
-<text x="1520" y="832" font-size="12" fill="#63666D" font-weight="400" data-max-width="72" text-anchor="end" class="numeric">240</text>
-<line x1="844" y1="848" x2="1532" y2="848" stroke="#ECEEF1" />
-<text x="844" y="887" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="360" >2026-09-05 14:32:08.482</text>
-<text x="1532" y="887" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="220" text-anchor="end">记录 ID · demo-query-0</text>
+<text x="844" y="485" font-size="13" fill="#63666D" font-weight="400" data-max-width="650" class="mono">www.example.com.</text>
+<line x1="820" y1="502" x2="1556" y2="502" stroke="#E8E9EC"/>
+<text x="844" y="529" font-size="13" fill="#202124" font-weight="600" data-max-width="650" >请求事实</text>
+<text x="844" y="557" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >原始客户端 ID</text>
+<text x="945" y="557" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >workstation</text>
+<text x="1192" y="557" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >请求 IP</text>
+<text x="1293" y="557" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >192.0.2.101</text>
+<text x="844" y="583" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >类型 / 协议</text>
+<text x="945" y="583" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >A · DoH</text>
+<text x="1192" y="583" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >总耗时 / 主链</text>
+<text x="1293" y="583" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >28 ms / 27.42 ms</text>
+<line x1="844" y1="600" x2="1532" y2="600" stroke="#E8E9EC"/>
+<text x="844" y="627" font-size="13" fill="#202124" font-weight="600" data-max-width="650" >当时策略匹配</text>
+<text x="844" y="655" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >匹配客户端 ID</text>
+<text x="945" y="655" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >workstation</text>
+<text x="1192" y="655" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >匹配来源</text>
+<text x="1293" y="655" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >ID 匹配</text>
+<text x="844" y="681" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >当前名称</text>
+<text x="945" y="681" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >工作站</text>
+<text x="1192" y="681" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >生效策略</text>
+<text x="1293" y="681" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >default</text>
+<text x="844" y="707" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >响应来源</text>
+<text x="945" y="707" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >上游 · 缓存未命中</text>
+<text x="1192" y="707" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >实际上游</text>
+<text x="1293" y="707" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >edge-primary</text>
+<text x="844" y="733" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >目标上游</text>
+<text x="945" y="733" font-size="12" fill="#202124" font-weight="400" data-max-width="232" >secure-group</text>
+<text x="1192" y="733" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="91" >配置状态</text>
+<text x="1293" y="733" font-size="12" fill="#202124" font-weight="400" data-max-width="237" >当前存在</text>
+<line x1="844" y1="752" x2="1532" y2="752" stroke="#E8E9EC"/>
+<text x="844" y="780" font-size="13" fill="#202124" font-weight="600" data-max-width="600" >响应记录</text>
+<text x="1532" y="780" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="100" text-anchor="end">3 条记录</text>
+<rect x="844" y="796" width="688" height="30" rx="0" fill="#F7F8FA" stroke="none" />
+<text x="856" y="817" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="200" >类型</text>
+<text x="938" y="817" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="200" >名称</text>
+<text x="1168" y="817" font-size="11.5" fill="#8B8F98" font-weight="400" data-max-width="200" >结果</text>
+<text x="1520" y="817" font-size="11" fill="#8B8F98" font-weight="400" data-max-width="62" text-anchor="end">TTL (s)</text>
+<text x="856" y="852" font-size="11" fill="#8065B5" font-weight="500" data-max-width="70" >CNAME</text>
+<text x="938" y="852" font-size="11" fill="#63666D" font-weight="400" data-max-width="219" class="mono">www.example.com.</text>
+<text x="1168" y="852" font-size="11" fill="#202124" font-weight="400" data-max-width="272" class="mono">edge.example.net.</text>
+<text x="1520" y="852" font-size="11" fill="#63666D" font-weight="400" data-max-width="61" text-anchor="end">300</text>
+<line x1="844" y1="869" x2="1532" y2="869" stroke="#E8E9EC"/>
+<text x="856" y="892" font-size="11" fill="#007AFF" font-weight="500" data-max-width="70" >A</text>
+<text x="938" y="892" font-size="11" fill="#63666D" font-weight="400" data-max-width="219" class="mono">edge.example.net.</text>
+<text x="1168" y="892" font-size="11" fill="#202124" font-weight="400" data-max-width="272" class="mono">192.0.2.24</text>
+<text x="1520" y="892" font-size="11" fill="#63666D" font-weight="400" data-max-width="61" text-anchor="end">240</text>
+<line x1="844" y1="909" x2="1532" y2="909" stroke="#E8E9EC"/>
+<text x="856" y="932" font-size="11" fill="#007AFF" font-weight="500" data-max-width="70" >A</text>
+<text x="938" y="932" font-size="11" fill="#63666D" font-weight="400" data-max-width="219" class="mono">edge.example.net.</text>
+<text x="1168" y="932" font-size="11" fill="#202124" font-weight="400" data-max-width="272" class="mono">192.0.2.25</text>
+<text x="1520" y="932" font-size="11" fill="#63666D" font-weight="400" data-max-width="61" text-anchor="end">240</text>
+<line x1="844" y1="949" x2="1532" y2="949" stroke="#E8E9EC"/>
+<text x="844" y="979" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="235" >2026-09-07 14:32:08.482</text>
+<text x="1532" y="979" font-size="10.5" fill="#8B8F98" font-weight="400" data-max-width="260" text-anchor="end">记录 ID · demo-query-0</text>
 </g>
 </svg>
