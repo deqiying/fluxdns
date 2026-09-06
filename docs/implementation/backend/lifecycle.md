@@ -65,7 +65,7 @@ Storage 停机先关闭 detail 输入并回收当前正在提交的 batch，不�
 
 ## 契约验证补充
 
-以下是 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 之后工作树的测试实现；运行结果与可重复入口统一见[契约验证运行入口](background-services.md#契约验证运行入口)。不覆盖真实 Unix 进程信号，也不把内部 worker 回收等同于 Supervisor 的失败升级。
+以下是 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 之后工作树的测试实现；运行结果与可重复入口统一见[契约验证运行入口](background-services.md#契约验证运行入口)。不覆盖真实 Unix 进程信号，也不把内部 worker 回收等同于 Supervisor 的失败升级。真实 PID 的首/第二信号、deadline 耗尽分类与退出后清理仍未验收，所需主机/权限、drain 同步证据、退出码断言见[Unix 执行单](../../plans/backend-contract-validation.md#106-v8-unix-进程信号)。
 
 | 用例 | 入口与同步点 | 断言与证据边界 |
 | --- | --- | --- |

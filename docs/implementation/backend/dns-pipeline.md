@@ -113,7 +113,7 @@ parallel 的上述择优不依赖 sink 是否存在。Positive 提前返回时�
 
 V3-H03 的截断 body 是**现状分类断言**：锁定 Reqwest 的 `Response::chunk` 将断流包装为 decode error，当前 `map_reqwest_error` 映射 `Internal`，DoH connector 将其视为不可重试；本轮没有改成 `Unavailable` 或扩大重试。若要将此类输入细分为协议错误或可重试读取失败，须先确认分类/策略，不把本表作为该调整已验收的依据。
 
-入站 TLS/PROXY 顺序、坏握手隔离以及 forwarded 信任链继续复用 [`transport/doh.rs`](../../../backend/src/transport/doh.rs) 的真实/合成夹具；SOCKS codec 的坏 reply、EOF 与凭据边界继续复用既有 suite。真实挂起拨号的在途取消、不同 OS 的网络终态和外部 TLS/代理仍未完成对应环境实测；不能用成功拨号、预过期预算或本地 handshake 结果替代这些证据。
+入站 TLS/PROXY 顺序、坏握手隔离以及 forwarded 信任链继续复用 [`transport/doh.rs`](../../../backend/src/transport/doh.rs) 的真实/合成夹具；SOCKS codec 的坏 reply、EOF 与凭据边界继续复用既有 suite。真实挂起拨号的在途取消、不同 OS 的网络终态仍无对应实测；具体目标阶段、环境输入和 body 分类决策见[网络分支执行单](../../plans/backend-contract-validation.md#102-v3-剩余网络分支)。不能用成功拨号、预过期预算或本地 handshake 结果替代这些证据。
 
 ### 真实会话边界
 
@@ -121,4 +121,4 @@ V3-H03 的截断 body 是**现状分类断言**：锁定 Reqwest 的 `Response::
 
 用例分别确认 1,023 和 1,024 个在途会话，超额请求保持等待；释放指定会话后，超额请求进入 core 并返回 HTTP/DNS 正确结果。停机后 request guard、Supervisor task 归零，并释放引用后重绑原端口。测试保留正式 `DEFAULT_REQUEST_TIMEOUT`，外层 60 秒 watchdog 与业务预算独立。
 
-本机三次独立容量/恢复运行不等于长期压力或完整 V6 验收；plain DoH 只借用 external endpoint 的 HTTP 层，未部署外部 TLS 终止代理。满载/reload/重连混合周期、OS 句柄趋势、慢握手/慢 body 组合和真实 external 信任链仍须按[活动计划](../../plans/backend-contract-validation.md)验收。
+本机三次独立容量/恢复运行不等于长期压力或完整 V6 验收；plain DoH 只借用 external endpoint 的 HTTP 层，未部署外部 TLS 终止代理。满载/reload/重连混合周期、OS 句柄趋势、慢握手/慢 body 组合的驱动仍待补；真实 external 入站与出站 SOCKS 各自还需核验代理环境，不能互相替代。逐项输入、步骤和关闭条件见[连接恢复与真实代理执行单](../../plans/backend-contract-validation.md#104-v6-连接恢复与真实代理)。

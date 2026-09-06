@@ -151,4 +151,14 @@ V4-S04 在修复前等待至 200ms watchdog，而没有在 20ms 调用预算内�
 
 本轮原始输出位于 `_fluxdns/contract-validation/20260905T161832928Z-43588/`（Local）及 `20260905T162144439Z-28988/`（Connections）。两个报告的源码前后 SHA-256 指纹均为 `5C3A2860385D2541F66B2C1EFE77CAC08C46F31039BC45235D835CA8A6E5F838`；源码未在两组验证间变化。修复前的复现错误与最小修复分别记录于本节和[生命周期](lifecycle.md#契约验证补充)，不拼接不同源码状态宣称最终通过。
 
-真实 Unix 主机、可控远程资源端点、获授权可丢弃故障介质和已冻结的长期负载/SLO 尚未提供；没有为补齐证据安装代理、驱动或工具。V5/V7/V8/V9/V10 以及 V6 external 的目标环境验收保持开放。已有 loopback 条件资源测试不代替远程验证，三个 SQLite trigger 周期不代替容量/故障恢复压测。
+下列范围未取得目标环境验收证据；“尚未指定/核验环境”不代表断言用户没有该环境。没有为补齐证据安装代理、驱动或工具。剩余实施与验收的完整步骤只在活动计划维护，本节保留证据边界及直达入口；开发前所需工具链、I/O、故障设施、代理/远程服务、Unix 和负载采样能力，按[测试开发依赖清单](../../plans/backend-contract-validation.md#11-测试开发依赖环境清单)逐项预检，不能只以端点可连接认定就绪。
+
+| 未验收范围 | 当前证据不能证明什么 | 具体执行单 |
+| --- | --- | --- |
+| 网络分支 | 已 poll read/握手取消不证明 OS connect 挂起取消或跨 OS 终态；截断 body 的 Internal/不可重试只是现状 | [V3：阶段证据与分类决策](../../plans/backend-contract-validation.md#102-v3-剩余网络分支) |
+| 真实介质故障 | SQLite trigger/锁不证明 disk-full、权限拒绝或介质 I/O 失败；尚无各故障类型的显式驱动和获准介质记录 | [V5：介质、阶段与恢复](../../plans/backend-contract-validation.md#103-v5-真实介质故障) |
+| 连接与代理 | 三次单轮容量测试不证明持续重连/reload/慢连接恢复；plain DoH 不证明 external TLS 终止链或真实出站 SOCKS | [V6：本机驱动与两类代理门槛](../../plans/backend-contract-validation.md#104-v6-连接恢复与真实代理) |
+| 远程资源 | loopback 条件请求不证明真实远程端点的 validator、pair/代际与刷新/reload 交错；尚无可控目标和编排驱动 | [V7：端点能力与双端证据](../../plans/backend-contract-validation.md#105-v7-可控远程资源) |
+| Unix 信号 | Windows/内部取消不能证明真实 PID 的首/第二信号、预算耗尽退出和端口/数据库终态 | [V8：进程、时序与退出分类](../../plans/backend-contract-validation.md#106-v8-unix-进程信号) |
+| 持续积压恢复 | 三个 trigger 周期不证明真实故障下的长期容量保护或 Cache/连接/owner 联合恢复；周期参数与联合驱动待补 | [V9：阈值前恢复与触限退出](../../plans/backend-contract-validation.md#107-v9-持续积压与联合恢复) |
+| 长期负载 | debug profile 不能推导 release 性能、生产 SLO 或 RSS/句柄长期稳定；构建对照、时长和阈值未冻结，长期驱动未实现 | [V10：参数冻结与通过/停止阈值](../../plans/backend-contract-validation.md#108-v10-长期负载与性能验收) |
