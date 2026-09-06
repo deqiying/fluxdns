@@ -1,0 +1,60 @@
+# 合成 loopback 夹具；从仓库根启动，运行文件仍位于根目录 _fluxdns 下。
+version: 1
+work:
+  path: ../../../_fluxdns/contract-load-service
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 18081
+  users: []
+dns: {}
+listener:
+  - name: dns-udp
+    type: udp
+    addresses: [127.0.0.1]
+    port: 15353
+    strategy: default
+  - name: dns-tcp
+    type: tcp
+    addresses: [127.0.0.1]
+    port: 15353
+    strategy: default
+  - name: dns-doh
+    type: doh
+    routes:
+      - path: /dns
+        strategy: default
+    endpoints:
+      - name: plain
+        addresses: [127.0.0.1]
+        port: 18080
+        tls:
+          mode: external
+        client_ip:
+          source: peer
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "192.0.2.25 load.test"
+hosts:
+  - type: const
+    name: synthetic
+    format: hosts
+    hosts: "192.0.2.25 load.test"
+outbound: []
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: synthetic
+    default_upstream: local
+clients: []

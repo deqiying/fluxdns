@@ -24,7 +24,7 @@
 | 首用户写回 | ConfigStore + source-preserving editor | setup，run 前恢复 journal | 本轮静态 | loader 为 8 MiB，writer 为 4 MiB；可加载不等于可写回 |
 | 热重载 | `process_owned_reload_change` | service-aware watcher | 本轮核对 guard | database、logs、webui enable/address/port/public_origin、dns.resolve_log 改变需重启；users 可动态更新 |
 
-本轮未执行 Cargo 或配置 validate。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)，后续矩阵见[契约验证开发计划](../plans/backend-contract-validation.md)。既定契约与代码冲突时须保留复现证据并明确修复边界，不仅修改字段说明来掩盖实现缺口。
+本轮未执行 Cargo 或配置 validate。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)，验证专项的已知边界见[验证范围与收口](backend/background-services.md#验证范围与收口)。既定契约与代码冲突时须保留复现证据并明确修复边界，不仅修改字段说明来掩盖实现缺口。
 
 ## 1. 配置模型概览
 

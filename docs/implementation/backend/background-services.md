@@ -7,6 +7,10 @@
 > 最后核对：2026-09-05（UTC；业务时间、升级矩阵、SQL/flush 停机交错与本机契约验证）
 >
 > 核对基线：`f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 加本次契约验证工作树
+>
+> 2026-09-06 增量核对：仅更新连接/负载驱动、命令和本次开发验证；其余正文保留上述历史核对范围
+>
+> 同日文档收口：经用户确认结束剩余验证专项，仅维护已知边界和引用；不新增运行结论，不重跑历史测试
 
 ## 资源准备与刷新
 
@@ -112,7 +116,7 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 | 关闭 telemetry | 12,000 | 0.143020 / 0.126200 / 0.255300 / 0.322900 | source accepted 12,100（含预热），0 series，无 telemetry 任务 |
 | 开启 telemetry | 12,000 | 0.153684 / 0.133200 / 0.255100 / 0.331400 | 同样 accepted 12,100，16 series，最终队列 0，输出 77 项，rejected_metrics 0 |
 
-本次不修改 Storage 积压预算，不把短时 profile 外推为稳定压力通过；积压保护与长期恢复的后续证据由[契约验证开发计划](../../plans/backend-contract-validation.md)的 V9/V10 跟踪。真实远程、真实磁盘满/权限/介质故障、Unix 信号、发布硬件 SLO 和长期 RSS/CPU 压测均未执行；SQLite 写锁和 trigger 故障只证明已列出的本地分支。
+本次不修改 Storage 积压预算，不把短时 profile 外推为稳定压力通过；积压保护与长期恢复的证据边界见[验证范围与收口](#验证范围与收口)。真实远程、真实磁盘满/权限/介质故障、Unix 信号、发布硬件 SLO 和长期 RSS/CPU 压测均未执行；SQLite 写锁和 trigger 故障只证明已列出的本地分支。
 
 ## 契约验证运行入口
 
@@ -145,20 +149,90 @@ V4-S04 在修复前等待至 200ms watchdog，而没有在 20ms 调用预算内�
 
 ### 环境与结果边界
 
-当前实施环境为 Windows x86_64，mise 解析 Rust 1.98.0，HEAD 为 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c`，验证包含本次未提交工作树；最终源码指纹和实际命令以本地报告为准。使用合成配置、动态 loopback 与本地 SQLite，不读取个人配置、凭据、共享数据库或任意公网端点。
+2026-09-05 的实施环境为 Windows x86_64，mise 解析 Rust 1.98.0，当时 HEAD 为 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c`，验证包含该批未提交工作树；最终源码指纹和实际命令以本地报告为准。使用合成配置、动态 loopback 与本地 SQLite，不读取个人配置、凭据、共享数据库或任意公网端点。
 
 2026-09-05（UTC）的 Local runner 实际结果：27 项新增默认测试重复 3 次均通过；完整回归 **669 通过、0 失败、3 忽略**（两个既有手动 profile 和新 V6-C01）。`cargo fmt --check` 与 `cargo check --locked` 同轮通过。Connections 模式另行重复 3 次通过，两个协议每轮均记录 accepted 1,023/1,024、超额等待 1、恢复 1、停机请求数 0 和端口重绑成功；这是独立重复运行，不是连续长期容量结论。
 
 本轮原始输出位于 `_fluxdns/contract-validation/20260905T161832928Z-43588/`（Local）及 `20260905T162144439Z-28988/`（Connections）。两个报告的源码前后 SHA-256 指纹均为 `5C3A2860385D2541F66B2C1EFE77CAC08C46F31039BC45235D835CA8A6E5F838`；源码未在两组验证间变化。修复前的复现错误与最小修复分别记录于本节和[生命周期](lifecycle.md#契约验证补充)，不拼接不同源码状态宣称最终通过。
 
-下列范围未取得目标环境验收证据；“尚未指定/核验环境”不代表断言用户没有该环境。没有为补齐证据安装代理、驱动或工具。剩余实施与验收的完整步骤只在活动计划维护，本节保留证据边界及直达入口；开发前所需工具链、I/O、故障设施、代理/远程服务、Unix 和负载采样能力，按[测试开发依赖清单](../../plans/backend-contract-validation.md#11-测试开发依赖环境清单)逐项预检，不能只以端点可连接认定就绪。
+### 验证范围与收口
 
-| 未验收范围 | 当前证据不能证明什么 | 具体执行单 |
+2026-09-06 经用户确认，结束后端契约验证专项的剩余测试工具开发与环境验收，移除活动计划及索引，不归档、不保留跳转副本。尚未实施的故障/远程/Unix 专用编排、联合恢复对账、OS 资源采样和长期性能对照不再作为本专项的活动待办；它们仍是未实现或未验收范围，不能标为完成或通过。今后需要重新开展时，按新的目标和授权另行确定范围，不因本次收口自动执行。
+
+已实现的生产修复、现有测试和 `contract-load` 工具保留，入口与实际证据继续由本页、[DNS 管线](dns-pipeline.md#契约验证补充)及[生命周期](lifecycle.md#契约验证补充)维护。配置语义、异步响应主链、owner/失败升级策略、共享 deadline 与资源预算不变；body 断流维持现有 `Internal`/不可重试行为，具体限制见[Adapter 支持矩阵](dns-pipeline.md#adapter-支持矩阵)，不再保留分类调整待办。
+
+下表集中记录未验收边界。“尚未指定/核验环境”不代表断言用户没有环境；结束专项也不等于取得目标环境证据。本次未安装代理、驱动或工具，后续任何实际实验仍遵守[环境规范](../../rules/environment-usage.md)和[本地测试规范](../../rules/local-testing.md)中的工具、授权及本地数据边界。
+
+| 未验收范围 | 当前证据不能证明什么 | 实现与证据入口 |
 | --- | --- | --- |
-| 网络分支 | 已 poll read/握手取消不证明 OS connect 挂起取消或跨 OS 终态；截断 body 的 Internal/不可重试只是现状 | [V3：阶段证据与分类决策](../../plans/backend-contract-validation.md#102-v3-剩余网络分支) |
-| 真实介质故障 | SQLite trigger/锁不证明 disk-full、权限拒绝或介质 I/O 失败；尚无各故障类型的显式驱动和获准介质记录 | [V5：介质、阶段与恢复](../../plans/backend-contract-validation.md#103-v5-真实介质故障) |
-| 连接与代理 | 三次单轮容量测试不证明持续重连/reload/慢连接恢复；plain DoH 不证明 external TLS 终止链或真实出站 SOCKS | [V6：本机驱动与两类代理门槛](../../plans/backend-contract-validation.md#104-v6-连接恢复与真实代理) |
-| 远程资源 | loopback 条件请求不证明真实远程端点的 validator、pair/代际与刷新/reload 交错；尚无可控目标和编排驱动 | [V7：端点能力与双端证据](../../plans/backend-contract-validation.md#105-v7-可控远程资源) |
-| Unix 信号 | Windows/内部取消不能证明真实 PID 的首/第二信号、预算耗尽退出和端口/数据库终态 | [V8：进程、时序与退出分类](../../plans/backend-contract-validation.md#106-v8-unix-进程信号) |
-| 持续积压恢复 | 三个 trigger 周期不证明真实故障下的长期容量保护或 Cache/连接/owner 联合恢复；周期参数与联合驱动待补 | [V9：阈值前恢复与触限退出](../../plans/backend-contract-validation.md#107-v9-持续积压与联合恢复) |
-| 长期负载 | debug profile 不能推导 release 性能、生产 SLO 或 RSS/句柄长期稳定；构建对照、时长和阈值未冻结，长期驱动未实现 | [V10：参数冻结与通过/停止阈值](../../plans/backend-contract-validation.md#108-v10-长期负载与性能验收) |
+| 网络分支 | 已 poll read/握手取消不证明 OS connect 挂起取消或跨 OS 终态；截断 body 的 Internal/不可重试按现状保留 | [Adapter 支持矩阵](dns-pipeline.md#adapter-支持矩阵) |
+| 真实介质故障 | SQLite trigger/锁不证明 disk-full、权限拒绝或介质 I/O 失败；没有各故障类型的显式驱动和获准介质记录 | [Storage 用例](#storage-用例)、[Cache persistence](#cache-persistence) |
+| 连接与代理 | 已补连续重连/reload/rebind 与慢 body/畸形连接；不证明 OS 句柄趋势、TLS 混合容量、external TLS 终止链或真实出站 SOCKS | [真实会话边界](dns-pipeline.md#真实会话边界) |
+| 远程资源 | loopback 条件请求不证明真实远程端点的 validator、pair/代际与刷新/reload 交错；没有可控目标和专用编排驱动 | [资源准备与刷新](#资源准备与刷新) |
+| Unix 信号 | Windows/内部取消不能证明真实 PID 的首/第二信号、预算耗尽退出和端口/数据库终态；没有真实信号编排驱动 | [Shutdown 与错误](lifecycle.md#shutdown-与错误) |
+| 持续积压恢复 | 已有多阶段/多周期流量入口；三个 trigger 周期或流量阶段切换不证明真实故障下的长期容量保护与 Cache/连接/owner 联合恢复 | [Storage 用例](#storage-用例)、[跨平台负载驱动](#跨平台负载驱动) |
+| 长期负载 | 已有跨平台 Rust 发送与有界报告入口；短时 smoke 不证明 release SLO 或 RSS/句柄长期稳定，对照编排、资源采样和阈值未冻结 | [跨平台负载驱动](#跨平台负载驱动)、[本次开发验证](#本次开发验证) |
+
+### 跨平台负载驱动
+
+[`contract-load`](../../../backend/examples/contract-load/main.rs) 是独立 Cargo example，可直接编译为 Windows、Linux、macOS 等目标支持的可执行文件。它只使用现有 Tokio、Reqwest/Rustls、Hickory、Serde 和 SHA-256 依赖，不改变主程序 CLI、生产 YAML、发布 workflow 或默认二进制集合；运行编译后的文件不要求安装 Rust 或 PowerShell。没有新增 OS 专属调用，实际编译平台仍以本次记录为准。
+
+从仓库根目录构建；跨目标构建须事先具备对应 target/linker，不自动安装：
+
+```powershell
+cargo build --manifest-path backend/Cargo.toml --locked --release --example contract-load
+cargo build --manifest-path backend/Cargo.toml --locked --release --example contract-load --target <target-triple>
+```
+
+本机产物为 `backend/target/release/examples/contract-load[.exe]`；显式 target 的产物多一层 `<target-triple>/`。命令为 `contract-load CONFIG.json [REPORT_ROOT]`，报告根目录默认 `_fluxdns/contract-validation/`。每次创建独立目录，已有文件不覆盖，不自动启动/终止服务、修改配置、施加故障或触发 reload。
+
+合成 [service.yaml](../../../backend/examples/contract-load/service.yaml) 和 [smoke.json](../../../backend/examples/contract-load/smoke.json) 使用 loopback 端口 15353/18080、合成 hosts 和根目录 `_fluxdns/contract-load-service/`；它们不是个人配置或服务默认配置。先核对端口空闲，在单独终端启动合成服务，再显式运行驱动；结束后关闭本次服务：
+
+```powershell
+cargo run --manifest-path backend/Cargo.toml --locked --bin fluxdns -- run --config backend/examples/contract-load/service.yaml
+cargo run --manifest-path backend/Cargo.toml --locked --example contract-load -- backend/examples/contract-load/smoke.json
+```
+
+配置由 [`config.rs`](../../../backend/examples/contract-load/config.rs) 严格反序列化，未知字段/缺失参数拒绝，未提供隐式长时负载。自定义配置和原始结果保持在 `_fluxdns/`：
+
+| 字段 | 行为与边界 |
+| --- | --- |
+| `targets` | 1–16 个不重复 ASCII `alias`，协议为 `udp`、`tcp`、`doh-get`、`doh-post`；UDP/TCP 要求显式 IP:port，DoH 要求 HTTP/HTTPS URL，不支持 userinfo、预置 query、fragment |
+| `queries` | 1–4,096 条固定 `name`、`record_type`、`expected_rcode`、`min_answers`；轮流跨 target/query 组合，不记录原始域名/地址 |
+| `phases` / `cycles` | phase 显式给 `alias`、`duration_ms`、`qps`；1–64 个阶段重复 1–100 轮，总发送时长最多 24 小时，QPS 是所有 target 的总量 |
+| `concurrency` / `reuse_connections` | 并发与 target 数乘积最多 4,096；TCP/UDP 在 worker 内按 target 复用，DoH 复用有界空闲池；关闭复用时每次使用新连接 |
+| `timeout_ms` | 1–60,000ms；拨号、TLS、写入、读取共用同一次 timeout，错误/超时后的 TCP/UDP session 丢弃，无额外重试 |
+| `sample_interval_ms` | 100–60,000ms，输出累计完成数、错误、在途数、漏发数和成功延迟；桶/汇总内存有界，不保存逐请求样本 |
+| `max_errors` / `max_scheduler_lag_ms` | 失败数超过上限停止新增请求；发送调度滞后超过显式 1–60,000ms 上限也停止；已有请求只等待原预算回收 |
+| `seed` | 固定 query 起点和 DNS ID 序列，不代表随机工作负载 |
+
+发送采用 open-loop 定时，不追赶历史 tick。过期 tick 计入 `skipped_schedule`，无空闲 worker 计入 `skipped_capacity`；不能把发送侧过载隐藏为较低的目标 QPS。阶段切换不重置在途请求预算，配置的协议比例为 target 等频轮转，负答案须在查询中显式给定期望 RCODE。
+
+[`exchange.rs`](../../../backend/examples/contract-load/exchange.rs) 使用真实 UDP/TCP/HTTP I/O 和 Hickory wire 校验。DoH 禁用系统代理和重定向，保持 TLS 身份校验，使用 HTTP/1.x；响应要求 HTTP 200、正确 media type、最多 65,535 字节。所有协议检查 QR、opcode、ID、question、RCODE、最低答案数、完整 wire，拒绝 TC 截断，不自动发 TCP fallback。只校验这些字段，不证明答案地址逐项正确或缓存/Storage 已对账。
+
+[`report.rs`](../../../backend/examples/contract-load/report.rs) 输出 `samples.jsonl` 和最终 `report.json`，保留 OS/架构、debug 标记、driver/编译时 Cargo.lock/配置 SHA-256、阶段、参数、分协议结果、错误类别/OS code 和清理状态；不输出目标 URL、qname、原始 wire。延迟 p50/p95/p99 只包含成功请求，是固定对数桶的微秒上界；没有成功样本时为 `null`，失败/超时另行计数。`completed_qps` 包含末尾请求回收时间，不能将其当作阶段瞬时 QPS。
+
+Ctrl-C 停止发送并有界回收。退出码 0 表示测量完成且有成功样本、无请求失败/漏发/未归账项；1 表示失败、漏发或提前停止；2 表示配置、I/O 或驱动错误。进程被强制杀死时可能只有 JSONL，不能认为已有完整结果。所有报告固定为 `measurement_only`；CPU/RSS/句柄/磁盘趋势、目标二进制/配置指纹、故障控制、数据对账、候选/对照自动编排仍由外部场景提供，不能仅凭驱动退出 0 关闭 V9/V10。
+
+### 本次开发验证
+
+2026-09-06 按用户调整，仅将可本机执行的编译、轻量驱动验证与文档检查作为本次代码交付检查；不强制新增单元测试或运行全量回归。环境缺口不阻塞本次开发，但仍不称为验收通过。
+
+已执行合成 loopback 的 UDP、TCP、DoH GET/POST 两轮稳态/增压/恢复短时测量：共 160 次请求，每协议 40 次，全部成功，错误、调度漏发、并发漏发和未归账项均为 0，驱动清理完成。原始结果位于 `_fluxdns/contract-validation/load-1788667044207-61892/`；这是 debug 驱动正确性 smoke，不是发布性能结论。合成服务只由本次验证进程创建并在结束后清理，未使用个人配置或远程目标。
+
+最终 Windows x86_64 release binary 再次运行四协议短时检查：连接复用模式 160/160 成功，禁用复用模式 80/80 成功，无漏发/未归账项；故意不匹配的 RCODE 产生 `dns_answer`、`error_limit` 和退出码 1，空目标配置在发送前返回退出码 2。三个报告目录分别为 `_fluxdns/contract-validation/load-1788667857317-37600/`、`load-1788667863443-24896/`、`load-1788667866512-11436/`；所有已启动请求均完成回收。正常测量和预期失败分别记录，不将错误场景的非零退出码当作驱动异常。
+
+扩展后的 Connections 入口以 `-Repeat 3 -TimeoutSeconds 180` 重复三次通过，每次包含 TCP/plain DoH 各三轮连续容量恢复、失败 reload、成功 reuse/rebind 和坏/慢连接子集。原始命令、前后源码指纹及结果位于 `_fluxdns/contract-validation/20260906T035742850Z-54984/`。初次扩展曾在第三轮等待新 session 超时；最终夹具增加 EOF/reset 终态等待，不把 request guard 归零直接作为下一轮的会话释放证据；未据此修改生产 listener。
+
+本次实际执行的静态/构建检查：
+
+| 检查 | 结果与范围 |
+| --- | --- |
+| `cargo fmt --manifest-path backend/Cargo.toml -- --check` | 通过 |
+| `cargo check --manifest-path backend/Cargo.toml --locked --all-targets` | 通过，包含主程序、既有测试和新增 example 的编译检查 |
+| `cargo clippy --manifest-path backend/Cargo.toml --locked --bin fluxdns --example contract-load -- -D warnings` | 通过，主程序与独立负载驱动 |
+| `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets -- -D warnings` | 未通过：既有 `storage/sqlite.rs` 的 `DetailSqlTestStage`/`TestGate` 字段触发 `clippy::type_complexity`；本轮未改该文件，不顺手重构 |
+| `cargo build --manifest-path backend/Cargo.toml --locked --release --bin fluxdns --example contract-load` | 通过，生成 `backend/target/release/fluxdns.exe` 和 `backend/target/release/examples/contract-load.exe` |
+| 文档检查器与 `git diff --check` | 通过，未验证外链或目标环境语义 |
+
+本机已安装的 target 只有 `x86_64-pc-windows-msvc`，本次仅实际编译该目标；未安装其他 target/linker，也未宣称 Linux/macOS 交叉编译、Unix 进程信号、真实代理/介质故障或长期性能验收通过。默认全量单元测试未重跑，没有新增单元测试框架或扩大默认测试集合；生产配置、Cargo.lock、依赖和发布矩阵未修改。

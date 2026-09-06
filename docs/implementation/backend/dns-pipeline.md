@@ -7,6 +7,10 @@
 > 最后核对：2026-09-05（UTC；late-window 组合、本地 adapter 与显式会话容量验证）
 >
 > 核对基线：`f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 加本次契约验证工作树
+>
+> 2026-09-06 增量核对：仅更新真实会话边界的连续恢复与 reload 驱动；其余正文保留上述历史核对范围
+>
+> 同日文档收口：结束剩余验证专项，维持 body 断流分类与重试行为；本次仅核对源码分类和文档引用，未新增运行验收
 
 ## 入口与调用链
 
@@ -72,7 +76,7 @@ parallel 的上述择优不依赖 sink 是否存在。Positive 提前返回时�
 | --- | --- | --- | --- | --- |
 | UDP/TCP/DoH | `transport/udp.rs`、`tcp.rs`、`doh.rs` | service 的 typed binding 与 session loop | 本次完整测试包含跨 UDP/TCP/DoH GET/POST 用例 | 本地 loopback，不是远程矩阵；DoH 入站非 HTTP/2 |
 | TLS / 客户端地址 | system socket TLS、DoH forwarded/PROXY parser | DoH accept 后先可信 PROXY、再 TLS、再 HTTP | 本轮核对生产分支 | 真实代理、证书和故障组合仍需环境验收 |
-| Moka / SQLite cache | `build_cache_facade`、`initialize_cache_persistence`、增量 SQLite writer | async prepare 默认构造 | schema v1 升级、增量写触发器、失败回滚与已有 adapter 契约测试 | 保留插入时间淘汰；真实 disk-full 与组合 late-window 的后续证据见[契约验证开发计划](../../plans/backend-contract-validation.md) |
+| Moka / SQLite cache | `build_cache_facade`、`initialize_cache_persistence`、增量 SQLite writer | async prepare 默认构造 | schema v1 升级、增量写触发器、失败回滚与已有 adapter 契约测试 | 保留插入时间淘汰；组合证据见[Late-window 与 owner](#late-window-与-owner)，真实介质限制见[验证范围与收口](background-services.md#验证范围与收口) |
 | Policy -> 出站 | core -> registry -> protocol-independent connector | 正式配置构造支持真实 HTTP/代理路径 | 本轮静态，无远程请求 | 不等同所有 SOCKS/Host/SNI 组合已实测 |
 | 单次完成事件 | service instrumented core、resolution publisher | core 返回后、编码前无等待移交 | 本轮核对调用位置 | ingress 满会出现可观测 gap，不能承诺零丢失 |
 | bootstrap 地址缓存 | 配置绑定 resolver、绝对到期点、查填许可 | 两个配置工厂均装配，direct/HTTPS/SOCKS5 共用 | [address_cache_tests.rs](../../../backend/src/upstream/address_cache_tests.rs)；registry 的正式 hosts bootstrap/代理测试 | 单 connector 单项；不缓存 system lookup、负答案或过期地址 |
@@ -111,14 +115,16 @@ parallel 的上述择优不依赖 sink 是否存在。Positive 提前返回时�
 | TLS / 响应头等待 | V3-D01 `contract_v3_tls_and_headers_wait_share_original_deadline` | 服务端实际收到 ClientHello 或完整 HTTP 请求后暂停；取消原因与原预算超时分别验证，不用预取消冒充在途取消 |
 | SOCKS 分段预算 | V3-D02 `socks5::tests::contract_v3_socks_stages_preserve_dial_budget_and_cancellation` | 真实 dialer/stream，依次在 method、userpass、CONNECT 卡住响应；每次 read/write 核对与拨号同一绝对 deadline，已完成阶段不重置预算，取消与超时各覆盖三个位置 |
 
-V3-H03 的截断 body 是**现状分类断言**：锁定 Reqwest 的 `Response::chunk` 将断流包装为 decode error，当前 `map_reqwest_error` 映射 `Internal`，DoH connector 将其视为不可重试；本轮没有改成 `Unavailable` 或扩大重试。若要将此类输入细分为协议错误或可重试读取失败，须先确认分类/策略，不把本表作为该调整已验收的依据。
+V3-H03 的截断 body 是**现状分类断言**：锁定 Reqwest 的 `Response::chunk` 将断流包装为 decode error，当前 `map_reqwest_error` 映射 `Internal`，DoH connector 将其视为不可重试。2026-09-06 收口时明确维持这一已知限制，不改成 `Unavailable`、不扩大重试，也不再将分类调整列为本专项的待办。将来若需细分协议错误与可重试读取失败，应独立确认策略和回归范围；本表不是该调整已实现或已验收的依据。
 
-入站 TLS/PROXY 顺序、坏握手隔离以及 forwarded 信任链继续复用 [`transport/doh.rs`](../../../backend/src/transport/doh.rs) 的真实/合成夹具；SOCKS codec 的坏 reply、EOF 与凭据边界继续复用既有 suite。真实挂起拨号的在途取消、不同 OS 的网络终态仍无对应实测；具体目标阶段、环境输入和 body 分类决策见[网络分支执行单](../../plans/backend-contract-validation.md#102-v3-剩余网络分支)。不能用成功拨号、预过期预算或本地 handshake 结果替代这些证据。
+入站 TLS/PROXY 顺序、坏握手隔离以及 forwarded 信任链继续复用 [`transport/doh.rs`](../../../backend/src/transport/doh.rs) 的真实/合成夹具；SOCKS codec 的坏 reply、EOF 与凭据边界继续复用既有 suite。真实挂起拨号的在途取消、不同 OS 的网络终态仍无对应实测；相关专项已结束，未验收事实保留在[验证范围与收口](background-services.md#验证范围与收口)。不能用成功拨号、预过期预算或本地 handshake 结果替代这些证据。
 
 ### 真实会话边界
 
 显式入口为 `pwsh -File script/test-backend-contracts.ps1 -Suite Connections`。V6-C01 位于 [`service.rs`](../../../backend/src/service.rs)，默认 `ignore`，只有显式选择才运行。使用真实 TCP/plain DoH listener 和受控 core；每条请求进入 core 时交出独立 oneshot，区分“TCP connect 已完成”与“已 accept 并进入请求处理”。
 
-用例分别确认 1,023 和 1,024 个在途会话，超额请求保持等待；释放指定会话后，超额请求进入 core 并返回 HTTP/DNS 正确结果。停机后 request guard、Supervisor task 归零，并释放引用后重绑原端口。测试保留正式 `DEFAULT_REQUEST_TIMEOUT`，外层 60 秒 watchdog 与业务预算独立。
+用例在同一 service 内连续执行三轮 1,023/1,024 个在途会话与超额等待；每轮释放指定会话后，超额请求进入 core 并返回 HTTP/DNS 正确结果。下一轮前等待连接 EOF/reset 和 request guard 归零，避免把请求结束等同于 session 已回收。第二轮满载时执行失败 rebind，确认旧 revision/请求不变；第三轮仍有旧请求时成功复用 listener 换代，再执行成功 rebind。新的入口混合 8 条慢 body/截断 frame 与 8 条畸形连接，并确认 UDP/TCP/DoH GET/POST 的有效回答一致。
 
-本机三次独立容量/恢复运行不等于长期压力或完整 V6 验收；plain DoH 只借用 external endpoint 的 HTTP 层，未部署外部 TLS 终止代理。满载/reload/重连混合周期、OS 句柄趋势、慢握手/慢 body 组合的驱动仍待补；真实 external 入站与出站 SOCKS 各自还需核验代理环境，不能互相替代。逐项输入、步骤和关闭条件见[连接恢复与真实代理执行单](../../plans/backend-contract-validation.md#104-v6-连接恢复与真实代理)。
+停机后当前/历史 request guard 和 Supervisor task 归零，释放引用后原端口和 rebind 端口均可重绑。测试保留正式 `DEFAULT_REQUEST_TIMEOUT`，外层 60 秒 watchdog 与业务预算独立。此驱动仍是显式选择，不扩大默认单元测试集合。
+
+本机运行不等于长期压力或完整 V6 验收；plain DoH 只借用 external endpoint 的 HTTP 层，未部署外部 TLS 终止代理。慢 TLS/坏证书与容量的联合周期、OS 句柄趋势、真实 external 入站与出站 SOCKS 仍未验收。2026-09-06 经用户确认结束剩余验证专项，相关边界见[验证范围与收口](background-services.md#验证范围与收口)，不将跳过改写为通过。实际运行结果统一见[后台服务](background-services.md#本次开发验证)。

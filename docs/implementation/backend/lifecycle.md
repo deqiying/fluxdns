@@ -65,7 +65,7 @@ Storage 停机先关闭 detail 输入并回收当前正在提交的 batch，不�
 
 ## 契约验证补充
 
-以下是 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 之后工作树的测试实现；运行结果与可重复入口统一见[契约验证运行入口](background-services.md#契约验证运行入口)。不覆盖真实 Unix 进程信号，也不把内部 worker 回收等同于 Supervisor 的失败升级。真实 PID 的首/第二信号、deadline 耗尽分类与退出后清理仍未验收，所需主机/权限、drain 同步证据、退出码断言见[Unix 执行单](../../plans/backend-contract-validation.md#106-v8-unix-进程信号)。
+以下是 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 之后工作树的测试实现；运行结果与可重复入口统一见[契约验证运行入口](background-services.md#契约验证运行入口)。不覆盖真实 Unix 进程信号，也不把内部 worker 回收等同于 Supervisor 的失败升级。真实 PID 的首/第二信号、deadline 耗尽分类与退出后清理仍未验收；相关专项已按用户要求结束，保留[验证范围与收口](background-services.md#验证范围与收口)中的已知边界，不生成替代通过记录。
 
 | 用例 | 入口与同步点 | 断言与证据边界 |
 | --- | --- | --- |
@@ -85,4 +85,4 @@ V2-O01 曾在修复前稳定复现 active 为 1 而非 0：[`LateCacheFinalizer:
 
 V1-R01 还复现了 service reload 等待 mutation gate 不受调用方 deadline 限制：20ms 预算一直等到 200ms 测试 watchdog。[`DnsService::reload_prepared`](../../../backend/src/service.rs) 现在在 listener 复用和 rebind 的 activation 等待外使用原 deadline，超时返回 `ServiceReloadError::Timeout`，不发布候选、不增加重试、不改变旧 runtime。此边界不承诺强行抢占已经进入 OS 的调用或同步 activation。
 
-现有 serialized activation CAS、旧 scoped task 退出、Supervisor panic 归因以及进程 panic hook 测试由全量回归复用。上述 owner 用例区分 adapter panic 与 worker 返回后的 join panic，未引入统一自动恢复策略；真实 Unix 首/双信号及其在途组合仍按[活动计划](../../plans/backend-contract-validation.md)保留。
+现有 serialized activation CAS、旧 scoped task 退出、Supervisor panic 归因以及进程 panic hook 测试由全量回归复用。上述 owner 用例区分 adapter panic 与 worker 返回后的 join panic，未引入统一自动恢复策略；真实 Unix 首/双信号及其在途组合保留为未验收边界，不再作为本专项的活动待办。

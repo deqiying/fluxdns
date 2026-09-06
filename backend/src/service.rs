@@ -3747,6 +3747,16 @@ clients: []
         doh_port: u16,
     ) -> Arc<crate::config::resolve::ResolvedConfig> {
         let work_path = crate::config::test_support::absolute_path("service-cross-transport");
+        cross_transport_runtime_config_at(&work_path, udp_port, tcp_port, doh_port)
+    }
+
+    /// reload 夹具固定进程级路径，只改变本轮需要重绑的 listener。
+    fn cross_transport_runtime_config_at(
+        work_path: &str,
+        udp_port: u16,
+        tcp_port: u16,
+        doh_port: u16,
+    ) -> Arc<crate::config::resolve::ResolvedConfig> {
         let large_hosts = (1..=64)
             .map(|suffix| format!("198.51.100.{suffix} large.transport.test"))
             .collect::<Vec<_>>()
@@ -3921,14 +3931,39 @@ clients: []
         }
     }
 
-    // V6-C01：真实连接建立与 session accept 分开观察；不要求超额 TCP connect 失败。
+    /// 每轮等待对端 EOF/reset，避免把 request guard 归零误当作 session 已释放。
+    async fn close_contract_connection(mut connection: TcpStream) {
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            connection.shutdown().await?;
+            let mut response = Vec::new();
+            connection.read_to_end(&mut response).await?;
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .expect("connection did not reach EOF/reset within the cycle budget");
+        if let Err(error) = result {
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::NotConnected
+                ),
+                "unexpected connection terminal error: {error}"
+            );
+        }
+    }
+
+    // V6-C01/R01：在同一 service 内重复释放/重连，再覆盖满载失败 reload 与换代恢复。
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    #[ignore = "explicit local TCP/DoH 1024-session capacity and recovery test"]
+    #[ignore = "explicit local TCP/DoH 1024-session cycles and reload recovery test"]
     async fn contract_v6_real_session_capacity_releases_and_recovers() {
         tokio::time::timeout(Duration::from_secs(60), async {
             for doh in [false, true] {
                 let ports = available_transport_ports();
-                let config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
+                let work_path = crate::config::test_support::absolute_path("contract-connections");
+                let config = cross_transport_runtime_config_at(&work_path, ports[0], ports[1], ports[2]);
                 let prepared = PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(1)).unwrap();
                 let bound = crate::runtime::bind_prepared(prepared, &SystemSocketFactory::new(),
                     Deadline::new(Instant::now() + Duration::from_secs(5)), &Cancellation::new(),
@@ -3948,59 +3983,131 @@ clients: []
                     (query.len() as u16).to_be_bytes().to_vec()
                 };
                 wire.extend_from_slice(&query);
-                let mut connections = Vec::new();
-                let mut releases = Vec::new();
                 assert_eq!(MAX_CONCURRENT_STREAM_SESSIONS, 1024);
-                for index in 0..MAX_CONCURRENT_STREAM_SESSIONS {
-                    let mut connection = TcpStream::connect(address).await.unwrap();
-                    connection.write_all(&wire).await.unwrap();
-                    let release = tokio::time::timeout(Duration::from_secs(2), sessions.recv()).await.unwrap().unwrap();
-                    connections.push(connection);
-                    releases.push(Some(release));
-                    if index == 1022 || index == 1023 {
-                        assert_eq!(runtime.active_requests(), index + 1);
+                for cycle in 1..=3 {
+                    let mut connections = Vec::new();
+                    let mut releases = Vec::new();
+                    for index in 0..MAX_CONCURRENT_STREAM_SESSIONS {
+                        let mut connection = TcpStream::connect(address).await.unwrap();
+                        connection.write_all(&wire).await.unwrap();
+                        let release = tokio::time::timeout(Duration::from_secs(2), sessions.recv()).await
+                            .unwrap_or_else(|_| panic!("session accept timed out: cycle={cycle} index={index} active={} tasks={}",
+                                runtime.active_requests(), service.supervisor.task_count())).unwrap();
+                        connections.push(connection);
+                        releases.push(Some(release));
+                        if index == 1022 || index == 1023 {
+                            assert_eq!(runtime.active_requests(), index + 1);
+                        }
                     }
+                    let mut queued = TcpStream::connect(address).await.unwrap();
+                    queued.write_all(&wire).await.unwrap();
+                    assert!(tokio::time::timeout(Duration::from_millis(30), sessions.recv()).await.is_err(),
+                        "request beyond session capacity must remain outside the core");
+                    assert_eq!(runtime.active_requests(), 1024);
+                    if cycle == 2 {
+                        let occupied = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+                        let failed = PreparedRuntime::prepare_with_policy_core(
+                            cross_transport_runtime_config_at(&work_path, occupied.local_addr().unwrap().port(), ports[1], ports[2]),
+                            RuntimeRevision(2),
+                        ).unwrap();
+                        assert!(matches!(
+                            service.reload_prepared(failed, &crate::runtime::SystemSocketFactory::new(),
+                                Deadline::new(Instant::now() + Duration::from_secs(2)), Cancellation::new()).await,
+                            Err(super::ServiceReloadError::Bind(_))
+                        ));
+                        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+                        assert!(!runtime.is_draining());
+                        assert_eq!(runtime.active_requests(), 1024);
+                    }
+                    // 精确释放一个已确认进入 core 的连接，不把 backlog 当作已 accept 的 session。
+                    releases[0].take().unwrap().send(()).unwrap();
+                    connections[0].shutdown().await.unwrap();
+                    let queued_release = tokio::time::timeout(Duration::from_secs(2), sessions.recv()).await.unwrap().unwrap();
+                    assert_eq!(runtime.active_requests(), 1024);
+                    queued_release.send(()).unwrap();
+                    let mut response = Vec::new();
+                    if doh {
+                        tokio::time::timeout(Duration::from_secs(2), queued.read_to_end(&mut response)).await.unwrap().unwrap();
+                        let split = response.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap();
+                        assert!(response.starts_with(b"HTTP/1.1 200"));
+                        response = response[split + 4..].to_vec();
+                    } else {
+                        let length = tokio::time::timeout(Duration::from_secs(2), queued.read_u16()).await.unwrap().unwrap();
+                        response.resize(usize::from(length), 0);
+                        queued.read_exact(&mut response).await.unwrap();
+                    }
+                    let response = Message::from_vec(&response).unwrap();
+                    assert_eq!(response.metadata.id, 42);
+                    assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+                    if cycle == 3 {
+                        // 仍有 1023 个旧请求时换代；成功 reload 必须取消旧 owner 并恢复新请求。
+                        let candidate = PreparedRuntime::prepare_with_policy_core(
+                            cross_transport_runtime_config_at(&work_path, ports[0], ports[1], ports[2]), RuntimeRevision(2),
+                        ).unwrap();
+                        service.reload_prepared(candidate, &crate::runtime::SystemSocketFactory::new(),
+                            Deadline::new(Instant::now() + Duration::from_secs(2)), Cancellation::new()).await.unwrap();
+                        assert!(runtime.is_draining());
+                        assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+                    } else {
+                        for release in releases.iter_mut().filter_map(Option::take) {
+                            release.send(()).unwrap();
+                        }
+                    }
+                    for connection in connections {
+                        close_contract_connection(connection).await;
+                    }
+                    close_contract_connection(queued).await;
+                    drop(releases);
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        while runtime.active_requests() != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("cycle must release all old request guards");
+                    println!("V6-C01 cycle={cycle} protocol={} accepted=1023,1024 backlog=1 recovered=1 old_requests=0",
+                        if doh { "plain-doh" } else { "tcp" });
                 }
-                let mut queued = TcpStream::connect(address).await.unwrap();
-                queued.write_all(&wire).await.unwrap();
-                assert!(tokio::time::timeout(Duration::from_millis(30), sessions.recv()).await.is_err(),
-                    "request beyond session capacity must remain outside the core");
-                assert_eq!(runtime.active_requests(), 1024);
-                // 精确释放一个已确认进入 core 的连接，不把 backlog 当作已 accept 的 session。
-                releases[0].take().unwrap().send(()).unwrap();
-                connections[0].shutdown().await.unwrap();
-                let queued_release = tokio::time::timeout(Duration::from_secs(2), sessions.recv()).await.unwrap().unwrap();
-                assert_eq!(runtime.active_requests(), 1024);
-                queued_release.send(()).unwrap();
-                let mut response = Vec::new();
-                if doh {
-                    tokio::time::timeout(Duration::from_secs(2), queued.read_to_end(&mut response)).await.unwrap().unwrap();
-                    let split = response.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap();
-                    assert!(response.starts_with(b"HTTP/1.1 200"));
-                    response = response[split + 4..].to_vec();
-                } else {
-                    let length = tokio::time::timeout(Duration::from_secs(2), queued.read_u16()).await.unwrap().unwrap();
-                    response.resize(usize::from(length), 0);
-                    queued.read_exact(&mut response).await.unwrap();
+                let all = query_all_transports(ports, 100, "transport.test.", RecordType::A).await;
+                assert_cross_transport_contract(all, 100, "transport.test.", RecordType::A, ResponseClass::Positive);
+                // 复用换代后再 rebind；畸形连接与慢 body 不应阻断新入口的有效流量。
+                let next_ports = available_transport_ports();
+                let candidate = PreparedRuntime::prepare_with_policy_core(
+                    cross_transport_runtime_config_at(&work_path, next_ports[0], next_ports[1], next_ports[2]), RuntimeRevision(3),
+                ).unwrap();
+                service.reload_prepared(candidate, &crate::runtime::SystemSocketFactory::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(2)), Cancellation::new()).await.unwrap();
+                let next_address = SocketAddr::from((Ipv4Addr::LOCALHOST, next_ports[if doh { 2 } else { 1 }]));
+                let mut slow = Vec::new();
+                for _ in 0..8 {
+                    let mut connection = TcpStream::connect(next_address).await.unwrap();
+                    let prefix = if doh {
+                        b"POST /dns HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nContent-Length: 100\r\n\r\nx".as_slice()
+                    } else {
+                        b"\0\x64x".as_slice()
+                    };
+                    connection.write_all(prefix).await.unwrap();
+                    slow.push(connection);
+                    let mut malformed = TcpStream::connect(next_address).await.unwrap();
+                    malformed.write_all(if doh { b"INVALID\r\n\r\n".as_slice() } else { b"\0\x01x".as_slice() }).await.unwrap();
+                    malformed.shutdown().await.unwrap();
                 }
-                let response = Message::from_vec(&response).unwrap();
-                assert_eq!(response.metadata.id, 42);
-                assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+                let all = query_all_transports(next_ports, 200, "transport.test.", RecordType::A).await;
+                assert_cross_transport_contract(all, 200, "transport.test.", RecordType::A, ResponseClass::Positive);
                 let report = service.shutdown(&SystemClock::new(),
                     Deadline::new(Instant::now() + Duration::from_secs(5)),
                 ).await.unwrap();
                 assert!(!report.deadline_expired);
                 assert_eq!(runtime.active_requests(), 0);
+                assert_eq!(service.runtime().active_requests(), 0);
                 assert_eq!(service.supervisor.task_count(), 0);
-                drop(releases);
-                drop(connections);
-                drop(queued);
+                drop(slow);
                 drop(service);
                 drop(runtime);
                 drop(coordinator);
-                let listener = tokio::net::TcpListener::bind(address).await.unwrap();
-                drop(listener);
-                println!("V6-C01 protocol={} accepted=1023,1024 backlog=1 recovered=1 requests_after_shutdown=0 port_rebound=true",
+                for address in [address, next_address] {
+                    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+                    drop(listener);
+                }
+                println!("V6-R01 protocol={} failed_reload_preserved=true reuse=true rebind=true slow=8 malformed=8 requests_after_shutdown=0 ports_rebound=true",
                     if doh { "plain-doh" } else { "tcp" });
             }
         }).await.expect("connection-capacity watchdog expired");

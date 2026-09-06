@@ -184,4 +184,4 @@ port error 至少包含：
 - fake telemetry 能拒绝高基数或敏感字段。
 - capturing observation sink 能验证 exactly-once、typed payload、共享 response identity 和 queue-full disposition。
 
-生产 Runtime 不执行 contract suite，也没有统一的 conformance 注册门禁。测试夹具存在不等于每个 adapter 的所有组合都已验收；已覆盖用例与剩余矩阵须按[契约验证开发计划](../../../plans/backend-contract-validation.md)的 V3/V6/V7 分别核验。
+生产 Runtime 不执行 contract suite，也没有统一的 conformance 注册门禁。测试夹具存在不等于每个 adapter 的所有组合都已验收；已覆盖用例见[Adapter 支持矩阵](../../../implementation/backend/dns-pipeline.md#adapter-支持矩阵)，未验收范围见[验证范围与收口](../../../implementation/backend/background-services.md#验证范围与收口)。

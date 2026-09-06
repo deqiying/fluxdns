@@ -1,0 +1,24 @@
+{
+  "targets": [
+    { "alias": "udp", "protocol": "udp", "address": "127.0.0.1:15353" },
+    { "alias": "tcp", "protocol": "tcp", "address": "127.0.0.1:15353" },
+    { "alias": "doh-get", "protocol": "doh-get", "address": "http://127.0.0.1:18080/dns" },
+    { "alias": "doh-post", "protocol": "doh-post", "address": "http://127.0.0.1:18080/dns" }
+  ],
+  "queries": [
+    { "name": "load.test.", "record_type": "A", "expected_rcode": 0, "min_answers": 1 }
+  ],
+  "phases": [
+    { "alias": "steady", "duration_ms": 1000, "qps": 20 },
+    { "alias": "load", "duration_ms": 1000, "qps": 40 },
+    { "alias": "recover", "duration_ms": 1000, "qps": 20 }
+  ],
+  "cycles": 2,
+  "concurrency": 8,
+  "timeout_ms": 1000,
+  "sample_interval_ms": 500,
+  "max_errors": 0,
+  "max_scheduler_lag_ms": 250,
+  "reuse_connections": true,
+  "seed": 1
+}
