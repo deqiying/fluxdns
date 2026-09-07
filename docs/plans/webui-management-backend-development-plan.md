@@ -48,7 +48,7 @@
 
 P0 进度：BC-01 的配置内部契约和 API/跨端契约两个语义单元已落实。配置单元提交为 `166e59e`（`refactor(config): 定义新版配置与校验契约`）；字段和边界见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)，API/状态/预算及测试见[Management 实现](../implementation/backend/management.md#p0-v2-契约)。生成类型和 12 路由/表单契约可供后续消费，但没有新页面或 v2 handler 接线。
 
-BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 fixture 仅通过离线新契约解析，不能作为生产启动成功证据。BC-01 契约交付不等于 BE-01/BC-26 的生产切换和完整验收全部完成。P1 已于 2026-09-07 获得授权；BC-02 内部能力及 BC-03 的差量 socket/任务预注册子项进度见下文，不重复实施 P0，也不扩大到 P2。
+BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 fixture 仅通过离线新契约解析，不能作为生产启动成功证据。BC-01 契约交付不等于 BE-01/BC-26 的生产切换和完整验收全部完成。P1 已于 2026-09-07 获得授权；BC-02 内部能力、BC-03 的差量 socket/任务预注册子项和 BC-23 指标已推进，进度见下文，不重复实施 P0，也不扩大到 P2。
 
 配置单元验证（Windows，2026-09-07）：Rust 1.98.0 / Node 26.8.1 / pnpm 11.25.0；`cargo test --manifest-path backend/Cargo.toml config:: --bin fluxdns` 53 通过，含 7 个新增 v2 测试；`cargo fmt --manifest-path backend/Cargo.toml -- --check`、前端 `pnpm run typecheck`、文档检查器和 `git diff --check` 通过。项目只有 binary target，最初 `--lib` 调用已修正；夹具的规则/mode 和裸 null 解析问题已回归通过。未运行新格式生产启动、磁盘 alias 防护、浏览器或性能测试。
 
@@ -253,6 +253,8 @@ QPS/RPM、趋势、在线身份、暖机和内存单位按[已确认 D-04](webui
 ### 验收
 
 受控时钟与已知请求序列核算窗口、趋势和在线身份；覆盖 NAT、同 IP 不同 ID、unknown ID、详情关闭、暖机、缺口、采样失败及容量上限。Windows 真实采样，Linux 特有实现标明未实测；两处内存口径一致。
+
+2026-09-08 BC-23 已完成：生产 service 在统一接纳边界记录 UDP/TCP/DoH 请求，进程级 owner 提供固定窗口、4096 在线身份保护和每秒共享 OS 快照，并注册两个受 Bearer 保护的 v2 查询端点。受控窗口、跨 transport、容量/缺口、Windows 真实采样及生产 loopback HTTP 已验证；Linux 条件编译实现、浏览器、性能及 BC-24 WebSocket 未在本项验收。
 
 ## 12. BE-10：WebSocket、序列与断线补齐
 

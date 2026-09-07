@@ -14,7 +14,7 @@ use crate::dns::{
     CancelReason, Cancellation, CoreError, CoreOutcome, Deadline, DispatchError, DnsCore,
     DnsRequest, ResponseClass, RuntimeRevision, TransportClass, dispatch_inbound,
 };
-use crate::management::{ManagementRuntime, ManagementService};
+use crate::management::{ManagementRuntime, ManagementService, MetricsOwner};
 use crate::observability::TelemetryWriter;
 use crate::ports::effects::SocketFactory;
 use crate::ports::effects::{ActivatedSocketHandle, Clock};
@@ -210,6 +210,7 @@ pub struct DnsService {
     resolution_event_sink: Option<Arc<dyn ResolutionEventSink>>,
     telemetry: Option<Arc<TelemetryWriter>>,
     telemetry_sampler: Option<Arc<TelemetrySampler>>,
+    metrics: Arc<MetricsOwner>,
     logging: Option<Arc<crate::observability::LoggingOwner>>,
     management: Option<Arc<ManagementRuntime>>,
     management_cancellation: Option<Cancellation>,
@@ -314,6 +315,26 @@ impl DnsService {
         storage: Option<StorageRuntime>,
         telemetry: Option<Arc<TelemetryWriter>>,
     ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage_telemetry_and_metrics(
+            coordinator,
+            core,
+            request_timeout,
+            storage,
+            telemetry,
+            Arc::new(MetricsOwner::new()),
+            false,
+        )
+    }
+
+    fn start_with_optional_storage_telemetry_and_metrics(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: Option<StorageRuntime>,
+        telemetry: Option<Arc<TelemetryWriter>>,
+        metrics: Arc<MetricsOwner>,
+        enable_process_sampler: bool,
+    ) -> Result<Self, ServiceStartError> {
         let runtime = coordinator.load();
         let mut supervisor = Supervisor::new();
         let (storage, stats_worker, detail_writer, resolution_metrics) = match storage {
@@ -372,6 +393,9 @@ impl DnsService {
                 telemetry_sampler.as_ref().unwrap().clone(),
             )?;
         }
+        if enable_process_sampler {
+            spawn_metrics_task(&mut supervisor, Arc::clone(&metrics))?;
+        }
         let transport_plans = prepare_transport_plans(
             runtime.listeners(),
             runtime.snapshot().config(),
@@ -383,6 +407,7 @@ impl DnsService {
             transport_plans,
             Arc::clone(&core),
             Arc::clone(&runtime),
+            Arc::clone(&metrics),
             TaskStartGate::default(),
         )?;
         if let Some(telemetry) = &telemetry
@@ -430,6 +455,7 @@ impl DnsService {
             resolution_event_sink,
             telemetry,
             telemetry_sampler,
+            metrics,
             logging: None,
             management: None,
             management_cancellation: None,
@@ -499,6 +525,28 @@ impl DnsService {
             DEFAULT_REQUEST_TIMEOUT,
             storage,
             telemetry,
+        )
+    }
+
+    pub(crate) fn with_default_timeout_from_coordinator_storage_telemetry_and_metrics(
+        coordinator: Arc<RuntimeCoordinator>,
+        storage: StorageRuntime,
+        telemetry: Arc<TelemetryWriter>,
+        metrics: Arc<MetricsOwner>,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::start_with_optional_storage_telemetry_and_metrics(
+            coordinator,
+            core,
+            DEFAULT_REQUEST_TIMEOUT,
+            Some(storage),
+            Some(telemetry),
+            metrics,
+            true,
         )
     }
 
@@ -747,6 +795,7 @@ impl DnsService {
             transport_plans,
             core,
             Arc::clone(&runtime),
+            Arc::clone(&self.metrics),
             start_gate.clone(),
         )
         .map_err(map_reload_spawn_error)?;
@@ -1733,6 +1782,24 @@ fn spawn_telemetry_task(
         .map_err(ServiceStartError::Task)
 }
 
+fn spawn_metrics_task(
+    supervisor: &mut Supervisor,
+    metrics: Arc<MetricsOwner>,
+) -> Result<Cancellation, ServiceStartError> {
+    let spec = TaskSpec::new(
+        "management.metrics",
+        "management",
+        FaultLevel::Degraded,
+        RestartPolicy::Never,
+    )
+    .expect("static metrics task id must be valid");
+    supervisor
+        .spawn_scoped(spec, move |cancellation| {
+            Box::pin(metrics.run_process_sampler(cancellation))
+        })
+        .map_err(ServiceStartError::Task)
+}
+
 fn map_reload_spawn_error(error: ServiceStartError) -> ServiceReloadError {
     match error {
         ServiceStartError::Task(source) => ServiceReloadError::Task(source),
@@ -1850,6 +1917,7 @@ fn spawn_transport_plans(
     plans: Vec<TransportTaskPlan>,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
     start: TaskStartGate,
 ) -> Result<Vec<TransportTask>, ServiceStartError> {
     let revision = runtime.revision().0;
@@ -1863,6 +1931,7 @@ fn spawn_transport_plans(
             } => {
                 let task_core = Arc::clone(&core);
                 let task_runtime = Arc::clone(&runtime);
+                let task_metrics = Arc::clone(&metrics);
                 let task_id = format!("transport.udp.{revision}.{index}");
                 let cancellation = spawn_transport_task(
                     supervisor,
@@ -1874,6 +1943,7 @@ fn spawn_transport_plans(
                             adapter.clone(),
                             Arc::clone(&task_core),
                             Arc::clone(&task_runtime),
+                            Arc::clone(&task_metrics),
                             cancellation,
                         )
                     },
@@ -1887,6 +1957,7 @@ fn spawn_transport_plans(
             } => {
                 let task_core = Arc::clone(&core);
                 let task_runtime = Arc::clone(&runtime);
+                let task_metrics = Arc::clone(&metrics);
                 let task_id = format!("transport.tcp.{revision}.{index}");
                 let cancellation = spawn_transport_task(
                     supervisor,
@@ -1898,6 +1969,7 @@ fn spawn_transport_plans(
                             adapter.clone(),
                             Arc::clone(&task_core),
                             Arc::clone(&task_runtime),
+                            Arc::clone(&task_metrics),
                             cancellation,
                         )
                     },
@@ -1911,6 +1983,7 @@ fn spawn_transport_plans(
             } => {
                 let task_core = Arc::clone(&core);
                 let task_runtime = Arc::clone(&runtime);
+                let task_metrics = Arc::clone(&metrics);
                 let task_id = format!("transport.doh.{revision}.{index}");
                 let cancellation = spawn_transport_task(
                     supervisor,
@@ -1922,6 +1995,7 @@ fn spawn_transport_plans(
                             adapter.clone(),
                             Arc::clone(&task_core),
                             Arc::clone(&task_runtime),
+                            Arc::clone(&task_metrics),
                             cancellation,
                         )
                     },
@@ -2221,36 +2295,44 @@ fn service_task<A>(
     adapter: A,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
     cancellation: Cancellation,
 ) -> crate::runtime::TaskFuture
 where
     A: InboundAdapter + 'static,
 {
-    Box::pin(async move { run_adapter_loop(adapter, core, runtime, cancellation).await })
+    Box::pin(async move { run_adapter_loop(adapter, core, runtime, metrics, cancellation).await })
 }
 
 fn tcp_listener_task(
     adapter: TcpAdapter,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
     cancellation: Cancellation,
 ) -> crate::runtime::TaskFuture {
-    Box::pin(async move { run_tcp_listener_loop(adapter, core, runtime, cancellation).await })
+    Box::pin(
+        async move { run_tcp_listener_loop(adapter, core, runtime, metrics, cancellation).await },
+    )
 }
 
 fn doh_listener_task(
     adapter: DohAdapter,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
     cancellation: Cancellation,
 ) -> crate::runtime::TaskFuture {
-    Box::pin(async move { run_doh_listener_loop(adapter, core, runtime, cancellation).await })
+    Box::pin(
+        async move { run_doh_listener_loop(adapter, core, runtime, metrics, cancellation).await },
+    )
 }
 
 async fn run_tcp_listener_loop(
     adapter: TcpAdapter,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
     cancellation: Cancellation,
 ) -> Result<(), TaskError> {
     let mut sessions = JoinSet::new();
@@ -2274,12 +2356,14 @@ async fn run_tcp_listener_loop(
                     Ok(Some(session)) => {
                         let session_core = Arc::clone(&core);
                         let session_runtime = Arc::clone(&runtime);
+                        let session_metrics = Arc::clone(&metrics);
                         let session_cancellation = session_cancellation.clone();
                         sessions.spawn(async move {
                             run_tcp_connection(
                                 session,
                                 session_core,
                                 session_runtime,
+                                session_metrics,
                                 session_cancellation,
                             )
                             .await
@@ -2328,6 +2412,7 @@ async fn run_doh_listener_loop(
     adapter: DohAdapter,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
     cancellation: Cancellation,
 ) -> Result<(), TaskError> {
     let mut sessions = JoinSet::new();
@@ -2351,12 +2436,14 @@ async fn run_doh_listener_loop(
                     Ok(Some(session)) => {
                         let session_core = Arc::clone(&core);
                         let session_runtime = Arc::clone(&runtime);
+                        let session_metrics = Arc::clone(&metrics);
                         let session_cancellation = session_cancellation.clone();
                         sessions.spawn(async move {
                             run_doh_connection(
                                 session,
                                 session_core,
                                 session_runtime,
+                                session_metrics,
                                 session_cancellation,
                             )
                             .await
@@ -2447,6 +2534,7 @@ async fn run_tcp_connection(
     mut session: TcpSession,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
     cancellation: Cancellation,
 ) -> Result<(), TaskError> {
     loop {
@@ -2500,6 +2588,7 @@ async fn run_tcp_connection(
                 return Ok(());
             }
         };
+        metrics.record_request(&inbound.request().context.client);
         let response_handle = inbound.response().clone();
         let deadline = inbound.request().context.meta.deadline;
         let request_cancellation = inbound.request().context.meta.cancellation.clone();
@@ -2538,6 +2627,7 @@ async fn run_doh_connection(
     mut session: DohSession,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
     cancellation: Cancellation,
 ) -> Result<(), TaskError> {
     loop {
@@ -2619,6 +2709,7 @@ async fn run_doh_connection(
                         return Ok(());
                     }
                 };
+                metrics.record_request(&inbound.request().context.client);
                 let response_handle = inbound.response().clone();
                 let deadline = inbound.request().context.meta.deadline;
                 let request_cancellation = inbound.request().context.meta.cancellation.clone();
@@ -2677,6 +2768,7 @@ async fn run_adapter_loop<A>(
     adapter: A,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
     cancellation: Cancellation,
 ) -> Result<(), TaskError>
 where
@@ -2715,6 +2807,7 @@ where
                 continue;
             }
         };
+        metrics.record_request(&inbound.request().context.client);
         let response_handle = inbound.response().clone();
         let deadline = inbound.request().context.meta.deadline;
         let request_cancellation = inbound.request().context.meta.cancellation.clone();
@@ -4157,6 +4250,7 @@ clients: []
         assert_eq!(tcp.class(), ResponseClass::Positive);
         assert!(!tcp.as_message().metadata.truncation);
         assert_eq!(tcp.as_message().answers.len(), 64);
+        assert_eq!(service.metrics.accepted_requests_for_test(), 16);
 
         let report = service
             .shutdown(

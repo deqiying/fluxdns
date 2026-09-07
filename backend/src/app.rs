@@ -465,6 +465,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .await
             .map_err(map_bind_error)?;
             let coordinator = Arc::new(crate::runtime::RuntimeCoordinator::new(candidate));
+            let metrics = Arc::new(crate::management::MetricsOwner::new());
             let management = match management_bootstrap {
                 Some((
                     config,
@@ -485,6 +486,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                             resolve_log_enabled,
                             Some(Arc::clone(&telemetry)),
                             resolution_metrics,
+                            Arc::clone(&metrics),
                         ),
                     )
                     .await
@@ -499,10 +501,11 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 None => None,
             };
             let mut service =
-                DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                DnsService::with_default_timeout_from_coordinator_storage_telemetry_and_metrics(
                     coordinator,
                     storage,
                     telemetry,
+                    metrics,
                 )
                 .map_err(map_service_start_error)?;
             service

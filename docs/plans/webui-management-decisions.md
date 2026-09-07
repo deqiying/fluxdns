@@ -193,4 +193,6 @@ P1 追加核定（2026-09-07）：T-03 的双文件观测已执行 4 MiB 上限�
 
 2026-09-08 T-06 壳层补充：按 D-08 锁定 `lucide-react 1.41.0`（ISC）作为直接生产依赖，静态导入 16 个壳层图标；必要性、完整包 unpacked size 与未单测的 bundle 增量见[交付实现](../implementation/delivery.md#前端与接口生成)。未升级 React、Ant Design、Node.js 或 pnpm。
 
+2026-09-08 T-05/T-06 指标补充：在线身份容量固定 4096，进程采样周期 1 秒，快照超过 3 秒未更新即返回 `observation_gap`；这些是 owner 内部保护，不新增 YAML 配置。Windows 复用 `windows-sys 0.61.2` 的现有锁定版本并增加进程 API feature，Linux 使用 procfs，无新增 crate；依赖和未实测边界见[交付实现](../implementation/delivery.md#前端与接口生成)。T-05 的 WS 帧、连接、心跳和慢消费者限额仍未关闭。
+
 确认后的技术细节同步对应任务和正式 schema，不在多处维护相互冲突的默认值。实施完成后按项目规则沉淀架构/实现事实，再删除本决策文件及相应活动计划；Git 保存历史，不另建归档。

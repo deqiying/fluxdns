@@ -1163,6 +1163,8 @@ export interface components {
             state: "unavailable";
             /** @enum {string} */
             reason: "warmup" | "observation_gap" | "sampling_failed" | "unsupported";
+            /** @description 仅 warmup 返回当前已覆盖秒数，其他原因返回 null */
+            observed_seconds: components["schemas"]["SafeInteger"] | null;
         };
         NumberMeasurement: {
             /** @constant */

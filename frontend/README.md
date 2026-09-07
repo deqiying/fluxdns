@@ -37,4 +37,4 @@ pnpm run test
 pnpm run build
 ```
 
-生成类型不手工修改。P0 [v2 目标契约](openapi/management-api-v2.yaml) 生成到独立 `generated-v2.ts`，尚未切换正式路由；`generate:api` 同时更新当前与目标产物，`test:contract:v2` 单独校验跨端夹具。上述为操作命令，不是通过记录。内嵌打包、显式配置启动、版本与自动发布，以及浏览器/原生平台的现有验收边界，统一见[交付实现](../docs/implementation/delivery.md)。
+生成类型不手工修改。P0 [v2 目标契约](openapi/management-api-v2.yaml) 生成到独立 `generated-v2.ts`；当前前端仍使用 v1 client，后端仅先行开放 BC-23 的两个 v2 指标读端点，尚未成套切换正式路由。`generate:api` 同时更新当前与目标产物，`test:contract:v2` 单独校验跨端夹具。上述为操作命令，不是通过记录。内嵌打包、显式配置启动、版本与自动发布，以及浏览器/原生平台的现有验收边界，统一见[交付实现](../docs/implementation/delivery.md)。

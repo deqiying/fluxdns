@@ -57,8 +57,8 @@
   },
   "metrics": {
     "sampled_at_ms": 1788739201000,
-    "qps": {"state": "unavailable", "reason": "warmup"},
-    "rpm": {"state": "unavailable", "reason": "observation_gap"},
+    "qps": {"state": "unavailable", "reason": "warmup", "observed_seconds": 23},
+    "rpm": {"state": "unavailable", "reason": "observation_gap", "observed_seconds": null},
     "online_clients": {"state": "available", "value": 2},
     "rss_bytes": {"state": "available", "value": "18446744073709551615"},
     "qps_trend": [],

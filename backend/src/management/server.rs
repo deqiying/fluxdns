@@ -10,6 +10,7 @@ use thiserror::Error;
 use super::ManagementRuntime;
 use super::assets;
 use super::auth::{AuthError, AuthState};
+use super::metrics::MetricsOwner;
 use super::query::ManagementQueryService;
 use super::router::{AuthServices, build_router};
 use super::session::SessionStore;
@@ -34,6 +35,7 @@ pub(crate) struct ManagementQueryDependencies {
     resolve_log_enabled: bool,
     telemetry: Option<Arc<TelemetryWriter>>,
     resolution_metrics: Arc<ResolutionPipelineMetrics>,
+    metrics: Arc<MetricsOwner>,
 }
 
 impl ManagementQueryDependencies {
@@ -43,6 +45,7 @@ impl ManagementQueryDependencies {
         resolve_log_enabled: bool,
         telemetry: Option<Arc<TelemetryWriter>>,
         resolution_metrics: Arc<ResolutionPipelineMetrics>,
+        metrics: Arc<MetricsOwner>,
     ) -> Self {
         Self {
             coordinator,
@@ -50,6 +53,7 @@ impl ManagementQueryDependencies {
             resolve_log_enabled,
             telemetry,
             resolution_metrics,
+            metrics,
         }
     }
 }
@@ -85,6 +89,7 @@ impl ManagementService {
             dependencies.telemetry,
             dependencies.resolve_log_enabled,
             dependencies.resolution_metrics,
+            dependencies.metrics,
         ));
         let services = Arc::new(AuthServices::new(
             Arc::clone(&auth),

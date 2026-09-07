@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
 use time::{Date, Month, OffsetDateTime};
 
+use super::contract::{ProcessMetrics, ServiceMetrics};
+use super::metrics::MetricsOwner;
 use super::router::{AuthServices, RequestId, internal_error, invalid_argument};
 use crate::config::BindTransport;
 use crate::dns::Deadline;
@@ -42,6 +44,7 @@ pub(crate) struct ManagementQueryService {
     started_instant: Instant,
     resolve_log_enabled: bool,
     resolution_metrics: Arc<ResolutionPipelineMetrics>,
+    metrics: Arc<MetricsOwner>,
 }
 
 impl ManagementQueryService {
@@ -51,6 +54,7 @@ impl ManagementQueryService {
         telemetry: Option<Arc<TelemetryWriter>>,
         resolve_log_enabled: bool,
         resolution_metrics: Arc<ResolutionPipelineMetrics>,
+        metrics: Arc<MetricsOwner>,
     ) -> Self {
         Self {
             coordinator,
@@ -60,7 +64,16 @@ impl ManagementQueryService {
             started_instant: Instant::now(),
             resolve_log_enabled,
             resolution_metrics,
+            metrics,
         }
+    }
+
+    fn service_metrics(&self) -> ServiceMetrics {
+        self.metrics.service_metrics()
+    }
+
+    fn process_metrics(&self) -> ProcessMetrics {
+        self.metrics.process_metrics()
     }
 
     async fn overview(&self) -> Result<Overview, QueryError> {
@@ -326,6 +339,8 @@ pub(crate) fn routes() -> Router<Arc<AuthServices>> {
         .route("/api/v1/queries", get(get_queries))
         .route("/api/v1/resources", get(get_resources))
         .route("/api/v1/system", get(get_system))
+        .route("/api/v2/service/metrics", get(get_service_metrics))
+        .route("/api/v2/system/runtime", get(get_process_metrics))
 }
 
 async fn get_overview(
@@ -415,6 +430,26 @@ async fn get_system(
         return internal_error(&request_id);
     };
     Json(queries.system()).into_response()
+}
+
+async fn get_service_metrics(
+    State(services): State<Arc<AuthServices>>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let Some(queries) = &services.queries else {
+        return internal_error(&request_id);
+    };
+    Json(queries.service_metrics()).into_response()
+}
+
+async fn get_process_metrics(
+    State(services): State<Arc<AuthServices>>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let Some(queries) = &services.queries else {
+        return internal_error(&request_id);
+    };
+    Json(queries.process_metrics()).into_response()
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1266,12 +1301,15 @@ mod tests {
         )
         .await
         .unwrap();
+        let metrics = Arc::new(MetricsOwner::new());
+        metrics.set_process_sample_for_test(64 * 1024 * 1024, 1.25, 8);
         let query_service = Arc::new(ManagementQueryService::new(
             Arc::new(RuntimeCoordinator::new(candidate)),
             Arc::new(FakeReadModel),
             None,
             true,
             Arc::new(ResolutionPipelineMetrics::default()),
+            metrics,
         ));
         let root = work_path.with_extension("management-query-router");
         std::fs::create_dir_all(&root).unwrap();
@@ -1398,7 +1436,10 @@ mod tests {
             "/api/v1/queries?transport=doh&source=rule&rcode=NOERROR&outcome=answered",
             "/api/v1/resources",
             "/api/v1/system",
+            "/api/v2/service/metrics",
+            "/api/v2/system/runtime",
         ];
+        let mut service_rss = None;
         for path in paths {
             let response = app
                 .clone()
@@ -1438,6 +1479,17 @@ mod tests {
                     );
                 }
                 assert!(pipeline.contains_key("gap_started_at_utc_millis"));
+            }
+            if path == "/api/v2/service/metrics" {
+                assert_eq!(body["rss_bytes"]["state"], "available");
+                assert_eq!(body["qps"]["reason"], "warmup");
+                assert!(body["qps"]["observed_seconds"].is_u64());
+                service_rss = Some(body["rss_bytes"].clone());
+            }
+            if path == "/api/v2/system/runtime" {
+                assert_eq!(body["cpu_percent"]["value"], 1.25);
+                assert_eq!(body["threads"]["value"], 8);
+                assert_eq!(Some(body["rss_bytes"].clone()), service_rss);
             }
             let serialized = serde_json::to_string(&body).unwrap();
             for forbidden in [

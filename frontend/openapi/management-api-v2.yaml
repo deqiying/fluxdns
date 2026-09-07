@@ -1284,10 +1284,13 @@ components:
     Unavailable:
       type: object
       additionalProperties: false
-      required: [state, reason]
+      required: [state, reason, observed_seconds]
       properties:
         state: {const: unavailable}
         reason: {type: string, enum: [warmup, observation_gap, sampling_failed, unsupported]}
+        observed_seconds:
+          description: 仅 warmup 返回当前已覆盖秒数，其他原因返回 null
+          oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]
     NumberMeasurement:
       oneOf:
         - type: object

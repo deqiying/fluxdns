@@ -98,6 +98,12 @@ token!(RecordId, 128);
 #[serde(transparent)]
 pub struct DecimalU64(String);
 
+impl From<u64> for DecimalU64 {
+    fn from(value: u64) -> Self {
+        Self(value.to_string())
+    }
+}
+
 impl<'de> Deserialize<'de> for DecimalU64 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
@@ -669,7 +675,7 @@ pub struct QueryDetail {
     pub directory_revision: Revision,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnavailableReason {
     Warmup,
@@ -678,11 +684,17 @@ pub enum UnavailableReason {
     Unsupported,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Measurement<T> {
-    Available { value: T },
-    Unavailable { reason: UnavailableReason },
+    Available {
+        value: T,
+    },
+    Unavailable {
+        reason: UnavailableReason,
+        /// 暖机时返回当前已覆盖秒数；其他缺数原因固定为 null。
+        observed_seconds: Option<u64>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

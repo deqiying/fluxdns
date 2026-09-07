@@ -26,6 +26,8 @@ P1 文件事务依赖核定（2026-09-07）：既有 `windows-sys 0.61.2`（MIT 
 
 P1 壳层依赖核定（2026-09-08）：新增锁定的 `lucide-react 1.41.0` 生产依赖，复用图稿采用的 Lucide 图标体系，供 12 个导航入口及折叠、移动菜单、登出控件使用，避免维护手绘 SVG。许可证为 ISC；registry 报告的完整包 unpacked size 为 32,023,893 bytes，实际只静态导入 16 个图标并由 Vite tree-shake，本轮不把完整包大小当成生产 bundle 增量，也未单独测量依赖增量。未增加构建脚本或工具链。
 
+P1 指标采样依赖核定（2026-09-08）：未新增 crate 或升级锁定版本。Windows 复用既有 `windows-sys 0.61.2`（MIT OR Apache-2.0），增加 `Win32_Foundation`、`Win32_System_Diagnostics_ToolHelp`、`Win32_System_ProcessStatus` 和 `Win32_System_Threading` feature；Linux 使用 Rust 标准库读取 procfs。新增 feature 只参与对应目标编译，未测量其独立构建物字节增量；Linux 条件编译代码本批未实测。
+
 [`vite.config.ts`](../../frontend/vite.config.ts) 在开发时把 `/api` 代理到 `http://127.0.0.1:8080`；浏览器仍请求同源相对路径。`VITE_USE_MOCK_API=true` 只在 DEV bootstrap 启用 MSW，生产构建不携带 mock worker 或 source map。完整生成与验证命令见[前端 README](../../frontend/README.md)。
 
 ## 本地内嵌打包

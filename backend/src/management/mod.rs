@@ -4,6 +4,7 @@ mod assets;
 mod auth;
 mod config_query;
 pub(crate) mod contract;
+mod metrics;
 mod query;
 mod router;
 mod server;
@@ -17,6 +18,7 @@ use session::SessionStore;
 use crate::config::resolve::ResolvedWebUiUser;
 use crate::config::store::ConfigStore;
 
+pub(crate) use metrics::MetricsOwner;
 pub(crate) use server::{ManagementBuildError, ManagementQueryDependencies, ManagementService};
 
 /// 由 DNS service 同生命周期持有的认证状态和配置写入协调器。

@@ -20,7 +20,7 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 
 ## P0 v2 契约
 
-2026-09-07 局部核对：目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。这是 BC-01 内部能力，`router` 未注册 `/api/v2`，既有 v1 handler 仍是当前正式入口；不提供双版本兼容服务。新版 owner、鉴权/client/代理的统一切换均未实施。
+2026-09-07 局部核对：目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。BC-01 当时只提供内部能力；2026-09-08 的 BC-23 已单独注册 `/api/v2/service/metrics` 和 `/api/v2/system/runtime` 两个受 Bearer 保护的只读端点。其余 v2 路由仍未注册，既有 v1 handler 仍承担当前页面，其间不提供完整双版本兼容服务。
 
 P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测、验证票据和操作记录已有 ConfigStore 内部入口，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。下表的 P0 decoder 不因此成为已接线的写入服务；文件事务和下述状态投影已有内部实现，正式状态端点、v2 服务生产者及认证接线仍未完成。
 
@@ -29,11 +29,11 @@ P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/
 | 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新不含 `client_id`；系统只读投影不含 users/hash | `decode_candidate` / `decode_apply` 限制 body、变更数、null 和字段；单模块入口强制模块相符。完整引用、名称占用、影响确认、prepare 由后续 ConfigStore 实施 |
 | 活动配置与文件 | active/runtime/persisted revision 分离；组合文件观测 token；源表达、生效值/来源、引用和独立 runtime 投影；外部差异、还原、同步重试请求 | DTO 本身不读取/覆盖文件；ConfigStore 状态与逐文件自写身份已有内部投影，外部差异和正式 handler 留 BC-30 |
 | 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、校验 token、明确确认清单 | 运行成功不等于文件同步，unknown 不能自动重放。有界记录和冻结结果已有内部消费，异步 owner/HTTP 接线未完成 |
-| 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | REST/WS 共用筛选预算；实际过滤、cursor 签名/水位校验、分片、采样、WS 鉴权/队列/replay 仍待 owner |
+| 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-23 已接入请求/进程采样和两个 HTTP 查询端点；历史过滤、cursor 签名/水位校验、分片及 WS 鉴权/队列/replay 仍待后续 owner |
 
 大计数/序列使用十进制 `u64` 字符串，Rust 和 schema 均拒绝溢出与前导零；安全整数时间采用 UTC ms，耗时采用 us。请求中的安全时间上界由 REST/WS 共用验证器执行；输出时间仍为 Rust `u64`，生产投影接线时必须保持 schema 的安全整数边界。源 DTO 的相对路径、SecretRef 来源和缺失继承保留，duration 序列化为精确 ns 字符串；这不是可回写的完整 YAML 语法树，不能据此丢弃原注释或显式源表达。
 
-所有预算在 OpenAPI `x-limits` 和字段 schema 中维护。已执行入站保护包括配置 4 MiB、变更 2 MiB/128 项、cursor 2048 bytes、历史查询 16 KiB/100 行/3650 天、WS 入站帧 128 KiB；文件读取、查询 deadline、在线身份、连接/队列/replay 限额目前仅为契约，不能据此宣称运行时已受保护。
+所有预算在 OpenAPI `x-limits` 和字段 schema 中维护。已执行入站保护包括配置 4 MiB、变更 2 MiB/128 项、cursor 2048 bytes、历史查询 16 KiB/100 行/3650 天、WS 入站帧 128 KiB；BC-23 的在线身份表上限为 4096，超限窗口显式返回 `observation_gap`。文件读取以及 WS 连接/队列/replay 限额仍仅为契约，不能据此宣称运行时已受保护。
 
 验证使用 [Rust 契约测试](../../../backend/src/management/contract/tests.rs)、[共享夹具](../../../backend/tests/fixtures/management-v2.json) 和 [Node schema 测试](../../../frontend/tests/contract-v2.node.mjs)：覆盖多态源值往返、只读注入、ID 修改、null、预算、精度、状态互斥及未注册 v2 写路由。Windows 定向执行 management 18 项通过（含 8 个新增契约测试），schema 3 项通过；既有认证/HTTP 回归通过不等于新 v2 HTTP/WS 实测。
 
@@ -59,7 +59,7 @@ Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/�
 
 ## 路由与保护
 
-[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout 认证端点、受 Bearer 保护的 session 与 [`query.rs`](../../../backend/src/management/query.rs) 七个查询端点；未知 API 与 SPA fallback 隔离。字段/状态码以 [OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，不在本文复制完整响应模型。
+[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout 认证端点、受 Bearer 保护的 session、[`query.rs`](../../../backend/src/management/query.rs) 七个 v1 查询端点及两个 BC-23 v2 指标端点；未知 API 与 SPA fallback 隔离。既有页面字段/状态码以 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，两个指标端点以 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
 
 router 固定保护包括 JSON body 16 KiB、URI 4 KiB、64 个 header/16 KiB header bytes、256 个并发请求和 15 秒总请求 timeout。另有 setup/login 限流、Origin/Fetch Metadata、request ID 和统一错误处理。这些是实现常量，不是额外 YAML 字段。
 
@@ -73,11 +73,23 @@ router 固定保护包括 JSON body 16 KiB、URI 4 KiB、64 个 header/16 KiB he
 
 SessionStore 复用原 24 小时绝对/30 分钟空闲期限、4096 全局/16 单用户容量。访问凭据 5 分钟有效，剩余 30 秒内换发；并发刷新复用当前值，旧值只活到原期限，每会话最多两项访问索引。到达会话绝对期限不反复生成新凭据；过期、容量淘汰、认证更新、登出和进程关闭同时回收相关索引。两类随机凭据不互换，刷新凭据不进入响应正文。没有新增依赖或持久会话存储。
 
-[`router/tests/bearer.rs`](../../../backend/src/management/router/tests/bearer.rs)、SessionStore 和查询路由测试覆盖两类凭据隔离、重复/非法 header、Origin、期限、索引回收及既有查询；[前端接线](../frontend/application.md#p1-bearer-接线2026-09-08)统一在业务请求中附加 Bearer。当前与目标 v2 OpenAPI/生成类型均已同步，但 `/api/v2` 仍未注册，不能由本次认证验证推断新版配置 owner 已启动。
+[`router/tests/bearer.rs`](../../../backend/src/management/router/tests/bearer.rs)、SessionStore 和查询路由测试覆盖两类凭据隔离、重复/非法 header、Origin、期限、索引回收及既有查询；[前端接线](../frontend/application.md#p1-bearer-接线2026-09-08)统一在业务请求中附加 Bearer。当前与目标 v2 OpenAPI/生成类型均已同步；BC-23 后仅两个指标端点已注册，不能由认证或指标验证推断新版配置 owner 已启动。
 
-Windows 使用本批工作树的内嵌 binary、独立 `_fluxdns/p1-bearer-ui-20260908-0055/` 配置/SQLite 和 loopback 端口完成真实 HTTP 12 项检查：登录、Bearer session/overview、Cookie-only/凭据互换/非法 Bearer 拒绝、跨源刷新拒绝、刷新、v2 仍 404、登出及两类凭据失效。浏览器 Network 已确认业务请求有 Authorization 且无 Cookie，刷新请求相反；还验证初始化、页面刷新恢复、重新登录和 Cookie 清除。HTTP 直连不证明外部 HTTPS 代理；未实现或验收 v2/WS，浏览器 WS 凭据传递留 BC-24 核定。
+Windows 使用 Bearer 子项当时的内嵌 binary、独立 `_fluxdns/p1-bearer-ui-20260908-0055/` 配置/SQLite 和 loopback 端口完成真实 HTTP 12 项检查：登录、Bearer session/overview、Cookie-only/凭据互换/非法 Bearer 拒绝、跨源刷新拒绝、刷新、当时尚未注册的 v2 返回 404、登出及两类凭据失效。浏览器 Network 已确认业务请求有 Authorization 且无 Cookie，刷新请求相反；还验证初始化、页面刷新恢复、重新登录和 Cookie 清除。该历史检查不覆盖随后新增的两个指标端点；HTTP 直连也不证明外部 HTTPS 代理，浏览器 WS 凭据传递留 BC-24 核定。
 
 本批最终回归：Management 39 项、Config 110 项、Cargo check、全部目标 no-run、fmt、前端 typecheck/schema 4 项/Vitest 9 文件 47 项/build 通过，当前及目标类型连续两次生成一致，文档检查与 diff 检查通过。Node/Vite 测试按已核实的沙盒 spawn 限制获准在沙盒外运行；未运行完整 Cargo suite、跨平台或性能验收，所有临时服务与运行数据均限定本次 `_fluxdns` 测试目录。
+
+## P1 服务与进程指标（2026-09-08）
+
+[`metrics.rs`](../../../backend/src/management/metrics.rs) 提供进程级唯一 `MetricsOwner`。UDP、TCP 和 DoH GET/POST 在入站基础校验完成且 `Runtime` 成功接纳后调用同一计数入口；上游重试、single-flight 分支和被容量拒绝的请求不会重复或提前计数。请求窗口使用 601 个有界秒桶保留当前不完整秒：QPS 为最近 60 秒请求数除以 60，RPM 为最近 600 秒请求数除以 10；趋势仅输出已完成的最多 600 个秒桶和 10 个分钟桶。
+
+在线身份只保留 SHA-256 脱敏 key 与最后出现秒。有效 `client_id` 优先，否则使用规范化后的有效 IP；ID、IPv4 和 IPv6 使用不同域前缀，IPv4-mapped IPv6 归一为 IPv4。表容量固定 4096，容量丢失影响的 60 秒窗口返回 `observation_gap`；进程启动未覆盖 60/600 秒时返回 `warmup` 和 `observed_seconds`，没有请求只有在完整窗口后才报告真实 0。该路径不依赖详情开关，也不把原始身份写入统计库或 telemetry label。
+
+生产 `DnsService` 只启动一个受 Supervisor 管理的 `management.metrics` 任务，每秒更新共享进程快照。Windows 使用既有 `windows-sys` 的 ProcessStatus、Threading 和 ToolHelp API 读取 RSS、进程 CPU 时间与线程数；Linux 条件编译实现读取 `/proc/self/status`、`/proc/self/stat` 和 `/proc/stat`，本批未在 Linux 实测。首次 CPU 样本返回 `warmup`，直接读取失败返回 `sampling_failed`，非 Windows/Linux 返回 `unsupported`，超过 3 秒未刷新返回 `observation_gap`；DNS 请求不等待 OS 采样。
+
+`GET /api/v2/service/metrics` 与 `GET /api/v2/system/runtime` 复用同一 `MetricsOwner` 和 RSS 快照并要求 Bearer。受控时钟测试覆盖精确窗口、趋势、NAT、同 IP 不同 ID、unknown、mapped IPv4、容量恢复和采样缺口；跨 transport 真实 socket 测试核对 16 个接纳请求只计 16 次，Windows 测试读取真实 RSS/CPU/thread。
+
+Windows 使用当前 debug binary、`_fluxdns/p1-metrics-http-20260908/` 独立配置和 loopback 端口 `18123`/`15399` 完成生产链启动：配置 validate 通过，Bearer 请求两个指标端点均为 200，QPS/RPM/在线身份在未满窗口时返回 `warmup` 与覆盖秒数；两处 RSS 值相同且大于 0，CPU/thread 可用且非负。无 Bearer 的指标请求为 401，尚未注册的 `/api/v2/config/state` 保持 404，实例已停止。Linux、浏览器、性能和 BC-24 WebSocket 本批未验证。
 
 ## 首次用户写入
 
@@ -106,6 +118,8 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 | queries | `ManagementStorageRead` 的详情查询 | 有界分页/过滤/排序，历史脱敏行返回 `legacy_redacted` |
 | resources | runtime 资源 snapshot 元数据 | 只读，不触发刷新 |
 | system | 版本、进程/构建与功能元数据 | 不提供配置秘密或绝对路径 |
+| service metrics（v2） | `MetricsOwner` 的请求窗口、在线身份和共享 RSS 快照 | 暖机、容量截断及采样缺口显式不可用；不返回原始身份 |
+| system runtime（v2） | `MetricsOwner` 的共享 OS 采样快照 | 仅 Windows 实测；Linux 条件编译实现未实测 |
 
 [`ports/management.rs`](../../../backend/src/ports/management.rs) 定义领域读口；[`SqliteManagementReadModel`](../../../backend/src/storage/management_read.rs) 使用独立只读 pool、绑定参数和固定 SQL。query service 固定 5 秒 deadline、默认 20/最大 100 行分页和最长 31 天统计窗口。
 
@@ -123,7 +137,7 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 | --- | --- | --- | --- | --- |
 | setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | P1 Bearer 定向测试、真实 HTTP 和浏览器 Network/Storage，见上节 | 未验证外部 HTTPS 代理及 v2/WS |
 | users 事务 | source_edit、ConfigStore、journal recovery | setup 写入，run 启动恢复，watcher 对账 | 本轮核对；存在双路径恢复与 Busy 竞争测试 | 完整跨平台 crash/权限矩阵待验收 |
-| 七个只读 API | ManagementQueryService + StorageRead port | app 注入真实 coordinator/DB/telemetry | 本轮核对 handler 不持有 SQLx | 未执行全端点真实 HTTP 与浏览器 smoke |
+| 七个 v1 与两个指标 v2 只读 API | ManagementQueryService + StorageRead port + MetricsOwner | app 注入真实 coordinator/DB/telemetry/metrics | v1 静态核对；BC-23 路由、跨 transport、Windows 真实采样及生产 HTTP | 未执行指标页面浏览器 smoke；其余 v2 未注册 |
 | 内嵌 SPA | assets + build feature | bind 前 ensure_available | 静态；历史证据单独标注于交付文档 | Actions/Linux/macOS 发布未由静态代码证明 |
 
 本页 2026-09-05 原核对仅有静态证据；后续 P1 的运行证据分别列在对应小节。已执行的 Bearer HTTP/浏览器验证不等于反向代理或完整配置事务故障矩阵均已验证。
