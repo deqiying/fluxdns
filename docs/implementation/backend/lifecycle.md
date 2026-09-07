@@ -44,7 +44,7 @@ TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于�
 
 正式 `run_command` 使用加载结果中的绝对源路径与 `work.snapshot_path`，相同路径只观测一次。[`ConfigFileWatcher`](../../../backend/src/app/config_watcher.rs) 复用 ConfigStore 的 `ManagedObservation`，源/派生文件分别受 4 MiB、SHA-256、文件身份和路径链接检查约束；服务轮询只收取已结束的结果，文件读取移到最多一个在途 `spawn_blocking` 任务，不积压读取队列。
 
-连续两次稳定观测后输出 `configuration_files_observed`，只含组合 revision 和 readable/missing/unreadable/oversized 状态，不输出内容或凭据。首次稳定状态也中性上报，不能静默接受 prepare 期间的外改。通知明确 `not_reloaded`，不解析或应用磁盘候选、不更新会话、不修改磁盘。变更提示不等于候选有效，通知也不猜测是否属于自写。退出停止调度并有界等待只读任务；若无法确认完成则显式警告，不声称 OS 文件 I/O 已取消。
+连续两次稳定观测后产生 `configuration_files_observed` 事件。tracing 调用点带组合 revision、readable/missing/unreadable/oversized 状态和 `not_reloaded`，不带内容或凭据；既有 `TypedTracingLayer` 只保留固定日志字段，正式 JSON 目前保留事件名而不保留上述自定义观测字段，不能将调用点字段当作已接线的状态投影。首次稳定状态也中性上报，不能静默接受 prepare 期间的外改。不解析或应用磁盘候选、不更新会话、不修改磁盘；变更提示不等于候选有效，也不猜测是否属于自写。退出停止调度并有界等待只读任务；若无法确认完成则显式警告，不声称 OS 文件 I/O 已取消。
 
 Windows 定向测试覆盖双文件、防抖、同长度内容变化、同内容文件身份替换、无效 YAML、缺失、非文件、超限和慢读取单在途。真实 UDP 服务在与生产相同的控制循环中，源/派生文件连续变化后保持同一个 Runtime、revision 和 DNS 策略；随后仅改 Hosts 资源文件，由正式 resource worker 到期刷新 DNS 结果，未手动调用 refresh。此处仍使用现有 v1 loader/runtime，不是 v2 生产启动验收。
 

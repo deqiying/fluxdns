@@ -370,7 +370,7 @@ git diff --check
 | BC-23 | BE-09：请求窗口、在线身份、OS 采样与查询端点 | BC-01、D-04/D-08 | V-B、V-A、V-I；已知流量和真实进程采样 | `feat(management): 提供实时服务与进程指标` |
 | BC-24 | BE-10：WS 鉴权/生命周期/限额、服务指标通道 | BC-23、D-05/D-08 | V-B、V-A、V-I；Origin、过期会话、长连接与慢消费者 | `feat(management): 接入服务指标实时推送` |
 | BC-25 | BE-10：记录提交推送、replay、快照交接和 resync | BC-24、BC-09、BC-13 | V-B、V-A、V-I；并发提交/迟到/断线/溢出 | `feat(management): 接入解析记录增量推送` |
-| BC-26 | BE-11：新配置/数据基线初始化、旧格式拒绝和开发夹具 | BC-01；可提前 | V-B、V-I；空目录、新格式重复启动、旧路径拒绝 | `refactor(storage): 建立新版配置与数据初始化基线` |
+| BC-26 | BE-11：新配置/数据基线初始化、旧格式拒绝和开发夹具 | 离线规格可随 BC-01；完整生产初始化依赖 BC-04、BC-07、BC-08 至 BC-11（及各自前置） | V-B、V-I；空目录、新格式重复启动、旧路径拒绝 | `refactor(storage): 建立新版配置与数据初始化基线` |
 | BC-27 | BE-11：旧配置映射、单库详情及 legacy 兼容路径退出 | BC-26、BC-07、BC-08 至 BC-13、BC-25；新路径已接线 | V-B、V-I、V-D；引用检查、新版重启/恢复 | `refactor(backend): 移除被替代的旧版兼容路径` |
 | BC-28 | BE-12：Windows 组合、约 10 客户端和 2ms 核心耗时验收 | BC-01 至 BC-27、BC-29 至 BC-32 | V-B、V-I、V-D；真实集成和时延结果 | `test(backend): 补齐管理后台重构集成验收` |
 | BC-29 | BE-02：应用后持久化、分阶段 journal、重试同步与恢复 | BC-03 | V-B、V-I；磁盘失败及双文件 crash point | `feat(config): 支持热应用后的配置持久化与恢复` |

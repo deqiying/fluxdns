@@ -27,6 +27,8 @@
 
 P1 先交付 BC-02 活动源、定向编辑和操作仲裁内部能力，事实见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)；BC-03 已接入现有 service 的差量 socket、任务预注册、请求 drain 和有界队列消费者，完整应用事务仍未完成。BC-29 的[文件事务与分阶段恢复内部能力](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)已由活动源消费，但 Runtime 回报仍为测试模拟，正式启动和 HTTP 未接线。v2 生产切换最小闭合集合仍是：新版 loader/resolve 与存储 owner 初始化、setup/auth/Origin、实际 handler、API client/代理/mock、SPA fallback 同批接线；不能将新字段映射到旧单库和 SQLite cache owner。BC-03/29/30/31 可以继续内部实施，但在 BC-26 依赖闭合前，不以内部测试关闭完整生产验收或仅修改版本常量。FC-16 只在本阶段交付可闭合的全局提示/还原基础，完整组合采用仍依赖各业务表单。
 
+2026-09-07 继续执行时，BC-30 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)已接入正式 app，双文件变更不触发 reload，Hosts 资源自动刷新有真实 UDP 定向证据。完整 P1 已设为执行目标，但原“不进入 P2”授权不变：完整 v2 初始化需要 BC-06/07 快照 owner、BC-08/09 日分片写入/读口、BC-10/11 共同保留水位/调度，再由 BC-26 初始化；其中 BC-04/05 身份链仍属 P1。是否将这些生产闭合必需的 P2 子项纳入本次执行，必须由用户另行决定。在决定前不实施这些子项、不关闭 P1，不扩展 BC-12/13 完整查询、业务页面、BC-24/25 WS、BC-27 总体旧路径退出或 P5 验收。其余 P1 内部能力仍有工作可做，该依赖不等于它们已完成。
+
 P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01 的生产 fixture 启动门槛随 BC-26 继续保留。实际能力、未接线边界和验证分别见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)、[Management 实现](../implementation/backend/management.md#p0-v2-契约)、[前端实现](../implementation/frontend/application.md#能力与证据)。本文不预设人员数量、固定人日或日历上线日期；排期以依赖和验收门槛为准。
 
 ## 2. 当前基线与改造范围
