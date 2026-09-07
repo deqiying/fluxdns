@@ -16,14 +16,14 @@
 
 | 源码 | 已有能力 | 本次必须改变 |
 | --- | --- | --- |
-| [app.rs](../../backend/src/app.rs) `ConfigFileWatcher`、`wait_for_ctrl_c_with_reload` 调用 | 已改为双文件稳定观测、单在途有界后台读取，仅输出提示；不调用 reload | 仍需配置 owner 自写归属、状态端点和全局提示接线 |
-| [ConfigStore](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs) | 首用户源文件定向编辑、锁、fingerprint、双文件 journal | 扩展活动源表达、通用候选/状态；不能直接套用原“先文件后认证”的事务 |
+| [app.rs](../../backend/src/app.rs) `ConfigFileWatcher`、`wait_for_ctrl_c_with_reload` 调用 | 已改为双文件稳定观测、单在途有界后台读取，仅输出提示；不调用 reload | 仍需连接配置 owner 的逐文件自写归属、状态端点和全局提示 |
+| [ConfigStore](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs) | v2 活动原文、定向候选、双文件 journal、冻结操作结果和内部状态投影 | 继续接入异步事务 owner、正式启动与 HTTP；不能直接套用原“先文件后认证”的事务 |
 | [service.rs](../../backend/src/service.rs) `reload_prepared` | 已差量复用、CAS 前预注册任务，已接纳旧请求按原 deadline drain | 继续完成控制命令和新进程 owner 的应用/补偿 |
 | [RuntimeCoordinator](../../backend/src/runtime/coordinator.rs) | 活动快照、revision、mutation gate、旧请求 drain | 复用此权威，不另建 WebUI Runtime；补足提交成功定义 |
 | [service.rs](../../backend/src/service.rs) `process_owned_reload_change` | database、部分 webui、resolve_log 变化被拒绝；logs 经 service owner 热切换 | 继续完成 v2 事务/持久化联合接线；详情 owner 随对应阶段推进 |
 | [observability.rs](../../backend/src/observability.rs) | app 始终创建同一 writer；日志 owner 复用 filter/共享输出，支持 off/on、level/path | 已有[Windows 子项证据](../implementation/backend/background-services.md#p1-日志热切换2026-09-07)，v2 HTTP/UI 与联合事务仍未闭合 |
 
-2026-09-07 P0 已落实 revision、操作结果、配置读/变更和外部差异的内部 DTO/生成类型，详见 [Management 契约事实](../implementation/backend/management.md#p0-v2-契约)。追加授权的 P1 已落实 BC-02 活动源、定向候选、双文件只读观测和操作仲裁内部入口，详见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。BC-03 的有界服务队列消费者已接入原服务循环；BC-29 已实现活动源内部文件事务、PREPARED/COMMIT_DECIDED 恢复与已知文件状态重试，见[持久化事实](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。BC-30 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)已接入正式 app，资源自动刷新不变；v2 活动源/operation 服务生产者、启动恢复、差异/还原/自写归属和 HTTP 仍留 BC-03/29/30/31。不能因为已有 `reload_prepared` 或状态机成功回报就宣称新版全部 owner 已完成切换或补偿。
+2026-09-07 P0 已落实 revision、操作结果、配置读/变更和外部差异的内部 DTO/生成类型，详见 [Management 契约事实](../implementation/backend/management.md#p0-v2-契约)。追加授权的 P1 已落实 BC-02 活动源、定向候选、双文件只读观测和操作仲裁内部入口，详见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。BC-03 的有界服务队列消费者已接入原服务循环；BC-29 已实现活动源内部文件事务、PREPARED/COMMIT_DECIDED 恢复与已知文件状态重试，见[持久化事实](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。BC-30 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)已接入正式 app，资源自动刷新不变；还原、外改重试和[状态投影](../implementation/backend/management.md#p1-配置状态内部投影2026-09-07)已有内部能力。v2 活动源/operation 服务生产者、启动恢复、异步文件事务、差异及 HTTP 联动仍留 BC-03/29/30/31。不能因为已有 `reload_prepared` 或状态机成功回报就宣称新版全部 owner 已完成切换或补偿。
 
 ## 2. 配置状态与权威
 
@@ -102,7 +102,7 @@ operation_id 由客户端在发送前固定，并由服务端在有界窗口内�
 
 复用现有轮询机制，不要求新增文件监听依赖。轮询在后台有界读取，区别内容变化、缺失、不可读、超限及仅元数据变化；两次稳定采样用于去抖，不作为锁或安全 CAS。
 
-自写识别必须匹配完整提交的 fingerprint/operation，不能用“忽略下一次事件”跳过真正外部修改。新状态通过配置状态 GET 提供，页面可轮询；WS 就绪后可推送失效通知，但不能依赖解析记录自动刷新开关。
+自写识别必须匹配完成提交或当前 journal 绑定的逐文件身份与 fingerprint，不能用“忽略下一次事件”跳过真正外部修改，也不能将同内容换身份视为自写。ConfigStore 内部已实现此识别与冻结结果投影；新状态仍须接入配置状态 GET，页面可轮询。WS 就绪后可推送失效通知，但不能依赖解析记录自动刷新开关。
 
 外部改动绝不自动 reload，也不自动变更会话或覆盖编辑草稿。Hosts/规则集资源文件原有自动刷新属于另一条资源链路，不随本次主配置 watcher 改造一起禁用。
 

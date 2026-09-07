@@ -46,6 +46,81 @@ pub(crate) enum OperationPhase {
     Unknown,
 }
 
+/// 只保留可公开的失败类别，不把文件路径、配置正文或底层错误字符串写进操作缓存。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OperationFailure {
+    ValidationFailed,
+    ActiveRevisionConflict,
+    FileRevisionConflict,
+    ApplyFailed,
+    PersistenceFailed,
+    CompensationFailed,
+}
+
+/// 每次状态转移冻结当时的结果版本；后续操作或外改不能改写旧 operation 的事实。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum OperationSnapshot {
+    Preparing,
+    Applying,
+    Persisting {
+        active_revision: String,
+    },
+    AppliedUnpersisted {
+        active_revision: String,
+        persisted_revision: Option<String>,
+        error: OperationFailure,
+    },
+    AppliedSynced {
+        active_revision: String,
+        persisted_revision: String,
+    },
+    Rejected {
+        error: OperationFailure,
+    },
+    CompensationFailed {
+        active_revision: Option<String>,
+        error: OperationFailure,
+    },
+    Unknown,
+}
+
+impl OperationSnapshot {
+    pub(crate) fn phase(&self) -> OperationPhase {
+        match self {
+            Self::Preparing => OperationPhase::Preparing,
+            Self::Applying => OperationPhase::Applying,
+            Self::Persisting { .. } => OperationPhase::Persisting,
+            Self::AppliedUnpersisted { .. } => OperationPhase::AppliedUnpersisted,
+            Self::AppliedSynced { .. } => OperationPhase::AppliedSynced,
+            Self::Rejected { .. } => OperationPhase::Rejected,
+            Self::CompensationFailed { .. } => OperationPhase::CompensationFailed,
+            Self::Unknown => OperationPhase::Unknown,
+        }
+    }
+
+    fn synced(snapshot: &ActiveSnapshot) -> Self {
+        Self::AppliedSynced {
+            active_revision: snapshot.revision.clone(),
+            persisted_revision: snapshot.revision.clone(),
+        }
+    }
+
+    fn persistence_failed(snapshot: &ActiveSnapshot, error: &PersistenceError) -> Self {
+        match error {
+            PersistenceError::CleanupRequired(_) => Self::CompensationFailed {
+                active_revision: Some(snapshot.revision.clone()),
+                error: OperationFailure::CompensationFailed,
+            },
+            PersistenceError::RecoveryRequired => Self::Unknown,
+            _ => Self::AppliedUnpersisted {
+                active_revision: snapshot.revision.clone(),
+                persisted_revision: snapshot.persisted_revision.clone(),
+                error: persistence_failure(error),
+            },
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct ActiveSnapshot {
     pub(crate) source: Arc<str>,
@@ -53,7 +128,7 @@ pub(crate) struct ActiveSnapshot {
     pub(crate) revision: String,
     pub(crate) runtime_revision: u64,
     pub(crate) persisted_revision: Option<String>,
-    persisted_fingerprint: String,
+    persisted_observation: ManagedObservation,
     pub(crate) observation: ManagedObservation,
     pub(crate) operation_id: Option<String>,
 }
@@ -67,9 +142,7 @@ impl ActiveSnapshot {
     }
 
     pub(crate) fn externally_changed(&self) -> bool {
-        !self
-            .observation
-            .matches_content(&self.persisted_fingerprint)
+        self.observation != self.persisted_observation
     }
 }
 
@@ -90,8 +163,15 @@ struct ValidationRecord {
 struct OperationRecord {
     digest: String,
     actor: String,
-    phase: OperationPhase,
+    result: OperationSnapshot,
     expires: Instant,
+}
+
+/// 管理投影读取一个锁内快照；不对外暴露活动正文，也不为查询重新构造运行态。
+pub(crate) struct ConfigurationStatus {
+    pub(crate) active: ActiveSnapshot,
+    pub(crate) known_files: ManagedObservation,
+    pub(crate) operation: Option<OperationSnapshot>,
 }
 
 pub(crate) struct ValidatedCandidate {
@@ -183,7 +263,7 @@ impl ConfigStore {
                 source: Arc::from(source),
                 config: Arc::new(config),
                 persisted_revision: Some(revision.clone()),
-                persisted_fingerprint: fingerprint,
+                persisted_observation: observation.clone(),
                 revision,
                 runtime_revision,
                 observation,
@@ -215,6 +295,34 @@ impl ConfigStore {
             .as_ref()
             .map(|state| state.snapshot.clone())
             .ok_or(ActiveError::Unavailable)
+    }
+
+    /// 仅读取最近观测；不在 HTTP 状态查询中执行同步文件 I/O。
+    /// 未接入异步事务 owner 前，文件事务持锁期间返回 Busy 而不是阻塞 executor。
+    pub(crate) fn configuration_status(&self) -> Result<ConfigurationStatus, ActiveError> {
+        let guard = self.active.try_lock().map_err(|_| ActiveError::Busy)?;
+        let state = guard.as_ref().ok_or(ActiveError::Unavailable)?;
+        let mut known_files = state.snapshot.persisted_observation.clone();
+        if let Some(persistence) = state.persistence.as_ref() {
+            let candidate_files = persistence.candidate_observation();
+            // 自写识别要求完整文件身份及摘要匹配，不能忽略“下一次文件事件”。
+            if state.snapshot.observation.source == candidate_files.source {
+                known_files.source = candidate_files.source;
+            }
+            if state.snapshot.observation.derived == candidate_files.derived {
+                known_files.derived = candidate_files.derived;
+            }
+        }
+        Ok(ConfigurationStatus {
+            active: state.snapshot.clone(),
+            known_files,
+            operation: state
+                .snapshot
+                .operation_id
+                .as_ref()
+                .and_then(|id| state.operations.get(id))
+                .map(|record| record.result.clone()),
+        })
     }
 
     /// 票据绑定调用者、候选摘要、双 revision 和确认影响；只保存摘要，避免积累完整配置副本。
@@ -285,7 +393,7 @@ impl ConfigStore {
         });
         if let Some(record) = state.operations.get(operation_id) {
             return if record.digest == operation_digest {
-                Ok(BeginApply::Existing(record.phase.clone()))
+                Ok(BeginApply::Existing(record.result.phase()))
             } else {
                 Err(ActiveError::OperationIdReused)
             };
@@ -316,7 +424,7 @@ impl ConfigStore {
             OperationRecord {
                 digest: operation_digest,
                 actor: sha256_digest(actor.as_bytes()),
-                phase: OperationPhase::Preparing,
+                result: OperationSnapshot::Preparing,
                 expires: now + OPERATION_TTL,
             },
         );
@@ -337,10 +445,20 @@ impl ConfigStore {
         actor: &str,
         operation_id: &str,
     ) -> Result<OperationPhase, ActiveError> {
-        let guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
-        let state = guard.as_ref().ok_or(ActiveError::Unavailable)?;
-        // 操作查询仍须由管理端鉴权；actor 校验避免未来 adapter 传空身份。
+        self.operation_snapshot(actor, operation_id)
+            .map(|result| result.phase())
+    }
+
+    /// 查询已冻结的操作事实；不同调用者、过期和未找到统一返回 Unknown，不暴露其他会话。
+    pub(crate) fn operation_snapshot(
+        &self,
+        actor: &str,
+        operation_id: &str,
+    ) -> Result<OperationSnapshot, ActiveError> {
         validate_token(actor)?;
+        validate_token(operation_id)?;
+        let guard = self.active.try_lock().map_err(|_| ActiveError::Busy)?;
+        let state = guard.as_ref().ok_or(ActiveError::Unavailable)?;
         Ok(state
             .operations
             .get(operation_id)
@@ -349,7 +467,7 @@ impl ConfigStore {
                     && (record.expires > Instant::now()
                         || state.snapshot.operation_id.as_deref() == Some(operation_id))
             })
-            .map_or(OperationPhase::Unknown, |record| record.phase.clone()))
+            .map_or(OperationSnapshot::Unknown, |record| record.result.clone()))
     }
 
     /// 仅持久化已成功应用的活动源；失败保留新运行态和 gate，重试不会再调用 Runtime。
@@ -396,10 +514,11 @@ impl ConfigStore {
         if record.actor != sha256_digest(actor.as_bytes()) {
             return Err(ActiveError::Unavailable);
         }
-        if record.phase == OperationPhase::AppliedSynced {
+        if record.result.phase() == OperationPhase::AppliedSynced {
             return Ok(state.snapshot.clone());
         }
-        if record.phase != OperationPhase::AppliedUnpersisted
+        if !(record.result.phase() == OperationPhase::AppliedUnpersisted
+            || (confirmation.is_none() && record.result.phase() == OperationPhase::Persisting))
             || state.snapshot.operation_id.as_deref() != Some(operation_id)
         {
             return Err(ActiveError::Busy);
@@ -425,25 +544,30 @@ impl ConfigStore {
                 &state.snapshot.observation,
                 state.snapshot.source.as_bytes(),
             ) {
-                state.operations.get_mut(operation_id).unwrap().phase =
-                    persistence_failure_phase(&error);
+                state.operations.get_mut(operation_id).unwrap().result =
+                    OperationSnapshot::persistence_failed(&state.snapshot, &error);
                 return Err(error.into());
             }
         }
+        state.operations.get_mut(operation_id).unwrap().result = OperationSnapshot::Persisting {
+            active_revision: state.snapshot.revision.clone(),
+        };
         let result = persistence.commit();
         state.snapshot.observation =
             ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
         if let Err(error) = result {
-            state.operations.get_mut(operation_id).unwrap().phase =
-                persistence_failure_phase(&error);
+            state.operations.get_mut(operation_id).unwrap().result =
+                OperationSnapshot::persistence_failed(&state.snapshot, &error);
             return Err(error.into());
         }
-        let fingerprint = sha256_digest(state.snapshot.source.as_bytes());
         // commit 已核对两个替换结果；其后的外改由 observation 暴露，不重放已完成提交。
         state.snapshot.persisted_revision = Some(state.snapshot.revision.clone());
-        state.snapshot.persisted_fingerprint = fingerprint;
+        state.snapshot.persisted_observation =
+            state.persistence.as_ref().unwrap().candidate_observation();
         state.snapshot.operation_id = None;
-        state.operations.get_mut(operation_id).unwrap().phase = OperationPhase::AppliedSynced;
+        let record = state.operations.get_mut(operation_id).unwrap();
+        record.result = OperationSnapshot::synced(&state.snapshot);
+        record.expires = Instant::now() + OPERATION_TTL;
         state.protection = state.persistence.as_ref().unwrap().protection();
         state.persistence = None;
         Ok(state.snapshot.clone())
@@ -473,7 +597,7 @@ impl ConfigStore {
         });
         if let Some(record) = state.operations.get(operation_id) {
             return if record.digest == digest {
-                Ok(record.phase.clone())
+                Ok(record.result.phase())
             } else {
                 Err(ActiveError::OperationIdReused)
             };
@@ -489,7 +613,7 @@ impl ConfigStore {
             OperationRecord {
                 digest,
                 actor: sha256_digest(actor.as_bytes()),
-                phase: OperationPhase::Preparing,
+                result: OperationSnapshot::Preparing,
                 expires: now + OPERATION_TTL,
             },
         );
@@ -509,33 +633,47 @@ impl ConfigStore {
                     PersistenceError::CleanupRequired(_) | PersistenceError::RecoveryRequired
                 ) || super::persistence::ensure_no_journal(&self.source_path)
                     .is_err();
-                let phase = if unresolved {
-                    OperationPhase::CompensationFailed
+                let result = if unresolved {
+                    OperationSnapshot::CompensationFailed {
+                        active_revision: Some(state.snapshot.revision.clone()),
+                        error: OperationFailure::CompensationFailed,
+                    }
                 } else {
                     state.snapshot.operation_id = None;
-                    OperationPhase::Rejected
+                    OperationSnapshot::Rejected {
+                        error: persistence_failure(&error),
+                    }
                 };
-                state.operations.get_mut(operation_id).unwrap().phase = phase;
+                let record = state.operations.get_mut(operation_id).unwrap();
+                record.result = result;
+                if !unresolved {
+                    record.expires = Instant::now() + OPERATION_TTL;
+                }
                 return Err(error.into());
             }
         };
         state.persistence = Some(persistence);
-        state.operations.get_mut(operation_id).unwrap().phase = OperationPhase::Persisting;
+        state.operations.get_mut(operation_id).unwrap().result = OperationSnapshot::Persisting {
+            active_revision: state.snapshot.revision.clone(),
+        };
         // 活动源已是权威运行配置，确认还原可以决定文件提交，不需要再次应用 DNS。
         let result = state.persistence.as_mut().unwrap().commit();
         state.snapshot.observation =
             ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
         if let Err(error) = result {
-            state.operations.get_mut(operation_id).unwrap().phase =
-                persistence_failure_phase(&error);
+            state.operations.get_mut(operation_id).unwrap().result =
+                OperationSnapshot::persistence_failed(&state.snapshot, &error);
             return Err(error.into());
         }
         state.snapshot.persisted_revision = Some(state.snapshot.revision.clone());
-        state.snapshot.persisted_fingerprint = sha256_digest(state.snapshot.source.as_bytes());
+        state.snapshot.persisted_observation =
+            state.persistence.as_ref().unwrap().candidate_observation();
         state.snapshot.operation_id = None;
         state.protection = state.persistence.as_ref().unwrap().protection();
         state.persistence = None;
-        state.operations.get_mut(operation_id).unwrap().phase = OperationPhase::AppliedSynced;
+        let record = state.operations.get_mut(operation_id).unwrap();
+        record.result = OperationSnapshot::synced(&state.snapshot);
+        record.expires = Instant::now() + OPERATION_TTL;
         Ok(OperationPhase::AppliedSynced)
     }
 }
@@ -562,7 +700,7 @@ impl ApplyPermit<'_> {
             .operations
             .get_mut(&self.operation_id)
             .ok_or(ActiveError::Unavailable)?;
-        if record.phase != OperationPhase::Preparing {
+        if record.result.phase() != OperationPhase::Preparing {
             return Err(ActiveError::Busy);
         }
         let persistence = Persistence::prepare_with_protection(
@@ -578,7 +716,7 @@ impl ApplyPermit<'_> {
         {
             return Err(ActiveError::FileConflict);
         }
-        record.phase = OperationPhase::Applying;
+        record.result = OperationSnapshot::Applying;
         Ok(())
     }
 
@@ -590,12 +728,14 @@ impl ApplyPermit<'_> {
             .operations
             .get_mut(&self.operation_id)
             .ok_or(ActiveError::Unavailable)?;
-        if record.phase != OperationPhase::Applying
+        if record.result.phase() != OperationPhase::Applying
             || runtime_revision <= state.snapshot.runtime_revision
         {
             return Err(ActiveError::ActiveConflict);
         }
-        record.phase = OperationPhase::AppliedUnpersisted;
+        record.result = OperationSnapshot::Persisting {
+            active_revision: self.next_revision.clone(),
+        };
         state.snapshot.source = Arc::from(self.candidate.source.as_str());
         state.snapshot.config = Arc::new(self.candidate.config.clone());
         state.snapshot.revision = self.next_revision.clone();
@@ -605,7 +745,16 @@ impl ApplyPermit<'_> {
     }
 
     /// prepare 拒绝或运行应用已完整补偿才可释放 gate；补偿不完整必须保持阻塞。
-    pub(crate) fn rejected(mut self, compensated: bool) -> Result<(), ActiveError> {
+    pub(crate) fn rejected(self, compensated: bool) -> Result<(), ActiveError> {
+        self.reject_with(OperationFailure::ApplyFailed, compensated)
+    }
+
+    /// 由事务 owner 提供已知的拒绝类别；是否释放 gate 仍以真实补偿及旁文件清理为准。
+    pub(crate) fn reject_with(
+        mut self,
+        error: OperationFailure,
+        compensated: bool,
+    ) -> Result<(), ActiveError> {
         let mut guard = self.store.active.lock().map_err(|_| ActiveError::Busy)?;
         let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
         let cleanup = if compensated {
@@ -623,12 +772,16 @@ impl ApplyPermit<'_> {
             .operations
             .get_mut(&self.operation_id)
             .ok_or(ActiveError::Unavailable)?;
-        record.phase = if compensated {
-            OperationPhase::Rejected
+        record.result = if compensated {
+            OperationSnapshot::Rejected { error }
         } else {
-            OperationPhase::CompensationFailed
+            OperationSnapshot::CompensationFailed {
+                active_revision: None,
+                error: OperationFailure::CompensationFailed,
+            }
         };
         if compensated {
+            record.expires = Instant::now() + OPERATION_TTL;
             state.snapshot.operation_id = None;
             state.persistence = None;
         }
@@ -646,16 +799,16 @@ impl Drop for ApplyPermit<'_> {
             && let Some(record) = state.operations.get_mut(&self.operation_id)
         {
             // 被取消或 panic 的命令不能被重放；保留 gate，等待控制 owner 核对真实状态。
-            record.phase = OperationPhase::Unknown;
+            record.result = OperationSnapshot::Unknown;
         }
     }
 }
 
-fn persistence_failure_phase(error: &PersistenceError) -> OperationPhase {
+fn persistence_failure(error: &PersistenceError) -> OperationFailure {
     match error {
-        PersistenceError::CleanupRequired(_) => OperationPhase::CompensationFailed,
-        PersistenceError::RecoveryRequired => OperationPhase::Unknown,
-        _ => OperationPhase::AppliedUnpersisted,
+        PersistenceError::Conflict => OperationFailure::FileRevisionConflict,
+        PersistenceError::CleanupRequired(_) => OperationFailure::CompensationFailed,
+        _ => OperationFailure::PersistenceFailed,
     }
 }
 

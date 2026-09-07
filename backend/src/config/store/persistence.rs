@@ -157,6 +157,18 @@ pub(crate) enum RecoveryOutcome {
 }
 
 impl Persistence {
+    /// 只返回 journal 绑定的候选身份，不把提交后读到的任意新文件误认作本进程自写。
+    pub(super) fn candidate_observation(&self) -> ManagedObservation {
+        let observe = |target: &Target| super::observation::FileObservation::Readable {
+            identity: target.staged.identity.clone(),
+            fingerprint: target.staged.fingerprint.clone(),
+        };
+        ManagedObservation {
+            source: observe(&self.journal.source),
+            derived: self.journal.derived.as_ref().map(observe),
+        }
+    }
+
     pub(super) fn prepare(
         source: &Path,
         derived: Option<&Path>,

@@ -7,21 +7,40 @@ const FIXTURE: &str = include_str!("../../../../tests/fixtures/config-v2.yaml");
 
 #[test]
 fn unresolved_persistence_results_are_not_classified_as_retryable_file_failure() {
+    let fixture = Fixture::new();
+    let snapshot = fixture.store.active_snapshot().unwrap();
     assert_eq!(
-        persistence_failure_phase(&PersistenceError::CleanupRequired(Box::new(
-            PersistenceError::Conflict
-        ))),
-        OperationPhase::CompensationFailed
+        OperationSnapshot::persistence_failed(
+            &snapshot,
+            &PersistenceError::CleanupRequired(Box::new(PersistenceError::Conflict))
+        ),
+        OperationSnapshot::CompensationFailed {
+            active_revision: Some(snapshot.revision.clone()),
+            error: OperationFailure::CompensationFailed,
+        }
     );
     assert_eq!(
-        persistence_failure_phase(&PersistenceError::RecoveryRequired),
-        OperationPhase::Unknown
+        OperationSnapshot::persistence_failed(&snapshot, &PersistenceError::RecoveryRequired),
+        OperationSnapshot::Unknown
     );
     assert_eq!(
-        persistence_failure_phase(&PersistenceError::Io(std::io::Error::from(
-            std::io::ErrorKind::PermissionDenied
-        ))),
-        OperationPhase::AppliedUnpersisted
+        OperationSnapshot::persistence_failed(
+            &snapshot,
+            &PersistenceError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        ),
+        OperationSnapshot::AppliedUnpersisted {
+            active_revision: snapshot.revision.clone(),
+            persisted_revision: snapshot.persisted_revision.clone(),
+            error: OperationFailure::PersistenceFailed,
+        }
+    );
+    assert_eq!(
+        OperationSnapshot::persistence_failed(&snapshot, &PersistenceError::Conflict),
+        OperationSnapshot::AppliedUnpersisted {
+            active_revision: snapshot.revision,
+            persisted_revision: snapshot.persisted_revision,
+            error: OperationFailure::FileRevisionConflict,
+        }
     );
 }
 
@@ -523,7 +542,8 @@ fn same_content_replacement_changes_identity_and_hardlinks_are_rejected() {
     fs::rename(replacement, &fixture.source).unwrap();
     let replaced = fixture.store.observe_files().unwrap();
     assert_ne!(initial.expected().files, replaced.expected().files);
-    assert!(!replaced.externally_changed());
+    // 相同正文但身份变更仍不是本进程自写，必须重新确认该文件版本。
+    assert!(replaced.externally_changed());
     fs::hard_link(&fixture.source, fixture.root.join("alias.yaml")).unwrap();
     assert_eq!(
         fixture.store.observe_files().unwrap().observation.source,
@@ -731,7 +751,7 @@ fn applied_state_is_separate_from_disk_and_failed_compensation_blocks() {
     assert_eq!(fs::read_to_string(&fixture.source).unwrap(), FIXTURE);
     assert_eq!(
         fixture.store.operation("session", "op").unwrap(),
-        OperationPhase::AppliedUnpersisted
+        OperationPhase::Persisting
     );
     assert!(matches!(
         fixture
@@ -834,6 +854,107 @@ fn expiration_capacity_and_setup_share_the_operation_boundary() {
         fixture.store.create_initial_user("admin", "not-a-hash"),
         Err(crate::config::store::ConfigStoreError::Busy)
     ));
+}
+
+#[test]
+fn operation_retention_restarts_at_completion_and_pins_in_progress_results() {
+    let fixture = Fixture::new();
+    let mut permit = fixture.permit("retained");
+    permit.begin_runtime_apply().unwrap();
+    {
+        let mut guard = fixture.store.active.lock().unwrap();
+        guard
+            .as_mut()
+            .unwrap()
+            .operations
+            .get_mut("retained")
+            .unwrap()
+            .expires = Instant::now() - Duration::from_secs(1);
+    }
+    assert_eq!(
+        fixture.store.operation("session-a", "retained").unwrap(),
+        OperationPhase::Applying
+    );
+    permit.applied(2).unwrap();
+    let completed_after = Instant::now();
+    fixture
+        .store
+        .persist_applied("session-a", "retained")
+        .unwrap();
+    {
+        let mut guard = fixture.store.active.lock().unwrap();
+        let record = guard
+            .as_mut()
+            .unwrap()
+            .operations
+            .get_mut("retained")
+            .unwrap();
+        assert!(record.expires >= completed_after + OPERATION_TTL);
+        assert!(matches!(
+            record.result,
+            OperationSnapshot::AppliedSynced { .. }
+        ));
+        record.expires = Instant::now() - Duration::from_secs(1);
+    }
+    assert_eq!(
+        fixture
+            .store
+            .operation_snapshot("session-a", "retained")
+            .unwrap(),
+        OperationSnapshot::Unknown
+    );
+    let permit = fixture.permit("rejected-retained");
+    {
+        let mut guard = fixture.store.active.lock().unwrap();
+        guard
+            .as_mut()
+            .unwrap()
+            .operations
+            .get_mut("rejected-retained")
+            .unwrap()
+            .expires = Instant::now() - Duration::from_secs(1);
+    }
+    let completed_after = Instant::now();
+    permit
+        .reject_with(OperationFailure::ValidationFailed, true)
+        .unwrap();
+    let guard = fixture.store.active.lock().unwrap();
+    let record = guard
+        .as_ref()
+        .unwrap()
+        .operations
+        .get("rejected-retained")
+        .unwrap();
+    assert!(record.expires >= completed_after + OPERATION_TTL);
+    assert_eq!(
+        record.result,
+        OperationSnapshot::Rejected {
+            error: OperationFailure::ValidationFailed
+        }
+    );
+}
+
+#[test]
+fn state_and_operation_queries_do_not_wait_for_the_file_transaction_lock() {
+    let fixture = Fixture::new();
+    let guard = fixture.store.active.lock().unwrap();
+    assert!(matches!(
+        fixture.store.configuration_status(),
+        Err(ActiveError::Busy)
+    ));
+    assert!(matches!(
+        fixture.store.operation_snapshot("session-a", "operation"),
+        Err(ActiveError::Busy)
+    ));
+    drop(guard);
+    assert!(fixture.store.configuration_status().is_ok());
+    assert_eq!(
+        fixture
+            .store
+            .operation_snapshot("session-a", "operation")
+            .unwrap(),
+        OperationSnapshot::Unknown
+    );
 }
 
 #[test]

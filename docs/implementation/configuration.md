@@ -45,7 +45,7 @@
 - 候选依次执行变更预算、活动源定向修改、已知 variant 引用更新、完整 `ConfigV2::parse/validate`、两级路径检查、CST 定位编辑及整树等价复核。覆盖 listener/DoH route、bootstrap、组成员/fallback、策略、Hosts、rule-set selector、proxy 和客户端策略；不对正文、路径、SecretRef 做字符串替换。资源首载、物理 owner 路径、socket 和进程 prepare 仍属于后续运行接线，不能把这一步视为可应用运行态。
 - [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。新增片段经 serializer 转义；支持块/flow、CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验；锚点/别名/merge 等无法安全维护的表达明确拒绝，没有整份重序列化回退。
 - [`observation`](../../backend/src/config/store/observation.rs) 有界读取源与派生文件，各自区分可读/缺失/不可读/超限，组合 token 包含内容指纹和物理文件身份；同内容替换仍产生不同 token。拒绝 hard link、symlink/reparse 路径；读取前后核对身份和元数据。Windows 使用真实 FileId，Unix 代码未在本次执行。此观测不提供 filesystem CAS，正式替换前仍须重新核对；BC-29 的写入身份与旁文件保护见下节。
-- 60 秒验证票据绑定调用者、候选、双 revision 与影响确认，只缓存 SHA-256 摘要；受管内容/观测 token 同样使用 SHA-256，不复用旧迁移 hash。随机验证票据仍为 256 bit，复用已有 `sha2 0.10.9`，没有依赖变更。操作记录上限 1024、窗口 30 分钟，进行中记录不淘汰。同 ID 不同命令拒绝，相同命令返回已有阶段；不同调用者的查询不披露结果。未同步、补偿失败或 permit 中断保持 gate，未知不被视为未执行。普通变更仍未调用 Runtime；状态机中的成功回报测试只是模拟控制 owner，实际文件事务的内部消费见下节。
+- 60 秒验证票据绑定调用者、候选、双 revision 与影响确认，只缓存 SHA-256 摘要；受管内容/观测 token 同样使用 SHA-256，不复用旧迁移 hash。随机验证票据仍为 256 bit，复用已有 `sha2 0.10.9`，没有依赖变更。操作记录上限 1024、完成后保留 30 分钟，进行中记录不淘汰。同 ID 不同命令拒绝，相同命令返回已有阶段；不同调用者的查询不披露结果。未同步、补偿失败或 permit 中断保持 gate，未知不被视为未执行。普通变更仍未调用 Runtime；状态机中的成功回报测试只是模拟控制 owner，实际文件事务的内部消费见下节。
 
 BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 71 项（含摘要加固后的 SHA-256 固定向量）、`management::` 18 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过。Node/Vite 子进程在沙盒内被 `spawn EPERM` 阻止后，经批准在沙盒外重跑通过。新测试覆盖候选/引用/源表达和真实双文件观测；文件只在 `_fluxdns/p1-config-tests/` 的随机用例目录创建并清理。该批未执行真实 v2 启动、HTTP、DNS 热更新、journal crash point、文件还原/同步重试、日志切换或浏览器验收；后续批次证据单列。当前 schema 和生成类型没有 wire 变化。
 
@@ -72,7 +72,7 @@ Windows Rust 1.98.0 本批 `config::` 89 项通过，其中 ConfigStore 28 项�
 
 Windows 本批 ConfigStore 36 项、完整 `config::` 97 项通过。新增还原确认/幂等/双版本冲突、真实文件占用失败和显式重试、单/双文件缺失、目录/硬链接拒绝、父目录替换、DACL 保留以及 no-replace 测试。子进程矩阵从 4 个扩至 8 个 crash point，增加缺失双文件的 PREPARED、COMMIT_DECIDED、源提交后、派生提交后；PREPARED 不补建目标，持久决策才补齐。用例数据仍在 `_fluxdns/p1-config-tests/` 和 `_fluxdns/p1-journal-tests/`，递归清理前核对真实绝对路径归属。
 
-该子项未接入 HTTP/UI 或 v2 生产启动，不替代完整 BC-30。新外改后的重新确认/事务重建内部进度见下节；受限差异预览、配置状态投影，以及文件 I/O 的异步 owner/预算和响应中断仍待完成。不能以内部 revision 不变断言新版真实 DNS 联合还原已验收。
+该子项未接入 HTTP/UI 或 v2 生产启动，不替代完整 BC-30。新外改后的重新确认/事务重建、配置状态投影内部进度见下文；受限差异预览，以及文件 I/O 的异步 owner/预算和响应中断仍待完成。不能以内部 revision 不变断言新版真实 DNS 联合还原已验收。
 
 ### P1 外改确认重试内部能力（2026-09-07）
 
@@ -84,7 +84,17 @@ Windows 本批 ConfigStore 36 项、完整 `config::` 97 项通过。新增还�
 
 Windows Rust 1.98.0 本批 `config::` 104 项通过，其中 ConfigStore 43 项。独立子进程退出矩阵扩至 12 个检查点，新增外改重新确认前、新决策持久化后、源替换后和派生替换后；新决策前保持未知外改，新决策后仅完成已确认候选。另有真实 journal 文件占用、调用者/双版本冲突、重复重试不覆盖后续外改、旁文件篡改与连续确认清单上界测试。`cargo check`、全部测试目标 `--all-targets --no-run` 和 fmt 检查通过；未执行断电、跨平台或正式 v2 HTTP 联合验收。
 
-该内部重试不意味着正式 `/api/v2/config/files/retry` 已可用。操作 DTO 的冻结结果投影、认证/handler、异步持久化 owner 和启动恢复仍未闭合；HTTP 结果未知必须查询 operation，不能自动重放应用或还原。
+该内部重试不意味着正式 `/api/v2/config/files/retry` 已可用。冻结结果的内部投影见下节，认证/handler、异步持久化 owner 和启动恢复仍未闭合；HTTP 结果未知必须查询 operation，不能自动重放应用或还原。
+
+### P1 配置状态与冻结操作结果（2026-09-07）
+
+ConfigStore 的操作记录保存 `OperationSnapshot`，在每次状态转移时冻结对应 active/persisted revision 和白名单失败类别；后续其他操作、外部文件变化不改写旧结果。应用成功回报进入 `Persisting`，实际文件提交失败才进入 `AppliedUnpersisted`。已确认运行版本的清理失败保留该版本；运行补偿结果不明则不编造 active revision。完成或已完整补偿的拒绝重新起算 30 分钟保留期，未同步/未知记录继续由当前 gate 固定。
+
+`configuration_status` 与 `operation_snapshot` 只读同一锁内的缓存快照，不执行文件 I/O；锁被文件事务占用时立即返回 `Busy`。这不替代尚未实现的异步事务 owner，正式 HTTP handler 不能直接调用同步写盘方法。Management 到 P0 DTO 的白名单映射、精度与脱敏证据见[内部状态投影](backend/management.md#p1-配置状态内部投影2026-09-07)。
+
+每个文件的已知状态来自上次持久化身份/摘要，或当前 journal 明确绑定的候选身份/摘要。部分提交只将精确匹配的那一个目标识别为自写，不用“忽略下一次事件”或仅内容相同放行。同步成功后以 journal 候选身份建立基线，随后读到的未知外改仍显示 changed；同内容换 FileId 也要求外改确认。`synchronization: synced` 表示上次受管提交完成，外部变化独立通过 `files` 表示，不等于磁盘当前仍与活动源一致。
+
+本批新增保留期、进行中固定、状态查询不阻塞及冻结结果类别的定向测试；Windows 实际文件投影覆盖部分提交、重试、同内容换身份、缺失、超限和不可读。测试回报的 Runtime 成功仍是内部模拟，未据此证明 v2 DNS/HTTP 联合流程。
 
 ### 当前生产加载器
 

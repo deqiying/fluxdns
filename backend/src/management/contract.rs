@@ -65,18 +65,23 @@ macro_rules! token {
                 &self.0
             }
         }
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-                let value = String::deserialize(deserializer)?;
+        impl TryFrom<String> for $name {
+            type Error = &'static str;
+            fn try_from(value: String) -> Result<Self, Self::Error> {
                 if value.is_empty()
                     || value.len() > $max
                     || !value
                         .bytes()
                         .all(|byte| byte.is_ascii_alphanumeric() || b"-._:".contains(&byte))
                 {
-                    return Err(de::Error::custom("invalid bounded opaque token"));
+                    return Err("invalid bounded opaque token");
                 }
                 Ok(Self(value))
+            }
+        }
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+                Self::try_from(String::deserialize(deserializer)?).map_err(de::Error::custom)
             }
         }
     };
