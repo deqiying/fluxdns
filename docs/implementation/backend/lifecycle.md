@@ -34,11 +34,19 @@
 
 [`app.rs`](../../../backend/src/app.rs) 的 `prepare_reload_candidate`、`reload_runtime_from_path` 与 `reload_service_from_path` 重读配置时关闭 snapshot 写入，先拒绝进程持有配置的变化，再 prepare。正式 service watcher 调用 service-aware 入口，不只替换裸 coordinator。
 
-[`DnsService::reload_prepared`](../../../backend/src/service.rs) 按 BindPlan 复用未变 listener 或先绑定新入口，经 revision CAS 激活后重建 transport/resource task，并取消旧 scoped token。候选失败保留旧 runtime；watcher 只在成功后提交 fingerprint。
+[`DnsService::reload_prepared`](../../../backend/src/service.rs) 在 BindPlan 相同时复用整个监听集合；有变化时调用 `bind_prepared_reusing`，按物理 `SocketSpec` 复用未变句柄，只为新增或改变的 endpoint 创建 socket。经 revision CAS 激活后重建 transport/resource task，并取消旧 scoped token。CAS 前的 bind/adapter 准备失败保留旧 runtime；CAS 后仍有 task 注册失败窗口，不能泛称全部应用失败都已补偿。当前 watcher 仍在 reload 成功后提交 fingerprint。
 
 Storage/Telemetry 和解析统计 sink 由进程持有，reload 为候选 core 复用这些 sink。`webui.users` 激活后交给 `ManagementRuntime::reconcile_users`，内部写入识别与外部 session 撤销见[管理端](management.md)。其他 restart-required 字段见[配置参考](../configuration.md)。
 
 TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于进程 owner，reload 不重置累计量。与之不同，重新 prepare 的 DoH connector 创建独立 bootstrap 地址缓存；旧请求只能填旧 resolver，候选失败不影响活动缓存。资源-only publish 未替换 connector 时继续使用其原缓存。
+
+### P1 差量 socket 子项（2026-09-07）
+
+`BoundEndpoint` 使用共享的 `Arc<dyn ActivatedSocket>`。复用键是底层协议、绑定地址/端口、`reuse_port` 和 `v6_only`；listener 名称、策略和 DoH 路由不参与物理键。新集合保留候选的 `BindEntry`，不会因复用句柄而保留旧逻辑名称。新 socket 仍先全部 prepare 再 activate；候选释放只减少旧句柄引用，不关闭仍由活动实例持有的 socket。地址范围重叠但物理键不同的重绑仍可能被操作系统拒绝，不通过关闭旧端口或启用端口共享强行成功。
+
+Windows Rust 1.98.0 定向证据：`runtime::bind::tests` 6 项、`service::tests::reload` 7 项通过；扩大到 `runtime::` 筛选回归 64 项通过（包含同名 cache runtime 测试），全部 Cargo 测试目标 `--no-run` 编译、fmt、文档及 diff 检查通过。新增 fake factory 用例核对改名复用、只准备变更端口、prepare/activate 失败后引用与释放计数；真实 loopback 用例仅改变 UDP 端口，确认 TCP/DoH 句柄 `Arc::ptr_eq`，在切换前后及占用新端口导致拒绝后执行 UDP/TCP/DoH POST/GET 查询，校验关联 ID、RCODE 和 canonical 响应一致。新用例不打开数据库、不加载个人配置，配置工作路径为 `_fluxdns/p1-service-differential`，端口由系统临时分配。
+
+这只是 BC-03 已接入现有 service 的差量 socket 子项，不是完整 BC-03。仍需有界服务控制命令、CAS 前 task/owner 可失败准备、真实补偿与应用成功边界、旧在途请求 drain，以及 BC-02 到运行 owner 的接线。真实测试使用当前生产支持的 v1 配置，不证明 v2 loader、HTTP/WS、持续无丢包热更新或日志切换已可用。
 
 ## Shutdown 与错误
 

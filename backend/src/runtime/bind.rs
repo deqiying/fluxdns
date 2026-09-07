@@ -1,12 +1,13 @@
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use thiserror::Error;
 
 use crate::config::{BindEntry, BindProtocol};
 use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision};
 use crate::ports::effects::{
-    ActivatedSocket, ActivatedSocketHandle, SocketFactory, SocketKind, SocketSpec,
+    ActivatedSocket, ActivatedSocketHandle, PreparedSocket, SocketFactory, SocketKind, SocketSpec,
 };
 use crate::ports::{PortError, PortErrorClass};
 
@@ -81,7 +82,7 @@ impl fmt::Debug for BoundListenerSet {
 
 struct BoundEndpoint {
     entry: BindEntry,
-    socket: Box<dyn ActivatedSocket>,
+    socket: Arc<dyn ActivatedSocket>,
 }
 
 /// 已绑定但尚未交给 coordinator 发布的候选运行时。
@@ -171,30 +172,73 @@ pub async fn bind_prepared(
     deadline: Deadline,
     cancellation: &Cancellation,
 ) -> Result<BoundCandidate, BindError> {
+    bind_with_previous(prepared, None, factory, deadline, cancellation).await
+}
+
+/// 按物理 SocketSpec 复用活动句柄，逻辑名称、策略或 DoH 路由变化不触发重复 bind。
+/// 新 socket 全部准备后才激活；失败仅释放候选，不能关闭旧集合的共享句柄。
+pub(crate) async fn bind_prepared_reusing(
+    prepared: PreparedRuntime,
+    previous: &BoundListenerSet,
+    factory: &dyn SocketFactory,
+    deadline: Deadline,
+    cancellation: &Cancellation,
+) -> Result<BoundCandidate, BindError> {
+    bind_with_previous(prepared, Some(previous), factory, deadline, cancellation).await
+}
+
+enum PendingSocket {
+    Reused(Arc<dyn ActivatedSocket>),
+    Prepared(Box<dyn PreparedSocket>),
+}
+
+async fn bind_with_previous(
+    prepared: PreparedRuntime,
+    previous: Option<&BoundListenerSet>,
+    factory: &dyn SocketFactory,
+    deadline: Deadline,
+    cancellation: &Cancellation,
+) -> Result<BoundCandidate, BindError> {
     let plan = prepared.bind_plan().clone();
     let mut pending = Vec::with_capacity(plan.entries.len());
 
     for (index, entry) in plan.entries.iter().enumerate() {
         check_budget(deadline, cancellation)?;
-        let socket = factory
-            .prepare(socket_spec(entry), deadline, cancellation)
-            .await
-            .map_err(|source| BindError::Prepare {
-                index,
-                owner: entry.owner.clone(),
-                source,
-            })?;
+        let spec = socket_spec(entry);
+        let socket = if let Some(existing) = previous
+            .into_iter()
+            .flat_map(|set| &set.endpoints)
+            .find(|endpoint| socket_spec(&endpoint.entry) == spec)
+        {
+            PendingSocket::Reused(Arc::clone(&existing.socket))
+        } else {
+            PendingSocket::Prepared(
+                factory
+                    .prepare(spec, deadline, cancellation)
+                    .await
+                    .map_err(|source| BindError::Prepare {
+                        index,
+                        owner: entry.owner.clone(),
+                        source,
+                    })?,
+            )
+        };
         pending.push((entry.clone(), socket));
     }
 
     check_budget(deadline, cancellation)?;
     let mut endpoints = Vec::with_capacity(pending.len());
     for (index, (entry, socket)) in pending.into_iter().enumerate() {
-        let activated = socket.activate().map_err(|source| BindError::Activate {
-            index,
-            owner: entry.owner.clone(),
-            source,
-        })?;
+        let activated = match socket {
+            PendingSocket::Reused(socket) => socket,
+            PendingSocket::Prepared(socket) => {
+                Arc::from(socket.activate().map_err(|source| BindError::Activate {
+                    index,
+                    owner: entry.owner.clone(),
+                    source,
+                })?)
+            }
+        };
         endpoints.push(BoundEndpoint {
             entry,
             socket: activated,
@@ -244,7 +288,7 @@ pub(crate) fn test_candidate(prepared: PreparedRuntime) -> BoundCandidate {
         prepared,
         BoundListenerSet::new(vec![BoundEndpoint {
             entry,
-            socket: Box::new(TestActivatedSocket { address }),
+            socket: Arc::new(TestActivatedSocket { address }),
         }]),
     )
 }
@@ -285,7 +329,7 @@ mod tests {
     };
     use crate::ports::{PortError, PortErrorClass, PortFuture};
 
-    use super::{BindError, bind_prepared};
+    use super::{BindError, bind_prepared, bind_prepared_reusing};
     use crate::runtime::PreparedRuntime;
 
     #[derive(Clone, Default)]
@@ -439,6 +483,10 @@ mod tests {
     }
 
     fn prepared_fixture() -> PreparedRuntime {
+        prepared_fixture_at("dns-udp", 5300, 5301)
+    }
+
+    fn prepared_fixture_at(udp_name: &str, udp_port: u16, tcp_port: u16) -> PreparedRuntime {
         let work_path = crate::config::test_support::absolute_path("runtime-bind");
         let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
@@ -462,14 +510,14 @@ webui:
 dns: {{}}
 listener:
   - type: udp
-    name: dns-udp
+    name: {udp_name}
     addresses: [127.0.0.1]
-    port: 5300
+    port: {udp_port}
     strategy: default
   - type: tcp
     name: dns-tcp
     addresses: ["::1"]
-    port: 5301
+    port: {tcp_port}
     strategy: default
 upstreams:
   - type: hosts
@@ -557,6 +605,89 @@ strategy:
         );
         assert_eq!(state.prepared_drops(), 1);
         assert_eq!(state.activated_drops(), 0);
+    }
+
+    #[tokio::test]
+    async fn differential_bind_reuses_renamed_socket_and_prepares_only_changed_port() {
+        let previous_state = FakeSocketState::default();
+        let (deadline, cancellation) = budget();
+        let previous = bind_prepared(
+            prepared_fixture(),
+            &FakeFactory::new(previous_state.clone()),
+            deadline,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        let next_state = FakeSocketState::default();
+        let next = bind_prepared_reusing(
+            prepared_fixture_at("renamed-udp", 5300, 5302),
+            previous.listeners(),
+            &FakeFactory::new(next_state.clone()),
+            deadline,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(next_state.events(), ["prepare-0", "activate-0"]);
+        assert_eq!(next_state.specs()[0].address.port(), 5302);
+        assert!(Arc::ptr_eq(
+            &previous.listeners.endpoints[0].socket,
+            &next.listeners.endpoints[0].socket,
+        ));
+        assert_ne!(
+            previous.listeners.endpoints[0].entry.owner,
+            next.listeners.endpoints[0].entry.owner,
+        );
+        assert!(!Arc::ptr_eq(
+            &previous.listeners.endpoints[1].socket,
+            &next.listeners.endpoints[1].socket,
+        ));
+        drop(previous);
+        assert_eq!(previous_state.activated_drops(), 1);
+        drop(next);
+        assert_eq!(previous_state.activated_drops(), 2);
+        assert_eq!(next_state.activated_drops(), 1);
+    }
+
+    #[tokio::test]
+    async fn differential_bind_failures_keep_previous_sockets_owned() {
+        let state = FakeSocketState::default();
+        let (deadline, cancellation) = budget();
+        let previous = bind_prepared(
+            prepared_fixture(),
+            &FakeFactory::new(state.clone()),
+            deadline,
+            &cancellation,
+        )
+        .await
+        .unwrap();
+        for fail_activation in [false, true] {
+            let failed_state = FakeSocketState::default();
+            let mut factory = FakeFactory::new(failed_state.clone());
+            if fail_activation {
+                factory.activate_failure_at = Some(0);
+            } else {
+                factory.prepare_failure_at = Some(0);
+            }
+            let error = bind_prepared_reusing(
+                prepared_fixture_at("dns-udp", 5300, 5302),
+                previous.listeners(),
+                &factory,
+                deadline,
+                &cancellation,
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.index(), Some(1));
+            assert_eq!(state.activated_drops(), 0);
+            assert_eq!(previous.listeners().local_addrs().unwrap().len(), 2);
+            assert_eq!(
+                Arc::strong_count(&previous.listeners.endpoints[0].socket),
+                1,
+            );
+        }
     }
 
     #[tokio::test]

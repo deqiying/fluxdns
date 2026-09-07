@@ -36,7 +36,7 @@ use crate::runtime::{
     BoundListenerSet, CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime,
     RefreshedResourceSnapshot, ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator,
     RuntimeReuseError, ShutdownPhaseStatus, ShutdownReport, Supervisor, SupervisorError,
-    SystemClock, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec, bind_prepared,
+    SystemClock, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
 };
 #[cfg(test)]
 use crate::storage::StatsPersistenceWorker;
@@ -655,9 +655,15 @@ impl DnsService {
             }
             return Ok(runtime);
         }
-        let candidate = bind_prepared(prepared, factory, deadline, &cancellation)
-            .await
-            .map_err(ServiceReloadError::Bind)?;
+        let candidate = crate::runtime::bind_prepared_reusing(
+            prepared,
+            self.runtime.listeners(),
+            factory,
+            deadline,
+            &cancellation,
+        )
+        .await
+        .map_err(ServiceReloadError::Bind)?;
         let transport_plans = prepare_transport_plans(
             candidate.listeners(),
             candidate.snapshot().config(),
@@ -5021,6 +5027,129 @@ clients: []
             RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 2)
         )));
 
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    /// 改动一个物理端口时，保留 TCP/DoH 句柄；候选 bind 失败不能影响当前三种协议。
+    #[tokio::test]
+    async fn reload_one_port_reuses_other_protocols_and_bind_failure_preserves_dns() {
+        let ports = available_transport_ports();
+        let work_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_fluxdns/p1-service-differential")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(&work_path, ports[0], ports[1], ports[2]),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+        let previous = coordinator.load();
+        let previous_handles = previous.listeners().endpoint_handles().unwrap();
+        let before = assert_cross_transport_contract(
+            query_all_transports(ports, 10, "transport.test.", RecordType::A).await,
+            10,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+
+        let available = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let next_ports = [available.local_addr().unwrap().port(), ports[1], ports[2]];
+        drop(available);
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(
+                &work_path,
+                next_ports[0],
+                next_ports[1],
+                next_ports[2],
+            ),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let next = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.revision(), RuntimeRevision(2));
+        assert_eq!(service.transport_task_count(), 3);
+        let next_handles = next.listeners().endpoint_handles().unwrap();
+        for index in [1, 2] {
+            match (&previous_handles[index].socket, &next_handles[index].socket) {
+                (
+                    crate::ports::effects::ActivatedSocketHandle::Tcp(old),
+                    crate::ports::effects::ActivatedSocketHandle::Tcp(new),
+                ) => assert!(Arc::ptr_eq(old, new)),
+                _ => panic!("TCP/DoH 必须保留相同 TCP socket 句柄"),
+            }
+        }
+        let after = assert_cross_transport_contract(
+            query_all_transports(next_ports, 20, "transport.test.", RecordType::A).await,
+            20,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+        assert_eq!(before, after);
+
+        let occupied = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let rejected = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(
+                &work_path,
+                occupied.local_addr().unwrap().port(),
+                next_ports[1],
+                next_ports[2],
+            ),
+            RuntimeRevision(3),
+        )
+        .unwrap();
+        assert!(matches!(
+            service
+                .reload_prepared(
+                    rejected,
+                    &factory,
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                    Cancellation::new(),
+                )
+                .await,
+            Err(super::ServiceReloadError::Bind(_))
+        ));
+        assert!(Arc::ptr_eq(&coordinator.load(), &next));
+        assert!(!next.is_draining());
+        let still_active = assert_cross_transport_contract(
+            query_all_transports(next_ports, 30, "transport.test.", RecordType::A).await,
+            30,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+        assert_eq!(after, still_active);
         let report = service
             .shutdown(
                 &SystemClock::new(),

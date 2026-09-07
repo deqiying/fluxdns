@@ -8,6 +8,7 @@ mod supervisor;
 mod system_clock;
 mod system_socket;
 
+pub(crate) use bind::bind_prepared_reusing;
 pub use bind::{BindError, BoundCandidate, BoundEndpointHandle, BoundListenerSet, bind_prepared};
 pub(crate) use coordinator::CacheFinalizerShutdownSummary;
 pub use coordinator::{

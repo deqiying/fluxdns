@@ -25,7 +25,7 @@
 
 2026-09-07 用户在 P0 交付后追加授权实施 P1、必要验证和阶段性本地提交，不 push、不自动进入 P2。P1 实际开工基线为 `main` / `99f8ca7c97aebc403d75c4886668688441dfa47a`，工作树干净；本地 `origin/main` 同指此提交，未 fetch，不据此推断远端实时状态或推送者。GC-01 与两笔 BC-01 的祖先关系已核对，不重复实施。BC-26 的生产初始化依赖新 owner，详细剩余依赖见[BE-11](webui-management-backend-development-plan.md#13-be-11新基线初始化与旧路径退出)。
 
-P1 先交付 BC-02 活动源、定向编辑和操作仲裁内部能力，事实见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。v2 生产切换最小闭合集合仍是：新版 loader/resolve 与存储 owner 初始化、setup/auth/Origin、实际 handler、API client/代理/mock、SPA fallback 同批接线；不能将新字段映射到旧单库和 SQLite cache owner。BC-03/29/30/31 可以继续内部实施，但在 BC-26 依赖闭合前，不以内部测试关闭完整生产验收或仅修改版本常量。FC-16 只在本阶段交付可闭合的全局提示/还原基础，完整组合采用仍依赖各业务表单。
+P1 先交付 BC-02 活动源、定向编辑和操作仲裁内部能力，事实见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)；BC-03 已接入现有 service 的[差量 socket 子项](../implementation/backend/lifecycle.md#p1-差量-socket-子项2026-09-07)，完整应用事务仍未完成。v2 生产切换最小闭合集合仍是：新版 loader/resolve 与存储 owner 初始化、setup/auth/Origin、实际 handler、API client/代理/mock、SPA fallback 同批接线；不能将新字段映射到旧单库和 SQLite cache owner。BC-03/29/30/31 可以继续内部实施，但在 BC-26 依赖闭合前，不以内部测试关闭完整生产验收或仅修改版本常量。FC-16 只在本阶段交付可闭合的全局提示/还原基础，完整组合采用仍依赖各业务表单。
 
 P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01 的生产 fixture 启动门槛随 BC-26 继续保留。实际能力、未接线边界和验证分别见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)、[Management 实现](../implementation/backend/management.md#p0-v2-契约)、[前端实现](../implementation/frontend/application.md#能力与证据)。本文不预设人员数量、固定人日或日历上线日期；排期以依赖和验收门槛为准。
 
@@ -42,7 +42,7 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01
 | 文件与日志 | [app](../../backend/src/app.rs) watcher 自动 reload；logs 关闭时不创建 telemetry writer；[observability](../../backend/src/observability.rs) 已有 reload handle | watcher 只提示；复用现有日志能力实现 off/on、level/path 热切换 |
 | 客户端与详情 | [model](../../backend/src/config/model.rs)、[Policy](../../backend/src/policy/client.rs)、[observation](../../backend/src/ports/observation.rs) 使用名称、多 ID 匹配与 `client_bucket`；详情来源无原始 ID 字段 | 建立单 ID 主键及原始身份、当时匹配、当前显示信息三层语义 |
 | 缓存与历史 | [缓存装配](../../backend/src/dns/policy.rs) 使用 SQLite persistence；[详情批写](../../backend/src/storage/sqlite.rs) 含历史清理和 COUNT | 切换独立快照、详情日分片和统一保留协调器 |
-| 生命周期 | [RuntimeCoordinator](../../backend/src/runtime/coordinator.rs) 有候选/CAS/drain；[DnsService](../../backend/src/service.rs) 按整份 BindPlan 选择全复用或全量 bind，CAS 后仍有 task 注册 | 沿既有 owner 增加差量绑定、应用成功判定及失败补偿，不再建另一套 Runtime |
+| 生命周期 | [RuntimeCoordinator](../../backend/src/runtime/coordinator.rs) 有候选/CAS/drain；[DnsService](../../backend/src/service.rs) 已按物理 SocketSpec 差量复用，CAS 后仍有 task 注册 | 沿既有 owner 补齐应用成功判定、失败补偿和控制命令，不再建另一套 Runtime |
 
 本轮核对上述源码和原计划，保留 29 张图稿映射，并修订冲突的文字要求；未重新执行视觉验收、产品构建或运行测试。原文档既有证据不自动升级为本轮通过记录。
 

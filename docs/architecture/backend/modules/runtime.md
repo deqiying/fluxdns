@@ -79,13 +79,13 @@ Config 的 `BindPlan` 是经过校验的 `BindEntry` 列表，记录底层 UDP/T
 
 绑定采用“全部成功再提交”：
 
-1. 逐项通过 `SocketFactory` 创建未激活 socket；
+1. 首启逐项通过 `SocketFactory` 创建未激活 socket；reload 按物理 `SocketSpec` 复用活动句柄，仅为新增或改变的 endpoint 创建 socket；
 2. 若任一失败，关闭本轮已创建 socket；
 3. 全部成功后组合为 `BoundListenerSet`；
 4. 激活前不启动 accept loop；
 5. ActiveRuntime 原子发布后统一启动或放行 accept。
 
-首启在全部 endpoint 成功后激活。配置切换允许复用未变 BindPlan 的 listener；需要 rebind 时，只有平台允许且所有新 endpoint 成功才切换。
+首启在全部 endpoint 成功后激活。配置切换即使整份 BindPlan 不同，也按底层协议、地址/端口、`reuse_port`、`v6_only` 复用 `Arc<dyn ActivatedSocket>`，新集合携带新逻辑引用。需要 rebind 时，只有平台允许且所有新 endpoint 成功才切换；候选失败不能释放仍由旧实例持有的句柄。现有 CAS 后 task 注册失败窗口与旧请求取消语义仍待 BC-03 后续完成，差量 socket 不等于完整应用事务。对应 Windows 证据见[生命周期实现](../../../implementation/backend/lifecycle.md#p1-差量-socket-子项2026-09-07)。
 
 ## 6. Coordinator 与 CAS
 
