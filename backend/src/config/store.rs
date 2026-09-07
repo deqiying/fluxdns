@@ -1,4 +1,4 @@
-//! Management API 对源配置执行首次用户事务的持久化边界。
+//! 源配置写入仲裁：正式首用户事务，以及尚待服务接线的 v2 活动源与候选基础。
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
@@ -13,6 +13,9 @@ use super::load::{ConfigLoader, LoadOptions};
 use super::migrate::deterministic_hash;
 use super::resolve::ResolvedWebUiUser;
 use super::source_edit::{InitialWebUiUser, create_initial_webui_user};
+
+pub(crate) mod active;
+pub(crate) mod observation;
 
 const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 const STALE_LOCK_AGE: Duration = Duration::from_secs(300);
@@ -29,6 +32,7 @@ pub(crate) struct ConfigStore {
     expected_fingerprint: Mutex<String>,
     self_written_fingerprint: Mutex<Option<String>>,
     transaction: Mutex<()>,
+    active: Mutex<Option<active::ActiveState>>,
 }
 
 impl ConfigStore {
@@ -44,6 +48,7 @@ impl ConfigStore {
             expected_fingerprint: Mutex::new(expected_fingerprint),
             self_written_fingerprint: Mutex::new(None),
             transaction: Mutex::new(()),
+            active: Mutex::new(None),
         }
     }
 
@@ -58,6 +63,15 @@ impl ConfigStore {
             std::sync::TryLockError::Poisoned(_) => ConfigStoreError::LockPoisoned,
             std::sync::TryLockError::WouldBlock => ConfigStoreError::Busy,
         })?;
+        // 新版 setup 必须与活动源发布一起接线；禁止旧 writer 绕过 v2 操作仲裁。
+        if self
+            .active
+            .lock()
+            .map_err(|_| ConfigStoreError::LockPoisoned)?
+            .is_some()
+        {
+            return Err(ConfigStoreError::CandidateRejected);
+        }
         let _file_lock = ConfigFileLock::acquire(&lock_path(&self.source_path))?;
         let source = read_bounded(&self.source_path)?;
         let fingerprint = deterministic_hash(&source);

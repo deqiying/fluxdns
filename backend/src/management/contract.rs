@@ -4,10 +4,10 @@
 use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
 
-use crate::config::contract::{ClientMatchV2, ClientV2, DnsV2, StatisticsV2};
+use crate::config::contract::{ClientV2, DnsV2, StatisticsV2};
+pub use crate::config::edit::{ConfigChange, ConfigModule};
 use crate::config::model::{
-    CacheOverrideDto, EcsDto, HostsResourceDto, ListenerDto, LogsDto, OutboundDto, RuleSetDto,
-    StrategyDto, TtlOverrideDto, UpstreamDto,
+    HostsResourceDto, ListenerDto, LogsDto, OutboundDto, RuleSetDto, StrategyDto, UpstreamDto,
 };
 
 pub const API_PREFIX: &str = "/api/v2";
@@ -105,21 +105,6 @@ impl<'de> Deserialize<'de> for DecimalU64 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ConfigModule {
-    Listener,
-    Upstreams,
-    Strategy,
-    Hosts,
-    Outbound,
-    RuleSet,
-    Clients,
-    Dns,
-    Statistics,
-    Logs,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Preconditions {
@@ -165,80 +150,6 @@ pub struct ConfigState {
     pub files: FileObservation,
     pub synchronization: SyncCondition,
     pub operation_id: Option<OperationId>,
-}
-
-/// 创建不携带旧名；更新始终由旧 name 定位。没有顶层删除或通用 Patch。
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ResourceMutation<T> {
-    Create { value: T },
-    Update { original_name: String, value: T },
-}
-
-/// 客户端普通编辑值刻意不含 client_id，不能借改名或差异采用改写请求身份。
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClientEdit {
-    pub name: String,
-    #[serde(default)]
-    pub r#match: ClientMatchV2,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub strategy: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cache: Option<CacheOverrideDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ttl_override: Option<TtlOverrideDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub edns_client_subnet: Option<EcsDto>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub enum ClientMutation {
-    Create {
-        value: ClientV2,
-    },
-    Update {
-        original_name: String,
-        value: ClientEdit,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(
-    tag = "module",
-    content = "change",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum ConfigChange {
-    Listener(ResourceMutation<ListenerDto>),
-    Upstreams(ResourceMutation<UpstreamDto>),
-    Strategy(ResourceMutation<StrategyDto>),
-    Hosts(ResourceMutation<HostsResourceDto>),
-    Outbound(ResourceMutation<OutboundDto>),
-    RuleSet(ResourceMutation<RuleSetDto>),
-    Clients(ClientMutation),
-    Dns(DnsV2),
-    Statistics(StatisticsV2),
-    Logs(LogsDto),
-}
-
-impl ConfigChange {
-    pub fn module(&self) -> ConfigModule {
-        match self {
-            Self::Listener(_) => ConfigModule::Listener,
-            Self::Upstreams(_) => ConfigModule::Upstreams,
-            Self::Strategy(_) => ConfigModule::Strategy,
-            Self::Hosts(_) => ConfigModule::Hosts,
-            Self::Outbound(_) => ConfigModule::Outbound,
-            Self::RuleSet(_) => ConfigModule::RuleSet,
-            Self::Clients(_) => ConfigModule::Clients,
-            Self::Dns(_) => ConfigModule::Dns,
-            Self::Statistics(_) => ConfigModule::Statistics,
-            Self::Logs(_) => ConfigModule::Logs,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

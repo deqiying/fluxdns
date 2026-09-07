@@ -2,6 +2,7 @@
 
 pub mod contract;
 pub(crate) mod doh_route;
+pub(crate) mod edit;
 pub mod load;
 pub mod migrate;
 pub mod model;

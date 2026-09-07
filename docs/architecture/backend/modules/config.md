@@ -205,3 +205,11 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 source-preserving 验收至少覆盖注释、键序、未知字段拒绝、块/流格式、引号、锚点/别名与不支持语法、SecretRef 原样保留、路径表达不变、双路径竞争、journal 损坏和中断恢复。无法安全修改的输入必须显式拒绝。
 
 真实入口、writer 与 loader 大小上限差异及故障验证边界见[管理端实现](../../../implementation/backend/management.md)。
+
+## 13. v2 活动配置与候选边界
+
+ConfigStore 同时仲裁首用户事务和新版活动配置，不建立第二份 Management 配置权威。活动源保留产生当前运行态的原始表达；外部文件仅进入观测状态。候选以旧 name 定位，在一份活动快照上完成类型化引用编辑，严格语义及路径校验后再提交服务控制 owner。Config 层不依赖 HTTP handler；Management 复用 Config 的变更类型并负责鉴权和协议投影。
+
+活动、运行和持久化 revision 各自独立；验证票据绑定调用者、候选、双 revision 和影响。同 operation ID 不同命令拒绝；未同步、补偿失败及中断结果未知时阻止叠加写入。源文档编辑不能将未变字段的缺失继承、SecretRef 或路径改为 resolved 值，不支持的语法明确拒绝。
+
+这些是接受的内部边界，不证明正式 loader、Runtime、journal 或 v2 API 已接线。当前实现和证据统一见[配置参考](../../../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)；后续应用/同步必须以真实 owner 成功为准。

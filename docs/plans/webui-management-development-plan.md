@@ -23,7 +23,9 @@
 | [前端开发计划](webui-management-frontend-development-plan.md) | `FE-01` 至 `FE-12`：导航、状态、表单、12 个模块、29 张图稿映射及浏览器验收 |
 | [原需求](webui-management-requirements.md)与[原后端方案](webui-management-backend-refactor.md) | 产品范围、图稿解释，以及身份/缓存/保留的不变量；开发计划不复制全部设计正文 |
 
-2026-09-07 用户已授权实施 P0、必要验证和阶段性本地提交，不 push、不自动进入 P1。GC-01 已由 `007f943` 完成，实施起点为该提交且工作区干净；本次不重复提交计划修订。BC-01 按内部配置契约、API/跨端契约拆分；BC-26 的生产初始化依赖新 owner，详细剩余依赖见[BE-11](webui-management-backend-development-plan.md#13-be-11新基线初始化与旧路径退出)。
+2026-09-07 用户在 P0 交付后追加授权实施 P1、必要验证和阶段性本地提交，不 push、不自动进入 P2。P1 实际开工基线为 `main` / `99f8ca7c97aebc403d75c4886668688441dfa47a`，工作树干净；本地 `origin/main` 同指此提交，未 fetch，不据此推断远端实时状态或推送者。GC-01 与两笔 BC-01 的祖先关系已核对，不重复实施。BC-26 的生产初始化依赖新 owner，详细剩余依赖见[BE-11](webui-management-backend-development-plan.md#13-be-11新基线初始化与旧路径退出)。
+
+P1 先交付 BC-02 活动源、定向编辑和操作仲裁内部能力，事实见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。v2 生产切换最小闭合集合仍是：新版 loader/resolve 与存储 owner 初始化、setup/auth/Origin、实际 handler、API client/代理/mock、SPA fallback 同批接线；不能将新字段映射到旧单库和 SQLite cache owner。BC-03/29/30/31 可以继续内部实施，但在 BC-26 依赖闭合前，不以内部测试关闭完整生产验收或仅修改版本常量。FC-16 只在本阶段交付可闭合的全局提示/还原基础，完整组合采用仍依赖各业务表单。
 
 P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01 的生产 fixture 启动门槛随 BC-26 继续保留。实际能力、未接线边界和验证分别见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)、[Management 实现](../implementation/backend/management.md#p0-v2-契约)、[前端实现](../implementation/frontend/application.md#能力与证据)。本文不预设人员数量、固定人日或日历上线日期；排期以依赖和验收门槛为准。
 

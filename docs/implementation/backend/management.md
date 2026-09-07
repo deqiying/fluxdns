@@ -20,6 +20,8 @@
 
 2026-09-07 局部核对：目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。这是 BC-01 内部能力，`router` 未注册 `/api/v2`，既有 v1 handler 仍是当前正式入口；不提供双版本兼容服务。新版 owner、鉴权/client/代理的统一切换均未实施。
 
+P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测、验证票据和操作记录已有 ConfigStore 内部入口，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。下表的 P0 decoder 不因此成为已接线的写入服务；状态端点、服务控制、持久化和安全错误投影仍未完成。
+
 | 契约 | 已落实的内部能力 | 正式接线与剩余边界 |
 | --- | --- | --- |
 | 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新不含 `client_id`；系统只读投影不含 users/hash | `decode_candidate` / `decode_apply` 限制 body、变更数、null 和字段；单模块入口强制模块相符。完整引用、名称占用、影响确认、prepare 由后续 ConfigStore 实施 |

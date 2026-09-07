@@ -5,6 +5,224 @@ use std::str::FromStr;
 use thiserror::Error;
 use yaml_edit::Document;
 
+/// 根据已校验的源树差异修改 CST；输出必须与目标树完全等价，不能静默损坏不支持的语法。
+pub(crate) fn edit_document(
+    source: &str,
+    original: &yaml_serde::Value,
+    intended: &yaml_serde::Value,
+) -> Result<String, SourceEditError> {
+    use yaml_edit::SyntaxKind;
+    // 锚点可能让一个局部编辑影响多个别名；本期明确拒绝，不猜测其写回语义。
+    if yaml_edit::lex(source).iter().any(|(kind, _)| {
+        matches!(
+            kind,
+            SyntaxKind::ANCHOR | SyntaxKind::REFERENCE | SyntaxKind::MERGE_KEY
+        )
+    }) {
+        return Err(SourceEditError::UnsupportedSyntax);
+    }
+    let document = Document::from_str(source).map_err(|_| SourceEditError::InvalidDocument)?;
+    let root = document
+        .as_mapping()
+        .ok_or(SourceEditError::RootMustBeMapping)?;
+    let mut edits = Vec::new();
+    collect_edits(
+        source,
+        yaml_edit::YamlNode::Mapping(root),
+        original,
+        intended,
+        &mut edits,
+    )?;
+    edits.sort_by_key(|edit| edit.0);
+    if edits.windows(2).any(|pair| pair[0].1 > pair[1].0) {
+        return Err(SourceEditError::UnsupportedSyntax);
+    }
+    let mut result = source.to_owned();
+    for (start, end, replacement) in edits.into_iter().rev() {
+        result.replace_range(start..end, &replacement);
+    }
+    let verified: yaml_serde::Value =
+        yaml_serde::from_str(&result).map_err(|_| SourceEditError::UnsupportedSyntax)?;
+    if verified != *intended {
+        return Err(SourceEditError::UnsupportedSyntax);
+    }
+    Ok(result)
+}
+
+/// CST 只用于定位，不调用会破坏嵌套节点的 remove/set；编辑范围必须互不重叠。
+fn collect_edits(
+    source: &str,
+    node: yaml_edit::YamlNode,
+    old: &yaml_serde::Value,
+    new: &yaml_serde::Value,
+    edits: &mut Vec<(usize, usize, String)>,
+) -> Result<(), SourceEditError> {
+    use yaml_edit::YamlNode;
+    use yaml_serde::Value;
+    if old == new {
+        return Ok(());
+    }
+    let range = node_range(&node)?;
+    let raw = &source[range.start as usize..range.end as usize];
+    let flow = raw.trim_start().starts_with(['{', '[']);
+    match (node, old, new) {
+        (YamlNode::Mapping(mapping), Value::Mapping(old), Value::Mapping(new)) => {
+            if new.is_empty() || (flow && old.keys().any(|key| !new.contains_key(key))) {
+                replace_node(raw, range, new, edits)?;
+                return Ok(());
+            }
+            for key in old.keys().filter(|key| !new.contains_key(*key)) {
+                let field = key.as_str().ok_or(SourceEditError::UnsupportedSyntax)?;
+                let entry = mapping
+                    .find_all_entries_by_key(field)
+                    .next()
+                    .ok_or(SourceEditError::UnsupportedSyntax)?;
+                let key_range =
+                    node_range(&entry.key_node().ok_or(SourceEditError::UnsupportedSyntax)?)?;
+                let value_range = node_range(
+                    &entry
+                        .value_node()
+                        .ok_or(SourceEditError::UnsupportedSyntax)?,
+                )?;
+                let start = line_start(source, key_range.start as usize);
+                if !source[start..key_range.start as usize].trim().is_empty() {
+                    return Err(SourceEditError::UnsupportedSyntax);
+                }
+                let end = value_range.end as usize;
+                let end = if source[..end].ends_with('\n') {
+                    end
+                } else {
+                    source[end..]
+                        .find('\n')
+                        .map_or(source.len(), |offset| end + offset + 1)
+                };
+                edits.push((start, end, String::new()));
+            }
+            let mut additions = Vec::new();
+            for (key, value) in new {
+                let field = key.as_str().ok_or(SourceEditError::UnsupportedSyntax)?;
+                if let Some(previous) = old.get(key) {
+                    let child = mapping
+                        .get(field)
+                        .ok_or(SourceEditError::UnsupportedSyntax)?;
+                    collect_edits(source, child, previous, value, edits)?;
+                } else {
+                    additions.push(format!(
+                        "{}: {}",
+                        quote_yaml_string(field),
+                        flow_value(value)?
+                    ));
+                }
+            }
+            if !additions.is_empty() {
+                if flow {
+                    let end = range.start as usize
+                        + raw.rfind('}').ok_or(SourceEditError::UnsupportedSyntax)?;
+                    let prefix = if old.is_empty() { "" } else { ", " };
+                    edits.push((end, end, format!("{prefix}{}", additions.join(", "))));
+                } else {
+                    let indent = range.start as usize - line_start(source, range.start as usize);
+                    let newline = preferred_newline(source);
+                    let prefix = if raw.ends_with('\n') { "" } else { newline };
+                    let addition = additions
+                        .iter()
+                        .map(|value| format!("{}{value}{newline}", " ".repeat(indent)))
+                        .collect::<String>();
+                    edits.push((
+                        range.end as usize,
+                        range.end as usize,
+                        format!("{prefix}{addition}"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        (YamlNode::Sequence(sequence), Value::Sequence(old), Value::Sequence(new)) => {
+            if new.len() < old.len() {
+                replace_node(raw, range, new, edits)?;
+                return Ok(());
+            }
+            for (index, (previous, value)) in old.iter().zip(new).enumerate() {
+                let child = sequence
+                    .get(index)
+                    .ok_or(SourceEditError::UnsupportedSyntax)?;
+                collect_edits(source, child, previous, value, edits)?;
+            }
+            if new.len() > old.len() {
+                let additions = new
+                    .iter()
+                    .skip(old.len())
+                    .map(flow_value)
+                    .collect::<Result<Vec<_>, _>>()?;
+                if flow {
+                    let end = range.start as usize
+                        + raw.rfind(']').ok_or(SourceEditError::UnsupportedSyntax)?;
+                    let prefix = if old.is_empty() { "" } else { ", " };
+                    edits.push((end, end, format!("{prefix}{}", additions.join(", "))));
+                } else {
+                    let indent = range.start as usize - line_start(source, range.start as usize);
+                    let newline = preferred_newline(source);
+                    let prefix = if raw.ends_with('\n') { "" } else { newline };
+                    let addition = additions
+                        .iter()
+                        .map(|value| format!("{}- {value}{newline}", " ".repeat(indent)))
+                        .collect::<String>();
+                    edits.push((
+                        range.end as usize,
+                        range.end as usize,
+                        format!("{prefix}{addition}"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        (_, _, new) => replace_node(raw, range, new, edits),
+    }
+}
+
+fn node_range(node: &yaml_edit::YamlNode) -> Result<yaml_edit::TextPosition, SourceEditError> {
+    match node {
+        yaml_edit::YamlNode::Mapping(node) => Ok(node.byte_range()),
+        yaml_edit::YamlNode::Sequence(node) => Ok(node.byte_range()),
+        yaml_edit::YamlNode::Scalar(node) => Ok(node.byte_range()),
+        _ => Err(SourceEditError::UnsupportedSyntax),
+    }
+}
+
+fn line_start(source: &str, index: usize) -> usize {
+    source[..index]
+        .rfind('\n')
+        .map_or(0, |position| position + 1)
+}
+
+fn replace_node(
+    raw: &str,
+    range: yaml_edit::TextPosition,
+    value: &impl serde::Serialize,
+    edits: &mut Vec<(usize, usize, String)>,
+) -> Result<(), SourceEditError> {
+    let ending = if raw.ends_with("\r\n") {
+        "\r\n"
+    } else if raw.ends_with('\n') {
+        "\n"
+    } else {
+        ""
+    };
+    edits.push((
+        range.start as usize,
+        range.end as usize,
+        format!("{}{ending}", flow_value(value)?),
+    ));
+    Ok(())
+}
+
+fn flow_value(value: &impl serde::Serialize) -> Result<String, SourceEditError> {
+    // serializer 负责转义；保留 flow 分隔空白，使下一次 CST 解析仍然可编辑。
+    Ok(serde_json::to_string_pretty(value)
+        .map_err(|_| SourceEditError::UnsupportedSyntax)?
+        .replace('\n', " "))
+}
+
 /// 首次初始化写入源配置所需的最小用户投影。
 pub(crate) struct InitialWebUiUser<'a> {
     pub(crate) name: &'a str,
@@ -136,6 +354,8 @@ fn preferred_newline(source: &str) -> &'static str {
 
 #[derive(Debug, Error, Eq, PartialEq)]
 pub(crate) enum SourceEditError {
+    #[error("source syntax cannot be edited without changing unrelated semantics")]
+    UnsupportedSyntax,
     #[error("source configuration is not valid YAML")]
     InvalidDocument,
     #[error("source configuration root must be a mapping")]
