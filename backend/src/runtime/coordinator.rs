@@ -131,15 +131,14 @@ impl ActiveRuntime {
                 Ordering::Acquire,
             ) {
                 Ok(_) => {
-                    // Drain may begin between the first check and the increment. The
-                    // second check establishes the admission linearization point.
+                    let guard = RequestGuard {
+                        admission: Arc::clone(&self.admission),
+                    };
+                    // 再检查确定接纳边界；并发 drain 拒绝时也由 guard 释放并通知归零。
                     if self.admission.draining.load(Ordering::Acquire) {
-                        self.admission.active.fetch_sub(1, Ordering::AcqRel);
                         return Err(AdmissionError::Draining);
                     }
-                    return Ok(RequestGuard {
-                        admission: Arc::clone(&self.admission),
-                    });
+                    return Ok(guard);
                 }
                 Err(observed) => active = observed,
             }
@@ -152,14 +151,29 @@ impl ActiveRuntime {
 
     /// 标记实例进入 drain；返回值表示本次调用是否完成了状态切换。
     pub fn begin_drain(&self) -> bool {
-        self.admission
+        let changed = self
+            .admission
             .draining
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
+            .is_ok();
+        if changed {
+            self.admission.retiring.notify_waiters();
+        }
+        changed
     }
 
     pub fn is_draining(&self) -> bool {
         self.admission.draining.load(Ordering::Acquire)
+    }
+
+    /// 仅唤醒入口和空闲连接退出，不取消已经取得 guard 的请求。
+    pub(crate) async fn wait_for_retirement(&self) {
+        let notified = self.admission.retiring.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_draining() {
+            notified.await;
+        }
     }
 
     /// 在 deadline 内等待当前 Runtime 的存量请求全部释放。
@@ -248,6 +262,7 @@ struct AdmissionState {
     draining: AtomicBool,
     active: AtomicUsize,
     drained: tokio::sync::Notify,
+    retiring: tokio::sync::Notify,
 }
 
 impl Default for AdmissionState {
@@ -256,6 +271,7 @@ impl Default for AdmissionState {
             draining: AtomicBool::new(false),
             active: AtomicUsize::new(0),
             drained: tokio::sync::Notify::new(),
+            retiring: tokio::sync::Notify::new(),
         }
     }
 }
@@ -418,6 +434,15 @@ impl RuntimeCoordinator {
             return;
         }
         owners.push(Arc::clone(runtime));
+    }
+
+    /// 服务任务换代或回收后释放已 drain 的历史实例；task 自己仍持有所需句柄。
+    pub(crate) fn prune_drained_runtime_owners(&self) {
+        self.runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|runtime| !runtime.is_draining() || runtime.active_requests() > 0);
+        self.prune_finalizer_owners();
     }
 
     fn prune_finalizer_owners(&self) {

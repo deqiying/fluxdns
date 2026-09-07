@@ -79,7 +79,7 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 
 1. 在 ConfigStore 保留活动源表达及 active/persisted/file revision；GET 和普通编辑以该源为基准，保留路径/继承/SecretRef，不序列化 resolved 值写回。
 2. 向持有 DnsService 的控制循环提交有界 typed 命令；复用 RuntimeCoordinator 的候选和 mutation gate，prepare 与最终提交分开，提交时复核版本。
-3. 扩展 `reload_prepared`：物理 endpoint 差量复用、transport/resource task 在 CAS 前注册并等待闸门已接入，见[生命周期实现](../implementation/backend/lifecycle.md#p1-任务预注册子项2026-09-07)。继续完善服务控制命令、新进程 owner 可失败准备/真实补偿及旧请求 drain。不能将这些内部子项测试等同于完整不停机应用验收。
+3. 扩展 `reload_prepared`：差量复用、任务预注册和已接纳请求按原 deadline drain 已接入，见[生命周期实现](../implementation/backend/lifecycle.md#p1-请求-drain-子项2026-09-07)。继续完善服务控制命令、新进程 owner 可失败准备/真实补偿。不能将这些内部子项测试等同于完整不停机应用验收。
 4. 实现先应用后正式文件替换，journal 区分 PREPARED 与 COMMIT_DECIDED；应用成功而落盘失败保留新运行态并回报未同步，重试不重新应用。
 5. 将 app watcher 改为只检测和上报；复用去抖轮询但有界读取，区分自写/外改/不可读/缺失；不改变 Hosts/规则集资源刷新。
 6. 实现脱敏差异、还原受管文件、模块化组合采用、普通保存覆盖确认；active/file 双版本校验，不接收任意文件路径或整份 YAML。

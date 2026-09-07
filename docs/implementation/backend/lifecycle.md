@@ -34,7 +34,7 @@
 
 [`app.rs`](../../../backend/src/app.rs) 的 `prepare_reload_candidate`、`reload_runtime_from_path` 与 `reload_service_from_path` 重读配置时关闭 snapshot 写入，先拒绝进程持有配置的变化，再 prepare。正式 service watcher 调用 service-aware 入口，不只替换裸 coordinator。
 
-[`DnsService::reload_prepared`](../../../backend/src/service.rs) 统一调用 `bind_prepared_reusing`，按物理 `SocketSpec` 复用未变句柄，只为新增或改变的 endpoint 创建 socket。transport/resource task 先注册并等待启动闸门，全部准备成功后执行 revision CAS，再同步更新服务集合并放行任务；旧 scoped token 在提交后取消。当前 watcher 仍在 reload 成功后提交 fingerprint。
+[`DnsService::reload_prepared`](../../../backend/src/service.rs) 统一调用 `bind_prepared_reusing`，按物理 `SocketSpec` 复用未变句柄，只为新增或改变的 endpoint 创建 socket。transport/resource task 先注册并等待启动闸门，全部准备成功后执行 revision CAS，再同步更新服务集合并放行任务；旧 transport 由 Runtime retirement 通知停止接纳，已接纳请求继续完成，被移除的资源任务单独取消。当前 watcher 仍在 reload 成功后提交 fingerprint。
 
 Storage/Telemetry 和解析统计 sink 由进程持有，reload 为候选 core 复用这些 sink。`webui.users` 激活后交给 `ManagementRuntime::reconcile_users`，内部写入识别与外部 session 撤销见[管理端](management.md)。其他 restart-required 字段见[配置参考](../configuration.md)。
 
@@ -46,17 +46,25 @@ TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于�
 
 Windows Rust 1.98.0 定向证据：`runtime::bind::tests` 6 项、`service::tests::reload` 7 项通过；扩大到 `runtime::` 筛选回归 64 项通过（包含同名 cache runtime 测试），全部 Cargo 测试目标 `--no-run` 编译、fmt、文档及 diff 检查通过。新增 fake factory 用例核对改名复用、只准备变更端口、prepare/activate 失败后引用与释放计数；真实 loopback 用例仅改变 UDP 端口，确认 TCP/DoH 句柄 `Arc::ptr_eq`，在切换前后及占用新端口导致拒绝后执行 UDP/TCP/DoH POST/GET 查询，校验关联 ID、RCODE 和 canonical 响应一致。新用例不打开数据库、不加载个人配置，配置工作路径为 `_fluxdns/p1-service-differential`，端口由系统临时分配。
 
-这只是 BC-03 已接入现有 service 的差量 socket 子项，不是完整 BC-03。后续任务预注册实现见下节；仍需有界服务控制命令、新配置 owner 的真实补偿与完整应用成功边界、旧在途请求 drain，以及 BC-02 到运行 owner 的接线。真实测试使用当前生产支持的 v1 配置，不证明 v2 loader、HTTP/WS、持续无丢包热更新或日志切换已可用。
+这只是 BC-03 已接入现有 service 的差量 socket 子项，不是完整 BC-03。后续任务预注册和请求 drain 实现见下文；仍需有界服务控制命令、新配置 owner 的真实补偿与完整应用成功边界，以及 BC-02 到运行 owner 的接线。真实测试使用当前生产支持的 v1 配置，不证明 v2 loader、HTTP/WS、持续无丢包热更新或日志切换已可用。
 
 ### P1 任务预注册子项（2026-09-07）
 
 `RuntimeCoordinator::prepare_service_activation` 在既有 mutation gate 内合并资源状态并建立未发布实例；`ServiceActivation` 持有该 gate，丢弃准备态不会改变当前指针、admission 或 owner 登记。service 在此期间完成 transport 和新增资源任务注册，任务由同一 Supervisor 管理，`TaskStartGate` 仅复用 Tokio watch，不添加第二套 task tree。
 
-启动闸门放行前不调用 transport factory，也不进行 receive/accept 或资源刷新。注册/版本/deadline 检查失败时，sender 释放，候选任务以 `Cancelled` 退出；旧任务集合和 admission 不变。部分成功注册的 task ID 在 Supervisor 回收 completion 前仍占用，不能重放操作绕过该约束。CAS 保留最终指针核对，不假定 mutation gate 能阻止所有底层非串行 API。成功后无 await 地更新服务集合、取消被替换的旧任务、协调认证并放行新任务，消除了原先“先 CAS、再执行可失败 task 注册”的窗口。
+启动闸门放行前不调用 transport factory，也不进行 receive/accept 或资源刷新。注册/版本/deadline 检查失败时，sender 释放，候选任务以 `Cancelled` 退出；旧任务集合和 admission 不变。部分成功注册的 task ID 在 Supervisor 回收 completion 前仍占用，不能重放操作绕过该约束。CAS 保留最终指针核对，不假定 mutation gate 能阻止所有底层非串行 API。成功后无 await 地更新服务集合、通知旧 transport 退场、取消被移除的资源任务、协调认证并放行新任务，消除了原先“先 CAS、再执行可失败 task 注册”的窗口。
 
 Windows 定向验证包括真实 Supervisor 的 transport ID 冲突和 transport 注册成功后的 resource ID 冲突、候选任务回收、同 revision 重新准备后成功，以及失败前后真实 UDP 查询；用例目录为 `_fluxdns/p1-service-stage/` 的独立随机目录。闸门测试覆盖放行与丢弃，coordinator 测试覆盖不发布准备态和最终 CAS 竞争。`service::tests::` 筛选 61 项通过、3 项按原有声明 ignored（包含 cache/storage 同名测试；不执行手动性能与 1024-session 专项）；`runtime::` 筛选 65 项通过，含既有资源交错、mutation deadline、owner 回收回归。全部测试目标 `--no-run` 编译、fmt、文档和 diff 检查通过。
 
-此处保证的是已有 DNS transport/resource 任务注册失败的前置拒绝，不声称日志/详情/新存储 owner 已加入事务或存在通用补偿器。旧在途 dispatch 仍可能随 scoped cancellation 中止，有界服务命令、operation/active_source 的正式应用回报和 v2 启动仍未接线；BC-03、BC-29 与 P1 退出条件继续保留。
+此处保证的是已有 DNS transport/resource 任务注册失败的前置拒绝，不声称日志/详情/新存储 owner 已加入事务或存在通用补偿器。有界服务命令、operation/active_source 的正式应用回报和 v2 启动仍未接线；BC-03、BC-29 与 P1 退出条件继续保留。
+
+### P1 请求 drain 子项（2026-09-07）
+
+`ActiveRuntime::begin_drain` 同时唤醒入口和空闲连接，但不取消已经取得 request guard 的 dispatch。UDP 停止下一次 receive，TCP/DoH 停止 accept，并在当前响应完成后关闭旧连接；新 transport 同时使用新 Runtime 服务。进程 shutdown 仍通过 Supervisor 的 scoped/global cancellation 中止任务，不把热更新 drain 扩大为无损停机承诺。
+
+三类 dispatch 均以请求入站时捕获的 deadline 为兜底，包括 Core 不合作的情况；不会从热更新时重新计算预算。超时取消原请求和 response handle，不伪造成功响应。guard 并发接纳失败也通过统一释放路径通知归零。服务任务完成后清除已 drain 的历史 Runtime owner 引用，避免已移除端口被历史实例长期持有。
+
+Windows Rust 1.98.0 验证：新增 2 项真实 loopback 测试覆盖复用/差量重绑时 4 条旧 UDP/TCP/DoH POST/GET 请求仍返回旧 Core 响应、新请求已由新 Core 响应、旧任务回收和旧 UDP 端口可重新绑定；不合作 Core 的 200ms 原始预算能释放 3 类请求且新实例继续服务。`service::tests::` 筛选 63 项通过、3 项按原声明 ignored。这里的“已接纳”以 request guard 为边界，不声称操作系统尚未交给 Runtime 的流量、任意规模持续负载或跨平台已无丢包验收。
 
 ## Shutdown 与错误
 

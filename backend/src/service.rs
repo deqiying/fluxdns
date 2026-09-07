@@ -676,7 +676,8 @@ impl DnsService {
         let runtime = activation
             .commit()
             .map_err(ServiceReloadError::Activation)?;
-        self.cancel_transport_tasks();
+        // commit 已通知旧 Runtime 退出入口；保留已接纳请求，不能使用停机 cancellation。
+        self.coordinator.prune_drained_runtime_owners();
         for task in &self.resource_tasks {
             if !resource_tasks
                 .iter()
@@ -954,6 +955,7 @@ impl DnsService {
                     }
                 }
                 completion = self.supervisor.join_next() => {
+                    self.coordinator.prune_drained_runtime_owners();
                     let Some(completion) = completion else {
                         let error = ServiceError::TaskFailure {
                             task_id: "supervisor".to_owned(),
@@ -2111,10 +2113,12 @@ async fn run_tcp_listener_loop(
 
     loop {
         tokio::select! {
+            biased;
             _ = cancellation.cancelled() => {
                 session_cancellation.cancel(CancelReason::Shutdown);
                 break;
             }
+            _ = runtime.wait_for_retirement() => break,
             joined = sessions.join_next(), if !sessions.is_empty() => {
                 observe_tcp_session(joined);
             }
@@ -2161,7 +2165,9 @@ async fn run_tcp_listener_loop(
         }
     }
 
-    session_cancellation.cancel(CancelReason::Shutdown);
+    if !runtime.is_draining() || cancellation.is_cancelled() || listener_failure.is_some() {
+        session_cancellation.cancel(CancelReason::Shutdown);
+    }
     while let Some(joined) = sessions.join_next().await {
         observe_tcp_session(Some(joined));
     }
@@ -2184,10 +2190,12 @@ async fn run_doh_listener_loop(
 
     loop {
         tokio::select! {
+            biased;
             _ = cancellation.cancelled() => {
                 session_cancellation.cancel(CancelReason::Shutdown);
                 break;
             }
+            _ = runtime.wait_for_retirement() => break,
             joined = sessions.join_next(), if !sessions.is_empty() => {
                 observe_doh_session(joined);
             }
@@ -2234,7 +2242,9 @@ async fn run_doh_listener_loop(
         }
     }
 
-    session_cancellation.cancel(CancelReason::Shutdown);
+    if !runtime.is_draining() || cancellation.is_cancelled() || listener_failure.is_some() {
+        session_cancellation.cancel(CancelReason::Shutdown);
+    }
     while let Some(joined) = sessions.join_next().await {
         observe_doh_session(Some(joined));
     }
@@ -2294,7 +2304,15 @@ async fn run_tcp_connection(
     cancellation: Cancellation,
 ) -> Result<(), TaskError> {
     loop {
-        let inbound = match session.receive(&cancellation).await {
+        let received = tokio::select! {
+            biased;
+            _ = runtime.wait_for_retirement() => {
+                session.close().await;
+                return Ok(());
+            }
+            received = session.receive(&cancellation) => received,
+        };
+        let inbound = match received {
             Ok(Some(inbound)) => inbound,
             Ok(None) => {
                 session.close().await;
@@ -2337,7 +2355,17 @@ async fn run_tcp_connection(
             }
         };
         let response_handle = inbound.response().clone();
+        let deadline = inbound.request().context.meta.deadline;
+        let request_cancellation = inbound.request().context.meta.cancellation.clone();
         let result = tokio::select! {
+            biased;
+            _ = tokio::time::sleep(deadline.remaining(Instant::now())) => {
+                request_cancellation.cancel(CancelReason::DeadlineExceeded);
+                let _ = response_handle.cancel(CancelReason::DeadlineExceeded);
+                drop(guard);
+                session.close().await;
+                return Ok(());
+            }
             result = dispatch_inbound(core.as_ref(), inbound) => result,
             _ = cancellation.cancelled() => {
                 let _ = response_handle.cancel(CancelReason::Shutdown);
@@ -2367,7 +2395,15 @@ async fn run_doh_connection(
     cancellation: Cancellation,
 ) -> Result<(), TaskError> {
     loop {
-        let event = match session.receive(&cancellation).await {
+        let received = tokio::select! {
+            biased;
+            _ = runtime.wait_for_retirement() => {
+                session.close().await;
+                return Ok(());
+            }
+            received = session.receive(&cancellation) => received,
+        };
+        let event = match received {
             Ok(event) => event,
             Err(error) => {
                 let cancelled = is_cancelled_error(&error, &cancellation);
@@ -2438,7 +2474,17 @@ async fn run_doh_connection(
                     }
                 };
                 let response_handle = inbound.response().clone();
+                let deadline = inbound.request().context.meta.deadline;
+                let request_cancellation = inbound.request().context.meta.cancellation.clone();
                 let result = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep(deadline.remaining(Instant::now())) => {
+                        request_cancellation.cancel(CancelReason::DeadlineExceeded);
+                        let _ = response_handle.cancel(CancelReason::DeadlineExceeded);
+                        drop(guard);
+                        session.close().await;
+                        return Ok(());
+                    }
                     result = dispatch_inbound(core.as_ref(), inbound) => result,
                     _ = cancellation.cancelled() => {
                         let _ = response_handle.cancel(CancelReason::Shutdown);
@@ -2491,7 +2537,12 @@ where
     A: InboundAdapter + 'static,
 {
     loop {
-        let inbound = match adapter.receive(&cancellation).await {
+        let received = tokio::select! {
+            biased;
+            _ = runtime.wait_for_retirement() => return Ok(()),
+            received = adapter.receive(&cancellation) => received,
+        };
+        let inbound = match received {
             Ok(Some(inbound)) => inbound,
             Ok(None) => return Err(TaskError::Cancelled),
             Err(error) => {
@@ -2519,7 +2570,16 @@ where
             }
         };
         let response_handle = inbound.response().clone();
+        let deadline = inbound.request().context.meta.deadline;
+        let request_cancellation = inbound.request().context.meta.cancellation.clone();
         let result = tokio::select! {
+            biased;
+            _ = tokio::time::sleep(deadline.remaining(Instant::now())) => {
+                request_cancellation.cancel(CancelReason::DeadlineExceeded);
+                let _ = response_handle.cancel(CancelReason::DeadlineExceeded);
+                drop(guard);
+                continue;
+            }
             result = dispatch_inbound(core.as_ref(), inbound) => result,
             _ = cancellation.cancelled() => {
                 let _ = response_handle.cancel(CancelReason::Shutdown);
@@ -3986,6 +4046,300 @@ clients: []
                 )))
             })
         }
+    }
+
+    /// 用真实请求和响应区分旧 Core 与新 Core，不以 guard 归零冒充请求已响应。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reload_drains_admitted_requests_while_new_runtime_serves_all_transports() {
+        for rebind in [false, true] {
+            let ports = available_transport_ports();
+            let work = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("_fluxdns/p1-service-drain")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let factory = SystemSocketFactory::new();
+            let initial = PreparedRuntime::prepare_with_policy_core(
+                cross_transport_runtime_config_at(&work, ports[0], ports[1], ports[2]),
+                RuntimeRevision(1),
+            )
+            .unwrap();
+            let bound = crate::runtime::bind_prepared(
+                initial,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+            let previous = coordinator.load();
+            let (accepted, mut waiting) = tokio::sync::mpsc::unbounded_channel();
+            let mut service = super::DnsService::start_with_coordinator(
+                Arc::clone(&coordinator),
+                Arc::new(ContractSessionCore { accepted }),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            let udp = tokio::spawn(async move {
+                udp_query_with_type(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, ports[0])),
+                    10,
+                    "transport.test.",
+                    RecordType::A,
+                )
+                .await
+            });
+            let tcp = tokio::spawn(async move {
+                tcp_query_with_type(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, ports[1])),
+                    11,
+                    "transport.test.",
+                    RecordType::A,
+                )
+                .await
+            });
+            let post = tokio::spawn(async move {
+                doh_post_query_with_type(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, ports[2])),
+                    12,
+                    "transport.test.",
+                    RecordType::A,
+                )
+                .await
+            });
+            let get = tokio::spawn(async move {
+                doh_get_query_with_type(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, ports[2])),
+                    13,
+                    "transport.test.",
+                    RecordType::A,
+                )
+                .await
+            });
+            let mut releases = Vec::new();
+            for _ in 0..4 {
+                releases.push(
+                    tokio::time::timeout(Duration::from_secs(2), waiting.recv())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            assert_eq!(previous.active_requests(), 4);
+            let next_ports = if rebind {
+                [available_transport_ports()[0], ports[1], ports[2]]
+            } else {
+                ports
+            };
+            let next = PreparedRuntime::prepare_with_policy_core(
+                cross_transport_runtime_config_at(
+                    &work,
+                    next_ports[0],
+                    next_ports[1],
+                    next_ports[2],
+                ),
+                RuntimeRevision(2),
+            )
+            .unwrap();
+            service
+                .reload_prepared(
+                    next,
+                    &factory,
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                    Cancellation::new(),
+                )
+                .await
+                .unwrap();
+            assert!(previous.is_draining());
+            assert_eq!(previous.active_requests(), 4);
+            let responses =
+                query_all_transports(next_ports, 20, "transport.test.", RecordType::A).await;
+            assert_cross_transport_contract(
+                responses,
+                20,
+                "transport.test.",
+                RecordType::A,
+                ResponseClass::Positive,
+            );
+            for release in releases {
+                release.send(()).expect("reload 不得取消已接纳请求");
+            }
+            let responses = [
+                udp.await.unwrap(),
+                tcp.await.unwrap(),
+                post.await.unwrap(),
+                get.await.unwrap(),
+            ];
+            assert_cross_transport_contract(
+                responses,
+                10,
+                "transport.test.",
+                RecordType::A,
+                ResponseClass::NoData,
+            );
+            assert!(
+                previous
+                    .wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(2)))
+                    .await
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while service.supervisor.task_count() > 3 {
+                    let completion = service.supervisor.join_next().await.unwrap();
+                    assert!(matches!(
+                        completion.exit,
+                        TaskExit::Completed | TaskExit::Cancelled
+                    ));
+                    coordinator.prune_drained_runtime_owners();
+                }
+            })
+            .await
+            .unwrap();
+            drop(previous);
+            if rebind {
+                StdUdpSocket::bind((Ipv4Addr::LOCALHOST, ports[0]))
+                    .expect("已 drain 的旧端口必须释放");
+            }
+            let report = service
+                .shutdown(
+                    &SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                )
+                .await
+                .unwrap();
+            assert!(!report.deadline_expired);
+        }
+    }
+
+    struct NonCooperativeDrainCore {
+        entered: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl DnsCore for NonCooperativeDrainCore {
+        fn resolve<'a>(
+            &'a self,
+            _: &'a DnsRequest,
+        ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
+            Box::pin(async move {
+                self.entered.add_permits(1);
+                std::future::pending().await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_drain_obeys_original_deadline_even_when_core_does_not_cooperate() {
+        let ports = available_transport_ports();
+        let work = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_fluxdns/p1-service-drain-deadline")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let factory = SystemSocketFactory::new();
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(&work, ports[0], ports[1], ports[2]),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let bound = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let previous = coordinator.load();
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut service = super::DnsService::start_with_coordinator(
+            Arc::clone(&coordinator),
+            Arc::new(NonCooperativeDrainCore {
+                entered: Arc::clone(&entered),
+            }),
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        let query = query_wire_with_type(1, "transport.test.", RecordType::A);
+        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        udp.send_to(&query, (Ipv4Addr::LOCALHOST, ports[0]))
+            .await
+            .unwrap();
+        let mut tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, ports[1]))
+            .await
+            .unwrap();
+        tcp.write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        tcp.write_all(&query).await.unwrap();
+        let mut doh = TcpStream::connect((Ipv4Addr::LOCALHOST, ports[2]))
+            .await
+            .unwrap();
+        doh.write_all(format!(
+            "POST /dns HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\n\r\n",
+            query.len(),
+        ).as_bytes()).await.unwrap();
+        doh.write_all(&query).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), entered.acquire_many(3))
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let next = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(&work, ports[0], ports[1], ports[2]),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        service
+            .reload_prepared(
+                next,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            previous
+                .wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(1)),)
+                .await
+        );
+        let mut byte = [0; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), doh.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), udp.recv(&mut byte))
+                .await
+                .is_err()
+        );
+        assert_cross_transport_contract(
+            query_all_transports(ports, 30, "transport.test.", RecordType::A).await,
+            30,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+        service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
     }
 
     /// 每轮等待对端 EOF/reset，避免把 request guard 归零误当作 session 已释放。

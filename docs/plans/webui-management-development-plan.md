@@ -42,7 +42,7 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01
 | 文件与日志 | [app](../../backend/src/app.rs) watcher 自动 reload；logs 关闭时不创建 telemetry writer；[observability](../../backend/src/observability.rs) 已有 reload handle | watcher 只提示；复用现有日志能力实现 off/on、level/path 热切换 |
 | 客户端与详情 | [model](../../backend/src/config/model.rs)、[Policy](../../backend/src/policy/client.rs)、[observation](../../backend/src/ports/observation.rs) 使用名称、多 ID 匹配与 `client_bucket`；详情来源无原始 ID 字段 | 建立单 ID 主键及原始身份、当时匹配、当前显示信息三层语义 |
 | 缓存与历史 | [缓存装配](../../backend/src/dns/policy.rs) 使用 SQLite persistence；[详情批写](../../backend/src/storage/sqlite.rs) 含历史清理和 COUNT | 切换独立快照、详情日分片和统一保留协调器 |
-| 生命周期 | [RuntimeCoordinator](../../backend/src/runtime/coordinator.rs) 有候选/CAS/drain；[DnsService](../../backend/src/service.rs) 已按物理 SocketSpec 差量复用，任务在 CAS 前注册并等待闸门 | 沿既有 owner 补齐完整应用判定、进程 owner 补偿、旧请求 drain 和控制命令，不再建另一套 Runtime |
+| 生命周期 | [RuntimeCoordinator](../../backend/src/runtime/coordinator.rs) 有候选/CAS/drain；[DnsService](../../backend/src/service.rs) 已差量复用、CAS 前预注册任务并按原请求 deadline drain | 沿既有 owner 补齐完整应用判定、进程 owner 补偿和控制命令，不再建另一套 Runtime |
 
 本轮核对上述源码和原计划，保留 29 张图稿映射，并修订冲突的文字要求；未重新执行视觉验收、产品构建或运行测试。原文档既有证据不自动升级为本轮通过记录。
 

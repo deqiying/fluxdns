@@ -11,7 +11,7 @@ WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md
 | [WebUI 重构决策清单](webui-management-decisions.md) | 有效 | 实施中 | 12 项决定已确认；P0 技术核定与剩余 T 项 |
 | [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0 内部契约已交付；P1 已授权并实施内部底座，P2-P5 未授权 |
 | [WebUI 配置热更新专项](webui-management-config-runtime-plan.md) | 有效 | 实施中 | 状态 DTO 已落地；活动源、应用/持久化、watcher、owner 与恢复待实现 |
-| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | BC-02 内部能力、BC-03 差量 socket 与任务预注册子项已落实；完整应用/持久化未完成；BE-01 启动及 BC-26 待新 owner |
+| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | BC-02 内部能力、BC-03 差量 socket/任务预注册/请求 drain 已落实；完整应用/持久化未完成；BE-01 启动及 BC-26 待新 owner |
 | [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 有效 | 实施中 | 路由/表单内部契约已交付；FC-01 至 FC-16 页面、接线及真实交互待实施 |
 | [WebUI 管理后台重构需求](webui-management-requirements.md) | 草案 | 待评审 | 保留已审阅模块范围；已按决定校正 name、热配置和旧图标注解释 |
 | [WebUI 配套后端重构方案](webui-management-backend-refactor.md) | 草案 | 待评审 | 身份、独立快照、统一保留与日分片；取消旧版迁移/兼容，接入热配置专项 |

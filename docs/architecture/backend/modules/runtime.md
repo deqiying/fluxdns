@@ -89,7 +89,7 @@ Config 的 `BindPlan` 是经过校验的 `BindEntry` 列表，记录底层 UDP/T
 
 ## 6. Coordinator 与 CAS
 
-service 的配置发布先取得 `ServiceActivation`：在 mutation gate 下合并状态，但不替换当前实例。任务先注册、等待共享启动闸门，再执行最终 CAS，成功后无 await 地换代服务集合并放行。准备失败不需要回退已发布 Runtime，因为候选从未发布；不能将此语义扩大为未来所有进程 owner 均可无损补偿。旧请求取消、服务控制命令和新配置 owner 的接线仍属于 BC-03 剩余工作，证据见[任务预注册实现](../../../implementation/backend/lifecycle.md#p1-任务预注册子项2026-09-07)。
+service 的配置发布先取得 `ServiceActivation`：在 mutation gate 下合并状态，但不替换当前实例。任务先注册、等待共享启动闸门，再执行最终 CAS，成功后无 await 地换代服务集合并放行。准备失败不需要回退已发布 Runtime，因为候选从未发布；不能将此语义扩大为未来所有进程 owner 均可无损补偿。服务控制命令和新配置 owner 的接线仍属于 BC-03 剩余工作，证据见[任务预注册实现](../../../implementation/backend/lifecycle.md#p1-任务预注册子项2026-09-07)。
 
 `RuntimeCoordinator` 串行处理配置候选、资源更新和 fatal 状态迁移。Application 的配置 fingerprint 轮询只负责产生 reload 触发，不绕过 coordinator；资源刷新可以并行执行，但发布必须满足：
 
@@ -99,7 +99,7 @@ service 的配置发布先取得 `ServiceActivation`：在 mutation gate 下合�
 - CAS 失败后重新读取最新 registry 并重放本资源变更；
 - 不从旧 registry 构造完整替换，避免并发更新互相覆盖。
 
-刷新前后必须确认 captured ActiveRuntime 仍为当前实例；stale 结果跳过并重新捕获。复用 listener 前合并定义兼容且版本更新的资源状态，避免覆盖候选本身的新配置。资源-only 更新复用 listener/shared services；配置候选才执行 runtime swap。发布后旧 task 通过 scoped cancellation 退出，但仍有 late task 的 owner 必须保留到有界 drain 完成。
+刷新前后必须确认 captured ActiveRuntime 仍为当前实例；stale 结果跳过并重新捕获。复用 listener 前合并定义兼容且版本更新的资源状态，避免覆盖候选本身的新配置。资源-only 更新复用 listener/shared services；配置候选才执行 runtime swap。发布后旧 transport 通过 Runtime retirement 通知停止接纳并排空已接纳请求；移除的 resource task 通过 scoped cancellation 退出，late task 的 owner 仍必须保留到有界 drain 完成。
 
 ## 7. Supervisor
 
@@ -145,9 +145,13 @@ Supervisor 瞬时重试采用确定性的指数退避：1ms 起、封顶 1,024ms
 - response 完成、客户端断开或取消时释放；
 - 进入 drain 后拒绝新 guard；
 - guard 归零即完成 drain；
-- task cancellation 可在等待 grace deadline 之前中止 dispatch；总 deadline 用于限制回收等待，不保证所有存量响应完成。
+- 热更新通知入口/空闲连接退出，已接纳 dispatch 保留原请求 deadline，不重新计时；
+- service 在 Core 外兜底原请求 deadline，超时释放 guard 和 response handle，不伪造成功；
+- 停机 task cancellation 仍可在 grace deadline 前中止 dispatch，总停机预算不保证所有存量响应完成。
 
 UDP 无连接请求同样受 guard 约束。后台 cache finalizer 使用独立 semaphore、task 计数和 JoinSet，不增加 `ActiveRuntime` 的 request guard；coordinator 单独登记历史/当前 finalizer owner。request guard 的 Capacity 仅防计数溢出，不是全局并发配额。
+
+完成任务回收时释放已 drain 的历史 Runtime owner 引用；请求和 task 持有的 Arc 继续保障自身所需句柄，已移除端口不因历史列表保留而泄漏。真实 Windows 证据见[请求 drain 实现](../../../implementation/backend/lifecycle.md#p1-请求-drain-子项2026-09-07)。
 
 ## 10. Shutdown
 
