@@ -4,7 +4,7 @@
 >
 > 适用范围：client、strategy、rule、resource matcher、`PolicyContext` 与 `RouteDecision`
 >
-> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
+> 最后评审：2026-09-08（客户端管理键、请求身份索引及 mapped IPv4 匹配边界；其余基线见[模块索引](README.md)）
 >
 > 关联实现：[client.rs](../../../../backend/src/policy/client.rs)、[plan.rs](../../../../backend/src/policy/plan.rs)、[dns/policy.rs](../../../../backend/src/dns/policy.rs)
 >
@@ -29,7 +29,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 
 | 文件 | 职责 |
 | --- | --- |
-| `client.rs` | exact client ID map、按前缀长度排序的 CIDR 列表和冲突检测 |
+| `client.rs` | 管理 name map、exact client ID map、按前缀长度排序的 CIDR 列表和冲突检测 |
 | `strategy.rs` | strategy、覆盖值和默认 upstream |
 | `route.rs` | listener/DoH route 到基础策略的映射 |
 | `plan.rs` | client override、cache/TTL/ECS 生效值，以及请求级 `PolicyContext`/`RouteDecision` 组合 |
@@ -40,7 +40,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 
 `PolicyIndex` 编译 client、strategy、route 与 hosts/rule 资源索引，语义上提供：
 
-- exact client ID map；
+- 配置管理 `name` map 与大小写敏感的 exact `client_id` map，两者不互相派生；
 - IPv4/IPv6 CIDR 列表，按 prefix length 降序扫描实现最长前缀匹配，并非 trie；
 - strategy ID → compiled strategy；
 - listener/route → base strategy；
@@ -52,7 +52,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 
 编译发生在 prepare/resource update，不在请求时解析字符串引用。
 
-索引只持有已解析 typed 值。client、strategy、route 分别编译，重复名称、空 matcher 和引用错误在构造时拒绝。resource prepare 交付已编译 snapshot；同步测试构造器不等同完整资源准备入口。
+索引只持有已解析 typed 值。`ResolvedClient`/`ClientRule` 以 `name` 表示配置管理键，以 `client_ids` 表示当前生产 v1 输入提供的请求身份集合；v2 契约只允许单个 `client_id`，待新版 loader 接线后映射到同一索引，不再沿用复数输入。client、strategy、route 分别编译，重复 name、重复 client ID、空 matcher 和引用错误在构造时拒绝。resource prepare 交付已编译 snapshot；同步测试构造器不等同完整资源准备入口。
 
 PolicyContext 在逐规则 matcher 前产生 cache/TTL/ECS/namespace；fast miss 后 RouteDecision 才执行 listener hosts 与有序 strategy rule。规则结果只输出 typed target、resource/version 和安全摘要。PolicyState 预计算不含观测/管理配置的语义基底，资源 CAS 同步更新 matcher 与 content hash，请求 fingerprint 只编码稳定字段。具体 core/registry 构造器见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)。
 
@@ -73,11 +73,11 @@ regex 在资源加载时编译，运行时只执行已限制语法和大小的 m
 顺序固定：
 
 1. 有 `client_id` 时先做 exact ID lookup；
-2. 未命中 ID 时按 `client_addr` 做最长 CIDR 前缀；
+2. 未命中 ID 时先把 IPv4-mapped IPv6 `client_addr` 规范化为 IPv4，再做最长 CIDR 前缀；
 3. 都未命中时使用 `unknown` bucket；
 4. 同优先级冲突必须在 Config prepare 阶段失败，运行时不依赖数组顺序。
 
-匹配结果包含 client rule ID 与实际 identity。cache namespace 使用实际命中的 client ID 或规范化 IP 生成域分隔 SHA-256 摘要，不只使用 client rule name，也不把原始身份写入缓存键。
+匹配结果包含 client rule name 与实际 identity。cache namespace 使用实际命中的 client ID 或规范化 IP 生成域分隔 SHA-256 摘要；IPv4 与其 mapped IPv6 表示得到同一摘要，不只使用 client rule name，也不把原始身份写入缓存键。
 
 ## 6. Strategy 选择
 
@@ -158,7 +158,7 @@ request fingerprint 使用规范化 ECS；无 ECS 时只编码 client address �
 
 ## 11. 错误语义
 
-- prepare 阶段：重复 client、冲突 CIDR、缺失 strategy/upstream/resource、非法 selector 直接失败；
+- prepare 阶段：重复 client name/client ID、冲突 CIDR、缺失 strategy/upstream/resource、非法 selector 直接失败；
 - 请求阶段：正常不匹配使用 default upstream；
 - snapshot 不变量破坏返回 internal，DNS Core 映射 SERVFAIL；
 - regex 或 matcher 不得在热路径产生 panic；
@@ -166,7 +166,7 @@ request fingerprint 使用规范化 ECS；无 ECS 时只编码 client address �
 
 ## 12. 契约验证要求
 
-- ID 优先于 CIDR、IPv4/IPv6 最长前缀、unknown；
+- name 与 client ID 独立索引、ID 优先于 CIDR、IPv4/IPv6 最长前缀、mapped IPv4 和 unknown；
 - 冲突在 prepare 阶段拒绝；
 - base strategy 与 client override；
 - DoH canonical route ID 选择，尾部 `{client_id}` 的裸路径不依赖 client ID 重建；

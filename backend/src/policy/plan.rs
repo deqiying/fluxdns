@@ -251,12 +251,12 @@ impl PolicyIndex {
         let clients = clients.into_iter().collect::<Vec<_>>();
         let mut client_configs = BTreeMap::new();
         for client in &clients {
-            let id = client.id.clone();
+            let name = client.name.clone();
             if client_configs
-                .insert(id.clone(), Arc::new(client.clone()))
+                .insert(name.clone(), Arc::new(client.clone()))
                 .is_some()
             {
-                return Err(PolicyBuildError::DuplicateClient(id));
+                return Err(PolicyBuildError::DuplicateClient(name));
             }
         }
         let client_rules = clients.iter().map(super::ClientRule::from_resolved);
@@ -378,7 +378,7 @@ impl PolicyIndex {
                 PolicyError::ClientStrategyNotFound {
                     client: client_config
                         .expect("client config was checked above")
-                        .id
+                        .name
                         .clone(),
                     strategy: client_strategy.clone(),
                 }
@@ -856,8 +856,8 @@ mod tests {
         cache: Option<ResolvedCacheOverride>,
     ) -> ResolvedClient {
         ResolvedClient {
-            id: ConfigId::new(name).unwrap(),
-            ids: vec!["alice".to_owned()],
+            name: ConfigId::new(name).unwrap(),
+            client_ids: vec!["alice".to_owned()],
             ips: vec![IpNet::new("192.0.2.0".parse().unwrap(), 24).unwrap()],
             strategy: strategy.map(|value| ConfigId::new(value).unwrap()),
             cache,

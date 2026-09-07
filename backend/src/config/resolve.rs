@@ -592,8 +592,8 @@ impl fmt::Debug for ResolvedRuleSet {
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ResolvedClient {
-    pub id: ConfigId,
-    pub ids: Vec<String>,
+    pub name: ConfigId,
+    pub client_ids: Vec<String>,
     pub ips: Vec<IpNet>,
     pub strategy: Option<ConfigId>,
     pub cache: Option<ResolvedCacheOverride>,
@@ -605,8 +605,8 @@ impl fmt::Debug for ResolvedClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ResolvedClient")
-            .field("id", &self.id)
-            .field("id_count", &self.ids.len())
+            .field("name", &self.name)
+            .field("client_id_count", &self.client_ids.len())
             .field("ip_count", &self.ips.len())
             .field("strategy", &self.strategy)
             .field("cache", &self.cache)
@@ -1387,8 +1387,8 @@ fn resolve_client(
     global_optimistic: &ResolvedOptimistic,
 ) -> ResolvedClient {
     ResolvedClient {
-        id: ConfigId::new(client.name.clone()).expect("validated client id"),
-        ids: client.r#match.ids.clone(),
+        name: ConfigId::new(client.name.clone()).expect("validated client name"),
+        client_ids: client.r#match.ids.clone(),
         ips: client.r#match.ips.clone(),
         strategy: client
             .strategy

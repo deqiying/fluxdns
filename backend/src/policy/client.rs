@@ -14,7 +14,7 @@ use crate::ports::cache::ClientCacheDigest;
 #[derive(Clone, Eq, PartialEq)]
 pub struct ClientRule {
     pub name: ConfigId,
-    pub ids: Vec<String>,
+    pub client_ids: Vec<String>,
     pub ips: Vec<IpNet>,
 }
 
@@ -23,7 +23,7 @@ impl fmt::Debug for ClientRule {
         formatter
             .debug_struct("ClientRule")
             .field("name", &self.name)
-            .field("id_count", &self.ids.len())
+            .field("client_id_count", &self.client_ids.len())
             .field("ip_count", &self.ips.len())
             .finish()
     }
@@ -32,8 +32,8 @@ impl fmt::Debug for ClientRule {
 impl ClientRule {
     pub fn from_resolved(client: &ResolvedClient) -> Self {
         Self {
-            name: client.id.clone(),
-            ids: client.ids.clone(),
+            name: client.name.clone(),
+            client_ids: client.client_ids.clone(),
             ips: client.ips.clone(),
         }
     }
@@ -42,7 +42,8 @@ impl ClientRule {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ClientRuleBuildError {
     EmptyRule,
-    DuplicateId,
+    DuplicateName,
+    DuplicateClientId,
     DuplicateCidr,
 }
 
@@ -101,8 +102,13 @@ impl ClientMatch {
                 _,
                 Some(IpAddr::V6(client_addr)),
             ) => {
-                hasher.update(b"ipv6\0");
-                hasher.update(client_addr.octets());
+                if let Some(client_addr) = client_addr.to_ipv4_mapped() {
+                    hasher.update(b"ipv4\0");
+                    hasher.update(client_addr.octets());
+                } else {
+                    hasher.update(b"ipv6\0");
+                    hasher.update(client_addr.octets());
+                }
             }
             _ => return None,
         }
@@ -117,6 +123,7 @@ impl ClientMatch {
 #[derive(Clone, Debug, Default)]
 pub struct ClientIndex {
     rules: Vec<Arc<ClientRule>>,
+    names: HashMap<ConfigId, usize>,
     exact_ids: HashMap<String, usize>,
     cidrs: Vec<CidrEntry>,
 }
@@ -133,14 +140,17 @@ impl ClientIndex {
     ) -> Result<Self, ClientRuleBuildError> {
         let mut index = Self::default();
         for rule in rules {
-            if rule.ids.is_empty() && rule.ips.is_empty() {
+            if rule.client_ids.is_empty() && rule.ips.is_empty() {
                 return Err(ClientRuleBuildError::EmptyRule);
             }
             let rule_index = index.rules.len();
+            if index.names.insert(rule.name.clone(), rule_index).is_some() {
+                return Err(ClientRuleBuildError::DuplicateName);
+            }
             let rule = Arc::new(rule);
-            for id in &rule.ids {
+            for id in &rule.client_ids {
                 if index.exact_ids.insert(id.clone(), rule_index).is_some() {
-                    return Err(ClientRuleBuildError::DuplicateId);
+                    return Err(ClientRuleBuildError::DuplicateClientId);
                 }
             }
             for network in &rule.ips {
@@ -172,21 +182,35 @@ impl ClientIndex {
         self.rules.is_empty()
     }
 
+    /// 按配置管理键定位客户端，不把 `name` 当作请求身份。
+    pub fn get_by_name(&self, name: &ConfigId) -> Option<Arc<ClientRule>> {
+        self.names
+            .get(name)
+            .map(|rule_index| Arc::clone(&self.rules[*rule_index]))
+    }
+
+    /// 按请求携带的精确 `client_id` 定位客户端，匹配保持大小写敏感。
+    pub fn get_by_client_id(&self, client_id: &str) -> Option<Arc<ClientRule>> {
+        self.exact_ids
+            .get(client_id)
+            .map(|rule_index| Arc::clone(&self.rules[*rule_index]))
+    }
+
     pub fn match_client(
         &self,
         client_id: Option<&str>,
         client_addr: Option<IpAddr>,
     ) -> ClientMatch {
         if let Some(client_id) = client_id
-            && let Some(rule_index) = self.exact_ids.get(client_id)
+            && let Some(client) = self.get_by_client_id(client_id)
         {
             return ClientMatch::Matched {
-                client: Arc::clone(&self.rules[*rule_index]),
+                client,
                 kind: ClientMatchKind::ExactId,
             };
         }
 
-        let Some(client_addr) = client_addr else {
+        let Some(client_addr) = client_addr.map(normalize_client_addr) else {
             return ClientMatch::Unknown;
         };
         self.cidrs
@@ -198,6 +222,15 @@ impl ClientIndex {
                     prefix_len: entry.network.prefix_len(),
                 },
             })
+    }
+}
+
+fn normalize_client_addr(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(address) => address
+            .to_ipv4_mapped()
+            .map_or(IpAddr::V6(address), IpAddr::V4),
+        IpAddr::V4(_) => address,
     }
 }
 
@@ -215,7 +248,7 @@ mod tests {
     fn rule(name: &str, ids: &[&str], ips: &[&str]) -> ClientRule {
         ClientRule {
             name: ConfigId::new(name).unwrap(),
-            ids: ids.iter().map(|id| (*id).to_owned()).collect(),
+            client_ids: ids.iter().map(|id| (*id).to_owned()).collect(),
             ips: ips.iter().map(|ip| IpNet::from_str(ip).unwrap()).collect(),
         }
     }
@@ -283,7 +316,45 @@ mod tests {
         assert_eq!(
             ClientIndex::build([rule("one", &["same"], &[]), rule("two", &["same"], &[]),])
                 .unwrap_err(),
-            ClientRuleBuildError::DuplicateId
+            ClientRuleBuildError::DuplicateClientId
+        );
+        assert_eq!(
+            ClientIndex::build([rule("same", &["one"], &[]), rule("same", &["two"], &[])])
+                .unwrap_err(),
+            ClientRuleBuildError::DuplicateName
+        );
+    }
+
+    #[test]
+    fn management_name_and_request_id_use_separate_indexes() {
+        let index = ClientIndex::build([
+            rule("desktop", &["Desktop-01"], &[]),
+            rule("phone", &["Phone-01"], &[]),
+        ])
+        .unwrap();
+
+        let desktop_name = ConfigId::new("desktop").unwrap();
+        assert_eq!(index.get_by_name(&desktop_name).unwrap().name, desktop_name);
+        assert_eq!(
+            index.get_by_client_id("Desktop-01").unwrap().name,
+            desktop_name
+        );
+        assert!(index.get_by_client_id("desktop").is_none());
+        assert!(index.get_by_client_id("desktop-01").is_none());
+    }
+
+    #[test]
+    fn mapped_ipv4_address_matches_and_hashes_as_ipv4() {
+        let index = ClientIndex::build([rule("office", &[], &["192.0.2.0/24"])]).unwrap();
+        let ipv4 = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 8));
+        let mapped = IpAddr::V6(Ipv6Addr::from_str("::ffff:192.0.2.8").unwrap());
+
+        let ipv4_match = index.match_client(None, Some(ipv4));
+        let mapped_match = index.match_client(None, Some(mapped));
+        assert_eq!(ipv4_match, mapped_match);
+        assert_eq!(
+            ipv4_match.cache_digest(None, Some(ipv4)),
+            mapped_match.cache_digest(None, Some(mapped))
         );
     }
 

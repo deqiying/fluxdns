@@ -96,6 +96,8 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 
 ## 5. BE-03：客户端身份贯穿请求与投影
 
+2026-09-08 BC-04 内部进度：v2 配置已冻结唯一 `name`/单 `client_id`，现有 resolved/policy 类型进一步显式区分管理 `name` 与请求 `client_ids`；`ClientIndex` 提供独立 name/exact ID 索引、重复拒绝、ID 优先/最长 CIDR 和 mapped IPv4 归一化，事实见[配置参考](../implementation/configuration.md#p1-客户端匹配索引内部能力2026-09-08)。生产 loader 仍为 v1，BC-04 保持部分完成；BC-05 的原始身份/历史匹配事件、详情/统计归属与 reload 隔离尚未实施。
+
 ### 开发步骤
 
 1. 在 [UDP](../../backend/src/transport/udp.rs)、[TCP](../../backend/src/transport/tcp.rs)、[DoH](../../backend/src/transport/doh.rs) 到 `RequestContext` 的路径核对原始 ID/IP 捕获。无 ID 协议保持 `null`；DoH 仅接受现有可信来源的有效 IP。

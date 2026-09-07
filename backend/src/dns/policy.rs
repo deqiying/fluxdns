@@ -2529,8 +2529,8 @@ mod tests {
         let mut config = Arc::try_unwrap(doh_config()).unwrap();
         assert!(!config.dns.cache.enabled);
         config.clients.push(ResolvedClient {
-            id: ConfigId::new("authenticated").unwrap(),
-            ids: vec!["alice".to_owned(), "bob".to_owned()],
+            name: ConfigId::new("authenticated").unwrap(),
+            client_ids: vec!["alice".to_owned(), "bob".to_owned()],
             ips: Vec::new(),
             strategy: None,
             cache: Some(ResolvedCacheOverride {
@@ -3007,8 +3007,8 @@ mod tests {
     async fn policy_core_observation_reports_matched_client_bucket() {
         let mut config = Arc::try_unwrap(doh_config()).unwrap();
         config.clients.push(ResolvedClient {
-            id: ConfigId::new("office").unwrap(),
-            ids: Vec::new(),
+            name: ConfigId::new("office").unwrap(),
+            client_ids: Vec::new(),
             ips: vec![IpNet::from_str("127.0.0.0/8").unwrap()],
             strategy: None,
             cache: None,

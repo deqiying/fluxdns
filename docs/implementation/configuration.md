@@ -4,9 +4,9 @@
 >
 > 适用范围：本文与当前模板同步，描述配置契约、校验和已实现运行时边界；未定义行为不应视为已支持。
 >
-> 最后核对：2026-09-05（加载入口、路径、运行支持与缓存容量计费边界；其余字段明细沿用原文 2026-09-04 记录，未逐字段复验）
+> 最后核对：2026-09-08（客户端管理键/请求身份索引与 mapped IPv4；其余字段明细沿用原核对范围）
 >
-> 核对基线：`8223d819efb83fed642900e6b121825083e8c1dd`
+> 核对基线：`16a395887cf4c1182e72600aceb591310991d97d` 加本次 BC-04 工作树
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
@@ -36,6 +36,12 @@
 共享 listener、上游、策略、Hosts、规则集、代理、SecretRef 和认证字段继续复用 [model](../../backend/src/config/model.rs)；共享资源引用、循环、socket 冲突和语义复用 [validate](../../backend/src/config/validate.rs)，没有另造旧版本转换层。名称和 ID 的请求期索引/历史事实属于 BC-04/05，P0 仅验证配置契约。
 
 `resolve_paths` 是无 I/O 的词法检查：拒绝统计/快照相互碰撞、与详情目录及受保护配置/日志路径重叠，包括逻辑文件成为另一目标父路径的反向冲突，Windows 比较不区分大小写。它不证明路径不存在 symlink、reparse point、hard link 或其他物理别名；真正打开目标前的身份校验、旁文件保护和恢复由 BC-26/07/08/29 owner 完成。
+
+### P1 客户端匹配索引内部能力（2026-09-08）
+
+[`ResolvedClient`](../../backend/src/config/resolve.rs) 与 [`ClientRule`](../../backend/src/policy/client.rs) 已把配置管理 `name` 和请求身份 `client_ids` 明确分离，`ClientIndex` 同时构建 name/exact ID 索引并拒绝重复 name、重复 ID、重复规范化 CIDR 和空 matcher。请求匹配仍固定为大小写敏感的 ID 优先、最长 CIDR 回退；IPv4-mapped IPv6 地址在 CIDR 匹配及客户端 cache digest 前归一化为 IPv4，因此与对应 IPv4 使用同一客户端池。
+
+v2 配置边界已只允许单个唯一 `clients[].client_id`；当前生产 `ConfigLoader` 仍读取 v1 `match.ids`，所以 `ResolvedClient` 暂时保留复数集合承接现有正式路径。本批没有切换 v2 启动、生成历史匹配事件、改变详情/统计归属或移除旧 schema；这些边界分别留给 BC-26 和 BC-05。Windows Rust 1.98.0 定向验证为 `policy::` 60 项、`config::contract` 7 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；未执行真实 UDP/TCP/DoH 或跨平台运行验收。
 
 ### P1 活动源与候选内部底座（2026-09-07）
 

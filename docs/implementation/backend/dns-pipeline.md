@@ -4,9 +4,9 @@
 >
 > 适用范围：正式 transport、Policy、Cache、Upstream 与单次完成事件链路
 >
-> 最后核对：2026-09-05（UTC；late-window 组合、本地 adapter 与显式会话容量验证）
+> 最后核对：2026-09-08（客户端管理键/请求身份索引与 mapped IPv4 定向验证；其余正文沿用原核对范围）
 >
-> 核对基线：`f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 加本次契约验证工作树
+> 核对基线：`16a395887cf4c1182e72600aceb591310991d97d` 加本次 BC-04 工作树
 >
 > 2026-09-06 增量核对：仅更新真实会话边界的连续恢复与 reload 驱动；其余正文保留上述历史核对范围
 >
@@ -42,7 +42,7 @@ SystemSocketFactory / typed binding
 
 `MemoryCacheStore`、`InMemoryStorageBackend` 和 `HostsCore`/`ServFailCore` 不在正式请求装配中。前两者用于与 Moka/SQLite 共用的 adapter 契约测试；后两者用于简化解析、dispatch/Transport 测试。它们不是查询性能优化，也不应为了清理名称相似的代码而删除生产 `MokaCacheStore`、`SqliteStorageBackend`、`PolicyDnsCore` 或 hosts upstream 使用的 `HostsTable`。
 
-client CIDR 按前缀长度降序扫描；hosts 使用 BTreeMap，rule exact/suffix 使用 BTreeSet，随后依次匹配 keyword/受限 regex。当前没有 CIDR/suffix trie。PolicyState 的 matcher/version/hash 一起发布，Runtime metadata 随后更新，不是跨两个 ArcSwap 的事务。
+`ResolvedClient` 与 `ClientRule` 显式区分配置管理 `name` 和请求 `client_ids`。`ClientIndex` 分别构建 name/exact ID 索引，ID 保持大小写敏感且优先于 IP；client CIDR 按前缀长度降序扫描，IPv4-mapped IPv6 在匹配与 cache digest 前归一化为 IPv4。当前生产 loader 仍为 v1，因此 resolved 值暂时保留复数请求 ID；v2 的单 `client_id` 契约尚未切换到生产 owner。hosts 使用 BTreeMap，rule exact/suffix 使用 BTreeSet，随后依次匹配 keyword/受限 regex。当前没有 CIDR/suffix trie。PolicyState 的 matcher/version/hash 一起发布，Runtime metadata 随后更新，不是跨两个 ArcSwap 的事务。
 
 ## Cache 与 TTL
 
