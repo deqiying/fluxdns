@@ -25,6 +25,18 @@ pub(crate) enum FileObservation {
     Oversized,
 }
 
+impl FileObservation {
+    /// 日志/状态提示只投影文件状态，不包含源内容、路径或凭据。
+    pub(crate) fn state(&self) -> &'static str {
+        match self {
+            Self::Readable { .. } => "readable",
+            Self::Missing => "missing",
+            Self::Unreadable => "unreadable",
+            Self::Oversized => "oversized",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ManagedObservation {
     pub(crate) source: FileObservation,

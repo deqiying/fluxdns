@@ -32,13 +32,23 @@
 
 ## Reload
 
-[`app.rs`](../../../backend/src/app.rs) 的 `prepare_reload_candidate`、`reload_runtime_from_path` 与 `reload_service_from_path` 重读配置时关闭 snapshot 写入，先拒绝进程持有配置的变化，再 prepare。正式 service watcher 调用 service-aware 入口，不只替换裸 coordinator。
+[`app.rs`](../../../backend/src/app.rs) 的 `prepare_reload_candidate`、`reload_runtime_from_path` 与 `reload_service_from_path` 是保留的显式内部入口：重读配置时关闭 snapshot 写入，先拒绝进程持有配置的变化，再 prepare。正式 app watcher 不再调用它们，只生成双文件观测提示。
 
-[`DnsService::reload_prepared`](../../../backend/src/service.rs) 统一调用 `bind_prepared_reusing`，按物理 `SocketSpec` 复用未变句柄，只为新增或改变的 endpoint 创建 socket。transport/resource task 先注册并等待启动闸门，全部准备成功后执行 revision CAS，再同步更新服务集合并放行任务；旧 transport 由 Runtime retirement 通知停止接纳，已接纳请求继续完成，被移除的资源任务单独取消。当前 watcher 仍在 reload 成功后提交 fingerprint。
+[`DnsService::reload_prepared`](../../../backend/src/service.rs) 统一调用 `bind_prepared_reusing`，按物理 `SocketSpec` 复用未变句柄，只为新增或改变的 endpoint 创建 socket。transport/resource task 先注册并等待启动闸门，全部准备成功后执行 revision CAS，再同步更新服务集合并放行任务；旧 transport 由 Runtime retirement 通知停止接纳，已接纳请求继续完成，被移除的资源任务单独取消。该显式应用入口不由文件 watcher 触发。
 
-Storage/Telemetry 和解析统计 sink 由进程持有，reload 为候选 core 复用这些 sink。`webui.users` 激活后交给 `ManagementRuntime::reconcile_users`，内部写入识别与外部 session 撤销见[管理端](management.md)。其他 restart-required 字段见[配置参考](../configuration.md)。
+Storage/Telemetry 和解析统计 sink 由进程持有，reload 为候选 core 复用这些 sink。`webui.users` 显式激活后交给 `ManagementRuntime::reconcile_users`，内部写入识别与凭据变化撤销会话见[管理端](management.md)。其他 restart-required 字段见[配置参考](../configuration.md)。
 
 TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于进程 owner，reload 不重置累计量。与之不同，重新 prepare 的 DoH connector 创建独立 bootstrap 地址缓存；旧请求只能填旧 resolver，候选失败不影响活动缓存。资源-only publish 未替换 connector 时继续使用其原缓存。
+
+### P1 仅提示文件观测（2026-09-07）
+
+正式 `run_command` 使用加载结果中的绝对源路径与 `work.snapshot_path`，相同路径只观测一次。[`ConfigFileWatcher`](../../../backend/src/app/config_watcher.rs) 复用 ConfigStore 的 `ManagedObservation`，源/派生文件分别受 4 MiB、SHA-256、文件身份和路径链接检查约束；服务轮询只收取已结束的结果，文件读取移到最多一个在途 `spawn_blocking` 任务，不积压读取队列。
+
+连续两次稳定观测后输出 `configuration_files_observed`，只含组合 revision 和 readable/missing/unreadable/oversized 状态，不输出内容或凭据。首次稳定状态也中性上报，不能静默接受 prepare 期间的外改。通知明确 `not_reloaded`，不解析或应用磁盘候选、不更新会话、不修改磁盘。变更提示不等于候选有效，通知也不猜测是否属于自写。退出停止调度并有界等待只读任务；若无法确认完成则显式警告，不声称 OS 文件 I/O 已取消。
+
+Windows 定向测试覆盖双文件、防抖、同长度内容变化、同内容文件身份替换、无效 YAML、缺失、非文件、超限和慢读取单在途。真实 UDP 服务在与生产相同的控制循环中，源/派生文件连续变化后保持同一个 Runtime、revision 和 DNS 策略；随后仅改 Hosts 资源文件，由正式 resource worker 到期刷新 DNS 结果，未手动调用 refresh。此处仍使用现有 v1 loader/runtime，不是 v2 生产启动验收。
+
+BC-30 仍缺配置 owner 的自写归属、脱敏差异/还原、外改重新确认后的同步重试及状态端点；当前仅有日志通知，不等同于 WebUI 全局提示。文件系统停滞的强制中断、完整应用级 shutdown 总预算仍未验证。
 
 ### P1 差量 socket 子项（2026-09-07）
 
@@ -91,7 +101,7 @@ Storage 停机先关闭 detail 输入并回收当前正在提交的 batch，不�
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | 完整启动 | `run_command`、async prepare、StorageRuntime deadline/probe | `main -> app -> DnsService` | 过期预算不建库、真实 SQLite 写锁与写入拒绝/回滚测试 | 不证明真实磁盘满或权限故障全部可恢复 |
-| 配置切换 | `reload_service_from_path`、`reload_prepared` | watcher 调用，复用进程服务 | 完整测试包含 reload/rebind/failure 用例 | 不宣称所有平台组合已验收 |
+| 配置切换 | `reload_service_from_path`、`reload_prepared` | 显式内部入口，复用进程服务；watcher 只观测 | reload/rebind/failure 和外改不 reload 用例 | v2 生产者未接线；不宣称所有平台组合已验收 |
 | 有界停机 | `shutdown`、finalizer owner、stats-first | 正常信号及 fatal task 路径 | SQLite trigger 验证 stats 提交先于 300 条多批详情排空 | 已执行 SQL 无强制抢占保证；Unix 双信号 smoke 未执行 |
 | 安全 panic hook | 固定分类、受限源码位置、backtrace 状态 | 异步 `main` 第一项安装 `std::panic::set_hook` | 独立子进程验证主线程/worker panic 不泄漏 payload、线程名或完整栈 | 不改变内部 task owner 的失败升级策略；安装前异常不覆盖 |
 

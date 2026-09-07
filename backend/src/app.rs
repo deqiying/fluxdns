@@ -1,9 +1,8 @@
 use std::ffi::OsString;
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use crate::config::model::LogLevelDto;
 use crate::config::resolve::SecretValidationError;
@@ -17,6 +16,10 @@ use crate::runtime::{
 use crate::service::{
     DnsService, ServiceError, ServiceReloadError, ServiceStartError, process_owned_reload_change,
 };
+
+mod config_watcher;
+
+use config_watcher::{ConfigFileWatcher, report_config_files};
 
 /// 进程退出码的大类，详细原因应由安全错误消息表达。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -231,92 +234,8 @@ where
 
 const BIND_TIMEOUT: Duration = Duration::from_secs(10);
 const PREPARE_TIMEOUT: Duration = Duration::from_secs(30);
-const CONFIG_RELOAD_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const CONFIG_RELOAD_TIMEOUT: Duration = PREPARE_TIMEOUT.saturating_add(BIND_TIMEOUT);
+const CONFIG_OBSERVATION_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ConfigFileStamp {
-    Missing,
-    Present {
-        modified: Option<SystemTime>,
-        len: u64,
-        content_hash: Option<u64>,
-    },
-}
-
-/// 轮询配置文件元数据和内容 fingerprint，避免在服务循环中重复解析未变更的配置。
-///
-/// 内容 hash 只用于变更检测，不作为安全校验或配置身份；真正加载时仍由
-/// `ConfigLoader` 重新读取并执行完整 strict validation。
-#[derive(Debug)]
-struct ConfigFileWatcher {
-    path: PathBuf,
-    observed: ConfigFileStamp,
-    candidate: Option<ConfigFileStamp>,
-    notified: bool,
-}
-
-impl ConfigFileWatcher {
-    fn new(path: PathBuf) -> Self {
-        let observed = config_file_stamp(&path);
-        Self {
-            path,
-            observed,
-            candidate: None,
-            notified: false,
-        }
-    }
-
-    /// 只有连续两次轮询得到同一 fingerprint 才通知，降低原子替换/半写入竞态。
-    fn poll_change(&mut self) -> Option<ConfigFileStamp> {
-        let current = config_file_stamp(&self.path);
-        if current == self.observed {
-            self.candidate = None;
-            self.notified = false;
-            return None;
-        }
-        if self.candidate != Some(current) {
-            self.candidate = Some(current);
-            self.notified = false;
-            return None;
-        }
-        if self.notified {
-            return None;
-        }
-        self.notified = true;
-        Some(current)
-    }
-
-    fn commit(&mut self, stamp: ConfigFileStamp) {
-        if self.candidate == Some(stamp) {
-            self.observed = stamp;
-            self.candidate = None;
-            self.notified = false;
-        }
-    }
-
-    fn retry(&mut self, stamp: ConfigFileStamp) {
-        if self.candidate == Some(stamp) {
-            self.notified = false;
-        }
-    }
-}
-
-fn config_file_stamp(path: &std::path::Path) -> ConfigFileStamp {
-    match std::fs::metadata(path) {
-        Ok(metadata) => ConfigFileStamp::Present {
-            modified: metadata.modified().ok(),
-            len: metadata.len(),
-            content_hash: std::fs::read(path).ok().map(|content| {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                content.hash(&mut hasher);
-                hasher.finish()
-            }),
-        },
-        Err(_) => ConfigFileStamp::Missing,
-    }
-}
 
 /// 根据当前命令加载并执行配置边界。
 pub async fn run() -> Result<(), AppError> {
@@ -474,6 +393,11 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             Ok(())
         }
         AppCommand::Run => {
+            let watched_paths = output.source_path.clone().map(|source| {
+                let derived = (source != output.resolved.work.snapshot_path)
+                    .then(|| output.resolved.work.snapshot_path.clone());
+                (source, derived)
+            });
             let management_bootstrap = output.resolved.webui.enable.then(|| {
                 (
                     output.resolved.webui.clone(),
@@ -593,71 +517,38 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 task_count = service.task_count(),
                 "service_ready"
             );
-            let config_path = options.config_path.clone();
-            let config_watcher = Arc::new(std::sync::Mutex::new(ConfigFileWatcher::new(
-                config_path.clone(),
-            )));
-            service
+            let config_watcher = watched_paths.map(|(source, derived)| {
+                Arc::new(tokio::sync::Mutex::new(ConfigFileWatcher::new(
+                    source, derived,
+                )))
+            });
+            let polling_watcher = config_watcher.clone();
+            let service_result = service
                 .wait_for_ctrl_c_with_reload(
                     SHUTDOWN_GRACE_PERIOD,
-                    CONFIG_RELOAD_POLL_INTERVAL,
-                    move |service| {
-                        let (stamp, watcher) = {
-                            let mut watcher = config_watcher
-                                .lock()
-                                .expect("configuration watcher lock must not be poisoned");
-                            let Some(stamp) = watcher.poll_change() else {
-                                return Box::pin(async { Ok(()) });
-                            };
-                            (stamp, Arc::clone(&config_watcher))
-                        };
-                        let path = config_path.clone();
+                    CONFIG_OBSERVATION_POLL_INTERVAL,
+                    move |_service| {
+                        let watcher = polling_watcher.clone();
                         Box::pin(async move {
-                            let cancellation = Cancellation::new();
-                            let deadline = Deadline::new(Instant::now() + CONFIG_RELOAD_TIMEOUT);
-                            let socket_factory = SystemSocketFactory::new();
-                            match reload_service_from_path(
-                                service,
-                                &path,
-                                &socket_factory,
-                                deadline,
-                                cancellation,
-                            )
-                            .await
-                            {
-                                Ok(runtime) => {
-                                    watcher
-                                        .lock()
-                                        .expect("configuration watcher lock must not be poisoned")
-                                        .commit(stamp);
-                                    tracing::info!(
-                                        event = "runtime_reloaded",
-                                        component = "application",
-                                        result = "success",
-                                        revision = runtime.revision().0,
-                                        "runtime_reloaded"
-                                    );
-                                }
-                                Err(error) => {
-                                    watcher
-                                        .lock()
-                                        .expect("configuration watcher lock must not be poisoned")
-                                        .retry(stamp);
-                                    tracing::warn!(
-                                        event = "runtime_reload_failed",
-                                        component = "application",
-                                        result = "kept_previous_runtime",
-                                        error = %bounded_message(error),
-                                        "runtime_reload_failed"
-                                    );
-                                }
+                            if let Some(watcher) = watcher {
+                                report_config_files(&watcher).await;
                             }
                             Ok(())
                         })
                     },
                 )
-                .await
-                .map_err(map_service_error)?;
+                .await;
+            if let Some(watcher) = config_watcher
+                && !watcher.lock().await.finish(SHUTDOWN_GRACE_PERIOD).await
+            {
+                tracing::warn!(
+                    event = "configuration_observation_shutdown_incomplete",
+                    component = "application",
+                    result = "read_task_not_confirmed_stopped",
+                    "configuration_observation_shutdown_incomplete"
+                );
+            }
+            service_result.map_err(map_service_error)?;
             tracing::info!(
                 event = "service_shutdown",
                 component = "application",
@@ -749,7 +640,7 @@ mod tests {
 
     use super::{
         AppCommand, AppErrorKind, AppExitCode, ApplicationReloadError, CliAction, CliError,
-        ConfigFileWatcher, parse_args, reload_runtime_from_path, reload_service_from_path,
+        parse_args, reload_runtime_from_path, reload_service_from_path,
     };
 
     #[derive(Clone, Copy)]
@@ -803,7 +694,7 @@ mod tests {
         }
     }
 
-    fn reload_source(work: &std::path::Path, port: u16) -> String {
+    pub(super) fn reload_source(work: &std::path::Path, port: u16) -> String {
         format!(
             r#"
 version: 1
@@ -853,7 +744,7 @@ clients: []
         )
     }
 
-    async fn udp_query(address: SocketAddr, id: u16, name: &str) -> Message {
+    pub(super) async fn udp_query(address: SocketAddr, id: u16, name: &str) -> Message {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let mut query = Message::new(id, MessageType::Query, OpCode::Query);
         query.add_query(Query::query(Name::from_ascii(name).unwrap(), RecordType::A));
@@ -918,67 +809,6 @@ clients: []
             parse_args([OsString::from("--config")]),
             Err(CliError::MissingValue)
         );
-    }
-
-    #[test]
-    fn config_file_watcher_reports_metadata_changes_once() {
-        let root = std::env::temp_dir().join(format!(
-            "fluxdns-config-watcher-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("config.yaml");
-        let mut watcher = ConfigFileWatcher::new(path.clone());
-
-        assert_eq!(watcher.poll_change(), None);
-        std::fs::write(&path, b"version: 1\n").unwrap();
-        assert_eq!(watcher.poll_change(), None);
-        let stamp = watcher
-            .poll_change()
-            .expect("stable change must be reported");
-        assert_eq!(watcher.poll_change(), None);
-        watcher.commit(stamp);
-        assert_eq!(watcher.poll_change(), None);
-        std::fs::remove_file(&path).unwrap();
-        assert_eq!(watcher.poll_change(), None);
-        let stamp = watcher.poll_change().expect("deletion must be reported");
-        watcher.retry(stamp);
-        assert_eq!(watcher.poll_change(), Some(stamp));
-        watcher.commit(stamp);
-        assert_eq!(watcher.poll_change(), None);
-
-        let _ = std::fs::remove_dir_all(root);
-    }
-
-    #[test]
-    fn config_file_watcher_reports_same_length_content_changes() {
-        let root = std::env::temp_dir().join(format!(
-            "fluxdns-config-watcher-content-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        let path = root.join("config.yaml");
-        std::fs::write(&path, b"version: 1\n").unwrap();
-        let mut watcher = ConfigFileWatcher::new(path.clone());
-
-        assert_eq!(watcher.poll_change(), None);
-        std::fs::write(&path, b"version: 2\n").unwrap();
-        assert_eq!(watcher.poll_change(), None);
-        let stamp = watcher
-            .poll_change()
-            .expect("same-length content change must be reported");
-        watcher.commit(stamp);
-        assert_eq!(watcher.poll_change(), None);
-
-        let _ = std::fs::remove_dir_all(root);
     }
 
     #[tokio::test]

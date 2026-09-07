@@ -963,8 +963,8 @@ impl DnsService {
 
     /// 等待终止信号、受管 task 故障或配置变更轮询回调。
     ///
-    /// 回调只负责决定是否执行一次 reload；配置错误应由调用方记录并吞掉，
-    /// 不应因为一次坏配置把当前仍可用的 Runtime 变成故障。
+    /// 主配置轮询只生成文件提示；显式热更新由有界控制队列消费。
+    /// 回调不能同步等待文件 I/O 或因无效外部配置终止当前可用的 Runtime。
     pub(crate) async fn wait_for_ctrl_c_with_reload<F>(
         &mut self,
         grace_period: Duration,
@@ -983,7 +983,8 @@ impl DnsService {
         .await
     }
 
-    async fn run_with_reload<F, S>(
+    /// 与生产相同的控制循环；允许本机验证注入终止信号，不发送真实进程信号。
+    pub(crate) async fn run_with_reload<F, S>(
         &mut self,
         grace_period: Duration,
         poll_interval: Duration,
