@@ -40,12 +40,14 @@ users empty -> setup_required
 
 ## 会话与同源安全
 
-- session token 至少具有 256 bit 随机熵，只经 Cookie 传输，服务端有界内存保存元数据，不把 token 暴露给前端存储。
+- 登录后的业务接口只接受 `Authorization: Bearer <access_token>`，不回退到 Cookie 或 URL query。访问 token 与刷新凭据分别使用至少 256 bit 随机熵，服务端复用同一有界会话权威；不引入 JWT、角色或第二份认证数据库。
+- 初始化、登录和同源 POST 刷新接口可以返回短期 access token，前端仅在内存保存；普通 session、配置和业务响应不返回认证 token。刷新凭据只经 HttpOnly Cookie 传输，不能当作 Bearer；Cookie 不再直接授权业务请求。
 - Cookie 固定 `HttpOnly`、`SameSite=Strict`、`Path=/`，不设置 `Domain`。HTTPS origin 使用 `__Host-fluxdns_session` 与 `Secure`；HTTP origin 使用 `fluxdns_session` 且不能设置 `Secure`。
 - session 同时受绝对/空闲期限、全局/单用户容量限制；退出、显式认证内容更新和进程重启使相关 session 失效。具体常量以 [session.rs](../../backend/src/management/session.rs) 为准。
+- 并发刷新复用当前访问凭据，临近过期才换发；旧访问凭据只保留到原期限，避免在途请求或其他 tab 被提前注销。退出/会话失效同时撤销关联凭据；前端拒绝迟到刷新结果恢复已结束会话，也不让旧请求的 401 清除新登录。
 - Management 本身只提供 HTTP；`public_origin` 是浏览器唯一可接受的绝对 HTTP/HTTPS origin，不含凭据、路径、query 或 fragment。
 - 同源判断不能根据 `X-Forwarded-Proto` 或 `X-Forwarded-Host` 放宽。Origin/Fetch Metadata、限流、大小/并发/超时保护必须在统一边界实施。
-- 前端不能把密码、hash、token 存入 URL、localStorage、sessionStorage 或查询缓存。未经另行评审不增加通用写 API 或自定义 token 方案。
+- 前端不能把密码、hash、token 存入 URL、localStorage、sessionStorage 或查询缓存。认证响应使用 no-store，访问 token 在进入 AuthProvider 前剥离；业务写请求的未知结果不触发自动刷新重放。未经另行评审不增加通用写 API。
 
 HTTP 直连不提供传输加密，只适用于 loopback/可信隔离管理网；真实浏览器与反向代理观察的证据边界见[管理端实现](../implementation/backend/management.md)。
 
@@ -53,7 +55,7 @@ HTTP 直连不提供传输加密，只适用于 loopback/可信隔离管理网�
 
 路由优先级是 setup/auth、受保护 `/api/v1/*`、未知 `/api/*` 的 JSON 错误、内嵌静态资源、满足条件的 SPA fallback。只有接受 HTML 的无扩展名 GET/HEAD 前端路径可以回退 `index.html`；资源缺失和未知 API 不得伪装成成功页面。
 
-API 使用统一 request ID、错误 envelope 和有界安全错误，不返回 SQL、绝对配置路径、SecretRef、hash、token 或 backtrace。查询使用只读连接、固定模板、参数绑定、分页和时间窗口上限。
+API 使用统一 request ID、错误 envelope 和有界安全错误；错误正文不返回 SQL、绝对配置路径、SecretRef、hash、token 或 backtrace。仅认证专用成功响应返回 access token，刷新凭据永不进入正文。查询使用只读连接、固定模板、参数绑定、分页和时间窗口上限。
 
 所有 authenticated WebUI 用户可以读取 canonical qname、有效 client IP、真实配置 ID、upstream provenance 与有界 answer。该授权范围不等同普通日志/metrics允许这些内容。历史已脱敏记录保留 `legacy_redacted` 和空详情；不得伪造丢失字段。始终禁止 DNS wire、request digest、route 原文与秘密配置进入 API。
 

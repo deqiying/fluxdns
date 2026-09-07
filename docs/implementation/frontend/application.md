@@ -27,9 +27,19 @@
 
 ## HTTP client 与类型
 
-[`apiRequest`](../../../frontend/src/shared/api/client.ts) 固定 `/api/v1` 前缀、`credentials: same-origin`、默认 10 秒 timeout，并合并调用者 AbortSignal。它校验 JSON Content-Type、解析错误 envelope，保留 request ID/retry-after；非鉴权请求 `401` 通知统一监听者。成功值最终是泛型断言，不是完整 OpenAPI 响应运行时 validator。
+[`apiRequest`](../../../frontend/src/shared/api/client.ts) 固定 `/api/v1` 前缀、默认 10 秒 timeout，并合并调用者 AbortSignal。P1 业务请求改为 Bearer 且 `credentials: omit`，认证专用请求才携带同源 Cookie，详见下节。它校验 JSON Content-Type、解析错误 envelope，保留 request ID/retry-after；非鉴权请求 `401` 通知统一监听者。普通成功值最终是泛型断言，不是完整 OpenAPI 响应运行时 validator。
 
 接口类型来自 [OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 生成的 [`generated.ts`](../../../frontend/src/shared/api/generated.ts)，[`types.ts`](../../../frontend/src/shared/api/types.ts) 提供前端投影。schema 改动后使用 `generate:api`，命令见[前端 README](../../../frontend/README.md)。
+
+## P1 Bearer 接线（2026-09-08）
+
+[`auth/api.ts`](../../../frontend/src/modules/auth/api.ts) 消费初始化/登录的 `AuthSession`，access token 仅存于共享 client 的模块内存；返回 AuthProvider/查询缓存前重新投影 `user/expires_at`，不透传 token 或额外 session 字段。业务请求和 `GET auth/session` 只附加 Authorization Bearer、明确省略 Cookie。页面重载后，client 先调用同源 `POST auth/refresh` 恢复访问凭据，不读取 HttpOnly Cookie 或浏览器持久存储。
+
+同一认证代次内所有请求共享一次在途刷新，刷新最多 5 秒且各等待方仍受自己的 10 秒/调用者取消约束。一个请求取消不终止其他等待者；登出/401 增加认证代次并禁止迟到刷新恢复会话，新登录不受旧请求迟到 401 影响。刷新只发生在业务请求发送前；已发出的请求返回 401/500 或结果未知均不自动重放。登出仍清空本地状态，失败不等于服务端已撤销，沿用上节的错误边界。
+
+mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状态模拟，不充当生产替代。Vite 继续把 `/api` 透明代理到既有后端，未硬编码令牌或生产 baseURL，正式 client 与 handler 保持同一 v1 前缀，v2 只同步目标 schema。Bearer 测试覆盖并发、取消、迟到结果、写请求不重放、无 token session 投影和登录/登出流程。
+
+真实内嵌 WebUI 的浏览器验证覆盖初始化、页面重载后的 Cookie 刷新/Bearer 业务请求、登出后刷新保持未登录、再次登录及 Cookie 清除。开发者接口只读确认 localStorage/sessionStorage 条目均为 0，`document.cookie` 不可读刷新凭据；Network 只记录请求头是否存在，不输出 token。该验证使用旧壳层的真实后端数据，不证明 FC-01 十二路由、FC-02 公共表单或 v2 配置接口完成。
 
 ## 能力与证据
 
@@ -43,9 +53,9 @@
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | 本轮静态；`App.test.tsx` 有路由/认证测试 | 未运行真实浏览器初始化和 Cookie 观察 |
-| 同源请求/取消 | `apiRequest`、unauthorized listener | 各 module API 共用 client | 本轮静态；client/contract tests 可定位 | 泛型不是完整运行时 schema 校验 |
+| setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | P1 认证测试及真实初始化/登录/刷新/登出，见上节 | 十二路由和 v2 切换未验收 |
+| 同源请求/取消 | `apiRequest`、unauthorized listener | 各 module API 共用 client | P1 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
 | 退出数据清理 | `performLogout` finally | AppLayout 使用 auth logout | 本轮核对实际分支 | 401 与 logout 清理行为不同，不能混写 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
 
-本轮未运行 pnpm、浏览器或 Network/Storage 观察。历史浏览器只覆盖 DOM/Console 的记录与尚无运行证据的环境边界见[交付证据](../delivery.md)；不再以已移除的 v2 计划作为当前实现来源。
+2026-09-05 原核对未运行 pnpm 或浏览器；P1 新增的 Bearer 运行证据见上节。历史记录与尚无运行证据的环境边界见[交付证据](../delivery.md)，不把旧壳层的认证回归算作 FC-01/02 完成。

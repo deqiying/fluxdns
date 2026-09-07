@@ -11,7 +11,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::rejection::JsonRejection;
 use axum::extract::{ConnectInfo, DefaultBodyLimit, Extension, Request, State};
-use axum::http::header::{CONTENT_LENGTH, COOKIE, ORIGIN, RETRY_AFTER, SET_COOKIE};
+use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, ORIGIN, RETRY_AFTER, SET_COOKIE};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode, Version};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -23,7 +23,7 @@ use super::assets;
 use super::auth::{AuthError, AuthState, hash_password, validate_setup_credentials};
 use super::query;
 use super::query::ManagementQueryService;
-use super::session::{SessionStore, SessionView};
+use super::session::{SessionStore, SessionView, valid_token};
 use crate::config::store::{ConfigStore, ConfigStoreError};
 
 const MAX_JSON_BODY_BYTES: usize = 16 * 1024;
@@ -140,6 +140,7 @@ pub(crate) fn build_router(services: Arc<AuthServices>) -> Router {
     Router::new()
         .route("/api/v1/auth/setup", get(get_setup).post(post_setup))
         .route("/api/v1/auth/login", post(post_login))
+        .route("/api/v1/auth/refresh", post(post_refresh))
         .route("/api/v1/auth/logout", post(post_logout))
         .merge(protected)
         .fallback(fallback)
@@ -212,7 +213,8 @@ async fn request_boundary(
             &request_id,
         );
     };
-    let response = match tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)).await {
+    let is_api = request.uri().path().starts_with("/api/");
+    let mut response = match tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)).await {
         Ok(response) => response,
         Err(_) => error_response(
             StatusCode::REQUEST_TIMEOUT,
@@ -222,6 +224,18 @@ async fn request_boundary(
             &request_id,
         ),
     };
+    if is_api {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+        if response.status() == StatusCode::UNAUTHORIZED {
+            response.headers_mut().insert(
+                axum::http::header::WWW_AUTHENTICATE,
+                HeaderValue::from_static("Bearer"),
+            );
+        }
+    }
     with_request_id(response, &request_id)
 }
 
@@ -231,7 +245,7 @@ async fn require_session(
     next: Next,
 ) -> Response {
     let request_id = request_id(&request);
-    let Some(token) = session_token(request.headers(), &services.sessions) else {
+    let Some(token) = session_token(request.headers()) else {
         return error_response(
             StatusCode::UNAUTHORIZED,
             "AUTH_REQUIRED",
@@ -404,7 +418,7 @@ async fn post_logout(
     {
         return response;
     }
-    if let Some(token) = session_token(&headers, &services.sessions) {
+    if let Some(token) = session_token(&headers) {
         services.sessions.revoke(&token);
     }
     let mut response = StatusCode::NO_CONTENT.into_response();
@@ -416,6 +430,33 @@ async fn post_logout(
 
 async fn get_session(Extension(session): Extension<SessionView>) -> Json<SessionView> {
     Json(session)
+}
+
+/// Cookie 只恢复访问凭据，不作为任何业务路由的鉴权后备。
+async fn post_refresh(
+    State(services): State<Arc<AuthServices>>,
+    Extension(request_id): Extension<RequestId>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(response) =
+        validate_mutating_request(&headers, &services.public_origin, &request_id)
+    {
+        return response;
+    }
+    let refreshed = refresh_token(&headers, &services.sessions)
+        .map(|token| services.sessions.refresh(&token))
+        .transpose();
+    match refreshed {
+        Ok(Some(Some(view))) => Json(view).into_response(),
+        Ok(_) => error_response(
+            StatusCode::UNAUTHORIZED,
+            "AUTH_REQUIRED",
+            "session required",
+            false,
+            &request_id,
+        ),
+        Err(_) => internal_error(&request_id),
+    }
 }
 
 async fn fallback(request: Request<Body>) -> Response {
@@ -466,7 +507,20 @@ fn validate_mutating_request(
     None
 }
 
-fn session_token(headers: &HeaderMap, sessions: &SessionStore) -> Option<String> {
+fn session_token(headers: &HeaderMap) -> Option<String> {
+    let mut values = headers.get_all(AUTHORIZATION).iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        return None;
+    }
+    let (scheme, token) = value.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Bearer") || !valid_token(token) {
+        return None;
+    }
+    Some(token.to_owned())
+}
+
+fn refresh_token(headers: &HeaderMap, sessions: &SessionStore) -> Option<String> {
     let mut values = headers.get_all(COOKIE).iter();
     let value = values.next()?.to_str().ok()?;
     if values.next().is_some() {
@@ -621,7 +675,7 @@ mod tests {
 
     use axum::body::{Body, to_bytes};
     use axum::extract::ConnectInfo;
-    use axum::http::header::{CONTENT_TYPE, COOKIE, ORIGIN, SET_COOKIE};
+    use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, ORIGIN, SET_COOKIE};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -632,6 +686,8 @@ mod tests {
     use crate::management::ManagementRuntime;
     use crate::management::auth::AuthState;
     use crate::management::session::SessionStore;
+
+    mod bearer;
 
     fn test_services() -> (Arc<AuthServices>, std::path::PathBuf, std::path::PathBuf) {
         let (source, work_path) = crate::config::test_support::portable_example();
@@ -690,7 +746,124 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn setup_persists_hash_and_issues_usable_cookie_session() {
+    async fn business_authentication_uses_only_bearer_not_cookie_or_url_query() {
+        let (services, root, _) = test_services();
+        let app = build_router(Arc::clone(&services));
+        let header_session = services.sessions.issue("header-admin".to_owned()).unwrap();
+        let query_session = services.sessions.issue("query-admin".to_owned()).unwrap();
+        let cookie = format!(
+            "{}={}",
+            services.sessions.cookie_name(),
+            header_session.token
+        );
+        let authorization = format!("Bearer {}", header_session.view.access_token);
+        for value in [
+            None,
+            Some(format!("Bearer {}", header_session.token)),
+            Some("Basic invalid".to_owned()),
+        ] {
+            let mut request = Request::builder()
+                .uri("/api/v1/auth/session")
+                .header(COOKIE, &cookie);
+            if let Some(value) = value {
+                request = request.header(AUTHORIZATION, value);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        for key in ["token", "access_token", "session_token", "fluxdns_session"] {
+            let request = Request::builder()
+                .uri(format!(
+                    "/api/v1/auth/session?{key}={}",
+                    query_session.view.access_token
+                ))
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["code"], "AUTH_REQUIRED");
+            assert!(!body.to_string().contains(&query_session.token));
+            assert!(!body.to_string().contains(&query_session.view.access_token));
+        }
+
+        let request = Request::builder()
+            .uri(format!(
+                "/api/v1/auth/session?token={}",
+                query_session.view.access_token
+            ))
+            .header(AUTHORIZATION, &authorization)
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["user"]["name"], "header-admin");
+        assert!(body.get("token").is_none());
+        assert!(!body.to_string().contains(&header_session.token));
+        assert!(!body.to_string().contains(&query_session.token));
+        assert!(!body.to_string().contains(&header_session.view.access_token));
+        assert!(!body.to_string().contains(&query_session.view.access_token));
+
+        // query 不能选择被注销的会话，也不能绕过已有 Origin 防护。
+        let logout_path = format!("/api/v1/auth/logout?token={}", query_session.token);
+        let mut request = post(&logout_path, "");
+        request
+            .headers_mut()
+            .insert(AUTHORIZATION, authorization.parse().unwrap());
+        request
+            .headers_mut()
+            .insert(ORIGIN, "https://foreign.example.test".parse().unwrap());
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            services
+                .sessions
+                .lookup(&header_session.view.access_token)
+                .unwrap()
+                .is_some()
+        );
+        let response = app.clone().oneshot(post(&logout_path, "")).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            services
+                .sessions
+                .lookup(&query_session.view.access_token)
+                .unwrap()
+                .is_some()
+        );
+        let mut request = post(&logout_path, "");
+        request
+            .headers_mut()
+            .insert(AUTHORIZATION, authorization.parse().unwrap());
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            services
+                .sessions
+                .lookup(&header_session.view.access_token)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            services
+                .sessions
+                .lookup(&query_session.view.access_token)
+                .unwrap()
+                .is_some()
+        );
+        drop(services);
+        cleanup_test_root(&root);
+    }
+
+    #[tokio::test]
+    async fn setup_persists_hash_and_issues_separate_refresh_and_bearer_credentials() {
         let (services, root, source_path) = test_services();
         let runtime = ManagementRuntime::new(
             Arc::clone(&services.auth),
@@ -716,7 +889,14 @@ mod tests {
             .unwrap()
             .to_owned();
         let cookie = set_cookie.split(';').next().unwrap();
-        let token = cookie.split_once('=').unwrap().1;
+        let refresh_token = cookie.split_once('=').unwrap().1;
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let token = body["access_token"].as_str().unwrap();
+        assert_eq!(body["token_type"], "Bearer");
+        assert_ne!(token, refresh_token);
+        assert!(!body.to_string().contains(refresh_token));
+        let token = token.to_owned();
         let source = std::fs::read_to_string(&source_path).unwrap();
         assert!(source.contains("$argon2id$"));
         assert!(!source.contains("correct horse battery staple"));
@@ -725,11 +905,11 @@ mod tests {
             .load_from_path(&source_path)
             .unwrap();
         runtime.reconcile_users(&loaded.resolved.webui.users, &loaded.resolved.input_hash);
-        assert!(services.sessions.lookup(token).unwrap().is_some());
+        assert!(services.sessions.lookup(&token).unwrap().is_some());
 
         let request = Request::builder()
             .uri("/api/v1/auth/session")
-            .header(COOKIE, cookie)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
@@ -739,7 +919,7 @@ mod tests {
         assert_eq!(body["user"]["name"], "admin");
 
         runtime.reconcile_users(&loaded.resolved.webui.users, "external-fingerprint");
-        assert!(services.sessions.lookup(token).unwrap().is_some());
+        assert!(services.sessions.lookup(&token).unwrap().is_some());
 
         let mut config = loaded.config;
         config.webui.users.push(crate::config::model::WebUiUserDto {
@@ -753,11 +933,17 @@ mod tests {
             .users
             .clone();
         runtime.reconcile_users(&users, "users-added");
-        assert!(services.sessions.lookup(token).unwrap().is_none());
+        assert!(services.sessions.lookup(&token).unwrap().is_none());
         let issued = services.sessions.issue("admin".to_owned()).unwrap();
         let reversed = users.iter().rev().cloned().collect::<Vec<_>>();
         runtime.reconcile_users(&reversed, "users-reordered");
-        assert!(services.sessions.lookup(&issued.token).unwrap().is_some());
+        assert!(
+            services
+                .sessions
+                .lookup(&issued.view.access_token)
+                .unwrap()
+                .is_some()
+        );
         config.webui.users[0].password_hash =
             super::super::auth::hash_password("a replacement test password").unwrap();
         let users = crate::config::resolve::resolve_config(&config, "password-changed")
@@ -767,7 +953,13 @@ mod tests {
             .users
             .clone();
         runtime.reconcile_users(&users, "password-changed");
-        assert!(services.sessions.lookup(&issued.token).unwrap().is_none());
+        assert!(
+            services
+                .sessions
+                .lookup(&issued.view.access_token)
+                .unwrap()
+                .is_none()
+        );
 
         cleanup_test_root(&root);
     }

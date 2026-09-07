@@ -19,7 +19,7 @@ export interface paths {
         put?: never;
         /**
          * 创建首个管理用户
-         * @description 仅在状态为 required 时可调用。服务端先持久化 Argon2id hash，再设置 HttpOnly、 SameSite=Strict Cookie；public_origin 为 HTTPS 时同时设置 Secure 和 __Host- 前缀。
+         * @description 仅在状态为 required 时可调用。服务端先持久化 Argon2id hash，再返回短期 Bearer 访问凭据并设置独立的 HttpOnly、SameSite=Strict 刷新 Cookie；public_origin 为 HTTPS 时同时设置 Secure 和 __Host- 前缀。
          */
         post: operations["initializeWebUi"];
         delete?: never;
@@ -39,7 +39,7 @@ export interface paths {
         put?: never;
         /**
          * 建立服务端 session
-         * @description 成功后由服务端设置 HttpOnly、SameSite=Strict Cookie；public_origin 为 HTTPS 时设置 Secure 和 __Host- 前缀。 服务端校验 Origin 和 Fetch Metadata；前端不持久化 token。
+         * @description 成功后返回短期 Bearer 访问凭据，并设置独立的 HttpOnly、SameSite=Strict 刷新 Cookie； public_origin 为 HTTPS 时设置 Secure 和 __Host- 前缀。服务端校验 Origin 和 Fetch Metadata；前端不持久化访问 token。
          */
         post: operations["login"];
         delete?: never;
@@ -59,9 +59,26 @@ export interface paths {
         put?: never;
         /**
          * 终止当前 session
-         * @description 服务端必须校验同源 Origin 和 Fetch Metadata，并清除 session Cookie。
+         * @description 服务端校验 Origin 和 Fetch Metadata，通过 Bearer 撤销关联会话及其访问凭据，并清除刷新 Cookie；无有效凭据时保持幂等，不以 Cookie 或 URL token 选择会话。
          */
         post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description 仅同源 POST 使用 HttpOnly Cookie 恢复短期访问凭据；保留 Origin/Fetch Metadata 检查，响应 no-store。Cookie 不能用于业务接口鉴权。 */
+        post: operations["refreshSession"];
         delete?: never;
         options?: never;
         head?: never;
@@ -234,6 +251,14 @@ export interface components {
             user: components["schemas"]["SessionUser"];
             /** Format: date-time */
             expires_at: string;
+        };
+        /** @description 只在初始化、登录和刷新响应出现；access token 只存前端内存，不进入 URL、持久存储或查询缓存；刷新凭据不进入正文。 */
+        AuthSession: {
+            session: components["schemas"]["Session"];
+            access_token: string;
+            /** @constant */
+            token_type: "Bearer";
+            access_expires_at_ms: number;
         };
         SessionUser: {
             name: string;
@@ -576,7 +601,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Session"];
+                    "application/json": components["schemas"]["AuthSession"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -605,7 +630,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Session"];
+                    "application/json": components["schemas"]["AuthSession"];
                 };
             };
             400: components["responses"]["BadRequest"];
@@ -632,6 +657,30 @@ export interface operations {
                 content?: never;
             };
             400: components["responses"]["BadRequest"];
+            429: components["responses"]["RateLimited"];
+            500: components["responses"]["InternalError"];
+        };
+    };
+    refreshSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 当前 session 和短期 Bearer 访问凭据 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthSession"];
+                };
+            };
+            400: components["responses"]["BadRequest"];
+            401: components["responses"]["Unauthorized"];
             429: components["responses"]["RateLimited"];
             500: components["responses"]["InternalError"];
         };

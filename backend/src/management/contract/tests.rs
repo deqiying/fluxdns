@@ -222,6 +222,14 @@ fn openapi_protection_constants_match_rust_and_write_routes_are_not_registered()
         ("websocket_frame_bytes", MAX_WS_FRAME_BYTES),
         ("operation_entries", MAX_OPERATION_ENTRIES),
         ("external_diff_bytes", MAX_EXTERNAL_DIFF_BYTES),
+        (
+            "access_token_ttl_seconds",
+            crate::management::session::ACCESS_TOKEN_TTL.as_secs() as usize,
+        ),
+        (
+            "access_renew_window_seconds",
+            crate::management::session::ACCESS_RENEW_WINDOW.as_secs() as usize,
+        ),
         ("operation_ttl_seconds", OPERATION_TTL_SECONDS as usize),
         ("websocket_protocol_version", WS_PROTOCOL_VERSION as usize),
     ] {

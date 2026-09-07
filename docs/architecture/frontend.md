@@ -23,7 +23,7 @@ app: providers / router / error boundary
 
 - `app` 只组装 provider、路由、错误边界和应用生命周期，不包含页面业务。
 - `modules` 按页面领域组织，查询键覆盖过滤/分页参数；页面不直接散落 fetch。
-- `shared/api` 集中同源路径、Cookie、取消、超时与错误转换；不内置任意生产 baseURL。
+- `shared/api` 集中同源路径、内存 Bearer、认证刷新、取消、超时与错误转换；业务请求不携带 Cookie，不内置任意生产 baseURL。
 - OpenAPI 是接口字段唯一权威，生成的 TypeScript 不手工改；fixture 遵守同一契约但不能作为服务已接线的证据。
 - 后端状态保持 `available/unavailable`、健康、stale、gap 等语义，不能把不可用数据显示为正常零值。
 
@@ -33,7 +33,7 @@ app: providers / router / error boundary
 
 未认证用户进入登录；请求 `401` 由统一认证边界回收会话、取消查询并交给 guard 跳转。退出需要清理前一个用户的查询数据。loading、error、setup-required、unauthenticated 和正常内容必须有明确状态，不能把失败当成未登录或空数据。
 
-Cookie、密码、Origin 与会话安全唯一维护于 [Management 设计](management.md)。实际 AuthProvider 与路由行为见[应用实现](../implementation/frontend/application.md)。
+Bearer、刷新 Cookie、密码、Origin 与会话安全唯一维护于 [Management 设计](management.md)。AuthProvider 只持有无 token 的 session 投影；客户端共享刷新有独立有界 deadline，各等待者取消互不影响，业务写请求不会自动重放。实际行为见[应用实现](../implementation/frontend/application.md)。
 
 ## 查询与呈现
 

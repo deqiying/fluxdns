@@ -90,4 +90,4 @@ pwsh -File script/dev.ps1 stop
 
 历史记录：迁移前 v2 方案在 2026-09-04 报告 Windows x86_64 三阶段打包、发布物 SHA-256 对齐 target binary、配置 validate、移出外部 dist 后的 SPA/API HTTP smoke、dev start/status/stop、CSP/nosniff/cache/ETag/304，以及 in-app browser 的初始化深链接/表单/Console 检查。**这是原文报告，本轮未复核**；测试所用源码提交未完整记录，不能把本页核对基线视为当时测试基线。过时的 v2 方案已按用户要求移除，历史原文由 Git 追溯。
 
-本页没有真实浏览器 Cookie/Network/Storage、GitHub Actions 实跑、Linux/macOS 原生发布与完整故障矩阵的新执行证据；删除过时计划不等于这些场景已经验证通过。
+2026-09-08 P1 使用本批工作树执行前端构建、`cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，并启动独立 loopback 测试实例；Bearer 鉴权的真实 HTTP 和浏览器 Cookie/Network/Storage 证据见[Management 实现](backend/management.md#p1-bearer-业务鉴权2026-09-08)及[前端应用](frontend/application.md#p1-bearer-接线2026-09-08)。本次不是三阶段 release 打包、Vite 开发代理或外部 HTTPS 代理验收；未执行 GitHub Actions、Linux/macOS 原生发布或完整故障矩阵。

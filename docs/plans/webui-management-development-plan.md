@@ -31,6 +31,8 @@ P1 先交付 BC-02 活动源、定向编辑和操作仲裁内部能力，事实�
 
 P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01 的生产 fixture 启动门槛随 BC-26 继续保留。实际能力、未接线边界和验证分别见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)、[Management 实现](../implementation/backend/management.md#p0-v2-契约)、[前端实现](../implementation/frontend/application.md#能力与证据)。本文不预设人员数量、固定人日或日历上线日期；排期以依赖和验收门槛为准。
 
+2026-09-08 认证子项已按用户追加决定改为业务 Bearer、认证专用 Cookie 刷新，真实 HTTP 与浏览器回归见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)。FC-01 仅认证子项完成，壳层/十二路由/主题、FC-02 和 v2 配置接线仍待实施；P1 继续保持部分完成。
+
 ## 2. 当前基线与改造范围
 
 ### 2.1 已核对的工程入口

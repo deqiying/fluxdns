@@ -59,13 +59,25 @@ Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/�
 
 ## 路由与保护
 
-[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装公开 setup/login/logout、受保护 session 与 [`query.rs`](../../../backend/src/management/query.rs) 的七个查询端点；未知 API 与 SPA fallback 隔离。字段/状态码以 [OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，不在本文复制完整响应模型。
+[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout 认证端点、受 Bearer 保护的 session 与 [`query.rs`](../../../backend/src/management/query.rs) 七个查询端点；未知 API 与 SPA fallback 隔离。字段/状态码以 [OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，不在本文复制完整响应模型。
 
 router 固定保护包括 JSON body 16 KiB、URI 4 KiB、64 个 header/16 KiB header bytes、256 个并发请求和 15 秒总请求 timeout。另有 setup/login 限流、Origin/Fetch Metadata、request ID 和统一错误处理。这些是实现常量，不是额外 YAML 字段。
 
 [`auth.rs`](../../../backend/src/management/auth.rs) 的 `validate_setup_credentials` 与 `hash_password` 使用 12 至 1024 bytes 密码、Argon2id 19 MiB/2 iterations/parallelism 1；登录兼容 bcrypt。密码不 trim，用户名使用配置层共享规范。
 
-[`session.rs`](../../../backend/src/management/session.rs) 使用 24 小时绝对期限、30 分钟空闲期限、全局 4096/单用户 16 的容量保护。`issue/lookup` 清理过期记录并控制容量，token 只通过 Cookie；HTTP/HTTPS 两种名称与 Secure 策略见 [Management 设计](../../architecture/management.md)。没有独立持久化 session 数据库。
+[`session.rs`](../../../backend/src/management/session.rs) 使用有界内存会话，访问/刷新凭据的职责和期限见下节；HTTP/HTTPS 两种 Cookie 名称与 Secure 策略见 [Management 设计](../../architecture/management.md)。没有独立持久化 session 数据库。
+
+## P1 Bearer 业务鉴权（2026-09-08）
+
+按用户追加决定，正式 `/api/v1` 的受保护 session 与全部业务查询均只读取 Authorization Bearer，不接受 Cookie、URL query、重复或非法 Authorization 作为后备。初始化/登录返回 `AuthSession`，包含无凭据 session、短期 access token、Bearer 类型与安全整数 UTC ms 过期时间；同时设置独立的 HttpOnly 刷新 Cookie。`POST /auth/refresh` 只接受该 Cookie 并校验 Origin/Fetch Metadata。`/auth/logout` 用有效 Bearer 撤销关联会话并清除 Cookie，无有效凭据时仍幂等，不用 Cookie/query 选择会话。API 响应 no-store，401 带 Bearer challenge。
+
+SessionStore 复用原 24 小时绝对/30 分钟空闲期限、4096 全局/16 单用户容量。访问凭据 5 分钟有效，剩余 30 秒内换发；并发刷新复用当前值，旧值只活到原期限，每会话最多两项访问索引。到达会话绝对期限不反复生成新凭据；过期、容量淘汰、认证更新、登出和进程关闭同时回收相关索引。两类随机凭据不互换，刷新凭据不进入响应正文。没有新增依赖或持久会话存储。
+
+[`router/tests/bearer.rs`](../../../backend/src/management/router/tests/bearer.rs)、SessionStore 和查询路由测试覆盖两类凭据隔离、重复/非法 header、Origin、期限、索引回收及既有查询；[前端接线](../frontend/application.md#p1-bearer-接线2026-09-08)统一在业务请求中附加 Bearer。当前与目标 v2 OpenAPI/生成类型均已同步，但 `/api/v2` 仍未注册，不能由本次认证验证推断新版配置 owner 已启动。
+
+Windows 使用本批工作树的内嵌 binary、独立 `_fluxdns/p1-bearer-ui-20260908-0055/` 配置/SQLite 和 loopback 端口完成真实 HTTP 12 项检查：登录、Bearer session/overview、Cookie-only/凭据互换/非法 Bearer 拒绝、跨源刷新拒绝、刷新、v2 仍 404、登出及两类凭据失效。浏览器 Network 已确认业务请求有 Authorization 且无 Cookie，刷新请求相反；还验证初始化、页面刷新恢复、重新登录和 Cookie 清除。HTTP 直连不证明外部 HTTPS 代理；未实现或验收 v2/WS，浏览器 WS 凭据传递留 BC-24 核定。
+
+本批最终回归：Management 39 项、Config 110 项、Cargo check、全部目标 no-run、fmt、前端 typecheck/schema 4 项/Vitest 9 文件 47 项/build 通过，当前及目标类型连续两次生成一致，文档检查与 diff 检查通过。Node/Vite 测试按已核实的沙盒 spawn 限制获准在沙盒外运行；未运行完整 Cargo suite、跨平台或性能验收，所有临时服务与运行数据均限定本次 `_fluxdns` 测试目录。
 
 ## 首次用户写入
 
@@ -109,11 +121,11 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | 本轮静态；源码含 auth/session/router 测试 | 真实浏览器 Cookie/Storage 未在本轮验证 |
+| setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | P1 Bearer 定向测试、真实 HTTP 和浏览器 Network/Storage，见上节 | 未验证外部 HTTPS 代理及 v2/WS |
 | users 事务 | source_edit、ConfigStore、journal recovery | setup 写入，run 启动恢复，watcher 对账 | 本轮核对；存在双路径恢复与 Busy 竞争测试 | 完整跨平台 crash/权限矩阵待验收 |
 | 七个只读 API | ManagementQueryService + StorageRead port | app 注入真实 coordinator/DB/telemetry | 本轮核对 handler 不持有 SQLx | 未执行全端点真实 HTTP 与浏览器 smoke |
 | 内嵌 SPA | assets + build feature | bind 前 ensure_available | 静态；历史证据单独标注于交付文档 | Actions/Linux/macOS 发布未由静态代码证明 |
 
-本页原核对仅有静态证据，未包含服务或真实浏览器观察。过时的 v2 计划已移除；现有测试定义不等于 Cookie/Network/Storage、反向代理或完整配置事务故障矩阵均已验证。
+本页 2026-09-05 原核对仅有静态证据；后续 P1 的运行证据分别列在对应小节。已执行的 Bearer HTTP/浏览器验证不等于反向代理或完整配置事务故障矩阵均已验证。
 
 本次时间改型补充了真实 SQLite 定向用例：跨位数升降序、同时间 ID 顺序、overview 包含边界和查询计划中的时间索引。完整 Cargo 结果见[后台服务验证](background-services.md#本次验证)，不等价浏览器 smoke。

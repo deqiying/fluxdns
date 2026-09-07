@@ -10,9 +10,11 @@ info:
 servers:
   - url: /api/v2
 security:
-  - sessionCookie: []
+  - bearerAuth: []
 x-implementation: contract-only
 x-limits:
+  access_token_ttl_seconds: 300
+  access_renew_window_seconds: 30
   configuration_bytes: 4194304
   mutation_bytes: 2097152
   external_diff_bytes: 2097152
@@ -79,8 +81,8 @@ paths:
         content: {application/json: {schema: {$ref: "#/components/schemas/Credentials"}}}
       responses:
         "201":
-          description: 创建用户并设置 HttpOnly、SameSite=Strict Cookie
-          content: {application/json: {schema: {$ref: "#/components/schemas/Session"}}}
+          description: 创建用户并签发短期 Bearer；HttpOnly、SameSite=Strict Cookie 仅用于认证刷新
+          content: {application/json: {schema: {$ref: "#/components/schemas/AuthSession"}}}
         default: {$ref: "#/components/responses/Error"}
   /auth/login:
     post:
@@ -91,15 +93,26 @@ paths:
         content: {application/json: {schema: {$ref: "#/components/schemas/Credentials"}}}
       responses:
         "200":
-          description: 建立同源 session；HTTPS 使用 Secure 和 __Host- Cookie
-          content: {application/json: {schema: {$ref: "#/components/schemas/Session"}}}
+          description: 建立会话并签发短期 Bearer；HTTPS 刷新 Cookie 使用 Secure 和 __Host- 前缀
+          content: {application/json: {schema: {$ref: "#/components/schemas/AuthSession"}}}
         default: {$ref: "#/components/responses/Error"}
   /auth/logout:
     post:
       operationId: logout
-      security: []
+      security: [{bearerAuth: []}, {}]
+      description: 通过 Bearer 撤销关联会话及访问凭据并清除刷新 Cookie；保留同源检查，无有效凭据时保持幂等，不以 Cookie 或 query 选择会话。
       responses:
         "204": {description: 撤销 session 及其订阅}
+        default: {$ref: "#/components/responses/Error"}
+  /auth/refresh:
+    post:
+      operationId: refreshSession
+      security: [{refreshCookie: []}]
+      description: 仅同源 POST 以 HttpOnly Cookie 恢复短期访问凭据，校验 Origin/Fetch Metadata；响应 no-store，业务接口不接受 Cookie 鉴权。
+      responses:
+        "200":
+          description: 当前 session 和短期 Bearer 访问凭据
+          content: {application/json: {schema: {$ref: "#/components/schemas/AuthSession"}}}
         default: {$ref: "#/components/responses/Error"}
   /auth/session:
     get:
@@ -314,8 +327,9 @@ paths:
     get:
       operationId: subscribeEvents
       description: >-
-        同源 Cookie 鉴权和 Origin 校验；upgrade 后独立连接 owner，不受普通 HTTP 15s deadline 截断。
-        不在 URL 携带 token。登出/过期回收；慢消费者关闭并 resync。JSON 帧使用共享 schema。
+        目标鉴权为 Bearer 并保留 Origin 校验；不以 Cookie 或 URL token 作为回退。
+        浏览器 WebSocket 的凭据传递仍待 BC-24 核定，不以此契约声称浏览器已可连接。
+        upgrade 后独立连接 owner，不受普通 HTTP 15s deadline 截断；登出/过期回收，慢消费者关闭并 resync。
       x-client-message: {$ref: "#/components/schemas/ClientMessage"}
       x-server-message: {$ref: "#/components/schemas/ServerMessage"}
       responses:
@@ -323,7 +337,8 @@ paths:
         default: {$ref: "#/components/responses/Error"}
 components:
   securitySchemes:
-    sessionCookie: {type: apiKey, in: cookie, name: fluxdns_session}
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: opaque}
+    refreshCookie: {type: apiKey, in: cookie, name: fluxdns_session}
   responses:
     Error:
       description: >-
@@ -571,6 +586,16 @@ components:
           required: [name]
           properties: {name: {$ref: "#/components/schemas/Name"}}
         expires_at: {type: string, format: date-time}
+    AuthSession:
+      type: object
+      additionalProperties: false
+      required: [session, access_token, token_type, access_expires_at_ms]
+      properties:
+        session: {$ref: "#/components/schemas/Session"}
+        access_token: {type: string, pattern: "^[A-Za-z0-9_-]{43}$", minLength: 43, maxLength: 43}
+        token_type: {type: string, const: Bearer}
+        access_expires_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+      description: 只在初始化、登录和刷新响应出现；access token 只存前端内存，不进入 URL、持久存储或查询缓存；刷新凭据不进入正文。
     SecretRef:
       oneOf:
         - type: object

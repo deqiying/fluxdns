@@ -1,20 +1,23 @@
 import { http, HttpResponse, delay } from "msw";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { setMockAuthenticated } from "@/mocks/handlers";
 import { server } from "@/mocks/server";
 import { ApiError, getSafeErrorMessage } from "./errors";
 import { apiRequest, createSearchParams, onUnauthorized } from "./client";
 
 describe("apiRequest", () => {
-  it("固定使用同源 Cookie 和 JSON", async () => {
+  beforeEach(() => setMockAuthenticated(true));
+  it("业务请求使用 Bearer 和 JSON，不附带 Cookie", async () => {
     server.use(
       http.get("/api/v1/probe", ({ request }) =>
-        HttpResponse.json({ credentials: request.credentials, accept: request.headers.get("accept") }),
+        HttpResponse.json({ credentials: request.credentials, accept: request.headers.get("accept"), authorization: request.headers.get("authorization") }),
       ),
     );
 
-    await expect(apiRequest<{ credentials: string; accept: string }>("/probe")).resolves.toEqual({
-      credentials: "same-origin",
+    await expect(apiRequest("/probe")).resolves.toEqual({
+      credentials: "omit",
       accept: "application/json",
+      authorization: `Bearer ${"A".repeat(43)}`,
     });
   });
 

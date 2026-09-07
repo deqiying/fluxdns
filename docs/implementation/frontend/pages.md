@@ -15,7 +15,7 @@
 | 路径 | 代码入口 | 数据/功能 |
 | --- | --- | --- |
 | `/initialize` | [InitializePage](../../../frontend/src/modules/auth/InitializePage.tsx) | setup 状态与首用户创建、竞争冲突刷新 |
-| `/login` | [LoginPage](../../../frontend/src/modules/auth/LoginPage.tsx) | Cookie session 登录 |
+| `/login` | [LoginPage](../../../frontend/src/modules/auth/LoginPage.tsx) | 登录签发内存 Bearer，HttpOnly Cookie 仅用于认证刷新 |
 | `/dashboard` | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) | overview 卡片与不可用原因 |
 | `/runtime` | [RuntimePage](../../../frontend/src/modules/runtime/RuntimePage.tsx) | runtime revision、listener 与生效摘要 |
 | `/health` | [HealthPage](../../../frontend/src/modules/health/HealthPage.tsx) | 组件健康、异常与恢复状态 |

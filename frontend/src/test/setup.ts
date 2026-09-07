@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, vi } from "vitest";
 import { cleanup } from "@testing-library/react";
 import { resetMockState } from "@/mocks/handlers";
 import { server } from "@/mocks/server";
+import { clearAccessSession } from "@/shared/api/client";
 
 function createMemoryStorage(): Storage {
   const values = new Map<string, string>();
@@ -52,6 +53,7 @@ afterEach(() => {
   cleanup();
   server.resetHandlers();
   resetMockState();
+  clearAccessSession(true);
   window.localStorage.clear();
   window.sessionStorage.clear();
   window.history.replaceState({}, "", "/");

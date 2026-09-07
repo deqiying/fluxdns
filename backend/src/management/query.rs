@@ -1107,7 +1107,7 @@ mod tests {
     use std::path::PathBuf;
 
     use axum::body::{Body, to_bytes};
-    use axum::http::header::{CONTENT_TYPE, COOKIE};
+    use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
@@ -1296,10 +1296,10 @@ mod tests {
         )
     }
 
-    fn get(path: &str, cookie: Option<&str>) -> Request<Body> {
+    fn get(path: &str, authorization: Option<&str>) -> Request<Body> {
         let mut request = Request::builder().uri(path);
-        if let Some(cookie) = cookie {
-            request = request.header(COOKIE, cookie);
+        if let Some(authorization) = authorization {
+            request = request.header(AUTHORIZATION, authorization);
         }
         request.body(Body::empty()).unwrap()
     }
@@ -1388,7 +1388,7 @@ mod tests {
     async fn authenticated_router_serves_all_read_only_contracts() {
         let (services, root) = test_services().await;
         let issued = services.sessions.issue("admin".to_owned()).unwrap();
-        let cookie = format!("{}={}", services.sessions.cookie_name(), issued.token);
+        let authorization = format!("Bearer {}", issued.view.access_token);
         let app = build_router(Arc::clone(&services));
         let paths = [
             "/api/v1/overview",
@@ -1400,7 +1400,11 @@ mod tests {
             "/api/v1/system",
         ];
         for path in paths {
-            let response = app.clone().oneshot(get(path, Some(&cookie))).await.unwrap();
+            let response = app
+                .clone()
+                .oneshot(get(path, Some(&authorization)))
+                .await
+                .unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{path}");
             assert_eq!(
                 response.headers().get(CONTENT_TYPE).unwrap(),
@@ -1463,7 +1467,7 @@ mod tests {
         let invalid = app
             .oneshot(get(
                 "/api/v1/statistics?date_from=2026-08-01&date_to=2026-09-01&dimension=total",
-                Some(&cookie),
+                Some(&authorization),
             ))
             .await
             .unwrap();

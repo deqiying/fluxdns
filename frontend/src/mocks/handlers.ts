@@ -1,4 +1,5 @@
 import { http, HttpResponse } from "msw";
+import type { AuthSession } from "@/shared/api/types";
 import {
   healthFixture,
   overviewFixture,
@@ -14,6 +15,21 @@ import {
 
 let authenticated = false;
 let setupRequired = false;
+let authenticatedName = sessionFixture.user.name;
+const MOCK_ACCESS_TOKEN = "A".repeat(43);
+
+function authorized(request: Request): boolean {
+  return authenticated && request.headers.get("authorization") === `Bearer ${MOCK_ACCESS_TOKEN}`;
+}
+
+function authSession(): AuthSession {
+  return {
+    session: { ...sessionFixture, user: { name: authenticatedName } },
+    access_token: MOCK_ACCESS_TOKEN,
+    token_type: "Bearer",
+    access_expires_at_ms: Date.now() + 300_000,
+  };
+}
 
 export function setMockAuthenticated(value: boolean) {
   authenticated = value;
@@ -27,6 +43,7 @@ export function setMockSetupRequired(value: boolean) {
 export function resetMockState() {
   authenticated = false;
   setupRequired = false;
+  authenticatedName = sessionFixture.user.name;
 }
 
 function unauthorized() {
@@ -44,12 +61,14 @@ function invalidArgument(message: string) {
 }
 
 function readOnly<T extends object>(fixture: T) {
-  return () => (authenticated ? HttpResponse.json(fixture) : unauthorized());
+  return ({ request }: { request: Request }) => (authorized(request) ? HttpResponse.json(fixture) : unauthorized());
 }
 
 export const handlers = [
   http.get("/api/v1/auth/setup", () => HttpResponse.json(setupRequired ? setupRequiredFixture : setupReadyFixture)),
-  http.get("/api/v1/auth/session", () => (authenticated ? HttpResponse.json(sessionFixture) : unauthorized())),
+  http.get("/api/v1/auth/session", ({ request }) => (authorized(request) ? HttpResponse.json(authSession().session) : unauthorized())),
+  // mock 的 authenticated 仅模拟浏览器刷新会话；真实 Cookie/Origin 防护由后端与浏览器联测验证。
+  http.post("/api/v1/auth/refresh", () => (authenticated ? HttpResponse.json(authSession()) : unauthorized())),
   http.post("/api/v1/auth/setup", async ({ request }) => {
     if (!setupRequired) {
       return HttpResponse.json(
@@ -66,7 +85,8 @@ export const handlers = [
     }
     setupRequired = false;
     authenticated = true;
-    return HttpResponse.json({ ...sessionFixture, user: { name: body.username } }, { status: 201 });
+    authenticatedName = body.username;
+    return HttpResponse.json(authSession(), { status: 201 });
   }),
   http.post("/api/v1/auth/login", async ({ request }) => {
     const body = (await request.json()) as { username?: string; password?: string };
@@ -77,17 +97,18 @@ export const handlers = [
       );
     }
     authenticated = true;
-    return HttpResponse.json({ ...sessionFixture, user: { name: body.username } });
+    authenticatedName = body.username;
+    return HttpResponse.json(authSession());
   }),
-  http.post("/api/v1/auth/logout", () => {
-    authenticated = false;
+  http.post("/api/v1/auth/logout", ({ request }) => {
+    if (authorized(request)) authenticated = false;
     return new HttpResponse(null, { status: 204 });
   }),
   http.get("/api/v1/overview", readOnly(overviewFixture)),
   http.get("/api/v1/runtime", readOnly(runtimeFixture)),
   http.get("/api/v1/health", readOnly(healthFixture)),
   http.get("/api/v1/statistics", ({ request }) => {
-    if (!authenticated) return unauthorized();
+    if (!authorized(request)) return unauthorized();
     const url = new URL(request.url);
     const page = Number(url.searchParams.get("page") ?? "1");
     const pageSize = Number(url.searchParams.get("page_size") ?? "20");
@@ -97,7 +118,7 @@ export const handlers = [
     return HttpResponse.json({ ...statisticsFixture, page, page_size: pageSize, items });
   }),
   http.get("/api/v1/queries", ({ request }) => {
-    if (!authenticated) return unauthorized();
+    if (!authorized(request)) return unauthorized();
     const url = new URL(request.url);
     const page = Number(url.searchParams.get("page") ?? "1");
     const pageSize = Number(url.searchParams.get("page_size") ?? "20");

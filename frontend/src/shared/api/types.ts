@@ -8,6 +8,7 @@ export type SetupState = Schemas["SetupState"];
 export type SetupStatus = Schemas["SetupStatus"];
 export type SetupRequest = Schemas["SetupRequest"];
 export type Session = Schemas["Session"];
+export type AuthSession = Schemas["AuthSession"];
 export type HealthStatus = Schemas["HealthStatus"];
 export type Overview = Schemas["Overview"];
 export type OverviewCard = Schemas["OverviewCard"];

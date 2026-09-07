@@ -46,7 +46,25 @@ export interface paths {
         };
         get?: never;
         put?: never;
+        /** @description 通过 Bearer 撤销关联会话及访问凭据并清除刷新 Cookie；保留同源检查，无有效凭据时保持幂等，不以 Cookie 或 query 选择会话。 */
         post: operations["logout"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/auth/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description 仅同源 POST 以 HttpOnly Cookie 恢复短期访问凭据，校验 Origin/Fetch Metadata；响应 no-store，业务接口不接受 Cookie 鉴权。 */
+        post: operations["refreshSession"];
         delete?: never;
         options?: never;
         head?: never;
@@ -357,7 +375,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description 同源 Cookie 鉴权和 Origin 校验；upgrade 后独立连接 owner，不受普通 HTTP 15s deadline 截断。 不在 URL 携带 token。登出/过期回收；慢消费者关闭并 resync。JSON 帧使用共享 schema。 */
+        /** @description 目标鉴权为 Bearer 并保留 Origin 校验；不以 Cookie 或 URL token 作为回退。 浏览器 WebSocket 的凭据传递仍待 BC-24 核定，不以此契约声称浏览器已可连接。 upgrade 后独立连接 owner，不受普通 HTTP 15s deadline 截断；登出/过期回收，慢消费者关闭并 resync。 */
         get: operations["subscribeEvents"];
         put?: never;
         post?: never;
@@ -591,6 +609,14 @@ export interface components {
             };
             /** Format: date-time */
             expires_at: string;
+        };
+        /** @description 只在初始化、登录和刷新响应出现；access token 只存前端内存，不进入 URL、持久存储或查询缓存；刷新凭据不进入正文。 */
+        AuthSession: {
+            session: components["schemas"]["Session"];
+            access_token: string;
+            /** @constant */
+            token_type: "Bearer";
+            access_expires_at_ms: components["schemas"]["SafeInteger"];
         };
         SecretRef: {
             env: string;
@@ -1298,13 +1324,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description 创建用户并设置 HttpOnly、SameSite=Strict Cookie */
+            /** @description 创建用户并签发短期 Bearer；HttpOnly、SameSite=Strict Cookie 仅用于认证刷新 */
             201: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Session"];
+                    "application/json": components["schemas"]["AuthSession"];
                 };
             };
             default: components["responses"]["Error"];
@@ -1323,13 +1349,13 @@ export interface operations {
             };
         };
         responses: {
-            /** @description 建立同源 session；HTTPS 使用 Secure 和 __Host- Cookie */
+            /** @description 建立会话并签发短期 Bearer；HTTPS 刷新 Cookie 使用 Secure 和 __Host- 前缀 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["Session"];
+                    "application/json": components["schemas"]["AuthSession"];
                 };
             };
             default: components["responses"]["Error"];
@@ -1350,6 +1376,27 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    refreshSession: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 当前 session 和短期 Bearer 访问凭据 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuthSession"];
+                };
             };
             default: components["responses"]["Error"];
         };

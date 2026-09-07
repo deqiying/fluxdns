@@ -77,6 +77,8 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 
 2026-09-08 BC-30 补充：固定源同次读取、完整校验、双文件/活动版本复核及十模块有界类型化差异已有[内部实现](../implementation/backend/management.md#p1-外部配置差异内部投影2026-09-08)。后续差异工作从异步事务 owner、鉴权/handler 和前端组合采用接线继续，不以内部文件测试关闭 BC-30。
 
+2026-09-08 认证追加决定已在当前 v1 生产链实施：业务接口只接受 Bearer，Cookie 仅用于认证刷新；当前/目标 schema、client 与 mock 已统一，真实 HTTP/浏览器证据见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)。这不是 v2 配置接口注册，BC-30 的异步 owner/handler 和 BC-26 依赖不变。
+
 完整状态机、热更新矩阵和失败语义只维护于[配置热更新专项](webui-management-config-runtime-plan.md)，本节列后端开发步骤：
 
 1. 在 ConfigStore 保留活动源表达及 active/persisted/file revision；GET 和普通编辑以该源为基准，保留路径/继承/SecretRef，不序列化 resolved 值写回。
@@ -254,7 +256,7 @@ QPS/RPM、趋势、在线身份、暖机和内存单位按[已确认 D-04](webui
 
 ### 开发步骤
 
-1. 在独立 Management Axum adapter 上启用经批准的 WS 能力；保持同源 Cookie session、Origin 校验与受监督生命周期，不复用 DoH parser。
+1. 在独立 Management Axum adapter 上启用经批准的 WS 能力；复用同一会话权威，保持 Origin 校验与受监督生命周期，不复用 DoH parser。业务只使用 Bearer，不以 Cookie 或 URL query 传 token；浏览器原生 WS 不能直接设置 Authorization header，凭据传递与握手方案在 BC-24 实施时核定，不由当前 HTTP 认证代替验收。
 2. 定义服务状态和解析记录订阅，推送周期采用[决策清单 D-05](webui-management-decisions.md#d-05-分页自动刷新与实时缓冲)确认的值；实现为有界默认行为，不擅自新增 YAML 调优字段。
 3. 每个连接限制订阅、帧长度、发送队列和速率；慢消费者收到缺口/重同步信号或断开，DNS 和 detail writer 不等网络发送。
 4. 身份过滤与 HTTP 查询语义一致。记录只在 BE-05 提交后发布，使用 `stream_epoch + sequence`，不能以事件时间作为“新记录”依据。

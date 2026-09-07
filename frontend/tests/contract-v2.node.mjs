@@ -58,3 +58,29 @@ test("全部 schema 可编译，v2 不声明角色/通用 YAML/顶层删除接�
   assert.equal(Object.keys(openapi.paths).some((path) => /roles|users|restart|stop|clear/.test(path)), false);
   for (const path of Object.values(openapi.paths)) assert.equal("delete" in path || "patch" in path, false);
 });
+
+test("v2 业务认证只接受 Bearer，Cookie 仅用于认证刷新且 token 不进入普通 session", () => {
+  assert.deepEqual(openapi.security, [{bearerAuth: []}]);
+  assert.deepEqual(openapi.components.securitySchemes, {
+    bearerAuth: {type: "http", scheme: "bearer", bearerFormat: "opaque"},
+    refreshCookie: {type: "apiKey", in: "cookie", name: "fluxdns_session"},
+  });
+  assert.deepEqual(openapi.paths["/auth/refresh"].post.security, [{refreshCookie: []}]);
+  for (const [path, operations] of Object.entries(openapi.paths)) {
+    if (!path.startsWith("/auth/") && path !== "/events") continue;
+    for (const operation of Object.values(operations)) {
+      assert.equal((operation.parameters ?? []).some((parameter) => parameter.in === "query"), false, path);
+    }
+  }
+  const session = ajv.getSchema("fluxdns-v2#/$defs/Session");
+  assert.ok(session);
+  const value = {user: {name: "admin"}, expires_at: "2026-09-07T00:00:00Z"};
+  assert.equal(session(value), true);
+  assert.equal(session({...value, token: "test-only-token"}), false);
+  const auth = {session: value, access_token: "A".repeat(43), token_type: "Bearer", access_expires_at_ms: 1800000000000};
+  validate("AuthSession", auth);
+  const validator = ajv.getSchema("fluxdns-v2#/$defs/AuthSession");
+  assert.equal(validator({...auth, refresh_token: "B".repeat(43)}), false);
+  assert.equal(validator({...auth, access_expires_at_ms: 9007199254740992}), false);
+  assert.equal(validator({...auth, access_token: "invalid"}), false);
+});

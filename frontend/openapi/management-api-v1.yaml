@@ -3,7 +3,7 @@ info:
   title: FluxDNS Management API
   version: 1.0.0
   description: >-
-    FluxDNS WebUI 的同源管理契约。除首次初始化、登录和登出外，首版接口均为只读查询；
+    FluxDNS WebUI 的同源管理契约。除首次初始化、登录、刷新和登出外，首版接口均为只读查询；
     authenticated 查询记录包含 canonical qname、有效 client IP 和有界 answer 摘要，
     API 仍不返回 SecretRef、密码 hash、TLS material 或 DNS wire。
 servers:
@@ -18,11 +18,14 @@ tags:
   - name: Queries
   - name: Resources
   - name: System
+security:
+  - bearerAuth: []
 paths:
   /auth/setup:
     get:
       tags: [Auth]
       operationId: getSetupStatus
+      security: []
       summary: 读取首次初始化状态
       description: 只返回 required 或 ready，不返回用户名、用户数量或密码 hash。
       responses:
@@ -42,10 +45,11 @@ paths:
     post:
       tags: [Auth]
       operationId: initializeWebUi
+      security: []
       summary: 创建首个管理用户
       description: >-
-        仅在状态为 required 时可调用。服务端先持久化 Argon2id hash，再设置 HttpOnly、
-        SameSite=Strict Cookie；public_origin 为 HTTPS 时同时设置 Secure 和 __Host- 前缀。
+        仅在状态为 required 时可调用。服务端先持久化 Argon2id hash，再返回短期 Bearer 访问凭据并设置独立的
+        HttpOnly、SameSite=Strict 刷新 Cookie；public_origin 为 HTTPS 时同时设置 Secure 和 __Host- 前缀。
       requestBody:
         required: true
         content:
@@ -61,7 +65,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Session"
+                $ref: "#/components/schemas/AuthSession"
         "400":
           $ref: "#/components/responses/BadRequest"
         "409":
@@ -74,10 +78,11 @@ paths:
     post:
       tags: [Auth]
       operationId: login
+      security: []
       summary: 建立服务端 session
       description: >-
-        成功后由服务端设置 HttpOnly、SameSite=Strict Cookie；public_origin 为 HTTPS 时设置 Secure 和 __Host- 前缀。
-        服务端校验 Origin 和 Fetch Metadata；前端不持久化 token。
+        成功后返回短期 Bearer 访问凭据，并设置独立的 HttpOnly、SameSite=Strict 刷新 Cookie；
+        public_origin 为 HTTPS 时设置 Secure 和 __Host- 前缀。服务端校验 Origin 和 Fetch Metadata；前端不持久化访问 token。
       requestBody:
         required: true
         content:
@@ -93,7 +98,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/Session"
+                $ref: "#/components/schemas/AuthSession"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -106,8 +111,9 @@ paths:
     post:
       tags: [Auth]
       operationId: logout
+      security: [{bearerAuth: []}, {}]
       summary: 终止当前 session
-      description: 服务端必须校验同源 Origin 和 Fetch Metadata，并清除 session Cookie。
+      description: 服务端校验 Origin 和 Fetch Metadata，通过 Bearer 撤销关联会话及其访问凭据，并清除刷新 Cookie；无有效凭据时保持幂等，不以 Cookie 或 URL token 选择会话。
       responses:
         "204":
           description: session 已终止；重复登出同样成功
@@ -120,6 +126,20 @@ paths:
           $ref: "#/components/responses/RateLimited"
         "500":
           $ref: "#/components/responses/InternalError"
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshSession
+      security: [{refreshCookie: []}]
+      description: 仅同源 POST 使用 HttpOnly Cookie 恢复短期访问凭据；保留 Origin/Fetch Metadata 检查，响应 no-store。Cookie 不能用于业务接口鉴权。
+      responses:
+        "200":
+          description: 当前 session 和短期 Bearer 访问凭据
+          content: {application/json: {schema: {$ref: "#/components/schemas/AuthSession"}}}
+        "400": {$ref: "#/components/responses/BadRequest"}
+        "401": {$ref: "#/components/responses/Unauthorized"}
+        "429": {$ref: "#/components/responses/RateLimited"}
+        "500": {$ref: "#/components/responses/InternalError"}
   /auth/session:
     get:
       tags: [Auth]
@@ -348,6 +368,9 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer, bearerFormat: opaque}
+    refreshCookie: {type: apiKey, in: cookie, name: fluxdns_session}
   headers:
     RequestId:
       description: 用于服务端日志关联的非敏感请求标识
@@ -513,6 +536,16 @@ components:
         expires_at:
           type: string
           format: date-time
+    AuthSession:
+      type: object
+      additionalProperties: false
+      required: [session, access_token, token_type, access_expires_at_ms]
+      properties:
+        session: {$ref: "#/components/schemas/Session"}
+        access_token: {type: string, pattern: "^[A-Za-z0-9_-]{43}$", minLength: 43, maxLength: 43}
+        token_type: {type: string, const: Bearer}
+        access_expires_at_ms: {type: integer, minimum: 0, maximum: 9007199254740991}
+      description: 只在初始化、登录和刷新响应出现；access token 只存前端内存，不进入 URL、持久存储或查询缓存；刷新凭据不进入正文。
     SessionUser:
       type: object
       additionalProperties: false

@@ -116,7 +116,9 @@
 
 **已确认：** 已认证 WebUI 用户全部按管理员处理，不新增角色/权限管理功能。
 
-沿原表单范围返回白名单源路径、env 名称和 SecretRef file 引用；管理员身份不等于开放任意文件读取。实际 Secret、代理凭据、password hash、session token 不回显；不发送全量 resolved config。`database/webui/work` 本期只读，`logs` 可编辑。
+沿原表单范围返回白名单源路径、env 名称和 SecretRef file 引用；管理员身份不等于开放任意文件读取。实际 Secret、代理凭据、password hash、认证 token 不进入配置/session/业务投影；不发送全量 resolved config。`database/webui/work` 本期只读，`logs` 可编辑。
+
+2026-09-08 用户追加确认：登录后的业务接口只使用 `Authorization: Bearer <token>`，WebUI 管理 token 不放 URL query，不以 Cookie 作为业务鉴权后备。为保留页面重载后的登录恢复，访问凭据只存在前端内存；独立 HttpOnly Cookie 仅用于同源 POST 刷新，初始化/登录/刷新成功响应是返回 access token 的唯一例外。实施与验证边界见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)，本项不授权提前开发 BC-24/25 WS。
 
 ### D-08 技术选型与依赖审批
 
@@ -186,5 +188,7 @@ P0 技术核定：
 P1 追加核定（2026-09-07）：T-03 的双文件观测已执行 4 MiB 上限、Windows FileId 与 SHA-256 校验，journal 读取为 16 KiB；写入增加父目录/权限/旁文件核对和 OS 锁，cursor 与实际配置事务调度预算仍待接线。T-04 已实现物理 SocketSpec 差量复用、CAS 前任务预注册，以及已接纳请求按原 deadline drain，真实 Windows 证据见[生命周期实现](../implementation/backend/lifecycle.md#p1-请求-drain-子项2026-09-07)。服务队列为一个排队候选加一个当前应用槽；PREPARED/COMMIT_DECIDED 内部文件事务及 4 个子进程退出点见[持久化事实](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。T-06 为既有 windows-sys 增加安全 API feature、无版本升级。日志/新存储 owner、启动恢复接线和活动源/operation 到服务的完整链仍未核定完成；T-05/07/08 不随这些子项关闭。
 
 2026-09-08 T-03 差异补充：类型化外部差异最多 128 项，完整 JSON 最多 2 MiB，按实际 UTF-8/escaping 计数，超限整体拒绝、不截断；固定源读取、完整语义/词法路径校验及返回前双版本复核已有内部测试，见[差异实现](../implementation/backend/management.md#p1-外部配置差异内部投影2026-09-08)。异步调度及 HTTP/UI 仍待接线，不将声明的预算视为整个 v2 已运行。
+
+2026-09-08 认证保护补充：访问凭据 TTL 300 秒、临近 30 秒换发，继承既有会话绝对/空闲/容量上限；共享刷新 client deadline 5 秒，业务请求总 deadline 仍包含等待刷新。T-02 已同步当前及目标 schema，T-03 的普通 HTTP 预算继续生效；这些值已有会话/并发/取消测试和真实 HTTP 证据，不关闭 T-05 的在线采样或 WS 限额核定。
 
 确认后的技术细节同步对应任务和正式 schema，不在多处维护相互冲突的默认值。实施完成后按项目规则沉淀架构/实现事实，再删除本决策文件及相应活动计划；Git 保存历史，不另建归档。

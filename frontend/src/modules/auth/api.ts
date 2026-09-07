@@ -1,6 +1,6 @@
 import { ApiError } from "@/shared/api/errors";
-import { apiRequest } from "@/shared/api/client";
-import type { LoginRequest, Session, SetupRequest, SetupStatus } from "@/shared/api/types";
+import { acceptAuthSession, apiRequest, clearAccessSession } from "@/shared/api/client";
+import type { AuthSession, LoginRequest, Session, SetupRequest, SetupStatus } from "@/shared/api/types";
 
 export const authKeys = {
   all: ["api", "v1", "auth"] as const,
@@ -12,6 +12,7 @@ export function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus> {
   return apiRequest<SetupStatus>("/auth/setup", {
     signal,
     handleUnauthorized: false,
+    auth: "public",
   });
 }
 
@@ -29,22 +30,32 @@ export async function getSession(signal?: AbortSignal): Promise<Session | null> 
   }
 }
 
-export function login(credentials: LoginRequest): Promise<Session> {
-  return apiRequest<Session>("/auth/login", {
+export async function login(credentials: LoginRequest): Promise<Session> {
+  clearAccessSession();
+  const response = await apiRequest<AuthSession>("/auth/login", {
     method: "POST",
     body: credentials,
     handleUnauthorized: false,
+    auth: "public",
   });
+  return acceptAuthSession(response);
 }
 
-export function initializeWebUi(credentials: SetupRequest): Promise<Session> {
-  return apiRequest<Session>("/auth/setup", {
+export async function initializeWebUi(credentials: SetupRequest): Promise<Session> {
+  clearAccessSession();
+  const response = await apiRequest<AuthSession>("/auth/setup", {
     method: "POST",
     body: credentials,
     handleUnauthorized: false,
+    auth: "public",
   });
+  return acceptAuthSession(response);
 }
 
-export function logout(): Promise<void> {
-  return apiRequest<void>("/auth/logout", { method: "POST" });
+export async function logout(): Promise<void> {
+  try {
+    await apiRequest<void>("/auth/logout", { method: "POST", auth: "logout" });
+  } finally {
+    clearAccessSession();
+  }
 }
