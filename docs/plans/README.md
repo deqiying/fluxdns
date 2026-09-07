@@ -4,11 +4,12 @@
 >
 > 适用范围：尚需实施、决策或验收的独立变更
 
-WebUI 重构从[开发总计划](webui-management-development-plan.md)进入：先确认共同契约和 P0-P5 顺序，再按前后端子计划开发，并按各自提交检查点分批验证和提交，不将整套重构合并成一次提交。
+WebUI 重构先在[决策清单](webui-management-decisions.md)集中确认选项与边界，再按[开发总计划](webui-management-development-plan.md)的 P0-P5 顺序推进前后端任务。各提交检查点分批验证和提交，不将整套重构合并成一次提交。
 
 | 计划 | 文档状态 | 计划状态 | 剩余范围 |
 | --- | --- | --- | --- |
-| [WebUI 重构开发总计划](webui-management-development-plan.md) | 草案 | 待评审 | 共同决策、P0-P5 依赖顺序、跨端交接、联合验收及阶段性 Git 提交规则 |
+| [WebUI 重构决策清单](webui-management-decisions.md) | 草案 | 待评审 | D-01 至 D-12 的选项、推荐与确认栏；T-01 至 T-08 技术核定及执行授权 |
+| [WebUI 重构开发总计划](webui-management-development-plan.md) | 草案 | 待评审 | 决策依赖、P0-P5 开发顺序、跨端交接、联合验收及阶段性 Git 提交规则 |
 | [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 草案 | 待评审 | BE-01 至 BE-12 详细任务及 BC-01 至 BC-28 提交检查点；配置、身份、快照、分片、保留、管理接口、实时与迁移 |
 | [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 草案 | 待评审 | FE-01 至 FE-12 详细任务及 FC-01 至 FC-15 提交检查点；12 模块、29 图稿、表单、实时交互与浏览器验收 |
 | [WebUI 管理后台重构需求](webui-management-requirements.md) | 草案 | 待评审 | 确认 12 个一级模块及 29 张视觉草案；范围及图稿解释由本文维护，执行拆解见开发总计划 |
