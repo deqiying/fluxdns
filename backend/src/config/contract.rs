@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ipnet::IpNet;
-use serde::Deserialize;
 use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize};
 
 use super::model::{
     CacheMemoryDto, CacheOverrideDto, DatabaseType, EcsDto, HostsResourceDto, ListenerDto, LogsDto,
     OptimisticDto, OutboundDto, RuleSetDto, StrategyDto, TtlOverrideDto, UpstreamDto, WebUiDto,
-    WorkDto, deserialize_duration, deserialize_optional_non_null,
+    WorkDto, deserialize_duration, deserialize_optional_non_null, serialize_duration,
 };
 use super::resolve::lexical_normalize;
 use super::validate::{
@@ -66,25 +66,44 @@ pub struct DatabaseV2 {
     pub records_path: PathBuf,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DnsV2 {
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache: Option<GlobalCacheV2>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ttl_override: Option<TtlOverrideDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub edns_client_subnet: Option<EcsDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub resolve_log: Option<ResolveLogV2>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct GlobalCacheV2 {
     pub enabled: bool,
     pub memory: CacheMemoryDto,
-    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
     pub failure_ttl: Duration,
     pub optimistic: OptimisticDto,
     #[serde(default)]
@@ -109,12 +128,15 @@ impl Default for GlobalCacheV2 {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SnapshotV2 {
     pub enabled: bool,
     pub path: PathBuf,
-    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
     pub snapshot_interval: Duration,
 }
 
@@ -128,19 +150,19 @@ impl Default for SnapshotV2 {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResolveLogV2 {
     pub enable: bool,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct StatisticsV2 {
     pub retention: RetentionV2,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RetentionV2 {
     pub days: u32,
@@ -158,20 +180,36 @@ impl Default for RetentionV2 {
     }
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientV2 {
     pub name: String,
     pub client_id: String,
     #[serde(default)]
     pub r#match: ClientMatchV2,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub strategy: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache: Option<CacheOverrideDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ttl_override: Option<TtlOverrideDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub edns_client_subnet: Option<EcsDto>,
 }
 
@@ -186,7 +224,7 @@ impl std::fmt::Debug for ClientV2 {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientMatchV2 {
     #[serde(default, deserialize_with = "deserialize_client_ips")]
@@ -240,7 +278,7 @@ impl ConfigV2 {
                 "configuration exceeds 4 MiB",
             ));
         }
-        #[derive(Deserialize)]
+        #[derive(Deserialize, Serialize)]
         struct Version {
             version: u32,
         }
@@ -506,20 +544,20 @@ impl ConfigV2 {
             ("dns.cache.persistence.path", &paths.snapshot),
         ] {
             check(
-                !same_path(path, &paths.records) && !within(path, &paths.records),
+                !paths_overlap(path, &paths.records),
                 field,
                 "file overlaps records directory",
                 &mut report,
             );
             check(
-                !protected.iter().any(|other| same_path(path, other)),
+                !protected.iter().any(|other| paths_overlap(path, other)),
                 field,
                 "file overlaps protected configuration or log",
                 &mut report,
             );
         }
         check(
-            !same_path(&paths.statistics, &paths.snapshot),
+            !paths_overlap(&paths.statistics, &paths.snapshot),
             "dns.cache.persistence.path",
             "snapshot overlaps statistics database",
             &mut report,
@@ -527,9 +565,9 @@ impl ConfigV2 {
         check(
             !protected
                 .iter()
-                .any(|path| same_path(path, &paths.records) || within(path, &paths.records)),
+                .any(|path| paths_overlap(path, &paths.records)),
             "database.records_path",
-            "records directory contains protected configuration or log",
+            "records directory overlaps protected configuration or log",
             &mut report,
         );
         if report.is_empty() {
@@ -600,11 +638,11 @@ fn path_key(path: &Path) -> PathBuf {
     path
 }
 
-fn same_path(left: &Path, right: &Path) -> bool {
-    path_key(left) == path_key(right)
-}
-fn within(path: &Path, parent: &Path) -> bool {
-    path_key(path).starts_with(path_key(parent))
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    let left = path_key(left);
+    let right = path_key(right);
+    // 文件不能占据另一逻辑文件或目录的父路径；不依赖尚未初始化的物理布局。
+    left.starts_with(&right) || right.starts_with(&left)
 }
 
 fn check(valid: bool, path: &str, message: &str, report: &mut ConfigErrorReport) {

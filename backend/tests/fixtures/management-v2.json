@@ -1,0 +1,122 @@
+{
+  "candidate": {
+    "expected": {"active_revision": "active-7", "observed_file_revision": "files-9"},
+    "changes": [
+      {"module": "clients", "change": {"action": "update", "original_name": "desktop", "value": {"name": "workstation", "match": {"ips": ["192.0.2.10/32"]}, "cache": {"enabled": false}}}},
+      {"module": "hosts", "change": {"action": "create", "value": {"name": "local", "type": "const", "format": "hosts", "hosts": "127.0.0.1 localhost"}}}
+    ],
+    "discard_external_changes": true
+  },
+  "state": {
+    "active_revision": "active-8",
+    "runtime_revision": "runtime-12",
+    "persisted_revision": "active-7",
+    "observed_file_revision": "files-10",
+    "files": {"source": "changed", "derived": "unchanged"},
+    "synchronization": "applied_unpersisted",
+    "operation_id": "op-123"
+  },
+  "operations": [
+    {"operation_id": "op-123", "status": {"state": "preparing"}},
+    {"operation_id": "op-123", "status": {"state": "applying"}},
+    {"operation_id": "op-123", "status": {"state": "persisting", "active_revision": "active-8"}},
+    {"operation_id": "op-123", "status": {"state": "applied_synced", "active_revision": "active-8", "persisted_revision": "active-8"}},
+    {"operation_id": "op-123", "status": {"state": "applied_unpersisted", "active_revision": "active-8", "persisted_revision": "active-7", "error": "PERSISTENCE_FAILED"}},
+    {"operation_id": "op-123", "status": {"state": "rejected", "error": "FILE_REVISION_CONFLICT"}},
+    {"operation_id": "op-123", "status": {"state": "compensation_failed", "active_revision": null, "error": "COMPENSATION_FAILED"}},
+    {"operation_id": "op-123", "status": {"state": "unknown"}}
+  ],
+  "query": {
+    "filter": {"from_ms": 1788739200000, "to_ms": 1788825600000, "client_id": "unknown-id", "transport": "doh"},
+    "cursor": null,
+    "direction": "older",
+    "page_size": 20,
+    "sort": "occurred_at",
+    "order": "desc"
+  },
+  "record": {
+    "id": "2026-09-07.17",
+    "occurred_at_ms": 1788739201000,
+    "identity": {"client_id": "unknown-id", "client_ip": "192.0.2.10"},
+    "matched": {"source": "ip", "matched_client_id": "Desktop-01"},
+    "current_client_name": "workstation",
+    "qname": "example.test.",
+    "qtype": "A",
+    "transport": "doh",
+    "rcode": "NOERROR",
+    "source": "upstream",
+    "outcome": "answered",
+    "cache": "miss",
+    "strategy_name": "default",
+    "upstream_target_name": "local",
+    "upstream_used_name": "local",
+    "cache_producer": null,
+    "duration_us": 123,
+    "dns_core_duration_us": 100,
+    "answers": {"state": "available", "total_count": 1, "records": [{"name": "example.test.", "type": "A", "ttl_seconds": 30, "data": "192.0.2.1"}]}
+  },
+  "metrics": {
+    "sampled_at_ms": 1788739201000,
+    "qps": {"state": "unavailable", "reason": "warmup"},
+    "rpm": {"state": "unavailable", "reason": "observation_gap"},
+    "online_clients": {"state": "available", "value": 2},
+    "rss_bytes": {"state": "available", "value": "18446744073709551615"},
+    "qps_trend": [],
+    "rpm_trend": []
+  },
+  "client_messages": [
+    {"type": "subscribe_metrics", "subscription_id": "metrics-1"},
+    {"type": "subscribe_queries", "subscription_id": "queries-1", "filter": {"from_ms": 1788739200000, "to_ms": 1788825600000}, "after": {"epoch": "stream-1", "sequence": "9007199254740993"}},
+    {"type": "unsubscribe", "subscription_id": "queries-1"},
+    {"type": "pong", "nonce": "heartbeat-1"}
+  ],
+  "config_read": {
+    "state": {"active_revision":"active-8","runtime_revision":"runtime-12","persisted_revision":"active-8","observed_file_revision":"files-10","files":{"source":"unchanged","derived":null},"synchronization":"synced","operation_id":null},
+    "values": [{"module":"listener","value":{"name":"dns","type":"udp","addresses":["127.0.0.1"],"port":15353,"strategy":"default"}}],
+    "effective": [{"path":"listener[0].cache.enabled","source":"global","value":false}],
+    "references": [{"from_module":"listener","from_name":"dns","path":"strategy","to_name":"default"}],
+    "runtime": [{"module":"listener","name":"dns","bindings":[{"endpoint_name":null,"address":"127.0.0.1","port":15353,"transport":"udp","accepting":true}]}]
+  },
+  "external_diff": {
+    "expected":{"active_revision":"active-8","observed_file_revision":"files-11"},
+    "editable":[{"active":{"module":"logs","value":{"enable":false,"level":"info","path":"./logs/fluxdns.log"}},"external":{"module":"logs","value":{"enable":true,"level":"info","path":"./logs/fluxdns.log"}}}],
+    "protected_changes":["database","protected_credentials"],
+    "parse_error":null
+  },
+  "validation": {
+    "validation_token":"validation-1",
+    "expected":{"active_revision":"active-7","observed_file_revision":"files-9"},
+    "expires_at_ms":1788739261000,
+    "required_confirmations":["rename_references","discard_external_changes"],
+    "affected_names":["desktop","workstation"]
+  },
+  "snapshot": {
+    "state":"idle","owner_revision":"owner-1","generation":"3","file_bytes":"1024","last_success_at_ms":1788739201000,"last_error":null
+  },
+  "module_sources": [
+    {"module": "listener", "value": {"type": "udp", "name": "dns", "addresses": ["127.0.0.1"], "port": 15353, "strategy": "default"}},
+    {"module": "listener", "value": {"type": "tcp", "name": "dns-tcp", "addresses": ["127.0.0.1"], "port": 15353, "strategy": "default"}},
+    {"module": "listener", "value": {"type": "doh", "name": "doh", "routes": [{"path": "/dns/{client_id}", "strategy": "default"}], "endpoints": [{"name": "proxy", "addresses": ["127.0.0.1"], "port": 18081, "tls": {"mode": "external"}, "client_ip": {"source": "peer"}}]}},
+    {"module": "upstreams", "value": {"type": "hosts", "name": "local", "format": "hosts", "hosts": "127.0.0.1 localhost"}},
+    {"module": "upstreams", "value": {"type": "doh", "name": "public", "address": "https://dns.example.test/dns-query", "connect_ip": "192.0.2.1"}},
+    {"module": "upstreams", "value": {"type": "group", "name": "group", "upstreams": [{"name": "public", "weight": 1}], "upstream_mode": "parallel", "timeout": "1000000000ns"}},
+    {"module": "strategy", "value": {"name": "default", "rules": [{"hosts": "local"}], "default_upstream": "public"}},
+    {"module": "hosts", "value": {"type": "const", "name": "local", "format": "hosts", "hosts": "127.0.0.1 localhost"}},
+    {"module": "hosts", "value": {"type": "file", "name": "file", "format": "hosts", "path": "./rules/hosts.txt", "auto_update": false}},
+    {"module": "outbound", "value": {"name": "proxy", "type": "socks5", "proxy_url": {"env": "FLUXDNS_PROXY"}}},
+    {"module": "rule_set", "value": {"name": "inline", "type": "const", "format": "clash", "rule": "DOMAIN,example.test"}},
+    {"module": "rule_set", "value": {"name": "file", "type": "file", "format": "dat", "path": "./rules/site.dat", "auto_update": false}},
+    {"module": "rule_set", "value": {"name": "remote", "type": "remote", "format": "json", "url": "https://example.test/rules.json", "auto_update": true, "update_interval": "60000000000ns"}},
+    {"module": "clients", "value": {"name": "desktop", "client_id": "Desktop-01", "match": {"ips": []}}},
+    {"module": "dns", "value": {"cache": {"enabled": false, "memory": {"max_size_bytes": 67108864}, "failure_ttl": "5000000000ns", "optimistic": {"enabled": false, "answer_ttl": "10000000000ns", "max_age": "86400000000000ns"}, "persistence": {"enabled": false, "path": "./data/dns-cache.db", "snapshot_interval": "300000000000ns"}}, "resolve_log": {"enable": false}}},
+    {"module": "statistics", "value": {"retention": {"days": 7, "grace_days": 3, "reference_size_bytes": 1073741824}}},
+    {"module": "logs", "value": {"enable": false, "level": "info", "path": "./logs/fluxdns.log"}}
+  ],
+  "server_messages": [
+    {"type": "ready", "protocol_version": 1, "epoch": "stream-1"},
+    {"type": "queries", "subscription_id": "queries-1", "cursor": {"epoch": "stream-1", "sequence": "9007199254740993"}, "directory_revision": "directory-3", "items": []},
+    {"type": "resync_required", "subscription_id": "queries-1", "reason": "buffer_overflow"},
+    {"type": "config_changed", "active_revision": "active-8", "observed_file_revision": "files-10"},
+    {"type": "ping", "nonce": "heartbeat-1"}
+  ]
+}

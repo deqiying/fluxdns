@@ -43,7 +43,9 @@ Cookie、密码、Origin 与会话安全唯一维护于 [Management 设计](mana
 - 不渲染后端返回的 HTML；qname、answer 等请求内容作为文本显示。历史空详情明确标识，不构造虚假的域名或响应。
 - 页面应支持窄屏、表格横向查看、键盘访问与明确状态，不用营销式大块说明替代管理操作。
 
-页面范围是初始化/登录和七个只读管理页。没有配置编辑、用户管理、资源强制刷新、缓存清除或 DNS query 工具；新增写入需要先评审权限、审计、CSRF、revision/conflict、幂等和回滚契约。
+当前已接线页面仍是初始化/登录和七个只读管理页。P0 接受的目标为 12 个管理模块，路径及共享表单契约已固化但尚未注册；唯一字段权威为 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml)，具体接线事实见[应用实现](../implementation/frontend/application.md)。
+
+目标表单固定打开时的活动/文件 revision，不能被 refetch 覆盖脏草稿；`name` 改名保留 original_name，客户端 ID 编辑只读。响应丢失进入结果未知并查询 operation，不能自动重放；运行成功但文件未同步独立展示并只重试同步。外部差异处理是现有壳层工作区，不新增一级模块；不增加角色、通用 YAML 编辑或顶层删除。
 
 ## 交付与验证边界
 

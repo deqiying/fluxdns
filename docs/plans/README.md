@@ -4,15 +4,15 @@
 >
 > 适用范围：尚需实施、决策或验收的独立变更
 
-WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md)记录确认结果。当前仅获准实施 P0，GC-01 已提交为 `007f943`；BC-01 分批验证、本地 commit，不 push、不自动进入 P1。后续按[总计划](webui-management-development-plan.md)顺序推进，[配置专项](webui-management-config-runtime-plan.md)统一热更新与文件处理语义。
+WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md)记录确认结果。当前仅获准实施 P0，GC-01 已提交为 `007f943`；BC-01 配置/跨端契约已分批落实，BC-26 依赖新 owner，未标完成；不 push、不自动进入 P1。下一后端起点为另行授权后的 BC-02，[配置专项](webui-management-config-runtime-plan.md)统一热更新与文件处理语义。
 
 | 计划 | 文档状态 | 计划状态 | 剩余范围 |
 | --- | --- | --- | --- |
 | [WebUI 重构决策清单](webui-management-decisions.md) | 有效 | 实施中 | 12 项决定已确认；P0 技术核定与剩余 T 项 |
-| [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0 契约实施；P1-P5 未授权启动 |
-| [WebUI 配置热更新专项](webui-management-config-runtime-plan.md) | 草案 | 待评审 | 活动源、先应用后持久化、外部差异/还原/采用、热 owner、失败恢复；不另建提交编号 |
-| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | BC-01 分单元实施；BC-26 待新 owner；其余检查点未执行 |
-| [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 草案 | 待评审 | FE-01 至 FE-12、FC-01 至 FC-16；12 模块、29 图稿、外部差异工作区及真实交互 |
+| [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0 内部契约已交付；生产初始化依赖未闭合，P1-P5 未授权启动 |
+| [WebUI 配置热更新专项](webui-management-config-runtime-plan.md) | 有效 | 实施中 | 状态 DTO 已落地；活动源、应用/持久化、watcher、owner 与恢复待实现 |
+| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | BC-01 契约完成；BE-01 启动验收及 BC-26 待新 owner；其余检查点未执行 |
+| [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 有效 | 实施中 | 路由/表单内部契约已交付；FC-01 至 FC-16 页面、接线及真实交互待实施 |
 | [WebUI 管理后台重构需求](webui-management-requirements.md) | 草案 | 待评审 | 保留已审阅模块范围；已按决定校正 name、热配置和旧图标注解释 |
 | [WebUI 配套后端重构方案](webui-management-backend-refactor.md) | 草案 | 待评审 | 身份、独立快照、统一保留与日分片；取消旧版迁移/兼容，接入热配置专项 |
 

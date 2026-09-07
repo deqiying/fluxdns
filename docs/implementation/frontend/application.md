@@ -33,6 +33,14 @@
 
 ## 能力与证据
 
+2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换，不提供 v1/v2 选择开关。
+
+[`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 固定 12 个一级路径与配置模块映射，保留 `/dashboard`、`/queries`；上游组仅为 `/upstreams` 页内 tab。它尚未导入 App，FC-01 仍待实施，不能将契约表计为页面完成。
+
+[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型：草稿固定双 revision，区分预校验/确认/应用/结果未知；客户端普通编辑白名单剔除 `client_id`；操作结果区分同步、仅重试持久化、回读活动值和阻塞；大整数转表单前检查安全范围。这里没有表单组件、网络请求或可变全局 store，FC-02 的真实交互、外部差异工作区与 owner 接线尚未实施。
+
+新增 [4 项 Vitest](../../../frontend/src/shared/config/contract.test.ts) 验证路径数量/映射、编辑身份只读、缺失/显式禁用、操作结果及整数精度；与 Rust 共用的 schema 夹具测试见[交付实现](../delivery.md#前端与接口生成)。这些验证不包含浏览器、深链接刷新或新 API 会话安全。
+
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | 本轮静态；`App.test.tsx` 有路由/认证测试 | 未运行真实浏览器初始化和 Cookie 观察 |

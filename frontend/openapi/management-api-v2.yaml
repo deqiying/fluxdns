@@ -1,0 +1,1390 @@
+openapi: 3.1.0
+info:
+  title: FluxDNS Management API
+  version: 2.0.0
+  description: >-
+    P0 冻结的目标契约，尚未注册 v2 handler。后续正式切换时初始化、认证、安全中间件、
+    client、mock、代理与 SPA fallback 一起替换，不并行兼容 v1。
+    配置以活动源表达为准，先应用后持久化；外部变化只提示。
+    所有认证用户均为管理员，不增加角色管理。路径和 SecretRef 来源可见，实际秘密不可见。
+servers:
+  - url: /api/v2
+security:
+  - sessionCookie: []
+x-implementation: contract-only
+x-limits:
+  configuration_bytes: 4194304
+  mutation_bytes: 2097152
+  inline_text_bytes: 262144
+  namespace_items: 1024
+  candidate_changes: 128
+  cursor_bytes: 2048
+  query_body_bytes: 16384
+  operation_entries: 1024
+  operation_ttl_seconds: 1800
+  validation_ttl_seconds: 60
+  query_timeout_seconds: 15
+  websocket_protocol_version: 1
+  websocket_frame_bytes: 131072
+  websocket_connections: 32
+  websocket_connections_per_session: 4
+  websocket_subscriptions_per_connection: 8
+  websocket_queue_bytes: 1048576
+  websocket_heartbeat_seconds: 15
+  websocket_idle_seconds: 45
+  online_identity_entries: 16384
+  replay_seconds: 60
+  replay_records: 5000
+  replay_bytes: 8388608
+  frontend_buffer_records: 500
+  frontend_buffer_bytes: 2097152
+# 仅为 ErrorEnvelope 映射；已受理操作的终态使用 OperationResult，不以 200 推断成功。
+x-error-statuses:
+  INVALID_ARGUMENT: 400
+  VALIDATION_FAILED: 422
+  PAYLOAD_TOO_LARGE: 413
+  VERSION_UNSUPPORTED: 422
+  AUTH_REQUIRED: 401
+  FORBIDDEN: 403
+  NOT_FOUND: 404
+  ACTIVE_REVISION_CONFLICT: 409
+  FILE_REVISION_CONFLICT: 409
+  EXTERNAL_CHANGES_REQUIRE_CONFIRMATION: 409
+  OPERATION_ID_REUSED: 409
+  OPERATION_BUSY: 409
+  VALIDATION_EXPIRED: 409
+  PERSISTENCE_FAILED: 500
+  APPLY_FAILED: 500
+  COMPENSATION_FAILED: 500
+  CURSOR_EXPIRED: 410
+  RATE_LIMITED: 429
+  SERVICE_UNAVAILABLE: 503
+paths:
+  /auth/setup:
+    get:
+      operationId: getSetupStatus
+      security: []
+      responses:
+        "200":
+          description: 不披露用户列表的初始化状态
+          content: {application/json: {schema: {$ref: "#/components/schemas/SetupStatus"}}}
+        default: {$ref: "#/components/responses/Error"}
+    post:
+      operationId: initializeWebUi
+      security: []
+      description: 首用户仍须持久化成功后发布认证，不使用普通配置的应用优先语义。
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/Credentials"}}}
+      responses:
+        "201":
+          description: 创建用户并设置 HttpOnly、SameSite=Strict Cookie
+          content: {application/json: {schema: {$ref: "#/components/schemas/Session"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /auth/login:
+    post:
+      operationId: login
+      security: []
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/Credentials"}}}
+      responses:
+        "200":
+          description: 建立同源 session；HTTPS 使用 Secure 和 __Host- Cookie
+          content: {application/json: {schema: {$ref: "#/components/schemas/Session"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /auth/logout:
+    post:
+      operationId: logout
+      security: []
+      responses:
+        "204": {description: 撤销 session 及其订阅}
+        default: {$ref: "#/components/responses/Error"}
+  /auth/session:
+    get:
+      operationId: getSession
+      responses:
+        "200":
+          description: 当前认证信息
+          content: {application/json: {schema: {$ref: "#/components/schemas/Session"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /config/state:
+    get:
+      operationId: getConfigState
+      responses:
+        "200":
+          description: 当前运行和受管双文件状态，不读取外部文件作为活动配置
+          content: {application/json: {schema: {$ref: "#/components/schemas/ConfigState"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /config/system:
+    get:
+      operationId: getSystemConfig
+      responses:
+        "200":
+          description: 启动配置白名单；无用户、hash、私钥或实际 Secret 值
+          content: {application/json: {schema: {$ref: "#/components/schemas/SystemConfigRead"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /config/modules/{module}:
+    get:
+      operationId: getConfigModule
+      parameters:
+        - {name: module, in: path, required: true, schema: {$ref: "#/components/schemas/ConfigModule"}}
+      responses:
+        "200":
+          description: 有界完整模块集合；values 仅包含请求的模块，不是任意页的局部搜索
+          content: {application/json: {schema: {$ref: "#/components/schemas/ConfigRead"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /config/validate:
+    post:
+      operationId: validateCandidate
+      description: 无应用/写文件副作用；候选基于活动源，整张引用图一次校验。
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/Candidate"}}}
+      responses:
+        "200":
+          description: 绑定候选摘要、影响、active/file revision 的短期 token
+          content: {application/json: {schema: {$ref: "#/components/schemas/ValidationResult"}}}
+        "422": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /config/modules/{module}/validate:
+    post:
+      operationId: validateModuleCandidate
+      description: 普通模块表单入口；候选只能包含一项且 module 必须与 URL 一致，拒绝其他模块混入。
+      parameters:
+        - {name: module, in: path, required: true, schema: {$ref: "#/components/schemas/ConfigModule"}}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/Candidate"}}}
+      responses:
+        "200":
+          description: 单模块预校验及影响
+          content: {application/json: {schema: {$ref: "#/components/schemas/ValidationResult"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /config/modules/{module}/apply:
+    post:
+      operationId: applyModuleCandidate
+      description: 普通模块表单入口；与组合采用共用应用编排，但只接收一个同模块 change。
+      parameters:
+        - {name: module, in: path, required: true, schema: {$ref: "#/components/schemas/ConfigModule"}}
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/ApplyRequest"}}}
+      responses:
+        "200":
+          description: 操作终态
+          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+        "202":
+          description: 操作进行中
+          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /config/apply:
+    post:
+      operationId: applyCandidate
+      description: >-
+        operation_id 首次发送前固定；同 ID 不同命令摘要拒绝。非终态返回 202。
+        已应用但文件未同步也是明确结果，不回滚为旧态，不把重试文件同步变成重新应用。
+        并发文件变化返回冲突；未知结果先查 operation 和活动资源，不自动重放。
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/ApplyRequest"}}}
+      responses:
+        "200":
+          description: 已确认操作结果，须检查 status 而不是只检查 HTTP 200
+          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+        "202":
+          description: 操作仍在执行
+          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+        "409": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /config/operations/{operation_id}:
+    get:
+      operationId: getConfigOperation
+      parameters:
+        - {name: operation_id, in: path, required: true, schema: {$ref: "#/components/schemas/OperationId"}}
+      responses:
+        "200":
+          description: 记录过期、重启或未命中返回 unknown，不能据此推断未执行
+          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /config/files/diff:
+    get:
+      operationId: getExternalDiff
+      description: 无效外部 YAML 不返回正文；只读/敏感变化仅返回受保护分类。采用使用 Candidate。
+      responses:
+        "200":
+          description: 与组合文件观测版本绑定的类型化差异
+          content: {application/json: {schema: {$ref: "#/components/schemas/ExternalDiff"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /config/files/restore:
+    post:
+      operationId: restoreConfigFiles
+      description: 以活动源还原受管文件，不重载 DNS；必须显式确认覆盖所见差异。
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/FileSyncRequest"}}}
+      responses:
+        "200":
+          description: 还原结果
+          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+        "202":
+          description: 还原进行中
+          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /config/files/retry:
+    post:
+      operationId: retryConfigPersistence
+      description: 只同步当前已应用源，不重新 prepare 或重放创建/改名。
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/FileSyncRequest"}}}
+      responses:
+        "200":
+          description: 同步结果
+          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+        "202":
+          description: 同步进行中
+          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /queries/search:
+    post:
+      operationId: searchQueries
+      description: >-
+        只读查询使用 JSON body，共用 HTTP/WS filter，避免把身份过滤写入 URL。
+        filter 在分页前应用；时间为 UTC 毫秒半开区间；cursor 与 filter、方向、水位绑定。
+        无固定 31 天限制，但最大跨度为 3650 天；无 COUNT、页码直跳或伪造总数。
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/QueryRequest"}}}
+      responses:
+        "200":
+          description: 捕获 replay 边界后的 HTTP 快照，可与补发重复，按稳定 ID 去重
+          content: {application/json: {schema: {$ref: "#/components/schemas/QueryPage"}}}
+        "409": {$ref: "#/components/responses/Error"}
+        default: {$ref: "#/components/responses/Error"}
+  /queries/{record_id}:
+    get:
+      operationId: getQueryDetail
+      parameters:
+        - {name: record_id, in: path, required: true, schema: {$ref: "#/components/schemas/RecordId"}}
+      responses:
+        "200":
+          description: 详情及当次目录显示快照；不重算历史 IP 匹配
+          content: {application/json: {schema: {$ref: "#/components/schemas/QueryDetail"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /retention:
+    get:
+      operationId: getRetentionStatus
+      responses:
+        "200":
+          description: 共同 UTC 水位和实际物理回收状态
+          content: {application/json: {schema: {$ref: "#/components/schemas/RetentionStatus"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /retention/preview:
+    post:
+      operationId: previewRetention
+      description: 后端采样详情 DB 加 WAL 长度；S 大于 T 用 R 天，否则 R+G；保存不立即清理。
+      requestBody:
+        required: true
+        content: {application/json: {schema: {$ref: "#/components/schemas/RetentionPreviewRequest"}}}
+      responses:
+        "200":
+          description: 预览不是删除承诺，实际任务冻结策略并重新采样
+          content: {application/json: {schema: {$ref: "#/components/schemas/RetentionPreview"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /service/metrics:
+    get:
+      operationId: getServiceMetrics
+      responses:
+        "200":
+          description: QPS 为近 60 秒请求数/60，RPM 为近 600 秒请求数/10；缺数不能填零
+          content: {application/json: {schema: {$ref: "#/components/schemas/ServiceMetrics"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /system/runtime:
+    get:
+      operationId: getProcessMetrics
+      responses:
+        "200":
+          description: 与服务指标共享采样口径的进程状态
+          content: {application/json: {schema: {$ref: "#/components/schemas/ProcessMetrics"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /events:
+    get:
+      operationId: subscribeEvents
+      description: >-
+        同源 Cookie 鉴权和 Origin 校验；upgrade 后独立连接 owner，不受普通 HTTP 15s deadline 截断。
+        不在 URL 携带 token。登出/过期回收；慢消费者关闭并 resync。JSON 帧使用共享 schema。
+      x-client-message: {$ref: "#/components/schemas/ClientMessage"}
+      x-server-message: {$ref: "#/components/schemas/ServerMessage"}
+      responses:
+        "101": {description: WebSocket upgrade}
+        default: {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    sessionCookie: {type: apiKey, in: cookie, name: fluxdns_session}
+  responses:
+    Error:
+      description: >-
+        400 形状/参数错误；401 未认证；403 来源/只读字段；404 不存在；
+        409 revision、operation 或 cursor 冲突；413 超限；422 候选语义不合法；
+        429 限流；503 owner 不可用。写请求不因 retryable 自动重放。
+      headers:
+        X-Request-Id: {schema: {type: string, maxLength: 128}}
+      content: {application/json: {schema: {$ref: "#/components/schemas/ErrorEnvelope"}}}
+  schemas:
+    Configuration:
+      type: object
+      additionalProperties: false
+      description: 内部 v2 文件契约，不作为 HTTP 读写 payload；当前生产 loader 尚未接线
+      required: [version, work, database, logs, webui, dns]
+      properties:
+        version: {const: 2}
+        work:
+          type: object
+          additionalProperties: false
+          required: [path, rules_path]
+          properties: {path: {$ref: "#/components/schemas/Path"}, rules_path: {$ref: "#/components/schemas/Path"}}
+        database:
+          type: object
+          additionalProperties: false
+          required: [type, path, records_path]
+          properties: {type: {const: sqlite}, path: {$ref: "#/components/schemas/Path"}, records_path: {$ref: "#/components/schemas/Path"}}
+        logs: {$ref: "#/components/schemas/Logs"}
+        webui:
+          type: object
+          additionalProperties: false
+          required: [enable, address, port]
+          properties:
+            enable: {type: boolean}
+            address: {type: string, maxLength: 64}
+            port: {type: integer, minimum: 1, maximum: 65535}
+            public_origin: {type: string, format: uri, maxLength: 4096}
+            users:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [name, password_hash]
+                properties: {name: {$ref: "#/components/schemas/Name"}, password_hash: {type: string, writeOnly: true}}
+        dns: {$ref: "#/components/schemas/Dns"}
+        statistics: {$ref: "#/components/schemas/Statistics"}
+        listener: {type: array, minItems: 1, maxItems: 1024, items: {$ref: "#/components/schemas/Listener"}}
+        upstreams: {type: array, minItems: 1, maxItems: 1024, items: {$ref: "#/components/schemas/Upstream"}}
+        strategy: {type: array, minItems: 1, maxItems: 1024, items: {$ref: "#/components/schemas/Strategy"}}
+        hosts: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/Hosts"}}
+        outbound: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/Outbound"}}
+        rule_set: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/RuleSet"}}
+        clients: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/Client"}}
+    ConfigChange:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: listener}, change: {$ref: "#/components/schemas/ListenerMutation"}}
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: upstreams}, change: {$ref: "#/components/schemas/UpstreamMutation"}}
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: strategy}, change: {$ref: "#/components/schemas/StrategyMutation"}}
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: hosts}, change: {$ref: "#/components/schemas/HostsMutation"}}
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: outbound}, change: {$ref: "#/components/schemas/OutboundMutation"}}
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: rule_set}, change: {$ref: "#/components/schemas/RuleSetMutation"}}
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: clients}, change: {$ref: "#/components/schemas/ClientMutation"}}
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: dns}, change: {$ref: "#/components/schemas/Dns"}}
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: statistics}, change: {$ref: "#/components/schemas/Statistics"}}
+        - type: object
+          additionalProperties: false
+          required: [module, change]
+          properties: {module: {const: logs}, change: {$ref: "#/components/schemas/Logs"}}
+    ListenerMutation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, value]
+          properties: {action: {const: create}, value: {$ref: "#/components/schemas/Listener"}}
+        - type: object
+          additionalProperties: false
+          required: [action, original_name, value]
+          properties: {action: {const: update}, original_name: {$ref: "#/components/schemas/Name"}, value: {$ref: "#/components/schemas/Listener"}}
+    UpstreamMutation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, value]
+          properties: {action: {const: create}, value: {$ref: "#/components/schemas/Upstream"}}
+        - type: object
+          additionalProperties: false
+          required: [action, original_name, value]
+          properties: {action: {const: update}, original_name: {$ref: "#/components/schemas/Name"}, value: {$ref: "#/components/schemas/Upstream"}}
+    StrategyMutation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, value]
+          properties: {action: {const: create}, value: {$ref: "#/components/schemas/Strategy"}}
+        - type: object
+          additionalProperties: false
+          required: [action, original_name, value]
+          properties: {action: {const: update}, original_name: {$ref: "#/components/schemas/Name"}, value: {$ref: "#/components/schemas/Strategy"}}
+    HostsMutation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, value]
+          properties: {action: {const: create}, value: {$ref: "#/components/schemas/Hosts"}}
+        - type: object
+          additionalProperties: false
+          required: [action, original_name, value]
+          properties: {action: {const: update}, original_name: {$ref: "#/components/schemas/Name"}, value: {$ref: "#/components/schemas/Hosts"}}
+    OutboundMutation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, value]
+          properties: {action: {const: create}, value: {$ref: "#/components/schemas/Outbound"}}
+        - type: object
+          additionalProperties: false
+          required: [action, original_name, value]
+          properties: {action: {const: update}, original_name: {$ref: "#/components/schemas/Name"}, value: {$ref: "#/components/schemas/Outbound"}}
+    RuleSetMutation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, value]
+          properties: {action: {const: create}, value: {$ref: "#/components/schemas/RuleSet"}}
+        - type: object
+          additionalProperties: false
+          required: [action, original_name, value]
+          properties: {action: {const: update}, original_name: {$ref: "#/components/schemas/Name"}, value: {$ref: "#/components/schemas/RuleSet"}}
+    ClientMutation:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [action, value]
+          properties: {action: {const: create}, value: {$ref: "#/components/schemas/Client"}}
+        - type: object
+          additionalProperties: false
+          required: [action, original_name, value]
+          properties: {action: {const: update}, original_name: {$ref: "#/components/schemas/Name"}, value: {$ref: "#/components/schemas/ClientEdit"}}
+    ModuleSource:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: listener}, value: {$ref: "#/components/schemas/Listener"}}
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: upstreams}, value: {$ref: "#/components/schemas/Upstream"}}
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: strategy}, value: {$ref: "#/components/schemas/Strategy"}}
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: hosts}, value: {$ref: "#/components/schemas/Hosts"}}
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: outbound}, value: {$ref: "#/components/schemas/Outbound"}}
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: rule_set}, value: {$ref: "#/components/schemas/RuleSet"}}
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: clients}, value: {$ref: "#/components/schemas/Client"}}
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: dns}, value: {$ref: "#/components/schemas/Dns"}}
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: statistics}, value: {$ref: "#/components/schemas/Statistics"}}
+        - type: object
+          additionalProperties: false
+          required: [module, value]
+          properties: {module: {const: logs}, value: {$ref: "#/components/schemas/Logs"}}
+    Name: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_.!-]+$'}
+    ClientId: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$'}
+    Revision: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$'}
+    OperationId: {$ref: "#/components/schemas/Revision"}
+    RecordId: {$ref: "#/components/schemas/Revision"}
+    Cursor: {type: string, minLength: 1, maxLength: 2048, pattern: '^[A-Za-z0-9._:-]+$'}
+    DecimalU64:
+      type: string
+      # 20 位边界按前缀逐位比较；不能借助 JSON number 表达 u64 最大值。
+      pattern: '^(0|[1-9][0-9]{0,18}|1[0-7][0-9]{18}|18[0-3][0-9]{17}|184[0-3][0-9]{16}|1844[0-5][0-9]{15}|18446[0-6][0-9]{14}|184467[0-3][0-9]{13}|1844674[0-3][0-9]{12}|184467440[0-6][0-9]{10}|1844674407[0-2][0-9]{9}|18446744073[0-6][0-9]{8}|1844674407370[0-8][0-9]{6}|18446744073709[0-4][0-9]{5}|184467440737095[0-4][0-9]{4}|18446744073709550[0-9]{3}|18446744073709551[0-5][0-9]{2}|1844674407370955160[0-9]{1}|1844674407370955161[0-4]|18446744073709551615)$'
+      description: 十进制 u64，不超过 18446744073709551615，不能先转 Number
+    SafeInteger: {type: integer, minimum: 0, maximum: 9007199254740991}
+    Bytes: {type: integer, minimum: 1, maximum: 1099511627776}
+    Duration: {type: string, minLength: 1, maxLength: 128, description: 沿用紧凑 duration parser，整数/小数加 ns/us/ms/s/m/h/d/w，可组合；范围由字段语义约束}
+    Path: {type: string, minLength: 1, maxLength: 4096}
+    InlineText: {type: string, maxLength: 262144, description: 另按 UTF-8 字节限制为 256 KiB}
+    ConfigModule: {type: string, enum: [listener, upstreams, strategy, hosts, outbound, rule_set, clients, dns, statistics, logs]}
+    Credentials:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: {type: string, minLength: 1, maxLength: 128}
+        password: {type: string, minLength: 1, maxLength: 1024, writeOnly: true, description: 不 trim；后端按 UTF-8 bytes 校验，setup 为 12..1024，login 为 1..1024}
+    SetupStatus:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties: {state: {type: string, enum: [required, ready]}}
+    Session:
+      type: object
+      additionalProperties: false
+      required: [user, expires_at]
+      properties:
+        user:
+          type: object
+          additionalProperties: false
+          required: [name]
+          properties: {name: {$ref: "#/components/schemas/Name"}}
+        expires_at: {type: string, format: date-time}
+    SecretRef:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [env]
+          properties: {env: {type: string, pattern: '^[A-Za-z_][A-Za-z0-9_]*$', maxLength: 256}}
+        - type: object
+          additionalProperties: false
+          required: [file]
+          properties: {file: {$ref: "#/components/schemas/Path"}}
+    Optimistic:
+      type: object
+      additionalProperties: false
+      required: [enabled, answer_ttl, max_age]
+      properties:
+        enabled: {type: boolean}
+        answer_ttl: {$ref: "#/components/schemas/Duration"}
+        max_age: {$ref: "#/components/schemas/Duration"}
+    CacheOverride:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled: {type: boolean}
+        optimistic: {$ref: "#/components/schemas/Optimistic"}
+    TtlOverride:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled: {type: boolean}
+        min: {$ref: "#/components/schemas/Duration"}
+        max: {$ref: "#/components/schemas/Duration"}
+    Ecs:
+      type: object
+      additionalProperties: false
+      required: [mode]
+      properties:
+        mode: {type: string, enum: [disabled, client, custom]}
+        custom_ip: {type: string, maxLength: 64}
+      description: custom 必须有 custom_ip，其余模式禁止；IP/CIDR 语义由公共 validator 检查
+    Snapshot:
+      type: object
+      additionalProperties: false
+      properties:
+        enabled: {type: boolean, default: false}
+        path: {allOf: [{$ref: "#/components/schemas/Path"}], default: ./data/dns-cache.db}
+        snapshot_interval: {allOf: [{$ref: "#/components/schemas/Duration"}], default: 5m, description: 1s 至 1d}
+    GlobalCache:
+      type: object
+      additionalProperties: false
+      required: [enabled, memory, failure_ttl, optimistic]
+      properties:
+        enabled: {type: boolean}
+        memory:
+          type: object
+          additionalProperties: false
+          required: [max_size_bytes]
+          properties: {max_size_bytes: {$ref: "#/components/schemas/Bytes"}}
+        failure_ttl: {allOf: [{$ref: "#/components/schemas/Duration"}], description: 1s 至 5m}
+        optimistic: {$ref: "#/components/schemas/Optimistic"}
+        persistence: {$ref: "#/components/schemas/Snapshot"}
+    Dns:
+      type: object
+      additionalProperties: false
+      properties:
+        cache: {$ref: "#/components/schemas/GlobalCache"}
+        ttl_override: {$ref: "#/components/schemas/TtlOverride"}
+        edns_client_subnet: {$ref: "#/components/schemas/Ecs"}
+        resolve_log:
+          type: object
+          additionalProperties: false
+          required: [enable]
+          properties: {enable: {type: boolean}}
+    Retention:
+      type: object
+      additionalProperties: false
+      properties:
+        days: {type: integer, minimum: 1, maximum: 3650, default: 7}
+        grace_days: {type: integer, minimum: 0, maximum: 3649, default: 3, description: days 加 grace_days 不超过 3650}
+        reference_size_bytes: {allOf: [{$ref: "#/components/schemas/Bytes"}], default: 1073741824}
+    Statistics:
+      type: object
+      additionalProperties: false
+      properties: {retention: {$ref: "#/components/schemas/Retention"}}
+    Logs:
+      type: object
+      additionalProperties: false
+      required: [enable, level, path]
+      properties:
+        enable: {type: boolean}
+        level: {type: string, enum: [trace, debug, info, warn, error]}
+        path: {$ref: "#/components/schemas/Path"}
+    ClientMatch:
+      type: object
+      additionalProperties: false
+      properties: {ips: {type: array, maxItems: 256, items: {type: string, maxLength: 64}}}
+    Client:
+      type: object
+      additionalProperties: false
+      required: [name, client_id]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        client_id: {$ref: "#/components/schemas/ClientId"}
+        match: {$ref: "#/components/schemas/ClientMatch"}
+        strategy: {$ref: "#/components/schemas/Name"}
+        cache: {$ref: "#/components/schemas/CacheOverride"}
+        ttl_override: {$ref: "#/components/schemas/TtlOverride"}
+        edns_client_subnet: {$ref: "#/components/schemas/Ecs"}
+    ClientEdit:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        match: {$ref: "#/components/schemas/ClientMatch"}
+        strategy: {$ref: "#/components/schemas/Name"}
+        cache: {$ref: "#/components/schemas/CacheOverride"}
+        ttl_override: {$ref: "#/components/schemas/TtlOverride"}
+        edns_client_subnet: {$ref: "#/components/schemas/Ecs"}
+    Listener:
+      oneOf:
+        - {$ref: "#/components/schemas/UdpListener"}
+        - {$ref: "#/components/schemas/TcpListener"}
+        - {$ref: "#/components/schemas/DohListener"}
+      discriminator: {propertyName: type}
+    UdpListener:
+      type: object
+      additionalProperties: false
+      required: [name, type, addresses, port, strategy]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        type: {const: udp}
+        addresses: {type: array, minItems: 1, items: {type: string, maxLength: 64}}
+        port: {type: integer, minimum: 1, maximum: 65535}
+        strategy: {$ref: "#/components/schemas/Name"}
+        hosts: {$ref: "#/components/schemas/Name"}
+    TcpListener:
+      type: object
+      additionalProperties: false
+      required: [name, type, addresses, port, strategy]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        type: {const: tcp}
+        addresses: {type: array, minItems: 1, items: {type: string, maxLength: 64}}
+        port: {type: integer, minimum: 1, maximum: 65535}
+        strategy: {$ref: "#/components/schemas/Name"}
+        hosts: {$ref: "#/components/schemas/Name"}
+    DohListener:
+      type: object
+      additionalProperties: false
+      required: [name, type, routes, endpoints]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        type: {const: doh}
+        routes:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [path, strategy]
+            properties:
+              path: {type: string, minLength: 1, maxLength: 4096}
+              strategy: {$ref: "#/components/schemas/Name"}
+        endpoints: {type: array, minItems: 1, items: {$ref: "#/components/schemas/DohEndpoint"}}
+    DohEndpoint:
+      type: object
+      additionalProperties: false
+      required: [name, addresses, port, tls, client_ip]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        addresses: {type: array, minItems: 1, items: {type: string, maxLength: 64}}
+        port: {type: integer, minimum: 1, maximum: 65535}
+        tls:
+          type: object
+          additionalProperties: false
+          required: [mode]
+          properties:
+            mode: {type: string, enum: [terminate, external]}
+            certificate_file: {$ref: "#/components/schemas/Path"}
+            private_key_file: {$ref: "#/components/schemas/Path"}
+          description: terminate 要求两个文件；external 禁止文件残留
+        client_ip:
+          type: object
+          additionalProperties: false
+          required: [source]
+          properties:
+            source: {type: string, enum: [peer, forwarded_header, proxy_protocol]}
+            header: {type: string, enum: [X-Forwarded-For, X-Real-IP, Forwarded]}
+            trusted_proxies: {type: array, items: {type: string, maxLength: 64}}
+            on_missing: {type: string, enum: [reject, use_peer]}
+            on_invalid: {type: string, enum: [reject, use_peer]}
+    Upstream:
+      oneOf:
+        - {$ref: "#/components/schemas/HostsUpstream"}
+        - {$ref: "#/components/schemas/DohUpstream"}
+        - {$ref: "#/components/schemas/UpstreamGroup"}
+      discriminator: {propertyName: type}
+    HostsUpstream:
+      type: object
+      additionalProperties: false
+      required: [name, type, format, hosts]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        type: {const: hosts}
+        format: {type: string, enum: [json, hosts]}
+        hosts: {$ref: "#/components/schemas/InlineText"}
+    DohUpstream:
+      type: object
+      additionalProperties: false
+      required: [name, type, address]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        type: {const: doh}
+        address: {type: string, format: uri, maxLength: 4096}
+        bootstrap: {$ref: "#/components/schemas/Name"}
+        connect_ip: {type: string, maxLength: 64}
+        proxy: {$ref: "#/components/schemas/Name"}
+        edns_client_subnet: {$ref: "#/components/schemas/Ecs"}
+    UpstreamMember:
+      type: object
+      additionalProperties: false
+      required: [name]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        weight: {type: integer, minimum: 1, maximum: 4294967295, default: 1}
+    UpstreamMode: {type: string, enum: [parallel, round-robin, load-balance, failover]}
+    UpstreamGroup:
+      type: object
+      additionalProperties: false
+      required: [name, type, upstreams, upstream_mode, timeout]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        type: {const: group}
+        upstreams: {type: array, minItems: 1, items: {$ref: "#/components/schemas/UpstreamMember"}}
+        upstream_mode: {$ref: "#/components/schemas/UpstreamMode"}
+        timeout: {$ref: "#/components/schemas/Duration"}
+        fallbacks: {type: array, minItems: 1, items: {$ref: "#/components/schemas/UpstreamMember"}}
+        fallback_upstream_mode: {$ref: "#/components/schemas/UpstreamMode"}
+        fallback_timeout: {$ref: "#/components/schemas/Duration"}
+    Strategy:
+      type: object
+      additionalProperties: false
+      required: [name, rules, default_upstream]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        default_upstream: {$ref: "#/components/schemas/Name"}
+        rules: {type: array, minItems: 1, items: {$ref: "#/components/schemas/StrategyRule"}}
+        cache: {$ref: "#/components/schemas/CacheOverride"}
+        ttl_override: {$ref: "#/components/schemas/TtlOverride"}
+        edns_client_subnet: {$ref: "#/components/schemas/Ecs"}
+    StrategyRule:
+      type: object
+      additionalProperties: false
+      properties:
+        rule_set: {type: string, minLength: 1, maxLength: 512}
+        hosts: {$ref: "#/components/schemas/Name"}
+        upstream: {$ref: "#/components/schemas/Name"}
+        edns_client_subnet: {$ref: "#/components/schemas/Ecs"}
+      description: rule_set 与 hosts 恰有一项；rule_set 必须有 upstream，hosts 禁止 upstream
+    Hosts:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [name, type, format, hosts]
+          properties:
+            name: {$ref: "#/components/schemas/Name"}
+            type: {const: const}
+            format: {type: string, enum: [json, hosts]}
+            hosts: {$ref: "#/components/schemas/InlineText"}
+        - type: object
+          additionalProperties: false
+          required: [name, type, format, path]
+          properties:
+            name: {$ref: "#/components/schemas/Name"}
+            type: {const: file}
+            format: {type: string, enum: [json, hosts]}
+            path: {$ref: "#/components/schemas/Path"}
+            auto_update: {type: boolean, default: false}
+            update_interval: {$ref: "#/components/schemas/Duration"}
+    Outbound:
+      type: object
+      additionalProperties: false
+      required: [name, type, proxy_url]
+      properties:
+        name: {$ref: "#/components/schemas/Name"}
+        type: {const: socks5}
+        proxy_url: {$ref: "#/components/schemas/SecretRef"}
+    RuleSet:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [name, type, format, rule]
+          properties:
+            name: {$ref: "#/components/schemas/Name"}
+            type: {const: const}
+            format: {type: string, enum: [json, clash, dat]}
+            rule: {$ref: "#/components/schemas/InlineText"}
+        - type: object
+          additionalProperties: false
+          required: [name, type, format, path]
+          properties:
+            name: {$ref: "#/components/schemas/Name"}
+            type: {const: file}
+            format: {type: string, enum: [json, clash, dat]}
+            path: {$ref: "#/components/schemas/Path"}
+            auto_update: {type: boolean, default: false}
+            update_interval: {$ref: "#/components/schemas/Duration"}
+        - type: object
+          additionalProperties: false
+          required: [name, type, format, url]
+          properties:
+            name: {$ref: "#/components/schemas/Name"}
+            type: {const: remote}
+            format: {type: string, enum: [json, clash, dat]}
+            url: {type: string, format: uri, maxLength: 4096}
+            proxy: {$ref: "#/components/schemas/Name"}
+            auto_update: {type: boolean, default: false}
+            update_interval: {$ref: "#/components/schemas/Duration"}
+    Preconditions:
+      type: object
+      additionalProperties: false
+      required: [active_revision, observed_file_revision]
+      properties:
+        active_revision: {$ref: "#/components/schemas/Revision"}
+        observed_file_revision: {$ref: "#/components/schemas/Revision"}
+    ConfigState:
+      type: object
+      additionalProperties: false
+      required: [active_revision, runtime_revision, persisted_revision, observed_file_revision, files, synchronization, operation_id]
+      properties:
+        active_revision: {$ref: "#/components/schemas/Revision"}
+        runtime_revision: {$ref: "#/components/schemas/Revision"}
+        persisted_revision: {oneOf: [{$ref: "#/components/schemas/Revision"}, {type: "null"}]}
+        observed_file_revision: {$ref: "#/components/schemas/Revision"}
+        files:
+          type: object
+          additionalProperties: false
+          required: [source, derived]
+          properties:
+            source: {$ref: "#/components/schemas/FileCondition"}
+            derived: {oneOf: [{$ref: "#/components/schemas/FileCondition"}, {type: "null"}]}
+        synchronization: {type: string, enum: [synced, applying, persisting, applied_unpersisted, blocked]}
+        operation_id: {oneOf: [{$ref: "#/components/schemas/OperationId"}, {type: "null"}]}
+    FileCondition: {type: string, enum: [unchanged, changed, missing, unreadable, oversized]}
+    Candidate:
+      type: object
+      additionalProperties: false
+      required: [expected, changes, discard_external_changes]
+      properties:
+        expected: {$ref: "#/components/schemas/Preconditions"}
+        changes: {type: array, minItems: 1, maxItems: 128, items: {$ref: "#/components/schemas/ConfigChange"}}
+        discard_external_changes: {type: boolean}
+    ApplyRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, candidate, validation_token, confirmations]
+      properties:
+        operation_id: {$ref: "#/components/schemas/OperationId"}
+        candidate: {$ref: "#/components/schemas/Candidate"}
+        validation_token: {$ref: "#/components/schemas/Revision"}
+        confirmations: {type: array, maxItems: 4, uniqueItems: true, items: {$ref: "#/components/schemas/ImpactKind"}}
+    ImpactKind: {type: string, enum: [rename_references, listener_rebind, retention_shortening, discard_external_changes]}
+    ValidationResult:
+      type: object
+      additionalProperties: false
+      required: [validation_token, expected, expires_at_ms, required_confirmations, affected_names]
+      properties:
+        validation_token: {$ref: "#/components/schemas/Revision"}
+        expected: {$ref: "#/components/schemas/Preconditions"}
+        expires_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+        required_confirmations: {type: array, items: {$ref: "#/components/schemas/ImpactKind"}}
+        affected_names: {type: array, maxItems: 8192, items: {$ref: "#/components/schemas/Name"}}
+    FileSyncRequest:
+      type: object
+      additionalProperties: false
+      required: [operation_id, expected, discard_external_changes]
+      properties:
+        operation_id: {$ref: "#/components/schemas/OperationId"}
+        expected: {$ref: "#/components/schemas/Preconditions"}
+        discard_external_changes: {type: boolean}
+    ErrorCode:
+      type: string
+      enum: [INVALID_ARGUMENT, VALIDATION_FAILED, PAYLOAD_TOO_LARGE, VERSION_UNSUPPORTED, AUTH_REQUIRED, FORBIDDEN, NOT_FOUND, ACTIVE_REVISION_CONFLICT, FILE_REVISION_CONFLICT, EXTERNAL_CHANGES_REQUIRE_CONFIRMATION, OPERATION_ID_REUSED, OPERATION_BUSY, VALIDATION_EXPIRED, PERSISTENCE_FAILED, APPLY_FAILED, COMPENSATION_FAILED, CURSOR_EXPIRED, RATE_LIMITED, SERVICE_UNAVAILABLE]
+    ErrorEnvelope:
+      type: object
+      additionalProperties: false
+      required: [code, request_id, message, retryable, field_errors]
+      properties:
+        code: {$ref: "#/components/schemas/ErrorCode"}
+        request_id: {type: string, maxLength: 128}
+        message: {type: string, maxLength: 512}
+        retryable: {type: boolean}
+        field_errors:
+          type: array
+          maxItems: 128
+          items:
+            type: object
+            additionalProperties: false
+            required: [path, code]
+            properties: {path: {type: string, maxLength: 512}, code: {$ref: "#/components/schemas/ErrorCode"}}
+    OperationResult:
+      type: object
+      additionalProperties: false
+      required: [operation_id, status]
+      properties:
+        operation_id: {$ref: "#/components/schemas/OperationId"}
+        status: {$ref: "#/components/schemas/OperationStatus"}
+    OperationStatus:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state]
+          properties: {state: {type: string, enum: [preparing, applying, unknown]}}
+        - type: object
+          additionalProperties: false
+          required: [state, active_revision]
+          properties: {state: {const: persisting}, active_revision: {$ref: "#/components/schemas/Revision"}}
+        - type: object
+          additionalProperties: false
+          required: [state, active_revision, persisted_revision]
+          properties:
+            state: {const: applied_synced}
+            active_revision: {$ref: "#/components/schemas/Revision"}
+            persisted_revision: {$ref: "#/components/schemas/Revision"}
+        - type: object
+          additionalProperties: false
+          required: [state, active_revision, persisted_revision, error]
+          properties:
+            state: {const: applied_unpersisted}
+            active_revision: {$ref: "#/components/schemas/Revision"}
+            persisted_revision: {oneOf: [{$ref: "#/components/schemas/Revision"}, {type: "null"}]}
+            error: {$ref: "#/components/schemas/ErrorCode"}
+        - type: object
+          additionalProperties: false
+          required: [state, error]
+          properties: {state: {const: rejected}, error: {$ref: "#/components/schemas/ErrorCode"}}
+        - type: object
+          additionalProperties: false
+          required: [state, active_revision, error]
+          properties:
+            state: {const: compensation_failed}
+            active_revision: {oneOf: [{$ref: "#/components/schemas/Revision"}, {type: "null"}]}
+            error: {$ref: "#/components/schemas/ErrorCode"}
+    ConfigRead:
+      type: object
+      additionalProperties: false
+      required: [state, values, effective, references, runtime]
+      properties:
+        state: {$ref: "#/components/schemas/ConfigState"}
+        values: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/ModuleSource"}}
+        effective:
+          type: array
+          maxItems: 8192
+          items:
+            type: object
+            additionalProperties: false
+            required: [path, source, value]
+            properties:
+              path: {type: string, maxLength: 512}
+              source: {type: string, enum: [default, global, strategy, client, explicit]}
+              value: {oneOf: [{type: string, maxLength: 4096}, {type: boolean}, {$ref: "#/components/schemas/SafeInteger"}]}
+        references:
+          type: array
+          maxItems: 8192
+          items:
+            type: object
+            additionalProperties: false
+            required: [from_module, from_name, path, to_name]
+            properties:
+              from_module: {$ref: "#/components/schemas/ConfigModule"}
+              from_name: {$ref: "#/components/schemas/Name"}
+              path: {type: string, maxLength: 512}
+              to_name: {$ref: "#/components/schemas/Name"}
+        runtime: {type: array, maxItems: 1024, items: {$ref: "#/components/schemas/ModuleRuntime"}}
+    ModuleRuntime:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [module, name, bindings]
+          properties:
+            module: {const: listener}
+            name: {$ref: "#/components/schemas/Name"}
+            bindings:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [endpoint_name, address, port, transport, accepting]
+                properties:
+                  endpoint_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+                  address: {type: string, maxLength: 64}
+                  port: {type: integer, minimum: 1, maximum: 65535}
+                  transport: {$ref: "#/components/schemas/Transport"}
+                  accepting: {type: boolean}
+        - type: object
+          additionalProperties: false
+          required: [module, name, condition, last_updated_at_ms, next_update_at_ms, error]
+          properties:
+            module: {type: string, enum: [hosts, rule_set]}
+            name: {$ref: "#/components/schemas/Name"}
+            condition: {type: string, enum: [ready, stale, failed, unavailable]}
+            last_updated_at_ms: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
+            next_update_at_ms: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
+            error: {oneOf: [{$ref: "#/components/schemas/ErrorCode"}, {type: "null"}]}
+        - type: object
+          additionalProperties: false
+          required: [module, snapshot]
+          properties:
+            module: {const: dns}
+            snapshot: {$ref: "#/components/schemas/CacheSnapshotStatus"}
+    CacheSnapshotStatus:
+      type: object
+      additionalProperties: false
+      required: [state, owner_revision, generation, file_bytes, last_success_at_ms, last_error]
+      properties:
+        state: {type: string, enum: [disabled, idle, writing, restoring, failed]}
+        owner_revision: {$ref: "#/components/schemas/Revision"}
+        generation: {$ref: "#/components/schemas/DecimalU64"}
+        file_bytes: {oneOf: [{$ref: "#/components/schemas/DecimalU64"}, {type: "null"}]}
+        last_success_at_ms: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
+        last_error: {oneOf: [{$ref: "#/components/schemas/ErrorCode"}, {type: "null"}]}
+    ExternalDiff:
+      type: object
+      additionalProperties: false
+      required: [expected, editable, protected_changes, parse_error]
+      properties:
+        expected: {$ref: "#/components/schemas/Preconditions"}
+        editable:
+          type: array
+          maxItems: 128
+          items:
+            type: object
+            additionalProperties: false
+            required: [active, external]
+            properties:
+              active: {oneOf: [{$ref: "#/components/schemas/ModuleSource"}, {type: "null"}]}
+              external: {oneOf: [{$ref: "#/components/schemas/ModuleSource"}, {type: "null"}]}
+        protected_changes: {type: array, uniqueItems: true, items: {type: string, enum: [work, database, webui, protected_credentials]}}
+        parse_error: {oneOf: [{$ref: "#/components/schemas/ErrorCode"}, {type: "null"}]}
+    SystemConfigRead:
+      type: object
+      additionalProperties: false
+      required: [state, work_path, rules_path, database_path, records_path, webui_enabled, webui_address, webui_port, public_origin]
+      properties:
+        state: {$ref: "#/components/schemas/ConfigState"}
+        work_path: {$ref: "#/components/schemas/Path"}
+        rules_path: {$ref: "#/components/schemas/Path"}
+        database_path: {$ref: "#/components/schemas/Path"}
+        records_path: {$ref: "#/components/schemas/Path"}
+        webui_enabled: {type: boolean}
+        webui_address: {type: string, maxLength: 64}
+        webui_port: {type: integer, minimum: 1, maximum: 65535}
+        public_origin: {type: [string, "null"], maxLength: 4096}
+    QueryFilter:
+      type: object
+      additionalProperties: false
+      required: [from_ms, to_ms]
+      properties:
+        from_ms: {$ref: "#/components/schemas/SafeInteger"}
+        to_ms: {$ref: "#/components/schemas/SafeInteger"}
+        client_id: {$ref: "#/components/schemas/ClientId"}
+        client_ip: {type: string, maxLength: 64}
+        qname: {type: string, minLength: 1, maxLength: 253}
+        transport: {$ref: "#/components/schemas/Transport"}
+        matched_client_id: {$ref: "#/components/schemas/ClientId"}
+        client_name: {type: string, minLength: 1, maxLength: 128, description: 在完整当前目录中解析名称匹配集合，再过滤历史 matched_client_id}
+        qtype: {type: string, minLength: 1, maxLength: 16}
+        rcode: {type: string, minLength: 1, maxLength: 16}
+        source: {$ref: "#/components/schemas/QuerySource"}
+        outcome: {$ref: "#/components/schemas/QueryOutcome"}
+        cache: {$ref: "#/components/schemas/CacheOutcome"}
+    QueryRequest:
+      type: object
+      additionalProperties: false
+      required: [filter, cursor, direction, page_size, sort, order]
+      properties:
+        filter: {$ref: "#/components/schemas/QueryFilter"}
+        cursor: {oneOf: [{$ref: "#/components/schemas/Cursor"}, {type: "null"}]}
+        direction: {type: string, enum: [older, newer]}
+        page_size: {type: integer, minimum: 1, maximum: 100, default: 20}
+        sort: {type: string, enum: [occurred_at, duration], description: cursor 同时绑定排序和稳定 ID 次序}
+        order: {type: string, enum: [asc, desc]}
+    QuerySource: {type: string, enum: [cache, hosts, rule, upstream, synthetic]}
+    QueryOutcome: {type: string, enum: [answered, negative, timeout, rejected, failed]}
+    CacheOutcome: {type: string, enum: [hit, stale, miss, bypass]}
+    Transport: {type: string, enum: [udp, tcp, doh]}
+    RequestIdentity:
+      type: object
+      additionalProperties: false
+      required: [client_id, client_ip]
+      properties:
+        client_id: {oneOf: [{$ref: "#/components/schemas/ClientId"}, {type: "null"}]}
+        client_ip: {type: string, maxLength: 64}
+    HistoricalMatch:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [source, matched_client_id]
+          properties: {source: {type: string, enum: [id, ip]}, matched_client_id: {$ref: "#/components/schemas/ClientId"}}
+        - type: object
+          additionalProperties: false
+          required: [source]
+          properties: {source: {const: none}}
+    DnsAnswer:
+      type: object
+      additionalProperties: false
+      required: [name, type, ttl_seconds, data]
+      properties:
+        name: {type: string, maxLength: 253}
+        type: {type: string, maxLength: 16}
+        ttl_seconds: {type: integer, minimum: 0, maximum: 4294967295}
+        data: {type: string, maxLength: 512}
+    AnswerSummary:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state, records, total_count]
+          properties: {state: {type: string, enum: [available, truncated]}, records: {type: array, maxItems: 16, items: {$ref: "#/components/schemas/DnsAnswer"}}, total_count: {type: integer, minimum: 0, maximum: 4294967295}}
+        - type: object
+          additionalProperties: false
+          required: [state]
+          properties: {state: {const: unavailable}}
+    QueryRecord:
+      type: object
+      additionalProperties: false
+      required: [id, occurred_at_ms, identity, matched, current_client_name, qname, qtype, transport, rcode, source, outcome, cache, strategy_name, upstream_target_name, upstream_used_name, cache_producer, duration_us, dns_core_duration_us, answers]
+      properties:
+        id: {$ref: "#/components/schemas/RecordId"}
+        occurred_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+        identity: {$ref: "#/components/schemas/RequestIdentity"}
+        matched: {$ref: "#/components/schemas/HistoricalMatch"}
+        current_client_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+        qname: {type: string, maxLength: 253}
+        qtype: {type: string, maxLength: 16}
+        transport: {$ref: "#/components/schemas/Transport"}
+        rcode: {type: string, maxLength: 16}
+        source: {$ref: "#/components/schemas/QuerySource"}
+        outcome: {$ref: "#/components/schemas/QueryOutcome"}
+        cache: {$ref: "#/components/schemas/CacheOutcome"}
+        strategy_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+        upstream_target_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+        upstream_used_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+        cache_producer: {oneOf: [{$ref: "#/components/schemas/CacheProducer"}, {type: "null"}]}
+        duration_us: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
+        dns_core_duration_us: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
+        answers: {$ref: "#/components/schemas/AnswerSummary"}
+    CacheProducer:
+      type: object
+      additionalProperties: false
+      required: [strategy_name, upstream_target_name, upstream_used_name]
+      properties:
+        strategy_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+        upstream_target_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+        upstream_used_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+    CommitCursor:
+      type: object
+      additionalProperties: false
+      required: [epoch, sequence]
+      properties:
+        epoch: {$ref: "#/components/schemas/Revision"}
+        sequence: {$ref: "#/components/schemas/DecimalU64"}
+    QueryPage:
+      type: object
+      additionalProperties: false
+      required: [items, previous_cursor, next_cursor, snapshot_cursor, directory_revision, retention_revision, available_from_ms]
+      properties:
+        items: {type: array, maxItems: 100, items: {$ref: "#/components/schemas/QueryRecord"}}
+        previous_cursor: {oneOf: [{$ref: "#/components/schemas/Cursor"}, {type: "null"}]}
+        next_cursor: {oneOf: [{$ref: "#/components/schemas/Cursor"}, {type: "null"}]}
+        snapshot_cursor: {$ref: "#/components/schemas/CommitCursor"}
+        directory_revision: {$ref: "#/components/schemas/Revision"}
+        retention_revision: {$ref: "#/components/schemas/Revision"}
+        available_from_ms: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
+    QueryDetail:
+      type: object
+      additionalProperties: false
+      required: [record, directory_revision]
+      properties:
+        record: {$ref: "#/components/schemas/QueryRecord"}
+        directory_revision: {$ref: "#/components/schemas/Revision"}
+    Unavailable:
+      type: object
+      additionalProperties: false
+      required: [state, reason]
+      properties:
+        state: {const: unavailable}
+        reason: {type: string, enum: [warmup, observation_gap, sampling_failed, unsupported]}
+    NumberMeasurement:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state, value]
+          properties: {state: {const: available}, value: {type: number, minimum: 0}}
+        - {$ref: "#/components/schemas/Unavailable"}
+    CountMeasurement:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state, value]
+          properties: {state: {const: available}, value: {type: integer, minimum: 0, maximum: 4294967295}}
+        - {$ref: "#/components/schemas/Unavailable"}
+    BytesMeasurement:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [state, value]
+          properties: {state: {const: available}, value: {$ref: "#/components/schemas/DecimalU64"}}
+        - {$ref: "#/components/schemas/Unavailable"}
+    RateSample:
+      type: object
+      additionalProperties: false
+      required: [at_ms, value]
+      properties: {at_ms: {$ref: "#/components/schemas/SafeInteger"}, value: {$ref: "#/components/schemas/NumberMeasurement"}}
+    ServiceMetrics:
+      type: object
+      additionalProperties: false
+      required: [sampled_at_ms, qps, rpm, online_clients, rss_bytes, qps_trend, rpm_trend]
+      properties:
+        sampled_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+        qps: {$ref: "#/components/schemas/NumberMeasurement"}
+        rpm: {$ref: "#/components/schemas/NumberMeasurement"}
+        online_clients: {$ref: "#/components/schemas/CountMeasurement"}
+        rss_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        qps_trend: {type: array, maxItems: 600, items: {$ref: "#/components/schemas/RateSample"}}
+        rpm_trend: {type: array, maxItems: 10, items: {$ref: "#/components/schemas/RateSample"}}
+    ProcessMetrics:
+      type: object
+      additionalProperties: false
+      required: [sampled_at_ms, uptime_seconds, rss_bytes, cpu_percent, threads]
+      properties:
+        sampled_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+        uptime_seconds: {$ref: "#/components/schemas/SafeInteger"}
+        rss_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        cpu_percent: {$ref: "#/components/schemas/NumberMeasurement"}
+        threads: {$ref: "#/components/schemas/CountMeasurement"}
+    RetentionStatus:
+      type: object
+      additionalProperties: false
+      required: [policy, sampled_at_ms, detail_bytes, cutoff_utc_date, last_completed_at_ms, next_scheduled_at_ms, pending_reclaim_bytes]
+      properties:
+        policy: {$ref: "#/components/schemas/Statistics"}
+        sampled_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+        detail_bytes: {$ref: "#/components/schemas/DecimalU64"}
+        cutoff_utc_date: {type: [string, "null"], format: date}
+        last_completed_at_ms: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
+        next_scheduled_at_ms: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
+        pending_reclaim_bytes: {$ref: "#/components/schemas/DecimalU64"}
+    RetentionPreviewRequest:
+      type: object
+      additionalProperties: false
+      required: [expected, policy]
+      properties: {expected: {$ref: "#/components/schemas/Preconditions"}, policy: {$ref: "#/components/schemas/Statistics"}}
+    RetentionPreview:
+      type: object
+      additionalProperties: false
+      required: [expected, sampled_at_ms, detail_bytes, proposed_cutoff_utc_date, shortens_history]
+      properties:
+        expected: {$ref: "#/components/schemas/Preconditions"}
+        sampled_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+        detail_bytes: {$ref: "#/components/schemas/DecimalU64"}
+        proposed_cutoff_utc_date: {type: string, format: date}
+        shortens_history: {type: boolean}
+    ClientMessage:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, subscription_id]
+          properties: {type: {type: string, enum: [subscribe_metrics, unsubscribe]}, subscription_id: {$ref: "#/components/schemas/Revision"}}
+        - type: object
+          additionalProperties: false
+          required: [type, subscription_id, filter, after]
+          properties:
+            type: {const: subscribe_queries}
+            subscription_id: {$ref: "#/components/schemas/Revision"}
+            filter: {$ref: "#/components/schemas/QueryFilter"}
+            after: {$ref: "#/components/schemas/CommitCursor"}
+        - type: object
+          additionalProperties: false
+          required: [type, nonce]
+          properties: {type: {const: pong}, nonce: {$ref: "#/components/schemas/Revision"}}
+    ServerMessage:
+      oneOf:
+        - type: object
+          additionalProperties: false
+          required: [type, protocol_version, epoch]
+          properties: {type: {const: ready}, protocol_version: {const: 1}, epoch: {$ref: "#/components/schemas/Revision"}}
+        - type: object
+          additionalProperties: false
+          required: [type, subscription_id, data]
+          properties: {type: {const: metrics}, subscription_id: {$ref: "#/components/schemas/Revision"}, data: {$ref: "#/components/schemas/ServiceMetrics"}}
+        - type: object
+          additionalProperties: false
+          required: [type, subscription_id, cursor, directory_revision, items]
+          properties:
+            type: {const: queries}
+            subscription_id: {$ref: "#/components/schemas/Revision"}
+            cursor: {$ref: "#/components/schemas/CommitCursor"}
+            directory_revision: {$ref: "#/components/schemas/Revision"}
+            items: {type: array, maxItems: 100, items: {$ref: "#/components/schemas/QueryRecord"}}
+        - type: object
+          additionalProperties: false
+          required: [type, subscription_id, reason]
+          properties:
+            type: {const: resync_required}
+            subscription_id: {$ref: "#/components/schemas/Revision"}
+            reason: {type: string, enum: [epoch_changed, cursor_expired, buffer_overflow, observation_gap, retention_changed]}
+        - type: object
+          additionalProperties: false
+          required: [type, active_revision, observed_file_revision]
+          properties:
+            type: {const: config_changed}
+            active_revision: {$ref: "#/components/schemas/Revision"}
+            observed_file_revision: {$ref: "#/components/schemas/Revision"}
+        - type: object
+          additionalProperties: false
+          required: [type, nonce]
+          properties: {type: {const: ping}, nonce: {$ref: "#/components/schemas/Revision"}}

@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ipnet::IpNet;
-use serde::Deserialize;
 use serde::de::{self, DeserializeOwned, Deserializer};
+use serde::{Deserialize, Serialize, Serializer};
 use url::Url;
 
 /// The schema revision implemented by this module.
@@ -116,13 +116,13 @@ pub struct DatabaseDto {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DatabaseType {
     Sqlite,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LogsDto {
     pub enable: bool,
@@ -130,7 +130,8 @@ pub struct LogsDto {
     pub path: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum LogLevelDto {
     Trace,
     Debug,
@@ -227,7 +228,7 @@ pub struct GlobalCacheDto {
     pub persistence: CachePersistenceDto,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheMemoryDto {
     pub max_size_bytes: u64,
@@ -240,46 +241,78 @@ pub struct CachePersistenceDto {
     pub max_size_bytes: u64,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OptimisticDto {
     pub enabled: bool,
-    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
     pub answer_ttl: Duration,
-    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
     pub max_age: Duration,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheOverrideDto {
     /// Optional here so the validator can distinguish a missing `enabled` field.
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub enabled: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub optimistic: Option<OptimisticDto>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TtlOverrideDto {
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub enabled: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_optional_duration")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_duration",
+        serialize_with = "serialize_optional_duration",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub min: Option<Duration>,
-    #[serde(default, deserialize_with = "deserialize_optional_duration")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_duration",
+        serialize_with = "serialize_optional_duration",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub max: Option<Duration>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct EcsDto {
     pub mode: EcsMode,
-    #[serde(default, deserialize_with = "deserialize_optional_cidr")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_cidr",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub custom_ip: Option<IpNet>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EcsMode {
     Disabled,
@@ -293,12 +326,15 @@ pub struct ResolveLogDto {
     pub enable: bool,
     pub eviction_threshold_records: u64,
     pub max_records: u64,
-    #[serde(deserialize_with = "deserialize_duration")]
+    #[serde(
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
     pub max_record_age: Duration,
 }
 
 /// Listener variants are internally tagged so each variant has an independent strict field set.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum ListenerDto {
     #[serde(rename = "udp")]
@@ -308,7 +344,11 @@ pub enum ListenerDto {
         addresses: Vec<IpAddr>,
         port: u16,
         strategy: String,
-        #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         hosts: Option<String>,
     },
     #[serde(rename = "tcp")]
@@ -318,7 +358,11 @@ pub enum ListenerDto {
         addresses: Vec<IpAddr>,
         port: u16,
         strategy: String,
-        #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         hosts: Option<String>,
     },
     #[serde(rename = "doh")]
@@ -366,14 +410,14 @@ impl ListenerDto {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DohRouteDto {
     pub path: String,
     pub strategy: String,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DohEndpointDto {
     pub name: String,
@@ -384,38 +428,62 @@ pub struct DohEndpointDto {
     pub client_ip: ClientIpDto,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TlsDto {
     pub mode: TlsMode,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub certificate_file: Option<PathBuf>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub private_key_file: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TlsMode {
     Terminate,
     External,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientIpDto {
     pub source: ClientIpSource,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub header: Option<ForwardedHeader>,
-    #[serde(default, deserialize_with = "deserialize_optional_cidr_vec")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_cidr_vec",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub trusted_proxies: Option<Vec<IpNet>>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub on_missing: Option<ForwardedDisposition>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub on_invalid: Option<ForwardedDisposition>,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientIpSource {
     Peer,
@@ -423,7 +491,7 @@ pub enum ClientIpSource {
     ProxyProtocol,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ForwardedHeader {
     #[serde(rename = "X-Forwarded-For")]
     XForwardedFor,
@@ -433,7 +501,7 @@ pub enum ForwardedHeader {
     Forwarded,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ForwardedDisposition {
     Reject,
@@ -441,7 +509,7 @@ pub enum ForwardedDisposition {
 }
 
 /// Upstream variants with strict per-type fields.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum UpstreamDto {
     #[serde(rename = "hosts")]
@@ -455,13 +523,29 @@ pub enum UpstreamDto {
         name: String,
         #[serde(deserialize_with = "deserialize_url")]
         address: Url,
-        #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         bootstrap: Option<String>,
-        #[serde(default, deserialize_with = "deserialize_optional_ip")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_ip",
+            skip_serializing_if = "Option::is_none"
+        )]
         connect_ip: Option<IpAddr>,
-        #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         proxy: Option<String>,
-        #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         edns_client_subnet: Option<EcsDto>,
     },
     #[serde(rename = "group")]
@@ -469,13 +553,29 @@ pub enum UpstreamDto {
         name: String,
         upstreams: Vec<UpstreamMemberDto>,
         upstream_mode: UpstreamMode,
-        #[serde(deserialize_with = "deserialize_duration")]
+        #[serde(
+            deserialize_with = "deserialize_duration",
+            serialize_with = "serialize_duration"
+        )]
         timeout: Duration,
-        #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         fallbacks: Option<Vec<UpstreamMemberDto>>,
-        #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         fallback_upstream_mode: Option<UpstreamMode>,
-        #[serde(default, deserialize_with = "deserialize_optional_duration")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_duration",
+            serialize_with = "serialize_optional_duration",
+            skip_serializing_if = "Option::is_none"
+        )]
         fallback_timeout: Option<Duration>,
     },
 }
@@ -588,7 +688,7 @@ impl UpstreamDto {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpstreamMemberDto {
     pub name: String,
@@ -613,7 +713,7 @@ pub(crate) fn normalize_rule_set_selector(value: &str, max_bytes: usize) -> Opti
         .then(|| value.to_ascii_lowercase())
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpstreamMode {
     Parallel,
@@ -622,34 +722,62 @@ pub enum UpstreamMode {
     Failover,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategyDto {
     pub name: String,
     pub rules: Vec<StrategyRuleDto>,
     pub default_upstream: String,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub cache: Option<CacheOverrideDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub ttl_override: Option<TtlOverrideDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub edns_client_subnet: Option<EcsDto>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct StrategyRuleDto {
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub rule_set: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub hosts: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub upstream: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub edns_client_subnet: Option<EcsDto>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum HostsResourceDto {
     #[serde(rename = "const")]
@@ -665,7 +793,12 @@ pub enum HostsResourceDto {
         path: PathBuf,
         #[serde(default)]
         auto_update: bool,
-        #[serde(default, deserialize_with = "deserialize_optional_duration")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_duration",
+            serialize_with = "serialize_optional_duration",
+            skip_serializing_if = "Option::is_none"
+        )]
         update_interval: Option<Duration>,
     },
 }
@@ -698,14 +831,14 @@ impl HostsResourceDto {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum HostsFormat {
     Json,
     Hosts,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutboundDto {
     pub name: String,
@@ -714,13 +847,13 @@ pub struct OutboundDto {
     pub proxy_url: SecretRefDto,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutboundType {
     Socks5,
 }
 
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum RuleSetDto {
     #[serde(rename = "const")]
@@ -736,7 +869,12 @@ pub enum RuleSetDto {
         path: PathBuf,
         #[serde(default)]
         auto_update: bool,
-        #[serde(default, deserialize_with = "deserialize_optional_duration")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_duration",
+            serialize_with = "serialize_optional_duration",
+            skip_serializing_if = "Option::is_none"
+        )]
         update_interval: Option<Duration>,
     },
     #[serde(rename = "remote")]
@@ -745,11 +883,20 @@ pub enum RuleSetDto {
         format: RuleSetFormat,
         #[serde(deserialize_with = "deserialize_url")]
         url: Url,
-        #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_non_null",
+            skip_serializing_if = "Option::is_none"
+        )]
         proxy: Option<String>,
         #[serde(default)]
         auto_update: bool,
-        #[serde(default, deserialize_with = "deserialize_optional_duration")]
+        #[serde(
+            default,
+            deserialize_with = "deserialize_optional_duration",
+            serialize_with = "serialize_optional_duration",
+            skip_serializing_if = "Option::is_none"
+        )]
         update_interval: Option<Duration>,
     },
 }
@@ -839,7 +986,7 @@ impl RuleSetDto {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RuleSetFormat {
     Json,
@@ -896,12 +1043,20 @@ impl fmt::Debug for ClientMatchDto {
 }
 
 /// A secret source. Its debug representation intentionally omits source details and value.
-#[derive(Clone, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SecretRefDto {
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub env: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_non_null",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub file: Option<PathBuf>,
 }
 
@@ -929,6 +1084,27 @@ where
         D: Deserializer<'de>,
     {
         Option::<T>::deserialize(deserializer).map(|value| value.map_or(Self::Null, Self::Value))
+    }
+}
+
+/// 源 DTO 的 duration 使用字符串传输，不泄漏 Rust Duration 的内部字段布局。
+pub(super) fn serialize_duration<S>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&format!("{}ns", value.as_nanos()))
+}
+
+pub(super) fn serialize_optional_duration<S>(
+    value: &Option<Duration>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serialize_duration(value, serializer),
+        None => serializer.serialize_none(),
     }
 }
 

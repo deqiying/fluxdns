@@ -175,6 +175,12 @@
 
 ## 4. 回填与退出
 
-P0 技术核定：T-01 的新字段默认值、名称/ID/单位/预算已落实到[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)与 Rust 内部契约。T-02/03 的 API、路由和操作状态随 BC-01 下一语义单元落实；T-04/05/07/08 按原任务时机保留，P0 未进行 owner、浏览器或 2ms 验收。T-06 当前无需新增依赖或升级工具链。
+P0 技术核定：
+
+- T-01 已落实到[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)及 Rust 新契约：默认值、名称/ID/单位/上界；物理路径 alias 留 owner 打开前检查。
+- T-02 已冻结 [v2 HTTP/WS schema](../../frontend/openapi/management-api-v2.yaml)、双 revision、操作状态、源/生效/运行投影和 12 路由；当前未注册 v2 handler，正式切换须一并处理 auth/client/代理/fallback。
+- T-03 已固定配置/候选/查询/内联/cursor 预算和错误码/HTTP 映射，并测试本阶段 parser/decoder 超限；实际文件读取、分页 cursor 签名/过滤水位和 deadline 留 BE-02/05/07/08 接线。
+- T-06 仅为现有 Rust 依赖启用 serde feature，以及将现有锁定版本的 schema 测试依赖显式列为 devDependencies；版本/许可证/体积边界见[交付实现](../implementation/delivery.md#前端与接口生成)，未升级工具链。
+- T-04、T-05 的 owner/采样/WS 运行限额、T-07 的实际表单交互、T-08 的 Windows 流量与 2ms 测量仍未实施；T-05 初始数值已进入 schema，但未用真实连接验证。后续核定仍由实施者负责，不重新询问 D-01 至 D-12。
 
 确认后的技术细节同步对应任务和正式 schema，不在多处维护相互冲突的默认值。实施完成后按项目规则沉淀架构/实现事实，再删除本决策文件及相应活动计划；Git 保存历史，不另建归档。

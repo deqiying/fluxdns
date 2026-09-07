@@ -16,14 +16,14 @@
 
 ## 1. 范围与实现原则
 
-本计划按确认决策重订 B1-B8，保留身份矩阵、快照协议和保留算法，取消旧版迁移与兼容。本次不执行代码改造；新补充实现细节待评审，用户已确认的产品方向不重新提问。
+本计划按确认决策重订 B1-B8，保留身份矩阵、快照协议和保留算法，取消旧版迁移与兼容。2026-09-07 已获准实施 P0；其余任务仍为未执行计划，用户已确认的产品方向不重新提问。
 
 - 沿 `Config -> Runtime -> DNS/Policy -> ports -> adapters` 扩展；Management handler 不直接操作 SQLx pool、DNS 缓存集合或源 YAML。
 - 请求路径只捕获 typed 事实、执行 DNS 与发布有界事件；快照、历史查询、名称关联、清理和磁盘写入全部在后台。
 - 复用现有候选校验、CAS、进程 owner、Supervisor、ConfigStore journal、SQLx 和 batch ledger；不能再建立后台专属的第二套配置或存储权威。
 - active/persisted/file revision、运行 revision、目录 revision、缓存 owner/generation、存储 layout version 和 WS stream epoch 各司其职。
 - 使用新 schema 和新数据基线，不维护旧身份/统计 legacy 读取；新生产接线完成后删除直接被替代旧代码。
-- 常见组件/依赖按 D-08 已获任务范围授权，优先复用并说明必要性；本轮不实际安装或替换框架。
+- 常见组件/依赖按 D-08 已获任务范围授权，优先复用并说明必要性；不借本阶段升级工具链或替换框架。
 
 ## 2. 任务与源码边界
 
@@ -46,9 +46,13 @@
 
 ## 3. BE-01：冻结版本和类型契约
 
-P0 进度：BC-01 拆分为配置内部契约、API/跨端契约两个可编译语义单元。配置内部契约已完成，字段和边界见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)；API/生成类型及完整检查点尚待完成。生产加载器不提前使用尚未接线的新 owner。
+P0 进度：BC-01 的配置内部契约和 API/跨端契约两个语义单元已落实。配置单元提交为 `166e59e`（`refactor(config): 定义新版配置与校验契约`）；字段和边界见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)，API/状态/预算及测试见[Management 实现](../implementation/backend/management.md#p0-v2-契约)。生成类型和 12 路由/表单契约可供后续消费，但没有新页面或 v2 handler 接线。
+
+BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 fixture 仅通过离线新契约解析，不能作为生产启动成功证据。BC-01 契约交付不等于 BE-01/BC-26 的生产切换和完整验收全部完成。下个准确起点是 P1 的 BC-02：在现有 ConfigStore 上保留活动源及双 revision，消费本契约构建候选与名称引用修改；需另行授权 P1，不提前执行。
 
 配置单元验证（Windows，2026-09-07）：Rust 1.98.0 / Node 26.8.1 / pnpm 11.25.0；`cargo test --manifest-path backend/Cargo.toml config:: --bin fluxdns` 53 通过，含 7 个新增 v2 测试；`cargo fmt --manifest-path backend/Cargo.toml -- --check`、前端 `pnpm run typecheck`、文档检查器和 `git diff --check` 通过。项目只有 binary target，最初 `--lib` 调用已修正；夹具的规则/mode 和裸 null 解析问题已回归通过。未运行新格式生产启动、磁盘 alias 防护、浏览器或性能测试。
+
+跨端单元验证（同日同工具链，Windows）：后端 `management:: --bin fluxdns` 18 项、`config:: --bin fluxdns` 53 项通过；`cargo test --manifest-path backend/Cargo.toml --all-targets --no-run` 编译全部测试目标通过，未执行全量 Cargo suite；Rust fmt check 通过。前端 `generate:api` 连续两次 SHA-256 一致，当前 v1 产物无 diff；`typecheck`、`test:contract:v2` 3 项、`test` 7 文件 38 项及 `build` 通过。Node/Vite 子进程在沙盒内曾被 EPERM 阻止，经批准外部重跑通过；Vitest 的 Node localStorage 实验性警告不影响结果。文档检查器与 `git diff --check` 通过。定向复核修复了路径反向父子冲突、WS 筛选绕过 REST 校验及 schema 的 u64 上界；不把既有 HTTP 测试当作新版 handler/WS 验收，也未执行 BC-26 启动、P5/2ms、跨平台或浏览器验收。
 
 ### 开发步骤
 
@@ -64,7 +68,7 @@ P0 进度：BC-01 拆分为配置内部契约、API/跨端契约两个可编译�
 
 - 每个字段能追溯到需求、图稿或现有 schema；不存在虚构 listener 开关、额外上游协议、缓存持久化配额。
 - 严格解析测试覆盖未知字段、类型分支残留、单位/溢出、非法 CIDR、路径别名/碰撞、缺失/禁用与引用环。
-- 新版本 fixture 可直接启动；旧格式明确拒绝，不实现旧配置转换预览或猜测映射。
+- 新版本 fixture 经 BC-26 接线后可直接启动；旧格式明确拒绝，不实现旧配置转换预览或猜测映射。P0 已验证内部 parser 拒绝旧格式，正式 loader 切换/启动尚未验收。
 - FE-01/FE-02 可使用生成类型开始开发，但不把 fixture 当作正式 handler 已就绪。
 
 ## 4. BE-02：配置事务、revision 与运行时应用

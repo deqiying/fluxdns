@@ -1,12 +1,12 @@
 # WebUI 配置热更新与文件同步专项计划
 
-> 文档状态：草案
+> 文档状态：有效
 >
-> 计划状态：待评审
+> 计划状态：实施中
 >
 > 适用范围：D-02 的运行时优先应用、受管文件同步、外部差异处理及 D-03 的原子引用更新
 >
-> 代码基线：`21fd23f3f711e2f7acc712b9ff715915c5248180`（2026-09-07 源码静态核对；未实施或运行测试）
+> 代码基线：`21fd23f3f711e2f7acc712b9ff715915c5248180`（原方案静态基线）；P0 从 `007f943` 实施，下述差距不视为已完成
 >
 > 上位依据：[决策清单](webui-management-decisions.md) · [开发总计划](webui-management-development-plan.md)
 
@@ -23,7 +23,7 @@
 | [service.rs](../../backend/src/service.rs) `process_owned_reload_change` | database、logs、部分 webui、resolve_log 变化被拒绝 | 日志和详情开关改为可控热切换；启动级字段保留明确限制 |
 | [observability.rs](../../backend/src/observability.rs) | 已有 reloadable filter/layer 与共享输出；app 在 logs 开启时才创建 writer | 复用 handle，设计始终存在的进程 owner 及 off/on 生命周期，不重复安装 subscriber |
 
-目前代码并未实现本专项流程。尤其不能因为已有 `reload_prepared` 就宣称任意 listener 变化或全部提交失败都能自动恢复旧服务。
+2026-09-07 P0 已落实 revision、操作结果、配置读/变更和外部差异的内部 DTO/生成类型，详见 [Management 契约事实](../implementation/backend/management.md#p0-v2-契约)。目前代码并未实现本专项运行流程：活动源、控制命令、先应用后持久化、仅提示 watcher 和恢复均留 BC-02/03/29/30/31。不能因为已有 `reload_prepared` 就宣称任意 listener 变化或全部提交失败都能自动恢复旧服务。
 
 ## 2. 配置状态与权威
 
@@ -34,7 +34,7 @@
 | `active_source` | 本进程当前活动配置的原始 DTO/可编辑语法树，保留相对路径、SecretRef、继承、显式缺省和允许的注释 |
 | `active_revision` | 管理写入的活动配置版本；与一次请求捕获的 RuntimeRevision 明确关联，不混用资源刷新 epoch |
 | `persisted_revision` | 已完成全部受管文件同步的活动版本；未持久化时可落后 |
-| `observed_file_revision` | 当前源文件的内容 fingerprint 或缺失/不可读状态，防止覆盖预览后发生的新修改 |
+| `observed_file_revision` | 源文件与派生副本的组合观测 token，覆盖 fingerprint 及缺失/不可读状态，防止任一文件在预览后再次变化 |
 | `operation_id` / 同步状态 | 有界记录一次操作的准备、应用、持久化及结果；HTTP 丢失后查询，不能自动重放 |
 
 operation_id 由客户端在发送前固定，并由服务端在有界窗口内关联命令摘要和结果；同 ID 不允许提交不同内容。记录已过期时明确返回结果未知，再回读活动版本/资源判断，不把找不到操作当作未执行。
@@ -164,4 +164,4 @@ operation_id 由客户端在发送前固定，并由服务端在有界窗口内�
 
 Windows 本机必须覆盖：正常保存持续请求、名称和引用整批变化、修改一项 listener 不重绑未变入口、外部改文件但 DNS 不变化、无效/删除/重复外改、还原、组合采用、普通保存丢弃差异确认、日志关开/换路径、磁盘写失败、双文件各 crash point、HTTP 丢失、旧请求 drain、并发资源刷新与配置写入。
 
-配套核心耗时验收遵循 D-11。Linux 特有代码进行源码审查，未运行的测试标为未验证，不作为本轮阻塞项。只有真实接线和上述测试通过后，才能将本专项沉淀到 Config/Runtime/Management 架构与实现文档；目前所有工作待实施。
+配套核心耗时验收遵循 D-11。Linux 特有代码进行源码审查，未运行的测试标为未验证，不作为本轮阻塞项。P0 只沉淀已验证的内部契约；本专项运行流程必须在真实接线和上述测试通过后再记录为正式实现，不能借 DTO 测试提前标记通过。

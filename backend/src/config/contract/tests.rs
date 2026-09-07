@@ -174,12 +174,24 @@ fn two_level_paths_and_lexical_collisions() {
     for path in [
         "./data/queries/other.db",
         "./data/../data/statistics.sqlite3",
+        "./data/statistics.sqlite3/cache.db",
+        "./data",
         "./config.yaml",
+        "./config.yaml/cache.db",
         "./logs/fluxdns.log",
     ] {
         let mut cache = GlobalCacheV2::default();
         cache.persistence.path = path.into();
         config.dns.cache = Some(cache);
+        assert!(config.resolve_paths(&source).is_err(), "{path}");
+    }
+    config.dns.cache = None;
+    for path in [
+        "./data/statistics.sqlite3/records",
+        "./logs/fluxdns.log/records",
+        "./config.yaml/records",
+    ] {
+        config.database.records_path = path.into();
         assert!(config.resolve_paths(&source).is_err(), "{path}");
     }
     assert!(

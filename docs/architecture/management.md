@@ -10,7 +10,9 @@
 
 Management 使用独立 HTTP listener 与 Axum router，不扩展 DoH 的有界 DNS parser。框架类型限定在 adapter 内；Runtime、Storage、Resource 和 DNS ports 只暴露领域类型。读数据通过 snapshot 或 `ManagementStorageRead`，不让 handler 持有 SQLx pool。
 
-API 字段、状态码和错误 envelope 的完整权威是 [OpenAPI](../../frontend/openapi/management-api-v1.yaml)，本文不复制 schema。实际 handler、middleware 和参数上限见[管理端实现](../implementation/backend/management.md)。
+当前正式 API 字段、状态码和错误 envelope 的完整权威是 [v1 OpenAPI](../../frontend/openapi/management-api-v1.yaml)，本文不复制 schema。P0 已冻结 [v2 目标契约](../../frontend/openapi/management-api-v2.yaml)，内部实现和未接线边界见[管理端实现](../implementation/backend/management.md#p0-v2-契约)；v1/v2 不作为并行兼容服务。
+
+v2 配置读写以活动源表达为权威，模块严格白名单，`name` 为管理/引用键，`client_id` 只负责请求身份且普通编辑不可修改。配置先运行时应用后持久化，操作结果和文件同步状态分开；外部变化只提示，不自动 reload。未来正式切换必须把鉴权、Origin、handler、client 与 SPA fallback 一并接入，不能只挂上尚无 owner 的写路由。不新增角色管理。
 
 ## 生命周期与失败
 

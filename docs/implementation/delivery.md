@@ -16,7 +16,11 @@
 
 ## 前端与接口生成
 
-[`frontend/package.json`](../../frontend/package.json) 定义 `dev`、`generate:api`、`typecheck`、`test` 和 `build`。`generate:api` 从 [OpenAPI](../../frontend/openapi/management-api-v1.yaml) 生成 [`shared/api/generated.ts`](../../frontend/src/shared/api/generated.ts)，生成文件不人工编辑。
+[`frontend/package.json`](../../frontend/package.json) 定义 `dev`、`generate:api`、`typecheck`、`test` 和 `build`。`generate:api` 顺序执行 `generate:api:current` 与 `generate:api:v2`：当前 [v1 OpenAPI](../../frontend/openapi/management-api-v1.yaml) 生成 [`generated.ts`](../../frontend/src/shared/api/generated.ts)，P0 [v2 目标契约](../../frontend/openapi/management-api-v2.yaml) 生成 [`generated-v2.ts`](../../frontend/src/shared/api/generated-v2.ts)。生成文件不人工编辑；独立产物只服务分阶段编译，不代表运行时双版本兼容，正式切换时删除被替代的 v1 产物。
+
+`test:contract:v2` 用 Node 自带 test runner 运行 OpenAPI 3.1 schema 校验，与 Rust 消费同一个 [JSON 夹具](../../backend/tests/fixtures/management-v2.json)。它独立于 Vitest UI suite；`test` 不会自动包含该检查，契约变化必须额外执行。该检查不启动服务，不验证真实 HTTP/WS 或完整配置引用语义。
+
+P0 依赖核定（2026-09-07）：`@redocly/ajv 8.11.2`、`js-yaml 4.3.1` 原已在锁文件作为间接依赖，本次按 D-08 显式加入 devDependencies，复用现有版本进行 JSON Schema/YAML 校验，不依赖隐式 hoist，不引入生产包。后端仅为既有 `ipnet 2.12.1`、`url 2.5.8` 开启 serde feature，避免复制 IP/URL 序列化逻辑，无 crate 版本升级。许可证及版本已按本地 package manifest 核对；前端两项为 MIT，后端两项为 MIT OR Apache-2.0。新增前端测试依赖不进入生产 bundle；Rust serde feature 可能增加编译产物，未测量其单独字节增量。未升级或安装工具链。
 
 [`vite.config.ts`](../../frontend/vite.config.ts) 在开发时把 `/api` 代理到 `http://127.0.0.1:8080`；浏览器仍请求同源相对路径。`VITE_USE_MOCK_API=true` 只在 DEV bootstrap 启用 MSW，生产构建不携带 mock worker 或 source map。完整生成与验证命令见[前端 README](../../frontend/README.md)。
 

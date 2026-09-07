@@ -2,6 +2,7 @@
 
 mod assets;
 mod auth;
+pub(crate) mod contract;
 mod query;
 mod router;
 mod server;

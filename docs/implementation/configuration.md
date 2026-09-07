@@ -35,7 +35,7 @@
 
 共享 listener、上游、策略、Hosts、规则集、代理、SecretRef 和认证字段继续复用 [model](../../backend/src/config/model.rs)；共享资源引用、循环、socket 冲突和语义复用 [validate](../../backend/src/config/validate.rs)，没有另造旧版本转换层。名称和 ID 的请求期索引/历史事实属于 BC-04/05，P0 仅验证配置契约。
 
-`resolve_paths` 是无 I/O 的词法检查：拒绝统计/快照相互碰撞、侵入详情目录及受保护配置/日志路径，Windows 比较不区分大小写。它不证明路径不存在 symlink、reparse point、hard link 或其他物理别名；真正打开目标前的身份校验、旁文件保护和恢复由 BC-26/07/08/29 owner 完成。
+`resolve_paths` 是无 I/O 的词法检查：拒绝统计/快照相互碰撞、与详情目录及受保护配置/日志路径重叠，包括逻辑文件成为另一目标父路径的反向冲突，Windows 比较不区分大小写。它不证明路径不存在 symlink、reparse point、hard link 或其他物理别名；真正打开目标前的身份校验、旁文件保护和恢复由 BC-26/07/08/29 owner 完成。
 
 ### 当前生产加载器
 
