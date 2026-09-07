@@ -23,7 +23,7 @@
 | [service.rs](../../backend/src/service.rs) `process_owned_reload_change` | database、logs、部分 webui、resolve_log 变化被拒绝 | 日志和详情开关改为可控热切换；启动级字段保留明确限制 |
 | [observability.rs](../../backend/src/observability.rs) | 已有 reloadable filter/layer 与共享输出；app 在 logs 开启时才创建 writer | 复用 handle，设计始终存在的进程 owner 及 off/on 生命周期，不重复安装 subscriber |
 
-2026-09-07 P0 已落实 revision、操作结果、配置读/变更和外部差异的内部 DTO/生成类型，详见 [Management 契约事实](../implementation/backend/management.md#p0-v2-契约)。追加授权的 P1 已落实 BC-02 活动源、定向候选、双文件只读观测和操作仲裁内部入口，详见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。正式控制命令、先应用后持久化、仅提示 watcher 和恢复仍留 BC-03/29/30/31；内部观测方法不等于 app watcher 已改变。不能因为已有 `reload_prepared` 或状态机成功回报就宣称实际 listener/owner 已完成切换或补偿。
+2026-09-07 P0 已落实 revision、操作结果、配置读/变更和外部差异的内部 DTO/生成类型，详见 [Management 契约事实](../implementation/backend/management.md#p0-v2-契约)。追加授权的 P1 已落实 BC-02 活动源、定向候选、双文件只读观测和操作仲裁内部入口，详见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。BC-03 的有界服务队列消费者已接入原服务循环，但 v2 活动源/operation 生产者、先应用后持久化、仅提示 watcher 和恢复仍留 BC-03/29/30/31；内部观测方法不等于 app watcher 已改变。不能因为已有 `reload_prepared` 或状态机成功回报就宣称新版全部 owner 已完成切换或补偿。
 
 ## 2. 配置状态与权威
 

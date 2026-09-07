@@ -73,7 +73,7 @@ BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 f
 
 ## 4. BE-02：配置事务、revision 与运行时应用
 
-BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件有界观测、版本分离、调用者/候选/双版本绑定票据、有界幂等操作和中断阻塞；定向源编辑已覆盖类型化引用、组合候选完整语义/路径校验及编辑后等价核对。实现与测试权威见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。尚未提供正式 v2 loader/resolve、资源/socket prepare、服务控制命令、持久化/journal、状态端点或新版 setup；应用回报测试仅为状态机模拟。因此 BC-02 生产接线子项保留，不能据此关闭 P1 或 BC-03/29/30。
+BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件有界观测、版本分离、调用者/候选/双版本绑定票据、有界幂等操作和中断阻塞；定向源编辑已覆盖类型化引用、组合候选完整语义/路径校验及编辑后等价核对。实现与测试权威见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。尚未提供正式 v2 loader/resolve、候选到资源/socket prepare 的转换、持久化/journal、状态端点或新版 setup；应用回报测试仅为状态机模拟。BC-03 已有[有界服务队列消费者](../implementation/backend/lifecycle.md#p1-服务控制队列子项2026-09-07)，但未连接 v2 活动源/operation 生产者。因此 BC-02 生产接线子项保留，不能据此关闭 P1 或 BC-03/29/30。
 
 完整状态机、热更新矩阵和失败语义只维护于[配置热更新专项](webui-management-config-runtime-plan.md)，本节列后端开发步骤：
 

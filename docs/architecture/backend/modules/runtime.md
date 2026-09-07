@@ -89,7 +89,9 @@ Config 的 `BindPlan` 是经过校验的 `BindEntry` 列表，记录底层 UDP/T
 
 ## 6. Coordinator 与 CAS
 
-service 的配置发布先取得 `ServiceActivation`：在 mutation gate 下合并状态，但不替换当前实例。任务先注册、等待共享启动闸门，再执行最终 CAS，成功后无 await 地换代服务集合并放行。准备失败不需要回退已发布 Runtime，因为候选从未发布；不能将此语义扩大为未来所有进程 owner 均可无损补偿。服务控制命令和新配置 owner 的接线仍属于 BC-03 剩余工作，证据见[任务预注册实现](../../../implementation/backend/lifecycle.md#p1-任务预注册子项2026-09-07)。
+service 的配置发布先取得 `ServiceActivation`：在 mutation gate 下合并状态，但不替换当前实例。任务先注册、等待共享启动闸门，再执行最终 CAS，成功后无 await 地换代服务集合并放行。准备失败不需要回退已发布 Runtime，因为候选从未发布；不能将此语义扩大为未来所有进程 owner 均可无损补偿。新配置 owner 和活动源回报仍属于 BC-03 剩余工作，证据见[任务预注册实现](../../../implementation/backend/lifecycle.md#p1-任务预注册子项2026-09-07)。
+
+`ServiceControl` 向既有 service 循环提交有界命令，容量为一个排队候选加一个当前执行候选；版本/deadline 在入队与消费边界核对，失败不自动重试。回执断开不等于未执行，配置事务 owner 必须另外维护 operation 并查询收敛。服务消费者已接线，但 v2 ConfigStore/Management 生产者尚未接入，见[服务控制队列实现](../../../implementation/backend/lifecycle.md#p1-服务控制队列子项2026-09-07)。
 
 `RuntimeCoordinator` 串行处理配置候选、资源更新和 fatal 状态迁移。Application 的配置 fingerprint 轮询只负责产生 reload 触发，不绕过 coordinator；资源刷新可以并行执行，但发布必须满足：
 

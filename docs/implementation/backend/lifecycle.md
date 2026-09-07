@@ -46,7 +46,7 @@ TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于�
 
 Windows Rust 1.98.0 定向证据：`runtime::bind::tests` 6 项、`service::tests::reload` 7 项通过；扩大到 `runtime::` 筛选回归 64 项通过（包含同名 cache runtime 测试），全部 Cargo 测试目标 `--no-run` 编译、fmt、文档及 diff 检查通过。新增 fake factory 用例核对改名复用、只准备变更端口、prepare/activate 失败后引用与释放计数；真实 loopback 用例仅改变 UDP 端口，确认 TCP/DoH 句柄 `Arc::ptr_eq`，在切换前后及占用新端口导致拒绝后执行 UDP/TCP/DoH POST/GET 查询，校验关联 ID、RCODE 和 canonical 响应一致。新用例不打开数据库、不加载个人配置，配置工作路径为 `_fluxdns/p1-service-differential`，端口由系统临时分配。
 
-这只是 BC-03 已接入现有 service 的差量 socket 子项，不是完整 BC-03。后续任务预注册和请求 drain 实现见下文；仍需有界服务控制命令、新配置 owner 的真实补偿与完整应用成功边界，以及 BC-02 到运行 owner 的接线。真实测试使用当前生产支持的 v1 配置，不证明 v2 loader、HTTP/WS、持续无丢包热更新或日志切换已可用。
+这只是 BC-03 已接入现有 service 的差量 socket 子项，不是完整 BC-03。后续任务预注册、请求 drain 和服务控制队列实现见下文；仍需新配置 owner 的真实补偿与完整应用成功边界，以及 BC-02 到运行 owner 的接线。真实测试使用当前生产支持的 v1 配置，不证明 v2 loader、HTTP/WS、持续无丢包热更新或日志切换已可用。
 
 ### P1 任务预注册子项（2026-09-07）
 
@@ -56,7 +56,7 @@ Windows Rust 1.98.0 定向证据：`runtime::bind::tests` 6 项、`service::test
 
 Windows 定向验证包括真实 Supervisor 的 transport ID 冲突和 transport 注册成功后的 resource ID 冲突、候选任务回收、同 revision 重新准备后成功，以及失败前后真实 UDP 查询；用例目录为 `_fluxdns/p1-service-stage/` 的独立随机目录。闸门测试覆盖放行与丢弃，coordinator 测试覆盖不发布准备态和最终 CAS 竞争。`service::tests::` 筛选 61 项通过、3 项按原有声明 ignored（包含 cache/storage 同名测试；不执行手动性能与 1024-session 专项）；`runtime::` 筛选 65 项通过，含既有资源交错、mutation deadline、owner 回收回归。全部测试目标 `--no-run` 编译、fmt、文档和 diff 检查通过。
 
-此处保证的是已有 DNS transport/resource 任务注册失败的前置拒绝，不声称日志/详情/新存储 owner 已加入事务或存在通用补偿器。有界服务命令、operation/active_source 的正式应用回报和 v2 启动仍未接线；BC-03、BC-29 与 P1 退出条件继续保留。
+此处保证的是已有 DNS transport/resource 任务注册失败的前置拒绝，不声称日志/详情/新存储 owner 已加入事务或存在通用补偿器。operation/active_source 的正式应用回报和 v2 启动仍未接线；BC-03、BC-29 与 P1 退出条件继续保留。
 
 ### P1 请求 drain 子项（2026-09-07）
 
@@ -65,6 +65,14 @@ Windows 定向验证包括真实 Supervisor 的 transport ID 冲突和 transport
 三类 dispatch 均以请求入站时捕获的 deadline 为兜底，包括 Core 不合作的情况；不会从热更新时重新计算预算。超时取消原请求和 response handle，不伪造成功响应。guard 并发接纳失败也通过统一释放路径通知归零。服务任务完成后清除已 drain 的历史 Runtime owner 引用，避免已移除端口被历史实例长期持有。
 
 Windows Rust 1.98.0 验证：新增 2 项真实 loopback 测试覆盖复用/差量重绑时 4 条旧 UDP/TCP/DoH POST/GET 请求仍返回旧 Core 响应、新请求已由新 Core 响应、旧任务回收和旧 UDP 端口可重新绑定；不合作 Core 的 200ms 原始预算能释放 3 类请求且新实例继续服务。`service::tests::` 筛选 63 项通过、3 项按原声明 ignored。这里的“已接纳”以 request guard 为边界，不声称操作系统尚未交给 Runtime 的流量、任意规模持续负载或跨平台已无丢包验收。
+
+### P1 服务控制队列子项（2026-09-07）
+
+[`service/control.rs`](../../../backend/src/service/control.rs) 提供单候选排队的 `ServiceControl`，另有一个由现有 `DnsService` 执行的应用槽。`try_apply` 只接受已准备且为 expected + 1 的 Runtime，队列满、已过期或 owner 已关闭时明确拒绝；服务循环消费时再次核对 revision/deadline，再走同一个 `reload_prepared`，不复制 Supervisor，也不增加重启/停止命令。
+
+回执超时或通道断开是 `OutcomeUnknown`，不会自动重发；调用者丢弃回执也不撤销已接纳命令。关闭 owner 会停止接纳并拒绝尚在排队的命令；应用等待 mutation gate 时仍可响应退出信号，中断的命令回执只能报告未知。该队列尚未连接 ConfigStore 的 operation owner，不独立提供可查询操作记录或 HTTP 幂等保证。
+
+Windows 新增 6 项测试覆盖容量、入队/出队过期、关闭、真实服务循环换代、丢弃回执后继续应用、旧 revision 拒绝、真实绑定失败后旧 DNS 可查询、回执丢失/超时，以及提交锁等待期间退出。`service::` 筛选 69 项通过、3 项按原声明 ignored。夹具仍为生产 v1 的内存配置，工作路径指向 `_fluxdns/p1-service-control`，无新数据库布局；不能把队列消费者接线解释为 v2 Management 候选已可保存。
 
 ## Shutdown 与错误
 

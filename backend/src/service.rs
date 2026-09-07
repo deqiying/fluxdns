@@ -188,6 +188,9 @@ const TELEMETRY_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 
 type ServiceReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ServiceError>> + 'a>>;
 
+mod control;
+pub(crate) use control::ServiceControl;
+
 /// 已绑定 listener 的 DNS service；所有 receive loop 都由同一个 Supervisor 持有。
 pub struct DnsService {
     runtime: Arc<ActiveRuntime>,
@@ -205,6 +208,9 @@ pub struct DnsService {
     telemetry_sampler: Option<Arc<TelemetrySampler>>,
     management: Option<Arc<ManagementRuntime>>,
     management_cancellation: Option<Cancellation>,
+    #[allow(dead_code)] // v2 配置事务生产者接线前，仅测试取得命令句柄。
+    control: ServiceControl,
+    control_commands: tokio::sync::mpsc::Receiver<control::ApplyCommand>,
 }
 
 #[derive(Clone)]
@@ -404,6 +410,7 @@ impl DnsService {
             telemetry.clone(),
         )?;
 
+        let (control, control_commands) = control::channel();
         Ok(Self {
             runtime,
             coordinator,
@@ -420,6 +427,8 @@ impl DnsService {
             telemetry_sampler,
             management: None,
             management_cancellation: None,
+            control,
+            control_commands,
         })
     }
 
@@ -489,6 +498,44 @@ impl DnsService {
 
     pub fn runtime(&self) -> &Arc<ActiveRuntime> {
         &self.runtime
+    }
+
+    /// 管理事务只取得命令句柄，不取得 service 或 Supervisor 的可变所有权。
+    #[allow(dead_code)] // 不把旧 watcher 包装为新版候选生产者。
+    pub(crate) fn control(&self) -> ServiceControl {
+        self.control.clone()
+    }
+
+    async fn apply_control_command(&mut self, command: control::ApplyCommand) {
+        let result = if command.deadline.is_expired(Instant::now()) {
+            Err(control::ControlError::Expired)
+        } else {
+            let actual = self.coordinator.current_revision();
+            if command.expected != actual || self.runtime.revision() != actual {
+                Err(control::ControlError::RevisionConflict {
+                    expected: command.expected,
+                    actual,
+                })
+            } else {
+                self.reload_prepared(
+                    command.prepared,
+                    &crate::runtime::SystemSocketFactory::new(),
+                    command.deadline,
+                    Cancellation::new(),
+                )
+                .await
+                .map(|runtime| runtime.revision())
+                .map_err(control::ControlError::Apply)
+            }
+        };
+        // 接收方离开不能回滚已应用运行态；配置事务 owner 必须保留自己的 operation 记录。
+        if command.reply.send(result).is_err() {
+            tracing::debug!(
+                event = "configuration_receipt_dropped",
+                component = "service",
+                "configuration caller no longer awaits the service receipt"
+            );
+        }
     }
 
     pub fn coordinator(&self) -> &Arc<RuntimeCoordinator> {
@@ -722,6 +769,10 @@ impl DnsService {
         clock: &dyn Clock,
         deadline: crate::dns::Deadline,
     ) -> Result<ShutdownReport, ServiceError> {
+        self.control_commands.close();
+        while let Ok(command) = self.control_commands.try_recv() {
+            let _ = command.reply.send(Err(control::ControlError::Unavailable));
+        }
         if let Some(management) = &self.management {
             management.shutdown();
         }
@@ -918,15 +969,34 @@ impl DnsService {
         &mut self,
         grace_period: Duration,
         poll_interval: Duration,
-        mut on_poll: F,
+        on_poll: F,
     ) -> Result<ShutdownReport, ServiceError>
     where
         F: for<'a> FnMut(&'a mut DnsService) -> ServiceReloadFuture<'a>,
     {
+        self.run_with_reload(
+            grace_period,
+            poll_interval,
+            on_poll,
+            wait_for_termination_signal(),
+        )
+        .await
+    }
+
+    async fn run_with_reload<F, S>(
+        &mut self,
+        grace_period: Duration,
+        poll_interval: Duration,
+        mut on_poll: F,
+        signal: S,
+    ) -> Result<ShutdownReport, ServiceError>
+    where
+        F: for<'a> FnMut(&'a mut DnsService) -> ServiceReloadFuture<'a>,
+        S: Future<Output = Result<(), ServiceError>>,
+    {
         if poll_interval.is_zero() {
             return Err(ServiceError::Signal);
         }
-        let signal = wait_for_termination_signal();
         tokio::pin!(signal);
         let mut poll = tokio::time::interval(poll_interval);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -934,25 +1004,7 @@ impl DnsService {
             tokio::select! {
                 result = &mut signal => {
                     result?;
-                    let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
-                    let clock = SystemClock::new();
-                    let shutdown = self.shutdown(&clock, deadline);
-                    tokio::pin!(shutdown);
-                    let second_signal = wait_for_termination_signal();
-                    tokio::pin!(second_signal);
-                    tokio::select! {
-                        result = &mut shutdown => {
-                            let report = result?;
-                            if report.deadline_expired {
-                                return Err(ServiceError::ShutdownDeadline);
-                            }
-                            return Ok(report);
-                        }
-                        result = &mut second_signal => {
-                            result?;
-                            return Err(ServiceError::Signal);
-                        }
-                    }
+                    return self.shutdown_with_second_signal(grace_period).await;
                 }
                 completion = self.supervisor.join_next() => {
                     self.coordinator.prune_drained_runtime_owners();
@@ -1018,6 +1070,42 @@ impl DnsService {
                 _ = poll.tick() => {
                     on_poll(self).await?;
                 }
+                Some(command) = self.control_commands.recv() => {
+                    // 等待提交锁期间仍响应退出；中断回执只能报告未知，不能重放命令。
+                    tokio::select! {
+                        biased;
+                        result = &mut signal => {
+                            result?;
+                            return self.shutdown_with_second_signal(grace_period).await;
+                        }
+                        _ = self.apply_control_command(command) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn shutdown_with_second_signal(
+        &mut self,
+        grace_period: Duration,
+    ) -> Result<ShutdownReport, ServiceError> {
+        let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
+        let clock = SystemClock::new();
+        let shutdown = self.shutdown(&clock, deadline);
+        tokio::pin!(shutdown);
+        let second_signal = wait_for_termination_signal();
+        tokio::pin!(second_signal);
+        tokio::select! {
+            result = &mut shutdown => {
+                let report = result?;
+                if report.deadline_expired {
+                    return Err(ServiceError::ShutdownDeadline);
+                }
+                Ok(report)
+            }
+            result = &mut second_signal => {
+                result?;
+                Err(ServiceError::Signal)
             }
         }
     }
@@ -3522,7 +3610,7 @@ mod tests {
     }
 
     /// 构造 bind plan 不变、hosts answer 可变的 reload 测试配置。
-    fn runtime_config_with_answer_at(
+    pub(super) fn runtime_config_with_answer_at(
         work_path: &str,
         port: u16,
         answer: &str,
@@ -3642,7 +3730,7 @@ clients: []
             .resolved
     }
 
-    async fn udp_query(address: SocketAddr, id: u16, name: &str) -> Message {
+    pub(super) async fn udp_query(address: SocketAddr, id: u16, name: &str) -> Message {
         udp_query_with_type(address, id, name, RecordType::A).await
     }
 
