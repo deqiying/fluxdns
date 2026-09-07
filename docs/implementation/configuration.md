@@ -14,6 +14,31 @@
 
 ## 加载与支持边界
 
+### P0 v2 内部契约（2026-09-07）
+
+[`config/contract.rs`](../../backend/src/config/contract.rs) 已提供 `ConfigV2::parse/validate/resolve_paths` 和[离线夹具](../../backend/tests/fixtures/config-v2.yaml)。这是可执行的候选契约，不是生产加载器：本节以下 v1 模板/owner 仍是当前正式接线事实。P0 不把新快照、详情和保留字段映射成旧存储参数；新版本启动切换等待 BC-04/07/08 等 owner 接线，不承诺 v1/v2 并行服务或兼容。
+
+| v2 字段/边界 | 契约与默认值 |
+| --- | --- |
+| `version` | 只接受 `2`；其他版本在完整解析前拒绝，无转换 |
+| `name` | 各命名空间内唯一，1-128 个 ASCII 字符 `[A-Za-z0-9_.!-]`；上游和组共享空间；不同空间可同名，DoH endpoint 名仅在所属 listener 内唯一 |
+| `clients[].client_id` | 必填、全体客户端唯一、大小写敏感，1-128 个 URL unreserved ASCII `[A-Za-z0-9._~-]`；普通编辑不可改变，name 不派生 ID |
+| `clients[].match.ips` | 缺省空数组；最多 256 项；地址转 /32 或 /128，CIDR 清除主机位，mapped IPv6 转 IPv4；规范化重复拒绝，包含关系允许 |
+| `dns.cache` | 缺失时全局池关闭，内存 64 MiB，failure TTL 5s，optimistic 关闭/answer TTL 10s/max age 1d；显式对象沿用必填字段规则 |
+| `dns.cache.persistence` | 缺失或空对象为 `enabled: false`、`path: ./data/dns-cache.db`、`snapshot_interval: 5m`；周期 1s-1d；删除旧 `max_size_bytes` |
+| `dns.resolve_log` | 缺失为关闭；显式对象只接受必填 `enable`，删除旧条数/年龄配额 |
+| `statistics.retention` | 缺失字段分别采用 `days: 7`、`grace_days: 3`、`reference_size_bytes: 1073741824`；days 为 1-3650，grace 非负且总和不超过 3650 |
+| 字节预算 | 内存预算、参考大小为 1-1099511627776 bytes（1 TiB），可由 JavaScript 安全整数无损表达；参考大小不是磁盘硬配额 |
+| `database.records_path` | 必填；与统计库、快照一起沿两级路径基准解析，不增加在线搬库 |
+| 解析/集合预算 | 配置最多 4 MiB；每命名空间最多 1024 项；每份内联 Hosts/规则文本最多 256 KiB（UTF-8 字节） |
+| 覆盖/类型分支 | cache/TTL/ECS 缺失仍表示继承，显式禁用不等于缺失；显式 null、未知字段、旧 `match.ids` 和 variant 残留字段均拒绝 |
+
+共享 listener、上游、策略、Hosts、规则集、代理、SecretRef 和认证字段继续复用 [model](../../backend/src/config/model.rs)；共享资源引用、循环、socket 冲突和语义复用 [validate](../../backend/src/config/validate.rs)，没有另造旧版本转换层。名称和 ID 的请求期索引/历史事实属于 BC-04/05，P0 仅验证配置契约。
+
+`resolve_paths` 是无 I/O 的词法检查：拒绝统计/快照相互碰撞、侵入详情目录及受保护配置/日志路径，Windows 比较不区分大小写。它不证明路径不存在 symlink、reparse point、hard link 或其他物理别名；真正打开目标前的身份校验、旁文件保护和恢复由 BC-26/07/08/29 owner 完成。
+
+### 当前生产加载器
+
 正式入口是 [`app::run_command`](../../backend/src/app.rs) -> [`ConfigLoader::load_from_path`](../../backend/src/config/load.rs) -> [model](../../backend/src/config/model.rs) / [migrate](../../backend/src/config/migrate.rs) / [resolve](../../backend/src/config/resolve.rs) / [validate](../../backend/src/config/validate.rs)。普通 loader 不读取 SecretRef 实际值；run 在 prepare 前执行 accessor 校验，validate 不写 snapshot、不做资源/数据库/网络可用性检查。
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |

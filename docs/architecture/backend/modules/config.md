@@ -12,6 +12,8 @@
 
 ## 1. 职责
 
+v2 重构已接受“唯一 name 管理键、独立 client_id、活动源优先、应用后持久化、外部文件只提示”的目标。P0 只引入 [`contract.rs`](../../../../backend/src/config/contract.rs) 的内部契约并复用共享校验，尚未替换下述生产加载/迁移/快照流程。契约默认值和接线边界见[配置参考](../../../implementation/configuration.md#p0-v2-内部契约2026-09-07)；其余配置事务仍按[活动专项](../../../plans/webui-management-config-runtime-plan.md)实施，不把设计目标写成已有运行能力。
+
 Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 prepare 的 `ResolvedConfig`。资源内容首次 snapshot 与 listener 装配属于 Resource/Runtime/Application，不是 YAML loader 的职责。
 
 它负责：

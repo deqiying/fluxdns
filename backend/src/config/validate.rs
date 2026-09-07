@@ -218,9 +218,14 @@ impl BindPlan {
 pub fn validate_config(config: &ConfigDto) -> Result<(), ConfigErrorReport> {
     let mut report = ConfigErrorReport::default();
     validate_basic(config, &mut report);
-    validate_collections(config, &mut report);
-    validate_references(config, &mut report);
-    validate_upstream_cycles(config, &mut report);
+    let resources = ResourceConfig::from(config);
+    validate_collections(&resources, &mut report);
+    validate_clients(config, &mut report);
+    validate_references(&resources, &mut report);
+    for (index, client) in config.clients.iter().enumerate() {
+        validate_client_strategy(client.strategy.as_deref(), index, &resources, &mut report);
+    }
+    validate_upstream_cycles(&resources, &mut report);
     if let Err(bind_errors) = build_bind_plan(config) {
         report.extend(bind_errors);
     }
@@ -229,6 +234,48 @@ pub fn validate_config(config: &ConfigDto) -> Result<(), ConfigErrorReport> {
         Ok(())
     } else {
         Err(report)
+    }
+}
+
+/// 借用未改变的资源契约，供当前加载器与 v2 候选共同校验，不转换配置版本。
+pub(super) struct ResourceConfig<'a> {
+    pub work: &'a super::model::WorkDto,
+    pub database_path: &'a std::path::Path,
+    pub logs: &'a super::model::LogsDto,
+    pub webui: &'a super::model::WebUiDto,
+    pub listener: &'a [ListenerDto],
+    pub upstreams: &'a [UpstreamDto],
+    pub strategy: &'a [StrategyDto],
+    pub hosts: &'a [HostsResourceDto],
+    pub outbound: &'a [OutboundDto],
+    pub rule_set: &'a [RuleSetDto],
+}
+
+impl<'a> From<&'a ConfigDto> for ResourceConfig<'a> {
+    fn from(config: &'a ConfigDto) -> Self {
+        Self {
+            work: &config.work,
+            database_path: &config.database.path,
+            logs: &config.logs,
+            webui: &config.webui,
+            listener: &config.listener,
+            upstreams: &config.upstreams,
+            strategy: &config.strategy,
+            hosts: &config.hosts,
+            outbound: &config.outbound,
+            rule_set: &config.rule_set,
+        }
+    }
+}
+
+/// 只验证共享资源、引用和绑定语义；不执行资源加载、文件写入或 runtime 发布。
+pub(super) fn validate_resources(config: &ResourceConfig<'_>, report: &mut ConfigErrorReport) {
+    validate_startup(config, report);
+    validate_collections(config, report);
+    validate_references(config, report);
+    validate_upstream_cycles(config, report);
+    if let Err(errors) = build_resource_bind_plan(config) {
+        report.extend(errors);
     }
 }
 
@@ -241,6 +288,11 @@ fn validate_basic(config: &ConfigDto, report: &mut ConfigErrorReport) {
         ));
     }
 
+    validate_startup(&ResourceConfig::from(config), report);
+    validate_dns(config, report);
+}
+
+fn validate_startup(config: &ResourceConfig<'_>, report: &mut ConfigErrorReport) {
     if !is_non_empty_path(&config.work.path) {
         report.push(ConfigError::new(
             ConfigErrorKind::MissingField,
@@ -255,7 +307,7 @@ fn validate_basic(config: &ConfigDto, report: &mut ConfigErrorReport) {
             "path must not be empty",
         ));
     }
-    if !is_non_empty_path(&config.database.path) {
+    if !is_non_empty_path(config.database_path) {
         report.push(ConfigError::new(
             ConfigErrorKind::MissingField,
             "database.path",
@@ -335,7 +387,9 @@ fn validate_basic(config: &ConfigDto, report: &mut ConfigErrorReport) {
             ));
         }
     }
+}
 
+fn validate_dns(config: &ConfigDto, report: &mut ConfigErrorReport) {
     if let Some(cache) = &config.dns.cache {
         if cache.memory.max_size_bytes == 0 {
             report.push(ConfigError::new(
@@ -402,7 +456,7 @@ fn validate_basic(config: &ConfigDto, report: &mut ConfigErrorReport) {
     }
 }
 
-fn validate_collections(config: &ConfigDto, report: &mut ConfigErrorReport) {
+fn validate_collections(config: &ResourceConfig<'_>, report: &mut ConfigErrorReport) {
     let mut listeners = BTreeSet::new();
     for (index, listener) in config.listener.iter().enumerate() {
         let path = format!("listener[{index}]");
@@ -654,7 +708,9 @@ fn validate_collections(config: &ConfigDto, report: &mut ConfigErrorReport) {
         }
         validate_rule_set(rule_set, &path, report);
     }
+}
 
+fn validate_clients(config: &ConfigDto, report: &mut ConfigErrorReport) {
     let mut clients = BTreeSet::new();
     let mut ids: BTreeMap<String, String> = BTreeMap::new();
     let mut cidrs: BTreeMap<IpNet, String> = BTreeMap::new();
@@ -1178,7 +1234,7 @@ fn validate_client_ip(
     }
 }
 
-fn validate_cache_override(
+pub(super) fn validate_cache_override(
     cache: &super::model::CacheOverrideDto,
     path: String,
     report: &mut ConfigErrorReport,
@@ -1195,7 +1251,7 @@ fn validate_cache_override(
     }
 }
 
-fn validate_optimistic(
+pub(super) fn validate_optimistic(
     optimistic: &super::model::OptimisticDto,
     path: impl Into<String>,
     report: &mut ConfigErrorReport,
@@ -1217,7 +1273,7 @@ fn validate_optimistic(
     }
 }
 
-fn validate_ttl(
+pub(super) fn validate_ttl(
     ttl: &super::model::TtlOverrideDto,
     path: impl Into<String>,
     report: &mut ConfigErrorReport,
@@ -1236,7 +1292,11 @@ fn validate_ttl(
     }
 }
 
-fn validate_ecs(ecs: Option<&EcsDto>, path: impl Into<String>, report: &mut ConfigErrorReport) {
+pub(super) fn validate_ecs(
+    ecs: Option<&EcsDto>,
+    path: impl Into<String>,
+    report: &mut ConfigErrorReport,
+) {
     let path = path.into();
     if let Some(ecs) = ecs {
         if matches!(ecs.mode, EcsMode::Custom) && ecs.custom_ip.is_none() {
@@ -1256,7 +1316,7 @@ fn validate_ecs(ecs: Option<&EcsDto>, path: impl Into<String>, report: &mut Conf
     }
 }
 
-fn validate_references(config: &ConfigDto, report: &mut ConfigErrorReport) {
+fn validate_references(config: &ResourceConfig<'_>, report: &mut ConfigErrorReport) {
     let strategies: BTreeSet<&str> = config
         .strategy
         .iter()
@@ -1441,16 +1501,30 @@ fn validate_references(config: &ConfigDto, report: &mut ConfigErrorReport) {
             );
         }
     }
-    for (index, client) in config.clients.iter().enumerate() {
-        if let Some(strategy) = &client.strategy {
-            check(
-                strategy,
-                format!("clients[{index}].strategy"),
-                "strategy",
-                &strategies,
-                report,
-            );
-        }
+}
+
+pub(super) fn validate_client_strategy(
+    strategy: Option<&str>,
+    index: usize,
+    resources: &ResourceConfig<'_>,
+    report: &mut ConfigErrorReport,
+) {
+    if let Some(name) = strategy
+        && !resources.strategy.iter().any(|item| item.name == name)
+    {
+        let wrong_kind = resources.upstreams.iter().any(|item| item.name() == name)
+            || resources.hosts.iter().any(|item| item.name() == name)
+            || resources.rule_set.iter().any(|item| item.name() == name)
+            || resources.outbound.iter().any(|item| item.name == name);
+        report.push(ConfigError::new(
+            if wrong_kind {
+                ConfigErrorKind::WrongReferenceKind
+            } else {
+                ConfigErrorKind::MissingReference
+            },
+            format!("clients[{index}].strategy"),
+            "reference must point to strategy",
+        ));
     }
 }
 
@@ -1487,9 +1561,9 @@ fn check_rule_set_selector(
     }
 }
 
-fn validate_upstream_cycles(config: &ConfigDto, report: &mut ConfigErrorReport) {
+fn validate_upstream_cycles(config: &ResourceConfig<'_>, report: &mut ConfigErrorReport) {
     let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for upstream in &config.upstreams {
+    for upstream in config.upstreams {
         let name = upstream_name(upstream).to_owned();
         let edges = match upstream {
             UpstreamDto::Doh {
@@ -1558,6 +1632,10 @@ fn validate_upstream_cycles(config: &ConfigDto, report: &mut ConfigErrorReport) 
 
 /// Build and validate the expanded socket bind plan.
 pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport> {
+    build_resource_bind_plan(&ResourceConfig::from(config))
+}
+
+fn build_resource_bind_plan(config: &ResourceConfig<'_>) -> Result<BindPlan, ConfigErrorReport> {
     let mut report = ConfigErrorReport::default();
     let mut plan = BindPlan::default();
     for (index, listener) in config.listener.iter().enumerate() {
@@ -1738,7 +1816,7 @@ fn validate_required_path(
     }
 }
 
-fn validate_name(name: &str, path: String, report: &mut ConfigErrorReport) {
+pub(super) fn validate_name(name: &str, path: String, report: &mut ConfigErrorReport) {
     if name.is_empty() || name.len() > 128 {
         report.push(ConfigError::new(
             ConfigErrorKind::InvalidValue,

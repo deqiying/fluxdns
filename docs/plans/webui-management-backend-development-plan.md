@@ -1,8 +1,8 @@
 # WebUI 管理后台后端重构开发计划
 
-> 文档状态：草案
+> 文档状态：有效
 >
-> 计划状态：待评审
+> 计划状态：实施中
 >
 > 适用范围：管理后台配套 Rust 后端、热配置、新存储基线、HTTP/WS 契约及 Windows 验收
 >
@@ -45,6 +45,10 @@
 表中链接为现有入口，不表示这些文件已实现目标能力。新增源码文件仅在已有模块内部按真实职责拆分，例如详情分片、保留或 WS adapter；不预建新的顶层架构层。
 
 ## 3. BE-01：冻结版本和类型契约
+
+P0 进度：BC-01 拆分为配置内部契约、API/跨端契约两个可编译语义单元。配置内部契约已完成，字段和边界见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)；API/生成类型及完整检查点尚待完成。生产加载器不提前使用尚未接线的新 owner。
+
+配置单元验证（Windows，2026-09-07）：Rust 1.98.0 / Node 26.8.1 / pnpm 11.25.0；`cargo test --manifest-path backend/Cargo.toml config:: --bin fluxdns` 53 通过，含 7 个新增 v2 测试；`cargo fmt --manifest-path backend/Cargo.toml -- --check`、前端 `pnpm run typecheck`、文档检查器和 `git diff --check` 通过。项目只有 binary target，最初 `--lib` 调用已修正；夹具的规则/mode 和裸 null 解析问题已回归通过。未运行新格式生产启动、磁盘 alias 防护、浏览器或性能测试。
 
 ### 开发步骤
 
@@ -262,6 +266,8 @@ QPS/RPM、趋势、在线身份、暖机和内存单位按[已确认 D-04](webui
 用真实 HTTP/WS 覆盖快照期间并发提交、迟到事件、去重、过滤变化、断线补齐、重启、新用户会话、Origin 伪造、缓冲/帧超限、慢消费者、心跳断开和 shutdown。有界 fixture 测试与真实连接测试分别记证据。
 
 ## 13. BE-11：新基线初始化与旧路径退出
+
+2026-09-07 P0 源码核定：BC-26 完整生产初始化不能独立于 BC-04/07/08 至 BC-11 完成。当前 `StorageRuntime::open` 仍初始化统计/详情单库 v6，cache 仍装配可自动升级的 SQLite adapter；把 v2 字段接入这些 owner 会错误保留旧语义。P0 的 v2 拒绝规则/离线夹具随 BC-01 交付，不另造无消费者的空 layout/marker，也不将 BC-26 标为完成。完整空目录启动、重复启动、旧路径拒绝和新格式恢复待这些 owner 就绪后单独验证、提交；不删除个人运行数据。
 
 按 D-10 删除原 BE-11 迁移预览、旧详情搬迁和维护回退任务，不顺延为未来必做项。
 

@@ -1,0 +1,49 @@
+# v2 契约夹具。P0 仅用于严格解析；正式启动切换待新 owner 接线。
+version: 2
+work:
+  path: .
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data/statistics.sqlite3
+  records_path: ./data/queries
+logs:
+  enable: false
+  level: info
+  path: ./logs/fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 18080
+dns: {}
+statistics:
+  retention:
+    days: 7
+    grace_days: 3
+    reference_size_bytes: 1073741824
+listener:
+  - name: local
+    type: udp
+    addresses: [127.0.0.1]
+    port: 15353
+    strategy: default
+upstreams:
+  - name: local
+    type: hosts
+    format: hosts
+    hosts: "127.0.0.1 localhost"
+strategy:
+  - name: default
+    rules:
+      - hosts: local
+    default_upstream: local
+hosts:
+  - name: local
+    type: const
+    format: hosts
+    hosts: "127.0.0.1 localhost"
+clients:
+  - name: desktop
+    client_id: Desktop-01
+    match:
+      ips: [192.0.2.10, "2001:db8::/64"]
