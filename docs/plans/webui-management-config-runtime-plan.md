@@ -18,7 +18,7 @@
 | --- | --- | --- |
 | [app.rs](../../backend/src/app.rs) `ConfigFileWatcher`、`wait_for_ctrl_c_with_reload` 调用 | 连续两次稳定 fingerprint 后调用 `reload_service_from_path`；失败 retry | watcher 改为仅上报，文件读取有界且移出服务控制循环的同步 I/O |
 | [ConfigStore](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs) | 首用户源文件定向编辑、锁、fingerprint、双文件 journal | 扩展活动源表达、通用候选/状态；不能直接套用原“先文件后认证”的事务 |
-| [service.rs](../../backend/src/service.rs) `reload_prepared` | 已按物理 SocketSpec 差量复用；CAS 后再 spawn/reconcile task | 处理 CAS 成功后 task 注册仍可能失败的窗口，以及旧请求 drain 和控制命令 |
+| [service.rs](../../backend/src/service.rs) `reload_prepared` | 已按物理 SocketSpec 差量复用；transport/resource task 在 CAS 前注册并等待闸门 | 继续完成旧请求 drain、控制命令和新进程 owner 的应用/补偿 |
 | [RuntimeCoordinator](../../backend/src/runtime/coordinator.rs) | 活动快照、revision、mutation gate、旧请求 drain | 复用此权威，不另建 WebUI Runtime；补足提交成功定义 |
 | [service.rs](../../backend/src/service.rs) `process_owned_reload_change` | database、logs、部分 webui、resolve_log 变化被拒绝 | 日志和详情开关改为可控热切换；启动级字段保留明确限制 |
 | [observability.rs](../../backend/src/observability.rs) | 已有 reloadable filter/layer 与共享输出；app 在 logs 开启时才创建 writer | 复用 handle，设计始终存在的进程 owner 及 off/on 生命周期，不重复安装 subscriber |

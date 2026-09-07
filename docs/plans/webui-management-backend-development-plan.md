@@ -48,7 +48,7 @@
 
 P0 进度：BC-01 的配置内部契约和 API/跨端契约两个语义单元已落实。配置单元提交为 `166e59e`（`refactor(config): 定义新版配置与校验契约`）；字段和边界见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)，API/状态/预算及测试见[Management 实现](../implementation/backend/management.md#p0-v2-契约)。生成类型和 12 路由/表单契约可供后续消费，但没有新页面或 v2 handler 接线。
 
-BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 fixture 仅通过离线新契约解析，不能作为生产启动成功证据。BC-01 契约交付不等于 BE-01/BC-26 的生产切换和完整验收全部完成。下个准确起点是 P1 的 BC-02：在现有 ConfigStore 上保留活动源及双 revision，消费本契约构建候选与名称引用修改；需另行授权 P1，不提前执行。
+BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 fixture 仅通过离线新契约解析，不能作为生产启动成功证据。BC-01 契约交付不等于 BE-01/BC-26 的生产切换和完整验收全部完成。P1 已于 2026-09-07 获得授权；BC-02 内部能力及 BC-03 的差量 socket/任务预注册子项进度见下文，不重复实施 P0，也不扩大到 P2。
 
 配置单元验证（Windows，2026-09-07）：Rust 1.98.0 / Node 26.8.1 / pnpm 11.25.0；`cargo test --manifest-path backend/Cargo.toml config:: --bin fluxdns` 53 通过，含 7 个新增 v2 测试；`cargo fmt --manifest-path backend/Cargo.toml -- --check`、前端 `pnpm run typecheck`、文档检查器和 `git diff --check` 通过。项目只有 binary target，最初 `--lib` 调用已修正；夹具的规则/mode 和裸 null 解析问题已回归通过。未运行新格式生产启动、磁盘 alias 防护、浏览器或性能测试。
 
@@ -79,7 +79,7 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 
 1. 在 ConfigStore 保留活动源表达及 active/persisted/file revision；GET 和普通编辑以该源为基准，保留路径/继承/SecretRef，不序列化 resolved 值写回。
 2. 向持有 DnsService 的控制循环提交有界 typed 命令；复用 RuntimeCoordinator 的候选和 mutation gate，prepare 与最终提交分开，提交时复核版本。
-3. 扩展 `reload_prepared`：按物理 endpoint 差量复用子项已接入；继续前置 transport/task/owner 可失败准备，定义 CAS 后失败补偿和旧请求 drain。不能将 socket 复用测试等同于完整不停机应用验收。
+3. 扩展 `reload_prepared`：物理 endpoint 差量复用、transport/resource task 在 CAS 前注册并等待闸门已接入，见[生命周期实现](../implementation/backend/lifecycle.md#p1-任务预注册子项2026-09-07)。继续完善服务控制命令、新进程 owner 可失败准备/真实补偿及旧请求 drain。不能将这些内部子项测试等同于完整不停机应用验收。
 4. 实现先应用后正式文件替换，journal 区分 PREPARED 与 COMMIT_DECIDED；应用成功而落盘失败保留新运行态并回报未同步，重试不重新应用。
 5. 将 app watcher 改为只检测和上报；复用去抖轮询但有界读取，区分自写/外改/不可读/缺失；不改变 Hosts/规则集资源刷新。
 6. 实现脱敏差异、还原受管文件、模块化组合采用、普通保存覆盖确认；active/file 双版本校验，不接收任意文件路径或整份 YAML。

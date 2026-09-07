@@ -183,4 +183,6 @@ P0 技术核定：
 - T-06 仅为现有 Rust 依赖启用 serde feature，以及将现有锁定版本的 schema 测试依赖显式列为 devDependencies；版本/许可证/体积边界见[交付实现](../implementation/delivery.md#前端与接口生成)，未升级工具链。
 - T-04、T-05 的 owner/采样/WS 运行限额、T-07 的实际表单交互、T-08 的 Windows 流量与 2ms 测量仍未实施；T-05 初始数值已进入 schema，但未用真实连接验证。后续核定仍由实施者负责，不重新询问 D-01 至 D-12。
 
+P1 追加核定（2026-09-07）：T-03 的受管双文件只读观测已执行 4 MiB 上限、Windows FileId 与 SHA-256 校验，写入旁文件/替换时身份闭合和 cursor 仍留后续；T-04 的差量 socket 采用物理 SocketSpec 共享句柄，transport/resource task 在 CAS 前注册、放行前等待 Tokio watch 闸门，真实 Windows 证据见[生命周期实现](../implementation/backend/lifecycle.md#p1-任务预注册子项2026-09-07)。日志/新存储 owner、journal 恢复、旧请求 drain 仍未核定完成；T-05/07/08 不随这两个子项关闭，依赖版本没有改变。
+
 确认后的技术细节同步对应任务和正式 schema，不在多处维护相互冲突的默认值。实施完成后按项目规则沉淀架构/实现事实，再删除本决策文件及相应活动计划；Git 保存历史，不另建归档。

@@ -85,9 +85,11 @@ Config 的 `BindPlan` 是经过校验的 `BindEntry` 列表，记录底层 UDP/T
 4. 激活前不启动 accept loop；
 5. ActiveRuntime 原子发布后统一启动或放行 accept。
 
-首启在全部 endpoint 成功后激活。配置切换即使整份 BindPlan 不同，也按底层协议、地址/端口、`reuse_port`、`v6_only` 复用 `Arc<dyn ActivatedSocket>`，新集合携带新逻辑引用。需要 rebind 时，只有平台允许且所有新 endpoint 成功才切换；候选失败不能释放仍由旧实例持有的句柄。现有 CAS 后 task 注册失败窗口与旧请求取消语义仍待 BC-03 后续完成，差量 socket 不等于完整应用事务。对应 Windows 证据见[生命周期实现](../../../implementation/backend/lifecycle.md#p1-差量-socket-子项2026-09-07)。
+首启在全部 endpoint 成功后激活。配置切换即使整份 BindPlan 不同，也按底层协议、地址/端口、`reuse_port`、`v6_only` 复用 `Arc<dyn ActivatedSocket>`，新集合携带新逻辑引用。需要 rebind 时，只有平台允许且所有新 endpoint 成功才切换；候选失败不能释放仍由旧实例持有的句柄。差量 socket 不等于完整应用事务。对应 Windows 证据见[生命周期实现](../../../implementation/backend/lifecycle.md#p1-差量-socket-子项2026-09-07)。
 
 ## 6. Coordinator 与 CAS
+
+service 的配置发布先取得 `ServiceActivation`：在 mutation gate 下合并状态，但不替换当前实例。任务先注册、等待共享启动闸门，再执行最终 CAS，成功后无 await 地换代服务集合并放行。准备失败不需要回退已发布 Runtime，因为候选从未发布；不能将此语义扩大为未来所有进程 owner 均可无损补偿。旧请求取消、服务控制命令和新配置 owner 的接线仍属于 BC-03 剩余工作，证据见[任务预注册实现](../../../implementation/backend/lifecycle.md#p1-任务预注册子项2026-09-07)。
 
 `RuntimeCoordinator` 串行处理配置候选、资源更新和 fatal 状态迁移。Application 的配置 fingerprint 轮询只负责产生 reload 触发，不绕过 coordinator；资源刷新可以并行执行，但发布必须满足：
 

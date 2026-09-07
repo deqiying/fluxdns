@@ -10,11 +10,11 @@ mod system_socket;
 
 pub(crate) use bind::bind_prepared_reusing;
 pub use bind::{BindError, BoundCandidate, BoundEndpointHandle, BoundListenerSet, bind_prepared};
-pub(crate) use coordinator::CacheFinalizerShutdownSummary;
 pub use coordinator::{
     ActivationError, ActiveRuntime, AdmissionError, RequestGuard, ResourceRefreshCoordinatorError,
     RuntimeCoordinator, RuntimeLease, RuntimeReloadError, RuntimeReuseError,
 };
+pub(crate) use coordinator::{CacheFinalizerShutdownSummary, ServiceActivationConflict};
 pub use prepared::{
     PreflightReport, PrepareError, PreparedRuntime, RefreshedResourceSnapshot, ResourceRefreshError,
 };

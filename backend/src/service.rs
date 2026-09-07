@@ -32,11 +32,11 @@ use crate::ports::telemetry::{
 use crate::ports::{PortError, PortErrorClass};
 use crate::resolution::{ResolutionPipelineMetrics, ResolutionRuntime};
 use crate::runtime::{
-    ActivationError, ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle,
-    BoundListenerSet, CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime,
-    RefreshedResourceSnapshot, ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator,
-    RuntimeReuseError, ShutdownPhaseStatus, ShutdownReport, Supervisor, SupervisorError,
-    SystemClock, TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
+    ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle, BoundListenerSet,
+    CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime, RefreshedResourceSnapshot,
+    ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator, ServiceActivationConflict,
+    ShutdownPhaseStatus, ShutdownReport, Supervisor, SupervisorError, SystemClock, TaskCompletion,
+    TaskError, TaskErrorKind, TaskExit, TaskSpec,
 };
 #[cfg(test)]
 use crate::storage::StatsPersistenceWorker;
@@ -76,9 +76,7 @@ pub enum ServiceReloadError {
     #[error("runtime reload bind failed: {0}")]
     Bind(#[source] BindError),
     #[error("runtime reload activation failed: {0}")]
-    Activation(#[source] ActivationError),
-    #[error("runtime reload listener reuse failed: {0}")]
-    Reuse(#[source] RuntimeReuseError),
+    Activation(#[source] ServiceActivationConflict),
     #[error("active runtime snapshot is missing its DNS core")]
     MissingDnsCore,
     #[error(
@@ -223,6 +221,23 @@ struct TransportTask {
     cancellation: Cancellation,
 }
 
+/// reload 的任务可先注册，但发布前不能执行 receive/accept 或资源刷新。
+/// 准备失败时 sender 随栈释放，所有候选任务按 Cancelled 退出，不影响旧任务。
+#[derive(Clone, Default)]
+struct TaskStartGate(Option<tokio::sync::watch::Receiver<bool>>);
+
+impl TaskStartGate {
+    async fn wait(mut self) -> Result<(), TaskError> {
+        if let Some(receiver) = &mut self.0 {
+            receiver
+                .wait_for(|started| *started)
+                .await
+                .map_err(|_| TaskError::Cancelled)?;
+        }
+        Ok(())
+    }
+}
+
 impl DnsService {
     pub fn start(
         runtime: Arc<ActiveRuntime>,
@@ -357,6 +372,7 @@ impl DnsService {
             transport_plans,
             Arc::clone(&core),
             Arc::clone(&runtime),
+            TaskStartGate::default(),
         )?;
         if let Some(telemetry) = &telemetry
             && !transport_tasks.is_empty()
@@ -537,9 +553,10 @@ impl DnsService {
         }
     }
 
-    fn reconcile_resource_tasks(
+    fn prepare_resource_tasks(
         &mut self,
         runtime: &Arc<ActiveRuntime>,
+        start: TaskStartGate,
     ) -> Result<Vec<ResourceTask>, ServiceStartError> {
         let resources = runtime.resource_worker_ids();
         let previous = self.resource_tasks.clone();
@@ -557,6 +574,7 @@ impl DnsService {
                 index,
                 resource,
                 self.telemetry.clone(),
+                start.clone(),
             ) {
                 Ok(task) => {
                     spawned.push(task.clone());
@@ -570,19 +588,14 @@ impl DnsService {
                 }
             }
         }
-        for task in &previous {
-            if !resources.contains(&task.resource) {
-                task.cancellation.cancel(CancelReason::Shutdown);
-            }
-        }
         Ok(next)
     }
 
     /// 切换一个新 Runtime，并按配置差异复用或重建 UDP/TCP/DoH listener task。
     ///
-    /// 资源 refresh task 会按新 Runtime 的 worker ID 集合重建，旧集合在新 task
-    /// 注册成功后通过 scoped cancellation 退出。进程级资源配置发生变化时拒绝切换，
-    /// 由调用方保留旧 Runtime 并要求重启进程；等待刷新让出 activation 时共享原 deadline。
+    /// 资源与 transport task 在 CAS 前注册并等待启动闸门，准备失败不取消旧集合。
+    /// 提交后同步换代并放行新任务，不再保留 CAS 后可失败的注册步骤。
+    /// 进程级资源配置变化仍拒绝；等待资源 mutation gate 共享调用方原 deadline。
     pub async fn reload_prepared(
         &mut self,
         prepared: PreparedRuntime,
@@ -603,58 +616,10 @@ impl DnsService {
         if actual != expected_next {
             return Err(ServiceReloadError::InvalidRevision { expected, actual });
         }
-        let reload_mode = classify_service_reload(
+        classify_service_reload(
             self.runtime.snapshot().config(),
             prepared.snapshot().config(),
         )?;
-        if reload_mode == ServiceReloadMode::ReuseListeners {
-            let transport_plans = prepare_transport_plans(
-                self.runtime.listeners(),
-                prepared.snapshot().config(),
-                actual,
-                self.request_timeout,
-            )
-            .map_err(ServiceReloadError::Endpoint)?;
-            let core = prepared
-                .snapshot()
-                .dns_core()
-                .ok_or(ServiceReloadError::MissingDnsCore)?;
-            let core = self.instrument_core(core);
-            let runtime = tokio::time::timeout(
-                deadline.remaining(Instant::now()),
-                self.coordinator
-                    .activate_prepared_reusing_listeners(expected, prepared),
-            )
-            .await
-            .map_err(|_| ServiceReloadError::Timeout)?
-            .map_err(ServiceReloadError::Reuse)?;
-            let transport_tasks = spawn_transport_plans(
-                &mut self.supervisor,
-                transport_plans,
-                core,
-                Arc::clone(&runtime),
-            )
-            .map_err(map_reload_spawn_error)?;
-            let resource_tasks = self
-                .reconcile_resource_tasks(&runtime)
-                .map_err(map_reload_spawn_error)?;
-            self.cancel_transport_tasks();
-            self.transport_tasks = transport_tasks;
-            self.resource_tasks = resource_tasks;
-            self.runtime = Arc::clone(&runtime);
-            self.reconcile_management_users(&runtime);
-            if let Some(telemetry) = &self.telemetry
-                && !self.transport_tasks.is_empty()
-            {
-                publish_component_health(
-                    telemetry,
-                    TelemetryComponent::Listener,
-                    ComponentHealthState::Healthy,
-                    None,
-                );
-            }
-            return Ok(runtime);
-        }
         let candidate = crate::runtime::bind_prepared_reusing(
             prepared,
             self.runtime.listeners(),
@@ -677,31 +642,54 @@ impl DnsService {
             .ok_or(ServiceReloadError::MissingDnsCore)?;
         let core = self.instrument_core(core);
 
-        tokio::time::timeout(
+        let coordinator = Arc::clone(&self.coordinator);
+        let activation = tokio::time::timeout(
             deadline.remaining(Instant::now()),
-            self.coordinator
-                .compare_and_activate_serialized(expected, candidate),
+            coordinator.prepare_service_activation(expected, candidate),
         )
         .await
         .map_err(|_| ServiceReloadError::Timeout)?
         .map_err(ServiceReloadError::Activation)?;
-        let runtime = self.coordinator.load();
+        let runtime = activation.runtime();
+        let (start, receiver) = tokio::sync::watch::channel(false);
+        let start_gate = TaskStartGate(Some(receiver));
         let transport_tasks = spawn_transport_plans(
             &mut self.supervisor,
             transport_plans,
             core,
             Arc::clone(&runtime),
+            start_gate.clone(),
         )
         .map_err(map_reload_spawn_error)?;
         let resource_tasks = self
-            .reconcile_resource_tasks(&runtime)
+            .prepare_resource_tasks(&runtime, start_gate)
             .map_err(map_reload_spawn_error)?;
 
+        if deadline.is_expired(Instant::now()) {
+            return Err(ServiceReloadError::Timeout);
+        }
+        if cancellation.is_cancelled() {
+            return Err(ServiceReloadError::Bind(BindError::Cancelled(
+                cancellation.reason().unwrap_or(CancelReason::Shutdown),
+            )));
+        }
+        let runtime = activation
+            .commit()
+            .map_err(ServiceReloadError::Activation)?;
         self.cancel_transport_tasks();
+        for task in &self.resource_tasks {
+            if !resource_tasks
+                .iter()
+                .any(|next| next.resource == task.resource)
+            {
+                task.cancellation.cancel(CancelReason::Shutdown);
+            }
+        }
         self.transport_tasks = transport_tasks;
         self.resource_tasks = resource_tasks;
         self.runtime = Arc::clone(&runtime);
         self.reconcile_management_users(&runtime);
+        start.send_replace(true);
         if let Some(telemetry) = &self.telemetry
             && !self.transport_tasks.is_empty()
         {
@@ -1714,6 +1702,7 @@ fn spawn_transport_plans(
     plans: Vec<TransportTaskPlan>,
     core: Arc<dyn DnsCore>,
     runtime: Arc<ActiveRuntime>,
+    start: TaskStartGate,
 ) -> Result<Vec<TransportTask>, ServiceStartError> {
     let revision = runtime.revision().0;
     let mut tasks = Vec::with_capacity(plans.len());
@@ -1731,6 +1720,7 @@ fn spawn_transport_plans(
                     supervisor,
                     task_id.clone(),
                     "udp",
+                    start.clone(),
                     move |cancellation| {
                         service_task(
                             adapter.clone(),
@@ -1754,6 +1744,7 @@ fn spawn_transport_plans(
                     supervisor,
                     task_id.clone(),
                     "tcp",
+                    start.clone(),
                     move |cancellation| {
                         tcp_listener_task(
                             adapter.clone(),
@@ -1777,6 +1768,7 @@ fn spawn_transport_plans(
                     supervisor,
                     task_id.clone(),
                     "doh",
+                    start.clone(),
                     move |cancellation| {
                         doh_listener_task(
                             adapter.clone(),
@@ -1864,6 +1856,7 @@ fn spawn_transport_task<F>(
     supervisor: &mut Supervisor,
     task_id: String,
     component: &'static str,
+    start: TaskStartGate,
     factory: F,
 ) -> Result<Cancellation, ServiceStartError>
 where
@@ -1882,8 +1875,16 @@ where
         kind: component,
         reason: error.to_string(),
     })?;
+    let factory = Arc::new(factory);
     supervisor
-        .spawn_scoped_with_factory(spec, factory)
+        .spawn_scoped_with_factory(spec, move |cancellation| {
+            let start = start.clone();
+            let factory = Arc::clone(&factory);
+            Box::pin(async move {
+                start.wait().await?;
+                factory(cancellation).await
+            })
+        })
         .map_err(ServiceStartError::Task)
 }
 
@@ -1903,6 +1904,7 @@ fn spawn_resource_tasks(
             index,
             resource,
             telemetry.clone(),
+            TaskStartGate::default(),
         )?);
     }
     Ok(cancellations)
@@ -1915,6 +1917,7 @@ fn spawn_resource_task(
     index: usize,
     resource: ConfigId,
     telemetry: Option<Arc<TelemetryWriter>>,
+    start: TaskStartGate,
 ) -> Result<ResourceTask, ServiceStartError> {
     let spec = TaskSpec::new(
         format!("resource.refresh.{}.{index}", revision.0),
@@ -1931,7 +1934,11 @@ fn spawn_resource_task(
     let task_resource = resource.clone();
     let cancellation = supervisor
         .spawn_scoped(spec, move |cancellation| {
-            resource_refresh_task(task_coordinator, task_resource, cancellation, telemetry)
+            Box::pin(async move {
+                start.wait().await?;
+                resource_refresh_task(task_coordinator, task_resource, cancellation, telemetry)
+                    .await
+            })
         })
         .map_err(ServiceStartError::Task)?;
     Ok(ResourceTask {
@@ -3133,6 +3140,7 @@ mod tests {
             &mut supervisor,
             "transport.test".to_owned(),
             "test",
+            super::TaskStartGate::default(),
             |cancellation| {
                 Box::pin(async move {
                     cancellation.cancelled().await;
@@ -3150,6 +3158,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn staged_transport_starts_only_after_commit_and_abandoned_gate_cancels() {
+        for commit in [false, true] {
+            let mut supervisor = Supervisor::new();
+            let starts = Arc::new(AtomicU32::new(0));
+            let observed_starts = Arc::clone(&starts);
+            let (sender, receiver) = tokio::sync::watch::channel(false);
+            spawn_transport_task(
+                &mut supervisor,
+                "transport.staged".to_owned(),
+                "test",
+                super::TaskStartGate(Some(receiver)),
+                move |_| {
+                    observed_starts.fetch_add(1, Ordering::AcqRel);
+                    Box::pin(async { Ok(()) })
+                },
+            )
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(starts.load(Ordering::Acquire), 0);
+            if commit {
+                sender.send_replace(true);
+            }
+            drop(sender);
+            let completion = tokio::time::timeout(Duration::from_secs(1), supervisor.join_next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                completion.exit,
+                if commit {
+                    TaskExit::Completed
+                } else {
+                    TaskExit::Cancelled
+                },
+            );
+            assert_eq!(starts.load(Ordering::Acquire), u32::from(commit));
+            assert_eq!(supervisor.task_count(), 0);
+        }
+    }
+
+    #[tokio::test]
     async fn transport_task_retries_transient_failure_before_scoped_shutdown() {
         let mut supervisor = Supervisor::new();
         let attempts = Arc::new(AtomicU32::new(0));
@@ -3158,6 +3207,7 @@ mod tests {
             &mut supervisor,
             "transport.retry".to_owned(),
             "test",
+            super::TaskStartGate::default(),
             move |cancellation| {
                 let attempt = factory_attempts.fetch_add(1, Ordering::AcqRel);
                 if attempt == 0 {
@@ -3197,6 +3247,7 @@ mod tests {
             &mut supervisor,
             "transport.exhausted".to_owned(),
             "udp",
+            super::TaskStartGate::default(),
             move |_cancellation| {
                 factory_attempts.fetch_add(1, Ordering::AcqRel);
                 Box::pin(async { Err(TaskError::Transient) })
@@ -5930,5 +5981,147 @@ clients: []
             .unwrap();
         assert!(!report.deadline_expired);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 在真实 Supervisor 注入重复 task ID，覆盖 transport 失败和 transport 已注册后的资源失败。
+    #[tokio::test]
+    async fn reload_task_registration_failure_keeps_old_dns_and_allows_retry() {
+        for duplicate in ["transport.udp.2.0", "resource.refresh.2.0"] {
+            let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("_fluxdns/p1-service-stage");
+            let root = base.join(format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let resource_path = root.join("hosts.txt");
+            std::fs::write(&resource_path, "192.0.2.10 example.test\n").unwrap();
+            let port = available_transport_ports()[0];
+            let factory = crate::runtime::SystemSocketFactory::new();
+            let initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, port, false),
+                RuntimeRevision(1),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let bound = crate::runtime::bind_prepared(
+                initial,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+            let original = coordinator.load();
+            let mut service =
+                super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                    .unwrap();
+            let collision = service
+                .supervisor
+                .spawn_scoped(
+                    TaskSpec::new(
+                        duplicate,
+                        "test",
+                        FaultLevel::Degraded,
+                        RestartPolicy::Never,
+                    )
+                    .unwrap(),
+                    |_| Box::pin(std::future::pending()),
+                )
+                .unwrap();
+            let next = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, port, true),
+                RuntimeRevision(2),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                service
+                    .reload_prepared(
+                        next,
+                        &factory,
+                        Deadline::new(Instant::now() + Duration::from_secs(5)),
+                        Cancellation::new(),
+                    )
+                    .await,
+                Err(super::ServiceReloadError::Task(
+                    crate::runtime::SupervisorError::DuplicateTask(_),
+                ))
+            ));
+            assert!(Arc::ptr_eq(&coordinator.load(), &original));
+            assert!(Arc::ptr_eq(service.runtime(), &original));
+            assert!(!original.is_draining());
+            assert_eq!(service.transport_task_count(), 1);
+            assert_eq!(service.resource_task_count(), 0);
+            let response = udp_query(
+                SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                1,
+                "example.test.",
+            )
+            .await;
+            assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+            assert_eq!(response.answers.len(), 1);
+
+            collision.cancel(CancelReason::Shutdown);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while service.supervisor.task_count() > 1 {
+                    let completion = service.supervisor.join_next().await.unwrap();
+                    assert_eq!(completion.exit, TaskExit::Cancelled);
+                }
+            })
+            .await
+            .unwrap();
+            let retry = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, port, true),
+                RuntimeRevision(2),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let active = service
+                .reload_prepared(
+                    retry,
+                    &factory,
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                    Cancellation::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(active.revision(), RuntimeRevision(2));
+            assert_eq!(service.resource_task_count(), 1);
+            assert_eq!(
+                udp_query(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                    2,
+                    "example.test."
+                )
+                .await
+                .answers
+                .len(),
+                1,
+            );
+            service
+                .shutdown(
+                    &SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                )
+                .await
+                .unwrap();
+            let target = root.canonicalize().unwrap();
+            assert!(target.starts_with(base.canonicalize().unwrap()));
+            std::fs::remove_dir_all(target).unwrap();
+        }
     }
 }

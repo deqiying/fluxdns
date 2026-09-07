@@ -201,6 +201,49 @@ impl fmt::Debug for ActiveRuntime {
     }
 }
 
+/// service 持有此准备态时仍由旧实例服务；task 注册成功后才能执行无 await 的同步发布。
+pub(crate) struct ServiceActivation<'a> {
+    coordinator: &'a RuntimeCoordinator,
+    _mutation: tokio::sync::MutexGuard<'a, ()>,
+    current: Arc<ActiveRuntime>,
+    next: Arc<ActiveRuntime>,
+}
+
+impl ServiceActivation<'_> {
+    pub(crate) fn runtime(&self) -> Arc<ActiveRuntime> {
+        Arc::clone(&self.next)
+    }
+
+    /// 只发布已准备实例；失败不改变旧实例的 admission 或 owner 登记。
+    /// 调用方必须在返回成功后同步更新服务任务集合并放行任务，期间不得 await。
+    pub(crate) fn commit(self) -> Result<Arc<ActiveRuntime>, ServiceActivationConflict> {
+        let observed = self
+            .coordinator
+            .active
+            .compare_and_swap(&self.current, Arc::clone(&self.next));
+        if !Arc::ptr_eq(&observed, &self.current) {
+            return Err(ServiceActivationConflict {
+                expected: self.current.revision(),
+                actual: observed.revision(),
+            });
+        }
+        self.coordinator.register_finalizer_owner(&self.next);
+        self.coordinator.register_runtime_core(&self.next);
+        self.coordinator.register_runtime_owner(&self.next);
+        self.coordinator.register_runtime_owner(&self.current);
+        self.current.begin_drain();
+        self.coordinator.prune_finalizer_owners();
+        Ok(Arc::clone(&self.next))
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("service activation revision conflict: expected {expected:?}, current {actual:?}")]
+pub struct ServiceActivationConflict {
+    expected: RuntimeRevision,
+    actual: RuntimeRevision,
+}
+
 struct AdmissionState {
     draining: AtomicBool,
     active: AtomicUsize,
@@ -559,6 +602,33 @@ impl RuntimeCoordinator {
         self.compare_and_activate(expected, candidate)
     }
 
+    /// 在资源 mutation gate 下合并候选，但将发布推迟到 service 的可失败任务准备之后。
+    pub(crate) async fn prepare_service_activation(
+        &self,
+        expected: RuntimeRevision,
+        candidate: BoundCandidate,
+    ) -> Result<ServiceActivation<'_>, ServiceActivationConflict> {
+        let mutation = self.mutation.lock().await;
+        let current = self.load();
+        if current.revision() != expected {
+            return Err(ServiceActivationConflict {
+                expected,
+                actual: current.revision(),
+            });
+        }
+        let (mut prepared, listeners) = candidate.into_parts();
+        prepared.merge_state_from(&current.prepared);
+        let next = Arc::new(ActiveRuntime::from_candidate(BoundCandidate::from_parts(
+            prepared, listeners,
+        )));
+        Ok(ServiceActivation {
+            coordinator: self,
+            _mutation: mutation,
+            current,
+            next,
+        })
+    }
+
     /// 在 BindPlan 未变化时复用当前已激活 listener，只切换 prepared Runtime。
     pub async fn activate_prepared_reusing_listeners(
         &self,
@@ -746,6 +816,41 @@ mod tests {
             .resolved;
         let prepared = PreparedRuntime::prepare(config, RuntimeRevision(revision)).unwrap();
         super::super::bind::test_candidate(prepared)
+    }
+
+    #[tokio::test]
+    async fn service_activation_stages_without_publication_and_rechecks_cas() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let original = coordinator.load();
+        let staged = coordinator
+            .prepare_service_activation(RuntimeRevision(1), candidate(2))
+            .await
+            .unwrap();
+        assert_eq!(staged.runtime().revision(), RuntimeRevision(2));
+        assert!(Arc::ptr_eq(&original, &coordinator.load()));
+        assert!(!original.is_draining());
+        drop(staged);
+        assert!(!original.is_draining());
+
+        let staged = coordinator
+            .prepare_service_activation(RuntimeRevision(1), candidate(2))
+            .await
+            .unwrap();
+        let active = staged.commit().unwrap();
+        assert!(Arc::ptr_eq(&active, &coordinator.load()));
+        assert!(original.is_draining());
+
+        let staged = coordinator
+            .prepare_service_activation(RuntimeRevision(2), candidate(3))
+            .await
+            .unwrap();
+        // 底层非串行发布仍必须被最终 CAS 检出，不能假定持有 mutation gate 就不会竞争。
+        coordinator.activate(candidate(4));
+        let error = staged.commit().unwrap_err();
+        assert_eq!(error.expected, RuntimeRevision(2));
+        assert_eq!(error.actual, RuntimeRevision(4));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(4));
+        assert!(!coordinator.load().is_draining());
     }
 
     fn policy_candidate(revision: u64) -> crate::runtime::BoundCandidate {
