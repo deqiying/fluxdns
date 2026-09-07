@@ -60,7 +60,7 @@ BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml 
 
 Windows Rust 1.98.0 本批 `config::` 89 项通过，其中 ConfigStore 28 项。新增子进程以退出码 73 在 PREPARED、COMMIT_DECIDED、源替换后、派生替换后直接退出，验证真实文件与 OS 锁恢复；另有真实 Windows journal/派生文件占用失败、同步重试、同内容换身份、损坏/超限 journal、单文件去重、权限和别名测试。测试数据限定 `_fluxdns/p1-journal-tests/` 与 `_fluxdns/p1-config-tests/`，不读取个人配置。
 
-剩余边界：Runtime 成功回报仍由测试模拟，v2 配置事务 owner/服务生产者、启动 recovery、HTTP 状态/重试端点未接线。外部新修改后的重新确认/重建事务、完整差异工作区仍归 BC-30；缺失文件还原的内部进度见下节。当前重试只接受 journal 已知状态，不能强行覆盖未知外改。文件 I/O 为同步内部调用，HTTP 断开后的 owner 生命周期和应用预算仍需接线验证。崩溃在 journal 建立之前或决策旁文件替换之前可能留下未登记的受限旁文件；不扫描删除未知残留，需明确人工处理。非合作编辑器的核对/替换竞态不能被普通 filesystem replace 完全消除。因此 BC-29 和 P1 生产退出条件仍未关闭。
+剩余边界：Runtime 成功回报仍由测试模拟，v2 配置事务 owner/服务生产者、启动 recovery、HTTP 状态/重试端点未接线。缺失文件还原及外部新修改后的明确确认/事务重建已有下述内部能力，完整差异工作区仍归 BC-30；未确认新双文件版本时不能强行覆盖未知外改。文件 I/O 为同步内部调用，HTTP 断开后的 owner 生命周期和应用预算仍需接线验证。崩溃在 journal 建立之前或决策旁文件替换之前可能留下未登记的受限旁文件；不扫描删除未知残留，需明确人工处理。非合作编辑器的核对/替换竞态不能被普通 filesystem replace 完全消除。因此 BC-29 和 P1 生产退出条件仍未关闭。
 
 ### P1 受管文件还原内部能力（2026-09-07）
 
@@ -72,7 +72,19 @@ Windows Rust 1.98.0 本批 `config::` 89 项通过，其中 ConfigStore 28 项�
 
 Windows 本批 ConfigStore 36 项、完整 `config::` 97 项通过。新增还原确认/幂等/双版本冲突、真实文件占用失败和显式重试、单/双文件缺失、目录/硬链接拒绝、父目录替换、DACL 保留以及 no-replace 测试。子进程矩阵从 4 个扩至 8 个 crash point，增加缺失双文件的 PREPARED、COMMIT_DECIDED、源提交后、派生提交后；PREPARED 不补建目标，持久决策才补齐。用例数据仍在 `_fluxdns/p1-config-tests/` 和 `_fluxdns/p1-journal-tests/`，递归清理前核对真实绝对路径归属。
 
-该子项未接入 HTTP/UI 或 v2 生产启动，不替代完整 BC-30。新外改后的重新确认/事务重建、受限差异预览、配置状态投影，以及文件 I/O 的异步 owner/预算和响应中断仍待完成；不能以内部 revision 不变断言新版真实 DNS 联合还原已验收。
+该子项未接入 HTTP/UI 或 v2 生产启动，不替代完整 BC-30。新外改后的重新确认/事务重建内部进度见下节；受限差异预览、配置状态投影，以及文件 I/O 的异步 owner/预算和响应中断仍待完成。不能以内部 revision 不变断言新版真实 DNS 联合还原已验收。
+
+### P1 外改确认重试内部能力（2026-09-07）
+
+`retry_persistence` 只继续当前 AppliedUnpersisted operation，核对原调用者和最新 active/file 双 revision；既有操作完成后再次请求只返回既有状态，不覆盖后来出现的外改。journal 已知的逐文件部分提交可以直接继续；遇到未知目标必须显式确认丢弃该次观测到的外改。活动源原文、active/runtime revision 和原 operation 保持不变，不接收替代候选，也不重新 prepare 或应用 DNS。
+
+`Persistence::reconfirm` 对同一活动源摘要重新执行完整配置/路径校验，以受限权限准备新 stage，并在提交决策前再次核对组合文件版本、目录及文件身份。新 COMMIT_DECIDED journal 原子替换旧 journal 后才能按新决策覆盖所见外改；决策未成功持久化时保持旧决策，不先删除旧 journal。缺失叶节点继续使用受管权限能力；不放行不可读、超限、链接或被替换的父目录。
+
+新 journal 最多登记 3 个待回收旧旁文件，只包含固定源/派生/决策角色、旧随机标识和完整身份摘要，不包含任意路径。恢复拒绝重复条目、当前候选标识、非法随机标识和无派生目标的派生角色；旧旁文件被外部改写时拒绝清理，不用名称猜测归属。连续重新确认先清理已知旧项，不无限累积清单。新 journal 替换失败且旧 journal 仍可验证时，只清理本次已知新旁文件；结果不能确认时保留现场和 Unknown。未核清旁文件记为 CompensationFailed，二者均禁止普通重试或叠加变更，等待 owner 核对。
+
+Windows Rust 1.98.0 本批 `config::` 104 项通过，其中 ConfigStore 43 项。独立子进程退出矩阵扩至 12 个检查点，新增外改重新确认前、新决策持久化后、源替换后和派生替换后；新决策前保持未知外改，新决策后仅完成已确认候选。另有真实 journal 文件占用、调用者/双版本冲突、重复重试不覆盖后续外改、旁文件篡改与连续确认清单上界测试。`cargo check`、全部测试目标 `--all-targets --no-run` 和 fmt 检查通过；未执行断电、跨平台或正式 v2 HTTP 联合验收。
+
+该内部重试不意味着正式 `/api/v2/config/files/retry` 已可用。操作 DTO 的冻结结果投影、认证/handler、异步持久化 owner 和启动恢复仍未闭合；HTTP 结果未知必须查询 operation，不能自动重放应用或还原。
 
 ### 当前生产加载器
 

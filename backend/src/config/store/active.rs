@@ -359,7 +359,33 @@ impl ConfigStore {
         actor: &str,
         operation_id: &str,
     ) -> Result<ActiveSnapshot, ActiveError> {
+        self.persist_current(actor, operation_id, None)
+    }
+
+    /// 显式继续当前未同步操作，重新核对双 revision；确认仅丢弃当前观测到的外改。
+    /// 原 operation、调用者及活动源保持绑定，不能借重试换入新的配置或再次激活 Runtime。
+    pub(crate) fn retry_persistence(
+        &self,
+        actor: &str,
+        operation_id: &str,
+        expected: &ExpectedRevisions,
+        discard_external_changes: bool,
+    ) -> Result<ActiveSnapshot, ActiveError> {
+        self.persist_current(
+            actor,
+            operation_id,
+            Some((expected, discard_external_changes)),
+        )
+    }
+
+    fn persist_current(
+        &self,
+        actor: &str,
+        operation_id: &str,
+        confirmation: Option<(&ExpectedRevisions, bool)>,
+    ) -> Result<ActiveSnapshot, ActiveError> {
         validate_token(actor)?;
+        validate_token(operation_id)?;
         let _transaction = self.transaction.try_lock().map_err(|_| ActiveError::Busy)?;
         let mut guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
         let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
@@ -378,11 +404,40 @@ impl ConfigStore {
         {
             return Err(ActiveError::Busy);
         }
+        if let Some((expected, _)) = confirmation {
+            state.snapshot.observation =
+                ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
+            if expected.active != state.snapshot.revision {
+                return Err(ActiveError::ActiveConflict);
+            }
+            if expected.files != state.snapshot.observation.revision() {
+                return Err(ActiveError::FileConflict);
+            }
+        }
         let persistence = state.persistence.as_mut().ok_or(ActiveError::Unavailable)?;
+        if let Some((_, discard)) = confirmation
+            && persistence.needs_reconfirmation()?
+        {
+            if !discard {
+                return Err(ActiveError::ExternalConfirmation);
+            }
+            if let Err(error) = persistence.reconfirm(
+                &state.snapshot.observation,
+                state.snapshot.source.as_bytes(),
+            ) {
+                state.operations.get_mut(operation_id).unwrap().phase =
+                    persistence_failure_phase(&error);
+                return Err(error.into());
+            }
+        }
         let result = persistence.commit();
         state.snapshot.observation =
             ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
-        result?;
+        if let Err(error) = result {
+            state.operations.get_mut(operation_id).unwrap().phase =
+                persistence_failure_phase(&error);
+            return Err(error.into());
+        }
         let fingerprint = sha256_digest(state.snapshot.source.as_bytes());
         // commit 已核对两个替换结果；其后的外改由 observation 暴露，不重放已完成提交。
         state.snapshot.persisted_revision = Some(state.snapshot.revision.clone());
@@ -472,7 +527,7 @@ impl ConfigStore {
             ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
         if let Err(error) = result {
             state.operations.get_mut(operation_id).unwrap().phase =
-                OperationPhase::AppliedUnpersisted;
+                persistence_failure_phase(&error);
             return Err(error.into());
         }
         state.snapshot.persisted_revision = Some(state.snapshot.revision.clone());
@@ -593,6 +648,14 @@ impl Drop for ApplyPermit<'_> {
             // 被取消或 panic 的命令不能被重放；保留 gate，等待控制 owner 核对真实状态。
             record.phase = OperationPhase::Unknown;
         }
+    }
+}
+
+fn persistence_failure_phase(error: &PersistenceError) -> OperationPhase {
+    match error {
+        PersistenceError::CleanupRequired(_) => OperationPhase::CompensationFailed,
+        PersistenceError::RecoveryRequired => OperationPhase::Unknown,
+        _ => OperationPhase::AppliedUnpersisted,
     }
 }
 

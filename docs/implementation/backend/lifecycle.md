@@ -48,7 +48,7 @@ TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于�
 
 Windows 定向测试覆盖双文件、防抖、同长度内容变化、同内容文件身份替换、无效 YAML、缺失、非文件、超限和慢读取单在途。真实 UDP 服务在与生产相同的控制循环中，源/派生文件连续变化后保持同一个 Runtime、revision 和 DNS 策略；随后仅改 Hosts 资源文件，由正式 resource worker 到期刷新 DNS 结果，未手动调用 refresh。此处仍使用现有 v1 loader/runtime，不是 v2 生产启动验收。
 
-BC-30 已有 ConfigStore 的[还原内部能力](../configuration.md#p1-受管文件还原内部能力2026-09-07)，但配置 owner 的自写归属、脱敏差异、外改重新确认后的同步重试和状态/还原端点仍未接线；当前仅有日志通知，不等同于 WebUI 全局提示。文件系统停滞的强制中断、完整应用级 shutdown 总预算仍未验证。
+BC-30 已有 ConfigStore 的[还原内部能力](../configuration.md#p1-受管文件还原内部能力2026-09-07)和[外改确认重试](../configuration.md#p1-外改确认重试内部能力2026-09-07)，但配置 owner 的自写归属、脱敏差异和状态/还原/重试端点仍未接线；当前仅有日志通知，不等同于 WebUI 全局提示。文件系统停滞的强制中断、完整应用级 shutdown 总预算仍未验证。
 
 ### P1 差量 socket 子项（2026-09-07）
 

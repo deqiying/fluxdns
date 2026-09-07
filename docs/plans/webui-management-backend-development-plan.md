@@ -73,7 +73,7 @@ BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 f
 
 ## 4. BE-02：配置事务、revision 与运行时应用
 
-BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件有界观测、版本分离、调用者/候选/双版本绑定票据、有界幂等操作和中断阻塞；定向源编辑已覆盖类型化引用、组合候选完整语义/路径校验及编辑后等价核对。实现与测试权威见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。尚未提供正式 v2 loader/resolve、候选到资源/socket prepare 的转换、状态端点或新版 setup；应用回报测试仅为状态机模拟。BC-03 已有[有界服务队列消费者](../implementation/backend/lifecycle.md#p1-服务控制队列子项2026-09-07)，但未连接 v2 活动源/operation 生产者。BC-29 的[分阶段文件事务](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)已接入活动源内部状态机并完成 Windows 子进程 crash point/文件失败重试测试；正式启动恢复和 HTTP、外改重新确认仍未闭合。BC-30 已交付正式 app 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)，双文件读取移出同步控制循环，真实 DNS 外改隔离及 Hosts 自动刷新有定向证据；差异/还原/自写归属、状态端点及 UI 仍未完成。因此上述生产接线子项保留，不能据此关闭 P1 或 BC-30。
+BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件有界观测、版本分离、调用者/候选/双版本绑定票据、有界幂等操作和中断阻塞；定向源编辑已覆盖类型化引用、组合候选完整语义/路径校验及编辑后等价核对。实现与测试权威见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。尚未提供正式 v2 loader/resolve、候选到资源/socket prepare 的转换、状态端点或新版 setup；应用回报测试仅为状态机模拟。BC-03 已有[有界服务队列消费者](../implementation/backend/lifecycle.md#p1-服务控制队列子项2026-09-07)，但未连接 v2 活动源/operation 生产者。BC-29 的[分阶段文件事务](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)已接入活动源内部状态机并完成 Windows 子进程 crash point/文件失败重试测试；还原和外改重新确认已有内部能力，正式启动恢复和 HTTP 仍未闭合。BC-30 已交付正式 app 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)，双文件读取移出同步控制循环，真实 DNS 外改隔离及 Hosts 自动刷新有定向证据；差异/自写归属、状态/还原/重试端点及 UI 仍未完成。因此上述生产接线子项保留，不能据此关闭 P1 或 BC-30。
 
 完整状态机、热更新矩阵和失败语义只维护于[配置热更新专项](webui-management-config-runtime-plan.md)，本节列后端开发步骤：
 
@@ -82,7 +82,7 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 3. 扩展 `reload_prepared`：差量复用、任务预注册和已接纳请求按原 deadline drain 已接入，见[生命周期实现](../implementation/backend/lifecycle.md#p1-请求-drain-子项2026-09-07)。继续连接活动源/operation 生产者、新进程 owner 可失败准备/真实补偿。不能将这些内部子项测试等同于完整不停机应用验收。
 4. 先应用后正式文件替换的内部状态机、PREPARED/COMMIT_DECIDED journal 与已知状态下文件重试已实现；继续完成服务成功回报、启动恢复及正式状态/重试端点。不能以模拟 Runtime 回报关闭联合验收。
 5. 将 app watcher 改为只检测和上报；复用去抖轮询但有界读取，区分自写/外改/不可读/缺失；不改变 Hosts/规则集资源刷新。
-6. 已有[受管文件还原内部能力](../implementation/configuration.md#p1-受管文件还原内部能力2026-09-07)，绑定 active/file 双版本、调用者及 operation，覆盖缺失叶节点的权限保持重建；继续实现脱敏差异、模块化组合采用、外改重新确认、普通保存覆盖确认及还原端点，不接收任意文件路径或整份 YAML，不据此关闭 BC-30。
+6. 已有[受管文件还原内部能力](../implementation/configuration.md#p1-受管文件还原内部能力2026-09-07)和[外改确认重试](../implementation/configuration.md#p1-外改确认重试内部能力2026-09-07)，绑定 active/file 双版本、调用者及 operation，覆盖缺失叶节点的权限保持重建及新旧 journal 决策交接；继续实现脱敏差异、模块化组合采用、普通保存覆盖确认与状态/还原/重试端点，不接收任意文件路径或整份 YAML，不据此关闭 BC-30。
 7. 复用 observability reload handle、共享输出和进程 owner，实现 logs off/on、level/path 热切换；先预开输出，失败不破坏旧 writer，指标不因关闭日志失效。
 8. 首用户初始化继续满足“持久化用户成功后发布认证”的安全要求，但写入仲裁和活动源必须与普通配置协调；本期不新增用户管理 API。普通配置/用户排序不回收 session 的显式应用边界已有 [P1 回归](../implementation/backend/management.md)，文件仅提示与 v2 setup 接线仍保留。
 

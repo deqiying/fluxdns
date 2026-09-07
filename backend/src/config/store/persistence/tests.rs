@@ -10,6 +10,130 @@ const NEW: &[u8] = concat!(
 )
 .as_bytes();
 
+#[cfg(windows)]
+#[test]
+fn reconfirmation_journal_replace_failure_keeps_old_decision_and_is_retryable() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let fixture = Fixture::new();
+    let mut transaction = fixture.prepare();
+    transaction.decide().unwrap();
+    transaction.commit_source().unwrap();
+    fs::write(&fixture.derived, b"external copy").unwrap();
+    let expected = ManagedObservation::read(&fixture.source, Some(&fixture.derived));
+    let old_decision = fs::read(journal_path(&fixture.source)).unwrap();
+    let occupied = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(journal_path(&fixture.source))
+        .unwrap();
+    assert!(transaction.reconfirm(&expected, NEW).is_err());
+    assert_eq!(
+        fs::read(journal_path(&fixture.source)).unwrap(),
+        old_decision
+    );
+    fixture.assert_bytes(NEW, b"external copy");
+    drop(occupied);
+    transaction.reconfirm(&expected, NEW).unwrap();
+    fixture.assert_bytes(NEW, b"external copy");
+    transaction.commit().unwrap();
+    fixture.assert_bytes(NEW, NEW);
+}
+
+#[test]
+fn reconfirmation_never_deletes_unknown_candidate_or_accepts_another_source() {
+    let fixture = Fixture::new();
+    let mut transaction = fixture.prepare();
+    fs::write(&fixture.derived, b"external copy").unwrap();
+    let expected = ManagedObservation::read(&fixture.source, Some(&fixture.derived));
+    assert!(matches!(
+        transaction.reconfirm(&expected, OLD),
+        Err(PersistenceError::Conflict)
+    ));
+    let stage = stage_path(&fixture.source, &transaction.journal.nonce);
+    fs::write(&stage, b"keep unknown stage").unwrap();
+    assert!(matches!(
+        transaction.reconfirm(&expected, NEW),
+        Err(PersistenceError::Conflict)
+    ));
+    assert_eq!(fs::read(stage).unwrap(), b"keep unknown stage");
+    fixture.assert_bytes(OLD, b"external copy");
+}
+
+#[test]
+fn recovery_rejects_tampered_retired_stage_before_replacing_formal_files() {
+    let fixture = Fixture::new();
+    let mut transaction = fixture.prepare();
+    let old_stage = stage_path(&fixture.source, &transaction.journal.nonce);
+    fs::write(&fixture.derived, b"external copy").unwrap();
+    transaction
+        .reconfirm(
+            &ManagedObservation::read(&fixture.source, Some(&fixture.derived)),
+            NEW,
+        )
+        .unwrap();
+    fs::write(&old_stage, b"unknown retired file").unwrap();
+    drop(transaction);
+    assert!(matches!(
+        recover(&fixture.source, Some(&fixture.derived)),
+        Err(PersistenceError::Conflict)
+    ));
+    fixture.assert_bytes(OLD, b"external copy");
+    assert_eq!(fs::read(old_stage).unwrap(), b"unknown retired file");
+}
+
+#[test]
+fn repeated_confirmation_bounds_retired_files_and_cleans_only_owned_stages() {
+    let fixture = Fixture::new();
+    let mut transaction = fixture.prepare();
+    for revision in 1..=8 {
+        fs::write(&fixture.derived, format!("external {revision}")).unwrap();
+        transaction
+            .reconfirm(
+                &ManagedObservation::read(&fixture.source, Some(&fixture.derived)),
+                NEW,
+            )
+            .unwrap();
+        assert!(transaction.journal.retired.len() <= 3);
+        assert_eq!(fs::read(&fixture.source).unwrap(), OLD);
+    }
+    transaction.commit().unwrap();
+    fixture.assert_bytes(NEW, NEW);
+    for entry in fs::read_dir(&fixture.root).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+        assert!(
+            !name.ends_with("-stage")
+                && !name.ends_with("-decision")
+                && !name.ends_with("-journal")
+        );
+    }
+}
+
+#[test]
+fn journal_cannot_retire_its_current_candidate() {
+    let fixture = Fixture::new();
+    let mut transaction = fixture.prepare();
+    fs::write(&fixture.derived, b"external copy").unwrap();
+    transaction
+        .reconfirm(
+            &ManagedObservation::read(&fixture.source, Some(&fixture.derived)),
+            NEW,
+        )
+        .unwrap();
+    transaction.journal.retired[0].nonce = transaction.journal.nonce.clone();
+    fs::write(
+        journal_path(&fixture.source),
+        serde_json::to_vec(&transaction.journal).unwrap(),
+    )
+    .unwrap();
+    drop(transaction);
+    assert!(matches!(
+        recover(&fixture.source, Some(&fixture.derived)),
+        Err(PersistenceError::InvalidJournal)
+    ));
+    fixture.assert_bytes(OLD, b"external copy");
+}
+
 struct Fixture {
     root: PathBuf,
     source: PathBuf,
@@ -453,6 +577,10 @@ fn process_crash_matrix_recovers_only_persisted_decisions() {
         "missing-decided",
         "missing-source",
         "missing-derived",
+        "reconfirm-before-decision",
+        "reconfirmed",
+        "reconfirmed-source",
+        "reconfirmed-derived",
     ] {
         let fixture = Fixture::new();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -466,6 +594,14 @@ fn process_crash_matrix_recovers_only_persisted_decisions() {
             .status()
             .unwrap();
         assert_eq!(status.code(), Some(73), "{point}");
+        if point == "reconfirm-before-decision" {
+            assert!(matches!(
+                recover(&fixture.source, Some(&fixture.derived)),
+                Err(PersistenceError::Conflict)
+            ));
+            fixture.assert_bytes(NEW, b"external copy");
+            continue;
+        }
         let outcome = recover(&fixture.source, Some(&fixture.derived)).unwrap();
         if point.ends_with("prepared") {
             assert_eq!(outcome, RecoveryOutcome::PreparedDiscarded);
@@ -507,6 +643,17 @@ fn crash_worker() {
         Some(&protection),
     )
     .unwrap();
+    if point.starts_with("reconfirm") {
+        transaction.decide().unwrap();
+        transaction.commit_source().unwrap();
+        fs::write(&derived, b"external copy").unwrap();
+        if point == "reconfirm-before-decision" {
+            std::process::exit(73);
+        }
+        transaction
+            .reconfirm(&ManagedObservation::read(&source, Some(&derived)), NEW)
+            .unwrap();
+    }
     if !point.ends_with("prepared") {
         transaction.decide().unwrap();
     }

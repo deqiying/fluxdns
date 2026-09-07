@@ -6,6 +6,118 @@ use std::fs;
 const FIXTURE: &str = include_str!("../../../../tests/fixtures/config-v2.yaml");
 
 #[test]
+fn unresolved_persistence_results_are_not_classified_as_retryable_file_failure() {
+    assert_eq!(
+        persistence_failure_phase(&PersistenceError::CleanupRequired(Box::new(
+            PersistenceError::Conflict
+        ))),
+        OperationPhase::CompensationFailed
+    );
+    assert_eq!(
+        persistence_failure_phase(&PersistenceError::RecoveryRequired),
+        OperationPhase::Unknown
+    );
+    assert_eq!(
+        persistence_failure_phase(&PersistenceError::Io(std::io::Error::from(
+            std::io::ErrorKind::PermissionDenied
+        ))),
+        OperationPhase::AppliedUnpersisted
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn confirmed_retry_rebuilds_only_current_operation_after_external_changes() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    for restoring in [false, true] {
+        let fixture = Fixture::new();
+        let occupied;
+        if restoring {
+            fs::write(&fixture.source, b"external source").unwrap();
+            let expected = fixture.store.observe_files().unwrap().expected();
+            occupied = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(&fixture.derived)
+                .unwrap();
+            assert!(
+                fixture
+                    .store
+                    .restore_files("session-a", "sync", &expected, true)
+                    .is_err()
+            );
+        } else {
+            let mut permit = fixture.permit("sync");
+            permit.begin_runtime_apply().unwrap();
+            permit.applied(2).unwrap();
+            occupied = fs::OpenOptions::new()
+                .read(true)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+                .open(&fixture.derived)
+                .unwrap();
+            assert!(fixture.store.persist_applied("session-a", "sync").is_err());
+        }
+        drop(occupied);
+        let active = fixture.store.active_snapshot().unwrap();
+        fs::write(&fixture.source, b"changed again").unwrap();
+        let stale = fixture.store.observe_files().unwrap().expected();
+        fs::remove_file(&fixture.derived).unwrap();
+        assert!(matches!(
+            fixture
+                .store
+                .retry_persistence("session-b", "sync", &stale, true),
+            Err(ActiveError::Unavailable)
+        ));
+        assert!(matches!(
+            fixture
+                .store
+                .retry_persistence("session-a", "sync", &stale, true),
+            Err(ActiveError::FileConflict)
+        ));
+        let expected = fixture.store.observe_files().unwrap().expected();
+        let mut wrong_active = expected.clone();
+        wrong_active.active = "another-revision".into();
+        assert!(matches!(
+            fixture
+                .store
+                .retry_persistence("session-a", "sync", &wrong_active, true),
+            Err(ActiveError::ActiveConflict)
+        ));
+        assert!(matches!(
+            fixture
+                .store
+                .retry_persistence("session-a", "sync", &expected, false),
+            Err(ActiveError::ExternalConfirmation)
+        ));
+        assert_eq!(fs::read(&fixture.source).unwrap(), b"changed again");
+        assert!(!fixture.derived.exists());
+        let synced = fixture
+            .store
+            .retry_persistence("session-a", "sync", &expected, true)
+            .unwrap();
+        assert_eq!(synced.revision, active.revision);
+        assert_eq!(synced.runtime_revision, active.runtime_revision);
+        assert_eq!(synced.source, active.source);
+        assert!(!synced.externally_changed());
+        assert_eq!(
+            fs::read_to_string(&fixture.source).unwrap(),
+            active.source.as_ref()
+        );
+        assert_eq!(
+            fs::read_to_string(&fixture.derived).unwrap(),
+            active.source.as_ref()
+        );
+        fs::write(&fixture.source, b"after completed").unwrap();
+        fixture
+            .store
+            .retry_persistence("session-a", "sync", &expected, true)
+            .unwrap();
+        assert_eq!(fs::read(&fixture.source).unwrap(), b"after completed");
+    }
+}
+
+#[test]
 fn restore_recreates_missing_managed_files_from_active_source() {
     for (source_missing, derived_missing) in [(true, false), (false, true), (true, true)] {
         let fixture = Fixture::new();

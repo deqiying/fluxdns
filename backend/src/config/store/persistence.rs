@@ -116,6 +116,24 @@ struct Journal {
     candidate_fingerprint: String,
     source: Target,
     derived: Option<Target>,
+    #[serde(default)]
+    retired: Vec<RetiredStage>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum StageRole {
+    Source,
+    Derived,
+    Decision,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RetiredStage {
+    nonce: String,
+    role: StageRole,
+    stamp: Stamp,
 }
 
 /// 路径只来自 ConfigStore 的固定目标；journal 不接受任意路径或任意文件删除指令。
@@ -226,6 +244,7 @@ impl Persistence {
             candidate_fingerprint: sha256_digest(candidate),
             source: source_target,
             derived: derived_target,
+            retired: Vec::new(),
         };
         let write_journal = || {
             verify_parent(source, &journal.source)?;
@@ -298,11 +317,226 @@ impl Persistence {
 
     pub(super) fn commit(&mut self) -> Result<(), PersistenceError> {
         self.decide()?;
+        self.cleanup_retired()?;
         // 先核对两个目标，再逐文件核对和替换；没有跨文件或跨进程 CAS 保证。
         self.verify_targets()?;
         self.commit_source()?;
         self.commit_derived()?;
         self.finish()
+    }
+
+    /// 只区分目标文件是否仍为已知状态；journal/父目录错误不能被“确认外改”放行。
+    pub(super) fn needs_reconfirmation(&self) -> Result<bool, PersistenceError> {
+        self.verify_journal()?;
+        for (path, target) in self.targets() {
+            verify_parent(path, target)?;
+            let current = files::optional_stamp(path)?;
+            if current != target.old
+                && !(self.journal.phase == Phase::CommitDecided
+                    && current.as_ref() == Some(&target.staged))
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// 显式确认新双文件版本后，仅重建同一活动源的文件决策，不重新应用 Runtime。
+    /// 新决策与旧决策原子替换；旧旁文件由新 journal 的受限角色列表负责回收。
+    pub(super) fn reconfirm(
+        &mut self,
+        expected: &ManagedObservation,
+        candidate: &[u8],
+    ) -> Result<(), PersistenceError> {
+        self.verify_journal()?;
+        if sha256_digest(candidate) != self.journal.candidate_fingerprint {
+            return Err(PersistenceError::Conflict);
+        }
+        validate_candidate(candidate, &self.source, self.derived.as_deref())?;
+        if &ManagedObservation::read(&self.source, self.derived.as_deref()) != expected {
+            return Err(PersistenceError::Conflict);
+        }
+        self.cleanup_retired()?;
+        let mut retired = Vec::new();
+        for (role, path, stamp) in [
+            (
+                StageRole::Source,
+                Some(stage_path(&self.source, &self.journal.nonce)),
+                Some(&self.journal.source.staged),
+            ),
+            (
+                StageRole::Derived,
+                self.derived
+                    .as_ref()
+                    .map(|path| stage_path(path, &self.journal.nonce)),
+                self.journal.derived.as_ref().map(|target| &target.staged),
+            ),
+            (
+                StageRole::Decision,
+                Some(decision_path(&self.source, &self.journal.nonce)),
+                self.decision_stage.as_ref(),
+            ),
+        ] {
+            if let (Some(path), Some(stamp)) = (path, stamp)
+                && let Some(current) = files::optional_stamp(&path)?
+            {
+                if &current != stamp {
+                    return Err(PersistenceError::Conflict);
+                }
+                retired.push(RetiredStage {
+                    nonce: self.journal.nonce.clone(),
+                    role,
+                    stamp: current,
+                });
+            }
+        }
+        let fallback = self.protection();
+        let source_old = files::optional_stamp(&self.source)?;
+        let derived_old = self
+            .derived
+            .as_deref()
+            .map(files::optional_stamp)
+            .transpose()?
+            .flatten();
+        let protection = ManagedProtection {
+            source: TargetProtection::for_current(
+                &self.source,
+                source_old.as_ref(),
+                Some(&fallback.source),
+            )?,
+            derived: self
+                .derived
+                .as_deref()
+                .map(|path| {
+                    TargetProtection::for_current(
+                        path,
+                        derived_old.as_ref(),
+                        fallback.derived.as_ref(),
+                    )
+                })
+                .transpose()?,
+        };
+        let mut random = [0u8; 32];
+        getrandom::fill(&mut random).map_err(|_| PersistenceError::InvalidJournal)?;
+        let nonce = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if nonce == self.journal.nonce {
+            return Err(PersistenceError::InvalidJournal);
+        }
+        let source = stage(
+            &self.source,
+            &nonce,
+            source_old,
+            &protection.source,
+            candidate,
+        )?;
+        let derived = match self.derived.as_deref().zip(protection.derived.as_ref()) {
+            Some((path, protection)) => {
+                match stage(path, &nonce, derived_old, protection, candidate) {
+                    Ok(target) => Some(target),
+                    Err(error) => {
+                        files::remove_known(&stage_path(&self.source, &nonce), &source.staged)
+                            .map_err(|error| PersistenceError::CleanupRequired(Box::new(error)))?;
+                        return Err(error);
+                    }
+                }
+            }
+            None => None,
+        };
+        let next = Journal {
+            version: 2,
+            nonce,
+            phase: Phase::CommitDecided,
+            candidate_fingerprint: self.journal.candidate_fingerprint.clone(),
+            source,
+            derived,
+            retired,
+        };
+        let decision = decision_path(&self.source, &next.nonce);
+        let mut decision_stamp = None;
+        let mut replace = || -> Result<Stamp, PersistenceError> {
+            self.verify_journal()?;
+            if &ManagedObservation::read(&self.source, self.derived.as_deref()) != expected {
+                return Err(PersistenceError::Conflict);
+            }
+            for (path, target) in std::iter::once((self.source.as_path(), &next.source))
+                .chain(self.derived.as_deref().zip(next.derived.as_ref()))
+            {
+                verify_parent(path, target)?;
+                files::require_optional(path, target.old.as_ref())?;
+            }
+            let staged = files::write_new_with_permissions(
+                &decision,
+                &protection.source.permissions,
+                &serde_json::to_vec(&next).map_err(|_| PersistenceError::InvalidJournal)?,
+            )?;
+            decision_stamp = Some(staged.clone());
+            files::replace(
+                &decision,
+                &journal_path(&self.source),
+                &staged,
+                Some(&self.journal_stamp),
+            )?;
+            Ok(staged)
+        };
+        let next_stamp = match replace() {
+            Ok(stamp) => stamp,
+            Err(error) => {
+                // 若决策替换结果已无法确定，不删除可能被新 journal 引用的候选。
+                if files::stamp(&journal_path(&self.source)).ok().as_ref()
+                    != Some(&self.journal_stamp)
+                {
+                    return Err(PersistenceError::RecoveryRequired);
+                }
+                let cleanup = || -> Result<(), PersistenceError> {
+                    files::remove_known(
+                        &stage_path(&self.source, &next.nonce),
+                        &next.source.staged,
+                    )?;
+                    if let Some((path, target)) = self.derived.as_deref().zip(next.derived.as_ref())
+                    {
+                        files::remove_known(&stage_path(path, &next.nonce), &target.staged)?;
+                    }
+                    if let Some(stamp) = &decision_stamp {
+                        files::remove_known(&decision, stamp)?;
+                    }
+                    Ok(())
+                };
+                cleanup().map_err(|error| PersistenceError::CleanupRequired(Box::new(error)))?;
+                return Err(error);
+            }
+        };
+        self.journal = next;
+        self.journal_stamp = next_stamp;
+        self.decision_stage = None;
+        self.protection = Some(protection);
+        Ok(())
+    }
+
+    fn cleanup_retired(&self) -> Result<(), PersistenceError> {
+        self.verify_journal()?;
+        for retired in &self.journal.retired {
+            let (target_path, target) = match retired.role {
+                StageRole::Source | StageRole::Decision => (&self.source, &self.journal.source),
+                StageRole::Derived => self
+                    .derived
+                    .as_ref()
+                    .zip(self.journal.derived.as_ref())
+                    .ok_or(PersistenceError::InvalidJournal)?,
+            };
+            verify_parent(target_path, target)?;
+            let path = if retired.role == StageRole::Decision {
+                decision_path(target_path, &retired.nonce)
+            } else {
+                stage_path(target_path, &retired.nonce)
+            };
+            if files::optional_stamp(&path)?.is_some() {
+                files::remove_known(&path, &retired.stamp)?;
+            }
+        }
+        Ok(())
     }
 
     fn commit_source(&self) -> Result<(), PersistenceError> {
@@ -420,17 +654,27 @@ pub(crate) fn recover(
     let journal: Journal =
         serde_json::from_slice(&bytes).map_err(|_| PersistenceError::InvalidJournal)?;
     if journal.version != 2
-        || journal.nonce.len() != 64
-        || !journal
-            .nonce
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+        || !valid_nonce(&journal.nonce)
         || journal.derived.is_some() != derived.is_some()
         || journal.source.staged.fingerprint != journal.candidate_fingerprint
         || journal
             .derived
             .as_ref()
             .is_some_and(|target| target.staged.fingerprint != journal.candidate_fingerprint)
+        || journal.retired.len() > 3
+        || (journal.phase == Phase::Prepared && !journal.retired.is_empty())
+        || journal.retired.iter().any(|stage| {
+            !valid_nonce(&stage.nonce)
+                || stage.nonce == journal.nonce
+                || (stage.role == StageRole::Derived && derived.is_none())
+        })
+        || journal
+            .retired
+            .iter()
+            .map(|stage| (&stage.nonce, stage.role))
+            .collect::<std::collections::BTreeSet<_>>()
+            .len()
+            != journal.retired.len()
     {
         return Err(PersistenceError::InvalidJournal);
     }
@@ -492,6 +736,13 @@ fn validate_candidate(
         return Err(PersistenceError::InvalidJournal);
     }
     Ok(())
+}
+
+fn valid_nonce(nonce: &str) -> bool {
+    nonce.len() == 64
+        && nonce
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 pub(super) fn ensure_no_journal(source: &Path) -> Result<(), PersistenceError> {
