@@ -1,5 +1,5 @@
 import { QueryClient } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
@@ -7,6 +7,7 @@ import { setMockAuthenticated, setMockSetupRequired } from "@/mocks/handlers";
 import { server } from "@/mocks/server";
 import { AppProviders } from "./providers";
 import { App } from "./App";
+import { managementRoutes } from "./route-contract";
 
 function renderApp(path: string) {
   window.history.replaceState({}, "", path);
@@ -35,7 +36,7 @@ describe("application routes", () => {
     await user.type(screen.getByLabelText("密码"), "correct horse battery staple");
     await user.type(screen.getByLabelText("确认密码"), "correct horse battery staple");
     await user.click(screen.getByRole("button", { name: "创建管理账号" }));
-    expect(await screen.findByRole("heading", { name: "运行总览" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "服务状态" })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/dashboard");
     expect(window.localStorage.length).toBe(0);
     expect(window.sessionStorage.length).toBe(0);
@@ -66,14 +67,14 @@ describe("application routes", () => {
   });
 
   it("未登录时保护所有业务路由", async () => {
-    renderApp("/runtime");
+    renderApp("/listeners");
     expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/login");
   });
 
   it("登录后回跳原受保护路由且不持久化密码", async () => {
     const user = userEvent.setup();
-    renderApp("/runtime");
+    renderApp("/listeners");
     await screen.findByRole("heading", { name: "登录 FluxDNS" });
 
     await user.type(screen.getByLabelText("用户名"), "operator");
@@ -81,7 +82,8 @@ describe("application routes", () => {
     await user.type(password, "fixture-password");
     await user.click(screen.getByRole("button", { name: /登\s*录/ }));
 
-    expect(await screen.findByRole("heading", { name: "Runtime" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "监听入口" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/listeners");
     await waitFor(() => expect(password.value).toBe(""));
     expect(window.localStorage.length).toBe(0);
     expect(window.sessionStorage.length).toBe(0);
@@ -90,20 +92,57 @@ describe("application routes", () => {
   it("有效 session 可直接进入 Dashboard 并区分局部不可用卡片", async () => {
     setMockAuthenticated(true);
     renderApp("/dashboard");
-    expect(await screen.findByRole("heading", { name: "运行总览" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "服务状态" })).toBeInTheDocument();
     expect(await screen.findByText("STORAGE_GAP")).toBeInTheDocument();
   });
 
-  it.each([
-    ["/health", "健康状态"],
-    ["/statistics", "解析统计"],
-    ["/queries", "解析记录"],
-    ["/resources", "资源状态"],
-    ["/system", "系统信息"],
-  ])("有效 session 可加载只读页面 %s", async (path, heading) => {
+  it.each(
+    managementRoutes
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams")
+      .map(({ path, title }) => [path, title]),
+  )("有效 session 可加载未接线入口 %s", async (path, heading) => {
     setMockAuthenticated(true);
     renderApp(path);
     expect(await screen.findByRole("heading", { name: heading, level: 2 })).toBeInTheDocument();
+    expect(screen.getByText("当前版本暂不可用。")).toBeInTheDocument();
+  });
+
+  it("按三组展示十二个入口并保持当前激活态", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/dashboard");
+    await screen.findByRole("heading", { name: "服务状态" });
+
+    const navigation = screen.getByRole("menu", { name: "主导航" });
+    expect(within(navigation).getByText("监控")).toBeInTheDocument();
+    expect(within(navigation).getByText("DNS 管理")).toBeInTheDocument();
+    expect(within(navigation).getByText("系统")).toBeInTheDocument();
+    for (const route of managementRoutes) {
+      expect(within(navigation).getByText(route.title)).toBeInTheDocument();
+    }
+
+    expect(within(navigation).getByText("服务状态").closest("li")).toHaveClass("ant-menu-item-selected");
+    await user.click(within(navigation).getByText("监听入口"));
+    expect(await screen.findByRole("heading", { name: "监听入口" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/listeners");
+    await user.click(screen.getByRole("button", { name: "收起导航" }));
+    expect(screen.getByRole("button", { name: "展开导航" })).toBeInTheDocument();
+  });
+
+  it("DNS 上游页内 tab 使用查询参数并支持返回", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/upstreams");
+    expect(await screen.findByRole("heading", { name: "DNS 上游", level: 2 })).toBeInTheDocument();
+
+    const groupsTab = screen.getByRole("tab", { name: "上游组" });
+    await user.click(groupsTab);
+    expect(groupsTab).toHaveAttribute("aria-selected", "true");
+    expect(window.location.search).toBe("?tab=groups");
+
+    window.history.back();
+    await waitFor(() => expect(window.location.search).toBe(""));
+    expect(screen.getByRole("tab", { name: "上游" })).toHaveAttribute("aria-selected", "true");
   });
 
   it("普通 API 返回 401 时只跳转一次并显示 session 过期提示", async () => {
@@ -125,8 +164,8 @@ describe("application routes", () => {
     const user = userEvent.setup();
     setMockAuthenticated(true);
     renderApp("/dashboard");
-    await screen.findByRole("heading", { name: "运行总览" });
-    await user.click(screen.getByRole("button", { name: /退\s*出/ }));
+    await screen.findByRole("heading", { name: "服务状态" });
+    await user.click(screen.getByRole("button", { name: "退出登录" }));
     expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();
     expect(window.location.pathname).toBe("/login");
   });
@@ -134,6 +173,20 @@ describe("application routes", () => {
   it("未知受保护路由显示 404 而不泄漏内部路径", async () => {
     setMockAuthenticated(true);
     renderApp("/unknown-route");
-    expect(await screen.findByText("页面不存在")).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "页面不存在" })).toBeInTheDocument();
+  });
+
+  it("未知子路径不误选父级菜单", async () => {
+    setMockAuthenticated(true);
+    renderApp("/dashboard/details");
+    expect(await screen.findByRole("heading", { name: "页面不存在" })).toBeInTheDocument();
+    expect(document.querySelectorAll(".ant-menu-item-selected")).toHaveLength(0);
+  });
+
+  it("旧只读路由不提供兼容跳转", async () => {
+    setMockAuthenticated(true);
+    renderApp("/runtime");
+    expect(await screen.findByRole("heading", { name: "页面不存在" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/runtime");
   });
 });

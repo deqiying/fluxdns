@@ -22,9 +22,9 @@
 
 复用 [package.json](../../frontend/package.json) 中的 React、TypeScript、Vite、Ant Design、Router、TanStack Query 和既有测试体系，沿 [app/modules/shared](../architecture/frontend.md) 分层实施；不为配置查询额外建立全局数据 store，不手工维护生成类型，不用一份通用 JSON/YAML 编辑器覆盖所有表单。
 
-2026-09-07 P0 已提供 v2 生成类型、12 个路径/模块映射、草稿/操作状态和客户端编辑白名单，事实见[应用实现](../implementation/frontend/application.md#能力与证据)。当前 App、认证、API client、代理和页面均未切换，FC-01/02 尚未完成；后续从 FC-01 壳层接线开始，不重复定义契约。Vitest/类型检查不等于浏览器验收。
+2026-09-07 P0 已提供 v2 生成类型、12 个路径/模块映射、草稿/操作状态和客户端编辑白名单，事实见[应用实现](../implementation/frontend/application.md#能力与证据)。API client、代理和业务页面仍未切换 v2；后续不重复定义契约。Vitest/fixture 浏览器不等于真实后端或生产内嵌验收。
 
-2026-09-08 FC-01 认证子项已按用户决定接入[内存 Bearer 与专用 Cookie 刷新](../implementation/frontend/application.md#p1-bearer-接线2026-09-08)，有真实初始化/登录/重载/登出及 Network/Storage 回归；正式接口仍为 v1，mock 仅在开发环境使用。壳层、十二路由、主题和 v2 切换尚未完成，FC-01 保持部分完成，FC-02/FC-16 不随本项关闭。
+2026-09-08 FC-01 已接入[内存 Bearer 与专用 Cookie 刷新](../implementation/frontend/application.md#p1-bearer-接线2026-09-08)，并完成[12 路由壳层、浅色主题、响应式导航和旧路径 404](../implementation/frontend/application.md#p1-应用壳层2026-09-08)。真实认证回归与 fixture 桌面/390×844 浏览器验证分别记录，不互相替代；正式接口仍为 v1，10 个未就绪入口不加载演示数据。v2 成套切换尚待生产 owner，因此 FC-01 保持部分完成，FC-02/FC-16 不随本项关闭。
 
 图稿中数值、地址、健康提示、分页总数和按钮均为演示；正式页面必须使用后端已支持且可追溯的值，不能把图稿内容复制为生产默认数据。
 

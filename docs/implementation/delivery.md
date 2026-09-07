@@ -4,9 +4,9 @@
 >
 > 适用范围：前端生成/构建、内嵌打包、开发进程、版本脚本与 Release workflow 行为
 >
-> 最后核对：2026-09-05（manifest、脚本与 workflow 静态核对）
+> 最后核对：2026-09-08（P1 前端依赖、构建与既有交付入口核对）
 >
-> 核对基线：`0f18d5b2ddf67625121fd7e0662e21723362565f`
+> 核对基线：`0c1b8171f335c49c57cfb525bab98605923533bd`
 
 ## 工具与命令边界
 
@@ -23,6 +23,8 @@
 P0 依赖核定（2026-09-07）：`@redocly/ajv 8.11.2`、`js-yaml 4.3.1` 原已在锁文件作为间接依赖，本次按 D-08 显式加入 devDependencies，复用现有版本进行 JSON Schema/YAML 校验，不依赖隐式 hoist，不引入生产包。后端仅为既有 `ipnet 2.12.1`、`url 2.5.8` 开启 serde feature，避免复制 IP/URL 序列化逻辑，无 crate 版本升级。许可证及版本已按本地 package manifest 核对；前端两项为 MIT，后端两项为 MIT OR Apache-2.0。新增前端测试依赖不进入生产 bundle；Rust serde feature 可能增加编译产物，未测量其单独字节增量。未升级或安装工具链。
 
 P1 文件事务依赖核定（2026-09-07）：既有 `windows-sys 0.61.2`（MIT OR Apache-2.0）仅增加 `Win32_Security` feature，用于创建文件时保留 owner/group/DACL 和禁止默认继承扩大访问；没有新增 crate 或升级锁定版本。OS 锁复用 Rust 标准库 `File::try_lock`，不添加锁库；未测量安全 API feature 的独立产物字节增量。Windows junction 回归调用项目既有 PowerShell 7，不安装测试工具。
+
+P1 壳层依赖核定（2026-09-08）：新增锁定的 `lucide-react 1.41.0` 生产依赖，复用图稿采用的 Lucide 图标体系，供 12 个导航入口及折叠、移动菜单、登出控件使用，避免维护手绘 SVG。许可证为 ISC；registry 报告的完整包 unpacked size 为 32,023,893 bytes，实际只静态导入 16 个图标并由 Vite tree-shake，本轮不把完整包大小当成生产 bundle 增量，也未单独测量依赖增量。未增加构建脚本或工具链。
 
 [`vite.config.ts`](../../frontend/vite.config.ts) 在开发时把 `/api` 代理到 `http://127.0.0.1:8080`；浏览器仍请求同源相对路径。`VITE_USE_MOCK_API=true` 只在 DEV bootstrap 启用 MSW，生产构建不携带 mock worker 或 source map。完整生成与验证命令见[前端 README](../../frontend/README.md)。
 
@@ -84,10 +86,11 @@ pwsh -File script/dev.ps1 stop
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| 本地打包 | package-embedded 三阶段 | 仓库根脚本 | 本轮静态检查顺序、产物和平台 gate | 未运行 build/打包 |
+| 前端构建 | `pnpm run build` | frontend package script | P1 壳层工作树 typecheck 与 Vite production build 通过 | 未运行内嵌 binary 打包 |
+| 本地打包 | package-embedded 三阶段 | 仓库根脚本 | 本轮静态检查顺序、产物和平台 gate | 未运行完整打包 |
 | 显式启动/身份检查 | dev start/status/stop | 本地发布 binary | 本轮静态 | 未启动或停止服务 |
 | 版本提交/三平台发布 | set-version、release.yml | main + tag gates | 本轮静态 | 未创建提交/tag、push、Actions 或 Release |
 
 历史记录：迁移前 v2 方案在 2026-09-04 报告 Windows x86_64 三阶段打包、发布物 SHA-256 对齐 target binary、配置 validate、移出外部 dist 后的 SPA/API HTTP smoke、dev start/status/stop、CSP/nosniff/cache/ETag/304，以及 in-app browser 的初始化深链接/表单/Console 检查。**这是原文报告，本轮未复核**；测试所用源码提交未完整记录，不能把本页核对基线视为当时测试基线。过时的 v2 方案已按用户要求移除，历史原文由 Git 追溯。
 
-2026-09-08 P1 使用本批工作树执行前端构建、`cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，并启动独立 loopback 测试实例；Bearer 鉴权的真实 HTTP 和浏览器 Cookie/Network/Storage 证据见[Management 实现](backend/management.md#p1-bearer-业务鉴权2026-09-08)及[前端应用](frontend/application.md#p1-bearer-接线2026-09-08)。本次不是三阶段 release 打包、Vite 开发代理或外部 HTTPS 代理验收；未执行 GitHub Actions、Linux/macOS 原生发布或完整故障矩阵。
+2026-09-08 Bearer 子项使用当批工作树执行前端构建、`cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，并启动独立 loopback 测试实例；真实 HTTP 和浏览器 Cookie/Network/Storage 证据见[Management 实现](backend/management.md#p1-bearer-业务鉴权2026-09-08)及[前端应用](frontend/application.md#p1-bearer-接线2026-09-08)。后续壳层子项执行 `pnpm run test` 9 文件 55 项和 `pnpm run build`，并用 Vite fixture 检查桌面、390×844、Drawer、上游 tab 与 Console；这不复核内嵌 binary、真实 v2 API、外部 HTTPS 代理、GitHub Actions 或 Linux/macOS 发布。

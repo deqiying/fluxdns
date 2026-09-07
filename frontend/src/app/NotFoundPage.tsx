@@ -6,9 +6,9 @@ export function NotFoundPage() {
   return (
     <Result
       status="404"
-      title="页面不存在"
-      subTitle="该地址不属于 FluxDNS 当前只读管理界面。"
-      extra={<Button onClick={() => navigate("/dashboard")}>返回总览</Button>}
+      title={<h2>页面不存在</h2>}
+      subTitle="该地址不属于 FluxDNS 管理后台。"
+      extra={<Button type="primary" onClick={() => navigate("/dashboard")}>返回服务状态</Button>}
     />
   );
 }

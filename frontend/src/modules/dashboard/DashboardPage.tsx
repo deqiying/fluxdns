@@ -18,7 +18,7 @@ export function DashboardPage() {
 
   return (
     <PageFrame
-      title="运行总览"
+      title="服务状态"
       description="聚合展示服务端生成的有界指标；各卡片可独立标记不可用。"
       meta={overview ? <SnapshotMeta sampledAt={overview.sampled_at} revision={overview.runtime_revision} /> : undefined}
       actions={overview ? <HealthStatusTag status={overview.overall_status} /> : undefined}

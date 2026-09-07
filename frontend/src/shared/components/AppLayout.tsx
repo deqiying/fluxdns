@@ -1,38 +1,82 @@
-import { useMemo, useState } from "react";
-import { Button, Flex, Layout, Menu, Space, Typography, message } from "antd";
+import { useState } from "react";
+import type { MenuProps } from "antd";
+import { Avatar, Breadcrumb, Button, Drawer, Flex, Layout, Menu, Tooltip, Typography, message } from "antd";
+import {
+  Activity,
+  FileCode2,
+  Gauge,
+  Laptop,
+  Layers3,
+  ListFilter,
+  LogOut,
+  Menu as MenuIcon,
+  Network,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Radio,
+  Settings2,
+  SlidersHorizontal,
+  Waypoints,
+  Workflow,
+  type LucideIcon,
+} from "lucide-react";
 import { Outlet, useLocation, useNavigate } from "react-router-dom";
+import { managementRoutes, type ManagementPath } from "@/app/route-contract";
 import { getSafeErrorMessage } from "@/shared/api/errors";
 import { useAuth } from "@/modules/auth/AuthProvider";
 
 const { Header, Content, Sider } = Layout;
 
-const navigation = [
-  { path: "/dashboard", label: "总览", short: "OV" },
-  { path: "/runtime", label: "运行时", short: "RT" },
-  { path: "/health", label: "健康状态", short: "HL" },
-  { path: "/statistics", label: "统计", short: "ST" },
-  { path: "/queries", label: "解析记录", short: "QY" },
-  { path: "/resources", label: "资源", short: "RS" },
-  { path: "/system", label: "系统", short: "SY" },
+const navigationGroups = [
+  { key: "monitor", label: "监控" },
+  { key: "dns", label: "DNS 管理" },
+  { key: "system", label: "系统" },
 ] as const;
+
+const routeIcons: Record<ManagementPath, LucideIcon> = {
+  "/dashboard": Activity,
+  "/queries": ListFilter,
+  "/listeners": Radio,
+  "/upstreams": Network,
+  "/dns-settings": SlidersHorizontal,
+  "/strategies": Workflow,
+  "/hosts": FileCode2,
+  "/rule-sets": Layers3,
+  "/clients": Laptop,
+  "/proxies": Waypoints,
+  "/system-settings": Settings2,
+  "/system-runtime": Gauge,
+};
+
+const menuItems: MenuProps["items"] = navigationGroups.map((group) => ({
+  key: group.key,
+  type: "group",
+  label: group.label,
+  children: managementRoutes
+    .filter((route) => route.group === group.key)
+    .map((route) => {
+      const Icon = routeIcons[route.path];
+      return {
+        key: route.path,
+        icon: <Icon size={18} strokeWidth={1.8} aria-hidden="true" />,
+        label: route.title,
+      };
+    }),
+}));
 
 export function AppLayout() {
   const [collapsed, setCollapsed] = useState(false);
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [messageApi, messageContext] = message.useMessage();
   const location = useLocation();
   const navigate = useNavigate();
   const auth = useAuth();
-  const current = navigation.find((item) => location.pathname.startsWith(item.path)) ?? navigation[0];
-
-  const menuItems = useMemo(
-    () =>
-      navigation.map((item) => ({
-        key: item.path,
-        icon: <span className="nav-glyph">{item.short}</span>,
-        label: item.label,
-      })),
-    [],
+  const current = managementRoutes.find(
+    (route) => location.pathname === route.path || location.pathname === `${route.path}/`,
   );
+  const currentGroup = navigationGroups.find((group) => group.key === current?.group);
+  const userName = auth.session?.user.name ?? "Administrator";
+  const userInitial = userName.trim().charAt(0).toUpperCase() || "A";
 
   const handleLogout = async () => {
     try {
@@ -42,52 +86,100 @@ export function AppLayout() {
     }
   };
 
+  const handleNavigate: MenuProps["onClick"] = ({ key }) => {
+    navigate(key);
+    setMobileNavigationOpen(false);
+  };
+
+  const navigationMenu = (className: string) => (
+    <Menu
+      aria-label="主导航"
+      className={className}
+      mode="inline"
+      selectedKeys={current ? [current.path] : []}
+      items={menuItems}
+      onClick={handleNavigate}
+    />
+  );
+
+  const accountPanel = (compact = false) => (
+    <div className={`sidebar-account${compact ? " sidebar-account-compact" : ""}`}>
+      <Avatar size={32}>{userInitial}</Avatar>
+      {!compact ? (
+        <div className="sidebar-account-copy">
+          <Typography.Text ellipsis title={userName}>{userName}</Typography.Text>
+          <Typography.Text type="secondary">管理员</Typography.Text>
+        </div>
+      ) : null}
+      <Tooltip title="退出登录" placement="top">
+        <Button
+          aria-label="退出登录"
+          type="text"
+          icon={<LogOut size={18} aria-hidden="true" />}
+          loading={auth.isLoggingOut}
+          onClick={() => void handleLogout()}
+        />
+      </Tooltip>
+    </div>
+  );
+
   return (
     <Layout className="app-shell">
       {messageContext}
-      <Sider
-        className="app-sider"
-        width={238}
-        collapsedWidth={72}
-        collapsible
-        collapsed={collapsed}
-        onCollapse={setCollapsed}
-      >
-        <div className="brand">
-          <div className="brand-mark">FD</div>
-          {!collapsed ? (
-            <div className="brand-copy">
-              <strong>FluxDNS</strong>
-              <span>READ-ONLY CONSOLE</span>
-            </div>
-          ) : null}
+      <Sider className="app-sider" theme="light" width={244} collapsedWidth={72} collapsed={collapsed} trigger={null}>
+        <div className="app-sidebar-content">
+          <div className="brand">
+            <span className="brand-mark"><Network size={20} strokeWidth={1.9} aria-hidden="true" /></span>
+            {!collapsed ? <strong>FluxDNS</strong> : null}
+          </div>
+          <div className="sidebar-navigation">{navigationMenu("app-menu")}</div>
+          <div className="sidebar-footer">
+            {accountPanel(collapsed)}
+            <Tooltip title={collapsed ? "展开导航" : "收起导航"} placement="right">
+              <Button
+                className="sidebar-collapse"
+                aria-label={collapsed ? "展开导航" : "收起导航"}
+                type="text"
+                icon={collapsed ? <PanelLeftOpen size={18} aria-hidden="true" /> : <PanelLeftClose size={18} aria-hidden="true" />}
+                onClick={() => setCollapsed((value) => !value)}
+              />
+            </Tooltip>
+          </div>
         </div>
-        <Menu
-          className="app-menu"
-          theme="dark"
-          mode="inline"
-          selectedKeys={[current.path]}
-          items={menuItems}
-          onClick={({ key }) => navigate(key)}
-        />
       </Sider>
-      <Layout>
+      <Drawer
+        className="mobile-navigation-drawer"
+        title="FluxDNS"
+        placement="left"
+        size={280}
+        open={mobileNavigationOpen}
+        onClose={() => setMobileNavigationOpen(false)}
+      >
+        {navigationMenu("app-menu mobile-app-menu")}
+        {accountPanel()}
+      </Drawer>
+      <Layout className="app-workspace">
         <Header className="app-header">
-          <Flex align="center" justify="space-between" style={{ height: "100%" }}>
-            <Space orientation="vertical" size={0}>
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
-                Management / {current.label}
-              </Typography.Text>
-              <Typography.Title level={4} className="header-title">
-                {current.label}
-              </Typography.Title>
-            </Space>
-            <Space size="middle">
-              <Typography.Text>{auth.session?.user.name}</Typography.Text>
-              <Button onClick={handleLogout} loading={auth.isLoggingOut}>
-                退出
-              </Button>
-            </Space>
+          <Flex align="center" justify="space-between" gap={16} style={{ height: "100%" }}>
+            <Flex align="center" gap={12} className="header-location">
+              <Button
+                className="mobile-nav-trigger"
+                aria-label="打开导航"
+                type="text"
+                icon={<MenuIcon size={20} aria-hidden="true" />}
+                onClick={() => setMobileNavigationOpen(true)}
+              />
+              <Breadcrumb
+                items={[
+                  { title: currentGroup?.label ?? "Management" },
+                  { title: current?.title ?? "页面不存在" },
+                ]}
+              />
+            </Flex>
+            <Flex align="center" gap={8} className="header-account">
+              <Avatar size={30}>{userInitial}</Avatar>
+              <Typography.Text ellipsis title={userName}>{userName}</Typography.Text>
+            </Flex>
           </Flex>
         </Header>
         <Content>

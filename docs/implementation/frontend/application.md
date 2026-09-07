@@ -4,15 +4,15 @@
 >
 > 适用范围：前端 bootstrap、provider、路由鉴权、HTTP client 与会话回收
 >
-> 最后核对：2026-09-05（入口、认证状态和 client 静态核对）
+> 最后核对：2026-09-08（P1 壳层、路由、主题与认证边界核对）
 >
-> 核对基线：`0f18d5b2ddf67625121fd7e0662e21723362565f`
+> 核对基线：`0c1b8171f335c49c57cfb525bab98605923533bd`
 
 ## 入口
 
 [`main.tsx`](../../../frontend/src/main.tsx) 的 `bootstrap` 仅在 DEV 且 `VITE_USE_MOCK_API=true` 时启动 MSW，再渲染 `AppErrorBoundary -> AppProviders -> App`。[`providers.tsx`](../../../frontend/src/app/providers.tsx) 依次组合 Ant Design、QueryClient、BrowserRouter 与 AuthProvider。
 
-[`App.tsx`](../../../frontend/src/app/App.tsx) lazy-load 页面，由 Suspense 展示加载态；`/login` 和 `/initialize` 在 guard 外，其他页面进入 `ProtectedRoute -> AppLayout`。根路径转 `/dashboard`，未知受保护路径展示 NotFound。具体页面见[页面与查询](pages.md)。
+[`App.tsx`](../../../frontend/src/app/App.tsx) lazy-load 页面，由 Suspense 展示加载态；`/login` 和 `/initialize` 在 guard 外，其他页面进入 `ProtectedRoute -> AppLayout`。根路径转 `/dashboard`，未知受保护路径展示 NotFound。受保护壳层消费 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 注册 12 个一级路径，具体接线见[页面与查询](pages.md)。
 
 ## 认证状态
 
@@ -41,11 +41,19 @@ mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状�
 
 真实内嵌 WebUI 的浏览器验证覆盖初始化、页面重载后的 Cookie 刷新/Bearer 业务请求、登出后刷新保持未登录、再次登录及 Cookie 清除。开发者接口只读确认 localStorage/sessionStorage 条目均为 0，`document.cookie` 不可读刷新凭据；Network 只记录请求头是否存在，不输出 token。该验证使用旧壳层的真实后端数据，不证明 FC-01 十二路由、FC-02 公共表单或 v2 配置接口完成。
 
+## P1 应用壳层（2026-09-08）
+
+[`AppLayout`](../../../frontend/src/shared/components/AppLayout.tsx) 从同一 `managementRoutes` 契约生成“监控 / DNS 管理 / 系统”三组 12 个一级入口，使用 Lucide 图标、浅色侧栏、面包屑、当前用户与图标化登出/折叠控件。桌面侧栏独立滚动；小于 720px 时改用 Drawer，不缩放固定宽画布。未知路径不选择任一菜单项，旧 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 路径不兼容跳转。
+
+`/dashboard` 和 `/queries` 继续消费当前 v1 真实只读数据；其他 10 个入口使用 [`PendingModulePage`](../../../frontend/src/app/PendingModulePage.tsx) 明确显示暂不可用，不加载或伪造图稿数据。`/upstreams` 仅接入“上游 / 上游组”页内 tab 壳层，`tab=groups` 进入浏览器历史；业务列表和表单仍归 FC-06。主题 token 改为浅灰导航、白工作区、蓝色主操作及独立成功/警告/错误色；未增加暗色全站主题。
+
+Windows 浏览器 fixture 验证覆盖默认桌面、390×844、移动 Drawer 跳转、上游 tab URL、Console warning/error 为空；Vitest 定向路由测试 22 项通过。fixture 不证明 v2 handler、真实配置页面、深链接静态 fallback 或生产内嵌资源已接线；API client 仍使用 `/api/v1`。
+
 ## 能力与证据
 
 2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换，不提供 v1/v2 选择开关。
 
-[`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 固定 12 个一级路径与配置模块映射，保留 `/dashboard`、`/queries`；上游组仅为 `/upstreams` 页内 tab。它尚未导入 App，FC-01 仍待实施，不能将契约表计为页面完成。
+[`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 固定 12 个一级路径与配置模块映射，保留 `/dashboard`、`/queries`；上游组仅为 `/upstreams` 页内 tab。App 与导航已消费该表，但未就绪入口只是明确空态，不能将路径存在计为业务页面完成。
 
 [`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型：草稿固定双 revision，区分预校验/确认/应用/结果未知；客户端普通编辑白名单剔除 `client_id`；操作结果区分同步、仅重试持久化、回读活动值和阻塞；大整数转表单前检查安全范围。这里没有表单组件、网络请求或可变全局 store，FC-02 的真实交互、外部差异工作区与 owner 接线尚未实施。
 
@@ -53,9 +61,10 @@ mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状�
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | P1 认证测试及真实初始化/登录/刷新/登出，见上节 | 十二路由和 v2 切换未验收 |
+| setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | P1 认证测试及真实初始化/登录/刷新/登出，见上节 | v2 切换与生产深链接未验收 |
 | 同源请求/取消 | `apiRequest`、unauthorized listener | 各 module API 共用 client | P1 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
 | 退出数据清理 | `performLogout` finally | AppLayout 使用 auth logout | 本轮核对实际分支 | 401 与 logout 清理行为不同，不能混写 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
+| 12 路由壳层 | route-contract、App、AppLayout、PendingModulePage | 受保护路由与分组导航 | 22 项路由测试；桌面/390×844 fixture 浏览器与 Console 检查 | 仅 dashboard/queries 有真实 v1 数据；v2 和业务页面未接线 |
 
-2026-09-05 原核对未运行 pnpm 或浏览器；P1 新增的 Bearer 运行证据见上节。历史记录与尚无运行证据的环境边界见[交付证据](../delivery.md)，不把旧壳层的认证回归算作 FC-01/02 完成。
+2026-09-05 原核对未运行 pnpm 或浏览器；P1 新增的 Bearer 与壳层证据见上节。历史记录与尚无运行证据的环境边界见[交付证据](../delivery.md)，不把 fixture 壳层回归算作 FC-02、v2 生产切换或业务页面完成。

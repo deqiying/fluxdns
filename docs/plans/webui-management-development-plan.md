@@ -31,7 +31,7 @@ P1 先交付 BC-02 活动源、定向编辑和操作仲裁内部能力，事实�
 
 P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01 的生产 fixture 启动门槛随 BC-26 继续保留。实际能力、未接线边界和验证分别见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)、[Management 实现](../implementation/backend/management.md#p0-v2-契约)、[前端实现](../implementation/frontend/application.md#能力与证据)。本文不预设人员数量、固定人日或日历上线日期；排期以依赖和验收门槛为准。
 
-2026-09-08 认证子项已按用户追加决定改为业务 Bearer、认证专用 Cookie 刷新，真实 HTTP 与浏览器回归见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)。FC-01 仅认证子项完成，壳层/十二路由/主题、FC-02 和 v2 配置接线仍待实施；P1 继续保持部分完成。
+2026-09-08 认证子项已按用户追加决定改为业务 Bearer、认证专用 Cookie 刷新，真实 HTTP 与浏览器回归见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)。FC-01 又完成[12 路由壳层、浅色主题和响应式导航](../implementation/frontend/application.md#p1-应用壳层2026-09-08)：只有 dashboard/queries 读取当前 v1 数据，其余入口明确不可用。v2 成套切换、FC-02/16 和业务页面仍待实施；P1 继续保持部分完成。
 
 ## 2. 当前基线与改造范围
 
@@ -39,7 +39,7 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01
 
 | 领域 | 当前事实与证据 | 计划影响 |
 | --- | --- | --- |
-| 前端 | [App](../../frontend/src/app/App.tsx) 和 [AppLayout](../../frontend/src/shared/components/AppLayout.tsx) 注册七个只读管理页；另有初始化和登录 | 改为 12 个一级模块，保留认证边界，不并存两套正式后台 |
+| 前端 | [App](../../frontend/src/app/App.tsx) 和 [AppLayout](../../frontend/src/shared/components/AppLayout.tsx) 已注册 12 个目标入口；只有 dashboard/queries 接当前 v1 数据，其余为空态 | 继续接入 v2 与业务模块，保留认证边界，不并存两套正式后台 |
 | 前端基础 | [package.json](../../frontend/package.json) 已有 React、TypeScript、Vite、Ant Design、TanStack Query、Router、Vitest/MSW | 复用工程和状态分层，不借重构更换整套技术栈 |
 | API | [router](../../backend/src/management/router.rs)、[query](../../backend/src/management/query.rs) 和 [OpenAPI](../../frontend/openapi/management-api-v1.yaml) 为认证与只读查询；统计查询限制 31 天 | 增加受限配置读写、身份过滤、跨日查询、实时指标和 WebSocket |
 | 配置写入 | [ConfigStore](../../backend/src/config/store.rs) 只有首用户定向写入、fingerprint/journal 与恢复 | 保存活动源表达，重建“先应用后持久化”事务及恢复门槛 |

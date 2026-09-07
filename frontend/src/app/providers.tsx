@@ -12,17 +12,22 @@ export function AppProviders({ children, queryClient = defaultQueryClient }: { c
     <ConfigProvider
       theme={{
         token: {
-          colorPrimary: "#0f9f93",
-          colorInfo: "#0891b2",
-          colorText: "#172033",
-          colorBgLayout: "#f3f6fa",
-          borderRadius: 12,
+          colorPrimary: "#007aff",
+          colorInfo: "#007aff",
+          colorSuccess: "#20824e",
+          colorWarning: "#b26a00",
+          colorError: "#c83a3a",
+          colorText: "#202124",
+          colorTextSecondary: "#63666d",
+          colorBorderSecondary: "#e0e2e6",
+          colorBgLayout: "#f7f7f8",
+          borderRadius: 6,
           fontFamily: 'Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
         },
         components: {
-          Card: { borderRadiusLG: 16 },
-          Button: { borderRadius: 9 },
-          Table: { headerBg: "#f7f9fb", headerColor: "#536174" },
+          Card: { borderRadiusLG: 8 },
+          Button: { borderRadius: 6 },
+          Table: { headerBg: "#f6f7f8", headerColor: "#535861" },
         },
       }}
     >

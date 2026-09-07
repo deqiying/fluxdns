@@ -2,7 +2,7 @@ import type { components } from "@/shared/api/generated-v2";
 
 type ConfigModule = components["schemas"]["ConfigModule"];
 
-/** P0 路由契约，不等于 App 已注册页面；正式壳层接线属于 FC-01。 */
+/** 管理壳层的一级路由契约；业务页面是否接线由各模块自行声明。 */
 export const managementRoutes = [
   { path: "/dashboard", title: "服务状态", group: "monitor", modules: [] },
   { path: "/queries", title: "解析记录", group: "monitor", modules: [] },

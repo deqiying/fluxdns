@@ -4,11 +4,11 @@
 >
 > 适用范围：WebUI 分层、状态所有权、路由、接口与展示约束
 >
-> 最后评审：2026-09-05（既有前端边界拆分复核）
+> 最后评审：2026-09-08（P1 路由壳层、响应式导航与主题边界）
 
 ## 设计结论
 
-前端是 React + TypeScript + Vite 的独立 SPA，使用 React Router、TanStack Query 与 Ant Design。它面向反复查看运行状态的管理场景，不承担 DNS 协议、配置继承或上游选择逻辑。确切依赖版本以 [package.json](../../frontend/package.json) 和 [锁文件](../../frontend/pnpm-lock.yaml) 为准。
+前端是 React + TypeScript + Vite 的独立 SPA，使用 React Router、TanStack Query、Ant Design 与 Lucide 图标。它面向反复查看运行状态的管理场景，不承担 DNS 协议、配置继承或上游选择逻辑。确切依赖版本以 [package.json](../../frontend/package.json) 和 [锁文件](../../frontend/pnpm-lock.yaml) 为准。
 
 不为已有查询数据额外建立全局 store。React Context/Hooks 保存会话和局部交互，TanStack Query 管理服务端快照；只有明确的新客户端状态需求才评估新增状态库。
 
@@ -43,12 +43,12 @@ Bearer、刷新 Cookie、密码、Origin 与会话安全唯一维护于 [Managem
 - 不渲染后端返回的 HTML；qname、answer 等请求内容作为文本显示。历史空详情明确标识，不构造虚假的域名或响应。
 - 页面应支持窄屏、表格横向查看、键盘访问与明确状态，不用营销式大块说明替代管理操作。
 
-当前已接线页面仍是初始化/登录和七个只读管理页。P0 接受的目标为 12 个管理模块，路径及共享表单契约已固化但尚未注册；唯一字段权威为 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml)，具体接线事实见[应用实现](../implementation/frontend/application.md)。
+受保护壳层按监控、DNS 管理、系统三组提供 12 个一级入口；上游组属于 DNS 上游页内 tab，不增加第 13 个入口。未接入真实数据源的页面必须明确不可用，不复制设计图演示内容。桌面侧栏和窄屏 Drawer 使用同一路由契约，具体接线事实见[应用实现](../implementation/frontend/application.md)。唯一目标字段权威仍为 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml)。
 
 目标表单固定打开时的活动/文件 revision，不能被 refetch 覆盖脏草稿；`name` 改名保留 original_name，客户端 ID 编辑只读。响应丢失进入结果未知并查询 operation，不能自动重放；运行成功但文件未同步独立展示并只重试同步。外部差异处理是现有壳层工作区，不新增一级模块；不增加角色、通用 YAML 编辑或顶层删除。
 
 ## 交付与验证边界
 
-开发代理和 mock 只是工程模式，生产浏览器始终访问同源 `/api/v1`。SPA 通过 `webui-embed` 可内嵌发布，API 与静态 fallback 独立分流；操作步骤见[交付实现](../implementation/delivery.md)。
+开发代理和 mock 只是工程模式。正式 v2 切换后浏览器应访问同源 `/api/v2`，鉴权、client、代理、mock 与 SPA fallback 必须成套切换，不保留双轨兼容；当前仍使用 v1 的实现边界见[应用实现](../implementation/frontend/application.md)。SPA 通过 `webui-embed` 内嵌发布，API 与静态 fallback 独立分流；操作步骤见[交付实现](../implementation/delivery.md)。
 
 组件测试、schema 类型生成和 mock 不能替代真实浏览器的 Cookie、Network/Storage、初始化跳转和安全观察。验证边界见[交付实现](../implementation/delivery.md)，页面与查询接线见[页面实现](../implementation/frontend/pages.md)。
