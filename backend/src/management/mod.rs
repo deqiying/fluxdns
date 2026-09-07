@@ -38,11 +38,11 @@ impl ManagementRuntime {
         }
     }
 
-    /// 应用一个已通过完整配置 reload 的用户快照；外部变更撤销现有 session。
+    /// 仅已应用的认证内容变化撤销 session；普通配置变化和单纯文件观测不能回收会话。
     pub(crate) fn reconcile_users(&self, users: &[ResolvedWebUiUser], source_fingerprint: &str) {
         let self_written = self.config_store.observe_reload(source_fingerprint);
-        self.auth.replace(users);
-        if !self_written {
+        let changed = self.auth.replace(users);
+        if changed && !self_written {
             self.sessions.revoke_all();
         }
     }

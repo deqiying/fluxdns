@@ -20,7 +20,7 @@ v2 配置读写以活动源表达为权威，模块严格白名单，`name` 为�
 - 正常加载前恢复配置事务；配置严格校验、DNS/management endpoint 冲突检查和依赖准备失败均阻止启动。
 - 管理 accept loop 与连接纳入 Supervisor。单连接/请求错误局部失败，不可恢复入口错误或重试耗尽触发进程优雅关闭。
 - 停机撤销 session、停止新请求并在统一预算内 drain。management 不能无限延长 DNS/Storage 的关闭时间。
-- listener 与浏览器 origin 属于进程配置，变更需重启；用户列表可更新，外部变更撤销既有 session。内部首次写入用指纹识别，不撤销刚签发的 session。
+- listener 与浏览器 origin 属于进程配置，变更需重启；已应用的用户或 password hash 变化撤销既有 session，普通配置和用户排序变化不撤销。内部首次写入用指纹识别，不撤销刚签发的 session；仅观测外部文件不能发布认证或回收会话。
 
 ## 初始化与配置事务
 
@@ -40,7 +40,7 @@ users empty -> setup_required
 
 - session token 至少具有 256 bit 随机熵，只经 Cookie 传输，服务端有界内存保存元数据，不把 token 暴露给前端存储。
 - Cookie 固定 `HttpOnly`、`SameSite=Strict`、`Path=/`，不设置 `Domain`。HTTPS origin 使用 `__Host-fluxdns_session` 与 `Secure`；HTTP origin 使用 `fluxdns_session` 且不能设置 `Secure`。
-- session 同时受绝对/空闲期限、全局/单用户容量限制；退出、外部用户 reload 和进程重启使相关 session 失效。具体常量以 [session.rs](../../backend/src/management/session.rs) 为准。
+- session 同时受绝对/空闲期限、全局/单用户容量限制；退出、显式认证内容更新和进程重启使相关 session 失效。具体常量以 [session.rs](../../backend/src/management/session.rs) 为准。
 - Management 本身只提供 HTTP；`public_origin` 是浏览器唯一可接受的绝对 HTTP/HTTPS origin，不含凭据、路径、query 或 fragment。
 - 同源判断不能根据 `X-Forwarded-Proto` 或 `X-Forwarded-Host` 放宽。Origin/Fetch Metadata、限流、大小/并发/超时保护必须在统一边界实施。
 - 前端不能把密码、hash、token 存入 URL、localStorage、sessionStorage 或查询缓存。未经另行评审不增加通用写 API 或自定义 token 方案。

@@ -635,7 +635,13 @@ mod tests {
 
     fn test_services() -> (Arc<AuthServices>, std::path::PathBuf, std::path::PathBuf) {
         let (source, work_path) = crate::config::test_support::portable_example();
-        let root = work_path.with_extension("management-router");
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../_fluxdns/p1-management-auth")
+            .join(work_path.file_name().unwrap());
+        let source = source.replace(
+            &work_path.to_string_lossy().replace('\\', "/"),
+            &root.to_string_lossy().replace('\\', "/"),
+        );
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("source.yaml");
         std::fs::write(&source_path, source.as_bytes()).unwrap();
@@ -657,6 +663,16 @@ mod tests {
             root,
             source_path,
         )
+    }
+
+    fn cleanup_test_root(root: &std::path::Path) {
+        let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../_fluxdns/p1-management-auth")
+            .canonicalize()
+            .unwrap();
+        let root = root.canonicalize().unwrap();
+        assert_eq!(root.parent(), Some(base.as_path()));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn post(path: &str, body: &'static str) -> Request<Body> {
@@ -723,9 +739,37 @@ mod tests {
         assert_eq!(body["user"]["name"], "admin");
 
         runtime.reconcile_users(&loaded.resolved.webui.users, "external-fingerprint");
-        assert!(services.sessions.lookup(token).unwrap().is_none());
+        assert!(services.sessions.lookup(token).unwrap().is_some());
 
-        let _ = std::fs::remove_dir_all(root);
+        let mut config = loaded.config;
+        config.webui.users.push(crate::config::model::WebUiUserDto {
+            name: "second".to_owned(),
+            password_hash: config.webui.users[0].password_hash.clone(),
+        });
+        let users = crate::config::resolve::resolve_config(&config, "users-added")
+            .unwrap()
+            .resolved
+            .webui
+            .users
+            .clone();
+        runtime.reconcile_users(&users, "users-added");
+        assert!(services.sessions.lookup(token).unwrap().is_none());
+        let issued = services.sessions.issue("admin".to_owned()).unwrap();
+        let reversed = users.iter().rev().cloned().collect::<Vec<_>>();
+        runtime.reconcile_users(&reversed, "users-reordered");
+        assert!(services.sessions.lookup(&issued.token).unwrap().is_some());
+        config.webui.users[0].password_hash =
+            super::super::auth::hash_password("a replacement test password").unwrap();
+        let users = crate::config::resolve::resolve_config(&config, "password-changed")
+            .unwrap()
+            .resolved
+            .webui
+            .users
+            .clone();
+        runtime.reconcile_users(&users, "password-changed");
+        assert!(services.sessions.lookup(&issued.token).unwrap().is_none());
+
+        cleanup_test_root(&root);
     }
 
     #[tokio::test]
@@ -746,6 +790,6 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "NOT_FOUND");
 
-        let _ = std::fs::remove_dir_all(root);
+        cleanup_test_root(&root);
     }
 }

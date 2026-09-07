@@ -15,7 +15,7 @@ pub(crate) const ARGON2_ITERATIONS: u32 = 2;
 pub(crate) const ARGON2_PARALLELISM: u32 = 1;
 pub(crate) const ARGON2_OUTPUT_BYTES: usize = 32;
 
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct UserCredential {
     name: String,
     password_hash: String,
@@ -42,11 +42,18 @@ impl AuthState {
             .unwrap_or(false)
     }
 
-    pub(crate) fn replace(&self, users: &[ResolvedWebUiUser]) {
-        *self
+    /// 返回认证内容是否改变；普通配置更新和用户排序不应撤销现有会话。
+    pub(crate) fn replace(&self, users: &[ResolvedWebUiUser]) -> bool {
+        let next = project_users(users);
+        let mut current = self
             .users
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = project_users(users);
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *current == next {
+            return false;
+        }
+        *current = next;
+        true
     }
 
     /// 未知用户仍执行 dummy verify，避免明显的用户名计时分支。
@@ -72,13 +79,15 @@ impl AuthState {
 }
 
 fn project_users(users: &[ResolvedWebUiUser]) -> Vec<UserCredential> {
-    users
+    let mut users = users
         .iter()
         .map(|user| UserCredential {
             name: user.name.clone(),
             password_hash: user.password_hash().to_owned(),
         })
-        .collect()
+        .collect::<Vec<_>>();
+    users.sort_by(|left, right| left.name.cmp(&right.name));
+    users
 }
 
 pub(crate) fn validate_setup_credentials(
