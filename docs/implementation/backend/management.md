@@ -47,6 +47,16 @@ P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/
 
 本批 Windows 验证：`config::` 106 项、`management::` 22 项、`cargo check`、全部测试目标 `--all-targets --no-run` 和 fmt 通过；12 个配置状态及 10 个真实操作投影经现有 AJV 对 v2 schema 校验通过，覆盖 8 种操作状态、5 种文件状态和 5 种同步状态。前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过；Node/Vite 的沙盒 `spawn EPERM` 经批准重跑解决。未运行完整 Cargo suite、v2 生产启动/HTTP、浏览器、跨平台或性能验收。
 
+## P1 外部配置差异内部投影（2026-09-08）
+
+[`config_query/external.rs`](../../../backend/src/management/config_query/external.rs) 消费 ConfigStore 的[固定源输入](../configuration.md#p1-外部差异输入内部能力2026-09-08)，比较全部十个可写模块的类型化源值。按同一命名空间的 `name` 配对，不猜测改名、不授权删除；客户端 ID 的读取差异不改变普通编辑白名单。缺失继承、SecretRef 引用、路径及资源内部顺序保留，类型化等价表达不制造假差异。
+
+`work/database/webui` 只报告类别，users/hash 变化只报告 `protected_credentials`；不返回原始解析错误、整份 YAML、Secret 实际值或管理认证 token。普通资源 URL query 按既有源 DTO 保留，不因含有 query 而整体隐藏，也不构造可误保存的替代 URL。凭据传输方式与资源 URL 是不同契约。
+
+完整输出最多 128 项、序列化 JSON 最多 2 MiB；超限整体报错，不截断。写入计数器按真实 UTF-8 和 JSON escaping 计费，另外检查 schema 的字段长度与安全整数。输入完整配置无效时只返回双版本绑定及安全 `parse_error`，不部分采用。
+
+Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/内联类型、引用失败、只读和 hash 隔离、128/129 项、输出字节与字段超限；15 个实际投影经现有 AJV 对 v2 schema 验证。测试中的 Runtime 成功仍是模拟，未注册 `/api/v2/config/external-diff`，尚缺异步 owner、正式鉴权/handler、前端差异与组合采用接线，不关闭 BC-30/FC-16。
+
 ## 路由与保护
 
 [`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装公开 setup/login/logout、受保护 session 与 [`query.rs`](../../../backend/src/management/query.rs) 的七个查询端点；未知 API 与 SPA fallback 隔离。字段/状态码以 [OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，不在本文复制完整响应模型。

@@ -185,4 +185,6 @@ P0 技术核定：
 
 P1 追加核定（2026-09-07）：T-03 的双文件观测已执行 4 MiB 上限、Windows FileId 与 SHA-256 校验，journal 读取为 16 KiB；写入增加父目录/权限/旁文件核对和 OS 锁，cursor 与实际配置事务调度预算仍待接线。T-04 已实现物理 SocketSpec 差量复用、CAS 前任务预注册，以及已接纳请求按原 deadline drain，真实 Windows 证据见[生命周期实现](../implementation/backend/lifecycle.md#p1-请求-drain-子项2026-09-07)。服务队列为一个排队候选加一个当前应用槽；PREPARED/COMMIT_DECIDED 内部文件事务及 4 个子进程退出点见[持久化事实](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。T-06 为既有 windows-sys 增加安全 API feature、无版本升级。日志/新存储 owner、启动恢复接线和活动源/operation 到服务的完整链仍未核定完成；T-05/07/08 不随这些子项关闭。
 
+2026-09-08 T-03 差异补充：类型化外部差异最多 128 项，完整 JSON 最多 2 MiB，按实际 UTF-8/escaping 计数，超限整体拒绝、不截断；固定源读取、完整语义/词法路径校验及返回前双版本复核已有内部测试，见[差异实现](../implementation/backend/management.md#p1-外部配置差异内部投影2026-09-08)。异步调度及 HTTP/UI 仍待接线，不将声明的预算视为整个 v2 已运行。
+
 确认后的技术细节同步对应任务和正式 schema，不在多处维护相互冲突的默认值。实施完成后按项目规则沉淀架构/实现事实，再删除本决策文件及相应活动计划；Git 保存历史，不另建归档。

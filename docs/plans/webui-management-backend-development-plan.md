@@ -75,6 +75,8 @@ BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 f
 
 BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件有界观测、版本分离、调用者/候选/双版本绑定票据、有界幂等操作和中断阻塞；定向源编辑已覆盖类型化引用、组合候选完整语义/路径校验及编辑后等价核对。实现与测试权威见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。尚未提供正式 v2 loader/resolve、候选到资源/socket prepare 的转换、状态端点或新版 setup；应用回报测试仅为状态机模拟。BC-03 已有[有界服务队列消费者](../implementation/backend/lifecycle.md#p1-服务控制队列子项2026-09-07)，但未连接 v2 活动源/operation 生产者。BC-29 的[分阶段文件事务](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)已接入活动源内部状态机并完成 Windows 子进程 crash point/文件失败重试测试；还原和外改重新确认已有内部能力，正式启动恢复和 HTTP 仍未闭合。BC-30 已交付正式 app 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)，双文件读取移出同步控制循环，真实 DNS 外改隔离及 Hosts 自动刷新有定向证据；[冻结结果/状态投影](../implementation/backend/management.md#p1-配置状态内部投影2026-09-07)和逐文件自写身份识别已有内部消费。差异预览、异步事务 owner、状态/还原/重试端点及 UI 仍未完成，因此不能关闭 P1 或 BC-30。
 
+2026-09-08 BC-30 补充：固定源同次读取、完整校验、双文件/活动版本复核及十模块有界类型化差异已有[内部实现](../implementation/backend/management.md#p1-外部配置差异内部投影2026-09-08)。后续差异工作从异步事务 owner、鉴权/handler 和前端组合采用接线继续，不以内部文件测试关闭 BC-30。
+
 完整状态机、热更新矩阵和失败语义只维护于[配置热更新专项](webui-management-config-runtime-plan.md)，本节列后端开发步骤：
 
 1. 在 ConfigStore 保留活动源表达及 active/persisted/file revision；GET 和普通编辑以该源为基准，保留路径/继承/SecretRef，不序列化 resolved 值写回。

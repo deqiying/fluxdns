@@ -12,6 +12,7 @@ use crate::config::model::{
 
 pub const API_PREFIX: &str = "/api/v2";
 pub const MAX_MUTATION_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_EXTERNAL_DIFF_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_CHANGES: usize = 128;
 pub const MAX_CURSOR_BYTES: usize = 2048;
 pub const MAX_QUERY_BYTES: usize = 16 * 1024;

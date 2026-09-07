@@ -1002,6 +1002,7 @@ export interface components {
             last_success_at_ms: components["schemas"]["SafeInteger"] | null;
             last_error: components["schemas"]["ErrorCode"] | null;
         };
+        /** @description 最多 128 项且完整 JSON 不超过 2 MiB，超限返回 PAYLOAD_TOO_LARGE，不截断。 按同命名空间 name 配对，不猜测改名；只有 active 的条目不授权删除。 普通资源 URL 的 query 按源配置保留，不伪造替代 URL；管理认证 token 不进入配置差异或 URL。 */
         ExternalDiff: {
             expected: components["schemas"]["Preconditions"];
             editable: {

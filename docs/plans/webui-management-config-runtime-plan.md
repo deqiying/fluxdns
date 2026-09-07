@@ -25,6 +25,8 @@
 
 2026-09-07 P0 已落实 revision、操作结果、配置读/变更和外部差异的内部 DTO/生成类型，详见 [Management 契约事实](../implementation/backend/management.md#p0-v2-契约)。追加授权的 P1 已落实 BC-02 活动源、定向候选、双文件只读观测和操作仲裁内部入口，详见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。BC-03 的有界服务队列消费者已接入原服务循环；BC-29 已实现活动源内部文件事务、PREPARED/COMMIT_DECIDED 恢复与已知文件状态重试，见[持久化事实](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。BC-30 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)已接入正式 app，资源自动刷新不变；还原、外改重试和[状态投影](../implementation/backend/management.md#p1-配置状态内部投影2026-09-07)已有内部能力。v2 活动源/operation 服务生产者、启动恢复、异步文件事务、差异及 HTTP 联动仍留 BC-03/29/30/31。不能因为已有 `reload_prepared` 或状态机成功回报就宣称新版全部 owner 已完成切换或补偿。
 
+2026-09-08 补充：ConfigStore 的固定源读取与 Management 的[类型化差异投影](../implementation/backend/management.md#p1-外部配置差异内部投影2026-09-08)已落实内部能力，覆盖完整候选语义校验、双文件竞争和输出预算；尚无正式端点或前端采用工作区，CR-04 继续保留异步调度、HTTP/UI 及联合验收。
+
 ## 2. 配置状态与权威
 
 在现有 ConfigStore/Runtime 所有权内保留以下状态，不添加并行的配置数据库：

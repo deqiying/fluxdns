@@ -96,6 +96,14 @@ ConfigStore 的操作记录保存 `OperationSnapshot`，在每次状态转移时
 
 本批新增保留期、进行中固定、状态查询不阻塞及冻结结果类别的定向测试；Windows 实际文件投影覆盖部分提交、重试、同内容换身份、缺失、超限和不可读。测试回报的 Runtime 成功仍是内部模拟，未据此证明 v2 DNS/HTTP 联合流程。
 
+### P1 外部差异输入内部能力（2026-09-08）
+
+[`active/external.rs`](../../backend/src/config/store/active/external.rs) 的 `ConfigStore::external_source` 只读创建 store 时固定的源文件及派生副本。源正文与 FileId/SHA-256 来自同一次 4 MiB 有界读取；随后执行完整 `ConfigV2::parse` 语义/引用校验和无 I/O 的 `resolve_paths`。派生副本仅参与观测，不成为候选来源；不读取资源、证书或 SecretRef 实际值。
+
+返回前再次观测双文件并核对活动 revision，期间内容或身份改变返回 `FileConflict`，活动发布交错返回 `ActiveConflict`；不把旧活动值配上新版本。缺失、不可读、超限、旧版本和无效配置只返回白名单错误类别。预览更新缓存观测，但不创建操作、候选或文件，不应用 Runtime、不改变 active/persisted revision。
+
+这是需要有界后台 owner 调度的同步内部入口，不可直接在 HTTP executor 执行，也不构成文件系统 CAS。Windows 定向测试覆盖双文件内容/同内容换身份、活动发布交错、事务忙及无副作用；`config::` 110 项通过。类型化 HTTP DTO 投影、输出预算与未接线项见[差异投影](backend/management.md#p1-外部配置差异内部投影2026-09-08)。
+
 ### 当前生产加载器
 
 正式入口是 [`app::run_command`](../../backend/src/app.rs) -> [`ConfigLoader::load_from_path`](../../backend/src/config/load.rs) -> [model](../../backend/src/config/model.rs) / [migrate](../../backend/src/config/migrate.rs) / [resolve](../../backend/src/config/resolve.rs) / [validate](../../backend/src/config/validate.rs)。普通 loader 不读取 SecretRef 实际值；run 在 prepare 前执行 accessor 校验，validate 不写 snapshot、不做资源/数据库/网络可用性检查。

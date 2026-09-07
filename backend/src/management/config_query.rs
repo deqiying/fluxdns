@@ -11,6 +11,8 @@ use crate::config::store::{
     observation::FileObservation as ObservedFile,
 };
 
+pub(crate) mod external;
+
 /// 状态查询不做文件 I/O；外部差异与持久化结果独立展示，不把文件变化解释成自动应用。
 pub(crate) fn configuration_state(store: &ConfigStore) -> Result<ConfigState, ErrorCode> {
     let status = store.configuration_status().map_err(error_code)?;

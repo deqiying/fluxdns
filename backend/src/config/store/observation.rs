@@ -65,14 +65,24 @@ impl ManagedObservation {
 }
 
 pub(super) fn observe(path: &Path) -> FileObservation {
+    observe_with_content(path).0
+}
+
+/// 差异预览必须使用生成观测摘要的同一次读取内容，不能另读正文后沿用旧 token。
+pub(super) fn observe_with_content(path: &Path) -> (FileObservation, Option<Vec<u8>>) {
     match read_file(path) {
-        Ok((identity, bytes)) => FileObservation::Readable {
-            identity,
-            fingerprint: sha256_digest(&bytes),
-        },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => FileObservation::Missing,
-        Err(error) if error.kind() == io::ErrorKind::FileTooLarge => FileObservation::Oversized,
-        Err(_) => FileObservation::Unreadable,
+        Ok((identity, bytes)) => (
+            FileObservation::Readable {
+                identity,
+                fingerprint: sha256_digest(&bytes),
+            },
+            Some(bytes),
+        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => (FileObservation::Missing, None),
+        Err(error) if error.kind() == io::ErrorKind::FileTooLarge => {
+            (FileObservation::Oversized, None)
+        }
+        Err(_) => (FileObservation::Unreadable, None),
     }
 }
 

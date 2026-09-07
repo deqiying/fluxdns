@@ -221,6 +221,7 @@ fn openapi_protection_constants_match_rust_and_write_routes_are_not_registered()
         ("query_body_bytes", MAX_QUERY_BYTES),
         ("websocket_frame_bytes", MAX_WS_FRAME_BYTES),
         ("operation_entries", MAX_OPERATION_ENTRIES),
+        ("external_diff_bytes", MAX_EXTERNAL_DIFF_BYTES),
         ("operation_ttl_seconds", OPERATION_TTL_SECONDS as usize),
         ("websocket_protocol_version", WS_PROTOCOL_VERSION as usize),
     ] {

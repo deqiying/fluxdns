@@ -13,6 +13,8 @@ use std::{
 
 const SOURCE: &str = include_str!("../../../tests/fixtures/config-v2.yaml");
 
+mod external;
+
 struct Fixture {
     root: PathBuf,
     source: PathBuf,
@@ -22,6 +24,10 @@ struct Fixture {
 
 impl Fixture {
     fn new(runtime_revision: u64) -> Self {
+        Self::with_source(runtime_revision, SOURCE)
+    }
+
+    fn with_source(runtime_revision: u64, source_text: &str) -> Self {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -37,7 +43,7 @@ impl Fixture {
         fs::create_dir_all(&root).unwrap();
         let source = root.join("source.yaml");
         let derived = root.join("config.yaml");
-        let content = format!("{SOURCE}\n# private-configuration-sentinel\n");
+        let content = format!("{source_text}\n# private-configuration-sentinel\n");
         fs::write(&source, &content).unwrap();
         fs::write(&derived, &content).unwrap();
         let store =

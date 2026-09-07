@@ -19,6 +19,8 @@ const MAX_RECORDS: usize = 1024;
 const VALIDATION_TTL: Duration = Duration::from_secs(60);
 const OPERATION_TTL: Duration = Duration::from_secs(1800);
 
+pub(crate) mod external;
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) struct ExpectedRevisions {
     pub(crate) active: String,
