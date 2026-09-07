@@ -7,6 +7,38 @@ use std::path::Path;
 use super::super::observation::{check_path, directory_identity, observe};
 use super::{PersistenceError, Stamp};
 
+/// 仅在进程内保存的权限能力，来自已校验文件，不接受 API 或 journal 提供的 ACL。
+#[derive(Clone)]
+pub(super) struct Permissions {
+    #[cfg(windows)]
+    descriptor: Vec<u32>,
+    #[cfg(unix)]
+    mode: u32,
+    #[cfg(unix)]
+    owner: u32,
+}
+
+impl Permissions {
+    pub(super) fn capture(path: &Path) -> Result<Self, PersistenceError> {
+        check_path(path)?;
+        #[cfg(windows)]
+        {
+            Ok(Self {
+                descriptor: protected_descriptor(path)?,
+            })
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let metadata = fs::metadata(path)?;
+            Ok(Self {
+                mode: metadata.mode() & 0o600,
+                owner: metadata.uid(),
+            })
+        }
+    }
+}
+
 pub(super) fn parent_identity(path: &Path) -> Result<String, PersistenceError> {
     Ok(directory_identity(
         path.parent().ok_or(PersistenceError::InvalidJournal)?,
@@ -27,12 +59,33 @@ pub(super) fn stamp(path: &Path) -> Result<Stamp, PersistenceError> {
     }
 }
 
+pub(super) fn optional_stamp(path: &Path) -> Result<Option<Stamp>, PersistenceError> {
+    // 只有目标叶节点缺失才可创建；父目录缺失、链接或替换不按空文件处理。
+    parent_identity(path)?;
+    match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+        Ok(_) => stamp(path).map(Some),
+    }
+}
+
 /// 锁文件保留为空旁文件；持有 OS 锁而不是以时间推测旧进程是否退出。
 pub(super) fn acquire_lock(source: &Path) -> Result<(File, Stamp), PersistenceError> {
+    acquire_lock_with_permissions(source, None)
+}
+
+pub(super) fn acquire_lock_with_permissions(
+    source: &Path,
+    permissions: Option<&Permissions>,
+) -> Result<(File, Stamp), PersistenceError> {
     let path = super::sibling(source, "lock");
     parent_identity(&path)?;
     if !path.try_exists()? {
-        match write_new(&path, source, b"") {
+        let created = match permissions {
+            Some(permissions) => write_new_with_permissions(&path, permissions, b""),
+            None => write_new(&path, source, b""),
+        };
+        match created {
             Ok(_) => {}
             Err(PersistenceError::Io(error)) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
@@ -95,19 +148,37 @@ pub(super) fn require(path: &Path, expected: &Stamp) -> Result<(), PersistenceEr
     Ok(())
 }
 
+pub(super) fn require_optional(
+    path: &Path,
+    expected: Option<&Stamp>,
+) -> Result<(), PersistenceError> {
+    if optional_stamp(path)?.as_ref() != expected {
+        return Err(PersistenceError::Conflict);
+    }
+    Ok(())
+}
+
 /// 先带限制权限创建空文件，再写入敏感 bytes；不能先默认继承再收紧权限。
 pub(super) fn write_new(
     path: &Path,
     permissions_from: &Path,
     bytes: &[u8],
 ) -> Result<Stamp, PersistenceError> {
-    check_path(permissions_from)?;
+    let permissions = Permissions::capture(permissions_from)?;
+    write_new_with_permissions(path, &permissions, bytes)
+}
+
+pub(super) fn write_new_with_permissions(
+    path: &Path,
+    permissions: &Permissions,
+    bytes: &[u8],
+) -> Result<Stamp, PersistenceError> {
     parent_identity(path)?;
-    let mut file = restricted_create(path, permissions_from)?;
+    let mut file = restricted_create(path, permissions)?;
     let written = file.write_all(bytes).and_then(|()| file.sync_all());
     let observed = stamp(path);
     drop(file);
-    let observed = observed?;
+    let observed = observed.map_err(|error| PersistenceError::CleanupRequired(Box::new(error)))?;
     if let Err(error) = written.and_then(|()| sync_parent(path)) {
         remove_known(path, &observed)
             .map_err(|error| PersistenceError::CleanupRequired(Box::new(error)))?;
@@ -127,29 +198,32 @@ pub(super) fn replace(
     stage: &Path,
     target: &Path,
     stage_stamp: &Stamp,
-    target_stamp: &Stamp,
+    target_stamp: Option<&Stamp>,
 ) -> Result<(), PersistenceError> {
     require(stage, stage_stamp)?;
-    require(target, target_stamp)?;
-    super::super::replace_file(stage, target).map_err(|error| match error {
-        super::super::ConfigStoreError::Io(error) => PersistenceError::Io(error),
-        _ => PersistenceError::Conflict,
-    })?;
+    require_optional(target, target_stamp)?;
+    if target_stamp.is_none() {
+        move_into_missing(stage, target)?;
+    } else {
+        super::super::replace_file(stage, target).map_err(|error| match error {
+            super::super::ConfigStoreError::Io(error) => PersistenceError::Io(error),
+            _ => PersistenceError::Conflict,
+        })?;
+    }
     sync_parent(target)?;
     require(target, stage_stamp)
 }
 
 #[cfg(unix)]
-fn restricted_create(path: &Path, permissions_from: &Path) -> io::Result<File> {
+fn restricted_create(path: &Path, permissions: &Permissions) -> io::Result<File> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     // stage 不需要其他用户读取；仅保留原文件 owner 权限的交集，绝不增加组/其他权限。
-    let mode = fs::metadata(permissions_from)?.mode() & 0o600;
     let file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .mode(mode)
+        .mode(permissions.mode)
         .open(path)?;
-    if file.metadata()?.uid() != fs::metadata(permissions_from)?.uid() {
+    if file.metadata()?.uid() != permissions.owner {
         return Err(io::Error::other(
             "configuration owner differs from process owner",
         ));
@@ -184,7 +258,7 @@ fn permission_stamp(path: &Path) -> io::Result<String> {
 }
 
 #[cfg(windows)]
-fn restricted_create(path: &Path, permissions_from: &Path) -> io::Result<File> {
+fn restricted_create(path: &Path, permissions: &Permissions) -> io::Result<File> {
     use std::os::windows::io::FromRawHandle;
     use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -192,7 +266,7 @@ fn restricted_create(path: &Path, permissions_from: &Path) -> io::Result<File> {
         CREATE_NEW, CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ,
     };
 
-    let mut descriptor = protected_descriptor(permissions_from)?;
+    let mut descriptor = permissions.descriptor.clone();
     let security = SECURITY_ATTRIBUTES {
         nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
         lpSecurityDescriptor: descriptor.as_mut_ptr().cast(),
@@ -215,6 +289,26 @@ fn restricted_create(path: &Path, permissions_from: &Path) -> io::Result<File> {
         return Err(io::Error::last_os_error());
     }
     Ok(unsafe { File::from_raw_handle(handle) })
+}
+
+#[cfg(windows)]
+pub(super) fn move_into_missing(stage: &Path, target: &Path) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+    let stage = wide(stage)?;
+    let target = wide(target)?;
+    // 不设置 REPLACE_EXISTING；确认缺失后重新出现的文件不能被这次创建覆盖。
+    if unsafe { MoveFileExW(stage.as_ptr(), target.as_ptr(), MOVEFILE_WRITE_THROUGH) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn move_into_missing(stage: &Path, target: &Path) -> io::Result<()> {
+    // 复用配置副本的 no-replace 发布方式；link/unlink 间中断留下双链接时恢复会拒绝，
+    // 不能为自动清理放松通用 hard-link 防护。该 Unix 中断窗口尚未实机验收。
+    fs::hard_link(stage, target)?;
+    fs::remove_file(stage)
 }
 
 #[cfg(windows)]

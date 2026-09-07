@@ -60,7 +60,19 @@ BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml 
 
 Windows Rust 1.98.0 本批 `config::` 89 项通过，其中 ConfigStore 28 项。新增子进程以退出码 73 在 PREPARED、COMMIT_DECIDED、源替换后、派生替换后直接退出，验证真实文件与 OS 锁恢复；另有真实 Windows journal/派生文件占用失败、同步重试、同内容换身份、损坏/超限 journal、单文件去重、权限和别名测试。测试数据限定 `_fluxdns/p1-journal-tests/` 与 `_fluxdns/p1-config-tests/`，不读取个人配置。
 
-剩余边界：Runtime 成功回报仍由测试模拟，v2 配置事务 owner/服务生产者、启动 recovery、HTTP 状态/重试端点未接线。外部新修改后的重新确认/重建事务、缺失文件还原、完整差异工作区归 BC-30；当前重试只接受 journal 已知状态，不能强行覆盖未知外改。文件 I/O 为同步内部调用，HTTP 断开后的 owner 生命周期和应用预算仍需接线验证。崩溃在 journal 建立之前或决策旁文件替换之前可能留下未登记的受限旁文件；不扫描删除未知残留，需明确人工处理。非合作编辑器的核对/替换竞态不能被普通 filesystem replace 完全消除。因此 BC-29 和 P1 生产退出条件仍未关闭。
+剩余边界：Runtime 成功回报仍由测试模拟，v2 配置事务 owner/服务生产者、启动 recovery、HTTP 状态/重试端点未接线。外部新修改后的重新确认/重建事务、完整差异工作区仍归 BC-30；缺失文件还原的内部进度见下节。当前重试只接受 journal 已知状态，不能强行覆盖未知外改。文件 I/O 为同步内部调用，HTTP 断开后的 owner 生命周期和应用预算仍需接线验证。崩溃在 journal 建立之前或决策旁文件替换之前可能留下未登记的受限旁文件；不扫描删除未知残留，需明确人工处理。非合作编辑器的核对/替换竞态不能被普通 filesystem replace 完全消除。因此 BC-29 和 P1 生产退出条件仍未关闭。
+
+### P1 受管文件还原内部能力（2026-09-07）
+
+`ConfigStore::restore_files` 绑定调用者、operation ID、active/file 双 revision 和丢弃外改确认。只从 `active_source` 取原文，同时还原固定源与派生路径，不创建 Runtime、不推进 active/runtime revision，也不触碰 DNS、会话或 Hosts/规则资源文件。重复 operation 只返回既有阶段，不能因文件随后再变而重放还原；未知 ID/不同调用者和不同命令不共用结果。正常完成更新 persisted 状态与组合文件观测。
+
+还原复用 PREPARED/COMMIT_DECIDED journal：确认还原已生效的活动源后才决定文件提交。准备失败且清理已确定完成时记为 Rejected；存在未核清的 journal/旁文件时保留阻塞。决定提交后发生 I/O 失败则保留活动源和 AppliedUnpersisted，禁止叠加变更；现有内部 `persist_applied` 只继续这次已知文件事务，不重新应用 Runtime。
+
+目标仅叶节点缺失时，journal 的 `old` 明确记录缺失；重新创建必须使用进程在先前受管状态捕获的权限及父目录身份。权限能力不来自 HTTP 或 journal，也不在其中序列化；成功提交后更新进程内能力。Windows 使用不带 REPLACE_EXISTING 的同目录发布，拒绝确认缺失后重新出现的目标；现有目标仍核对身份、内容和权限后替换。目录、hard link、不可读、超限、缺失/被替换的父目录都拒绝，不删除未知文件或自动重建目录。Unix 沿用配置副本的 hard-link no-replace 方式；link/unlink 间中断留下的双链接将被现有防护拒绝，需人工核对，此路径未实机验收。
+
+Windows 本批 ConfigStore 36 项、完整 `config::` 97 项通过。新增还原确认/幂等/双版本冲突、真实文件占用失败和显式重试、单/双文件缺失、目录/硬链接拒绝、父目录替换、DACL 保留以及 no-replace 测试。子进程矩阵从 4 个扩至 8 个 crash point，增加缺失双文件的 PREPARED、COMMIT_DECIDED、源提交后、派生提交后；PREPARED 不补建目标，持久决策才补齐。用例数据仍在 `_fluxdns/p1-config-tests/` 和 `_fluxdns/p1-journal-tests/`，递归清理前核对真实绝对路径归属。
+
+该子项未接入 HTTP/UI 或 v2 生产启动，不替代完整 BC-30。新外改后的重新确认/事务重建、受限差异预览、配置状态投影，以及文件 I/O 的异步 owner/预算和响应中断仍待完成；不能以内部 revision 不变断言新版真实 DNS 联合还原已验收。
 
 ### 当前生产加载器
 

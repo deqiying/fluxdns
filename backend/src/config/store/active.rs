@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use super::ConfigStore;
 use super::observation::{ManagedObservation, sha256_digest};
-use super::persistence::{Persistence, PersistenceError};
+use super::persistence::{ManagedProtection, Persistence, PersistenceError};
 use crate::config::contract::ConfigV2;
 use crate::config::edit::{ConfigChange, EditError, SourceCandidate, build_candidate};
 
@@ -38,6 +38,7 @@ pub(crate) enum Impact {
 pub(crate) enum OperationPhase {
     Preparing,
     Applying,
+    Persisting,
     AppliedUnpersisted,
     AppliedSynced,
     Rejected,
@@ -77,6 +78,7 @@ pub(super) struct ActiveState {
     validations: BTreeMap<String, ValidationRecord>,
     operations: BTreeMap<String, OperationRecord>,
     persistence: Option<Persistence>,
+    protection: ManagedProtection,
 }
 
 struct ValidationRecord {
@@ -168,6 +170,13 @@ impl ConfigStore {
         if !observation.matches_content(&fingerprint) {
             return Err(ActiveError::FileConflict);
         }
+        let protection =
+            ManagedProtection::capture(&store.source_path, store.snapshot_path.as_deref())?;
+        if ManagedObservation::read(&store.source_path, store.snapshot_path.as_deref())
+            != observation
+        {
+            return Err(ActiveError::FileConflict);
+        }
         let revision = random_token()?;
         *store.active.lock().map_err(|_| ActiveError::Busy)? = Some(ActiveState {
             snapshot: ActiveSnapshot {
@@ -183,6 +192,7 @@ impl ConfigStore {
             validations: BTreeMap::new(),
             operations: BTreeMap::new(),
             persistence: None,
+            protection,
         });
         Ok(store)
     }
@@ -379,8 +389,99 @@ impl ConfigStore {
         state.snapshot.persisted_fingerprint = fingerprint;
         state.snapshot.operation_id = None;
         state.operations.get_mut(operation_id).unwrap().phase = OperationPhase::AppliedSynced;
+        state.protection = state.persistence.as_ref().unwrap().protection();
         state.persistence = None;
         Ok(state.snapshot.clone())
+    }
+
+    /// 以活动原文还原固定受管文件；不构造候选 Runtime，不改变 active/runtime revision。
+    /// 相同 operation 返回既有结果，失败后的再次写盘必须经过显式同步重试。
+    pub(crate) fn restore_files(
+        &self,
+        actor: &str,
+        operation_id: &str,
+        expected: &ExpectedRevisions,
+        discard_external_changes: bool,
+    ) -> Result<OperationPhase, ActiveError> {
+        validate_token(actor)?;
+        validate_token(operation_id)?;
+        let digest = sha256_digest(
+            &serde_json::to_vec(&("restore", actor, expected, discard_external_changes))
+                .map_err(|_| EditError::UnsupportedSource)?,
+        );
+        let _transaction = self.transaction.try_lock().map_err(|_| ActiveError::Busy)?;
+        let mut guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
+        let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
+        let now = Instant::now();
+        state.operations.retain(|id, record| {
+            record.expires > now || state.snapshot.operation_id.as_ref() == Some(id)
+        });
+        if let Some(record) = state.operations.get(operation_id) {
+            return if record.digest == digest {
+                Ok(record.phase.clone())
+            } else {
+                Err(ActiveError::OperationIdReused)
+            };
+        }
+        state.snapshot.observation =
+            ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
+        check_expected(&state.snapshot, expected, discard_external_changes)?;
+        if state.operations.len() >= MAX_RECORDS {
+            return Err(ActiveError::Busy);
+        }
+        state.operations.insert(
+            operation_id.into(),
+            OperationRecord {
+                digest,
+                actor: sha256_digest(actor.as_bytes()),
+                phase: OperationPhase::Preparing,
+                expires: now + OPERATION_TTL,
+            },
+        );
+        state.snapshot.operation_id = Some(operation_id.into());
+        let prepared = Persistence::prepare_with_protection(
+            &self.source_path,
+            self.snapshot_path.as_deref(),
+            &state.snapshot.observation,
+            state.snapshot.source.as_bytes(),
+            Some(&state.protection),
+        );
+        let persistence = match prepared {
+            Ok(persistence) => persistence,
+            Err(error) => {
+                let unresolved = matches!(
+                    error,
+                    PersistenceError::CleanupRequired(_) | PersistenceError::RecoveryRequired
+                ) || super::persistence::ensure_no_journal(&self.source_path)
+                    .is_err();
+                let phase = if unresolved {
+                    OperationPhase::CompensationFailed
+                } else {
+                    state.snapshot.operation_id = None;
+                    OperationPhase::Rejected
+                };
+                state.operations.get_mut(operation_id).unwrap().phase = phase;
+                return Err(error.into());
+            }
+        };
+        state.persistence = Some(persistence);
+        state.operations.get_mut(operation_id).unwrap().phase = OperationPhase::Persisting;
+        // 活动源已是权威运行配置，确认还原可以决定文件提交，不需要再次应用 DNS。
+        let result = state.persistence.as_mut().unwrap().commit();
+        state.snapshot.observation =
+            ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
+        if let Err(error) = result {
+            state.operations.get_mut(operation_id).unwrap().phase =
+                OperationPhase::AppliedUnpersisted;
+            return Err(error.into());
+        }
+        state.snapshot.persisted_revision = Some(state.snapshot.revision.clone());
+        state.snapshot.persisted_fingerprint = sha256_digest(state.snapshot.source.as_bytes());
+        state.snapshot.operation_id = None;
+        state.protection = state.persistence.as_ref().unwrap().protection();
+        state.persistence = None;
+        state.operations.get_mut(operation_id).unwrap().phase = OperationPhase::AppliedSynced;
+        Ok(OperationPhase::AppliedSynced)
     }
 }
 
@@ -409,11 +510,12 @@ impl ApplyPermit<'_> {
         if record.phase != OperationPhase::Preparing {
             return Err(ActiveError::Busy);
         }
-        let persistence = Persistence::prepare(
+        let persistence = Persistence::prepare_with_protection(
             &self.store.source_path,
             self.store.snapshot_path.as_deref(),
             &state.snapshot.observation,
             self.candidate.source.as_bytes(),
+            Some(&state.protection),
         )?;
         state.persistence = Some(persistence);
         if ManagedObservation::read(&self.store.source_path, self.store.snapshot_path.as_deref())

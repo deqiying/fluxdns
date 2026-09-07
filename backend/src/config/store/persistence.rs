@@ -48,8 +48,63 @@ enum Phase {
 #[serde(deny_unknown_fields)]
 struct Target {
     parent: String,
-    old: Stamp,
+    old: Option<Stamp>,
     staged: Stamp,
+}
+
+#[derive(Clone)]
+struct TargetProtection {
+    path: PathBuf,
+    parent: String,
+    permissions: files::Permissions,
+}
+
+/// 还原缺失文件时使用最后一次受管状态的权限，不从任意外部路径继承。
+#[derive(Clone)]
+pub(super) struct ManagedProtection {
+    source: TargetProtection,
+    derived: Option<TargetProtection>,
+}
+
+impl ManagedProtection {
+    pub(super) fn capture(source: &Path, derived: Option<&Path>) -> Result<Self, PersistenceError> {
+        Ok(Self {
+            source: TargetProtection::capture(source)?,
+            derived: derived.map(TargetProtection::capture).transpose()?,
+        })
+    }
+}
+
+impl TargetProtection {
+    fn capture(path: &Path) -> Result<Self, PersistenceError> {
+        let before = files::stamp(path)?;
+        let protection = Self {
+            path: path.to_owned(),
+            parent: files::parent_identity(path)?,
+            permissions: files::Permissions::capture(path)?,
+        };
+        files::require(path, &before)?;
+        Ok(protection)
+    }
+
+    fn for_current(
+        path: &Path,
+        old: Option<&Stamp>,
+        fallback: Option<&Self>,
+    ) -> Result<Self, PersistenceError> {
+        let parent = files::parent_identity(path)?;
+        if let Some(fallback) = fallback
+            && (fallback.path != path || fallback.parent != parent)
+        {
+            return Err(PersistenceError::Conflict);
+        }
+        if let Some(old) = old {
+            let protection = Self::capture(path)?;
+            files::require(path, old)?;
+            return Ok(protection);
+        }
+        fallback.cloned().ok_or(PersistenceError::Conflict)
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -73,6 +128,7 @@ pub(super) struct Persistence {
     _lock: File,
     lock_stamp: Stamp,
     derived_lock: Option<(File, Stamp)>,
+    protection: Option<ManagedProtection>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -89,21 +145,57 @@ impl Persistence {
         expected: &ManagedObservation,
         candidate: &[u8],
     ) -> Result<Self, PersistenceError> {
+        Self::prepare_with_protection(source, derived, expected, candidate, None)
+    }
+
+    /// 缺失目标必须有进程先前捕获的权限与父目录身份；不可读/超限目标仍拒绝覆盖。
+    pub(super) fn prepare_with_protection(
+        source: &Path,
+        derived: Option<&Path>,
+        expected: &ManagedObservation,
+        candidate: &[u8],
+        protection: Option<&ManagedProtection>,
+    ) -> Result<Self, PersistenceError> {
         if candidate.len() > crate::config::contract::MAX_CONFIG_BYTES {
             return Err(PersistenceError::InvalidJournal);
         }
         validate_candidate(candidate, source, derived)?;
-        let (lock, lock_stamp) = files::acquire_lock(source)?;
-        let derived_lock = derived.map(files::acquire_lock).transpose()?;
+        let source_old = files::optional_stamp(source)?;
+        let derived_old = derived.map(files::optional_stamp).transpose()?.flatten();
+        let source_protection = TargetProtection::for_current(
+            source,
+            source_old.as_ref(),
+            protection.map(|value| &value.source),
+        )?;
+        let derived_protection = derived
+            .map(|path| {
+                TargetProtection::for_current(
+                    path,
+                    derived_old.as_ref(),
+                    protection.and_then(|value| value.derived.as_ref()),
+                )
+            })
+            .transpose()?;
+        let protection = ManagedProtection {
+            source: source_protection,
+            derived: derived_protection,
+        };
+        let (lock, lock_stamp) =
+            files::acquire_lock_with_permissions(source, Some(&protection.source.permissions))?;
+        let derived_lock = derived
+            .zip(protection.derived.as_ref())
+            .map(|(path, protection)| {
+                files::acquire_lock_with_permissions(path, Some(&protection.permissions))
+            })
+            .transpose()?;
         ensure_no_journal(source)?;
         if &ManagedObservation::read(source, derived) != expected {
             return Err(PersistenceError::Conflict);
         }
-        let source_old = files::stamp(source)?;
-        let derived_old = derived.map(files::stamp).transpose()?;
-        if derived_old
+        if source_old
             .as_ref()
-            .is_some_and(|other| other.identity == source_old.identity)
+            .zip(derived_old.as_ref())
+            .is_some_and(|(source, other)| other.identity == source.identity)
         {
             return Err(PersistenceError::Conflict);
         }
@@ -113,16 +205,18 @@ impl Persistence {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        let source_target = stage(source, &nonce, source_old, candidate)?;
-        let derived_target = match (derived, derived_old) {
-            (Some(path), Some(old)) => match stage(path, &nonce, old, candidate) {
-                Ok(target) => Some(target),
-                Err(error) => {
-                    files::remove_known(&stage_path(source, &nonce), &source_target.staged)
-                        .map_err(|error| PersistenceError::CleanupRequired(Box::new(error)))?;
-                    return Err(error);
+        let source_target = stage(source, &nonce, source_old, &protection.source, candidate)?;
+        let derived_target = match (derived, protection.derived.as_ref()) {
+            (Some(path), Some(protection)) => {
+                match stage(path, &nonce, derived_old, protection, candidate) {
+                    Ok(target) => Some(target),
+                    Err(error) => {
+                        files::remove_known(&stage_path(source, &nonce), &source_target.staged)
+                            .map_err(|error| PersistenceError::CleanupRequired(Box::new(error)))?;
+                        return Err(error);
+                    }
                 }
-            },
+            }
             _ => None,
         };
         let journal = Journal {
@@ -135,14 +229,14 @@ impl Persistence {
         };
         let write_journal = || {
             verify_parent(source, &journal.source)?;
-            files::require(source, &journal.source.old)?;
+            files::require_optional(source, journal.source.old.as_ref())?;
             if let (Some(path), Some(target)) = (derived, &journal.derived) {
                 verify_parent(path, target)?;
-                files::require(path, &target.old)?;
+                files::require_optional(path, target.old.as_ref())?;
             }
-            files::write_new(
+            files::write_new_with_permissions(
                 &journal_path(source),
-                source,
+                &protection.source.permissions,
                 &serde_json::to_vec(&journal).map_err(|_| PersistenceError::InvalidJournal)?,
             )
         };
@@ -167,11 +261,12 @@ impl Persistence {
             _lock: lock,
             lock_stamp,
             derived_lock,
+            protection: Some(protection),
         };
         Ok(transaction)
     }
 
-    /// 必须在运行 owner 明确应用成功后调用；PREPARED 文件准备不能自行决定提交。
+    /// 运行 owner 明确应用成功或用户确认还原活动源后调用；PREPARED 不能自行决定提交。
     pub(super) fn decide(&mut self) -> Result<(), PersistenceError> {
         self.verify_journal()?;
         self.verify_targets()?;
@@ -194,7 +289,7 @@ impl Persistence {
                 stamp
             }
         };
-        files::replace(&stage_path, &path, &staged, &self.journal_stamp)?;
+        files::replace(&stage_path, &path, &staged, Some(&self.journal_stamp))?;
         self.journal = next;
         self.journal_stamp = staged;
         self.decision_stage = None;
@@ -227,8 +322,8 @@ impl Persistence {
         }
         self.verify_journal()?;
         verify_parent(path, target)?;
-        let current = files::stamp(path)?;
-        if current == target.staged {
+        let current = files::optional_stamp(path)?;
+        if current.as_ref() == Some(&target.staged) {
             return Ok(());
         }
         if current != target.old {
@@ -238,7 +333,7 @@ impl Persistence {
             &stage_path(path, &self.journal.nonce),
             path,
             &target.staged,
-            &target.old,
+            target.old.as_ref(),
         )
     }
 
@@ -276,13 +371,21 @@ impl Persistence {
             .chain(self.derived.as_deref().zip(self.journal.derived.as_ref()))
     }
 
+    pub(super) fn protection(&self) -> ManagedProtection {
+        self.protection
+            .clone()
+            .expect("live transaction owns captured permissions")
+    }
+
     fn verify_targets(&self) -> Result<(), PersistenceError> {
         for (path, target) in self.targets() {
             verify_parent(path, target)?;
-            let current = files::stamp(path)?;
+            let current = files::optional_stamp(path)?;
             if current == target.old {
                 files::require(&stage_path(path, &self.journal.nonce), &target.staged)?;
-            } else if self.journal.phase != Phase::CommitDecided || current != target.staged {
+            } else if self.journal.phase != Phase::CommitDecided
+                || current.as_ref() != Some(&target.staged)
+            {
                 return Err(PersistenceError::Conflict);
             }
         }
@@ -340,6 +443,7 @@ pub(crate) fn recover(
         _lock: lock,
         lock_stamp,
         derived_lock,
+        protection: None,
     };
     if transaction.journal_stamp.identity != identity
         || transaction.journal_stamp.fingerprint != sha256_digest(&bytes)
@@ -353,7 +457,9 @@ pub(crate) fn recover(
         }
         Phase::CommitDecided => {
             transaction.verify_targets()?;
-            let candidate_path = if files::stamp(source)? == transaction.journal.source.staged {
+            let candidate_path = if files::optional_stamp(source)?.as_ref()
+                == Some(&transaction.journal.source.staged)
+            {
                 source.to_owned()
             } else {
                 stage_path(source, &transaction.journal.nonce)
@@ -395,10 +501,29 @@ pub(super) fn ensure_no_journal(source: &Path) -> Result<(), PersistenceError> {
     Ok(())
 }
 
-fn stage(path: &Path, nonce: &str, old: Stamp, bytes: &[u8]) -> Result<Target, PersistenceError> {
+fn stage(
+    path: &Path,
+    nonce: &str,
+    old: Option<Stamp>,
+    protection: &TargetProtection,
+    bytes: &[u8],
+) -> Result<Target, PersistenceError> {
     let parent = files::parent_identity(path)?;
-    let staged = files::write_new(&stage_path(path, nonce), path, bytes)?;
-    if let Err(error) = files::require(path, &old) {
+    if parent != protection.parent {
+        return Err(PersistenceError::Conflict);
+    }
+    let staged = files::write_new_with_permissions(
+        &stage_path(path, nonce),
+        &protection.permissions,
+        bytes,
+    )?;
+    let recheck = || {
+        if files::parent_identity(path)? != parent {
+            return Err(PersistenceError::Conflict);
+        }
+        files::require_optional(path, old.as_ref())
+    };
+    if let Err(error) = recheck() {
         files::remove_known(&stage_path(path, nonce), &staged)
             .map_err(|error| PersistenceError::CleanupRequired(Box::new(error)))?;
         return Err(error);

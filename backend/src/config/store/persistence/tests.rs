@@ -59,7 +59,10 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../_fluxdns/p1-journal-tests");
         assert_eq!(self.root.parent(), Some(base.as_path()));
-        fs::remove_dir_all(&self.root).unwrap();
+        let resolved = fs::canonicalize(&self.root).unwrap();
+        let base = fs::canonicalize(base).unwrap();
+        assert_eq!(resolved.parent(), Some(base.as_path()));
+        fs::remove_dir_all(resolved).unwrap();
     }
 }
 
@@ -75,6 +78,95 @@ fn prepare_does_not_touch_targets_and_discard_never_rolls_forward() {
     transaction.discard().unwrap();
     fixture.assert_bytes(OLD, OLD);
     assert!(!journal_path(&fixture.source).exists());
+}
+
+#[test]
+fn missing_targets_require_captured_permissions_and_conflicting_creation_is_not_overwritten() {
+    let fixture = Fixture::new();
+    let protection = ManagedProtection::capture(&fixture.source, Some(&fixture.derived)).unwrap();
+    fs::remove_file(&fixture.source).unwrap();
+    fs::remove_file(&fixture.derived).unwrap();
+    let expected = ManagedObservation::read(&fixture.source, Some(&fixture.derived));
+    assert!(matches!(
+        Persistence::prepare(&fixture.source, Some(&fixture.derived), &expected, NEW),
+        Err(PersistenceError::Conflict)
+    ));
+    let mut transaction = Persistence::prepare_with_protection(
+        &fixture.source,
+        Some(&fixture.derived),
+        &expected,
+        NEW,
+        Some(&protection),
+    )
+    .unwrap();
+    assert!(!fixture.source.exists());
+    assert!(!fixture.derived.exists());
+    fs::write(&fixture.derived, b"created by editor").unwrap();
+    assert!(matches!(
+        transaction.commit(),
+        Err(PersistenceError::Conflict)
+    ));
+    assert!(!fixture.source.exists());
+    assert_eq!(fs::read(&fixture.derived).unwrap(), b"created by editor");
+    transaction.discard().unwrap();
+}
+
+#[test]
+fn captured_permissions_do_not_authorize_a_replaced_parent_directory() {
+    let fixture = Fixture::new();
+    let managed = fixture.root.join("managed");
+    fs::create_dir(&managed).unwrap();
+    let source = managed.join("source.yaml");
+    let derived = managed.join("config.yaml");
+    fs::write(&source, OLD).unwrap();
+    fs::write(&derived, OLD).unwrap();
+    let protection = ManagedProtection::capture(&source, Some(&derived)).unwrap();
+    fs::rename(&managed, fixture.root.join("old-managed")).unwrap();
+    fs::create_dir(&managed).unwrap();
+    let expected = ManagedObservation::read(&source, Some(&derived));
+    assert!(matches!(
+        Persistence::prepare_with_protection(
+            &source,
+            Some(&derived),
+            &expected,
+            NEW,
+            Some(&protection),
+        ),
+        Err(PersistenceError::Conflict)
+    ));
+    assert_eq!(
+        fs::read(fixture.root.join("old-managed/source.yaml")).unwrap(),
+        OLD
+    );
+    assert_eq!(fs::read_dir(&managed).unwrap().count(), 0);
+}
+
+#[cfg(windows)]
+#[test]
+fn recreated_files_keep_captured_access_entries_and_missing_move_refuses_existing_target() {
+    let fixture = Fixture::new();
+    let source_permissions = files::access_entries(&fixture.source);
+    let derived_permissions = files::access_entries(&fixture.derived);
+    let protection = ManagedProtection::capture(&fixture.source, Some(&fixture.derived)).unwrap();
+    fs::remove_file(&fixture.source).unwrap();
+    fs::remove_file(&fixture.derived).unwrap();
+    let mut transaction = Persistence::prepare_with_protection(
+        &fixture.source,
+        Some(&fixture.derived),
+        &ManagedObservation::read(&fixture.source, Some(&fixture.derived)),
+        NEW,
+        Some(&protection),
+    )
+    .unwrap();
+    transaction.commit().unwrap();
+    assert_eq!(files::access_entries(&fixture.source), source_permissions);
+    assert_eq!(files::access_entries(&fixture.derived), derived_permissions);
+    fixture.assert_bytes(NEW, NEW);
+    let late_stage = fixture.root.join("late-stage");
+    fs::write(&late_stage, b"candidate").unwrap();
+    assert!(files::move_into_missing(&late_stage, &fixture.source).is_err());
+    assert_eq!(fs::read(&late_stage).unwrap(), b"candidate");
+    fixture.assert_bytes(NEW, NEW);
 }
 
 #[test]
@@ -352,7 +444,16 @@ fn windows_junction_parent_is_rejected_before_creating_candidate_files() {
 
 #[test]
 fn process_crash_matrix_recovers_only_persisted_decisions() {
-    for point in ["prepared", "decided", "source", "derived"] {
+    for point in [
+        "prepared",
+        "decided",
+        "source",
+        "derived",
+        "missing-prepared",
+        "missing-decided",
+        "missing-source",
+        "missing-derived",
+    ] {
         let fixture = Fixture::new();
         let status = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
@@ -366,9 +467,14 @@ fn process_crash_matrix_recovers_only_persisted_decisions() {
             .unwrap();
         assert_eq!(status.code(), Some(73), "{point}");
         let outcome = recover(&fixture.source, Some(&fixture.derived)).unwrap();
-        if point == "prepared" {
+        if point.ends_with("prepared") {
             assert_eq!(outcome, RecoveryOutcome::PreparedDiscarded);
-            fixture.assert_bytes(OLD, OLD);
+            if point.starts_with("missing-") {
+                assert!(!fixture.source.exists());
+                assert!(!fixture.derived.exists());
+            } else {
+                fixture.assert_bytes(OLD, OLD);
+            }
         } else {
             assert_eq!(outcome, RecoveryOutcome::CommittedFiles);
             fixture.assert_bytes(NEW, NEW);
@@ -387,21 +493,27 @@ fn crash_worker() {
     assert_eq!(root.parent(), Some(base.as_path()));
     let source = root.join("source.yaml");
     let derived = root.join("config.yaml");
-    let mut transaction = Persistence::prepare(
+    let point = std::env::var("FLUXDNS_P1_JOURNAL_POINT").unwrap();
+    let protection = ManagedProtection::capture(&source, Some(&derived)).unwrap();
+    if point.starts_with("missing-") {
+        fs::remove_file(&source).unwrap();
+        fs::remove_file(&derived).unwrap();
+    }
+    let mut transaction = Persistence::prepare_with_protection(
         &source,
         Some(&derived),
         &ManagedObservation::read(&source, Some(&derived)),
         NEW,
+        Some(&protection),
     )
     .unwrap();
-    let point = std::env::var("FLUXDNS_P1_JOURNAL_POINT").unwrap();
-    if point != "prepared" {
+    if !point.ends_with("prepared") {
         transaction.decide().unwrap();
     }
-    if point == "source" || point == "derived" {
+    if point.ends_with("source") || point.ends_with("derived") {
         transaction.commit_source().unwrap();
     }
-    if point == "derived" {
+    if point.ends_with("derived") {
         transaction.commit_derived().unwrap();
     }
     // 模拟进程直接退出，不运行 Persistence/File 的 Drop；不能用普通 scope drop 冒充 crash。

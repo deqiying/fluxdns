@@ -5,6 +5,208 @@ use std::fs;
 
 const FIXTURE: &str = include_str!("../../../../tests/fixtures/config-v2.yaml");
 
+#[test]
+fn restore_recreates_missing_managed_files_from_active_source() {
+    for (source_missing, derived_missing) in [(true, false), (false, true), (true, true)] {
+        let fixture = Fixture::new();
+        let initial = fixture.store.active_snapshot().unwrap();
+        if source_missing {
+            fs::remove_file(&fixture.source).unwrap();
+        }
+        if derived_missing {
+            fs::remove_file(&fixture.derived).unwrap();
+        }
+        let expected = fixture.store.observe_files().unwrap().expected();
+        assert_eq!(
+            fixture
+                .store
+                .restore_files("session-a", "missing", &expected, true)
+                .unwrap(),
+            OperationPhase::AppliedSynced
+        );
+        let restored = fixture.store.active_snapshot().unwrap();
+        assert_eq!(restored.revision, initial.revision);
+        assert_eq!(restored.runtime_revision, initial.runtime_revision);
+        assert!(!restored.externally_changed());
+        assert_eq!(fs::read_to_string(&fixture.source).unwrap(), FIXTURE);
+        assert_eq!(fs::read_to_string(&fixture.derived).unwrap(), FIXTURE);
+    }
+}
+
+#[test]
+fn restore_never_replaces_directory_or_hard_link_and_keeps_new_operation_available() {
+    let fixture = Fixture::new();
+    fs::remove_file(&fixture.source).unwrap();
+    fs::create_dir(&fixture.source).unwrap();
+    fs::write(fixture.source.join("personal-file"), b"keep").unwrap();
+    let expected = fixture.store.observe_files().unwrap().expected();
+    assert!(
+        fixture
+            .store
+            .restore_files("session-a", "directory", &expected, true)
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(fixture.source.join("personal-file")).unwrap(),
+        b"keep"
+    );
+    assert_eq!(
+        fixture.store.operation("session-a", "directory").unwrap(),
+        OperationPhase::Rejected
+    );
+    // 只移除本用例明确创建的文件与空目录，不自动清理未知内容。
+    fs::remove_file(fixture.source.join("personal-file")).unwrap();
+    fs::remove_dir(&fixture.source).unwrap();
+    fs::hard_link(&fixture.derived, &fixture.source).unwrap();
+    let expected = fixture.store.observe_files().unwrap().expected();
+    assert!(
+        fixture
+            .store
+            .restore_files("session-a", "hard-link", &expected, true)
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(&fixture.source).unwrap(), FIXTURE);
+    fs::remove_file(&fixture.source).unwrap();
+    let expected = fixture.store.observe_files().unwrap().expected();
+    fixture
+        .store
+        .restore_files("session-a", "after-correction", &expected, true)
+        .unwrap();
+}
+
+#[test]
+fn restore_uses_active_bytes_without_changing_runtime_or_replaying_operation() {
+    let fixture = Fixture::new();
+    let initial = fixture.store.active_snapshot().unwrap();
+    fs::write(&fixture.source, b"invalid: [yaml").unwrap();
+    fs::write(&fixture.derived, b"external copy").unwrap();
+    let expected = fixture.store.observe_files().unwrap().expected();
+    assert!(matches!(
+        fixture
+            .store
+            .restore_files("session-a", "restore", &expected, false),
+        Err(ActiveError::ExternalConfirmation)
+    ));
+    assert_eq!(
+        fixture
+            .store
+            .restore_files("session-a", "restore", &expected, true)
+            .unwrap(),
+        OperationPhase::AppliedSynced
+    );
+    let restored = fixture.store.active_snapshot().unwrap();
+    assert_eq!(restored.revision, initial.revision);
+    assert_eq!(restored.runtime_revision, initial.runtime_revision);
+    assert_eq!(restored.source, initial.source);
+    assert!(!restored.externally_changed());
+    assert_eq!(fs::read_to_string(&fixture.source).unwrap(), FIXTURE);
+    assert_eq!(fs::read_to_string(&fixture.derived).unwrap(), FIXTURE);
+
+    fs::write(&fixture.source, b"another external change").unwrap();
+    assert_eq!(
+        fixture
+            .store
+            .restore_files("session-a", "restore", &expected, true)
+            .unwrap(),
+        OperationPhase::AppliedSynced
+    );
+    assert_eq!(
+        fs::read(&fixture.source).unwrap(),
+        b"another external change"
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .restore_files("session-b", "restore", &expected, true),
+        Err(ActiveError::OperationIdReused)
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .restore_files("session-a", "restore", &expected, false),
+        Err(ActiveError::OperationIdReused)
+    ));
+}
+
+#[test]
+fn restore_rejects_stale_file_and_active_revisions_before_writing() {
+    let fixture = Fixture::new();
+    fs::write(&fixture.source, b"external one").unwrap();
+    let expected = fixture.store.observe_files().unwrap().expected();
+    fs::write(&fixture.derived, b"external two").unwrap();
+    assert!(matches!(
+        fixture
+            .store
+            .restore_files("session-a", "stale-file", &expected, true),
+        Err(ActiveError::FileConflict)
+    ));
+    let mut expected = fixture.store.observe_files().unwrap().expected();
+    expected.active = "other-active-revision".into();
+    assert!(matches!(
+        fixture
+            .store
+            .restore_files("session-a", "stale-active", &expected, true),
+        Err(ActiveError::ActiveConflict)
+    ));
+    assert_eq!(fs::read(&fixture.source).unwrap(), b"external one");
+    assert_eq!(fs::read(&fixture.derived).unwrap(), b"external two");
+}
+
+#[cfg(windows)]
+#[test]
+fn restore_failure_stays_blocked_and_only_explicit_persistence_retry_writes_again() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let fixture = Fixture::new();
+    let initial = fixture.store.active_snapshot().unwrap();
+    fs::write(&fixture.source, b"external source").unwrap();
+    fs::write(&fixture.derived, b"external copy").unwrap();
+    let expected = fixture.store.observe_files().unwrap().expected();
+    let occupied = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&fixture.derived)
+        .unwrap();
+    assert!(matches!(
+        fixture
+            .store
+            .restore_files("session-a", "failed-restore", &expected, true),
+        Err(ActiveError::Persistence(_))
+    ));
+    assert_eq!(fs::read_to_string(&fixture.source).unwrap(), FIXTURE);
+    assert_eq!(fs::read(&fixture.derived).unwrap(), b"external copy");
+    assert_eq!(
+        fixture
+            .store
+            .operation("session-a", "failed-restore")
+            .unwrap(),
+        OperationPhase::AppliedUnpersisted
+    );
+    drop(occupied);
+    assert_eq!(
+        fixture
+            .store
+            .restore_files("session-a", "failed-restore", &expected, true)
+            .unwrap(),
+        OperationPhase::AppliedUnpersisted
+    );
+    assert_eq!(fs::read(&fixture.derived).unwrap(), b"external copy");
+    let current = fixture.store.observe_files().unwrap();
+    assert!(matches!(
+        fixture
+            .store
+            .restore_files("session-a", "stacked", &current.expected(), true),
+        Err(ActiveError::Busy)
+    ));
+    let restored = fixture
+        .store
+        .persist_applied("session-a", "failed-restore")
+        .unwrap();
+    assert_eq!(restored.revision, initial.revision);
+    assert_eq!(restored.runtime_revision, initial.runtime_revision);
+    assert_eq!(fs::read_to_string(&fixture.derived).unwrap(), FIXTURE);
+}
+
 struct Fixture {
     root: PathBuf,
     source: PathBuf,
@@ -165,7 +367,10 @@ impl Drop for Fixture {
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../_fluxdns/p1-config-tests");
         assert_eq!(self.root.parent(), Some(base.as_path()));
         self.store.active.lock().unwrap().take();
-        fs::remove_dir_all(&self.root).unwrap();
+        let resolved = fs::canonicalize(&self.root).unwrap();
+        let base = fs::canonicalize(base).unwrap();
+        assert_eq!(resolved.parent(), Some(base.as_path()));
+        fs::remove_dir_all(resolved).unwrap();
     }
 }
 

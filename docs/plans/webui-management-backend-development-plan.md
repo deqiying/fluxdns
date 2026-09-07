@@ -82,7 +82,7 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 3. 扩展 `reload_prepared`：差量复用、任务预注册和已接纳请求按原 deadline drain 已接入，见[生命周期实现](../implementation/backend/lifecycle.md#p1-请求-drain-子项2026-09-07)。继续连接活动源/operation 生产者、新进程 owner 可失败准备/真实补偿。不能将这些内部子项测试等同于完整不停机应用验收。
 4. 先应用后正式文件替换的内部状态机、PREPARED/COMMIT_DECIDED journal 与已知状态下文件重试已实现；继续完成服务成功回报、启动恢复及正式状态/重试端点。不能以模拟 Runtime 回报关闭联合验收。
 5. 将 app watcher 改为只检测和上报；复用去抖轮询但有界读取，区分自写/外改/不可读/缺失；不改变 Hosts/规则集资源刷新。
-6. 实现脱敏差异、还原受管文件、模块化组合采用、普通保存覆盖确认；active/file 双版本校验，不接收任意文件路径或整份 YAML。
+6. 已有[受管文件还原内部能力](../implementation/configuration.md#p1-受管文件还原内部能力2026-09-07)，绑定 active/file 双版本、调用者及 operation，覆盖缺失叶节点的权限保持重建；继续实现脱敏差异、模块化组合采用、外改重新确认、普通保存覆盖确认及还原端点，不接收任意文件路径或整份 YAML，不据此关闭 BC-30。
 7. 复用 observability reload handle、共享输出和进程 owner，实现 logs off/on、level/path 热切换；先预开输出，失败不破坏旧 writer，指标不因关闭日志失效。
 8. 首用户初始化继续满足“持久化用户成功后发布认证”的安全要求，但写入仲裁和活动源必须与普通配置协调；本期不新增用户管理 API。普通配置/用户排序不回收 session 的显式应用边界已有 [P1 回归](../implementation/backend/management.md)，文件仅提示与 v2 setup 接线仍保留。
 
