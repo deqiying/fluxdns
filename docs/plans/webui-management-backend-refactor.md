@@ -10,6 +10,8 @@
 >
 > 代码基线：`3059876413224cc8bc3914ac670a7da4edd7ac9d`（定向静态核对）
 
+详细开发拆解见[后端开发计划](webui-management-backend-development-plan.md)，对应页面见[前端开发计划](webui-management-frontend-development-plan.md)；跨端顺序、阶段门槛及分批提交规则统一见[开发总计划](webui-management-development-plan.md)。本文继续维护目标设计与不变量，不重复维护子计划的任务和 Git 检查点。
+
 ## 1. 目标与边界
 
 本方案为上位需求提供后端实施依据，不是当前实现说明。本轮仅交付方案和配套图稿，不修改 Rust、正式配置模板、数据库、OpenAPI 或前端代码，不执行迁移、缓存清理、历史数据删除或服务重启。

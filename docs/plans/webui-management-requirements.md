@@ -14,6 +14,8 @@
 
 本文维护需求与视觉草案；配套的[后端重构方案](webui-management-backend-refactor.md)负责客户端身份、缓存快照、历史保留及管理接口的实施设计。两者目前均待评审，本轮不实现前端代码，也不修改后端代码或现有接口契约。
 
+详细实施安排见[开发总计划](webui-management-development-plan.md)、[前端开发计划](webui-management-frontend-development-plan.md)和[后端开发计划](webui-management-backend-development-plan.md)。总计划维护跨端依赖、评审门槛和阶段性 Git 提交顺序，子计划维护任务、图稿/源码映射、验证与各自提交检查点；新增计划不表示本需求已获批或已经实现。
+
 ## 2. 总体要求
 
 - 配置按业务模块查看和编辑，使用面向具体配置项的表单，不提供直接编辑整个配置文件的页面。
