@@ -10,10 +10,9 @@ use serde::Serialize;
 use thiserror::Error;
 
 use super::ConfigStore;
-use super::observation::ManagedObservation;
+use super::observation::{ManagedObservation, sha256_digest};
 use crate::config::contract::ConfigV2;
 use crate::config::edit::{ConfigChange, EditError, SourceCandidate, build_candidate};
-use crate::config::migrate::deterministic_hash;
 
 const MAX_RECORDS: usize = 1024;
 const VALIDATION_TTL: Duration = Duration::from_secs(60);
@@ -152,7 +151,7 @@ impl ConfigStore {
         let paths = config
             .resolve_paths(&source_path)
             .map_err(EditError::from)?;
-        let fingerprint = deterministic_hash(source.as_bytes());
+        let fingerprint = sha256_digest(source.as_bytes());
         let store = Self::new(
             source_path,
             paths.work.join("config.yaml"),
@@ -256,7 +255,7 @@ impl ConfigStore {
         validate_token(operation_id)?;
         let _transaction = self.transaction.try_lock().map_err(|_| ActiveError::Busy)?;
         let digest = command_digest(actor, expected, changes, discard_external_changes)?;
-        let operation_digest = deterministic_hash(
+        let operation_digest = sha256_digest(
             &serde_json::to_vec(&(&digest, validation_token, confirmations))
                 .map_err(|_| EditError::UnsupportedSource)?,
         );
@@ -300,7 +299,7 @@ impl ConfigStore {
             operation_id.to_owned(),
             OperationRecord {
                 digest: operation_digest,
-                actor: deterministic_hash(actor.as_bytes()),
+                actor: sha256_digest(actor.as_bytes()),
                 phase: OperationPhase::Preparing,
                 expires: now + OPERATION_TTL,
             },
@@ -330,7 +329,7 @@ impl ConfigStore {
             .operations
             .get(operation_id)
             .filter(|record| {
-                record.actor == deterministic_hash(actor.as_bytes())
+                record.actor == sha256_digest(actor.as_bytes())
                     && (record.expires > Instant::now()
                         || state.snapshot.operation_id.as_deref() == Some(operation_id))
             })
@@ -478,7 +477,7 @@ fn command_digest(
     changes: &[ConfigChange],
     discard: bool,
 ) -> Result<String, ActiveError> {
-    Ok(deterministic_hash(
+    Ok(sha256_digest(
         &serde_json::to_vec(&(actor, expected, changes, discard))
             .map_err(|_| EditError::UnsupportedSource)?,
     ))

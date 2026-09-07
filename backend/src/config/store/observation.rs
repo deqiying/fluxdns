@@ -5,9 +5,14 @@ use std::io::{self, Read};
 use std::path::Path;
 
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::config::contract::MAX_CONFIG_BYTES;
-use crate::config::migrate::deterministic_hash;
+
+/// 受管文件版本和操作绑定使用抗碰撞摘要，不能复用旧迁移模块的非密码学 hash。
+pub(super) fn sha256_digest(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub(crate) enum FileObservation {
@@ -35,7 +40,7 @@ impl ManagedObservation {
     }
 
     pub(crate) fn revision(&self) -> String {
-        deterministic_hash(&serde_json::to_vec(self).expect("file observation is serializable"))
+        sha256_digest(&serde_json::to_vec(self).expect("file observation is serializable"))
     }
 
     pub(crate) fn matches_content(&self, fingerprint: &str) -> bool {
@@ -51,7 +56,7 @@ fn observe(path: &Path) -> FileObservation {
     match read_file(path) {
         Ok((identity, bytes)) => FileObservation::Readable {
             identity,
-            fingerprint: deterministic_hash(&bytes),
+            fingerprint: sha256_digest(&bytes),
         },
         Err(error) if error.kind() == io::ErrorKind::NotFound => FileObservation::Missing,
         Err(error) if error.kind() == io::ErrorKind::FileTooLarge => FileObservation::Oversized,

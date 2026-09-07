@@ -398,3 +398,11 @@ fn expiration_capacity_and_setup_share_the_operation_boundary() {
         Err(crate::config::store::ConfigStoreError::Busy)
     ));
 }
+
+#[test]
+fn binding_digest_is_sha256() {
+    assert_eq!(
+        super::sha256_digest(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+}
