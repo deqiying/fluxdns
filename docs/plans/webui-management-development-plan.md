@@ -41,7 +41,7 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01
 | 前端基础 | [package.json](../../frontend/package.json) 已有 React、TypeScript、Vite、Ant Design、TanStack Query、Router、Vitest/MSW | 复用工程和状态分层，不借重构更换整套技术栈 |
 | API | [router](../../backend/src/management/router.rs)、[query](../../backend/src/management/query.rs) 和 [OpenAPI](../../frontend/openapi/management-api-v1.yaml) 为认证与只读查询；统计查询限制 31 天 | 增加受限配置读写、身份过滤、跨日查询、实时指标和 WebSocket |
 | 配置写入 | [ConfigStore](../../backend/src/config/store.rs) 只有首用户定向写入、fingerprint/journal 与恢复 | 保存活动源表达，重建“先应用后持久化”事务及恢复门槛 |
-| 文件与日志 | [app](../../backend/src/app.rs) watcher 自动 reload；logs 关闭时不创建 telemetry writer；[observability](../../backend/src/observability.rs) 已有 reload handle | watcher 只提示；复用现有日志能力实现 off/on、level/path 热切换 |
+| 文件与日志 | [app](../../backend/src/app.rs) watcher 已只提示；日志 owner 已复用现有 filter/输出并保持 writer，支持 service 热切换 | 继续闭合 v2 事务/持久化与 HTTP/UI；Windows 子项证据见[日志热切换](../implementation/backend/background-services.md#p1-日志热切换2026-09-07) |
 | 客户端与详情 | [model](../../backend/src/config/model.rs)、[Policy](../../backend/src/policy/client.rs)、[observation](../../backend/src/ports/observation.rs) 使用名称、多 ID 匹配与 `client_bucket`；详情来源无原始 ID 字段 | 建立单 ID 主键及原始身份、当时匹配、当前显示信息三层语义 |
 | 缓存与历史 | [缓存装配](../../backend/src/dns/policy.rs) 使用 SQLite persistence；[详情批写](../../backend/src/storage/sqlite.rs) 含历史清理和 COUNT | 切换独立快照、详情日分片和统一保留协调器 |
 | 生命周期 | [RuntimeCoordinator](../../backend/src/runtime/coordinator.rs) 有候选/CAS/drain；[DnsService](../../backend/src/service.rs) 已差量复用、CAS 前预注册任务并按原请求 deadline drain | 沿既有 owner 补齐完整应用判定、进程 owner 补偿和控制命令，不再建另一套 Runtime |

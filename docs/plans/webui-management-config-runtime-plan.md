@@ -20,8 +20,8 @@
 | [ConfigStore](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs) | 首用户源文件定向编辑、锁、fingerprint、双文件 journal | 扩展活动源表达、通用候选/状态；不能直接套用原“先文件后认证”的事务 |
 | [service.rs](../../backend/src/service.rs) `reload_prepared` | 已差量复用、CAS 前预注册任务，已接纳旧请求按原 deadline drain | 继续完成控制命令和新进程 owner 的应用/补偿 |
 | [RuntimeCoordinator](../../backend/src/runtime/coordinator.rs) | 活动快照、revision、mutation gate、旧请求 drain | 复用此权威，不另建 WebUI Runtime；补足提交成功定义 |
-| [service.rs](../../backend/src/service.rs) `process_owned_reload_change` | database、logs、部分 webui、resolve_log 变化被拒绝 | 日志和详情开关改为可控热切换；启动级字段保留明确限制 |
-| [observability.rs](../../backend/src/observability.rs) | 已有 reloadable filter/layer 与共享输出；app 在 logs 开启时才创建 writer | 复用 handle，设计始终存在的进程 owner 及 off/on 生命周期，不重复安装 subscriber |
+| [service.rs](../../backend/src/service.rs) `process_owned_reload_change` | database、部分 webui、resolve_log 变化被拒绝；logs 经 service owner 热切换 | 继续完成 v2 事务/持久化联合接线；详情 owner 随对应阶段推进 |
+| [observability.rs](../../backend/src/observability.rs) | app 始终创建同一 writer；日志 owner 复用 filter/共享输出，支持 off/on、level/path | 已有[Windows 子项证据](../implementation/backend/background-services.md#p1-日志热切换2026-09-07)，v2 HTTP/UI 与联合事务仍未闭合 |
 
 2026-09-07 P0 已落实 revision、操作结果、配置读/变更和外部差异的内部 DTO/生成类型，详见 [Management 契约事实](../implementation/backend/management.md#p0-v2-契约)。追加授权的 P1 已落实 BC-02 活动源、定向候选、双文件只读观测和操作仲裁内部入口，详见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。BC-03 的有界服务队列消费者已接入原服务循环；BC-29 已实现活动源内部文件事务、PREPARED/COMMIT_DECIDED 恢复与已知文件状态重试，见[持久化事实](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。BC-30 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)已接入正式 app，资源自动刷新不变；v2 活动源/operation 服务生产者、启动恢复、差异/还原/自写归属和 HTTP 仍留 BC-03/29/30/31。不能因为已有 `reload_prepared` 或状态机成功回报就宣称新版全部 owner 已完成切换或补偿。
 

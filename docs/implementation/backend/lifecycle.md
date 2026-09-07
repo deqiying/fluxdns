@@ -15,12 +15,12 @@
 `run_command` 的顺序是：
 
 1. 仅 `run` 先执行 `recover_pending_transaction`；`validate` 关闭 snapshot 写入，不恢复写事务。
-2. `ConfigLoader::load_from_path` 加载配置；`run` 再解析检查 SecretRef 并配置正式日志输出。
+2. `ConfigLoader::load_from_path` 加载配置；`run` 再解析检查 SecretRef 并配置正式日志输出，始终创建 telemetry writer 和日志 owner，日志关闭不停止指标。
 3. 调用 `PreparedRuntime::prepare_with_policy_core_and_remote_resources`，准备资源、Policy core、upstream 和启用的缓存恢复。
 4. `StorageRuntime::open` 在共享 deadline 内建目录、打开统计/详情数据库、迁移并执行独立事务写入/回滚探针；失败映射为 prepare 错误，不创建服务 owner。
 5. `bind_prepared` 使用 `SystemSocketFactory` 绑定 DNS endpoint，构造 `RuntimeCoordinator`。
 6. WebUI 启用时 `ManagementService::bind` 注入 coordinator、数据库路径、详情开关、telemetry 与 resolution metrics。
-7. 构造 `DnsService`，通过 `attach_management` 注册管理服务；进入信号、Supervisor 和配置 watcher 等待。
+7. 构造 `DnsService`，通过 `attach_logging` 挂接同一进程日志 owner，通过 `attach_management` 注册管理服务；进入信号、Supervisor 和配置 watcher 等待。
 
 `validate` 不执行后面的资源网络 fetch、数据库打开或 listener bind，因此配置校验通过不证明端口、秘密实际值、资源、SQLite 或网络可用。
 
@@ -39,6 +39,8 @@
 Storage/Telemetry 和解析统计 sink 由进程持有，reload 为候选 core 复用这些 sink。`webui.users` 显式激活后交给 `ManagementRuntime::reconcile_users`，内部写入识别与凭据变化撤销会话见[管理端](management.md)。其他 restart-required 字段见[配置参考](../configuration.md)。
 
 TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于进程 owner，reload 不重置累计量。与之不同，重新 prepare 的 DoH connector 创建独立 bootstrap 地址缓存；旧请求只能填旧 resolver，候选失败不影响活动缓存。资源-only publish 未替换 connector 时继续使用其原缓存。
+
+P1 的 logs enable/level/path 已进入 service-aware 热应用边界，先预开输出，再协调 filter/Runtime 发布，保留旧输出和真实失败分类，见[日志热切换](background-services.md#p1-日志热切换2026-09-07)。仅 coordinator 的旧入口没有日志 owner，继续拒绝日志变化。该接线不代表 v2 配置事务或 HTTP 日志保存已完成。
 
 ### P1 仅提示文件观测（2026-09-07）
 

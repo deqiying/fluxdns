@@ -74,12 +74,12 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 
 ## Observability
 
-[`observability.rs`](../../../backend/src/observability.rs) 的 `TelemetryWriter`、`StructuredTelemetryOutput` 和 health registry 使用低基数、有界内存与安全 typed event；Application 在配置校验后切换正式日志目标和过滤器。`logs.enable` 影响运行 telemetry 的创建，不应从设计存在推断任意配置都启用全部观测。
+[`observability.rs`](../../../backend/src/observability.rs) 的 `TelemetryWriter`、`StructuredTelemetryOutput` 和 health registry 使用低基数、有界内存与安全 typed event；Application 在配置校验后切换正式日志目标和过滤器。P1 日志 owner 接线后，正式 app 始终创建 writer；`logs.enable` 只影响日志接纳及文件输出，不关闭指标和 health，见[日志热切换](#p1-日志热切换2026-09-07)。
 
 [`service.rs`](../../../backend/src/service.rs) 为启用的 writer 创建 `TelemetrySampler`，在既有 5 秒周期 flush 前采样：
 
 - 从同一个 `ResolutionPipelineMetrics` Arc 读取 accepted，将与共享游标的差值记录为 `ResolutionEventsAccepted`；仅成功后推进游标。重复采样、reload 与最终采样不会重复累计，源倒退/溢出明确报错。
-- 将采样时的事件队列长度覆盖为 `WriterQueueDepth`。无 Resolution owner 只生成这一项；`logs.enable=false` 不构造运行 writer、sampler 或额外任务。
+- 将采样时的事件队列长度覆盖为 `WriterQueueDepth`。无 Resolution owner 只生成这一项；正式 app 的 `logs.enable=false` 仍保留同一个 writer/sampler 和周期任务，但不创建日志文件。
 
 `TelemetryWriter` 持有 [registry.rs](../../../backend/src/observability/registry.rs) 的有界聚合器。周期采样保留上述两个 series，dispatcher 的 `record_resolution` 另更新固定 14 项：两个请求/core latency histogram、六种 outcome 和六种 cache status 计数。聚合共享 128 series 上限，不进入日志队列、不保存原始样本或按请求值生成标签。单事件更新先检查全部溢出，再整体发布；失败和关闭后 record 增加固定 `rejected_metrics`，不递归写故障事件。
 
@@ -87,7 +87,22 @@ coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/ca
 
 最终 shutdown 在 Resolution、Cache finalizer、Storage 回收后再次采样，随后关闭 writer 输入、排空事件并输出最终累计值；所有步骤使用既有总预算。主输出失败可走 stderr fallback，双输出失败在进程内更新 health，完整 flush 成功可恢复状态。同步底层 Write 无强制中断保证；resolution ingress gap、详情丢弃、cache commit outcome 和数据库 persistence gap 也仍分别计量。
 
-请求 instrumented core 和 Resolution publisher 不新增同步聚合调用；新指标只在后台 dispatcher 消费现有完成事件，`f732cd64` 的异步观测与缓存移交保持不变。`accepted` 仅代表 ingress 成功入队，histogram 则统计已消费并被指标接受的事件，都不是所有 DNS 请求或持久化成功数。详情关闭不停止请求指标；telemetry 关闭不停止 stats。TypedTracingLayer 仍不建立完整 request/group/attempt span 树，本轮也不新增独立 attempt 事件流。
+请求 instrumented core 和 Resolution publisher 不新增同步聚合调用；新指标只在后台 dispatcher 消费现有完成事件，`f732cd64` 的异步观测与缓存移交保持不变。`accepted` 仅代表 ingress 成功入队，histogram 则统计已消费并被指标接受的事件，都不是所有 DNS 请求或持久化成功数。详情或日志关闭不停止请求指标；测试可独立不注入 telemetry，这不等于正式 app 的 logs 开关。TypedTracingLayer 仍不建立完整 request/group/attempt span 树，本轮也不新增独立 attempt 事件流。
+
+### P1 日志热切换（2026-09-07）
+
+[`LoggingOwner`](../../../backend/src/observability/logging.rs) 复用既有 bootstrap filter handle、共享输出目标和 `TelemetryWriter`。app 即使从 `logs.enable=false` 启动也安装一次 typed tracing layer，将相同 writer 注入 Management、Storage/Resolution 和 service，再通过 `attach_logging` 校验 owner 与 writer/活动 logs 配置一致。不重复安装全局 subscriber，不因日志开关重置指标、health 或采样游标。
+
+`DnsService::reload_prepared` 在绑定/发布前预开日志输出。文件打开移到单槽 `spawn_blocking`；超时放弃等待，但 worker 直到真实退出才释放槽位，不积压阻塞任务。仅变更 level 且 enable/path 不变时复用当前文件句柄；关闭日志不访问目标路径。预开可能创建空文件，不代表运行配置已应用；取消或失败不按路径删除日志文件。
+
+发布前尝试取得 writer flush 和输出锁，Busy 时不等磁盘 flush、不执行 Runtime CAS。reload filter 失败不发布 Runtime；CAS 失败恢复旧 filter，输出目标仍是旧句柄，补偿失败使用独立 `LoggingCompensation` 返回，不能伪装为普通拒绝。CAS 成功后同步切换输出、直接 LogSink 的级别过滤及 owner 配置，再放行新服务任务；其中不再进行可失败的文件打开。关闭或收紧 level 会丢弃不再符合条件的排队日志，指标/health 保留；已接纳且仍符合新级别的排队日志允许写入新路径。
+
+只有 service-aware 应用路径可切换日志。保留的 coordinator-only `reload_runtime_from_path` 在 prepare 前拒绝日志变化，没有挂接日志 owner 的 service 也拒绝变化；不能只更新 Runtime 的 logs 字段而不更新输出。文件 watcher 仍只提示，不因此恢复自动 reload。
+
+Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独立子进程、真实日志文件/Windows 占用失败、off/on、level/path、filter 失败和补偿失败区别；`service::` 筛选 70 项通过、3 项保持原有忽略标记，`app::` 13 项、`management::` 18 项通过。`cargo check`、全部测试目标 `--all-targets --no-run`、fmt 和文档检查通过；未改 schema、前端或依赖，本批未重跑前端验证。真实 UDP/SQLite service 联合测试通过连续五次日志切换和坏路径拒绝，DNS 持续查询，writer、sampler 和 Resolution metrics Source Arc 保持相同。测试目录为 `_fluxdns/p1-logging-tests/`、`_fluxdns/p1-logging-dns-tests/`；既有临时文件测试运行时将 TEMP/TMP 限定到 `_fluxdns/test-temp/`。
+
+边界：正式 app 仍使用 v1 loader/runtime/storage，v2 配置事务生产者、应用后持久化联合路径和 HTTP/UI 日志保存未接线；上述证据不关闭完整 BC-31/CR-05 或 P1。filter/CAS 补偿失败的测试使用真实 reload handle 和故意撤销的测试 subscriber，不能视为生产 subscriber 曾失效。日志预开仅检查实际打开句柄为普通文件，尚未提供日志目标与其他受保护文件的完整物理 alias 防护，必须随 v2 写入安全边界闭合。未验证 OS 文件调用强制中断、Unix、日志轮转、磁盘满或性能；此次未改变 BC-23 的 QPS/RPM 口径，也未提供其新查询端点。
+
 ## 能力与证据
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |

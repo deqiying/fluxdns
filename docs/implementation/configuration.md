@@ -96,9 +96,9 @@ Windows Rust 1.98.0 本批 `config::` 104 项通过，其中 ConfigStore 43 项�
 | 资源与缓存 | async PreparedRuntime、PolicyDnsCore | run 加载后 prepare | 本轮核对生产接线 | 能解析不表示网络/文件/SQLite 已成功打开 |
 | WebUI | webui model + ManagementService | enable 时创建服务 | 本轮静态 | origin、DB 与 bind 必须可用；默认 binary 可仅提供 API，SPA 需要 embed feature，详见[管理端](backend/management.md) |
 | 首用户写回 | ConfigStore + source-preserving editor | setup，run 前恢复 journal | 本轮静态 | loader 为 8 MiB，writer 为 4 MiB；可加载不等于可写回 |
-| 热重载 | `process_owned_reload_change` | service-aware watcher | 本轮核对 guard | database、logs、webui enable/address/port/public_origin、dns.resolve_log 改变需重启；users 可动态更新 |
+| 热重载 | `process_owned_reload_change` + service owner | 显式 service-aware 应用；watcher 只提示 | P1 证据见[生命周期](backend/lifecycle.md)及[日志热切换](backend/background-services.md#p1-日志热切换2026-09-07) | database、webui enable/address/port/public_origin、dns.resolve_log 仍为启动级；logs 经 owner 热切换，users 可动态更新；v2 事务未闭合 |
 
-本轮未执行 Cargo 或配置 validate。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)，验证专项的已知边界见[验证范围与收口](backend/background-services.md#验证范围与收口)。既定契约与代码冲突时须保留复现证据并明确修复边界，不仅修改字段说明来掩盖实现缺口。
+本表原始静态核对未执行 Cargo 或配置 validate，后续 P1 定向验证以上述分批记录为准。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)，验证专项的已知边界见[验证范围与收口](backend/background-services.md#验证范围与收口)。既定契约与代码冲突时须保留复现证据并明确修复边界，不仅修改字段说明来掩盖实现缺口。
 
 ## 1. 配置模型概览
 
@@ -273,6 +273,8 @@ RawConfigVn
 | `logs.enable` | boolean | 必填 | 是否启用服务日志。 |
 | `logs.level` | string | 必填 | 日志级别；v1 接受 `trace`、`debug`、`info`、`warn`、`error`，大小写归一化，未知值拒绝。 |
 | `logs.path` | string | 必填 | 日志文件路径；相对路径以 `work.path` 为基准。 |
+
+正式 app 关闭日志时仍保持 telemetry 指标/health。enable/level/path 经已有 service 日志 owner 显式热切换；路径预开失败不切 Runtime 或旧输出。当前 v2 表单保存和文件持久化联合接线仍待完成，具体边界见[日志热切换](backend/background-services.md#p1-日志热切换2026-09-07)。
 
 ## 7. `webui`
 

@@ -20,7 +20,10 @@ use crate::ports::{PortError, PortErrorClass, PortFuture};
 use tracing::Subscriber;
 use tracing_subscriber::layer::{Context, Layer};
 
+mod logging;
 mod registry;
+pub use logging::LoggingError;
+pub(crate) use logging::{LoggingOwner, LoggingPublishError};
 pub use registry::{LatencyHistogram, MetricSnapshot, REQUEST_LATENCY_BUCKETS_MICROS};
 use registry::{ObservabilityRegistry, RegistryError};
 
@@ -94,13 +97,13 @@ pub fn configure_final_output(
     } else {
         OutputTarget::File(OpenOptions::new().create(true).append(true).open(path)?)
     };
-    *lock_unpoisoned(output) = target;
     let filter = BOOTSTRAP_FILTER.get().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::NotFound,
             "bootstrap filter is not initialized",
         )
     })?;
+    let mut output = lock_unpoisoned(output);
     filter
         .reload(if enable {
             level.as_filter()
@@ -108,6 +111,7 @@ pub fn configure_final_output(
             tracing_subscriber::filter::LevelFilter::OFF
         })
         .map_err(|_| io::Error::other("bootstrap filter reload failed"))?;
+    *output = target;
     Ok(())
 }
 
@@ -487,6 +491,7 @@ enum TelemetryItem {
 
 struct TelemetryWriterState {
     queue: VecDeque<TelemetryItem>,
+    log_filter: tracing_subscriber::filter::LevelFilter,
     in_flight: usize,
     emitted: u64,
     dropped_low_priority: u64,
@@ -591,6 +596,7 @@ impl TelemetryWriter {
             output,
             state: Mutex::new(TelemetryWriterState {
                 queue: VecDeque::with_capacity(capacity),
+                log_filter: tracing_subscriber::filter::LevelFilter::TRACE,
                 in_flight: 0,
                 emitted: 0,
                 dropped_low_priority: 0,
@@ -677,6 +683,9 @@ impl TelemetryWriter {
                 "observability.telemetry.enqueue",
             )
             .with_safe_context("writer closed"));
+        }
+        if !item.matches_log_filter(state.log_filter) {
+            return Ok(());
         }
 
         if state.queue.len() + state.in_flight < self.capacity {
@@ -847,6 +856,20 @@ impl TelemetryWriter {
 }
 
 impl TelemetryItem {
+    fn matches_log_filter(&self, filter: tracing_subscriber::filter::LevelFilter) -> bool {
+        let Self::Log(event) = self else {
+            return true;
+        };
+        let level = match event.level {
+            TelemetryLogLevel::Trace => tracing::Level::TRACE,
+            TelemetryLogLevel::Debug => tracing::Level::DEBUG,
+            TelemetryLogLevel::Info => tracing::Level::INFO,
+            TelemetryLogLevel::Warn => tracing::Level::WARN,
+            TelemetryLogLevel::Error => tracing::Level::ERROR,
+        };
+        filter >= level
+    }
+
     fn is_low_priority(&self) -> bool {
         matches!(
             self,

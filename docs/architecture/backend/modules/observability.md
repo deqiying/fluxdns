@@ -32,6 +32,8 @@ Observability 模块实现 Ports 定义的 telemetry/metrics 契约，提供：
 
 `logs.enable=false` 时关闭常规服务日志，但启动 fatal 和最终退出原因仍写 stderr。`logs.enable=true` 时写配置路径的追加文件，并保留 fatal stderr。
 
+日志输出和观测 owner 的生命周期分离：正式 app 始终创建同一 writer、typed layer 和指标采样任务，日志 enable/level 同时约束 tracing 与直接 LogSink。热切换先预开输出，再与 service 发布协调；失败保留旧句柄，filter 补偿失败必须单独报告。关闭不保留待再次开启时重放的日志，指标/health 不随开关清空。实现、实际 Windows 证据和 v2 未接线边界见[日志热切换](../../../implementation/backend/background-services.md#p1-日志热切换2026-09-07)。
+
 v1 日志级别固定接受 `trace`、`debug`、`info`、`warn`、`error`，大小写归一化；未知值由 Config 拒绝。
 
 ## 3. 日志格式
@@ -59,7 +61,7 @@ v1 日志级别固定接受 `trace`、`debug`、`info`、`warn`、`error`，大�
 | `ResolutionEventsAccepted` | Counter；`Component::Resolution` | `ResolutionPipelineMetrics.accepted`，是完成事件 ingress 接收数，不是所有 DNS 请求，也不等于持久化成功数 |
 | `WriterQueueDepth` | Gauge；`Component::Telemetry` | flush 前 writer 的排队事件数，不含聚合 series |
 
-Service 在既有 5 秒 flush 周期中采样，复用进程级 Source Arc 和共享游标；只在增量成功记录后推进游标，重复/最终采样不重复累计，源倒退明确报错。没有 Resolution owner 时只采样队列深度。`logs.enable=false` 不构造 writer/sampler，也不新增文件或任务。
+Service 在既有 5 秒 flush 周期中采样，复用进程级 Source Arc 和共享游标；只在增量成功记录后推进游标，重复/最终采样不重复累计，源倒退明确报错。没有 Resolution owner 时只采样队列深度。正式 app 在 `logs.enable=false` 时仍保留 writer/sampler 与周期任务，但不创建日志文件。
 
 后台 `ResolutionRuntime` dispatcher 在更新 stats 后，将同一完成事件交给 `TelemetryWriter::record_resolution`，增加固定 14 个 series：`RequestLatency`、`DnsCoreLatency` 两个 histogram，`RequestsTotal` 六种 outcome 与 `CacheOperations` 六种 cache status 计数。每项只使用固定 Component 和枚举标签，不为配置 ID、请求字段或逐 attempt 创建维度。请求包装层与 publisher 仍只有原有无等待移交；关闭详情不影响这些指标。
 

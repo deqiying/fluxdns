@@ -52,6 +52,8 @@ use crate::transport::{
 
 #[derive(Debug, Error)]
 pub enum ServiceStartError {
+    #[error("logging owner does not match the process telemetry or current configuration")]
+    LoggingOwnerMismatch,
     #[error("active runtime snapshot is missing its DNS core")]
     MissingDnsCore,
     #[error("could not obtain active listener handles: {class} ({operation})")]
@@ -71,6 +73,10 @@ pub enum ServiceStartError {
 
 #[derive(Debug, Error)]
 pub enum ServiceReloadError {
+    #[error("logging configuration could not be applied: {0}")]
+    Logging(#[source] crate::observability::LoggingError),
+    #[error("runtime activation failed and the previous logging filter could not be restored: {0}")]
+    LoggingCompensation(#[source] ServiceActivationConflict),
     #[error("runtime reload activation deadline exceeded")]
     Timeout,
     #[error("runtime reload bind failed: {0}")]
@@ -128,8 +134,6 @@ pub(crate) fn process_owned_reload_change(
 ) -> Option<&'static str> {
     if current.database != candidate.database {
         Some("database")
-    } else if current.logs != candidate.logs {
-        Some("logs")
     } else if current.webui.enable != candidate.webui.enable
         || current.webui.address != candidate.webui.address
         || current.webui.port != candidate.webui.port
@@ -206,6 +210,7 @@ pub struct DnsService {
     resolution_event_sink: Option<Arc<dyn ResolutionEventSink>>,
     telemetry: Option<Arc<TelemetryWriter>>,
     telemetry_sampler: Option<Arc<TelemetrySampler>>,
+    logging: Option<Arc<crate::observability::LoggingOwner>>,
     management: Option<Arc<ManagementRuntime>>,
     management_cancellation: Option<Cancellation>,
     #[allow(dead_code)] // v2 配置事务生产者接线前，仅测试取得命令句柄。
@@ -425,6 +430,7 @@ impl DnsService {
             resolution_event_sink,
             telemetry,
             telemetry_sampler,
+            logging: None,
             management: None,
             management_cancellation: None,
             control,
@@ -504,6 +510,23 @@ impl DnsService {
     #[allow(dead_code)] // 不把旧 watcher 包装为新版候选生产者。
     pub(crate) fn control(&self) -> ServiceControl {
         self.control.clone()
+    }
+
+    /// 日志 owner 必须与服务已有 writer 和活动配置一致，不在热更新时另建指标/任务。
+    pub(crate) fn attach_logging(
+        &mut self,
+        owner: Arc<crate::observability::LoggingOwner>,
+    ) -> Result<(), ServiceStartError> {
+        if self.logging.is_some()
+            || !self
+                .telemetry
+                .as_ref()
+                .is_some_and(|writer| owner.matches(&self.runtime.snapshot().config().logs, writer))
+        {
+            return Err(ServiceStartError::LoggingOwnerMismatch);
+        }
+        self.logging = Some(owner);
+        Ok(())
     }
 
     async fn apply_control_command(&mut self, command: control::ApplyCommand) {
@@ -667,6 +690,25 @@ impl DnsService {
             self.runtime.snapshot().config(),
             prepared.snapshot().config(),
         )?;
+        let logging = if self.runtime.snapshot().config().logs != prepared.snapshot().config().logs
+        {
+            Some(
+                self.logging
+                    .as_ref()
+                    .ok_or(ServiceReloadError::Logging(
+                        crate::observability::LoggingError::Unavailable,
+                    ))?
+                    .prepare(
+                        &self.runtime.snapshot().config().logs,
+                        prepared.snapshot().config().logs.clone(),
+                        deadline,
+                    )
+                    .await
+                    .map_err(ServiceReloadError::Logging)?,
+            )
+        } else {
+            None
+        };
         let candidate = crate::runtime::bind_prepared_reusing(
             prepared,
             self.runtime.listeners(),
@@ -720,9 +762,24 @@ impl DnsService {
                 cancellation.reason().unwrap_or(CancelReason::Shutdown),
             )));
         }
-        let runtime = activation
-            .commit()
-            .map_err(ServiceReloadError::Activation)?;
+        let runtime = match logging {
+            Some(logging) => logging
+                .publish_with(|| activation.commit())
+                .map_err(|error| match error {
+                    crate::observability::LoggingPublishError::Logging(error) => {
+                        ServiceReloadError::Logging(error)
+                    }
+                    crate::observability::LoggingPublishError::Application(error) => {
+                        ServiceReloadError::Activation(error)
+                    }
+                    crate::observability::LoggingPublishError::CompensationFailed(error) => {
+                        ServiceReloadError::LoggingCompensation(error)
+                    }
+                })?,
+            None => activation
+                .commit()
+                .map_err(ServiceReloadError::Activation)?,
+        };
         // commit 已通知旧 Runtime 退出入口；保留已接纳请求，不能使用停机 cancellation。
         self.coordinator.prune_drained_runtime_owners();
         for task in &self.resource_tasks {
@@ -2720,6 +2777,9 @@ impl From<DohAdapterError> for ServiceStartError {
         }
     }
 }
+
+#[cfg(test)]
+mod logging_tests;
 
 #[cfg(test)]
 mod tests {

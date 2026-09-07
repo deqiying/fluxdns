@@ -83,7 +83,7 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 4. 先应用后正式文件替换的内部状态机、PREPARED/COMMIT_DECIDED journal 与已知状态下文件重试已实现；继续完成服务成功回报、启动恢复及正式状态/重试端点。不能以模拟 Runtime 回报关闭联合验收。
 5. 将 app watcher 改为只检测和上报；复用去抖轮询但有界读取，区分自写/外改/不可读/缺失；不改变 Hosts/规则集资源刷新。
 6. 已有[受管文件还原内部能力](../implementation/configuration.md#p1-受管文件还原内部能力2026-09-07)和[外改确认重试](../implementation/configuration.md#p1-外改确认重试内部能力2026-09-07)，绑定 active/file 双版本、调用者及 operation，覆盖缺失叶节点的权限保持重建及新旧 journal 决策交接；继续实现脱敏差异、模块化组合采用、普通保存覆盖确认与状态/还原/重试端点，不接收任意文件路径或整份 YAML，不据此关闭 BC-30。
-7. 复用 observability reload handle、共享输出和进程 owner，实现 logs off/on、level/path 热切换；先预开输出，失败不破坏旧 writer，指标不因关闭日志失效。
+7. [日志 owner](../implementation/backend/background-services.md#p1-日志热切换2026-09-07)已接入 app/service，复用 reload handle、共享输出和 writer，具备 off/on、level/path、单槽后台预开和 filter/发布失败分类；真实 UDP/SQLite 联合测试验证持续 DNS 与进程指标复用。继续完成 v2 配置事务生产者、应用后持久化和 HTTP/UI 日志保存的联合接线，不以当前 v1 service 证据关闭 BC-31。
 8. 首用户初始化继续满足“持久化用户成功后发布认证”的安全要求，但写入仲裁和活动源必须与普通配置协调；本期不新增用户管理 API。普通配置/用户排序不回收 session 的显式应用边界已有 [P1 回归](../implementation/backend/management.md)，文件仅提示与 v2 setup 接线仍保留。
 
 ### 验收

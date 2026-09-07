@@ -282,6 +282,7 @@ pub async fn reload_runtime_from_path(
         path,
         deadline,
         cancellation.clone(),
+        false,
     )
     .await?;
 
@@ -307,6 +308,7 @@ pub async fn reload_service_from_path(
         path,
         deadline,
         cancellation.clone(),
+        true,
     )
     .await?;
     service
@@ -321,6 +323,7 @@ async fn prepare_reload_candidate(
     path: impl AsRef<std::path::Path>,
     deadline: Deadline,
     cancellation: Cancellation,
+    allow_logging_change: bool,
 ) -> Result<PreparedRuntime, ApplicationReloadError> {
     let output = ConfigLoader::new(LoadOptions::default().without_snapshot())
         .load_from_path(path)
@@ -331,6 +334,12 @@ async fn prepare_reload_candidate(
         .map_err(ApplicationReloadError::SecretValidation)?;
     if let Some(component) = process_owned_reload_change(current, &output.resolved) {
         return Err(ApplicationReloadError::RestartRequired { component });
+    }
+    // 仅 coordinator 的旧入口没有日志 owner，不能发布“字段已变、输出未变”的假成功。
+    if !allow_logging_change && current.logs != output.resolved.logs {
+        return Err(ApplicationReloadError::Service(
+            ServiceReloadError::Logging(observability::LoggingError::Unavailable),
+        ));
     }
     let revision = RuntimeRevision(
         expected
@@ -408,17 +417,16 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                     output.resolved.dns.resolve_log.enable,
                 )
             });
-            let telemetry = if output.resolved.logs.enable {
-                let writer = observability::build_runtime_telemetry().map_err(|error| {
-                    AppError::new(AppErrorKind::Prepare, bounded_message(error))
-                })?;
-                observability::install_final_tracing(Arc::clone(&writer)).map_err(|error| {
-                    AppError::new(AppErrorKind::Prepare, bounded_message(error))
-                })?;
-                Some(writer)
-            } else {
-                None
-            };
+            // 日志关闭只关闭输出，指标、health 和进程 writer 的生命周期不随之退出。
+            let telemetry = observability::build_runtime_telemetry()
+                .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+            observability::install_final_tracing(Arc::clone(&telemetry))
+                .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+            let logging = observability::LoggingOwner::from_bootstrap(
+                output.resolved.logs.clone(),
+                Arc::clone(&telemetry),
+            )
+            .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
             let prepared =
                 crate::runtime::PreparedRuntime::prepare_with_policy_core_and_remote_resources(
                     output.resolved,
@@ -475,7 +483,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                             Arc::clone(&coordinator),
                             database_path,
                             resolve_log_enabled,
-                            telemetry.clone(),
+                            Some(Arc::clone(&telemetry)),
                             resolution_metrics,
                         ),
                     )
@@ -490,20 +498,16 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 }
                 None => None,
             };
-            let mut service = match telemetry {
-                Some(telemetry) => {
-                    DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
-                        coordinator,
-                        storage,
-                        telemetry,
-                    )
-                }
-                None => DnsService::with_default_timeout_from_coordinator_and_storage(
+            let mut service =
+                DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
                     coordinator,
                     storage,
-                ),
-            }
-            .map_err(map_service_start_error)?;
+                    telemetry,
+                )
+                .map_err(map_service_start_error)?;
+            service
+                .attach_logging(logging)
+                .map_err(map_service_start_error)?;
             if let Some(management) = management {
                 service
                     .attach_management(management)
@@ -977,6 +981,27 @@ clients: []
         assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
         assert!(!current.is_draining());
         assert!(!root.join("other.sqlite").exists());
+        std::fs::write(
+            &path,
+            reload_source(&root, 5300).replace("level: info", "level: debug"),
+        )
+        .unwrap();
+        let error = reload_runtime_from_path(
+            &coordinator,
+            &path,
+            &TestSocketFactory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ApplicationReloadError::Service(crate::service::ServiceReloadError::Logging(
+                crate::observability::LoggingError::Unavailable
+            ))
+        ));
+        assert!(std::sync::Arc::ptr_eq(&current, &coordinator.load()) && !current.is_draining());
         let _ = std::fs::remove_dir_all(root);
     }
 
