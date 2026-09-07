@@ -44,10 +44,23 @@
 - [`config/edit.rs`](../../backend/src/config/edit.rs) 承接原 Management 的严格变更类型，Management 重用同一类型，无新增 HTTP 契约。旧 name 相对同一活动快照定位，单候选不重复编辑同一目标；交换名称按一次映射处理，不递归串联改名。上游/组共享空间，客户端更新保留原 `client_id`。
 - 候选依次执行变更预算、活动源定向修改、已知 variant 引用更新、完整 `ConfigV2::parse/validate`、两级路径检查、CST 定位编辑及整树等价复核。覆盖 listener/DoH route、bootstrap、组成员/fallback、策略、Hosts、rule-set selector、proxy 和客户端策略；不对正文、路径、SecretRef 做字符串替换。资源首载、物理 owner 路径、socket 和进程 prepare 仍属于后续运行接线，不能把这一步视为可应用运行态。
 - [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。新增片段经 serializer 转义；支持块/flow、CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验；锚点/别名/merge 等无法安全维护的表达明确拒绝，没有整份重序列化回退。
-- [`observation`](../../backend/src/config/store/observation.rs) 有界读取源与派生文件，各自区分可读/缺失/不可读/超限，组合 token 包含内容指纹和物理文件身份；同内容替换仍产生不同 token。拒绝 hard link、symlink/reparse 路径；读取前后核对身份和元数据。Windows 使用真实 FileId，Unix 代码未在本次执行。此观测不提供 filesystem CAS，正式替换前仍须重新核对，journal 目标归属和旁文件保护留 BC-29。
-- 60 秒验证票据绑定调用者、候选、双 revision 与影响确认，只缓存 SHA-256 摘要；受管内容/观测 token 同样使用 SHA-256，不复用旧迁移 hash。随机验证票据仍为 256 bit，复用已有 `sha2 0.10.9`，没有依赖变更。操作记录上限 1024、窗口 30 分钟，进行中记录不淘汰。同 ID 不同命令拒绝，相同命令返回已有阶段；不同调用者的查询不披露结果。未同步、补偿失败或 permit 中断保持 gate，未知不被视为未执行。普通变更仍未调用 Runtime，也未持久化；状态机中的成功回报测试只是模拟控制 owner。
+- [`observation`](../../backend/src/config/store/observation.rs) 有界读取源与派生文件，各自区分可读/缺失/不可读/超限，组合 token 包含内容指纹和物理文件身份；同内容替换仍产生不同 token。拒绝 hard link、symlink/reparse 路径；读取前后核对身份和元数据。Windows 使用真实 FileId，Unix 代码未在本次执行。此观测不提供 filesystem CAS，正式替换前仍须重新核对；BC-29 的写入身份与旁文件保护见下节。
+- 60 秒验证票据绑定调用者、候选、双 revision 与影响确认，只缓存 SHA-256 摘要；受管内容/观测 token 同样使用 SHA-256，不复用旧迁移 hash。随机验证票据仍为 256 bit，复用已有 `sha2 0.10.9`，没有依赖变更。操作记录上限 1024、窗口 30 分钟，进行中记录不淘汰。同 ID 不同命令拒绝，相同命令返回已有阶段；不同调用者的查询不披露结果。未同步、补偿失败或 permit 中断保持 gate，未知不被视为未执行。普通变更仍未调用 Runtime；状态机中的成功回报测试只是模拟控制 owner，实际文件事务的内部消费见下节。
 
-本批 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 71 项（含摘要加固后的 SHA-256 固定向量）、`management::` 18 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过。Node/Vite 子进程在沙盒内被 `spawn EPERM` 阻止后，经批准在沙盒外重跑通过。新测试覆盖候选/引用/源表达和真实双文件观测；文件只在 `_fluxdns/p1-config-tests/` 的随机用例目录创建并清理。未执行真实 v2 启动、HTTP、DNS 热更新、journal crash point、文件还原/同步重试、日志切换或浏览器验收，未关闭相应检查点。当前 schema 和生成类型没有 wire 变化。
+BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 71 项（含摘要加固后的 SHA-256 固定向量）、`management::` 18 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过。Node/Vite 子进程在沙盒内被 `spawn EPERM` 阻止后，经批准在沙盒外重跑通过。新测试覆盖候选/引用/源表达和真实双文件观测；文件只在 `_fluxdns/p1-config-tests/` 的随机用例目录创建并清理。该批未执行真实 v2 启动、HTTP、DNS 热更新、journal crash point、文件还原/同步重试、日志切换或浏览器验收；后续批次证据单列。当前 schema 和生成类型没有 wire 变化。
+
+### P1 应用后持久化内部底座（2026-09-07）
+
+[`store/persistence.rs`](../../backend/src/config/store/persistence.rs) 与 [`files.rs`](../../backend/src/config/store/persistence/files.rs) 为 v2 普通配置建立独立于旧 setup journal 的分阶段事务。它们已由活动源状态机消费，不建立空存储 layout，不使用 ResolvedConfig 反写：
+
+- `begin_runtime_apply` 在完整候选和版本核对后准备受限同目录 stage、写入 PREPARED journal，再复核两个文件；没有正式文件替换。应用成功回报只推进 active/runtime，`persist_applied` 才写 COMMIT_DECIDED 决策并分别替换源和派生文件。成功更新 persisted revision、最终观测及操作状态；失败保持新活动源和未同步 gate，重试只执行文件操作。
+- 源与派生目标分别持有 `File::try_lock` 的 OS 锁，冲突有界失败；空锁旁文件保留，进程退出释放锁，不按时间删除“过期锁”。每次替换核对固定角色、父目录身份、旧/新文件身份、SHA-256 和权限摘要；journal 不携带可任意指定的目标路径。源即派生文件时只处理一个目标。
+- 恢复入口只用于新版启动前：PREPARED 清理已知候选、不 roll-forward；COMMIT_DECIDED 在两个目标均为已知旧/新身份与内容时，重新严格校验候选及派生路径，再补齐同一候选。损坏、超限、未知内容/身份、链接或范围不符都拒绝；不在运行进程中调用恢复自动 reload。journal 读取上限 16 KiB，配置/stage 上限 4 MiB。
+- Windows 创建 stage/journal 时即复制 owner/group/DACL 并保护 DACL，拒绝空 DACL；不是先默认继承再写秘密。替换沿用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`，文件先 `sync_all`；实际 DACL 条目、FileId、hard link、junction、ADS 与尾点别名有测试。Unix 使用限制模式、owner 核对和目录 fsync，但未在本批执行；Windows 不声称做了 Unix 目录 fsync 或硬件断电验收。
+
+Windows Rust 1.98.0 本批 `config::` 89 项通过，其中 ConfigStore 28 项。新增子进程以退出码 73 在 PREPARED、COMMIT_DECIDED、源替换后、派生替换后直接退出，验证真实文件与 OS 锁恢复；另有真实 Windows journal/派生文件占用失败、同步重试、同内容换身份、损坏/超限 journal、单文件去重、权限和别名测试。测试数据限定 `_fluxdns/p1-journal-tests/` 与 `_fluxdns/p1-config-tests/`，不读取个人配置。
+
+剩余边界：Runtime 成功回报仍由测试模拟，v2 配置事务 owner/服务生产者、启动 recovery、HTTP 状态/重试端点未接线。外部新修改后的重新确认/重建事务、缺失文件还原、完整差异工作区归 BC-30；当前重试只接受 journal 已知状态，不能强行覆盖未知外改。文件 I/O 为同步内部调用，HTTP 断开后的 owner 生命周期和应用预算仍需接线验证。崩溃在 journal 建立之前或决策旁文件替换之前可能留下未登记的受限旁文件；不扫描删除未知残留，需明确人工处理。非合作编辑器的核对/替换竞态不能被普通 filesystem replace 完全消除。因此 BC-29 和 P1 生产退出条件仍未关闭。
 
 ### 当前生产加载器
 

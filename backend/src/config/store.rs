@@ -16,6 +16,7 @@ use super::source_edit::{InitialWebUiUser, create_initial_webui_user};
 
 pub(crate) mod active;
 pub(crate) mod observation;
+pub(crate) mod persistence;
 
 const MAX_CONFIG_BYTES: usize = 4 * 1024 * 1024;
 const STALE_LOCK_AGE: Duration = Duration::from_secs(300);

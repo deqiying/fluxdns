@@ -73,14 +73,14 @@ BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 f
 
 ## 4. BE-02：配置事务、revision 与运行时应用
 
-BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件有界观测、版本分离、调用者/候选/双版本绑定票据、有界幂等操作和中断阻塞；定向源编辑已覆盖类型化引用、组合候选完整语义/路径校验及编辑后等价核对。实现与测试权威见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。尚未提供正式 v2 loader/resolve、候选到资源/socket prepare 的转换、持久化/journal、状态端点或新版 setup；应用回报测试仅为状态机模拟。BC-03 已有[有界服务队列消费者](../implementation/backend/lifecycle.md#p1-服务控制队列子项2026-09-07)，但未连接 v2 活动源/operation 生产者。因此 BC-02 生产接线子项保留，不能据此关闭 P1 或 BC-03/29/30。
+BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件有界观测、版本分离、调用者/候选/双版本绑定票据、有界幂等操作和中断阻塞；定向源编辑已覆盖类型化引用、组合候选完整语义/路径校验及编辑后等价核对。实现与测试权威见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。尚未提供正式 v2 loader/resolve、候选到资源/socket prepare 的转换、状态端点或新版 setup；应用回报测试仅为状态机模拟。BC-03 已有[有界服务队列消费者](../implementation/backend/lifecycle.md#p1-服务控制队列子项2026-09-07)，但未连接 v2 活动源/operation 生产者。BC-29 的[分阶段文件事务](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)已接入活动源内部状态机并完成 Windows 子进程 crash point/文件失败重试测试；正式启动恢复和 HTTP、外改重新确认仍未闭合。因此 BC-02/03/29 生产接线子项保留，不能据此关闭 P1 或 BC-30。
 
 完整状态机、热更新矩阵和失败语义只维护于[配置热更新专项](webui-management-config-runtime-plan.md)，本节列后端开发步骤：
 
 1. 在 ConfigStore 保留活动源表达及 active/persisted/file revision；GET 和普通编辑以该源为基准，保留路径/继承/SecretRef，不序列化 resolved 值写回。
 2. 向持有 DnsService 的控制循环提交有界 typed 命令；复用 RuntimeCoordinator 的候选和 mutation gate，prepare 与最终提交分开，提交时复核版本。
-3. 扩展 `reload_prepared`：差量复用、任务预注册和已接纳请求按原 deadline drain 已接入，见[生命周期实现](../implementation/backend/lifecycle.md#p1-请求-drain-子项2026-09-07)。继续完善服务控制命令、新进程 owner 可失败准备/真实补偿。不能将这些内部子项测试等同于完整不停机应用验收。
-4. 实现先应用后正式文件替换，journal 区分 PREPARED 与 COMMIT_DECIDED；应用成功而落盘失败保留新运行态并回报未同步，重试不重新应用。
+3. 扩展 `reload_prepared`：差量复用、任务预注册和已接纳请求按原 deadline drain 已接入，见[生命周期实现](../implementation/backend/lifecycle.md#p1-请求-drain-子项2026-09-07)。继续连接活动源/operation 生产者、新进程 owner 可失败准备/真实补偿。不能将这些内部子项测试等同于完整不停机应用验收。
+4. 先应用后正式文件替换的内部状态机、PREPARED/COMMIT_DECIDED journal 与已知状态下文件重试已实现；继续完成服务成功回报、启动恢复及正式状态/重试端点。不能以模拟 Runtime 回报关闭联合验收。
 5. 将 app watcher 改为只检测和上报；复用去抖轮询但有界读取，区分自写/外改/不可读/缺失；不改变 Hosts/规则集资源刷新。
 6. 实现脱敏差异、还原受管文件、模块化组合采用、普通保存覆盖确认；active/file 双版本校验，不接收任意文件路径或整份 YAML。
 7. 复用 observability reload handle、共享输出和进程 owner，实现 logs off/on、level/path 热切换；先预开输出，失败不破坏旧 writer，指标不因关闭日志失效。

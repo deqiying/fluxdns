@@ -52,7 +52,7 @@ impl ManagedObservation {
     }
 }
 
-fn observe(path: &Path) -> FileObservation {
+pub(super) fn observe(path: &Path) -> FileObservation {
     match read_file(path) {
         Ok((identity, bytes)) => FileObservation::Readable {
             identity,
@@ -67,6 +67,13 @@ fn observe(path: &Path) -> FileObservation {
 /// 源与父目录都不能经过 symlink/reparse point；读取前后检查路径、文件身份和元数据。
 /// 非合作外部编辑器仍可能在检查后修改文件，写入方必须重新观测，不能复用旧 token 代替检查。
 pub(super) fn read_file(path: &Path) -> io::Result<(String, Vec<u8>)> {
+    read_file_limited(path, MAX_CONFIG_BYTES)
+}
+
+pub(super) fn read_file_limited(path: &Path, limit: usize) -> io::Result<(String, Vec<u8>)> {
+    if limit > MAX_CONFIG_BYTES {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
     check_path(path)?;
     let mut file = File::open(path)?;
     let metadata = file.metadata()?;
@@ -78,9 +85,9 @@ pub(super) fn read_file(path: &Path) -> io::Result<(String, Vec<u8>)> {
     let identity = file_identity(&file)?;
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
-        .take(MAX_CONFIG_BYTES as u64 + 1)
+        .take(limit as u64 + 1)
         .read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_CONFIG_BYTES {
+    if bytes.len() > limit {
         return Err(io::Error::from(io::ErrorKind::FileTooLarge));
     }
     check_path(path)?;
@@ -97,9 +104,20 @@ pub(super) fn read_file(path: &Path) -> io::Result<(String, Vec<u8>)> {
     Ok((identity, bytes))
 }
 
-fn check_path(path: &Path) -> io::Result<()> {
+pub(super) fn check_path(path: &Path) -> io::Result<()> {
     if !path.is_absolute() {
         return Err(io::Error::other("absolute managed path required"));
+    }
+    #[cfg(windows)]
+    for part in path.components() {
+        if let std::path::Component::Normal(name) = part {
+            let name = name.to_string_lossy();
+            if name.contains(':') || name.ends_with(['.', ' ']) {
+                return Err(io::Error::other(
+                    "managed path alias or alternate stream rejected",
+                ));
+            }
+        }
     }
     for part in path.ancestors() {
         let metadata = fs::symlink_metadata(part)?;
@@ -122,7 +140,29 @@ fn is_reparse(_: &fs::Metadata) -> bool {
 }
 
 #[cfg(windows)]
-fn file_identity(file: &File) -> io::Result<String> {
+pub(super) fn file_identity(file: &File) -> io::Result<String> {
+    identity(file, false)
+}
+
+/// 目录身份也参与 journal 绑定，不能仅凭词法路径和文件内容接受替换后的父目录。
+pub(super) fn directory_identity(path: &Path) -> io::Result<String> {
+    check_path(path)?;
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_dir() {
+        return Err(io::Error::other("managed parent is not a directory"));
+    }
+    identity(&file, true)
+}
+
+#[cfg(windows)]
+fn identity(file: &File, directory: bool) -> io::Result<String> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO, FileIdInfo, GetFileInformationByHandle,
@@ -143,7 +183,7 @@ fn file_identity(file: &File) -> io::Result<String> {
             return Err(io::Error::last_os_error());
         }
         let info = info.assume_init();
-        if info.nNumberOfLinks != 1 {
+        if !directory && info.nNumberOfLinks != 1 {
             return Err(io::Error::other("hard-linked managed file rejected"));
         }
         let id = id.assume_init();
@@ -155,10 +195,15 @@ fn file_identity(file: &File) -> io::Result<String> {
 }
 
 #[cfg(unix)]
-fn file_identity(file: &File) -> io::Result<String> {
+pub(super) fn file_identity(file: &File) -> io::Result<String> {
+    identity(file, false)
+}
+
+#[cfg(unix)]
+fn identity(file: &File, directory: bool) -> io::Result<String> {
     use std::os::unix::fs::MetadataExt;
     let metadata = file.metadata()?;
-    if metadata.nlink() != 1 {
+    if !directory && metadata.nlink() != 1 {
         return Err(io::Error::other("hard-linked managed file rejected"));
     }
     Ok(format!("{}:{}", metadata.dev(), metadata.ino()))

@@ -212,4 +212,12 @@ ConfigStore 同时仲裁首用户事务和新版活动配置，不建立第二�
 
 活动、运行和持久化 revision 各自独立；验证票据绑定调用者、候选、双 revision 和影响。同 operation ID 不同命令拒绝；未同步、补偿失败及中断结果未知时阻止叠加写入。源文档编辑不能将未变字段的缺失继承、SecretRef 或路径改为 resolved 值，不支持的语法明确拒绝。
 
-这些是接受的内部边界，不证明正式 loader、Runtime、journal 或 v2 API 已接线。当前实现和证据统一见[配置参考](../../../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)；后续应用/同步必须以真实 owner 成功为准。
+这些是接受的内部边界，不证明正式 loader、Runtime 或 v2 API 已接线。当前实现和证据统一见[配置参考](../../../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)；后续应用/同步必须以真实 owner 成功为准。
+
+## 14. v2 文件事务与恢复
+
+普通配置不沿用首用户的“文件成功后发布认证”顺序。ConfigStore 在运行应用前建立 PREPARED 候选，只有应用成功回报后才能持久化 COMMIT_DECIDED 并逐个替换受管目标。失败不回滚 DNS，也不释放未同步 gate；重试持久化原活动源，不重复新增、改名或 Runtime 激活。
+
+每个受管目标使用固定角色和 OS 锁；journal 记录父目录/文件身份、内容和权限摘要，不提供任意路径操作。源和派生副本先整体核对，再逐文件核对、替换和复读，不能宣称双文件原子或跨进程 CAS。Windows 受限创建和同目录替换、Unix 目录同步分别实现，平台证据分开。
+
+恢复只在新进程 loader/owner 启动之前执行。PREPARED 不代表旧进程曾完成应用，必须丢弃；COMMIT_DECIDED 仅补齐已知候选，随后仍需正常启动新 Runtime。未知内容/身份、损坏 journal、链接和候选校验失败时保持文件，不做历史自愈。具体实现、Windows crash point 和未接线范围见[持久化事实](../../../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。

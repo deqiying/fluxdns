@@ -22,6 +22,8 @@
 
 P0 依赖核定（2026-09-07）：`@redocly/ajv 8.11.2`、`js-yaml 4.3.1` 原已在锁文件作为间接依赖，本次按 D-08 显式加入 devDependencies，复用现有版本进行 JSON Schema/YAML 校验，不依赖隐式 hoist，不引入生产包。后端仅为既有 `ipnet 2.12.1`、`url 2.5.8` 开启 serde feature，避免复制 IP/URL 序列化逻辑，无 crate 版本升级。许可证及版本已按本地 package manifest 核对；前端两项为 MIT，后端两项为 MIT OR Apache-2.0。新增前端测试依赖不进入生产 bundle；Rust serde feature 可能增加编译产物，未测量其单独字节增量。未升级或安装工具链。
 
+P1 文件事务依赖核定（2026-09-07）：既有 `windows-sys 0.61.2`（MIT OR Apache-2.0）仅增加 `Win32_Security` feature，用于创建文件时保留 owner/group/DACL 和禁止默认继承扩大访问；没有新增 crate 或升级锁定版本。OS 锁复用 Rust 标准库 `File::try_lock`，不添加锁库；未测量安全 API feature 的独立产物字节增量。Windows junction 回归调用项目既有 PowerShell 7，不安装测试工具。
+
 [`vite.config.ts`](../../frontend/vite.config.ts) 在开发时把 `/api` 代理到 `http://127.0.0.1:8080`；浏览器仍请求同源相对路径。`VITE_USE_MOCK_API=true` 只在 DEV bootstrap 启用 MSW，生产构建不携带 mock worker 或 source map。完整生成与验证命令见[前端 README](../../frontend/README.md)。
 
 ## 本地内嵌打包

@@ -38,6 +38,125 @@ impl Fixture {
             path: "./logs/other.log".into(),
         })]
     }
+
+    fn permit(&self, id: &str) -> ApplyPermit<'_> {
+        let expected = self.store.observe_files().unwrap().expected();
+        let changes = self.edit();
+        let validation = self
+            .store
+            .validate_edit("session-a", &expected, &changes, false)
+            .unwrap();
+        let BeginApply::Accepted(permit) = self
+            .store
+            .begin_apply(
+                "session-a",
+                id,
+                &expected,
+                &changes,
+                false,
+                &validation.token,
+                &validation.impacts,
+            )
+            .unwrap()
+        else {
+            panic!("new operation expected");
+        };
+        permit
+    }
+}
+
+#[test]
+fn applied_operation_persists_original_source_and_repeated_sync_is_idempotent() {
+    let fixture = Fixture::new();
+    let old = fixture.store.active_snapshot().unwrap();
+    let mut permit = fixture.permit("persist");
+    permit.begin_runtime_apply().unwrap();
+    let candidate = permit.candidate.source.clone();
+    assert_eq!(fs::read_to_string(&fixture.source).unwrap(), FIXTURE);
+    // 这里只模拟 Runtime owner 的成功回报；真实 v2 服务生产者仍未接线。
+    permit.applied(2).unwrap();
+    let before = fixture.store.active_snapshot().unwrap();
+    assert_ne!(before.revision, old.revision);
+    assert_eq!(before.persisted_revision, old.persisted_revision);
+    let synced = fixture
+        .store
+        .persist_applied("session-a", "persist")
+        .unwrap();
+    assert_eq!(synced.runtime_revision, 2);
+    assert_eq!(synced.persisted_revision.as_ref(), Some(&synced.revision));
+    assert_eq!(synced.operation_id, None);
+    assert_eq!(fs::read_to_string(&fixture.source).unwrap(), candidate);
+    assert_eq!(fs::read_to_string(&fixture.derived).unwrap(), candidate);
+    assert_eq!(
+        fixture.store.operation("session-a", "persist").unwrap(),
+        OperationPhase::AppliedSynced
+    );
+    assert_eq!(
+        fixture
+            .store
+            .persist_applied("session-a", "persist")
+            .unwrap()
+            .expected(),
+        synced.expected()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn applied_write_failure_preserves_new_active_state_and_retry_never_reapplies() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+    let fixture = Fixture::new();
+    let mut permit = fixture.permit("retry");
+    permit.begin_runtime_apply().unwrap();
+    permit.applied(2).unwrap();
+    let active = fixture.store.active_snapshot().unwrap();
+    let occupied = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&fixture.derived)
+        .unwrap();
+    assert!(fixture.store.persist_applied("session-a", "retry").is_err());
+    let failed = fixture.store.active_snapshot().unwrap();
+    assert_eq!(failed.revision, active.revision);
+    assert_eq!(failed.runtime_revision, 2);
+    assert_eq!(failed.persisted_revision, active.persisted_revision);
+    assert_eq!(
+        fixture.store.operation("session-a", "retry").unwrap(),
+        OperationPhase::AppliedUnpersisted
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .validate_edit("session-a", &failed.expected(), &fixture.edit(), true),
+        Err(ActiveError::Busy)
+    ));
+    assert!(fixture.store.persist_applied("session-b", "retry").is_err());
+    drop(occupied);
+    let retried = fixture.store.persist_applied("session-a", "retry").unwrap();
+    assert_eq!(retried.revision, active.revision);
+    assert_eq!(retried.runtime_revision, 2);
+    assert_eq!(retried.persisted_revision.as_ref(), Some(&active.revision));
+}
+
+#[test]
+fn rejected_prepared_operation_discards_only_its_candidate_and_releases_the_gate() {
+    let fixture = Fixture::new();
+    let old = fixture.store.active_snapshot().unwrap();
+    let mut permit = fixture.permit("reject");
+    permit.begin_runtime_apply().unwrap();
+    permit.rejected(true).unwrap();
+    assert_eq!(
+        fixture.store.operation("session-a", "reject").unwrap(),
+        OperationPhase::Rejected
+    );
+    assert_eq!(
+        fixture.store.active_snapshot().unwrap().expected(),
+        old.expected()
+    );
+    assert_eq!(fs::read_to_string(&fixture.source).unwrap(), FIXTURE);
+    assert_eq!(fs::read_to_string(&fixture.derived).unwrap(), FIXTURE);
+    fixture.permit("next").rejected(true).unwrap();
 }
 
 impl Drop for Fixture {
@@ -45,6 +164,7 @@ impl Drop for Fixture {
         // 仅清理本用例随机创建、已验证归属的目录，不触碰个人运行目录。
         let base = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../_fluxdns/p1-config-tests");
         assert_eq!(self.root.parent(), Some(base.as_path()));
+        self.store.active.lock().unwrap().take();
         fs::remove_dir_all(&self.root).unwrap();
     }
 }

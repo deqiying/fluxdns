@@ -1,4 +1,4 @@
-//! ConfigStore 内的 v2 活动源、验证票据和有界操作记录；尚不调用 Runtime 或持久化。
+//! ConfigStore 内的 v2 活动源、验证票据、有界操作记录与文件事务；Runtime 由服务 owner 回报。
 #![allow(dead_code)] // BC-02 内部入口；BC-03/29 服务控制与 BC-26 启动接线后移除。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +11,7 @@ use thiserror::Error;
 
 use super::ConfigStore;
 use super::observation::{ManagedObservation, sha256_digest};
+use super::persistence::{Persistence, PersistenceError};
 use crate::config::contract::ConfigV2;
 use crate::config::edit::{ConfigChange, EditError, SourceCandidate, build_candidate};
 
@@ -75,6 +76,7 @@ pub(super) struct ActiveState {
     snapshot: ActiveSnapshot,
     validations: BTreeMap<String, ValidationRecord>,
     operations: BTreeMap<String, OperationRecord>,
+    persistence: Option<Persistence>,
 }
 
 struct ValidationRecord {
@@ -136,6 +138,8 @@ pub(crate) enum ActiveError {
     Candidate(#[from] EditError),
     #[error("secure token generation failed")]
     Entropy,
+    #[error("configuration persistence failed: {0}")]
+    Persistence(#[from] PersistenceError),
 }
 
 impl ConfigStore {
@@ -147,6 +151,7 @@ impl ConfigStore {
         runtime_revision: u64,
     ) -> Result<Self, ActiveError> {
         let source_path = crate::config::resolve::lexical_normalize(&source_path);
+        super::persistence::ensure_no_journal(&source_path)?;
         let config = ConfigV2::parse(source.as_bytes()).map_err(EditError::from)?;
         let paths = config
             .resolve_paths(&source_path)
@@ -177,6 +182,7 @@ impl ConfigStore {
             },
             validations: BTreeMap::new(),
             operations: BTreeMap::new(),
+            persistence: None,
         });
         Ok(store)
     }
@@ -335,10 +341,51 @@ impl ConfigStore {
             })
             .map_or(OperationPhase::Unknown, |record| record.phase.clone()))
     }
+
+    /// 仅持久化已成功应用的活动源；失败保留新运行态和 gate，重试不会再调用 Runtime。
+    /// 同步文件 I/O 必须由配置事务 owner 调度，不应直接放进 HTTP handler 或 DNS 请求。
+    pub(crate) fn persist_applied(
+        &self,
+        actor: &str,
+        operation_id: &str,
+    ) -> Result<ActiveSnapshot, ActiveError> {
+        validate_token(actor)?;
+        let _transaction = self.transaction.try_lock().map_err(|_| ActiveError::Busy)?;
+        let mut guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
+        let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
+        let record = state
+            .operations
+            .get(operation_id)
+            .ok_or(ActiveError::Unavailable)?;
+        if record.actor != sha256_digest(actor.as_bytes()) {
+            return Err(ActiveError::Unavailable);
+        }
+        if record.phase == OperationPhase::AppliedSynced {
+            return Ok(state.snapshot.clone());
+        }
+        if record.phase != OperationPhase::AppliedUnpersisted
+            || state.snapshot.operation_id.as_deref() != Some(operation_id)
+        {
+            return Err(ActiveError::Busy);
+        }
+        let persistence = state.persistence.as_mut().ok_or(ActiveError::Unavailable)?;
+        let result = persistence.commit();
+        state.snapshot.observation =
+            ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
+        result?;
+        let fingerprint = sha256_digest(state.snapshot.source.as_bytes());
+        // commit 已核对两个替换结果；其后的外改由 observation 暴露，不重放已完成提交。
+        state.snapshot.persisted_revision = Some(state.snapshot.revision.clone());
+        state.snapshot.persisted_fingerprint = fingerprint;
+        state.snapshot.operation_id = None;
+        state.operations.get_mut(operation_id).unwrap().phase = OperationPhase::AppliedSynced;
+        state.persistence = None;
+        Ok(state.snapshot.clone())
+    }
 }
 
 impl ApplyPermit<'_> {
-    /// 在资源、临时文件和 socket 准备后再次核对两个版本，然后才允许调用服务控制命令。
+    /// 建立 PREPARED 并复核双版本，之后才允许提交服务命令；正式发布前仍须再次核对。
     pub(crate) fn begin_runtime_apply(&mut self) -> Result<(), ActiveError> {
         let _transaction = self
             .store
@@ -361,6 +408,18 @@ impl ApplyPermit<'_> {
             .ok_or(ActiveError::Unavailable)?;
         if record.phase != OperationPhase::Preparing {
             return Err(ActiveError::Busy);
+        }
+        let persistence = Persistence::prepare(
+            &self.store.source_path,
+            self.store.snapshot_path.as_deref(),
+            &state.snapshot.observation,
+            self.candidate.source.as_bytes(),
+        )?;
+        state.persistence = Some(persistence);
+        if ManagedObservation::read(&self.store.source_path, self.store.snapshot_path.as_deref())
+            != state.snapshot.observation
+        {
+            return Err(ActiveError::FileConflict);
         }
         record.phase = OperationPhase::Applying;
         Ok(())
@@ -392,6 +451,17 @@ impl ApplyPermit<'_> {
     pub(crate) fn rejected(mut self, compensated: bool) -> Result<(), ActiveError> {
         let mut guard = self.store.active.lock().map_err(|_| ActiveError::Busy)?;
         let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
+        let cleanup = if compensated {
+            match state.persistence.as_ref() {
+                Some(persistence) => persistence.discard().map(Some),
+                None => {
+                    super::persistence::ensure_no_journal(&self.store.source_path).map(|()| None)
+                }
+            }
+        } else {
+            Ok(None)
+        };
+        let compensated = compensated && cleanup.is_ok();
         let record = state
             .operations
             .get_mut(&self.operation_id)
@@ -403,8 +473,10 @@ impl ApplyPermit<'_> {
         };
         if compensated {
             state.snapshot.operation_id = None;
+            state.persistence = None;
         }
         self.completed = true;
+        cleanup?;
         Ok(())
     }
 }
