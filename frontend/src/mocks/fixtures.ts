@@ -260,20 +260,22 @@ export const processMetricsFixture = {
   threads: { state: "available", value: 18 },
 } satisfies V2Schemas["ProcessMetrics"];
 
+const serviceMetricsSampledAt = Date.now();
+
 export const serviceMetricsFixture = {
-  sampled_at_ms: Date.parse("2026-09-07T00:00:10Z"),
+  sampled_at_ms: serviceMetricsSampledAt,
   qps: { state: "available", value: 4.25 },
   rpm: { state: "available", value: 255 },
   online_clients: { state: "available", value: 2 },
   rss_bytes: { state: "available", value: "195454566" },
   qps_trend: [
-    { at_ms: Date.parse("2026-09-07T00:00:08Z"), value: { state: "available", value: 1.5 } },
-    { at_ms: Date.parse("2026-09-07T00:00:09Z"), value: { state: "unavailable", reason: "observation_gap", observed_seconds: null } },
-    { at_ms: Date.parse("2026-09-07T00:00:10Z"), value: { state: "available", value: 12.75 } },
+    { at_ms: serviceMetricsSampledAt - 2_000, value: { state: "available", value: 1.5 } },
+    { at_ms: serviceMetricsSampledAt - 1_000, value: { state: "unavailable", reason: "observation_gap", observed_seconds: null } },
+    { at_ms: serviceMetricsSampledAt, value: { state: "available", value: 12.75 } },
   ],
   rpm_trend: [
-    { at_ms: Date.parse("2026-09-07T00:00:00Z"), value: { state: "unavailable", reason: "warmup", observed_seconds: 300 } },
-    { at_ms: Date.parse("2026-09-07T00:00:10Z"), value: { state: "available", value: 255 } },
+    { at_ms: serviceMetricsSampledAt - 60_000, value: { state: "unavailable", reason: "warmup", observed_seconds: 300 } },
+    { at_ms: serviceMetricsSampledAt, value: { state: "available", value: 255 } },
   ],
 } satisfies V2Schemas["ServiceMetrics"];
 

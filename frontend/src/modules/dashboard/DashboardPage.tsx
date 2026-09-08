@@ -1,57 +1,58 @@
-import { Card, Col, Row, Space, Typography } from "antd";
+import { Alert, Typography } from "antd";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState, InlineUnavailable } from "@/shared/components/PageState";
-import { SnapshotMeta } from "@/shared/components/SnapshotMeta";
-import { HealthStatusTag } from "@/shared/components/StatusTag";
-import { formatCount, formatPercent } from "@/shared/formatters";
-import type { OverviewCard } from "@/shared/api/types";
-import { useOverview } from "./hooks";
+import { formatBytesMiB, formatCount, formatEpochMillis } from "@/shared/formatters";
+import type { ServiceMetrics } from "./api";
+import { MetricsTrendChart } from "./MetricsTrendChart";
+import { useServiceMetrics } from "./hooks";
 
-function formatMetric(card: OverviewCard): string {
-  if (card.value === undefined || card.value === null) return "—";
-  return card.unit === "percent" ? formatPercent(card.value) : formatCount(card.value);
-}
+type Measurement = ServiceMetrics["qps"] | ServiceMetrics["online_clients"] | ServiceMetrics["rss_bytes"];
 
 export function DashboardPage() {
-  const query = useOverview();
-  const overview = query.data;
+  const query = useServiceMetrics();
+  const metrics = query.data;
 
   return (
     <PageFrame
       title="服务状态"
-      description="聚合展示服务端生成的有界指标；各卡片可独立标记不可用。"
-      meta={overview ? <SnapshotMeta sampledAt={overview.sampled_at} revision={overview.runtime_revision} /> : undefined}
-      actions={overview ? <HealthStatusTag status={overview.overall_status} /> : undefined}
+      description="主实例 · 最近十分钟"
+      meta={metrics ? <Typography.Text type="secondary">采样：{formatEpochMillis(metrics.sampled_at_ms)}</Typography.Text> : undefined}
     >
       <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
-      {overview ? (
-        <Space orientation="vertical" size={22} style={{ width: "100%" }}>
-          <Row gutter={[18, 18]}>
-            {overview.cards.map((card) => (
-              <Col xs={24} sm={12} xl={8} xxl={6} key={card.key}>
-                <Card className="metric-card">
-                  <div className="metric-label">{card.label}</div>
-                  {card.status === "available" ? (
-                    <div className="metric-value">{formatMetric(card)}</div>
-                  ) : (
-                    <div style={{ marginTop: 18 }}>
-                      <InlineUnavailable reasonCode={card.unavailable_reason_code} />
-                    </div>
-                  )}
-                </Card>
-              </Col>
-            ))}
-          </Row>
-          <Card className="snapshot-card">
-            <Space orientation="vertical" size={6}>
-              <Typography.Text strong>快照边界</Typography.Text>
-              <Typography.Text type="secondary">
-                当前页面只展示采样时刻的服务端摘要，不将其他页面的不同采样响应合并为同一快照。
-              </Typography.Text>
-            </Space>
-          </Card>
-        </Space>
+      {metrics ? (
+        <div className="service-status-content">
+          {query.stale ? <Alert className="service-status-alert" type="warning" showIcon title="实时指标暂时不可用，当前显示最后一次有效快照" /> : null}
+          <div className="service-status-metrics">
+            <Metric label="当前内存" measurement={metrics.rss_bytes} formatter={(value) => formatBytesMiB(String(value))} />
+            <Metric label="平均 QPS" measurement={metrics.qps} formatter={(value) => formatRate(Number(value))} />
+            <Metric label="平均 RPM" measurement={metrics.rpm} formatter={(value) => formatRate(Number(value))} />
+            <Metric label="在线客户端" measurement={metrics.online_clients} formatter={(value) => formatCount(Number(value))} />
+          </div>
+          <MetricsTrendChart metrics={metrics} />
+        </div>
       ) : null}
     </PageFrame>
   );
+}
+
+function Metric({ label, measurement, formatter }: { label: string; measurement: Measurement; formatter: (value: string | number) => string }) {
+  return (
+    <div className="service-status-metric">
+      <div className="metric-label">{label}</div>
+      {measurement.state === "available"
+        ? <div className="service-status-value">{formatter(measurement.value)}</div>
+        : <InlineUnavailable reasonCode={unavailableLabel(measurement.reason, measurement.observed_seconds)} />}
+    </div>
+  );
+}
+
+function unavailableLabel(reason: string, observedSeconds: number | null): string {
+  if (reason === "warmup") return `暖机中${observedSeconds === null ? "" : ` · ${observedSeconds}s`}`;
+  if (reason === "observation_gap") return "观测存在缺口";
+  if (reason === "sampling_failed") return "采样失败";
+  return "平台不支持";
+}
+
+function formatRate(value: number): string {
+  return new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 }).format(value);
 }

@@ -28,6 +28,38 @@ class MockResizeObserver implements ResizeObserver {
 
 Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, value: MockResizeObserver });
 
+class MockWebSocket extends EventTarget {
+  static readonly CONNECTING = 0;
+  static readonly OPEN = 1;
+  static readonly CLOSING = 2;
+  static readonly CLOSED = 3;
+  readonly url: string;
+  readonly protocol: string;
+  readyState = MockWebSocket.CONNECTING;
+
+  constructor(url: string | URL, protocols?: string | string[]) {
+    super();
+    this.url = String(url);
+    this.protocol = Array.isArray(protocols) ? protocols[0] ?? "" : protocols ?? "";
+    queueMicrotask(() => {
+      if (this.readyState !== MockWebSocket.CONNECTING) return;
+      this.readyState = MockWebSocket.OPEN;
+      this.dispatchEvent(new Event("open"));
+      this.dispatchEvent(new MessageEvent("message", { data: JSON.stringify({ type: "ready", protocol_version: 1, epoch: "mock-epoch" }) }));
+    });
+  }
+
+  send() {}
+
+  close(code = 1000, reason = "") {
+    if (this.readyState === MockWebSocket.CLOSED) return;
+    this.readyState = MockWebSocket.CLOSED;
+    this.dispatchEvent(new CloseEvent("close", { code, reason, wasClean: true }));
+  }
+}
+
+Object.defineProperty(globalThis, "WebSocket", { configurable: true, writable: true, value: MockWebSocket });
+
 const jsdomGetComputedStyle = window.getComputedStyle.bind(window);
 Object.defineProperty(window, "getComputedStyle", {
   configurable: true,

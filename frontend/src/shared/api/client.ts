@@ -7,6 +7,7 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 
 type UnauthorizedListener = () => void;
 const unauthorizedListeners = new Set<UnauthorizedListener>();
+const authSessionListeners = new Set<() => void>();
 let access: { token: string; expiresAt: number } | undefined;
 let authEpoch = 0;
 let refreshAllowed = true;
@@ -27,6 +28,7 @@ export function clearAccessSession(allowRefresh = false): void {
   authEpoch += 1;
   refreshAllowed = allowRefresh;
   refreshing = undefined;
+  authSessionListeners.forEach((listener) => listener());
 }
 
 function installAccessSession(value: AuthSession): Session {
@@ -80,6 +82,18 @@ async function accessForRequest(signal: AbortSignal): Promise<{ token: string; e
 export function onUnauthorized(listener: UnauthorizedListener): () => void {
   unauthorizedListeners.add(listener);
   return () => unauthorizedListeners.delete(listener);
+}
+
+/** WS 等进程内资源监听认证世代变化，确保登出和重新登录不会复用旧连接。 */
+export function onAuthSessionChange(listener: () => void): () => void {
+  authSessionListeners.add(listener);
+  return () => authSessionListeners.delete(listener);
+}
+
+/** 非 HTTP transport 报告同一认证失效事件，不另建第二套登录状态。 */
+export function reportUnauthorized(): void {
+  clearAccessSession();
+  unauthorizedListeners.forEach((listener) => listener());
 }
 
 export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
@@ -179,8 +193,8 @@ async function requestWithPrefix<T>(prefix: string, path: string, options: ApiRe
   } catch (error) {
     if (error instanceof ApiError) {
       if (error.status === 401 && (mode === "required" || mode === "logout") && requestEpoch === authEpoch) {
-        clearAccessSession();
-        if (options.handleUnauthorized !== false) unauthorizedListeners.forEach((listener) => listener());
+        if (options.handleUnauthorized === false) clearAccessSession();
+        else reportUnauthorized();
       }
       throw error;
     }

@@ -1,4 +1,4 @@
-import { http, HttpResponse } from "msw";
+import { http, HttpResponse, ws } from "msw";
 import type { AuthSession } from "@/shared/api/types";
 import {
   healthFixture,
@@ -34,6 +34,17 @@ let authenticated = false;
 let setupRequired = false;
 let authenticatedName = sessionFixture.user.name;
 const MOCK_ACCESS_TOKEN = "A".repeat(43);
+const eventSocket = ws.link("ws://localhost:3000/api/v2/events");
+const eventSocketHandler = eventSocket.addEventListener("connection", ({ client }) => {
+  client.send(JSON.stringify({ type: "ready", protocol_version: 1, epoch: "mock-epoch" }));
+  client.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") return;
+    const message = JSON.parse(event.data) as { type?: string; subscription_id?: string };
+    if (message.type === "subscribe_metrics" && message.subscription_id) {
+      client.send(JSON.stringify({ type: "metrics", subscription_id: message.subscription_id, data: serviceMetricsFixture }));
+    }
+  });
+});
 
 function authorized(request: Request): boolean {
   return authenticated && request.headers.get("authorization") === `Bearer ${MOCK_ACCESS_TOKEN}`;
@@ -96,6 +107,7 @@ function readOnlyV2<T extends object>(fixture: T) {
 }
 
 export const handlers = [
+  eventSocketHandler,
   http.get("/api/v1/auth/setup", () => HttpResponse.json(setupRequired ? setupRequiredFixture : setupReadyFixture)),
   http.get("/api/v1/auth/session", ({ request }) => (authorized(request) ? HttpResponse.json(authSession().session) : unauthorized())),
   // mock 的 authenticated 仅模拟浏览器刷新会话；真实 Cookie/Origin 防护由后端与浏览器联测验证。
@@ -162,6 +174,9 @@ export const handlers = [
   http.get("/api/v1/system", readOnly(systemFixture)),
   http.get("/api/v2/system/runtime", readOnlyV2(processMetricsFixture)),
   http.get("/api/v2/service/metrics", readOnlyV2(serviceMetricsFixture)),
+  http.post("/api/v2/events/ticket", ({ request }) => authorized(request)
+    ? HttpResponse.json({ ticket: "T".repeat(43), expires_at_ms: Date.now() + 30_000 }, { status: 201 })
+    : v2Error(401, "AUTH_REQUIRED", "session required")),
   http.get("/api/v2/config/state", readOnlyV2(configStateFixture)),
   http.get("/api/v2/config/system", readOnlyV2(systemConfigReadFixture)),
   http.get("/api/v2/config/modules/:module", ({ request, params }) => {

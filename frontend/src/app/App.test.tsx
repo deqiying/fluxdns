@@ -91,11 +91,11 @@ describe("application routes", () => {
     expect(window.sessionStorage.length).toBe(0);
   });
 
-  it("有效 session 可直接进入 Dashboard 并区分局部不可用卡片", async () => {
+  it("有效 session 可直接进入 Dashboard 并读取 v2 服务指标", async () => {
     setMockAuthenticated(true);
     renderApp("/dashboard");
     expect(await screen.findByRole("heading", { name: "服务状态" })).toBeInTheDocument();
-    expect(await screen.findByText("STORAGE_GAP")).toBeInTheDocument();
+    expect(await screen.findByText("当前内存")).toBeInTheDocument();
   });
 
   it("全局提示读取外部差异并在确认后只还原文件", async () => {
@@ -524,6 +524,19 @@ describe("application routes", () => {
     expect(screen.getByRole("button", { name: "展开导航" })).toBeInTheDocument();
   });
 
+  it("服务状态使用 v2 固定口径并在同一趋势图保留缺口", async () => {
+    setMockAuthenticated(true);
+    renderApp("/dashboard");
+
+    expect(await screen.findByText("当前内存")).toBeInTheDocument();
+    expect(screen.getByText("186.4 MiB")).toBeInTheDocument();
+    expect(screen.getByText("4.25")).toBeInTheDocument();
+    expect(screen.getByText("255")).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /QPS 与 RPM 请求趋势/ })).toBeInTheDocument();
+    expect(document.querySelectorAll(".metrics-chart-qps-line")).toHaveLength(2);
+    expect(document.querySelectorAll(".metrics-chart-rpm-line")).toHaveLength(1);
+  });
+
   it("DNS 上游页内 tab 使用查询参数并支持返回", async () => {
     const user = userEvent.setup();
     setMockAuthenticated(true);
@@ -544,7 +557,7 @@ describe("application routes", () => {
   it("普通 API 返回 401 时只跳转一次并显示 session 过期提示", async () => {
     setMockAuthenticated(true);
     server.use(
-      http.get("/api/v1/overview", () =>
+      http.get("/api/v2/service/metrics", () =>
         HttpResponse.json(
           { code: "AUTH_SESSION_EXPIRED", message: "expired", request_id: "expired-401", retryable: false },
           { status: 401 },
