@@ -395,25 +395,30 @@ impl DetailCommittedRecord {
         ]
         .into_iter()
         .flatten()
-        .map(str::len)
+        .map(json_string_budget)
         .sum::<usize>();
-        256_usize
-            .saturating_add(self.id.as_str().len())
-            .saturating_add(record.qname().len())
+        512_usize
+            .saturating_add(json_string_budget(self.id.as_str()))
+            .saturating_add(json_string_budget(record.qname()))
             .saturating_add(optional)
             .saturating_add(
                 record
                     .answers()
                     .iter()
                     .map(|answer| {
-                        answer.name.len()
-                            + answer.record_type.len()
-                            + answer.data.len()
-                            + std::mem::size_of::<ResolveAnswer>()
+                        json_string_budget(&answer.name)
+                            + json_string_budget(&answer.record_type)
+                            + json_string_budget(&answer.data)
+                            + 64
                     })
                     .sum(),
             )
     }
+}
+
+/// JSON 控制字符最多展开为六字节 `\u00xx` 转义，replay 预算按该上界计数。
+fn json_string_budget(value: &str) -> usize {
+    value.len().saturating_mul(6)
 }
 
 impl fmt::Debug for DetailCommittedRecord {
