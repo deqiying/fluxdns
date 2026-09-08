@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use tokio::task::JoinHandle;
 
+use crate::config::store::ConfigStore;
+use crate::config::store::active::ActiveError;
 use crate::config::store::observation::ManagedObservation;
 
 pub(super) struct ConfigFileWatcher {
@@ -73,6 +75,14 @@ impl ConfigFileWatcher {
         Some(current)
     }
 
+    /// ConfigStore 正忙时保留本次稳定事实，下一轮继续投递而不是静默丢失。
+    fn retry_report(&mut self, observation: ManagedObservation) {
+        if self.observed.as_ref() == Some(&observation) {
+            self.observed = None;
+            self.candidate = Some(observation);
+        }
+    }
+
     /// 停止调度并有界等待已开始的只读任务；超时不等于 OS 文件读取已取消。
     pub(super) async fn finish(&mut self, timeout: Duration) -> bool {
         let Some(mut reading) = self.reading.take() else {
@@ -83,17 +93,38 @@ impl ConfigFileWatcher {
 }
 
 /// 生产服务循环只调用此只读入口，不持有修改 DnsService 的能力。
-pub(super) async fn report_config_files(watcher: &tokio::sync::Mutex<ConfigFileWatcher>) {
-    match watcher.lock().await.poll_change().await {
-        Ok(Some(observation)) => tracing::warn!(
-            event = "configuration_files_observed",
-            component = "application",
-            result = "not_reloaded",
-            observed_file_revision = %observation.revision(),
-            source_state = observation.source.state(),
-            derived_state = observation.derived.as_ref().map(|file| file.state()),
-            "configuration_files_observed"
-        ),
+pub(super) async fn report_config_files(
+    watcher: &tokio::sync::Mutex<ConfigFileWatcher>,
+    store: Option<&ConfigStore>,
+) {
+    let change = watcher.lock().await.poll_change().await;
+    match change {
+        Ok(Some(observation)) => {
+            if let Some(store) = store
+                && let Err(error) = store.record_file_observation(observation.clone())
+            {
+                if matches!(error, ActiveError::Busy) {
+                    watcher.lock().await.retry_report(observation);
+                } else {
+                    tracing::warn!(
+                        event = "configuration_observation_rejected",
+                        component = "application",
+                        result = "kept_previous_observation",
+                        "configuration_observation_rejected"
+                    );
+                }
+                return;
+            }
+            tracing::warn!(
+                event = "configuration_files_observed",
+                component = "application",
+                result = "not_reloaded",
+                observed_file_revision = %observation.revision(),
+                source_state = observation.source.state(),
+                derived_state = observation.derived.as_ref().map(|file| file.state()),
+                "configuration_files_observed"
+            );
+        }
         Ok(None) => {}
         Err(_) => tracing::warn!(
             event = "configuration_observation_task_failed",

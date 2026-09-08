@@ -1,5 +1,5 @@
 //! ConfigStore 内的 v2 活动源、验证票据、有界操作记录与文件事务；Runtime 由服务 owner 回报。
-#![allow(dead_code)] // BC-02 内部入口；BC-03/29 服务控制与 BC-26 启动接线后移除。
+#![allow(dead_code)] // P3 模块写入仍会继续消费部分细粒度 helper。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -190,8 +190,8 @@ pub(crate) struct ValidatedCandidate {
 }
 
 /// 只有 begin_apply 可以生成；调用方仍须完成资源/owner/socket prepare 后才能切换运行态。
-pub(crate) struct ApplyPermit<'a> {
-    store: &'a ConfigStore,
+pub(crate) struct ApplyPermit {
+    store: Arc<ConfigStore>,
     operation_id: String,
     expected: ExpectedRevisions,
     next_revision: String,
@@ -199,8 +199,8 @@ pub(crate) struct ApplyPermit<'a> {
     completed: bool,
 }
 
-pub(crate) enum BeginApply<'a> {
-    Accepted(ApplyPermit<'a>),
+pub(crate) enum BeginApply {
+    Accepted(ApplyPermit),
     Existing(OperationPhase),
 }
 
@@ -305,6 +305,9 @@ impl ConfigStore {
             .as_ref()
             .map(|state| state.snapshot.clone())
             .ok_or(ConfigStoreError::CandidateRejected)?;
+        if active.operation_id.is_some() {
+            return Err(ConfigStoreError::Busy);
+        }
         if source.as_slice() != active.source.as_bytes() {
             return Err(ConfigStoreError::Conflict);
         }
@@ -388,6 +391,17 @@ impl ConfigStore {
         Ok(state.snapshot.clone())
     }
 
+    /// 接受后台 watcher 已完成的稳定观测；本入口不读取文件，也不改变活动配置或 Runtime。
+    pub(crate) fn record_file_observation(
+        &self,
+        observation: ManagedObservation,
+    ) -> Result<(), ActiveError> {
+        let mut state = self.active.try_lock().map_err(|_| ActiveError::Busy)?;
+        let state = state.as_mut().ok_or(ActiveError::Unavailable)?;
+        state.snapshot.observation = observation;
+        Ok(())
+    }
+
     pub(crate) fn active_snapshot(&self) -> Result<ActiveSnapshot, ActiveError> {
         self.active
             .lock()
@@ -466,7 +480,7 @@ impl ConfigStore {
 
     /// 幂等检查先于过期版本检查；相同操作只返回既有结果，不再次执行新增或改名。
     pub(crate) fn begin_apply(
-        &self,
+        self: &Arc<Self>,
         actor: &str,
         operation_id: &str,
         expected: &ExpectedRevisions,
@@ -474,7 +488,7 @@ impl ConfigStore {
         discard_external_changes: bool,
         validation_token: &str,
         confirmations: &BTreeSet<Impact>,
-    ) -> Result<BeginApply<'_>, ActiveError> {
+    ) -> Result<BeginApply, ActiveError> {
         validate_token(actor)?;
         validate_token(operation_id)?;
         let _transaction = self.transaction.try_lock().map_err(|_| ActiveError::Busy)?;
@@ -530,7 +544,7 @@ impl ConfigStore {
         );
         state.snapshot.operation_id = Some(operation_id.to_owned());
         Ok(BeginApply::Accepted(ApplyPermit {
-            store: self,
+            store: Arc::clone(self),
             operation_id: operation_id.into(),
             expected: expected.clone(),
             next_revision,
@@ -778,7 +792,21 @@ impl ConfigStore {
     }
 }
 
-impl ApplyPermit<'_> {
+impl ApplyPermit {
+    /// 将已冻结候选编译为 Runtime 配置；仍不代表资源、socket 或进程 owner 已准备完成。
+    pub(crate) fn resolve_runtime_config(
+        &self,
+    ) -> Result<Arc<crate::config::resolve::ResolvedConfig>, ActiveError> {
+        resolve_config_v2(
+            &self.candidate.config,
+            deterministic_hash(self.candidate.source.as_bytes()),
+            &self.store.source_path,
+        )
+        .map(|validated| validated.resolved)
+        .map_err(EditError::from)
+        .map_err(ActiveError::from)
+    }
+
     /// 建立 PREPARED 并复核双版本，之后才允许提交服务命令；正式发布前仍须再次核对。
     pub(crate) fn begin_runtime_apply(&mut self) -> Result<(), ActiveError> {
         let _transaction = self
@@ -891,7 +919,7 @@ impl ApplyPermit<'_> {
     }
 }
 
-impl Drop for ApplyPermit<'_> {
+impl Drop for ApplyPermit {
     fn drop(&mut self) {
         if !self.completed
             && let Ok(mut guard) = self.store.active.lock()

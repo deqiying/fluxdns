@@ -1321,7 +1321,7 @@ mod tests {
     use std::path::PathBuf;
 
     use axum::body::{Body, to_bytes};
-    use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
+    use axum::http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, ORIGIN};
     use axum::http::{Request, StatusCode};
     use serde_json::json;
     use tower::ServiceExt;
@@ -2052,6 +2052,53 @@ mod tests {
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
         }
+
+        let rejected_origin = Request::builder()
+            .method("POST")
+            .uri("/api/v2/config/validate")
+            .header(AUTHORIZATION, &authorization)
+            .header(ORIGIN, "http://example.invalid")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = app.clone().oneshot(rejected_origin).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+            "FORBIDDEN"
+        );
+
+        let unavailable_owner = Request::builder()
+            .method("POST")
+            .uri("/api/v2/config/validate")
+            .header(AUTHORIZATION, &authorization)
+            .header(ORIGIN, "http://127.0.0.1:8080")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))
+            .unwrap();
+        let response = app.clone().oneshot(unavailable_owner).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let oversized = Request::builder()
+            .method("POST")
+            .uri("/api/v2/config/validate")
+            .header(AUTHORIZATION, &authorization)
+            .header(ORIGIN, "http://127.0.0.1:8080")
+            .header(CONTENT_TYPE, "application/json")
+            .header(
+                CONTENT_LENGTH,
+                (crate::management::contract::MAX_MUTATION_BYTES + 1).to_string(),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(oversized).await.unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap()["code"],
+            "PAYLOAD_TOO_LARGE"
+        );
 
         let invalid = app
             .clone()

@@ -35,6 +35,8 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BC-26
 
 2026-09-08 用户已授权实施 P2、必要验证和阶段性本地提交，不 push。P2 从 BC-06 独立二进制快照 codec 开始；在 BC-06 至 BC-11 完成后，BC-12/13 的正式 v2 查询接线被生产 `ConfigLoader`/inactive ConfigStore 阻塞，用户随后明确授权把 P5 BC-26 提前到当前任务。扩展仅覆盖正式 v2 启动、新数据布局/旧格式拒绝和 active store，不包含 BC-27、旧数据迁移或 P3 写接口。
 
+同日用户继续授权完成 P1 剩余配置链及 FC-01/02/16 全局接线，仍不 push、不实施 P3 模块写接口、WS、旧数据兼容或 BC-27。BC-03/29/30/31 已通过 [`ConfigMutationOwner`](../implementation/backend/management.md#p1-配置事务与文件操作2026-09-08)连接正式 Runtime、日志 owner、应用后持久化、启动恢复、稳定文件观测及 P1 组合/文件路由；P3 单模块 validate/apply 保持未注册。真实 Windows Bearer HTTP、UDP、SQLite、双文件、日志拒绝/切换、外改/还原/重试和重启复读通过；前端全局轮询/提示/文件操作随后接线。
+
 同日 BC-06/07 已完成：`FDCS` codec、Moka 分批恢复、唯一进程 owner、周期覆盖、reload generation/source 仲裁和 finalizer 后最终写入已进入正式 app/runtime/service；生产 cache 路径已退出 SQLite。过渡接线仅消费 v1 已解析路径并固定 5 分钟周期，不改变上述 BC-26 边界。P2 下一依赖从 BC-08 日分片开始。
 
 同日 BC-08 已完成：生产详情 writer 与统计主库分离，按事件 UTC 日写入受管 SQLite 日文件；同日 lease 串行、活动连接上限、关闭排空和退役入口已建立，批写不再运行 v1 条数/年龄淘汰。旧详情不迁移，旧单库 adapter 只留兼容测试；过渡 `queries/` 路径由统计库同级推导，v2 `database.records_path` 的正式启动消费仍留 BC-26。P2 下一依赖为 BC-09 稳定 ID、跨分片 cursor/读口和提交后通知。

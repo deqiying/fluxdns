@@ -4,15 +4,15 @@
 >
 > 适用范围：正式 Management listener、认证、配置写入、只读查询与内嵌资源接线
 >
-> 最后核对：2026-09-08（BC-13 新版解析历史查询）
+> 最后核对：2026-09-08（P1 配置事务与文件操作路由）
 >
-> 核对基线：`0f7cffbab6bb1ba040f0537f7f2c28bdfc1dd13e`
+> 核对基线：`4a5a5a7b13896f3b4c1d86fe4469a3afae38ac10` 加本次 P1 工作树
 >
 > 时间存储补充核对：2026-09-05，`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加业务时间迁移工作树；不扩大其他管理功能审计范围
 
 ## 入口与生命周期
 
-[`app::run_command`](../../../backend/src/app.rs) 在 DNS candidate 绑定、coordinator 创建后调用 [`ManagementService::bind_with_config_store`](../../../backend/src/management/server.rs)。后者消费 v2 loader 原文建立的 active ConfigStore，调用 feature-aware 资源检查并要求 origin，创建 AuthState、SessionStore、只读 SQLite adapter 与 query service，最后绑定独立 HTTP listener。
+[`app::run_command`](../../../backend/src/app.rs) 在 DNS candidate 绑定、coordinator 和 DnsService 创建并挂接日志 owner 后调用 [`ManagementService::bind_with_config_store`](../../../backend/src/management/server.rs)。后者消费 v2 loader 原文建立的 active ConfigStore 和 `service.control()`，调用 feature-aware 资源检查并要求 origin，创建 AuthState、SessionStore、配置事务 owner、只读 SQLite adapter 与 query service，最后绑定独立 HTTP listener。
 
 `DnsService::attach_management` 持有管理状态并注册受监督 task。不是 DoH listener 的附加路由；`webui.enable: false` 不创建此链。`ManagementRuntime::reconcile_users` 识别内部写入指纹，并只在实际认证内容改变时撤销 session；普通配置指纹变化或用户排序不撤销会话，`shutdown` 仍撤销会话。
 
@@ -20,22 +20,22 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 
 ## P0 v2 契约
 
-2026-09-07 局部核对：目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。BC-23 已注册 `/api/v2/service/metrics` 和 `/api/v2/system/runtime`；BC-12 又注册配置状态、系统白名单、模块投影和保留状态四类只读端点；BC-13 注册历史列表与详情。它们均受 Bearer 保护。v2 认证、配置写入与 WS 仍未注册，既有 v1 handler 继续承担当前页面，不据此宣称完整双版本服务。
+目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。除既有指标、配置只读、保留和历史端点外，P1 已注册组合配置校验/应用、operation 查询、外部差异、文件还原和持久化重试。它们均受 Bearer 保护，写请求额外要求 Origin/Fetch Metadata。P3 的 `/config/modules/{module}/validate|apply` 与 WS 仍未注册。
 
 P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测、验证票据和操作记录已有 ConfigStore 内部入口，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。下表的 P0 decoder 不因此成为已接线的写入服务；BC-12 只开放读取，异步应用、外部差异与普通配置写入仍未注册。
 
 | 契约 | 已落实的内部能力 | 正式接线与剩余边界 |
 | --- | --- | --- |
-| 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新不含 `client_id`；系统只读投影不含 users/hash | `decode_candidate` / `decode_apply` 限制 body、变更数、null 和字段；单模块入口强制模块相符。完整引用、名称占用、影响确认、prepare 由后续 ConfigStore 实施 |
-| 活动配置与文件 | active/runtime/persisted revision 分离；组合文件观测 token；源表达、生效值/来源、引用和独立 runtime 投影；外部差异、还原、同步重试请求 | DTO 本身不读取/覆盖文件；ConfigStore 状态与逐文件自写身份已有内部投影，外部差异和正式 handler 留 BC-30 |
-| 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、校验 token、明确确认清单 | 运行成功不等于文件同步，unknown 不能自动重放。有界记录和冻结结果已有内部消费，异步 owner/HTTP 接线未完成 |
+| 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新不含 `client_id`；系统只读投影不含 users/hash | P1 组合入口消费 `decode_candidate` / `decode_apply`；单模块 decoder 保留给 P3，但对应路由未注册 |
+| 活动配置与文件 | active/runtime/persisted revision 分离；组合文件观测 token；源表达、生效值/来源、引用和独立 runtime 投影；外部差异、还原、同步重试请求 | 状态、差异、还原和重试已接线；DTO 不接受路径、整份 YAML 或 Secret 实际值 |
+| 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、校验 token、明确确认清单 | ConfigMutationOwner 独立于 HTTP 请求推进 Runtime 与持久化；运行成功不等于文件同步，unknown 不能自动重放 |
 | 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-09 已实现分片 storage 读口、cursor 上下文/水位完整性和 commit 后通知；BC-13 已接入当前名称投影与 Bearer HTTP，WS 鉴权/队列/replay 待 BC-24/25 |
 
 大计数/序列使用十进制 `u64` 字符串，Rust 和 schema 均拒绝溢出与前导零；安全整数时间采用 UTC ms，耗时采用 us。请求中的安全时间上界由 REST/WS 共用验证器执行；输出时间仍为 Rust `u64`，生产投影接线时必须保持 schema 的安全整数边界。源 DTO 的相对路径、SecretRef 来源和缺失继承保留，duration 序列化为精确 ns 字符串；这不是可回写的完整 YAML 语法树，不能据此丢弃原注释或显式源表达。
 
 所有预算在 OpenAPI `x-limits` 和字段 schema 中维护。已执行入站保护包括配置 4 MiB、变更 2 MiB/128 项、cursor 2048 bytes、历史查询 16 KiB/100 行/3650 天、WS 入站帧 128 KiB；BC-23 的在线身份表上限为 4096，超限窗口显式返回 `observation_gap`。文件读取以及 WS 连接/队列/replay 限额仍仅为契约，不能据此宣称运行时已受保护。
 
-验证使用 [Rust 契约测试](../../../backend/src/management/contract/tests.rs)、[共享夹具](../../../backend/tests/fixtures/management-v2.json) 和 [Node schema 测试](../../../frontend/tests/contract-v2.node.mjs)：覆盖多态源值往返、只读注入、ID 修改、null、预算、精度、状态互斥及未注册 v2 写路由。Windows 定向执行 management 18 项通过（含 8 个新增契约测试），schema 3 项通过；既有认证/HTTP 回归通过不等于新 v2 HTTP/WS 实测。
+验证使用 [Rust 契约测试](../../../backend/src/management/contract/tests.rs)、[共享夹具](../../../backend/tests/fixtures/management-v2.json) 和 [Node schema 测试](../../../frontend/tests/contract-v2.node.mjs)：覆盖多态源值往返、只读注入、ID 修改、null、预算、精度、状态互斥、P1 路由清单及 P3 模块写路由缺席。真实 P1 HTTP/Runtime 证据见下述配置事务接线；WS 仍未实现。
 
 ## P1 配置状态内部投影（2026-09-07）
 
@@ -73,13 +73,21 @@ Windows 定向测试用两个真实 UTC 日 SQLite 分片覆盖跨日稳定分�
 
 完整输出最多 128 项、序列化 JSON 最多 2 MiB；超限整体报错，不截断。写入计数器按真实 UTF-8 和 JSON escaping 计费，另外检查 schema 的字段长度与安全整数。输入完整配置无效时只返回双版本绑定及安全 `parse_error`，不部分采用。
 
-Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/内联类型、引用失败、只读和 hash 隔离、128/129 项、输出字节与字段超限；15 个实际投影经现有 AJV 对 v2 schema 验证。测试中的 Runtime 成功仍是模拟，未注册 `/api/v2/config/external-diff`，尚缺异步 owner、正式鉴权/handler、前端差异与组合采用接线，不关闭 BC-30/FC-16。
+Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/内联类型、引用失败、只读和 hash 隔离、128/129 项、输出字节与字段超限；15 个实际投影经现有 AJV 对 v2 schema 验证。正式路径为 `GET /api/v2/config/files/diff`，由阻塞 owner 执行同一投影；前端组合采用仍等待各 P3 业务表单。
+
+## P1 配置事务与文件操作（2026-09-08）
+
+[`config_mutation.rs`](../../../backend/src/management/config_mutation.rs) 注册 `POST /api/v2/config/validate`、`POST /api/v2/config/apply`、`GET /api/v2/config/operations/{operation_id}`、`GET /api/v2/config/files/diff`、`POST /api/v2/config/files/restore` 和 `POST /api/v2/config/files/retry`。没有注册 P3 单模块 validate/apply、任意 YAML、PATCH、DELETE、restart 或 stop。写请求复用 v2 Bearer，并返回 v2 `FORBIDDEN` 形状的同源拒绝；候选路由单独允许 2 MiB body，其余既有路由继续使用 16 KiB 默认上限。
+
+组合 apply 在阻塞线程完成 ConfigStore 受理后立即返回 202；后台 owner 完成 Runtime prepare、ServiceControl 回执和持久化，客户端按相同 operation ID 查询。文件还原/重试在阻塞 owner 中执行，HTTP 取消不终止已经开始的写盘；已记录失败优先返回冻结 OperationResult，受理前冲突返回 ErrorEnvelope。operation 按用户名隔离，不在响应或日志中返回源正文、路径身份、底层错误或认证凭据。
+
+Windows 真实 HTTP 使用一次性 setup/后续 login 获取内存 Bearer，完成校验、apply、operation 轮询、状态、差异、还原和重试。日志父目录缺失返回冻结 `APPLY_FAILED` 且 Runtime/文件未变；有效日志候选得到 `applied_synced`、Runtime revision 2、双文件一致。仅 Cookie 的现有配置读拒绝证据沿用 BC-12；本批未验证 HTTPS 反向代理、Linux、磁盘满、响应恰在 service commit 后丢失或 P3 模块写入口。
 
 ## 路由与保护
 
-[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout 认证端点、受 Bearer 保护的 session、[`query.rs`](../../../backend/src/management/query.rs) 七个 v1 查询端点及 BC-23/BC-12/BC-13 v2 只读端点；未知 API 与 SPA fallback 隔离。既有页面字段/状态码以 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，v2 端点以 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
+[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout、受 Bearer 保护的 session、[`query.rs`](../../../backend/src/management/query.rs) 查询路由和 P1 配置事务路由；未知 API 与 SPA fallback 隔离。既有页面字段/状态码以 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，v2 端点以 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
 
-router 固定保护包括 JSON body 16 KiB、URI 4 KiB、64 个 header/16 KiB header bytes、256 个并发请求和 15 秒总请求 timeout。另有 setup/login 限流、Origin/Fetch Metadata、request ID 和统一错误处理。这些是实现常量，不是额外 YAML 字段。
+router 固定保护包括普通 JSON body 16 KiB、P1 配置候选 2 MiB、URI 4 KiB、64 个 header/16 KiB header bytes、256 个并发请求和 15 秒总请求 timeout。另有 setup/login 限流、写请求 Origin/Fetch Metadata、request ID 和统一错误处理。这些是实现常量，不是额外 YAML 字段。
 
 [`auth.rs`](../../../backend/src/management/auth.rs) 的 `validate_setup_credentials` 与 `hash_password` 使用 12 至 1024 bytes 密码、Argon2id 19 MiB/2 iterations/parallelism 1；登录兼容 bcrypt。密码不 trim，用户名使用配置层共享规范。
 

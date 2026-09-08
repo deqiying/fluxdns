@@ -20,7 +20,6 @@ use crate::config::store::{
 use crate::resource::ResourceStaleStatus;
 use crate::runtime::RuntimeCoordinator;
 
-#[allow(dead_code)] // 外部差异属于 P3 写入前置，本批保留既有内部契约但不注册路由。
 pub(crate) mod external;
 
 /// 状态查询不做文件 I/O；外部差异与持久化结果独立展示，不把文件变化解释成自动应用。
@@ -732,7 +731,6 @@ fn unix_millis(value: SystemTime) -> Option<u64> {
 }
 
 /// adapter 仍须先鉴权；此读口按原调用者返回冻结结果，Unknown 不能触发自动重放。
-#[allow(dead_code)] // operation 查询随 P3 写端点注册。
 pub(crate) fn operation_result(
     store: &ConfigStore,
     actor: &str,
@@ -797,7 +795,6 @@ fn file_condition(current: &ObservedFile, known: Option<&ObservedFile>) -> FileC
     }
 }
 
-#[allow(dead_code)]
 fn failure_code(error: OperationFailure) -> ErrorCode {
     match error {
         OperationFailure::ValidationFailed => ErrorCode::ValidationFailed,
@@ -809,7 +806,7 @@ fn failure_code(error: OperationFailure) -> ErrorCode {
     }
 }
 
-fn error_code(error: ActiveError) -> ErrorCode {
+pub(super) fn error_code(error: ActiveError) -> ErrorCode {
     match error {
         ActiveError::Busy => ErrorCode::OperationBusy,
         ActiveError::InvalidToken => ErrorCode::InvalidArgument,

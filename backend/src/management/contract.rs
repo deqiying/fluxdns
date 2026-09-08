@@ -867,6 +867,15 @@ pub fn decode_apply(bytes: &[u8], module: Option<ConfigModule>) -> Result<ApplyR
     Ok(request)
 }
 
+/// 文件动作只接受固定 operation、双版本和覆盖确认，不接收路径或配置正文。
+pub fn decode_file_sync(bytes: &[u8]) -> Result<FileSyncRequest, ErrorCode> {
+    let tree: serde_json::Value = decode_json(bytes, MAX_MUTATION_BYTES)?;
+    if contains_null(&tree) {
+        return Err(ErrorCode::InvalidArgument);
+    }
+    serde_json::from_value(tree).map_err(|_| ErrorCode::InvalidArgument)
+}
+
 fn contains_null(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Null => true,

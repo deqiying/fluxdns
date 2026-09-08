@@ -225,7 +225,7 @@ async fn production_service_loop_keeps_dns_and_revision_during_external_changes(
                 move |_| {
                     let polling = Arc::clone(&polling);
                     Box::pin(async move {
-                        report_config_files(&polling).await;
+                        report_config_files(&polling, None).await;
                         Ok(())
                     })
                 },

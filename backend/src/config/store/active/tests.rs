@@ -1,7 +1,7 @@
 use super::*;
 use crate::config::model::LogsDto;
 use crate::config::store::observation::FileObservation;
-use std::fs;
+use std::{fs, sync::Arc};
 
 const FIXTURE: &str = include_str!("../../../../tests/fixtures/config-v2.yaml");
 
@@ -342,7 +342,7 @@ struct Fixture {
     root: PathBuf,
     source: PathBuf,
     derived: PathBuf,
-    store: ConfigStore,
+    store: Arc<ConfigStore>,
 }
 
 impl Fixture {
@@ -355,7 +355,7 @@ impl Fixture {
         let derived = root.join("config.yaml");
         fs::write(&source, FIXTURE).unwrap();
         fs::write(&derived, FIXTURE).unwrap();
-        let store = ConfigStore::with_active_source(source.clone(), FIXTURE, 1).unwrap();
+        let store = Arc::new(ConfigStore::with_active_source(source.clone(), FIXTURE, 1).unwrap());
         Self {
             root,
             source,
@@ -372,7 +372,7 @@ impl Fixture {
         })]
     }
 
-    fn permit(&self, id: &str) -> ApplyPermit<'_> {
+    fn permit(&self, id: &str) -> ApplyPermit {
         let expected = self.store.observe_files().unwrap().expected();
         let changes = self.edit();
         let validation = self
@@ -576,6 +576,26 @@ fn same_content_replacement_changes_identity_and_hardlinks_are_rejected() {
 }
 
 #[test]
+fn background_observation_updates_file_state_without_reloading_active_source() {
+    let fixture = Fixture::new();
+    let initial = fixture.store.active_snapshot().unwrap();
+    fs::write(&fixture.source, format!("{FIXTURE}\n# external\n")).unwrap();
+    let observation = ManagedObservation::read(&fixture.source, Some(&fixture.derived));
+
+    fixture
+        .store
+        .record_file_observation(observation.clone())
+        .unwrap();
+
+    let current = fixture.store.active_snapshot().unwrap();
+    assert_eq!(current.source, initial.source);
+    assert_eq!(current.revision, initial.revision);
+    assert_eq!(current.runtime_revision, initial.runtime_revision);
+    assert_eq!(current.observation, observation);
+    assert!(current.externally_changed());
+}
+
+#[test]
 fn validation_binds_actor_both_revisions_content_and_confirmation() {
     let fixture = Fixture::new();
     let expected = fixture.store.active_snapshot().unwrap().expected();
@@ -738,6 +758,23 @@ fn accepted_operation_is_idempotent_and_dropped_permit_remains_unknown_and_block
             .store
             .validate_edit("session", &expected, &changes, false),
         Err(ActiveError::Busy)
+    ));
+}
+
+#[test]
+fn accepted_operation_blocks_initial_user_commit_until_it_is_reconciled() {
+    let fixture = Fixture::new();
+    let permit = fixture.permit("setup-race");
+
+    assert!(matches!(
+        fixture.store.create_initial_user("admin", "not-a-hash"),
+        Err(ConfigStoreError::Busy)
+    ));
+
+    permit.rejected(true).unwrap();
+    assert!(!matches!(
+        fixture.store.create_initial_user("bad/name", "not-a-hash"),
+        Err(ConfigStoreError::Busy)
     ));
 }
 

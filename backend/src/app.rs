@@ -512,41 +512,43 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 .attach_cache_snapshot_owner(cache_snapshot_owner)
                 .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
             let metrics = Arc::new(crate::management::MetricsOwner::new());
-            let management = match management_bootstrap {
-                Some((config, config_store, database_path, resolve_log_enabled)) => Some(
-                    crate::management::ManagementService::bind_with_config_store(
-                        &config,
-                        config_store,
-                        crate::management::ManagementQueryDependencies::new(
-                            Arc::clone(&coordinator),
-                            database_path,
-                            resolve_log_enabled,
-                            Some(Arc::clone(&telemetry)),
-                            resolution_metrics,
-                            Arc::clone(&metrics),
-                            crate::management::ManagementHistoryDependencies::new(
-                                retention,
-                                detail_store,
-                            ),
-                        ),
-                    )
-                    .await
-                    .map_err(map_management_build_error)?,
-                ),
-                None => None,
-            };
+            let configuration_store = management_bootstrap
+                .as_ref()
+                .map(|(_, store, _, _)| Arc::clone(store));
             let mut service =
                 DnsService::with_default_timeout_from_coordinator_storage_telemetry_and_metrics(
                     coordinator,
                     storage,
-                    telemetry,
-                    metrics,
+                    Arc::clone(&telemetry),
+                    Arc::clone(&metrics),
                 )
                 .map_err(map_service_start_error)?;
             service
                 .attach_logging(logging)
                 .map_err(map_service_start_error)?;
-            if let Some(management) = management {
+            if let Some((config, config_store, database_path, resolve_log_enabled)) =
+                management_bootstrap
+            {
+                let control = service.control();
+                let management = crate::management::ManagementService::bind_with_config_store(
+                    &config,
+                    config_store,
+                    control,
+                    crate::management::ManagementQueryDependencies::new(
+                        Arc::clone(service.coordinator()),
+                        database_path,
+                        resolve_log_enabled,
+                        Some(Arc::clone(&telemetry)),
+                        resolution_metrics,
+                        Arc::clone(&metrics),
+                        crate::management::ManagementHistoryDependencies::new(
+                            retention,
+                            detail_store,
+                        ),
+                    ),
+                )
+                .await
+                .map_err(map_management_build_error)?;
                 service
                     .attach_management(management)
                     .map_err(map_service_start_error)?;
@@ -565,15 +567,17 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 )))
             });
             let polling_watcher = config_watcher.clone();
+            let polling_store = configuration_store.clone();
             let service_result = service
                 .wait_for_ctrl_c_with_reload(
                     SHUTDOWN_GRACE_PERIOD,
                     CONFIG_OBSERVATION_POLL_INTERVAL,
                     move |_service| {
                         let watcher = polling_watcher.clone();
+                        let store = polling_store.clone();
                         Box::pin(async move {
                             if let Some(watcher) = watcher {
-                                report_config_files(&watcher).await;
+                                report_config_files(&watcher, store.as_deref()).await;
                             }
                             Ok(())
                         })

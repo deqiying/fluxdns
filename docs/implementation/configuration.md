@@ -4,9 +4,9 @@
 >
 > 适用范围：本文与当前模板同步，描述配置契约、校验和已实现运行时边界；未定义行为不应视为已支持。
 >
-> 最后核对：2026-09-08（BC-26 正式 v2 启动、活动源与新数据基线）
+> 最后核对：2026-09-08（BC-03/29/30/31 配置事务生产接线）
 >
-> 核对基线：P2 BC-26 工作树
+> 核对基线：`4a5a5a7b13896f3b4c1d86fe4469a3afae38ac10` 加本次 P1 工作树
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
@@ -51,7 +51,7 @@ v2 配置边界只允许单个唯一 `clients[].client_id`，生产 resolver 将
 - 候选依次执行变更预算、活动源定向修改、已知 variant 引用更新、完整 `ConfigV2::parse/validate`、两级路径检查、CST 定位编辑及整树等价复核。覆盖 listener/DoH route、bootstrap、组成员/fallback、策略、Hosts、rule-set selector、proxy 和客户端策略；不对正文、路径、SecretRef 做字符串替换。资源首载、物理 owner 路径、socket 和进程 prepare 仍属于后续运行接线，不能把这一步视为可应用运行态。
 - [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。新增片段经 serializer 转义；支持块/flow、CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验；锚点/别名/merge 等无法安全维护的表达明确拒绝，没有整份重序列化回退。
 - [`observation`](../../backend/src/config/store/observation.rs) 有界读取源与派生文件，各自区分可读/缺失/不可读/超限，组合 token 包含内容指纹和物理文件身份；同内容替换仍产生不同 token。拒绝 hard link、symlink/reparse 路径；读取前后核对身份和元数据。Windows 使用真实 FileId，Unix 代码未在本次执行。此观测不提供 filesystem CAS，正式替换前仍须重新核对；BC-29 的写入身份与旁文件保护见下节。
-- 60 秒验证票据绑定调用者、候选、双 revision 与影响确认，只缓存 SHA-256 摘要；受管内容/观测 token 同样使用 SHA-256，不复用旧迁移 hash。随机验证票据仍为 256 bit，复用已有 `sha2 0.10.9`，没有依赖变更。操作记录上限 1024、完成后保留 30 分钟，进行中记录不淘汰。同 ID 不同命令拒绝，相同命令返回已有阶段；不同调用者的查询不披露结果。未同步、补偿失败或 permit 中断保持 gate，未知不被视为未执行。普通变更仍未调用 Runtime；状态机中的成功回报测试只是模拟控制 owner，实际文件事务的内部消费见下节。
+- 60 秒验证票据绑定调用者、候选、双 revision 与影响确认，只缓存 SHA-256 摘要；受管内容/观测 token 同样使用 SHA-256，不复用旧迁移 hash。随机验证票据仍为 256 bit，复用已有 `sha2 0.10.9`，没有依赖变更。操作记录上限 1024、完成后保留 30 分钟，进行中记录不淘汰。同 ID 不同命令拒绝，相同命令返回已有阶段；不同调用者的查询不披露结果。未同步、补偿失败或 permit 中断保持 gate，未知不被视为未执行。普通变更现由下述 P1 operation owner 连接 Runtime 与持久化；P3 单模块入口仍未开放。
 
 BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 71 项（含摘要加固后的 SHA-256 固定向量）、`management::` 18 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过。Node/Vite 子进程在沙盒内被 `spawn EPERM` 阻止后，经批准在沙盒外重跑通过。新测试覆盖候选/引用/源表达和真实双文件观测；文件只在 `_fluxdns/p1-config-tests/` 的随机用例目录创建并清理。该批未执行真实 v2 启动、HTTP、DNS 热更新、journal crash point、文件还原/同步重试、日志切换或浏览器验收；后续批次证据单列。当前 schema 和生成类型没有 wire 变化。
 
@@ -66,7 +66,7 @@ BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml 
 
 Windows Rust 1.98.0 本批 `config::` 89 项通过，其中 ConfigStore 28 项。新增子进程以退出码 73 在 PREPARED、COMMIT_DECIDED、源替换后、派生替换后直接退出，验证真实文件与 OS 锁恢复；另有真实 Windows journal/派生文件占用失败、同步重试、同内容换身份、损坏/超限 journal、单文件去重、权限和别名测试。测试数据限定 `_fluxdns/p1-journal-tests/` 与 `_fluxdns/p1-config-tests/`，不读取个人配置。
 
-剩余边界：Runtime 成功回报仍由测试模拟，v2 配置事务 owner/服务生产者、启动 recovery、HTTP 状态/重试端点未接线。缺失文件还原及外部新修改后的明确确认/事务重建已有下述内部能力，完整差异工作区仍归 BC-30；未确认新双文件版本时不能强行覆盖未知外改。文件 I/O 为同步内部调用，HTTP 断开后的 owner 生命周期和应用预算仍需接线验证。崩溃在 journal 建立之前或决策旁文件替换之前可能留下未登记的受限旁文件；不扫描删除未知残留，需明确人工处理。非合作编辑器的核对/替换竞态不能被普通 filesystem replace 完全消除。因此 BC-29 和 P1 生产退出条件仍未关闭。
+当前正式 operation owner 已把 Runtime 成功回报接到 `persist_applied`，启动也在 loader 前执行 v2 recovery；文件 I/O 由阻塞 owner 调度，HTTP 断开不取消已受理操作。缺失文件还原及外部新修改后的明确确认/事务重建由固定文件路由消费；未确认新双文件版本时仍不能覆盖未知外改。崩溃在 journal 建立之前或决策旁文件替换之前可能留下未登记的受限旁文件；不扫描删除未知残留，需明确人工处理。非合作编辑器的核对/替换竞态不能被普通 filesystem replace 完全消除。
 
 ### P1 受管文件还原内部能力（2026-09-07）
 
@@ -78,7 +78,7 @@ Windows Rust 1.98.0 本批 `config::` 89 项通过，其中 ConfigStore 28 项�
 
 Windows 本批 ConfigStore 36 项、完整 `config::` 97 项通过。新增还原确认/幂等/双版本冲突、真实文件占用失败和显式重试、单/双文件缺失、目录/硬链接拒绝、父目录替换、DACL 保留以及 no-replace 测试。子进程矩阵从 4 个扩至 8 个 crash point，增加缺失双文件的 PREPARED、COMMIT_DECIDED、源提交后、派生提交后；PREPARED 不补建目标，持久决策才补齐。用例数据仍在 `_fluxdns/p1-config-tests/` 和 `_fluxdns/p1-journal-tests/`，递归清理前核对真实绝对路径归属。
 
-该子项未接入 HTTP/UI 或 v2 生产启动，不替代完整 BC-30。新外改后的重新确认/事务重建、配置状态投影内部进度见下文；受限差异预览，以及文件 I/O 的异步 owner/预算和响应中断仍待完成。不能以内部 revision 不变断言新版真实 DNS 联合还原已验收。
+该子项现已接入受 Bearer/Origin 保护的文件还原路由和阻塞 owner；UI 全局接线另见前端实现。新外改后的重新确认/事务重建、配置状态投影见下文；还原仍不改变 Runtime revision，不能把文件成功等同为重新应用 DNS。
 
 ### P1 外改确认重试内部能力（2026-09-07）
 
@@ -90,7 +90,7 @@ Windows 本批 ConfigStore 36 项、完整 `config::` 97 项通过。新增还�
 
 Windows Rust 1.98.0 本批 `config::` 104 项通过，其中 ConfigStore 43 项。独立子进程退出矩阵扩至 12 个检查点，新增外改重新确认前、新决策持久化后、源替换后和派生替换后；新决策前保持未知外改，新决策后仅完成已确认候选。另有真实 journal 文件占用、调用者/双版本冲突、重复重试不覆盖后续外改、旁文件篡改与连续确认清单上界测试。`cargo check`、全部测试目标 `--all-targets --no-run` 和 fmt 检查通过；未执行断电、跨平台或正式 v2 HTTP 联合验收。
 
-该内部重试不意味着正式 `/api/v2/config/files/retry` 已可用。冻结结果的内部投影见下节，认证/handler、异步持久化 owner 和启动恢复仍未闭合；HTTP 结果未知必须查询 operation，不能自动重放应用或还原。
+正式 `/api/v2/config/files/retry` 已只推进原 operation 的文件事务，认证、阻塞 owner 和启动恢复均已接线；HTTP 结果未知仍必须查询 operation，不能自动重放应用或还原。
 
 ### P1 配置状态与冻结操作结果（2026-09-07）
 
@@ -100,7 +100,7 @@ ConfigStore 的操作记录保存 `OperationSnapshot`，在每次状态转移时
 
 每个文件的已知状态来自上次持久化身份/摘要，或当前 journal 明确绑定的候选身份/摘要。部分提交只将精确匹配的那一个目标识别为自写，不用“忽略下一次事件”或仅内容相同放行。同步成功后以 journal 候选身份建立基线，随后读到的未知外改仍显示 changed；同内容换 FileId 也要求外改确认。`synchronization: synced` 表示上次受管提交完成，外部变化独立通过 `files` 表示，不等于磁盘当前仍与活动源一致。
 
-本批新增保留期、进行中固定、状态查询不阻塞及冻结结果类别的定向测试；Windows 实际文件投影覆盖部分提交、重试、同内容换身份、缺失、超限和不可读。测试回报的 Runtime 成功仍是内部模拟，未据此证明 v2 DNS/HTTP 联合流程。
+本批新增保留期、进行中固定、状态查询不阻塞及冻结结果类别的定向测试；Windows 实际文件投影覆盖部分提交、重试、同内容换身份、缺失、超限和不可读。2026-09-08 又以真实 v2 进程、Bearer HTTP、UDP、SQLite 和双文件验证了 Runtime 应用及文件同步，具体联合证据见下节。
 
 ### P1 外部差异输入内部能力（2026-09-08）
 
@@ -108,7 +108,15 @@ ConfigStore 的操作记录保存 `OperationSnapshot`，在每次状态转移时
 
 返回前再次观测双文件并核对活动 revision，期间内容或身份改变返回 `FileConflict`，活动发布交错返回 `ActiveConflict`；不把旧活动值配上新版本。缺失、不可读、超限、旧版本和无效配置只返回白名单错误类别。预览更新缓存观测，但不创建操作、候选或文件，不应用 Runtime、不改变 active/persisted revision。
 
-这是需要有界后台 owner 调度的同步内部入口，不可直接在 HTTP executor 执行，也不构成文件系统 CAS。Windows 定向测试覆盖双文件内容/同内容换身份、活动发布交错、事务忙及无副作用；`config::` 110 项通过。类型化 HTTP DTO 投影、输出预算与未接线项见[差异投影](backend/management.md#p1-外部配置差异内部投影2026-09-08)。
+该同步入口由阻塞 owner 调度，不直接占用 HTTP executor，也不构成文件系统 CAS。Windows 定向测试覆盖双文件内容/同内容换身份、活动发布交错、事务忙及无副作用；类型化 HTTP DTO 投影与输出预算见[差异投影](backend/management.md#p1-外部配置差异内部投影2026-09-08)。
+
+### P1 配置事务生产接线（2026-09-08）
+
+[`ConfigMutationOwner`](../../backend/src/management/config_mutation.rs) 以同一 `Arc<ConfigStore>` 和 [`ServiceControl`](../../backend/src/service/control.rs) 为权威。校验和 ConfigStore 文件阶段在 `spawn_blocking` 执行；已受理 apply 立即保留可查询 operation，随后独立于 HTTP 请求完成 `resolve_config_v2`、SecretRef 检查、远程资源/Policy prepare、PREPARED 文件阶段、service 应用回执、活动源发布及持久化。回执丢失或任务中断保留 `Unknown`，不会自动重放；只有 `LoggingCompensation` 明确标记补偿失败，其余发布前拒绝清理候选并释放 gate。
+
+正式 app 在构造并挂接日志 owner 后把 `service.control()` 注入 Management，再注册 HTTP task。稳定双文件 watcher 会把已完成的 `ManagedObservation` 写入 ConfigStore；Store 忙时保留该事实供下一轮投递。外改仍不调用 Runtime。启动顺序继续先恢复 setup/v2 journal，再由 loader 建立活动源；PREPARED 只清理，COMMIT_DECIDED 只补齐已知候选。
+
+Windows 真实联合验证使用 `_fluxdns/p1-config-runtime-live/` 的 v2 源文件、派生文件、SQLite 和 loopback UDP/HTTP。日志父目录缺失时 operation 返回 `APPLY_FAILED`，Runtime revision 保持 1、双文件未变；创建目录后相同 logs 候选完成 `applied_synced`，Runtime revision 变为 2，源/派生一致，debug 日志写入新路径，前后 UDP `localhost A` 均返回 `127.0.0.1`，SQLite `fluxdns_layout` 为 `statistics-v2|1`。外改源文件后 watcher 报 `changed` 且 Runtime 不变，差异投影返回 logs，文件还原与已同步重试均不重新应用 Runtime。进程停止并从持久化源重启后继续读取 `debug` 和 `./logs/hot.log`。配置定向测试 115 项通过，包含真实 Windows 子进程 crash matrix；未验证 Unix、磁盘满、OS I/O 强制中断或 P3 模块表单写入。
 
 ### 当前生产加载器
 
@@ -120,7 +128,7 @@ ConfigStore 的操作记录保存 `OperationSnapshot`，在每次状态转移时
 | 资源与缓存 | async PreparedRuntime、PolicyDnsCore | run 加载后 prepare | 本轮核对生产接线 | 能解析不表示网络/文件/SQLite 已成功打开 |
 | WebUI | webui model + ManagementService | enable 时创建服务 | 本轮静态 | origin、DB 与 bind 必须可用；默认 binary 可仅提供 API，SPA 需要 embed feature，详见[管理端](backend/management.md) |
 | 首用户写回 | active ConfigStore + source-preserving editor | setup，run 前恢复 journal | v2 active source 双文件提交测试 | HTTP 断连与磁盘故障组合仍需更高层验收 |
-| 热重载 | `process_owned_reload_change` + service owner | 显式 service-aware 应用；watcher 只提示 | P1 证据见[生命周期](backend/lifecycle.md)及[日志热切换](backend/background-services.md#p1-日志热切换2026-09-07) | database、webui enable/address/port/public_origin、dns.resolve_log 仍为启动级；logs 经 owner 热切换，users 可动态更新；v2 事务未闭合 |
+| 热重载 | `ConfigMutationOwner` + `ServiceControl` + `reload_prepared` | P1 组合 apply；watcher 只更新文件事实 | 真实 Bearer HTTP、UDP、SQLite、日志和双文件联合验证 | database、webui enable/address/port/public_origin、dns.resolve_log 仍为启动级；P3 单模块写入未开放 |
 
 本表原始静态核对未执行 Cargo 或配置 validate，后续 P1 定向验证以上述分批记录为准。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)，验证专项的已知边界见[验证范围与收口](backend/background-services.md#验证范围与收口)。既定契约与代码冲突时须保留复现证据并明确修复边界，不仅修改字段说明来掩盖实现缺口。
 

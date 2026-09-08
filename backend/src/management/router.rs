@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 
 use super::assets;
 use super::auth::{AuthError, AuthState, hash_password, validate_setup_credentials};
+use super::config_mutation::ConfigMutationOwner;
 use super::query;
 use super::query::ManagementQueryService;
 use super::session::{SessionStore, SessionView, valid_token};
@@ -45,8 +46,9 @@ pub(crate) struct AuthServices {
     pub(crate) auth: Arc<AuthState>,
     pub(crate) sessions: Arc<SessionStore>,
     pub(crate) config_store: Arc<ConfigStore>,
+    pub(crate) config_mutations: Option<Arc<ConfigMutationOwner>>,
     pub(crate) queries: Option<Arc<ManagementQueryService>>,
-    public_origin: String,
+    pub(crate) public_origin: String,
     attempts: Arc<AttemptLimiter>,
 }
 
@@ -62,10 +64,19 @@ impl AuthServices {
             auth,
             sessions,
             config_store,
+            config_mutations: None,
             queries,
             public_origin,
             attempts: Arc::new(AttemptLimiter::default()),
         }
+    }
+
+    pub(crate) fn with_config_control(mut self, control: crate::service::ServiceControl) -> Self {
+        self.config_mutations = Some(Arc::new(ConfigMutationOwner::new(
+            Arc::clone(&self.config_store),
+            control,
+        )));
+        self
     }
 }
 
@@ -129,6 +140,7 @@ pub(crate) fn build_router(services: Arc<AuthServices>) -> Router {
     let protected = Router::new()
         .route("/api/v1/auth/session", get(get_session))
         .merge(query::routes())
+        .merge(super::config_mutation::routes())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&services),
             require_session,
@@ -194,8 +206,11 @@ async fn request_boundary(
         .get(CONTENT_LENGTH)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<usize>().ok())
-        .is_some_and(|value| value > MAX_JSON_BODY_BYTES)
+        .is_some_and(|value| value > request_body_limit(request.uri().path()))
     {
+        if request.uri().path().starts_with("/api/v2/") {
+            return v2_error_response(super::contract::ErrorCode::PayloadTooLarge, &request_id);
+        }
         return error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
             "PAYLOAD_TOO_LARGE",
@@ -237,6 +252,16 @@ async fn request_boundary(
         }
     }
     with_request_id(response, &request_id)
+}
+
+fn request_body_limit(path: &str) -> usize {
+    match path {
+        "/api/v2/config/validate"
+        | "/api/v2/config/apply"
+        | "/api/v2/config/files/restore"
+        | "/api/v2/config/files/retry" => super::contract::MAX_MUTATION_BYTES,
+        _ => MAX_JSON_BODY_BYTES,
+    }
 }
 
 async fn require_session(
@@ -481,21 +506,37 @@ async fn fallback(request: Request<Body>) -> Response {
     assets::fallback(request).await
 }
 
-fn validate_mutating_request(
+pub(super) fn validate_mutating_request(
     headers: &HeaderMap,
     public_origin: &str,
     request_id: &RequestId,
 ) -> Option<Response> {
+    if mutating_request_is_allowed(headers, public_origin) {
+        return None;
+    }
+    Some(error_response(
+        StatusCode::BAD_REQUEST,
+        "ORIGIN_REJECTED",
+        "request origin was rejected",
+        false,
+        request_id,
+    ))
+}
+
+pub(super) fn validate_v2_mutating_request(
+    headers: &HeaderMap,
+    public_origin: &str,
+    request_id: &RequestId,
+) -> Option<Response> {
+    (!mutating_request_is_allowed(headers, public_origin))
+        .then(|| v2_error_response(super::contract::ErrorCode::Forbidden, request_id))
+}
+
+fn mutating_request_is_allowed(headers: &HeaderMap, public_origin: &str) -> bool {
     let mut origins = headers.get_all(ORIGIN).iter();
     let origin = origins.next().and_then(|value| value.to_str().ok());
     if origin != Some(public_origin) || origins.next().is_some() {
-        return Some(error_response(
-            StatusCode::BAD_REQUEST,
-            "ORIGIN_REJECTED",
-            "request origin was rejected",
-            false,
-            request_id,
-        ));
+        return false;
     }
     let mut fetch_sites = headers.get_all("sec-fetch-site").iter();
     if fetch_sites
@@ -504,15 +545,9 @@ fn validate_mutating_request(
         .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
         || fetch_sites.next().is_some()
     {
-        return Some(error_response(
-            StatusCode::BAD_REQUEST,
-            "ORIGIN_REJECTED",
-            "request origin was rejected",
-            false,
-            request_id,
-        ));
+        return false;
     }
-    None
+    true
 }
 
 fn session_token(headers: &HeaderMap) -> Option<String> {

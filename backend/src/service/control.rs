@@ -1,5 +1,4 @@
 //! 服务 owner 的有界配置应用命令；不提供停止/重启或任意执行能力。
-#![allow(dead_code)] // BC-03 消费者已接线，v2 配置事务生产者待新版 Runtime prepare 闭合。
 
 use std::time::Instant;
 
@@ -29,6 +28,7 @@ pub(super) struct ApplyCommand {
 /// 入队与实际应用是两个边界；接收回执失败不能被解释为“没有执行”。
 pub(crate) struct ApplyReceipt {
     result: oneshot::Receiver<Result<RuntimeRevision, ControlError>>,
+    #[cfg(test)]
     deadline: Deadline,
 }
 
@@ -79,16 +79,28 @@ impl ServiceControl {
                 mpsc::error::TrySendError::Full(_) => ControlError::Busy,
                 mpsc::error::TrySendError::Closed(_) => ControlError::Unavailable,
             })?;
-        Ok(ApplyReceipt { result, deadline })
+        Ok(ApplyReceipt {
+            result,
+            #[cfg(test)]
+            deadline,
+        })
     }
 }
 
 impl ApplyReceipt {
     /// 等待仅消费当前回执；超时/断线必须由配置事务查询 operation，不能自动重新入队。
+    #[cfg(test)]
     pub(crate) async fn outcome(self) -> Result<RuntimeRevision, ControlError> {
         tokio::time::timeout(self.deadline.remaining(Instant::now()), self.result)
             .await
             .map_err(|_| ControlError::OutcomeUnknown)?
+            .map_err(|_| ControlError::OutcomeUnknown)?
+    }
+
+    /// 配置 operation owner 不受单个 HTTP 请求生命周期约束，并等待 service 的最终回执。
+    pub(crate) async fn owner_outcome(self) -> Result<RuntimeRevision, ControlError> {
+        self.result
+            .await
             .map_err(|_| ControlError::OutcomeUnknown)?
     }
 }

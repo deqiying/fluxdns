@@ -112,6 +112,18 @@ fn apply_envelope_and_ws_filters_use_the_same_ingress_boundaries() {
     apply["candidate"]["changes"][0]["change"]["value"]["strategy"] = Value::Null;
     assert!(decode_apply(&serde_json::to_vec(&apply).unwrap(), None).is_err());
 
+    let mut file_sync = json!({
+        "operation_id": "file-operation-1",
+        "expected": {
+            "active_revision": "active-1",
+            "observed_file_revision": "files-1"
+        },
+        "discard_external_changes": true
+    });
+    assert!(decode_file_sync(&serde_json::to_vec(&file_sync).unwrap()).is_ok());
+    file_sync["path"] = json!("not-accepted.yaml");
+    assert!(decode_file_sync(&serde_json::to_vec(&file_sync).unwrap()).is_err());
+
     let base = json!({
         "type": "subscribe_queries",
         "subscription_id": "subscription-1",
@@ -208,7 +220,7 @@ fn operation_states_cannot_mix_success_and_failure_fields() {
 }
 
 #[test]
-fn openapi_protection_constants_match_rust_and_write_routes_are_not_registered() {
+fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_registered() {
     let schema: yaml_serde::Value = yaml_serde::from_str(include_str!(
         "../../../../frontend/openapi/management-api-v2.yaml"
     ))
@@ -250,6 +262,8 @@ fn openapi_protection_constants_match_rust_and_write_routes_are_not_registered()
             .unwrap()
             .len()
     );
-    let router = include_str!("../router.rs");
-    assert!(!router.contains("/api/v2/config"));
+    let routes = include_str!("../config_mutation.rs");
+    assert!(routes.contains("/api/v2/config/apply"));
+    assert!(routes.contains("/api/v2/config/files/restore"));
+    assert!(!routes.contains("/api/v2/config/modules/{module}"));
 }

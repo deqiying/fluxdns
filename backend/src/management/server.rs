@@ -21,6 +21,7 @@ use crate::observability::TelemetryWriter;
 use crate::ports::management::ManagementStorageRead;
 use crate::resolution::ResolutionPipelineMetrics;
 use crate::runtime::{RuntimeCoordinator, TaskError};
+use crate::service::ServiceControl;
 use crate::storage::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
 
 pub(crate) struct ManagementService {
@@ -66,6 +67,7 @@ impl ManagementService {
     pub(crate) async fn bind_with_config_store(
         config: &ResolvedWebUi,
         config_store: Arc<ConfigStore>,
+        config_control: ServiceControl,
         dependencies: ManagementQueryDependencies,
     ) -> Result<Self, ManagementBuildError> {
         assets::ensure_available().map_err(ManagementBuildError::Assets)?;
@@ -89,13 +91,16 @@ impl ManagementService {
             dependencies.metrics,
             dependencies.history,
         ));
-        let services = Arc::new(AuthServices::new(
-            Arc::clone(&auth),
-            Arc::clone(&sessions),
-            Arc::clone(&config_store),
-            origin.as_str().trim_end_matches('/').to_owned(),
-            Some(queries),
-        ));
+        let services = Arc::new(
+            AuthServices::new(
+                Arc::clone(&auth),
+                Arc::clone(&sessions),
+                Arc::clone(&config_store),
+                origin.as_str().trim_end_matches('/').to_owned(),
+                Some(queries),
+            )
+            .with_config_control(config_control),
+        );
         let runtime = Arc::new(ManagementRuntime::new(auth, sessions, config_store));
         let address = SocketAddr::new(config.address, config.port);
         let listener = tokio::net::TcpListener::bind(address)

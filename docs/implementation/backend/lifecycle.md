@@ -4,9 +4,9 @@
 >
 > 适用范围：正式 CLI 启动、资源准备、bind、reload 与 shutdown 接线
 >
-> 最后核对：2026-09-08（UTC；启动/停机、刷新/reload 竞争与 cache snapshot owner 本机契约验证）
+> 最后核对：2026-09-08（P1 配置 operation、文件观测与 service 应用接线）
 >
-> 核对基线：`8ac6c63168285093350e79a1cfb039a900871123` 加本次 BC-07 工作树
+> 核对基线：`4a5a5a7b13896f3b4c1d86fe4469a3afae38ac10` 加本次 P1 工作树
 
 ## 正式入口
 
@@ -20,8 +20,8 @@
 4. `StorageRuntime::open` 在共享 deadline 内建目录、打开统计/详情数据库、迁移并执行独立事务写入/回滚探针；失败映射为 prepare 错误，不创建服务 owner。
 5. app 创建唯一 `CacheSnapshotOwner`，在独立的有界 prepare deadline 内把快照分批恢复到活动 Moka；恢复故障降级冷启。owner 就绪后才继续 bind。
 6. `bind_prepared` 使用 `SystemSocketFactory` 绑定 DNS endpoint，构造 `RuntimeCoordinator` 并登记与活动 core 匹配的 snapshot owner。
-7. WebUI 启用时 `ManagementService::bind` 注入 coordinator、数据库路径、详情开关、telemetry 与 resolution metrics。
-8. 构造 `DnsService`，通过 `attach_logging` 挂接同一进程日志 owner，通过 `attach_management` 注册管理服务；进入信号、Supervisor 和配置 watcher 等待。
+7. 构造 `DnsService` 并通过 `attach_logging` 挂接同一进程日志 owner，再取得有界 `ServiceControl`。
+8. WebUI 启用时 `ManagementService::bind_with_config_store` 注入活动 ConfigStore、ServiceControl、coordinator、数据库/详情读口、telemetry 与 metrics，随后通过 `attach_management` 注册管理服务；最后进入信号、Supervisor 和配置 watcher 等待。
 
 `validate` 不执行后面的资源网络 fetch、数据库打开或 listener bind，因此配置校验通过不证明端口、秘密实际值、资源、SQLite 或网络可用。
 
@@ -43,17 +43,17 @@ Storage/Telemetry 和解析统计 sink 由进程持有，reload 为候选 core �
 
 TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于进程 owner，reload 不重置累计量。与之不同，重新 prepare 的 DoH connector 创建独立 bootstrap 地址缓存；旧请求只能填旧 resolver，候选失败不影响活动缓存。资源-only publish 未替换 connector 时继续使用其原缓存。
 
-P1 的 logs enable/level/path 已进入 service-aware 热应用边界，先预开输出，再协调 filter/Runtime 发布，保留旧输出和真实失败分类，见[日志热切换](background-services.md#p1-日志热切换2026-09-07)。仅 coordinator 的旧入口没有日志 owner，继续拒绝日志变化。该接线不代表 v2 配置事务或 HTTP 日志保存已完成。
+P1 的 logs enable/level/path 已通过 ConfigMutationOwner 进入 service-aware 热应用边界，先预开输出，再协调 filter/Runtime 发布，保留旧输出和真实失败分类，见[日志热切换](background-services.md#p1-日志热切换2026-09-07)。仅 coordinator 的旧入口没有日志 owner，继续拒绝日志变化。
 
 ### P1 仅提示文件观测（2026-09-07）
 
 正式 `run_command` 使用加载结果中的绝对源路径与 `work.snapshot_path`，相同路径只观测一次。[`ConfigFileWatcher`](../../../backend/src/app/config_watcher.rs) 复用 ConfigStore 的 `ManagedObservation`，源/派生文件分别受 4 MiB、SHA-256、文件身份和路径链接检查约束；服务轮询只收取已结束的结果，文件读取移到最多一个在途 `spawn_blocking` 任务，不积压读取队列。
 
-连续两次稳定观测后产生 `configuration_files_observed` 事件。tracing 调用点带组合 revision、readable/missing/unreadable/oversized 状态和 `not_reloaded`，不带内容或凭据；既有 `TypedTracingLayer` 只保留固定日志字段，正式 JSON 目前保留事件名而不保留上述自定义观测字段，不能将调用点字段当作已接线的状态投影。首次稳定状态也中性上报，不能静默接受 prepare 期间的外改。不解析或应用磁盘候选、不更新会话、不修改磁盘；变更提示不等于候选有效，也不猜测是否属于自写。退出停止调度并有界等待只读任务；若无法确认完成则显式警告，不声称 OS 文件 I/O 已取消。
+连续两次稳定观测后，watcher 先把同一份 `ManagedObservation` 写入活动 ConfigStore，再产生 `configuration_files_observed` 事件；Store 正忙时保留观测并在下一轮重投，不在 service loop 同步读盘。tracing 调用点带组合 revision、readable/missing/unreadable/oversized 状态和 `not_reloaded`，不带内容或凭据；既有 `TypedTracingLayer` 只保留固定日志字段，正式 JSON 目前保留事件名而不保留上述自定义观测字段。首次稳定状态也中性上报。不解析或应用磁盘候选、不更新会话、不修改磁盘；变更提示不等于候选有效。退出停止调度并有界等待只读任务；若无法确认完成则显式警告，不声称 OS 文件 I/O 已取消。
 
 Windows 定向测试覆盖双文件、防抖、同长度内容变化、同内容文件身份替换、无效 YAML、缺失、非文件、超限和慢读取单在途。真实 UDP 服务在与生产相同的控制循环中，源/派生文件连续变化后保持同一个 Runtime、revision 和 DNS 策略；随后仅改 Hosts 资源文件，由正式 resource worker 到期刷新 DNS 结果，未手动调用 refresh。该 watcher 证据早于 BC-26，仍只证明外改不触发 reload；v2 冷启/重启证据单独记录。
 
-BC-30 已有 ConfigStore 的[还原内部能力](../configuration.md#p1-受管文件还原内部能力2026-09-07)和[外改确认重试](../configuration.md#p1-外改确认重试内部能力2026-09-07)，但配置 owner 的自写归属、脱敏差异和状态/还原/重试端点仍未接线；当前仅有日志通知，不等同于 WebUI 全局提示。文件系统停滞的强制中断、完整应用级 shutdown 总预算仍未验证。
+BC-30 的 ConfigStore [还原](../configuration.md#p1-受管文件还原内部能力2026-09-07)、[外改确认重试](../configuration.md#p1-外改确认重试内部能力2026-09-07)、脱敏差异和状态/文件端点已正式接线；WebUI 全局提示见前端实现。文件系统停滞的强制中断和完整应用级 shutdown 总预算仍未验证。
 
 ### P1 差量 socket 子项（2026-09-07）
 
@@ -85,9 +85,9 @@ Windows Rust 1.98.0 验证：新增 2 项真实 loopback 测试覆盖复用/差�
 
 [`service/control.rs`](../../../backend/src/service/control.rs) 提供单候选排队的 `ServiceControl`，另有一个由现有 `DnsService` 执行的应用槽。`try_apply` 只接受已准备且为 expected + 1 的 Runtime，队列满、已过期或 owner 已关闭时明确拒绝；服务循环消费时再次核对 revision/deadline，再走同一个 `reload_prepared`，不复制 Supervisor，也不增加重启/停止命令。
 
-回执超时或通道断开是 `OutcomeUnknown`，不会自动重发；调用者丢弃回执也不撤销已接纳命令。关闭 owner 会停止接纳并拒绝尚在排队的命令；应用等待 mutation gate 时仍可响应退出信号，中断的命令回执只能报告未知。该队列尚未连接 ConfigStore 的 operation owner，不独立提供可查询操作记录或 HTTP 幂等保证。
+回执超时或通道断开是 `OutcomeUnknown`，不会自动重发；调用者丢弃回执也不撤销已接纳命令。关闭 owner 会停止接纳并拒绝尚在排队的命令；应用等待 mutation gate 时仍可响应退出信号，中断的命令回执只能报告未知。生产 ConfigMutationOwner 现在等待 service 最终回执并更新 ConfigStore 的可查询 operation；单个 HTTP 请求只负责受理，不持有该生命周期。
 
-Windows 新增 6 项测试覆盖容量、入队/出队过期、关闭、真实服务循环换代、丢弃回执后继续应用、旧 revision 拒绝、真实绑定失败后旧 DNS 可查询、回执丢失/超时，以及提交锁等待期间退出。`service::` 筛选 69 项通过、3 项按原声明 ignored。夹具仍为生产 v1 的内存配置，工作路径指向 `_fluxdns/p1-service-control`，无新数据库布局；不能把队列消费者接线解释为 v2 Management 候选已可保存。
+既有 6 项测试覆盖容量、入队/出队过期、关闭、真实服务循环换代、丢弃回执后继续应用、旧 revision 拒绝、真实绑定失败后旧 DNS 可查询、回执丢失/超时，以及提交锁等待期间退出。2026-09-08 的 v2 真实进程进一步通过组合 apply 将日志配置应用、持久化并重启复读，前后 UDP 查询持续成功；文件、SQLite 与 HTTP 证据见[配置事务生产接线](../configuration.md#p1-配置事务生产接线2026-09-08)。
 
 ## Shutdown 与错误
 
@@ -106,7 +106,7 @@ Storage 停机先关闭 detail 输入并回收当前正在提交的 batch，不�
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | 完整启动 | `run_command`、async prepare、StorageRuntime deadline/probe | `main -> app -> DnsService` | 过期预算不建库、真实 SQLite 写锁与写入拒绝/回滚测试 | 不证明真实磁盘满或权限故障全部可恢复 |
-| 配置切换 | `reload_service_from_path`、`reload_prepared` | 显式内部入口，复用进程服务；watcher 只观测 | reload/rebind/failure 和外改不 reload 用例 | v2 生产者未接线；不宣称所有平台组合已验收 |
+| 配置切换 | `ConfigMutationOwner`、`ServiceControl`、`reload_prepared` | P1 组合 apply，复用进程服务；watcher 只观测 | reload/rebind/failure、真实 v2 Bearer HTTP/UDP/日志/文件联合验证 | P3 单模块写入未接线；不宣称所有平台组合已验收 |
 | 有界停机 | `shutdown`、finalizer owner、stats-first | 正常信号及 fatal task 路径 | SQLite trigger 验证 stats 提交先于 300 条多批详情排空 | 已执行 SQL 无强制抢占保证；Unix 双信号 smoke 未执行 |
 | 安全 panic hook | 固定分类、受限源码位置、backtrace 状态 | 异步 `main` 第一项安装 `std::panic::set_hook` | 独立子进程验证主线程/worker panic 不泄漏 payload、线程名或完整栈 | 不改变内部 task owner 的失败升级策略；安装前异常不覆盖 |
 

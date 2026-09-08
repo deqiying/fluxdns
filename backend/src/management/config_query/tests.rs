@@ -8,6 +8,7 @@ use serde_json::{Value, json};
 use std::{
     fs,
     path::PathBuf,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -19,7 +20,7 @@ struct Fixture {
     root: PathBuf,
     source: PathBuf,
     derived: PathBuf,
-    store: Option<ConfigStore>,
+    store: Option<Arc<ConfigStore>>,
 }
 
 impl Fixture {
@@ -46,8 +47,9 @@ impl Fixture {
         let content = format!("{source_text}\n# private-configuration-sentinel\n");
         fs::write(&source, &content).unwrap();
         fs::write(&derived, &content).unwrap();
-        let store =
-            ConfigStore::with_active_source(source.clone(), &content, runtime_revision).unwrap();
+        let store = Arc::new(
+            ConfigStore::with_active_source(source.clone(), &content, runtime_revision).unwrap(),
+        );
         Self {
             root,
             source,
@@ -56,11 +58,11 @@ impl Fixture {
         }
     }
 
-    fn store(&self) -> &ConfigStore {
+    fn store(&self) -> &Arc<ConfigStore> {
         self.store.as_ref().unwrap()
     }
 
-    fn permit(&self, id: &str, level: LogLevelDto) -> ApplyPermit<'_> {
+    fn permit(&self, id: &str, level: LogLevelDto) -> ApplyPermit {
         let expected = self.store().observe_files().unwrap().expected();
         let changes = vec![ConfigChange::Logs(LogsDto {
             enable: false,

@@ -16,16 +16,18 @@
 
 | 源码 | 已有能力 | 本次必须改变 |
 | --- | --- | --- |
-| [app.rs](../../backend/src/app.rs) `ConfigFileWatcher`、`wait_for_ctrl_c_with_reload` 调用 | 已改为双文件稳定观测、单在途有界后台读取，仅输出提示；不调用 reload | 仍需连接配置 owner 的逐文件自写归属、状态端点和全局提示 |
-| [ConfigStore](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs) | v2 活动原文、定向候选、双文件 journal、冻结操作结果和内部状态投影 | 继续接入异步事务 owner、正式启动与 HTTP；不能直接套用原“先文件后认证”的事务 |
-| [service.rs](../../backend/src/service.rs) `reload_prepared` | 已差量复用、CAS 前预注册任务，已接纳旧请求按原 deadline drain | 继续完成控制命令和新进程 owner 的应用/补偿 |
+| [app.rs](../../backend/src/app.rs) `ConfigFileWatcher`、`wait_for_ctrl_c_with_reload` 调用 | 双文件稳定观测、单在途有界后台读取并投递 ConfigStore；不调用 reload | 前端全局提示消费状态；OS I/O 强制中断仍不承诺 |
+| [ConfigStore](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs) | v2 活动原文、定向候选、双文件 journal、冻结结果、恢复和正式 operation owner | P3 单模块表单继续复用，不建立第二套权威 |
+| [service.rs](../../backend/src/service.rs) `reload_prepared` | 差量复用、CAS 前任务注册、请求 drain，并由 ConfigMutationOwner 消费最终回执 | P3 owner 随模块能力补充，不复制控制循环 |
 | [RuntimeCoordinator](../../backend/src/runtime/coordinator.rs) | 活动快照、revision、mutation gate、旧请求 drain | 复用此权威，不另建 WebUI Runtime；补足提交成功定义 |
-| [service.rs](../../backend/src/service.rs) `process_owned_reload_change` | database、部分 webui、resolve_log 变化被拒绝；logs 经 service owner 热切换 | 继续完成 v2 事务/持久化联合接线；详情 owner 随对应阶段推进 |
-| [observability.rs](../../backend/src/observability.rs) | app 始终创建同一 writer；日志 owner 复用 filter/共享输出，支持 off/on、level/path | 已有[Windows 子项证据](../implementation/backend/background-services.md#p1-日志热切换2026-09-07)，v2 HTTP/UI 与联合事务仍未闭合 |
+| [service.rs](../../backend/src/service.rs) `process_owned_reload_change` | database、部分 webui、resolve_log 变化被拒绝；logs 经 service owner 热切换 | 详情 owner 随对应阶段推进；启动级字段继续拒绝 |
+| [observability.rs](../../backend/src/observability.rs) | app 始终创建同一 writer；日志 owner 复用 filter/共享输出，支持 off/on、level/path | v2 组合 HTTP/Runtime/持久化联合接线已验证；FC-13 页面仍属 P3 |
 
 2026-09-07 P0 已落实 revision、操作结果、配置读/变更和外部差异的内部 DTO/生成类型，详见 [Management 契约事实](../implementation/backend/management.md#p0-v2-契约)。追加授权的 P1 已落实 BC-02 活动源、定向候选、双文件只读观测和操作仲裁内部入口，详见[配置参考](../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)。BC-03 的有界服务队列消费者已接入原服务循环；BC-29 已实现活动源内部文件事务、PREPARED/COMMIT_DECIDED 恢复与已知文件状态重试，见[持久化事实](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。BC-30 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)已接入正式 app，资源自动刷新不变；还原、外改重试和[状态投影](../implementation/backend/management.md#p1-配置状态内部投影2026-09-07)已有内部能力。v2 活动源/operation 服务生产者、启动恢复、异步文件事务、差异及 HTTP 联动仍留 BC-03/29/30/31。不能因为已有 `reload_prepared` 或状态机成功回报就宣称新版全部 owner 已完成切换或补偿。
 
 2026-09-08 补充：ConfigStore 的固定源读取与 Management 的[类型化差异投影](../implementation/backend/management.md#p1-外部配置差异内部投影2026-09-08)已落实内部能力，覆盖完整候选语义校验、双文件竞争和输出预算；尚无正式端点或前端采用工作区，CR-04 继续保留异步调度、HTTP/UI 及联合验收。
+
+2026-09-08 生产闭合：P1 组合配置事务和文件动作已由[正式 owner 与路由](../implementation/backend/management.md#p1-配置事务与文件操作2026-09-08)接线，真实 Windows 进程验证 Runtime、日志、双文件、SQLite、UDP、Bearer HTTP、外改/还原/重试和重启复读。前端全局状态与文件工作区正在接线；“修改并采用”继续等待 FC-05 至 FC-13 的领域表单，不能用通用 YAML 编辑器替代。
 
 ## 2. 配置状态与权威
 

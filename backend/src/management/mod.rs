@@ -2,6 +2,7 @@
 
 mod assets;
 mod auth;
+mod config_mutation;
 mod config_query;
 pub(crate) mod contract;
 mod metrics;

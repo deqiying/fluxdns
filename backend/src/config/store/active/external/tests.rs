@@ -4,7 +4,7 @@ use crate::config::{
     model::{LogLevelDto, LogsDto},
     store::active::BeginApply,
 };
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, sync::Arc};
 
 const SOURCE: &str = include_str!("../../../../../tests/fixtures/config-v2.yaml");
 
@@ -12,7 +12,7 @@ struct Fixture {
     root: PathBuf,
     source: PathBuf,
     derived: PathBuf,
-    store: ConfigStore,
+    store: Arc<ConfigStore>,
 }
 
 impl Fixture {
@@ -27,7 +27,7 @@ impl Fixture {
         let derived = root.join("config.yaml");
         fs::write(&source, SOURCE).unwrap();
         fs::write(&derived, SOURCE).unwrap();
-        let store = ConfigStore::with_active_source(source.clone(), SOURCE, 1).unwrap();
+        let store = Arc::new(ConfigStore::with_active_source(source.clone(), SOURCE, 1).unwrap());
         Self {
             root,
             source,

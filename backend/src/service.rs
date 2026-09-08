@@ -196,7 +196,7 @@ const TELEMETRY_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
 type ServiceReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ServiceError>> + 'a>>;
 
 mod control;
-pub(crate) use control::ServiceControl;
+pub(crate) use control::{ControlError, ServiceControl};
 
 /// 已绑定 listener 的 DNS service；所有 receive loop 都由同一个 Supervisor 持有。
 pub struct DnsService {
@@ -217,7 +217,6 @@ pub struct DnsService {
     logging: Option<Arc<crate::observability::LoggingOwner>>,
     management: Option<Arc<ManagementRuntime>>,
     management_cancellation: Option<Cancellation>,
-    #[allow(dead_code)] // v2 配置事务生产者接线前，仅测试取得命令句柄。
     control: ServiceControl,
     control_commands: tokio::sync::mpsc::Receiver<control::ApplyCommand>,
 }
@@ -558,7 +557,6 @@ impl DnsService {
     }
 
     /// 管理事务只取得命令句柄，不取得 service 或 Supervisor 的可变所有权。
-    #[allow(dead_code)] // 不把旧 watcher 包装为新版候选生产者。
     pub(crate) fn control(&self) -> ServiceControl {
         self.control.clone()
     }
