@@ -126,6 +126,10 @@ BC-07 Windows 验证：全量 Cargo suite 807 passed、0 failed、3 ignored；�
 
 BC-08 Windows 验证：完整 Cargo suite 815 passed、0 failed、3 ignored；Storage 定向 75 项和全部测试目标编译通过，真实文件另覆盖硬链接拒绝。fmt、文档与 diff 检查通过。未执行三个 ignored 专项、Linux、完整 v2 冷启/重启、真实权限/磁盘满、跨日 cursor/回收、浏览器或约 10 客户端及 core 2ms 性能验收。
 
+同日 BC-09 已完成 storage 基础：layout v1 前向增加耗时和身份/qname 查询索引；稳定 opaque ID 编码 UTC 日与事务返回的本地 row ID，跨重启不变；keyset cursor 绑定 filter/sort/order/direction、retention revision 与进程 key。跨分片查询逐日取得只读 lease，在 SQLite 内先过滤和应用 keyset/`page_size + 1`，再做有界全局归并，不执行 `OFFSET`/`COUNT`。独立 `stream_epoch + sequence` 在详情事务 commit 后才发布批记录通知，迟到事件按提交顺序可见，失败/丢弃不提前通知。当前客户端名称/目录 revision 和正式 Bearer HTTP 留 BC-13，replay/WS 留 BC-25，共同水位持久化仍留 BC-10。
+
+BC-09 Windows 验证：真实 SQLite 新增 7 项、detail 定向 15 项通过；完整 Cargo suite 822 passed、0 failed、3 ignored。覆盖跨日/同毫秒前后分页、复合过滤、duration 排序、ID 重启一致、cursor 篡改/上下文/进程/水位失效、按 ID 读取、空读不建库、deadline 和 commit 前后/失败通知。未执行三个 ignored 专项、Linux、完整 v2 冷启/重启、真实权限/磁盘满、共同水位/回收、Bearer HTTP/WS、浏览器或约 10 客户端及 core 2ms 性能验收。
+
 ### 开发步骤
 
 1. 审核 `cache/persistence.rs` 的现有 codec，保留可复用的版本、TTL、fingerprint、canonical wire 与 provenance；替换其第二份全量集合和文件容量逻辑，不直接将旧 adapter 改名接入。

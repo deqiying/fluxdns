@@ -655,7 +655,7 @@ impl SqliteStorageBackend {
                 .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
             let summary =
                 match apply_resolve_records_with_limits(&mut transaction, &records, limits).await {
-                    Ok(summary) => summary,
+                    Ok(applied) => applied.summary,
                     Err(error) => {
                         if matches!(error.class(), PortErrorClass::Unavailable) {
                             self.mark_degraded();
@@ -1053,22 +1053,32 @@ async fn apply_resolve_batch(
         .cloned()
         .map(ResolveDetailRecord::from_event)
         .collect::<Result<Vec<_>, _>>()?;
-    apply_resolve_records(transaction, &records).await
+    apply_resolve_records(transaction, &records)
+        .await
+        .map(|_| ())
 }
 
 pub(super) async fn apply_resolve_records(
     transaction: &mut sqlx::Transaction<'_, Sqlite>,
     records: &[ResolveDetailRecord],
-) -> Result<(), PortError> {
-    let _ = apply_resolve_records_with_limits(transaction, records, None).await?;
-    Ok(())
+) -> Result<Vec<i64>, PortError> {
+    Ok(
+        apply_resolve_records_with_limits(transaction, records, None)
+            .await?
+            .row_ids,
+    )
+}
+
+struct AppliedResolveRecords {
+    summary: SqliteResolveDetailFlushSummary,
+    row_ids: Vec<i64>,
 }
 
 async fn apply_resolve_records_with_limits(
     transaction: &mut sqlx::Transaction<'_, Sqlite>,
     records: &[ResolveDetailRecord],
     limits: Option<SqliteResolveDetailLimits>,
-) -> Result<SqliteResolveDetailFlushSummary, PortError> {
+) -> Result<AppliedResolveRecords, PortError> {
     let (evicted, available) = if let Some(limits) = limits {
         let cutoff = SystemTime::now()
             .checked_sub(limits.max_record_age)
@@ -1125,6 +1135,7 @@ async fn apply_resolve_records_with_limits(
     let accepted_len = records
         .len()
         .min(usize::try_from(available).unwrap_or(usize::MAX));
+    let mut row_ids = Vec::with_capacity(accepted_len);
     for record in records.iter().take(accepted_len) {
         let duration_millis = i64::try_from(record.duration_millis()).unwrap_or(i64::MAX);
         let dns_core_duration_micros =
@@ -1155,7 +1166,7 @@ async fn apply_resolve_records_with_limits(
         let answer_summary_json = serde_json::to_string(record.answers()).map_err(|_| {
             PortError::new(PortErrorClass::InvalidInput, "sqlite_storage.resolve_batch")
         })?;
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO resolve_log \
              (event_time_utc_millis, duration_millis, dns_core_duration_micros, request_id_digest, listener_id, route_id, \
                client_bucket, strategy_id, canonical_qname, qtype, qclass, source, upstream_id, \
@@ -1203,11 +1214,15 @@ async fn apply_resolve_records_with_limits(
         .execute(&mut **transaction)
         .await
         .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_batch"))?;
+        row_ids.push(result.last_insert_rowid());
     }
-    Ok(SqliteResolveDetailFlushSummary {
-        committed: accepted_len as u64,
-        evicted,
-        dropped: records.len().saturating_sub(accepted_len) as u64,
+    Ok(AppliedResolveRecords {
+        summary: SqliteResolveDetailFlushSummary {
+            committed: accepted_len as u64,
+            evicted,
+            dropped: records.len().saturating_sub(accepted_len) as u64,
+        },
+        row_ids,
     })
 }
 
@@ -2214,7 +2229,8 @@ mod tests {
         let mut transaction = backend.pool.begin().await.unwrap();
         let summary = super::apply_resolve_records_with_limits(&mut transaction, &[], Some(limits))
             .await
-            .unwrap();
+            .unwrap()
+            .summary;
         transaction.commit().await.unwrap();
         assert_eq!(summary.evicted, 1);
         let remaining: Vec<i64> = sqlx::query_scalar(
@@ -2228,7 +2244,8 @@ mod tests {
         let mut transaction = backend.pool.begin().await.unwrap();
         let summary = super::apply_resolve_records_with_limits(&mut transaction, &[], Some(limits))
             .await
-            .unwrap();
+            .unwrap()
+            .summary;
         transaction.commit().await.unwrap();
         assert_eq!(summary.evicted, 1);
         let remaining: Vec<i64> =

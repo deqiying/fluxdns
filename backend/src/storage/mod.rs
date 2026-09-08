@@ -2,6 +2,7 @@
 //!
 //! 本模块负责内存统计、epoch checkpoint、批次幂等状态以及 SQLite/stats/service writer 生命周期边界。
 
+mod detail_query;
 mod detail_shards;
 mod ledger;
 mod management_read;
@@ -15,6 +16,12 @@ mod writer;
 #[cfg(test)]
 mod backend_contract_tests;
 
+pub use detail_query::{
+    DetailCommitCursor, DetailCommitNotification, DetailCommittedRecord, DetailPageDirection,
+    DetailQuery, DetailQueryCacheOutcome, DetailQueryFilter, DetailQueryOutcome, DetailQueryPage,
+    DetailQueryRcode, DetailQueryRecord, DetailQuerySort, DetailQuerySource, DetailQueryTransport,
+    DetailRecordId, DetailSortOrder,
+};
 pub use detail_shards::{
     DEFAULT_MAX_ACTIVE_DETAIL_SHARDS, DETAIL_SHARD_LAYOUT_VERSION, DetailShardStore,
     DetailShardStoreBuildError, ShardedResolveDetailWorker, ShardedResolveDetailWriter,

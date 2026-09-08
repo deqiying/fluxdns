@@ -17,6 +17,7 @@ use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, mpsc};
 use crate::dns::Deadline;
 use crate::ports::{PortError, PortErrorClass};
 
+use super::detail_query::DetailQueryState;
 use super::resolve_log::ResolveDetailRecord;
 use super::sqlite::{
     SqliteResolveDetailFlushSummary, SqliteResolveDetailRunSummary, apply_resolve_records,
@@ -49,6 +50,8 @@ pub enum DetailShardStoreBuildError {
     InvalidPath,
     #[error("detail shard active connection limit must be greater than zero")]
     InvalidConnectionLimit,
+    #[error("detail shard process identity could not be generated")]
+    Entropy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
@@ -76,6 +79,7 @@ pub struct DetailShardStore {
     active: Arc<AtomicUsize>,
     peak_active: Arc<AtomicUsize>,
     state: Mutex<DetailShardState>,
+    pub(super) query_state: DetailQueryState,
     #[cfg(test)]
     detail_test_gate: DetailTestGate,
 }
@@ -110,6 +114,7 @@ impl DetailShardStore {
             return Err(DetailShardStoreBuildError::InvalidConnectionLimit);
         }
         validate_managed_root(&root, &protected_paths)?;
+        let query_state = DetailQueryState::new()?;
         Ok(Self {
             root: Arc::new(root),
             protected_paths: Arc::new(protected_paths),
@@ -119,6 +124,7 @@ impl DetailShardStore {
             active: Arc::new(AtomicUsize::new(0)),
             peak_active: Arc::new(AtomicUsize::new(0)),
             state: Mutex::new(DetailShardState::default()),
+            query_state,
             #[cfg(test)]
             detail_test_gate: Arc::new(Mutex::new(None)),
         })
@@ -241,13 +247,14 @@ impl DetailShardStore {
                 let mut transaction = pool.begin().await.map_err(|_| {
                     PortError::new(PortErrorClass::Unavailable, "detail_shard.write")
                 })?;
-                apply_resolve_records(&mut transaction, records).await?;
+                let row_ids = apply_resolve_records(&mut transaction, records).await?;
                 #[cfg(test)]
                 self.pause_detail_for_test(DetailSqlTestStage::BeforeCommit)
                     .await;
                 transaction.commit().await.map_err(|_| {
                     PortError::new(PortErrorClass::Unavailable, "detail_shard.write")
                 })?;
+                self.query_state.publish_commit(day_utc, records, &row_ids);
                 #[cfg(test)]
                 self.pause_detail_for_test(DetailSqlTestStage::AfterCommit)
                     .await;
@@ -301,11 +308,10 @@ impl DetailShardStore {
     #[allow(dead_code)] // BC-10 从 manifest 恢复水位时调用。
     pub(crate) fn publish_retired_before(&self, day_utc: i32) {
         let mut state = self.state.lock().unwrap();
-        state.retired_before = Some(
-            state
-                .retired_before
-                .map_or(day_utc, |current| current.max(day_utc)),
-        );
+        if state.retired_before.is_none_or(|current| day_utc > current) {
+            state.retired_before = Some(day_utc);
+            self.query_state.advance_retention_revision();
+        }
     }
 
     /// 拒绝新 lease，并等待所有活动连接在同一 deadline 内归还。
@@ -340,6 +346,10 @@ impl DetailShardStore {
                 .retired_before
                 .is_none_or(|retired_before| day_utc >= retired_before)
             && !state.retiring_days.contains(&day_utc)
+    }
+
+    pub(super) fn retired_before(&self) -> Option<i32> {
+        self.state.lock().unwrap().retired_before
     }
 
     #[cfg(test)]
@@ -588,7 +598,7 @@ fn record_day(record: &ResolveDetailRecord) -> Result<i32, PortError> {
     })
 }
 
-fn format_shard_file_name(day_utc: i32) -> Option<String> {
+pub(super) fn format_shard_file_name(day_utc: i32) -> Option<String> {
     let date = Date::from_julian_day(day_utc.checked_add(UNIX_EPOCH_JULIAN_DAY)?).ok()?;
     Some(format!(
         "{:04}-{:02}-{:02}.sqlite3",
@@ -708,11 +718,27 @@ async fn initialize_or_validate_shard(
                 PortError::new(PortErrorClass::Unavailable, "detail_shard.initialize")
             })?;
         }
+        for statement in include_str!("../../migrations/detail/0003_detail_query_indexes.sql").split(';') {
+            let statement = statement.trim();
+            if !statement.is_empty() {
+                sqlx::query(statement)
+                    .execute(&mut *transaction)
+                    .await
+                    .map_err(|_| {
+                        PortError::new(PortErrorClass::Unavailable, "detail_shard.initialize")
+                    })?;
+            }
+        }
         validate_shard_metadata_executor(&mut transaction, day_utc).await?;
         let required_objects: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM sqlite_schema WHERE \
              (type = 'table' AND name = 'resolve_log') OR \
              (type = 'index' AND name = 'resolve_log_event_time_idx') OR \
+             (type = 'index' AND name = 'resolve_log_duration_idx') OR \
+             (type = 'index' AND name = 'resolve_log_client_id_time_idx') OR \
+             (type = 'index' AND name = 'resolve_log_client_ip_time_idx') OR \
+             (type = 'index' AND name = 'resolve_log_matched_client_time_idx') OR \
+             (type = 'index' AND name = 'resolve_log_qname_time_idx') OR \
              (type = 'trigger' AND name = 'resolve_log_day_guard')",
         )
         .fetch_one(&mut *transaction)
@@ -745,6 +771,11 @@ async fn validate_shard_metadata(
             "SELECT COUNT(*) FROM sqlite_schema WHERE \
              (type = 'table' AND name = 'resolve_log') OR \
              (type = 'index' AND name = 'resolve_log_event_time_idx') OR \
+             (type = 'index' AND name = 'resolve_log_duration_idx') OR \
+             (type = 'index' AND name = 'resolve_log_client_id_time_idx') OR \
+             (type = 'index' AND name = 'resolve_log_client_ip_time_idx') OR \
+             (type = 'index' AND name = 'resolve_log_matched_client_time_idx') OR \
+             (type = 'index' AND name = 'resolve_log_qname_time_idx') OR \
              (type = 'trigger' AND name = 'resolve_log_day_guard')",
         )
         .fetch_one(pool)
@@ -785,7 +816,7 @@ fn validate_metadata_values(row: &sqlx::sqlite::SqliteRow, day_utc: i32) -> Resu
 }
 
 fn validate_required_objects(count: i64) -> Result<(), PortError> {
-    if count != 3 {
+    if count != 8 {
         return Err(
             PortError::new(PortErrorClass::InvalidInput, "detail_shard.validate")
                 .with_safe_context("detail shard layout is incomplete"),
