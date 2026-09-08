@@ -16,7 +16,7 @@
 
 ### P0 v2 内部契约（2026-09-07）
 
-[`config/contract.rs`](../../backend/src/config/contract.rs) 已提供 `ConfigV2::parse/validate/resolve_paths` 和[离线夹具](../../backend/tests/fixtures/config-v2.yaml)。这是可执行的候选契约，不是生产加载器：本节以下 v1 模板/owner 仍是当前正式接线事实。P2 已分批接通快照、日分片与共同水位 owner，但不把 v2 字段伪装成旧存储参数；新版本生产启动切换仍归 BC-26，不承诺 v1/v2 并行服务或兼容。
+[`config/contract.rs`](../../backend/src/config/contract.rs) 已提供 `ConfigV2::parse/validate/resolve_paths` 和[离线夹具](../../backend/tests/fixtures/config-v2.yaml)。这是可执行的候选契约，不是生产加载器：本节以下 v1 模板/owner 仍是当前正式接线事实。P2 已分批接通快照、日分片、共同水位和每日 retention owner；BC-26 前 retention owner 只使用已确认的 R=7、G=3、T=1 GiB 过渡默认值，不把 v2 字段伪装成旧存储参数。新版本生产启动切换仍归 BC-26，不承诺 v1/v2 并行服务或兼容。
 
 | v2 字段/边界 | 契约与默认值 |
 | --- | --- |

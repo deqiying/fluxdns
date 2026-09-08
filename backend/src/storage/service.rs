@@ -11,11 +11,12 @@ use crate::ports::storage::{StatsRecorder, StorageBackend, StorageFlushSummary};
 
 use super::{
     DEFAULT_MAX_ACTIVE_DETAIL_SHARDS, DetailShardStore, DetailShardStoreBuildError,
-    RetentionCoordinator, STORAGE_SCHEMA_VERSION, ShardedResolveDetailWorker,
-    ShardedResolveDetailWriter, ShardedResolveDetailWriterBuildError,
-    SqliteResolveDetailFlushSummary, SqliteResolveDetailRunSummary, SqliteResolveDetailWorker,
-    SqliteStorageBackend, SqliteStorageBackendBuildError, StatsPersistenceError,
-    StatsPersistenceFlushSummary, StatsPersistenceWorker,
+    RetentionCoordinator, RetentionPolicy, RetentionScheduler, RetentionSchedulerSummary,
+    STORAGE_SCHEMA_VERSION, ShardedResolveDetailWorker, ShardedResolveDetailWriter,
+    ShardedResolveDetailWriterBuildError, SqliteResolveDetailFlushSummary,
+    SqliteResolveDetailRunSummary, SqliteResolveDetailWorker, SqliteStorageBackend,
+    SqliteStorageBackendBuildError, StatsPersistenceError, StatsPersistenceFlushSummary,
+    StatsPersistenceWorker,
 };
 
 pub const DEFAULT_STORAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
@@ -117,6 +118,8 @@ pub struct StorageRuntime {
     backend_for_test: Arc<SqliteStorageBackend>,
     detail_store: Arc<DetailShardStore>,
     retention: Arc<RetentionCoordinator>,
+    retention_cancellation: Option<Cancellation>,
+    retention_task: Option<tokio::task::JoinHandle<RetentionSchedulerSummary>>,
     detail_writer: Option<ShardedResolveDetailWriter>,
     resolution_metrics: Arc<crate::resolution::ResolutionPipelineMetrics>,
     detail_cancellation: Option<Cancellation>,
@@ -352,6 +355,11 @@ impl StorageRuntime {
         } else {
             None
         };
+        let retention_cancellation = Cancellation::new();
+        let retention_task = tokio::spawn(
+            RetentionScheduler::new(Arc::clone(&retention), RetentionPolicy::default())
+                .run_until_stopped(retention_cancellation.clone()),
+        );
 
         Ok(Self {
             service,
@@ -359,6 +367,8 @@ impl StorageRuntime {
             backend_for_test,
             detail_store,
             retention,
+            retention_cancellation: Some(retention_cancellation),
+            retention_task: Some(retention_task),
             detail_writer,
             resolution_metrics: Arc::new(crate::resolution::ResolutionPipelineMetrics::default()),
             detail_cancellation,
@@ -409,9 +419,34 @@ impl StorageRuntime {
         deadline: Deadline,
     ) -> Result<StorageServiceFlushSummary, StorageServiceError> {
         self.detail_writer = None;
+        if let Some(cancellation) = self.retention_cancellation.take() {
+            cancellation.cancel(CancelReason::Shutdown);
+        }
         if let Some(cancellation) = self.detail_cancellation.take() {
             cancellation.cancel(CancelReason::Shutdown);
         }
+        let retention_owner = match self.retention_task.take() {
+            Some(mut task) => {
+                match tokio::time::timeout(deadline.remaining(std::time::Instant::now()), &mut task)
+                    .await
+                {
+                    Ok(Ok(_)) => Ok(()),
+                    Ok(Err(_)) => Err(PortError::new(
+                        crate::ports::PortErrorClass::Internal,
+                        "retention.scheduler",
+                    )),
+                    Err(_) => {
+                        task.abort();
+                        let _ = task.await;
+                        Err(PortError::new(
+                            crate::ports::PortErrorClass::Timeout,
+                            "retention.scheduler_shutdown",
+                        ))
+                    }
+                }
+            }
+            None => Ok(()),
+        };
         let detail_owner = match self.detail_task.take() {
             Some(mut task) => {
                 match tokio::time::timeout(deadline.remaining(std::time::Instant::now()), &mut task)
@@ -437,6 +472,12 @@ impl StorageRuntime {
             None => Ok(None),
         };
         let service = self.service.shutdown(deadline).await;
+        let service = match (retention_owner, service) {
+            (Ok(()), service) => service,
+            (Err(error), Ok(_)) => Err(StorageServiceError::Backend(error)),
+            // service 自身错误包含更精确的 stats/backend 状态；retention owner 错误仍由状态表保留。
+            (Err(_), Err(service)) => Err(service),
+        };
         let detail = match detail_owner {
             Ok(Some((worker, mut summary))) => match worker.shutdown(deadline).await {
                 Ok(final_flush) => {
@@ -964,6 +1005,7 @@ mod tests {
         let mut runtime = StorageRuntime::open(config.as_ref(), deadline())
             .await
             .unwrap();
+        assert!(runtime.retention_task.is_some());
         let state = runtime
             .retention_coordinator()
             .publish(plan, deadline())
@@ -975,6 +1017,7 @@ mod tests {
             Some(reference_day - 2)
         );
         runtime.shutdown(deadline()).await.unwrap();
+        assert!(runtime.retention_task.is_none());
         drop(runtime);
 
         let mut reopened = StorageRuntime::open(config.as_ref(), deadline())
@@ -984,7 +1027,9 @@ mod tests {
             reopened.detail_store.retired_before(),
             Some(reference_day - 2)
         );
+        assert!(reopened.retention_task.is_some());
         reopened.shutdown(deadline()).await.unwrap();
+        assert!(reopened.retention_task.is_none());
         drop(reopened);
         std::fs::remove_dir_all(work_path).unwrap();
     }

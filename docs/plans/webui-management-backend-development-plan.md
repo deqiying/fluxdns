@@ -134,6 +134,10 @@ BC-09 Windows 验证：真实 SQLite 新增 7 项、detail 定向 15 项通过�
 
 BC-10 Windows 验证：真实 stats SQLite/日分片新增 4 项 retention 用例及 1 项 `StorageRuntime` 重启用例，storage 定向 87 项通过；完整 Cargo suite 827 passed、0 failed、3 ignored，全部测试目标编译通过。覆盖计划表中的阈值/边界、受管大小口径、水位前后失败、lease 排空、pending replay、迟到写、manifest/ledger 和重启恢复。未执行三个 ignored 专项、Linux、完整 v2 冷启/重启、真实权限/磁盘满、01:00/时区/DST、物理删除重试、Bearer HTTP/WS、浏览器或约 10 客户端及 core 2ms 性能验收。
 
+同日 BC-11 已完成唯一生产 retention scheduler owner：每分钟通过 Jiff 重读服务器时区，按本地 01:00 单日执行；新空库建立有时间语义的基线，既有水位启动补跑，失败五分钟重试，DST 跳时/重复、墙钟回拨和时区日期变化由持久化 `retention_run_state` 去重。物理回收逐日等待 retirement lease，验证 layout、checkpoint/关闭后仅删除受管主文件及 SQLite sidecar；失败保存 manifest attempts/安全错误码并重试。只读 storage 状态已提供目标天数、已发布/预计水位、实际 stats/detail 范围、清理时间、空间大小和 pending/failed 计数。当前 owner 固定消费确认默认 R/G/T；正式 v2 typed 配置仍归 BC-26。
+
+BC-11 Windows 验证：7 项 retention、91 项 storage 定向通过；完整 Cargo suite 830 passed、0 failed、3 ignored，全部测试目标编译通过。真实 stats SQLite 与三日详情分片覆盖删除失败、manifest 重试/reclaimed、状态范围和 cache 文件隔离；受控墙钟覆盖 01:00、DST/回拨/时区变化、retry gate 与重启。Clippy 未新增告警，仍被基线已有 6 项 lint 阻断。未执行三个 ignored 专项、Linux、真实权限/磁盘满、发布 binary 跨 DST 长时间运行、完整 v2 冷启/重启、Bearer HTTP/WS、浏览器或约 10 客户端及 core 2ms 性能验收。
+
 ### 开发步骤
 
 1. 审核 `cache/persistence.rs` 的现有 codec，保留可复用的版本、TTL、fingerprint、canonical wire 与 provenance；替换其第二份全量集合和文件容量逻辑，不直接将旧 adapter 改名接入。

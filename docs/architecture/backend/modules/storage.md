@@ -4,7 +4,7 @@
 >
 > 适用范围：统计 SQLite、解析详情日分片、migration、lease 和存储生命周期
 >
-> 最后评审：2026-09-08（BC-10 完成 R/G/T 计算、共同水位、stats/detail 写保护与 manifest；每日调度和物理回收仍待 BC-11）
+> 最后评审：2026-09-08（BC-11 完成服务器本地 01:00 调度、补跑、物理回收重试与状态查询；对外历史 API 仍待 BC-13）
 >
 > 关联实现：[detail_shards.rs](../../../../backend/src/storage/detail_shards.rs)、[detail_query.rs](../../../../backend/src/storage/detail_query.rs)、[retention.rs](../../../../backend/src/storage/retention.rs)、[sqlite.rs](../../../../backend/src/storage/sqlite.rs)、[service.rs](../../../../backend/src/storage/service.rs)、[statistics.rs](../../../../backend/src/storage/statistics.rs)、[ledger.rs](../../../../backend/src/storage/ledger.rs)、[migrations](../../../../backend/migrations)
 >
@@ -115,7 +115,7 @@ prepare 阶段先初始化统计库：
 
 每个文件只接受 `event_time_utc_millis / 86400000 == detail_meta.day_utc` 的记录，应用路由错误也会由 SQLite trigger 回滚。分片内 `id` 只是局部自增键；`DetailRecordId` 将 layout、UTC 日和事务实际返回的 row ID 编码为带完整性校验的稳定 opaque token，重启后保持不变且不接受路径文本或被修改的 token。调用方不能将局部 ID 对外解释为全局 ID。
 
-解析详情本身是敏感数据；受管目录使用工作目录权限保护，不把详情复制到服务日志。统计库 schema v8 中的旧 `resolve_log` 表暂留供旧读 adapter/兼容测试使用，生产 `StorageRuntime` 不再写入，待 BC-27 删除。
+解析详情本身是敏感数据；受管目录使用工作目录权限保护，不把详情复制到服务日志。统计库 schema v9 中的旧 `resolve_log` 表暂留供旧读 adapter/兼容测试使用，生产 `StorageRuntime` 不再写入，待 BC-27 删除。
 
 ## 4. 聚合统计热路径
 
@@ -165,9 +165,11 @@ writer 周期性执行：
 
 BC-10 按冻结的 `reference_day_utc` 与受管详情大小 `S` 计算共同水位：`S > T` 取 R 天，否则取 R+G 天，等于阈值仍享有宽限；保留范围包含当前 UTC 日，只退役严格早于 `keep_from_day_utc` 的数据。策略限制为 R 至少 1 天、R+G 最多 3650 天、T 为 1 byte 至 1 TiB，大小只累计规范详情主文件与 WAL，不计 stats、cache、SHM、备份或其他文件；采样失败或整数溢出会终止本轮，不解释为 0。
 
-发布先取得全局详情 retention write lease，等待现有读写 lease 排空并阻止新 lease，再冻结 stats flush 的最早可重放 batch ID。schema v8 在单一 stats 事务中推进单调 `retention_state`、删除旧 stats 日、按 replay floor 而非日期删除 ledger，并把已存在的旧详情日登记到 `retention_detail_manifest`；事务成功后才在仍持有详情 write lease 时发布进程水位。失败事务不改变详情可见范围；期限延长或压力下降只更新运行记录，不后退水位或恢复数据。stats pending 重放在事务内读取水位，已退役事件只推进原 batch 的幂等确认，不增加业务计数；详情迟到批次计入 dropped 且不能重建旧分片。
+发布先取得全局详情 retention write lease，等待现有读写 lease 排空并阻止新 lease，再冻结 stats flush 的最早可重放 batch ID。schema v9 在单一 stats 事务中推进单调 `retention_state`、删除旧 stats 日、按 replay floor 而非日期删除 ledger，并把已存在的旧详情日登记到 `retention_detail_manifest`；事务成功后才在仍持有详情 write lease 时发布进程水位。失败事务不改变详情可见范围；期限延长或压力下降只更新运行记录，不后退水位或恢复数据。stats pending 重放在事务内读取水位，已退役事件只推进原 batch 的幂等确认，不增加业务计数；详情迟到批次计入 dropped 且不能重建旧分片。
 
-`StorageRuntime::open` 从 stats DB 恢复水位，并以 `max(ledger high + 1, replay_floor)` 续接 batch ID，随后才启动详情 writer。BC-10 只登记逻辑退役和待回收 manifest；01:00 调度、补跑、状态/预览确认、checkpoint/关闭/删除 sidecar 与失败重试属于 BC-11，当前不会自动物理删除。
+`StorageRuntime::open` 从 stats DB 恢复水位，并以 `max(ledger high + 1, replay_floor)` 续接 batch ID，随后启动详情 writer 和唯一 retention scheduler owner。scheduler 每分钟重新读取系统时区与墙钟，不固定 sleep 24h；本地时间首次达到或越过 01:00 时，以当时 UTC 日运行一次。`retention_run_state` 持久化最后成功本地日，因此 DST 跳时会补跑、重复小时/回拨不会重复，时区变更按新本地日判断，失败五分钟后重试，重启会立即核对补跑。全新空库在 01:00 前以昨日为基线、在当日 01:00 首跑；01:00 后首次启动以当日为基线，不伪造无数据清理。
+
+共同水位发布后，scheduler 对 pending/failed manifest 逐日取得退役独占 lease，等待内部读写连接排空，校验 layout 后执行 `wal_checkpoint(TRUNCATE)`、关闭 pool，再只删除规范主文件及 `-wal`/`-shm`/`-journal` sidecar。删除成功后标记 reclaimed；任何路径、checkpoint、关闭或删除失败都增加 attempts、保存安全错误码并保留重试资格。状态查询同时返回策略/目标天数、采样大小、已发布截止日、下一预计截止日、stats/detail 实际可查日范围、最后成功清理时间以及 pending/failed 数量。详情关闭时 scheduler 仍运行并保留 stats；当前生产 owner 使用已确认的 R=7、G=3、T=1 GiB 过渡默认值，v2 typed 配置由 BC-26 接入，不在 BC-11 伪造 loader 切换。
 
 BC-09 的历史 cursor 绑定规范化后的 filter、sort、order、翻页方向、当前 retention revision 和进程随机 key；任一上下文改变、进程重启、token 被修改或水位推进都会拒绝继续使用。`older` 沿当前排序继续，`newer` 反向扫描后恢复同一展示顺序；每个分片先用 bind 参数执行时间和业务过滤、keyset 条件及 `page_size + 1` 上限，随后只保留全局有界候选，不使用 `OFFSET`、`COUNT` 或分页后过滤。范围最多 3650 天，缺失日只检查路径且不创建目录/SQLite。
 
@@ -181,7 +183,7 @@ BC-09 的历史 cursor 绑定规范化后的 filter、sort、order、翻页方�
 - 两个 worker 的事务短且不在 DNS 请求任务中执行；
 - 新 `DetailShardStore` 读口通过受限 read lease 跨分片查询；旧 v1 Management HTTP 仍读取主库，BC-13 才切换正式 v2 API；
 - 所有 SQL 使用 bind 参数；
-- 统计 migration 只在 prepare 执行，当前 schema v8；日分片仅在首个写 lease 初始化并核对固定 layout。
+- 统计 migration 只在 prepare 执行，当前 schema v9；日分片仅在首个写 lease 初始化并核对固定 layout。
 
 ## 9. 运行期故障
 
@@ -245,4 +247,5 @@ shutdown：
 - shutdown deadline 和 gap summary；
 - 统计 DB、详情目录与 cache 文件完全隔离。
 - BC-09 已覆盖跨分片分页/filter/sort、opaque ID、cursor 水位/完整性和提交通知时序；当前目录名称安全投影与 Bearer HTTP 待 BC-13。
-- BC-10 已覆盖 R/G/T 阈值/边界、主文件+WAL 采样、共同水位单调性、stats pending/详情迟到保护、manifest/ledger replay floor、事务回滚、lease 排空和启动恢复；调度与物理回收待 BC-11。
+- BC-10 已覆盖 R/G/T 阈值/边界、主文件+WAL 采样、共同水位单调性、stats pending/详情迟到保护、manifest/ledger replay floor、事务回滚、lease 排空和启动恢复。
+- BC-11 已覆盖 01:00 前后、DST 跳过/重复、墙钟回拨、时区日期变化、失败 retry gate、跨重启单日一次、真实多日 checkpoint/delete、删除失败 manifest 重试、cache 文件隔离和运行状态查询；未执行 Linux 实机或真实权限/磁盘满。

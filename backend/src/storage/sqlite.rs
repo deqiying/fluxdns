@@ -20,7 +20,10 @@ use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 use super::STORAGE_SCHEMA_VERSION;
 use super::resolve_log::ResolveDetailRecord;
-use super::retention::{RetentionBootstrap, RetentionPlan, RetentionState};
+use super::retention::{
+    RetentionAvailableRange, RetentionBootstrap, RetentionManifestEntry, RetentionManifestState,
+    RetentionPlan, RetentionRunState, RetentionState, RetentionStatusMetadata,
+};
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
 const INITIAL_STORAGE_SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
@@ -520,6 +523,292 @@ impl SqliteStorageBackend {
         .await
     }
 
+    /// 新空库以启动当日本地日期为调度基线；已有水位的升级库仍保留补跑资格。
+    pub(crate) async fn initialize_retention_schedule(
+        &self,
+        local_day: i32,
+        local_second: u32,
+        deadline: Deadline,
+    ) -> Result<(), PortError> {
+        let operation = "sqlite_storage.retention_schedule_init";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            validate_retention_day(local_day, operation)?;
+            if local_second >= 24 * 60 * 60 {
+                return Err(PortError::new(PortErrorClass::InvalidInput, operation));
+            }
+            let baseline_day = if local_second < super::retention::RETENTION_SCHEDULE_LOCAL_SECOND {
+                local_day
+                    .checked_sub(1)
+                    .ok_or_else(|| PortError::new(PortErrorClass::InvalidInput, operation))?
+            } else {
+                local_day
+            };
+            validate_retention_day(baseline_day, operation)?;
+            let _guard = self.lock_operation(deadline, operation).await?;
+            sqlx::query(
+                "UPDATE retention_run_state SET last_success_local_day = ? \
+                 WHERE singleton = 1 AND last_success_local_day IS NULL \
+                 AND NOT EXISTS (SELECT 1 FROM retention_state WHERE singleton = 1)",
+            )
+            .bind(i64::from(baseline_day))
+            .execute(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn retention_run_state(
+        &self,
+        deadline: Deadline,
+    ) -> Result<RetentionRunState, PortError> {
+        let operation = "sqlite_storage.retention_run_state";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let row = sqlx::query(
+                "SELECT last_attempt_local_day, last_success_local_day, \
+                 last_attempted_at_utc_millis, last_succeeded_at_utc_millis, \
+                 consecutive_failures, last_error_code \
+                 FROM retention_run_state WHERE singleton = 1",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            retention_run_state_from_row(&row, operation)
+        })
+        .await
+    }
+
+    pub(crate) async fn begin_retention_run(
+        &self,
+        local_day: i32,
+        attempted_at: SystemTime,
+        deadline: Deadline,
+    ) -> Result<(), PortError> {
+        let operation = "sqlite_storage.retention_run_begin";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            validate_retention_day(local_day, operation)?;
+            let attempted_at = system_time_utc_millis(attempted_at, operation)?;
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let changed = sqlx::query(
+                "UPDATE retention_run_state SET last_attempt_local_day = ?, \
+                 last_attempted_at_utc_millis = ?, last_error_code = NULL \
+                 WHERE singleton = 1",
+            )
+            .bind(i64::from(local_day))
+            .bind(attempted_at)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            if changed.rows_affected() != 1 {
+                return Err(PortError::new(PortErrorClass::CorruptData, operation));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn finish_retention_run(
+        &self,
+        local_day: i32,
+        finished_at: SystemTime,
+        error_code: Option<&'static str>,
+        deadline: Deadline,
+    ) -> Result<(), PortError> {
+        let operation = "sqlite_storage.retention_run_finish";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            validate_retention_day(local_day, operation)?;
+            validate_retention_error_code(error_code, operation)?;
+            let finished_at = system_time_utc_millis(finished_at, operation)?;
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let changed = if let Some(error_code) = error_code {
+                sqlx::query(
+                    "UPDATE retention_run_state SET last_attempt_local_day = ?, \
+                     last_attempted_at_utc_millis = ?, \
+                     consecutive_failures = consecutive_failures + 1, last_error_code = ? \
+                     WHERE singleton = 1 AND consecutive_failures < 4294967295",
+                )
+                .bind(i64::from(local_day))
+                .bind(finished_at)
+                .bind(error_code)
+                .execute(&self.pool)
+                .await
+            } else {
+                sqlx::query(
+                    "UPDATE retention_run_state SET last_attempt_local_day = ?, \
+                     last_success_local_day = CASE \
+                         WHEN last_success_local_day IS NULL OR last_success_local_day < ? \
+                         THEN ? ELSE last_success_local_day END, \
+                     last_attempted_at_utc_millis = ?, last_succeeded_at_utc_millis = ?, \
+                     consecutive_failures = 0, last_error_code = NULL WHERE singleton = 1",
+                )
+                .bind(i64::from(local_day))
+                .bind(i64::from(local_day))
+                .bind(i64::from(local_day))
+                .bind(finished_at)
+                .bind(finished_at)
+                .execute(&self.pool)
+                .await
+            }
+            .map_err(|error| self.database_error(error, operation))?;
+            if changed.rows_affected() != 1 {
+                return Err(PortError::new(PortErrorClass::ResourceExhausted, operation));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn pending_retention_reclaims(
+        &self,
+        deadline: Deadline,
+    ) -> Result<Vec<RetentionManifestEntry>, PortError> {
+        let operation = "sqlite_storage.retention_manifest";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let rows = sqlx::query(
+                "SELECT day_utc, retired_revision, state, attempts, last_error_code, \
+                 updated_at_utc_millis FROM retention_detail_manifest \
+                 WHERE state IN ('pending', 'failed') ORDER BY day_utc ASC",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            rows.iter()
+                .map(|row| retention_manifest_from_row(row, operation))
+                .collect()
+        })
+        .await
+    }
+
+    pub(crate) async fn pending_retention_reclaim_count(
+        &self,
+        deadline: Deadline,
+    ) -> Result<u32, PortError> {
+        let operation = "sqlite_storage.retention_manifest_count";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM retention_detail_manifest \
+                 WHERE state IN ('pending', 'failed')",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            u32::try_from(count).map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))
+        })
+        .await
+    }
+
+    pub(crate) async fn finish_retention_reclaim(
+        &self,
+        day_utc: i32,
+        error_code: Option<&'static str>,
+        deadline: Deadline,
+    ) -> Result<(), PortError> {
+        let operation = "sqlite_storage.retention_manifest_finish";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            validate_retention_day(day_utc, operation)?;
+            validate_retention_error_code(error_code, operation)?;
+            let updated_at = system_time_utc_millis(SystemTime::now(), operation)?;
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let changed = sqlx::query(
+                "UPDATE retention_detail_manifest SET state = ?, attempts = attempts + 1, \
+                 last_error_code = ?, updated_at_utc_millis = ? \
+                 WHERE day_utc = ? AND state IN ('pending', 'failed') \
+                 AND attempts < 4294967295",
+            )
+            .bind(if error_code.is_some() {
+                RetentionManifestState::Failed.as_str()
+            } else {
+                RetentionManifestState::Reclaimed.as_str()
+            })
+            .bind(error_code)
+            .bind(updated_at)
+            .bind(i64::from(day_utc))
+            .execute(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            if changed.rows_affected() != 1 {
+                return Err(PortError::new(PortErrorClass::CorruptData, operation));
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn retention_status_metadata(
+        &self,
+        deadline: Deadline,
+    ) -> Result<RetentionStatusMetadata, PortError> {
+        let operation = "sqlite_storage.retention_status";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let published = sqlx::query(
+                "SELECT revision, watermark_revision, retired_before_day_utc, reference_day_utc, \
+                 target_days, sampled_detail_bytes, reference_size_bytes, replay_floor_batch_id, \
+                 published_at_utc_millis FROM retention_state WHERE singleton = 1",
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?
+            .map(|row| retention_state_from_row(&row, operation))
+            .transpose()?;
+            let (stats_from, stats_to): (Option<i64>, Option<i64>) =
+                sqlx::query_as("SELECT MIN(day_utc), MAX(day_utc) FROM stats_daily_total")
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|error| self.database_error(error, operation))?;
+            let stats_available = RetentionAvailableRange {
+                from_day_utc: optional_retention_day(stats_from, operation)?,
+                to_day_utc: optional_retention_day(stats_to, operation)?,
+            };
+            let (pending, failed): (i64, i64) = sqlx::query_as(
+                "SELECT COUNT(*) FILTER (WHERE state = 'pending'), \
+                 COUNT(*) FILTER (WHERE state = 'failed') FROM retention_detail_manifest",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            let last_reclaim_at: Option<i64> = sqlx::query_scalar(
+                "SELECT MAX(updated_at_utc_millis) FROM retention_detail_manifest \
+                 WHERE state = 'reclaimed'",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            let run_row = sqlx::query(
+                "SELECT last_attempt_local_day, last_success_local_day, \
+                 last_attempted_at_utc_millis, last_succeeded_at_utc_millis, \
+                 consecutive_failures, last_error_code \
+                 FROM retention_run_state WHERE singleton = 1",
+            )
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            Ok(RetentionStatusMetadata {
+                published,
+                stats_available,
+                pending_reclaims: u32::try_from(pending)
+                    .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?,
+                failed_reclaims: u32::try_from(failed)
+                    .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?,
+                last_reclaim_at: optional_system_time_from_millis(last_reclaim_at, operation)?,
+                run: retention_run_state_from_row(&run_row, operation)?,
+            })
+        })
+        .await
+    }
+
     /// 在统计事务中发布单调水位、清理旧统计并登记待回收详情日。
     pub(crate) async fn publish_retention(
         &self,
@@ -955,6 +1244,10 @@ async fn migrate_storage_schema(pool: &SqlitePool) -> Result<(), SqliteStorageBa
             7 => (
                 8,
                 include_str!("../../migrations/0008_retention_watermark.sql"),
+            ),
+            8 => (
+                9,
+                include_str!("../../migrations/0009_retention_scheduler.sql"),
             ),
             _ => return Err(SqliteStorageBackendBuildError::Schema),
         };
@@ -1615,6 +1908,155 @@ fn retention_state_from_row(
     })
 }
 
+fn retention_run_state_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+    operation: &'static str,
+) -> Result<RetentionRunState, PortError> {
+    let last_error_code = row
+        .try_get::<Option<String>, _>("last_error_code")
+        .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?;
+    if !retention_error_code_is_valid(last_error_code.as_deref()) {
+        return Err(PortError::new(PortErrorClass::CorruptData, operation));
+    }
+    let consecutive_failures = row
+        .try_get::<i64, _>("consecutive_failures")
+        .ok()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    Ok(RetentionRunState {
+        last_attempt_local_day: optional_retention_day(
+            row.try_get::<Option<i64>, _>("last_attempt_local_day")
+                .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?,
+            operation,
+        )?,
+        last_success_local_day: optional_retention_day(
+            row.try_get::<Option<i64>, _>("last_success_local_day")
+                .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?,
+            operation,
+        )?,
+        last_attempted_at: optional_system_time_from_millis(
+            row.try_get::<Option<i64>, _>("last_attempted_at_utc_millis")
+                .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?,
+            operation,
+        )?,
+        last_succeeded_at: optional_system_time_from_millis(
+            row.try_get::<Option<i64>, _>("last_succeeded_at_utc_millis")
+                .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?,
+            operation,
+        )?,
+        consecutive_failures,
+        last_error_code,
+    })
+}
+
+fn retention_manifest_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+    operation: &'static str,
+) -> Result<RetentionManifestEntry, PortError> {
+    let day_utc = row
+        .try_get::<i64, _>("day_utc")
+        .ok()
+        .and_then(|value| i32::try_from(value).ok())
+        .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    validate_retention_day(day_utc, operation)?;
+    let retired_revision = row
+        .try_get::<i64, _>("retired_revision")
+        .ok()
+        .filter(|value| *value > 0)
+        .and_then(|value| u64::try_from(value).ok())
+        .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    let state = row
+        .try_get::<String, _>("state")
+        .ok()
+        .and_then(|value| RetentionManifestState::parse(&value))
+        .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    let attempts = row
+        .try_get::<i64, _>("attempts")
+        .ok()
+        .and_then(|value| u32::try_from(value).ok())
+        .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    let last_error_code = row
+        .try_get::<Option<String>, _>("last_error_code")
+        .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?;
+    if !retention_error_code_is_valid(last_error_code.as_deref()) {
+        return Err(PortError::new(PortErrorClass::CorruptData, operation));
+    }
+    let updated_at = optional_system_time_from_millis(
+        Some(
+            row.try_get::<i64, _>("updated_at_utc_millis")
+                .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?,
+        ),
+        operation,
+    )?
+    .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    Ok(RetentionManifestEntry {
+        day_utc,
+        retired_revision,
+        state,
+        attempts,
+        last_error_code,
+        updated_at,
+    })
+}
+
+fn validate_retention_day(day: i32, operation: &'static str) -> Result<(), PortError> {
+    if super::detail_shards::format_shard_file_name(day).is_some() {
+        Ok(())
+    } else {
+        Err(PortError::new(PortErrorClass::InvalidInput, operation))
+    }
+}
+
+fn optional_retention_day(
+    day: Option<i64>,
+    operation: &'static str,
+) -> Result<Option<i32>, PortError> {
+    day.map(|value| {
+        let value = i32::try_from(value)
+            .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?;
+        validate_retention_day(value, operation)
+            .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?;
+        Ok(value)
+    })
+    .transpose()
+}
+
+fn validate_retention_error_code(
+    code: Option<&str>,
+    operation: &'static str,
+) -> Result<(), PortError> {
+    if retention_error_code_is_valid(code) {
+        Ok(())
+    } else {
+        Err(PortError::new(PortErrorClass::InvalidInput, operation))
+    }
+}
+
+fn retention_error_code_is_valid(code: Option<&str>) -> bool {
+    code.is_none_or(|code| {
+        !code.is_empty()
+            && code.len() <= 64
+            && code
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+    })
+}
+
+fn optional_system_time_from_millis(
+    millis: Option<i64>,
+    operation: &'static str,
+) -> Result<Option<SystemTime>, PortError> {
+    millis
+        .map(|millis| {
+            let millis = u64::try_from(millis)
+                .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?;
+            UNIX_EPOCH
+                .checked_add(Duration::from_millis(millis))
+                .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1997,7 +2439,7 @@ mod tests {
     // V4-M02：中间步骤失败只回滚该步，之前已经提交的 migration 必须保留。
     #[tokio::test]
     async fn contract_v4_each_migration_failure_preserves_last_committed_step() {
-        for failing_version in 2..=8 {
+        for failing_version in 2..=9 {
             let (path, pool) = if failing_version >= 7 {
                 let (path, pool) = legacy_database(5).await;
                 super::apply_storage_migration(
@@ -2008,12 +2450,22 @@ mod tests {
                 )
                 .await
                 .unwrap();
-                if failing_version == 8 {
+                if failing_version >= 8 {
                     super::apply_storage_migration(
                         &pool,
                         6,
                         7,
                         include_str!("../../migrations/0007_client_identity.sql"),
+                    )
+                    .await
+                    .unwrap();
+                }
+                if failing_version == 9 {
+                    super::apply_storage_migration(
+                        &pool,
+                        7,
+                        8,
+                        include_str!("../../migrations/0008_retention_watermark.sql"),
                     )
                     .await
                     .unwrap();
@@ -2081,7 +2533,15 @@ mod tests {
             .fetch_one(&pool)
             .await
             .unwrap();
-            assert_eq!(has_retention, 0);
+            assert_eq!(has_retention, i64::from(failing_version > 8));
+            let has_retention_run_state: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+                 AND name = 'retention_run_state'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(has_retention_run_state, 0);
             if failing_version == 6 {
                 sqlx::query("UPDATE storage_meta SET created_at_utc='1000'")
                     .execute(&pool)

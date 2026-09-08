@@ -4,6 +4,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -30,7 +32,7 @@ use super::statistics::day_utc;
 pub const DETAIL_SHARD_LAYOUT_VERSION: u32 = 1;
 pub const DEFAULT_MAX_ACTIVE_DETAIL_SHARDS: usize = 4;
 
-const UNIX_EPOCH_JULIAN_DAY: i32 = 2_440_588;
+pub(super) const UNIX_EPOCH_JULIAN_DAY: i32 = 2_440_588;
 const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[cfg(test)]
@@ -86,6 +88,8 @@ pub struct DetailShardStore {
     pub(super) query_state: DetailQueryState,
     #[cfg(test)]
     detail_test_gate: DetailTestGate,
+    #[cfg(test)]
+    fail_reclaim_delete_once: Arc<AtomicBool>,
 }
 
 /// 已校验归属且受 registry 约束的单日 SQLite lease。
@@ -113,10 +117,13 @@ pub(crate) struct DetailStorageSample {
 }
 
 /// 先发布退役状态、再等待既有读写 lease 排空后的独占日锁。
-#[allow(dead_code)] // BC-10 将在共同水位发布后消费退役 lease。
 pub(crate) struct DetailShardRetirementLease {
     day_utc: i32,
     path: PathBuf,
+    root: Arc<PathBuf>,
+    protected_paths: Arc<Vec<PathBuf>>,
+    #[cfg(test)]
+    fail_reclaim_delete_once: Arc<AtomicBool>,
     _day_guard: OwnedMutexGuard<()>,
 }
 
@@ -145,6 +152,8 @@ impl DetailShardStore {
             query_state,
             #[cfg(test)]
             detail_test_gate: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            fail_reclaim_delete_once: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -315,7 +324,6 @@ impl DetailShardStore {
     }
 
     /// 发布逻辑退役并取得该日独占锁；物理 checkpoint/delete 由保留协调器执行。
-    #[allow(dead_code)] // BC-10 保留协调器的接入点。
     pub(crate) async fn begin_retirement(
         &self,
         day_utc: i32,
@@ -341,12 +349,15 @@ impl DetailShardStore {
         Ok(DetailShardRetirementLease {
             day_utc,
             path,
+            root: Arc::clone(&self.root),
+            protected_paths: Arc::clone(&self.protected_paths),
+            #[cfg(test)]
+            fail_reclaim_delete_once: Arc::clone(&self.fail_reclaim_delete_once),
             _day_guard: guard,
         })
     }
 
     /// 从已持久化共同水位恢复逻辑可见范围；水位只能向前推进。
-    #[allow(dead_code)] // BC-10 从 manifest 恢复水位时调用。
     pub(crate) fn publish_retired_before(&self, day_utc: i32) {
         let mut state = self.state.lock().unwrap();
         if state.retired_before.is_none_or(|current| day_utc > current) {
@@ -504,6 +515,11 @@ impl DetailShardStore {
     }
 
     #[cfg(test)]
+    pub(super) fn fail_next_reclaim_delete_for_test(&self) {
+        self.fail_reclaim_delete_once.store(true, Ordering::Release);
+    }
+
+    #[cfg(test)]
     async fn pause_detail_for_test(&self, stage: DetailSqlTestStage) {
         let gate = {
             let mut slot = self.detail_test_gate.lock().unwrap();
@@ -564,7 +580,7 @@ impl Drop for DetailShardLease {
     }
 }
 
-#[allow(dead_code)] // 物理回收由 BC-10 接入。
+#[allow(dead_code)] // day/path 元数据仅供分片 lease 契约测试；生产回收直接消费 reclaim。
 impl DetailShardRetirementLease {
     pub(crate) fn day_utc(&self) -> i32 {
         self.day_utc
@@ -572,6 +588,59 @@ impl DetailShardRetirementLease {
 
     pub(crate) fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 在独占日锁内 checkpoint 并删除规范主文件及 SQLite sidecar；缺失文件视为幂等成功。
+    pub(crate) async fn reclaim(self, deadline: Deadline) -> Result<u64, PortError> {
+        validate_shard_path(&self.path, &self.root, &self.protected_paths)?;
+        let reclaimed_bytes = managed_shard_bytes(&self.path)?;
+        if self.path.exists() {
+            let pool = open_existing_writable_shard_pool(&self.path, deadline).await?;
+            let validation = validate_shard_metadata(&pool, self.day_utc, deadline).await;
+            if let Err(error) = validation {
+                pool.close().await;
+                return Err(error);
+            }
+            let checkpoint = deadline_future(deadline, "detail_shard.checkpoint", async {
+                sqlx::query_as::<_, (i64, i64, i64)>("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .fetch_one(&pool)
+                    .await
+            })
+            .await?
+            .map_err(|_| PortError::new(PortErrorClass::Unavailable, "detail_shard.checkpoint"))
+            .and_then(|(busy, _, _)| {
+                if busy == 0 {
+                    Ok(())
+                } else {
+                    Err(PortError::new(
+                        PortErrorClass::Unavailable,
+                        "detail_shard.checkpoint",
+                    ))
+                }
+            });
+            let close = deadline_future(deadline, "detail_shard.reclaim_close", pool.close()).await;
+            checkpoint?;
+            close?;
+        }
+        validate_shard_path(&self.path, &self.root, &self.protected_paths)?;
+        #[cfg(test)]
+        if self.fail_reclaim_delete_once.swap(false, Ordering::AcqRel) {
+            return Err(PortError::new(
+                PortErrorClass::Unavailable,
+                "detail_shard.reclaim_delete",
+            ));
+        }
+        for suffix in ["-wal", "-shm", "-journal", ""] {
+            let path = if suffix.is_empty() {
+                self.path.clone()
+            } else {
+                let mut sidecar = self.path.as_os_str().to_os_string();
+                sidecar.push(suffix);
+                PathBuf::from(sidecar)
+            };
+            remove_managed_file(&path, deadline).await?;
+        }
+        Ok(reclaimed_bytes)
     }
 }
 
@@ -799,6 +868,72 @@ async fn open_shard_pool(
     )
     .await?
     .map_err(|_| PortError::new(PortErrorClass::Unavailable, "detail_shard.open"))
+}
+
+async fn open_existing_writable_shard_pool(
+    path: &Path,
+    deadline: Deadline,
+) -> Result<SqlitePool, PortError> {
+    let options = SqliteConnectOptions::new()
+        .filename(path)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(SQLITE_BUSY_TIMEOUT.min(deadline.remaining(Instant::now())));
+    deadline_future(
+        deadline,
+        "detail_shard.reclaim_open",
+        SqlitePoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(deadline.remaining(Instant::now()))
+            .connect_with(options),
+    )
+    .await?
+    .map_err(|_| PortError::new(PortErrorClass::Unavailable, "detail_shard.reclaim_open"))
+}
+
+fn managed_shard_bytes(path: &Path) -> Result<u64, PortError> {
+    let mut bytes = 0_u64;
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let candidate = if suffix.is_empty() {
+            path.to_path_buf()
+        } else {
+            let mut candidate = path.as_os_str().to_os_string();
+            candidate.push(suffix);
+            PathBuf::from(candidate)
+        };
+        match fs::metadata(candidate) {
+            Ok(metadata) => {
+                bytes = bytes.checked_add(metadata.len()).ok_or_else(|| {
+                    PortError::new(PortErrorClass::ResourceExhausted, "detail_shard.reclaim")
+                })?;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(PortError::new(
+                    PortErrorClass::Unavailable,
+                    "detail_shard.reclaim",
+                ));
+            }
+        }
+    }
+    Ok(bytes)
+}
+
+async fn remove_managed_file(path: &Path, deadline: Deadline) -> Result<(), PortError> {
+    if deadline.is_expired(Instant::now()) {
+        return Err(PortError::new(
+            PortErrorClass::Timeout,
+            "detail_shard.reclaim_delete",
+        ));
+    }
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(PortError::new(
+            PortErrorClass::Unavailable,
+            "detail_shard.reclaim_delete",
+        )),
+    }
 }
 
 async fn initialize_or_validate_shard(
