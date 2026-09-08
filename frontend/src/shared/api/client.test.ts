@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setMockAuthenticated } from "@/mocks/handlers";
 import { server } from "@/mocks/server";
 import { ApiError, getSafeErrorMessage } from "./errors";
-import { apiRequest, createSearchParams, onUnauthorized } from "./client";
+import { apiRequest, apiV2Request, createSearchParams, onUnauthorized } from "./client";
 
 describe("apiRequest", () => {
   beforeEach(() => setMockAuthenticated(true));
@@ -18,6 +18,18 @@ describe("apiRequest", () => {
       credentials: "omit",
       accept: "application/json",
       authorization: `Bearer ${"A".repeat(43)}`,
+    });
+  });
+
+  it("v2 client 复用 Bearer，但不改变 v1 认证刷新路径", async () => {
+    server.use(
+      http.get("/api/v2/probe", ({ request }) =>
+        HttpResponse.json({ authorization: request.headers.get("authorization"), credentials: request.credentials }),
+      ),
+    );
+    await expect(apiV2Request("probe")).resolves.toEqual({
+      authorization: `Bearer ${"A".repeat(43)}`,
+      credentials: "omit",
     });
   });
 
@@ -68,6 +80,23 @@ describe("apiRequest", () => {
     const error = new ApiError({ code: "UNKNOWN_INTERNAL", message: "sensitive backend detail", kind: "http", status: 500 });
     expect(getSafeErrorMessage(error)).toBe("管理服务暂时不可用，请稍后重试。");
     expect(getSafeErrorMessage(error)).not.toContain("sensitive backend detail");
+  });
+
+  it("保留 v2 字段错误和安全 request ID", async () => {
+    server.use(http.post("/api/v2/config/validate", () => HttpResponse.json({
+      code: "VALIDATION_FAILED",
+      message: "field failed",
+      request_id: "request-422",
+      retryable: false,
+      field_errors: [{ path: "/changes/0/change/path", code: "INVALID_ARGUMENT" }],
+    }, { status: 422 })));
+
+    const error = await apiV2Request("/config/validate", { method: "POST", body: {} }).catch((value) => value);
+    expect(error).toMatchObject({
+      code: "VALIDATION_FAILED",
+      requestId: "request-422",
+      fieldErrors: [{ path: "/changes/0/change/path", code: "INVALID_ARGUMENT" }],
+    });
   });
 });
 

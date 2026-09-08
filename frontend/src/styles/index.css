@@ -30,6 +30,21 @@ select {
   font: inherit;
 }
 
+.config-form-modal .ant-modal-content {
+  max-height: calc(100vh - 48px);
+  overflow: hidden;
+}
+
+.config-form-modal .ant-modal-body {
+  max-height: calc(100vh - 196px);
+  overflow-y: auto;
+  padding-inline-end: 4px;
+}
+
+.config-form-error {
+  margin-bottom: 20px;
+}
+
 .app-shell {
   min-height: 100vh;
   background: #fff;

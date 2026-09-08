@@ -15,7 +15,13 @@ interface ApiErrorOptions {
   requestId?: string;
   retryable?: boolean;
   retryAfterMs?: number;
+  fieldErrors?: readonly ApiFieldError[];
   cause?: unknown;
+}
+
+export interface ApiFieldError {
+  path: string;
+  code: string;
 }
 
 export class ApiError extends Error {
@@ -25,6 +31,7 @@ export class ApiError extends Error {
   readonly requestId?: string;
   readonly retryable: boolean;
   readonly retryAfterMs?: number;
+  readonly fieldErrors: readonly ApiFieldError[];
 
   constructor(options: ApiErrorOptions) {
     super(options.message, { cause: options.cause });
@@ -35,6 +42,7 @@ export class ApiError extends Error {
     this.requestId = options.requestId;
     this.retryable = options.retryable ?? false;
     this.retryAfterMs = options.retryAfterMs;
+    this.fieldErrors = options.fieldErrors ?? [];
   }
 }
 

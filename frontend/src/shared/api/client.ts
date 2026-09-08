@@ -1,7 +1,8 @@
 import { ApiError, isErrorEnvelope } from "./errors";
 import type { AuthSession, Session } from "./types";
 
-const API_PREFIX = "/api/v1";
+const API_V1_PREFIX = "/api/v1";
+const API_V2_PREFIX = "/api/v2";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
 type UnauthorizedListener = () => void;
@@ -82,6 +83,15 @@ export function onUnauthorized(listener: UnauthorizedListener): () => void {
 }
 
 export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  return requestWithPrefix<T>(API_V1_PREFIX, path, options);
+}
+
+/** 新版配置和管理能力的同源入口；不会改变现有 v1 页面或认证刷新路径。 */
+export async function apiV2Request<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
+  return requestWithPrefix<T>(API_V2_PREFIX, path, options);
+}
+
+async function requestWithPrefix<T>(prefix: string, path: string, options: ApiRequestOptions): Promise<T> {
   const controller = new AbortController();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let timedOut = false;
@@ -108,7 +118,7 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
       if (requestEpoch !== authEpoch) throw new ApiError({ code: "REQUEST_CANCELLED", message: "session changed", kind: "cancelled" });
     }
     controller.signal.throwIfAborted();
-    const response = await fetch(`${API_PREFIX}${path.startsWith("/") ? path : `/${path}`}`, {
+    const response = await fetch(`${prefix}${path.startsWith("/") ? path : `/${path}`}`, {
       method: options.method ?? "GET",
       credentials: mode === "required" ? "omit" : "same-origin",
       headers: {
@@ -159,6 +169,7 @@ export async function apiRequest<T>(path: string, options: ApiRequestOptions = {
         requestId: envelope?.request_id ?? response.headers.get("x-request-id") ?? undefined,
         retryable: envelope?.retryable ?? (response.status === 429 || response.status >= 500),
         retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
+        fieldErrors: extractFieldErrors(payload),
       });
 
       throw error;
@@ -217,4 +228,17 @@ function parseRetryAfter(value: string | null): number | undefined {
   if (value === null) return undefined;
   const seconds = Number(value);
   return Number.isFinite(seconds) && seconds > 0 ? seconds * 1_000 : undefined;
+}
+
+function extractFieldErrors(value: unknown): { path: string; code: string }[] {
+  if (typeof value !== "object" || value === null || !("field_errors" in value)) return [];
+  const fieldErrors = (value as { field_errors?: unknown }).field_errors;
+  if (!Array.isArray(fieldErrors)) return [];
+  return fieldErrors.flatMap((item) =>
+    typeof item === "object" && item !== null
+      && typeof (item as { path?: unknown }).path === "string"
+      && typeof (item as { code?: unknown }).code === "string"
+      ? [{ path: (item as { path: string }).path, code: (item as { code: string }).code }]
+      : [],
+  );
 }
