@@ -2,21 +2,21 @@
 
 > 文档状态：有效
 >
-> 适用范围：SQLite、统计、解析记录、migration、容量边界和存储生命周期
+> 适用范围：统计 SQLite、解析详情日分片、migration、lease 和存储生命周期
 >
-> 最后评审：2026-09-05（在已提交的启动/停机契约上统一业务时间为整数毫秒；基线为 `43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加本次时间迁移工作树，本地证据见[后台服务](../../../implementation/backend/background-services.md#本次验证)）
+> 最后评审：2026-09-08（BC-08 将生产详情 writer 切换为 UTC 日分片；跨分片查询与共同保留水位仍待 BC-09/10）
 >
-> 关联实现：[sqlite.rs](../../../../backend/src/storage/sqlite.rs)、[service.rs](../../../../backend/src/storage/service.rs)、[statistics.rs](../../../../backend/src/storage/statistics.rs)、[ledger.rs](../../../../backend/src/storage/ledger.rs)、[migrations](../../../../backend/migrations)
+> 关联实现：[detail_shards.rs](../../../../backend/src/storage/detail_shards.rs)、[sqlite.rs](../../../../backend/src/storage/sqlite.rs)、[service.rs](../../../../backend/src/storage/service.rs)、[statistics.rs](../../../../backend/src/storage/statistics.rs)、[ledger.rs](../../../../backend/src/storage/ledger.rs)、[migrations](../../../../backend/migrations)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Ports](ports.md) · [Observability](observability.md) · [Cache](cache.md)
 
 ## 1. 职责与边界
 
-Storage 模块实现业务 SQLite：
+Storage 模块实现两个相互隔离的持久化 owner：
 
 - schema migration；
 - 默认开启的聚合统计；
-- 可选解析详情；
+- 可选解析详情 UTC 日分片；
 - writer 健康状态、flush 和 shutdown。
 
 它不存储 DNS response cache。Cache persistence 使用配置中的独立文件和独立 `PersistentCacheStore`，不能复用本模块 pool、表或 writer。
@@ -25,17 +25,18 @@ Storage 模块实现业务 SQLite：
 
 | 文件 | 职责 |
 | --- | --- |
-| `sqlite.rs` | SQLx pool、PRAGMA、migration、统计/详情 transaction、唯一 bounded detail writer、满批/周期 flush、详情淘汰/硬上限、health/checkpoint/shutdown |
-| `service.rs` | `StorageRuntime` 组装、详情 worker task、backend/detail flush 与 shutdown 顺序 facade、resolution metrics owner |
+| `detail_shards.rs` | 日分片 layout、日期路径、受限连接 registry、读写/退役 lease、唯一 bounded 生产 detail writer 与关闭边界 |
+| `sqlite.rs` | 统计 SQLx pool、PRAGMA、migration、统计 transaction、health/checkpoint/shutdown；旧单库详情 adapter 仅保留给兼容测试，待 BC-27 删除 |
+| `service.rs` | `StorageRuntime` 组装、分片详情 worker task、统计 backend/detail store 的 shutdown 顺序、resolution metrics owner |
 | `stats.rs` | StatsAccumulator epoch snapshot、BatchLedger 顺序提交与失败重试 worker |
 | `statistics.rs` / `ledger.rs` | sharded counters/epoch checkpoint 与 pending batch ledger |
 | `resolve_log.rs` | 从 typed `ResolutionEvent` 投影、校验和裁剪 `ResolveDetailRecord` |
 | `management_read.rs` | Management overview、统计和解析详情的独立只读 SQLite adapter、安全投影与固定查询模板 |
 | `writer.rs` | 无外部依赖的事务/幂等 writer contract 实现与 focused tests |
 
-## 2. SQLite 初始化
+## 2. Storage 初始化
 
-prepare 阶段：
+prepare 阶段先初始化统计库：
 
 1. 创建数据库父目录；
 2. 以读写/创建模式打开文件；
@@ -43,8 +44,12 @@ prepare 阶段：
 4. 使用 `synchronous=NORMAL` 作为吞吐与崩溃恢复折中；
 5. 通过 `include_str!` 内嵌 SQL 在同一事务创建基础表和 metadata，再按 `storage_meta.schema_version` 执行前向 migration；不是 `sqlx::migrate!`/SQLx Migrator；
 6. `StorageRuntime::open` 调用 `migrate` 核对当前 schema version，在独立事务内更新 singleton metadata 并显式回滚，验证真实写入路径；
-7. 建立 stats worker 和唯一的 SQLite detail writer channel；
-8. 返回 `StorageRuntime`。
+7. 建立 stats worker；
+8. 校验详情受管目录与统计库、缓存快照不存在词法包含或物理文件别名，再建立最多 4 个活动连接的分片 registry；
+9. 详情启用时建立唯一的分片 writer channel；未启用或尚无记录时不创建详情目录；
+10. 返回 `StorageRuntime`。
+
+详情第一次写某个事件 UTC 日时，registry 仅由已解析日期生成 `YYYY-MM-DD.sqlite3`，以 WAL、`synchronous=NORMAL`、单连接 pool 打开，在同一事务创建 `detail_meta`、`resolve_log`、时间索引和日归属 trigger。已有文件必须声明匹配的 layout version/day 且具备完整 schema；普通外部 SQLite、错误日期 metadata、symlink/reparse point、hard link 及统计/缓存文件别名均拒绝采用。当前生产 `ConfigLoader` 仍为 v1，BC-08 暂从 `database.path` 同级推导 `queries/`；正式读取 v2 `database.records_path`、新数据基线和旧格式拒绝归 BC-26，不能把此过渡值当成已完成的 v2 启动切换。
 
 建目录、connect/schema/migration、写探针共用调用方 deadline，不逐阶段重置。探针不提交业务统计或详情，也不永久修改 metadata；失败或预算耗尽不创建可服务的 Storage owner，并作为启动错误返回。deadline 限制异步等待与后续步骤，不承诺强制中断已进入 OS/SQLite worker 的操作；真实介质故障仍需环境验收。
 
@@ -86,7 +91,14 @@ prepare 阶段：
 
 用于幂等重试，不能与详情日志共享。
 
-### `resolve_log`
+### 分片 `detail_meta`
+
+- 固定 singleton；
+- detail layout version；
+- 文件唯一归属的 `day_utc`；
+- 创建时间。
+
+### 分片 `resolve_log`
 
 - event time、从 transport 接入到 core 完成的 request duration，以及微秒精度的 DNS core 主链耗时；
 - request ID digest；
@@ -99,7 +111,9 @@ prepare 阶段：
 - failure/cancellation 分类；
 - runtime/resource revision 摘要。
 
-解析详情本身是敏感数据；数据库文件使用工作目录权限保护，不把详情复制到服务日志。
+每个文件只接受 `event_time_utc_millis / 86400000 == detail_meta.day_utc` 的记录，应用路由错误也会由 SQLite trigger 回滚。当前分片内 `id` 只是局部自增键；BC-09 才定义包含分片定位信息的稳定 opaque ID、跨日 cursor 和读取契约，不能将局部 ID 对外解释为全局 ID。
+
+解析详情本身是敏感数据；受管目录使用工作目录权限保护，不把详情复制到服务日志。统计库 schema v7 中的旧 `resolve_log` 表暂留供旧读 adapter/兼容测试使用，生产 `StorageRuntime` 不再写入，待 BC-27 删除。
 
 ## 4. 聚合统计热路径
 
@@ -127,7 +141,7 @@ writer 周期性执行：
 
 重试前先查 ledger；已提交 batch 不重复累加。新请求始终写下一 epoch，不等待旧批次。
 
-当前 `StatsPersistenceWorker` 已实现上述闭环：resolution dispatcher 通过 `StatsRecorder` 只触碰内存 accumulator，`flush` 先冻结 epoch，再将 pending batch 通过 `StorageBackend::execute` 按 batch ID 顺序提交；backend 失败时仅增加 batch 的失败尝试次数并保留原 payload，后续 flush 可继续幂等重试。worker 同时返回 committed batch/event 数量、pending 数量和 persistence gap 摘要。`StorageService` 普通 flush 按 stats → backend checkpoint → detail 执行，shutdown 按 stats → detail drain → backend close 执行。
+当前 `StatsPersistenceWorker` 已实现上述闭环：resolution dispatcher 通过 `StatsRecorder` 只触碰内存 accumulator，`flush` 先冻结 epoch，再将 pending batch 通过 `StorageBackend::execute` 按 batch ID 顺序提交；backend 失败时仅增加 batch 的失败尝试次数并保留原 payload，后续 flush 可继续幂等重试。worker 同时返回 committed batch/event 数量、pending 数量和 persistence gap 摘要。分片详情有自己的 store/lease，不再与统计事务争用同一个 pool。
 
 运行期间未提交批次与 ingress 丢弃有可观测 gap；进程硬崩溃会丢失尚未落库的计数，当前没有请求 WAL 或重启后恢复丢失数量的机制，不承诺能重建或准确报告这部分数量。
 
@@ -136,33 +150,28 @@ writer 周期性执行：
 详情开启时，resolution producer 在统一事件中附带 typed `ResolutionDetailSource`，后台 dispatcher 再尝试写入独立的 projection channel：
 
 - projection send 使用 non-blocking `try_send`；
-- projector 在后台生成 request digest、canonical qname 和有界 answer JSON，再调用 SQLite writer 的 non-blocking `try_write`；
+- projector 在后台生成 request digest、canonical qname 和有界 answer JSON，再调用分片 writer 的 non-blocking `try_write`；
 - projection 或 SQLite queue 满时只丢弃当前详情，并分别累计 `detail_dropped`；写入拒绝累计 `detail_failed`；
-- SQLite worker 达到 batch 上限时立即提交，低流量尾批最多等待 5 秒；
+- 分片 worker 达到 batch 上限时立即提交，低流量尾批最多等待 5 秒；单个事务只取队首同一 UTC 日的连续记录，跨文件不做部分提交；
 - `enable=false` 时 producer 不附带详情 source，但同一低基数事件仍进入 stats/cache 消费者。
 
 请求级字符串化和字段长度限制只在 projector/SQLite 边界执行；总耗时与主链耗时在 DNS core 完成时已冻结为数值，projector 不再根据当前时刻计算。`ResolutionEvent` 的 `Debug` 只显示存在性和 typed 安全字段。
 
-## 7. 淘汰和硬上限
+## 7. 保留边界
 
-每次详情 batch commit 在同一维护循环检查：
+生产分片批写只执行有界入队、字段校验和 `INSERT`，不执行历史 `COUNT`、按条数淘汰、按年龄 `DELETE` 或 `VACUUM`。v1 `eviction_threshold_records`、`max_records`、`max_record_age` 在 BC-26 删除旧配置字段前仍会被 loader 解析校验，但不再控制生产详情写入；旧单库 adapter 的容量测试不代表生产契约。
 
-1. 删除早于 `max_record_age` 的记录；
-2. 数量达到 `eviction_threshold_records` 时按时间/id 删除最旧记录；
-3. 目标降到软阈值以下；
-4. 插入前计算本事务后的数量；
-5. 如果仍会超过 `max_records`，丢弃本批次中最晚到达的详情并计数。
-
-硬上限判断和插入在同一 writer 串行路径中完成，避免并发突破。聚合表和 ledger 不受详情上限影响。
+按 R/G/T 计算的共同水位、stats/详情逻辑退役、manifest/ledger 与物理回收由 BC-10/11 完成。BC-08 registry 已提供先禁止新 lease、等待该日既有 lease 排空、checkpoint/关闭和恢复水位的入口，但当前没有调度器或自动删除；不能仅凭日分片声明保留策略已交付。
 
 ## 8. Connection 与事务
 
-- stats 和 detail 使用同一业务数据库，但独立逻辑 worker；
-- pool 保持小规模，避免 SQLite 写锁竞争；
+- stats 使用主业务 SQLite pool；detail 每个 lease 使用单日、最多一个连接的临时 pool，两者不共享文件；
+- registry 全局最多允许 4 个活动详情连接，同一天以日锁串行；历史日不常驻连接；
+- read lease 对缺失文件返回空且不创建目录，retirement 先发布逻辑不可见再等待既有日锁；
 - 两个 worker 的事务短且不在 DNS 请求任务中执行；
-- Management 只读查询使用独立、最多两个连接的 read-only pool；
+- 旧 Management 查询暂时仍读取主库；BC-09 改为通过受限 read lease 跨分片查询；
 - 所有 SQL 使用 bind 参数；
-- migration 只在 prepare 执行。
+- 统计 migration 只在 prepare 执行；日分片仅在首个写 lease 初始化并核对固定 layout。
 
 ## 9. 运行期故障
 
@@ -176,9 +185,9 @@ SQLite busy、磁盘满、I/O error：
 - 记录 degraded 首发、最近重试、积压 batch、persistence gap 风险；
 - pending batch/补偿计数达到 v1 固定内存保护上限时，stats 不能静默丢弃；升级为明确 fatal 或受控进程退出，由 supervisor 处理。
 
-`StorageBackend` 自身 panic、schema corruption 或无法保证 ledger 正确性时升级 fatal，不继续写可能重复的统计。
+`StorageBackend` 自身 panic、schema corruption 或无法保证 ledger 正确性时升级 fatal，不继续写可能重复的统计。分片文件 metadata/layout 不匹配、路径身份异常或连接 deadline 耗尽会拒绝该批详情，不静默接管外部文件；已进入 dispatcher 的统计仍独立处理。
 
-resolution runtime 与 Storage 都由进程级 owner 持有，不因普通 Runtime reload 重置。Management overview 暴露 ingress accepted/dropped/首次 gap、cache commit 各终态和 detail accepted/dropped/failed；Storage shutdown 摘要继续报告 SQLite detail committed/evicted/dropped 和 stats persistence 状态。
+resolution runtime 与 Storage 都由进程级 owner 持有，不因普通 Runtime reload 重置。Management overview 暴露 ingress accepted/dropped/首次 gap、cache commit 各终态和 detail accepted/dropped/failed；Storage shutdown 摘要继续报告 detail committed/evicted/dropped 和 stats persistence 状态。分片 writer 的 `evicted`/`dropped` 只保留统一摘要形状，正常批写固定为 0；队列拒绝仍由 resolution metrics 计量。
 
 Policy Core 通过 `DnsCore::resolve_with_completion` 提供已经完成策略判定的 `strategy_id`、answer `source`、lookup `cache_status`、请求期 `ClientMatchObservation`、过渡期 `client_bucket`、策略目标 `upstream_id`、实际结果 `upstream_used_id`，以及不含规则文本/matcher 的 matched rule/resource 摘要和 typed `ResourceVersion`；service 将其与最终共享 `CoreOutcome` 组合成唯一 `ResolutionEvent`。cache hit 从 `CacheEntry` 恢复生产请求的 target/used provenance，不以当前 route 猜测。客户端匹配事实保存匹配来源和当时的稳定 ID，事件消费或 reload 不按当前目录重映射；stats 只使用该低基数 ID。detail projector 允许保存受限原始 client ID、有效 client IP、匹配事实、已验证配置 ID、canonical qname 和有界 answer，但这些请求级值不进入事件 `Debug`、tracing 或 telemetry label。
 
@@ -190,10 +199,11 @@ shutdown：
 2. 停止并排空 resolution ingress、cache commit 和 detail projection worker；
 3. `StorageRuntime` 关闭 detail 输入，等待当前正在写入的 batch 结束，取回尚未排空的 worker；
 4. 冻结最后一个 stats epoch，优先提交 pending stats batch；
-5. 详情只使用剩余预算排空，再执行 WAL checkpoint 和 pool 关闭；
-6. 返回 resolution、stats、detail 和可能 gap 的独立摘要。
+5. 详情只使用剩余预算按日排空，每个写 lease 关闭其 pool；
+6. detail store 拒绝新 lease并等待全部活动连接归还，再完成统计 backend 关闭结果汇总；
+7. 返回 resolution、stats、detail 和可能 gap 的独立摘要。
 
-生产 owner 与 `StorageService::shutdown` 统一采用 stats → 剩余 detail → backend；回收独立 task 不再先排空全部详情队列。已执行的 SQLite 写入仍需先结束，可能消耗剩余预算，因此“统计优先”不等于抢占正在进行的 SQL 或保证零丢失。全部阶段共享同一 deadline，超时/失败显式报告，幂等 ledger 在各自事务内保持一致。
+生产 owner 先停止详情输入并等待当前分片事务返回，再由 `StorageService` 提交 stats/关闭主 backend，随后用剩余预算排空已取回的详情 worker 并关闭 registry。已执行的 SQLite 写入仍需先结束，可能消耗剩余预算，因此“统计优先”不等于抢占正在进行的 SQL 或保证零丢失。全部阶段共享同一 deadline，超时/失败显式报告，幂等 ledger 在统计事务内保持一致。
 
 ## 11. Migration
 
@@ -204,7 +214,7 @@ shutdown：
 - migration 失败保留原库并阻止启动；
 - backup/rollback CLI 属于后续独立契约。
 
-新库与旧库走同一前向升级链。业务时间改型通过新表复制、校验、替换，在单事务中保留详情 ID、已删除记录留下的自增高水位、统计与 ledger；合法旧毫秒字符串只改存储类型，不换算单位。拒绝不能无损转换的旧值，失败保留该步迁移前的表、数据和版本，不通过清库或造时间继续启动。
+当前统计库仍走原前向升级链并保留旧详情表；BC-08 不迁移、复制、删除或重新匹配旧详情。新日分片仅接受 layout v1 空文件或由 owner 新建的文件，不把单库旧行搬入分片。正式新数据基线和旧格式拒绝由 BC-26 完成。
 
 新增可空详情字段不补造历史事实；历史脱敏记录由 read model 明确标为 legacy_redacted，缺失主链耗时保持 null。升级会一次性复制相关表并重建时间索引，需要额外临时空间，仍使用原启动 deadline；不擅自延长预算。旧 binary 不支持新 schema，不自动 down。实际 migration 文件和 schema 版本见[后台服务实现](../../../implementation/backend/background-services.md)，不在设计中重复逐版本清单。
 
@@ -216,11 +226,12 @@ shutdown：
 - 时间改型无损复制、异常值回滚、实际 INTEGER 类型、自增高水位、跨位数排序/范围/清理与索引使用；
 - stats total/dimension upsert；
 - batch commit 后崩溃与 retry 去重；
-- event 跨午夜、late write；
+- 真实日分片空目录、event 跨午夜、late write 与日归属 trigger；
 - parallel/hosts/cache source 计数；
-- detail enable/disable、队列满、软阈值、硬上限和 age；
-- stats/detail 并发互不阻塞；
+- detail enable/disable、队列满、同日串行、活动连接上限和关闭排空；
+- 生产批写不执行条数/年龄淘汰，v1 小上限不截断分片记录；
+- stats/detail 文件隔离，生产主库旧详情表保持 0 新写入；
 - busy、disk full、permission、corruption；
 - shutdown deadline 和 gap summary；
-- 业务 DB 与 cache DB 完全隔离。
-- Management read-only pool、分页/filter/sort、opaque ID 和敏感字段安全投影。
+- 统计 DB、详情目录与 cache 文件完全隔离。
+- Management 跨分片分页/filter/sort、opaque ID 和敏感字段安全投影待 BC-09/13。

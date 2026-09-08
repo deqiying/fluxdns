@@ -77,6 +77,7 @@ pub struct SqliteResolveDetailRunSummary {
 /// 将有界详情记录送入独立 SQLite writer channel。
 #[derive(Clone)]
 pub struct SqliteResolveDetailWriter {
+    #[allow(dead_code)] // 生产已切至日分片，旧 sender 仅保留到 BC-27 的兼容测试。
     sender: mpsc::Sender<ResolveDetailRecord>,
 }
 
@@ -131,6 +132,7 @@ impl SqliteResolveDetailWriter {
     }
 
     /// 由详情 projector 无等待提交一条已经完成校验和裁剪的记录。
+    #[allow(dead_code)] // 生产已切至日分片，旧入口仅保留到 BC-27 的兼容测试。
     pub(crate) fn try_write(&self, record: ResolveDetailRecord) -> Result<(), PortError> {
         self.sender.try_send(record).map_err(|error| match error {
             mpsc::error::TrySendError::Full(_) => PortError::new(
@@ -284,17 +286,6 @@ pub struct SqliteStorageBackend {
     operation_lock: Arc<tokio::sync::Mutex<()>>,
     #[cfg(test)]
     injected_fault: Arc<Mutex<Option<InjectedSqliteFault>>>,
-    #[cfg(test)]
-    detail_test_gate:
-        Arc<Mutex<Option<(DetailSqlTestStage, Arc<crate::ports::testing::TestGate>)>>>,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum DetailSqlTestStage {
-    BeforeSql,
-    BeforeCommit,
-    AfterCommit,
 }
 
 #[derive(Clone, Copy)]
@@ -445,37 +436,7 @@ impl SqliteStorageBackend {
             operation_lock: Arc::new(tokio::sync::Mutex::new(())),
             #[cfg(test)]
             injected_fault: Arc::new(Mutex::new(None)),
-            #[cfg(test)]
-            detail_test_gate: Arc::new(Mutex::new(None)),
         })
-    }
-
-    #[cfg(test)]
-    pub(super) fn set_detail_test_gate(
-        &self,
-        stage: DetailSqlTestStage,
-        gate: Arc<crate::ports::testing::TestGate>,
-    ) {
-        *self.detail_test_gate.lock().unwrap() = Some((stage, gate));
-    }
-
-    /// 只暂停当前实例的首个匹配批次，后续 shutdown drain 不重复进入同步点。
-    #[cfg(test)]
-    async fn pause_detail_for_test(&self, stage: DetailSqlTestStage) {
-        let gate = {
-            let mut slot = self.detail_test_gate.lock().unwrap();
-            if slot
-                .as_ref()
-                .is_some_and(|(expected, _)| *expected == stage)
-            {
-                slot.take().map(|(_, gate)| gate)
-            } else {
-                None
-            }
-        };
-        if let Some(gate) = gate {
-            gate.pause().await;
-        }
     }
 
     /// 在真实目标库执行最小元数据写入并回滚；不产生伪造业务记录或持久化探针数据。
@@ -687,9 +648,6 @@ impl SqliteStorageBackend {
             let _guard = self
                 .lock_operation(deadline, "sqlite_storage.resolve_detail")
                 .await?;
-            #[cfg(test)]
-            self.pause_detail_for_test(DetailSqlTestStage::BeforeSql)
-                .await;
             let mut transaction = self
                 .pool
                 .begin()
@@ -705,18 +663,12 @@ impl SqliteStorageBackend {
                         return Err(error);
                     }
                 };
-            #[cfg(test)]
-            self.pause_detail_for_test(DetailSqlTestStage::BeforeCommit)
-                .await;
             check_deadline(deadline, "sqlite_storage.resolve_detail")?;
             transaction
                 .commit()
                 .await
                 .map_err(|error| self.database_error(error, "sqlite_storage.resolve_detail"))?;
             self.mark_healthy();
-            #[cfg(test)]
-            self.pause_detail_for_test(DetailSqlTestStage::AfterCommit)
-                .await;
             Ok(summary)
         })
         .await
@@ -1104,7 +1056,7 @@ async fn apply_resolve_batch(
     apply_resolve_records(transaction, &records).await
 }
 
-async fn apply_resolve_records(
+pub(super) async fn apply_resolve_records(
     transaction: &mut sqlx::Transaction<'_, Sqlite>,
     records: &[ResolveDetailRecord],
 ) -> Result<(), PortError> {

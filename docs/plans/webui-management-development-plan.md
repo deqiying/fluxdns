@@ -37,6 +37,8 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01
 
 同日 BC-06/07 已完成：`FDCS` codec、Moka 分批恢复、唯一进程 owner、周期覆盖、reload generation/source 仲裁和 finalizer 后最终写入已进入正式 app/runtime/service；生产 cache 路径已退出 SQLite。过渡接线仅消费 v1 已解析路径并固定 5 分钟周期，不改变上述 BC-26 边界。P2 下一依赖从 BC-08 日分片开始。
 
+同日 BC-08 已完成：生产详情 writer 与统计主库分离，按事件 UTC 日写入受管 SQLite 日文件；同日 lease 串行、活动连接上限、关闭排空和退役入口已建立，批写不再运行 v1 条数/年龄淘汰。旧详情不迁移，旧单库 adapter 只留兼容测试；过渡 `queries/` 路径由统计库同级推导，v2 `database.records_path` 的正式启动消费仍留 BC-26。P2 下一依赖为 BC-09 稳定 ID、跨分片 cursor/读口和提交后通知。
+
 ## 2. 当前基线与改造范围
 
 ### 2.1 已核对的工程入口

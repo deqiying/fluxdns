@@ -122,6 +122,10 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 
 BC-07 Windows 验证：全量 Cargo suite 807 passed、0 failed、3 ignored；定向 service、app、coordinator 和真实 `FDCS` 重启链路均通过。fmt、全部测试目标编译、文档与 diff 检查通过。未执行三个手动/大连接 ignored 专项、Linux、完整 v2 冷启/重启、真实权限/磁盘满、浏览器或约 10 客户端及 core 2ms 性能验收。
 
+同日 BC-08 已完成生产写入接线：`StorageRuntime` 将统计主库与 `detail_shards` owner 分离，详情按事件 UTC 日写入 layout v1 的 `YYYY-MM-DD.sqlite3`，registry 提供同日串行、最多 4 个活动连接、读写/退役 lease 与有界 shutdown。生产 batch 不再执行旧单库详情的历史 `COUNT`、按条数/年龄 `DELETE` 或 `VACUUM`；v1 三个配额字段仅待 BC-26 删除 loader 契约，主库旧详情 adapter 留到 BC-27。BC-08 不迁移旧记录；过渡目录由统计库同级 `queries/` 推导，正式 v2 `database.records_path` 仍归 BC-26。真实 SQLite 已定向覆盖跨日/迟到、错误日 trigger、只读不建库、外部库拒绝、连接/退役/关闭交错和小 v1 配额不截断；跨分片 ID/cursor/通知继续由 BC-09 完成，共同水位/物理回收由 BC-10/11 完成。
+
+BC-08 Windows 验证：完整 Cargo suite 815 passed、0 failed、3 ignored；Storage 定向 75 项和全部测试目标编译通过，真实文件另覆盖硬链接拒绝。fmt、文档与 diff 检查通过。未执行三个 ignored 专项、Linux、完整 v2 冷启/重启、真实权限/磁盘满、跨日 cursor/回收、浏览器或约 10 客户端及 core 2ms 性能验收。
+
 ### 开发步骤
 
 1. 审核 `cache/persistence.rs` 的现有 codec，保留可复用的版本、TTL、fingerprint、canonical wire 与 provenance；替换其第二份全量集合和文件容量逻辑，不直接将旧 adapter 改名接入。

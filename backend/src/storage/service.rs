@@ -10,10 +10,12 @@ use crate::ports::PortError;
 use crate::ports::storage::{StatsRecorder, StorageBackend, StorageFlushSummary};
 
 use super::{
-    STORAGE_SCHEMA_VERSION, SqliteResolveDetailFlushSummary, SqliteResolveDetailLimits,
-    SqliteResolveDetailRunSummary, SqliteResolveDetailWorker, SqliteResolveDetailWriter,
-    SqliteResolveDetailWriterBuildError, SqliteStorageBackend, SqliteStorageBackendBuildError,
-    StatsPersistenceError, StatsPersistenceFlushSummary, StatsPersistenceWorker,
+    DEFAULT_MAX_ACTIVE_DETAIL_SHARDS, DetailShardStore, DetailShardStoreBuildError,
+    STORAGE_SCHEMA_VERSION, ShardedResolveDetailWorker, ShardedResolveDetailWriter,
+    ShardedResolveDetailWriterBuildError, SqliteResolveDetailFlushSummary,
+    SqliteResolveDetailRunSummary, SqliteResolveDetailWorker, SqliteStorageBackend,
+    SqliteStorageBackendBuildError, StatsPersistenceError, StatsPersistenceFlushSummary,
+    StatsPersistenceWorker,
 };
 
 pub const DEFAULT_STORAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
@@ -113,12 +115,13 @@ pub struct StorageRuntime {
     service: StorageService,
     #[cfg(test)]
     backend_for_test: Arc<SqliteStorageBackend>,
-    detail_writer: Option<SqliteResolveDetailWriter>,
+    detail_store: Arc<DetailShardStore>,
+    detail_writer: Option<ShardedResolveDetailWriter>,
     resolution_metrics: Arc<crate::resolution::ResolutionPipelineMetrics>,
     detail_cancellation: Option<Cancellation>,
     detail_task: Option<
         tokio::task::JoinHandle<
-            Result<(SqliteResolveDetailWorker, SqliteResolveDetailRunSummary), PortError>,
+            Result<(ShardedResolveDetailWorker, SqliteResolveDetailRunSummary), PortError>,
         >,
     >,
 }
@@ -133,10 +136,10 @@ pub enum StorageRuntimeBuildError {
     Migration(#[source] PortError),
     #[error("sqlite storage startup write probe failed: {0}")]
     WriteProbe(#[source] PortError),
-    #[error("resolve detail limits are invalid: {0}")]
-    DetailLimits(#[source] SqliteResolveDetailWriterBuildError),
+    #[error("resolve detail shard store is invalid: {0}")]
+    DetailStore(#[source] DetailShardStoreBuildError),
     #[error("resolve detail channel could not be created: {0}")]
-    DetailChannel(#[source] SqliteResolveDetailWriterBuildError),
+    DetailChannel(#[source] ShardedResolveDetailWriterBuildError),
 }
 
 /// 业务 Storage 的统一 flush/shutdown facade。
@@ -292,20 +295,31 @@ impl StorageRuntime {
         let service = StorageService::new(backend.clone()).with_stats_worker(stats_worker);
         #[cfg(test)]
         let backend_for_test = Arc::clone(&backend);
+        // BC-26 切换正式 v2 loader 前，由统计库同级目录提供不含旧数据迁移的过渡默认值。
+        let records_path = config
+            .database
+            .path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""))
+            .join("queries");
+        let detail_store = Arc::new(
+            DetailShardStore::new(
+                records_path,
+                vec![
+                    config.database.path.clone(),
+                    config.dns.cache.persistence_path.clone(),
+                ],
+                DEFAULT_MAX_ACTIVE_DETAIL_SHARDS,
+            )
+            .map_err(StorageRuntimeBuildError::DetailStore)?,
+        );
         let mut detail_cancellation = None;
         let mut detail_task = None;
         let detail_writer = if config.dns.resolve_log.enable {
-            let limits = SqliteResolveDetailLimits::new(
-                config.dns.resolve_log.eviction_threshold_records,
-                config.dns.resolve_log.max_records,
-                config.dns.resolve_log.max_record_age,
-            )
-            .map_err(StorageRuntimeBuildError::DetailLimits)?;
-            let (writer, worker) = SqliteResolveDetailWriter::channel_with_limits(
-                backend,
+            let (writer, worker) = ShardedResolveDetailWriter::channel(
+                Arc::clone(&detail_store),
                 DEFAULT_RESOLVE_LOG_QUEUE_CAPACITY,
                 DEFAULT_RESOLVE_LOG_BATCH_SIZE,
-                limits,
             )
             .map_err(StorageRuntimeBuildError::DetailChannel)?;
             let cancellation = Cancellation::new();
@@ -324,6 +338,7 @@ impl StorageRuntime {
             service,
             #[cfg(test)]
             backend_for_test,
+            detail_store,
             detail_writer,
             resolution_metrics: Arc::new(crate::resolution::ResolutionPipelineMetrics::default()),
             detail_cancellation,
@@ -343,8 +358,13 @@ impl StorageRuntime {
             .expect("storage runtime always owns a stats recorder")
     }
 
-    pub(crate) fn detail_writer(&self) -> Option<SqliteResolveDetailWriter> {
+    pub(crate) fn detail_writer(&self) -> Option<ShardedResolveDetailWriter> {
         self.detail_writer.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn detail_store(&self) -> Arc<DetailShardStore> {
+        Arc::clone(&self.detail_store)
     }
 
     pub(crate) fn resolution_metrics(&self) -> Arc<crate::resolution::ResolutionPipelineMetrics> {
@@ -359,7 +379,7 @@ impl StorageRuntime {
         self.service.flush(deadline).await
     }
 
-    /// 停止详情的新输入并回收当前批次，先保存统计，再用同一 deadline 的余量排空详情。
+    /// 停止详情的新输入，先保存统计，再排空独立分片并关闭两个存储 owner。
     pub async fn shutdown(
         &mut self,
         deadline: Deadline,
@@ -368,34 +388,53 @@ impl StorageRuntime {
         if let Some(cancellation) = self.detail_cancellation.take() {
             cancellation.cancel(CancelReason::Shutdown);
         }
-        let detail = match self.detail_task.take() {
+        let detail_owner = match self.detail_task.take() {
             Some(mut task) => {
                 match tokio::time::timeout(deadline.remaining(std::time::Instant::now()), &mut task)
                     .await
                 {
-                    Ok(Ok(Ok((worker, summary)))) => {
-                        self.service.detail_worker = Some(worker);
-                        Ok(summary)
-                    }
+                    Ok(Ok(Ok((worker, summary)))) => Ok(Some((worker, summary))),
                     Ok(Ok(Err(error))) => Err(error),
                     Ok(Err(_)) => Err(PortError::new(
                         crate::ports::PortErrorClass::Internal,
-                        "sqlite_resolve_log.worker",
+                        "detail_shard.worker",
                     )),
                     Err(_) => {
                         task.abort();
-                        // 等待 Rust task 释放 transaction；底层 SQL 回滚仍由连接队列顺序保证。
+                        // 等待 task 释放当前 lease；底层 transaction 由连接关闭回滚。
                         let _ = task.await;
                         Err(PortError::new(
                             crate::ports::PortErrorClass::Timeout,
-                            "sqlite_resolve_log.shutdown",
+                            "detail_shard.shutdown",
                         ))
                     }
                 }
             }
-            None => Ok(SqliteResolveDetailRunSummary::default()),
+            None => Ok(None),
         };
         let service = self.service.shutdown(deadline).await;
+        let detail = match detail_owner {
+            Ok(Some((worker, mut summary))) => match worker.shutdown(deadline).await {
+                Ok(final_flush) => {
+                    summary.flush.committed = summary
+                        .flush
+                        .committed
+                        .saturating_add(final_flush.committed);
+                    summary.flush.evicted =
+                        summary.flush.evicted.saturating_add(final_flush.evicted);
+                    summary.flush.dropped =
+                        summary.flush.dropped.saturating_add(final_flush.dropped);
+                    Ok(summary)
+                }
+                Err(error) => Err(error),
+            },
+            Ok(None) => Ok(SqliteResolveDetailRunSummary::default()),
+            Err(error) => Err(error),
+        };
+        let detail = match (detail, self.detail_store.shutdown(deadline).await) {
+            (Ok(summary), Ok(())) => Ok(summary),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        };
         match (detail, service) {
             (Ok(detail), Ok(mut summary)) => {
                 summary.detail.committed = summary
@@ -521,7 +560,7 @@ mod tests {
             .unwrap()
             .unwrap_err();
         assert!(matches!(&error, StorageServiceError::Detail(source)
-            if source.operation() == "sqlite_resolve_log.worker"
+            if source.operation() == "detail_shard.worker"
                 && matches!(source.class(), crate::ports::PortErrorClass::Internal)));
         assert!(!format!("{error:?}").contains("private detail"));
         assert!(runtime.detail_task.is_none());
@@ -547,7 +586,7 @@ mod tests {
         use std::sync::Arc;
 
         use crate::ports::testing::TestGate;
-        use crate::storage::sqlite::DetailSqlTestStage;
+        use crate::storage::detail_shards::DetailSqlTestStage;
 
         for stage in [
             DetailSqlTestStage::BeforeSql,
@@ -564,23 +603,38 @@ mod tests {
                     .await
                     .unwrap();
                 let backend = runtime.backend_for_test.clone();
+                let detail_store = runtime.detail_store();
                 let stats = runtime.stats_worker();
                 let writer = runtime.detail_writer().unwrap();
                 let cancelled = runtime.detail_cancellation.as_ref().unwrap().clone();
                 let gate = Arc::new(TestGate::new());
-                backend.set_detail_test_gate(stage, gate.clone());
+                detail_store.set_detail_test_gate(stage, gate.clone());
+                stats.record_request(20_260_905, Vec::new()).unwrap();
+                let record = detail_record();
+                let detail_day = crate::storage::day_utc(record.occurred_at()).unwrap();
+                for _ in 0..super::DEFAULT_RESOLVE_LOG_BATCH_SIZE {
+                    writer.try_write(record.clone()).unwrap();
+                }
+                gate.wait_reached().await;
+                let detail_path = detail_store.shard_path(detail_day).unwrap();
                 let verification = sqlx::sqlite::SqlitePoolOptions::new()
                     .max_connections(1)
                     .connect_with(
-                        sqlx::sqlite::SqliteConnectOptions::new().filename(&config.database.path),
+                        sqlx::sqlite::SqliteConnectOptions::new()
+                            .filename(&detail_path)
+                            .read_only(true),
                     )
                     .await
                     .unwrap();
-                stats.record_request(20_260_905, Vec::new()).unwrap();
-                for _ in 0..super::DEFAULT_RESOLVE_LOG_BATCH_SIZE {
-                    writer.try_write(detail_record()).unwrap();
-                }
-                gate.wait_reached().await;
+                let stats_verification = sqlx::sqlite::SqlitePoolOptions::new()
+                    .max_connections(1)
+                    .connect_with(
+                        sqlx::sqlite::SqliteConnectOptions::new()
+                            .filename(&config.database.path)
+                            .read_only(true),
+                    )
+                    .await
+                    .unwrap();
                 let visible: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
                     .fetch_one(&verification)
                     .await
@@ -609,7 +663,7 @@ mod tests {
                 tokio::time::timeout(Duration::from_secs(5), cancelled.cancelled())
                     .await
                     .unwrap();
-                // 取消已送达但当前详情仍持有 operation lock，统计尚不能提交。
+                // 取消已送达但当前详情事务仍在结束；owner 尚未进入统计提交阶段。
                 assert!(!shutdown.is_finished());
                 assert_eq!(stats.pending_batch_count(), 0);
                 if !expire {
@@ -652,17 +706,23 @@ mod tests {
                 );
                 let total: i64 =
                     sqlx::query_scalar("SELECT SUM(total_requests) FROM stats_daily_total")
-                        .fetch_one(&verification)
+                        .fetch_one(&stats_verification)
                         .await
                         .unwrap();
                 assert_eq!(total, 1);
+                let legacy_details: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+                    .fetch_one(&stats_verification)
+                    .await
+                    .unwrap();
+                assert_eq!(legacy_details, 0);
                 let integrity: String = sqlx::query_scalar("PRAGMA integrity_check")
                     .fetch_one(&verification)
                     .await
                     .unwrap();
                 assert_eq!(integrity, "ok");
                 verification.close().await;
-                drop((runtime, backend, stats, writer));
+                stats_verification.close().await;
+                drop((runtime, backend, detail_store, stats, writer));
                 std::fs::remove_dir_all(work_path).unwrap();
             }
         }
@@ -782,8 +842,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_runtime_flushes_stats_before_draining_multiple_detail_batches() {
+    async fn storage_runtime_separates_stats_and_ignores_v1_detail_record_limits() {
         let (source, work_path) = crate::config::test_support::portable_example();
+        let source = source
+            .replace(
+                "eviction_threshold_records: 90000",
+                "eviction_threshold_records: 2",
+            )
+            .replace("max_records: 100000", "max_records: 3");
         let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("storage runtime fixture must be valid")
@@ -791,27 +857,23 @@ mod tests {
         let mut runtime = StorageRuntime::open(config.as_ref(), deadline())
             .await
             .expect("storage runtime must open configured sqlite");
-        let verification = sqlx::sqlite::SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(sqlx::sqlite::SqliteConnectOptions::new().filename(&config.database.path))
-            .await
-            .unwrap();
-        // 让真实详情写入以统计已落盘为前提，避免只凭 facade 调用顺序判断正式 owner。
-        sqlx::query(
-            "CREATE TRIGGER require_stats BEFORE INSERT ON resolve_log \
-             WHEN NOT EXISTS (SELECT 1 FROM stats_daily_total WHERE total_requests > 0) \
-             BEGIN SELECT RAISE(ABORT, 'stats must be committed first'); END",
-        )
-        .execute(&verification)
-        .await
-        .unwrap();
-
         let _stats_recorder = runtime.stats_recorder();
         assert_eq!(runtime.stats_worker().pending_batch_count(), 0);
         let writer = runtime
             .detail_writer()
             .expect("resolved fixture enables detail writer");
         let record = detail_record();
+        let day = crate::storage::day_utc(record.occurred_at()).unwrap();
+        let detail_store = runtime.detail_store();
+        let lease = detail_store.acquire_write(day, deadline()).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER reject_record_delete BEFORE DELETE ON resolve_log \
+             BEGIN SELECT RAISE(ABORT, 'detail writer must not delete'); END",
+        )
+        .execute(lease.pool())
+        .await
+        .unwrap();
+        lease.close(deadline()).await.unwrap();
         for _ in 0..300 {
             writer
                 .try_write(record.clone())
@@ -828,7 +890,36 @@ mod tests {
         assert_eq!(shutdown.stats.events_committed, 1);
         assert_eq!(shutdown.detail.committed, 300);
         assert!(writer.try_write(record).is_err());
-        verification.close().await;
+        let detail_verification = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(detail_store.shard_path(day).unwrap())
+                    .read_only(true),
+            )
+            .await
+            .unwrap();
+        let detail_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&detail_verification)
+            .await
+            .unwrap();
+        assert_eq!(detail_count, 300);
+        detail_verification.close().await;
+        let stats_verification = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&config.database.path)
+                    .read_only(true),
+            )
+            .await
+            .unwrap();
+        let legacy_detail_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(&stats_verification)
+            .await
+            .unwrap();
+        assert_eq!(legacy_detail_count, 0);
+        stats_verification.close().await;
         let _ = std::fs::remove_dir_all(work_path);
     }
 

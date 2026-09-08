@@ -36,17 +36,17 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 ## Storage
 
-[`StorageRuntime::open`](../../../backend/src/storage/service.rs) 在 DNS bind 前打开 SQLite 并构建 stats/detail 能力；`database` 始终必需，关闭 `resolve_log` 不关闭聚合统计。
+[`StorageRuntime::open`](../../../backend/src/storage/service.rs) 在 DNS bind 前打开统计 SQLite，并构建独立的详情日分片 registry/writer；`database` 始终必需，关闭 `resolve_log` 不关闭聚合统计，也不会创建新的详情目录或文件。
 
 [`StatsPersistenceWorker`](../../../backend/src/storage/stats.rs)、[`statistics.rs`](../../../backend/src/storage/statistics.rs) 与 [`ledger.rs`](../../../backend/src/storage/ledger.rs) 负责 epoch、待提交批次和幂等去重。SQLite adapter 在同一事务内更新聚合和 ledger，成功后 ack；普通不可用保留 pending 重试，pending 内存保护或不可恢复错误通过 service/Supervisor 处理。
 
-详情由 [`resolve_log.rs`](../../../backend/src/storage/resolve_log.rs) 投影，再交 [`sqlite.rs`](../../../backend/src/storage/sqlite.rs) 的唯一有界 detail worker 批写，满批立即提交，低流量尾批由周期 flush 处理；`writer.rs` 是内存 contract 实现，不是正式 SQLite writer。管理查询使用 [`SqliteManagementReadModel`](../../../backend/src/storage/management_read.rs) 独立只读 pool，不复用请求写入链路。
+详情由 [`resolve_log.rs`](../../../backend/src/storage/resolve_log.rs) 投影，再交 [`detail_shards.rs`](../../../backend/src/storage/detail_shards.rs) 的唯一有界 detail worker 批写。worker 按事件 UTC 日选择 `<records_path>/YYYY-MM-DD.sqlite3`，满批立即提交，低流量尾批由周期 flush 处理；一次事务只处理队首同日记录。registry 以日锁串行同一分片、全局最多 4 个活动单连接 pool，读 lease 缺文件时不建库，retirement 先阻止新 lease 再等待已有 lease。`writer.rs` 是内存 contract 实现，不是正式 SQLite writer。旧 [`SqliteManagementReadModel`](../../../backend/src/storage/management_read.rs) 仍读取主库，跨分片管理查询由 BC-09/13 替换。
 
-[迁移目录](../../../backend/migrations)的前向链是 0001 基础表、0002 resolution metadata、0003 management query projection、0004 query record observability、0005 DNS core duration、0006 integer business timestamps、0007 client identity。当前业务 schema 为 v7；v5 前的主链耗时及 v7 前的 `client_id`/匹配事实仍为 null，v4 前的脱敏详情仍标记为 legacy_redacted，不回填丢失内容。新库也执行同一链。SQLite 使用 WAL、NORMAL synchronous、busy timeout 和串行 operation lock；内存 adapter 是契约基线，不替代正式数据库。
+[主库迁移目录](../../../backend/migrations)的前向链仍是 0001 基础表至 0007 client identity，统计库当前 schema 为 v7；其中旧 `resolve_log` 暂留兼容读口/测试，生产不再写入。新详情文件使用 [`migrations/detail`](../../../backend/migrations/detail) 的 layout v1：`detail_meta` 固定版本和唯一 UTC 日，`resolve_log` 保持当前有效字段，`(event_time_utc_millis, id)` 索引和 trigger 双重约束记录只能属于该文件日期。BC-08 不迁移、删除或重新匹配旧详情。两类 SQLite 均使用 WAL、NORMAL synchronous 和 busy timeout；统计库保留串行 operation lock，详情连接由 registry lease 管理。
 
-升级由 adapter 手动执行 `include_str!` SQL 并更新 `storage_meta`，不是 SQLx Migrator。`connect_with_deadline` 将建目录、连接和迁移纳入 open 的同一预算；随后 `startup_write_probe` 在独立事务中实际更新 metadata 并回滚，不提交统计或详情。失败/超时不产生可服务 owner。已有 metadata 只读取核对，不再执行使用旧时间列的 `INSERT OR IGNORE`；不存在 metadata 行不作为自动修复场景。
+主库升级由 adapter 手动执行 `include_str!` SQL 并更新 `storage_meta`，不是 SQLx Migrator。`connect_with_deadline` 将建目录、连接和迁移纳入 open 的同一预算；随后 `startup_write_probe` 在独立事务中实际更新 metadata 并回滚，不提交统计或详情。详情目录只在首个写 lease 时创建；已有日期文件必须声明匹配的 layout/day 和完整表、索引、trigger，普通外部 SQLite 或路径/文件身份异常会被拒绝。失败/超时不产生可服务 lease。
 
-停机时 `run_until_stopped` 关闭详情输入并将剩余 worker/队列交回 owner；正在执行的批次先结束，其余详情不抢先排空。`StorageService::shutdown` 先提交统计，再用剩余时间排空详情，最后关闭 pool。启动/停机 deadline 不重置，但不能强制中断已进入 OS/SQLite worker 的操作；超时不伪装为成功或零丢失。
+停机时 `run_until_stopped` 关闭详情输入并将剩余 worker/队列交回 owner；正在执行的批次先结束，其余详情不抢先排空。`StorageService::shutdown` 提交统计并关闭主 pool，随后 `StorageRuntime` 用剩余时间排空分片详情、拒绝新 lease 并等待活动连接归还。启动/停机 deadline 不重置，但不能强制中断已进入 OS/SQLite worker 的操作；超时不伪装为成功或零丢失。
 
 ### 业务时间存储
 
@@ -54,9 +54,10 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 | --- | --- | --- |
 | `storage_meta` | `created_at_utc_millis`、`migrated_at_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64` |
 | `stats_batch_ledger` | `committed_at_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64` |
-| `resolve_log` | `event_time_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64` |
+| 主库旧 `resolve_log` / 日分片 `resolve_log` | `event_time_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64`；生产只写日分片 |
 | `stats_daily_total` / `stats_daily_dimension` | `day_utc` | `INTEGER`，epoch 起算的 UTC 自然日编号，语义不变 |
-| `resolve_log` | `duration_millis`、`dns_core_duration_micros` | `INTEGER` 耗时，分别为毫秒/微秒；历史主链耗时可为空 |
+| 日分片 `detail_meta` | `day_utc`、`created_at_utc_millis` | 文件归属的 epoch UTC 日和 layout 创建时间 |
+| 主库旧 `resolve_log` / 日分片 `resolve_log` | `duration_millis`、`dns_core_duration_micros` | `INTEGER` 耗时，分别为毫秒/微秒；旧历史主链耗时可为空 |
 
 [`0006_integer_business_timestamps.sql`](../../../backend/migrations/0006_integer_business_timestamps.sql) 只迁移原四个绝对时间字段，不修改 0001–0005。它在同一事务中创建目标表、按完整字段复制、检查时间无损往返、替换表并重建 `(event_time_utc_millis, id)` 索引；stats 日表不重写，ledger hash/序号、详情 ID/其他字段/空值和 AUTOINCREMENT 历史高水位保留。最后才推进 schema version，并将 migrated time 更新为本次升级时间；重开和写探针不刷新该时间。
 
@@ -64,7 +65,7 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 旧 writer 产生的规范非负十进制毫秒字符串可无损转换。空串、非数字、小数、指数格式、负值和超出 `i64` 的值不静默 `CAST` 成零或饱和值，迁移失败并回滚该步全部变更；不删除坏行或推测历史时间。新写入由 `system_time_utc_millis` 转为 `i64`，亚毫秒截断、epoch 前归零保留旧行为，溢出显式错误。时间列有 `typeof(...)='integer'` 与非负约束，不能保存不合法 TEXT/REAL 值。
 
-管理 overview/查询排序和 writer 的 age/容量清理都直接使用整数列；对外仍返回原 OpenAPI 日期格式。此变更不影响独立缓存 DB 的纳秒索引、Duration 精度、配置或异步队列。v6 迁移在启动时一次性复制相关表，需要额外空间；v7 只执行可空列追加。大库迁移耗时受原启动预算限制，尚无生产规模数据证明。运行新 binary 会前向升级，旧 binary 不支持 v7，不提供自动降级。
+分片 writer 用整数毫秒计算 UTC 日；文件内 trigger 再校验 `event_time_utc_millis / 86400000 == detail_meta.day_utc`。生产批写不执行历史 `COUNT`、按年龄/条数 `DELETE` 或 `VACUUM`，v1 三个详情配额字段只在 BC-26 删除前继续由旧 loader 解析校验。R/G/T 共同水位、manifest/ledger 和物理回收尚待 BC-10/11，当前不会自动删除分片。对外查询仍暂走旧读口，不能据此宣称跨日 API 已接线。
 
 ## Cache persistence
 
@@ -78,7 +79,7 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 [`RuntimeCoordinator`](../../../backend/src/runtime/coordinator.rs) 只登记一个 owner，并核对它与活动 revision/Moka source 一致。reload 在候选发布前校验新路径，Runtime CAS 成功后同步递增 generation 并切换 source；不从磁盘恢复候选，也不让旧写任务覆盖新代。发布前再次检查路径链接/文件身份及受保护文件 alias。shutdown 先排空历史和当前 [`LateCacheFinalizer`](../../../backend/src/cache/service.rs)，再在同一总 deadline 内 best-effort 写当前 Moka 的最终快照；Cache health 分别汇总 finalizer 与 snapshot gap，不记录 key、response、路径或底层原始错误。
 
-旧 [`CachePersistenceRuntime`](../../../backend/src/cache/runtime.rs)、[`SqlitePersistentCacheStore`](../../../backend/src/cache/sqlite.rs)、文件 adapter 和确定性 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs) 仍保留给既有契约测试及 P5 BC-27 删除工作，生产 `app/runtime/dns/service` 路径不再创建或挂接 SQLite cache persistence。业务统计/详情数据库仍是独立 SQLite，不受本次缓存切换影响。
+旧 [`CachePersistenceRuntime`](../../../backend/src/cache/runtime.rs)、[`SqlitePersistentCacheStore`](../../../backend/src/cache/sqlite.rs)、文件 adapter 和确定性 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs) 仍保留给既有契约测试及 P5 BC-27 删除工作，生产 `app/runtime/dns/service` 路径不再创建或挂接 SQLite cache persistence。统计主库与详情日分片均和缓存快照文件隔离，不受本次缓存切换影响。
 
 Windows `_fluxdns/p2-cache-tests/`、`_fluxdns/p2-cache-owner-tests/` 和 `_fluxdns/p2-cache-owner-policy-tests/` 真实文件测试覆盖流式往返、停机 TTL、损坏/未知版本/文件预算、失败保留旧文件、周期跳过未变化代、预算缩小后的部分预热、reload/clear 代际仲裁与清理后不复活、路径 hard-link/alias、超时 shutdown，以及两个真实 `PolicyDnsCore` 之间的 `FDCS` 重启命中。后者直接核对文件头且确认没有 SQLite `-wal`/`-shm` sidecar；未执行真实权限/磁盘满、Unix 或个人配置启动。
 
@@ -120,7 +121,7 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | remote/file 刷新 | 条件 fetch、manifest v2、epoch/CAS、scheduler | async prepare + service resource task | loopback 200/304 与真实条件头；重复 304、坏 pair/响应、旧 manifest、换代及同预算重试 | 未执行真实远程/代理组合 |
-| stats/detail | schema v6 整数时间、启动 deadline/probe、StorageRuntime、ResolutionRuntime | app 打开，service 持有并复用 sink；stats-first shutdown | 新库/v1/v5 升级、时间类型/排序/范围/清理、索引、高水位与异常值回滚；原 SQLite 锁/探针和 stats-first 回归 | ingress/pending/数据库故障仍可产生明确 gap；未验证生产规模迁移成本 |
+| stats/detail | 统计 schema v7、详情分片 layout v1、registry/lease、StorageRuntime、ResolutionRuntime | app 打开；统计主库与日分片 writer 分离 | 真实跨日/迟到分片、日归属、外部库拒绝、只读不建库、连接上限/退役/shutdown、小 v1 配额不截断；原统计迁移回归 | 跨分片读口、共同水位/回收待 BC-09 至 BC-11；未验证真实权限/磁盘满 |
 | legacy cache persistence | schema v2、增量 upsert、CachePersistenceRuntime | 仅保留 adapter/契约测试，生产不再挂接 | v1 升级、增量触发器、失败回滚与坏行清理既有测试 | 待 P5 BC-27 删除；不代表当前生产路径 |
 | cache 二进制快照 owner | `FDCS` header/SHA-256、Moka 分批导出/恢复、周期 worker、generation | app 启动恢复 + coordinator reload + service shutdown | Windows 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际/超时定向测试 | 过渡期固定 5 分钟；未验证真实权限/磁盘满、Unix 或 v2 冷启 |
 | telemetry lifecycle / 聚合 | histogram、typed writer、registry、sampler | dispatcher + app/service 周期及最终 flush | 固定桶/标签、溢出原子性、拥塞下聚合、关闭详情、输出重试、reload 与最终快照 | 没有 exporter/逐 attempt 流；长期负载与全部输出故障未验收 |
@@ -128,6 +129,8 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 ## 本次验证
 
 本节保留时间整数迁移批次的既有结果。后续契约验证工作树的入口、证据类别和运行结果见[契约验证运行入口](#契约验证运行入口)，不要把两个工作树的计数或性能样本拼接为同一轮。
+
+2026-09-08 P2 BC-08 验证在 Windows x86_64 使用 Rust/Cargo 1.98.0，真实 SQLite 文件位于仓库忽略的 `_fluxdns/p2-detail-shard-tests/` 或既有独立临时 `work.path`，用例结束仅清理各自唯一目录。`cargo test --manifest-path backend/Cargo.toml --locked storage:: -- --nocapture` 运行 75 项通过；完整 `cargo test --manifest-path backend/Cargo.toml --locked` 为 815 passed、0 failed、3 ignored，`--all-targets --no-run` 通过。覆盖两个 UTC 日和迟到记录、layout metadata/trigger、只读 lease 不建库、最多一个连接的受控场景、退役与关闭等待、外部 SQLite/硬链接拒绝，以及生产主库不新增详情和 v1 `max_records=3` 时 300 条分片记录全部提交。该结果不包含 Linux、真实权限/磁盘满、跨日 cursor 或保留删除。
 
 2026-09-05 在 Windows x86_64 使用项目 mise 管理的 Rust/Cargo 1.98.0；命令从仓库根执行，`CARGO_HOME=backend/.cargo-home`、构建物在 `backend/target`。测试使用代码内嵌配置，临时 `work.path`、数据库与证书由测试夹具在 `_fluxdns/test-temp` 下产生，端口为动态 loopback，不使用个人配置或远程服务。
 
@@ -168,10 +171,11 @@ pwsh -File script/test-backend-contracts.ps1 -Suite Connections -Repeat 3
 | V4-M03 | `contract_v4_newer_schema_is_rejected_without_mutation` | v8 被拒绝，schema SQL 与版本保持原样；不自动降级 |
 | V4-S01 / V9-S-local | `contract_v4_midnight_late_events_and_repeated_sqlite_recovery`；真实 SQLite，三轮事务 trigger 失败/解除/重试 | `day_utc` 从午夜两侧事件时间计算日桶；乱序与 late event 分属两个 epoch，失败不写 ledger，恢复后无重复总数，pending/gap 清除，重开及 integrity check 通过。trigger 不等价 disk-full 或介质 I/O 故障 |
 | V4-S02 | `stats::tests::contract_v4_pending_event_limit_preserves_active_epoch`；内存 backend 拒绝提交 | 分别达到 65,535/65,536 pending events，再产生两条 active event，保护错误保留 pending 与 active；batch 数上限继续复用原 64-batch 用例 |
-| V4-S03 | `storage::service::tests::contract_v4_sql_stages_share_shutdown_budget_and_reclaim_owner`；正式 StorageRuntime、真实 SQLite，SQL 前/已 INSERT 未提交/已提交待回收 × 放行/截止超时 | 当前详情先回收，统计不能抢占它；正常释放后 stats/detail 均完成，超时报告失败且不延长预算。未提交详情回滚、已提交详情保留，pending 统计可在显式新预算下幂等恢复；channel 关闭、句柄回收及 integrity check 均断言 |
+| V4-S03 | `storage::service::tests::contract_v4_sql_stages_share_shutdown_budget_and_reclaim_owner`；正式 StorageRuntime、真实日分片 SQLite，SQL 前/已 INSERT 未提交/已提交待回收 × 放行/截止超时 | 当前详情事务先回收，owner 尚未进入统计提交；正常释放后 stats/detail 均完成，超时报告失败且不延长预算。未提交详情回滚、已提交详情保留，pending 统计可在显式新预算下幂等恢复；主库无详情新行、channel/句柄/lease 回收及 integrity check 均断言 |
+| P2-S08 | `detail_shards::tests` 与 `storage_runtime_separates_stats_and_ignores_v1_detail_record_limits`；真实 UTC 日文件、迟到/错误日、缺失读取、外部库、连接和退役交错 | 文件名和 metadata 日一致，错误日由 trigger 回滚；只读不创建、连接受全局上限、shutdown 等待 lease；生产主库详情保持空，小 v1 条数/年龄配置不触发分片 COUNT/DELETE 配额路径 |
 | V4-S04 | `stats::tests::contract_v4_concurrent_flush_wait_preserves_deadline_and_active_epoch`；显式持有上一轮 flush 的串行锁 | 新调用的 20ms 预算耗尽即返回 Timeout，未提前交换 active epoch；放锁后可且仅可提交一次 |
 
-历史 v5 的完整非 NULL 字段、异常时间/INTEGER 约束、自增删除高水位及时间排序/索引用例继续复用。SQLite operation lock/pool wait、同批幂等提交、详情软/硬容量/年龄清理、满批/尾批和 stats-first shutdown 由既有定向 suite 与全量回归覆盖。V4-S03 的暂停点仅在 `cfg(test)` 的单个 backend 实例启用，分别位于真实 SQL 前、commit 前和 commit 后；不把同步点或 Tokio future 取消描述为可强制抢占 SQLite 系统调用。
+历史 v5 的完整非 NULL 字段、异常时间/INTEGER 约束、自增删除高水位及时间排序/索引用例继续复用。主库 SQLite operation lock/pool wait、同批幂等提交和旧单库详情配额测试仍作为兼容 adapter 回归，不能代表生产分片仍按条数/年龄清理。分片满批/尾批和 stats-first shutdown 由 P2-S08/V4-S03 覆盖。V4-S03 的暂停点仅在 `cfg(test)` 的单个分片 store 实例启用，分别位于真实 SQL 前、commit 前和 commit 后；不把同步点或 Tokio future 取消描述为可强制抢占 SQLite 系统调用。
 
 V4-S04 在修复前等待至 200ms watchdog，而没有在 20ms 调用预算内结束。[`StatsPersistenceWorker::flush`](../../../backend/src/storage/stats.rs) 现对 `flush_lock` 的排队使用原 deadline，超时返回 `Timeout / stats_persistence.flush_lock`；拿锁后的 epoch、pending、ledger 与提交顺序保持不变，没有增加重试、持久化主链或内存上限。
 

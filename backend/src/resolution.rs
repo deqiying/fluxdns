@@ -20,7 +20,7 @@ use crate::ports::telemetry::{
 };
 use crate::ports::{PortError, PortErrorClass};
 use crate::storage::{
-    ResolveDetailRecord, SqliteResolveDetailWriter, StatsPersistenceWorker, day_utc,
+    ResolveDetailRecord, ShardedResolveDetailWriter, StatsPersistenceWorker, day_utc,
 };
 
 pub const DEFAULT_RESOLUTION_INGRESS_CAPACITY: usize = 1_024;
@@ -166,7 +166,7 @@ pub struct ResolutionRuntime {
 impl ResolutionRuntime {
     pub fn start(
         stats: Arc<StatsPersistenceWorker>,
-        detail_writer: Option<SqliteResolveDetailWriter>,
+        detail_writer: Option<ShardedResolveDetailWriter>,
         telemetry: Option<Arc<TelemetryWriter>>,
     ) -> Self {
         Self::start_with_metrics(
@@ -179,7 +179,7 @@ impl ResolutionRuntime {
 
     pub fn start_with_metrics(
         stats: Arc<StatsPersistenceWorker>,
-        detail_writer: Option<SqliteResolveDetailWriter>,
+        detail_writer: Option<ShardedResolveDetailWriter>,
         telemetry: Option<Arc<TelemetryWriter>>,
         metrics: Arc<ResolutionPipelineMetrics>,
     ) -> Self {
@@ -340,7 +340,7 @@ async fn run_cache_worker(
 
 async fn run_detail_projector(
     mut receiver: mpsc::Receiver<Arc<ResolutionEvent>>,
-    writer: SqliteResolveDetailWriter,
+    writer: ShardedResolveDetailWriter,
     metrics: Arc<ResolutionPipelineMetrics>,
 ) {
     while let Some(event) = receiver.recv().await {

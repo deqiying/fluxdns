@@ -21,7 +21,7 @@ work:
   # 规则资源的落盘目录，相对于 work.path。
   rules_path: ./rules
 
-# 数据库配置。聚合统计默认开启，因此 database 始终必填；resolve_log 详情和聚合统计共用此数据库。
+# 数据库配置。聚合统计默认开启，因此 database 始终必填；P2 过渡期详情写入同级 queries/ 日分片。
 database:
   # 数据库后端；当前仅支持 sqlite。
   type: sqlite
@@ -102,11 +102,11 @@ dns:
   resolve_log:
     # 是否记录每次解析请求的详情；false 不会关闭按日/客户端等聚合统计。
     enable: true
-    # 详细记录达到该软阈值后启动异步淘汰。
+    # v1 兼容字段；P2 生产分片 writer 不再按条数启动淘汰，BC-26 将随 v2 loader 删除。
     eviction_threshold_records: 90000
-    # 详细记录的硬上限；达到上限且无法及时淘汰时丢弃新的详细记录，但继续累计统计。
+    # v1 兼容字段；P2 生产分片 writer 不把它作为硬上限。
     max_records: 100000
-    # 记录最长保留时间。
+    # v1 兼容字段；P2 保留期限由后续 R/G/T 共同水位取代。
     max_record_age: 7d
 
 # 一个 listener 是一个逻辑服务；addresses 中的地址由运行时展开为独立 socket。
@@ -588,7 +588,7 @@ clients:
 #   且只信任代理对端地址；
 #   forwarded header 链按从右到左解析，反向代理必须先清理客户端自带的伪造 header；
 # - bootstrap 与 connect_ip 互斥；socks5h:// 不得再配置 bootstrap；
-# - database.type/path 始终必填，聚合统计默认开启并依赖 SQLite；
+# - database.type/path 始终必填，聚合统计默认开启并依赖 SQLite；P2 详情暂写同级 queries/；
 # - resolve_log 只控制每次解析详情，关闭时仍保留按日/客户端等聚合统计；
-# - 0 < resolve_log.eviction_threshold_records < resolve_log.max_records；
+# - v1 loader 仍要求 0 < resolve_log.eviction_threshold_records < resolve_log.max_records，生产分片不消费该配额；
 # - 任何引用环、资源首次加载失败或内容校验失败都提供带路径的错误并阻止启动。

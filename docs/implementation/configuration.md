@@ -260,7 +260,7 @@ RawConfigVn
 | --- | --- | --- |
 | `version` | integer | 配置 schema 版本；当前必须为 `1`。 |
 | `work` | object | 工作目录和规则资源落盘目录。 |
-| `database` | object | 默认开启的聚合统计、可选解析详情和其他持久化能力使用的数据库；始终必填。 |
+| `database` | object | 默认开启的聚合统计和其他主库存储能力；始终必填。P2 详情生产写入已分离到日分片。 |
 | `logs` | object | 服务日志输出。 |
 | `webui` | object | WebUI Management Server、浏览器 origin 和登录用户。 |
 | `dns` | object | 全局缓存、TTL、ECS 和解析日志默认值。 |
@@ -286,9 +286,9 @@ RawConfigVn
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
 | `database.type` | string | 必填 | 当前模板仅定义 `sqlite`。未知类型应拒绝。聚合统计默认开启，因此不能省略。 |
-| `database.path` | string | 必填 | SQLite 数据库文件路径；相对路径以 `work.path` 为基准，父目录由程序创建。聚合统计和（启用时的）详情日志共用该数据库。 |
+| `database.path` | string | 必填 | 统计 SQLite 文件路径；相对路径以 `work.path` 为基准，父目录由程序创建。P2 过渡期详情目录由该文件同级 `queries/` 推导。 |
 
-数据库在 prepare 阶段必须完成打开、schema migration 和基本写入检查；失败时拒绝启动。运行中数据库暂时不可写时，DNS 继续服务，由统计 writer 保留进程内补偿计数并重试；未恢复前进程退出可能造成 persistence gap，该状态必须可观测。`database.path` 表示文件，不表示目录。
+数据库在 prepare 阶段必须完成打开、schema migration 和基本写入检查；失败时拒绝启动。运行中数据库暂时不可写时，DNS 继续服务，由统计 writer 保留进程内补偿计数并重试；未恢复前进程退出可能造成 persistence gap，该状态必须可观测。`database.path` 表示统计文件，不表示详情目录。正式 v2 使用独立必填 `database.records_path`；当前 v1 `ConfigLoader` 尚未切换，BC-08 仅以同级 `queries/` 接通分片 owner，BC-26 才负责正式字段和新数据基线启动。
 
 ## 6. `logs`
 
@@ -404,11 +404,11 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `enable` | boolean | 是否记录每次解析请求的详情（请求、策略、规则、ECS、缓存、上游结果和耗时等）。关闭时不写详情表，但不关闭聚合统计。 |
-| `eviction_threshold_records` | integer | 详细记录达到该软阈值后开始后台淘汰。 |
-| `max_records` | integer | 详细记录的硬上限；不能因并发写入而突破。 |
-| `max_record_age` | duration | 记录最长保留时间，例如 `7d`。 |
+| `eviction_threshold_records` | integer | v1 loader 兼容字段；P2 生产分片 writer 不消费。 |
+| `max_records` | integer | v1 loader 兼容字段；P2 生产分片 writer 不作为硬上限。 |
+| `max_record_age` | duration | v1 loader 兼容字段；P2 后续由 R/G/T 共同水位替代。 |
 
-必须满足 `0 < eviction_threshold_records < max_records`。这两个字段都按详细记录条数计数，不是 SQLite 文件字节上限。请求任务只向统一 resolution ingress 附带 typed question 和共享 response，qname digest、canonical qname 与 answer JSON 在后台 detail projector 中生成，再进入 SQLite adapter 唯一的有界详情 channel；满批立即提交，低流量尾批最多等待 5 秒。达到软阈值后先删除超过 `max_record_age` 的记录，再按时间删除最旧记录，直到回到软阈值以下。若 projection/SQLite 队列已满、数据库忙或提交会突破硬上限，则丢弃新的详细记录，DNS 请求不得等待或失败。
+当前 v1 loader 仍要求 `0 < eviction_threshold_records < max_records`，仅为 BC-26 前的旧 schema 解析边界；生产分片 writer 不读取三项配额。请求任务只向统一 resolution ingress 附带 typed question 和共享 response，qname digest、canonical qname 与 answer JSON 在后台 detail projector 中生成，再进入唯一有界详情 channel；满批立即提交，低流量尾批最多等待 5 秒。worker 按事件 UTC 日写入 `YYYY-MM-DD.sqlite3`，批写只执行校验与 `INSERT`，不执行历史 `COUNT`、按条数/年龄 `DELETE` 或 `VACUUM`。projection/SQLite 队列满或分片提交失败时丢弃当前详情并计量，DNS 请求不得等待或失败。
 
 详情中的 `duration_ms` 从 transport 接入计时点计到 DNS core 完成，`dns_core_duration_ms` 只计算 `DnsCore::resolve_with_completion` 主链；两者均在主链返回时冻结，不包含后台观测排队和 SQLite 写入。DoH 的 `duration_ms` 包含入站 TLS/HTTP 处理，但不包含响应编码和网络写回。schema v5 之前的历史记录无法回填主链耗时，Management API 返回 `null`。
 
@@ -416,7 +416,7 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 
 聚合统计默认开启且始终依赖 `database`：至少按 UTC 自然日记录总请求数，并按有界的 client bucket、transport class、strategy、source/upstream、RCODE 和 cache lookup status 记录分项计数。未匹配客户端统一进入 `unknown` bucket；不能使用域名、完整客户端 ID 或原始 IP 作为无界维度。请求任务只做一次有界 `ResolutionEnvelope::try_publish`，后台 dispatcher 更新进程内 sharded counters，stats writer 周期性以带 `batch_id` 的 checkpoint 批量 upsert 到 SQLite，并用 batch ledger 幂等去重。detail 下游溢出不影响聚合统计；但统一 ingress 溢出会同时丢失该事件的 stats/detail/cache commit，因此必须累计 `dropped` 并冻结首次 `gap_started_at_utc_millis`。一次请求只计一次 `total_requests`；cache/hosts 命中归入本地 source，parallel 的多个上游尝试不重复计请求。统计不能因为详情记录被丢弃或 `enable: false` 而停止。数据库运行中暂时不可写时继续维护进程内计数并报告 `degraded`/persistence gap；启动阶段数据库不可用则拒绝启动。
 
-“依赖数据库”表示统计/详情的权威持久化后端是 `database`；请求线程不同步等待数据库。Management overview 的 `resolution_pipeline` 暴露 ingress accepted/dropped/首次 gap 时间、cache commit 各终态以及 detail accepted/dropped/failed。`resolve_log` 的详情在当前有界 `max_records` 契约下允许 best-effort 丢弃并计数，若未来需要无损审计需另行定义 spool、背压和磁盘配额。
+“依赖数据库”表示统计依赖 `database.path`，详情依赖独立受管日分片；请求线程不同步等待任一 SQLite。Management overview 的 `resolution_pipeline` 暴露 ingress accepted/dropped/首次 gap 时间、cache commit 各终态以及 detail accepted/dropped/failed。详情仍是有界内存队列后的 best-effort 写入，不因取消条数上限变成无损审计；若需要无损语义仍须另行定义 spool、背压和磁盘配额。
 
 ## 9. `listener[]`
 
@@ -712,8 +712,8 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 11. DoH route 的 path 模板合法且彼此不存在语义重叠；endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段；GET/POST wire、Content-Type 和固定消息上限合法。
 12. `forwarded_header`/`proxy_protocol` 必须配置 `trusted_proxies`，且可信范围只覆盖反代对端；PROXY v1/v2 前导头缺失、未知或非法时拒绝。
 13. DoH 上游的 `bootstrap` 与 `connect_ip` 互斥；SecretRef 解析后的代理 scheme 合法，`socks5h://` 不得同时使用 `bootstrap`。
-14. `database.type`/`database.path` 始终存在且为受支持的 SQLite 配置；prepare 阶段数据库打开、migration 或基本写入检查失败必须阻止启动。
-15. 聚合统计默认开启，按日和有界 client/transport/strategy/upstream/RCODE/cache 维度持久化；`dns.resolve_log.enable` 只控制详情记录，且 `0 < eviction_threshold_records < max_records`。
+14. `database.type`/`database.path` 始终存在且为受支持的 SQLite 统计配置；prepare 阶段数据库打开、migration 或基本写入检查失败必须阻止启动。P2 分片目录还必须与统计库、缓存快照物理隔离。
+15. 聚合统计默认开启，按日和有界 client/transport/strategy/upstream/RCODE/cache 维度持久化；`dns.resolve_log.enable` 只控制详情记录。v1 loader 仍校验 `0 < eviction_threshold_records < max_records`，生产分片不消费该配额。
 16. 所有配置资源在 bind 前形成有效首次 snapshot；任何首次读取、下载或校验失败都阻止启动，后续单资源刷新失败才保留该资源旧版本；成功刷新更新 policy fingerprint，但不能触发全局 cache clear。
 
 ## 17. v1 范围外与版本化边界
