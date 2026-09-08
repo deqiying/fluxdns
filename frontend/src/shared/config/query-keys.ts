@@ -12,8 +12,9 @@ export const configKeys = {
   references: () => ["config-v2", "references"] as const,
   overview: () => ["config-v2", "overview"] as const,
   operation: (operationId: string) => ["config-v2", "operation", operationId] as const,
+  externalDiffs: () => ["config-v2", "external-diff"] as const,
   externalDiff: (activeRevision: string, fileRevision: string) =>
-    ["config-v2", "external-diff", { activeRevision, fileRevision }] as const,
+    [...configKeys.externalDiffs(), { activeRevision, fileRevision }] as const,
 };
 
 const dependentModules: Record<ConfigModule, readonly ConfigModule[]> = {

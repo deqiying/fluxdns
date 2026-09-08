@@ -9,10 +9,10 @@ WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md
 | 计划 | 文档状态 | 计划状态 | 剩余范围 |
 | --- | --- | --- | --- |
 | [WebUI 重构决策清单](webui-management-decisions.md) | 有效 | 实施中 | 12 项决定已确认；P0 技术核定与剩余 T 项 |
-| [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0、P2 与 BC-26 已交付；P1 配置事务后端已接线，前端全局状态/文件操作正在闭合；P3-P5 其余范围未授权 |
-| [WebUI 配置热更新专项](webui-management-config-runtime-plan.md) | 有效 | 实施中 | BC-02/03/29/30/31 后端生产链、恢复、差异与文件路由已接线；FC-01/02/16 全局 UI 和 P3 表单采用仍有边界 |
+| [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0、P2、BC-26 与 P1 配置事务/全局文件处理已交付；P3-P5 其余范围未授权 |
+| [WebUI 配置热更新专项](webui-management-config-runtime-plan.md) | 有效 | 实施中 | BC-02/03/29/30/31 及 FC-01/02/16 全局轮询、差异、还原/重试已接线；P3 表单采用仍有边界 |
 | [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | P1 配置事务及 BC-06 至 BC-13、BC-26 已完成；P3 写入、BC-24/25 实时通道与 BC-27 未授权 |
-| [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 有效 | 实施中 | FC-01/02、FC-16 基础与 FC-14 已交付；当前接入全局配置状态、差异提示和文件操作，P3 业务表单仍未授权 |
+| [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 有效 | 实施中 | FC-01/02、FC-16 全局基础与 FC-14 已交付；组合采用及 P3 业务表单仍未授权 |
 | [WebUI 管理后台重构需求](webui-management-requirements.md) | 草案 | 待评审 | 保留已审阅模块范围；已按决定校正 name、热配置和旧图标注解释 |
 | [WebUI 配套后端重构方案](webui-management-backend-refactor.md) | 草案 | 待评审 | 身份、独立快照、统一保留与日分片；取消旧版迁移/兼容，接入热配置专项 |
 

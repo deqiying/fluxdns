@@ -24,6 +24,7 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { managementRoutes, type ManagementPath } from "@/app/route-contract";
 import { getSafeErrorMessage } from "@/shared/api/errors";
 import { useAuth } from "@/modules/auth/AuthProvider";
+import { ConfigFileStatus } from "./ConfigFileStatus";
 
 const { Header, Content, Sider } = Layout;
 
@@ -183,6 +184,7 @@ export function AppLayout() {
           </Flex>
         </Header>
         <Content>
+          <ConfigFileStatus />
           <div className="content-wrap">
             <Outlet />
           </div>

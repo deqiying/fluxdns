@@ -65,7 +65,11 @@ Windows 浏览器 fixture 验证覆盖默认桌面、390×844、移动 Drawer �
 
 [`ExternalChangeBanner`](../../../frontend/src/shared/components/ExternalChangeBanner.tsx) 和 [`ExternalChangeDrawer`](../../../frontend/src/shared/components/ExternalChangeDrawer.tsx) 提供轻量提示、差异/受保护变化展示、脏关闭确认、文件还原确认及可选的组合采用/同步重试入口。还原确认明确只覆盖所见文件版本，不回滚运行态。[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 对还原和持久化重试复用单次 mutation + operation 回读，不把“重试文件同步”变成配置重新应用。
 
-这组基础当前没有挂入 `AppLayout`，也没有启动全局 polling：后端 BC-30 尚未注册正式配置状态/差异/文件操作 route，提前挂载只会制造持续失败请求。各模块的组合差异编辑仍需 FC-05 至 FC-13 提供真实领域表单；当前组件只暴露可选入口，不伪造通用 YAML 或自动合并能力。
+[`ConfigFileStatus`](../../../frontend/src/shared/components/ConfigFileStatus.tsx) 已挂入受保护的 `AppLayout`，以 `configKeys.state()` 每 30 秒仅在页面可见时轮询正式 `/api/v2/config/state`；刷新失败显示可重试的全局提示，不阻断当前页面。发现 issue 后才读取绑定双 revision 的差异，外改不会自动进入 Runtime；还原固定新 `operation_id` 并显式确认丢弃外改，`applied_unpersisted` 重试严格复用原 ID、只调用文件 retry route。mutation 结束后失效差异并回读权威状态，Banner 不因 HTTP 成功提前消失；被拒绝、补偿失败、结果未知和版本冲突继续展示事实。
+
+各模块的组合差异编辑和普通保存覆盖确认仍需 FC-05 至 FC-13 提供真实领域表单；全局协调器不传 `onAdopt`，不伪造通用 YAML 或自动合并能力。本轮 App/MSW 测试覆盖外改差异、确认还原和原 ID 持久化重试，完整 Vitest 20 个文件 86 项、typecheck、生产 build 与 v2 契约 4 项通过。真实后端文件/Runtime/Bearer 联合证据见[配置实现](../configuration.md#p1-配置事务生产接线2026-09-08)。
+
+当前 production embed WebUI 连接 `_fluxdns/p1-config-runtime-live/` 的 loopback 后端完成真实登录；外改 logs 后，30 秒全局轮询显示 Banner，Drawer 读取 `logs` 差异和双 revision，确认还原后 Banner/Drawer 依据权威状态消失。源/派生文件恢复为 `debug` 与 `./logs/hot.log`，浏览器 warning/error 为 0，Runtime revision 前后保持 1，随后 UDP `localhost A` 仍返回 `127.0.0.1`，SQLite 布局仍为 `statistics-v2|1`。该浏览器证据未覆盖窄屏、刷新失败、二次冲突、持久化 retry 异常态或 P3 组合采用；这些状态保留自动测试或后续阶段验收。
 
 ## P1 系统运行状态（2026-09-08）
 
@@ -87,7 +91,7 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 固定 12 个一级路径与配置模块映射，保留 `/dashboard`、`/queries`；上游组仅为 `/upstreams` 页内 tab。App 与导航已消费该表，但未就绪入口只是明确空态，不能将路径存在计为业务页面完成。
 
-[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型：草稿固定双 revision，区分预校验/确认/应用/结果未知；客户端普通编辑白名单剔除 `client_id`；操作结果区分同步、仅重试持久化、回读活动值和阻塞；大整数转表单前检查安全范围。FC-02 已补配置 client、操作回读、query key/精确失效、共享值转换和 Modal 容器，但没有可变全局配置 store；外部差异工作区与生产 owner 接线仍是独立边界。
+[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型：草稿固定双 revision，区分预校验/确认/应用/结果未知；客户端普通编辑白名单剔除 `client_id`；操作结果区分同步、仅重试持久化、回读活动值和阻塞；大整数转表单前检查安全范围。FC-02 已补配置 client、操作回读、query key/精确失效、共享值转换和 Modal 容器；全局文件状态由壳层协调器消费 TanStack Query，不另建可变配置权威。领域表单仍按 P3 模块分别接入。
 
 FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置 endpoint、operation 单次发送/回读/unknown、query key/失效、单位/duration/IP/继承/variant 及脏关闭确认；与 Rust 共用的 schema 夹具测试见[交付实现](../delivery.md#前端与接口生成)。这些验证使用 MSW/jsdom，不证明后端配置 route、真实文件、浏览器路由离开或内嵌环境已经接线。
 
@@ -99,8 +103,8 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | P2 固定 v2 数据 | mocks fixtures/handlers、dns-settings/system-settings api | 未挂载业务页面 | 类型检查、schema contract 与 MSW 定向测试 | 不证明 BC-12/13 handler、真实 SQLite、页面或 WS 已接线 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
 | 12 路由壳层 | route-contract、App、AppLayout、PendingModulePage | 受保护路由与分组导航 | 23 项路由测试；桌面/390×844 fixture 浏览器与 Console 检查沿用 FC-01 证据 | 八个入口为空态，upstreams 仍只有 tab 壳层 |
-| 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 仅供后续模块调用，未挂载业务页 | FC-02 定向 Vitest 27 项、typecheck | MSW/jsdom；正式 v2 配置 route、真实文件和浏览器交互未验收 |
-| 外部变化基础 | external-change reducer、Banner/Drawer、文件单次 mutation 回读 | 未挂 AppLayout，等待 BC-30 | FC-16 基础定向 Vitest 8 项、typecheck | 无真实文件/后端/browser；组合采用等待领域表单 |
+| 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 全局 state/operation 已接壳层；领域表单未挂载 | 完整 Vitest 20 文件 86 项、typecheck/build、真实 Bearer 配置 route/embed 登录 | P3 模块编辑未接 |
+| 外部变化基础 | ConfigFileStatus、external-change reducer、Banner/Drawer、文件单次 mutation 回读 | AppLayout 全局可见性轮询、差异、还原与 retry | App/MSW 断言双 revision、新/原 operation ID 与 apply 零重放；production embed 完成真实外改提示/差异/还原 | 组合采用与普通保存覆盖确认等待领域表单；窄屏及 retry 异常态未做浏览器验收 |
 | 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取 v2 进程指标和 v1 基础信息 | FC-14 定向 27 项；完整 Vitest 19 文件 80 项；typecheck/build；Windows 真实浏览器/后端可用样本 | 窄屏和真实不可用 OS 样本未做浏览器验收；其他 v2 页面未接线 |
 
-2026-09-05 原核对未运行 pnpm 或浏览器；P1 新增的 Bearer、壳层、FC-02/16 和 FC-14 证据见上节。历史记录与尚无运行证据的环境边界见[交付证据](../delivery.md)，不把共享组件/MSW 回归算作整套 v2 生产切换或其他业务页面完成。
+2026-09-05 原核对未运行 pnpm 或浏览器；P1 新增的 Bearer、壳层、FC-02/16 和 FC-14 证据见上节。历史记录与尚无运行证据的环境边界见[交付证据](../delivery.md)，不把全局协调器/MSW 回归算作 P3 业务页面、组合采用或整套浏览器验收完成。

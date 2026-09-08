@@ -50,6 +50,13 @@ select {
   border-inline: 0;
 }
 
+.global-config-status {
+  width: 100%;
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 16px 40px 0;
+}
+
 .external-change-drawer .ant-drawer-body {
   overflow-y: auto;
 }
@@ -580,6 +587,10 @@ select {
 
   .content-wrap {
     padding: 20px 16px;
+  }
+
+  .global-config-status {
+    padding: 12px 16px 0;
   }
 
   .system-runtime-metrics {

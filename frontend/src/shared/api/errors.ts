@@ -71,6 +71,11 @@ const errorMessages: Record<string, string> = {
   NETWORK_ERROR: "无法连接管理服务，请检查服务是否正在运行。",
   INVALID_RESPONSE: "管理服务返回了无法识别的响应。",
   SERVICE_UNAVAILABLE: "管理服务暂时不可用，请稍后重试。",
+  FILE_REVISION_CONFLICT: "配置文件已再次变化，请重新读取差异。",
+  OPERATION_BUSY: "已有配置操作正在执行，请等待其完成。",
+  PERSISTENCE_FAILED: "运行配置已生效，但配置文件同步失败。",
+  APPLY_FAILED: "配置未能应用，运行状态保持不变。",
+  COMPENSATION_FAILED: "配置补偿失败，请先核对当前运行状态。",
 };
 
 /** 将服务端错误码映射为固定安全文案，避免直接渲染任意后端字符串。 */

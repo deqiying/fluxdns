@@ -14,6 +14,7 @@ export interface ExternalIssue {
   kind: ExternalIssueKind;
   activeRevision: string;
   fileRevision: string;
+  operationId: string | null;
 }
 
 export interface ExternalWorkspaceState {
@@ -108,10 +109,12 @@ export function externalIssueFromState(state: ConfigState): ExternalIssue | null
       state.synchronization,
       state.files.source,
       state.files.derived,
+      state.operation_id,
     ]),
     kind,
     activeRevision: state.active_revision,
     fileRevision: state.observed_file_revision,
+    operationId: state.operation_id,
   };
 }
 

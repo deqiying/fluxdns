@@ -19,9 +19,10 @@ export function ExternalChangeDrawer({
   onAdopt,
 }: ExternalChangeDrawerProps) {
   const { modal } = App.useApp();
-  const busy = state.phase === "loading" || state.phase === "restoring";
+  const closeBlocked = state.phase === "loading" || state.phase === "restoring";
+  const actionBlocked = closeBlocked || state.phase === "awaiting_state";
   const requestClose = () => {
-    if (busy) return;
+    if (closeBlocked) return;
     if (!state.dirty) {
       onClose();
       return;
@@ -50,25 +51,30 @@ export function ExternalChangeDrawer({
       title="配置文件变化"
       width={640}
       destroyOnHidden
-      keyboard={!busy}
-      mask={{ closable: !busy }}
+      keyboard={!closeBlocked}
+      mask={{ closable: !closeBlocked }}
       onClose={requestClose}
       footer={state.issue ? (
         <Space wrap>
           <Button
             icon={<RotateCcw size={16} aria-hidden="true" />}
-            disabled={busy}
+            disabled={actionBlocked}
             onClick={confirmRestore}
           >
             还原文件
           </Button>
           {state.issue.kind === "applied_unpersisted" && onRetryPersistence ? (
-            <Button type="primary" loading={state.phase === "restoring"} onClick={onRetryPersistence}>
+            <Button
+              type="primary"
+              loading={state.phase === "restoring"}
+              disabled={state.phase === "awaiting_state"}
+              onClick={onRetryPersistence}
+            >
               重试文件同步
             </Button>
           ) : null}
           {onAdopt ? (
-            <Button type="primary" icon={<GitMerge size={16} aria-hidden="true" />} disabled={busy} onClick={onAdopt}>
+            <Button type="primary" icon={<GitMerge size={16} aria-hidden="true" />} disabled={actionBlocked} onClick={onAdopt}>
               修改并采用
             </Button>
           ) : null}
@@ -91,6 +97,9 @@ function ExternalChangeDrawerBody({ state }: { state: ExternalWorkspaceState }) 
   const { diff } = state;
   return (
     <Space direction="vertical" size={20} className="external-change-content">
+      {state.phase === "awaiting_state" ? (
+        <Alert type="info" showIcon message="文件操作已受理，正在确认权威配置状态。" />
+      ) : null}
       <Descriptions size="small" column={1} bordered>
         <Descriptions.Item label="活动版本">{diff.expected.active_revision}</Descriptions.Item>
         <Descriptions.Item label="文件版本">{diff.expected.observed_file_revision}</Descriptions.Item>

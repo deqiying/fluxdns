@@ -27,7 +27,7 @@
 
 2026-09-08 补充：ConfigStore 的固定源读取与 Management 的[类型化差异投影](../implementation/backend/management.md#p1-外部配置差异内部投影2026-09-08)已落实内部能力，覆盖完整候选语义校验、双文件竞争和输出预算；尚无正式端点或前端采用工作区，CR-04 继续保留异步调度、HTTP/UI 及联合验收。
 
-2026-09-08 生产闭合：P1 组合配置事务和文件动作已由[正式 owner 与路由](../implementation/backend/management.md#p1-配置事务与文件操作2026-09-08)接线，真实 Windows 进程验证 Runtime、日志、双文件、SQLite、UDP、Bearer HTTP、外改/还原/重试和重启复读。前端全局状态与文件工作区正在接线；“修改并采用”继续等待 FC-05 至 FC-13 的领域表单，不能用通用 YAML 编辑器替代。
+2026-09-08 生产闭合：P1 组合配置事务和文件动作已由[正式 owner 与路由](../implementation/backend/management.md#p1-配置事务与文件操作2026-09-08)接线，真实 Windows 进程验证 Runtime、日志、双文件、SQLite、UDP、Bearer HTTP、外改/还原/重试和重启复读。前端全局状态轮询、差异提示、还原和未同步重试也已接入受保护壳层；“修改并采用”继续等待 FC-05 至 FC-13 的领域表单，不能用通用 YAML 编辑器替代。
 
 ## 2. 配置状态与权威
 

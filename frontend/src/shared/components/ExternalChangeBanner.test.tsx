@@ -8,7 +8,7 @@ it("外部变化提示提供查看和仅关闭当前提示的动作", async () =
   const onOpen = vi.fn();
   const onDismiss = vi.fn();
   render(<ExternalChangeBanner
-    issue={{ key: "issue", kind: "files_changed", activeRevision: "active-1", fileRevision: "file-2" }}
+    issue={{ key: "issue", kind: "files_changed", activeRevision: "active-1", fileRevision: "file-2", operationId: null }}
     onOpen={onOpen}
     onDismiss={onDismiss}
   />);

@@ -6,7 +6,7 @@ import type { ExternalWorkspaceState } from "@/shared/config/external-change";
 import { ExternalChangeDrawer } from "./ExternalChangeDrawer";
 
 const state: ExternalWorkspaceState = {
-  issue: { key: "issue", kind: "files_changed", activeRevision: "active-1", fileRevision: "file-2" },
+  issue: { key: "issue", kind: "files_changed", activeRevision: "active-1", fileRevision: "file-2", operationId: null },
   dismissedKey: null,
   open: true,
   dirty: false,

@@ -32,6 +32,7 @@ describe("外部配置变化状态机", () => {
   it("关闭提示不解决问题，同一事实保持关闭，新版本重新提示", () => {
     const observed = externalWorkspaceReducer(initialExternalWorkspaceState, { type: "snapshot", state: configState() });
     expect(isExternalBannerVisible(observed)).toBe(true);
+    expect(observed.issue?.operationId).toBeNull();
     const dismissed = externalWorkspaceReducer(observed, { type: "dismiss" });
     expect(dismissed.issue).not.toBeNull();
     expect(isExternalBannerVisible(dismissed)).toBe(false);
