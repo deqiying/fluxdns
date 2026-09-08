@@ -4,7 +4,7 @@
 >
 > 适用范围：统计 SQLite、解析详情日分片、migration、lease 和存储生命周期
 >
-> 最后评审：2026-09-08（BC-26 接入 v2 路径、R/G/T 与新统计库布局；对外历史 API 仍待 BC-13）
+> 最后评审：2026-09-08（BC-13 对外历史 API 接入跨日读口）
 >
 > 关联实现：[detail_shards.rs](../../../../backend/src/storage/detail_shards.rs)、[detail_query.rs](../../../../backend/src/storage/detail_query.rs)、[retention.rs](../../../../backend/src/storage/retention.rs)、[sqlite.rs](../../../../backend/src/storage/sqlite.rs)、[service.rs](../../../../backend/src/storage/service.rs)、[statistics.rs](../../../../backend/src/storage/statistics.rs)、[ledger.rs](../../../../backend/src/storage/ledger.rs)、[migrations](../../../../backend/migrations)
 >
@@ -181,7 +181,7 @@ BC-09 的历史 cursor 绑定规范化后的 filter、sort、order、翻页方�
 - registry 全局最多允许 4 个活动详情连接，同一天以日锁串行；历史日不常驻连接；
 - read lease 对缺失文件返回空且不创建目录，retirement 先发布逻辑不可见再等待既有日锁；
 - 两个 worker 的事务短且不在 DNS 请求任务中执行；
-- 新 `DetailShardStore` 读口通过受限 read lease 跨分片查询；旧 v1 Management HTTP 仍读取主库，BC-13 才切换正式 v2 API；
+- 新 `DetailShardStore` 读口通过受限 read lease 跨分片查询，BC-13 正式 v2 API 已接入；旧 v1 Management HTTP 仍读取主库；
 - 所有 SQL 使用 bind 参数；
 - 统计 migration 只在 prepare 执行，当前 schema v9；日分片仅在首个写 lease 初始化并核对固定 layout。
 
@@ -246,6 +246,6 @@ shutdown：
 - busy、disk full、permission、corruption；
 - shutdown deadline 和 gap summary；
 - 统计 DB、详情目录与 cache 文件完全隔离。
-- BC-09 已覆盖跨分片分页/filter/sort、opaque ID、cursor 水位/完整性和提交通知时序；当前目录名称安全投影与 Bearer HTTP 待 BC-13。
+- BC-09 已覆盖跨分片分页/filter/sort、opaque ID、cursor 水位/完整性和提交通知时序；BC-13 已覆盖当前目录名称安全投影、分页前过滤与 Bearer HTTP。
 - BC-10 已覆盖 R/G/T 阈值/边界、主文件+WAL 采样、共同水位单调性、stats pending/详情迟到保护、manifest/ledger replay floor、事务回滚、lease 排空和启动恢复。
 - BC-11 已覆盖 01:00 前后、DST 跳过/重复、墙钟回拨、时区日期变化、失败 retry gate、跨重启单日一次、真实多日 checkpoint/delete、删除失败 manifest 重试、cache 文件隔离和运行状态查询；未执行 Linux 实机或真实权限/磁盘满。

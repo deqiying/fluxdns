@@ -41,7 +41,9 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BC-26
 
 同日经追加授权，BC-26 已提前实施：正式 `run`/`validate` 只接受 `ConfigV2`，直接消费 `records_path`、快照 enabled/path/interval 和 R/G/T；统计库增加 v2 layout marker，旧配置和未标记旧库拒绝，Management 使用 loader 原文建立 active `ConfigStore`。旧 loader/单库 adapter 仅留测试等待 BC-27，不提供迁移或双版本开关。
 
-同日 BC-12 已完成配置状态、系统白名单、十模块投影和 retention 状态的正式 Bearer GET。读取只组合相同 runtime revision 的 active source 与 RuntimeSnapshot，系统端点不输出 users/hash/Secret 实值或解析后的任意路径；配置写入、外部差异和 retention preview 仍留 P3。P2 下一项为 BC-13 跨日历史 HTTP 查询。
+同日 BC-12 已完成配置状态、系统白名单、十模块投影和 retention 状态的正式 Bearer GET。读取只组合相同 runtime revision 的 active source 与 RuntimeSnapshot，系统端点不输出 users/hash/Secret 实值或解析后的任意路径；配置写入、外部差异和 retention preview 仍留 P3。
+
+同日 BC-13 已完成跨日历史列表与详情的正式 Bearer HTTP：复用分片 storage 的稳定 ID、前后 cursor、提交边界和共同水位，在分页前应用过滤；当前客户端名称来自一次 active 目录快照，原始身份和历史匹配事实不重算。真实多日 SQLite、生产 UDP 写入及列表/详情 HTTP 已验证，WS/replay 与页面接线仍留 BC-24/25 和后续 FC 检查点。至此本次授权的 P2 后端 BC-06 至 BC-13、固定契约/只读前端基础及提前 BC-26 均已实施，不据此认领尚依赖实时通道或业务页面的 FC 检查点。
 
 ## 2. 当前基线与改造范围
 

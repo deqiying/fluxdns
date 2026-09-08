@@ -11,7 +11,7 @@ use super::ManagementRuntime;
 use super::assets;
 use super::auth::{AuthError, AuthState};
 use super::metrics::MetricsOwner;
-use super::query::ManagementQueryService;
+use super::query::{ManagementHistoryDependencies, ManagementQueryService};
 use super::router::{AuthServices, build_router};
 use super::session::SessionStore;
 use crate::config::resolve::ResolvedWebUi;
@@ -21,9 +21,7 @@ use crate::observability::TelemetryWriter;
 use crate::ports::management::ManagementStorageRead;
 use crate::resolution::ResolutionPipelineMetrics;
 use crate::runtime::{RuntimeCoordinator, TaskError};
-use crate::storage::{
-    RetentionCoordinator, SqliteManagementReadModel, SqliteManagementReadModelBuildError,
-};
+use crate::storage::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
 
 pub(crate) struct ManagementService {
     listener: tokio::net::TcpListener,
@@ -38,7 +36,7 @@ pub(crate) struct ManagementQueryDependencies {
     telemetry: Option<Arc<TelemetryWriter>>,
     resolution_metrics: Arc<ResolutionPipelineMetrics>,
     metrics: Arc<MetricsOwner>,
-    retention: Arc<RetentionCoordinator>,
+    history: ManagementHistoryDependencies,
 }
 
 impl ManagementQueryDependencies {
@@ -49,7 +47,7 @@ impl ManagementQueryDependencies {
         telemetry: Option<Arc<TelemetryWriter>>,
         resolution_metrics: Arc<ResolutionPipelineMetrics>,
         metrics: Arc<MetricsOwner>,
-        retention: Arc<RetentionCoordinator>,
+        history: ManagementHistoryDependencies,
     ) -> Self {
         Self {
             coordinator,
@@ -58,7 +56,7 @@ impl ManagementQueryDependencies {
             telemetry,
             resolution_metrics,
             metrics,
-            retention,
+            history,
         }
     }
 }
@@ -89,7 +87,7 @@ impl ManagementService {
             dependencies.resolve_log_enabled,
             dependencies.resolution_metrics,
             dependencies.metrics,
-            dependencies.retention,
+            dependencies.history,
         ));
         let services = Arc::new(AuthServices::new(
             Arc::clone(&auth),

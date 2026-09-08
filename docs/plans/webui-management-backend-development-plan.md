@@ -144,6 +144,8 @@ BC-26 Windows 验证：真实 `StorageRuntime` 临时文件覆盖空目录初始
 
 同日 BC-12 已接入四类正式 Bearer GET：配置状态、系统白名单、十模块 source/effective/reference/runtime 投影和 retention 状态。模块投影只组合同 revision 的 active ConfigStore 与 RuntimeSnapshot，不一致返回 503；系统投影不含 users/hash/Secret 实值或解析后任意路径。retention 复用生产 coordinator，补充 pending/failed manifest 对应主文件与 WAL 字节及服务器时区下一次本地 01:00。普通配置 POST、外部差异和 retention preview 未注册，仍留 P3。
 
+同日 BC-13 已接入 `/api/v2/queries/search` 与 `/api/v2/queries/{record_id}`：Management 只消费 active 目录快照和 `DetailShardStore` 领域读口，名称过滤先解析完整当前 ID 集合，全部条件在跨分片 keyset 分页前应用。输出保留原始身份/历史匹配事实，单独投影当前名称、缓存 producer、稳定记录 ID、前后 cursor、commit cursor 和共同水位。真实两日 SQLite 路由测试及生产 debug binary 的 UDP 写入、Bearer 列表/详情均通过；最终 Cargo 836 passed/3 ignored，前端 84 项与 schema 4 项通过，Clippy 仅余 6 项既有基线 lint。WS/replay 与前端业务页面不在 BC-13。
+
 ### 开发步骤
 
 1. 审核 `cache/persistence.rs` 的现有 codec，保留可复用的版本、TTL、fingerprint、canonical wire 与 provenance；替换其第二份全量集合和文件容量逻辑，不直接将旧 adapter 改名接入。

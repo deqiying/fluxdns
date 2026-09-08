@@ -4,13 +4,13 @@
 >
 > 适用范围：独立管理面、认证与会话、初始化写入、只读 API 和 SPA 安全边界
 >
-> 最后评审：2026-09-08（v2 指标只读端点与共享采样 owner）
+> 最后评审：2026-09-08（v2 配置、保留与历史只读端点）
 
 ## 设计结论
 
 Management 使用独立 HTTP listener 与 Axum router，不扩展 DoH 的有界 DNS parser。框架类型限定在 adapter 内；Runtime、Storage、Resource 和 DNS ports 只暴露领域类型。读数据通过 snapshot 或 `ManagementStorageRead`，不让 handler 持有 SQLx pool。
 
-当前页面 API 字段、状态码和错误 envelope 的权威仍是 [v1 OpenAPI](../../frontend/openapi/management-api-v1.yaml)，本文不复制 schema。P0 已冻结 [v2 目标契约](../../frontend/openapi/management-api-v2.yaml)；BC-23 允许服务指标和进程信息两个无写副作用的 v2 读端点先行接入，其余 v2 路由仍等待成套切换。该局部接入不是承诺长期维护 v1/v2 并行兼容服务，实际边界见[管理端实现](../implementation/backend/management.md#p0-v2-契约)。
+当前页面 API 字段、状态码和错误 envelope 的权威仍是 [v1 OpenAPI](../../frontend/openapi/management-api-v1.yaml)，本文不复制 schema。P0 已冻结 [v2 目标契约](../../frontend/openapi/management-api-v2.yaml)；BC-23、BC-12 和 BC-13 已依次接入指标、配置/保留及历史查询的无写副作用 v2 端点，配置写入与 WS 仍等待后续检查点。该分阶段接入不是承诺长期维护 v1/v2 并行兼容服务，实际边界见[管理端实现](../implementation/backend/management.md#p0-v2-契约)。
 
 v2 配置读写以活动源表达为权威，模块严格白名单，`name` 为管理/引用键，`client_id` 只负责请求身份且普通编辑不可修改。配置先运行时应用后持久化，操作结果和文件同步状态分开；外部变化只提示，不自动 reload。未来正式切换必须把鉴权、Origin、handler、client 与 SPA fallback 一并接入，不能只挂上尚无 owner 的写路由。不新增角色管理。
 

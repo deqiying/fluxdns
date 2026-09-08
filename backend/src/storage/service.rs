@@ -406,7 +406,6 @@ impl StorageRuntime {
         self.detail_writer.clone()
     }
 
-    #[cfg(test)]
     pub(crate) fn detail_store(&self) -> Arc<DetailShardStore> {
         Arc::clone(&self.detail_store)
     }

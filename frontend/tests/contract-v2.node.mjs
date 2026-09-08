@@ -62,6 +62,8 @@ test("全部 schema 可编译，v2 不声明角色/通用 YAML/顶层删除接�
     "getRetentionStatus",
     "getServiceMetrics",
     "getProcessMetrics",
+    "searchQueries",
+    "getQueryDetail",
   ]);
   assert.equal(Object.keys(openapi.paths).some((path) => /roles|users|restart|stop|clear/.test(path)), false);
   for (const path of Object.values(openapi.paths)) assert.equal("delete" in path || "patch" in path, false);

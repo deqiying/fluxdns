@@ -185,6 +185,8 @@ pub struct DetailQueryFilter {
     pub transport: Option<DetailQueryTransport>,
     pub matched_client_id: Option<String>,
     pub matched_client_ids: Vec<String>,
+    /// `client_name` 已在完整当前目录解析；即使结果为空也必须应用该过滤。
+    pub require_matched_client_ids: bool,
     pub qtype: Option<u16>,
     pub rcode: Option<DetailQueryRcode>,
     pub source: Option<DetailQuerySource>,
@@ -695,7 +697,9 @@ async fn query_shard(
     if let Some(value) = &query.filter.matched_client_id {
         sql.push(" AND matched_client_id = ").push_bind(value);
     }
-    if !query.filter.matched_client_ids.is_empty() {
+    if query.filter.require_matched_client_ids && query.filter.matched_client_ids.is_empty() {
+        sql.push(" AND 1 = 0");
+    } else if !query.filter.matched_client_ids.is_empty() {
         sql.push(" AND matched_client_id IN (");
         let mut values = sql.separated(", ");
         for value in &query.filter.matched_client_ids {
@@ -1478,6 +1482,7 @@ mod tests {
         filtered.filter.qname = Some("target.example.".to_owned());
         filtered.filter.transport = Some(DetailQueryTransport::Udp);
         filtered.filter.matched_client_ids = vec!["client-b".to_owned(), "missing".to_owned()];
+        filtered.filter.require_matched_client_ids = true;
         filtered.filter.qtype = Some(1);
         filtered.filter.rcode = Some(DetailQueryRcode::NoError);
         filtered.filter.source = Some(DetailQuerySource::Upstream);
@@ -1498,6 +1503,17 @@ mod tests {
         assert_eq!(second.items.len(), 1);
         assert_eq!(second.items[0].duration_millis, 2);
         assert!(second.next_cursor.is_none());
+
+        let mut no_current_name_match = query(FIRST_DAY, FIRST_DAY + 1, 20);
+        no_current_name_match.filter.require_matched_client_ids = true;
+        assert!(
+            store
+                .query_details(no_current_name_match, deadline())
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
         store.shutdown(deadline()).await.unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -4,9 +4,9 @@
 >
 > 适用范围：正式 Management listener、认证、配置写入、只读查询与内嵌资源接线
 >
-> 最后核对：2026-09-08（BC-12 模块配置与保留状态只读 API）
+> 最后核对：2026-09-08（BC-13 新版解析历史查询）
 >
-> 核对基线：`0f18d5b2ddf67625121fd7e0662e21723362565f`
+> 核对基线：`0f7cffbab6bb1ba040f0537f7f2c28bdfc1dd13e`
 >
 > 时间存储补充核对：2026-09-05，`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加业务时间迁移工作树；不扩大其他管理功能审计范围
 
@@ -20,7 +20,7 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 
 ## P0 v2 契约
 
-2026-09-07 局部核对：目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。BC-23 已注册 `/api/v2/service/metrics` 和 `/api/v2/system/runtime`；BC-12 又注册配置状态、系统白名单、模块投影和保留状态四类只读端点。它们均受 Bearer 保护。v2 认证、配置写入、历史查询与 WS 仍未注册，既有 v1 handler 继续承担当前页面，不据此宣称完整双版本服务。
+2026-09-07 局部核对：目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。BC-23 已注册 `/api/v2/service/metrics` 和 `/api/v2/system/runtime`；BC-12 又注册配置状态、系统白名单、模块投影和保留状态四类只读端点；BC-13 注册历史列表与详情。它们均受 Bearer 保护。v2 认证、配置写入与 WS 仍未注册，既有 v1 handler 继续承担当前页面，不据此宣称完整双版本服务。
 
 P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测、验证票据和操作记录已有 ConfigStore 内部入口，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。下表的 P0 decoder 不因此成为已接线的写入服务；BC-12 只开放读取，异步应用、外部差异与普通配置写入仍未注册。
 
@@ -29,7 +29,7 @@ P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/
 | 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新不含 `client_id`；系统只读投影不含 users/hash | `decode_candidate` / `decode_apply` 限制 body、变更数、null 和字段；单模块入口强制模块相符。完整引用、名称占用、影响确认、prepare 由后续 ConfigStore 实施 |
 | 活动配置与文件 | active/runtime/persisted revision 分离；组合文件观测 token；源表达、生效值/来源、引用和独立 runtime 投影；外部差异、还原、同步重试请求 | DTO 本身不读取/覆盖文件；ConfigStore 状态与逐文件自写身份已有内部投影，外部差异和正式 handler 留 BC-30 |
 | 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、校验 token、明确确认清单 | 运行成功不等于文件同步，unknown 不能自动重放。有界记录和冻结结果已有内部消费，异步 owner/HTTP 接线未完成 |
-| 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-09 已实现分片 storage 读口、cursor 上下文/水位完整性和 commit 后通知；当前名称投影/Bearer HTTP 待 BC-13，WS 鉴权/队列/replay 待 BC-24/25 |
+| 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-09 已实现分片 storage 读口、cursor 上下文/水位完整性和 commit 后通知；BC-13 已接入当前名称投影与 Bearer HTTP，WS 鉴权/队列/replay 待 BC-24/25 |
 
 大计数/序列使用十进制 `u64` 字符串，Rust 和 schema 均拒绝溢出与前导零；安全整数时间采用 UTC ms，耗时采用 us。请求中的安全时间上界由 REST/WS 共用验证器执行；输出时间仍为 Rust `u64`，生产投影接线时必须保持 schema 的安全整数边界。源 DTO 的相对路径、SecretRef 来源和缺失继承保留，duration 序列化为精确 ns 字符串；这不是可回写的完整 YAML 语法树，不能据此丢弃原注释或显式源表达。
 
@@ -57,6 +57,14 @@ Windows 使用本批 debug binary 与独立 `_fluxdns/bc12-http/` v2 配置完�
 
 本批 Windows 验证：`config::` 106 项、`management::` 22 项、`cargo check`、全部测试目标 `--all-targets --no-run` 和 fmt 通过；12 个配置状态及 10 个真实操作投影经现有 AJV 对 v2 schema 校验通过，覆盖 8 种操作状态、5 种文件状态和 5 种同步状态。前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过；Node/Vite 的沙盒 `spawn EPERM` 经批准重跑解决。未运行完整 Cargo suite、v2 生产启动/HTTP、浏览器、跨平台或性能验收。
 
+## P2 新版解析历史查询（2026-09-08）
+
+`POST /api/v2/queries/search` 与 `GET /api/v2/queries/{record_id}` 已进入正式 Bearer query router，直接消费 [`DetailShardStore`](../../../backend/src/storage/detail_query.rs) 的跨日读口，不让 handler 持有 SQLx pool。列表先以一次 active ConfigStore 快照把 `client_name` 模糊匹配解析为完整当前 `client_id` 集合，再由 storage 在分页前应用全部过滤；空 ID 集合也显式返回空结果。原始 ID/IP、历史匹配来源和匹配 ID 保持写入时事实，当前名称及 `directory_revision` 只作为同次读取投影，不补造或重匹配历史。
+
+qname 在进入 storage 前归一化为小写绝对名，qtype 接受标准名或 `TYPE<n>`；详情耗时从存储毫秒精确投影为微秒。缓存命中的顶层 upstream 字段保持空值，写入时 producer 的 strategy/目标/实际 upstream 单独放入 `cache_producer`。记录 ID、前后 cursor、commit cursor 和 retention revision 沿用 BC-09 的 opaque/十进制契约；cursor 篡改或水位失效返回 410 `CURSOR_EXPIRED`，非法 filter/record ID 返回 400，已过期或不存在记录返回 404，storage/目录代次异常返回 503。
+
+Windows 定向测试用两个真实 UTC 日 SQLite 分片覆盖跨日稳定分页、分页前名称过滤、无尾点 qname、缓存 provenance、详情定位、非法 qtype/cursor 与 Bearer 拒绝。生产 debug binary 又在独立 `_fluxdns/bc13-http/` 目录完成真实 login、`doggo` UDP 请求、详情分片提交及 Bearer HTTP：列表和详情均为 200，返回同一稳定 ID；无 Bearer 列表为 401。实际两类响应另经当前 OpenAPI AJV 校验。最终完整 Cargo 为 836 passed、3 ignored，全部测试目标编译、build 和 fmt 通过；前端 typecheck、20 文件 84 项 Vitest、build 与 4 项 v2 schema contract 通过。Clippy `-D warnings` 仍被本次改动前已有的 6 项 lint 阻断，本项没有新增 lint；一次此前成功运行后的默认并发 Cargo 重跑发生无具体失败用例的 Windows `STATUS_STACK_BUFFER_OVERRUN`，立即同命令重跑通过。测试进程已停止；这不覆盖浏览器、WS/replay、HTTPS 反向代理、Linux、约 10 客户端或 core 2ms 性能。
+
 ## P1 外部配置差异内部投影（2026-09-08）
 
 [`config_query/external.rs`](../../../backend/src/management/config_query/external.rs) 消费 ConfigStore 的[固定源输入](../configuration.md#p1-外部差异输入内部能力2026-09-08)，比较全部十个可写模块的类型化源值。按同一命名空间的 `name` 配对，不猜测改名、不授权删除；客户端 ID 的读取差异不改变普通编辑白名单。缺失继承、SecretRef 引用、路径及资源内部顺序保留，类型化等价表达不制造假差异。
@@ -69,7 +77,7 @@ Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/�
 
 ## 路由与保护
 
-[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout 认证端点、受 Bearer 保护的 session、[`query.rs`](../../../backend/src/management/query.rs) 七个 v1 查询端点及 BC-23/BC-12 v2 只读端点；未知 API 与 SPA fallback 隔离。既有页面字段/状态码以 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，v2 端点以 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
+[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout 认证端点、受 Bearer 保护的 session、[`query.rs`](../../../backend/src/management/query.rs) 七个 v1 查询端点及 BC-23/BC-12/BC-13 v2 只读端点；未知 API 与 SPA fallback 隔离。既有页面字段/状态码以 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，v2 端点以 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
 
 router 固定保护包括 JSON body 16 KiB、URI 4 KiB、64 个 header/16 KiB header bytes、256 个并发请求和 15 秒总请求 timeout。另有 setup/login 限流、Origin/Fetch Metadata、request ID 和统一错误处理。这些是实现常量，不是额外 YAML 字段。
 
@@ -132,6 +140,7 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 | system runtime（v2） | `MetricsOwner` 的共享 OS 采样快照 | 仅 Windows 实测；Linux 条件编译实现未实测 |
 | config state/system/modules（v2） | active ConfigStore 与同 revision RuntimeSnapshot | 系统字段白名单；模块集合最多 1024，revision 冲突返回 503 |
 | retention（v2） | 生产 RetentionCoordinator、stats layout、详情分片与 manifest | 主文件加 WAL；下一次为服务器时区本地 01:00；只读不触发回收 |
+| queries（v2） | active ConfigStore 目录快照与 DetailShardStore 跨日读口 | 过滤先于 keyset 分页；原始/历史事实不重匹配；cursor 绑定过滤、水位和进程 epoch |
 
 [`ports/management.rs`](../../../backend/src/ports/management.rs) 定义领域读口；[`SqliteManagementReadModel`](../../../backend/src/storage/management_read.rs) 使用独立只读 pool、绑定参数和固定 SQL。query service 固定 5 秒 deadline、默认 20/最大 100 行分页和最长 31 天统计窗口。
 
@@ -149,7 +158,7 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 | --- | --- | --- | --- | --- |
 | setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | P1 Bearer 定向测试、真实 HTTP 和浏览器 Network/Storage，见上节 | 未验证外部 HTTPS 代理及 v2/WS |
 | users 事务 | source_edit、ConfigStore、journal recovery | setup 写入，run 启动恢复，watcher 对账 | 本轮核对；存在双路径恢复与 Busy 竞争测试 | 完整跨平台 crash/权限矩阵待验收 |
-| 七个 v1、两个指标与四类配置/保留 v2 只读 API | ManagementQueryService + StorageRead port + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/DB/telemetry/metrics/retention | BC-12 路由使用真实临时 SQLite；生产 Bearer HTTP 证据见本节 | v2 认证、历史、写入与 WS 未注册；未执行浏览器 smoke |
+| 七个 v1、两个指标、配置/保留与历史 v2 只读 API | ManagementQueryService + StorageRead port + DetailShardStore + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/DB/telemetry/metrics/retention/detail store | BC-12/13 路由使用真实临时 SQLite；生产 Bearer HTTP 证据见本节 | v2 认证、写入与 WS 未注册；未执行浏览器 smoke |
 | 内嵌 SPA | assets + build feature | bind 前 ensure_available | 静态；历史证据单独标注于交付文档 | Actions/Linux/macOS 发布未由静态代码证明 |
 
 本页 2026-09-05 原核对仅有静态证据；后续 P1 的运行证据分别列在对应小节。已执行的 Bearer HTTP/浏览器验证不等于反向代理或完整配置事务故障矩阵均已验证。

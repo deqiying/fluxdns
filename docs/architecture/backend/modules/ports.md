@@ -117,7 +117,7 @@ stats、cache commit 和 detail projection 是 dispatcher 的三个独立消费�
 
 `StatsRecorder` 是 resolution dispatcher 的内部消费端，不再由 DNS 请求任务直接调用。`ResolveEvent` 只保留为存储 transaction 使用的持久化 DTO，不是另一个可发布 port。详情 projector 与 SQLite writer 各自使用有界 channel；详情队列满只能影响详情，不能反向阻塞 stats 或 cache commit。统一 ingress 自身溢出则属于整条 resolution event gap，必须显式计数。
 
-`ManagementStorageRead` 只接受 UTC day、分页和有限 enum filter/sort。authenticated queries 投影允许返回 canonical qname、配置客户端名称、有效 client IP、strategy、target/actual upstream 与有界 answer；仍不返回 DNS wire、request digest、route 文本或数据库 row ID。HTTP handler 只依赖该 port；SQLite adapter 自行负责 opaque ID、固定 SQL 模板、绑定参数、历史 `legacy_redacted` 映射和 read-only 连接。
+`ManagementStorageRead` 只接受 UTC day、分页和有限 enum filter/sort，继续承载 v1 聚合与 legacy 详情读取；`DetailShardStore` 为 v2 历史提供独立的跨日领域读口。authenticated queries 投影允许返回 canonical qname、配置客户端名称、有效 client IP、strategy、target/actual upstream 与有界 answer；仍不返回 DNS wire、request digest、route 文本或数据库 row ID。HTTP handler 不持有 SQLx pool；adapter 自行负责 opaque ID、固定 SQL 模板、绑定参数和 read-only lease，v1 adapter 另保留历史 `legacy_redacted` 映射。
 
 ## 8. Telemetry 与副作用
 

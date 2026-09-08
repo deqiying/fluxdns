@@ -498,6 +498,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .map_err(map_storage_prepare_error)?;
             let resolution_metrics = storage.resolution_metrics();
             let retention = storage.retention_coordinator();
+            let detail_store = storage.detail_store();
             let candidate = crate::runtime::bind_prepared(
                 prepared,
                 &socket_factory,
@@ -523,7 +524,10 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                             Some(Arc::clone(&telemetry)),
                             resolution_metrics,
                             Arc::clone(&metrics),
-                            retention,
+                            crate::management::ManagementHistoryDependencies::new(
+                                retention,
+                                detail_store,
+                            ),
                         ),
                     )
                     .await

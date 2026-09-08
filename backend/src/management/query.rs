@@ -8,7 +8,7 @@ use axum::extract::rejection::PathRejection;
 use axum::extract::rejection::QueryRejection;
 use axum::extract::{Extension, Path, Query, State};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use time::format_description::well_known::Rfc3339;
@@ -35,6 +35,8 @@ use crate::resource::{ResourceSourceKind, ResourceStaleStatus};
 use crate::runtime::RuntimeCoordinator;
 use crate::storage::{RetentionCoordinator, RetentionPolicy, next_scheduled_at_utc_millis};
 
+mod history;
+
 const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_PAGE: u32 = 1;
 const DEFAULT_PAGE_SIZE: u32 = 20;
@@ -52,6 +54,25 @@ pub(crate) struct ManagementQueryService {
     resolution_metrics: Arc<ResolutionPipelineMetrics>,
     metrics: Arc<MetricsOwner>,
     retention: Arc<RetentionCoordinator>,
+    detail_store: Arc<crate::storage::DetailShardStore>,
+}
+
+/// 历史查询共享同一保留水位 owner 与日分片读口，避免两者被独立接线。
+pub(crate) struct ManagementHistoryDependencies {
+    retention: Arc<RetentionCoordinator>,
+    detail_store: Arc<crate::storage::DetailShardStore>,
+}
+
+impl ManagementHistoryDependencies {
+    pub(crate) fn new(
+        retention: Arc<RetentionCoordinator>,
+        detail_store: Arc<crate::storage::DetailShardStore>,
+    ) -> Self {
+        Self {
+            retention,
+            detail_store,
+        }
+    }
 }
 
 impl ManagementQueryService {
@@ -62,7 +83,7 @@ impl ManagementQueryService {
         resolve_log_enabled: bool,
         resolution_metrics: Arc<ResolutionPipelineMetrics>,
         metrics: Arc<MetricsOwner>,
-        retention: Arc<RetentionCoordinator>,
+        history: ManagementHistoryDependencies,
     ) -> Self {
         Self {
             coordinator,
@@ -73,7 +94,8 @@ impl ManagementQueryService {
             resolve_log_enabled,
             resolution_metrics,
             metrics,
-            retention,
+            retention: history.retention,
+            detail_store: history.detail_store,
         }
     }
 
@@ -414,6 +436,11 @@ pub(crate) fn routes() -> Router<Arc<AuthServices>> {
         .route("/api/v2/config/system", get(get_system_config))
         .route("/api/v2/config/modules/{module}", get(get_config_module))
         .route("/api/v2/retention", get(get_retention))
+        .route("/api/v2/queries/search", post(history::post_query_search))
+        .route(
+            "/api/v2/queries/{record_id}",
+            get(history::get_query_detail),
+        )
 }
 
 async fn get_overview(
@@ -1305,6 +1332,7 @@ mod tests {
     use crate::config::store::ConfigStore;
     use crate::config::store::active::BeginApply;
     use crate::config::{ConfigV2Loader, LoadOptions};
+    use crate::dns::TransportClass;
     use crate::dns::{Cancellation, RuntimeRevision};
     use crate::management::auth::AuthState;
     use crate::management::router::{AuthServices, build_router};
@@ -1316,8 +1344,66 @@ mod tests {
     use crate::ports::management::{
         OverviewCounters, ResolveQueryResult, StatisticRecord, StatisticsResult,
     };
+    use crate::ports::observation::ClientMatchSource;
+    use crate::ports::storage::{ResolveAnswer, ResolveEvent, StatsSource};
+    use crate::ports::telemetry::{CacheStatus, OutcomeClass};
     use crate::ports::{PortError, PortErrorClass, PortFuture};
     use crate::runtime::{PreparedRuntime, RuntimeCoordinator, bind_prepared};
+
+    const HISTORY_DAY: u64 = 20_710;
+
+    fn history_record(
+        day: u64,
+        offset: u64,
+        source: StatsSource,
+    ) -> crate::storage::ResolveDetailRecord {
+        crate::storage::ResolveDetailRecord::from_event(ResolveEvent {
+            occurred_at: UNIX_EPOCH + Duration::from_millis(day * 86_400_000 + offset),
+            duration_millis: if source == StatsSource::Cache { 4 } else { 7 },
+            dns_core_duration_micros: 900,
+            request_digest: Arc::from("management-history-test"),
+            listener_id: Arc::from("local"),
+            route_id: None,
+            client_id: Some(Arc::from("raw-device")),
+            client_ip: Some("192.0.2.10".parse().unwrap()),
+            client_match_source: Some(ClientMatchSource::Ip),
+            matched_client_id: Some(Arc::from("Desktop-01")),
+            client_bucket: Some(Arc::from("Desktop-01")),
+            strategy_id: Some(Arc::from("default")),
+            upstream_id: Some(Arc::from("local")),
+            upstream_member_id: None,
+            upstream_used_id: Some(Arc::from("local")),
+            matched_rule_source: None,
+            matched_resource_id: None,
+            matched_rule_ordinal: None,
+            resource_version: None,
+            transport: TransportClass::Datagram,
+            qname: Arc::from(if source == StatsSource::Cache {
+                "cached.example."
+            } else {
+                "direct.example."
+            }),
+            qtype: 1,
+            qclass: 1,
+            answers: vec![ResolveAnswer {
+                name: "answer.example.".to_owned(),
+                record_type: "A".to_owned(),
+                data: "192.0.2.20".to_owned(),
+                ttl: 30,
+            }],
+            rcode: 0,
+            cancellation_reason: None,
+            outcome: OutcomeClass::Success,
+            source,
+            cache_status: if source == StatsSource::Cache {
+                CacheStatus::Stale
+            } else {
+                CacheStatus::Miss
+            },
+            runtime_revision: RuntimeRevision(7),
+        })
+        .unwrap()
+    }
 
     struct FakeReadModel;
 
@@ -1446,6 +1532,7 @@ mod tests {
         let root = PathBuf::from(crate::config::test_support::absolute_path(
             "management-query-router-v2",
         ));
+        let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let source_path = root.join("config.yaml");
         let source = include_str!("../../tests/fixtures/config-v2.yaml");
@@ -1460,6 +1547,23 @@ mod tests {
         .await
         .unwrap();
         let retention = storage_runtime.retention_coordinator();
+        let detail_store = storage_runtime.detail_store();
+        detail_store
+            .write_records(
+                i32::try_from(HISTORY_DAY).unwrap(),
+                &[history_record(HISTORY_DAY, 1, StatsSource::Upstream)],
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        detail_store
+            .write_records(
+                i32::try_from(HISTORY_DAY + 1).unwrap(),
+                &[history_record(HISTORY_DAY + 1, 1, StatsSource::Cache)],
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
         let prepared = PreparedRuntime::prepare(output.resolved, RuntimeRevision(7)).unwrap();
         let candidate = bind_prepared(
             prepared,
@@ -1478,7 +1582,7 @@ mod tests {
             true,
             Arc::new(ResolutionPipelineMetrics::default()),
             metrics,
-            retention,
+            ManagementHistoryDependencies::new(retention, detail_store),
         ));
         let auth = Arc::new(AuthState::new(&[]).unwrap());
         let sessions = Arc::new(SessionStore::new(false));
@@ -1503,6 +1607,17 @@ mod tests {
             request = request.header(AUTHORIZATION, authorization);
         }
         request.body(Body::empty()).unwrap()
+    }
+
+    fn post_json(path: &str, authorization: Option<&str>, body: String) -> Request<Body> {
+        let mut request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header(CONTENT_TYPE, "application/json");
+        if let Some(authorization) = authorization {
+            request = request.header(AUTHORIZATION, authorization);
+        }
+        request.body(Body::from(body)).unwrap()
     }
 
     #[test]
@@ -1742,6 +1857,157 @@ mod tests {
                 }
             }
         }
+
+        let mut search = json!({
+            "filter": {
+                "from_ms": HISTORY_DAY * 86_400_000,
+                "to_ms": (HISTORY_DAY + 2) * 86_400_000
+            },
+            "cursor": null,
+            "direction": "older",
+            "page_size": 1,
+            "sort": "occurred_at",
+            "order": "asc"
+        });
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v2/queries/search",
+                Some(&authorization),
+                search.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let first: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(first["items"].as_array().unwrap().len(), 1);
+        assert_eq!(first["items"][0]["qname"], "direct.example.");
+        assert_eq!(first["items"][0]["matched"]["source"], "ip");
+        assert_eq!(first["items"][0]["current_client_name"], "desktop");
+        assert_eq!(first["items"][0]["duration_us"], 7000);
+        assert_eq!(first["items"][0]["cache_producer"], serde_json::Value::Null);
+        assert_eq!(first["items"][0]["upstream_target_name"], "local");
+        assert!(first["next_cursor"].is_string());
+        assert!(first["snapshot_cursor"]["sequence"].is_string());
+        assert!(first["retention_revision"].is_string());
+        assert!(first["available_from_ms"].is_u64());
+
+        search["cursor"] = first["next_cursor"].clone();
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v2/queries/search",
+                Some(&authorization),
+                search.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let second: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(second["items"][0]["qname"], "cached.example.");
+        assert_eq!(second["items"][0]["source"], "cache");
+        assert_eq!(
+            second["items"][0]["upstream_target_name"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            second["items"][0]["cache_producer"]["upstream_target_name"],
+            "local"
+        );
+
+        let record_id = first["items"][0]["id"].as_str().unwrap();
+        let response = app
+            .clone()
+            .oneshot(get(
+                &format!("/api/v2/queries/{record_id}"),
+                Some(&authorization),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let detail: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(detail["record"]["id"], record_id);
+        assert_eq!(detail["directory_revision"], first["directory_revision"]);
+
+        search["cursor"] = serde_json::Value::Null;
+        search["page_size"] = json!(20);
+        search["filter"]["client_name"] = json!("missing-name");
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v2/queries/search",
+                Some(&authorization),
+                search.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let no_match: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(no_match["items"].as_array().unwrap().is_empty());
+
+        search["filter"]
+            .as_object_mut()
+            .unwrap()
+            .remove("client_name");
+        search["filter"]["qname"] = json!("direct.example");
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v2/queries/search",
+                Some(&authorization),
+                search.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let canonical: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(canonical["items"].as_array().unwrap().len(), 1);
+
+        search["filter"].as_object_mut().unwrap().remove("qname");
+        search["cursor"] = json!("invalid-cursor");
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v2/queries/search",
+                Some(&authorization),
+                search.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GONE);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let cursor_error: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(cursor_error["code"], "CURSOR_EXPIRED");
+        assert_eq!(cursor_error["field_errors"], json!([]));
+
+        search["cursor"] = serde_json::Value::Null;
+        search["filter"]["qtype"] = json!("BOGUS");
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v2/queries/search",
+                Some(&authorization),
+                search.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v2/queries/search",
+                None,
+                search.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 
         let unauthorized = app
             .clone()
