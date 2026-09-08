@@ -378,6 +378,20 @@ export const hostsConfigReadFixture = {
   ],
 } satisfies V2Schemas["ConfigRead"];
 
+export const ruleSetsConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [
+    { module: "rule_set", value: { name: "domains", type: "remote", format: "json", url: "https://rules.example.test/domains.json", proxy: "proxy-primary", auto_update: true, update_interval: "86400000000000ns" } },
+    { module: "rule_set", value: { name: "custom", type: "const", format: "clash", rule: "+.example.test\n+.example.org" } },
+  ],
+  effective: [],
+  references: [{ from_module: "strategy", from_name: "default", path: "rules[1].rule_set", to_name: "domains" }],
+  runtime: [
+    { module: "rule_set", name: "domains", condition: "stale", last_updated_at_ms: Date.parse("2026-09-07T00:00:00Z"), next_update_at_ms: Date.parse("2026-09-09T00:00:00Z"), error: "APPLY_FAILED" },
+    { module: "rule_set", name: "custom", condition: "ready", last_updated_at_ms: null, next_update_at_ms: null, error: null },
+  ],
+} satisfies V2Schemas["ConfigRead"];
+
 export const systemConfigReadFixture = {
   state: synchronizedConfigStateFixture,
   work_path: "D:/Projects/Rust/fluxdns/_fluxdns",

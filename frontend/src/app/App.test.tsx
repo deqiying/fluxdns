@@ -214,7 +214,7 @@ describe("application routes", () => {
 
   it.each(
     managementRoutes
-      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/hosts" && path !== "/proxies" && path !== "/system-runtime")
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/hosts" && path !== "/rule-sets" && path !== "/proxies" && path !== "/system-runtime")
       .map(({ path, title }) => [path, title]),
   )("有效 session 可加载未接线入口 %s", async (path, heading) => {
     setMockAuthenticated(true);
@@ -275,6 +275,14 @@ describe("application routes", () => {
     renderApp("/hosts");
     expect(await screen.findByRole("heading", { name: "Hosts 配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("office")).toBeInTheDocument();
+    expect(screen.getByText("stale")).toBeInTheDocument();
+  });
+
+  it("规则集页面区分远程来源和陈旧快照", async () => {
+    setMockAuthenticated(true);
+    renderApp("/rule-sets");
+    expect(await screen.findByRole("heading", { name: "规则集", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("domains")).toBeInTheDocument();
     expect(screen.getByText("stale")).toBeInTheDocument();
   });
 

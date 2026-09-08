@@ -93,6 +93,8 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`HostsPage`](../../../frontend/src/modules/hosts/HostsPage.tsx) 已替换 `/hosts` 空态，读取类型化 `const/file` 来源、引用数和 Runtime ready/stale/failed 状态。表单按来源只提交内联正文或文件路径/更新周期，并保留 `json/hosts` 格式；来源切换不会携带隐藏分支字段。
 
+[`RuleSetsPage`](../../../frontend/src/modules/rule-sets/RuleSetsPage.tsx) 已替换 `/rule-sets` 空态，区分 `const/file/remote` 与 `json/clash/dat`，并显示远程代理、刷新计划及 Runtime stale/failed 状态。表单只提交当前来源字段；`clash` 保持行格式，`dat` 不作为 YAML/JSON 文本解析，也未增加主动刷新端点。
+
 ## 能力与证据
 
 2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换；新增 `apiV2Request` 仅由明确的新版模块调用，不提供运行时 v1/v2 选择开关。

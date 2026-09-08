@@ -10,6 +10,7 @@ import {
   outboundConfigReadFixture,
   processMetricsFixture,
   queryPageFixture,
+  ruleSetsConfigReadFixture,
   retentionStatusFixture,
   resourceFixture,
   runtimeFixture,
@@ -167,6 +168,7 @@ export const handlers = [
       statistics: statisticsConfigReadFixture,
       logs: logsConfigReadFixture,
       outbound: outboundConfigReadFixture,
+      rule_set: ruleSetsConfigReadFixture,
     }[String(params.module)];
     return fixture
       ? HttpResponse.json(fixture)
