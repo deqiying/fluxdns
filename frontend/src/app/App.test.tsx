@@ -453,6 +453,7 @@ describe("application routes", () => {
     setMockAuthenticated(true);
     renderApp("/system-settings");
     expect(await screen.findByRole("heading", { name: "系统配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("活动源配置中的只读路径表达")).toBeInTheDocument();
     expect(await screen.findByText("D:/Projects/Rust/fluxdns/_fluxdns/statistics.db")).toBeInTheDocument();
     expect(screen.getByText("http://127.0.0.1:8080")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "编辑日志" }));
@@ -537,7 +538,7 @@ describe("application routes", () => {
 
     window.history.back();
     await waitFor(() => expect(window.location.search).toBe(""));
-    expect(screen.getByRole("tab", { name: "上游" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(screen.getByRole("tab", { name: "上游" })).toHaveAttribute("aria-selected", "true"));
   });
 
   it("普通 API 返回 401 时只跳转一次并显示 session 过期提示", async () => {

@@ -62,7 +62,7 @@ export function SystemSettingsPage() {
           <section className="settings-section">
             <div>
               <Typography.Title level={4}>工作路径</Typography.Title>
-              <Typography.Text type="secondary">启动配置解析后的只读路径</Typography.Text>
+              <Typography.Text type="secondary">活动源配置中的只读路径表达</Typography.Text>
             </div>
             <Descriptions column={{ xs: 1, md: 2 }}>
               <Descriptions.Item label="work.path"><Typography.Text code>{systemQuery.data.work_path}</Typography.Text></Descriptions.Item>
