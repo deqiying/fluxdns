@@ -41,6 +41,8 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BC-26
 
 同日经追加授权，BC-26 已提前实施：正式 `run`/`validate` 只接受 `ConfigV2`，直接消费 `records_path`、快照 enabled/path/interval 和 R/G/T；统计库增加 v2 layout marker，旧配置和未标记旧库拒绝，Management 使用 loader 原文建立 active `ConfigStore`。旧 loader/单库 adapter 仅留测试等待 BC-27，不提供迁移或双版本开关。
 
+同日 BC-12 已完成配置状态、系统白名单、十模块投影和 retention 状态的正式 Bearer GET。读取只组合相同 runtime revision 的 active source 与 RuntimeSnapshot，系统端点不输出 users/hash/Secret 实值或解析后的任意路径；配置写入、外部差异和 retention preview 仍留 P3。P2 下一项为 BC-13 跨日历史 HTTP 查询。
+
 ## 2. 当前基线与改造范围
 
 ### 2.1 已核对的工程入口

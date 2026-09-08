@@ -497,6 +497,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .await
             .map_err(map_storage_prepare_error)?;
             let resolution_metrics = storage.resolution_metrics();
+            let retention = storage.retention_coordinator();
             let candidate = crate::runtime::bind_prepared(
                 prepared,
                 &socket_factory,
@@ -522,6 +523,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                             Some(Arc::clone(&telemetry)),
                             resolution_metrics,
                             Arc::clone(&metrics),
+                            retention,
                         ),
                     )
                     .await

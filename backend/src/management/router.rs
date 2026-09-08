@@ -245,7 +245,11 @@ async fn require_session(
     next: Next,
 ) -> Response {
     let request_id = request_id(&request);
+    let v2 = request.uri().path().starts_with("/api/v2/");
     let Some(token) = session_token(request.headers()) else {
+        if v2 {
+            return v2_error_response(super::contract::ErrorCode::AuthRequired, &request_id);
+        }
         return error_response(
             StatusCode::UNAUTHORIZED,
             "AUTH_REQUIRED",
@@ -259,6 +263,7 @@ async fn require_session(
             request.extensions_mut().insert(session);
             next.run(request).await
         }
+        Ok(None) if v2 => v2_error_response(super::contract::ErrorCode::AuthRequired, &request_id),
         Ok(None) => error_response(
             StatusCode::UNAUTHORIZED,
             "AUTH_REQUIRED",
@@ -266,6 +271,9 @@ async fn require_session(
             false,
             &request_id,
         ),
+        Err(_) if v2 => {
+            v2_error_response(super::contract::ErrorCode::ServiceUnavailable, &request_id)
+        }
         Err(_) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "INTERNAL_ERROR",
@@ -594,6 +602,38 @@ pub(super) fn invalid_argument(request_id: &RequestId) -> Response {
         "INVALID_ARGUMENT",
         "query parameters are invalid",
         false,
+        request_id,
+    )
+}
+
+/// v2 业务接口统一使用固定文案与 field_errors，避免落回 v1 错误形状。
+pub(super) fn v2_error_response(
+    code: super::contract::ErrorCode,
+    request_id: &RequestId,
+) -> Response {
+    let status =
+        StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    let (message, retryable) = match code {
+        super::contract::ErrorCode::InvalidArgument => ("request is invalid", false),
+        super::contract::ErrorCode::AuthRequired => ("session required", false),
+        super::contract::ErrorCode::NotFound => ("resource was not found", false),
+        super::contract::ErrorCode::ServiceUnavailable => {
+            ("management service is unavailable", true)
+        }
+        _ => ("request could not be completed", false),
+    };
+    with_request_id(
+        (
+            status,
+            Json(super::contract::ErrorEnvelope {
+                code,
+                request_id: request_id.0.clone(),
+                message: message.to_owned(),
+                retryable,
+                field_errors: Vec::new(),
+            }),
+        )
+            .into_response(),
         request_id,
     )
 }

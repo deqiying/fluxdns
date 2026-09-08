@@ -31,7 +31,6 @@ pub use detail_shards::{
 pub use ledger::{BatchDecision, BatchLedger, BatchLedgerError, BatchReceipt, PendingStatsBatch};
 pub use management_read::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
 pub use resolve_log::ResolveDetailRecord;
-pub(crate) use retention::RetentionScheduler;
 pub use retention::{
     DEFAULT_RETENTION_DAYS, DEFAULT_RETENTION_GRACE_DAYS, DEFAULT_RETENTION_OPERATION_TIMEOUT,
     DEFAULT_RETENTION_POLL_INTERVAL, DEFAULT_RETENTION_REFERENCE_SIZE_BYTES,
@@ -41,6 +40,7 @@ pub use retention::{
     RetentionPolicyError, RetentionReclaimSummary, RetentionRunState, RetentionSchedulerSummary,
     RetentionState, RetentionStatus,
 };
+pub(crate) use retention::{RetentionScheduler, next_scheduled_at_utc_millis};
 pub use service::{
     DEFAULT_RESOLVE_LOG_BATCH_SIZE, DEFAULT_RESOLVE_LOG_QUEUE_CAPACITY,
     DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StorageRuntime,

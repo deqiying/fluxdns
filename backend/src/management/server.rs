@@ -21,7 +21,9 @@ use crate::observability::TelemetryWriter;
 use crate::ports::management::ManagementStorageRead;
 use crate::resolution::ResolutionPipelineMetrics;
 use crate::runtime::{RuntimeCoordinator, TaskError};
-use crate::storage::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
+use crate::storage::{
+    RetentionCoordinator, SqliteManagementReadModel, SqliteManagementReadModelBuildError,
+};
 
 pub(crate) struct ManagementService {
     listener: tokio::net::TcpListener,
@@ -36,6 +38,7 @@ pub(crate) struct ManagementQueryDependencies {
     telemetry: Option<Arc<TelemetryWriter>>,
     resolution_metrics: Arc<ResolutionPipelineMetrics>,
     metrics: Arc<MetricsOwner>,
+    retention: Arc<RetentionCoordinator>,
 }
 
 impl ManagementQueryDependencies {
@@ -46,6 +49,7 @@ impl ManagementQueryDependencies {
         telemetry: Option<Arc<TelemetryWriter>>,
         resolution_metrics: Arc<ResolutionPipelineMetrics>,
         metrics: Arc<MetricsOwner>,
+        retention: Arc<RetentionCoordinator>,
     ) -> Self {
         Self {
             coordinator,
@@ -54,6 +58,7 @@ impl ManagementQueryDependencies {
             telemetry,
             resolution_metrics,
             metrics,
+            retention,
         }
     }
 }
@@ -84,6 +89,7 @@ impl ManagementService {
             dependencies.resolve_log_enabled,
             dependencies.resolution_metrics,
             dependencies.metrics,
+            dependencies.retention,
         ));
         let services = Arc::new(AuthServices::new(
             Arc::clone(&auth),

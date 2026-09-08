@@ -37,7 +37,7 @@ pub use snapshot::{
     write_cache_snapshot,
 };
 pub(crate) use snapshot_owner::{
-    CacheSnapshotFailure, CacheSnapshotOwner, CacheSnapshotOwnerBuildError,
+    CacheSnapshotCondition, CacheSnapshotFailure, CacheSnapshotOwner, CacheSnapshotOwnerBuildError,
     CacheSnapshotOwnerStatus, CacheSnapshotSettings, CacheSnapshotShutdownSummary,
     PreparedCacheSnapshotSwitch,
 };

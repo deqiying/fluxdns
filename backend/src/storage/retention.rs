@@ -1,5 +1,6 @@
 //! 统计与详情共用的单调保留水位计算、发布和恢复边界。
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -208,6 +209,7 @@ pub struct RetentionStatus {
     pub stats_available: RetentionAvailableRange,
     pub pending_reclaims: u32,
     pub failed_reclaims: u32,
+    pub pending_reclaim_bytes: u64,
     pub last_cleanup_at: Option<SystemTime>,
     pub run: RetentionRunState,
 }
@@ -485,6 +487,19 @@ impl RetentionCoordinator {
             .retention_status_metadata(deadline)
             .await
             .map_err(RetentionError::Backend)?;
+        let pending_days = self
+            .backend
+            .pending_retention_reclaims(deadline)
+            .await
+            .map_err(RetentionError::Backend)?
+            .into_iter()
+            .map(|entry| entry.day_utc)
+            .collect::<BTreeSet<_>>();
+        let pending_reclaim_bytes = self
+            .detail
+            .sample_pending_storage(&pending_days, deadline)
+            .map_err(RetentionError::Sample)?
+            .bytes;
         let published_cutoff = metadata.published.map(|state| state.retired_before_day_utc);
         let visible_days = sample
             .shard_days
@@ -504,6 +519,7 @@ impl RetentionCoordinator {
             stats_available: metadata.stats_available,
             pending_reclaims: metadata.pending_reclaims,
             failed_reclaims: metadata.failed_reclaims,
+            pending_reclaim_bytes,
             last_cleanup_at: metadata
                 .last_reclaim_at
                 .into_iter()
@@ -707,6 +723,42 @@ pub(crate) fn system_wall_time() -> Result<RetentionWallTime, PortError> {
     })
 }
 
+/// 以当前系统时区计算严格晚于观测时刻的下一次本地 01:00，DST 间隙按 jiff compatible 规则处理。
+pub(crate) fn next_scheduled_at_utc_millis(observed_at: SystemTime) -> Result<u64, PortError> {
+    let millis = observed_at
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .ok_or_else(|| PortError::new(PortErrorClass::InvalidInput, "retention.next_schedule"))?;
+    let timestamp = jiff::Timestamp::from_millisecond(millis)
+        .map_err(|_| PortError::new(PortErrorClass::InvalidInput, "retention.next_schedule"))?;
+    let timezone = jiff::tz::TimeZone::try_system()
+        .map_err(|_| PortError::new(PortErrorClass::Unavailable, "retention.next_schedule"))?;
+    next_scheduled_timestamp(timestamp, timezone).and_then(|value| {
+        u64::try_from(value.as_millisecond())
+            .map_err(|_| PortError::new(PortErrorClass::InvalidInput, "retention.next_schedule"))
+    })
+}
+
+fn next_scheduled_timestamp(
+    timestamp: jiff::Timestamp,
+    timezone: jiff::tz::TimeZone,
+) -> Result<jiff::Timestamp, PortError> {
+    let local = timestamp.to_zoned(timezone.clone());
+    let date = jiff::civil::date(local.year(), local.month(), local.day());
+    let mut scheduled = date
+        .at(1, 0, 0, 0)
+        .to_zoned(timezone.clone())
+        .map_err(|_| PortError::new(PortErrorClass::Unavailable, "retention.next_schedule"))?;
+    if scheduled.timestamp() <= timestamp {
+        scheduled = date
+            .tomorrow()
+            .and_then(|date| date.at(1, 0, 0, 0).to_zoned(timezone))
+            .map_err(|_| PortError::new(PortErrorClass::Unavailable, "retention.next_schedule"))?;
+    }
+    Ok(scheduled.timestamp())
+}
+
 fn available_range(days: impl Iterator<Item = i32>) -> RetentionAvailableRange {
     days.fold(RetentionAvailableRange::default(), |mut range, day| {
         range.from_day_utc = Some(range.from_day_utc.map_or(day, |current| current.min(day)));
@@ -751,7 +803,7 @@ mod tests {
     use super::{
         RETENTION_SCHEDULE_LOCAL_SECOND, RetentionCoordinator, RetentionManifestState,
         RetentionPlan, RetentionPolicy, RetentionPolicyError, RetentionScheduler,
-        RetentionWallTime, daily_run_is_due,
+        RetentionWallTime, daily_run_is_due, next_scheduled_timestamp,
     };
 
     const DAY_MILLIS: u64 = 86_400_000;
@@ -860,6 +912,37 @@ mod tests {
                 .unwrap_err(),
             RetentionPolicyError::SampleTooLarge
         );
+    }
+
+    #[test]
+    fn next_schedule_is_strictly_after_observation_at_local_one_o_clock() {
+        let timezone = jiff::tz::TimeZone::UTC;
+        let before = jiff::civil::date(2026, 9, 8)
+            .at(0, 59, 59, 0)
+            .to_zoned(timezone.clone())
+            .unwrap()
+            .timestamp();
+        let at = jiff::civil::date(2026, 9, 8)
+            .at(1, 0, 0, 0)
+            .to_zoned(timezone.clone())
+            .unwrap()
+            .timestamp();
+        let today = jiff::civil::date(2026, 9, 8)
+            .at(1, 0, 0, 0)
+            .to_zoned(timezone.clone())
+            .unwrap()
+            .timestamp();
+        let tomorrow = jiff::civil::date(2026, 9, 9)
+            .at(1, 0, 0, 0)
+            .to_zoned(timezone.clone())
+            .unwrap()
+            .timestamp();
+
+        assert_eq!(
+            next_scheduled_timestamp(before, timezone.clone()).unwrap(),
+            today
+        );
+        assert_eq!(next_scheduled_timestamp(at, timezone).unwrap(), tomorrow);
     }
 
     #[tokio::test]
@@ -1360,6 +1443,15 @@ mod tests {
         assert_eq!(entries[0].state, RetentionManifestState::Failed);
         assert_eq!(entries[0].attempts, 1);
         assert_eq!(entries[0].last_error_code.as_deref(), Some("delete"));
+        let pending = coordinator
+            .status(
+                RetentionPolicy::new(2, 0, 1 << 40).unwrap(),
+                REFERENCE_DAY,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(pending.pending_reclaim_bytes > 0);
 
         let recovered = coordinator.reclaim_pending(deadline()).await.unwrap();
         assert_eq!(
@@ -1393,6 +1485,7 @@ mod tests {
         assert_eq!(status.stats_available.from_day_utc, Some(REFERENCE_DAY - 1));
         assert_eq!(status.stats_available.to_day_utc, Some(REFERENCE_DAY));
         assert_eq!((status.pending_reclaims, status.failed_reclaims), (0, 0));
+        assert_eq!(status.pending_reclaim_bytes, 0);
         assert!(status.last_cleanup_at.is_some());
 
         let verification = sqlx::sqlite::SqlitePoolOptions::new()

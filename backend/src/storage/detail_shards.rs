@@ -1,6 +1,6 @@
 //! 解析详情 UTC 日分片的 layout、受限连接和 writer 生命周期。
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs;
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -394,6 +394,23 @@ impl DetailShardStore {
         &self,
         deadline: Deadline,
     ) -> Result<DetailStorageSample, PortError> {
+        self.sample_managed_storage_for_days(None, deadline)
+    }
+
+    /// 只统计指定 manifest 日期的主文件与 WAL；调用方持有 retention run lock，避免回收交错。
+    pub(crate) fn sample_pending_storage(
+        &self,
+        days: &BTreeSet<i32>,
+        deadline: Deadline,
+    ) -> Result<DetailStorageSample, PortError> {
+        self.sample_managed_storage_for_days(Some(days), deadline)
+    }
+
+    fn sample_managed_storage_for_days(
+        &self,
+        days: Option<&BTreeSet<i32>>,
+        deadline: Deadline,
+    ) -> Result<DetailStorageSample, PortError> {
         if deadline.is_expired(Instant::now()) {
             return Err(PortError::new(
                 PortErrorClass::Timeout,
@@ -428,6 +445,9 @@ impl DetailShardStore {
             let Some(day_utc) = parse_shard_file_name(&name) else {
                 continue;
             };
+            if days.is_some_and(|days| !days.contains(&day_utc)) {
+                continue;
+            }
             let path = entry.path();
             validate_shard_path(&path, &self.root, &self.protected_paths)?;
             let main_bytes = fs::metadata(&path)

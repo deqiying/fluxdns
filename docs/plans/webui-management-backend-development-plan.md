@@ -142,6 +142,8 @@ BC-11 Windows 验证：7 项 retention、91 项 storage 定向通过；完整 Ca
 
 BC-26 Windows 验证：真实 `StorageRuntime` 临时文件覆盖空目录初始化、详情写入、正常关闭和重开，统计布局测试另覆盖旧库拒绝；完整 Cargo suite 835 passed、0 failed、3 ignored，全部测试目标编译和 fmt 通过。本地构建二进制在独立 `_fluxdns/bc26-process-*` 目录以启用 WebUI 的 v2 配置完成冷启与终止后重启，均确认 Management 端口、派生快照和统计库存在；CLI v2 validate 返回 0，v1 返回 2 并提示新开发目录。前端生成类型无 diff、typecheck 通过，v2 schema 4 项在沙盒外通过。Clippy 仍仅被基线已有 6 项 lint 阻断；未验证 Linux、真实权限/磁盘满、完整浏览器、约 10 客户端及 core 2ms 性能。
 
+同日 BC-12 已接入四类正式 Bearer GET：配置状态、系统白名单、十模块 source/effective/reference/runtime 投影和 retention 状态。模块投影只组合同 revision 的 active ConfigStore 与 RuntimeSnapshot，不一致返回 503；系统投影不含 users/hash/Secret 实值或解析后任意路径。retention 复用生产 coordinator，补充 pending/failed manifest 对应主文件与 WAL 字节及服务器时区下一次本地 01:00。普通配置 POST、外部差异和 retention preview 未注册，仍留 P3。
+
 ### 开发步骤
 
 1. 审核 `cache/persistence.rs` 的现有 codec，保留可复用的版本、TTL、fingerprint、canonical wire 与 provenance；替换其第二份全量集合和文件容量逻辑，不直接将旧 adapter 改名接入。
