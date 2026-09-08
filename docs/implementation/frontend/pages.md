@@ -45,5 +45,6 @@
 | 进程状态 | system Page/hooks/api、formatters | `/system-runtime` 已注册 | FC-14 定向 27 项；完整 Vitest 19 文件 80 项；typecheck/build；Windows 真实浏览器/后端可用样本与刷新 | 基础信息仍复用 v1；窄屏和真实不可用 OS 样本未做浏览器验收 |
 | 查询过滤与分页 | QueriesPage、query keys | `useQueries(params)` | 本轮静态；存在 `QueriesPage.test.tsx` | 本轮未测宽/窄屏或组合筛选 |
 | 历史空详情 | detail_status 分支、formatter | 查询表格与 answer 展开 | 本轮静态；formatter tests 可定位 | 不重建历史丢失值 |
+| P2 固定契约与配置只读基础 | v2 MSW fixtures、dns-settings/system-settings api | 未替换空态路由 | 生成类型、schema contract 与定向 API 测试 | FE-03/04 未开发页面；FE-07/11 未接生产 handler 或编辑能力 |
 
 本轮 typecheck、Vitest 和生产 build 已通过。Windows 使用当前 Vite 页面、`_fluxdns/fc14-ui-live-setup/` 隔离配置和 loopback 后端完成真实登录与 `/system-runtime` 检查：页面显示实际 RSS/CPU/thread、版本、启动/采样时间，手动刷新后采样时间与 uptime 推进，浏览器日志无错误。该检查只覆盖桌面可用样本；不可用分支由 MSW 覆盖，窄屏仍留完整浏览器验收。BC-23 更底层的真实 HTTP 证据见[后端 Management 实现](../backend/management.md#p1-服务与进程指标2026-09-08)。

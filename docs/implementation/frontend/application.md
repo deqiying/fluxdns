@@ -75,6 +75,12 @@ Windows 浏览器 fixture 验证覆盖默认桌面、390×844、移动 Drawer �
 
 Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-setup/` 的 loopback 后端，完成登录、导航、可用进程样本和手动刷新；实际 RSS/CPU/thread 及时间字段正确展示，刷新后 sample/uptime 推进，浏览器日志为空。该证据不覆盖窄屏或真实 OS 采样失败，后者仅由前端 fixture 与 BC-23 后端测试分别覆盖。
 
+## P2 固定契约与只读基础（2026-09-08）
+
+[`mocks/fixtures.ts`](../../../frontend/src/mocks/fixtures.ts) 新增严格绑定生成 v2 DTO 的服务指标、跨日记录、配置模块、系统白名单和保留状态样本。指标样本包含峰值、warmup 与观测缺口；记录样本包含同毫秒稳定 ID、原始身份与历史匹配分离、缓存生产者和截断 Answer。MSW 对应路由只返回固定契约数据，使用 Bearer 并保持 v2 `field_errors` 错误 envelope，不模拟分页、过滤或运行时 owner 已交付。
+
+[`modules/dns-settings/api.ts`](../../../frontend/src/modules/dns-settings/api.ts) 暴露 DNS、统计与保留只读入口，[`modules/system-settings/api.ts`](../../../frontend/src/modules/system-settings/api.ts) 暴露系统白名单与 logs 模块读取；两者直接复用 `apiV2Request` 和配置模块 API。它们尚未替换 `PendingModulePage`，也没有编辑入口；FE-03/04 仍只获得固定 fixture，FE-07/11 只获得只读数据基础，不能据此认领 FC-03/04/07/13。
+
 ## 能力与证据
 
 2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换；新增 `apiV2Request` 仅由明确的新版模块调用，不提供运行时 v1/v2 选择开关。
@@ -90,6 +96,7 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | P1 认证测试及真实初始化/登录/刷新/登出，见上节 | v2 切换与生产深链接未验收 |
 | 同源请求/取消 | `apiRequest`、unauthorized listener | 各 module API 共用 client | P1 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
 | 退出数据清理 | `performLogout` finally | AppLayout 使用 auth logout | 本轮核对实际分支 | 401 与 logout 清理行为不同，不能混写 |
+| P2 固定 v2 数据 | mocks fixtures/handlers、dns-settings/system-settings api | 未挂载业务页面 | 类型检查、schema contract 与 MSW 定向测试 | 不证明 BC-12/13 handler、真实 SQLite、页面或 WS 已接线 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
 | 12 路由壳层 | route-contract、App、AppLayout、PendingModulePage | 受保护路由与分组导航 | 23 项路由测试；桌面/390×844 fixture 浏览器与 Console 检查沿用 FC-01 证据 | 八个入口为空态，upstreams 仍只有 tab 壳层 |
 | 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 仅供后续模块调用，未挂载业务页 | FC-02 定向 Vitest 27 项、typecheck | MSW/jsdom；正式 v2 配置 route、真实文件和浏览器交互未验收 |

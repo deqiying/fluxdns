@@ -12,6 +12,7 @@ export type FileSyncRequest = Schemas["FileSyncRequest"];
 export type ValidationResult = Schemas["ValidationResult"];
 export type OperationResult = Schemas["OperationResult"];
 export type ExternalDiff = Schemas["ExternalDiff"];
+export type SystemConfigRead = Schemas["SystemConfigRead"];
 
 export function fetchConfigState(signal?: AbortSignal): Promise<ConfigState> {
   return apiV2Request("/config/state", { signal });
@@ -19,6 +20,10 @@ export function fetchConfigState(signal?: AbortSignal): Promise<ConfigState> {
 
 export function fetchConfigModule(module: ConfigModule, signal?: AbortSignal): Promise<ConfigRead> {
   return apiV2Request(`/config/modules/${encodeURIComponent(module)}`, { signal });
+}
+
+export function fetchSystemConfig(signal?: AbortSignal): Promise<SystemConfigRead> {
+  return apiV2Request("/config/system", { signal });
 }
 
 export function validateCandidate(

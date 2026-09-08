@@ -2,16 +2,25 @@ import { http, HttpResponse } from "msw";
 import type { AuthSession } from "@/shared/api/types";
 import {
   healthFixture,
+  configStateFixture,
+  dnsConfigReadFixture,
+  logsConfigReadFixture,
   overviewFixture,
   processMetricsFixture,
   queryPageFixture,
+  retentionStatusFixture,
   resourceFixture,
   runtimeFixture,
   sessionFixture,
+  serviceMetricsFixture,
   setupReadyFixture,
   setupRequiredFixture,
+  statisticsConfigReadFixture,
   statisticsFixture,
+  systemConfigReadFixture,
   systemFixture,
+  v2QueryPageFixture,
+  v2QueryRecordsFixture,
 } from "./fixtures";
 
 let authenticated = false;
@@ -61,8 +70,22 @@ function invalidArgument(message: string) {
   );
 }
 
+function v2Error(status: 400 | 401 | 404, code: "INVALID_ARGUMENT" | "AUTH_REQUIRED" | "NOT_FOUND", message: string) {
+  const requestId = `mock-v2-${status}`;
+  return HttpResponse.json(
+    { code, message, request_id: requestId, retryable: false, field_errors: [] },
+    { status, headers: { "X-Request-Id": requestId } },
+  );
+}
+
 function readOnly<T extends object>(fixture: T) {
   return ({ request }: { request: Request }) => (authorized(request) ? HttpResponse.json(fixture) : unauthorized());
+}
+
+function readOnlyV2<T extends object>(fixture: T) {
+  return ({ request }: { request: Request }) => (
+    authorized(request) ? HttpResponse.json(fixture) : v2Error(401, "AUTH_REQUIRED", "session required")
+  );
 }
 
 export const handlers = [
@@ -130,5 +153,38 @@ export const handlers = [
   }),
   http.get("/api/v1/resources", readOnly(resourceFixture)),
   http.get("/api/v1/system", readOnly(systemFixture)),
-  http.get("/api/v2/system/runtime", readOnly(processMetricsFixture)),
+  http.get("/api/v2/system/runtime", readOnlyV2(processMetricsFixture)),
+  http.get("/api/v2/service/metrics", readOnlyV2(serviceMetricsFixture)),
+  http.get("/api/v2/config/state", readOnlyV2(configStateFixture)),
+  http.get("/api/v2/config/system", readOnlyV2(systemConfigReadFixture)),
+  http.get("/api/v2/config/modules/:module", ({ request, params }) => {
+    if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
+    const fixture = {
+      dns: dnsConfigReadFixture,
+      statistics: statisticsConfigReadFixture,
+      logs: logsConfigReadFixture,
+    }[String(params.module)];
+    return fixture
+      ? HttpResponse.json(fixture)
+      : v2Error(404, "NOT_FOUND", "module fixture not found");
+  }),
+  http.get("/api/v2/retention", readOnlyV2(retentionStatusFixture)),
+  http.post("/api/v2/queries/search", async ({ request }) => {
+    if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
+    const body = await request.json() as { filter?: { from_ms?: number; to_ms?: number }; page_size?: number };
+    if (!body.filter || !Number.isSafeInteger(body.filter.from_ms) || !Number.isSafeInteger(body.filter.to_ms)) {
+      return v2Error(400, "INVALID_ARGUMENT", "query time range is required");
+    }
+    if (!Number.isSafeInteger(body.page_size) || Number(body.page_size) < 1 || Number(body.page_size) > 100) {
+      return v2Error(400, "INVALID_ARGUMENT", "page size outside contract");
+    }
+    return HttpResponse.json({ ...v2QueryPageFixture, items: v2QueryPageFixture.items.slice(0, Number(body.page_size)) });
+  }),
+  http.get("/api/v2/queries/:recordId", ({ request, params }) => {
+    if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
+    const record = v2QueryRecordsFixture.find(({ id }) => id === params.recordId);
+    return record
+      ? HttpResponse.json({ record, directory_revision: v2QueryPageFixture.directory_revision })
+      : v2Error(404, "NOT_FOUND", "record fixture not found");
+  }),
 ];

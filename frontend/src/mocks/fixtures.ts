@@ -259,3 +259,178 @@ export const processMetricsFixture = {
   cpu_percent: { state: "available", value: 1.25 },
   threads: { state: "available", value: 18 },
 } satisfies V2Schemas["ProcessMetrics"];
+
+export const serviceMetricsFixture = {
+  sampled_at_ms: Date.parse("2026-09-07T00:00:10Z"),
+  qps: { state: "available", value: 4.25 },
+  rpm: { state: "available", value: 255 },
+  online_clients: { state: "available", value: 2 },
+  rss_bytes: { state: "available", value: "195454566" },
+  qps_trend: [
+    { at_ms: Date.parse("2026-09-07T00:00:08Z"), value: { state: "available", value: 1.5 } },
+    { at_ms: Date.parse("2026-09-07T00:00:09Z"), value: { state: "unavailable", reason: "observation_gap", observed_seconds: null } },
+    { at_ms: Date.parse("2026-09-07T00:00:10Z"), value: { state: "available", value: 12.75 } },
+  ],
+  rpm_trend: [
+    { at_ms: Date.parse("2026-09-07T00:00:00Z"), value: { state: "unavailable", reason: "warmup", observed_seconds: 300 } },
+    { at_ms: Date.parse("2026-09-07T00:00:10Z"), value: { state: "available", value: 255 } },
+  ],
+} satisfies V2Schemas["ServiceMetrics"];
+
+export const configStateFixture = {
+  active_revision: "active-8",
+  runtime_revision: "runtime-12",
+  persisted_revision: "active-7",
+  observed_file_revision: "files-10",
+  files: { source: "changed", derived: "unchanged" },
+  synchronization: "applied_unpersisted",
+  operation_id: "op-123",
+} satisfies V2Schemas["ConfigState"];
+
+const synchronizedConfigStateFixture = {
+  ...configStateFixture,
+  persisted_revision: "active-8",
+  files: { source: "unchanged", derived: "unchanged" },
+  synchronization: "synced",
+  operation_id: null,
+} satisfies V2Schemas["ConfigState"];
+
+export const dnsConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [{
+    module: "dns",
+    value: {
+      cache: {
+        enabled: true,
+        memory: { max_size_bytes: 67_108_864 },
+        failure_ttl: "5000000000ns",
+        optimistic: { enabled: true, answer_ttl: "10000000000ns", max_age: "86400000000000ns" },
+        persistence: { enabled: true, path: "./data/dns-cache.fdcs", snapshot_interval: "300000000000ns" },
+      },
+      resolve_log: { enable: true },
+    },
+  }],
+  effective: [
+    { path: "dns.cache.enabled", source: "global", value: true },
+    { path: "dns.cache.memory.max_size_bytes", source: "global", value: 67_108_864 },
+  ],
+  references: [],
+  runtime: [{
+    module: "dns",
+    snapshot: {
+      state: "idle",
+      owner_revision: "owner-1",
+      generation: "3",
+      file_bytes: "32768",
+      last_success_at_ms: Date.parse("2026-09-07T00:00:00Z"),
+      last_error: null,
+    },
+  }],
+} satisfies V2Schemas["ConfigRead"];
+
+export const statisticsConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [{
+    module: "statistics",
+    value: { retention: { days: 7, grace_days: 3, reference_size_bytes: 1_073_741_824 } },
+  }],
+  effective: [
+    { path: "statistics.retention.days", source: "global", value: 7 },
+    { path: "statistics.retention.grace_days", source: "global", value: 3 },
+  ],
+  references: [],
+  runtime: [],
+} satisfies V2Schemas["ConfigRead"];
+
+export const logsConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [{ module: "logs", value: { enable: true, level: "info", path: "./logs/fluxdns.log" } }],
+  effective: [],
+  references: [],
+  runtime: [],
+} satisfies V2Schemas["ConfigRead"];
+
+export const systemConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  work_path: "D:/Projects/Rust/fluxdns/_fluxdns",
+  rules_path: "D:/Projects/Rust/fluxdns/_fluxdns/rules",
+  database_path: "D:/Projects/Rust/fluxdns/_fluxdns/statistics.db",
+  records_path: "D:/Projects/Rust/fluxdns/_fluxdns/queries",
+  webui_enabled: true,
+  webui_address: "127.0.0.1",
+  webui_port: 8080,
+  public_origin: "http://127.0.0.1:8080",
+} satisfies V2Schemas["SystemConfigRead"];
+
+export const retentionStatusFixture = {
+  policy: { retention: { days: 7, grace_days: 3, reference_size_bytes: 1_073_741_824 } },
+  sampled_at_ms: Date.parse("2026-09-07T01:00:10Z"),
+  detail_bytes: "805306368",
+  cutoff_utc_date: "2026-08-28",
+  last_completed_at_ms: Date.parse("2026-09-07T01:00:05Z"),
+  next_scheduled_at_ms: Date.parse("2026-09-08T01:00:00Z"),
+  pending_reclaim_bytes: "16777216",
+} satisfies V2Schemas["RetentionStatus"];
+
+export const v2QueryRecordsFixture = [
+  {
+    id: "2026-09-07.18",
+    occurred_at_ms: Date.parse("2026-09-07T00:00:01Z"),
+    identity: { client_id: "unknown-id", client_ip: "192.0.2.10" },
+    matched: { source: "ip", matched_client_id: "Desktop-01" },
+    current_client_name: "workstation",
+    qname: "example.test.",
+    qtype: "A",
+    transport: "doh",
+    rcode: "NOERROR",
+    source: "upstream",
+    outcome: "answered",
+    cache: "miss",
+    strategy_name: "default",
+    upstream_target_name: "public",
+    upstream_used_name: "public-1",
+    cache_producer: null,
+    duration_us: 123,
+    dns_core_duration_us: 100,
+    answers: {
+      state: "available",
+      total_count: 1,
+      records: [{ name: "example.test.", type: "A", ttl_seconds: 30, data: "192.0.2.1" }],
+    },
+  },
+  {
+    id: "2026-09-07.17",
+    occurred_at_ms: Date.parse("2026-09-07T00:00:01Z"),
+    identity: { client_id: null, client_ip: "192.0.2.20" },
+    matched: { source: "none" },
+    current_client_name: null,
+    qname: "cached.example.test.",
+    qtype: "AAAA",
+    transport: "udp",
+    rcode: "NOERROR",
+    source: "cache",
+    outcome: "answered",
+    cache: "stale",
+    strategy_name: "default",
+    upstream_target_name: null,
+    upstream_used_name: null,
+    cache_producer: {
+      strategy_name: "default",
+      upstream_target_name: "public",
+      upstream_used_name: "public-2",
+    },
+    duration_us: 42,
+    dns_core_duration_us: 30,
+    answers: { state: "truncated", total_count: 20, records: [] },
+  },
+] satisfies V2Schemas["QueryRecord"][];
+
+export const v2QueryPageFixture = {
+  items: v2QueryRecordsFixture,
+  previous_cursor: null,
+  next_cursor: "cursor:older:2026-09-07.17",
+  snapshot_cursor: { epoch: "stream-1", sequence: "42" },
+  directory_revision: "clients-12",
+  retention_revision: "retention-9",
+  available_from_ms: Date.parse("2026-08-28T00:00:00Z"),
+} satisfies V2Schemas["QueryPage"];
