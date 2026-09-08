@@ -16,12 +16,13 @@ const RuleSetsPage = lazy(() => import("@/modules/rule-sets/RuleSetsPage").then(
 const StrategiesPage = lazy(() => import("@/modules/strategies/StrategiesPage").then((module) => ({ default: module.StrategiesPage })));
 const ListenersPage = lazy(() => import("@/modules/listeners/ListenersPage").then((module) => ({ default: module.ListenersPage })));
 const ClientsPage = lazy(() => import("@/modules/clients/ClientsPage").then((module) => ({ default: module.ClientsPage })));
+const DnsSettingsPage = lazy(() => import("@/modules/dns-settings/DnsSettingsPage").then((module) => ({ default: module.DnsSettingsPage })));
 const PendingModulePage = lazy(() => import("./PendingModulePage").then((module) => ({ default: module.PendingModulePage })));
 const UpstreamsPage = lazy(() => import("@/modules/upstreams/UpstreamsPage").then((module) => ({ default: module.UpstreamsPage })));
 const NotFoundPage = lazy(() => import("./NotFoundPage").then((module) => ({ default: module.NotFoundPage })));
 
 const pendingRoutes = managementRoutes.filter(
-  ({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/clients" && path !== "/proxies" && path !== "/system-runtime",
+  ({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/dns-settings" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/clients" && path !== "/proxies" && path !== "/system-runtime",
 );
 
 export function App() {
@@ -37,6 +38,7 @@ export function App() {
             <Route path="/queries" element={<QueriesPage />} />
             <Route path="/listeners" element={<ListenersPage />} />
             <Route path="/upstreams" element={<UpstreamsPage />} />
+            <Route path="/dns-settings" element={<DnsSettingsPage />} />
             <Route path="/hosts" element={<HostsPage />} />
             <Route path="/rule-sets" element={<RuleSetsPage />} />
             <Route path="/strategies" element={<StrategiesPage />} />

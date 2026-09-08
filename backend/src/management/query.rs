@@ -16,8 +16,9 @@ use time::{Date, Month, OffsetDateTime};
 
 use super::config_query;
 use super::contract::{
-    ConfigModule, ConfigRead, ConfigState, DecimalU64, ErrorCode, ProcessMetrics,
-    RetentionStatus as RetentionStatusResponse, ServiceMetrics, SystemConfigRead,
+    ConfigModule, ConfigRead, ConfigState, DecimalU64, ErrorCode, ProcessMetrics, RetentionPreview,
+    RetentionPreviewRequest, RetentionStatus as RetentionStatusResponse, ServiceMetrics,
+    SystemConfigRead,
 };
 use super::metrics::MetricsOwner;
 use super::router::{AuthServices, RequestId, internal_error, invalid_argument, v2_error_response};
@@ -33,7 +34,9 @@ use crate::ports::telemetry::{Component as TelemetryComponent, ComponentHealthSt
 use crate::resolution::{ResolutionPipelineMetrics, ResolutionPipelineSnapshot};
 use crate::resource::{ResourceSourceKind, ResourceStaleStatus};
 use crate::runtime::RuntimeCoordinator;
-use crate::storage::{RetentionCoordinator, RetentionPolicy, next_scheduled_at_utc_millis};
+use crate::storage::{
+    RetentionCoordinator, RetentionPlan, RetentionPolicy, next_scheduled_at_utc_millis,
+};
 
 mod history;
 
@@ -164,6 +167,58 @@ impl ManagementQueryService {
             last_completed_at_ms: status.last_cleanup_at.and_then(unix_millis_u64),
             next_scheduled_at_ms: next_scheduled_at_utc_millis(sampled_at).ok(),
             pending_reclaim_bytes: DecimalU64::from(status.pending_reclaim_bytes),
+        })
+    }
+
+    /// 预览使用真实详情文件采样，但不发布水位、不创建回收任务。
+    async fn retention_preview(
+        &self,
+        store: &crate::config::store::ConfigStore,
+        request: RetentionPreviewRequest,
+    ) -> Result<RetentionPreview, ErrorCode> {
+        let state = config_query::configuration_state(store)?;
+        if request.expected.active_revision.as_str() != state.active_revision.as_str() {
+            return Err(ErrorCode::ActiveRevisionConflict);
+        }
+        if request.expected.observed_file_revision.as_str() != state.observed_file_revision.as_str()
+        {
+            return Err(ErrorCode::FileRevisionConflict);
+        }
+        let active = store
+            .active_snapshot()
+            .map_err(|_| ErrorCode::ServiceUnavailable)?;
+        if active.runtime_revision != self.coordinator.load().revision().0 {
+            return Err(ErrorCode::ServiceUnavailable);
+        }
+        let proposed_policy = RetentionPolicy::new(
+            request.policy.retention.days,
+            request.policy.retention.grace_days,
+            request.policy.retention.reference_size_bytes,
+        )
+        .map_err(|_| ErrorCode::InvalidArgument)?;
+        let current_policy = RetentionPolicy::new(
+            active.config.statistics.retention.days,
+            active.config.statistics.retention.grace_days,
+            active.config.statistics.retention.reference_size_bytes,
+        )
+        .map_err(|_| ErrorCode::ServiceUnavailable)?;
+        let sampled_at = SystemTime::now();
+        let reference_day =
+            crate::storage::day_utc(sampled_at).map_err(|_| ErrorCode::ServiceUnavailable)?;
+        let proposed = self
+            .retention
+            .preview(proposed_policy, reference_day, query_deadline())
+            .await
+            .map_err(|_| ErrorCode::ServiceUnavailable)?;
+        let current =
+            RetentionPlan::calculate(current_policy, reference_day, proposed.sampled_detail_bytes)
+                .map_err(|_| ErrorCode::ServiceUnavailable)?;
+        Ok(RetentionPreview {
+            expected: request.expected,
+            sampled_at_ms: unix_millis_u64(sampled_at).ok_or(ErrorCode::ServiceUnavailable)?,
+            detail_bytes: DecimalU64::from(proposed.sampled_detail_bytes),
+            proposed_cutoff_utc_date: format_epoch_day(proposed.keep_from_day_utc),
+            shortens_history: proposed.keep_from_day_utc > current.keep_from_day_utc,
         })
     }
 
@@ -436,6 +491,7 @@ pub(crate) fn routes() -> Router<Arc<AuthServices>> {
         .route("/api/v2/config/system", get(get_system_config))
         .route("/api/v2/config/modules/{module}", get(get_config_module))
         .route("/api/v2/retention", get(get_retention))
+        .route("/api/v2/retention/preview", post(post_retention_preview))
         .route("/api/v2/queries/search", post(history::post_query_search))
         .route(
             "/api/v2/queries/{record_id}",
@@ -600,6 +656,25 @@ async fn get_retention(
         return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
     };
     v2_result(queries.retention(&services.config_store).await, &request_id)
+}
+
+async fn post_retention_preview(
+    State(services): State<Arc<AuthServices>>,
+    Extension(request_id): Extension<RequestId>,
+    body: Result<Json<RetentionPreviewRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Ok(Json(request)) = body else {
+        return v2_error_response(ErrorCode::InvalidArgument, &request_id);
+    };
+    let Some(queries) = &services.queries else {
+        return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
+    };
+    v2_result(
+        queries
+            .retention_preview(&services.config_store, request)
+            .await,
+        &request_id,
+    )
 }
 
 fn v2_result<T: Serialize>(result: Result<T, ErrorCode>, request_id: &RequestId) -> Response {
@@ -2051,19 +2126,36 @@ mod tests {
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
         }
-        let response = app
+        let state_response = app
             .clone()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/api/v2/retention/preview")
-                    .header(AUTHORIZATION, &authorization)
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
+            .oneshot(get("/api/v2/config/state", Some(&authorization)))
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let state = to_bytes(state_response.into_body(), 4096).await.unwrap();
+        let state: serde_json::Value = serde_json::from_slice(&state).unwrap();
+        let preview = json!({
+            "expected": {
+                "active_revision": state["active_revision"],
+                "observed_file_revision": state["observed_file_revision"]
+            },
+            "policy": {"retention": {"days": 1, "grace_days": 0, "reference_size_bytes": 1}}
+        });
+        let response = app
+            .clone()
+            .oneshot(post_json(
+                "/api/v2/retention/preview",
+                Some(&authorization),
+                preview.to_string(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["expected"], preview["expected"]);
+        assert!(body["detail_bytes"].is_string());
+        assert!(body["proposed_cutoff_utc_date"].is_string());
+        assert!(body["shortens_history"].is_boolean());
 
         let rejected_origin = Request::builder()
             .method("POST")

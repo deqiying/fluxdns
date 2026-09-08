@@ -26,6 +26,7 @@ x-implemented-operations:
   - restoreConfigFiles
   - retryConfigPersistence
   - getRetentionStatus
+  - previewRetention
   - getServiceMetrics
   - getProcessMetrics
   - searchQueries

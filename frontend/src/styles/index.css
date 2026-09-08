@@ -471,6 +471,25 @@ select {
   margin-bottom: 10px;
 }
 
+.settings-sections {
+  border-block: 1px solid #e0e2e6;
+}
+
+.settings-section {
+  display: grid;
+  gap: 18px;
+  padding: 24px 0;
+}
+
+.settings-section + .settings-section {
+  border-top: 1px solid #e8e9ec;
+}
+
+.settings-section h4.ant-typography {
+  margin: 0 0 4px;
+  font-size: 18px;
+}
+
 .filter-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

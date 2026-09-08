@@ -103,6 +103,8 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`ClientsPage`](../../../frontend/src/modules/clients/ClientsPage.tsx) 已替换 `/clients` 空态，列表同时展示唯一管理 name、请求匹配 `client_id` 和 IP/CIDR。创建时输入 ID，编辑时 ID 控件只读且 payload 通过 `clientEditValue` 剔除；name、IP、策略及 cache/TTL/ECS 覆盖按旧 name 提交，不重写历史身份。
 
+[`DnsSettingsPage`](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) 已替换 `/dns-settings` 空态，分区编辑缓存/快照、TTL、ECS、详情记录和 R/G/T。保留保存前调用正式 preview 获取真实 SQLite/WAL 字节与候选 UTC cutoff，并把结果并入后端 `retention_shortening` 确认；浏览器不自行计算权威水位，保存也不触发立即清理。
+
 ## 能力与证据
 
 2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换；新增 `apiV2Request` 仅由明确的新版模块调用，不提供运行时 v1/v2 选择开关。

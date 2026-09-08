@@ -81,6 +81,8 @@ Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/�
 
 P3 首个消费方为 `outbound`：代理创建/编辑仍由完整 ConfigV2 候选验证 SecretRef 的 env/file 互斥、名称唯一和类型化引用改名，再经过统一 prepare、热应用和文件事务。Management 响应只含 SecretRef 来源，不解析或回显实际代理 URL、用户名、密码或令牌。
 
+P3 `POST /api/v2/retention/preview` 绑定 active/file revision，调用现有 `RetentionCoordinator::preview` 真实采样详情主文件和 WAL，但不发布水位或创建回收任务。当前与候选策略使用同一次采样计算 cutoff；响应返回十进制字节、候选 UTC 截止日及是否缩短历史，实际保存仍由 `statistics` 单模块事务重新校验且不立即清理。
+
 组合 apply 在阻塞线程完成 ConfigStore 受理后立即返回 202；后台 owner 完成 Runtime prepare、ServiceControl 回执和持久化，客户端按相同 operation ID 查询。文件还原/重试在阻塞 owner 中执行，HTTP 取消不终止已经开始的写盘；已记录失败优先返回冻结 OperationResult，受理前冲突返回 ErrorEnvelope。operation 按用户名隔离，不在响应或日志中返回源正文、路径身份、底层错误或认证凭据。
 
 Windows 真实 HTTP 使用一次性 setup/后续 login 获取内存 Bearer，完成校验、apply、operation 轮询、状态、差异、还原和重试。日志父目录缺失返回冻结 `APPLY_FAILED` 且 Runtime/文件未变；有效日志候选得到 `applied_synced`、Runtime revision 2、双文件一致。仅 Cookie 的现有配置读拒绝证据沿用 BC-12；本批未验证 HTTPS 反向代理、Linux、磁盘满、响应恰在 service commit 后丢失或 P3 模块写入口。

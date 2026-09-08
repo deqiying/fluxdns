@@ -214,7 +214,7 @@ describe("application routes", () => {
 
   it.each(
     managementRoutes
-      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/clients" && path !== "/proxies" && path !== "/system-runtime")
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/dns-settings" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/clients" && path !== "/proxies" && path !== "/system-runtime")
       .map(({ path, title }) => [path, title]),
   )("有效 session 可加载未接线入口 %s", async (path, heading) => {
     setMockAuthenticated(true);
@@ -310,6 +310,14 @@ describe("application routes", () => {
     expect(await screen.findByText("Desktop-01")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "编辑客户端 desktop" }));
     expect(screen.getByLabelText("客户端 ID")).toBeDisabled();
+  });
+
+  it("DNS 页面展示缓存、详情和真实保留状态", async () => {
+    setMockAuthenticated(true);
+    renderApp("/dns-settings");
+    expect(await screen.findByRole("heading", { name: "DNS 配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("数据保留")).toBeInTheDocument();
+    expect(await screen.findByText(/805306368/)).toBeInTheDocument();
   });
 
   it("系统运行状态显示 v2 进程采样并可手动刷新", async () => {

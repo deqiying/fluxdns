@@ -211,6 +211,11 @@ export const handlers = [
     });
   }),
   http.get("/api/v2/retention", readOnlyV2(retentionStatusFixture)),
+  http.post("/api/v2/retention/preview", async ({ request }) => {
+    if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
+    const body = await request.json() as { expected: unknown; policy: { retention: { days?: number } } };
+    return HttpResponse.json({ expected: body.expected, sampled_at_ms: Date.now(), detail_bytes: "805306368", proposed_cutoff_utc_date: "2026-09-01", shortens_history: (body.policy.retention.days ?? 7) < 7 });
+  }),
   http.post("/api/v2/queries/search", async ({ request }) => {
     if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
     const body = await request.json() as { filter?: { from_ms?: number; to_ms?: number }; page_size?: number };

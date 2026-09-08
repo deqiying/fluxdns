@@ -28,7 +28,7 @@ export function useConfigChangeMutation(module: ConfigModule) {
   const queryClient = useQueryClient();
   const { message, modal } = App.useApp();
   return useMutation({
-    mutationFn: async ({ change, state }: { change: ConfigChange; state: ConfigState }): Promise<OperationResult | null> => {
+    mutationFn: async ({ change, state, confirmationDetails }: { change: ConfigChange; state: ConfigState; confirmationDetails?: Partial<Record<Schemas["ImpactKind"], string>> }): Promise<OperationResult | null> => {
       const discardExternalChanges = hasExternalFileChanges(state);
       const candidate: Schemas["Candidate"] = {
         expected: {
@@ -40,7 +40,7 @@ export function useConfigChangeMutation(module: ConfigModule) {
       };
       const validation = await validateCandidate(candidate, { module });
       if (validation.required_confirmations.length > 0) {
-        const confirmed = await confirmImpacts(modal.confirm, validation.required_confirmations);
+        const confirmed = await confirmImpacts(modal.confirm, validation.required_confirmations, confirmationDetails);
         if (!confirmed) return null;
       }
       const settlement = await applyAndSettle({
@@ -87,11 +87,12 @@ function hasExternalFileChanges(state: ConfigState): boolean {
 function confirmImpacts(
   confirm: ReturnType<typeof App.useApp>["modal"]["confirm"],
   impacts: Schemas["ImpactKind"][],
+  details?: Partial<Record<Schemas["ImpactKind"], string>>,
 ): Promise<boolean> {
   return new Promise((resolve) => {
     confirm({
       title: "确认配置影响",
-      content: impacts.map((impact) => confirmationLabels[impact]).join("；"),
+      content: impacts.map((impact) => details?.[impact] ?? confirmationLabels[impact]).join("；"),
       okText: "确认应用",
       cancelText: "返回编辑",
       onOk: () => resolve(true),

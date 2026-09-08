@@ -17,3 +17,7 @@ export function getStatisticsConfig(signal?: AbortSignal): Promise<Schemas["Conf
 export function getRetentionStatus(signal?: AbortSignal): Promise<Schemas["RetentionStatus"]> {
   return apiV2Request("/retention", { signal });
 }
+
+export function previewRetention(request: Schemas["RetentionPreviewRequest"], signal?: AbortSignal): Promise<Schemas["RetentionPreview"]> {
+  return apiV2Request("/retention/preview", { method: "POST", body: request, signal });
+}
