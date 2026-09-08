@@ -368,6 +368,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/events/ticket": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description 使用业务 Bearer 签发 30 秒、单次消费的 WS ticket。ticket 只进入 Sec-WebSocket-Protocol，不进入 URL、Cookie、日志或普通 session 投影。 */
+        post: operations["issueWebSocketTicket"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/events": {
         parameters: {
             query?: never;
@@ -375,7 +392,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description 目标鉴权为 Bearer 并保留 Origin 校验；不以 Cookie 或 URL token 作为回退。 浏览器 WebSocket 的凭据传递仍待 BC-24 核定，不以此契约声称浏览器已可连接。 upgrade 后独立连接 owner，不受普通 HTTP 15s deadline 截断；登出/过期回收，慢消费者关闭并 resync。 */
+        /** @description 浏览器先用 Bearer POST /events/ticket，再以 fluxdns.v1 和 fluxdns.ticket.<ticket> 两个 Sec-WebSocket-Protocol 值握手；服务端只回显 fluxdns.v1。Cookie 和 URL query 不参与鉴权，Origin 必须与 public_origin 一致。upgrade 后由独立连接 owner 接管， 不受普通 HTTP 15s deadline 截断；登出/过期回收，慢消费者关闭并要求重同步。 */
         get: operations["subscribeEvents"];
         put?: never;
         post?: never;
@@ -1201,6 +1218,10 @@ export interface components {
             cpu_percent: components["schemas"]["NumberMeasurement"];
             threads: components["schemas"]["CountMeasurement"];
         };
+        WebSocketTicket: {
+            ticket: string;
+            expires_at_ms: components["schemas"]["SafeInteger"];
+        };
         RetentionStatus: {
             policy: components["schemas"]["Statistics"];
             sampled_at_ms: components["schemas"]["SafeInteger"];
@@ -1858,6 +1879,27 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProcessMetrics"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    issueWebSocketTicket: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 短期单次 WS ticket */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebSocketTicket"];
                 };
             };
             default: components["responses"]["Error"];

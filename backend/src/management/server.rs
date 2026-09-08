@@ -10,6 +10,7 @@ use thiserror::Error;
 use super::ManagementRuntime;
 use super::assets;
 use super::auth::{AuthError, AuthState};
+use super::events::EventHub;
 use super::metrics::MetricsOwner;
 use super::query::{ManagementHistoryDependencies, ManagementQueryService};
 use super::router::{AuthServices, build_router};
@@ -77,6 +78,12 @@ impl ManagementService {
             .ok_or(ManagementBuildError::MissingPublicOrigin)?;
         let auth = Arc::new(AuthState::new(&config.users).map_err(ManagementBuildError::Auth)?);
         let sessions = Arc::new(SessionStore::new(origin.scheme() == "https"));
+        let event_epoch = dependencies
+            .history
+            .detail_store
+            .detail_commit_cursor()
+            .epoch;
+        let metrics = Arc::clone(&dependencies.metrics);
         let read_model: Arc<dyn ManagementStorageRead> = Arc::new(
             SqliteManagementReadModel::connect(dependencies.database_path)
                 .await
@@ -91,6 +98,10 @@ impl ManagementService {
             dependencies.metrics,
             dependencies.history,
         ));
+        let events = Arc::new(
+            EventHub::new(Arc::clone(&sessions), metrics, event_epoch)
+                .map_err(ManagementBuildError::Events)?,
+        );
         let services = Arc::new(
             AuthServices::new(
                 Arc::clone(&auth),
@@ -99,9 +110,15 @@ impl ManagementService {
                 origin.as_str().trim_end_matches('/').to_owned(),
                 Some(queries),
             )
-            .with_config_control(config_control),
+            .with_config_control(config_control)
+            .with_events(Arc::clone(&events)),
         );
-        let runtime = Arc::new(ManagementRuntime::new(auth, sessions, config_store));
+        let runtime = Arc::new(ManagementRuntime::new(
+            auth,
+            sessions,
+            config_store,
+            Some(events),
+        ));
         let address = SocketAddr::new(config.address, config.port);
         let listener = tokio::net::TcpListener::bind(address)
             .await
@@ -151,6 +168,8 @@ pub(crate) enum ManagementBuildError {
     Auth(#[source] AuthError),
     #[error("management read model initialization failed")]
     ReadModel(#[source] SqliteManagementReadModelBuildError),
+    #[error("management WebSocket initialization failed: {0}")]
+    Events(&'static str),
     #[error("management WebUI assets are unavailable: {0}")]
     Assets(&'static str),
     #[error("management HTTP listener bind failed")]
@@ -196,7 +215,7 @@ mod tests {
         let service = ManagementService {
             listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
             router: build_router(services),
-            runtime: Arc::new(ManagementRuntime::new(auth, sessions, config_store)),
+            runtime: Arc::new(ManagementRuntime::new(auth, sessions, config_store, None)),
         };
         let address = service.local_addr().unwrap();
         let cancellation = Cancellation::new();

@@ -19,6 +19,16 @@ pub const MAX_QUERY_BYTES: usize = 16 * 1024;
 pub const MAX_QUERY_PAGE_SIZE: u16 = 100;
 pub const DEFAULT_QUERY_PAGE_SIZE: u16 = 20;
 pub const MAX_WS_FRAME_BYTES: usize = 128 * 1024;
+pub const WS_CONNECTION_CAPACITY: usize = 32;
+pub const WS_CONNECTIONS_PER_SESSION: usize = 4;
+pub const WS_SUBSCRIPTIONS_PER_CONNECTION: usize = 8;
+pub const WS_QUEUE_BYTES: usize = 1024 * 1024;
+pub const WS_QUEUE_MESSAGES: usize = 64;
+pub const WS_HEARTBEAT_SECONDS: u64 = 15;
+pub const WS_IDLE_SECONDS: u64 = 45;
+pub const WS_WRITE_TIMEOUT_SECONDS: u64 = 5;
+pub const WS_INBOUND_MESSAGES_PER_MINUTE: usize = 64;
+pub const MAX_ONLINE_IDENTITIES: usize = 4_096;
 pub const MAX_OPERATION_ENTRIES: usize = 1024;
 pub const OPERATION_TTL_SECONDS: u64 = 1800;
 pub const WS_PROTOCOL_VERSION: u16 = 1;
@@ -724,6 +734,13 @@ pub struct ProcessMetrics {
     pub rss_bytes: Measurement<DecimalU64>,
     pub cpu_percent: Measurement<f64>,
     pub threads: Measurement<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebSocketTicket {
+    pub ticket: String,
+    pub expires_at_ms: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

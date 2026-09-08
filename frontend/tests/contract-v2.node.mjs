@@ -16,7 +16,7 @@ const validate = (name, value) => {
 };
 
 test("共享 JSON 夹具符合正式 v2 schema", () => {
-  for (const [key, schema] of Object.entries({candidate: "Candidate", state: "ConfigState", query: "QueryRequest", record: "QueryRecord", metrics: "ServiceMetrics", config_read: "ConfigRead", external_diff: "ExternalDiff", validation: "ValidationResult", snapshot: "CacheSnapshotStatus"})) {
+  for (const [key, schema] of Object.entries({candidate: "Candidate", state: "ConfigState", query: "QueryRequest", record: "QueryRecord", metrics: "ServiceMetrics", websocket_ticket: "WebSocketTicket", config_read: "ConfigRead", external_diff: "ExternalDiff", validation: "ValidationResult", snapshot: "CacheSnapshotStatus"})) {
     validate(schema, fixtures[key]);
   }
   for (const item of fixtures.operations) validate("OperationResult", item);
@@ -73,6 +73,8 @@ test("全部 schema 可编译，v2 不声明角色/通用 YAML/顶层删除接�
     "getProcessMetrics",
     "searchQueries",
     "getQueryDetail",
+    "issueWebSocketTicket",
+    "subscribeEvents",
   ]);
   assert.equal(Object.keys(openapi.paths).some((path) => /roles|users|restart|stop|clear/.test(path)), false);
   for (const path of Object.values(openapi.paths)) assert.equal("delete" in path || "patch" in path, false);
@@ -86,7 +88,7 @@ test("v2 业务认证只接受 Bearer，Cookie 仅用于认证刷新且 token �
   });
   assert.deepEqual(openapi.paths["/auth/refresh"].post.security, [{refreshCookie: []}]);
   for (const [path, operations] of Object.entries(openapi.paths)) {
-    if (!path.startsWith("/auth/") && path !== "/events") continue;
+    if (!path.startsWith("/auth/") && !path.startsWith("/events")) continue;
     for (const operation of Object.values(operations)) {
       assert.equal((operation.parameters ?? []).some((parameter) => parameter.in === "query"), false, path);
     }
@@ -102,4 +104,6 @@ test("v2 业务认证只接受 Bearer，Cookie 仅用于认证刷新且 token �
   assert.equal(validator({...auth, refresh_token: "B".repeat(43)}), false);
   assert.equal(validator({...auth, access_expires_at_ms: 9007199254740992}), false);
   assert.equal(validator({...auth, access_token: "invalid"}), false);
+  assert.deepEqual(openapi.paths["/events"].get.security, []);
+  assert.equal(openapi.paths["/events"].get["x-websocket-protocol"], "fluxdns.v1");
 });

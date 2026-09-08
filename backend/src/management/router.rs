@@ -48,6 +48,7 @@ pub(crate) struct AuthServices {
     pub(crate) config_store: Arc<ConfigStore>,
     pub(crate) config_mutations: Option<Arc<ConfigMutationOwner>>,
     pub(crate) queries: Option<Arc<ManagementQueryService>>,
+    pub(crate) events: Option<Arc<super::events::EventHub>>,
     pub(crate) public_origin: String,
     attempts: Arc<AttemptLimiter>,
 }
@@ -66,6 +67,7 @@ impl AuthServices {
             config_store,
             config_mutations: None,
             queries,
+            events: None,
             public_origin,
             attempts: Arc::new(AttemptLimiter::default()),
         }
@@ -76,6 +78,11 @@ impl AuthServices {
             Arc::clone(&self.config_store),
             control,
         )));
+        self
+    }
+
+    pub(crate) fn with_events(mut self, events: Arc<super::events::EventHub>) -> Self {
+        self.events = Some(events);
         self
     }
 }
@@ -141,6 +148,7 @@ pub(crate) fn build_router(services: Arc<AuthServices>) -> Router {
         .route("/api/v1/auth/session", get(get_session))
         .merge(query::routes())
         .merge(super::config_mutation::routes())
+        .merge(super::events::protected_routes())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&services),
             require_session,
@@ -154,6 +162,7 @@ pub(crate) fn build_router(services: Arc<AuthServices>) -> Router {
         .route("/api/v1/auth/login", post(post_login))
         .route("/api/v1/auth/refresh", post(post_refresh))
         .route("/api/v1/auth/logout", post(post_logout))
+        .merge(super::events::upgrade_routes())
         .merge(protected)
         .fallback(fallback)
         .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
@@ -518,7 +527,7 @@ pub(super) fn validate_mutating_request(
     public_origin: &str,
     request_id: &RequestId,
 ) -> Option<Response> {
-    if mutating_request_is_allowed(headers, public_origin) {
+    if origin_is_allowed(headers, public_origin) {
         return None;
     }
     Some(error_response(
@@ -535,11 +544,11 @@ pub(super) fn validate_v2_mutating_request(
     public_origin: &str,
     request_id: &RequestId,
 ) -> Option<Response> {
-    (!mutating_request_is_allowed(headers, public_origin))
+    (!origin_is_allowed(headers, public_origin))
         .then(|| v2_error_response(super::contract::ErrorCode::Forbidden, request_id))
 }
 
-fn mutating_request_is_allowed(headers: &HeaderMap, public_origin: &str) -> bool {
+pub(super) fn origin_is_allowed(headers: &HeaderMap, public_origin: &str) -> bool {
     let mut origins = headers.get_all(ORIGIN).iter();
     let origin = origins.next().and_then(|value| value.to_str().ok());
     if origin != Some(public_origin) || origins.next().is_some() {
@@ -557,7 +566,7 @@ fn mutating_request_is_allowed(headers: &HeaderMap, public_origin: &str) -> bool
     true
 }
 
-fn session_token(headers: &HeaderMap) -> Option<String> {
+pub(super) fn session_token(headers: &HeaderMap) -> Option<String> {
     let mut values = headers.get_all(AUTHORIZATION).iter();
     let value = values.next()?.to_str().ok()?;
     if values.next().is_some() {
@@ -951,6 +960,7 @@ mod tests {
             Arc::clone(&services.auth),
             Arc::clone(&services.sessions),
             Arc::clone(&services.config_store),
+            None,
         );
         let app = build_router(Arc::clone(&services));
 

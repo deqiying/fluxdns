@@ -62,8 +62,8 @@ pub(crate) struct ManagementQueryService {
 
 /// 历史查询共享同一保留水位 owner 与日分片读口，避免两者被独立接线。
 pub(crate) struct ManagementHistoryDependencies {
-    retention: Arc<RetentionCoordinator>,
-    detail_store: Arc<crate::storage::DetailShardStore>,
+    pub(super) retention: Arc<RetentionCoordinator>,
+    pub(super) detail_store: Arc<crate::storage::DetailShardStore>,
 }
 
 impl ManagementHistoryDependencies {

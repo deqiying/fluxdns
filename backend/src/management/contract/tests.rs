@@ -19,6 +19,7 @@ fn shared_http_and_ws_fixtures_round_trip_without_precision_loss() {
     round_trip::<QueryRequest>(&fixtures["query"]);
     round_trip::<QueryRecord>(&fixtures["record"]);
     round_trip::<ServiceMetrics>(&fixtures["metrics"]);
+    round_trip::<WebSocketTicket>(&fixtures["websocket_ticket"]);
     round_trip::<ConfigRead>(&fixtures["config_read"]);
     round_trip::<ExternalDiff>(&fixtures["external_diff"]);
     round_trip::<ValidationResult>(&fixtures["validation"]);
@@ -232,6 +233,40 @@ fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_register
         ("cursor_bytes", MAX_CURSOR_BYTES),
         ("query_body_bytes", MAX_QUERY_BYTES),
         ("websocket_frame_bytes", MAX_WS_FRAME_BYTES),
+        ("websocket_connections", WS_CONNECTION_CAPACITY),
+        (
+            "websocket_connections_per_session",
+            WS_CONNECTIONS_PER_SESSION,
+        ),
+        (
+            "websocket_subscriptions_per_connection",
+            WS_SUBSCRIPTIONS_PER_CONNECTION,
+        ),
+        ("websocket_queue_bytes", WS_QUEUE_BYTES),
+        ("websocket_queue_messages", WS_QUEUE_MESSAGES),
+        ("websocket_heartbeat_seconds", WS_HEARTBEAT_SECONDS as usize),
+        ("websocket_idle_seconds", WS_IDLE_SECONDS as usize),
+        (
+            "websocket_write_timeout_seconds",
+            WS_WRITE_TIMEOUT_SECONDS as usize,
+        ),
+        (
+            "websocket_inbound_messages_per_minute",
+            WS_INBOUND_MESSAGES_PER_MINUTE,
+        ),
+        (
+            "websocket_ticket_ttl_seconds",
+            crate::management::session::WS_TICKET_TTL.as_secs() as usize,
+        ),
+        (
+            "websocket_ticket_entries",
+            crate::management::session::WS_TICKET_GLOBAL_CAPACITY,
+        ),
+        (
+            "websocket_tickets_per_session",
+            crate::management::session::WS_TICKET_PER_SESSION_CAPACITY,
+        ),
+        ("online_identity_entries", MAX_ONLINE_IDENTITIES),
         ("operation_entries", MAX_OPERATION_ENTRIES),
         ("external_diff_bytes", MAX_EXTERNAL_DIFF_BYTES),
         (
@@ -267,4 +302,7 @@ fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_register
     assert!(routes.contains("/api/v2/config/files/restore"));
     assert!(routes.contains("/api/v2/config/modules/{module}/validate"));
     assert!(routes.contains("/api/v2/config/modules/{module}/apply"));
+    let event_routes = include_str!("../events.rs");
+    assert!(event_routes.contains("/api/v2/events/ticket"));
+    assert!(event_routes.contains("/api/v2/events"));
 }

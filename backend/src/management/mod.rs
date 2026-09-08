@@ -5,6 +5,7 @@ mod auth;
 mod config_mutation;
 mod config_query;
 pub(crate) mod contract;
+mod events;
 mod metrics;
 mod query;
 mod router;
@@ -14,6 +15,7 @@ mod session;
 use std::sync::Arc;
 
 use auth::AuthState;
+use events::EventHub;
 use session::SessionStore;
 
 use crate::config::resolve::ResolvedWebUiUser;
@@ -28,6 +30,7 @@ pub(crate) struct ManagementRuntime {
     auth: Arc<AuthState>,
     sessions: Arc<SessionStore>,
     config_store: Arc<ConfigStore>,
+    events: Option<Arc<EventHub>>,
 }
 
 impl ManagementRuntime {
@@ -35,11 +38,13 @@ impl ManagementRuntime {
         auth: Arc<AuthState>,
         sessions: Arc<SessionStore>,
         config_store: Arc<ConfigStore>,
+        events: Option<Arc<EventHub>>,
     ) -> Self {
         Self {
             auth,
             sessions,
             config_store,
+            events,
         }
     }
 
@@ -54,5 +59,8 @@ impl ManagementRuntime {
 
     pub(crate) fn shutdown(&self) {
         self.sessions.revoke_all();
+        if let Some(events) = &self.events {
+            events.shutdown();
+        }
     }
 }

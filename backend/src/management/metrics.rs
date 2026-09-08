@@ -8,7 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sha2::{Digest, Sha256};
 
 use super::contract::{
-    DecimalU64, Measurement, ProcessMetrics, RateSample, ServiceMetrics, UnavailableReason,
+    DecimalU64, MAX_ONLINE_IDENTITIES, Measurement, ProcessMetrics, RateSample, ServiceMetrics,
+    UnavailableReason,
 };
 use crate::dns::{Cancellation, ClientIdentity};
 use crate::runtime::TaskError;
@@ -18,7 +19,6 @@ const REQUEST_BUCKET_COUNT: usize = REQUEST_WINDOW_SECONDS as usize + 1;
 const QPS_WINDOW_SECONDS: u64 = 60;
 const RPM_WINDOW_SECONDS: u64 = 600;
 const ONLINE_WINDOW_SECONDS: u64 = 60;
-const MAX_ONLINE_IDENTITIES: usize = 4_096;
 const PROCESS_SAMPLE_INTERVAL: Duration = Duration::from_secs(1);
 const PROCESS_SAMPLE_STALE_AFTER: Duration = Duration::from_secs(3);
 

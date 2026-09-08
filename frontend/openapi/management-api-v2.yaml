@@ -5,7 +5,7 @@ info:
   description: >-
     P0 冻结的目标契约，按检查点分阶段注册 handler。当前已实现服务/进程指标、配置状态、
     系统白名单、十个模块读投影、P1 组合配置事务与文件操作、P3 单模块写入、保留状态及历史查询；
-    P3 业务页面按模块接入，WS 仍待后续检查点。
+    P3 业务页面按模块接入；P4 已接入指标 WS，记录 replay 仍待 BC-25。
     配置以活动源表达为准，先应用后持久化；外部变化只提示。
     所有认证用户均为管理员，不增加角色管理。路径和 SecretRef 来源可见，实际秘密不可见。
 servers:
@@ -31,6 +31,8 @@ x-implemented-operations:
   - getProcessMetrics
   - searchQueries
   - getQueryDetail
+  - issueWebSocketTicket
+  - subscribeEvents
 x-limits:
   access_token_ttl_seconds: 300
   access_renew_window_seconds: 30
@@ -52,9 +54,15 @@ x-limits:
   websocket_connections_per_session: 4
   websocket_subscriptions_per_connection: 8
   websocket_queue_bytes: 1048576
+  websocket_queue_messages: 64
   websocket_heartbeat_seconds: 15
   websocket_idle_seconds: 45
-  online_identity_entries: 16384
+  websocket_write_timeout_seconds: 5
+  websocket_inbound_messages_per_minute: 64
+  websocket_ticket_ttl_seconds: 30
+  websocket_ticket_entries: 128
+  websocket_tickets_per_session: 4
+  online_identity_entries: 4096
   replay_seconds: 60
   replay_records: 5000
   replay_bytes: 8388608
@@ -342,13 +350,28 @@ paths:
           description: 与服务指标共享采样口径的进程状态
           content: {application/json: {schema: {$ref: "#/components/schemas/ProcessMetrics"}}}
         default: {$ref: "#/components/responses/Error"}
+  /events/ticket:
+    post:
+      operationId: issueWebSocketTicket
+      description: >-
+        使用业务 Bearer 签发 30 秒、单次消费的 WS ticket。ticket 只进入
+        Sec-WebSocket-Protocol，不进入 URL、Cookie、日志或普通 session 投影。
+      responses:
+        "201":
+          description: 短期单次 WS ticket
+          content: {application/json: {schema: {$ref: "#/components/schemas/WebSocketTicket"}}}
+        default: {$ref: "#/components/responses/Error"}
   /events:
     get:
       operationId: subscribeEvents
+      security: []
       description: >-
-        目标鉴权为 Bearer 并保留 Origin 校验；不以 Cookie 或 URL token 作为回退。
-        浏览器 WebSocket 的凭据传递仍待 BC-24 核定，不以此契约声称浏览器已可连接。
-        upgrade 后独立连接 owner，不受普通 HTTP 15s deadline 截断；登出/过期回收，慢消费者关闭并 resync。
+        浏览器先用 Bearer POST /events/ticket，再以 fluxdns.v1 和 fluxdns.ticket.<ticket>
+        两个 Sec-WebSocket-Protocol 值握手；服务端只回显 fluxdns.v1。Cookie 和 URL query
+        不参与鉴权，Origin 必须与 public_origin 一致。upgrade 后由独立连接 owner 接管，
+        不受普通 HTTP 15s deadline 截断；登出/过期回收，慢消费者关闭并要求重同步。
+      x-websocket-protocol: fluxdns.v1
+      x-websocket-ticket-protocol-prefix: fluxdns.ticket.
       x-client-message: {$ref: "#/components/schemas/ClientMessage"}
       x-server-message: {$ref: "#/components/schemas/ServerMessage"}
       responses:
@@ -1368,6 +1391,13 @@ components:
         rss_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
         cpu_percent: {$ref: "#/components/schemas/NumberMeasurement"}
         threads: {$ref: "#/components/schemas/CountMeasurement"}
+    WebSocketTicket:
+      type: object
+      additionalProperties: false
+      required: [ticket, expires_at_ms]
+      properties:
+        ticket: {type: string, pattern: "^[A-Za-z0-9_-]{43}$"}
+        expires_at_ms: {$ref: "#/components/schemas/SafeInteger"}
     RetentionStatus:
       type: object
       additionalProperties: false
