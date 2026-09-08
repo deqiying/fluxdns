@@ -178,6 +178,58 @@ impl MokaCacheStore {
     {
         future.await
     }
+
+    /// 分批遍历当前可见记录，供进程级快照 owner 在查询锁之外编码。
+    ///
+    /// Moka 的迭代器是弱一致视图；并发更新允许本轮少量遗漏，但不会阻塞 DNS 查询。
+    pub(crate) fn visit_snapshot_batches<E>(
+        &self,
+        batch_size: usize,
+        deadline: Deadline,
+        mut visit: impl FnMut(Vec<(CacheKey, CacheRecord)>) -> Result<(), E>,
+    ) -> Result<u64, SnapshotVisitError<E>> {
+        if batch_size == 0 {
+            return Err(SnapshotVisitError::ZeroBatchSize);
+        }
+        {
+            let state = lock(&self.state, "moka_cache.snapshot")
+                .map_err(|_| SnapshotVisitError::Unavailable)?;
+            if state.shutting_down {
+                return Err(SnapshotVisitError::Unavailable);
+            }
+        }
+
+        self.cache.run_pending_tasks();
+        let now = Instant::now();
+        let mut visited = 0_u64;
+        let mut batch = Vec::with_capacity(batch_size);
+        for (key, record) in self.cache.iter() {
+            if deadline.is_expired(Instant::now()) {
+                return Err(SnapshotVisitError::Timeout);
+            }
+            if !is_visible(&record, now) {
+                continue;
+            }
+            batch.push((key.as_ref().clone(), record));
+            visited = visited.saturating_add(1);
+            if batch.len() == batch_size {
+                visit(std::mem::take(&mut batch)).map_err(SnapshotVisitError::Visitor)?;
+                batch = Vec::with_capacity(batch_size);
+            }
+        }
+        if !batch.is_empty() {
+            visit(batch).map_err(SnapshotVisitError::Visitor)?;
+        }
+        Ok(visited)
+    }
+}
+
+#[derive(Debug)]
+pub(crate) enum SnapshotVisitError<E> {
+    ZeroBatchSize,
+    Timeout,
+    Unavailable,
+    Visitor(E),
 }
 
 impl fmt::Debug for MokaCacheStore {

@@ -7,6 +7,7 @@ mod moka;
 mod persistence;
 mod runtime;
 mod service;
+mod snapshot;
 mod sqlite;
 
 pub use admission::{
@@ -29,6 +30,10 @@ pub use service::{
     CacheFacadeOptions, CacheLookup, CacheRefreshPermit, CacheWriteRequest, CacheWriteResult,
     LateCacheFinalizer, LateCacheFinalizerBuildError, LateCacheFinalizerShutdownSummary,
     LateCacheFinalizerSubmitError,
+};
+pub use snapshot::{
+    CacheSnapshotError, CacheSnapshotReader, CacheSnapshotWriteSummary, open_cache_snapshot,
+    write_cache_snapshot,
 };
 pub use sqlite::{
     SqliteCacheDiskUsage, SqlitePersistentCacheStore, SqlitePersistentCacheStoreBuildError,

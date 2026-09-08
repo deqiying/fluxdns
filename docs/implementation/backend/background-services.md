@@ -78,6 +78,14 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/cache/service.rs) owner，shutdown 在同一 deadline 排空并汇总 persistence success/failure/drop。关闭 telemetry 前发布安全计数与 Cache health/gap，不记录 key、response 或 adapter 原始错误。
 
+### P2 二进制快照基础（2026-09-08）
+
+[`snapshot.rs`](../../../backend/src/cache/snapshot.rs) 已实现独立 `FDCS` 完整快照格式。写入从生产 [`MokaCacheStore`](../../../backend/src/cache/moka.rs) 的弱一致视图按调用方批次上限取得可见记录，批外编码并直接顺序写入同目录临时文件；不复制完整缓存或维护第二份 entry 集合。文件头记录独立版本、生成 UTC 毫秒、记录数、body 长度和覆盖 metadata/body 的 SHA-256，正式替换前 `sync_all`；Windows 使用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`，失败清理本轮临时文件并保留上一份快照。
+
+`open_cache_snapshot` 在返回 reader 前先以调用方文件字节预算和 deadline 验证完整长度/摘要，随后 `CacheSnapshotReader` 分批解码；逐条复用现有 key/entry codec，按绝对 expiry/stale-until 扣除停机时间，隔离过期、损坏和不兼容记录。同一快照使用有界 SHA-256 key 集合去重，记录数 100000、单条 2 MiB；这些是内部恢复保护，不是磁盘配额或 Moka/RSS 一比一承诺。
+
+Windows `_fluxdns/p2-cache-tests/` 真实文件定向测试覆盖单条批次流式往返、停机 TTL、body/header 损坏、未知版本、文件预算、缺失冷启、替换前失败保留旧文件及成功覆盖；`cache::` 共 71 项通过。该批没有创建周期 owner、没有把 reader 注入活动 Moka，也没有改变生产 [`PolicyDnsCore::initialize_cache_persistence`](../../../backend/src/dns/policy.rs) 的 SQLite 接线；owner/generation、预算缩小后的部分预热、reload/shutdown 和旧路径退出留在 BC-07。
+
 ## Observability
 
 [`observability.rs`](../../../backend/src/observability.rs) 的 `TelemetryWriter`、`StructuredTelemetryOutput` 和 health registry 使用低基数、有界内存与安全 typed event；Application 在配置校验后切换正式日志目标和过滤器。P1 日志 owner 接线后，正式 app 始终创建 writer；`logs.enable` 只影响日志接纳及文件输出，不关闭指标和 health，见[日志热切换](#p1-日志热切换2026-09-07)。
@@ -116,6 +124,7 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 | remote/file 刷新 | 条件 fetch、manifest v2、epoch/CAS、scheduler | async prepare + service resource task | loopback 200/304 与真实条件头；重复 304、坏 pair/响应、旧 manifest、换代及同预算重试 | 未执行真实远程/代理组合 |
 | stats/detail | schema v6 整数时间、启动 deadline/probe、StorageRuntime、ResolutionRuntime | app 打开，service 持有并复用 sink；stats-first shutdown | 新库/v1/v5 升级、时间类型/排序/范围/清理、索引、高水位与异常值回滚；原 SQLite 锁/探针和 stats-first 回归 | ingress/pending/数据库故障仍可产生明确 gap；未验证生产规模迁移成本 |
 | cache 恢复/后台写 | schema v2、增量 upsert、CachePersistenceRuntime | core prepare + commit worker + finalizer shutdown | v1 升级保留 payload/重复 key；trigger 证明仅改动行写入；失败回滚、坏行清理、原 Busy/DiskFull 用例 | 注入不等价真实 disk-full；保留插入时间淘汰 |
+| cache 二进制快照 codec | snapshot header、SHA-256、Moka 分批导出与流式 reader | 未接线，等待 BC-07 进程 owner | Windows 真实文件 6 项；`cache::` 71 项 | 未验证权限/磁盘满、Unix 或生产恢复；当前仍走 SQLite |
 | telemetry lifecycle / 聚合 | histogram、typed writer、registry、sampler | dispatcher + app/service 周期及最终 flush | 固定桶/标签、溢出原子性、拥塞下聚合、关闭详情、输出重试、reload 与最终快照 | 没有 exporter/逐 attempt 流；长期负载与全部输出故障未验收 |
 
 ## 本次验证

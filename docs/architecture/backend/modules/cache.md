@@ -2,24 +2,24 @@
 
 > 文档状态：有效
 >
-> 适用范围：缓存 key、TTL、single-flight、memory adapter 和 persistence 生命周期
+> 适用范围：缓存 key、TTL、single-flight、memory adapter 和 snapshot 生命周期
 >
-> 最后评审：2026-09-05（增量持久化、原编码预算与插入时间淘汰；基线见[模块索引](README.md)，本地证据见[后台服务](../../../implementation/backend/background-services.md#本次验证)）
+> 最后评审：2026-09-08（内存权威与独立完整快照；其余基线见[模块索引](README.md)，实际接线见[后台服务](../../../implementation/backend/background-services.md#cache-persistence)）
 >
-> 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[sqlite.rs](../../../../backend/src/cache/sqlite.rs)、[persistence.rs](../../../../backend/src/cache/persistence.rs)
+> 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[snapshot.rs](../../../../backend/src/cache/snapshot.rs)、[persistence.rs](../../../../backend/src/cache/persistence.rs)
 >
 > 关联文档：[后端设计](../overview.md) · [配置参考](../../../implementation/configuration.md) · [DNS 管线](../../../implementation/backend/dns-pipeline.md) · [后台服务](../../../implementation/backend/background-services.md)
 
 ## 1. 职责与边界
 
-Cache 管理逻辑池、entry 生命周期、single-flight、optimistic refresh 和独立持久化。`CacheFacade` 编排语义，`CacheStore` 与 `PersistentCacheStore` 隔离具体存储。缓存 SQLite 与业务统计 SQLite 是不同文件、schema、writer 和故障边界。
+Cache 管理逻辑池、entry 生命周期、single-flight、optimistic refresh 和独立完整快照。`CacheFacade` 编排语义，Moka 内存集合是缓存唯一权威；快照只负责进程启动预热和周期覆盖，不维护第二份增量集合。缓存文件与业务统计 SQLite、详情日分片使用不同路径、owner 和故障边界。
 
 | 组件 | 设计职责 |
 | --- | --- |
 | key / admission | 稳定编码、响应分类、TTL、checksum 与质量 |
 | memory / Moka adapter | 同一 CacheStore 契约、容量和逐 entry 过期 |
-| persistence codec / SQLite adapter | format 校验、批量事务、恢复与容量维护 |
-| persistence runtime | 有界非阻塞入队、单写者和有序关闭 |
+| snapshot codec / file adapter | 完整文件头、流式记录、完整性校验、恢复与原子发布 |
+| snapshot owner | 进程级周期覆盖、generation 仲裁、冷启降级和有序关闭 |
 | facade / commit candidate / finalizer | lookup、CAS、single-flight lease 和晚到结果生命周期 |
 
 ## 2. Namespace 与 key
@@ -79,21 +79,17 @@ finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明�
 
 确定性 HashMap/Mutex adapter 用于替代实现和契约测试，不是生产默认的证据。
 
-## 7. Persistence
+## 7. Snapshot
 
-独立 SQLite cache DB 使用 `cache_meta` 保存 schema/cache/key format。schema v2 的 `cache_entries` 保留原 `id/payload`，增加完整 namespace/key 编码的唯一索引、编码大小、插入时间、可见截止时间和稳定淘汰排序列；不使用仅 hash 的 key 身份。时间索引使用 Unix 纳秒 `INTEGER`，恢复时转换回单调时钟语义。
+快照使用单个非 SQLite 二进制文件。文件头包含独立 snapshot format version、生成时间、记录数、body 长度和 SHA-256 完整性摘要；每条记录继续复用 cache key/entry format、canonical response、绝对到期时间、fingerprint 及 upstream provenance。快照格式版本不复用配置、详情 layout 或 WS 版本。
 
-写入通过有界队列提交给单 writer。SQLite `persist` 在单事务中按 key 增量 upsert 当前批次，清理已发现的坏行、过期项并裁剪容量；未变化 payload 不重新解码或写入。容量合计与裁剪仍会扫描索引元数据，不宣称整个操作仅与本批大小相关。recover、persist、maintain_capacity 和 shutdown 共用 operation lock 和调用者 deadline；关闭后拒绝操作。
+一个进程级 owner 从 Moka 当前可见集合分批取得记录，释放查询锁后编码并顺序写入同目录临时文件。单条和总记录数有内部上界；同一轮按完整 key 摘要去重。并发更新、淘汰可能让本轮少量记录未被捕获，这是允许的弱一致性，不得通过保留旧磁盘条目补齐。完成 header、长度和摘要后 flush/sync，再经过 owner generation 仲裁发布；失败保留上一份完整文件。
 
-`max_size_bytes` 保留与 codec `prepare_snapshot` 一致的编码预算：10 字节头，加每条 payload 长度及 4 字节 framing。它不是 SQLite `max_page_count` 或实际文件硬上限。数据库页、freelist、索引及 WAL/SHM 会额外占用空间；`disk_usage()` 可读取主库与 sidecar 大小，但不据此触发收缩。本轮明确不新增物理配额。
+快照没有用户可配置的磁盘大小配额，也不承诺文件大小等于 Moka weight 或 RSS。读取仍受文件字节数、单条大小、记录数、批次和 deadline 保护；先验证整个文件的长度与摘要，再分批解码。恢复逐条检查 key/entry version、checksum、绝对 expiry/stale-until 和当前内存预算，停机时间不会重新补满 TTL。损坏、未知版本、超时或预算不足只形成冷启/部分恢复状态，不阻止 DNS 服务。
 
-容量裁剪按 entry 的 `inserted_at` 从旧到新淘汰，同值按 record version、encoded key 稳定排序，完整存储 key 最终破平局。已决定保留插入时间口径，不新增 last-access bucket 或近似 LRU；增量写不因其他 key 更新而刷新旧项插入时间。
+内存 commit 不再产生逐条 persistence 队列。周期任务覆盖当时的完整可见集合，被内存预算淘汰或显式清理的记录会从下一份快照消失。owner/path 切换和未来 clear 必须递增 generation，使旧任务失去发布权；正常 shutdown 只在统一剩余预算内尽力补写，不无限延长退出。
 
-schema v1 在事务内一次性解码并回填索引，保持兼容 payload 与 row ID；重复 key 保留最后一条，与旧恢复语义一致。损坏/不兼容项在恢复中计数，后续事务维护移除，不通过全库清空完成迁移。未知 schema/cache/key format 明确拒绝；普通批写失败回滚，不破坏旧有效批次。
-
-启动恢复依次检查 schema/format、checksum、expiry/compatibility，再注入 memory store。无法恢复只禁用 persistence 并标记 degraded，不阻止 DNS 启动。内存 CAS 成功后的 enqueue 不等待磁盘；队列满、DB busy、disk full 均保持内存服务并记录 gap。
-
-正常 shutdown 排空已入队批次并关闭 adapter；历史与当前 owner 共用总 deadline，成功/失败/drop/未完成摘要在 Telemetry 关闭前发布，不记录 key、response 或原始数据库错误。
+当前生产仍使用 SQLite 增量 persistence，直到活动计划 BC-07 完成 owner、启动恢复、reload/shutdown 接线并退出该旧路径；BC-06 的 codec/真实文件能力不能单独作为生产切换证据。
 
 ## 8. 显式失效
 
@@ -105,8 +101,8 @@ Facade 提供 exact key、namespace、typed predicate 和 all 失效。普通资
 - 正/负/failure TTL、REFUSED 拒绝、质量 CAS、并发乱序和 client-visible TTL 隔离。
 - 多 waiter 取消、candidate drop、commit 终态、占位上限和关闭后拒绝。
 - optimistic 最新资源/目标、跨 runtime late-window、独立 deadline 和失败不延长 stale。
-- Moka weight/expiry、替代 adapter 一致性、format/checksum/recovery、编码快照预算与实际磁盘占用的区别。
-- 真实 Busy/disk-full 与恢复不破坏旧数据、不阻塞 DNS；测试 hook 不替代真实介质。
+- Moka weight/expiry、分批导出、format/header/checksum/recovery、内存预算与实际文件大小的区别。
+- 真实替换/权限/空间失败与恢复不破坏上一份快照、不阻塞 DNS；测试 hook 不替代真实介质。
 - 显式失效范围、历史 owner drain、失败摘要和秘密不进入日志。
 
 这些是验证要求，不是本次通过记录。当前构造与证据见[后台服务实现](../../../implementation/backend/background-services.md)。

@@ -33,6 +33,8 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01
 
 2026-09-08 认证子项已按用户追加决定改为业务 Bearer、认证专用 Cookie 刷新，真实 HTTP 与浏览器回归见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)。FC-01 又完成[12 路由壳层、浅色主题和响应式导航](../implementation/frontend/application.md#p1-应用壳层2026-09-08)；dashboard/queries 读取当前 v1 数据，FC-14 已提前接入[系统运行状态](../implementation/frontend/application.md#p1-系统运行状态2026-09-08)，其余入口保持明确空态或 tab 壳层。BC-04/05 已完成[客户端 name/ID 索引](../implementation/configuration.md#p1-客户端匹配索引内部能力2026-09-08)和[请求身份/历史匹配事件链](../implementation/backend/background-services.md#完成事件与后台分发)，生产新 loader 接线仍未完成。BC-23 已完成[服务指标、在线身份和共享 OS 采样](../implementation/backend/management.md#p1-服务与进程指标2026-09-08)。FC-02 已完成[配置交互公共基础](../implementation/frontend/application.md#p1-配置交互基础2026-09-08)，FC-16 已完成[提示/还原与同步重试基础](../implementation/frontend/application.md#p1-外部配置变化基础2026-09-08)，但不把未挂载组件或 MSW 当生产 v2 配置接口；v2 配置成套切换、FC-16 全局/组合接线和其他业务页面仍待后续依赖，P1 继续保持部分完成。
 
+2026-09-08 用户已授权实施 P2、必要验证和阶段性本地提交，不 push。P2 从 BC-06 独立二进制快照 codec 开始；v1/v2 正式 `ConfigLoader` 与数据基线启动切换仍归 P5 的 BC-26，不借 P2 owner 接线提前实施。若 P2 生产接线出现无法绕开的 BC-26 依赖，先报告具体证据并取得扩展授权。
+
 ## 2. 当前基线与改造范围
 
 ### 2.1 已核对的工程入口
