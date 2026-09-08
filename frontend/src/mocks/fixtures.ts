@@ -422,6 +422,20 @@ export const strategiesConfigReadFixture = {
   runtime: [],
 } satisfies V2Schemas["ConfigRead"];
 
+export const listenersConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [
+    { module: "listener", value: { name: "local", type: "udp", addresses: ["127.0.0.1"], port: 15353, strategy: "default", hosts: "local" } },
+    { module: "listener", value: { name: "https", type: "doh", routes: [{ path: "/dns-query", strategy: "default" }], endpoints: [{ name: "loopback", addresses: ["127.0.0.1"], port: 18443, tls: { mode: "external" }, client_ip: { source: "forwarded_header", header: "X-Forwarded-For", trusted_proxies: ["127.0.0.1/32"], on_missing: "reject", on_invalid: "reject" } }] } },
+  ],
+  effective: [],
+  references: [],
+  runtime: [
+    { module: "listener", name: "local", bindings: [{ endpoint_name: null, address: "127.0.0.1", port: 15353, transport: "udp", accepting: true }] },
+    { module: "listener", name: "https", bindings: [{ endpoint_name: "loopback", address: "127.0.0.1", port: 18443, transport: "doh", accepting: true }] },
+  ],
+} satisfies V2Schemas["ConfigRead"];
+
 export const systemConfigReadFixture = {
   state: synchronizedConfigStateFixture,
   work_path: "D:/Projects/Rust/fluxdns/_fluxdns",

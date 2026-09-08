@@ -448,6 +448,29 @@ select {
   width: 100%;
 }
 
+.doh-route-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.7fr) 36px;
+}
+
+.doh-route-row .ant-form-item {
+  margin-bottom: 0;
+}
+
+.doh-endpoint-fields {
+  padding: 14px;
+  border: 1px solid #e0e2e6;
+  border-radius: 6px;
+  background: #fafbfc;
+}
+
+.doh-endpoint-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
 .filter-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

@@ -6,6 +6,7 @@ import {
   configStateFixture,
   dnsConfigReadFixture,
   logsConfigReadFixture,
+  listenersConfigReadFixture,
   overviewFixture,
   outboundConfigReadFixture,
   processMetricsFixture,
@@ -167,6 +168,7 @@ export const handlers = [
     const fixture = {
       dns: dnsConfigReadFixture,
       hosts: hostsConfigReadFixture,
+      listener: listenersConfigReadFixture,
       statistics: statisticsConfigReadFixture,
       strategy: strategiesConfigReadFixture,
       logs: logsConfigReadFixture,

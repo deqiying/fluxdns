@@ -214,7 +214,7 @@ describe("application routes", () => {
 
   it.each(
     managementRoutes
-      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/proxies" && path !== "/system-runtime")
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/proxies" && path !== "/system-runtime")
       .map(({ path, title }) => [path, title]),
   )("有效 session 可加载未接线入口 %s", async (path, heading) => {
     setMockAuthenticated(true);
@@ -292,6 +292,14 @@ describe("application routes", () => {
     expect(await screen.findByRole("heading", { name: "DNS 分流策略", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("default-group")).toBeInTheDocument();
     expect(screen.getByText("2 条")).toBeInTheDocument();
+  });
+
+  it("Listener 页面展示真实绑定接纳状态", async () => {
+    setMockAuthenticated(true);
+    renderApp("/listeners");
+    expect(await screen.findByRole("heading", { name: "监听入口", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("127.0.0.1:15353")).toBeInTheDocument();
+    expect(screen.getAllByText("1/1 接受中")).toHaveLength(2);
   });
 
   it("系统运行状态显示 v2 进程采样并可手动刷新", async () => {
