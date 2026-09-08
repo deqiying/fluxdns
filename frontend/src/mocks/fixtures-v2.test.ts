@@ -71,6 +71,6 @@ it("v2 固定路由保留严格错误 envelope", async () => {
     body: { filter: {}, cursor: null, direction: "older", page_size: 20, sort: "occurred_at", order: "desc" },
   })).rejects.toMatchObject({ code: "INVALID_ARGUMENT", status: 400, requestId: "mock-v2-400" });
 
-  await expect(apiV2Request("/config/modules/upstreams"))
+  await expect(apiV2Request("/config/modules/not-a-module"))
     .rejects.toMatchObject({ code: "NOT_FOUND", status: 404, requestId: "mock-v2-404" });
 });

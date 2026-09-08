@@ -214,7 +214,7 @@ describe("application routes", () => {
 
   it.each(
     managementRoutes
-      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/dns-settings" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/clients" && path !== "/proxies" && path !== "/system-runtime")
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/dns-settings" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/clients" && path !== "/proxies" && path !== "/system-settings" && path !== "/system-runtime")
       .map(({ path, title }) => [path, title]),
   )("有效 session 可加载未接线入口 %s", async (path, heading) => {
     setMockAuthenticated(true);
@@ -318,6 +318,18 @@ describe("application routes", () => {
     expect(await screen.findByRole("heading", { name: "DNS 配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("数据保留")).toBeInTheDocument();
     expect(await screen.findByText(/805306368/)).toBeInTheDocument();
+  });
+
+  it("系统配置页面区分只读启动配置和可编辑日志", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/system-settings");
+    expect(await screen.findByRole("heading", { name: "系统配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("D:/Projects/Rust/fluxdns/_fluxdns/statistics.db")).toBeInTheDocument();
+    expect(screen.getByText("http://127.0.0.1:8080")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "编辑日志" }));
+    expect(await screen.findByRole("dialog", { name: "编辑日志" })).toBeInTheDocument();
+    expect(screen.getByLabelText("日志文件")).toHaveValue("./logs/fluxdns.log");
   });
 
   it("系统运行状态显示 v2 进程采样并可手动刷新", async () => {
