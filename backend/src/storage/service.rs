@@ -146,6 +146,8 @@ pub enum StorageRuntimeBuildError {
     RetentionBootstrap(#[source] PortError),
     #[error("resolve detail channel could not be created: {0}")]
     DetailChannel(#[source] ShardedResolveDetailWriterBuildError),
+    #[error("retention configuration is invalid: {0}")]
+    RetentionPolicy(#[source] super::RetentionPolicyError),
 }
 
 /// 业务 Storage 的统一 flush/shutdown facade。
@@ -279,9 +281,18 @@ impl StorageRuntime {
             return Err(StorageRuntimeBuildError::DatabaseType);
         }
         let backend = Arc::new(
-            SqliteStorageBackend::connect_with_deadline(config.database.path.clone(), deadline)
+            if config.version == crate::config::contract::CONFIG_VERSION {
+                SqliteStorageBackend::connect_v2_with_deadline(
+                    config.database.path.clone(),
+                    deadline,
+                )
                 .await
-                .map_err(StorageRuntimeBuildError::Connect)?,
+                .map_err(StorageRuntimeBuildError::Connect)?
+            } else {
+                SqliteStorageBackend::connect_with_deadline(config.database.path.clone(), deadline)
+                    .await
+                    .map_err(StorageRuntimeBuildError::Connect)?
+            },
         );
         backend
             .migrate(STORAGE_SCHEMA_VERSION, deadline)
@@ -309,16 +320,9 @@ impl StorageRuntime {
             StorageService::new(backend.clone()).with_stats_worker(Arc::clone(&stats_worker));
         #[cfg(test)]
         let backend_for_test = Arc::clone(&backend);
-        // BC-26 切换正式 v2 loader 前，由统计库同级目录提供不含旧数据迁移的过渡默认值。
-        let records_path = config
-            .database
-            .path
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(""))
-            .join("queries");
         let detail_store = Arc::new(
             DetailShardStore::new(
-                records_path,
+                config.database.records_path.clone(),
                 vec![
                     config.database.path.clone(),
                     config.dns.cache.persistence_path.clone(),
@@ -356,8 +360,14 @@ impl StorageRuntime {
             None
         };
         let retention_cancellation = Cancellation::new();
+        let retention_policy = RetentionPolicy::new(
+            config.statistics.retention_days,
+            config.statistics.retention_grace_days,
+            config.statistics.retention_reference_size_bytes,
+        )
+        .map_err(StorageRuntimeBuildError::RetentionPolicy)?;
         let retention_task = tokio::spawn(
-            RetentionScheduler::new(Arc::clone(&retention), RetentionPolicy::default())
+            RetentionScheduler::new(Arc::clone(&retention), retention_policy)
                 .run_until_stopped(retention_cancellation.clone()),
         );
 
@@ -548,7 +558,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime};
 
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigLoader, ConfigV2Loader, LoadOptions};
     use crate::dns::Deadline;
     use crate::ports::PortFuture;
     use crate::ports::storage::{
@@ -597,6 +607,67 @@ mod tests {
             runtime_revision: crate::dns::RuntimeRevision(1),
         })
         .expect("detail event must be valid")
+    }
+
+    #[tokio::test]
+    async fn v2_runtime_initializes_writes_shuts_down_and_reopens_new_layout() {
+        let root = std::path::PathBuf::from(crate::config::test_support::absolute_path(
+            "v2-storage-runtime",
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let source_path = root.join("input.yaml");
+        let source = include_str!("../../tests/fixtures/config-v2.yaml")
+            .replace("dns: {}", "dns:\n  resolve_log:\n    enable: true");
+        std::fs::write(&source_path, source).unwrap();
+        let config = ConfigV2Loader::default()
+            .load_from_path(&source_path)
+            .unwrap()
+            .resolved;
+        let operation_deadline = || Deadline::new(Instant::now() + Duration::from_secs(5));
+
+        let mut runtime = StorageRuntime::open(&config, operation_deadline())
+            .await
+            .unwrap();
+        assert_eq!(runtime.detail_store().root(), config.database.records_path);
+        runtime
+            .detail_writer()
+            .unwrap()
+            .try_write(detail_record())
+            .unwrap();
+        runtime.shutdown(operation_deadline()).await.unwrap();
+
+        let marker_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                sqlx::sqlite::SqliteConnectOptions::new()
+                    .filename(&config.database.path)
+                    .read_only(true),
+            )
+            .await
+            .unwrap();
+        let marker: String = sqlx::query_scalar(
+            "SELECT kind FROM fluxdns_layout WHERE singleton = 1 AND layout_version = 1",
+        )
+        .fetch_one(&marker_pool)
+        .await
+        .unwrap();
+        assert_eq!(marker, "statistics-v2");
+        marker_pool.close().await;
+        assert!(
+            std::fs::read_dir(&config.database.records_path)
+                .unwrap()
+                .any(|entry| entry
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|value| value == "sqlite3"))
+        );
+
+        let mut reopened = StorageRuntime::open(&config, operation_deadline())
+            .await
+            .unwrap();
+        reopened.shutdown(operation_deadline()).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// V1-O03：真实 detail worker 已返回后模拟 owner join panic，不泄露 payload 或跳过统计。

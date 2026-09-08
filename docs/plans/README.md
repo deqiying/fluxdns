@@ -4,7 +4,7 @@
 >
 > 适用范围：尚需实施、决策或验收的独立变更
 
-WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md)记录确认结果。2026-09-08 已追加授权 P2 核心数据、必要验证和中文 Conventional Commit 本地提交，不 push；v1/v2 正式启动切换仍属于 P5 的 BC-26，不随 P2 提前实施。GC-01/BC-01 不重复实施；BC-02 活动源与候选内部能力已落实，生产接线仍待服务控制和新 owner。[配置专项](webui-management-config-runtime-plan.md)统一热更新与文件处理语义。
+WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md)记录确认结果。2026-09-08 已追加授权 P2 核心数据、必要验证和中文 Conventional Commit 本地提交，不 push；BC-12/13 出现生产依赖后，用户明确授权把 P5 BC-26 的正式 v2 启动与新数据基线提前到当前任务。GC-01/BC-01 不重复实施；BC-27、旧数据迁移和 P3 写接口不随之扩展。[配置专项](webui-management-config-runtime-plan.md)统一热更新与文件处理语义。
 
 | 计划 | 文档状态 | 计划状态 | 剩余范围 |
 | --- | --- | --- | --- |

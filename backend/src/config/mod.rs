@@ -12,8 +12,8 @@ pub(crate) mod store;
 pub mod validate;
 
 pub use load::{
-    ConfigLoadError, ConfigLoadOutput, ConfigLoader, LoadOptions, SnapshotStatus, load_from_bytes,
-    load_from_path, load_from_str,
+    ConfigLoadError, ConfigLoadOutput, ConfigLoader, ConfigV2LoadOutput, ConfigV2Loader,
+    LoadOptions, SnapshotStatus, load_from_bytes, load_from_path, load_from_str,
 };
 pub use model::{ConfigDto, RawConfig};
 pub use resolve::{
@@ -42,7 +42,7 @@ pub(crate) mod test_support {
 
     pub(crate) fn portable_example() -> (String, PathBuf) {
         let path = absolute_path("example");
-        let source = include_str!("../../../config-example.yaml")
+        let source = include_str!("../../tests/fixtures/config-v1.yaml")
             .replace("path: /etc/fluxdns", &format!("path: {path}"));
         (source, PathBuf::from(path))
     }

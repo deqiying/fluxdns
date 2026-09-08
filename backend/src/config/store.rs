@@ -59,20 +59,19 @@ impl ConfigStore {
         name: &str,
         password_hash: &str,
     ) -> Result<InitialUserCommit, ConfigStoreError> {
-        // setup 请求不能无限等待另一笔事务；竞争时由 API 映射为有界冲突响应。
-        let _transaction = self.transaction.try_lock().map_err(|error| match error {
-            std::sync::TryLockError::Poisoned(_) => ConfigStoreError::LockPoisoned,
-            std::sync::TryLockError::WouldBlock => ConfigStoreError::Busy,
-        })?;
-        // 新版 setup 必须与活动源发布一起接线；禁止旧 writer 绕过 v2 操作仲裁。
         if self
             .active
             .lock()
             .map_err(|_| ConfigStoreError::LockPoisoned)?
             .is_some()
         {
-            return Err(ConfigStoreError::CandidateRejected);
+            return self.create_initial_user_v2(name, password_hash);
         }
+        // setup 请求不能无限等待另一笔事务；竞争时由 API 映射为有界冲突响应。
+        let _transaction = self.transaction.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::Poisoned(_) => ConfigStoreError::LockPoisoned,
+            std::sync::TryLockError::WouldBlock => ConfigStoreError::Busy,
+        })?;
         let _file_lock = ConfigFileLock::acquire(&lock_path(&self.source_path))?;
         let source = read_bounded(&self.source_path)?;
         let fingerprint = deterministic_hash(&source);
@@ -166,6 +165,8 @@ pub(crate) enum ConfigStoreError {
     RecoveryConflict,
     #[error("configuration transaction I/O failed")]
     Io(#[source] std::io::Error),
+    #[error("v2 configuration transaction recovery failed")]
+    V2Recovery(#[source] persistence::PersistenceError),
     #[error("configuration transaction lock was poisoned")]
     LockPoisoned,
 }
@@ -216,6 +217,24 @@ pub(crate) fn recover_pending_transaction(source_path: &Path) -> Result<(), Conf
     }
     remove_if_exists(&journal_path)?;
     remove_if_exists(&lock_path(&source_path))?;
+    Ok(())
+}
+
+/// 在 v2 loader 建立活动源前恢复已经做出提交决定的普通配置文件事务。
+pub(crate) fn recover_v2_pending_transaction(source_path: &Path) -> Result<(), ConfigStoreError> {
+    let source_path = absolute_source_path(source_path)?;
+    if !persistence::has_pending_recovery(&source_path).map_err(ConfigStoreError::V2Recovery)? {
+        return Ok(());
+    }
+    let source = read_bounded(&source_path)?;
+    let config =
+        super::contract::ConfigV2::parse(&source).map_err(|_| ConfigStoreError::InvalidSource)?;
+    let paths = config
+        .resolve_paths(&source_path)
+        .map_err(|_| ConfigStoreError::InvalidSource)?;
+    let snapshot = paths.work.join("config.yaml");
+    let derived = (snapshot != source_path).then_some(snapshot);
+    persistence::recover(&source_path, derived.as_deref()).map_err(ConfigStoreError::V2Recovery)?;
     Ok(())
 }
 

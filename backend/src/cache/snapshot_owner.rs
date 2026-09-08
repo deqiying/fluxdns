@@ -31,16 +31,14 @@ pub(crate) struct CacheSnapshotSettings {
 }
 
 impl CacheSnapshotSettings {
-    /// BC-07 过渡接线：v1 只提供路径，周期使用已冻结的 5 分钟默认值。
-    /// 旧 `max_size_bytes` 不进入新快照语义；v2 字段由 BC-26 正式装载。
+    /// 从已解析配置读取进程级快照开关、路径和周期。
     pub(crate) fn from_current_config(
         config: &crate::config::ResolvedConfig,
-        enabled: bool,
     ) -> Result<Self, CacheSnapshotOwnerBuildError> {
         Self::new(
-            enabled,
+            config.dns.cache.persistence_enabled,
             config.dns.cache.persistence_path.clone(),
-            Duration::from_secs(300),
+            config.dns.cache.snapshot_interval,
             vec![
                 config.database.path.clone(),
                 config.logs.path.clone(),

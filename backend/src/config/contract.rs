@@ -1,4 +1,4 @@
-//! P0 冻结的 v2 配置契约。尚未接入 ConfigLoader 或进程 owner，不提供旧格式转换。
+//! 正式 v2 配置契约；生产 loader 直接解析，不提供旧格式转换。
 
 use std::collections::BTreeSet;
 use std::net::IpAddr;

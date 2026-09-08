@@ -32,7 +32,7 @@ manifest v2 保存源身份 digest、fetcher 代际及不透明验证器，不�
 
 service 在 core 返回时冻结 port 字段 `duration_millis` 和 `dns_core_duration_micros`：前者从 transport 接入计时点到 core 完成，后者仅 core 主链；都不包含响应编码/写回或后台排队、详情投影和数据库写入。DoH 总耗时可能包含入站 TLS 与 HTTP 读取/解析。dispatcher 的 `attempt_outcome` 维度也来自这一请求终态，不是独立的逐 upstream attempt 事件。
 
-transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDetailSource` 进入详情链。Policy 在当次 Runtime 内把 `ClientMatchObservation` 冻结为 `Id` 或 `Ip` 来源及匹配时的稳定客户端 ID；事件消费与后续 reload 不重新查询客户端目录。stats 的客户端维度只消费该稳定 ID，不读取可变管理名称；请求原始身份不进入 telemetry label 或事件 `Debug`。当前生产配置仍为 v1：仅单 ID 客户端的 IP 命中可无歧义生成稳定 ID，多 ID/IP 命中保持未知，待新配置基线接线后退出该过渡边界。
+transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDetailSource` 进入详情链。Policy 在当次 Runtime 内把 `ClientMatchObservation` 冻结为 `Id` 或 `Ip` 来源及匹配时的稳定客户端 ID；事件消费与后续 reload 不重新查询客户端目录。stats 的客户端维度只消费该稳定 ID，不读取可变管理名称；请求原始身份不进入 telemetry label 或事件 `Debug`。生产 v2 配置为每个客户端提供唯一 `client_id`，因此 ID/IP 命中都能冻结同一个稳定身份；旧历史不补造或重匹配。
 
 ## Storage
 
@@ -65,7 +65,7 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 旧 writer 产生的规范非负十进制毫秒字符串可无损转换。空串、非数字、小数、指数格式、负值和超出 `i64` 的值不静默 `CAST` 成零或饱和值，迁移失败并回滚该步全部变更；不删除坏行或推测历史时间。新写入由 `system_time_utc_millis` 转为 `i64`，亚毫秒截断、epoch 前归零保留旧行为，溢出显式错误。时间列有 `typeof(...)='integer'` 与非负约束，不能保存不合法 TEXT/REAL 值。
 
-分片 writer 用整数毫秒计算 UTC 日；文件内 trigger 再校验 `event_time_utc_millis / 86400000 == detail_meta.day_utc`。生产批写不执行历史 `COUNT`、按年龄/条数 `DELETE` 或 `VACUUM`，v1 三个详情配额字段只在 BC-26 删除前继续由旧 loader 解析校验且不参与保留。BC-10 的 `RetentionCoordinator` 按 R/G/T 冻结详情主文件+WAL 大小、在 stats 事务内发布单调共同水位、清理旧统计与确认 replay floor 以前的 ledger，并登记待物理回收详情日；stats pending 和迟到详情均受同一水位约束。BC-11 的唯一 `RetentionScheduler` 已由 `StorageRuntime` 正式持有：每分钟用 Jiff 重读服务器时区，按本地 01:00 单日运行，失败五分钟重试，启动核对补跑，shutdown 先停止该 owner。manifest 回收等待分片 lease、checkpoint/关闭后删除确切主文件和 sidecar，失败持久化 attempts/安全错误码；缓存路径是 protected file，不参与采样或删除。BC-09 storage 读口已按日 lease、分页前 filter、稳定 ID 和双向 keyset cursor 查询，并在事务 commit 后发布独立序列通知；对外 HTTP 仍暂走旧读口，不能据此宣称跨日 API 或 WS replay 已接线。
+分片 writer 用整数毫秒计算 UTC 日；文件内 trigger 再校验 `event_time_utc_millis / 86400000 == detail_meta.day_utc`。生产 v2 只接受详情 `enable`，批写不执行历史 `COUNT`、按年龄/条数 `DELETE` 或 `VACUUM`。BC-10 的 `RetentionCoordinator` 按配置 R/G/T 冻结详情主文件+WAL 大小、在 stats 事务内发布单调共同水位、清理旧统计与确认 replay floor 以前的 ledger，并登记待物理回收详情日；stats pending 和迟到详情均受同一水位约束。BC-11 的唯一 `RetentionScheduler` 已由 `StorageRuntime` 正式持有：每分钟用 Jiff 重读服务器时区，按本地 01:00 单日运行，失败五分钟重试，启动核对补跑，shutdown 先停止该 owner。manifest 回收等待分片 lease、checkpoint/关闭后删除确切主文件和 sidecar，失败持久化 attempts/安全错误码；缓存路径是 protected file，不参与采样或删除。BC-09 storage 读口已按日 lease、分页前 filter、稳定 ID 和双向 keyset cursor 查询，并在事务 commit 后发布独立序列通知；对外 HTTP 仍暂走旧读口，不能据此宣称跨日 API 或 WS replay 已接线。
 
 ## Cache persistence
 
@@ -75,7 +75,7 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 [`CacheSnapshotOwner`](../../../backend/src/cache/snapshot_owner.rs) 是唯一进程级持有者。正式 app 在 Policy core 完成 prepare 后、listener bind 前把 `FDCS` 分批恢复到该 core 的 Moka；缺失、损坏、不兼容、超时或内存预算不足分别形成冷启/部分恢复状态，不阻止启动。恢复完成后 owner 启动一个周期 worker；内存 commit 不再产生逐条磁盘队列，Moka 仍是运行权威。
 
-当前生产 loader 仍为 v1。BC-07 仅复用已解析的 `dns.cache.persistence.path` 作为快照路径，并使用内部固定 5 分钟周期；旧 `persistence.max_size_bytes` 不再参与生产快照。v2 的 `enabled/path/snapshot_interval` 正式加载与新数据基线初始化仍属于 P5 BC-26，不能从当前过渡接线推断已经完成 v2 启动。
+BC-26 后生产 loader 直接消费 v2 `dns.cache.persistence.enabled/path/snapshot_interval`，快照启用与全局内存池开关相互独立。旧 `persistence.max_size_bytes` 不再属于生产 schema；SQLite cache adapter 仅留兼容测试，待 BC-27 删除。
 
 [`RuntimeCoordinator`](../../../backend/src/runtime/coordinator.rs) 只登记一个 owner，并核对它与活动 revision/Moka source 一致。reload 在候选发布前校验新路径，Runtime CAS 成功后同步递增 generation 并切换 source；不从磁盘恢复候选，也不让旧写任务覆盖新代。发布前再次检查路径链接/文件身份及受保护文件 alias。shutdown 先排空历史和当前 [`LateCacheFinalizer`](../../../backend/src/cache/service.rs)，再在同一总 deadline 内 best-effort 写当前 Moka 的最终快照；Cache health 分别汇总 finalizer 与 snapshot gap，不记录 key、response、路径或底层原始错误。
 
@@ -114,16 +114,16 @@ BC-07 交付验证在 Windows、Rust/Cargo 1.98.0 执行：全量 `cargo test --
 
 Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独立子进程、真实日志文件/Windows 占用失败、off/on、level/path、filter 失败和补偿失败区别；`service::` 筛选 70 项通过、3 项保持原有忽略标记，`app::` 13 项、`management::` 18 项通过。`cargo check`、全部测试目标 `--all-targets --no-run`、fmt 和文档检查通过；未改 schema、前端或依赖，本批未重跑前端验证。真实 UDP/SQLite service 联合测试通过连续五次日志切换和坏路径拒绝，DNS 持续查询，writer、sampler 和 Resolution metrics Source Arc 保持相同。测试目录为 `_fluxdns/p1-logging-tests/`、`_fluxdns/p1-logging-dns-tests/`；既有临时文件测试运行时将 TEMP/TMP 限定到 `_fluxdns/test-temp/`。
 
-边界：正式 app 仍使用 v1 loader/runtime/storage，v2 配置事务生产者、应用后持久化联合路径和 HTTP/UI 日志保存未接线；上述证据不关闭完整 BC-31/CR-05 或 P1。filter/CAS 补偿失败的测试使用真实 reload handle 和故意撤销的测试 subscriber，不能视为生产 subscriber 曾失效。日志预开仅检查实际打开句柄为普通文件，尚未提供日志目标与其他受保护文件的完整物理 alias 防护，必须随 v2 写入安全边界闭合。未验证 OS 文件调用强制中断、Unix、日志轮转、磁盘满或性能；此次未改变 BC-23 的 QPS/RPM 口径，也未提供其新查询端点。
+边界：正式 app 已使用 v2 loader/runtime/storage，但 v2 配置事务生产者、应用后持久化联合路径和 HTTP/UI 日志保存仍未接线；上述证据不关闭完整 BC-31/CR-05 或 P1。filter/CAS 补偿失败的测试使用真实 reload handle 和故意撤销的测试 subscriber，不能视为生产 subscriber 曾失效。日志预开仅检查实际打开句柄为普通文件，尚未提供日志目标与其他受保护文件的完整物理 alias 防护。未验证 OS 文件调用强制中断、Unix、日志轮转、磁盘满或性能；此次未改变 BC-23 的 QPS/RPM 口径，也未提供其新查询端点。
 
 ## 能力与证据
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | remote/file 刷新 | 条件 fetch、manifest v2、epoch/CAS、scheduler | async prepare + service resource task | loopback 200/304 与真实条件头；重复 304、坏 pair/响应、旧 manifest、换代及同预算重试 | 未执行真实远程/代理组合 |
-| stats/detail | 统计 schema v9、详情分片 layout v1、registry/lease、稳定 ID、跨日 cursor、commit stream、共同水位/manifest/run state、StorageRuntime、ResolutionRuntime | app 打开并恢复水位；统计主库与日分片 writer 分离；唯一 01:00 retention owner 已接线，v2 HTTP 尚未接线 | 真实 R/G/T 阈值、大小采样、水位事务回滚/单调性、pending replay、迟到写、lease 排空、ledger floor、调度/重启、删除失败重试和 cache 隔离；既有跨日查询与迁移回归 | v2 R/G/T loader 待 BC-26，HTTP/WS 待 BC-13/25；未验证 Linux、真实权限/磁盘满 |
+| stats/detail | 统计 schema v9 + v2 layout marker、详情分片 layout v1、registry/lease、稳定 ID、跨日 cursor、commit stream、共同水位/manifest/run state、StorageRuntime、ResolutionRuntime | app 从 v2 配置打开独立统计库/records_path 并恢复水位；唯一 01:00 retention owner 消费配置 R/G/T | 真实布局初始化/重开/旧库拒绝、R/G/T、水位、调度与回收回归 | HTTP/WS 待 BC-13/25；未验证 Linux、真实权限/磁盘满 |
 | legacy cache persistence | schema v2、增量 upsert、CachePersistenceRuntime | 仅保留 adapter/契约测试，生产不再挂接 | v1 升级、增量触发器、失败回滚与坏行清理既有测试 | 待 P5 BC-27 删除；不代表当前生产路径 |
-| cache 二进制快照 owner | `FDCS` header/SHA-256、Moka 分批导出/恢复、周期 worker、generation | app 启动恢复 + coordinator reload + service shutdown | Windows 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际/超时定向测试 | 过渡期固定 5 分钟；未验证真实权限/磁盘满、Unix 或 v2 冷启 |
+| cache 二进制快照 owner | `FDCS` header/SHA-256、Moka 分批导出/恢复、周期 worker、generation | app 从 v2 enabled/path/interval 启动恢复 + coordinator reload + service shutdown | Windows 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际/超时定向测试 | 未验证真实权限/磁盘满或 Unix |
 | telemetry lifecycle / 聚合 | histogram、typed writer、registry、sampler | dispatcher + app/service 周期及最终 flush | 固定桶/标签、溢出原子性、拥塞下聚合、关闭详情、输出重试、reload 与最终快照 | 没有 exporter/逐 attempt 流；长期负载与全部输出故障未验收 |
 
 ## 本次验证

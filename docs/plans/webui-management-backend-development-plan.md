@@ -16,7 +16,7 @@
 
 ## 1. 范围与实现原则
 
-本计划按确认决策重订 B1-B8，保留身份矩阵、快照协议和保留算法，取消旧版迁移与兼容。2026-09-08 已追加授权 P2 核心数据与阶段性本地提交；不 push，且不提前实施 P5 的 BC-26 启动切换，用户已确认的产品方向不重新提问。
+本计划按确认决策重订 B1-B8，保留身份矩阵、快照协议和保留算法，取消旧版迁移与兼容。2026-09-08 已追加授权 P2 核心数据与阶段性本地提交；不 push。BC-12/13 出现正式生产接线阻塞后，用户明确授权把 P5 BC-26 提前到当前任务；BC-27、旧数据迁移和 P3 写接口仍不在授权范围。
 
 - 沿 `Config -> Runtime -> DNS/Policy -> ports -> adapters` 扩展；Management handler 不直接操作 SQLx pool、DNS 缓存集合或源 YAML。
 - 请求路径只捕获 typed 事实、执行 DNS 与发布有界事件；快照、历史查询、名称关联、清理和磁盘写入全部在后台。
@@ -46,7 +46,7 @@
 
 ## 3. BE-01：冻结版本和类型契约
 
-P0 进度：BC-01 的配置内部契约和 API/跨端契约两个语义单元已落实。配置单元提交为 `166e59e`（`refactor(config): 定义新版配置与校验契约`）；字段和边界见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)，API/状态/预算及测试见[Management 实现](../implementation/backend/management.md#p0-v2-契约)。生成类型和 12 路由/表单契约可供后续消费，但没有新页面或 v2 handler 接线。
+P0 进度：BC-01 的配置内部契约和 API/跨端契约两个语义单元已落实。配置单元提交为 `166e59e`（`refactor(config): 定义新版配置与校验契约`）；字段和边界见[配置参考](../implementation/configuration.md#v2-契约与生产基线2026-09-08)，API/状态/预算及测试见[Management 实现](../implementation/backend/management.md#p0-v2-契约)。生成类型和 12 路由/表单契约可供后续消费，但没有新页面或 v2 handler 接线。
 
 BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 fixture 仅通过离线新契约解析，不能作为生产启动成功证据。BC-01 契约交付不等于 BE-01/BC-26 的生产切换和完整验收全部完成。P1 已于 2026-09-07 获得授权；BC-02 内部能力、BC-03 的差量 socket/任务预注册子项和 BC-23 指标已推进，进度见下文，不重复实施 P0，也不扩大到 P2。
 
@@ -68,7 +68,7 @@ BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 f
 
 - 每个字段能追溯到需求、图稿或现有 schema；不存在虚构 listener 开关、额外上游协议、缓存持久化配额。
 - 严格解析测试覆盖未知字段、类型分支残留、单位/溢出、非法 CIDR、路径别名/碰撞、缺失/禁用与引用环。
-- 新版本 fixture 经 BC-26 接线后可直接启动；旧格式明确拒绝，不实现旧配置转换预览或猜测映射。P0 已验证内部 parser 拒绝旧格式，正式 loader 切换/启动尚未验收。
+- 新版本 fixture 由 BC-26 正式 loader 直接解析和启动；旧格式明确拒绝，不实现旧配置转换预览或猜测映射。完整浏览器、Linux 与真实故障介质仍单列为未验收边界。
 - FE-01/FE-02 可使用生成类型开始开发，但不把 fixture 当作正式 handler 已就绪。
 
 ## 4. BE-02：配置事务、revision 与运行时应用
@@ -96,7 +96,7 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 
 ## 5. BE-03：客户端身份贯穿请求与投影
 
-2026-09-08 BC-04/BC-05 内部进度：v2 配置已冻结唯一 `name`/单 `client_id`，现有 resolved/policy 类型进一步显式区分管理 `name` 与请求 `client_ids`；`ClientIndex` 提供独立 name/exact ID 索引、重复拒绝、ID 优先/最长 CIDR 和 mapped IPv4 归一化，事实见[配置参考](../implementation/configuration.md#p1-客户端匹配索引内部能力2026-09-08)。transport 原始 `client_id`/IP、请求期 `Id`/`Ip` 匹配来源和稳定 ID 已经由完成事件冻结，详情 schema v7 持久化并由统计直接归属，reload 后不重映射；事实见[后台服务](../implementation/backend/background-services.md#完成事件与后台分发)。生产 loader 仍为 v1，多 ID 客户端的 IP 命中没有唯一历史 ID，保持未知而不补造；BC-04/BC-05 的新基线完整接线及其全矩阵验收仍依赖 BC-26，日分片查询与对外投影分别留在 BC-08/BC-09/BC-22。
+2026-09-08 BC-04/BC-05 内部进度：v2 配置已冻结唯一 `name`/单 `client_id`，现有 resolved/policy 类型进一步显式区分管理 `name` 与请求 `client_ids`；`ClientIndex` 提供独立 name/exact ID 索引、重复拒绝、ID 优先/最长 CIDR 和 mapped IPv4 归一化，事实见[配置参考](../implementation/configuration.md#p1-客户端匹配索引内部能力2026-09-08)。transport 原始 `client_id`/IP、请求期 `Id`/`Ip` 匹配来源和稳定 ID 已经由完成事件冻结，详情 schema v7 持久化并由统计直接归属，reload 后不重映射；事实见[后台服务](../implementation/backend/background-services.md#完成事件与后台分发)。BC-26 已把单 `client_id` 正式接入生产 resolver；旧历史仍不补造或重匹配。日分片查询与对外投影分别由 BC-09/BC-13、BC-22 承接。
 
 ### 开发步骤
 
@@ -137,6 +137,10 @@ BC-10 Windows 验证：真实 stats SQLite/日分片新增 4 项 retention 用�
 同日 BC-11 已完成唯一生产 retention scheduler owner：每分钟通过 Jiff 重读服务器时区，按本地 01:00 单日执行；新空库建立有时间语义的基线，既有水位启动补跑，失败五分钟重试，DST 跳时/重复、墙钟回拨和时区日期变化由持久化 `retention_run_state` 去重。物理回收逐日等待 retirement lease，验证 layout、checkpoint/关闭后仅删除受管主文件及 SQLite sidecar；失败保存 manifest attempts/安全错误码并重试。只读 storage 状态已提供目标天数、已发布/预计水位、实际 stats/detail 范围、清理时间、空间大小和 pending/failed 计数。当前 owner 固定消费确认默认 R/G/T；正式 v2 typed 配置仍归 BC-26。
 
 BC-11 Windows 验证：7 项 retention、91 项 storage 定向通过；完整 Cargo suite 830 passed、0 failed、3 ignored，全部测试目标编译通过。真实 stats SQLite 与三日详情分片覆盖删除失败、manifest 重试/reclaimed、状态范围和 cache 文件隔离；受控墙钟覆盖 01:00、DST/回拨/时区变化、retry gate 与重启。Clippy 未新增告警，仍被基线已有 6 项 lint 阻断。未执行三个 ignored 专项、Linux、真实权限/磁盘满、发布 binary 跨 DST 长时间运行、完整 v2 冷启/重启、Bearer HTTP/WS、浏览器或约 10 客户端及 core 2ms 性能验收。
+
+同日经用户追加授权，BC-26 已提前实施：`ConfigV2Loader` 直接生成运行态并保留原始活动源，根示例/fixture 切为 v2；生产 cache、records_path 和 retention owner 分别消费 enabled/path/interval、日分片路径和 R/G/T。统计 SQLite 用事务化 `fluxdns_layout` 标记区分新布局，空库可初始化/重开，已有未标记旧库和旧配置明确拒绝。Management 绑定 active `ConfigStore`，一次性 setup 在同一活动源上更新双文件与认证事实；普通 P3 写入仍未开放。旧 loader、单库详情和 SQLite cache adapter 只留测试，待 BC-27 删除。
+
+BC-26 Windows 验证：真实 `StorageRuntime` 临时文件覆盖空目录初始化、详情写入、正常关闭和重开，统计布局测试另覆盖旧库拒绝；完整 Cargo suite 835 passed、0 failed、3 ignored，全部测试目标编译和 fmt 通过。本地构建二进制在独立 `_fluxdns/bc26-process-*` 目录以启用 WebUI 的 v2 配置完成冷启与终止后重启，均确认 Management 端口、派生快照和统计库存在；CLI v2 validate 返回 0，v1 返回 2 并提示新开发目录。前端生成类型无 diff、typecheck 通过，v2 schema 4 项在沙盒外通过。Clippy 仍仅被基线已有 6 项 lint 阻断；未验证 Linux、真实权限/磁盘满、完整浏览器、约 10 客户端及 core 2ms 性能。
 
 ### 开发步骤
 

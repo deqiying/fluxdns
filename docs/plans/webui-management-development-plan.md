@@ -29,15 +29,17 @@ P1 先交付 BC-02 活动源、定向编辑和操作仲裁内部能力，事实�
 
 2026-09-07 继续执行时，BC-30 的[仅提示 watcher](../implementation/backend/lifecycle.md#p1-仅提示文件观测2026-09-07)已接入正式 app，双文件变更不触发 reload，Hosts 资源自动刷新有真实 UDP 定向证据。完整 P1 已设为执行目标，但原“不进入 P2”授权不变：完整 v2 初始化需要 BC-06/07 快照 owner、BC-08/09 日分片写入/读口、BC-10/11 共同保留水位/调度，再由 BC-26 初始化；其中 BC-04/05 身份链仍属 P1。是否将这些生产闭合必需的 P2 子项纳入本次执行，必须由用户另行决定。在决定前不实施这些子项、不关闭 P1，不扩展 BC-12/13 完整查询、业务页面、BC-24/25 WS、BC-27 总体旧路径退出或 P5 验收。其余 P1 内部能力仍有工作可做，该依赖不等于它们已完成。
 
-P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01 的生产 fixture 启动门槛随 BC-26 继续保留。实际能力、未接线边界和验证分别见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)、[Management 实现](../implementation/backend/management.md#p0-v2-契约)、[前端实现](../implementation/frontend/application.md#能力与证据)。本文不预设人员数量、固定人日或日历上线日期；排期以依赖和验收门槛为准。
+P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BC-26 已在追加授权后闭合配置 fixture 的生产启动门槛。实际能力、未接线边界和验证分别见[配置参考](../implementation/configuration.md#v2-契约与生产基线2026-09-08)、[Management 实现](../implementation/backend/management.md#p0-v2-契约)、[前端实现](../implementation/frontend/application.md#能力与证据)。本文不预设人员数量、固定人日或日历上线日期；排期以依赖和验收门槛为准。
 
 2026-09-08 认证子项已按用户追加决定改为业务 Bearer、认证专用 Cookie 刷新，真实 HTTP 与浏览器回归见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)。FC-01 又完成[12 路由壳层、浅色主题和响应式导航](../implementation/frontend/application.md#p1-应用壳层2026-09-08)；dashboard/queries 读取当前 v1 数据，FC-14 已提前接入[系统运行状态](../implementation/frontend/application.md#p1-系统运行状态2026-09-08)，其余入口保持明确空态或 tab 壳层。BC-04/05 已完成[客户端 name/ID 索引](../implementation/configuration.md#p1-客户端匹配索引内部能力2026-09-08)和[请求身份/历史匹配事件链](../implementation/backend/background-services.md#完成事件与后台分发)，生产新 loader 接线仍未完成。BC-23 已完成[服务指标、在线身份和共享 OS 采样](../implementation/backend/management.md#p1-服务与进程指标2026-09-08)。FC-02 已完成[配置交互公共基础](../implementation/frontend/application.md#p1-配置交互基础2026-09-08)，FC-16 已完成[提示/还原与同步重试基础](../implementation/frontend/application.md#p1-外部配置变化基础2026-09-08)，但不把未挂载组件或 MSW 当生产 v2 配置接口；v2 配置成套切换、FC-16 全局/组合接线和其他业务页面仍待后续依赖，P1 继续保持部分完成。
 
-2026-09-08 用户已授权实施 P2、必要验证和阶段性本地提交，不 push。P2 从 BC-06 独立二进制快照 codec 开始；v1/v2 正式 `ConfigLoader` 与数据基线启动切换仍归 P5 的 BC-26，不借 P2 owner 接线提前实施。若 P2 生产接线出现无法绕开的 BC-26 依赖，先报告具体证据并取得扩展授权。
+2026-09-08 用户已授权实施 P2、必要验证和阶段性本地提交，不 push。P2 从 BC-06 独立二进制快照 codec 开始；在 BC-06 至 BC-11 完成后，BC-12/13 的正式 v2 查询接线被生产 `ConfigLoader`/inactive ConfigStore 阻塞，用户随后明确授权把 P5 BC-26 提前到当前任务。扩展仅覆盖正式 v2 启动、新数据布局/旧格式拒绝和 active store，不包含 BC-27、旧数据迁移或 P3 写接口。
 
 同日 BC-06/07 已完成：`FDCS` codec、Moka 分批恢复、唯一进程 owner、周期覆盖、reload generation/source 仲裁和 finalizer 后最终写入已进入正式 app/runtime/service；生产 cache 路径已退出 SQLite。过渡接线仅消费 v1 已解析路径并固定 5 分钟周期，不改变上述 BC-26 边界。P2 下一依赖从 BC-08 日分片开始。
 
 同日 BC-08 已完成：生产详情 writer 与统计主库分离，按事件 UTC 日写入受管 SQLite 日文件；同日 lease 串行、活动连接上限、关闭排空和退役入口已建立，批写不再运行 v1 条数/年龄淘汰。旧详情不迁移，旧单库 adapter 只留兼容测试；过渡 `queries/` 路径由统计库同级推导，v2 `database.records_path` 的正式启动消费仍留 BC-26。P2 下一依赖为 BC-09 稳定 ID、跨分片 cursor/读口和提交后通知。
+
+同日经追加授权，BC-26 已提前实施：正式 `run`/`validate` 只接受 `ConfigV2`，直接消费 `records_path`、快照 enabled/path/interval 和 R/G/T；统计库增加 v2 layout marker，旧配置和未标记旧库拒绝，Management 使用 loader 原文建立 active `ConfigStore`。旧 loader/单库 adapter 仅留测试等待 BC-27，不提供迁移或双版本开关。
 
 ## 2. 当前基线与改造范围
 

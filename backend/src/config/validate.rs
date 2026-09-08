@@ -1635,7 +1635,9 @@ pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport
     build_resource_bind_plan(&ResourceConfig::from(config))
 }
 
-fn build_resource_bind_plan(config: &ResourceConfig<'_>) -> Result<BindPlan, ConfigErrorReport> {
+pub(super) fn build_resource_bind_plan(
+    config: &ResourceConfig<'_>,
+) -> Result<BindPlan, ConfigErrorReport> {
     let mut report = ConfigErrorReport::default();
     let mut plan = BindPlan::default();
     for (index, listener) in config.listener.iter().enumerate() {

@@ -179,7 +179,7 @@
 
 P0 技术核定：
 
-- T-01 已落实到[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)及 Rust 新契约：默认值、名称/ID/单位/上界；物理路径 alias 留 owner 打开前检查。
+- T-01 已落实到[配置参考](../implementation/configuration.md#v2-契约与生产基线2026-09-08)及 Rust 新契约：默认值、名称/ID/单位/上界；物理路径 alias 留 owner 打开前检查。
 - T-02 已冻结 [v2 HTTP/WS schema](../../frontend/openapi/management-api-v2.yaml)、双 revision、操作状态、源/生效/运行投影和 12 路由；当前未注册 v2 handler，正式切换须一并处理 auth/client/代理/fallback。
 - T-03 已固定配置/候选/查询/内联/cursor 预算和错误码/HTTP 映射，并测试本阶段 parser/decoder 超限；实际文件读取、分页 cursor 签名/过滤水位和 deadline 留 BE-02/05/07/08 接线。
 - T-06 仅为现有 Rust 依赖启用 serde feature，以及将现有锁定版本的 schema 测试依赖显式列为 devDependencies；版本/许可证/体积边界见[交付实现](../implementation/delivery.md#前端与接口生成)，未升级工具链。

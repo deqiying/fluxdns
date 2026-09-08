@@ -10,6 +10,7 @@ use std::time::Duration;
 use ipnet::IpNet;
 use url::Url;
 
+use super::contract::{ClientV2, ConfigV2, GlobalCacheV2, ResolveLogV2};
 use super::migrate::deterministic_hash;
 use super::model::{
     CacheOverrideDto, ClientDto, ClientIpDto, ClientIpSource, ConfigDto, DatabaseType, EcsDto,
@@ -18,8 +19,8 @@ use super::model::{
     TlsMode, UpstreamDto, normalize_rule_set_selector,
 };
 use super::validate::{
-    BindPlan, ConfigError, ConfigErrorKind, ConfigErrorReport, DohBindingRef, build_bind_plan,
-    validate_config,
+    BindPlan, ConfigError, ConfigErrorKind, ConfigErrorReport, DohBindingRef, ResourceConfig,
+    build_bind_plan, build_resource_bind_plan, validate_config,
 };
 
 struct SafeUrl<'a>(&'a Url);
@@ -80,6 +81,7 @@ pub struct ResolvedWork {
 pub struct ResolvedDatabase {
     pub kind: DatabaseType,
     pub path: PathBuf,
+    pub records_path: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -141,8 +143,17 @@ pub struct ResolvedGlobalCache {
     pub memory_max_size_bytes: u64,
     pub failure_ttl: Duration,
     pub optimistic: ResolvedOptimistic,
+    pub persistence_enabled: bool,
     pub persistence_path: PathBuf,
+    pub snapshot_interval: Duration,
     pub persistence_max_size_bytes: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedStatistics {
+    pub retention_days: u32,
+    pub retention_grace_days: u32,
+    pub retention_reference_size_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -624,6 +635,7 @@ pub struct ResolvedConfig {
     pub logs: ResolvedLogs,
     pub webui: ResolvedWebUi,
     pub dns: ResolvedDns,
+    pub statistics: ResolvedStatistics,
     pub listeners: Vec<ResolvedListener>,
     pub upstreams: Vec<ResolvedUpstream>,
     pub strategies: Vec<ResolvedStrategy>,
@@ -786,6 +798,10 @@ pub(crate) fn resolve_config_with_base_dir(
     let database = ResolvedDatabase {
         kind: config.database.kind,
         path: resolve_path(&work.path, &config.database.path),
+        records_path: resolve_path(&work.path, &config.database.path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join("queries"),
     };
     let logs = ResolvedLogs {
         enable: config.logs.enable,
@@ -814,6 +830,11 @@ pub(crate) fn resolve_config_with_base_dir(
         config.dns.resolve_log.as_ref(),
         &work.path,
     );
+    let statistics = ResolvedStatistics {
+        retention_days: 7,
+        retention_grace_days: 3,
+        retention_reference_size_bytes: 1 << 30,
+    };
     let strategies = config
         .strategy
         .iter()
@@ -902,6 +923,172 @@ pub(crate) fn resolve_config_with_base_dir(
             logs,
             webui,
             dns,
+            statistics,
+            listeners,
+            upstreams,
+            strategies,
+            hosts,
+            outbounds,
+            rule_sets,
+            clients,
+            bind_plan,
+            input_hash,
+            normalized_hash,
+        }),
+    })
+}
+
+/// 直接把 v2 契约编译为运行时配置；不经过 v1 DTO、迁移或兼容默认值。
+pub(crate) fn resolve_config_v2(
+    config: &ConfigV2,
+    input_hash: impl Into<String>,
+    source_path: &Path,
+) -> Result<ValidatedConfig, ConfigErrorReport> {
+    config.validate()?;
+    let paths = config.resolve_paths(source_path)?;
+    let resources = ResourceConfig {
+        work: &config.work,
+        database_path: &config.database.path,
+        logs: &config.logs,
+        webui: &config.webui,
+        listener: &config.listener,
+        upstreams: &config.upstreams,
+        strategy: &config.strategy,
+        hosts: &config.hosts,
+        outbound: &config.outbound,
+        rule_set: &config.rule_set,
+    };
+    let bind_plan = build_resource_bind_plan(&resources)?;
+    let work = ResolvedWork {
+        rules_path: resolve_path(&paths.work, &config.work.rules_path),
+        snapshot_path: paths.work.join("config.yaml"),
+        path: paths.work,
+    };
+    let database = ResolvedDatabase {
+        kind: config.database.kind,
+        path: paths.statistics,
+        records_path: paths.records,
+    };
+    let logs = ResolvedLogs {
+        enable: config.logs.enable,
+        level: config.logs.level,
+        path: resolve_path(&work.path, &config.logs.path),
+    };
+    let webui = ResolvedWebUi {
+        enable: config.webui.enable,
+        address: config.webui.address,
+        port: config.webui.port,
+        public_origin: config.webui.public_origin.clone(),
+        users: config
+            .webui
+            .users
+            .iter()
+            .map(|user| ResolvedWebUiUser {
+                name: user.name.clone(),
+                password_hash: user.password_hash.clone(),
+            })
+            .collect(),
+    };
+    let dns = resolve_dns_v2(
+        config.dns.cache.as_ref(),
+        config.dns.ttl_override.as_ref(),
+        config.dns.edns_client_subnet.as_ref(),
+        config.dns.resolve_log.as_ref(),
+        &work.path,
+    );
+    let statistics = ResolvedStatistics {
+        retention_days: config.statistics.retention.days,
+        retention_grace_days: config.statistics.retention.grace_days,
+        retention_reference_size_bytes: config.statistics.retention.reference_size_bytes,
+    };
+    let strategies = config
+        .strategy
+        .iter()
+        .map(|strategy| {
+            resolve_strategy(
+                strategy,
+                &dns.ttl_override,
+                &dns.edns_client_subnet,
+                &dns.cache.optimistic,
+            )
+        })
+        .collect();
+    let listeners = config
+        .listener
+        .iter()
+        .map(|listener| resolve_listener(listener, &work.path))
+        .collect();
+    let upstreams = config
+        .upstreams
+        .iter()
+        .map(|upstream| resolve_upstream(upstream, &dns.edns_client_subnet))
+        .collect();
+    let hosts = config
+        .hosts
+        .iter()
+        .map(|resource| resolve_hosts(resource, &work.path))
+        .collect();
+    let outbounds: Vec<ResolvedOutbound> = config
+        .outbound
+        .iter()
+        .map(|outbound| resolve_outbound(outbound, &work.path))
+        .collect();
+    let rule_sets = config
+        .rule_set
+        .iter()
+        .map(|resource| resolve_rule_set(resource, &work.path))
+        .collect();
+    let clients = config
+        .clients
+        .iter()
+        .map(|client| {
+            resolve_client_v2(
+                client,
+                &dns.ttl_override,
+                &dns.edns_client_subnet,
+                &dns.cache.optimistic,
+            )
+        })
+        .collect();
+    let input_hash = input_hash.into();
+    let secret_material = outbounds
+        .iter()
+        .map(|outbound| {
+            let source = match (&outbound.proxy_url.env, &outbound.proxy_url.file) {
+                (Some(name), None) => format!("env:{name}"),
+                (None, Some(path)) => format!("file:{path:?}"),
+                _ => "invalid".to_owned(),
+            };
+            format!("{}={source}", outbound.id.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let password_material = webui
+        .users
+        .iter()
+        .map(|user| {
+            format!(
+                "{}={}",
+                user.name,
+                deterministic_hash(user.password_hash.as_bytes())
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("|");
+    let normalized_material = format!(
+        "version={}|work={work:?}|db={database:?}|logs={logs:?}|webui={webui:?}|dns={dns:?}|statistics={statistics:?}|listeners={listeners:?}|upstreams={upstreams:?}|strategies={strategies:?}|hosts={hosts:?}|outbounds={outbounds:?}|rule_sets={rule_sets:?}|clients={clients:?}|bind={bind_plan:?}|secret_refs={secret_material}|password_hashes={password_material}",
+        config.version
+    );
+    let normalized_hash = deterministic_hash(normalized_material.as_bytes());
+    Ok(ValidatedConfig {
+        resolved: Arc::new(ResolvedConfig {
+            version: config.version,
+            work,
+            database,
+            logs,
+            webui,
+            dns,
+            statistics,
             listeners,
             upstreams,
             strategies,
@@ -959,7 +1146,9 @@ fn resolve_dns(
             memory_max_size_bytes: value.memory.max_size_bytes,
             failure_ttl: value.failure_ttl,
             optimistic: resolve_optimistic(&value.optimistic),
+            persistence_enabled: value.enabled,
             persistence_path: resolve_path(work_path, &value.persistence.path),
+            snapshot_interval: Duration::from_secs(300),
             persistence_max_size_bytes: value.persistence.max_size_bytes,
         },
     );
@@ -976,6 +1165,37 @@ fn resolve_dns(
     }
 }
 
+fn resolve_dns_v2(
+    cache: Option<&GlobalCacheV2>,
+    ttl: Option<&super::model::TtlOverrideDto>,
+    ecs: Option<&EcsDto>,
+    resolve_log: Option<&ResolveLogV2>,
+    work_path: &Path,
+) -> ResolvedDns {
+    let cache = cache.cloned().unwrap_or_default();
+    ResolvedDns {
+        cache: ResolvedGlobalCache {
+            enabled: cache.enabled,
+            memory_max_size_bytes: cache.memory.max_size_bytes,
+            failure_ttl: cache.failure_ttl,
+            optimistic: resolve_optimistic(&cache.optimistic),
+            persistence_enabled: cache.persistence.enabled,
+            persistence_path: resolve_path(work_path, &cache.persistence.path),
+            snapshot_interval: cache.persistence.snapshot_interval,
+            // v2 快照格式自身受 1 GiB 硬上限约束，不再从配置接受旧大小字段。
+            persistence_max_size_bytes: 1 << 30,
+        },
+        ttl_override: resolve_ttl(ttl, None, ValueSource::Global),
+        edns_client_subnet: resolve_ecs(ecs, None, ValueSource::Global),
+        resolve_log: ResolvedResolveLog {
+            enable: resolve_log.is_some_and(|value| value.enable),
+            eviction_threshold_records: 0,
+            max_records: 0,
+            max_record_age: Duration::ZERO,
+        },
+    }
+}
+
 fn default_global_cache(work_path: &Path) -> ResolvedGlobalCache {
     ResolvedGlobalCache {
         enabled: false,
@@ -986,7 +1206,9 @@ fn default_global_cache(work_path: &Path) -> ResolvedGlobalCache {
             answer_ttl: Duration::from_secs(10),
             max_age: Duration::from_secs(86_400),
         },
+        persistence_enabled: false,
         persistence_path: work_path.join("cache.db"),
+        snapshot_interval: Duration::from_secs(300),
         persistence_max_size_bytes: 8 * 1024 * 1024,
     }
 }
@@ -1389,6 +1611,38 @@ fn resolve_client(
     ResolvedClient {
         name: ConfigId::new(client.name.clone()).expect("validated client name"),
         client_ids: client.r#match.ids.clone(),
+        ips: client.r#match.ips.clone(),
+        strategy: client
+            .strategy
+            .as_ref()
+            .map(|value| ConfigId::new(value.clone()).expect("validated strategy id")),
+        cache: resolve_cache(
+            client.cache.as_ref(),
+            global_optimistic,
+            ValueSource::Client,
+        ),
+        ttl_override: resolve_ttl(
+            client.ttl_override.as_ref(),
+            Some(global_ttl),
+            ValueSource::Client,
+        ),
+        edns_client_subnet: resolve_ecs(
+            client.edns_client_subnet.as_ref(),
+            Some(global_ecs),
+            ValueSource::Client,
+        ),
+    }
+}
+
+fn resolve_client_v2(
+    client: &ClientV2,
+    global_ttl: &ResolvedTtlOverride,
+    global_ecs: &ResolvedEcs,
+    global_optimistic: &ResolvedOptimistic,
+) -> ResolvedClient {
+    ResolvedClient {
+        name: ConfigId::new(client.name.clone()).expect("validated client name"),
+        client_ids: vec![client.client_id.clone()],
         ips: client.r#match.ips.clone(),
         strategy: client
             .strategy

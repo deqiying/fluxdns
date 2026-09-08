@@ -59,11 +59,10 @@ impl ManagementQueryDependencies {
 }
 
 impl ManagementService {
-    pub(crate) async fn bind(
+    /// 生产 v2 启动传入已冻结活动源的 ConfigStore，确保只读投影与运行态同源。
+    pub(crate) async fn bind_with_config_store(
         config: &ResolvedWebUi,
-        source_path: PathBuf,
-        snapshot_path: PathBuf,
-        source_fingerprint: String,
+        config_store: Arc<ConfigStore>,
         dependencies: ManagementQueryDependencies,
     ) -> Result<Self, ManagementBuildError> {
         assets::ensure_available().map_err(ManagementBuildError::Assets)?;
@@ -73,11 +72,6 @@ impl ManagementService {
             .ok_or(ManagementBuildError::MissingPublicOrigin)?;
         let auth = Arc::new(AuthState::new(&config.users).map_err(ManagementBuildError::Auth)?);
         let sessions = Arc::new(SessionStore::new(origin.scheme() == "https"));
-        let config_store = Arc::new(ConfigStore::new(
-            source_path,
-            snapshot_path,
-            source_fingerprint,
-        ));
         let read_model: Arc<dyn ManagementStorageRead> = Arc::new(
             SqliteManagementReadModel::connect(dependencies.database_path)
                 .await

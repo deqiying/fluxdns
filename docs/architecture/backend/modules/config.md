@@ -4,7 +4,7 @@
 >
 > 适用范围：配置加载、迁移、归一化、校验、引用图和安全快照
 >
-> 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
+> 最后评审：2026-09-08（BC-26 正式 v2 loader、快照和 active source 接线）
 >
 > 关联实现：[load.rs](../../../../backend/src/config/load.rs)、[resolve.rs](../../../../backend/src/config/resolve.rs)、[validate.rs](../../../../backend/src/config/validate.rs)、[store.rs](../../../../backend/src/config/store.rs)
 >
@@ -12,17 +12,17 @@
 
 ## 1. 职责
 
-v2 重构已接受“唯一 name 管理键、独立 client_id、活动源优先、应用后持久化、外部文件只提示”的目标。P0 只引入 [`contract.rs`](../../../../backend/src/config/contract.rs) 的内部契约并复用共享校验，尚未替换下述生产加载/迁移/快照流程。契约默认值和接线边界见[配置参考](../../../implementation/configuration.md#p0-v2-内部契约2026-09-07)；其余配置事务仍按[活动专项](../../../plans/webui-management-config-runtime-plan.md)实施，不把设计目标写成已有运行能力。
+v2 重构采用“唯一 name 管理键、独立 client_id、活动源优先、应用后持久化、外部文件只提示”。BC-26 已把 [`contract.rs`](../../../../backend/src/config/contract.rs) 直接接入生产 loader/resolve/快照和 active `ConfigStore`；契约默认值和边界见[配置参考](../../../implementation/configuration.md#v2-契约与生产基线2026-09-08)。普通配置写接口和完整服务控制事务仍按[活动专项](../../../plans/webui-management-config-runtime-plan.md)实施。
 
 Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 prepare 的 `ResolvedConfig`。资源内容首次 snapshot 与 listener 装配属于 Resource/Runtime/Application，不是 YAML loader 的职责。
 
 它负责：
 
-- schema version 识别与显式迁移；
+- schema version 识别与旧版本拒绝；
 - 严格 DTO 反序列化和字段路径错误；
 - 路径、URL、CIDR、duration、SecretRef source 和默认值归一化；SecretRef 实际值只通过显式 accessor 读取；
 - 引用、循环、条件字段、继承和 bind 冲突校验；
-- 生成配置摘要、来源信息和 migration report；
+- 生成配置摘要并保留产生运行态的源正文；
 - 安全地维护工作目录中的 `config.yaml` 快照。
 
 字段含义和默认值只在[配置参考](../../../implementation/configuration.md)定义，本模块文档说明解析、信任边界和写入不变量。
@@ -32,9 +32,10 @@ Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 pre
 | 文件 | 职责 |
 | --- | --- |
 | `doh_route.rs` | DoH path 模板的共享编译、匹配和语义重叠检测 |
-| `model.rs` | 当前 schema DTO、按 `type` 区分的 tagged model |
-| `load.rs` | 文件读取、大小/编码检查、字段路径解析、版本迁移和安全配置快照 |
-| `migrate.rs` | `MigrationStep` 注册表和 `MigrationReport` |
+| `contract.rs` | 正式 v2 DTO、新字段预算、客户端身份与两级路径碰撞检查 |
+| `model.rs` | v2 复用的资源 DTO；旧 v1 顶层 DTO 仅留 BC-27 前的测试路径 |
+| `load.rs` | v2 文件读取、大小/编码检查、直接 resolve 和安全配置快照；旧 loader 仅供测试 |
+| `migrate.rs` | 旧 v1 `MigrationStep` 注册表，仅留回归测试 |
 | `resolve.rs` | 默认值、三态、继承和来源信息归一化 |
 | `validate.rs` | 名称、引用图、循环、条件字段和 bind |
 | `store.rs` | 首用户配置事务、fingerprint 冲突、journal 与恢复 |
@@ -47,8 +48,8 @@ DTO、ValidatedConfig 和 ResolvedConfig 必须是不同类型，不能用布尔
 ```text
 read bounded UTF-8 bytes
   → parse minimal version header
-  → run ordered migration chain
-  → deserialize current strict DTO
+  → require version: 2 without migration
+  → deserialize strict ConfigV2
   → validate DTO values, references, cycles and bind conflicts
   → resolve config_dir and work.path, build BindPlan
   → normalize project paths, SecretRef sources and inheritance
@@ -56,13 +57,13 @@ read bounded UTF-8 bytes
   → optionally create a safe work-directory config snapshot
 ```
 
-YAML 文件必须是 UTF-8。加载器以 `DEFAULT_MAX_CONFIG_BYTES`（当前 8 MiB）限制输入，避免在解析前无界分配；超限错误记录上限，v1 不新增配置字段。当前 loader 还拒绝空输入、重复 document 和显式 `null` 旁路，并通过 `serde_path_to_error` 保留解析路径和位置。
+YAML 文件必须是 UTF-8。正式 v2 loader 以 4 MiB 限制输入，避免在解析前无界分配；同时拒绝空输入、重复 document、显式 `null`、YAML tag 和未知字段，并保留安全字段路径。旧 8 MiB loader 不从生产 `run`/`validate` 可达。
 
 所有 DTO 使用 `deny_unknown_fields` 或等价严格机制。tagged variant 只接受自身字段，不能把拼写错误吞入扁平 map。配置示例的 strict load 只使用离线 fixture，不访问远程资源。
 
-## 4. Migration
+## 4. 旧 Migration 测试边界
 
-迁移注册表按单步链组织：
+旧迁移注册表仍按单步链组织，但只服务 BC-27 前的回归测试，不是 v2 生产兼容能力：
 
 ```text
 MigrationStep {
@@ -130,7 +131,7 @@ MigrationStep {
 
 例如启动文件为 `/opt/_fluxdns/config.yaml`、`work.path: ./` 时，`resolved_work_path` 是 `/opt/_fluxdns`；随后 `database.path: ./data/fluxdns.sqlite3` 解析为 `/opt/_fluxdns/data/fluxdns.sqlite3`，而不是相对于进程当前工作目录或再次相对于配置文件路径拼接。
 
-当启动配置不位于 `resolved_work_path` 时，按契约复制为 `<resolved_work_path>/config.yaml`。快照逻辑只能接收已经解析完成的绝对工作目录，不能再次解释原始 `work.path`。为避免覆盖用户已有配置，v1 采用：
+当启动配置本身不等于 `<resolved_work_path>/config.yaml` 时，按契约复制到该固定路径；同目录不同文件名仍必须创建派生快照。快照逻辑只能接收已经解析完成的绝对工作目录，不能再次解释原始 `work.path`。为避免覆盖用户已有配置，采用：
 
 1. 创建工作目录和父目录；
 2. 对输入字节计算 hash；

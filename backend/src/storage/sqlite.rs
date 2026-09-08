@@ -27,6 +27,8 @@ use super::retention::{
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
 const INITIAL_STORAGE_SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
+const V2_STORAGE_LAYOUT_VERSION: i64 = 1;
+const V2_STORAGE_LAYOUT_KIND: &str = "statistics-v2";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
 pub enum SqliteResolveDetailWriterBuildError {
@@ -332,6 +334,10 @@ pub enum SqliteStorageBackendBuildError {
     Connect,
     #[error("sqlite storage schema could not be initialized")]
     Schema,
+    #[error("existing sqlite storage uses the legacy layout; use a new development directory")]
+    LegacyLayout,
+    #[error("sqlite storage layout marker is invalid")]
+    InvalidLayout,
 }
 
 impl SqliteStorageBackend {
@@ -354,7 +360,23 @@ impl SqliteStorageBackend {
         }
         tokio::time::timeout(
             deadline.remaining(Instant::now()),
-            Self::connect_within_budget(path.into(), deadline),
+            Self::connect_within_budget(path.into(), deadline, false),
+        )
+        .await
+        .map_err(|_| SqliteStorageBackendBuildError::Timeout)?
+    }
+
+    /// 只打开带 v2 布局标记的统计库；空文件可初始化，任何既有未标记 schema 均拒绝。
+    pub(crate) async fn connect_v2_with_deadline(
+        path: impl Into<PathBuf>,
+        deadline: Deadline,
+    ) -> Result<Self, SqliteStorageBackendBuildError> {
+        if deadline.is_expired(Instant::now()) {
+            return Err(SqliteStorageBackendBuildError::Timeout);
+        }
+        tokio::time::timeout(
+            deadline.remaining(Instant::now()),
+            Self::connect_within_budget(path.into(), deadline, true),
         )
         .await
         .map_err(|_| SqliteStorageBackendBuildError::Timeout)?
@@ -363,6 +385,7 @@ impl SqliteStorageBackend {
     async fn connect_within_budget(
         path: PathBuf,
         deadline: Deadline,
+        require_v2_layout: bool,
     ) -> Result<Self, SqliteStorageBackendBuildError> {
         if let Some(parent) = path
             .parent()
@@ -392,6 +415,9 @@ impl SqliteStorageBackend {
             .begin()
             .await
             .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+        if require_v2_layout {
+            initialize_or_validate_v2_layout(&mut initialization).await?;
+        }
         let has_meta = sqlx::query(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'storage_meta' LIMIT 1",
         )
@@ -1206,6 +1232,62 @@ impl SqliteStorageBackend {
             }
         }
     }
+}
+
+async fn initialize_or_validate_v2_layout(
+    transaction: &mut sqlx::Transaction<'_, Sqlite>,
+) -> Result<(), SqliteStorageBackendBuildError> {
+    let has_layout = sqlx::query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'fluxdns_layout' LIMIT 1",
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| SqliteStorageBackendBuildError::Schema)?
+    .is_some();
+    if has_layout {
+        let row =
+            sqlx::query("SELECT kind, layout_version FROM fluxdns_layout WHERE singleton = 1")
+                .fetch_optional(&mut **transaction)
+                .await
+                .map_err(|_| SqliteStorageBackendBuildError::InvalidLayout)?
+                .ok_or(SqliteStorageBackendBuildError::InvalidLayout)?;
+        let kind = row
+            .try_get::<String, _>("kind")
+            .map_err(|_| SqliteStorageBackendBuildError::InvalidLayout)?;
+        let version = row
+            .try_get::<i64, _>("layout_version")
+            .map_err(|_| SqliteStorageBackendBuildError::InvalidLayout)?;
+        if kind != V2_STORAGE_LAYOUT_KIND || version != V2_STORAGE_LAYOUT_VERSION {
+            return Err(SqliteStorageBackendBuildError::InvalidLayout);
+        }
+        return Ok(());
+    }
+
+    let existing_table = sqlx::query(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' LIMIT 1",
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| SqliteStorageBackendBuildError::Schema)?
+    .is_some();
+    if existing_table {
+        return Err(SqliteStorageBackendBuildError::LegacyLayout);
+    }
+    sqlx::query(
+        "CREATE TABLE fluxdns_layout (\
+         singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+         kind TEXT NOT NULL, layout_version INTEGER NOT NULL)",
+    )
+    .execute(&mut **transaction)
+    .await
+    .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+    sqlx::query("INSERT INTO fluxdns_layout (singleton, kind, layout_version) VALUES (1, ?, ?)")
+        .bind(V2_STORAGE_LAYOUT_KIND)
+        .bind(V2_STORAGE_LAYOUT_VERSION)
+        .execute(&mut **transaction)
+        .await
+        .map_err(|_| SqliteStorageBackendBuildError::Schema)?;
+    Ok(())
 }
 
 /// 按版本顺序执行小步 migration；每个版本在同一事务中更新 schema 标记。
@@ -2112,6 +2194,43 @@ mod tests {
             Err(super::SqliteStorageBackendBuildError::Timeout)
         ));
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn v2_layout_initializes_reopens_and_rejects_legacy_database() {
+        let fresh = path();
+        let opened = SqliteStorageBackend::connect_v2_with_deadline(
+            &fresh,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let marker: (String, i64) =
+            sqlx::query_as("SELECT kind, layout_version FROM fluxdns_layout WHERE singleton = 1")
+                .fetch_one(&opened.pool)
+                .await
+                .unwrap();
+        assert_eq!(marker, ("statistics-v2".to_owned(), 1));
+        drop(opened);
+        SqliteStorageBackend::connect_v2_with_deadline(
+            &fresh,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+
+        let legacy = path();
+        drop(SqliteStorageBackend::connect(&legacy).await.unwrap());
+        assert!(matches!(
+            SqliteStorageBackend::connect_v2_with_deadline(
+                &legacy,
+                Deadline::new(Instant::now() + Duration::from_secs(5))
+            )
+            .await,
+            Err(super::SqliteStorageBackendBuildError::LegacyLayout)
+        ));
+        let _ = std::fs::remove_file(fresh);
+        let _ = std::fs::remove_file(legacy);
     }
 
     #[tokio::test]

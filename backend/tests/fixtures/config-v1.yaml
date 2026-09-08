@@ -1,6 +1,6 @@
-# FluxDNS v2 配置模板
+# FluxDNS v1 配置模板
 #
-# 该文件描述当前正式启动使用的 version: 2 配置契约。
+# 该文件描述当前 version: 1 的配置契约。
 # 目标是先收敛配置契约，再进入运行时实现：
 # 1. 修正示例格式、路径和引用歧义；
 # 2. 增加版本、默认值和严格校验约定；
@@ -10,7 +10,7 @@
 # 未在本文件中加入 DoT、DoQ、上游健康检查、热加载和远程版本锁定字段；这些能力待后续契约单独定稿。
 
 # 配置 schema 版本；字段重命名和迁移以此版本为边界。
-version: 2
+version: 1
 
 # work.path 是独立的工作目录配置；绝对路径直接使用，相对路径以启动配置文件所在目录为基准。
 # 启动时如果配置文件所在目录不是解析后的 work.path，程序将其复制到 <work.path>/config.yaml；
@@ -21,14 +21,12 @@ work:
   # 规则资源的落盘目录，相对于 work.path。
   rules_path: ./rules
 
-# 数据库配置。聚合统计和解析详情使用相互独立的新布局，不读取旧单库数据。
+# 数据库配置。聚合统计默认开启，因此 database 始终必填；P2 过渡期详情写入同级 queries/ 日分片。
 database:
   # 数据库后端；当前仅支持 sqlite。
   type: sqlite
   # SQLite 数据库文件路径，相对于 work.path，父目录由程序创建。
-  path: ./data/statistics.sqlite3
-  # UTC 日分片目录，相对于 work.path。
-  records_path: ./data/queries
+  path: ./data/fluxdns.sqlite3
 
 # 服务日志配置。
 logs:
@@ -76,12 +74,10 @@ dns:
       max_age: 1d
     # 缓存持久化设置；策略级和客户端级 cache 不包含此部分。
     persistence:
-      # 是否启用进程级二进制快照；与内存缓存开关相互独立。
-      enabled: true
       # 持久化缓存文件路径，相对于 work.path。
-      path: ./data/dns-cache.snapshot
-      # 周期快照间隔；文件格式自身具有固定 1 GiB 上限。
-      snapshot_interval: 5m
+      path: ./cache.db
+      # 持久化缓存文件的最大大小，单位为字节。
+      max_size_bytes: 8388608
 
   # TTL 覆写与 cache 平级；用于控制返回给客户端的 DNS TTL。
   # 未配置的字段继承下层，enabled=false 表示在当前层级关闭 TTL 覆写。
@@ -106,16 +102,12 @@ dns:
   resolve_log:
     # 是否记录每次解析请求的详情；false 不会关闭按日/客户端等聚合统计。
     enable: true
-
-# 统计与详情共享的保留策略；水位只会单调前进。
-statistics:
-  retention:
-    # 基础保留天数 R。
-    days: 7
-    # 参考大小未超过阈值时追加的宽限天数 G。
-    grace_days: 3
-    # 参考大小阈值 T，单位为字节。
-    reference_size_bytes: 1073741824
+    # v1 兼容字段；P2 生产分片 writer 不再按条数启动淘汰，BC-26 将随 v2 loader 删除。
+    eviction_threshold_records: 90000
+    # v1 兼容字段；P2 生产分片 writer 不把它作为硬上限。
+    max_records: 100000
+    # v1 兼容字段；P2 保留期限由后续 R/G/T 共同水位取代。
+    max_record_age: 7d
 
 # 一个 listener 是一个逻辑服务；addresses 中的地址由运行时展开为独立 socket。
 # 同一个 listener 的所有地址共享 type、port 和 strategy。
@@ -537,13 +529,15 @@ rule_set:
 # 客户端匹配配置。
 clients:
   # 客户端匹配和客户端级覆盖列表。
-  # client_id 为请求身份，ips 为 CIDR 匹配；同优先级冲突在配置校验阶段拒绝。
+  # ids 为精确匹配，ips 为 CIDR 匹配；两者同时命中时先比较 id，再比较最长前缀。
+  # 同优先级冲突应在配置校验阶段报错，而不是依赖数组顺序。
   # 每个客户端规则的 name 必须唯一。
   - name: client1
-    # 独立的请求身份，不从管理名称派生。
-    client_id: 7a753d8a-a5c7-4e37-a207-9b0e15d9009f
     # 客户端匹配条件。
     match:
+      # DoH client_id 或其他协议提供的客户端标识。
+      ids:
+        - 7a753d8a-a5c7-4e37-a207-9b0e15d9009f
       # 客户端 IP/CIDR 匹配条件。
       ips:
         - 192.168.1.0/24
@@ -577,11 +571,11 @@ clients:
       # mode=custom 时使用的 ECS 网段。
       custom_ip: 120.85.32.0/24
 
-# v2 启动前必须执行的校验：
+# v1 启动前必须执行的校验：
 # - work.path 非空；相对值以启动配置文件目录解析，目录不存在时创建，启动配置不在该目录时复制为 config.yaml；
 # - 拒绝未知字段；每种 type 只允许自己的字段集合；
 # - 所有 name 唯一，且所有引用存在、类型正确；
-# - webui.enable=true 时创建独立 Management Server，并要求 public_origin；
+# - webui 配置保留但 enable 必须为 false；v1 不实例化 WebUI，也不把它加入 bind 计划；
 # - 所有 listener endpoint 展开后不得存在 TCP/UDP bind 冲突；
 # - mode、format、type、端口、CIDR、URL、duration 和内嵌内容必须合法；
 # - ttl_override 与 cache 为平级配置，不得嵌套在 cache 内；未配置的 override 块按字段继承；
@@ -594,8 +588,7 @@ clients:
 #   且只信任代理对端地址；
 #   forwarded header 链按从右到左解析，反向代理必须先清理客户端自带的伪造 header；
 # - bootstrap 与 connect_ip 互斥；socks5h:// 不得再配置 bootstrap；
-# - database.type/path/records_path 始终必填，统计库和日分片目录必须是新布局；
+# - database.type/path 始终必填，聚合统计默认开启并依赖 SQLite；P2 详情暂写同级 queries/；
 # - resolve_log 只控制每次解析详情，关闭时仍保留按日/客户端等聚合统计；
-# - statistics.retention 使用 R/G/T 共同水位，缓存快照使用独立 enabled/path/snapshot_interval；
-# - version: 1 或无 v2 布局标记的旧数据库会被拒绝，并提示使用新的开发目录；
+# - v1 loader 仍要求 0 < resolve_log.eviction_threshold_records < resolve_log.max_records，生产分片不消费该配额；
 # - 任何引用环、资源首次加载失败或内容校验失败都提供带路径的错误并阻止启动。

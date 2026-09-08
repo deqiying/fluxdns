@@ -4,7 +4,7 @@
 >
 > 适用范围：统计 SQLite、解析详情日分片、migration、lease 和存储生命周期
 >
-> 最后评审：2026-09-08（BC-11 完成服务器本地 01:00 调度、补跑、物理回收重试与状态查询；对外历史 API 仍待 BC-13）
+> 最后评审：2026-09-08（BC-26 接入 v2 路径、R/G/T 与新统计库布局；对外历史 API 仍待 BC-13）
 >
 > 关联实现：[detail_shards.rs](../../../../backend/src/storage/detail_shards.rs)、[detail_query.rs](../../../../backend/src/storage/detail_query.rs)、[retention.rs](../../../../backend/src/storage/retention.rs)、[sqlite.rs](../../../../backend/src/storage/sqlite.rs)、[service.rs](../../../../backend/src/storage/service.rs)、[statistics.rs](../../../../backend/src/storage/statistics.rs)、[ledger.rs](../../../../backend/src/storage/ledger.rs)、[migrations](../../../../backend/migrations)
 >
@@ -19,7 +19,7 @@ Storage 模块实现两个相互隔离的持久化 owner：
 - 可选解析详情 UTC 日分片；
 - writer 健康状态、flush 和 shutdown。
 
-它不存储 DNS response cache。Cache persistence 使用配置中的独立文件和独立 `PersistentCacheStore`，不能复用本模块 pool、表或 writer。
+它不存储 DNS response cache。Cache persistence 使用配置中的独立 `FDCS` 文件和进程级 `CacheSnapshotOwner`，不能复用本模块 pool、表或 writer。
 
 内部结构：
 
@@ -44,14 +44,14 @@ prepare 阶段先初始化统计库：
 2. 以读写/创建模式打开文件；
 3. 显式设置 WAL，busy timeout 取 2 秒与剩余启动预算的较小值，连接池最多 4 个连接；
 4. 使用 `synchronous=NORMAL` 作为吞吐与崩溃恢复折中；
-5. 通过 `include_str!` 内嵌 SQL 在同一事务创建基础表和 metadata，再按 `storage_meta.schema_version` 执行前向 migration；不是 `sqlx::migrate!`/SQLx Migrator；
+5. 空库在同一事务创建 `fluxdns_layout(kind=statistics-v2, layout_version=1)`、基础表和 metadata；已有库必须先带匹配标记，未标记旧 schema 或错误标记直接拒绝；随后按 `storage_meta.schema_version` 执行前向 migration；
 6. `StorageRuntime::open` 调用 `migrate` 核对当前 schema version，在独立事务内更新 singleton metadata 并显式回滚，验证真实写入路径；
 7. 建立 stats worker；
 8. 校验详情受管目录与统计库、缓存快照不存在词法包含或物理文件别名，再建立最多 4 个活动连接的分片 registry；
 9. 详情启用时建立唯一的分片 writer channel；未启用或尚无记录时不创建详情目录；
-10. 返回 `StorageRuntime`。
+10. 使用 `statistics.retention` 的 R/G/T 创建唯一 retention scheduler，再返回 `StorageRuntime`。
 
-详情第一次写某个事件 UTC 日时，registry 仅由已解析日期生成 `YYYY-MM-DD.sqlite3`，以 WAL、`synchronous=NORMAL`、单连接 pool 打开，在同一事务创建 `detail_meta`、`resolve_log`、日归属 trigger、时间/耗时索引及 client ID/IP、历史匹配 ID、qname 查询索引。已有文件必须声明匹配的 layout version/day 且具备完整 schema；普通外部 SQLite、错误日期 metadata、symlink/reparse point、hard link 及统计/缓存文件别名均拒绝采用。当前生产 `ConfigLoader` 仍为 v1，BC-08 暂从 `database.path` 同级推导 `queries/`；正式读取 v2 `database.records_path`、新数据基线和旧格式拒绝归 BC-26，不能把此过渡值当成已完成的 v2 启动切换。
+详情第一次写某个事件 UTC 日时，registry 仅由已解析的 `database.records_path` 和日期生成 `YYYY-MM-DD.sqlite3`，以 WAL、`synchronous=NORMAL`、单连接 pool 打开，在同一事务创建 `detail_meta`、`resolve_log`、日归属 trigger、时间/耗时索引及 client ID/IP、历史匹配 ID、qname 查询索引。已有文件必须声明匹配的 layout version/day 且具备完整 schema；普通外部 SQLite、错误日期 metadata、symlink/reparse point、hard link 及统计/缓存文件别名均拒绝采用。不会扫描或迁移旧单库详情。
 
 建目录、connect/schema/migration、写探针共用调用方 deadline，不逐阶段重置。探针不提交业务统计或详情，也不永久修改 metadata；失败或预算耗尽不创建可服务的 Storage owner，并作为启动错误返回。deadline 限制异步等待与后续步骤，不承诺强制中断已进入 OS/SQLite worker 的操作；真实介质故障仍需环境验收。
 
@@ -161,7 +161,7 @@ writer 周期性执行：
 
 ## 7. 保留边界
 
-生产分片批写只执行有界入队、字段校验和 `INSERT`，不执行历史 `COUNT`、按条数淘汰、按年龄 `DELETE` 或 `VACUUM`。v1 `eviction_threshold_records`、`max_records`、`max_record_age` 在 BC-26 删除旧配置字段前仍会被 loader 解析校验，但不再控制生产详情写入；旧单库 adapter 的容量测试不代表生产契约。
+生产分片批写只执行有界入队、字段校验和 `INSERT`，不执行历史 `COUNT`、按条数淘汰、按年龄 `DELETE` 或 `VACUUM`。v2 已删除 `eviction_threshold_records`、`max_records`、`max_record_age`；旧字段只由 BC-27 待删除的测试 loader/单库 adapter 覆盖，不代表生产契约。
 
 BC-10 按冻结的 `reference_day_utc` 与受管详情大小 `S` 计算共同水位：`S > T` 取 R 天，否则取 R+G 天，等于阈值仍享有宽限；保留范围包含当前 UTC 日，只退役严格早于 `keep_from_day_utc` 的数据。策略限制为 R 至少 1 天、R+G 最多 3650 天、T 为 1 byte 至 1 TiB，大小只累计规范详情主文件与 WAL，不计 stats、cache、SHM、备份或其他文件；采样失败或整数溢出会终止本轮，不解释为 0。
 
@@ -169,7 +169,7 @@ BC-10 按冻结的 `reference_day_utc` 与受管详情大小 `S` 计算共同水
 
 `StorageRuntime::open` 从 stats DB 恢复水位，并以 `max(ledger high + 1, replay_floor)` 续接 batch ID，随后启动详情 writer 和唯一 retention scheduler owner。scheduler 每分钟重新读取系统时区与墙钟，不固定 sleep 24h；本地时间首次达到或越过 01:00 时，以当时 UTC 日运行一次。`retention_run_state` 持久化最后成功本地日，因此 DST 跳时会补跑、重复小时/回拨不会重复，时区变更按新本地日判断，失败五分钟后重试，重启会立即核对补跑。全新空库在 01:00 前以昨日为基线、在当日 01:00 首跑；01:00 后首次启动以当日为基线，不伪造无数据清理。
 
-共同水位发布后，scheduler 对 pending/failed manifest 逐日取得退役独占 lease，等待内部读写连接排空，校验 layout 后执行 `wal_checkpoint(TRUNCATE)`、关闭 pool，再只删除规范主文件及 `-wal`/`-shm`/`-journal` sidecar。删除成功后标记 reclaimed；任何路径、checkpoint、关闭或删除失败都增加 attempts、保存安全错误码并保留重试资格。状态查询同时返回策略/目标天数、采样大小、已发布截止日、下一预计截止日、stats/detail 实际可查日范围、最后成功清理时间以及 pending/failed 数量。详情关闭时 scheduler 仍运行并保留 stats；当前生产 owner 使用已确认的 R=7、G=3、T=1 GiB 过渡默认值，v2 typed 配置由 BC-26 接入，不在 BC-11 伪造 loader 切换。
+共同水位发布后，scheduler 对 pending/failed manifest 逐日取得退役独占 lease，等待内部读写连接排空，校验 layout 后执行 `wal_checkpoint(TRUNCATE)`、关闭 pool，再只删除规范主文件及 `-wal`/`-shm`/`-journal` sidecar。删除成功后标记 reclaimed；任何路径、checkpoint、关闭或删除失败都增加 attempts、保存安全错误码并保留重试资格。状态查询同时返回策略/目标天数、采样大小、已发布截止日、下一预计截止日、stats/detail 实际可查日范围、最后成功清理时间以及 pending/failed 数量。详情关闭时 scheduler 仍运行并保留 stats；生产 owner 使用 v2 `statistics.retention` 的 R/G/T。
 
 BC-09 的历史 cursor 绑定规范化后的 filter、sort、order、翻页方向、当前 retention revision 和进程随机 key；任一上下文改变、进程重启、token 被修改或水位推进都会拒绝继续使用。`older` 沿当前排序继续，`newer` 反向扫描后恢复同一展示顺序；每个分片先用 bind 参数执行时间和业务过滤、keyset 条件及 `page_size + 1` 上限，随后只保留全局有界候选，不使用 `OFFSET`、`COUNT` 或分页后过滤。范围最多 3650 天，缺失日只检查路径且不创建目录/SQLite。
 

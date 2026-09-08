@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::model::LogLevelDto;
 use crate::config::resolve::SecretValidationError;
-use crate::config::{ConfigLoadError, ConfigLoader, LoadOptions};
+use crate::config::{ConfigLoadError, ConfigLoader, ConfigV2Loader, LoadOptions};
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::observability;
 use crate::ports::effects::SocketFactory;
@@ -361,12 +361,14 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
     if options.command == AppCommand::Run {
         crate::config::store::recover_pending_transaction(&options.config_path)
             .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+        crate::config::store::recover_v2_pending_transaction(&options.config_path)
+            .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
     }
     let load_options = match options.command {
         AppCommand::Run => LoadOptions::default(),
         AppCommand::Validate => LoadOptions::default().without_snapshot(),
     };
-    let output = ConfigLoader::new(load_options)
+    let output = ConfigV2Loader::new(load_options)
         .load_from_path(&options.config_path)
         .map_err(map_config_error)?;
     if options.command == AppCommand::Run {
@@ -402,21 +404,25 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             Ok(())
         }
         AppCommand::Run => {
-            let watched_paths = output.source_path.clone().map(|source| {
-                let derived = (source != output.resolved.work.snapshot_path)
-                    .then(|| output.resolved.work.snapshot_path.clone());
-                (source, derived)
-            });
-            let management_bootstrap = output.resolved.webui.enable.then(|| {
-                (
-                    output.resolved.webui.clone(),
+            let derived = (output.source_path != output.resolved.work.snapshot_path)
+                .then(|| output.resolved.work.snapshot_path.clone());
+            let watched_paths = Some((output.source_path.clone(), derived));
+            let management_bootstrap = if output.resolved.webui.enable {
+                let store = crate::config::store::ConfigStore::with_active_source(
                     output.source_path.clone(),
-                    output.resolved.work.snapshot_path.clone(),
-                    output.resolved.input_hash.clone(),
+                    &output.source,
+                    1,
+                )
+                .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+                Some((
+                    output.resolved.webui.clone(),
+                    Arc::new(store),
                     output.resolved.database.path.clone(),
                     output.resolved.dns.resolve_log.enable,
-                )
-            });
+                ))
+            } else {
+                None
+            };
             // 日志关闭只关闭输出，指标、health 和进程 writer 的生命周期不随之退出。
             let telemetry = observability::build_runtime_telemetry()
                 .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
@@ -442,7 +448,6 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 .ok_or_else(|| AppError::new(AppErrorKind::Prepare, "缓存 owner 缺少 DNS core"))?;
             let cache_snapshot_settings = crate::cache::CacheSnapshotSettings::from_current_config(
                 prepared.snapshot().config(),
-                cache_core.cache().options().enabled,
             )
             .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
             let cache_snapshot_owner = crate::cache::CacheSnapshotOwner::start(
@@ -506,19 +511,10 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
             let metrics = Arc::new(crate::management::MetricsOwner::new());
             let management = match management_bootstrap {
-                Some((
-                    config,
-                    Some(source_path),
-                    snapshot_path,
-                    source_fingerprint,
-                    database_path,
-                    resolve_log_enabled,
-                )) => Some(
-                    crate::management::ManagementService::bind(
+                Some((config, config_store, database_path, resolve_log_enabled)) => Some(
+                    crate::management::ManagementService::bind_with_config_store(
                         &config,
-                        source_path,
-                        snapshot_path,
-                        source_fingerprint,
+                        config_store,
                         crate::management::ManagementQueryDependencies::new(
                             Arc::clone(&coordinator),
                             database_path,
@@ -531,12 +527,6 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                     .await
                     .map_err(map_management_build_error)?,
                 ),
-                Some((_, None, _, _, _, _)) => {
-                    return Err(AppError::new(
-                        AppErrorKind::Prepare,
-                        "Management Server 需要文件形式的启动配置",
-                    ));
-                }
                 None => None,
             };
             let mut service =

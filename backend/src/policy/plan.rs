@@ -913,7 +913,9 @@ mod tests {
                 answer_ttl: Duration::from_secs(10),
                 max_age: Duration::from_secs(60),
             },
+            persistence_enabled: enabled,
             persistence_path: PathBuf::from("cache.db"),
+            snapshot_interval: Duration::from_secs(300),
             persistence_max_size_bytes: 1024,
         }
     }

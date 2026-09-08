@@ -9,11 +9,17 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use thiserror::Error;
 
-use super::ConfigStore;
 use super::observation::{ManagedObservation, sha256_digest};
 use super::persistence::{ManagedProtection, Persistence, PersistenceError};
+use super::{
+    ConfigFileLock, ConfigStore, ConfigStoreError, InitialUserCommit, commit_candidate, lock_path,
+    read_bounded,
+};
 use crate::config::contract::ConfigV2;
 use crate::config::edit::{ConfigChange, EditError, SourceCandidate, build_candidate};
+use crate::config::migrate::deterministic_hash;
+use crate::config::resolve::resolve_config_v2;
+use crate::config::source_edit::{InitialWebUiUser, create_initial_webui_user};
 
 const MAX_RECORDS: usize = 1024;
 const VALIDATION_TTL: Duration = Duration::from_secs(60);
@@ -228,7 +234,7 @@ pub(crate) enum ActiveError {
 
 impl ConfigStore {
     /// 在 v2 启动 owner 成功后，以产生该运行态的原始 bytes 建立活动源，绝不以重读文件替代。
-    /// 本阶段只提供内部入口；正式 loader/Storage 仍未切换。
+    /// 正式启动只以 loader 已消费的正文建立该状态，不从文件二次构造运行权威。
     pub(crate) fn with_active_source(
         source_path: PathBuf,
         source: &str,
@@ -277,6 +283,98 @@ impl ConfigStore {
             protection,
         });
         Ok(store)
+    }
+
+    /// setup 是 v2 活动源上的唯一 P2 写操作；提交后同步更新认证所需用户和活动文件事实。
+    pub(super) fn create_initial_user_v2(
+        &self,
+        name: &str,
+        password_hash: &str,
+    ) -> Result<InitialUserCommit, ConfigStoreError> {
+        let _transaction = self.transaction.try_lock().map_err(|error| match error {
+            std::sync::TryLockError::Poisoned(_) => ConfigStoreError::LockPoisoned,
+            std::sync::TryLockError::WouldBlock => ConfigStoreError::Busy,
+        })?;
+        let _file_lock = ConfigFileLock::acquire(&lock_path(&self.source_path))?;
+        let source = read_bounded(&self.source_path)?;
+        let text = std::str::from_utf8(&source).map_err(|_| ConfigStoreError::InvalidSource)?;
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| ConfigStoreError::LockPoisoned)?
+            .as_ref()
+            .map(|state| state.snapshot.clone())
+            .ok_or(ConfigStoreError::CandidateRejected)?;
+        if source.as_slice() != active.source.as_bytes() {
+            return Err(ConfigStoreError::Conflict);
+        }
+        let candidate = create_initial_webui_user(
+            text,
+            InitialWebUiUser {
+                name,
+                password_hash,
+            },
+        )
+        .map_err(|error| match error {
+            crate::config::source_edit::SourceEditError::AlreadyInitialized => {
+                ConfigStoreError::AlreadyInitialized
+            }
+            _ => ConfigStoreError::UnsupportedSource,
+        })?;
+        let candidate_bytes = candidate.as_bytes();
+        let config =
+            ConfigV2::parse(candidate_bytes).map_err(|_| ConfigStoreError::CandidateRejected)?;
+        let resolved = resolve_config_v2(
+            &config,
+            deterministic_hash(candidate_bytes),
+            &self.source_path,
+        )
+        .map_err(|_| ConfigStoreError::CandidateRejected)?
+        .resolved;
+        if resolved.webui.users.len() != 1 || resolved.webui.users[0].name != name {
+            return Err(ConfigStoreError::CandidateRejected);
+        }
+
+        commit_candidate(
+            &self.source_path,
+            self.snapshot_path.as_deref(),
+            &source,
+            candidate_bytes,
+        )?;
+        let fingerprint = sha256_digest(candidate_bytes);
+        let observation =
+            ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
+        if !observation.matches_content(&fingerprint) {
+            return Err(ConfigStoreError::Conflict);
+        }
+        let protection =
+            ManagedProtection::capture(&self.source_path, self.snapshot_path.as_deref())
+                .map_err(|_| ConfigStoreError::CandidateRejected)?;
+        let revision = random_token().map_err(|_| ConfigStoreError::CandidateRejected)?;
+        let mut state = self
+            .active
+            .lock()
+            .map_err(|_| ConfigStoreError::LockPoisoned)?;
+        let state = state.as_mut().ok_or(ConfigStoreError::CandidateRejected)?;
+        state.snapshot.source = Arc::from(candidate);
+        state.snapshot.config = Arc::new(config);
+        state.snapshot.revision = revision.clone();
+        state.snapshot.persisted_revision = Some(revision);
+        state.snapshot.persisted_observation = observation.clone();
+        state.snapshot.observation = observation;
+        state.snapshot.operation_id = None;
+        state.protection = protection;
+        *self
+            .expected_fingerprint
+            .lock()
+            .map_err(|_| ConfigStoreError::LockPoisoned)? = fingerprint.clone();
+        *self
+            .self_written_fingerprint
+            .lock()
+            .map_err(|_| ConfigStoreError::LockPoisoned)? = Some(fingerprint);
+        Ok(InitialUserCommit {
+            users: resolved.webui.users.clone(),
+        })
     }
 
     /// 文件变化只更新观测，绝不修改活动源、Runtime revision 或认证。

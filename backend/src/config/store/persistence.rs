@@ -731,6 +731,12 @@ pub(crate) fn recover(
     }
 }
 
+pub(crate) fn has_pending_recovery(source: &Path) -> Result<bool, PersistenceError> {
+    journal_path(source)
+        .try_exists()
+        .map_err(PersistenceError::Io)
+}
+
 fn validate_candidate(
     candidate: &[u8],
     source: &Path,

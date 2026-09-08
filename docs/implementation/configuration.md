@@ -4,9 +4,9 @@
 >
 > 适用范围：本文与当前模板同步，描述配置契约、校验和已实现运行时边界；未定义行为不应视为已支持。
 >
-> 最后核对：2026-09-08（客户端管理键/请求身份索引与 mapped IPv4；其余字段明细沿用原核对范围）
+> 最后核对：2026-09-08（BC-26 正式 v2 启动、活动源与新数据基线）
 >
-> 核对基线：`16a395887cf4c1182e72600aceb591310991d97d` 加本次 BC-04 工作树
+> 核对基线：P2 BC-26 工作树
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
@@ -14,9 +14,9 @@
 
 ## 加载与支持边界
 
-### P0 v2 内部契约（2026-09-07）
+### v2 契约与生产基线（2026-09-08）
 
-[`config/contract.rs`](../../backend/src/config/contract.rs) 已提供 `ConfigV2::parse/validate/resolve_paths` 和[离线夹具](../../backend/tests/fixtures/config-v2.yaml)。这是可执行的候选契约，不是生产加载器：本节以下 v1 模板/owner 仍是当前正式接线事实。P2 已分批接通快照、日分片、共同水位和每日 retention owner；BC-26 前 retention owner 只使用已确认的 R=7、G=3、T=1 GiB 过渡默认值，不把 v2 字段伪装成旧存储参数。新版本生产启动切换仍归 BC-26，不承诺 v1/v2 并行服务或兼容。
+[`config/contract.rs`](../../backend/src/config/contract.rs) 提供 `ConfigV2::parse/validate/resolve_paths`，[`ConfigV2Loader`](../../backend/src/config/load.rs) 已由 `app::run_command` 正式使用并直接生成 `ResolvedConfig`，不经过 v1 DTO 或 migration。根[配置模板](../../config-example.yaml)和[启动夹具](../../backend/tests/fixtures/config-v2.yaml)均为 v2；生产不提供 v1/v2 切换开关，不接受旧配置，也不转换旧配置或数据库。
 
 | v2 字段/边界 | 契约与默认值 |
 | --- | --- |
@@ -35,17 +35,17 @@
 
 共享 listener、上游、策略、Hosts、规则集、代理、SecretRef 和认证字段继续复用 [model](../../backend/src/config/model.rs)；共享资源引用、循环、socket 冲突和语义复用 [validate](../../backend/src/config/validate.rs)，没有另造旧版本转换层。名称和 ID 的请求期索引/历史事实属于 BC-04/05，P0 仅验证配置契约。
 
-`resolve_paths` 是无 I/O 的词法检查：拒绝统计/快照相互碰撞、与详情目录及受保护配置/日志路径重叠，包括逻辑文件成为另一目标父路径的反向冲突，Windows 比较不区分大小写。它不证明路径不存在 symlink、reparse point、hard link 或其他物理别名；真正打开目标前的身份校验、旁文件保护和恢复由 BC-26/07/08/29 owner 完成。
+`resolve_paths` 是无 I/O 的词法检查：拒绝统计/快照相互碰撞、与详情目录及受保护配置/日志路径重叠，包括逻辑文件成为另一目标父路径的反向冲突，Windows 比较不区分大小写。物理路径由对应 owner 再检查；统计库要求 `fluxdns_layout(kind=statistics-v2, layout_version=1)`，空文件可在首次事务初始化，任何已有未标记 schema 或错误标记均拒绝。详情分片继续由每个文件的 `detail_meta` 标记归属。
 
 ### P1 客户端匹配索引内部能力（2026-09-08）
 
 [`ResolvedClient`](../../backend/src/config/resolve.rs) 与 [`ClientRule`](../../backend/src/policy/client.rs) 已把配置管理 `name` 和请求身份 `client_ids` 明确分离，`ClientIndex` 同时构建 name/exact ID 索引并拒绝重复 name、重复 ID、重复规范化 CIDR 和空 matcher。请求匹配仍固定为大小写敏感的 ID 优先、最长 CIDR 回退；IPv4-mapped IPv6 地址在 CIDR 匹配及客户端 cache digest 前归一化为 IPv4，因此与对应 IPv4 使用同一客户端池。
 
-v2 配置边界已只允许单个唯一 `clients[].client_id`；当前生产 `ConfigLoader` 仍读取 v1 `match.ids`，所以 `ResolvedClient` 暂时保留复数集合承接现有正式路径。本批没有切换 v2 启动、生成历史匹配事件、改变详情/统计归属或移除旧 schema；这些边界分别留给 BC-26 和 BC-05。Windows Rust 1.98.0 定向验证为 `policy::` 60 项、`config::contract` 7 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；未执行真实 UDP/TCP/DoH 或跨平台运行验收。
+v2 配置边界只允许单个唯一 `clients[].client_id`，生产 resolver 将其直接编译为唯一请求身份；`ResolvedClient` 的复数容器暂为运行时内部形态，旧 `match.ids` 只存在于 BC-27 待删除的 v1 测试 loader。历史记录仍只保留请求发生时已经冻结的匹配事实，不补造或重匹配旧身份。
 
 ### P1 活动源与候选内部底座（2026-09-07）
 
-[`ConfigStore`](../../backend/src/config/store.rs) 的 [`active`](../../backend/src/config/store/active.rs) 子模块持有唯一 v2 活动源：`with_active_source` 只接受产生运行态的原始配置及 runtime revision，并要求受管文件内容与之相同。它不重新从外部文件构造活动值，不创建数据库布局，也不替代尚未切换的 ConfigLoader。正式首用户 writer 共用原 transaction gate；挂接 v2 活动源后明确拒绝旧 setup writer，等待新版初始化一并接线。
+[`ConfigStore`](../../backend/src/config/store.rs) 的 [`active`](../../backend/src/config/store/active.rs) 子模块持有唯一 v2 活动源：生产启动把 loader 实际消费的原始正文及 runtime revision 交给 `with_active_source`，并要求源文件和派生快照一致。Management 复用该 active store；首次用户提交在同一 transaction gate 中校验 v2 候选、原子写入两份文件，并同步更新认证用户和活动文件事实。
 
 - [`config/edit.rs`](../../backend/src/config/edit.rs) 承接原 Management 的严格变更类型，Management 重用同一类型，无新增 HTTP 契约。旧 name 相对同一活动快照定位，单候选不重复编辑同一目标；交换名称按一次映射处理，不递归串联改名。上游/组共享空间，客户端更新保留原 `client_id`。
 - 候选依次执行变更预算、活动源定向修改、已知 variant 引用更新、完整 `ConfigV2::parse/validate`、两级路径检查、CST 定位编辑及整树等价复核。覆盖 listener/DoH route、bootstrap、组成员/fallback、策略、Hosts、rule-set selector、proxy 和客户端策略；不对正文、路径、SecretRef 做字符串替换。资源首载、物理 owner 路径、socket 和进程 prepare 仍属于后续运行接线，不能把这一步视为可应用运行态。
@@ -112,14 +112,14 @@ ConfigStore 的操作记录保存 `OperationSnapshot`，在每次状态转移时
 
 ### 当前生产加载器
 
-正式入口是 [`app::run_command`](../../backend/src/app.rs) -> [`ConfigLoader::load_from_path`](../../backend/src/config/load.rs) -> [model](../../backend/src/config/model.rs) / [migrate](../../backend/src/config/migrate.rs) / [resolve](../../backend/src/config/resolve.rs) / [validate](../../backend/src/config/validate.rs)。普通 loader 不读取 SecretRef 实际值；run 在 prepare 前执行 accessor 校验，validate 不写 snapshot、不做资源/数据库/网络可用性检查。
+正式入口是 [`app::run_command`](../../backend/src/app.rs) -> [`ConfigV2Loader::load_from_path`](../../backend/src/config/load.rs) -> [contract](../../backend/src/config/contract.rs) / [resolve](../../backend/src/config/resolve.rs) / [validate](../../backend/src/config/validate.rs)。loader 限制配置为 4 MiB 并保留产生运行态的原始正文；`run` 在 prepare 前恢复已知 setup/v2 文件事务、创建或核对 `<work.path>/config.yaml`，再校验 SecretRef。`validate` 不写 snapshot，也不做资源、数据库或网络可用性检查。
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| 严格配置与路径 | ConfigLoader、ResolvedConfig、validate | run/validate 共用加载 | 本轮静态追踪，字段表继承来源如头部所示 | 未运行配置矩阵或重新核对每一字段 |
+| 严格配置与路径 | ConfigV2Loader、ConfigV2、ResolvedConfig | run/validate 共用 v2 加载 | loader、根模板、路径与旧版本拒绝测试 | v1 loader 仅留测试，待 BC-27 删除 |
 | 资源与缓存 | async PreparedRuntime、PolicyDnsCore | run 加载后 prepare | 本轮核对生产接线 | 能解析不表示网络/文件/SQLite 已成功打开 |
 | WebUI | webui model + ManagementService | enable 时创建服务 | 本轮静态 | origin、DB 与 bind 必须可用；默认 binary 可仅提供 API，SPA 需要 embed feature，详见[管理端](backend/management.md) |
-| 首用户写回 | ConfigStore + source-preserving editor | setup，run 前恢复 journal | 本轮静态 | loader 为 8 MiB，writer 为 4 MiB；可加载不等于可写回 |
+| 首用户写回 | active ConfigStore + source-preserving editor | setup，run 前恢复 journal | v2 active source 双文件提交测试 | HTTP 断连与磁盘故障组合仍需更高层验收 |
 | 热重载 | `process_owned_reload_change` + service owner | 显式 service-aware 应用；watcher 只提示 | P1 证据见[生命周期](backend/lifecycle.md)及[日志热切换](backend/background-services.md#p1-日志热切换2026-09-07) | database、webui enable/address/port/public_origin、dns.resolve_log 仍为启动级；logs 经 owner 热切换，users 可动态更新；v2 事务未闭合 |
 
 本表原始静态核对未执行 Cargo 或配置 validate，后续 P1 定向验证以上述分批记录为准。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)，验证专项的已知边界见[验证范围与收口](backend/background-services.md#验证范围与收口)。既定契约与代码冲突时须保留复现证据并明确修复边界，不仅修改字段说明来掩盖实现缺口。
@@ -147,7 +147,7 @@ listener
 
 ### 2.1 版本
 
-顶层 `version` 是配置 schema 版本。当前模板为 `version: 1`；字段重命名、删除和迁移规则以该字段为边界。加载器应拒绝不支持的版本，而不是静默按旧字段解释。
+顶层 `version` 是配置 schema 版本。当前模板和生产加载器只接受 `version: 2`；其他版本直接拒绝并提示使用新的开发目录，不迁移或按旧字段猜测。
 
 ### 2.2 路径和工作目录
 
@@ -156,7 +156,7 @@ listener
 1. 先确定启动配置文件的绝对路径。命令行传入的配置文件路径若为相对路径，仅在这一步相对于进程启动时的当前工作目录解析；其父目录记为 `config_dir`。
 2. 解析 `work.path`：绝对值直接使用；相对值按 `config_dir.join(work.path)` 解析。结果经词法归一化后形成绝对的 `resolved_work_path`。
 3. 解析项目路径字段：绝对值直接使用；相对值统一按 `resolved_work_path.join(field_path)` 解析并做词法归一化，不能再回到 `config_dir` 或进程当前工作目录。
-4. `work.rules_path`、`database.path`、`logs.path`、`dns.cache.persistence.path`、TLS 证书和私钥、SecretRef 文件、本地 hosts 与规则文件路径都遵循第 3 步。
+4. `work.rules_path`、`database.path`、`database.records_path`、`logs.path`、`dns.cache.persistence.path`、TLS 证书和私钥、SecretRef 文件、本地 hosts 与规则文件路径都遵循第 3 步。
 
 词法归一化应消除 `.` 和可消解的 `..`，但不依赖目标文件或目录已经存在。通过 bytes/string 加载且没有配置文件来源路径时，不存在 `config_dir`；此时相对 `work.path` 必须报错，调用方需要提供来源路径或改用绝对 `work.path`，不得隐式回退到进程当前工作目录。
 
@@ -167,7 +167,7 @@ listener
 | `/etc/fluxdns/bootstrap/config.yaml` | `work.path: ../runtime`、`logs.path: ./logs/fluxdns.log` | `logs.path = /etc/fluxdns/runtime/logs/fluxdns.log` |
 | `/etc/fluxdns/config.yaml` | `work.path: /var/lib/fluxdns`、`database.path: /srv/fluxdns.sqlite3` | 两个绝对路径均不与其他基准拼接 |
 
-启动时若配置文件所在目录不是 `resolved_work_path`，程序将配置复制到 `<resolved_work_path>/config.yaml`，固定文件名为 `config.yaml`。该文件是工作目录中的配置快照；启动流程负责创建工作目录和所需父目录。
+启动时若配置文件本身不是 `<resolved_work_path>/config.yaml`，程序将其原子复制到该固定路径；仅仅位于同一目录但文件名不同仍会创建快照。该文件是工作目录中的配置快照；启动流程负责创建工作目录和所需父目录。
 
 配置副本按 [Config 模块方案](../architecture/backend/modules/config.md) 原子创建：目标不存在时在同目录写临时文件并以 no-replace 方式发布，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
 
@@ -236,20 +236,20 @@ clients[].ttl_override > strategy[].ttl_override > dns.ttl_override
 
 缓存不是逐层查询的 fallback 链。每个请求只选择一个逻辑缓存池：客户端显式启用时选择“实际客户端身份 + 生效策略”池；否则策略显式启用时选择策略池；策略未配置 `cache` 时才选择全局池。策略或客户端显式 `enabled: false` 会终止选择，不再回退到全局池。详见 [`dns.cache`](#81-dnscache)。
 
-### 2.6 配置迁移与归一化
+### 2.6 配置版本与归一化
 
-配置加载不直接把 YAML DTO 当作运行时配置，而是经过显式版本迁移和归一化：
+生产加载不直接把 YAML DTO 当作运行时配置，也不执行旧版本迁移：
 
 ```text
-RawConfigVn
-  → migrate 到当前 schema
+ConfigV2
+  → 拒绝非 version: 2
   → normalize 路径、SecretRef、默认值和继承
   → semantic validate
   → ResolvedConfig
 ```
 
-- 只支持从已知旧版本向当前版本逐级迁移；未来版本直接拒绝，不能按旧字段猜测。
-- 迁移必须是可测试、可重放的纯转换，保留缺失、`null`、空数组和空对象的区别；数组替换/合并、cache/TTL/ECS 继承和来源信息在 `ResolvedConfig` 阶段一次性确定。任何有损删除都必须产生 warning 并显式确认，不能静默丢字段。
+- v1 DTO/migration 仅留给 BC-27 前的内部回归测试，不从生产 `run`/`validate` 可达。
+- 缺失、显式 `null`、空数组和空对象的区别由严格 v2 parser 保留；cache/TTL/ECS 继承和来源信息在 `ResolvedConfig` 阶段一次性确定。
 - 原始配置文件不被自动覆盖。实现 `validate`/`migrate`/`print-normalized`/`diff`/`rollback` 命令时，输出应写到新文件或显式指定的目标，并保存输入/输出 hash、step IDs 和变更摘要。
 - 配置 schema 版本、SQLite schema 版本、资源 parser/compiler 版本和 cache key format 版本彼此独立；升级一个版本不能隐式宣称其他版本兼容。
 - 运行时升级沿用 `prepare candidate → preflight → atomic activate/keep old`：可热更新项替换 `RuntimeSnapshot`，需要重新绑定的项 drain 后切换，无法安全切换的项拒绝候选并保留旧运行时。
@@ -286,9 +286,10 @@ RawConfigVn
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
 | `database.type` | string | 必填 | 当前模板仅定义 `sqlite`。未知类型应拒绝。聚合统计默认开启，因此不能省略。 |
-| `database.path` | string | 必填 | 统计 SQLite 文件路径；相对路径以 `work.path` 为基准，父目录由程序创建。P2 过渡期详情目录由该文件同级 `queries/` 推导。 |
+| `database.path` | string | 必填 | 带 v2 布局标记的统计 SQLite 文件路径；相对路径以 `work.path` 为基准。 |
+| `database.records_path` | string | 必填 | UTC 日分片目录；必须与统计库、缓存快照及受保护文件隔离。 |
 
-数据库在 prepare 阶段必须完成打开、schema migration 和基本写入检查；失败时拒绝启动。运行中数据库暂时不可写时，DNS 继续服务，由统计 writer 保留进程内补偿计数并重试；未恢复前进程退出可能造成 persistence gap，该状态必须可观测。`database.path` 表示统计文件，不表示详情目录。正式 v2 使用独立必填 `database.records_path`；当前 v1 `ConfigLoader` 尚未切换，BC-08 仅以同级 `queries/` 接通分片 owner，BC-26 才负责正式字段和新数据基线启动。
+数据库在 prepare 阶段必须完成 v2 布局核对、schema migration 和基本写入检查；失败时拒绝启动。空统计文件在同一事务写入布局标记与初始 schema，重启继续前向 migration；已有未标记库、错误标记和把旧单库路径误作新统计库均拒绝，不自动搬迁或清空。运行中数据库暂时不可写时，DNS 继续服务，由统计 writer 保留进程内补偿计数并重试；未恢复前进程退出可能造成 persistence gap，该状态必须可观测。
 
 ## 6. `logs`
 
@@ -322,7 +323,7 @@ RawConfigVn
 
 ### 8.1 `dns.cache`
 
-`cache` 描述全局池开关、共享内存容量、短期失败 TTL、乐观缓存和当前 v1 过渡期快照路径；TTL 覆写不再嵌套在其中。
+`cache` 描述全局池开关、共享内存容量、短期失败 TTL、乐观缓存和独立二进制快照；TTL 覆写不再嵌套在其中。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -332,18 +333,19 @@ RawConfigVn
 | `dns.cache.optimistic.enabled` | boolean | 是否允许返回已过期记录并在后台刷新。 |
 | `dns.cache.optimistic.answer_ttl` | duration | 乐观缓存应答使用的 TTL。 |
 | `dns.cache.optimistic.max_age` | duration | 记录过期后仍可乐观返回的最长时间。 |
+| `dns.cache.persistence.enabled` | boolean | 是否启用进程级 `FDCS` 快照；不等同于全局内存缓存开关。 |
 | `dns.cache.persistence.path` | string | 当前进程级 `FDCS` 快照文件路径；相对路径以 `work.path` 为基准。 |
-| `dns.cache.persistence.max_size_bytes` | integer | v1 loader 仍要求并校验的 legacy 字段；BC-07 生产 owner 不消费该值。 |
+| `dns.cache.persistence.snapshot_interval` | duration | 完整快照周期，范围 `1s..=1d`。 |
 
-`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS。当前 `FDCS` 快照没有用户磁盘大小配额，也不承诺文件大小等于 Moka weight；reader 只使用内部文件/记录保护上限。`persistence.max_size_bytes` 仅由仍保留的 legacy adapter 测试消费，不能据此规划当前生产快照。完整 v2 cache 配置的 `enabled/path/snapshot_interval` 由 BC-26 切换生产 loader，不在 BC-07 用旧字段伪造。
+`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS。`FDCS` 文件没有用户可配的磁盘配额，也不承诺文件大小等于 Moka weight；reader/writer 使用内部 1 GiB 文件上限和记录预算。旧 `persistence.max_size_bytes` 在 v2 中是未知字段。
 
-任一逻辑缓存池启用时，正式 app 在 bind 前由唯一进程 owner 从 `FDCS` 分批预热活动 Moka，随后按内部固定 5 分钟周期覆盖完整可见集合；缺失、损坏、不兼容、超时和内存预算不足只形成冷启/部分恢复状态。内存 CAS 不等待磁盘，也不再排入逐条 SQLite persistence。reload 只切换 owner generation/source，不恢复候选；shutdown 在 finalizer 排空后 best-effort 写最终快照。详见[Cache 设计](../architecture/backend/modules/cache.md)与[后台服务](backend/background-services.md#cache-persistence)。
+`persistence.enabled` 开启时，正式 app 在 bind 前由唯一进程 owner 从 `FDCS` 分批预热活动 Moka，随后按 `snapshot_interval` 覆盖完整可见集合；缺失、损坏、不兼容、超时和内存预算不足只形成冷启/部分恢复状态。内存 CAS 不等待磁盘，也不再排入逐条 SQLite persistence。reload 只切换 owner generation/source，不恢复候选；shutdown 在 finalizer 排空后 best-effort 写最终快照。详见[Cache 设计](../architecture/backend/modules/cache.md)与[后台服务](backend/background-services.md#cache-persistence)。
 
 策略级和客户端级 `cache` 只允许 `enabled` 与 `optimistic` 子对象，不包含 `memory`、`failure_ttl` 或 `persistence`。只要出现策略级或客户端级 `cache` 对象，`enabled` 就必须显式提供；整个对象缺失才表示继续向较低优先级选择。
 
 #### 逻辑缓存池选择
 
-v1 只有三类逻辑缓存池，并共享 `dns.cache.memory` 与 `dns.cache.persistence` 的容量预算和存储后端：
+当前有三类逻辑缓存池，并共享 `dns.cache.memory` 容量预算与快照 owner：
 
 1. 全局池：namespace 为 `global`；
 2. 策略池：namespace 包含生效的 `strategy.name`；
@@ -404,11 +406,8 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | `enable` | boolean | 是否记录每次解析请求的详情（请求、策略、规则、ECS、缓存、上游结果和耗时等）。关闭时不写详情表，但不关闭聚合统计。 |
-| `eviction_threshold_records` | integer | v1 loader 兼容字段；P2 生产分片 writer 不消费。 |
-| `max_records` | integer | v1 loader 兼容字段；P2 生产分片 writer 不作为硬上限。 |
-| `max_record_age` | duration | v1 loader 兼容字段；P2 共同水位不消费。 |
 
-当前 v1 loader 仍要求 `0 < eviction_threshold_records < max_records`，仅为 BC-26 前的旧 schema 解析边界；生产分片 writer 不读取三项配额。请求任务只向统一 resolution ingress 附带 typed question 和共享 response，qname digest、canonical qname 与 answer JSON 在后台 detail projector 中生成，再进入唯一有界详情 channel；满批立即提交，低流量尾批最多等待 5 秒。worker 按事件 UTC 日写入 `YYYY-MM-DD.sqlite3`，批写只执行校验与 `INSERT`，不执行历史 `COUNT`、按条数/年龄 `DELETE` 或 `VACUUM`。projection/SQLite 队列满或分片提交失败时丢弃当前详情并计量，DNS 请求不得等待或失败。
+v2 只接受 `enable`；旧条数/年龄配额是未知字段。请求任务只向统一 resolution ingress 附带 typed question 和共享 response，qname digest、canonical qname 与 answer JSON 在后台 detail projector 中生成，再进入唯一有界详情 channel；满批立即提交，低流量尾批最多等待 5 秒。worker 按事件 UTC 日写入 `YYYY-MM-DD.sqlite3`，批写只执行校验与 `INSERT`，不执行历史 `COUNT`、按条数/年龄 `DELETE` 或 `VACUUM`。projection/SQLite 队列满或分片提交失败时丢弃当前详情并计量，DNS 请求不得等待或失败。
 
 详情中的 `duration_ms` 从 transport 接入计时点计到 DNS core 完成，`dns_core_duration_ms` 只计算 `DnsCore::resolve_with_completion` 主链；两者均在主链返回时冻结，不包含后台观测排队和 SQLite 写入。DoH 的 `duration_ms` 包含入站 TLS/HTTP 处理，但不包含响应编码和网络写回。schema v5 之前的历史记录无法回填主链耗时，Management API 返回 `null`。
 
@@ -683,23 +682,23 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
 | `name` | string | 必填 | 客户端规则名称，列表内唯一。 |
-| `match` | object | 必填 | 客户端匹配条件，至少包含 `ids` 或 `ips`。 |
-| `match.ids` | array[string] | 可选 | 精确匹配 DoH `client_id` 或其他协议提供的客户端标识。 |
+| `client_id` | string | 必填 | 唯一、大小写敏感的请求身份，不从 `name` 派生。 |
+| `match` | object | 可选 | 客户端 IP 匹配条件；缺失时使用空 `ips`。 |
 | `match.ips` | array[CIDR] | 可选 | 按客户端 IP/CIDR 匹配。 |
 | `strategy` | string | 可选 | 命中后使用的策略；省略时继承 listener 或 DoH route 的策略。 |
 | `cache` | object | 可选 | 客户端级缓存覆盖，优先级最高。 |
 | `ttl_override` | object | 可选 | 客户端级 TTL 覆写，与 `cache` 平级。 |
 | `edns_client_subnet` | object | 可选 | 客户端级 ECS 覆盖。 |
 
-匹配优先级固定为：先精确 `id`，再按 IP 的最长 CIDR 前缀。在同一优先级出现多个冲突规则时应在配置校验阶段报错，而不是依赖数组顺序。`match.ids` 和 `match.ips` 至少提供一个；`id`、`ip` 不再是顶层客户端字段。
+匹配优先级固定为：先精确 `client_id`，再按 IP 的最长 CIDR 前缀。在同一优先级出现多个冲突规则时在配置校验阶段报错，不依赖数组顺序。单个客户端可以仅由 `client_id` 标识而没有 IP 条目。
 
 客户端级 `cache.enabled: true` 选择“实际客户端身份 + 生效策略”逻辑池，`false` 完全禁用当前请求的缓存；只有整个客户端 `cache` 对象缺失时才继续选择策略池或全局池。客户端级 `ttl_override` 和 `edns_client_subnet` 分别遵循[覆盖和继承](#25-覆盖和继承)中的层级规则。
 
 ## 16. 配置校验清单
 
-建议 v1 配置加载阶段至少执行以下校验：
+v2 配置加载阶段至少执行以下校验：
 
-1. `version` 存在且为 `1`；未知版本拒绝加载。
+1. `version` 存在且为 `2`；其他版本拒绝加载且不迁移。
 2. 拒绝未知字段；每种 `type` 只允许自己的字段集合，条件字段满足 exactly-one-of/required-if 约束。
 3. 所有资源集合中的 `name` 唯一，所有引用存在、类型正确且无循环引用。
 4. `work.path` 非空；相对值可基于启动配置文件目录解析为绝对的 `resolved_work_path`，缺少来源目录时拒绝；目录不存在时创建，启动配置不在该目录时复制为 `<resolved_work_path>/config.yaml`。
@@ -708,22 +707,22 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 7. `ttl_override` 与 `cache` 平级；策略/客户端 cache 对象存在时 `enabled` 必填，显式 `false` 不得回退到全局池。
 8. ECS 块未配置时继承，显式 `mode: disabled` 才停止继续传递。
 9. `webui.users[].password_hash` 必须是受支持算法生成的单向 hash，禁止明文 `password` 字段。
-10. `dns.cache.memory.max_size_bytes` 和 `persistence.max_size_bytes` 为正数，`failure_ttl` 在 `1s..=5m`。
+10. `dns.cache.memory.max_size_bytes` 为正数，`failure_ttl` 在 `1s..=5m`，`persistence.snapshot_interval` 在 `1s..=1d`。
 11. DoH route 的 path 模板合法且彼此不存在语义重叠；endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段；GET/POST wire、Content-Type 和固定消息上限合法。
 12. `forwarded_header`/`proxy_protocol` 必须配置 `trusted_proxies`，且可信范围只覆盖反代对端；PROXY v1/v2 前导头缺失、未知或非法时拒绝。
 13. DoH 上游的 `bootstrap` 与 `connect_ip` 互斥；SecretRef 解析后的代理 scheme 合法，`socks5h://` 不得同时使用 `bootstrap`。
-14. `database.type`/`database.path` 始终存在且为受支持的 SQLite 统计配置；prepare 阶段数据库打开、migration 或基本写入检查失败必须阻止启动。P2 分片目录还必须与统计库、缓存快照物理隔离。
-15. 聚合统计默认开启，按日和有界 client/transport/strategy/upstream/RCODE/cache 维度持久化；`dns.resolve_log.enable` 只控制详情记录。v1 loader 仍校验 `0 < eviction_threshold_records < max_records`，生产分片不消费该配额。
+14. `database.type`/`database.path`/`database.records_path` 始终存在；prepare 阶段布局标记、数据库打开、migration 或写探针失败必须阻止启动，分片目录与统计库、缓存快照物理隔离。
+15. 聚合统计默认开启，按日和有界 client/transport/strategy/upstream/RCODE/cache 维度持久化；`dns.resolve_log.enable` 只控制详情记录，R/G/T 来自 `statistics.retention`。
 16. 所有配置资源在 bind 前形成有效首次 snapshot；任何首次读取、下载或校验失败都阻止启动，后续单资源刷新失败才保留该资源旧版本；成功刷新更新 policy fingerprint，但不能触发全局 cache clear。
 
-## 17. v1 范围外与版本化边界
+## 17. v2 范围外与版本化边界
 
-以下项目不在当前 v1 配置 schema 中，不应通过猜测扩展字段：
+以下项目不在当前 v2 配置 schema 中，不应通过猜测扩展字段：
 
 1. `dot`/`doq` listener 的字段、TLS/QUIC 材料来源和协议特有校验。
 2. 主动上游健康检查、熔断器和持久健康分数配置。
-3. 远程规则的 expected checksum、版本锁定和签名验证字段；v1 只记录内部 content hash/source fingerprint。
-4. 未来配置版本及 SQLite schema v6 之后的兼容窗口和 migration SQL；当前业务库升级链见 [Storage 模块](../architecture/backend/modules/storage.md)。
+3. 远程规则的 expected checksum、版本锁定和签名验证字段；当前只记录内部 content hash/source fingerprint。
+4. 旧配置/旧数据库兼容窗口或转换工具；当前业务库升级链见 [Storage 模块](../architecture/backend/modules/storage.md)。
 5. WebUI 配置写操作、缓存清理、权限分级和更长期的历史统计保留策略。
 
 ## 18. 协议依据

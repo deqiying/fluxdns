@@ -399,6 +399,30 @@ impl Fixture {
 }
 
 #[test]
+fn initial_user_commit_updates_v2_active_source_and_both_files() {
+    let fixture = Fixture::new();
+    let before = fixture.store.active_snapshot().unwrap();
+    let hash = "$argon2id$v=19$m=19456,t=2,p=1$c2FsdHNhbHQ$2M7ZV4yI1YVh7VdXk9G97A";
+
+    let commit = fixture.store.create_initial_user("admin", hash).unwrap();
+    let after = fixture.store.active_snapshot().unwrap();
+
+    assert_eq!(commit.users.len(), 1);
+    assert_eq!(commit.users[0].name, "admin");
+    assert_ne!(after.revision, before.revision);
+    assert_eq!(after.runtime_revision, before.runtime_revision);
+    assert_eq!(after.config.webui.users.len(), 1);
+    assert_eq!(
+        fs::read(&fixture.source).unwrap(),
+        fs::read(&fixture.derived).unwrap()
+    );
+    assert!(matches!(
+        fixture.store.create_initial_user("other", hash),
+        Err(ConfigStoreError::AlreadyInitialized)
+    ));
+}
+
+#[test]
 fn applied_operation_persists_original_source_and_repeated_sync_is_idempotent() {
     let fixture = Fixture::new();
     let old = fixture.store.active_snapshot().unwrap();

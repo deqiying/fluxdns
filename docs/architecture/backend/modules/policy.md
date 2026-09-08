@@ -52,7 +52,7 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 
 编译发生在 prepare/resource update，不在请求时解析字符串引用。
 
-索引只持有已解析 typed 值。`ResolvedClient`/`ClientRule` 以 `name` 表示配置管理键，以 `client_ids` 表示当前生产 v1 输入提供的请求身份集合；v2 契约只允许单个 `client_id`，待新版 loader 接线后映射到同一索引，不再沿用复数输入。client、strategy、route 分别编译，重复 name、重复 client ID、空 matcher 和引用错误在构造时拒绝。resource prepare 交付已编译 snapshot；同步测试构造器不等同完整资源准备入口。
+索引只持有已解析 typed 值。`ResolvedClient`/`ClientRule` 以 `name` 表示配置管理键，生产 v2 的单个 `client_id` 直接进入内部 `client_ids` 统一容器。client、strategy、route 分别编译，重复 name、重复 client ID、空 matcher 和引用错误在构造时拒绝。resource prepare 交付已编译 snapshot；同步测试构造器不等同完整资源准备入口。
 
 PolicyContext 在逐规则 matcher 前产生 cache/TTL/ECS/namespace；fast miss 后 RouteDecision 才执行 listener hosts 与有序 strategy rule。规则结果只输出 typed target、resource/version 和安全摘要。PolicyState 预计算不含观测/管理配置的语义基底，资源 CAS 同步更新 matcher 与 content hash，请求 fingerprint 只编码稳定字段。具体 core/registry 构造器见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)。
 

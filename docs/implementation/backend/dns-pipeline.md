@@ -42,7 +42,7 @@ SystemSocketFactory / typed binding
 
 `MemoryCacheStore`、`InMemoryStorageBackend` 和 `HostsCore`/`ServFailCore` 不在正式请求装配中。前两者用于与 Moka/SQLite 共用的 adapter 契约测试；后两者用于简化解析、dispatch/Transport 测试。它们不是查询性能优化，也不应为了清理名称相似的代码而删除生产 `MokaCacheStore`、`SqliteStorageBackend`、`PolicyDnsCore` 或 hosts upstream 使用的 `HostsTable`。
 
-`ResolvedClient` 与 `ClientRule` 显式区分配置管理 `name` 和请求 `client_ids`。`ClientIndex` 分别构建 name/exact ID 索引，ID 保持大小写敏感且优先于 IP；client CIDR 按前缀长度降序扫描，IPv4-mapped IPv6 在匹配与 cache digest 前归一化为 IPv4。当前生产 loader 仍为 v1，因此 resolved 值暂时保留复数请求 ID；v2 的单 `client_id` 契约尚未切换到生产 owner。hosts 使用 BTreeMap，rule exact/suffix 使用 BTreeSet，随后依次匹配 keyword/受限 regex。当前没有 CIDR/suffix trie。PolicyState 的 matcher/version/hash 一起发布，Runtime metadata 随后更新，不是跨两个 ArcSwap 的事务。
+`ResolvedClient` 与 `ClientRule` 显式区分配置管理 `name` 和请求 `client_ids`。`ClientIndex` 分别构建 name/exact ID 索引，ID 保持大小写敏感且优先于 IP；client CIDR 按前缀长度降序扫描，IPv4-mapped IPv6 在匹配与 cache digest 前归一化为 IPv4。生产 v2 loader 把单个 `client_id` 直接编译到运行时索引；复数容器只是内部统一形态，不表示配置仍接受 `match.ids`。hosts 使用 BTreeMap，rule exact/suffix 使用 BTreeSet，随后依次匹配 keyword/受限 regex。当前没有 CIDR/suffix trie。PolicyState 的 matcher/version/hash 一起发布，Runtime metadata 随后更新，不是跨两个 ArcSwap 的事务。
 
 ## Cache 与 TTL
 
@@ -76,7 +76,7 @@ parallel 的上述择优不依赖 sink 是否存在。Positive 提前返回时�
 | --- | --- | --- | --- | --- |
 | UDP/TCP/DoH | `transport/udp.rs`、`tcp.rs`、`doh.rs` | service 的 typed binding 与 session loop | 本次完整测试包含跨 UDP/TCP/DoH GET/POST 用例 | 本地 loopback，不是远程矩阵；DoH 入站非 HTTP/2 |
 | TLS / 客户端地址 | system socket TLS、DoH forwarded/PROXY parser | DoH accept 后先可信 PROXY、再 TLS、再 HTTP | 本轮核对生产分支 | 真实代理、证书和故障组合仍需环境验收 |
-| Moka / FDCS cache | `build_cache_facade`、`CacheSnapshotOwner`、二进制 codec | app 启动恢复、coordinator reload、service shutdown | 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际测试；旧 SQLite adapter 测试保留 | 固定 5 分钟过渡周期；未验证 Unix、真实磁盘满或 v2 冷启；late-window 组合见[Late-window 与 owner](#late-window-与-owner) |
+| Moka / FDCS cache | `build_cache_facade`、`CacheSnapshotOwner`、二进制 codec | app 从 v2 enabled/path/interval 启动恢复、coordinator reload、service shutdown | 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际测试；旧 SQLite adapter 测试保留 | 未验证 Unix、真实磁盘满；late-window 组合见[Late-window 与 owner](#late-window-与-owner) |
 | Policy -> 出站 | core -> registry -> protocol-independent connector | 正式配置构造支持真实 HTTP/代理路径 | 本轮静态，无远程请求 | 不等同所有 SOCKS/Host/SNI 组合已实测 |
 | 单次完成事件 | service instrumented core、resolution publisher | core 返回后、编码前无等待移交 | 本轮核对调用位置 | ingress 满会出现可观测 gap，不能承诺零丢失 |
 | bootstrap 地址缓存 | 配置绑定 resolver、绝对到期点、查填许可 | 两个配置工厂均装配，direct/HTTPS/SOCKS5 共用 | [address_cache_tests.rs](../../../backend/src/upstream/address_cache_tests.rs)；registry 的正式 hosts bootstrap/代理测试 | 单 connector 单项；不缓存 system lookup、负答案或过期地址 |

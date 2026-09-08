@@ -15,7 +15,7 @@
 `run_command` 的顺序是：
 
 1. 仅 `run` 先执行 `recover_pending_transaction`；`validate` 关闭 snapshot 写入，不恢复写事务。
-2. `ConfigLoader::load_from_path` 加载配置；`run` 再解析检查 SecretRef 并配置正式日志输出，始终创建 telemetry writer 和日志 owner，日志关闭不停止指标。
+2. `ConfigV2Loader::load_from_path` 只加载 `version: 2`，`run` 先恢复已知配置文件事务并建立 active `ConfigStore`，再检查 SecretRef、配置正式日志输出并始终创建 telemetry writer 和日志 owner。
 3. 调用 `PreparedRuntime::prepare_with_policy_core_and_remote_resources`，准备资源、Policy core 和 upstream；候选 prepare 不读写 cache snapshot。
 4. `StorageRuntime::open` 在共享 deadline 内建目录、打开统计/详情数据库、迁移并执行独立事务写入/回滚探针；失败映射为 prepare 错误，不创建服务 owner。
 5. app 创建唯一 `CacheSnapshotOwner`，在独立的有界 prepare deadline 内把快照分批恢复到活动 Moka；恢复故障降级冷启。owner 就绪后才继续 bind。
@@ -51,7 +51,7 @@ P1 的 logs enable/level/path 已进入 service-aware 热应用边界，先预�
 
 连续两次稳定观测后产生 `configuration_files_observed` 事件。tracing 调用点带组合 revision、readable/missing/unreadable/oversized 状态和 `not_reloaded`，不带内容或凭据；既有 `TypedTracingLayer` 只保留固定日志字段，正式 JSON 目前保留事件名而不保留上述自定义观测字段，不能将调用点字段当作已接线的状态投影。首次稳定状态也中性上报，不能静默接受 prepare 期间的外改。不解析或应用磁盘候选、不更新会话、不修改磁盘；变更提示不等于候选有效，也不猜测是否属于自写。退出停止调度并有界等待只读任务；若无法确认完成则显式警告，不声称 OS 文件 I/O 已取消。
 
-Windows 定向测试覆盖双文件、防抖、同长度内容变化、同内容文件身份替换、无效 YAML、缺失、非文件、超限和慢读取单在途。真实 UDP 服务在与生产相同的控制循环中，源/派生文件连续变化后保持同一个 Runtime、revision 和 DNS 策略；随后仅改 Hosts 资源文件，由正式 resource worker 到期刷新 DNS 结果，未手动调用 refresh。此处仍使用现有 v1 loader/runtime，不是 v2 生产启动验收。
+Windows 定向测试覆盖双文件、防抖、同长度内容变化、同内容文件身份替换、无效 YAML、缺失、非文件、超限和慢读取单在途。真实 UDP 服务在与生产相同的控制循环中，源/派生文件连续变化后保持同一个 Runtime、revision 和 DNS 策略；随后仅改 Hosts 资源文件，由正式 resource worker 到期刷新 DNS 结果，未手动调用 refresh。该 watcher 证据早于 BC-26，仍只证明外改不触发 reload；v2 冷启/重启证据单独记录。
 
 BC-30 已有 ConfigStore 的[还原内部能力](../configuration.md#p1-受管文件还原内部能力2026-09-07)和[外改确认重试](../configuration.md#p1-外改确认重试内部能力2026-09-07)，但配置 owner 的自写归属、脱敏差异和状态/还原/重试端点仍未接线；当前仅有日志通知，不等同于 WebUI 全局提示。文件系统停滞的强制中断、完整应用级 shutdown 总预算仍未验证。
 
@@ -61,7 +61,7 @@ BC-30 已有 ConfigStore 的[还原内部能力](../configuration.md#p1-受管�
 
 Windows Rust 1.98.0 定向证据：`runtime::bind::tests` 6 项、`service::tests::reload` 7 项通过；扩大到 `runtime::` 筛选回归 64 项通过（包含同名 cache runtime 测试），全部 Cargo 测试目标 `--no-run` 编译、fmt、文档及 diff 检查通过。新增 fake factory 用例核对改名复用、只准备变更端口、prepare/activate 失败后引用与释放计数；真实 loopback 用例仅改变 UDP 端口，确认 TCP/DoH 句柄 `Arc::ptr_eq`，在切换前后及占用新端口导致拒绝后执行 UDP/TCP/DoH POST/GET 查询，校验关联 ID、RCODE 和 canonical 响应一致。新用例不打开数据库、不加载个人配置，配置工作路径为 `_fluxdns/p1-service-differential`，端口由系统临时分配。
 
-这只是 BC-03 已接入现有 service 的差量 socket 子项，不是完整 BC-03。后续任务预注册、请求 drain 和服务控制队列实现见下文；仍需新配置 owner 的真实补偿与完整应用成功边界，以及 BC-02 到运行 owner 的接线。真实测试使用当前生产支持的 v1 配置，不证明 v2 loader、HTTP/WS、持续无丢包热更新或日志切换已可用。
+这只是 BC-03 已接入现有 service 的差量 socket 子项，不是完整 BC-03。后续任务预注册、请求 drain 和服务控制队列实现见下文；仍需新配置 owner 的真实补偿与完整应用成功边界。该批真实测试使用 v1 内存夹具，不证明后来接线的 v2 loader、HTTP/WS、持续无丢包热更新或日志切换组合已可用。
 
 ### P1 任务预注册子项（2026-09-07）
 

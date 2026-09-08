@@ -15,6 +15,7 @@ use serde::{Deserialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
+    contract::ConfigV2,
     migrate::{self, MigrationError, MigrationRegistry, MigrationReport},
     model::RawConfig,
     resolve::{self, ResolvedConfig},
@@ -66,6 +67,68 @@ pub struct ConfigLoadOutput {
     pub source_version: u32,
     pub migration_report: MigrationReport,
     pub snapshot: SnapshotStatus,
+}
+
+/// 正式 v2 启动产物，保留生成运行态的原始配置正文供活动源初始化。
+#[derive(Clone, Debug)]
+pub struct ConfigV2LoadOutput {
+    pub config: ConfigV2,
+    pub resolved: std::sync::Arc<ResolvedConfig>,
+    pub source_path: PathBuf,
+    pub source: std::sync::Arc<str>,
+    pub snapshot: SnapshotStatus,
+}
+
+/// 只接受 `version: 2` 的生产加载器，不注册旧版本迁移。
+pub struct ConfigV2Loader {
+    options: LoadOptions,
+}
+
+impl ConfigV2Loader {
+    pub fn new(options: LoadOptions) -> Self {
+        Self { options }
+    }
+
+    pub fn load_from_path<P: AsRef<Path>>(
+        &self,
+        path: P,
+    ) -> Result<ConfigV2LoadOutput, ConfigLoadError> {
+        let source_path = absolute_config_path(path.as_ref())?;
+        let bytes = read_bounded_file(&source_path, self.options.max_bytes)?;
+        let config = ConfigV2::parse(&bytes).map_err(ConfigLoadError::Validation)?;
+        let source = std::str::from_utf8(&bytes)
+            .map_err(|error| ConfigLoadError::InvalidUtf8 {
+                valid_up_to: error.valid_up_to(),
+            })?
+            .to_owned();
+        let resolved =
+            resolve::resolve_config_v2(&config, migrate::deterministic_hash(&bytes), &source_path)
+                .map_err(ConfigLoadError::Validation)?
+                .resolved;
+        let snapshot = if self.options.create_snapshot {
+            create_snapshot(
+                &resolved.work.path,
+                &source_path,
+                &bytes,
+                self.options.max_bytes,
+            )?
+        } else {
+            SnapshotStatus::Skipped
+        };
+        Ok(ConfigV2LoadOutput {
+            config,
+            resolved,
+            source_path,
+            source: std::sync::Arc::from(source),
+            snapshot,
+        })
+    }
+}
+
+impl Default for ConfigV2Loader {
+    fn default() -> Self {
+        Self::new(LoadOptions::default())
+    }
 }
 
 pub struct ConfigLoader {
@@ -373,8 +436,7 @@ where
     }
     validate_work_path_components(work_path)?;
     let target = work_path.join("config.yaml");
-    let source_parent = source_path.parent().unwrap_or_else(|| Path::new("."));
-    if equivalent_directory(source_parent, work_path) {
+    if equivalent_path(source_path, &target) {
         return Ok(SnapshotStatus::SourceInWorkDirectory { path: target });
     }
     fs::create_dir_all(work_path).map_err(|source| ConfigLoadError::SnapshotIo {
@@ -564,7 +626,7 @@ fn sync_directory(path: &Path) -> Result<(), ConfigLoadError> {
     Ok(())
 }
 
-fn equivalent_directory(left: &Path, right: &Path) -> bool {
+fn equivalent_path(left: &Path, right: &Path) -> bool {
     let left = fs::canonicalize(left).unwrap_or_else(|_| lexical_absolute(left));
     let right = fs::canonicalize(right).unwrap_or_else(|_| lexical_absolute(right));
     left == right
@@ -871,7 +933,7 @@ mod tests {
         let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
         let unknown = format!(
             "{}\nunknown: true\n",
-            include_str!("../../../config-example.yaml")
+            include_str!("../../tests/fixtures/config-v1.yaml")
         );
         assert!(matches!(
             loader.load_str(&unknown),
@@ -880,7 +942,7 @@ mod tests {
 
         let duplicate = format!(
             "{}\nversion: 1\n",
-            include_str!("../../../config-example.yaml")
+            include_str!("../../tests/fixtures/config-v1.yaml")
         );
         assert!(matches!(
             loader.load_str(&duplicate),
@@ -889,7 +951,7 @@ mod tests {
 
         let multiple = format!(
             "{}\n---\nversion: 1\n",
-            include_str!("../../../config-example.yaml")
+            include_str!("../../tests/fixtures/config-v1.yaml")
         );
         assert!(matches!(
             loader.load_str(&multiple),
@@ -920,7 +982,7 @@ mod tests {
     #[test]
     fn strict_loader_rejects_explicit_null_instead_of_treating_it_as_missing() {
         let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
-        let source = include_str!("../../../config-example.yaml").replacen(
+        let source = include_str!("../../tests/fixtures/config-v1.yaml").replacen(
             "  cache:\n",
             "  cache: null\n",
             1,
@@ -946,7 +1008,7 @@ mod tests {
     #[test]
     fn loader_rejects_empty_tls_certificate_path() {
         let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
-        let source = include_str!("../../../config-example.yaml").replace(
+        let source = include_str!("../../tests/fixtures/config-v1.yaml").replace(
             "certificate_file: ./tls/fullchain.pem",
             "certificate_file: \"\"",
         );
@@ -997,7 +1059,7 @@ mod tests {
         let config_dir = root.join("bootstrap");
         let config_path = config_dir.join("config.yaml");
         fs::create_dir_all(&config_dir).unwrap();
-        let source = include_str!("../../../config-example.yaml")
+        let source = include_str!("../../tests/fixtures/config-v1.yaml")
             .replace("path: /etc/fluxdns", "path: ../runtime")
             .replace("rules_path: ./rules", "rules_path: ./rules/../rules")
             .replace(
@@ -1030,7 +1092,7 @@ mod tests {
         let config_dir = root.join("bootstrap");
         let config_path = config_dir.join("input.yaml");
         fs::create_dir_all(&config_dir).unwrap();
-        let source = include_str!("../../../config-example.yaml")
+        let source = include_str!("../../tests/fixtures/config-v1.yaml")
             .replace("path: /etc/fluxdns", "path: ../runtime");
         fs::write(&config_path, source.as_bytes()).unwrap();
 
@@ -1049,8 +1111,8 @@ mod tests {
 
     #[test]
     fn load_without_source_rejects_relative_work_path() {
-        let source =
-            include_str!("../../../config-example.yaml").replace("path: /etc/fluxdns", "path: ./");
+        let source = include_str!("../../tests/fixtures/config-v1.yaml")
+            .replace("path: /etc/fluxdns", "path: ./");
         let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
         let error = loader.load_str(&source).unwrap_err();
         match error {
@@ -1064,5 +1126,55 @@ mod tests {
             }
             other => panic!("expected missing config base error, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn v2_loader_resolves_new_paths_and_creates_exact_snapshot() {
+        let root = temp_dir();
+        let source_path = root.join("input.yaml");
+        let source = include_str!("../../tests/fixtures/config-v2.yaml");
+        fs::write(&source_path, source).unwrap();
+
+        let output = super::ConfigV2Loader::default()
+            .load_from_path(&source_path)
+            .unwrap();
+
+        assert_eq!(output.config.version, 2);
+        assert_eq!(output.resolved.version, 2);
+        assert_eq!(
+            output.resolved.database.path,
+            root.join("data/statistics.sqlite3")
+        );
+        assert_eq!(
+            output.resolved.database.records_path,
+            root.join("data/queries")
+        );
+        assert!(!output.resolved.dns.cache.persistence_enabled);
+        assert_eq!(output.resolved.statistics.retention_days, 7);
+        assert_eq!(output.source.as_ref(), source);
+        assert_eq!(
+            fs::read(root.join("config.yaml")).unwrap(),
+            source.as_bytes()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn v2_loader_rejects_v1_without_migration() {
+        let root = temp_dir();
+        let source_path = root.join("input.yaml");
+        fs::write(
+            &source_path,
+            include_str!("../../tests/fixtures/config-v1.yaml"),
+        )
+        .unwrap();
+
+        let error = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot())
+            .load_from_path(&source_path)
+            .unwrap_err();
+
+        assert!(matches!(error, ConfigLoadError::Validation(_)));
+        assert!(error.to_string().contains("new development directory"));
+        let _ = fs::remove_dir_all(root);
     }
 }

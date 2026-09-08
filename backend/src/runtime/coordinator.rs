@@ -464,10 +464,7 @@ impl RuntimeCoordinator {
         let core = snapshot
             .policy_core_arc()
             .ok_or(CacheSnapshotOwnerBuildError::MissingSource)?;
-        let settings = CacheSnapshotSettings::from_current_config(
-            snapshot.config(),
-            core.cache().options().enabled,
-        )?;
+        let settings = CacheSnapshotSettings::from_current_config(snapshot.config())?;
         Ok(Some(owner.prepare_switch(
             snapshot.revision(),
             core.cache_snapshot_source(),
@@ -1042,11 +1039,7 @@ clients: []
         let owner = CacheSnapshotOwner::start(
             RuntimeRevision(1),
             initial_core.cache_snapshot_source(),
-            CacheSnapshotSettings::from_current_config(
-                initial.snapshot().config(),
-                initial_core.cache().options().enabled,
-            )
-            .unwrap(),
+            CacheSnapshotSettings::from_current_config(initial.snapshot().config()).unwrap(),
             Deadline::new(Instant::now() + Duration::from_secs(5)),
         )
         .await
