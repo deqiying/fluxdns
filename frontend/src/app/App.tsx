@@ -13,12 +13,13 @@ const SystemPage = lazy(() => import("@/modules/system/SystemPage").then((module
 const ProxiesPage = lazy(() => import("@/modules/proxies/ProxiesPage").then((module) => ({ default: module.ProxiesPage })));
 const HostsPage = lazy(() => import("@/modules/hosts/HostsPage").then((module) => ({ default: module.HostsPage })));
 const RuleSetsPage = lazy(() => import("@/modules/rule-sets/RuleSetsPage").then((module) => ({ default: module.RuleSetsPage })));
+const StrategiesPage = lazy(() => import("@/modules/strategies/StrategiesPage").then((module) => ({ default: module.StrategiesPage })));
 const PendingModulePage = lazy(() => import("./PendingModulePage").then((module) => ({ default: module.PendingModulePage })));
 const UpstreamsPage = lazy(() => import("@/modules/upstreams/UpstreamsPage").then((module) => ({ default: module.UpstreamsPage })));
 const NotFoundPage = lazy(() => import("./NotFoundPage").then((module) => ({ default: module.NotFoundPage })));
 
 const pendingRoutes = managementRoutes.filter(
-  ({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/hosts" && path !== "/rule-sets" && path !== "/proxies" && path !== "/system-runtime",
+  ({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/proxies" && path !== "/system-runtime",
 );
 
 export function App() {
@@ -35,6 +36,7 @@ export function App() {
             <Route path="/upstreams" element={<UpstreamsPage />} />
             <Route path="/hosts" element={<HostsPage />} />
             <Route path="/rule-sets" element={<RuleSetsPage />} />
+            <Route path="/strategies" element={<StrategiesPage />} />
             <Route path="/proxies" element={<ProxiesPage />} />
             <Route path="/system-runtime" element={<SystemPage />} />
             {pendingRoutes.map((route) => (

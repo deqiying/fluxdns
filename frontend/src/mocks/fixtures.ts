@@ -404,6 +404,24 @@ export const upstreamsConfigReadFixture = {
   runtime: [],
 } satisfies V2Schemas["ConfigRead"];
 
+export const strategiesConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [{
+    module: "strategy",
+    value: {
+      name: "default",
+      default_upstream: "default-group",
+      rules: [{ hosts: "local" }, { rule_set: "domains", upstream: "secure-dns" }],
+      cache: { enabled: true },
+      ttl_override: { enabled: true, min: "30000000000ns", max: "3600000000000ns" },
+      edns_client_subnet: { mode: "disabled" },
+    },
+  }],
+  effective: [{ path: "strategy.default.cache.enabled", source: "strategy", value: true }],
+  references: [{ from_module: "listener", from_name: "local", path: "strategy", to_name: "default" }],
+  runtime: [],
+} satisfies V2Schemas["ConfigRead"];
+
 export const systemConfigReadFixture = {
   state: synchronizedConfigStateFixture,
   work_path: "D:/Projects/Rust/fluxdns/_fluxdns",

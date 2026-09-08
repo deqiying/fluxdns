@@ -426,6 +426,28 @@ select {
   margin-bottom: 0;
 }
 
+.strategy-rules {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 22px;
+}
+
+.strategy-rule-row {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 120px minmax(0, 1fr) minmax(0, 1fr) 106px;
+}
+
+.strategy-rule-row .ant-form-item,
+.paired-fields .ant-form-item {
+  margin-bottom: 0;
+}
+
+.paired-fields,
+.paired-fields > .ant-space-item {
+  width: 100%;
+}
+
 .filter-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
@@ -616,6 +638,10 @@ select {
   .nested-form-row {
     gap: 4px !important;
     grid-template-columns: minmax(0, 1fr) 88px repeat(3, 32px);
+  }
+
+  .strategy-rule-row {
+    grid-template-columns: 100px minmax(0, 1fr) 96px;
   }
 
   .app-sider {

@@ -214,7 +214,7 @@ describe("application routes", () => {
 
   it.each(
     managementRoutes
-      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/hosts" && path !== "/rule-sets" && path !== "/proxies" && path !== "/system-runtime")
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/proxies" && path !== "/system-runtime")
       .map(({ path, title }) => [path, title]),
   )("有效 session 可加载未接线入口 %s", async (path, heading) => {
     setMockAuthenticated(true);
@@ -284,6 +284,14 @@ describe("application routes", () => {
     expect(await screen.findByRole("heading", { name: "规则集", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("domains")).toBeInTheDocument();
     expect(screen.getByText("stale")).toBeInTheDocument();
+  });
+
+  it("策略页面展示有序规则和覆盖来源", async () => {
+    setMockAuthenticated(true);
+    renderApp("/strategies");
+    expect(await screen.findByRole("heading", { name: "DNS 分流策略", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("default-group")).toBeInTheDocument();
+    expect(screen.getByText("2 条")).toBeInTheDocument();
   });
 
   it("系统运行状态显示 v2 进程采样并可手动刷新", async () => {
