@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
 import { setMockAuthenticated, setMockSetupRequired } from "@/mocks/handlers";
+import { processMetricsFixture } from "@/mocks/fixtures";
 import { server } from "@/mocks/server";
 import { AppProviders } from "./providers";
 import { App } from "./App";
@@ -98,13 +99,54 @@ describe("application routes", () => {
 
   it.each(
     managementRoutes
-      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams")
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/system-runtime")
       .map(({ path, title }) => [path, title]),
   )("有效 session 可加载未接线入口 %s", async (path, heading) => {
     setMockAuthenticated(true);
     renderApp(path);
     expect(await screen.findByRole("heading", { name: heading, level: 2 })).toBeInTheDocument();
     expect(screen.getByText("当前版本暂不可用。")).toBeInTheDocument();
+  });
+
+  it("系统运行状态显示 v2 进程采样并可手动刷新", async () => {
+    const user = userEvent.setup();
+    let processRequests = 0;
+    setMockAuthenticated(true);
+    server.use(
+      http.get("/api/v2/system/runtime", () => {
+        processRequests += 1;
+        return HttpResponse.json(processMetricsFixture);
+      }),
+    );
+    renderApp("/system-runtime");
+
+    expect(await screen.findByRole("heading", { name: "系统运行状态", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("186.4 MiB")).toBeInTheDocument();
+    expect(screen.getByText("1.25%")).toBeInTheDocument();
+    expect(screen.getByText("18")).toBeInTheDocument();
+    expect(screen.getByText("0.1.0-dev")).toBeInTheDocument();
+    expect(screen.getByText(/02:00:/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(processRequests).toBe(2));
+  });
+
+  it("系统运行状态不把不可用进程读数伪装为零", async () => {
+    setMockAuthenticated(true);
+    server.use(
+      http.get("/api/v2/system/runtime", () => HttpResponse.json({
+        ...processMetricsFixture,
+        rss_bytes: { state: "unavailable", reason: "sampling_failed", observed_seconds: null },
+        cpu_percent: { state: "unavailable", reason: "warmup", observed_seconds: 1 },
+        threads: { state: "unavailable", reason: "unsupported", observed_seconds: null },
+      })),
+    );
+    renderApp("/system-runtime");
+
+    expect(await screen.findByText("sampling_failed")).toBeInTheDocument();
+    expect(screen.getByText("warmup")).toBeInTheDocument();
+    expect(screen.getByText("unsupported")).toBeInTheDocument();
+    expect(screen.queryByText("0 MiB")).not.toBeInTheDocument();
   });
 
   it("按三组展示十二个入口并保持当前激活态", async () => {

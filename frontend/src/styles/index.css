@@ -309,6 +309,67 @@ select {
   font-size: 12px;
 }
 
+.system-runtime-content {
+  width: 100%;
+}
+
+.system-runtime-metrics {
+  display: grid;
+  width: 100%;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-block: 1px solid #e8e9ec;
+}
+
+.system-runtime-metric {
+  min-width: 0;
+  min-height: 132px;
+  padding: 24px 28px;
+}
+
+.system-runtime-metric + .system-runtime-metric {
+  border-inline-start: 1px solid #e8e9ec;
+}
+
+.system-runtime-value {
+  min-height: 48px;
+  margin-top: 14px;
+  color: #202124;
+  font-size: 28px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.system-runtime-value .ant-typography {
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.system-runtime-details {
+  width: 100%;
+}
+
+.system-runtime-details h4.ant-typography {
+  margin: 0;
+  font-size: 18px;
+}
+
+.system-runtime-descriptions {
+  margin-top: 14px;
+  padding-block: 4px;
+  border-block: 1px solid #e8e9ec;
+}
+
+.system-runtime-descriptions .ant-descriptions-row > th,
+.system-runtime-descriptions .ant-descriptions-row > td {
+  padding-block: 16px;
+  border-bottom: 1px solid #f0f1f3;
+}
+
+.system-runtime-descriptions .ant-descriptions-item-label {
+  width: 132px;
+  color: #63666d;
+}
+
 .table-toolbar {
   margin-bottom: 18px;
 }
@@ -469,6 +530,18 @@ select {
 }
 
 @media (max-width: 900px) {
+  .system-runtime-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .system-runtime-metric:nth-child(3) {
+    border-inline-start: 0;
+  }
+
+  .system-runtime-metric:nth-child(n + 3) {
+    border-top: 1px solid #e8e9ec;
+  }
+
   .login-page {
     grid-template-columns: 1fr;
   }
@@ -507,5 +580,23 @@ select {
 
   .content-wrap {
     padding: 20px 16px;
+  }
+
+  .system-runtime-metrics {
+    grid-template-columns: 1fr;
+  }
+
+  .system-runtime-metric {
+    min-height: 112px;
+    padding: 20px 4px;
+  }
+
+  .system-runtime-metric + .system-runtime-metric {
+    border-top: 1px solid #e8e9ec;
+    border-inline-start: 0;
+  }
+
+  .system-runtime-value {
+    font-size: 25px;
   }
 }

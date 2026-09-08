@@ -9,11 +9,14 @@ const DashboardPage = lazy(() => import("@/modules/dashboard/DashboardPage").the
 const LoginPage = lazy(() => import("@/modules/auth/LoginPage").then((module) => ({ default: module.LoginPage })));
 const InitializePage = lazy(() => import("@/modules/auth/InitializePage").then((module) => ({ default: module.InitializePage })));
 const QueriesPage = lazy(() => import("@/modules/queries/QueriesPage").then((module) => ({ default: module.QueriesPage })));
+const SystemPage = lazy(() => import("@/modules/system/SystemPage").then((module) => ({ default: module.SystemPage })));
 const PendingModulePage = lazy(() => import("./PendingModulePage").then((module) => ({ default: module.PendingModulePage })));
 const PendingUpstreamsPage = lazy(() => import("./PendingModulePage").then((module) => ({ default: module.PendingUpstreamsPage })));
 const NotFoundPage = lazy(() => import("./NotFoundPage").then((module) => ({ default: module.NotFoundPage })));
 
-const pendingRoutes = managementRoutes.filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams");
+const pendingRoutes = managementRoutes.filter(
+  ({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/system-runtime",
+);
 
 export function App() {
   return (
@@ -27,6 +30,7 @@ export function App() {
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/queries" element={<QueriesPage />} />
             <Route path="/upstreams" element={<PendingUpstreamsPage />} />
+            <Route path="/system-runtime" element={<SystemPage />} />
             {pendingRoutes.map((route) => (
               <Route key={route.path} path={route.path} element={<PendingModulePage title={route.title} />} />
             ))}

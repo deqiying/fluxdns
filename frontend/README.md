@@ -37,4 +37,4 @@ pnpm run test
 pnpm run build
 ```
 
-生成类型不手工修改。P0 [v2 目标契约](openapi/management-api-v2.yaml) 生成到独立 `generated-v2.ts`；当前业务页面仍使用 v1，FC-02 配置公共层已显式使用 v2 client，后端 v2 命名空间目前只开放 BC-23 两个指标读端点，尚未成套切换正式配置路由。`generate:api` 同时更新当前与目标产物，`test:contract:v2` 单独校验跨端夹具。上述为操作命令，不是通过记录。内嵌打包、显式配置启动、版本与自动发布，以及浏览器/原生平台的现有验收边界，统一见[交付实现](../docs/implementation/delivery.md)。
+生成类型不手工修改。P0 [v2 目标契约](openapi/management-api-v2.yaml) 生成到独立 `generated-v2.ts`；dashboard/queries 仍使用 v1，`/system-runtime` 已使用 BC-23 的 v2 进程指标并复用 v1 基础信息，FC-02 配置公共层也显式选择 v2 client。后端 v2 命名空间目前只开放 BC-23 两个指标读端点，尚未成套切换正式配置路由。`generate:api` 同时更新当前与目标产物，`test:contract:v2` 单独校验跨端夹具。上述为操作命令，不是通过记录。内嵌打包、显式配置启动、版本与自动发布，以及浏览器/原生平台的现有验收边界，统一见[交付实现](../docs/implementation/delivery.md)。

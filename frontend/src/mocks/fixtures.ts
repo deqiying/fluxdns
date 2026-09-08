@@ -9,6 +9,9 @@ import type {
   StatisticsPage,
   SystemInfo,
 } from "@/shared/api/types";
+import type { components as V2Components } from "@/shared/api/generated-v2";
+
+type V2Schemas = V2Components["schemas"];
 
 export const setupReadyFixture = { state: "ready" } satisfies SetupStatus;
 export const setupRequiredFixture = { state: "required" } satisfies SetupStatus;
@@ -248,3 +251,11 @@ export const systemFixture = {
     "read:system",
   ],
 } satisfies SystemInfo;
+
+export const processMetricsFixture = {
+  sampled_at_ms: Date.parse("2026-09-03T08:00:00Z"),
+  uptime_seconds: 7_200,
+  rss_bytes: { state: "available", value: "195454566" },
+  cpu_percent: { state: "available", value: 1.25 },
+  threads: { state: "available", value: 18 },
+} satisfies V2Schemas["ProcessMetrics"];

@@ -3,6 +3,7 @@ import type { AuthSession } from "@/shared/api/types";
 import {
   healthFixture,
   overviewFixture,
+  processMetricsFixture,
   queryPageFixture,
   resourceFixture,
   runtimeFixture,
@@ -129,4 +130,5 @@ export const handlers = [
   }),
   http.get("/api/v1/resources", readOnly(resourceFixture)),
   http.get("/api/v1/system", readOnly(systemFixture)),
+  http.get("/api/v2/system/runtime", readOnly(processMetricsFixture)),
 ];

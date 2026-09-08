@@ -4,9 +4,9 @@
 >
 > 适用范围：前端 bootstrap、provider、路由鉴权、HTTP client 与会话回收
 >
-> 最后核对：2026-09-08（P1 壳层、路由、主题与认证边界核对）
+> 最后核对：2026-09-08（P1 壳层、认证、配置基础与系统运行状态接线核对）
 >
-> 核对基线：`0c1b8171f335c49c57cfb525bab98605923533bd`
+> 核对基线：`a47725dbcf57e000213ba1dacb72ef189fc14d7a`
 
 ## 入口
 
@@ -45,7 +45,7 @@ mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状�
 
 [`AppLayout`](../../../frontend/src/shared/components/AppLayout.tsx) 从同一 `managementRoutes` 契约生成“监控 / DNS 管理 / 系统”三组 12 个一级入口，使用 Lucide 图标、浅色侧栏、面包屑、当前用户与图标化登出/折叠控件。桌面侧栏独立滚动；小于 720px 时改用 Drawer，不缩放固定宽画布。未知路径不选择任一菜单项，旧 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 路径不兼容跳转。
 
-`/dashboard` 和 `/queries` 继续消费当前 v1 真实只读数据；其他 10 个入口使用 [`PendingModulePage`](../../../frontend/src/app/PendingModulePage.tsx) 明确显示暂不可用，不加载或伪造图稿数据。`/upstreams` 仅接入“上游 / 上游组”页内 tab 壳层，`tab=groups` 进入浏览器历史；业务列表和表单仍归 FC-06。主题 token 改为浅灰导航、白工作区、蓝色主操作及独立成功/警告/错误色；未增加暗色全站主题。
+`/dashboard` 和 `/queries` 继续消费当前 v1 真实只读数据；FC-14 又将 `/system-runtime` 接入真实 v2 进程读数。其余九个入口不加载或伪造图稿业务数据，其中八个使用 [`PendingModulePage`](../../../frontend/src/app/PendingModulePage.tsx)，`/upstreams` 仅接入“上游 / 上游组”页内 tab 壳层，`tab=groups` 进入浏览器历史；业务列表和表单仍归 FC-06。主题 token 改为浅灰导航、白工作区、蓝色主操作及独立成功/警告/错误色；未增加暗色全站主题。
 
 Windows 浏览器 fixture 验证覆盖默认桌面、390×844、移动 Drawer 跳转、上游 tab URL、Console warning/error 为空；Vitest 定向路由测试 22 项通过。fixture 不证明 v2 handler、真实配置页面、深链接静态 fallback 或生产内嵌资源已接线；已接入页面仍使用 `/api/v1`。
 
@@ -67,6 +67,14 @@ Windows 浏览器 fixture 验证覆盖默认桌面、390×844、移动 Drawer �
 
 这组基础当前没有挂入 `AppLayout`，也没有启动全局 polling：后端 BC-30 尚未注册正式配置状态/差异/文件操作 route，提前挂载只会制造持续失败请求。各模块的组合差异编辑仍需 FC-05 至 FC-13 提供真实领域表单；当前组件只暴露可选入口，不伪造通用 YAML 或自动合并能力。
 
+## P1 系统运行状态（2026-09-08）
+
+[`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 已从旧 `/system` 路由退出后的未挂载源码转为 `/system-runtime` 正式页面。进程数据由 [`getProcessMetrics`](../../../frontend/src/modules/system/api.ts) 读取 BC-23 的 `/api/v2/system/runtime`，沿共享 Bearer client 展示运行时长、RSS、CPU、线程与采样时间；现有 `/api/v1/system` 只补版本、启动时间和管理能力，两路失败可独立降级。
+
+[`useProcessMetrics`](../../../frontend/src/modules/system/hooks.ts) 复用 30 秒可见性轮询和手动刷新；uptime 只从有效响应基准按接收时刻本地递增，隐藏页不逐秒渲染。RSS 格式化保留十进制 u64 字符串到 BigInt 的精度并统一显示 MiB；后端 measurement 的 `warmup`、`observation_gap`、`sampling_failed`、`unsupported` 原因显式呈现，不映射为零。页面没有 QPS/RPM、停止、重启或日志写操作。
+
+Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-setup/` 的 loopback 后端，完成登录、导航、可用进程样本和手动刷新；实际 RSS/CPU/thread 及时间字段正确展示，刷新后 sample/uptime 推进，浏览器日志为空。该证据不覆盖窄屏或真实 OS 采样失败，后者仅由前端 fixture 与 BC-23 后端测试分别覆盖。
+
 ## 能力与证据
 
 2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换；新增 `apiV2Request` 仅由明确的新版模块调用，不提供运行时 v1/v2 选择开关。
@@ -83,8 +91,9 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | 同源请求/取消 | `apiRequest`、unauthorized listener | 各 module API 共用 client | P1 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
 | 退出数据清理 | `performLogout` finally | AppLayout 使用 auth logout | 本轮核对实际分支 | 401 与 logout 清理行为不同，不能混写 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
-| 12 路由壳层 | route-contract、App、AppLayout、PendingModulePage | 受保护路由与分组导航 | 22 项路由测试；桌面/390×844 fixture 浏览器与 Console 检查 | 仅 dashboard/queries 有真实 v1 数据；v2 和业务页面未接线 |
+| 12 路由壳层 | route-contract、App、AppLayout、PendingModulePage | 受保护路由与分组导航 | 23 项路由测试；桌面/390×844 fixture 浏览器与 Console 检查沿用 FC-01 证据 | 八个入口为空态，upstreams 仍只有 tab 壳层 |
 | 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 仅供后续模块调用，未挂载业务页 | FC-02 定向 Vitest 27 项、typecheck | MSW/jsdom；正式 v2 配置 route、真实文件和浏览器交互未验收 |
 | 外部变化基础 | external-change reducer、Banner/Drawer、文件单次 mutation 回读 | 未挂 AppLayout，等待 BC-30 | FC-16 基础定向 Vitest 8 项、typecheck | 无真实文件/后端/browser；组合采用等待领域表单 |
+| 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取 v2 进程指标和 v1 基础信息 | FC-14 定向 27 项；完整 Vitest 19 文件 80 项；typecheck/build；Windows 真实浏览器/后端可用样本 | 窄屏和真实不可用 OS 样本未做浏览器验收；其他 v2 页面未接线 |
 
-2026-09-05 原核对未运行 pnpm 或浏览器；P1 新增的 Bearer、壳层与 FC-02 证据见上节。历史记录与尚无运行证据的环境边界见[交付证据](../delivery.md)，不把共享组件/MSW 回归算作 v2 生产切换或业务页面完成。
+2026-09-05 原核对未运行 pnpm 或浏览器；P1 新增的 Bearer、壳层、FC-02/16 和 FC-14 证据见上节。历史记录与尚无运行证据的环境边界见[交付证据](../delivery.md)，不把共享组件/MSW 回归算作整套 v2 生产切换或其他业务页面完成。
