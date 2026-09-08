@@ -58,6 +58,13 @@ pub struct StatsPersistenceWorker {
     flush_lock: tokio::sync::Mutex<()>,
 }
 
+/// 序列化 retention 与普通 flush，并冻结本轮可安全回收的 batch replay 下界。
+pub(crate) struct StatsRetentionLease<'a> {
+    worker: &'a StatsPersistenceWorker,
+    replay_floor_batch_id: u64,
+    _guard: tokio::sync::MutexGuard<'a, ()>,
+}
+
 impl StatsPersistenceWorker {
     pub fn new(backend: Arc<dyn StorageBackend>) -> Self {
         Self::with_accumulator(backend, Arc::new(StatsAccumulator::with_default_shards()))
@@ -67,10 +74,27 @@ impl StatsPersistenceWorker {
         backend: Arc<dyn StorageBackend>,
         accumulator: Arc<StatsAccumulator>,
     ) -> Self {
+        Self::with_accumulator_and_next_batch_id(backend, accumulator, 1)
+    }
+
+    pub(crate) fn with_next_batch_id(backend: Arc<dyn StorageBackend>, next_batch_id: u64) -> Self {
+        Self::with_accumulator_and_next_batch_id(
+            backend,
+            Arc::new(StatsAccumulator::with_default_shards()),
+            next_batch_id,
+        )
+    }
+
+    fn with_accumulator_and_next_batch_id(
+        backend: Arc<dyn StorageBackend>,
+        accumulator: Arc<StatsAccumulator>,
+        next_batch_id: u64,
+    ) -> Self {
+        debug_assert!(next_batch_id > 0);
         Self {
             backend,
             accumulator,
-            ledger: Mutex::new(BatchLedger::new()),
+            ledger: Mutex::new(BatchLedger::with_next_batch_id(next_batch_id)),
             flush_lock: tokio::sync::Mutex::new(()),
         }
     }
@@ -98,6 +122,33 @@ impl StatsPersistenceWorker {
     pub fn persistence_gap(&self) -> PersistenceGapState {
         let ledger = self.ledger.lock().expect("stats ledger lock poisoned");
         self.accumulator.persistence_gap(&ledger)
+    }
+
+    pub(crate) async fn begin_retention(
+        &self,
+        deadline: Deadline,
+    ) -> Result<StatsRetentionLease<'_>, StatsPersistenceError> {
+        let guard = tokio::time::timeout(
+            deadline.remaining(std::time::Instant::now()),
+            self.flush_lock.lock(),
+        )
+        .await
+        .map_err(|_| {
+            StatsPersistenceError::Backend(PortError::new(
+                PortErrorClass::Timeout,
+                "stats_persistence.retention_lock",
+            ))
+        })?;
+        let replay_floor_batch_id = self
+            .ledger
+            .lock()
+            .expect("stats ledger lock poisoned")
+            .replay_floor_batch_id();
+        Ok(StatsRetentionLease {
+            worker: self,
+            replay_floor_batch_id,
+            _guard: guard,
+        })
     }
 
     /// 等待其他 flush 时共享调用方 deadline，再按既有 epoch/batch 顺序提交。
@@ -193,6 +244,20 @@ impl StatsPersistenceWorker {
             PersistenceGapState::Clear
         );
         Ok(summary)
+    }
+}
+
+impl StatsRetentionLease<'_> {
+    pub(crate) const fn replay_floor_batch_id(&self) -> u64 {
+        self.replay_floor_batch_id
+    }
+
+    pub(crate) fn commit(self) {
+        self.worker
+            .ledger
+            .lock()
+            .expect("stats ledger lock poisoned")
+            .reclaim_committed_before(self.replay_floor_batch_id);
     }
 }
 

@@ -12,7 +12,10 @@ use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, S
 use sqlx::{Row, SqlitePool};
 use thiserror::Error;
 use time::{Date, Month};
-use tokio::sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{
+    OwnedMutexGuard, OwnedRwLockReadGuard, OwnedRwLockWriteGuard, OwnedSemaphorePermit, RwLock,
+    Semaphore, mpsc,
+};
 
 use crate::dns::Deadline;
 use crate::ports::{PortError, PortErrorClass};
@@ -74,6 +77,7 @@ pub struct DetailShardStore {
     root: Arc<PathBuf>,
     protected_paths: Arc<Vec<PathBuf>>,
     day_locks: Mutex<HashMap<i32, Weak<tokio::sync::Mutex<()>>>>,
+    retention_gate: Arc<RwLock<()>>,
     permits: Arc<Semaphore>,
     max_active: usize,
     active: Arc<AtomicUsize>,
@@ -91,8 +95,21 @@ pub(crate) struct DetailShardLease {
     path: PathBuf,
     pool: SqlitePool,
     active: Arc<AtomicUsize>,
+    _retention_guard: OwnedRwLockReadGuard<()>,
     _day_guard: OwnedMutexGuard<()>,
     _permit: OwnedSemaphorePermit,
+}
+
+/// 冻结所有分片 lease，供共同水位事务成功后原子发布详情逻辑边界。
+pub(crate) struct DetailRetentionPublicationLease<'a> {
+    store: &'a DetailShardStore,
+    _guard: OwnedRwLockWriteGuard<()>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DetailStorageSample {
+    pub bytes: u64,
+    pub shard_days: Vec<i32>,
 }
 
 /// 先发布退役状态、再等待既有读写 lease 排空后的独占日锁。
@@ -119,6 +136,7 @@ impl DetailShardStore {
             root: Arc::new(root),
             protected_paths: Arc::new(protected_paths),
             day_locks: Mutex::new(HashMap::new()),
+            retention_gate: Arc::new(RwLock::new(())),
             permits: Arc::new(Semaphore::new(max_active)),
             max_active,
             active: Arc::new(AtomicUsize::new(0)),
@@ -143,6 +161,7 @@ impl DetailShardStore {
     }
 
     /// 获取写 lease；同一天串行，不同天共享全局连接上限。
+    #[allow(dead_code)] // 直接 lease 仅供存储契约测试；生产批写通过 write_records 统一处理水位丢弃。
     pub(crate) async fn acquire_write(
         &self,
         day_utc: i32,
@@ -170,6 +189,12 @@ impl DetailShardStore {
         writable: bool,
         deadline: Deadline,
     ) -> Result<Option<DetailShardLease>, PortError> {
+        let retention_guard = deadline_future(
+            deadline,
+            "detail_shard.retention_gate",
+            Arc::clone(&self.retention_gate).read_owned(),
+        )
+        .await?;
         if !self.day_is_visible(day_utc) {
             return Ok(None);
         }
@@ -223,6 +248,7 @@ impl DetailShardStore {
             path,
             pool,
             active: Arc::clone(&self.active),
+            _retention_guard: retention_guard,
             _day_guard: day_guard,
             _permit: permit,
         }))
@@ -237,7 +263,22 @@ impl DetailShardStore {
         if records.is_empty() {
             return Ok(SqliteResolveDetailFlushSummary::default());
         }
-        let lease = self.acquire_write(day_utc, deadline).await?;
+        let lease = match self.acquire(day_utc, true, deadline).await? {
+            Some(lease) => lease,
+            None if self.day_is_retired(day_utc) => {
+                return Ok(SqliteResolveDetailFlushSummary {
+                    committed: 0,
+                    evicted: 0,
+                    dropped: records.len() as u64,
+                });
+            }
+            None => {
+                return Err(PortError::new(
+                    PortErrorClass::Unavailable,
+                    "detail_shard.write_lease",
+                ));
+            }
+        };
         let pool = lease.pool.clone();
         #[cfg(test)]
         self.pause_detail_for_test(DetailSqlTestStage::BeforeSql)
@@ -314,6 +355,99 @@ impl DetailShardStore {
         }
     }
 
+    /// 等待现有读写 lease 全部归还，并在持锁期间阻止新 lease。
+    pub(crate) async fn begin_retention_publication(
+        &self,
+        deadline: Deadline,
+    ) -> Result<DetailRetentionPublicationLease<'_>, PortError> {
+        let guard = deadline_future(
+            deadline,
+            "detail_shard.retention_publication",
+            Arc::clone(&self.retention_gate).write_owned(),
+        )
+        .await?;
+        if self.state.lock().unwrap().stopping {
+            return Err(PortError::new(
+                PortErrorClass::Unavailable,
+                "detail_shard.retention_publication",
+            ));
+        }
+        Ok(DetailRetentionPublicationLease {
+            store: self,
+            _guard: guard,
+        })
+    }
+
+    /// 冻结本轮受管详情主文件与 WAL 大小；不统计 SHM、备份或其他文件。
+    pub(crate) fn sample_managed_storage(
+        &self,
+        deadline: Deadline,
+    ) -> Result<DetailStorageSample, PortError> {
+        if deadline.is_expired(Instant::now()) {
+            return Err(PortError::new(
+                PortErrorClass::Timeout,
+                "detail_shard.sample",
+            ));
+        }
+        let entries = match fs::read_dir(self.root()) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DetailStorageSample::default());
+            }
+            Err(_) => {
+                return Err(PortError::new(
+                    PortErrorClass::Unavailable,
+                    "detail_shard.sample",
+                ));
+            }
+        };
+        let mut sample = DetailStorageSample::default();
+        for entry in entries {
+            if deadline.is_expired(Instant::now()) {
+                return Err(PortError::new(
+                    PortErrorClass::Timeout,
+                    "detail_shard.sample",
+                ));
+            }
+            let entry = entry
+                .map_err(|_| PortError::new(PortErrorClass::Unavailable, "detail_shard.sample"))?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Some(day_utc) = parse_shard_file_name(&name) else {
+                continue;
+            };
+            let path = entry.path();
+            validate_shard_path(&path, &self.root, &self.protected_paths)?;
+            let main_bytes = fs::metadata(&path)
+                .map_err(|_| PortError::new(PortErrorClass::Unavailable, "detail_shard.sample"))?
+                .len();
+            let mut wal = path.as_os_str().to_os_string();
+            wal.push("-wal");
+            let wal_bytes = match fs::metadata(Path::new(&wal)) {
+                Ok(metadata) => metadata.len(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+                Err(_) => {
+                    return Err(PortError::new(
+                        PortErrorClass::Unavailable,
+                        "detail_shard.sample",
+                    ));
+                }
+            };
+            sample.bytes = sample
+                .bytes
+                .checked_add(main_bytes)
+                .and_then(|value| value.checked_add(wal_bytes))
+                .ok_or_else(|| {
+                    PortError::new(PortErrorClass::ResourceExhausted, "detail_shard.sample")
+                })?;
+            sample.shard_days.push(day_utc);
+        }
+        sample.shard_days.sort_unstable();
+        sample.shard_days.dedup();
+        Ok(sample)
+    }
+
     /// 拒绝新 lease，并等待所有活动连接在同一 deadline 内归还。
     pub async fn shutdown(&self, deadline: Deadline) -> Result<(), PortError> {
         self.state.lock().unwrap().stopping = true;
@@ -346,6 +480,14 @@ impl DetailShardStore {
                 .retired_before
                 .is_none_or(|retired_before| day_utc >= retired_before)
             && !state.retiring_days.contains(&day_utc)
+    }
+
+    fn day_is_retired(&self, day_utc: i32) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .retired_before
+            .is_some_and(|retired_before| day_utc < retired_before)
     }
 
     pub(super) fn retired_before(&self) -> Option<i32> {
@@ -387,6 +529,13 @@ impl DetailShardStore {
     #[cfg(test)]
     fn peak_active_connections(&self) -> usize {
         self.peak_active.load(Ordering::Acquire)
+    }
+}
+
+impl DetailRetentionPublicationLease<'_> {
+    /// 必须在统计水位事务提交后调用；持有 write guard 时没有详情 lease 可穿越边界。
+    pub(crate) fn publish(self, retired_before_day_utc: i32) {
+        self.store.publish_retired_before(retired_before_day_utc);
     }
 }
 

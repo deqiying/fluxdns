@@ -11,11 +11,11 @@ use crate::ports::storage::{StatsRecorder, StorageBackend, StorageFlushSummary};
 
 use super::{
     DEFAULT_MAX_ACTIVE_DETAIL_SHARDS, DetailShardStore, DetailShardStoreBuildError,
-    STORAGE_SCHEMA_VERSION, ShardedResolveDetailWorker, ShardedResolveDetailWriter,
-    ShardedResolveDetailWriterBuildError, SqliteResolveDetailFlushSummary,
-    SqliteResolveDetailRunSummary, SqliteResolveDetailWorker, SqliteStorageBackend,
-    SqliteStorageBackendBuildError, StatsPersistenceError, StatsPersistenceFlushSummary,
-    StatsPersistenceWorker,
+    RetentionCoordinator, STORAGE_SCHEMA_VERSION, ShardedResolveDetailWorker,
+    ShardedResolveDetailWriter, ShardedResolveDetailWriterBuildError,
+    SqliteResolveDetailFlushSummary, SqliteResolveDetailRunSummary, SqliteResolveDetailWorker,
+    SqliteStorageBackend, SqliteStorageBackendBuildError, StatsPersistenceError,
+    StatsPersistenceFlushSummary, StatsPersistenceWorker,
 };
 
 pub const DEFAULT_STORAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
@@ -116,6 +116,7 @@ pub struct StorageRuntime {
     #[cfg(test)]
     backend_for_test: Arc<SqliteStorageBackend>,
     detail_store: Arc<DetailShardStore>,
+    retention: Arc<RetentionCoordinator>,
     detail_writer: Option<ShardedResolveDetailWriter>,
     resolution_metrics: Arc<crate::resolution::ResolutionPipelineMetrics>,
     detail_cancellation: Option<Cancellation>,
@@ -138,6 +139,8 @@ pub enum StorageRuntimeBuildError {
     WriteProbe(#[source] PortError),
     #[error("resolve detail shard store is invalid: {0}")]
     DetailStore(#[source] DetailShardStoreBuildError),
+    #[error("retention state could not be restored: {0}")]
+    RetentionBootstrap(#[source] PortError),
     #[error("resolve detail channel could not be created: {0}")]
     DetailChannel(#[source] ShardedResolveDetailWriterBuildError),
 }
@@ -291,8 +294,16 @@ impl StorageRuntime {
             ));
         }
 
-        let stats_worker = Arc::new(StatsPersistenceWorker::new(backend.clone()));
-        let service = StorageService::new(backend.clone()).with_stats_worker(stats_worker);
+        let retention_bootstrap = backend
+            .retention_bootstrap(deadline)
+            .await
+            .map_err(StorageRuntimeBuildError::RetentionBootstrap)?;
+        let stats_worker = Arc::new(StatsPersistenceWorker::with_next_batch_id(
+            backend.clone(),
+            retention_bootstrap.next_stats_batch_id,
+        ));
+        let service =
+            StorageService::new(backend.clone()).with_stats_worker(Arc::clone(&stats_worker));
         #[cfg(test)]
         let backend_for_test = Arc::clone(&backend);
         // BC-26 切换正式 v2 loader 前，由统计库同级目录提供不含旧数据迁移的过渡默认值。
@@ -313,6 +324,14 @@ impl StorageRuntime {
             )
             .map_err(StorageRuntimeBuildError::DetailStore)?,
         );
+        if let Some(state) = retention_bootstrap.state {
+            detail_store.publish_retired_before(state.retired_before_day_utc);
+        }
+        let retention = Arc::new(RetentionCoordinator::new(
+            Arc::clone(&backend),
+            Arc::clone(&stats_worker),
+            Arc::clone(&detail_store),
+        ));
         let mut detail_cancellation = None;
         let mut detail_task = None;
         let detail_writer = if config.dns.resolve_log.enable {
@@ -339,6 +358,7 @@ impl StorageRuntime {
             #[cfg(test)]
             backend_for_test,
             detail_store,
+            retention,
             detail_writer,
             resolution_metrics: Arc::new(crate::resolution::ResolutionPipelineMetrics::default()),
             detail_cancellation,
@@ -356,6 +376,10 @@ impl StorageRuntime {
         self.service
             .stats_recorder()
             .expect("storage runtime always owns a stats recorder")
+    }
+
+    pub fn retention_coordinator(&self) -> Arc<RetentionCoordinator> {
+        Arc::clone(&self.retention)
     }
 
     pub(crate) fn detail_writer(&self) -> Option<ShardedResolveDetailWriter> {
@@ -921,6 +945,48 @@ mod tests {
         assert_eq!(legacy_detail_count, 0);
         stats_verification.close().await;
         let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    #[tokio::test]
+    async fn storage_runtime_restores_persisted_retention_watermark() {
+        let (source, work_path) = crate::config::test_support::portable_example();
+        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .expect("storage runtime fixture must be valid")
+            .resolved;
+        let reference_day = 20_710;
+        let plan = crate::storage::RetentionPlan::calculate(
+            crate::storage::RetentionPolicy::new(3, 0, 1 << 30).unwrap(),
+            reference_day,
+            0,
+        )
+        .unwrap();
+        let mut runtime = StorageRuntime::open(config.as_ref(), deadline())
+            .await
+            .unwrap();
+        let state = runtime
+            .retention_coordinator()
+            .publish(plan, deadline())
+            .await
+            .unwrap();
+        assert_eq!(state.retired_before_day_utc, reference_day - 2);
+        assert_eq!(
+            runtime.detail_store.retired_before(),
+            Some(reference_day - 2)
+        );
+        runtime.shutdown(deadline()).await.unwrap();
+        drop(runtime);
+
+        let mut reopened = StorageRuntime::open(config.as_ref(), deadline())
+            .await
+            .unwrap();
+        assert_eq!(
+            reopened.detail_store.retired_before(),
+            Some(reference_day - 2)
+        );
+        reopened.shutdown(deadline()).await.unwrap();
+        drop(reopened);
+        std::fs::remove_dir_all(work_path).unwrap();
     }
 
     #[test]

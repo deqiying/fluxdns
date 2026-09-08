@@ -130,6 +130,10 @@ BC-08 Windows 验证：完整 Cargo suite 815 passed、0 failed、3 ignored；St
 
 BC-09 Windows 验证：真实 SQLite 新增 7 项、detail 定向 15 项通过；完整 Cargo suite 822 passed、0 failed、3 ignored。覆盖跨日/同毫秒前后分页、复合过滤、duration 排序、ID 重启一致、cursor 篡改/上下文/进程/水位失效、按 ID 读取、空读不建库、deadline 和 commit 前后/失败通知。未执行三个 ignored 专项、Linux、完整 v2 冷启/重启、真实权限/磁盘满、共同水位/回收、Bearer HTTP/WS、浏览器或约 10 客户端及 core 2ms 性能验收。
 
+同日 BC-10 已完成共同水位基础：R/G/T 纯计算在 `S == T` 时保留宽限并包含当前 UTC 日；大小只采样受管详情主文件与 WAL。schema v8 在同一 stats 事务内单调发布水位、清理旧统计、按进程冻结的 replay floor 回收 ledger，并登记旧详情日 manifest。全局详情 retention lease 先阻断新 lease 并排空在途读写，事务成功后才发布逻辑水位；失败不提前隐藏。stats pending 重放只推进幂等确认，详情迟到批次计为 dropped，`StorageRuntime` 启动恢复水位并续接 batch ID。01:00 调度、补跑、状态/预览确认及物理文件回收仍留 BC-11，v2 R/G/T 生产配置入口仍不冒充 BC-26。
+
+BC-10 Windows 验证：真实 stats SQLite/日分片新增 4 项 retention 用例及 1 项 `StorageRuntime` 重启用例，storage 定向 87 项通过；完整 Cargo suite 827 passed、0 failed、3 ignored，全部测试目标编译通过。覆盖计划表中的阈值/边界、受管大小口径、水位前后失败、lease 排空、pending replay、迟到写、manifest/ledger 和重启恢复。未执行三个 ignored 专项、Linux、完整 v2 冷启/重启、真实权限/磁盘满、01:00/时区/DST、物理删除重试、Bearer HTTP/WS、浏览器或约 10 客户端及 core 2ms 性能验收。
+
 ### 开发步骤
 
 1. 审核 `cache/persistence.rs` 的现有 codec，保留可复用的版本、TTL、fingerprint、canonical wire 与 provenance；替换其第二份全量集合和文件容量逻辑，不直接将旧 adapter 改名接入。

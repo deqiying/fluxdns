@@ -78,6 +78,14 @@ impl BatchLedger {
         }
     }
 
+    pub(crate) const fn with_next_batch_id(next_batch_id: u64) -> Self {
+        Self {
+            next_batch_id,
+            pending: BTreeMap::new(),
+            committed: BTreeMap::new(),
+        }
+    }
+
     pub const fn next_batch_id(&self) -> u64 {
         self.next_batch_id
     }
@@ -182,6 +190,18 @@ impl BatchLedger {
 
     pub fn committed_count(&self) -> usize {
         self.committed.len()
+    }
+
+    /// 低于该值的 batch 已不可能由本进程重放，可以安全回收持久化幂等记录。
+    pub(crate) fn replay_floor_batch_id(&self) -> u64 {
+        self.pending
+            .first_key_value()
+            .map_or(self.next_batch_id, |(batch_id, _)| *batch_id)
+    }
+
+    pub(crate) fn reclaim_committed_before(&mut self, replay_floor_batch_id: u64) {
+        self.committed
+            .retain(|batch_id, _| *batch_id >= replay_floor_batch_id);
     }
 }
 

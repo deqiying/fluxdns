@@ -16,7 +16,7 @@
 
 ### P0 v2 内部契约（2026-09-07）
 
-[`config/contract.rs`](../../backend/src/config/contract.rs) 已提供 `ConfigV2::parse/validate/resolve_paths` 和[离线夹具](../../backend/tests/fixtures/config-v2.yaml)。这是可执行的候选契约，不是生产加载器：本节以下 v1 模板/owner 仍是当前正式接线事实。P0 不把新快照、详情和保留字段映射成旧存储参数；新版本启动切换等待 BC-04/07/08 等 owner 接线，不承诺 v1/v2 并行服务或兼容。
+[`config/contract.rs`](../../backend/src/config/contract.rs) 已提供 `ConfigV2::parse/validate/resolve_paths` 和[离线夹具](../../backend/tests/fixtures/config-v2.yaml)。这是可执行的候选契约，不是生产加载器：本节以下 v1 模板/owner 仍是当前正式接线事实。P2 已分批接通快照、日分片与共同水位 owner，但不把 v2 字段伪装成旧存储参数；新版本生产启动切换仍归 BC-26，不承诺 v1/v2 并行服务或兼容。
 
 | v2 字段/边界 | 契约与默认值 |
 | --- | --- |
@@ -406,7 +406,7 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 | `enable` | boolean | 是否记录每次解析请求的详情（请求、策略、规则、ECS、缓存、上游结果和耗时等）。关闭时不写详情表，但不关闭聚合统计。 |
 | `eviction_threshold_records` | integer | v1 loader 兼容字段；P2 生产分片 writer 不消费。 |
 | `max_records` | integer | v1 loader 兼容字段；P2 生产分片 writer 不作为硬上限。 |
-| `max_record_age` | duration | v1 loader 兼容字段；P2 后续由 R/G/T 共同水位替代。 |
+| `max_record_age` | duration | v1 loader 兼容字段；P2 共同水位不消费。 |
 
 当前 v1 loader 仍要求 `0 < eviction_threshold_records < max_records`，仅为 BC-26 前的旧 schema 解析边界；生产分片 writer 不读取三项配额。请求任务只向统一 resolution ingress 附带 typed question 和共享 response，qname digest、canonical qname 与 answer JSON 在后台 detail projector 中生成，再进入唯一有界详情 channel；满批立即提交，低流量尾批最多等待 5 秒。worker 按事件 UTC 日写入 `YYYY-MM-DD.sqlite3`，批写只执行校验与 `INSERT`，不执行历史 `COUNT`、按条数/年龄 `DELETE` 或 `VACUUM`。projection/SQLite 队列满或分片提交失败时丢弃当前详情并计量，DNS 请求不得等待或失败。
 

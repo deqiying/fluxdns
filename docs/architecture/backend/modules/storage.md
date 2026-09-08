@@ -4,9 +4,9 @@
 >
 > 适用范围：统计 SQLite、解析详情日分片、migration、lease 和存储生命周期
 >
-> 最后评审：2026-09-08（BC-09 完成稳定 ID、跨分片 cursor 读口与提交后通知；共同保留水位仍待 BC-10）
+> 最后评审：2026-09-08（BC-10 完成 R/G/T 计算、共同水位、stats/detail 写保护与 manifest；每日调度和物理回收仍待 BC-11）
 >
-> 关联实现：[detail_shards.rs](../../../../backend/src/storage/detail_shards.rs)、[detail_query.rs](../../../../backend/src/storage/detail_query.rs)、[sqlite.rs](../../../../backend/src/storage/sqlite.rs)、[service.rs](../../../../backend/src/storage/service.rs)、[statistics.rs](../../../../backend/src/storage/statistics.rs)、[ledger.rs](../../../../backend/src/storage/ledger.rs)、[migrations](../../../../backend/migrations)
+> 关联实现：[detail_shards.rs](../../../../backend/src/storage/detail_shards.rs)、[detail_query.rs](../../../../backend/src/storage/detail_query.rs)、[retention.rs](../../../../backend/src/storage/retention.rs)、[sqlite.rs](../../../../backend/src/storage/sqlite.rs)、[service.rs](../../../../backend/src/storage/service.rs)、[statistics.rs](../../../../backend/src/storage/statistics.rs)、[ledger.rs](../../../../backend/src/storage/ledger.rs)、[migrations](../../../../backend/migrations)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Ports](ports.md) · [Observability](observability.md) · [Cache](cache.md)
 
@@ -27,6 +27,7 @@ Storage 模块实现两个相互隔离的持久化 owner：
 | --- | --- |
 | `detail_shards.rs` | 日分片 layout、日期路径、受限连接 registry、读写/退役 lease、唯一 bounded 生产 detail writer 与关闭边界 |
 | `detail_query.rs` | 稳定 opaque 记录 ID、进程绑定 keyset cursor、跨分片有界读取、retention revision 和 commit cursor/通知基础 |
+| `retention.rs` | R/G/T 纯计算、受管文件大小采样、共同水位发布，以及 stats/detail owner 的一致性边界 |
 | `sqlite.rs` | 统计 SQLx pool、PRAGMA、migration、统计 transaction、health/checkpoint/shutdown；旧单库详情 adapter 仅保留给兼容测试，待 BC-27 删除 |
 | `service.rs` | `StorageRuntime` 组装、分片详情 worker task、统计 backend/detail store 的 shutdown 顺序、resolution metrics owner |
 | `stats.rs` | StatsAccumulator epoch snapshot、BatchLedger 顺序提交与失败重试 worker |
@@ -114,7 +115,7 @@ prepare 阶段先初始化统计库：
 
 每个文件只接受 `event_time_utc_millis / 86400000 == detail_meta.day_utc` 的记录，应用路由错误也会由 SQLite trigger 回滚。分片内 `id` 只是局部自增键；`DetailRecordId` 将 layout、UTC 日和事务实际返回的 row ID 编码为带完整性校验的稳定 opaque token，重启后保持不变且不接受路径文本或被修改的 token。调用方不能将局部 ID 对外解释为全局 ID。
 
-解析详情本身是敏感数据；受管目录使用工作目录权限保护，不把详情复制到服务日志。统计库 schema v7 中的旧 `resolve_log` 表暂留供旧读 adapter/兼容测试使用，生产 `StorageRuntime` 不再写入，待 BC-27 删除。
+解析详情本身是敏感数据；受管目录使用工作目录权限保护，不把详情复制到服务日志。统计库 schema v8 中的旧 `resolve_log` 表暂留供旧读 adapter/兼容测试使用，生产 `StorageRuntime` 不再写入，待 BC-27 删除。
 
 ## 4. 聚合统计热路径
 
@@ -162,7 +163,11 @@ writer 周期性执行：
 
 生产分片批写只执行有界入队、字段校验和 `INSERT`，不执行历史 `COUNT`、按条数淘汰、按年龄 `DELETE` 或 `VACUUM`。v1 `eviction_threshold_records`、`max_records`、`max_record_age` 在 BC-26 删除旧配置字段前仍会被 loader 解析校验，但不再控制生产详情写入；旧单库 adapter 的容量测试不代表生产契约。
 
-按 R/G/T 计算的共同水位、stats/详情逻辑退役、manifest/ledger 与物理回收由 BC-10/11 完成。BC-08 registry 已提供先禁止新 lease、等待该日既有 lease 排空、checkpoint/关闭和恢复水位的入口，但当前没有调度器或自动删除；不能仅凭日分片声明保留策略已交付。
+BC-10 按冻结的 `reference_day_utc` 与受管详情大小 `S` 计算共同水位：`S > T` 取 R 天，否则取 R+G 天，等于阈值仍享有宽限；保留范围包含当前 UTC 日，只退役严格早于 `keep_from_day_utc` 的数据。策略限制为 R 至少 1 天、R+G 最多 3650 天、T 为 1 byte 至 1 TiB，大小只累计规范详情主文件与 WAL，不计 stats、cache、SHM、备份或其他文件；采样失败或整数溢出会终止本轮，不解释为 0。
+
+发布先取得全局详情 retention write lease，等待现有读写 lease 排空并阻止新 lease，再冻结 stats flush 的最早可重放 batch ID。schema v8 在单一 stats 事务中推进单调 `retention_state`、删除旧 stats 日、按 replay floor 而非日期删除 ledger，并把已存在的旧详情日登记到 `retention_detail_manifest`；事务成功后才在仍持有详情 write lease 时发布进程水位。失败事务不改变详情可见范围；期限延长或压力下降只更新运行记录，不后退水位或恢复数据。stats pending 重放在事务内读取水位，已退役事件只推进原 batch 的幂等确认，不增加业务计数；详情迟到批次计入 dropped 且不能重建旧分片。
+
+`StorageRuntime::open` 从 stats DB 恢复水位，并以 `max(ledger high + 1, replay_floor)` 续接 batch ID，随后才启动详情 writer。BC-10 只登记逻辑退役和待回收 manifest；01:00 调度、补跑、状态/预览确认、checkpoint/关闭/删除 sidecar 与失败重试属于 BC-11，当前不会自动物理删除。
 
 BC-09 的历史 cursor 绑定规范化后的 filter、sort、order、翻页方向、当前 retention revision 和进程随机 key；任一上下文改变、进程重启、token 被修改或水位推进都会拒绝继续使用。`older` 沿当前排序继续，`newer` 反向扫描后恢复同一展示顺序；每个分片先用 bind 参数执行时间和业务过滤、keyset 条件及 `page_size + 1` 上限，随后只保留全局有界候选，不使用 `OFFSET`、`COUNT` 或分页后过滤。范围最多 3650 天，缺失日只检查路径且不创建目录/SQLite。
 
@@ -176,7 +181,7 @@ BC-09 的历史 cursor 绑定规范化后的 filter、sort、order、翻页方�
 - 两个 worker 的事务短且不在 DNS 请求任务中执行；
 - 新 `DetailShardStore` 读口通过受限 read lease 跨分片查询；旧 v1 Management HTTP 仍读取主库，BC-13 才切换正式 v2 API；
 - 所有 SQL 使用 bind 参数；
-- 统计 migration 只在 prepare 执行；日分片仅在首个写 lease 初始化并核对固定 layout。
+- 统计 migration 只在 prepare 执行，当前 schema v8；日分片仅在首个写 lease 初始化并核对固定 layout。
 
 ## 9. 运行期故障
 
@@ -240,3 +245,4 @@ shutdown：
 - shutdown deadline 和 gap summary；
 - 统计 DB、详情目录与 cache 文件完全隔离。
 - BC-09 已覆盖跨分片分页/filter/sort、opaque ID、cursor 水位/完整性和提交通知时序；当前目录名称安全投影与 Bearer HTTP 待 BC-13。
+- BC-10 已覆盖 R/G/T 阈值/边界、主文件+WAL 采样、共同水位单调性、stats pending/详情迟到保护、manifest/ledger replay floor、事务回滚、lease 排空和启动恢复；调度与物理回收待 BC-11。

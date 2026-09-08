@@ -7,6 +7,7 @@ mod detail_shards;
 mod ledger;
 mod management_read;
 mod resolve_log;
+mod retention;
 mod service;
 mod sqlite;
 mod statistics;
@@ -30,6 +31,11 @@ pub use detail_shards::{
 pub use ledger::{BatchDecision, BatchLedger, BatchLedgerError, BatchReceipt, PendingStatsBatch};
 pub use management_read::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
 pub use resolve_log::ResolveDetailRecord;
+pub use retention::{
+    DEFAULT_RETENTION_DAYS, DEFAULT_RETENTION_GRACE_DAYS, DEFAULT_RETENTION_REFERENCE_SIZE_BYTES,
+    MAX_RETENTION_DAYS, MAX_RETENTION_REFERENCE_SIZE_BYTES, RetentionCoordinator, RetentionError,
+    RetentionPlan, RetentionPolicy, RetentionPolicyError, RetentionState,
+};
 pub use service::{
     DEFAULT_RESOLVE_LOG_BATCH_SIZE, DEFAULT_RESOLVE_LOG_QUEUE_CAPACITY,
     DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StorageRuntime,

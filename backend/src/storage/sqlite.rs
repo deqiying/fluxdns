@@ -20,6 +20,7 @@ use crate::ports::{PortError, PortErrorClass, PortFuture};
 
 use super::STORAGE_SCHEMA_VERSION;
 use super::resolve_log::ResolveDetailRecord;
+use super::retention::{RetentionBootstrap, RetentionPlan, RetentionState};
 
 const SQLITE_BUSY_TIMEOUT_MS: u64 = 2_000;
 const INITIAL_STORAGE_SCHEMA_VERSION: SchemaVersion = SchemaVersion(1);
@@ -295,7 +296,7 @@ struct SqliteStorageState {
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
-enum InjectedSqliteFault {
+pub(super) enum InjectedSqliteFault {
     Busy,
     DiskFull,
 }
@@ -473,8 +474,220 @@ impl SqliteStorageBackend {
         self.path.as_ref()
     }
 
+    /// 恢复共同水位，并从持久化 replay 下界/ledger 高水位选择新的 batch ID 起点。
+    pub(crate) async fn retention_bootstrap(
+        &self,
+        deadline: Deadline,
+    ) -> Result<RetentionBootstrap, PortError> {
+        let operation = "sqlite_storage.retention_bootstrap";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let state = sqlx::query(
+                "SELECT revision, watermark_revision, retired_before_day_utc, reference_day_utc, \
+                 target_days, sampled_detail_bytes, reference_size_bytes, replay_floor_batch_id, \
+                 published_at_utc_millis FROM retention_state WHERE singleton = 1",
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|error| self.database_error(error, operation))?
+            .map(|row| retention_state_from_row(&row, operation))
+            .transpose()?;
+            let max_batch_id: Option<i64> =
+                sqlx::query_scalar("SELECT MAX(batch_id) FROM stats_batch_ledger")
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|error| self.database_error(error, operation))?;
+            let ledger_next = match max_batch_id {
+                Some(value) if value > 0 => u64::try_from(value)
+                    .ok()
+                    .and_then(|value| value.checked_add(1))
+                    .ok_or_else(|| PortError::new(PortErrorClass::ResourceExhausted, operation))?,
+                Some(_) => return Err(PortError::new(PortErrorClass::CorruptData, operation)),
+                None => 1,
+            };
+            let next_stats_batch_id = state.as_ref().map_or(ledger_next, |state| {
+                ledger_next.max(state.replay_floor_batch_id)
+            });
+            if next_stats_batch_id == 0 || i64::try_from(next_stats_batch_id).is_err() {
+                return Err(PortError::new(PortErrorClass::ResourceExhausted, operation));
+            }
+            Ok(RetentionBootstrap {
+                state,
+                next_stats_batch_id,
+            })
+        })
+        .await
+    }
+
+    /// 在统计事务中发布单调水位、清理旧统计并登记待回收详情日。
+    pub(crate) async fn publish_retention(
+        &self,
+        plan: RetentionPlan,
+        manifest_days: &[i32],
+        replay_floor_batch_id: u64,
+        deadline: Deadline,
+    ) -> Result<RetentionState, PortError> {
+        let operation = "sqlite_storage.publish_retention";
+        run_with_deadline(deadline, operation, async {
+            self.available(operation)?;
+            if replay_floor_batch_id == 0
+                || i64::try_from(replay_floor_batch_id).is_err()
+                || !plan.is_valid()
+            {
+                return Err(PortError::new(PortErrorClass::InvalidInput, operation));
+            }
+            let _guard = self.lock_operation(deadline, operation).await?;
+            let mut transaction = self
+                .pool
+                .begin()
+                .await
+                .map_err(|error| self.database_error(error, operation))?;
+            let current = sqlx::query(
+                "SELECT revision, watermark_revision, retired_before_day_utc, reference_day_utc, \
+                 target_days, sampled_detail_bytes, reference_size_bytes, replay_floor_batch_id, \
+                 published_at_utc_millis FROM retention_state WHERE singleton = 1",
+            )
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| self.database_error(error, operation))?
+            .map(|row| retention_state_from_row(&row, operation))
+            .transpose()?;
+            let revision = current
+                .as_ref()
+                .map_or(Ok(1), |state| state.revision.checked_add(1).ok_or(()))
+                .map_err(|()| PortError::new(PortErrorClass::ResourceExhausted, operation))?;
+            let retired_before_day_utc = current.as_ref().map_or(
+                plan.keep_from_day_utc,
+                |state| state.retired_before_day_utc.max(plan.keep_from_day_utc),
+            );
+            let watermark_revision = match current.as_ref() {
+                None => 1,
+                Some(state) if retired_before_day_utc > state.retired_before_day_utc => state
+                    .watermark_revision
+                    .checked_add(1)
+                    .ok_or_else(|| {
+                        PortError::new(PortErrorClass::ResourceExhausted, operation)
+                    })?,
+                Some(state) => state.watermark_revision,
+            };
+            if i64::try_from(revision).is_err() || i64::try_from(watermark_revision).is_err() {
+                return Err(PortError::new(
+                    PortErrorClass::ResourceExhausted,
+                    operation,
+                ));
+            }
+            let replay_floor_batch_id = current.as_ref().map_or(
+                replay_floor_batch_id,
+                |state| state.replay_floor_batch_id.max(replay_floor_batch_id),
+            );
+            let published_at = SystemTime::now();
+            let published_at_millis = system_time_utc_millis(published_at, operation)?;
+
+            sqlx::query("DELETE FROM stats_daily_dimension WHERE day_utc < ?")
+                .bind(i64::from(retired_before_day_utc))
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| self.database_error(error, operation))?;
+            sqlx::query("DELETE FROM stats_daily_total WHERE day_utc < ?")
+                .bind(i64::from(retired_before_day_utc))
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| self.database_error(error, operation))?;
+            sqlx::query("DELETE FROM stats_batch_ledger WHERE batch_id < ?")
+                .bind(i64::try_from(replay_floor_batch_id).unwrap())
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| self.database_error(error, operation))?;
+
+            let mut unique_days = manifest_days.to_vec();
+            unique_days.sort_unstable();
+            unique_days.dedup();
+            for day_utc in unique_days
+                .into_iter()
+                .filter(|day_utc| *day_utc < retired_before_day_utc)
+            {
+                if super::detail_shards::format_shard_file_name(day_utc).is_none() {
+                    return Err(PortError::new(PortErrorClass::InvalidInput, operation));
+                }
+                sqlx::query(
+                    "INSERT INTO retention_detail_manifest \
+                     (day_utc, retired_revision, state, attempts, last_error_code, updated_at_utc_millis) \
+                     VALUES (?, ?, 'pending', 0, NULL, ?) \
+                     ON CONFLICT(day_utc) DO UPDATE SET \
+                         retired_revision = excluded.retired_revision, \
+                         state = CASE WHEN retention_detail_manifest.state = 'reclaimed' \
+                             THEN 'pending' ELSE retention_detail_manifest.state END, \
+                         attempts = CASE WHEN retention_detail_manifest.state = 'reclaimed' \
+                             THEN 0 ELSE retention_detail_manifest.attempts END, \
+                         last_error_code = CASE WHEN retention_detail_manifest.state = 'reclaimed' \
+                             THEN NULL ELSE retention_detail_manifest.last_error_code END, \
+                         updated_at_utc_millis = excluded.updated_at_utc_millis",
+                )
+                .bind(i64::from(day_utc))
+                .bind(i64::try_from(watermark_revision).unwrap())
+                .bind(published_at_millis)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| self.database_error(error, operation))?;
+            }
+
+            sqlx::query(
+                "INSERT INTO retention_state \
+                 (singleton, revision, watermark_revision, retired_before_day_utc, reference_day_utc, \
+                  target_days, sampled_detail_bytes, reference_size_bytes, replay_floor_batch_id, \
+                  published_at_utc_millis) \
+                 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(singleton) DO UPDATE SET \
+                     revision = excluded.revision, \
+                     watermark_revision = excluded.watermark_revision, \
+                     retired_before_day_utc = excluded.retired_before_day_utc, \
+                     reference_day_utc = excluded.reference_day_utc, \
+                     target_days = excluded.target_days, \
+                     sampled_detail_bytes = excluded.sampled_detail_bytes, \
+                     reference_size_bytes = excluded.reference_size_bytes, \
+                     replay_floor_batch_id = excluded.replay_floor_batch_id, \
+                     published_at_utc_millis = excluded.published_at_utc_millis",
+            )
+            .bind(i64::try_from(revision).unwrap())
+            .bind(i64::try_from(watermark_revision).unwrap())
+            .bind(i64::from(retired_before_day_utc))
+            .bind(i64::from(plan.reference_day_utc))
+            .bind(i64::from(plan.target_days))
+            .bind(i64::try_from(plan.sampled_detail_bytes).map_err(|_| {
+                PortError::new(PortErrorClass::ResourceExhausted, operation)
+            })?)
+            .bind(i64::try_from(plan.policy.reference_size_bytes).map_err(|_| {
+                PortError::new(PortErrorClass::ResourceExhausted, operation)
+            })?)
+            .bind(i64::try_from(replay_floor_batch_id).unwrap())
+            .bind(published_at_millis)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| self.database_error(error, operation))?;
+            check_deadline(deadline, operation)?;
+            transaction
+                .commit()
+                .await
+                .map_err(|error| self.database_error(error, operation))?;
+            self.mark_healthy();
+            Ok(RetentionState {
+                revision,
+                watermark_revision,
+                retired_before_day_utc,
+                reference_day_utc: plan.reference_day_utc,
+                target_days: plan.target_days,
+                sampled_detail_bytes: plan.sampled_detail_bytes,
+                reference_size_bytes: plan.policy.reference_size_bytes,
+                replay_floor_batch_id,
+                published_at,
+            })
+        })
+        .await
+    }
+
     #[cfg(test)]
-    fn inject_fault(&self, fault: InjectedSqliteFault) {
+    pub(super) fn inject_fault(&self, fault: InjectedSqliteFault) {
         *self
             .injected_fault
             .lock()
@@ -739,6 +952,10 @@ async fn migrate_storage_schema(pool: &SqlitePool) -> Result<(), SqliteStorageBa
                 include_str!("../../migrations/0006_integer_business_timestamps.sql"),
             ),
             6 => (7, include_str!("../../migrations/0007_client_identity.sql")),
+            7 => (
+                8,
+                include_str!("../../migrations/0008_retention_watermark.sql"),
+            ),
             _ => return Err(SqliteStorageBackendBuildError::Schema),
         };
         apply_storage_migration(pool, version, next, migration).await?;
@@ -983,7 +1200,15 @@ async fn apply_stats_batch(
                 .with_safe_context("invalid event sequence"),
         );
     }
-    for event in &batch.events {
+    let retired_before_day_utc: Option<i64> = sqlx::query_scalar(
+        "SELECT retired_before_day_utc FROM retention_state WHERE singleton = 1",
+    )
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.stats_batch"))?;
+    for event in batch.events.iter().filter(|event| {
+        retired_before_day_utc.is_none_or(|watermark| i64::from(event.day_utc()) >= watermark)
+    }) {
         sqlx::query(
             "INSERT INTO stats_daily_total (day_utc, total_requests) VALUES (?, 1) \
              ON CONFLICT(day_utc) DO UPDATE SET total_requests = total_requests + 1",
@@ -1326,6 +1551,70 @@ fn system_time_utc_millis(time: SystemTime, operation: &'static str) -> Result<i
     })
 }
 
+fn retention_state_from_row(
+    row: &sqlx::sqlite::SqliteRow,
+    operation: &'static str,
+) -> Result<RetentionState, PortError> {
+    let positive = |column: &str| {
+        row.try_get::<i64, _>(column)
+            .ok()
+            .filter(|value| *value > 0)
+            .and_then(|value| u64::try_from(value).ok())
+            .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))
+    };
+    let revision = positive("revision")?;
+    let watermark_revision = positive("watermark_revision")?;
+    let retired_before_day_utc = row
+        .try_get::<i64, _>("retired_before_day_utc")
+        .ok()
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|day| super::detail_shards::format_shard_file_name(*day).is_some())
+        .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    let reference_day_utc = row
+        .try_get::<i64, _>("reference_day_utc")
+        .ok()
+        .and_then(|value| i32::try_from(value).ok())
+        .filter(|day| super::detail_shards::format_shard_file_name(*day).is_some())
+        .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    let target_days = u32::try_from(positive("target_days")?)
+        .ok()
+        .filter(|value| *value <= super::retention::MAX_RETENTION_DAYS)
+        .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    let sampled_detail_bytes = u64::try_from(
+        row.try_get::<i64, _>("sampled_detail_bytes")
+            .ok()
+            .filter(|value| *value >= 0)
+            .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?,
+    )
+    .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?;
+    let reference_size_bytes = positive("reference_size_bytes")?;
+    if reference_size_bytes > super::retention::MAX_RETENTION_REFERENCE_SIZE_BYTES {
+        return Err(PortError::new(PortErrorClass::CorruptData, operation));
+    }
+    let replay_floor_batch_id = positive("replay_floor_batch_id")?;
+    let published_at_millis = u64::try_from(
+        row.try_get::<i64, _>("published_at_utc_millis")
+            .ok()
+            .filter(|value| *value >= 0)
+            .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?,
+    )
+    .map_err(|_| PortError::new(PortErrorClass::CorruptData, operation))?;
+    let published_at = UNIX_EPOCH
+        .checked_add(Duration::from_millis(published_at_millis))
+        .ok_or_else(|| PortError::new(PortErrorClass::CorruptData, operation))?;
+    Ok(RetentionState {
+        revision,
+        watermark_revision,
+        retired_before_day_utc,
+        reference_day_utc,
+        target_days,
+        sampled_detail_bytes,
+        reference_size_bytes,
+        replay_floor_batch_id,
+        published_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1593,7 +1882,7 @@ mod tests {
                     assert_eq!(
                         meta,
                         (
-                            7,
+                            i64::from(crate::storage::STORAGE_SCHEMA_VERSION.0),
                             "timestamp-migration-test".into(),
                             1000,
                             "integer".into(),
@@ -1708,8 +1997,8 @@ mod tests {
     // V4-M02：中间步骤失败只回滚该步，之前已经提交的 migration 必须保留。
     #[tokio::test]
     async fn contract_v4_each_migration_failure_preserves_last_committed_step() {
-        for failing_version in 2..=7 {
-            let (path, pool) = if failing_version == 7 {
+        for failing_version in 2..=8 {
+            let (path, pool) = if failing_version >= 7 {
                 let (path, pool) = legacy_database(5).await;
                 super::apply_storage_migration(
                     &pool,
@@ -1719,6 +2008,16 @@ mod tests {
                 )
                 .await
                 .unwrap();
+                if failing_version == 8 {
+                    super::apply_storage_migration(
+                        &pool,
+                        6,
+                        7,
+                        include_str!("../../migrations/0007_client_identity.sql"),
+                    )
+                    .await
+                    .unwrap();
+                }
                 (path, pool)
             } else {
                 legacy_database(1).await
@@ -1776,6 +2075,13 @@ mod tests {
                     "migration {failing_version}: {name}"
                 );
             }
+            let has_retention: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'retention_state'",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(has_retention, 0);
             if failing_version == 6 {
                 sqlx::query("UPDATE storage_meta SET created_at_utc='1000'")
                     .execute(&pool)
@@ -1796,7 +2102,9 @@ mod tests {
     #[tokio::test]
     async fn contract_v4_newer_schema_is_rejected_without_mutation() {
         let backend = SqliteStorageBackend::connect(path()).await.unwrap();
-        sqlx::query("UPDATE storage_meta SET schema_version=8")
+        let newer = i64::from(crate::storage::STORAGE_SCHEMA_VERSION.0) + 1;
+        sqlx::query("UPDATE storage_meta SET schema_version=?")
+            .bind(newer)
             .execute(&backend.pool)
             .await
             .unwrap();
@@ -1821,7 +2129,7 @@ mod tests {
             .fetch_one(&backend.pool)
             .await
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, newer);
         backend.shutdown(deadline()).await.unwrap();
     }
 

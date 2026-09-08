@@ -12,7 +12,7 @@
 >
 > 同日文档收口：经用户确认结束剩余验证专项，仅维护已知边界和引用；不新增运行结论，不重跑历史测试
 >
-> 2026-09-08 增量核对：仅核对客户端请求身份、历史匹配事实和 schema v7 前向迁移；其余正文保留原核对范围
+> 2026-09-08 增量核对：BC-10 已核对 schema v8、共同水位、manifest、pending replay 与生产启动恢复；其余正文保留原核对范围
 
 ## 资源准备与刷新
 
@@ -42,7 +42,7 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 详情由 [`resolve_log.rs`](../../../backend/src/storage/resolve_log.rs) 投影，再交 [`detail_shards.rs`](../../../backend/src/storage/detail_shards.rs) 的唯一有界 detail worker 批写。worker 按事件 UTC 日选择 `<records_path>/YYYY-MM-DD.sqlite3`，满批立即提交，低流量尾批由周期 flush 处理；一次事务只处理队首同日记录。registry 以日锁串行同一分片、全局最多 4 个活动单连接 pool，读 lease 缺文件时不建库，retirement 先阻止新 lease 再等待已有 lease。`writer.rs` 是内存 contract 实现，不是正式 SQLite writer。[`detail_query.rs`](../../../backend/src/storage/detail_query.rs) 已提供跨分片 storage 读口；旧 [`SqliteManagementReadModel`](../../../backend/src/storage/management_read.rs) 仍服务 v1 HTTP，正式 v2 历史 API 由 BC-13 切换。
 
-[主库迁移目录](../../../backend/migrations)的前向链仍是 0001 基础表至 0007 client identity，统计库当前 schema 为 v7；其中旧 `resolve_log` 暂留兼容读口/测试，生产不再写入。新详情文件使用 [`migrations/detail`](../../../backend/migrations/detail) 的 layout v1：`detail_meta` 固定版本和唯一 UTC 日，`resolve_log` 保持当前有效字段，日归属 trigger 约束记录只能属于该文件日期；时间、耗时及 client ID/IP、历史匹配 ID、qname 使用查询索引。BC-08/09 不迁移、删除或重新匹配旧详情。两类 SQLite 均使用 WAL、NORMAL synchronous 和 busy timeout；统计库保留串行 operation lock，详情连接由 registry lease 管理。
+[主库迁移目录](../../../backend/migrations)的前向链为 0001 基础表至 0008 retention watermark，统计库当前 schema 为 v8；其中旧 `resolve_log` 暂留兼容读口/测试，生产不再写入。0008 新增单例 `retention_state` 与按日 `retention_detail_manifest`，不搬迁或重匹配旧详情。新详情文件使用 [`migrations/detail`](../../../backend/migrations/detail) 的 layout v1：`detail_meta` 固定版本和唯一 UTC 日，`resolve_log` 保持当前有效字段，日归属 trigger 约束记录只能属于该文件日期；时间、耗时及 client ID/IP、历史匹配 ID、qname 使用查询索引。两类 SQLite 均使用 WAL、NORMAL synchronous 和 busy timeout；统计库保留串行 operation lock，详情连接由 registry lease 管理。
 
 主库升级由 adapter 手动执行 `include_str!` SQL 并更新 `storage_meta`，不是 SQLx Migrator。`connect_with_deadline` 将建目录、连接和迁移纳入 open 的同一预算；随后 `startup_write_probe` 在独立事务中实际更新 metadata 并回滚，不提交统计或详情。详情目录只在首个写 lease 时创建；已有日期文件必须声明匹配的 layout/day 和完整表、索引、trigger，普通外部 SQLite 或路径/文件身份异常会被拒绝。失败/超时不产生可服务 lease。
 
@@ -65,7 +65,7 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 旧 writer 产生的规范非负十进制毫秒字符串可无损转换。空串、非数字、小数、指数格式、负值和超出 `i64` 的值不静默 `CAST` 成零或饱和值，迁移失败并回滚该步全部变更；不删除坏行或推测历史时间。新写入由 `system_time_utc_millis` 转为 `i64`，亚毫秒截断、epoch 前归零保留旧行为，溢出显式错误。时间列有 `typeof(...)='integer'` 与非负约束，不能保存不合法 TEXT/REAL 值。
 
-分片 writer 用整数毫秒计算 UTC 日；文件内 trigger 再校验 `event_time_utc_millis / 86400000 == detail_meta.day_utc`。生产批写不执行历史 `COUNT`、按年龄/条数 `DELETE` 或 `VACUUM`，v1 三个详情配额字段只在 BC-26 删除前继续由旧 loader 解析校验。R/G/T 共同水位、manifest/ledger 和物理回收尚待 BC-10/11，当前不会自动删除分片。BC-09 storage 读口已按日 lease、分页前 filter、稳定 ID 和双向 keyset cursor 查询，并在事务 commit 后发布独立序列通知；对外 HTTP 仍暂走旧读口，不能据此宣称跨日 API 或 WS replay 已接线。
+分片 writer 用整数毫秒计算 UTC 日；文件内 trigger 再校验 `event_time_utc_millis / 86400000 == detail_meta.day_utc`。生产批写不执行历史 `COUNT`、按年龄/条数 `DELETE` 或 `VACUUM`，v1 三个详情配额字段只在 BC-26 删除前继续由旧 loader 解析校验且不参与保留。BC-10 的 `RetentionCoordinator` 已按 R/G/T 冻结详情主文件+WAL 大小、在 stats 事务内发布单调共同水位、清理旧统计与确认 replay floor 以前的 ledger，并登记待物理回收详情日；stats pending 和迟到详情均受同一水位约束。BC-11 才接入 01:00 调度、补跑和实际文件删除，因此当前不会自动物理删除分片。BC-09 storage 读口已按日 lease、分页前 filter、稳定 ID 和双向 keyset cursor 查询，并在事务 commit 后发布独立序列通知；对外 HTTP 仍暂走旧读口，不能据此宣称跨日 API 或 WS replay 已接线。
 
 ## Cache persistence
 
@@ -121,7 +121,7 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | remote/file 刷新 | 条件 fetch、manifest v2、epoch/CAS、scheduler | async prepare + service resource task | loopback 200/304 与真实条件头；重复 304、坏 pair/响应、旧 manifest、换代及同预算重试 | 未执行真实远程/代理组合 |
-| stats/detail | 统计 schema v7、详情分片 layout v1、registry/lease、稳定 ID、跨日 cursor、commit stream、StorageRuntime、ResolutionRuntime | app 打开；统计主库与日分片 writer 分离；v2 HTTP 尚未切读口 | 真实跨日/迟到分片、双向分页/同毫秒/复杂过滤、cursor 失效、通知时序、只读不建库、连接/退役/shutdown、小 v1 配额不截断；原统计迁移回归 | 共同水位/回收待 BC-10/11，HTTP/WS 待 BC-13/25；未验证真实权限/磁盘满 |
+| stats/detail | 统计 schema v8、详情分片 layout v1、registry/lease、稳定 ID、跨日 cursor、commit stream、共同水位/manifest、StorageRuntime、ResolutionRuntime | app 打开并恢复水位；统计主库与日分片 writer 分离；调度和 v2 HTTP 尚未接线 | 真实 R/G/T 阈值、大小采样、水位事务回滚/单调性、pending replay、迟到写、lease 排空、ledger floor/manifest/重启；既有跨日查询与迁移回归 | 01:00 调度/物理回收待 BC-11，HTTP/WS 待 BC-13/25；未验证真实权限/磁盘满 |
 | legacy cache persistence | schema v2、增量 upsert、CachePersistenceRuntime | 仅保留 adapter/契约测试，生产不再挂接 | v1 升级、增量触发器、失败回滚与坏行清理既有测试 | 待 P5 BC-27 删除；不代表当前生产路径 |
 | cache 二进制快照 owner | `FDCS` header/SHA-256、Moka 分批导出/恢复、周期 worker、generation | app 启动恢复 + coordinator reload + service shutdown | Windows 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际/超时定向测试 | 过渡期固定 5 分钟；未验证真实权限/磁盘满、Unix 或 v2 冷启 |
 | telemetry lifecycle / 聚合 | histogram、typed writer、registry、sampler | dispatcher + app/service 周期及最终 flush | 固定桶/标签、溢出原子性、拥塞下聚合、关闭详情、输出重试、reload 与最终快照 | 没有 exporter/逐 attempt 流；长期负载与全部输出故障未验收 |
@@ -133,6 +133,8 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 2026-09-08 P2 BC-08 验证在 Windows x86_64 使用 Rust/Cargo 1.98.0，真实 SQLite 文件位于仓库忽略的 `_fluxdns/p2-detail-shard-tests/` 或既有独立临时 `work.path`，用例结束仅清理各自唯一目录。`cargo test --manifest-path backend/Cargo.toml --locked storage:: -- --nocapture` 运行 75 项通过；完整 `cargo test --manifest-path backend/Cargo.toml --locked` 为 815 passed、0 failed、3 ignored，`--all-targets --no-run` 通过。覆盖两个 UTC 日和迟到记录、layout metadata/trigger、只读 lease 不建库、最多一个连接的受控场景、退役与关闭等待、外部 SQLite/硬链接拒绝，以及生产主库不新增详情和 v1 `max_records=3` 时 300 条分片记录全部提交。该结果不包含 Linux、真实权限/磁盘满、跨日 cursor 或保留删除。
 
 同日 P2 BC-09 使用真实 `_fluxdns/p2-detail-query-tests/` SQLite 分片验证 7 个新增用例，连同 `detail_shards` 定向 15 项通过；完整 Cargo suite 为 822 passed、0 failed、3 ignored。覆盖跨日/同毫秒稳定次序、前后 cursor 不重不漏、分页前复合过滤、duration 全局归并、稳定 ID 重启一致、cursor filter/direction/process/watermark/完整性失效、按 ID 定位、空读不建库、deadline，以及 commit 前无通知、commit 后递增和失败事务不通知。共同水位持久化/回收、Bearer HTTP、WS replay、Linux、真实权限/磁盘满、浏览器和性能未在本项验证。
+
+同日 P2 BC-10 使用真实 `_fluxdns/p2-retention-tests/` stats SQLite 与详情分片新增 4 项 retention 用例，并增加 1 项正式 `StorageRuntime` 重启回归；storage 定向 87 项通过，完整 Cargo suite 为 827 passed、0 failed、3 ignored，全部测试目标编译通过。覆盖 R/G/T 的 R=1/3/7/30、G=0、`S<T`/`S=T`/`S>T`、截止日等号、范围/大小溢出，主文件+WAL 口径，lease 排空，事务失败不提前发布，水位单调不回退，stats pending 重放、迟到详情丢弃、manifest/ledger replay floor、schema v1-v7 前向失败恢复和生产 owner 重启恢复。尚未验证 01:00/时区/DST、物理删除与重试（BC-11）、Linux、真实权限/磁盘满、完整 v2 冷启或浏览器/性能。
 
 2026-09-05 在 Windows x86_64 使用项目 mise 管理的 Rust/Cargo 1.98.0；命令从仓库根执行，`CARGO_HOME=backend/.cargo-home`、构建物在 `backend/target`。测试使用代码内嵌配置，临时 `work.path`、数据库与证书由测试夹具在 `_fluxdns/test-temp` 下产生，端口为动态 loopback，不使用个人配置或远程服务。
 
