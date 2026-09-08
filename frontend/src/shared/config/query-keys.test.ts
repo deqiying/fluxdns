@@ -13,7 +13,7 @@ describe("配置 query key", () => {
 
   it("只失效目标模块、引用依赖和概览", () => {
     const keys = invalidationKeysForChanges([
-      { module: "upstreams", change: { action: "create", value: { name: "edge", type: "HostsUpstream", format: "json", hosts: "{}" } } },
+      { module: "upstreams", change: { action: "create", value: { name: "edge", type: "hosts", format: "json", hosts: "{}" } } },
     ]);
     expect(keys).toContainEqual(configKeys.moduleRoot("upstreams"));
     expect(keys).toContainEqual(configKeys.moduleRoot("strategy"));

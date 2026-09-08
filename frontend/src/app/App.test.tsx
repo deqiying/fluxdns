@@ -354,6 +354,7 @@ describe("application routes", () => {
     setMockAuthenticated(true);
     renderApp("/upstreams");
     expect(await screen.findByRole("heading", { name: "DNS 上游", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("secure-dns")).toBeInTheDocument();
 
     const groupsTab = screen.getByRole("tab", { name: "上游组" });
     await user.click(groupsTab);

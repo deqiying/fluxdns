@@ -738,7 +738,12 @@ components:
         - {$ref: "#/components/schemas/UdpListener"}
         - {$ref: "#/components/schemas/TcpListener"}
         - {$ref: "#/components/schemas/DohListener"}
-      discriminator: {propertyName: type}
+      discriminator:
+        propertyName: type
+        mapping:
+          udp: "#/components/schemas/UdpListener"
+          tcp: "#/components/schemas/TcpListener"
+          doh: "#/components/schemas/DohListener"
     UdpListener:
       type: object
       additionalProperties: false
@@ -811,7 +816,12 @@ components:
         - {$ref: "#/components/schemas/HostsUpstream"}
         - {$ref: "#/components/schemas/DohUpstream"}
         - {$ref: "#/components/schemas/UpstreamGroup"}
-      discriminator: {propertyName: type}
+      discriminator:
+        propertyName: type
+        mapping:
+          hosts: "#/components/schemas/HostsUpstream"
+          doh: "#/components/schemas/DohUpstream"
+          group: "#/components/schemas/UpstreamGroup"
     HostsUpstream:
       type: object
       additionalProperties: false

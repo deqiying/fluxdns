@@ -95,6 +95,8 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`RuleSetsPage`](../../../frontend/src/modules/rule-sets/RuleSetsPage.tsx) 已替换 `/rule-sets` 空态，区分 `const/file/remote` 与 `json/clash/dat`，并显示远程代理、刷新计划及 Runtime stale/failed 状态。表单只提交当前来源字段；`clash` 保持行格式，`dat` 不作为 YAML/JSON 文本解析，也未增加主动刷新端点。
 
+[`UpstreamsPage`](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx) 已替换 `/upstreams` tab 空态，在同一模块读写 Hosts、DoH 和 Group。DoH 只提交当前 address/bootstrap/connect_ip/proxy/ECS 字段；组成员与 fallback 使用有序结构化名称/权重控件，类型和模式切换不携带隐藏字段。嵌套组、循环、模式权重和改名引用仍由后端完整候选权威校验。v2 OpenAPI 同批补充 Listener/Upstream discriminator mapping，生成类型现在使用线上真实 `udp/tcp/doh` 与 `hosts/doh/group`，不再误用 schema 名称作为 type 值。
+
 ## 能力与证据
 
 2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换；新增 `apiV2Request` 仅由明确的新版模块调用，不提供运行时 v1/v2 选择开关。

@@ -719,7 +719,7 @@ export interface components {
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
-            type: "UdpListener";
+            type: "udp";
             addresses: string[];
             port: number;
             strategy: components["schemas"]["Name"];
@@ -731,7 +731,7 @@ export interface components {
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
-            type: "TcpListener";
+            type: "tcp";
             addresses: string[];
             port: number;
             strategy: components["schemas"]["Name"];
@@ -743,7 +743,7 @@ export interface components {
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
-            type: "DohListener";
+            type: "doh";
             routes: {
                 path: string;
                 strategy: components["schemas"]["Name"];
@@ -780,7 +780,7 @@ export interface components {
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
-            type: "HostsUpstream";
+            type: "hosts";
             /** @enum {string} */
             format: "json" | "hosts";
             hosts: components["schemas"]["InlineText"];
@@ -791,7 +791,7 @@ export interface components {
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
-            type: "DohUpstream";
+            type: "doh";
             /** Format: uri */
             address: string;
             bootstrap?: components["schemas"]["Name"];
@@ -812,7 +812,7 @@ export interface components {
              * @description discriminator enum property added by openapi-typescript
              * @enum {string}
              */
-            type: "UpstreamGroup";
+            type: "group";
             upstreams: components["schemas"]["UpstreamMember"][];
             upstream_mode: components["schemas"]["UpstreamMode"];
             timeout: components["schemas"]["Duration"];

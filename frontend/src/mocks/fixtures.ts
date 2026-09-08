@@ -392,6 +392,18 @@ export const ruleSetsConfigReadFixture = {
   ],
 } satisfies V2Schemas["ConfigRead"];
 
+export const upstreamsConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [
+    { module: "upstreams", value: { name: "local", type: "hosts", format: "hosts", hosts: "127.0.0.1 localhost" } },
+    { module: "upstreams", value: { name: "secure-dns", type: "doh", address: "https://dns.example.test/dns-query", bootstrap: "local", proxy: "proxy-primary", edns_client_subnet: { mode: "disabled" } } },
+    { module: "upstreams", value: { name: "default-group", type: "group", upstreams: [{ name: "secure-dns", weight: 2 }, { name: "local", weight: 1 }], upstream_mode: "load-balance", timeout: "5000000000ns", fallbacks: [{ name: "local", weight: 1 }], fallback_upstream_mode: "failover", fallback_timeout: "3000000000ns" } },
+  ],
+  effective: [],
+  references: [{ from_module: "strategy", from_name: "default", path: "default_upstream", to_name: "default-group" }],
+  runtime: [],
+} satisfies V2Schemas["ConfigRead"];
+
 export const systemConfigReadFixture = {
   state: synchronizedConfigStateFixture,
   work_path: "D:/Projects/Rust/fluxdns/_fluxdns",

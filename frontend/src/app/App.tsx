@@ -14,7 +14,7 @@ const ProxiesPage = lazy(() => import("@/modules/proxies/ProxiesPage").then((mod
 const HostsPage = lazy(() => import("@/modules/hosts/HostsPage").then((module) => ({ default: module.HostsPage })));
 const RuleSetsPage = lazy(() => import("@/modules/rule-sets/RuleSetsPage").then((module) => ({ default: module.RuleSetsPage })));
 const PendingModulePage = lazy(() => import("./PendingModulePage").then((module) => ({ default: module.PendingModulePage })));
-const PendingUpstreamsPage = lazy(() => import("./PendingModulePage").then((module) => ({ default: module.PendingUpstreamsPage })));
+const UpstreamsPage = lazy(() => import("@/modules/upstreams/UpstreamsPage").then((module) => ({ default: module.UpstreamsPage })));
 const NotFoundPage = lazy(() => import("./NotFoundPage").then((module) => ({ default: module.NotFoundPage })));
 
 const pendingRoutes = managementRoutes.filter(
@@ -32,7 +32,7 @@ export function App() {
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/queries" element={<QueriesPage />} />
-            <Route path="/upstreams" element={<PendingUpstreamsPage />} />
+            <Route path="/upstreams" element={<UpstreamsPage />} />
             <Route path="/hosts" element={<HostsPage />} />
             <Route path="/rule-sets" element={<RuleSetsPage />} />
             <Route path="/proxies" element={<ProxiesPage />} />

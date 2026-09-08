@@ -22,6 +22,7 @@ import {
   statisticsFixture,
   systemConfigReadFixture,
   systemFixture,
+  upstreamsConfigReadFixture,
   v2QueryPageFixture,
   v2QueryRecordsFixture,
 } from "./fixtures";
@@ -169,6 +170,7 @@ export const handlers = [
       logs: logsConfigReadFixture,
       outbound: outboundConfigReadFixture,
       rule_set: ruleSetsConfigReadFixture,
+      upstreams: upstreamsConfigReadFixture,
     }[String(params.module)];
     return fixture
       ? HttpResponse.json(fixture)
