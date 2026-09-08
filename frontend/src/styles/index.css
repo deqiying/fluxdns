@@ -45,6 +45,29 @@ select {
   margin-bottom: 20px;
 }
 
+.external-change-banner {
+  border-radius: 0;
+  border-inline: 0;
+}
+
+.external-change-drawer .ant-drawer-body {
+  overflow-y: auto;
+}
+
+.external-change-loading {
+  display: grid;
+  min-height: 240px;
+  place-items: center;
+}
+
+.external-change-content {
+  width: 100%;
+}
+
+.external-change-content .ant-typography {
+  margin-top: 0;
+}
+
 .app-shell {
   min-height: 100vh;
   background: #fff;

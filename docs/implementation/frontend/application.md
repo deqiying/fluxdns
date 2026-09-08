@@ -59,6 +59,14 @@ Windows 浏览器 fixture 验证覆盖默认桌面、390×844、移动 Drawer �
 
 [`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx) 统一受限高度、内部滚动、保存防重、脏关闭确认、安全错误与 request ID 展示，并提供字段路径到 Ant Design Form 的定位转换。它是业务表单容器而非 schema 自动表单；当前尚未挂到未交付的配置页面，路由离开 guard 和领域上下界由后续各模块接入。
 
+## P1 外部配置变化基础（2026-09-08）
+
+[`external-change.ts`](../../../frontend/src/shared/config/external-change.ts) 从权威 `ConfigState` 派生文件变化、缺失、不可读、超限、已应用未同步和阻塞事实。关闭提示只记录当前事实 key，不清除 issue；活动/文件 revision 或文件状态变化后重新提示。差异响应必须与当前活动/观察 revision 同时匹配，否则进入冲突；还原返回成功后仍保留 issue 并等待下一份权威状态确认，不自行假定文件已同步。`FILE_REVISION_CONFLICT` 保留当前差异与脏草稿。
+
+[`ExternalChangeBanner`](../../../frontend/src/shared/components/ExternalChangeBanner.tsx) 和 [`ExternalChangeDrawer`](../../../frontend/src/shared/components/ExternalChangeDrawer.tsx) 提供轻量提示、差异/受保护变化展示、脏关闭确认、文件还原确认及可选的组合采用/同步重试入口。还原确认明确只覆盖所见文件版本，不回滚运行态。[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 对还原和持久化重试复用单次 mutation + operation 回读，不把“重试文件同步”变成配置重新应用。
+
+这组基础当前没有挂入 `AppLayout`，也没有启动全局 polling：后端 BC-30 尚未注册正式配置状态/差异/文件操作 route，提前挂载只会制造持续失败请求。各模块的组合差异编辑仍需 FC-05 至 FC-13 提供真实领域表单；当前组件只暴露可选入口，不伪造通用 YAML 或自动合并能力。
+
 ## 能力与证据
 
 2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换；新增 `apiV2Request` 仅由明确的新版模块调用，不提供运行时 v1/v2 选择开关。
@@ -77,5 +85,6 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
 | 12 路由壳层 | route-contract、App、AppLayout、PendingModulePage | 受保护路由与分组导航 | 22 项路由测试；桌面/390×844 fixture 浏览器与 Console 检查 | 仅 dashboard/queries 有真实 v1 数据；v2 和业务页面未接线 |
 | 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 仅供后续模块调用，未挂载业务页 | FC-02 定向 Vitest 27 项、typecheck | MSW/jsdom；正式 v2 配置 route、真实文件和浏览器交互未验收 |
+| 外部变化基础 | external-change reducer、Banner/Drawer、文件单次 mutation 回读 | 未挂 AppLayout，等待 BC-30 | FC-16 基础定向 Vitest 8 项、typecheck | 无真实文件/后端/browser；组合采用等待领域表单 |
 
 2026-09-05 原核对未运行 pnpm 或浏览器；P1 新增的 Bearer、壳层与 FC-02 证据见上节。历史记录与尚无运行证据的环境边界见[交付证据](../delivery.md)，不把共享组件/MSW 回归算作 v2 生产切换或业务页面完成。

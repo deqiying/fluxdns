@@ -3,9 +3,12 @@ import {
   applyCandidate,
   fetchConfigOperation,
   fetchConfigState,
+  restoreConfigFiles,
+  retryConfigPersistence,
   type ApplyRequest,
   type ConfigModule,
   type ConfigState,
+  type FileSyncRequest,
   type OperationResult,
   type ValidationResult,
 } from "./api";
@@ -59,6 +62,20 @@ export async function applyAndSettle(
   return settleOperation(operation, options);
 }
 
+export function restoreFilesAndSettle(
+  request: FileSyncRequest,
+  options: Omit<ApplyAndSettleOptions, "module"> = {},
+): Promise<OperationSettlement> {
+  return runFileMutationAndSettle(restoreConfigFiles, request, options);
+}
+
+export function retryPersistenceAndSettle(
+  request: FileSyncRequest,
+  options: Omit<ApplyAndSettleOptions, "module"> = {},
+): Promise<OperationSettlement> {
+  return runFileMutationAndSettle(retryConfigPersistence, request, options);
+}
+
 export async function settleOperation(
   initial: OperationResult,
   options: Omit<ApplyAndSettleOptions, "module"> = {},
@@ -85,6 +102,22 @@ function isInProgress(operation: OperationResult): boolean {
   return operation.status.state === "preparing"
     || operation.status.state === "applying"
     || operation.status.state === "persisting";
+}
+
+async function runFileMutationAndSettle(
+  mutation: (request: FileSyncRequest, signal?: AbortSignal) => Promise<OperationResult>,
+  request: FileSyncRequest,
+  options: Omit<ApplyAndSettleOptions, "module">,
+): Promise<OperationSettlement> {
+  let operation: OperationResult;
+  try {
+    operation = await mutation(request, options.signal);
+  } catch (error) {
+    if (!(error instanceof ApiError) || (error.kind !== "timeout" && error.kind !== "network")) throw error;
+    operation = await fetchConfigOperation(request.operation_id, options.signal);
+  }
+  assertOperationId(request.operation_id, operation);
+  return settleOperation(operation, options);
 }
 
 function assertOperationId(expected: string, operation: OperationResult): void {

@@ -31,7 +31,7 @@ P1 先交付 BC-02 活动源、定向编辑和操作仲裁内部能力，事实�
 
 P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01 的生产 fixture 启动门槛随 BC-26 继续保留。实际能力、未接线边界和验证分别见[配置参考](../implementation/configuration.md#p0-v2-内部契约2026-09-07)、[Management 实现](../implementation/backend/management.md#p0-v2-契约)、[前端实现](../implementation/frontend/application.md#能力与证据)。本文不预设人员数量、固定人日或日历上线日期；排期以依赖和验收门槛为准。
 
-2026-09-08 认证子项已按用户追加决定改为业务 Bearer、认证专用 Cookie 刷新，真实 HTTP 与浏览器回归见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)。FC-01 又完成[12 路由壳层、浅色主题和响应式导航](../implementation/frontend/application.md#p1-应用壳层2026-09-08)：只有 dashboard/queries 读取当前 v1 数据，其余入口明确不可用。BC-04/05 已推进[客户端 name/ID 索引](../implementation/configuration.md#p1-客户端匹配索引内部能力2026-09-08)和[请求身份/历史匹配事件链](../implementation/backend/background-services.md#完成事件与后台分发)，生产新 loader 接线仍未完成。BC-23 已完成[服务指标、在线身份和共享 OS 采样](../implementation/backend/management.md#p1-服务与进程指标2026-09-08)。FC-02 已完成[配置交互公共基础](../implementation/frontend/application.md#p1-配置交互基础2026-09-08)，但不把未挂载组件或 MSW 当生产 v2 配置接口；v2 成套切换、FC-16 和业务页面仍待实施，P1 继续保持部分完成。
+2026-09-08 认证子项已按用户追加决定改为业务 Bearer、认证专用 Cookie 刷新，真实 HTTP 与浏览器回归见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)。FC-01 又完成[12 路由壳层、浅色主题和响应式导航](../implementation/frontend/application.md#p1-应用壳层2026-09-08)：只有 dashboard/queries 读取当前 v1 数据，其余入口明确不可用。BC-04/05 已推进[客户端 name/ID 索引](../implementation/configuration.md#p1-客户端匹配索引内部能力2026-09-08)和[请求身份/历史匹配事件链](../implementation/backend/background-services.md#完成事件与后台分发)，生产新 loader 接线仍未完成。BC-23 已完成[服务指标、在线身份和共享 OS 采样](../implementation/backend/management.md#p1-服务与进程指标2026-09-08)。FC-02 已完成[配置交互公共基础](../implementation/frontend/application.md#p1-配置交互基础2026-09-08)，FC-16 已完成[提示/还原与同步重试基础](../implementation/frontend/application.md#p1-外部配置变化基础2026-09-08)，但不把未挂载组件或 MSW 当生产 v2 配置接口；v2 成套切换、FC-16 全局/组合接线和业务页面仍待后续依赖，P1 继续保持部分完成。
 
 ## 2. 当前基线与改造范围
 
@@ -231,7 +231,7 @@ BE-03/04/05/06 + BE-11 -> BE-12 + FE-12 -> 联合交付
 | 阶段 | 推荐提交检查点 | 阶段停靠点 |
 | --- | --- | --- |
 | P0 | GC-01 修订计划/决策；BC-01 契约；BC-26 新格式初始化可先行 | 契约和提交范围可审查，无迁移预览 |
-| P1 | BC-02/03/29 内部能力已提交，生产闭合待 BC-30；BC-31 热日志、BC-04/05 身份与 BC-23 指标已提交；FC-01 壳层和 FC-02 公共配置交互已提交，继续 FC-16 可独立基础 | 应用/持久化/watcher 分别提交，基础可供模块使用 |
+| P1 | BC-02/03/29 内部能力已提交，生产闭合待 BC-30；BC-31 热日志、BC-04/05 身份与 BC-23 指标已提交；FC-01/02 与 FC-16 可独立基础已提交 | 应用/持久化/watcher 分别提交，基础可供模块使用；生产闭合转入依赖链 |
 | P2 | BC-06/07 快照；BC-08/09 分片；BC-10/11 保留；BC-12/13 查询 | 每条数据分支独立提交，真实 adapter 通过后再交给页面联调 |
 | P3 | BC-14 至 BC-22；FC-12/09/10 -> FC-06 -> FC-08 -> FC-05/11；FC-07/13；FC-16 随表单补齐，最后 BC-32 | 每模块单独闭环；多模块差异采用和配置故障回归独立提交 |
 | P4 | BC-24/25 实时通道；FC-03/04 实时页面；FC-14 进程状态可提前；必要的联调修复分别提交 | 真 HTTP/WS 和页面语义闭合，模块改动已有历史节点 |

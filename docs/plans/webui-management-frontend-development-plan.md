@@ -24,7 +24,7 @@
 
 2026-09-07 P0 已提供 v2 生成类型、12 个路径/模块映射、草稿/操作状态和客户端编辑白名单，事实见[应用实现](../implementation/frontend/application.md#能力与证据)。API client、代理和业务页面仍未切换 v2；后续不重复定义契约。Vitest/fixture 浏览器不等于真实后端或生产内嵌验收。
 
-2026-09-08 FC-01 已接入[内存 Bearer 与专用 Cookie 刷新](../implementation/frontend/application.md#p1-bearer-接线2026-09-08)，并完成[12 路由壳层、浅色主题、响应式导航和旧路径 404](../implementation/frontend/application.md#p1-应用壳层2026-09-08)。FC-02 已交付[配置 client、operation 回读、版本化 query key、精确单位/继承/variant helper 与表单容器](../implementation/frontend/application.md#p1-配置交互基础2026-09-08)，但尚未挂到未完成业务页。真实认证回归、fixture 浏览器验证和 FC-02 MSW/jsdom 验证分别记录，不互相替代；已接入页面仍为 v1，10 个未就绪入口不加载演示数据。v2 成套切换尚待生产 owner，因此 FC-01/02 保持部分完成，FC-16 不随本项关闭。
+2026-09-08 FC-01 已接入[内存 Bearer 与专用 Cookie 刷新](../implementation/frontend/application.md#p1-bearer-接线2026-09-08)，并完成[12 路由壳层、浅色主题、响应式导航和旧路径 404](../implementation/frontend/application.md#p1-应用壳层2026-09-08)。FC-02 已交付[配置 client、operation 回读、版本化 query key、精确单位/继承/variant helper 与表单容器](../implementation/frontend/application.md#p1-配置交互基础2026-09-08)，FC-16 也已交付[提示/差异/还原与同步重试基础](../implementation/frontend/application.md#p1-外部配置变化基础2026-09-08)；两者尚未挂到未完成业务页或启动全局轮询。真实认证回归、fixture 浏览器验证和 MSW/jsdom 验证分别记录，不互相替代；已接入页面仍为 v1，10 个未就绪入口不加载演示数据。v2 成套切换尚待生产 owner，因此 FC-01/02 保持部分完成，FC-16 的全局接线与组合采用仍依赖 BC-30 和 FC-05 至 FC-13。
 
 图稿中数值、地址、健康提示、分页总数和按钮均为演示；正式页面必须使用后端已支持且可追溯的值，不能把图稿内容复制为生产默认数据。
 
