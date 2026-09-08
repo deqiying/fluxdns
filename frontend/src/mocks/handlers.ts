@@ -4,6 +4,7 @@ import {
   healthFixture,
   hostsConfigReadFixture,
   configStateFixture,
+  clientsConfigReadFixture,
   dnsConfigReadFixture,
   logsConfigReadFixture,
   listenersConfigReadFixture,
@@ -167,6 +168,7 @@ export const handlers = [
     if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
     const fixture = {
       dns: dnsConfigReadFixture,
+      clients: clientsConfigReadFixture,
       hosts: hostsConfigReadFixture,
       listener: listenersConfigReadFixture,
       statistics: statisticsConfigReadFixture,

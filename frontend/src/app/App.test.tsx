@@ -214,7 +214,7 @@ describe("application routes", () => {
 
   it.each(
     managementRoutes
-      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/proxies" && path !== "/system-runtime")
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/clients" && path !== "/proxies" && path !== "/system-runtime")
       .map(({ path, title }) => [path, title]),
   )("有效 session 可加载未接线入口 %s", async (path, heading) => {
     setMockAuthenticated(true);
@@ -300,6 +300,16 @@ describe("application routes", () => {
     expect(await screen.findByRole("heading", { name: "监听入口", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("127.0.0.1:15353")).toBeInTheDocument();
     expect(screen.getAllByText("1/1 接受中")).toHaveLength(2);
+  });
+
+  it("客户端编辑时保持 client_id 只读", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/clients");
+    expect(await screen.findByRole("heading", { name: "客户端配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("Desktop-01")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "编辑客户端 desktop" }));
+    expect(screen.getByLabelText("客户端 ID")).toBeDisabled();
   });
 
   it("系统运行状态显示 v2 进程采样并可手动刷新", async () => {

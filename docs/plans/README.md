@@ -11,8 +11,8 @@ WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md
 | [WebUI 重构决策清单](webui-management-decisions.md) | 有效 | 实施中 | 12 项决定已确认；P0 技术核定与剩余 T 项 |
 | [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0-P2 与 BC-26 已交付；P3 配置模块按依赖实施，P4/P5 未授权 |
 | [WebUI 配置热更新专项](webui-management-config-runtime-plan.md) | 有效 | 实施中 | BC-02/03/29/30/31 及 FC-01/02/16 全局轮询、差异、还原/重试已接线；P3 表单与组合采用正在补齐 |
-| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | P1 配置事务及 BC-06 至 BC-13、BC-26 已完成；P3 基础资源至 Listener 已接线，客户端/DNS/logs 实施中 |
-| [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 有效 | 实施中 | FC-01/02、FC-05/06、FC-08 至 FC-10、FC-12/14 与 FC-16 全局基础已交付；其余 P3 页面及组合采用实施中 |
+| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | P1 配置事务及 BC-06 至 BC-13、BC-26 已完成；P3 基础资源至客户端已接线，DNS/logs 实施中 |
+| [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 有效 | 实施中 | FC-01/02、FC-05/06、FC-08 至 FC-12、FC-14 与 FC-16 全局基础已交付；DNS/logs 页面及组合采用实施中 |
 | [WebUI 管理后台重构需求](webui-management-requirements.md) | 草案 | 待评审 | 保留已审阅模块范围；已按决定校正 name、热配置和旧图标注解释 |
 | [WebUI 配套后端重构方案](webui-management-backend-refactor.md) | 草案 | 待评审 | 身份、独立快照、统一保留与日分片；取消旧版迁移/兼容，接入热配置专项 |
 

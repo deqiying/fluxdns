@@ -436,6 +436,17 @@ export const listenersConfigReadFixture = {
   ],
 } satisfies V2Schemas["ConfigRead"];
 
+export const clientsConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [
+    { module: "clients", value: { name: "desktop", client_id: "Desktop-01", match: { ips: ["192.0.2.10", "2001:db8::/64"] }, strategy: "default", cache: { enabled: true }, edns_client_subnet: { mode: "disabled" } } },
+    { module: "clients", value: { name: "mobile", client_id: "Mobile-01", match: { ips: [] } } },
+  ],
+  effective: [{ path: "clients.desktop.cache.enabled", source: "client", value: true }],
+  references: [],
+  runtime: [],
+} satisfies V2Schemas["ConfigRead"];
+
 export const systemConfigReadFixture = {
   state: synchronizedConfigStateFixture,
   work_path: "D:/Projects/Rust/fluxdns/_fluxdns",
