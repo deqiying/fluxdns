@@ -2041,7 +2041,6 @@ mod tests {
         for path in [
             "/api/v2/config/modules/logs/validate",
             "/api/v2/config/modules/logs/apply",
-            "/api/v2/retention/preview",
         ] {
             let request = Request::builder()
                 .method("POST")
@@ -2050,8 +2049,21 @@ mod tests {
                 .body(Body::from("{}"))
                 .unwrap();
             let response = app.clone().oneshot(request).await.unwrap();
-            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
         }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v2/retention/preview")
+                    .header(AUTHORIZATION, &authorization)
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
         let rejected_origin = Request::builder()
             .method("POST")

@@ -25,7 +25,7 @@ use super::config_query::{error_code, operation_result};
 use super::contract::{
     ApplyRequest, Candidate, ErrorCode, FileSyncRequest, ImpactKind, OperationResult,
     OperationStatus, Preconditions, Revision, ValidationResult, decode_apply, decode_candidate,
-    decode_file_sync,
+    decode_file_sync, decode_module_candidate,
 };
 use super::router::{AuthServices, RequestId, v2_error_response, validate_v2_mutating_request};
 use super::session::SessionView;
@@ -294,6 +294,14 @@ pub(super) fn routes() -> Router<Arc<AuthServices>> {
         .route("/api/v2/config/validate", post(post_validate))
         .route("/api/v2/config/apply", post(post_apply))
         .route(
+            "/api/v2/config/modules/{module}/validate",
+            post(post_module_validate),
+        )
+        .route(
+            "/api/v2/config/modules/{module}/apply",
+            post(post_module_apply),
+        )
+        .route(
             "/api/v2/config/operations/{operation_id}",
             get(get_operation),
         )
@@ -359,6 +367,96 @@ async fn post_apply(
         owner.start_apply(session.user.name, request).await,
         &request_id,
     )
+}
+
+/// 单模块入口只复用整体事务编排，不允许借通用封套修改其他模块。
+async fn post_module_validate(
+    State(services): State<Arc<AuthServices>>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(session): Extension<SessionView>,
+    headers: HeaderMap,
+    module: Result<Path<String>, axum::extract::rejection::PathRejection>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    if let Some(response) =
+        validate_v2_mutating_request(&headers, &services.public_origin, &request_id)
+    {
+        return response;
+    }
+    let module = match parse_module_path(module) {
+        Ok(module) => module,
+        Err(error) => return v2_error_response(error, &request_id),
+    };
+    let Some(owner) = &services.config_mutations else {
+        return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
+    };
+    let body = match body_bytes(body, &request_id) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let candidate = match decode_module_candidate(&body, module) {
+        Ok(candidate) => candidate,
+        Err(error) => return v2_error_response(error, &request_id),
+    };
+    v2_result(
+        owner.validate(session.user.name, candidate).await,
+        &request_id,
+    )
+}
+
+async fn post_module_apply(
+    State(services): State<Arc<AuthServices>>,
+    Extension(request_id): Extension<RequestId>,
+    Extension(session): Extension<SessionView>,
+    headers: HeaderMap,
+    module: Result<Path<String>, axum::extract::rejection::PathRejection>,
+    body: Result<Bytes, BytesRejection>,
+) -> Response {
+    if let Some(response) =
+        validate_v2_mutating_request(&headers, &services.public_origin, &request_id)
+    {
+        return response;
+    }
+    let module = match parse_module_path(module) {
+        Ok(module) => module,
+        Err(error) => return v2_error_response(error, &request_id),
+    };
+    let Some(owner) = &services.config_mutations else {
+        return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
+    };
+    let body = match body_bytes(body, &request_id) {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let request = match decode_apply(&body, Some(module)) {
+        Ok(request) => request,
+        Err(error) => return v2_error_response(error, &request_id),
+    };
+    operation_response(
+        owner.start_apply(session.user.name, request).await,
+        &request_id,
+    )
+}
+
+fn parse_module_path(
+    module: Result<Path<String>, axum::extract::rejection::PathRejection>,
+) -> Result<crate::config::edit::ConfigModule, ErrorCode> {
+    let Ok(Path(module)) = module else {
+        return Err(ErrorCode::InvalidArgument);
+    };
+    match module.as_str() {
+        "listener" => Ok(crate::config::edit::ConfigModule::Listener),
+        "upstreams" => Ok(crate::config::edit::ConfigModule::Upstreams),
+        "strategy" => Ok(crate::config::edit::ConfigModule::Strategy),
+        "hosts" => Ok(crate::config::edit::ConfigModule::Hosts),
+        "outbound" => Ok(crate::config::edit::ConfigModule::Outbound),
+        "rule_set" => Ok(crate::config::edit::ConfigModule::RuleSet),
+        "clients" => Ok(crate::config::edit::ConfigModule::Clients),
+        "dns" => Ok(crate::config::edit::ConfigModule::Dns),
+        "statistics" => Ok(crate::config::edit::ConfigModule::Statistics),
+        "logs" => Ok(crate::config::edit::ConfigModule::Logs),
+        _ => Err(ErrorCode::NotFound),
+    }
 }
 
 async fn get_operation(

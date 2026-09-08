@@ -350,6 +350,20 @@ export const logsConfigReadFixture = {
   runtime: [],
 } satisfies V2Schemas["ConfigRead"];
 
+export const outboundConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [
+    { module: "outbound", value: { name: "proxy-primary", type: "socks5", proxy_url: { env: "PROXY_URL" } } },
+    { module: "outbound", value: { name: "proxy-backup", type: "socks5", proxy_url: { file: "./secrets/proxy.txt" } } },
+  ],
+  effective: [],
+  references: [
+    { from_module: "upstreams", from_name: "secure-dns", path: "proxy", to_name: "proxy-primary" },
+    { from_module: "rule_set", from_name: "domains", path: "proxy", to_name: "proxy-primary" },
+  ],
+  runtime: [],
+} satisfies V2Schemas["ConfigRead"];
+
 export const systemConfigReadFixture = {
   state: synchronizedConfigStateFixture,
   work_path: "D:/Projects/Rust/fluxdns/_fluxdns",

@@ -214,13 +214,60 @@ describe("application routes", () => {
 
   it.each(
     managementRoutes
-      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/system-runtime")
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/upstreams" && path !== "/proxies" && path !== "/system-runtime")
       .map(({ path, title }) => [path, title]),
   )("有效 session 可加载未接线入口 %s", async (path, heading) => {
     setMockAuthenticated(true);
     renderApp(path);
     expect(await screen.findByRole("heading", { name: heading, level: 2 })).toBeInTheDocument();
     expect(screen.getByText("当前版本暂不可用。")).toBeInTheDocument();
+  });
+
+  it("代理页通过单模块接口预校验并保存 SecretRef 引用", async () => {
+    const user = userEvent.setup();
+    const requests: unknown[] = [];
+    setMockAuthenticated(true);
+    server.use(
+      http.post("/api/v2/config/modules/outbound/validate", async ({ request }) => {
+        const candidate = await request.json() as { expected: unknown };
+        requests.push(candidate);
+        return HttpResponse.json({
+          validation_token: "validation-proxy",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: [],
+          affected_names: ["proxy-primary"],
+        });
+      }),
+      http.post("/api/v2/config/modules/outbound/apply", async ({ request }) => {
+        const body = await request.json() as { operation_id: string };
+        requests.push(body);
+        return HttpResponse.json({
+          operation_id: body.operation_id,
+          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
+        });
+      }),
+    );
+    renderApp("/proxies");
+    expect(await screen.findByRole("heading", { name: "代理配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("proxy-primary")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "编辑代理 proxy-primary" }));
+    const secret = screen.getByLabelText("环境变量", { selector: "input[type='text']" });
+    await user.clear(secret);
+    await user.type(secret, "UPDATED_PROXY_URL");
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]).toMatchObject({
+      changes: [{
+        module: "outbound",
+        change: {
+          action: "update",
+          original_name: "proxy-primary",
+          value: { name: "proxy-primary", type: "socks5", proxy_url: { env: "UPDATED_PROXY_URL" } },
+        },
+      }],
+      discard_external_changes: false,
+    });
   });
 
   it("系统运行状态显示 v2 进程采样并可手动刷新", async () => {

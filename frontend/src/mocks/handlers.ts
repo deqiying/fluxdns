@@ -6,6 +6,7 @@ import {
   dnsConfigReadFixture,
   logsConfigReadFixture,
   overviewFixture,
+  outboundConfigReadFixture,
   processMetricsFixture,
   queryPageFixture,
   retentionStatusFixture,
@@ -163,10 +164,39 @@ export const handlers = [
       dns: dnsConfigReadFixture,
       statistics: statisticsConfigReadFixture,
       logs: logsConfigReadFixture,
+      outbound: outboundConfigReadFixture,
     }[String(params.module)];
     return fixture
       ? HttpResponse.json(fixture)
       : v2Error(404, "NOT_FOUND", "module fixture not found");
+  }),
+  http.post("/api/v2/config/modules/:module/validate", async ({ request, params }) => {
+    if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
+    const candidate = await request.json() as { expected?: unknown; changes?: Array<{ module?: string }> };
+    if (candidate.changes?.length !== 1 || candidate.changes[0]?.module !== String(params.module)) {
+      return v2Error(400, "INVALID_ARGUMENT", "module candidate mismatch");
+    }
+    return HttpResponse.json({
+      validation_token: "validation-1",
+      expected: candidate.expected,
+      expires_at_ms: Date.now() + 30_000,
+      required_confirmations: [],
+      affected_names: [],
+    });
+  }),
+  http.post("/api/v2/config/modules/:module/apply", async ({ request, params }) => {
+    if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
+    const body = await request.json() as {
+      operation_id?: string;
+      candidate?: { changes?: Array<{ module?: string }> };
+    };
+    if (body.candidate?.changes?.length !== 1 || body.candidate.changes[0]?.module !== String(params.module)) {
+      return v2Error(400, "INVALID_ARGUMENT", "module apply mismatch");
+    }
+    return HttpResponse.json({
+      operation_id: body.operation_id,
+      status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
+    });
   }),
   http.get("/api/v2/retention", readOnlyV2(retentionStatusFixture)),
   http.post("/api/v2/queries/search", async ({ request }) => {

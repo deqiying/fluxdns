@@ -265,5 +265,6 @@ fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_register
     let routes = include_str!("../config_mutation.rs");
     assert!(routes.contains("/api/v2/config/apply"));
     assert!(routes.contains("/api/v2/config/files/restore"));
-    assert!(!routes.contains("/api/v2/config/modules/{module}"));
+    assert!(routes.contains("/api/v2/config/modules/{module}/validate"));
+    assert!(routes.contains("/api/v2/config/modules/{module}/apply"));
 }

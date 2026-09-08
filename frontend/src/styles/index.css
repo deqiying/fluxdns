@@ -381,6 +381,32 @@ select {
   margin-bottom: 18px;
 }
 
+.config-module-content {
+  overflow: hidden;
+  border: 1px solid #e0e2e6;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.config-table-toolbar {
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid #e8e9ec;
+}
+
+.config-table-toolbar .ant-input-affix-wrapper {
+  width: min(420px, 100%);
+}
+
+.config-module-content .ant-table-wrapper {
+  width: 100%;
+}
+
+.config-state-summary .ant-typography {
+  font-size: 12px;
+}
+
 .filter-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));

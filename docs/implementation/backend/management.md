@@ -77,7 +77,9 @@ Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/�
 
 ## P1 配置事务与文件操作（2026-09-08）
 
-[`config_mutation.rs`](../../../backend/src/management/config_mutation.rs) 注册 `POST /api/v2/config/validate`、`POST /api/v2/config/apply`、`GET /api/v2/config/operations/{operation_id}`、`GET /api/v2/config/files/diff`、`POST /api/v2/config/files/restore` 和 `POST /api/v2/config/files/retry`。没有注册 P3 单模块 validate/apply、任意 YAML、PATCH、DELETE、restart 或 stop。写请求复用 v2 Bearer，并返回 v2 `FORBIDDEN` 形状的同源拒绝；候选路由单独允许 2 MiB body，其余既有路由继续使用 16 KiB 默认上限。
+[`config_mutation.rs`](../../../backend/src/management/config_mutation.rs) 注册组合配置与文件操作，并在 P3 增加 `POST /api/v2/config/modules/{module}/validate` 和 `POST /api/v2/config/modules/{module}/apply`。单模块入口复用同一 ConfigStore/Runtime/ServiceControl 事务，只接受一项与 URL 相同的 `ConfigChange`；跨模块封套返回 `FORBIDDEN`，未知模块返回 `NOT_FOUND`。没有任意 YAML、PATCH、DELETE、restart 或 stop。写请求复用 v2 Bearer，并返回 v2 同源错误；动态模块候选与组合候选均使用 2 MiB 上限，其余既有路由继续使用 16 KiB 默认上限。
+
+P3 首个消费方为 `outbound`：代理创建/编辑仍由完整 ConfigV2 候选验证 SecretRef 的 env/file 互斥、名称唯一和类型化引用改名，再经过统一 prepare、热应用和文件事务。Management 响应只含 SecretRef 来源，不解析或回显实际代理 URL、用户名、密码或令牌。
 
 组合 apply 在阻塞线程完成 ConfigStore 受理后立即返回 202；后台 owner 完成 Runtime prepare、ServiceControl 回执和持久化，客户端按相同 operation ID 查询。文件还原/重试在阻塞 owner 中执行，HTTP 取消不终止已经开始的写盘；已记录失败优先返回冻结 OperationResult，受理前冲突返回 ErrorEnvelope。operation 按用户名隔离，不在响应或日志中返回源正文、路径身份、底层错误或认证凭据。
 

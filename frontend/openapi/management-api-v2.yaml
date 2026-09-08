@@ -4,8 +4,8 @@ info:
   version: 2.0.0
   description: >-
     P0 冻结的目标契约，按检查点分阶段注册 handler。当前已实现服务/进程指标、配置状态、
-    系统白名单、十个模块只读投影、P1 组合配置事务与文件操作、保留状态及历史查询；
-    P3 模块写入与 WS 仍待后续检查点。
+    系统白名单、十个模块读投影、P1 组合配置事务与文件操作、P3 单模块写入、保留状态及历史查询；
+    P3 业务页面按模块接入，WS 仍待后续检查点。
     配置以活动源表达为准，先应用后持久化；外部变化只提示。
     所有认证用户均为管理员，不增加角色管理。路径和 SecretRef 来源可见，实际秘密不可见。
 servers:
@@ -17,6 +17,8 @@ x-implemented-operations:
   - getConfigState
   - getSystemConfig
   - getConfigModule
+  - validateModuleCandidate
+  - applyModuleCandidate
   - validateCandidate
   - applyCandidate
   - getConfigOperation

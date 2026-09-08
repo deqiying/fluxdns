@@ -255,12 +255,19 @@ async fn request_boundary(
 }
 
 fn request_body_limit(path: &str) -> usize {
-    match path {
+    if matches!(
+        path,
         "/api/v2/config/validate"
-        | "/api/v2/config/apply"
-        | "/api/v2/config/files/restore"
-        | "/api/v2/config/files/retry" => super::contract::MAX_MUTATION_BYTES,
-        _ => MAX_JSON_BODY_BYTES,
+            | "/api/v2/config/apply"
+            | "/api/v2/config/files/restore"
+            | "/api/v2/config/files/retry"
+    ) || path
+        .strip_prefix("/api/v2/config/modules/")
+        .is_some_and(|tail| tail.ends_with("/validate") || tail.ends_with("/apply"))
+    {
+        super::contract::MAX_MUTATION_BYTES
+    } else {
+        MAX_JSON_BODY_BYTES
     }
 }
 

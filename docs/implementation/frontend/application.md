@@ -85,6 +85,12 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`modules/dns-settings/api.ts`](../../../frontend/src/modules/dns-settings/api.ts) 暴露 DNS、统计与保留只读入口，[`modules/system-settings/api.ts`](../../../frontend/src/modules/system-settings/api.ts) 暴露系统白名单与 logs 模块读取；两者直接复用 `apiV2Request` 和配置模块 API。它们尚未替换 `PendingModulePage`，也没有编辑入口；FE-03/04 仍只获得固定 fixture，FE-07/11 只获得只读数据基础，不能据此认领 FC-03/04/07/13。
 
+## P3 单模块写入与代理配置（2026-09-08）
+
+[`shared/config/hooks.ts`](../../../frontend/src/shared/config/hooks.ts) 统一消费模块 `ConfigRead`、双 revision 和正式单模块 validate/apply。每次保存先预校验，再按后端返回的改名、listener 重绑、保留缩短或外部变化覆盖影响确认；`operation_id` 首次发送前固定，网络结果不明时只回读，不自动重放。成功后按类型化依赖失效 query；`applied_unpersisted` 保持独立警告并交给全局文件同步入口。
+
+[`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 已替换 `/proxies` 空态，提供搜索、新建和按旧 name 编辑。表单只在 env/file 两类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；实际 Secret 值不进入浏览器。MSW 交互测试检查单模块路径、预校验先于 apply、旧 name 和 SecretRef payload；真实后端热应用与文件证据在 P3 联合验证后补录。
+
 ## 能力与证据
 
 2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换；新增 `apiV2Request` 仅由明确的新版模块调用，不提供运行时 v1/v2 选择开关。
@@ -102,7 +108,7 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | 退出数据清理 | `performLogout` finally | AppLayout 使用 auth logout | 本轮核对实际分支 | 401 与 logout 清理行为不同，不能混写 |
 | P2 固定 v2 数据 | mocks fixtures/handlers、dns-settings/system-settings api | 未挂载业务页面 | 类型检查、schema contract 与 MSW 定向测试 | 不证明 BC-12/13 handler、真实 SQLite、页面或 WS 已接线 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
-| 12 路由壳层 | route-contract、App、AppLayout、PendingModulePage | 受保护路由与分组导航 | 23 项路由测试；桌面/390×844 fixture 浏览器与 Console 检查沿用 FC-01 证据 | 八个入口为空态，upstreams 仍只有 tab 壳层 |
+| 12 路由壳层 | route-contract、App、AppLayout、PendingModulePage | 受保护路由与分组导航；`/proxies` 已接业务页 | 路由与代理 MSW 交互测试；桌面/390×844 fixture 浏览器证据待 P3 更新 | 七个入口为空态，upstreams 仍只有 tab 壳层 |
 | 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 全局 state/operation 已接壳层；领域表单未挂载 | 完整 Vitest 20 文件 86 项、typecheck/build、真实 Bearer 配置 route/embed 登录 | P3 模块编辑未接 |
 | 外部变化基础 | ConfigFileStatus、external-change reducer、Banner/Drawer、文件单次 mutation 回读 | AppLayout 全局可见性轮询、差异、还原与 retry | App/MSW 断言双 revision、新/原 operation ID 与 apply 零重放；production embed 完成真实外改提示/差异/还原 | 组合采用与普通保存覆盖确认等待领域表单；窄屏及 retry 异常态未做浏览器验收 |
 | 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取 v2 进程指标和 v1 基础信息 | FC-14 定向 27 项；完整 Vitest 19 文件 80 项；typecheck/build；Windows 真实浏览器/后端可用样本 | 窄屏和真实不可用 OS 样本未做浏览器验收；其他 v2 页面未接线 |

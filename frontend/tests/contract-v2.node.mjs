@@ -59,6 +59,8 @@ test("全部 schema 可编译，v2 不声明角色/通用 YAML/顶层删除接�
     "getConfigState",
     "getSystemConfig",
     "getConfigModule",
+    "validateModuleCandidate",
+    "applyModuleCandidate",
     "validateCandidate",
     "applyCandidate",
     "getConfigOperation",
