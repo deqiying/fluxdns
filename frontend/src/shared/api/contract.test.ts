@@ -82,9 +82,9 @@ describe("management API fixtures", () => {
   });
 
   it("query key 包含全部服务端参数", () => {
-    const base = { page: 1, pageSize: 20, sort: "occurred_at", order: "desc" } as const;
-    expect(queryRecordKeys.list(base)).not.toEqual(queryRecordKeys.list({ ...base, page: 2 }));
-    expect(queryRecordKeys.list(base)).not.toEqual(queryRecordKeys.list({ ...base, transport: "udp" }));
+    const base = { filter: { from_ms: 1, to_ms: 2 }, cursor: null, direction: "older", page_size: 20, sort: "occurred_at", order: "desc" } as const;
+    expect(queryRecordKeys.list(base)).not.toEqual(queryRecordKeys.list({ ...base, cursor: "opaque-next" }));
+    expect(queryRecordKeys.list(base)).not.toEqual(queryRecordKeys.list({ ...base, filter: { ...base.filter, transport: "udp" } }));
 
     const statistics = { dateFrom: "2026-09-01", dateTo: "2026-09-03", dimension: "total", page: 1, pageSize: 20 } as const;
     expect(statisticsKeys.list(statistics)).not.toEqual(statisticsKeys.list({ ...statistics, dimension: "rcode" }));
@@ -93,7 +93,7 @@ describe("management API fixtures", () => {
   it("mock contract 拒绝越界页大小", async () => {
     setMockAuthenticated(true);
     await expect(
-      getQueries({ page: 1, pageSize: 101, sort: "occurred_at", order: "desc" }),
+      getQueries({ filter: { from_ms: 1, to_ms: 2 }, cursor: null, direction: "older", page_size: 101, sort: "occurred_at", order: "desc" }),
     ).rejects.toMatchObject({ status: 400, code: "INVALID_ARGUMENT" });
   });
 });

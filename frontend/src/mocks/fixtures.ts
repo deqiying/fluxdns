@@ -530,6 +530,6 @@ export const v2QueryPageFixture = {
   next_cursor: "cursor:older:2026-09-07.17",
   snapshot_cursor: { epoch: "stream-1", sequence: "42" },
   directory_revision: "clients-12",
-  retention_revision: "retention-9",
+  retention_revision: "9",
   available_from_ms: Date.parse("2026-08-28T00:00:00Z"),
 } satisfies V2Schemas["QueryPage"];

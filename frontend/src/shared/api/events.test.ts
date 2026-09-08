@@ -2,7 +2,7 @@ import { http, HttpResponse } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { server } from "@/mocks/server";
 import { setMockAuthenticated } from "@/mocks/handlers";
-import { serviceMetricsFixture, sessionFixture } from "@/mocks/fixtures";
+import { serviceMetricsFixture, sessionFixture, v2QueryPageFixture, v2QueryRecordsFixture } from "@/mocks/fixtures";
 import { acceptAuthSession, onUnauthorized } from "./client";
 import { managementEvents } from "./events";
 
@@ -107,5 +107,51 @@ describe("ManagementEventClient", () => {
     expect(CapturingWebSocket.instances).toHaveLength(2);
     unsubscribe();
     removeUnauthorized();
+  });
+
+  it("记录订阅在断线后携最新 commit cursor replay，并显式转发 resync", async () => {
+    const batches = vi.fn();
+    const resync = vi.fn();
+    const unsubscribe = managementEvents.subscribeQueries({
+      filter: { from_ms: 1, to_ms: 2 },
+      after: v2QueryPageFixture.snapshot_cursor,
+      retentionRevision: v2QueryPageFixture.retention_revision,
+    }, batches, resync, vi.fn());
+    await vi.waitFor(() => expect(CapturingWebSocket.instances).toHaveLength(1));
+    const first = CapturingWebSocket.instances[0];
+    first.open();
+    const firstSubscription = first.sent.map((value) => JSON.parse(value)).find(({ type }) => type === "subscribe_queries");
+    expect(firstSubscription).toMatchObject({
+      after: v2QueryPageFixture.snapshot_cursor,
+      retention_revision: "9",
+    });
+
+    first.message({
+      type: "queries",
+      subscription_id: firstSubscription.subscription_id,
+      cursor: { epoch: "stream-1", sequence: "43" },
+      directory_revision: "clients-13",
+      items: [v2QueryRecordsFixture[0]],
+    });
+    expect(batches).toHaveBeenCalledWith(expect.objectContaining({
+      cursor: { epoch: "stream-1", sequence: "43" },
+      directoryRevision: "clients-13",
+    }));
+
+    first.close(1013, "slow consumer");
+    await vi.waitFor(() => expect(CapturingWebSocket.instances).toHaveLength(2), { timeout: 1_500 });
+    const second = CapturingWebSocket.instances[1];
+    second.open();
+    expect(second.sent.map((value) => JSON.parse(value))).toContainEqual(expect.objectContaining({
+      type: "subscribe_queries",
+      after: { epoch: "stream-1", sequence: "43" },
+    }));
+    second.message({
+      type: "resync_required",
+      subscription_id: firstSubscription.subscription_id,
+      reason: "retention_changed",
+    });
+    expect(resync).toHaveBeenCalledWith("retention_changed");
+    unsubscribe();
   });
 });
