@@ -116,7 +116,8 @@ DnsService
   ├─ ResolutionRuntime（dispatcher / cache commit / detail projector）
   ├─ StorageRuntime（SQLite detail worker）
   └─ RuntimeCoordinator
-      └─ current / historical LateCacheFinalizer（late JoinSet / persistence owner）
+      ├─ current / historical LateCacheFinalizer（late JoinSet）
+      └─ process CacheSnapshotOwner（Moka source / generation / periodic worker）
 ```
 
 Supervisor 的 `TaskSpec` 只含 task ID、组件、restart policy 和 fault level；cancellation、JoinSet 及 restart count 由 Supervisor 运行状态持有。它没有通用的最近启动时间或逐 task shutdown-hook 字段。内部 worker 的 JoinHandle/JoinSet 由各自 owner 显式关闭，不等同于所有 panic 都会立即作为 Supervisor completion 上报。
@@ -130,7 +131,7 @@ Supervisor 的 `TaskSpec` 只含 task ID、组件、restart policy 和 fault lev
 故障等级：
 
 - `request-local`：单请求解析、timeout、取消；
-- `degraded`：资源刷新、详情 writer、cache persistence、telemetry/log writer 等可降级故障；
+- `degraded`：资源刷新、详情 writer、cache snapshot、telemetry/log writer 等可降级故障；
 - `fatal-candidate`：候选 prepare/bind 失败，保留旧 runtime；
 - `fatal-endpoint`：单 endpoint 达到重试上限；
 - `fatal`：逻辑 listener 全部不可用、supervisor panic、启动必需 storage 失效或 shutdown timeout。
@@ -165,10 +166,11 @@ UDP 无连接请求同样受 guard 约束。后台 cache finalizer 使用独立 
 4. coordinator 等待当前及旧 runtime 的 request guard 归零；
 5. ResolutionRuntime 关闭 ingress 并依次排空 dispatcher/cache/detail；
 6. coordinator 关闭历史/当前 LateCacheFinalizer 及其缓存持久化，合并安全计数；
-7. StorageRuntime 关闭详情 worker、flush stats 并关闭业务数据库；
-8. 最后关闭 Telemetry。
+7. 进程级 CacheSnapshotOwner 用剩余预算 best-effort 覆盖当前 Moka；
+8. StorageRuntime 关闭详情 worker、flush stats 并关闭业务数据库；
+9. 最后关闭 Telemetry。
 
-stats、resolve log、SQLite checkpoint 和 Telemetry flush 都必须纳入进程 drain。cache persistence 由 finalizer owner 有序关闭，安全摘要在 Telemetry 关闭前发布；未完成关闭与持久化失败/drop 分别记录，不能混成同一 timeout。实际 owner 和 task 接线见[后台服务](../../../implementation/backend/background-services.md)。
+stats、resolve log、SQLite checkpoint、cache snapshot 和 Telemetry flush 都必须纳入进程 drain。LateCacheFinalizer 与 CacheSnapshotOwner 分阶段有序关闭，合并后的安全摘要在 Telemetry 关闭前发布；未完成 finalizer 与 snapshot 写入分别记录，不能混成同一 timeout。实际 owner 和 task 接线见[后台服务](../../../implementation/backend/background-services.md)。
 
 所有阶段共享调用方给定的总 deadline，阶段结果分别记录；不是每一步独立重置预算。“已读请求必须完成”不属于已接受的停机契约；并发、故障与 Unix 信号的实际证据和限制见[生命周期](../../../implementation/backend/lifecycle.md#契约验证补充)，不借验证专项的收口改变停机契约。
 

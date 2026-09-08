@@ -26,6 +26,7 @@ pub struct MokaCacheStore {
     load_store: MemoryCacheStore,
     state: Arc<Mutex<MokaState>>,
     next_version: Arc<AtomicU64>,
+    snapshot_reset_generation: Arc<AtomicU64>,
     max_weight: Option<u64>,
     eviction_count: Arc<AtomicU64>,
 }
@@ -151,6 +152,7 @@ impl MokaCacheStore {
             load_store: MemoryCacheStore::default(),
             state: Arc::new(Mutex::new(MokaState::default())),
             next_version: Arc::new(AtomicU64::new(0)),
+            snapshot_reset_generation: Arc::new(AtomicU64::new(0)),
             max_weight,
             eviction_count,
         }
@@ -221,6 +223,16 @@ impl MokaCacheStore {
             visit(batch).map_err(SnapshotVisitError::Visitor)?;
         }
         Ok(visited)
+    }
+
+    /// 返回影响完整快照内容的单调代际；owner 仅用它跳过确定无变化的周期。
+    pub(crate) fn snapshot_generation(&self) -> u64 {
+        self.next_version.load(Ordering::Acquire)
+    }
+
+    /// 返回显式失效代际；快照发布必须核对它，避免 clear 后旧文件复活。
+    pub(crate) fn snapshot_reset_generation(&self) -> u64 {
+        self.snapshot_reset_generation.load(Ordering::Acquire)
     }
 }
 
@@ -396,6 +408,11 @@ impl CacheStore for MokaCacheStore {
                 .collect::<Vec<_>>();
             for key in &keys {
                 self.cache.invalidate(key.as_ref());
+            }
+            if !keys.is_empty() {
+                self.next_version.fetch_add(1, Ordering::AcqRel);
+                self.snapshot_reset_generation
+                    .fetch_add(1, Ordering::AcqRel);
             }
             self.cache.run_pending_tasks();
             Ok(keys.len() as u64)

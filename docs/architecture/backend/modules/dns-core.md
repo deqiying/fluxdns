@@ -16,7 +16,7 @@ DNS Core 是 transport 无关的请求编排器。输入是 canonical query 和 
 
 公开 `DnsCore` 契约不暴露 socket/HTTP/SQLite/Moka，不根据具体 UDP/TCP/DoH 类型分支；transport 差异通过 capability 和 response encoder 处理。正式启动由 async prepare 构造 `PolicyDnsCore`，Policy、资源、Cache、Upstream 和后台完成事件链路已经接通。
 
-`dns/policy.rs` 同时承担部分组合根职责：构造具体 Upstream registry、Moka facade，并在显式 prepare 中初始化 SQLite cache persistence；不能把“公共接口隔离”写成整个文件不依赖 adapter。`HostsCore`/`ServFailCore` 保留为简化解析与契约测试实现；配置装配统一使用 `PolicyDnsCore`，不维护另一套仅处理 hosts 的配置装配层。
+`dns/policy.rs` 同时承担部分组合根职责：构造具体 Upstream registry、Moka facade，并向进程级 cache snapshot owner 暴露受限 source；不能把“公共接口隔离”写成整个文件不依赖 adapter。它不再初始化 SQLite cache persistence。`HostsCore`/`ServFailCore` 保留为简化解析与契约测试实现；配置装配统一使用 `PolicyDnsCore`，不维护另一套仅处理 hosts 的配置装配层。
 
 ## 2. 内部结构
 
@@ -91,7 +91,7 @@ Core 不再次计算继承，也不把 rule 文本写入日志。
 - stale hit 可以先返回，并启动捕获最新 snapshot 的 refresh；
 - miss 进入 single-flight；
 - waiter 取消只释放自身，不取消仍有其他 waiter 的 exchange；
-- Core 把上游结果与 single-flight lease 封装为 `CacheCommitCandidate`，由统一解析事件移交后台 worker；worker 用独立 100ms deadline 完成准入、质量 CAS、follower completion 和 persistence enqueue。
+- Core 把上游结果与 single-flight lease 封装为 `CacheCommitCandidate`，由统一解析事件移交后台 worker；worker 用独立 100ms deadline 完成准入、质量 CAS 和 follower completion。进程快照不在请求完成链逐条 enqueue。
 
 Core 不直接调用 Moka 或持久化 store。
 

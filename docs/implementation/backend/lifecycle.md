@@ -4,9 +4,9 @@
 >
 > 适用范围：正式 CLI 启动、资源准备、bind、reload 与 shutdown 接线
 >
-> 最后核对：2026-09-05（UTC；启动/停机、刷新/reload 竞争与 owner 本机契约验证）
+> 最后核对：2026-09-08（UTC；启动/停机、刷新/reload 竞争与 cache snapshot owner 本机契约验证）
 >
-> 核对基线：`f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 加本次契约验证工作树
+> 核对基线：`8ac6c63168285093350e79a1cfb039a900871123` 加本次 BC-07 工作树
 
 ## 正式入口
 
@@ -16,17 +16,18 @@
 
 1. 仅 `run` 先执行 `recover_pending_transaction`；`validate` 关闭 snapshot 写入，不恢复写事务。
 2. `ConfigLoader::load_from_path` 加载配置；`run` 再解析检查 SecretRef 并配置正式日志输出，始终创建 telemetry writer 和日志 owner，日志关闭不停止指标。
-3. 调用 `PreparedRuntime::prepare_with_policy_core_and_remote_resources`，准备资源、Policy core、upstream 和启用的缓存恢复。
+3. 调用 `PreparedRuntime::prepare_with_policy_core_and_remote_resources`，准备资源、Policy core 和 upstream；候选 prepare 不读写 cache snapshot。
 4. `StorageRuntime::open` 在共享 deadline 内建目录、打开统计/详情数据库、迁移并执行独立事务写入/回滚探针；失败映射为 prepare 错误，不创建服务 owner。
-5. `bind_prepared` 使用 `SystemSocketFactory` 绑定 DNS endpoint，构造 `RuntimeCoordinator`。
-6. WebUI 启用时 `ManagementService::bind` 注入 coordinator、数据库路径、详情开关、telemetry 与 resolution metrics。
-7. 构造 `DnsService`，通过 `attach_logging` 挂接同一进程日志 owner，通过 `attach_management` 注册管理服务；进入信号、Supervisor 和配置 watcher 等待。
+5. app 创建唯一 `CacheSnapshotOwner`，在独立的有界 prepare deadline 内把快照分批恢复到活动 Moka；恢复故障降级冷启。owner 就绪后才继续 bind。
+6. `bind_prepared` 使用 `SystemSocketFactory` 绑定 DNS endpoint，构造 `RuntimeCoordinator` 并登记与活动 core 匹配的 snapshot owner。
+7. WebUI 启用时 `ManagementService::bind` 注入 coordinator、数据库路径、详情开关、telemetry 与 resolution metrics。
+8. 构造 `DnsService`，通过 `attach_logging` 挂接同一进程日志 owner，通过 `attach_management` 注册管理服务；进入信号、Supervisor 和配置 watcher 等待。
 
 `validate` 不执行后面的资源网络 fetch、数据库打开或 listener bind，因此配置校验通过不证明端口、秘密实际值、资源、SQLite 或网络可用。
 
 ## 候选与活动实例
 
-[`prepared.rs`](../../../backend/src/runtime/prepared.rs) 的 async prepare 先检查本地/远程 snapshot；remote rule-set 优先恢复已验证 content/manifest，无有效恢复才 bounded fetch、解析与持久化。构造 `PolicyDnsCore` 后，如缓存启用则初始化独立 SQLite cache persistence；失败降级 warning，不等同统计数据库失败。
+[`prepared.rs`](../../../backend/src/runtime/prepared.rs) 的 async prepare 先检查本地/远程 rule-set snapshot；remote rule-set 优先恢复已验证 content/manifest，无有效恢复才 bounded fetch、解析与持久化。构造 `PolicyDnsCore` 只建立 Moka source，不创建 SQLite cache persistence 或读写缓存文件。初次恢复由 app 的进程级 `CacheSnapshotOwner` 完成；reload 候选不恢复磁盘，避免准备态产生缓存副作用。
 
 [`coordinator.rs`](../../../backend/src/runtime/coordinator.rs) 保存活动 runtime 和历史 finalizer owner；[`bind.rs`](../../../backend/src/runtime/bind.rs) 与 [`system_socket.rs`](../../../backend/src/runtime/system_socket.rs) 负责真实绑定、TLS 材料和系统 socket。`PreparedRuntime` 不是已监听的服务，候选失败不会改变旧活动实例。
 
@@ -35,6 +36,8 @@
 [`app.rs`](../../../backend/src/app.rs) 的 `prepare_reload_candidate`、`reload_runtime_from_path` 与 `reload_service_from_path` 是保留的显式内部入口：重读配置时关闭 snapshot 写入，先拒绝进程持有配置的变化，再 prepare。正式 app watcher 不再调用它们，只生成双文件观测提示。
 
 [`DnsService::reload_prepared`](../../../backend/src/service.rs) 统一调用 `bind_prepared_reusing`，按物理 `SocketSpec` 复用未变句柄，只为新增或改变的 endpoint 创建 socket。transport/resource task 先注册并等待启动闸门，全部准备成功后执行 revision CAS，再同步更新服务集合并放行任务；旧 transport 由 Runtime retirement 通知停止接纳，已接纳请求继续完成，被移除的资源任务单独取消。该显式应用入口不由文件 watcher 触发。
+
+cache snapshot 路径在候选发布前经过 owner 校验；Runtime CAS 成功后同步切换 owner 的 revision、Moka source 和 generation，不恢复候选、不等待磁盘写入。旧 generation 即使已经完成临时文件，也必须在最终替换前失去发布权。服务关闭时先停止 Resolution 并排空所有 cache finalizer，再用剩余总预算写当前 generation 的最终快照，最后关闭 Storage 与 Telemetry。
 
 Storage/Telemetry 和解析统计 sink 由进程持有，reload 为候选 core 复用这些 sink。`webui.users` 显式激活后交给 `ManagementRuntime::reconcile_users`，内部写入识别与凭据变化撤销会话见[管理端](management.md)。其他 restart-required 字段见[配置参考](../configuration.md)。
 

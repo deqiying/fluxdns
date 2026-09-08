@@ -166,6 +166,8 @@ pub struct ShutdownReport {
     pub request_drain: ShutdownPhaseStatus,
     /// 关闭当前及历史 cache finalizer owner 的结果。
     pub cache_finalizers: ShutdownPhaseStatus,
+    /// 当前进程级缓存快照的最终补写结果；未启用时为 `Skipped`。
+    pub cache_snapshot: ShutdownPhaseStatus,
     /// 关闭 StorageRuntime 的结果；未配置时为 `Skipped`。
     pub storage: ShutdownPhaseStatus,
     /// 最终 flush 并关闭 TelemetryWriter 的结果；未配置时为 `Skipped`。

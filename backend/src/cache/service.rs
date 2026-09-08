@@ -260,6 +260,7 @@ impl LateCacheFinalizer {
     }
 
     /// 绑定与该 finalizer 同生命周期的 cache persistence owner。
+    #[allow(dead_code)] // 旧 SQLite adapter 契约保留到 BC-27，生产装配已由快照 owner 取代。
     pub(crate) fn attach_persistence_runtime(&self, runtime: Arc<CachePersistenceRuntime>) {
         *self
             .state
@@ -583,6 +584,7 @@ impl CacheFacade {
     }
 
     /// 绑定非阻塞 persistence 写入端；恢复完成前不应调用。
+    #[allow(dead_code)] // 旧 SQLite adapter 契约保留到 BC-27，生产装配已由快照 owner 取代。
     pub(crate) fn attach_persistence_writer(&self, writer: CachePersistenceWriter) {
         *self
             .persistence

@@ -6,7 +6,7 @@
 >
 > 最后评审：2026-09-08（内存权威与独立完整快照；其余基线见[模块索引](README.md)，实际接线见[后台服务](../../../implementation/backend/background-services.md#cache-persistence)）
 >
-> 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[snapshot.rs](../../../../backend/src/cache/snapshot.rs)、[persistence.rs](../../../../backend/src/cache/persistence.rs)
+> 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[snapshot.rs](../../../../backend/src/cache/snapshot.rs)、[snapshot_owner.rs](../../../../backend/src/cache/snapshot_owner.rs)
 >
 > 关联文档：[后端设计](../overview.md) · [配置参考](../../../implementation/configuration.md) · [DNS 管线](../../../implementation/backend/dns-pipeline.md) · [后台服务](../../../implementation/backend/background-services.md)
 
@@ -53,7 +53,7 @@ single-flight key 与 cache key 一致：
 1. 首个 miss 创建 producer，后续 waiter 订阅同一结果；单 waiter 取消不影响其他人。
 2. 无 waiter 且无 late cache value 时可取消 producer；optimistic refresh 在独立窗口内可以继续。
 3. producer 返回共享 response，将请求、origin response 和不可 clone 的 RAII lease 移交 `CacheCommitCandidate`。
-4. 后台 cache worker 使用独立 100ms deadline 执行 admission/CAS/persistence enqueue，发布 Ready/Miss/Failed。
+4. 后台 cache worker 使用独立 100ms deadline 执行 admission/CAS，发布 Ready/Miss/Failed；磁盘覆盖由进程级 snapshot owner 独立调度。
 5. 队列拒绝、取消、panic、abandon 或 drop 都必须结束 lease 并唤醒 waiter，不能永久占位。
 
 占位表受容量和空闲超时保护；超限允许独立解析并计数，不全局阻塞。异步 Stored/Rejected/Conflict/Unavailable/Dropped 与响应前的 cache lookup status 分别计数。
@@ -89,7 +89,7 @@ finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明�
 
 内存 commit 不再产生逐条 persistence 队列。周期任务覆盖当时的完整可见集合，被内存预算淘汰或显式清理的记录会从下一份快照消失。owner/path 切换和未来 clear 必须递增 generation，使旧任务失去发布权；正常 shutdown 只在统一剩余预算内尽力补写，不无限延长退出。
 
-当前生产仍使用 SQLite 增量 persistence，直到活动计划 BC-07 完成 owner、启动恢复、reload/shutdown 接线并退出该旧路径；BC-06 的 codec/真实文件能力不能单独作为生产切换证据。
+BC-07 已将正式 app/runtime/dns/service 切换到一个进程级 owner：初次启动恢复、周期完整覆盖、reload generation/source 切换和 finalizer 后最终写入均已接线。旧 SQLite 增量 persistence 仅保留给契约测试并等待 P5 BC-27 删除。当前仍由 v1 loader 提供过渡路径并使用固定 5 分钟周期；正式 v2 字段加载和新数据基线启动属于 BC-26。
 
 ## 8. 显式失效
 

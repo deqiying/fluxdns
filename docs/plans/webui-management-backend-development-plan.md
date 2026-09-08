@@ -116,7 +116,11 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 
 ## 6. BE-04：内存权威与独立缓存快照
 
-2026-09-08 BC-06 已完成：新增独立 `FDCS` 二进制完整快照、Moka 有界分批导出、header/body SHA-256 和先完整校验后分批恢复 reader；真实 Windows 临时文件覆盖停机 TTL、预算、损坏和失败保留旧文件。该提交不建立周期 owner、不恢复到活动 Moka，也不改变当前 SQLite 生产 persistence；这些生产边界继续由 BC-07 完成，不能将 codec 测试当作旧路径已经退出。
+2026-09-08 BC-06 已完成：新增独立 `FDCS` 二进制完整快照、Moka 有界分批导出、header/body SHA-256 和先完整校验后分批恢复 reader；真实 Windows 临时文件覆盖停机 TTL、预算、损坏和失败保留旧文件。
+
+同日 BC-07 已完成：正式 app 在 bind 前启动唯一 `CacheSnapshotOwner` 并恢复活动 Moka，使用固定 5 分钟过渡周期完整覆盖；coordinator 在 reload 提交后切换 source/generation，service 在 late finalizer 后用剩余 deadline 最终写入。生产 `PolicyDnsCore`/prepare 不再创建或挂接 SQLite cache persistence，旧 adapter 仅留契约测试等待 BC-27。真实文件覆盖跨 core 重启、缩小内存预算、周期写入/跳过、reload/clear 旧代发布拒绝与清理后不复活、路径 alias 和有界 shutdown。当前仍是 v1 loader 提供路径，v2 cache 字段加载及新数据基线启动仍由 BC-26 完成。
+
+BC-07 Windows 验证：全量 Cargo suite 807 passed、0 failed、3 ignored；定向 service、app、coordinator 和真实 `FDCS` 重启链路均通过。fmt、全部测试目标编译、文档与 diff 检查通过。未执行三个手动/大连接 ignored 专项、Linux、完整 v2 冷启/重启、真实权限/磁盘满、浏览器或约 10 客户端及 core 2ms 性能验收。
 
 ### 开发步骤
 

@@ -8,6 +8,7 @@ mod persistence;
 mod runtime;
 mod service;
 mod snapshot;
+mod snapshot_owner;
 mod sqlite;
 
 pub use admission::{
@@ -34,6 +35,11 @@ pub use service::{
 pub use snapshot::{
     CacheSnapshotError, CacheSnapshotReader, CacheSnapshotWriteSummary, open_cache_snapshot,
     write_cache_snapshot,
+};
+pub(crate) use snapshot_owner::{
+    CacheSnapshotFailure, CacheSnapshotOwner, CacheSnapshotOwnerBuildError,
+    CacheSnapshotOwnerStatus, CacheSnapshotSettings, CacheSnapshotShutdownSummary,
+    PreparedCacheSnapshotSwitch,
 };
 pub use sqlite::{
     SqliteCacheDiskUsage, SqlitePersistentCacheStore, SqlitePersistentCacheStoreBuildError,

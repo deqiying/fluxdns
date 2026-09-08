@@ -436,6 +436,42 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 )
                 .await
                 .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+            let cache_core = prepared
+                .snapshot()
+                .policy_core()
+                .ok_or_else(|| AppError::new(AppErrorKind::Prepare, "缓存 owner 缺少 DNS core"))?;
+            let cache_snapshot_settings = crate::cache::CacheSnapshotSettings::from_current_config(
+                prepared.snapshot().config(),
+                cache_core.cache().options().enabled,
+            )
+            .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+            let cache_snapshot_owner = crate::cache::CacheSnapshotOwner::start(
+                prepared.snapshot().revision(),
+                cache_core.cache_snapshot_source(),
+                cache_snapshot_settings,
+                Deadline::new(Instant::now() + PREPARE_TIMEOUT),
+            )
+            .await
+            .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+            let cache_snapshot_status = cache_snapshot_owner.status();
+            tracing::info!(
+                event = "cache_snapshot_owner_ready",
+                component = "cache",
+                result = if cache_snapshot_status.last_error.is_some() {
+                    "degraded"
+                } else {
+                    "success"
+                },
+                state = ?cache_snapshot_status.condition,
+                generation = cache_snapshot_status.generation,
+                loaded = cache_snapshot_status.recovery.loaded,
+                expired = cache_snapshot_status.recovery.expired,
+                corrupt = cache_snapshot_status.recovery.corrupt,
+                incompatible = cache_snapshot_status.recovery.incompatible,
+                skipped = cache_snapshot_status.recovery_skipped,
+                failure = ?cache_snapshot_status.last_error,
+                "cache_snapshot_owner_ready"
+            );
             tracing::info!(
                 event = "runtime_prepared",
                 component = "application",
@@ -465,6 +501,9 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             .await
             .map_err(map_bind_error)?;
             let coordinator = Arc::new(crate::runtime::RuntimeCoordinator::new(candidate));
+            coordinator
+                .attach_cache_snapshot_owner(cache_snapshot_owner)
+                .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
             let metrics = Arc::new(crate::management::MetricsOwner::new());
             let management = match management_bootstrap {
                 Some((

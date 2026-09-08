@@ -9,9 +9,9 @@ WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md
 | 计划 | 文档状态 | 计划状态 | 剩余范围 |
 | --- | --- | --- | --- |
 | [WebUI 重构决策清单](webui-management-decisions.md) | 有效 | 实施中 | 12 项决定已确认；P0 技术核定与剩余 T 项 |
-| [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0 内部契约已交付；P1 可独立子项已推进；P2 已授权并从 BC-06 快照基础开始实施，P3-P5 未授权 |
+| [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0 内部契约已交付；P1 可独立子项已推进；P2 已授权，BC-06/07 缓存快照链已完成，继续分片/保留/查询；P3-P5 未授权 |
 | [WebUI 配置热更新专项](webui-management-config-runtime-plan.md) | 有效 | 实施中 | 活动源、服务队列消费者、文件事务/状态与差异投影内部能力及仅提示 watcher 已落实；正式 v2 应用/恢复、异步事务和 HTTP/UI 未闭合 |
-| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | BC-02/03/29/30/31 内部能力、BC-04/05 身份链与 BC-23 指标已推进；BC-06 快照 codec 已完成，P2 owner/分片/保留/查询继续实施，BC-26 留 P5 |
+| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | BC-02/03/29/30/31 内部能力、BC-04/05 身份链与 BC-23 指标已推进；BC-06/07 快照及生产 owner 已完成，P2 分片/保留/查询继续实施，BC-26 留 P5 |
 | [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 有效 | 实施中 | FC-01/02、FC-16 基础与 FC-14 进程状态已交付；v2 配置切换、全局差异接线和其他业务页面等待后端依赖 |
 | [WebUI 管理后台重构需求](webui-management-requirements.md) | 草案 | 待评审 | 保留已审阅模块范围；已按决定校正 name、热配置和旧图标注解释 |
 | [WebUI 配套后端重构方案](webui-management-backend-refactor.md) | 草案 | 待评审 | 身份、独立快照、统一保留与日分片；取消旧版迁移/兼容，接入热配置专项 |

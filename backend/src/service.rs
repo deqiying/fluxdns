@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::task::JoinSet;
 
+use crate::cache::CacheSnapshotShutdownSummary;
 use crate::config::resolve::ConfigId;
 use crate::config::{BindTransport, ResolvedConfig};
 use crate::dns::{
@@ -96,6 +97,8 @@ pub enum ServiceReloadError {
     Endpoint(#[source] ServiceStartError),
     #[error("runtime reload task registration failed: {0}")]
     Task(#[source] SupervisorError),
+    #[error("cache snapshot owner could not prepare the reload switch")]
+    CacheSnapshot,
     #[error(
         "runtime reload changes process-owned {component} configuration and requires process restart"
     )]
@@ -738,6 +741,10 @@ impl DnsService {
             self.runtime.snapshot().config(),
             prepared.snapshot().config(),
         )?;
+        let cache_snapshot_switch = self
+            .coordinator
+            .prepare_cache_snapshot_switch(prepared.snapshot())
+            .map_err(|_| ServiceReloadError::CacheSnapshot)?;
         let logging = if self.runtime.snapshot().config().logs != prepared.snapshot().config().logs
         {
             Some(
@@ -829,6 +836,8 @@ impl DnsService {
                 .commit()
                 .map_err(ServiceReloadError::Activation)?,
         };
+        self.coordinator
+            .publish_cache_snapshot_switch(cache_snapshot_switch);
         // commit 已通知旧 Runtime 退出入口；保留已接纳请求，不能使用停机 cancellation。
         self.coordinator.prune_drained_runtime_owners();
         for task in &self.resource_tasks {
@@ -944,10 +953,25 @@ impl DnsService {
             report.cache_finalizers = ShutdownPhaseStatus::TimedOut;
             report.deadline_expired = true;
         }
-        if let Some(telemetry) = &self.telemetry {
-            publish_cache_shutdown_health(telemetry, cache_summary);
-        }
         log_cache_shutdown_summary(cache_summary);
+        let snapshot_summary = self.coordinator.shutdown_cache_snapshot(deadline).await;
+        report.cache_snapshot = if !snapshot_summary.attempted {
+            ShutdownPhaseStatus::Skipped
+        } else if snapshot_summary.completed {
+            ShutdownPhaseStatus::Completed
+        } else if matches!(
+            snapshot_summary.error,
+            Some(crate::cache::CacheSnapshotFailure::Timeout)
+        ) {
+            report.deadline_expired = true;
+            ShutdownPhaseStatus::TimedOut
+        } else {
+            ShutdownPhaseStatus::Failed
+        };
+        if let Some(telemetry) = &self.telemetry {
+            publish_cache_shutdown_health(telemetry, cache_summary, snapshot_summary);
+        }
+        log_cache_snapshot_shutdown_summary(snapshot_summary);
         let storage_error = match self.storage.take() {
             Some(storage) => {
                 if let Some(telemetry) = &self.telemetry {
@@ -1501,13 +1525,22 @@ fn telemetry_component_for_task(component: &'static str) -> TelemetryComponent {
     }
 }
 
-/// 发布 cache persistence 的停机健康状态，不把 key、响应或 adapter 错误写入 telemetry。
+/// 发布 cache finalizer 与进程快照的停机健康状态，不把 key、响应或底层错误写入 telemetry。
 fn publish_cache_shutdown_health(
     telemetry: &TelemetryWriter,
     summary: CacheFinalizerShutdownSummary,
+    snapshot: CacheSnapshotShutdownSummary,
 ) {
     let now = Instant::now();
-    let persistence_gap = !summary.completed || summary.persistence.has_persistence_gap();
+    let finalizer_gap = !summary.completed || summary.persistence.has_persistence_gap();
+    let snapshot_gap = snapshot.attempted && !snapshot.completed;
+    let persistence_gap = finalizer_gap || snapshot_gap;
+    let safe_reason = match (finalizer_gap, snapshot_gap) {
+        (true, true) => Some("cache finalizer and snapshot shutdown have gaps"),
+        (true, false) => Some("cache finalizer shutdown has gaps"),
+        (false, true) => Some("cache snapshot shutdown has gaps"),
+        (false, false) => None,
+    };
     let event = ComponentHealthEvent {
         component: TelemetryComponent::Cache,
         state: if persistence_gap {
@@ -1518,10 +1551,13 @@ fn publish_cache_shutdown_health(
         first_seen: now,
         last_changed: now,
         last_success: None,
-        retry_count: summary.persistence.failed_batches,
+        retry_count: summary
+            .persistence
+            .failed_batches
+            .saturating_add(u64::from(snapshot.attempted && !snapshot.completed)),
         stale_age_micros: None,
         persistence_gap,
-        safe_reason: persistence_gap.then_some("cache persistence shutdown has gaps"),
+        safe_reason,
     };
     if let Err(error) = HealthSink::update(telemetry, event) {
         tracing::debug!(
@@ -1547,6 +1583,18 @@ fn log_cache_shutdown_summary(summary: CacheFinalizerShutdownSummary) {
         capacity_removed = summary.persistence.capacity_removed,
         persistence_gap = !summary.completed || summary.persistence.has_persistence_gap(),
         "cache_shutdown_summary"
+    );
+}
+
+fn log_cache_snapshot_shutdown_summary(summary: CacheSnapshotShutdownSummary) {
+    tracing::info!(
+        event = "cache_snapshot_shutdown_summary",
+        component = "cache",
+        completed = summary.completed,
+        attempted = summary.attempted,
+        written = summary.written,
+        failure = ?summary.error,
+        "cache_snapshot_shutdown_summary"
     );
 }
 
@@ -2901,7 +2949,7 @@ mod tests {
         publish_component_health, response_rcode, retire_current_transport_task,
         spawn_telemetry_task, spawn_transport_task, task_failure, telemetry_component_for_task,
     };
-    use crate::cache::CachePersistenceRunSummary;
+    use crate::cache::{CachePersistenceRunSummary, CacheSnapshotShutdownSummary};
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, CanonicalResponse,
@@ -3298,6 +3346,7 @@ mod tests {
                     capacity_removed: 4,
                 },
             },
+            CacheSnapshotShutdownSummary::default(),
         );
 
         crate::ports::telemetry::LogSink::flush(
@@ -3314,7 +3363,37 @@ mod tests {
         assert!(health_events[0].persistence_gap);
         assert_eq!(
             health_events[0].safe_reason,
-            Some("cache persistence shutdown has gaps")
+            Some("cache finalizer shutdown has gaps")
+        );
+
+        drop(health_events);
+        let snapshot_output = Arc::new(CountingTelemetryOutput::default());
+        let snapshot_writer = TelemetryWriter::new(4, snapshot_output.clone()).unwrap();
+        publish_cache_shutdown_health(
+            &snapshot_writer,
+            CacheFinalizerShutdownSummary {
+                completed: true,
+                ..CacheFinalizerShutdownSummary::default()
+            },
+            CacheSnapshotShutdownSummary {
+                completed: false,
+                attempted: true,
+                written: false,
+                error: None,
+            },
+        );
+        crate::ports::telemetry::LogSink::flush(
+            &snapshot_writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        let health_events = snapshot_output.health_events.lock().unwrap();
+        assert_eq!(health_events.len(), 1);
+        assert_eq!(health_events[0].retry_count, 1);
+        assert_eq!(
+            health_events[0].safe_reason,
+            Some("cache snapshot shutdown has gaps")
         );
     }
 

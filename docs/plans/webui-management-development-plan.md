@@ -35,6 +35,8 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BE-01
 
 2026-09-08 用户已授权实施 P2、必要验证和阶段性本地提交，不 push。P2 从 BC-06 独立二进制快照 codec 开始；v1/v2 正式 `ConfigLoader` 与数据基线启动切换仍归 P5 的 BC-26，不借 P2 owner 接线提前实施。若 P2 生产接线出现无法绕开的 BC-26 依赖，先报告具体证据并取得扩展授权。
 
+同日 BC-06/07 已完成：`FDCS` codec、Moka 分批恢复、唯一进程 owner、周期覆盖、reload generation/source 仲裁和 finalizer 后最终写入已进入正式 app/runtime/service；生产 cache 路径已退出 SQLite。过渡接线仅消费 v1 已解析路径并固定 5 分钟周期，不改变上述 BC-26 边界。P2 下一依赖从 BC-08 日分片开始。
+
 ## 2. 当前基线与改造范围
 
 ### 2.1 已核对的工程入口

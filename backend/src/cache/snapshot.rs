@@ -39,6 +39,8 @@ pub enum CacheSnapshotError {
     Timeout,
     #[error("cache snapshot source is unavailable")]
     Unavailable,
+    #[error("cache snapshot generation was superseded")]
+    Superseded,
     #[error("cache snapshot is corrupt")]
     Corrupt,
     #[error("cache snapshot format is incompatible")]
@@ -62,6 +64,17 @@ pub fn write_cache_snapshot(
     batch_size: usize,
     deadline: Deadline,
 ) -> Result<CacheSnapshotWriteSummary, CacheSnapshotError> {
+    write_cache_snapshot_if_current(store, path, batch_size, deadline, || Ok(true))
+}
+
+/// 完成临时文件后在调用方 generation 仲裁下决定是否发布。
+pub(crate) fn write_cache_snapshot_if_current(
+    store: &MokaCacheStore,
+    path: &Path,
+    batch_size: usize,
+    deadline: Deadline,
+    publish_current: impl FnOnce() -> Result<bool, CacheSnapshotError>,
+) -> Result<CacheSnapshotWriteSummary, CacheSnapshotError> {
     ensure_deadline(deadline)?;
     let parent = path.parent().filter(|value| !value.as_os_str().is_empty());
     if let Some(parent) = parent {
@@ -73,6 +86,9 @@ pub fn write_cache_snapshot(
     let result =
         write_temporary_snapshot(store, &temp_path, batch_size, deadline).and_then(|summary| {
             ensure_deadline(deadline)?;
+            if !publish_current()? {
+                return Err(CacheSnapshotError::Superseded);
+            }
             replace_file(&temp_path, path)?;
             if let Some(parent) = parent {
                 sync_directory(parent)?;

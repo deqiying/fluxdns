@@ -6,7 +6,11 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use arc_swap::ArcSwap;
 use thiserror::Error;
 
-use crate::cache::{CachePersistenceRunSummary, LateCacheFinalizer};
+use crate::cache::{
+    CachePersistenceRunSummary, CacheSnapshotOwner, CacheSnapshotOwnerBuildError,
+    CacheSnapshotOwnerStatus, CacheSnapshotSettings, CacheSnapshotShutdownSummary,
+    LateCacheFinalizer, PreparedCacheSnapshotSwitch,
+};
 use crate::config::resolve::ConfigId;
 use crate::dns::{PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, RuntimeRevision};
 use crate::ports::effects::{ResourceFetcher, SocketFactory};
@@ -356,6 +360,7 @@ pub struct RuntimeCoordinator {
     finalizer_owners: std::sync::Mutex<Vec<Arc<LateCacheFinalizer>>>,
     runtime_owners: std::sync::Mutex<Vec<Arc<ActiveRuntime>>>,
     runtime_core_cell: Arc<RuntimeCoreCell>,
+    cache_snapshot_owner: std::sync::Mutex<Option<Arc<CacheSnapshotOwner>>>,
 }
 
 /// coordinator 汇总所有新旧 Runtime cache finalizer 的停机结果。
@@ -378,6 +383,7 @@ impl RuntimeCoordinator {
             finalizer_owners: std::sync::Mutex::new(active.finalizer_owner().into_iter().collect()),
             runtime_owners: std::sync::Mutex::new(vec![Arc::clone(&active)]),
             runtime_core_cell: Arc::new(RuntimeCoreCell::default()),
+            cache_snapshot_owner: std::sync::Mutex::new(None),
         };
         coordinator.register_runtime_core(&active);
         coordinator
@@ -392,6 +398,7 @@ impl RuntimeCoordinator {
             ),
             runtime_owners: std::sync::Mutex::new(vec![Arc::clone(&initial)]),
             runtime_core_cell: Arc::new(RuntimeCoreCell::default()),
+            cache_snapshot_owner: std::sync::Mutex::new(None),
         };
         coordinator.register_runtime_core(&initial);
         coordinator
@@ -408,6 +415,99 @@ impl RuntimeCoordinator {
                 core,
                 revision: runtime.revision(),
             })));
+    }
+
+    /// 启动发布后登记唯一进程级快照 owner；owner 必须已经恢复当前 core。
+    pub(crate) fn attach_cache_snapshot_owner(
+        &self,
+        owner: Arc<CacheSnapshotOwner>,
+    ) -> Result<(), CacheSnapshotOwnerBuildError> {
+        let runtime = self.load();
+        let core = runtime
+            .policy_core_arc()
+            .ok_or(CacheSnapshotOwnerBuildError::MissingSource)?;
+        if !owner.matches_source(runtime.revision(), &core.cache_snapshot_source()) {
+            return Err(CacheSnapshotOwnerBuildError::SourceMismatch);
+        }
+        let mut current = self
+            .cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.is_some() {
+            return Err(CacheSnapshotOwnerBuildError::AlreadyAttached);
+        }
+        *current = Some(owner);
+        Ok(())
+    }
+
+    #[allow(dead_code)] // BC-12 将通过只读 Management 投影消费该状态。
+    pub(crate) fn cache_snapshot_status(&self) -> Option<CacheSnapshotOwnerStatus> {
+        self.cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|owner| owner.status())
+    }
+
+    pub(crate) fn prepare_cache_snapshot_switch(
+        &self,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<Option<PreparedCacheSnapshotSwitch>, CacheSnapshotOwnerBuildError> {
+        let owner = self
+            .cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+        let core = snapshot
+            .policy_core_arc()
+            .ok_or(CacheSnapshotOwnerBuildError::MissingSource)?;
+        let settings = CacheSnapshotSettings::from_current_config(
+            snapshot.config(),
+            core.cache().options().enabled,
+        )?;
+        Ok(Some(owner.prepare_switch(
+            snapshot.revision(),
+            core.cache_snapshot_source(),
+            settings,
+        )))
+    }
+
+    pub(crate) fn publish_cache_snapshot_switch(
+        &self,
+        prepared: Option<PreparedCacheSnapshotSwitch>,
+    ) {
+        let Some(prepared) = prepared else {
+            return;
+        };
+        if let Some(owner) = self
+            .cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            owner.publish_switch(prepared);
+        }
+    }
+
+    pub(crate) async fn shutdown_cache_snapshot(
+        &self,
+        deadline: crate::dns::Deadline,
+    ) -> CacheSnapshotShutdownSummary {
+        let owner = self
+            .cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match owner {
+            Some(owner) => owner.shutdown(deadline).await,
+            None => CacheSnapshotShutdownSummary {
+                completed: true,
+                ..CacheSnapshotShutdownSummary::default()
+            },
+        }
     }
 
     fn register_finalizer_owner(&self, runtime: &ActiveRuntime) {
@@ -818,7 +918,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use crate::cache::CachePersistenceRunSummary;
+    use crate::cache::{CachePersistenceRunSummary, CacheSnapshotOwner, CacheSnapshotSettings};
     use crate::config::resolve::ConfigId;
     use crate::config::{ConfigLoader, LoadOptions};
     use crate::dns::{Cancellation, Deadline, RuntimeRevision};
@@ -933,6 +1033,48 @@ clients: []
         let prepared =
             PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(revision)).unwrap();
         super::super::bind::test_candidate(prepared)
+    }
+
+    #[tokio::test]
+    async fn process_cache_owner_switches_with_the_committed_runtime() {
+        let initial = policy_candidate(1);
+        let initial_core = initial.snapshot().policy_core().unwrap();
+        let owner = CacheSnapshotOwner::start(
+            RuntimeRevision(1),
+            initial_core.cache_snapshot_source(),
+            CacheSnapshotSettings::from_current_config(
+                initial.snapshot().config(),
+                initial_core.cache().options().enabled,
+            )
+            .unwrap(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let coordinator = RuntimeCoordinator::new(initial);
+        coordinator
+            .attach_cache_snapshot_owner(Arc::clone(&owner))
+            .unwrap();
+
+        let candidate = policy_candidate(2);
+        let switch = coordinator
+            .prepare_cache_snapshot_switch(candidate.snapshot())
+            .unwrap();
+        let activation = coordinator
+            .prepare_service_activation(RuntimeRevision(1), candidate)
+            .await
+            .unwrap();
+        let active = activation.commit().unwrap();
+        coordinator.publish_cache_snapshot_switch(switch);
+
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        assert_eq!(owner.status().owner_revision, RuntimeRevision(2));
+        assert_eq!(owner.status().generation, 2);
+        let shutdown = coordinator
+            .shutdown_cache_snapshot(Deadline::new(Instant::now() + Duration::from_secs(5)))
+            .await;
+        assert!(shutdown.completed);
+        assert!(!shutdown.attempted);
     }
 
     #[derive(Clone, Copy)]

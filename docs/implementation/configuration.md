@@ -322,7 +322,7 @@ RawConfigVn
 
 ### 8.1 `dns.cache`
 
-`cache` 描述全局池开关、共享内存容量、短期失败 TTL、乐观缓存和持久化；TTL 覆写不再嵌套在其中。
+`cache` 描述全局池开关、共享内存容量、短期失败 TTL、乐观缓存和当前 v1 过渡期快照路径；TTL 覆写不再嵌套在其中。
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -332,12 +332,12 @@ RawConfigVn
 | `dns.cache.optimistic.enabled` | boolean | 是否允许返回已过期记录并在后台刷新。 |
 | `dns.cache.optimistic.answer_ttl` | duration | 乐观缓存应答使用的 TTL。 |
 | `dns.cache.optimistic.max_age` | duration | 记录过期后仍可乐观返回的最长时间。 |
-| `dns.cache.persistence.path` | string | 持久化缓存文件路径；相对路径以 `work.path` 为基准。 |
-| `dns.cache.persistence.max_size_bytes` | integer | 当前实现为持久化编码快照的容量预算，单位为字节；不是 SQLite 文件物理硬上限。 |
+| `dns.cache.persistence.path` | string | 当前进程级 `FDCS` 快照文件路径；相对路径以 `work.path` 为基准。 |
+| `dns.cache.persistence.max_size_bytes` | integer | v1 loader 仍要求并校验的 legacy 字段；BC-07 生产 owner 不消费该值。 |
 
-`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS。`persistence.max_size_bytes` 保留 [`prepare_snapshot`](../../backend/src/cache/persistence.rs) 的计费语义：10 字节快照头，加每条 payload 长度及 4 字节 framing；[`SQLite adapter`](../../backend/src/cache/sqlite.rs) 使用增量 upsert 与编码大小索引维护同一预算，没有据此设置 `max_page_count` 或物理文件收缩。主库页/freelist/索引及 `-wal`/`-shm` 均可能使实际磁盘占用超过这个值，不能据此规划硬磁盘配额。
+`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS。当前 `FDCS` 快照没有用户磁盘大小配额，也不承诺文件大小等于 Moka weight；reader 只使用内部文件/记录保护上限。`persistence.max_size_bytes` 仅由仍保留的 legacy adapter 测试消费，不能据此规划当前生产快照。完整 v2 cache 配置的 `enabled/path/snapshot_interval` 由 BC-26 切换生产 loader，不在 BC-07 用旧字段伪造。
 
-任一逻辑缓存池启用时，production async prepare 从独立 SQLite 恢复可用记录；内存 CAS 成功后通过有界队列 best-effort 持久化，有序 shutdown 排空已入队批次。超出编码预算时按 entry 插入时间淘汰旧项，不按访问热度；队列满或持久化失败不改变 DNS 响应。已接受的编码预算与插入时间淘汰约束见[Cache 设计](../architecture/backend/modules/cache.md)；物理硬配额与 LRU 不是后续验收待办。
+任一逻辑缓存池启用时，正式 app 在 bind 前由唯一进程 owner 从 `FDCS` 分批预热活动 Moka，随后按内部固定 5 分钟周期覆盖完整可见集合；缺失、损坏、不兼容、超时和内存预算不足只形成冷启/部分恢复状态。内存 CAS 不等待磁盘，也不再排入逐条 SQLite persistence。reload 只切换 owner generation/source，不恢复候选；shutdown 在 finalizer 排空后 best-effort 写最终快照。详见[Cache 设计](../architecture/backend/modules/cache.md)与[后台服务](backend/background-services.md#cache-persistence)。
 
 策略级和客户端级 `cache` 只允许 `enabled` 与 `optimistic` 子对象，不包含 `memory`、`failure_ttl` 或 `persistence`。只要出现策略级或客户端级 `cache` 对象，`enabled` 就必须显式提供；整个对象缺失才表示继续向较低优先级选择。
 
@@ -376,7 +376,7 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 - 缓存保存不含客户端 DNS ID 和传输 envelope 的 canonical response。若本地 UDP 输出因本次客户端 advertised size 而截断，应保存完整 canonical response，并在每次发送时重新编码；只有上游本身返回的 `TC=1` 才保存截断条目。
 - 写入按响应质量做 compare-and-replace：完整 `NOERROR/TC=0` 可以提升并替换未过期的 NXDOMAIN/SERVFAIL/TC 条目，SERVFAIL/TC 不能覆盖未过期的完整回答；同质量条目在过期前不因后到竞态反复覆盖。
 - optimistic/stale 只适用于已经按上述规则准入的条目；缓存返回时按剩余 TTL 和当前请求重新生成响应。
-- 同一 key 的并发 miss/optimistic refresh 通过 single-flight 合并。leader 得到可缓存结果后先形成持有 lease 的 `CacheCommitCandidate` 并返回共享响应；后台 worker 使用独立 100ms deadline 完成 admission/CAS/persistence enqueue 并唤醒 waiter。客户端响应不等待 commit；candidate 被队列丢弃、取消或直接 drop 时，RAII lease 必须发布失败终态，不能永久挂住 follower。
+- 同一 key 的并发 miss/optimistic refresh 通过 single-flight 合并。leader 得到可缓存结果后先形成持有 lease 的 `CacheCommitCandidate` 并返回共享响应；后台 worker 使用独立 100ms deadline 完成 admission/CAS 并唤醒 waiter，进程快照由独立周期 owner 覆盖。客户端响应不等待 commit；candidate 被队列丢弃、取消或直接 drop 时，RAII lease 必须发布失败终态，不能永久挂住 follower。
 
 ### 8.2 `dns.ttl_override`
 

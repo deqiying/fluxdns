@@ -68,23 +68,21 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 ## Cache persistence
 
-[`PolicyDnsCore::initialize_cache_persistence`](../../../backend/src/dns/policy.rs) 在 async prepare 中打开独立 [`SqlitePersistentCacheStore`](../../../backend/src/cache/sqlite.rs)，恢复可用 entry 到 Moka。同步/测试构造器不因此自动产生磁盘副作用。
+[`snapshot.rs`](../../../backend/src/cache/snapshot.rs) 实现独立 `FDCS` 完整快照格式。写入从生产 [`MokaCacheStore`](../../../backend/src/cache/moka.rs) 的弱一致视图按批次上限取得可见记录，批外编码并直接顺序写入同目录临时文件；不复制完整缓存或维护第二份 entry 集合。文件头记录独立版本、生成 UTC 毫秒、记录数、body 长度和覆盖 metadata/body 的 SHA-256，正式替换前 `sync_all`；Windows 使用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`，失败清理本轮临时文件并保留上一份快照。
 
-[`CachePersistenceRuntime`](../../../backend/src/cache/runtime.rs) 通过有界队列接收成功内存 commit 的持久化批次；单 writer 串行 I/O，失败 best-effort 计数，不令 DNS 响应失败。`recover/persist/maintain_capacity/shutdown` 共用 operation lock 和调用者 deadline，恢复检查 format、checksum、expiry 与 key compatibility。容量约束的是编码快照字节数，没有 SQLite page budget/文件物理硬上限，见[配置参考](../configuration.md)。
+`open_cache_snapshot` 在返回 reader 前先以调用方文件字节预算和 deadline 验证完整长度/摘要，随后 `CacheSnapshotReader` 分批解码；逐条复用现有 key/entry codec，按绝对 expiry/stale-until 扣除停机时间，隔离过期、损坏和不兼容记录。同一快照使用有界 SHA-256 key 集合去重，记录数上限为 100000、单条上限为 2 MiB；这些是内部恢复保护，不是磁盘配额或 Moka/RSS 一比一承诺。
 
-[`persistence.rs`](../../../backend/src/cache/persistence.rs) 的文件 adapter/codec 和 [`memory.rs`](../../../backend/src/cache/memory.rs) 用于替代实现与契约测试；正式默认仍是 Moka + SQLite。SQLite schema v2 在旧 payload 之外保存完整 key 唯一索引、编码大小及时间/排序索引；v1 一次性事务迁移保留有效内容和 row ID。常规批写只 upsert 变更项，不解码或重写其余 payload；过期/已发现坏行清理、容量裁剪同属一个事务，失败回滚。
+[`CacheSnapshotOwner`](../../../backend/src/cache/snapshot_owner.rs) 是唯一进程级持有者。正式 app 在 Policy core 完成 prepare 后、listener bind 前把 `FDCS` 分批恢复到该 core 的 Moka；缺失、损坏、不兼容、超时或内存预算不足分别形成冷启/部分恢复状态，不阻止启动。恢复完成后 owner 启动一个周期 worker；内存 commit 不再产生逐条磁盘队列，Moka 仍是运行权威。
 
-容量合计仍扫描轻量索引，不宣称整个批次 O(变更项)。计费继续为 10 字节头加每条 payload 与 4 字节 framing，按插入时间淘汰而非访问热度。插入/可见截止时间索引为 Unix 纳秒整数，避免无关 key 更新重置旧项年龄。详见 [Cache](../../architecture/backend/modules/cache.md)。
+当前生产 loader 仍为 v1。BC-07 仅复用已解析的 `dns.cache.persistence.path` 作为快照路径，并使用内部固定 5 分钟周期；旧 `persistence.max_size_bytes` 不再参与生产快照。v2 的 `enabled/path/snapshot_interval` 正式加载与新数据基线初始化仍属于 P5 BC-26，不能从当前过渡接线推断已经完成 v2 启动。
 
-coordinator 保留历史与当前 [`LateCacheFinalizer`](../../../backend/src/cache/service.rs) owner，shutdown 在同一 deadline 排空并汇总 persistence success/failure/drop。关闭 telemetry 前发布安全计数与 Cache health/gap，不记录 key、response 或 adapter 原始错误。
+[`RuntimeCoordinator`](../../../backend/src/runtime/coordinator.rs) 只登记一个 owner，并核对它与活动 revision/Moka source 一致。reload 在候选发布前校验新路径，Runtime CAS 成功后同步递增 generation 并切换 source；不从磁盘恢复候选，也不让旧写任务覆盖新代。发布前再次检查路径链接/文件身份及受保护文件 alias。shutdown 先排空历史和当前 [`LateCacheFinalizer`](../../../backend/src/cache/service.rs)，再在同一总 deadline 内 best-effort 写当前 Moka 的最终快照；Cache health 分别汇总 finalizer 与 snapshot gap，不记录 key、response、路径或底层原始错误。
 
-### P2 二进制快照基础（2026-09-08）
+旧 [`CachePersistenceRuntime`](../../../backend/src/cache/runtime.rs)、[`SqlitePersistentCacheStore`](../../../backend/src/cache/sqlite.rs)、文件 adapter 和确定性 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs) 仍保留给既有契约测试及 P5 BC-27 删除工作，生产 `app/runtime/dns/service` 路径不再创建或挂接 SQLite cache persistence。业务统计/详情数据库仍是独立 SQLite，不受本次缓存切换影响。
 
-[`snapshot.rs`](../../../backend/src/cache/snapshot.rs) 已实现独立 `FDCS` 完整快照格式。写入从生产 [`MokaCacheStore`](../../../backend/src/cache/moka.rs) 的弱一致视图按调用方批次上限取得可见记录，批外编码并直接顺序写入同目录临时文件；不复制完整缓存或维护第二份 entry 集合。文件头记录独立版本、生成 UTC 毫秒、记录数、body 长度和覆盖 metadata/body 的 SHA-256，正式替换前 `sync_all`；Windows 使用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`，失败清理本轮临时文件并保留上一份快照。
+Windows `_fluxdns/p2-cache-tests/`、`_fluxdns/p2-cache-owner-tests/` 和 `_fluxdns/p2-cache-owner-policy-tests/` 真实文件测试覆盖流式往返、停机 TTL、损坏/未知版本/文件预算、失败保留旧文件、周期跳过未变化代、预算缩小后的部分预热、reload/clear 代际仲裁与清理后不复活、路径 hard-link/alias、超时 shutdown，以及两个真实 `PolicyDnsCore` 之间的 `FDCS` 重启命中。后者直接核对文件头且确认没有 SQLite `-wal`/`-shm` sidecar；未执行真实权限/磁盘满、Unix 或个人配置启动。
 
-`open_cache_snapshot` 在返回 reader 前先以调用方文件字节预算和 deadline 验证完整长度/摘要，随后 `CacheSnapshotReader` 分批解码；逐条复用现有 key/entry codec，按绝对 expiry/stale-until 扣除停机时间，隔离过期、损坏和不兼容记录。同一快照使用有界 SHA-256 key 集合去重，记录数 100000、单条 2 MiB；这些是内部恢复保护，不是磁盘配额或 Moka/RSS 一比一承诺。
-
-Windows `_fluxdns/p2-cache-tests/` 真实文件定向测试覆盖单条批次流式往返、停机 TTL、body/header 损坏、未知版本、文件预算、缺失冷启、替换前失败保留旧文件及成功覆盖；`cache::` 共 71 项通过。该批没有创建周期 owner、没有把 reader 注入活动 Moka，也没有改变生产 [`PolicyDnsCore::initialize_cache_persistence`](../../../backend/src/dns/policy.rs) 的 SQLite 接线；owner/generation、预算缩小后的部分预热、reload/shutdown 和旧路径退出留在 BC-07。
+BC-07 交付验证在 Windows、Rust/Cargo 1.98.0 执行：全量 `cargo test --locked -- --test-threads=4` 为 807 passed、0 failed、3 ignored；另以 `service::tests::`、`app::tests::`、`runtime::coordinator::tests::` 和跨 Policy core 重启用例定向核对接线。三个 ignored 仍是手动性能与 1024-session 专项。本轮未运行 Linux、真实磁盘故障、完整 v2 冷启/重启、浏览器或核心 2ms 性能验收。
 
 ## Observability
 
@@ -123,8 +121,8 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 | --- | --- | --- | --- | --- |
 | remote/file 刷新 | 条件 fetch、manifest v2、epoch/CAS、scheduler | async prepare + service resource task | loopback 200/304 与真实条件头；重复 304、坏 pair/响应、旧 manifest、换代及同预算重试 | 未执行真实远程/代理组合 |
 | stats/detail | schema v6 整数时间、启动 deadline/probe、StorageRuntime、ResolutionRuntime | app 打开，service 持有并复用 sink；stats-first shutdown | 新库/v1/v5 升级、时间类型/排序/范围/清理、索引、高水位与异常值回滚；原 SQLite 锁/探针和 stats-first 回归 | ingress/pending/数据库故障仍可产生明确 gap；未验证生产规模迁移成本 |
-| cache 恢复/后台写 | schema v2、增量 upsert、CachePersistenceRuntime | core prepare + commit worker + finalizer shutdown | v1 升级保留 payload/重复 key；trigger 证明仅改动行写入；失败回滚、坏行清理、原 Busy/DiskFull 用例 | 注入不等价真实 disk-full；保留插入时间淘汰 |
-| cache 二进制快照 codec | snapshot header、SHA-256、Moka 分批导出与流式 reader | 未接线，等待 BC-07 进程 owner | Windows 真实文件 6 项；`cache::` 71 项 | 未验证权限/磁盘满、Unix 或生产恢复；当前仍走 SQLite |
+| legacy cache persistence | schema v2、增量 upsert、CachePersistenceRuntime | 仅保留 adapter/契约测试，生产不再挂接 | v1 升级、增量触发器、失败回滚与坏行清理既有测试 | 待 P5 BC-27 删除；不代表当前生产路径 |
+| cache 二进制快照 owner | `FDCS` header/SHA-256、Moka 分批导出/恢复、周期 worker、generation | app 启动恢复 + coordinator reload + service shutdown | Windows 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际/超时定向测试 | 过渡期固定 5 分钟；未验证真实权限/磁盘满、Unix 或 v2 冷启 |
 | telemetry lifecycle / 聚合 | histogram、typed writer、registry、sampler | dispatcher + app/service 周期及最终 flush | 固定桶/标签、溢出原子性、拥塞下聚合、关闭详情、输出重试、reload 与最终快照 | 没有 exporter/逐 attempt 流；长期负载与全部输出故障未验收 |
 
 ## 本次验证

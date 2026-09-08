@@ -19,8 +19,8 @@ use thiserror::Error;
 
 use crate::cache::{
     CacheAdmissionPolicy, CacheCommitCandidate, CacheFacade, CacheFacadeOptions, CacheFingerprint,
-    CacheKeyDimensions, CacheKeyMode, CacheLookup, CachePersistenceRuntime, CacheWriteRequest,
-    LateCacheFinalizer, MokaCacheStore, SqlitePersistentCacheStore, build_cache_key,
+    CacheKeyDimensions, CacheKeyMode, CacheLookup, CacheWriteRequest, LateCacheFinalizer,
+    MokaCacheStore, build_cache_key,
 };
 use crate::config::model::EcsMode;
 use crate::config::resolve::{
@@ -32,8 +32,7 @@ use crate::policy::{ClientMatch, MatchedRuleKind, PolicyBuildError, PolicyIndex,
 use crate::ports::PortFuture;
 use crate::ports::cache::{
     CacheCondition, CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation, CacheQuality,
-    CacheRecoverySummary, CacheUpstreamId, CacheUpstreamProvenance, CacheWriteOutcome,
-    PersistentCacheStore,
+    CacheUpstreamId, CacheUpstreamProvenance,
 };
 use crate::ports::exchange::{
     ConnectorId, DnsExchange, TransportFailure, TransportFailureClass, UpstreamOutcome,
@@ -104,6 +103,7 @@ pub struct PolicyDnsCore {
     policy: Arc<ArcSwap<PolicyState>>,
     upstreams: UpstreamRuntime,
     cache: Arc<CacheFacade>,
+    cache_snapshot_source: Arc<MokaCacheStore>,
     late_cache_finalizer: Arc<LateCacheFinalizer>,
     runtime_cell: Arc<ArcSwap<RuntimeCoreCell>>,
     ttl: u32,
@@ -299,7 +299,7 @@ impl PolicyDnsCore {
         let policy =
             PolicyIndex::from_config_with_resource_indexes(config, &host_indexes, &rule_indexes)
                 .map_err(PolicyCoreBuildError::Policy)?;
-        let (cache, late_cache_finalizer) = build_cache_facade(config)?;
+        let (cache, cache_snapshot_source, late_cache_finalizer) = build_cache_facade(config)?;
         let policy_state = PolicyState {
             index: policy,
             host_versions: resource_versions(&config.hosts),
@@ -313,6 +313,7 @@ impl PolicyDnsCore {
             policy: Arc::new(ArcSwap::from_pointee(policy_state)),
             upstreams,
             cache,
+            cache_snapshot_source,
             late_cache_finalizer,
             runtime_cell: Arc::new(ArcSwap::from_pointee(RuntimeCoreCell::default())),
             ttl,
@@ -335,77 +336,14 @@ impl PolicyDnsCore {
         &self.cache
     }
 
+    /// 返回供唯一进程级快照 owner 遍历的生产 Moka handle。
+    pub(crate) fn cache_snapshot_source(&self) -> Arc<MokaCacheStore> {
+        Arc::clone(&self.cache_snapshot_source)
+    }
+
     /// 返回由 Runtime 生命周期统一托管的 late-cache finalizer。
     pub(crate) fn finalizer_owner(&self) -> Arc<LateCacheFinalizer> {
         Arc::clone(&self.late_cache_finalizer)
-    }
-
-    /// 在 async prepare 边界恢复并启动独立 SQLite cache persistence。
-    ///
-    /// 调用方可在失败时保留当前内存 cache；该方法不会把持久化 I/O 放进 DNS 请求路径。
-    pub(crate) async fn initialize_cache_persistence(
-        &self,
-        config: &ResolvedConfig,
-        deadline: Deadline,
-    ) -> Result<CacheRecoverySummary, PolicyCoreBuildError> {
-        if !self.cache.options().enabled {
-            return Ok(CacheRecoverySummary::default());
-        }
-        let store: Arc<dyn PersistentCacheStore> = Arc::new(
-            SqlitePersistentCacheStore::connect(
-                &config.dns.cache.persistence_path,
-                config.dns.cache.persistence_max_size_bytes,
-            )
-            .await
-            .map_err(|error| PolicyCoreBuildError::Cache {
-                reason: format!("cache persistence connect failed: {error}"),
-            })?,
-        );
-        let (batch, mut summary) = match store.recover(deadline).await {
-            Ok(recovered) => recovered,
-            Err(error) => {
-                let _ = store.shutdown(deadline).await;
-                return Err(PolicyCoreBuildError::Cache {
-                    reason: format!("cache persistence recovery failed: {error}"),
-                });
-            }
-        };
-        let mut loaded = 0_u64;
-        for (key, record) in batch.records {
-            if matches!(
-                self.cache
-                    .store()
-                    .compare_and_swap(key, CacheCondition::Absent, record.entry, deadline)
-                    .await,
-                Ok(CacheWriteOutcome::Inserted(_) | CacheWriteOutcome::Replaced(_))
-            ) {
-                loaded = loaded.saturating_add(1);
-            }
-        }
-        summary.loaded = loaded;
-        let runtime = match CachePersistenceRuntime::start(
-            Arc::clone(&store),
-            CACHE_PERSISTENCE_QUEUE_CAPACITY,
-            Duration::from_secs(CACHE_PERSISTENCE_OPERATION_TIMEOUT_SECS),
-        ) {
-            Ok(runtime) => Arc::new(runtime),
-            Err(error) => {
-                let _ = store.shutdown(deadline).await;
-                return Err(PolicyCoreBuildError::Cache {
-                    reason: format!("cache persistence runtime failed: {error:?}"),
-                });
-            }
-        };
-        self.cache.attach_persistence_writer(runtime.writer());
-        self.late_cache_finalizer
-            .attach_persistence_runtime(runtime);
-        Ok(summary)
-    }
-
-    /// 返回生产 async prepare 是否已接入 cache persistence 生命周期。
-    #[cfg(test)]
-    pub(crate) fn has_cache_persistence(&self) -> bool {
-        self.late_cache_finalizer.has_persistence_runtime()
     }
 
     pub(crate) fn attach_runtime_cell(&self, cell: Arc<RuntimeCoreCell>) {
@@ -1692,12 +1630,16 @@ fn late_response_preference(class: crate::dns::ResponseClass) -> CacheQuality {
 
 const DEFAULT_LATE_CACHE_FINALIZER_CAPACITY: usize = 64;
 const OPTIMISTIC_REFRESH_TIMEOUT_SECS: u64 = 2;
-const CACHE_PERSISTENCE_QUEUE_CAPACITY: usize = 256;
-const CACHE_PERSISTENCE_OPERATION_TIMEOUT_SECS: u64 = 2;
-
 fn build_cache_facade(
     config: &ResolvedConfig,
-) -> Result<(Arc<CacheFacade>, Arc<LateCacheFinalizer>), PolicyCoreBuildError> {
+) -> Result<
+    (
+        Arc<CacheFacade>,
+        Arc<MokaCacheStore>,
+        Arc<LateCacheFinalizer>,
+    ),
+    PolicyCoreBuildError,
+> {
     let store = MokaCacheStore::with_max_weight(config.dns.cache.memory_max_size_bytes).map_err(
         |error| PolicyCoreBuildError::Cache {
             reason: error.to_string(),
@@ -1710,8 +1652,10 @@ fn build_cache_facade(
                 reason: format!("{error:?}"),
             }
         })?;
+    let store = Arc::new(store);
     Ok((
-        Arc::new(CacheFacade::new(Arc::new(store), options)),
+        Arc::new(CacheFacade::new(store.clone(), options)),
+        store,
         Arc::new(finalizer),
     ))
 }
@@ -2335,7 +2279,7 @@ mod tests {
     };
     use ipnet::IpNet;
 
-    use crate::cache::CacheLookup;
+    use crate::cache::{CacheLookup, CacheSnapshotOwner, CacheSnapshotSettings};
     use crate::config::model::{EcsMode, RuleSetFormat};
     use crate::config::resolve::{
         ConfigId, ResolvedCacheOverride, ResolvedClient, ResolvedEcs, ResolvedOutbound,
@@ -2592,20 +2536,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_persistence_recovers_across_policy_core_instances() {
-        let root = std::env::temp_dir().join(format!(
-            "fluxdns-policy-cache-persistence-{}-{}",
-            std::process::id(),
-            SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+    async fn cache_snapshot_recovers_across_policy_core_instances() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_fluxdns")
+            .join("p2-cache-owner-policy-tests")
+            .join(format!(
+                "{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
         std::fs::create_dir_all(&root).unwrap();
         let mut config = Arc::try_unwrap(doh_config()).unwrap();
         config.dns.cache.enabled = true;
-        config.dns.cache.persistence_path = root.join("cache.sqlite3");
-        config.dns.cache.persistence_max_size_bytes = 1024 * 1024;
+        config.dns.cache.persistence_path = root.join("cache.snapshot");
         let deadline = || Deadline::new(Instant::now() + Duration::from_secs(5));
 
         let first_transport = Arc::new(FakeDohTransport::new());
@@ -2615,12 +2563,21 @@ mod tests {
         )
         .unwrap();
         let first = PolicyDnsCore::from_config_with_registry(&config, 42, first_registry).unwrap();
-        let first_recovery = first
-            .initialize_cache_persistence(&config, deadline())
-            .await
-            .unwrap();
-        assert_eq!(first_recovery.loaded, 0);
-        assert!(first.has_cache_persistence());
+        let first_owner = CacheSnapshotOwner::start(
+            RuntimeRevision(1),
+            first.cache_snapshot_source(),
+            CacheSnapshotSettings::new(
+                true,
+                config.dns.cache.persistence_path.clone(),
+                Duration::from_secs(3600),
+                Vec::new(),
+            )
+            .unwrap(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(first_owner.status().recovery.loaded, 0);
         first
             .resolve(&request("persistent-cache.example.", RecordType::A))
             .await
@@ -2628,13 +2585,32 @@ mod tests {
         assert_eq!(first_transport.calls.load(Ordering::Acquire), 1);
         let first_shutdown = first.finalizer_owner().shutdown_until(deadline()).await;
         assert!(first_shutdown.completed, "shutdown: {first_shutdown:?}");
-        assert_eq!(
-            first_shutdown.persistence.persisted_batches, 1,
-            "shutdown: {first_shutdown:?}"
+        assert_eq!(first_shutdown.persistence.persisted_batches, 0);
+        let snapshot_shutdown = first_owner.shutdown(deadline()).await;
+        assert!(
+            snapshot_shutdown.completed,
+            "shutdown: {snapshot_shutdown:?}"
         );
+        assert!(snapshot_shutdown.written, "shutdown: {snapshot_shutdown:?}");
         assert_eq!(
-            first_shutdown.persistence.capacity_removed, 0,
-            "shutdown: {first_shutdown:?}"
+            &std::fs::read(&config.dns.cache.persistence_path).unwrap()[..4],
+            b"FDCS"
+        );
+        assert!(
+            !config
+                .dns
+                .cache
+                .persistence_path
+                .with_extension("snapshot-wal")
+                .exists()
+        );
+        assert!(
+            !config
+                .dns
+                .cache
+                .persistence_path
+                .with_extension("snapshot-shm")
+                .exists()
         );
 
         let second_transport = Arc::new(FakeDohTransport::new());
@@ -2645,13 +2621,25 @@ mod tests {
         .unwrap();
         let second =
             PolicyDnsCore::from_config_with_registry(&config, 42, second_registry).unwrap();
-        let second_recovery = second
-            .initialize_cache_persistence(&config, deadline())
-            .await
-            .unwrap();
+        let second_owner = CacheSnapshotOwner::start(
+            RuntimeRevision(1),
+            second.cache_snapshot_source(),
+            CacheSnapshotSettings::new(
+                true,
+                config.dns.cache.persistence_path.clone(),
+                Duration::from_secs(3600),
+                Vec::new(),
+            )
+            .unwrap(),
+            deadline(),
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            second_recovery.loaded, 1,
-            "unexpected recovery summary: {second_recovery:?}"
+            second_owner.status().recovery.loaded,
+            1,
+            "unexpected recovery status: {:?}",
+            second_owner.status()
         );
         second
             .resolve(&request("persistent-cache.example.", RecordType::A))
@@ -2665,6 +2653,7 @@ mod tests {
                 .await
                 .completed
         );
+        assert!(second_owner.shutdown(deadline()).await.completed);
         std::fs::remove_dir_all(root).unwrap();
     }
 
