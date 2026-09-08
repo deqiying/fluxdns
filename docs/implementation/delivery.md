@@ -88,11 +88,13 @@ pwsh -File script/dev.ps1 stop
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| 前端构建 | `pnpm run build` | frontend package script | P1 壳层工作树 typecheck 与 Vite production build 通过 | 未运行内嵌 binary 打包 |
+| 前端构建 | `pnpm run build` | frontend package script | P3 工作树 typecheck 与 Vite production build 通过 | 未运行 release 三阶段打包 |
 | 本地打包 | package-embedded 三阶段 | 仓库根脚本 | 本轮静态检查顺序、产物和平台 gate | 未运行完整打包 |
-| 显式启动/身份检查 | dev start/status/stop | 本地发布 binary | 本轮静态 | 未启动或停止服务 |
+| 显式启动/身份检查 | dev start/status/stop | debug embed binary + P3 ConfigV2 | 真实 start/status、Bearer/UDP/SQLite/浏览器；最终实例留供本地复核 | 未作为 release binary 验收 |
 | 版本提交/三平台发布 | set-version、release.yml | main + tag gates | 本轮静态 | 未创建提交/tag、push、Actions 或 Release |
 
 历史记录：迁移前 v2 方案在 2026-09-04 报告 Windows x86_64 三阶段打包、发布物 SHA-256 对齐 target binary、配置 validate、移出外部 dist 后的 SPA/API HTTP smoke、dev start/status/stop、CSP/nosniff/cache/ETag/304，以及 in-app browser 的初始化深链接/表单/Console 检查。**这是原文报告，本轮未复核**；测试所用源码提交未完整记录，不能把本页核对基线视为当时测试基线。过时的 v2 方案已按用户要求移除，历史原文由 Git 追溯。
 
 2026-09-08 Bearer 子项使用当批工作树执行前端构建、`cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，并启动独立 loopback 测试实例；真实 HTTP 和浏览器 Cookie/Network/Storage 证据见[Management 实现](backend/management.md#p1-bearer-业务鉴权2026-09-08)及[前端应用](frontend/application.md#p1-bearer-接线2026-09-08)。后续壳层子项执行 `pnpm run test` 9 文件 55 项和 `pnpm run build`，并用 Vite fixture 检查桌面、390×844、Drawer、上游 tab 与 Console；这不复核内嵌 binary、真实 v2 API、外部 HTTPS 代理、GitHub Actions 或 Linux/macOS 发布。
+
+2026-09-08 P3 使用当批工作树执行 `pnpm run build` 与 `cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，由 debug 内嵌 binary 显式加载 `_fluxdns/p3-live/config.yaml`。真实 Bearer module/global HTTP、operation 轮询、文件持久化、UDP、SQLite、外改组合采用和两档浏览器视口证据见[Management 实现](backend/management.md#p1-配置事务与文件操作2026-09-08)与[前端应用](frontend/application.md#p3-联合验收2026-09-08)。该验证不等于 release 三阶段打包、HTTPS 反向代理、Linux/macOS、GitHub Actions 或发布授权。

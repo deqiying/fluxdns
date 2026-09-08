@@ -4,17 +4,17 @@
 >
 > 适用范围：独立管理面、认证与会话、初始化写入、只读 API 和 SPA 安全边界
 >
-> 最后评审：2026-09-08（v2 配置、保留与历史只读端点）
+> 最后评审：2026-09-08（P3 v2 类型化配置写入与外部组合采用）
 
 ## 设计结论
 
 Management 使用独立 HTTP listener 与 Axum router，不扩展 DoH 的有界 DNS parser。框架类型限定在 adapter 内；Runtime、Storage、Resource 和 DNS ports 只暴露领域类型。读数据通过 snapshot 或 `ManagementStorageRead`，不让 handler 持有 SQLx pool。
 
-当前页面 API 字段、状态码和错误 envelope 的权威仍是 [v1 OpenAPI](../../frontend/openapi/management-api-v1.yaml)，本文不复制 schema。P0 已冻结 [v2 目标契约](../../frontend/openapi/management-api-v2.yaml)；BC-23、BC-12 和 BC-13 已依次接入指标、配置/保留及历史查询的无写副作用 v2 端点，配置写入与 WS 仍等待后续检查点。该分阶段接入不是承诺长期维护 v1/v2 并行兼容服务，实际边界见[管理端实现](../implementation/backend/management.md#p0-v2-契约)。
+既有页面 API 字段、状态码和错误 envelope 的权威为 [v1 OpenAPI](../../frontend/openapi/management-api-v1.yaml)，P0 冻结并由 P1-P3 接入的配置、保留、历史和指标契约以 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml) 为权威；本文不复制 schema。P3 已注册全局及十模块类型化配置写入、保留预览和文件处理，WS 仍等待 P4。该分阶段接入不是承诺长期维护 v1/v2 并行兼容服务，实际边界见[管理端实现](../implementation/backend/management.md#p0-v2-契约)。
 
-v2 配置读写以活动源表达为权威，模块严格白名单，`name` 为管理/引用键，`client_id` 只负责请求身份且普通编辑不可修改。配置先运行时应用后持久化，操作结果和文件同步状态分开；外部变化只提示，不自动 reload。未来正式切换必须把鉴权、Origin、handler、client 与 SPA fallback 一并接入，不能只挂上尚无 owner 的写路由。不新增角色管理。
+v2 配置读写以活动源表达为权威，模块严格白名单，`name` 为管理/引用键，`client_id` 只负责请求身份且普通编辑不可修改。配置先运行时应用后持久化，操作结果和文件同步状态分开；外部变化只提示，不自动 reload。正式链路已把 Bearer/Origin、handler、ConfigMutationOwner、typed client 与 SPA fallback 一并接入；不新增角色管理。
 
-v2 外部差异只投影白名单模块源值；只读字段和认证 hash 仅显示变化类别。沿 D-07 显示源路径及 SecretRef 引用而不读取实际秘密，普通资源 URL query 与管理认证 token 分开。差异按命名空间/name 配对，不猜改名或授予删除能力；完整输出受项数及实际序列化字节预算限制，不通过截断或伪造替代值制造可采用配置。当前内部实现及未接线范围见[差异投影](../implementation/backend/management.md#p1-外部配置差异内部投影2026-09-08)。
+v2 外部差异只投影白名单模块源值；只读字段和认证 hash 仅显示变化类别。沿 D-07 显示源路径及 SecretRef 引用而不读取实际秘密，普通资源 URL query 与管理认证 token 分开。差异按命名空间/name 配对，不猜改名或授予删除能力；完整输出受项数及实际序列化字节预算限制，不通过截断或伪造替代值制造可采用配置。P3 前端把同名项映射为带旧 name 的 update、仅外部项映射为 create，并以一次全局 Candidate 组合采用；未选和受保护变化只能经覆盖确认还原。
 
 服务指标在所有 transport 的同一 Runtime 接纳边界计数，使用进程级有界窗口和脱敏在线身份，不依赖详情存储。进程 RSS、CPU 和线程由一个受监督采样 owner 定期更新，HTTP 与后续 WS 只能读取同一快照，不能按页面或连接重复启动 OS 采样；暖机、容量截断、读取失败、平台不支持和观测中断必须显式不可用，不能填零伪装。
 

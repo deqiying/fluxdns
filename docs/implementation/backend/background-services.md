@@ -114,7 +114,7 @@ BC-07 交付验证在 Windows、Rust/Cargo 1.98.0 执行：全量 `cargo test --
 
 Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独立子进程、真实日志文件/Windows 占用失败、off/on、level/path、filter 失败和补偿失败区别；`service::` 筛选 70 项通过、3 项保持原有忽略标记，`app::` 13 项、`management::` 18 项通过。`cargo check`、全部测试目标 `--all-targets --no-run`、fmt 和文档检查通过；未改 schema、前端或依赖，本批未重跑前端验证。真实 UDP/SQLite service 联合测试通过连续五次日志切换和坏路径拒绝，DNS 持续查询，writer、sampler 和 Resolution metrics Source Arc 保持相同。测试目录为 `_fluxdns/p1-logging-tests/`、`_fluxdns/p1-logging-dns-tests/`；既有临时文件测试运行时将 TEMP/TMP 限定到 `_fluxdns/test-temp/`。
 
-2026-09-08，v2 ConfigMutationOwner 已把组合 apply、ServiceControl 回执和应用后持久化接到该日志 owner。真实 Bearer HTTP 将 logs 从关闭切为 `debug` 和新路径，Runtime revision 递增、双配置文件同步，重启后继续使用新配置；父目录缺失时返回 `APPLY_FAILED` 且旧 Runtime/文件保留。前端日志业务表单仍属 FC-13/P3，不能将组合入口当作该页面已完成。filter/CAS 补偿失败测试使用真实 reload handle 和故意撤销的测试 subscriber，不能视为生产 subscriber 曾失效。日志目标与其他受保护文件的完整物理 alias 防护、OS 文件调用强制中断、Unix、日志轮转、磁盘满和性能仍未验证。
+2026-09-08，v2 ConfigMutationOwner 已把组合/单模块 apply、ServiceControl 回执和应用后持久化接到该日志 owner。真实 Bearer HTTP 将 logs 从关闭切为 `debug` 和新路径，Runtime revision 递增、双配置文件同步，重启后继续使用新配置；父目录缺失时返回 `APPLY_FAILED` 且旧 Runtime/文件保留。P3 日志表单又在真实内嵌浏览器完成 validate/apply/operation/回显，外改 logs 与 Hosts 可一次组合采用。filter/CAS 补偿失败测试使用真实 reload handle 和故意撤销的测试 subscriber，不能视为生产 subscriber 曾失效。日志目标与其他受保护文件的完整物理 alias 防护、OS 文件调用强制中断、Unix、日志轮转、磁盘满和性能仍未验证。
 
 ## 能力与证据
 

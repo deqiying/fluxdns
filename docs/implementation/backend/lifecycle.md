@@ -106,7 +106,7 @@ Storage 停机先关闭 detail 输入并回收当前正在提交的 batch，不�
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | 完整启动 | `run_command`、async prepare、StorageRuntime deadline/probe | `main -> app -> DnsService` | 过期预算不建库、真实 SQLite 写锁与写入拒绝/回滚测试 | 不证明真实磁盘满或权限故障全部可恢复 |
-| 配置切换 | `ConfigMutationOwner`、`ServiceControl`、`reload_prepared` | P1 组合 apply，复用进程服务；watcher 只观测 | reload/rebind/failure、真实 v2 Bearer HTTP/UDP/日志/文件联合验证 | P3 单模块写入未接线；不宣称所有平台组合已验收 |
+| 配置切换 | `ConfigMutationOwner`、`ServiceControl`、`reload_prepared` | 组合及 P3 十模块 apply，复用进程服务；watcher 只观测 | reload/rebind/failure、真实 v2 Bearer HTTP/UDP/日志/文件/组合采用 | 不宣称所有平台、磁盘故障或长连接组合已验收 |
 | 有界停机 | `shutdown`、finalizer owner、stats-first | 正常信号及 fatal task 路径 | SQLite trigger 验证 stats 提交先于 300 条多批详情排空 | 已执行 SQL 无强制抢占保证；Unix 双信号 smoke 未执行 |
 | 安全 panic hook | 固定分类、受限源码位置、backtrace 状态 | 异步 `main` 第一项安装 `std::panic::set_hook` | 独立子进程验证主线程/worker panic 不泄漏 payload、线程名或完整栈 | 不改变内部 task owner 的失败升级策略；安装前异常不覆盖 |
 

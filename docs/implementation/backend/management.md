@@ -4,9 +4,9 @@
 >
 > 适用范围：正式 Management listener、认证、配置写入、只读查询与内嵌资源接线
 >
-> 最后核对：2026-09-08（P1 配置事务与文件操作路由）
+> 最后核对：2026-09-08（P3 十模块写入、保留预览与联合验收）
 >
-> 核对基线：`4a5a5a7b13896f3b4c1d86fe4469a3afae38ac10` 加本次 P1 工作树
+> 核对基线：`6eab5599f009aa154c14a0a03b50c21a0c074793` 加本次 P3 文档工作树
 >
 > 时间存储补充核对：2026-09-05，`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加业务时间迁移工作树；不扩大其他管理功能审计范围
 
@@ -20,13 +20,13 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 
 ## P0 v2 契约
 
-目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。除既有指标、配置只读、保留和历史端点外，P1 已注册组合配置校验/应用、operation 查询、外部差异、文件还原和持久化重试。它们均受 Bearer 保护，写请求额外要求 Origin/Fetch Metadata。P3 的 `/config/modules/{module}/validate|apply` 与 WS 仍未注册。
+目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。除指标、配置只读、保留和历史端点外，正式 router 已注册组合与十模块配置校验/应用、operation 查询、保留预览、外部差异、文件还原和持久化重试。它们均受 Bearer 保护，写请求额外要求 Origin/Fetch Metadata；WS 仍未注册。
 
 P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测、验证票据和操作记录已有 ConfigStore 内部入口，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。下表的 P0 decoder 不因此成为已接线的写入服务；BC-12 只开放读取，异步应用、外部差异与普通配置写入仍未注册。
 
 | 契约 | 已落实的内部能力 | 正式接线与剩余边界 |
 | --- | --- | --- |
-| 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新不含 `client_id`；系统只读投影不含 users/hash | P1 组合入口消费 `decode_candidate` / `decode_apply`；单模块 decoder 保留给 P3，但对应路由未注册 |
+| 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新不含 `client_id`；系统只读投影不含 users/hash | 组合与单模块入口都消费相同 decoder/owner；单模块只接受一项且 module 必须与 URL 一致 |
 | 活动配置与文件 | active/runtime/persisted revision 分离；组合文件观测 token；源表达、生效值/来源、引用和独立 runtime 投影；外部差异、还原、同步重试请求 | 状态、差异、还原和重试已接线；DTO 不接受路径、整份 YAML 或 Secret 实际值 |
 | 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、校验 token、明确确认清单 | ConfigMutationOwner 独立于 HTTP 请求推进 Runtime 与持久化；运行成功不等于文件同步，unknown 不能自动重放 |
 | 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-09 已实现分片 storage 读口、cursor 上下文/水位完整性和 commit 后通知；BC-13 已接入当前名称投影与 Bearer HTTP，WS 鉴权/队列/replay 待 BC-24/25 |
@@ -35,7 +35,7 @@ P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/
 
 所有预算在 OpenAPI `x-limits` 和字段 schema 中维护。已执行入站保护包括配置 4 MiB、变更 2 MiB/128 项、cursor 2048 bytes、历史查询 16 KiB/100 行/3650 天、WS 入站帧 128 KiB；BC-23 的在线身份表上限为 4096，超限窗口显式返回 `observation_gap`。文件读取以及 WS 连接/队列/replay 限额仍仅为契约，不能据此宣称运行时已受保护。
 
-验证使用 [Rust 契约测试](../../../backend/src/management/contract/tests.rs)、[共享夹具](../../../backend/tests/fixtures/management-v2.json) 和 [Node schema 测试](../../../frontend/tests/contract-v2.node.mjs)：覆盖多态源值往返、只读注入、ID 修改、null、预算、精度、状态互斥、P1 路由清单及 P3 模块写路由缺席。真实 P1 HTTP/Runtime 证据见下述配置事务接线；WS 仍未实现。
+验证使用 [Rust 契约测试](../../../backend/src/management/contract/tests.rs)、[共享夹具](../../../backend/tests/fixtures/management-v2.json) 和 [Node schema 测试](../../../frontend/tests/contract-v2.node.mjs)：覆盖多态源值往返、只读注入、ID 修改、null、预算、精度、状态互斥及正式路由清单。真实 P3 HTTP/Runtime 证据见下述配置事务接线；WS 仍未实现。
 
 ## P1 配置状态内部投影（2026-09-07）
 
@@ -73,7 +73,7 @@ Windows 定向测试用两个真实 UTC 日 SQLite 分片覆盖跨日稳定分�
 
 完整输出最多 128 项、序列化 JSON 最多 2 MiB；超限整体报错，不截断。写入计数器按真实 UTF-8 和 JSON escaping 计费，另外检查 schema 的字段长度与安全整数。输入完整配置无效时只返回双版本绑定及安全 `parse_error`，不部分采用。
 
-Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/内联类型、引用失败、只读和 hash 隔离、128/129 项、输出字节与字段超限；15 个实际投影经现有 AJV 对 v2 schema 验证。正式路径为 `GET /api/v2/config/files/diff`，由阻塞 owner 执行同一投影；前端组合采用仍等待各 P3 业务表单。
+Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/内联类型、引用失败、只读和 hash 隔离、128/129 项、输出字节与字段超限；15 个实际投影经现有 AJV 对 v2 schema 验证。正式路径为 `GET /api/v2/config/files/diff`，由阻塞 owner 执行同一投影；P3 前端已用各领域 DTO 完成跨模块选择和一次 Candidate 组合采用。
 
 ## P1 配置事务与文件操作（2026-09-08）
 
@@ -85,7 +85,9 @@ P3 `POST /api/v2/retention/preview` 绑定 active/file revision，调用现有 `
 
 组合 apply 在阻塞线程完成 ConfigStore 受理后立即返回 202；后台 owner 完成 Runtime prepare、ServiceControl 回执和持久化，客户端按相同 operation ID 查询。文件还原/重试在阻塞 owner 中执行，HTTP 取消不终止已经开始的写盘；已记录失败优先返回冻结 OperationResult，受理前冲突返回 ErrorEnvelope。operation 按用户名隔离，不在响应或日志中返回源正文、路径身份、底层错误或认证凭据。
 
-Windows 真实 HTTP 使用一次性 setup/后续 login 获取内存 Bearer，完成校验、apply、operation 轮询、状态、差异、还原和重试。日志父目录缺失返回冻结 `APPLY_FAILED` 且 Runtime/文件未变；有效日志候选得到 `applied_synced`、Runtime revision 2、双文件一致。仅 Cookie 的现有配置读拒绝证据沿用 BC-12；本批未验证 HTTPS 反向代理、Linux、磁盘满、响应恰在 service commit 后丢失或 P3 模块写入口。
+P3 Windows 联合验收使用内嵌 debug binary、`_fluxdns/p3-live/` 真实 ConfigV2 和一次性 setup/后续 login 的内存 Bearer。代理、Hosts、规则集、上游/组、策略、Listener、客户端、DNS、statistics 与 logs 按依赖逐一完成单模块 validate、202 apply、operation 轮询、`applied_synced`、源文件持久化和查询回显；代理改名返回 `rename_references`，Listener 端口热切换返回 `listener_rebind`，陈旧双 revision 预校验返回 409。随后真实文件外改 Hosts/logs 未进入活动态，双模块全局 Candidate 经 `discard_external_changes` 组合采用；validate 后二次外改使 apply 返回 `FILE_REVISION_CONFLICT`，正式 restore 恢复 `synced/unchanged`。未验证 HTTPS 反向代理、Linux、磁盘满或响应恰在 service commit 后丢失。
+
+同一进程的 UDP Listener 从 `15389` 热重绑到 `15390` 后，`p3.test A` 返回 `NOERROR`、1 个 `192.0.2.10` 答案。请求写入真实 SQLite：统计库 65536 bytes，详情目录 3 个文件共 73728 bytes；保留 preview 采样详情主文件/WAL 为 40960 bytes，历史 HTTP 返回 1 项。以上大小是本次临时目录样本，不是容量承诺。
 
 ## 路由与保护
 
@@ -168,10 +170,11 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | P1 Bearer 定向测试、真实 HTTP 和浏览器 Network/Storage，见上节 | 未验证外部 HTTPS 代理及 v2/WS |
+| setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | P1 Bearer 定向测试、真实 HTTP 和浏览器 Network/Storage；P3 v2 写请求复核 | 未验证外部 HTTPS 代理及 WS |
 | users 事务 | source_edit、ConfigStore、journal recovery | setup 写入，run 启动恢复，watcher 对账 | 本轮核对；存在双路径恢复与 Busy 竞争测试 | 完整跨平台 crash/权限矩阵待验收 |
-| 七个 v1、两个指标、配置/保留与历史 v2 只读 API | ManagementQueryService + StorageRead port + DetailShardStore + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/DB/telemetry/metrics/retention/detail store | BC-12/13 路由使用真实临时 SQLite；生产 Bearer HTTP 证据见本节 | v2 认证、写入与 WS 未注册；未执行浏览器 smoke |
-| 内嵌 SPA | assets + build feature | bind 前 ensure_available | 静态；历史证据单独标注于交付文档 | Actions/Linux/macOS 发布未由静态代码证明 |
+| 七个 v1、两个指标、配置/保留与历史 v2 API | ManagementQueryService + StorageRead port + DetailShardStore + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/DB/telemetry/metrics/retention/detail store | BC-12/13 与 P3 使用真实临时 SQLite、UDP 和 Bearer HTTP | WS 未注册；外部 HTTPS 代理未验证 |
+| v2 配置写入与文件处理 | ConfigMutationOwner + ConfigStore + ServiceControl | 全局/十模块 validate/apply、operation、diff、restore/retry | P3 十模块 `applied_synced`、外改组合采用、二次冲突与回显 | Linux、磁盘满和 service commit 后响应丢失未验证 |
+| 内嵌 SPA | assets + build feature | bind 前 ensure_available | P3 debug embed 的 12 路由和两档视口真实浏览器 | release 三阶段、Actions/Linux/macOS 发布未验证 |
 
 本页 2026-09-05 原核对仅有静态证据；后续 P1 的运行证据分别列在对应小节。已执行的 Bearer HTTP/浏览器验证不等于反向代理或完整配置事务故障矩阵均已验证。
 

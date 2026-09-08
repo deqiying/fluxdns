@@ -148,6 +148,8 @@ BC-26 Windows 验证：真实 `StorageRuntime` 临时文件覆盖空目录初始
 
 同日 BC-13 已接入 `/api/v2/queries/search` 与 `/api/v2/queries/{record_id}`：Management 只消费 active 目录快照和 `DetailShardStore` 领域读口，名称过滤先解析完整当前 ID 集合，全部条件在跨分片 keyset 分页前应用。输出保留原始身份/历史匹配事实，单独投影当前名称、缓存 producer、稳定记录 ID、前后 cursor、commit cursor 和共同水位。真实两日 SQLite 路由测试及生产 debug binary 的 UDP 写入、Bearer 列表/详情均通过；最终 Cargo 836 passed/3 ignored，前端 84 项与 schema 4 项通过，Clippy 仅余 6 项既有基线 lint。WS/replay 与前端业务页面不在 BC-13。
 
+同日 P3 已完成 BC-14 至 BC-22：十模块单模块路由复用同一 ConfigMutationOwner，保留 preview 使用真实详情文件/WAL 采样，FC-16 组合采用继续使用全局 Candidate。真实 ConfigV2 进程逐模块完成预校验、热应用、持久化、冲突和回显，并覆盖 UDP 热重绑、SQLite 详情、外改不自动加载、双模块采用、二次冲突和 restore；P4/P5、WS、BC-27、Linux 与性能未进入。
+
 ### 开发步骤
 
 1. 审核 `cache/persistence.rs` 的现有 codec，保留可复用的版本、TTL、fingerprint、canonical wire 与 provenance；替换其第二份全量集合和文件容量逻辑，不直接将旧 adapter 改名接入。

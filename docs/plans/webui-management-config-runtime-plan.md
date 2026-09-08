@@ -29,6 +29,8 @@
 
 2026-09-08 生产闭合：P1 组合配置事务和文件动作已由[正式 owner 与路由](../implementation/backend/management.md#p1-配置事务与文件操作2026-09-08)接线，真实 Windows 进程验证 Runtime、日志、双文件、SQLite、UDP、Bearer HTTP、外改/还原/重试和重启复读。前端全局状态轮询、差异提示、还原和未同步重试也已接入受保护壳层；“修改并采用”继续等待 FC-05 至 FC-13 的领域表单，不能用通用 YAML 编辑器替代。
 
+同日 P3 闭合：十模块领域表单已复用统一 typed Candidate/owner，FC-16 将同名外部项映射为带旧 name 的 update、仅外部项映射为 create，仅活动项不授权删除。真实文件验证外改不自动加载、Hosts/logs 一次组合采用、validate 后二次外改冲突和 restore；普通保存与未选/受保护变化仍由 `discard_external_changes` 显式确认。WS 通知未授权，状态继续以可见性 HTTP 轮询回读。
+
 ## 2. 配置状态与权威
 
 在现有 ConfigStore/Runtime 所有权内保留以下状态，不添加并行的配置数据库：

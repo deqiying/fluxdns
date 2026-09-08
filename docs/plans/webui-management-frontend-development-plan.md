@@ -26,6 +26,8 @@
 
 2026-09-08 FC-01 已接入[内存 Bearer 与专用 Cookie 刷新](../implementation/frontend/application.md#p1-bearer-接线2026-09-08)，并完成[12 路由壳层、浅色主题、响应式导航和旧路径 404](../implementation/frontend/application.md#p1-应用壳层2026-09-08)。FC-02 已交付[配置 client、operation 回读、版本化 query key、精确单位/继承/variant helper 与表单容器](../implementation/frontend/application.md#p1-配置交互基础2026-09-08)，FC-16 已交付[提示/差异/还原与同步重试基础](../implementation/frontend/application.md#p1-外部配置变化基础2026-09-08)。BC-30 正式路由就绪后，二者进一步接入 AppLayout 的 30 秒可见性轮询、全局失败/变化提示、双 revision 差异、确认还原和原 operation 持久化重试。FC-14 已提前接入[系统运行状态](../implementation/frontend/application.md#p1-系统运行状态2026-09-08)，直接消费 BC-23 的 v2 进程指标并复用 v1 基础信息。真实认证回归、后端文件联合验证、fixture 浏览器验证和 MSW/jsdom 验证分别记录，不互相替代；其余九个未就绪入口不加载演示业务数据。FC-01/02 的本轮全局接线已完成；FC-16 的组合采用和普通保存覆盖确认仍依赖 FC-05 至 FC-13，不在未授权 P3 前伪造入口。
 
+同日 P3 授权后，FC-05 至 FC-13 已替换全部配置空态，FC-16 已补齐十模块差异映射、普通保存覆盖确认与跨模块组合采用。真实内嵌浏览器完成 12 路由、日志保存、保留 preview 顺序、外改组合采用、1440×900 和 390×844 验收；当前剩余 FC-03/04 的 WS 实时能力与 FC-15/P5 收口未授权。
+
 图稿中数值、地址、健康提示、分页总数和按钮均为演示；正式页面必须使用后端已支持且可追溯的值，不能把图稿内容复制为生产默认数据。
 
 ## 2. 页面与图稿覆盖

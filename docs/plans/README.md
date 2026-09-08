@@ -4,15 +4,15 @@
 >
 > 适用范围：尚需实施、决策或验收的独立变更
 
-WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md)记录确认结果。2026-09-08 已完成 P1、P2 及提前实施的 BC-26；用户随后授权 P3 配置模块开发，并继续允许必要验证与中文 Conventional Commit 本地分项提交，不 push。BC-27、旧数据迁移、P4/P5 和 WS 不随之扩展。[配置专项](webui-management-config-runtime-plan.md)统一热更新与文件处理语义。
+WebUI 重构的 D-01 至 D-12 已在[决策清单](webui-management-decisions.md)记录确认结果。2026-09-08 已完成 P1、P2、提前实施的 BC-26 及 P3 类型化配置模块；P3 使用真实 ConfigV2、文件、SQLite、UDP、Bearer HTTP 和浏览器完成联合验收，并按模块创建中文 Conventional Commit 本地提交，未 push。BC-27、旧数据迁移、P4/P5 和 WS 未授权。[配置专项](webui-management-config-runtime-plan.md)统一热更新与文件处理语义。
 
 | 计划 | 文档状态 | 计划状态 | 剩余范围 |
 | --- | --- | --- | --- |
 | [WebUI 重构决策清单](webui-management-decisions.md) | 有效 | 实施中 | 12 项决定已确认；P0 技术核定与剩余 T 项 |
-| [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0-P2 与 BC-26 已交付；P3 配置模块按依赖实施，P4/P5 未授权 |
-| [WebUI 配置热更新专项](webui-management-config-runtime-plan.md) | 有效 | 实施中 | BC-02/03/29/30/31 及 FC-01/02/16 轮询、差异、还原/重试与跨模块组合采用已接线；等待 P3 联合验收 |
-| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | P1 配置事务及 BC-06 至 BC-13、BC-26 已完成；P3 十模块类型化读写与组合采用已接线，联合验收实施中 |
-| [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 有效 | 实施中 | FC-01/02、FC-05 至 FC-14 与 FC-16 已接线；P3 联合验收实施中 |
+| [WebUI 重构开发总计划](webui-management-development-plan.md) | 有效 | 实施中 | P0-P3 与 BC-26 已交付；P4/P5 未授权 |
+| [WebUI 配置热更新专项](webui-management-config-runtime-plan.md) | 有效 | 实施中 | P3 所需轮询、差异、还原/重试、覆盖确认和跨模块组合采用已联合验收；后续实时通知未授权 |
+| [WebUI 后端开发计划](webui-management-backend-development-plan.md) | 有效 | 实施中 | P3 十模块类型化读写、保留预览、热应用、持久化、冲突与组合采用已联合验收；P4/P5 剩余 |
+| [WebUI 前端开发计划](webui-management-frontend-development-plan.md) | 有效 | 实施中 | FC-05 至 FC-13 与 FC-16 的 P3 范围已联合验收；FC-03/04 实时和 FC-15 收口未授权 |
 | [WebUI 管理后台重构需求](webui-management-requirements.md) | 草案 | 待评审 | 保留已审阅模块范围；已按决定校正 name、热配置和旧图标注解释 |
 | [WebUI 配套后端重构方案](webui-management-backend-refactor.md) | 草案 | 待评审 | 身份、独立快照、统一保留与日分片；取消旧版迁移/兼容，接入热配置专项 |
 
