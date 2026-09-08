@@ -364,6 +364,20 @@ export const outboundConfigReadFixture = {
   runtime: [],
 } satisfies V2Schemas["ConfigRead"];
 
+export const hostsConfigReadFixture = {
+  state: synchronizedConfigStateFixture,
+  values: [
+    { module: "hosts", value: { name: "local", type: "const", format: "hosts", hosts: "127.0.0.1 localhost\n192.0.2.20 printer.lan" } },
+    { module: "hosts", value: { name: "office", type: "file", format: "json", path: "./rules/office-hosts.json", auto_update: true, update_interval: "300000000000ns" } },
+  ],
+  effective: [],
+  references: [{ from_module: "strategy", from_name: "default", path: "rules[0].hosts", to_name: "local" }],
+  runtime: [
+    { module: "hosts", name: "local", condition: "ready", last_updated_at_ms: Date.parse("2026-09-08T00:00:00Z"), next_update_at_ms: null, error: null },
+    { module: "hosts", name: "office", condition: "stale", last_updated_at_ms: Date.parse("2026-09-07T23:55:00Z"), next_update_at_ms: Date.parse("2026-09-08T00:05:00Z"), error: "APPLY_FAILED" },
+  ],
+} satisfies V2Schemas["ConfigRead"];
+
 export const systemConfigReadFixture = {
   state: synchronizedConfigStateFixture,
   work_path: "D:/Projects/Rust/fluxdns/_fluxdns",

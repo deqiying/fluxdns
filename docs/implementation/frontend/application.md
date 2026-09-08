@@ -91,6 +91,8 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 已替换 `/proxies` 空态，提供搜索、新建和按旧 name 编辑。表单只在 env/file 两类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；实际 Secret 值不进入浏览器。MSW 交互测试检查单模块路径、预校验先于 apply、旧 name 和 SecretRef payload；真实后端热应用与文件证据在 P3 联合验证后补录。
 
+[`HostsPage`](../../../frontend/src/modules/hosts/HostsPage.tsx) 已替换 `/hosts` 空态，读取类型化 `const/file` 来源、引用数和 Runtime ready/stale/failed 状态。表单按来源只提交内联正文或文件路径/更新周期，并保留 `json/hosts` 格式；来源切换不会携带隐藏分支字段。
+
 ## 能力与证据
 
 2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换；新增 `apiV2Request` 仅由明确的新版模块调用，不提供运行时 v1/v2 选择开关。

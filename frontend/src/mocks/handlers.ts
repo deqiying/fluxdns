@@ -2,6 +2,7 @@ import { http, HttpResponse } from "msw";
 import type { AuthSession } from "@/shared/api/types";
 import {
   healthFixture,
+  hostsConfigReadFixture,
   configStateFixture,
   dnsConfigReadFixture,
   logsConfigReadFixture,
@@ -162,6 +163,7 @@ export const handlers = [
     if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
     const fixture = {
       dns: dnsConfigReadFixture,
+      hosts: hostsConfigReadFixture,
       statistics: statisticsConfigReadFixture,
       logs: logsConfigReadFixture,
       outbound: outboundConfigReadFixture,
