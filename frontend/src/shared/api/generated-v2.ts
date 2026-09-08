@@ -1254,6 +1254,7 @@ export interface components {
             subscription_id: components["schemas"]["Revision"];
             filter: components["schemas"]["QueryFilter"];
             after: components["schemas"]["CommitCursor"];
+            retention_revision: components["schemas"]["Revision"];
         } | {
             /** @constant */
             type: "pong";

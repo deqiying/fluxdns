@@ -29,6 +29,7 @@ pub(crate) struct ManagementService {
     listener: tokio::net::TcpListener,
     router: Router,
     runtime: Arc<ManagementRuntime>,
+    events: Option<Arc<EventHub>>,
 }
 
 pub(crate) struct ManagementQueryDependencies {
@@ -78,11 +79,6 @@ impl ManagementService {
             .ok_or(ManagementBuildError::MissingPublicOrigin)?;
         let auth = Arc::new(AuthState::new(&config.users).map_err(ManagementBuildError::Auth)?);
         let sessions = Arc::new(SessionStore::new(origin.scheme() == "https"));
-        let event_epoch = dependencies
-            .history
-            .detail_store
-            .detail_commit_cursor()
-            .epoch;
         let metrics = Arc::clone(&dependencies.metrics);
         let read_model: Arc<dyn ManagementStorageRead> = Arc::new(
             SqliteManagementReadModel::connect(dependencies.database_path)
@@ -99,8 +95,13 @@ impl ManagementService {
             dependencies.history,
         ));
         let events = Arc::new(
-            EventHub::new(Arc::clone(&sessions), metrics, event_epoch)
-                .map_err(ManagementBuildError::Events)?,
+            EventHub::new(
+                Arc::clone(&sessions),
+                metrics,
+                Arc::clone(&queries),
+                Arc::clone(&config_store),
+            )
+            .map_err(ManagementBuildError::Events)?,
         );
         let services = Arc::new(
             AuthServices::new(
@@ -117,7 +118,7 @@ impl ManagementService {
             auth,
             sessions,
             config_store,
-            Some(events),
+            Some(Arc::clone(&events)),
         ));
         let address = SocketAddr::new(config.address, config.port);
         let listener = tokio::net::TcpListener::bind(address)
@@ -127,6 +128,7 @@ impl ManagementService {
             listener,
             router: build_router(services),
             runtime,
+            events: Some(events),
         })
     }
 
@@ -140,9 +142,17 @@ impl ManagementService {
     }
 
     pub(crate) async fn serve(self, cancellation: Cancellation) -> Result<(), TaskError> {
+        let collector = self
+            .events
+            .as_ref()
+            .and_then(|events| events.start_collector());
         let shutdown_cancellation = cancellation.clone();
+        let shutdown_events = self.events.clone();
         let shutdown = async move {
             shutdown_cancellation.cancelled().await;
+            if let Some(events) = shutdown_events {
+                events.shutdown();
+            }
         };
         let result = axum::serve(
             self.listener,
@@ -151,6 +161,12 @@ impl ManagementService {
         )
         .with_graceful_shutdown(shutdown)
         .await;
+        if let Some(events) = &self.events {
+            events.shutdown();
+        }
+        if let Some(collector) = collector {
+            let _ = collector.await;
+        }
         if cancellation.is_cancelled() {
             Err(TaskError::Cancelled)
         } else {
@@ -216,6 +232,7 @@ mod tests {
             listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
             router: build_router(services),
             runtime: Arc::new(ManagementRuntime::new(auth, sessions, config_store, None)),
+            events: None,
         };
         let address = service.local_addr().unwrap();
         let cancellation = Cancellation::new();

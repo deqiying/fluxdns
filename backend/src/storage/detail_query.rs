@@ -5,7 +5,7 @@ use std::fmt;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Instant, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -15,8 +15,10 @@ use sqlx::{QueryBuilder, Row, Sqlite};
 use tokio::sync::broadcast;
 
 use crate::dns::Deadline;
+use crate::dns::TransportClass;
 use crate::ports::observation::ClientMatchSource;
-use crate::ports::storage::ResolveAnswer;
+use crate::ports::storage::{ResolveAnswer, StatsSource};
+use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 use crate::ports::{PortError, PortErrorClass};
 
 use super::detail_shards::{DetailShardStore, format_shard_file_name};
@@ -25,7 +27,7 @@ use super::resolve_log::ResolveDetailRecord;
 const MAX_QUERY_SPAN_MILLIS: u64 = 3_650 * 86_400_000;
 const MAX_PAGE_SIZE: u16 = 100;
 const MAX_MATCHED_CLIENT_IDS: usize = 1_024;
-// 这里只保留短暂的提交通知窗口；BC-25 再按时间、条数和字节建立正式 replay。
+// 这里只负责把 commit 无等待移交给 Management replay owner。
 const COMMIT_CHANNEL_CAPACITY: usize = 16;
 const RECORD_ID_PREFIX: &str = "qry1_";
 const CURSOR_PREFIX: &str = "cur1_";
@@ -194,6 +196,43 @@ pub struct DetailQueryFilter {
     pub cache: Option<DetailQueryCacheOutcome>,
 }
 
+impl DetailQueryFilter {
+    /// WS replay 与 SQLite 查询共用同一已规范化过滤语义。
+    pub fn matches_record(&self, record: &DetailQueryRecord) -> bool {
+        record.occurred_at_millis >= self.from_utc_millis
+            && record.occurred_at_millis < self.to_utc_millis
+            && self
+                .client_id
+                .as_ref()
+                .is_none_or(|value| record.client_id.as_ref() == Some(value))
+            && self
+                .client_ip
+                .as_ref()
+                .is_none_or(|value| record.client_ip.as_ref() == Some(value))
+            && self
+                .qname
+                .as_ref()
+                .is_none_or(|value| record.qname == *value)
+            && self.transport.is_none_or(|value| record.transport == value)
+            && self
+                .matched_client_id
+                .as_ref()
+                .is_none_or(|value| record.matched_client_id.as_ref() == Some(value))
+            && (!self.require_matched_client_ids
+                || self
+                    .matched_client_ids
+                    .iter()
+                    .any(|value| record.matched_client_id.as_ref() == Some(value)))
+            && self.qtype.is_none_or(|value| record.qtype == value)
+            && self
+                .rcode
+                .is_none_or(|value| rcode_matches(value, record.rcode))
+            && self.source.is_none_or(|value| record.source == value)
+            && self.outcome.is_none_or(|value| record.outcome == value)
+            && self.cache.is_none_or(|value| record.cache == value)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DetailQuery {
     pub filter: DetailQueryFilter,
@@ -278,6 +317,103 @@ pub struct DetailQueryPage {
 pub struct DetailCommittedRecord {
     pub id: DetailRecordId,
     pub record: ResolveDetailRecord,
+}
+
+impl DetailCommittedRecord {
+    /// 将刚提交的内存记录投影为与 SQLite 读取完全相同的 Management read model。
+    pub fn to_query_record(&self) -> Result<DetailQueryRecord, PortError> {
+        let record = &self.record;
+        let occurred_at_millis = record
+            .occurred_at()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|value| u64::try_from(value.as_millis()).ok())
+            .ok_or_else(|| corrupt("detail_query.committed_record"))?;
+        let source = match record.source() {
+            StatsSource::Cache => DetailQuerySource::Cache,
+            StatsSource::Hosts => DetailQuerySource::Hosts,
+            StatsSource::RuleSet => DetailQuerySource::Rule,
+            StatsSource::Upstream => DetailQuerySource::Upstream,
+        };
+        let outcome = match record.outcome() {
+            OutcomeClass::Timeout => DetailQueryOutcome::Timeout,
+            OutcomeClass::Failure | OutcomeClass::Cancelled | OutcomeClass::Dropped => {
+                DetailQueryOutcome::Failed
+            }
+            OutcomeClass::Success | OutcomeClass::Rejected => {
+                outcome_from_row(None, record.rcode())
+            }
+        };
+        let cache = match record.cache_status() {
+            CacheStatus::Fresh => DetailQueryCacheOutcome::Hit,
+            CacheStatus::Stale => DetailQueryCacheOutcome::Stale,
+            CacheStatus::Miss => DetailQueryCacheOutcome::Miss,
+            CacheStatus::Disabled | CacheStatus::StoreUnavailable | CacheStatus::WriteRejected => {
+                DetailQueryCacheOutcome::Bypass
+            }
+        };
+        Ok(DetailQueryRecord {
+            id: self.id.clone(),
+            occurred_at_millis,
+            duration_millis: record.duration_millis(),
+            dns_core_duration_micros: Some(record.dns_core_duration_micros()),
+            client_id: record.client_id().map(str::to_owned),
+            client_ip: record
+                .client_ip()
+                .map(|value| normalize_ip(value).to_string()),
+            client_match_source: record.client_match_source(),
+            matched_client_id: record.matched_client_id().map(str::to_owned),
+            qname: record.qname().to_owned(),
+            qtype: record.qtype(),
+            transport: match record.transport() {
+                TransportClass::Datagram => DetailQueryTransport::Udp,
+                TransportClass::Stream => DetailQueryTransport::Tcp,
+                TransportClass::Multiplexed => DetailQueryTransport::Doh,
+            },
+            rcode: record.rcode(),
+            source,
+            outcome,
+            cache,
+            strategy_id: record.strategy_id().map(str::to_owned),
+            upstream_target_id: record.upstream_id().map(str::to_owned),
+            upstream_used_id: record.upstream_used_id().map(str::to_owned),
+            answers: record.answers().to_vec(),
+            answer_count: record.answer_count(),
+            answers_truncated: record.answers_truncated(),
+        })
+    }
+
+    /// replay 字节预算按可见字段的 UTF-8 长度保守估算，不序列化敏感 Debug。
+    pub fn estimated_replay_bytes(&self) -> usize {
+        let record = &self.record;
+        let optional = [
+            record.client_id(),
+            record.matched_client_id(),
+            record.strategy_id(),
+            record.upstream_id(),
+            record.upstream_used_id(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::len)
+        .sum::<usize>();
+        256_usize
+            .saturating_add(self.id.as_str().len())
+            .saturating_add(record.qname().len())
+            .saturating_add(optional)
+            .saturating_add(
+                record
+                    .answers()
+                    .iter()
+                    .map(|answer| {
+                        answer.name.len()
+                            + answer.record_type.len()
+                            + answer.data.len()
+                            + std::mem::size_of::<ResolveAnswer>()
+                    })
+                    .sum(),
+            )
+    }
 }
 
 impl fmt::Debug for DetailCommittedRecord {
@@ -377,6 +513,13 @@ impl DetailShardStore {
     /// 捕获当前 commit 边界，供 HTTP 快照与后续 replay 交接。
     pub fn detail_commit_cursor(&self) -> DetailCommitCursor {
         self.query_state.snapshot_cursor()
+    }
+
+    /// 返回与 HTTP cursor 同源的共同保留水位 revision，供实时订阅检测失效。
+    pub fn detail_retention_revision(&self) -> u64 {
+        self.query_state
+            .retention_revision
+            .load(AtomicOrdering::Acquire)
     }
 
     /// 在所有可见日分片内执行有界 keyset 查询。
@@ -1048,6 +1191,25 @@ fn outcome_from_row(failure: Option<&str>, rcode: u8) -> DetailQueryOutcome {
         (None, 3) => DetailQueryOutcome::Negative,
         (None, 1 | 4 | 5) => DetailQueryOutcome::Rejected,
         (None, _) => DetailQueryOutcome::Answered,
+    }
+}
+
+fn rcode_matches(expected: DetailQueryRcode, value: u8) -> bool {
+    match expected {
+        DetailQueryRcode::NoError => value == 0,
+        DetailQueryRcode::FormErr => value == 1,
+        DetailQueryRcode::ServFail => value == 2,
+        DetailQueryRcode::NxDomain => value == 3,
+        DetailQueryRcode::NotImp => value == 4,
+        DetailQueryRcode::Refused => value == 5,
+        DetailQueryRcode::Other => value > 5,
+    }
+}
+
+fn normalize_ip(value: IpAddr) -> IpAddr {
+    match value {
+        IpAddr::V6(value) => value.to_ipv4_mapped().map_or(IpAddr::V6(value), IpAddr::V4),
+        value => value,
     }
 }
 

@@ -70,7 +70,7 @@
   },
   "client_messages": [
     {"type": "subscribe_metrics", "subscription_id": "metrics-1"},
-    {"type": "subscribe_queries", "subscription_id": "queries-1", "filter": {"from_ms": 1788739200000, "to_ms": 1788825600000}, "after": {"epoch": "stream-1", "sequence": "9007199254740993"}},
+    {"type": "subscribe_queries", "subscription_id": "queries-1", "filter": {"from_ms": 1788739200000, "to_ms": 1788825600000}, "after": {"epoch": "stream-1", "sequence": "9007199254740993"}, "retention_revision": "9"},
     {"type": "unsubscribe", "subscription_id": "queries-1"},
     {"type": "pong", "nonce": "heartbeat-1"}
   ],

@@ -129,7 +129,8 @@ fn apply_envelope_and_ws_filters_use_the_same_ingress_boundaries() {
         "type": "subscribe_queries",
         "subscription_id": "subscription-1",
         "filter": fixtures()["query"]["filter"],
-        "after": {"epoch": "epoch-1", "sequence": "18446744073709551615"}
+        "after": {"epoch": "epoch-1", "sequence": "18446744073709551615"},
+        "retention_revision": "9"
     });
     assert!(decode_client_message(&serde_json::to_vec(&base).unwrap()).is_ok());
     for (field, invalid) in [
@@ -267,6 +268,9 @@ fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_register
             crate::management::session::WS_TICKET_PER_SESSION_CAPACITY,
         ),
         ("online_identity_entries", MAX_ONLINE_IDENTITIES),
+        ("replay_seconds", REPLAY_SECONDS as usize),
+        ("replay_records", REPLAY_RECORDS),
+        ("replay_bytes", REPLAY_BYTES),
         ("operation_entries", MAX_OPERATION_ENTRIES),
         ("external_diff_bytes", MAX_EXTERNAL_DIFF_BYTES),
         (

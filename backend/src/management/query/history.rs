@@ -25,9 +25,9 @@ use crate::management::router::{AuthServices, RequestId, v2_error_response};
 use crate::ports::observation::ClientMatchSource;
 use crate::ports::{PortError, PortErrorClass};
 use crate::storage::{
-    DetailPageDirection, DetailQuery, DetailQueryCacheOutcome, DetailQueryFilter,
-    DetailQueryOutcome, DetailQueryRcode, DetailQueryRecord, DetailQuerySort, DetailQuerySource,
-    DetailQueryTransport, DetailRecordId, DetailSortOrder,
+    DetailCommittedRecord, DetailPageDirection, DetailQuery, DetailQueryCacheOutcome,
+    DetailQueryFilter, DetailQueryOutcome, DetailQueryRcode, DetailQueryRecord, DetailQuerySort,
+    DetailQuerySource, DetailQueryTransport, DetailRecordId, DetailSortOrder,
 };
 
 const MAX_SAFE_INTEGER: u64 = 9_007_199_254_740_991;
@@ -127,6 +127,38 @@ async fn detail(
         record: query_record(record, &directory.names)?,
         directory_revision: directory.revision,
     })
+}
+
+/// 将 commit 后通知按 HTTP 相同的目录快照、规范化和过滤规则投影为 WS 记录。
+pub(super) fn project_committed_records(
+    service: &ManagementQueryService,
+    store: &ConfigStore,
+    filter: QueryFilter,
+    records: &[DetailCommittedRecord],
+) -> Result<(Revision, Vec<QueryRecord>), ErrorCode> {
+    let directory = directory_snapshot(service, store)?;
+    let matched_client_ids = filter.client_name.as_ref().map_or_else(Vec::new, |name| {
+        let needle = name.to_ascii_lowercase();
+        directory
+            .config
+            .clients
+            .iter()
+            .filter(|client| client.name.to_ascii_lowercase().contains(&needle))
+            .map(|client| client.client_id.clone())
+            .collect()
+    });
+    let require_matched_client_ids = filter.client_name.is_some();
+    let filter = storage_filter(filter, matched_client_ids, require_matched_client_ids)?;
+    let items = records
+        .iter()
+        .map(DetailCommittedRecord::to_query_record)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?
+        .into_iter()
+        .filter(|record| filter.matches_record(record))
+        .map(|record| query_record(record, &directory.names))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((directory.revision, items))
 }
 
 struct DirectorySnapshot {

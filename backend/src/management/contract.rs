@@ -29,6 +29,9 @@ pub const WS_IDLE_SECONDS: u64 = 45;
 pub const WS_WRITE_TIMEOUT_SECONDS: u64 = 5;
 pub const WS_INBOUND_MESSAGES_PER_MINUTE: usize = 64;
 pub const MAX_ONLINE_IDENTITIES: usize = 4_096;
+pub const REPLAY_SECONDS: u64 = 60;
+pub const REPLAY_RECORDS: usize = 5_000;
+pub const REPLAY_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_OPERATION_ENTRIES: usize = 1024;
 pub const OPERATION_TTL_SECONDS: u64 = 1800;
 pub const WS_PROTOCOL_VERSION: u16 = 1;
@@ -111,6 +114,14 @@ pub struct DecimalU64(String);
 impl From<u64> for DecimalU64 {
     fn from(value: u64) -> Self {
         Self(value.to_string())
+    }
+}
+
+impl DecimalU64 {
+    pub fn as_u64(&self) -> u64 {
+        self.0
+            .parse()
+            .expect("DecimalU64 is validated during construction")
     }
 }
 
@@ -782,6 +793,7 @@ pub enum ClientMessage {
         subscription_id: Revision,
         filter: QueryFilter,
         after: CommitCursor,
+        retention_revision: Revision,
     },
     Unsubscribe {
         subscription_id: Revision,
@@ -925,8 +937,17 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ErrorCode> {
     }
     let message: ClientMessage =
         serde_json::from_value(tree).map_err(|_| ErrorCode::InvalidArgument)?;
-    if let ClientMessage::SubscribeQueries { filter, .. } = &message {
+    if let ClientMessage::SubscribeQueries {
+        filter,
+        retention_revision,
+        ..
+    } = &message
+    {
         validate_query_filter(filter)?;
+        retention_revision
+            .as_str()
+            .parse::<u64>()
+            .map_err(|_| ErrorCode::InvalidArgument)?;
     }
     Ok(message)
 }

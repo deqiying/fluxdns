@@ -110,6 +110,19 @@ impl ManagementQueryService {
         self.metrics.process_metrics()
     }
 
+    pub(super) fn detail_store(&self) -> Arc<crate::storage::DetailShardStore> {
+        Arc::clone(&self.detail_store)
+    }
+
+    pub(super) fn project_committed_records(
+        &self,
+        store: &crate::config::store::ConfigStore,
+        filter: super::contract::QueryFilter,
+        records: &[crate::storage::DetailCommittedRecord],
+    ) -> Result<(super::contract::Revision, Vec<super::contract::QueryRecord>), ErrorCode> {
+        history::project_committed_records(self, store, filter, records)
+    }
+
     fn config_state(
         &self,
         store: &crate::config::store::ConfigStore,
@@ -1391,7 +1404,7 @@ const fn default_page_size() -> u32 {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::net::SocketAddr;
     use std::path::PathBuf;
 
@@ -1425,9 +1438,9 @@ mod tests {
     use crate::ports::{PortError, PortErrorClass, PortFuture};
     use crate::runtime::{PreparedRuntime, RuntimeCoordinator, bind_prepared};
 
-    const HISTORY_DAY: u64 = 20_710;
+    pub(crate) const HISTORY_DAY: u64 = 20_710;
 
-    fn history_record(
+    pub(crate) fn history_record(
         day: u64,
         offset: u64,
         source: StatsSource,
@@ -1603,7 +1616,7 @@ mod tests {
         }
     }
 
-    async fn test_services() -> (Arc<AuthServices>, PathBuf) {
+    pub(crate) async fn test_services() -> (Arc<AuthServices>, PathBuf) {
         let root = PathBuf::from(crate::config::test_support::absolute_path(
             "management-query-router-v2",
         ));
