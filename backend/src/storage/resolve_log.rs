@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::time::SystemTime;
 
 use crate::dns::{CancelReason, RuntimeRevision, TransportClass};
-use crate::ports::observation::{ResolutionEvent, ResolutionTerminal};
+use crate::ports::observation::{ClientMatchSource, ResolutionEvent, ResolutionTerminal};
 use crate::ports::storage::{ResolveAnswer, ResolveEvent, ResolveRuleSource, StatsSource};
 use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 use crate::ports::{PortError, PortErrorClass};
@@ -29,7 +29,10 @@ pub struct ResolveDetailRecord {
     dns_core_duration_micros: u64,
     listener_id: String,
     has_route: bool,
+    client_id: Option<String>,
     client_ip: Option<IpAddr>,
+    client_match_source: Option<ClientMatchSource>,
+    matched_client_id: Option<String>,
     client_bucket: Option<String>,
     strategy_id: Option<String>,
     upstream_id: Option<String>,
@@ -90,7 +93,16 @@ impl ResolveDetailRecord {
             request_digest: std::sync::Arc::from(format!("{:032x}", detail.request_id.0)),
             listener_id: std::sync::Arc::clone(&event.listener_id),
             route_id: event.route_id.clone(),
+            client_id: detail
+                .client_id
+                .as_ref()
+                .map(|value| std::sync::Arc::from(value.as_str())),
             client_ip: detail.client_ip,
+            client_match_source: event.client_match.as_ref().map(|matched| matched.source),
+            matched_client_id: event
+                .client_match
+                .as_ref()
+                .map(|matched| std::sync::Arc::clone(&matched.matched_client_id)),
             client_bucket: event.client_bucket.clone(),
             strategy_id: event.strategy_id.clone(),
             upstream_id: event.upstream_id.clone(),
@@ -116,6 +128,14 @@ impl ResolveDetailRecord {
 
     pub(crate) fn from_event(event: ResolveEvent) -> Result<Self, PortError> {
         validate_listener_id(&event.listener_id)?;
+        validate_optional_client_id(event.client_id.as_deref(), "client id")?;
+        validate_optional_client_id(event.matched_client_id.as_deref(), "matched client id")?;
+        if event.client_match_source.is_some() != event.matched_client_id.is_some() {
+            return Err(
+                PortError::new(PortErrorClass::InvalidInput, "resolve detail writer")
+                    .with_safe_context("incomplete client match fact"),
+            );
+        }
         validate_optional_configured_id(event.client_bucket.as_deref(), "client bucket")?;
         validate_optional_configured_id(event.strategy_id.as_deref(), "strategy id")?;
         validate_optional_configured_id(event.upstream_id.as_deref(), "upstream id")?;
@@ -142,7 +162,10 @@ impl ResolveDetailRecord {
             dns_core_duration_micros: event.dns_core_duration_micros,
             listener_id: event.listener_id.to_string(),
             has_route: event.route_id.is_some(),
+            client_id: event.client_id.map(|value| value.to_string()),
             client_ip: event.client_ip,
+            client_match_source: event.client_match_source,
+            matched_client_id: event.matched_client_id.map(|value| value.to_string()),
             client_bucket: event.client_bucket.map(|value| value.to_string()),
             strategy_id: event.strategy_id.map(|value| value.to_string()),
             upstream_id: event.upstream_id.map(|value| value.to_string()),
@@ -191,6 +214,18 @@ impl ResolveDetailRecord {
 
     pub const fn client_ip(&self) -> Option<IpAddr> {
         self.client_ip
+    }
+
+    pub fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
+    }
+
+    pub const fn client_match_source(&self) -> Option<ClientMatchSource> {
+        self.client_match_source
+    }
+
+    pub fn matched_client_id(&self) -> Option<&str> {
+        self.matched_client_id.as_deref()
     }
 
     pub fn client_bucket(&self) -> Option<&str> {
@@ -296,7 +331,10 @@ impl fmt::Debug for ResolveDetailRecord {
             .field("dns_core_duration_micros", &self.dns_core_duration_micros)
             .field("listener_id_byte_len", &self.listener_id.len())
             .field("has_route", &self.has_route)
+            .field("has_client_id", &self.client_id.is_some())
             .field("has_client_ip", &self.client_ip.is_some())
+            .field("client_match_source", &self.client_match_source)
+            .field("has_matched_client_id", &self.matched_client_id.is_some())
             .field("has_client_bucket", &self.client_bucket.is_some())
             .field("has_strategy", &self.strategy_id.is_some())
             .field("has_upstream", &self.upstream_id.is_some())
@@ -393,6 +431,16 @@ fn validate_listener_id(listener_id: &str) -> Result<(), PortError> {
     Ok(())
 }
 
+fn validate_optional_client_id(value: Option<&str>, field: &'static str) -> Result<(), PortError> {
+    if value.is_some_and(|value| !crate::config::contract::valid_client_id(value)) {
+        return Err(
+            PortError::new(PortErrorClass::InvalidInput, "resolve detail writer")
+                .with_safe_context(field),
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -400,6 +448,7 @@ mod tests {
 
     use crate::dns::{CancelReason, RuntimeRevision, TransportClass};
     use crate::ports::PortErrorClass;
+    use crate::ports::observation::ClientMatchSource;
     use crate::ports::storage::{ResolveAnswer, ResolveEvent, ResolveRuleSource, StatsSource};
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
     use crate::resource::ResourceVersion;
@@ -414,7 +463,10 @@ mod tests {
             request_digest: Arc::from("request-digest-do-not-store"),
             listener_id: Arc::from(listener_id),
             route_id: Some(Arc::from("route-private-id")),
+            client_id: Some(Arc::from("Original-Client-01")),
             client_ip: Some("192.0.2.10".parse().unwrap()),
+            client_match_source: Some(ClientMatchSource::Id),
+            matched_client_id: Some(Arc::from("Original-Client-01")),
             client_bucket: Some(Arc::from("client-private-bucket")),
             strategy_id: Some(Arc::from("strategy-private-id")),
             upstream_id: Some(Arc::from("upstream-private-id")),
@@ -452,6 +504,9 @@ mod tests {
         assert_eq!(record.qname(), "private.example.test.");
         assert!(record.has_route());
         assert_eq!(record.client_ip(), Some("192.0.2.10".parse().unwrap()));
+        assert_eq!(record.client_id(), Some("Original-Client-01"));
+        assert_eq!(record.client_match_source(), Some(ClientMatchSource::Id));
+        assert_eq!(record.matched_client_id(), Some("Original-Client-01"));
         assert_eq!(record.client_bucket(), Some("client-private-bucket"));
         assert_eq!(record.strategy_id(), Some("strategy-private-id"));
         assert_eq!(record.upstream_id(), Some("upstream-private-id"));

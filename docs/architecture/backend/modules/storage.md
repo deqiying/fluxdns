@@ -180,7 +180,7 @@ SQLite busy、磁盘满、I/O error：
 
 resolution runtime 与 Storage 都由进程级 owner 持有，不因普通 Runtime reload 重置。Management overview 暴露 ingress accepted/dropped/首次 gap、cache commit 各终态和 detail accepted/dropped/failed；Storage shutdown 摘要继续报告 SQLite detail committed/evicted/dropped 和 stats persistence 状态。
 
-Policy Core 通过 `DnsCore::resolve_with_completion` 提供已经完成策略判定的 `strategy_id`、answer `source`、lookup `cache_status`、`client_bucket`、策略目标 `upstream_id`、实际结果 `upstream_used_id`，以及不含规则文本/matcher 的 matched rule/resource 摘要和 typed `ResourceVersion`；service 将其与最终共享 `CoreOutcome` 组合成唯一 `ResolutionEvent`。cache hit 从 `CacheEntry` 恢复生产请求的 target/used provenance，不以当前 route 猜测。stats 仅消费低基数维度；detail projector 允许保存已验证配置 ID、canonical qname、有效 client IP 和有界 answer，但这些请求级值不进入事件 `Debug`、tracing 或 telemetry label。
+Policy Core 通过 `DnsCore::resolve_with_completion` 提供已经完成策略判定的 `strategy_id`、answer `source`、lookup `cache_status`、请求期 `ClientMatchObservation`、过渡期 `client_bucket`、策略目标 `upstream_id`、实际结果 `upstream_used_id`，以及不含规则文本/matcher 的 matched rule/resource 摘要和 typed `ResourceVersion`；service 将其与最终共享 `CoreOutcome` 组合成唯一 `ResolutionEvent`。cache hit 从 `CacheEntry` 恢复生产请求的 target/used provenance，不以当前 route 猜测。客户端匹配事实保存匹配来源和当时的稳定 ID，事件消费或 reload 不按当前目录重映射；stats 只使用该低基数 ID。detail projector 允许保存受限原始 client ID、有效 client IP、匹配事实、已验证配置 ID、canonical qname 和有界 answer，但这些请求级值不进入事件 `Debug`、tracing 或 telemetry label。
 
 ## 10. Flush 与 shutdown
 

@@ -10,6 +10,7 @@ use sha2::{Digest, Sha256};
 
 use crate::config::resolve::{ConfigId, ResolvedClient};
 use crate::ports::cache::ClientCacheDigest;
+use crate::ports::observation::{ClientMatchObservation, ClientMatchSource};
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ClientRule {
@@ -63,6 +64,27 @@ pub enum ClientMatch {
 }
 
 impl ClientMatch {
+    /// 冻结当次匹配使用的配置身份。v1 多 ID/IP 规则没有唯一历史 ID，等待新版基线退出。
+    pub(crate) fn observation(&self, client_id: Option<&str>) -> Option<ClientMatchObservation> {
+        match self {
+            Self::Matched {
+                kind: ClientMatchKind::ExactId,
+                ..
+            } => client_id.map(|matched_client_id| ClientMatchObservation {
+                source: ClientMatchSource::Id,
+                matched_client_id: Arc::from(matched_client_id),
+            }),
+            Self::Matched {
+                client,
+                kind: ClientMatchKind::Cidr { .. },
+            } if client.client_ids.len() == 1 => Some(ClientMatchObservation {
+                source: ClientMatchSource::Ip,
+                matched_client_id: Arc::from(client.client_ids[0].as_str()),
+            }),
+            Self::Matched { .. } | Self::Unknown => None,
+        }
+    }
+
     /// 根据实际命中的身份类型生成域分隔摘要，避免把客户端原始标识写入缓存键。
     pub(crate) fn cache_digest(
         &self,
@@ -244,6 +266,7 @@ mod tests {
     use crate::config::resolve::ConfigId;
 
     use super::{ClientIndex, ClientMatch, ClientMatchKind, ClientRule, ClientRuleBuildError};
+    use crate::ports::observation::ClientMatchSource;
 
     fn rule(name: &str, ids: &[&str], ips: &[&str]) -> ClientRule {
         ClientRule {
@@ -378,5 +401,30 @@ mod tests {
             exact.cache_digest(Some("alice"), Some(address)),
             cidr.cache_digest(Some("alice"), Some(address))
         );
+    }
+
+    #[test]
+    fn historical_match_freezes_id_or_ip_source_without_using_management_name() {
+        let index = ClientIndex::build([rule(
+            "mutable-name",
+            &["Stable-Client-01"],
+            &["192.0.2.0/24"],
+        )])
+        .unwrap();
+        let address = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 8));
+
+        let exact = index
+            .match_client(Some("Stable-Client-01"), Some(address))
+            .observation(Some("Stable-Client-01"))
+            .unwrap();
+        assert_eq!(exact.source, ClientMatchSource::Id);
+        assert_eq!(exact.matched_client_id.as_ref(), "Stable-Client-01");
+
+        let cidr = index
+            .match_client(Some("unknown"), Some(address))
+            .observation(Some("unknown"))
+            .unwrap();
+        assert_eq!(cidr.source, ClientMatchSource::Ip);
+        assert_eq!(cidr.matched_client_id.as_ref(), "Stable-Client-01");
     }
 }

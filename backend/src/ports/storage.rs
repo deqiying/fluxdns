@@ -5,6 +5,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use super::observation::ClientMatchSource;
 use crate::dns::{CancelReason, Deadline, RuntimeRevision, TransportClass};
 use crate::resource::ResourceVersion;
 
@@ -359,8 +360,13 @@ pub struct ResolveEvent {
     pub request_digest: Arc<str>,
     pub listener_id: Arc<str>,
     pub route_id: Option<Arc<str>>,
+    /// transport 恢复出的原始请求 ID；无 ID 协议保持 `None`。
+    pub client_id: Option<Arc<str>>,
     /// 已解析出的客户端 IP；是否命中已配置客户端由 `client_bucket` 区分。
     pub client_ip: Option<IpAddr>,
+    pub client_match_source: Option<ClientMatchSource>,
+    pub matched_client_id: Option<Arc<str>>,
+    /// 旧 v1 Management 查询使用的管理名称；新版身份不能从此字段反推。
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
     /// 策略选中的 direct upstream 或 group ID。
@@ -425,7 +431,10 @@ impl fmt::Debug for ResolveEvent {
             .field("has_request_digest", &!self.request_digest.is_empty())
             .field("listener_id", &self.listener_id)
             .field("has_route_id", &self.route_id.is_some())
+            .field("has_client_id", &self.client_id.is_some())
             .field("has_client_ip", &self.client_ip.is_some())
+            .field("client_match_source", &self.client_match_source)
+            .field("has_matched_client_id", &self.matched_client_id.is_some())
             .field("has_client_bucket", &self.client_bucket.is_some())
             .field("has_strategy_id", &self.strategy_id.is_some())
             .field("has_upstream_id", &self.upstream_id.is_some())
@@ -543,7 +552,10 @@ mod tests {
             request_digest: Arc::from("request-digest-do-not-log"),
             listener_id: Arc::from("listener-public-id"),
             route_id: Some(Arc::from("route-private-id")),
+            client_id: Some(Arc::from("Original-Client-01")),
             client_ip: Some("192.0.2.10".parse().unwrap()),
+            client_match_source: Some(ClientMatchSource::Id),
+            matched_client_id: Some(Arc::from("Original-Client-01")),
             client_bucket: Some(Arc::from("client-private-bucket")),
             strategy_id: Some(Arc::from("strategy-private-id")),
             upstream_id: Some(Arc::from("upstream-private-id")),

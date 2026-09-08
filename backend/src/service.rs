@@ -1290,6 +1290,7 @@ impl EventPublishingDnsCore {
             .detail_enabled()
             .then(|| ResolutionDetailSource {
                 request_id: request.context.meta.request_id,
+                client_id: request.context.client.client_id.clone(),
                 client_ip: request.context.client.client_addr,
                 question: request.query.question().clone(),
                 response: match &result {
@@ -1308,6 +1309,9 @@ impl EventPublishingDnsCore {
                 .route_id
                 .as_ref()
                 .map(|route| Arc::from(route.as_ref())),
+            client_match: observation
+                .as_ref()
+                .and_then(|value| value.client_match.clone()),
             client_bucket: observation
                 .as_ref()
                 .and_then(|value| value.client_bucket.clone()),
@@ -3015,7 +3019,7 @@ mod tests {
                 client: ClientIdentity {
                     peer_addr: None,
                     client_addr: Some(Ipv4Addr::new(192, 0, 2, 10).into()),
-                    client_id: None,
+                    client_id: Some(crate::dns::ClientId::from("Original-01")),
                 },
                 transport: TransportCapabilities {
                     class: TransportClass::Datagram,
@@ -3039,6 +3043,10 @@ mod tests {
                 DnsCoreCompletion {
                     result: Ok(CoreOutcome::Response(Arc::clone(&response))),
                     observation: Some(DnsResolutionObservation {
+                        client_match: Some(crate::ports::observation::ClientMatchObservation {
+                            source: crate::ports::observation::ClientMatchSource::Id,
+                            matched_client_id: Arc::from("Original-01"),
+                        }),
                         client_bucket: Some(Arc::from("client")),
                         strategy_id: Some(Arc::from("strategy")),
                         matched_rule: Some(MatchedRuleObservation {
@@ -3070,6 +3078,16 @@ mod tests {
         let event = &events[0];
         assert_eq!(event.listener_id.as_ref(), "dns");
         assert_eq!(event.route_id.as_deref(), Some("route"));
+        assert_eq!(
+            event
+                .client_match
+                .as_ref()
+                .map(|value| (value.source, value.matched_client_id.as_ref())),
+            Some((
+                crate::ports::observation::ClientMatchSource::Id,
+                "Original-01"
+            ))
+        );
         assert_eq!(event.strategy_id.as_deref(), Some("strategy"));
         assert_eq!(event.cache_lookup_status, CacheStatus::Fresh);
         assert_eq!(event.runtime_revision, RuntimeRevision(3));
@@ -3084,6 +3102,10 @@ mod tests {
         ));
         let detail = event.detail.as_ref().unwrap();
         assert_eq!(detail.request_id, RequestId(9));
+        assert_eq!(
+            detail.client_id.as_ref().map(|id| id.as_str()),
+            Some("Original-01")
+        );
         assert_eq!(detail.question.name().to_ascii(), "private.example.test.");
         assert!(Arc::ptr_eq(detail.response.as_ref().unwrap(), &response));
     }

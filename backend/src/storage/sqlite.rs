@@ -786,6 +786,7 @@ async fn migrate_storage_schema(pool: &SqlitePool) -> Result<(), SqliteStorageBa
                 6,
                 include_str!("../../migrations/0006_integer_business_timestamps.sql"),
             ),
+            6 => (7, include_str!("../../migrations/0007_client_identity.sql")),
             _ => return Err(SqliteStorageBackendBuildError::Schema),
         };
         apply_storage_migration(pool, version, next, migration).await?;
@@ -1182,7 +1183,10 @@ async fn apply_resolve_records_with_limits(
             "<absent>"
         };
         let route_id = record.has_route().then_some("<present>");
+        let client_id = record.client_id();
         let client_ip = record.client_ip().map(|value| value.to_string());
+        let client_match_source = record.client_match_source().map(client_match_source_name);
+        let matched_client_id = record.matched_client_id();
         let client_bucket = record.client_bucket();
         let strategy_id = record.strategy_id();
         let upstream_id = record.upstream_id();
@@ -1205,8 +1209,9 @@ async fn apply_resolve_records_with_limits(
                client_bucket, strategy_id, canonical_qname, qtype, qclass, source, upstream_id, \
                upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
                rcode, cache_status, failure_class, cancellation_reason, runtime_revision, resource_revision, \
-               transport, client_ip, upstream_used_id, answer_count, answers_truncated, answer_summary_json) \
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+               transport, client_ip, upstream_used_id, answer_count, answers_truncated, answer_summary_json, \
+               client_id, client_match_source, matched_client_id) \
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(system_time_utc_millis(
             record.occurred_at(),
@@ -1240,6 +1245,9 @@ async fn apply_resolve_records_with_limits(
         .bind(i64::from(record.answer_count()))
         .bind(record.answers_truncated())
         .bind(answer_summary_json)
+        .bind(client_id)
+        .bind(client_match_source)
+        .bind(matched_client_id)
         .execute(&mut **transaction)
         .await
         .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_batch"))?;
@@ -1289,6 +1297,13 @@ fn transport_name(value: crate::dns::TransportClass) -> &'static str {
         crate::dns::TransportClass::Datagram => "udp",
         crate::dns::TransportClass::Stream => "tcp",
         crate::dns::TransportClass::Multiplexed => "doh",
+    }
+}
+
+fn client_match_source_name(value: crate::ports::observation::ClientMatchSource) -> &'static str {
+    match value {
+        crate::ports::observation::ClientMatchSource::Id => "id",
+        crate::ports::observation::ClientMatchSource::Ip => "ip",
     }
 }
 
@@ -1611,7 +1626,7 @@ mod tests {
                     assert_eq!(
                         meta,
                         (
-                            6,
+                            7,
                             "timestamp-migration-test".into(),
                             1000,
                             "integer".into(),
@@ -1662,6 +1677,9 @@ mod tests {
                             "matched_resource_id",
                             "transport",
                             "client_ip",
+                            "client_id",
+                            "client_match_source",
+                            "matched_client_id",
                             "upstream_used_id",
                             "answer_summary_json",
                         ] {
@@ -1723,8 +1741,21 @@ mod tests {
     // V4-M02：中间步骤失败只回滚该步，之前已经提交的 migration 必须保留。
     #[tokio::test]
     async fn contract_v4_each_migration_failure_preserves_last_committed_step() {
-        for failing_version in 2..=6 {
-            let (path, pool) = legacy_database(1).await;
+        for failing_version in 2..=7 {
+            let (path, pool) = if failing_version == 7 {
+                let (path, pool) = legacy_database(5).await;
+                super::apply_storage_migration(
+                    &pool,
+                    5,
+                    6,
+                    include_str!("../../migrations/0006_integer_business_timestamps.sql"),
+                )
+                .await
+                .unwrap();
+                (path, pool)
+            } else {
+                legacy_database(1).await
+            };
             // v6 会重建 metadata，改用实际非法时间让该步失败。
             if failing_version == 6 {
                 sqlx::query("UPDATE storage_meta SET created_at_utc='invalid'")
@@ -1770,6 +1801,7 @@ mod tests {
                 (4, "client_ip"),
                 (5, "dns_core_duration_micros"),
                 (6, "event_time_utc_millis"),
+                (7, "client_id"),
             ] {
                 assert_eq!(
                     columns.iter().any(|column| column == name),
@@ -1797,7 +1829,7 @@ mod tests {
     #[tokio::test]
     async fn contract_v4_newer_schema_is_rejected_without_mutation() {
         let backend = SqliteStorageBackend::connect(path()).await.unwrap();
-        sqlx::query("UPDATE storage_meta SET schema_version=7")
+        sqlx::query("UPDATE storage_meta SET schema_version=8")
             .execute(&backend.pool)
             .await
             .unwrap();
@@ -1822,7 +1854,7 @@ mod tests {
             .fetch_one(&backend.pool)
             .await
             .unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         backend.shutdown(deadline()).await.unwrap();
     }
 
@@ -1994,7 +2026,7 @@ mod tests {
         .fetch_one(&backend.pool)
         .await
         .unwrap();
-        assert_eq!(meta.0, 6);
+        assert_eq!(meta.0, i64::from(crate::storage::STORAGE_SCHEMA_VERSION.0));
         assert_eq!(meta.1, "timestamp-migration-test");
         assert_eq!(meta.2, 1000);
         assert!(meta.3 > 2000);
@@ -2031,6 +2063,9 @@ mod tests {
             ("answer_summary_json", "[]"),
         ] {
             assert_eq!(detail.get::<String, _>(column), expected, "{column}");
+        }
+        for column in ["client_id", "client_match_source", "matched_client_id"] {
+            assert_eq!(detail.get::<Option<String>, _>(column), None, "{column}");
         }
         for (column, expected) in [
             ("duration_millis", 8),
@@ -2358,7 +2393,8 @@ mod tests {
         let row = sqlx::query(
             "SELECT upstream_member_id, matched_rule_source, matched_resource_id, \
               matched_rule_ordinal, transport, client_ip, upstream_used_id, answer_count, \
-              answers_truncated, answer_summary_json, dns_core_duration_micros \
+              answers_truncated, answer_summary_json, dns_core_duration_micros, client_id, \
+              client_match_source, matched_client_id \
               FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
@@ -2379,7 +2415,14 @@ mod tests {
                 .unwrap(),
             None
         );
-        for column in ["client_ip", "upstream_used_id", "answer_summary_json"] {
+        for column in [
+            "client_ip",
+            "client_id",
+            "client_match_source",
+            "matched_client_id",
+            "upstream_used_id",
+            "answer_summary_json",
+        ] {
             assert_eq!(row.try_get::<Option<String>, _>(column).unwrap(), None);
         }
         assert_eq!(row.try_get::<Option<i64>, _>("answer_count").unwrap(), None);
@@ -2727,7 +2770,10 @@ mod tests {
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener"),
                 route_id: Some(Arc::from("route")),
+                client_id: Some(Arc::from("Original-01")),
                 client_ip: Some("192.0.2.10".parse().unwrap()),
+                client_match_source: Some(crate::ports::observation::ClientMatchSource::Ip),
+                matched_client_id: Some(Arc::from("Matched-01")),
                 client_bucket: None,
                 strategy_id: Some(Arc::from("strategy")),
                 upstream_id: Some(Arc::from("upstream")),
@@ -2763,10 +2809,11 @@ mod tests {
         assert_eq!(count, 1);
         let row = sqlx::query(
             "SELECT event_time_utc_millis, typeof(event_time_utc_millis) AS event_time_type, \
-             duration_millis, dns_core_duration_micros, request_id_digest, route_id, client_bucket, strategy_id, upstream_id, \
+             duration_millis, dns_core_duration_micros, request_id_digest, route_id, client_id, client_ip, \
+             client_match_source, matched_client_id, client_bucket, strategy_id, upstream_id, \
              upstream_member_id, matched_rule_source, matched_resource_id, matched_rule_ordinal, \
              canonical_qname, source, rcode, failure_class, cancellation_reason, resource_revision, \
-             transport, client_ip, upstream_used_id, answer_count, answers_truncated, answer_summary_json \
+             transport, upstream_used_id, answer_count, answers_truncated, answer_summary_json \
              FROM resolve_log LIMIT 1",
         )
         .fetch_one(&backend.pool)
@@ -2789,6 +2836,24 @@ mod tests {
                 .unwrap()
                 .as_deref(),
             Some("<present>")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("client_id")
+                .unwrap()
+                .as_deref(),
+            Some("Original-01")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("client_match_source")
+                .unwrap()
+                .as_deref(),
+            Some("ip")
+        );
+        assert_eq!(
+            row.try_get::<Option<String>, _>("matched_client_id")
+                .unwrap()
+                .as_deref(),
+            Some("Matched-01")
         );
         assert_eq!(
             row.try_get::<Option<String>, _>("client_bucket")
@@ -2904,7 +2969,10 @@ mod tests {
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
+                    client_id: None,
                     client_ip: None,
+                    client_match_source: None,
+                    matched_client_id: None,
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
@@ -2976,7 +3044,10 @@ mod tests {
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener"),
                 route_id: None,
+                client_id: None,
                 client_ip: None,
+                client_match_source: None,
+                matched_client_id: None,
                 client_bucket: None,
                 strategy_id: None,
                 upstream_id: None,
@@ -3025,7 +3096,10 @@ mod tests {
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
+                    client_id: None,
                     client_ip: None,
+                    client_match_source: None,
+                    matched_client_id: None,
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
@@ -3062,7 +3136,10 @@ mod tests {
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener-e"),
                 route_id: None,
+                client_id: None,
                 client_ip: None,
+                client_match_source: None,
+                matched_client_id: None,
                 client_bucket: None,
                 strategy_id: None,
                 upstream_id: None,
@@ -3121,7 +3198,10 @@ mod tests {
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
+                    client_id: None,
                     client_ip: None,
+                    client_match_source: None,
+                    matched_client_id: None,
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
@@ -3178,7 +3258,10 @@ mod tests {
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
+                    client_id: None,
                     client_ip: None,
+                    client_match_source: None,
+                    matched_client_id: None,
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,
@@ -3232,7 +3315,10 @@ mod tests {
                 request_digest: Arc::from("digest"),
                 listener_id: Arc::from("listener"),
                 route_id: None,
+                client_id: None,
                 client_ip: None,
+                client_match_source: None,
+                matched_client_id: None,
                 client_bucket: None,
                 strategy_id: None,
                 upstream_id: None,
@@ -3301,7 +3387,10 @@ mod tests {
                     request_digest: Arc::from("digest"),
                     listener_id: Arc::from(listener_id),
                     route_id: None,
+                    client_id: None,
                     client_ip: None,
+                    client_match_source: None,
+                    matched_client_id: None,
                     client_bucket: None,
                     strategy_id: None,
                     upstream_id: None,

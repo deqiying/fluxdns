@@ -914,6 +914,14 @@ impl PolicyDnsCore {
             Ok(context) => context,
             Err(_error) => return (servfail(request), None, None, None),
         };
+        let client_match = context.client.observation(
+            request
+                .context
+                .client
+                .client_id
+                .as_ref()
+                .map(|client_id| client_id.as_str()),
+        );
         let client_bucket = match &context.client {
             ClientMatch::Matched { client, .. } => Some(Arc::from(client.name.as_str())),
             ClientMatch::Unknown => None,
@@ -1001,6 +1009,7 @@ impl PolicyDnsCore {
             return (
                 result,
                 Some(DnsResolutionObservation {
+                    client_match,
                     client_bucket,
                     strategy_id,
                     matched_rule,
@@ -1033,6 +1042,7 @@ impl PolicyDnsCore {
             return (
                 servfail(request),
                 Some(DnsResolutionObservation {
+                    client_match,
                     client_bucket,
                     strategy_id,
                     matched_rule: matched_rule.clone(),
@@ -1070,6 +1080,7 @@ impl PolicyDnsCore {
         (
             result,
             Some(DnsResolutionObservation {
+                client_match,
                 client_bucket,
                 strategy_id,
                 matched_rule,
@@ -1561,6 +1572,14 @@ fn cached_completion(
     Option<crate::dns::CancelReason>,
     Option<CacheCommitCandidate>,
 ) {
+    let client_match = context.client.observation(
+        request
+            .context
+            .client
+            .client_id
+            .as_ref()
+            .map(|client_id| client_id.as_str()),
+    );
     let client_bucket = match &context.client {
         ClientMatch::Matched { client, .. } => Some(Arc::from(client.name.as_str())),
         ClientMatch::Unknown => None,
@@ -1583,6 +1602,7 @@ fn cached_completion(
     (
         result,
         Some(DnsResolutionObservation {
+            client_match,
             client_bucket,
             strategy_id: Some(Arc::from(context.strategy.id.as_str())),
             matched_rule: None,
@@ -3004,11 +3024,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_core_observation_reports_matched_client_bucket() {
+    async fn policy_core_observation_freezes_matched_client_identity() {
         let mut config = Arc::try_unwrap(doh_config()).unwrap();
         config.clients.push(ResolvedClient {
             name: ConfigId::new("office").unwrap(),
-            client_ids: Vec::new(),
+            client_ids: vec!["Office-01".to_owned()],
             ips: vec![IpNet::from_str("127.0.0.0/8").unwrap()],
             strategy: None,
             cache: None,
@@ -3034,13 +3054,17 @@ mod tests {
         let (_, observation) = core
             .resolve_with_observation(&request("remote.example.", RecordType::A))
             .await;
+        let observation =
+            observation.expect("matched client must be included in policy observation");
+        assert_eq!(observation.client_bucket.as_deref(), Some("office"));
+        let matched = observation
+            .client_match
+            .expect("IP match must freeze the stable client ID");
         assert_eq!(
-            observation
-                .expect("matched client must be included in policy observation")
-                .client_bucket
-                .as_deref(),
-            Some("office")
+            matched.source,
+            crate::ports::observation::ClientMatchSource::Ip
         );
+        assert_eq!(matched.matched_client_id.as_ref(), "Office-01");
     }
 
     #[tokio::test]

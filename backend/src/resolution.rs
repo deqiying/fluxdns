@@ -375,8 +375,9 @@ fn record_stats(worker: &StatsPersistenceWorker, event: &ResolutionEvent) {
         dimensions.push(StatsDimension::rcode(rcode));
     }
     if let Some(id) = event
-        .client_bucket
-        .as_deref()
+        .client_match
+        .as_ref()
+        .map(|matched| matched.matched_client_id.as_ref())
         .and_then(|id| configured_id_from_validated(ConfiguredIdKind::ClientBucket, id))
         && let Ok(dimension) = StatsDimension::client_bucket(id)
     {
@@ -441,11 +442,13 @@ mod tests {
     use crate::cache::CacheCommitOutcome;
     use crate::dns::{ResponseClass, RuntimeRevision, TransportClass};
     use crate::ports::observation::{
-        ResolutionEnvelope, ResolutionEvent, ResolutionEventSink, ResolutionPublishDisposition,
-        ResolutionTerminal,
+        ClientMatchObservation, ClientMatchSource, ResolutionEnvelope, ResolutionEvent,
+        ResolutionEventSink, ResolutionPublishDisposition, ResolutionTerminal,
     };
-    use crate::ports::storage::StatsSource;
-    use crate::ports::telemetry::{CacheStatus, OutcomeClass};
+    use crate::ports::storage::{StatsDimension, StatsSource, StorageBackend};
+    use crate::ports::telemetry::{
+        CacheStatus, ConfiguredIdKind, OutcomeClass, configured_id_from_validated,
+    };
 
     use super::{ResolutionPipelineMetrics, ResolutionPublisher};
 
@@ -456,6 +459,7 @@ mod tests {
             dns_core_duration_micros: 250,
             listener_id: Arc::from("dns"),
             route_id: None,
+            client_match: None,
             client_bucket: None,
             strategy_id: None,
             upstream_id: None,
@@ -476,6 +480,51 @@ mod tests {
             runtime_revision: RuntimeRevision(1),
             detail: None,
         })
+    }
+
+    #[tokio::test]
+    async fn stats_use_the_frozen_matched_client_id_instead_of_the_legacy_name() {
+        let backend = Arc::new(crate::storage::InMemoryStorageBackend::new());
+        backend
+            .migrate(
+                crate::storage::STORAGE_SCHEMA_VERSION,
+                crate::dns::Deadline::new(
+                    std::time::Instant::now() + std::time::Duration::from_secs(1),
+                ),
+            )
+            .await
+            .unwrap();
+        let worker = crate::storage::StatsPersistenceWorker::new(backend.clone());
+        let mut event = (*event()).clone();
+        event.client_match = Some(ClientMatchObservation {
+            source: ClientMatchSource::Ip,
+            matched_client_id: Arc::from("Stable-Client-01"),
+        });
+        event.client_bucket = Some(Arc::from("mutable-management-name"));
+        let day = super::day_utc(event.occurred_at).unwrap();
+
+        super::record_stats(&worker, &event);
+        worker
+            .flush(crate::dns::Deadline::new(
+                std::time::Instant::now() + std::time::Duration::from_secs(1),
+            ))
+            .await
+            .unwrap();
+
+        let matched =
+            configured_id_from_validated(ConfiguredIdKind::ClientBucket, "Stable-Client-01")
+                .unwrap();
+        let legacy_name =
+            configured_id_from_validated(ConfiguredIdKind::ClientBucket, "mutable-management-name")
+                .unwrap();
+        assert_eq!(
+            backend.dimension_count(day, &StatsDimension::client_bucket(matched).unwrap()),
+            1
+        );
+        assert_eq!(
+            backend.dimension_count(day, &StatsDimension::client_bucket(legacy_name).unwrap()),
+            0
+        );
     }
 
     /// V1-O04：分别在三个正式 worker 返回后模拟 join panic，owner 必须报告未完成并收齐句柄。

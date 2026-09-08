@@ -96,7 +96,7 @@ BC-02 内部进度（2026-09-07）：ConfigStore 已有 v2 活动源、双文件
 
 ## 5. BE-03：客户端身份贯穿请求与投影
 
-2026-09-08 BC-04 内部进度：v2 配置已冻结唯一 `name`/单 `client_id`，现有 resolved/policy 类型进一步显式区分管理 `name` 与请求 `client_ids`；`ClientIndex` 提供独立 name/exact ID 索引、重复拒绝、ID 优先/最长 CIDR 和 mapped IPv4 归一化，事实见[配置参考](../implementation/configuration.md#p1-客户端匹配索引内部能力2026-09-08)。生产 loader 仍为 v1，BC-04 保持部分完成；BC-05 的原始身份/历史匹配事件、详情/统计归属与 reload 隔离尚未实施。
+2026-09-08 BC-04/BC-05 内部进度：v2 配置已冻结唯一 `name`/单 `client_id`，现有 resolved/policy 类型进一步显式区分管理 `name` 与请求 `client_ids`；`ClientIndex` 提供独立 name/exact ID 索引、重复拒绝、ID 优先/最长 CIDR 和 mapped IPv4 归一化，事实见[配置参考](../implementation/configuration.md#p1-客户端匹配索引内部能力2026-09-08)。transport 原始 `client_id`/IP、请求期 `Id`/`Ip` 匹配来源和稳定 ID 已经由完成事件冻结，详情 schema v7 持久化并由统计直接归属，reload 后不重映射；事实见[后台服务](../implementation/backend/background-services.md#完成事件与后台分发)。生产 loader 仍为 v1，多 ID 客户端的 IP 命中没有唯一历史 ID，保持未知而不补造；BC-04/BC-05 的新基线完整接线及其全矩阵验收仍依赖 BC-26，日分片查询与对外投影分别留在 BC-08/BC-09/BC-22。
 
 ### 开发步骤
 

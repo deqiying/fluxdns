@@ -50,6 +50,8 @@ impl DnsCoreCompletion {
 /// selected upstream、answer source 和 cache 状态，供详情日志与聚合统计复用同一份判定结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DnsResolutionObservation {
+    pub client_match: Option<crate::ports::observation::ClientMatchObservation>,
+    /// 旧 v1 Management 查询仍使用管理名称；身份与统计只消费 `client_match`。
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
     /// 当前请求实际命中的 listener/strategy rule 摘要。

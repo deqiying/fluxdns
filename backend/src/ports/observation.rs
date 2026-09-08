@@ -7,8 +7,8 @@ use std::time::SystemTime;
 
 use crate::cache::CacheCommitCandidate;
 use crate::dns::{
-    CancelReason, CanonicalQuestion, CanonicalResponse, RequestId, ResponseClass, RuntimeRevision,
-    TransportClass,
+    CancelReason, CanonicalQuestion, CanonicalResponse, ClientId, RequestId, ResponseClass,
+    RuntimeRevision, TransportClass,
 };
 use crate::resource::ResourceVersion;
 
@@ -23,6 +23,7 @@ use super::telemetry::{CacheStatus, OutcomeClass};
 #[derive(Clone)]
 pub struct ResolutionDetailSource {
     pub request_id: RequestId,
+    pub client_id: Option<ClientId>,
     pub client_ip: Option<IpAddr>,
     pub question: CanonicalQuestion,
     pub response: Option<Arc<CanonicalResponse>>,
@@ -33,9 +34,33 @@ impl fmt::Debug for ResolutionDetailSource {
         formatter
             .debug_struct("ResolutionDetailSource")
             .field("has_request_id", &true)
+            .field("has_client_id", &self.client_id.is_some())
             .field("has_client_ip", &self.client_ip.is_some())
             .field("question", &self.question)
             .field("has_response", &self.response.is_some())
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClientMatchSource {
+    Id,
+    Ip,
+}
+
+/// 请求所属客户端在当次 Runtime 中冻结的匹配事实，不包含可变的管理名称。
+#[derive(Clone, Eq, PartialEq)]
+pub struct ClientMatchObservation {
+    pub source: ClientMatchSource,
+    pub matched_client_id: Arc<str>,
+}
+
+impl fmt::Debug for ClientMatchObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ClientMatchObservation")
+            .field("source", &self.source)
+            .field("has_matched_client_id", &true)
             .finish()
     }
 }
@@ -58,6 +83,8 @@ pub struct ResolutionEvent {
     pub dns_core_duration_micros: u64,
     pub listener_id: Arc<str>,
     pub route_id: Option<Arc<str>>,
+    pub client_match: Option<ClientMatchObservation>,
+    /// 旧 v1 查询投影仍消费管理名称；新版详情与统计不得从此字段反推请求身份。
     pub client_bucket: Option<Arc<str>>,
     pub strategy_id: Option<Arc<str>>,
     pub upstream_id: Option<Arc<str>>,
@@ -86,6 +113,7 @@ impl fmt::Debug for ResolutionEvent {
             .field("dns_core_duration_micros", &self.dns_core_duration_micros)
             .field("listener_id", &self.listener_id)
             .field("has_route_id", &self.route_id.is_some())
+            .field("has_client_match", &self.client_match.is_some())
             .field("has_client_bucket", &self.client_bucket.is_some())
             .field("has_strategy_id", &self.strategy_id.is_some())
             .field("has_upstream_id", &self.upstream_id.is_some())

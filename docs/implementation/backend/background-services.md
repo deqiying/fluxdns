@@ -11,6 +11,8 @@
 > 2026-09-06 增量核对：仅更新连接/负载驱动、命令和本次开发验证；其余正文保留上述历史核对范围
 >
 > 同日文档收口：经用户确认结束剩余验证专项，仅维护已知边界和引用；不新增运行结论，不重跑历史测试
+>
+> 2026-09-08 增量核对：仅核对客户端请求身份、历史匹配事实和 schema v7 前向迁移；其余正文保留原核对范围
 
 ## 资源准备与刷新
 
@@ -30,6 +32,8 @@ manifest v2 保存源身份 digest、fetcher 代际及不透明验证器，不�
 
 service 在 core 返回时冻结 port 字段 `duration_millis` 和 `dns_core_duration_micros`：前者从 transport 接入计时点到 core 完成，后者仅 core 主链；都不包含响应编码/写回或后台排队、详情投影和数据库写入。DoH 总耗时可能包含入站 TLS 与 HTTP 读取/解析。dispatcher 的 `attempt_outcome` 维度也来自这一请求终态，不是独立的逐 upstream attempt 事件。
 
+transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDetailSource` 进入详情链。Policy 在当次 Runtime 内把 `ClientMatchObservation` 冻结为 `Id` 或 `Ip` 来源及匹配时的稳定客户端 ID；事件消费与后续 reload 不重新查询客户端目录。stats 的客户端维度只消费该稳定 ID，不读取可变管理名称；请求原始身份不进入 telemetry label 或事件 `Debug`。当前生产配置仍为 v1：仅单 ID 客户端的 IP 命中可无歧义生成稳定 ID，多 ID/IP 命中保持未知，待新配置基线接线后退出该过渡边界。
+
 ## Storage
 
 [`StorageRuntime::open`](../../../backend/src/storage/service.rs) 在 DNS bind 前打开 SQLite 并构建 stats/detail 能力；`database` 始终必需，关闭 `resolve_log` 不关闭聚合统计。
@@ -38,7 +42,7 @@ service 在 core 返回时冻结 port 字段 `duration_millis` 和 `dns_core_dur
 
 详情由 [`resolve_log.rs`](../../../backend/src/storage/resolve_log.rs) 投影，再交 [`sqlite.rs`](../../../backend/src/storage/sqlite.rs) 的唯一有界 detail worker 批写，满批立即提交，低流量尾批由周期 flush 处理；`writer.rs` 是内存 contract 实现，不是正式 SQLite writer。管理查询使用 [`SqliteManagementReadModel`](../../../backend/src/storage/management_read.rs) 独立只读 pool，不复用请求写入链路。
 
-[迁移目录](../../../backend/migrations)的前向链是 0001 基础表、0002 resolution metadata、0003 management query projection、0004 query record observability、0005 DNS core duration、0006 integer business timestamps。当前业务 schema 为 v6；v5 前的主链耗时仍为 null，v4 前的脱敏详情仍标记为 legacy_redacted，不回填丢失内容。新库也执行同一链。SQLite 使用 WAL、NORMAL synchronous、busy timeout 和串行 operation lock；内存 adapter 是契约基线，不替代正式数据库。
+[迁移目录](../../../backend/migrations)的前向链是 0001 基础表、0002 resolution metadata、0003 management query projection、0004 query record observability、0005 DNS core duration、0006 integer business timestamps、0007 client identity。当前业务 schema 为 v7；v5 前的主链耗时及 v7 前的 `client_id`/匹配事实仍为 null，v4 前的脱敏详情仍标记为 legacy_redacted，不回填丢失内容。新库也执行同一链。SQLite 使用 WAL、NORMAL synchronous、busy timeout 和串行 operation lock；内存 adapter 是契约基线，不替代正式数据库。
 
 升级由 adapter 手动执行 `include_str!` SQL 并更新 `storage_meta`，不是 SQLx Migrator。`connect_with_deadline` 将建目录、连接和迁移纳入 open 的同一预算；随后 `startup_write_probe` 在独立事务中实际更新 metadata 并回滚，不提交统计或详情。失败/超时不产生可服务 owner。已有 metadata 只读取核对，不再执行使用旧时间列的 `INSERT OR IGNORE`；不存在 metadata 行不作为自动修复场景。
 
@@ -56,9 +60,11 @@ service 在 core 返回时冻结 port 字段 `duration_millis` 和 `dns_core_dur
 
 [`0006_integer_business_timestamps.sql`](../../../backend/migrations/0006_integer_business_timestamps.sql) 只迁移原四个绝对时间字段，不修改 0001–0005。它在同一事务中创建目标表、按完整字段复制、检查时间无损往返、替换表并重建 `(event_time_utc_millis, id)` 索引；stats 日表不重写，ledger hash/序号、详情 ID/其他字段/空值和 AUTOINCREMENT 历史高水位保留。最后才推进 schema version，并将 migrated time 更新为本次升级时间；重开和写探针不刷新该时间。
 
-旧 writer 产生的规范非负十进制毫秒字符串可无损转换。空串、非数字、小数、指数格式、负值和超出 `i64` 的值不静默 `CAST` 成零或饱和值，迁移失败并回滚该步全部变更；不删除坏行或推测历史时间。新写入由 `system_time_utc_millis` 转为 `i64`，亚毫秒截断、epoch 前归零保留旧行为，溢出显式错误。新列有 `typeof(...)='integer'` 与非负约束，不能保存不合法 TEXT/REAL 值。
+[`0007_client_identity.sql`](../../../backend/migrations/0007_client_identity.sql) 只为 `resolve_log` 增加可空 `client_id`、受限为 `id`/`ip` 的 `client_match_source` 和 `matched_client_id`。writer 要求匹配来源与匹配 ID 同时存在或同时缺失，并按配置 ID 长度规则校验两个 ID；旧行保持 null，不从 `client_bucket` 或 client IP 反推历史身份。
 
-管理 overview/查询排序和 writer 的 age/容量清理都直接使用整数列；对外仍返回原 OpenAPI 日期格式。此变更不影响独立缓存 DB 的纳秒索引、Duration 精度、配置或异步队列。迁移在启动时一次性复制相关表，需要额外空间；大库迁移耗时受原启动预算限制，尚无生产规模数据证明。运行新 binary 会前向升级，旧 binary 不支持 v6，不提供自动降级。
+旧 writer 产生的规范非负十进制毫秒字符串可无损转换。空串、非数字、小数、指数格式、负值和超出 `i64` 的值不静默 `CAST` 成零或饱和值，迁移失败并回滚该步全部变更；不删除坏行或推测历史时间。新写入由 `system_time_utc_millis` 转为 `i64`，亚毫秒截断、epoch 前归零保留旧行为，溢出显式错误。时间列有 `typeof(...)='integer'` 与非负约束，不能保存不合法 TEXT/REAL 值。
+
+管理 overview/查询排序和 writer 的 age/容量清理都直接使用整数列；对外仍返回原 OpenAPI 日期格式。此变更不影响独立缓存 DB 的纳秒索引、Duration 精度、配置或异步队列。v6 迁移在启动时一次性复制相关表，需要额外空间；v7 只执行可空列追加。大库迁移耗时受原启动预算限制，尚无生产规模数据证明。运行新 binary 会前向升级，旧 binary 不支持 v7，不提供自动降级。
 
 ## Cache persistence
 
@@ -151,8 +157,8 @@ pwsh -File script/test-backend-contracts.ps1 -Suite Connections -Repeat 3
 | 用例 | 前置与故障点 | 断言与边界 |
 | --- | --- | --- |
 | V4-M01 | `sqlite::tests::contract_v4_all_legacy_versions_preserve_rows_and_nulls_on_reopen`；用原 migration 构造 v1–v5，各自空库/含数据 | 每个起点升级后两次打开，对照 metadata、全部详情字段/历史 NULL、统计总数/维度、ledger hash/序号、删除后的自增高水位和 integrity check；不重写旧 migration |
-| V4-M02 | `contract_v4_each_migration_failure_preserves_last_committed_step`；从 v1 出发，分别让 v2–v5 metadata update trigger 失败及 v6 时间转换失败 | schema version 和已提交字段保留在失败前一步，该步新增列不残留；解除故障后可升级。v1 建库失败另复用原 DDL 回滚测试 |
-| V4-M03 | `contract_v4_newer_schema_is_rejected_without_mutation` | v7 被拒绝，schema SQL 与版本保持原样；不自动降级 |
+| V4-M02 | `contract_v4_each_migration_failure_preserves_last_committed_step`；从 v1 出发，分别让 v2–v5 metadata update trigger 失败及 v6 时间转换失败；v7 从真实 v6 起点让 metadata update trigger 失败 | schema version 和已提交字段保留在失败前一步，该步新增列不残留；解除故障后可升级。v1 建库失败另复用原 DDL 回滚测试 |
+| V4-M03 | `contract_v4_newer_schema_is_rejected_without_mutation` | v8 被拒绝，schema SQL 与版本保持原样；不自动降级 |
 | V4-S01 / V9-S-local | `contract_v4_midnight_late_events_and_repeated_sqlite_recovery`；真实 SQLite，三轮事务 trigger 失败/解除/重试 | `day_utc` 从午夜两侧事件时间计算日桶；乱序与 late event 分属两个 epoch，失败不写 ledger，恢复后无重复总数，pending/gap 清除，重开及 integrity check 通过。trigger 不等价 disk-full 或介质 I/O 故障 |
 | V4-S02 | `stats::tests::contract_v4_pending_event_limit_preserves_active_epoch`；内存 backend 拒绝提交 | 分别达到 65,535/65,536 pending events，再产生两条 active event，保护错误保留 pending 与 active；batch 数上限继续复用原 64-batch 用例 |
 | V4-S03 | `storage::service::tests::contract_v4_sql_stages_share_shutdown_budget_and_reclaim_owner`；正式 StorageRuntime、真实 SQLite，SQL 前/已 INSERT 未提交/已提交待回收 × 放行/截止超时 | 当前详情先回收，统计不能抢占它；正常释放后 stats/detail 均完成，超时报告失败且不延长预算。未提交详情回滚、已提交详情保留，pending 统计可在显式新预算下幂等恢复；channel 关闭、句柄回收及 integrity check 均断言 |
