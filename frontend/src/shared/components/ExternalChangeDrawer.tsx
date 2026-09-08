@@ -1,14 +1,20 @@
-import { Alert, App, Button, Descriptions, Drawer, Empty, List, Space, Spin, Tag, Typography } from "antd";
+import { useEffect, useMemo, useState } from "react";
+import { Alert, App, Button, Checkbox, Descriptions, Drawer, Empty, List, Space, Spin, Tag, Typography } from "antd";
 import { GitMerge, RotateCcw } from "lucide-react";
+import type { components } from "@/shared/api/generated-v2";
 import type { ExternalWorkspaceState } from "@/shared/config/external-change";
+import { externalAdoptionItems, type ExternalAdoptionItem } from "@/shared/config/external-adoption";
 import { getSafeErrorMessage } from "@/shared/api/errors";
+
+type ConfigChange = components["schemas"]["ConfigChange"];
 
 export interface ExternalChangeDrawerProps {
   state: ExternalWorkspaceState;
   onClose: () => void;
   onRestore: () => void;
   onRetryPersistence?: () => void;
-  onAdopt?: () => void;
+  onAdopt?: (changes: ConfigChange[]) => void;
+  onDirty?: (dirty: boolean) => void;
 }
 
 export function ExternalChangeDrawer({
@@ -17,10 +23,31 @@ export function ExternalChangeDrawer({
   onRestore,
   onRetryPersistence,
   onAdopt,
+  onDirty,
 }: ExternalChangeDrawerProps) {
   const { modal } = App.useApp();
-  const closeBlocked = state.phase === "loading" || state.phase === "restoring";
+  const items = useMemo(() => state.diff ? externalAdoptionItems(state.diff) : [], [state.diff]);
+  const adoptableKeys = useMemo(() => items.filter((item) => item.change).map((item) => item.key), [items]);
+  const revisionKey = state.diff ? `${state.diff.expected.active_revision}:${state.diff.expected.observed_file_revision}` : "none";
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  useEffect(() => {
+    setSelectedKeys(new Set(adoptableKeys));
+  }, [adoptableKeys, revisionKey]);
+  const selectedChanges = items.flatMap((item) => item.change && selectedKeys.has(item.key) ? [item.change] : []);
+  const closeBlocked = state.phase === "loading" || state.phase === "restoring" || state.phase === "applying";
   const actionBlocked = closeBlocked || state.phase === "awaiting_state";
+  const setItemSelected = (key: string, selected: boolean) => {
+    setSelectedKeys((current) => {
+      const next = new Set(current);
+      if (selected) next.add(key); else next.delete(key);
+      return next;
+    });
+    onDirty?.(true);
+  };
+  const setAllSelected = (selected: boolean) => {
+    setSelectedKeys(new Set(selected ? adoptableKeys : []));
+    onDirty?.(true);
+  };
   const requestClose = () => {
     if (closeBlocked) return;
     if (!state.dirty) {
@@ -74,19 +101,31 @@ export function ExternalChangeDrawer({
             </Button>
           ) : null}
           {onAdopt ? (
-            <Button type="primary" icon={<GitMerge size={16} aria-hidden="true" />} disabled={actionBlocked} onClick={onAdopt}>
-              修改并采用
+            <Button type="primary" icon={<GitMerge size={16} aria-hidden="true" />} loading={state.phase === "applying"} disabled={actionBlocked || selectedChanges.length === 0 || Boolean(state.diff?.parse_error)} onClick={() => onAdopt(selectedChanges)}>
+              组合采用 {selectedChanges.length} 项
             </Button>
           ) : null}
         </Space>
       ) : null}
     >
-      <ExternalChangeDrawerBody state={state} />
+      <ExternalChangeDrawerBody state={state} items={items} selectedKeys={selectedKeys} onSelect={setItemSelected} onSelectAll={setAllSelected} />
     </Drawer>
   );
 }
 
-function ExternalChangeDrawerBody({ state }: { state: ExternalWorkspaceState }) {
+function ExternalChangeDrawerBody({
+  state,
+  items,
+  selectedKeys,
+  onSelect,
+  onSelectAll,
+}: {
+  state: ExternalWorkspaceState;
+  items: ExternalAdoptionItem[];
+  selectedKeys: Set<string>;
+  onSelect: (key: string, selected: boolean) => void;
+  onSelectAll: (selected: boolean) => void;
+}) {
   if (state.phase === "loading") return <div className="external-change-loading"><Spin /></div>;
   if (state.phase === "error") return <Alert type="error" showIcon message={getSafeErrorMessage(state.error)} />;
   if (state.phase === "conflict") {
@@ -112,15 +151,43 @@ function ExternalChangeDrawerBody({ state }: { state: ExternalWorkspaceState }) 
         </div>
       ) : null}
       <div>
-        <Typography.Title level={5}>可编辑变化</Typography.Title>
+        <Space className="external-change-heading" align="center" wrap>
+          <Typography.Title level={5}>可编辑变化</Typography.Title>
+          {items.some((item) => item.change) ? (
+            <Checkbox
+              checked={items.filter((item) => item.change).every((item) => selectedKeys.has(item.key))}
+              indeterminate={items.some((item) => item.change && selectedKeys.has(item.key)) && !items.filter((item) => item.change).every((item) => selectedKeys.has(item.key))}
+              onChange={(event) => onSelectAll(event.target.checked)}
+            >采用全部可用变化</Checkbox>
+          ) : null}
+        </Space>
         <List
           size="small"
           bordered
           locale={{ emptyText: "无可编辑变化" }}
-          dataSource={diff.editable}
-          renderItem={(item, index) => (
-            <List.Item>
-              <Typography.Text>{item.external?.module ?? item.active?.module ?? `变化 ${index + 1}`}</Typography.Text>
+          dataSource={items}
+          renderItem={(item) => (
+            <List.Item className="external-change-item">
+              <div className="external-change-item-content">
+                <Space align="start" wrap>
+                  <Checkbox aria-label={`采用 ${item.label}`} checked={item.change !== null && selectedKeys.has(item.key)} disabled={!item.change} onChange={(event) => onSelect(item.key, event.target.checked)} />
+                  <Typography.Text strong>{item.label}</Typography.Text>
+                  <Tag>{item.action === "create" ? "新增" : item.action === "update" ? "更新" : "不可采用"}</Tag>
+                </Space>
+                {item.note ? <Typography.Text type="secondary">{item.note}</Typography.Text> : null}
+                {item.fields.length > 0 ? (
+                  <div className="external-field-diff">
+                    {item.fields.map((field) => (
+                      <div key={field.path} className="external-field-diff-row">
+                        <Typography.Text code>{field.path}</Typography.Text>
+                        <Typography.Text title={field.active}>{field.active}</Typography.Text>
+                        <Typography.Text type="secondary">→</Typography.Text>
+                        <Typography.Text title={field.external}>{field.external}</Typography.Text>
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             </List.Item>
           )}
         />

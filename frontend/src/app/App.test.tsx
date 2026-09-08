@@ -6,7 +6,7 @@ import { http, HttpResponse } from "msw";
 import { setMockAuthenticated, setMockSetupRequired } from "@/mocks/handlers";
 import { processMetricsFixture } from "@/mocks/fixtures";
 import { server } from "@/mocks/server";
-import type { ConfigState, FileSyncRequest } from "@/shared/config/api";
+import type { ApplyRequest, Candidate, ConfigState, FileSyncRequest } from "@/shared/config/api";
 import { AppProviders } from "./providers";
 import { App } from "./App";
 import { managementRoutes } from "./route-contract";
@@ -210,6 +210,134 @@ describe("application routes", () => {
     });
     expect(applyRequests).toBe(0);
     await waitFor(() => expect(screen.queryByText("运行配置已生效，但文件尚未同步")).not.toBeInTheDocument());
+  });
+
+  it("外部差异可将 Hosts 与日志作为一个候选组合采用", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    const changed: ConfigState = {
+      active_revision: "active-3",
+      runtime_revision: "runtime-3",
+      persisted_revision: "active-3",
+      observed_file_revision: "files-6",
+      files: { source: "changed", derived: "unchanged" },
+      synchronization: "synced",
+      operation_id: null,
+    };
+    let current = changed;
+    const candidates: Candidate[] = [];
+    const applies: ApplyRequest[] = [];
+    server.use(
+      http.get("/api/v2/config/state", () => HttpResponse.json(current)),
+      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
+        expected: { active_revision: "active-3", observed_file_revision: "files-6" },
+        editable: [
+          {
+            active: { module: "hosts", value: { name: "local", type: "const", format: "hosts", hosts: "127.0.0.1 localhost" } },
+            external: { module: "hosts", value: { name: "local", type: "const", format: "hosts", hosts: "127.0.0.2 localhost" } },
+          },
+          {
+            active: { module: "logs", value: { enable: true, level: "info", path: "old.log" } },
+            external: { module: "logs", value: { enable: true, level: "debug", path: "new.log" } },
+          },
+        ],
+        protected_changes: ["database"],
+        parse_error: null,
+      })),
+      http.post("/api/v2/config/validate", async ({ request }) => {
+        const candidate = await request.json() as Candidate;
+        candidates.push(candidate);
+        return HttpResponse.json({
+          validation_token: "combo-validation-1",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: ["discard_external_changes"],
+          affected_names: ["local"],
+        });
+      }),
+      http.post("/api/v2/config/apply", async ({ request }) => {
+        const apply = await request.json() as ApplyRequest;
+        applies.push(apply);
+        current = {
+          ...changed,
+          active_revision: "active-4",
+          runtime_revision: "runtime-4",
+          persisted_revision: "active-4",
+          observed_file_revision: "files-7",
+          files: { source: "unchanged", derived: "unchanged" },
+        };
+        return HttpResponse.json({
+          operation_id: apply.operation_id,
+          status: { state: "applied_synced", active_revision: "active-4", persisted_revision: "active-4" },
+        });
+      }),
+    );
+
+    renderApp("/dashboard");
+    expect(await screen.findByText("配置文件已在外部修改")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看" }));
+    expect(await screen.findByText("Hosts / local")).toBeInTheDocument();
+    expect(screen.getByText("日志")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "组合采用 2 项" }));
+    expect(await screen.findByText(/未采用可编辑差异 0 项，受保护变化 1 类/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认采用" }));
+
+    await waitFor(() => expect(applies).toHaveLength(1));
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      expected: { active_revision: "active-3", observed_file_revision: "files-6" },
+      discard_external_changes: true,
+      changes: [
+        { module: "hosts", change: { action: "update", original_name: "local", value: { hosts: "127.0.0.2 localhost" } } },
+        { module: "logs", change: { level: "debug", path: "new.log" } },
+      ],
+    });
+    expect(applies[0]).toMatchObject({ candidate: candidates[0], validation_token: "combo-validation-1", confirmations: ["discard_external_changes"] });
+    await waitFor(() => expect(screen.queryByText("配置文件已在外部修改")).not.toBeInTheDocument());
+  });
+
+  it("组合采用校验遇到二次外改时停止并要求重读", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    const changed: ConfigState = {
+      active_revision: "active-5",
+      runtime_revision: "runtime-5",
+      persisted_revision: "active-5",
+      observed_file_revision: "files-8",
+      files: { source: "changed", derived: "unchanged" },
+      synchronization: "synced",
+      operation_id: null,
+    };
+    let applyRequests = 0;
+    server.use(
+      http.get("/api/v2/config/state", () => HttpResponse.json(changed)),
+      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
+        expected: { active_revision: "active-5", observed_file_revision: "files-8" },
+        editable: [{
+          active: { module: "logs", value: { enable: true, level: "info", path: "old.log" } },
+          external: { module: "logs", value: { enable: true, level: "warn", path: "new.log" } },
+        }],
+        protected_changes: [],
+        parse_error: null,
+      })),
+      http.post("/api/v2/config/validate", () => HttpResponse.json({
+        code: "FILE_REVISION_CONFLICT",
+        message: "configuration file changed again",
+        request_id: "mock-file-conflict",
+        retryable: true,
+      }, { status: 409 })),
+      http.post("/api/v2/config/apply", () => {
+        applyRequests += 1;
+        return HttpResponse.error();
+      }),
+    );
+
+    renderApp("/dashboard");
+    expect(await screen.findByText("配置文件已在外部修改")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看" }));
+    await user.click(await screen.findByRole("button", { name: "组合采用 1 项" }));
+    expect(await screen.findByText("配置文件已再次变化，请重新读取差异。")).toBeInTheDocument();
+    expect(applyRequests).toBe(0);
   });
 
   it.each(

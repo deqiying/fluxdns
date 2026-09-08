@@ -75,6 +75,40 @@ select {
   margin-top: 0;
 }
 
+.external-change-heading {
+  justify-content: space-between;
+  width: 100%;
+}
+
+.external-change-heading h5.ant-typography {
+  margin-bottom: 0;
+}
+
+.external-change-item-content {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  width: 100%;
+}
+
+.external-field-diff {
+  display: grid;
+  gap: 6px;
+  padding-left: 26px;
+}
+
+.external-field-diff-row {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.7fr) minmax(0, 1fr) auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.external-field-diff-row .ant-typography {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .app-shell {
   min-height: 100vh;
   background: #fff;

@@ -22,7 +22,7 @@ export interface ExternalWorkspaceState {
   dismissedKey: string | null;
   open: boolean;
   dirty: boolean;
-  phase: "idle" | "loading" | "ready" | "restoring" | "awaiting_state" | "conflict" | "error";
+  phase: "idle" | "loading" | "ready" | "restoring" | "applying" | "awaiting_state" | "conflict" | "error";
   diff: ExternalDiff | null;
   operation: OperationResult | null;
   error: unknown;
@@ -37,6 +37,7 @@ export type ExternalWorkspaceAction =
   | { type: "loaded"; diff: ExternalDiff }
   | { type: "dirty"; value: boolean }
   | { type: "restore" }
+  | { type: "apply" }
   | { type: "operation"; operation: OperationResult }
   | { type: "failure"; error: unknown };
 
@@ -86,6 +87,8 @@ export function externalWorkspaceReducer(
       return { ...current, dirty: action.value };
     case "restore":
       return { ...current, phase: "restoring", error: null };
+    case "apply":
+      return { ...current, phase: "applying", error: null };
     case "operation":
       return { ...current, phase: "awaiting_state", operation: action.operation, error: null };
     case "failure":

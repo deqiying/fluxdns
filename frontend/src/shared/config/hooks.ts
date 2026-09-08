@@ -10,7 +10,7 @@ type Schemas = components["schemas"];
 type ConfigChange = Schemas["ConfigChange"];
 type OperationResult = Schemas["OperationResult"];
 
-const confirmationLabels: Record<Schemas["ImpactKind"], string> = {
+export const confirmationLabels: Record<Schemas["ImpactKind"], string> = {
   rename_references: "资源改名将同步更新全部类型化引用",
   listener_rebind: "监听入口将重新绑定发生变化的 socket",
   retention_shortening: "保留范围将缩短，已清理的数据无法恢复",
