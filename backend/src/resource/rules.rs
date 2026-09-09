@@ -116,6 +116,7 @@ pub struct RuleIndex {
     regex: Vec<CompiledRegex>,
     selectors: BTreeMap<String, Arc<RuleIndex>>,
     rule_count: usize,
+    skipped_unsupported_count: usize,
 }
 
 impl fmt::Debug for RuleIndex {
@@ -184,6 +185,7 @@ impl RuleIndex {
         }
         let mut reader = DatReader::new(input);
         let mut selectors: BTreeMap<String, RuleIndex> = BTreeMap::new();
+        let mut skipped_unsupported_count = 0;
         while let Some((field, wire)) = reader.read_key()? {
             if field == 1 && wire == WIRE_LEN_DELIM {
                 let payload = reader.read_length_delimited()?;
@@ -204,6 +206,7 @@ impl RuleIndex {
                 if total_rules > limits.max_rules {
                     return Err(RuleParseError::TooManyRules);
                 }
+                skipped_unsupported_count += site.index.skipped_unsupported_count;
                 selectors.insert(selector, site.index);
             } else {
                 reader.skip_field(wire)?;
@@ -213,6 +216,14 @@ impl RuleIndex {
             return Err(RuleParseError::InvalidDat);
         }
         let rule_count = selectors.values().map(|index| index.rule_count).sum();
+        if skipped_unsupported_count > 0 {
+            tracing::warn!(
+                event = "rule_set_unsupported_entries_skipped",
+                format = "dat",
+                skipped_count = skipped_unsupported_count,
+                "unsupported DAT regex entries were skipped"
+            );
+        }
         Ok(Self {
             exact: BTreeSet::new(),
             suffix: BTreeSet::new(),
@@ -223,6 +234,7 @@ impl RuleIndex {
                 .map(|(name, index)| (name, Arc::new(index)))
                 .collect(),
             rule_count,
+            skipped_unsupported_count,
         })
     }
 
@@ -375,6 +387,7 @@ impl RuleIndex {
             regex: Vec::new(),
             selectors: BTreeMap::new(),
             rule_count: 0,
+            skipped_unsupported_count: 0,
         }
     }
 
@@ -932,7 +945,13 @@ fn parse_dat_site(payload: &[u8], limits: RuleLimits) -> Result<DatSite, RulePar
     for domain in domains {
         match domain.kind {
             0 => index.add_keyword(&domain.value, limits)?,
-            1 => index.add_regex(&domain.value, 0, limits)?,
+            1 => match index.add_regex(&domain.value, 0, limits) {
+                Ok(()) => {}
+                Err(RuleParseError::UnsupportedRegex { .. }) => {
+                    index.skipped_unsupported_count += 1;
+                }
+                Err(error) => return Err(error),
+            },
             2 => index.add_domain(RuleKind::Suffix, &domain.value, 0, limits)?,
             3 => index.add_domain(RuleKind::Exact, &domain.value, 0, limits)?,
             _ => return Err(RuleParseError::UnsupportedDatDomainType),
@@ -1257,5 +1276,18 @@ mod tests {
             ),
             Err(RuleParseError::DatSelectorTooLong)
         ));
+    }
+
+    #[test]
+    fn dat_parser_skips_unsupported_regex_and_keeps_other_domains() {
+        let input = dat_site("cn", &[(1, "(foo|bar)"), (3, "example.test")]);
+        let index = RuleIndex::parse_dat(&input).expect("unsupported regex is best effort");
+        assert!(
+            index
+                .selector("cn")
+                .unwrap()
+                .matches(&domain("example.test"))
+                .is_some()
+        );
     }
 }
