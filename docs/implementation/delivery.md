@@ -81,10 +81,20 @@ pwsh -File script/dev.ps1 stop
 
 1. 校验 tag 提交属于 `main`，且 tag、VERSION、Cargo 与前端 package 版本一致。
 2. 共享门禁执行前端测试/构建、Rust fmt/Clippy/全 feature 测试。
-3. Windows x86_64、Linux x86_64、macOS ARM64 原生 runner 消费同一份已测试前端产物，分别构建内嵌 binary。
-4. 归档平台 binary、根 README 与配置示例，Unix 保留 executable 权限；汇总 artifacts 与 `checksums.txt` 后创建 GitHub Release。
+3. `build` matrix 的 Windows x86_64、Linux x86_64、OpenWrt x86_64、macOS ARM64 四项只依赖共享 `quality`，彼此没有 `needs` 关系；`max-parallel: 4` 允许同时构建，`fail-fast: false` 保留其他平台的执行机会。实际调度仍受 GitHub runner 可用性与账户并发配额限制。
+4. 四项消费同一份已测试前端产物，分别构建内嵌 binary，并使用独立的 matrix artifact/cache key。OpenWrt 在 Ubuntu runner 上使用 musl，其他三项保持各自现有 target。
+5. 归档平台 binary、根 README 与配置示例，Unix 保留 executable 权限；`release` 等待整个 `build` matrix 成功后，统一汇总 artifacts 与 `checksums.txt` 并创建 GitHub Release。
 
-归档名为 `fluxdns_<version>_windows_x86_64.zip`、`fluxdns_<version>_linux_x86_64.tar.gz`、`fluxdns_<version>_macos_arm64.tar.gz`。workflow 存在不证明 Actions 已跑通；本地 x86_64 脚本也不等同三平台自动发布。
+| 平台 | Rust target | Release 归档 |
+| --- | --- | --- |
+| Windows x86_64 | `x86_64-pc-windows-msvc` | `fluxdns_<version>_windows_x86_64.zip` |
+| Linux x86_64（glibc） | `x86_64-unknown-linux-gnu` | `fluxdns_<version>_linux_x86_64.tar.gz` |
+| OpenWrt x86_64（musl 静态链接） | `x86_64-unknown-linux-musl` | `fluxdns_<version>_openwrt_x86_64.tar.gz` |
+| macOS ARM64 | `aarch64-apple-darwin` | `fluxdns_<version>_macos_arm64.tar.gz` |
+
+OpenWrt 构建项在临时 Ubuntu runner 安装 `musl-tools` 与 `binutils`，为 `cc` 指定 `CC_x86_64_unknown_linux_musl=musl-gcc`，并为 Cargo 指定对应 target 的 linker；现有 SQLite bundled 与 ring C 代码随该工具链构建，不增加 Rust 依赖。该项显式启用 `-C target-feature=+crt-static`，打包前通过 `readelf` 拒绝 ELF `INTERP` 和动态 `NEEDED` 依赖，再复用公共的 `--version` 检查与打包流程。OpenWrt 安装端应选择 `_openwrt_x86_64.tar.gz`，不能回退使用 GNU/Linux 包；归档中的程序仍命名为 `fluxdns`。
+
+上述工具安装属于该 CI 构建项；本地工具安装仍遵循[环境规则](../rules/environment-usage.md)，本地 `package-embedded.ps1` 仍只支持原有 Windows/Linux x86_64。workflow 配置、静态链接检查与版本检查不等同 OpenWrt 上的真实 DNS/DoH 验收；新增平台尚待 GitHub Actions 构建和目标设备运行验证。
 
 ## 证据与验收边界
 
@@ -92,6 +102,7 @@ pwsh -File script/dev.ps1 stop
 | --- | --- | --- | --- | --- |
 | 前端构建 | package scripts | 唯一 v2 类型生成与 Vite production build | 24 文件 98 项 Vitest、4 项 schema、typecheck/build | 不以 mock 代替真实后端 |
 | 本地打包 | package-embedded 三阶段 | 仓库根脚本、Windows target 与 deploy | 完整三阶段成功，deploy 与 target SHA-256 相同 | 未执行 Actions/Linux/macOS 发布 |
+| OpenWrt 发布项 | release.yml 的 musl matrix 与 ELF 检查 | 共享 quality 后四项并行，全部成功后统一发布 | 2026-09-09 Windows：YAML 结构及原三项/共享门禁不变检查、Bash/PowerShell 语法检查、4 项 ELF 判定模拟通过 | 未执行 musl 编译、GitHub Actions 或 OpenWrt 设备运行 |
 | 显式启动/身份检查 | dev start/status/stop | 最终 release embed 与独立 ConfigV2 | 新目录启动、受控重启、文件摘要不变、FDCS 恢复及旧分片 ID 可读 | 原生触控和外部 HTTPS 代理限制见联合验收 |
 | 本地 HTTP/WS 验收 | test-webui-http.mjs、test-webui-events.ps1 | loopback 夹具与管理账号 | 四种 DNS 请求、配置/文件/安全、WS replay 与撤销 | 仅使用独立测试配置，不访问生产或公网 |
 | 版本与远端发布 | set-version、release.yml | main + tag gates | 本轮不执行 | 没有 tag、push、Actions 或 Release 授权 |

@@ -154,6 +154,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
+      # 四个平台仅依赖共享 quality 门禁，彼此之间没有构建依赖。
+      max-parallel: 4
       matrix:
         include:
           - id: windows-x86_64
@@ -170,6 +172,13 @@ jobs:
             platform_name: linux
             architecture_name: x86_64
             archive_extension: tar.gz
+          - id: openwrt-x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            source_name: fluxdns
+            platform_name: openwrt
+            architecture_name: x86_64
+            archive_extension: tar.gz
           - id: macos-arm64
             runner: macos-15
             target: aarch64-apple-darwin
@@ -182,6 +191,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Setup OpenWrt musl build tools
+        if: matrix.id == 'openwrt-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends musl-tools binutils
+          # SQLite 和 ring 的 C 代码及最终链接均使用 musl 工具链。
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "${GITHUB_ENV}"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "${GITHUB_ENV}"
+
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -189,7 +209,7 @@ jobs:
           target: ${{ matrix.target }}
           cache-workspaces: backend -> target
           cache-key: ${{ matrix.id }}
-          rustflags: ""
+          rustflags: ${{ matrix.id == 'openwrt-x86_64' && '-C target-feature=+crt-static' || '' }}
 
       - name: Download tested WebUI
         uses: actions/download-artifact@v7
@@ -199,6 +219,23 @@ jobs:
 
       - name: Build embedded release binary
         run: cargo build --manifest-path backend/Cargo.toml --locked --release --features webui-embed --target ${{ matrix.target }}
+
+      - name: Verify OpenWrt static linkage
+        if: matrix.id == 'openwrt-x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="backend/target/x86_64-unknown-linux-musl/release/fluxdns"
+          headers="${RUNNER_TEMP}/fluxdns-openwrt-program-headers.txt"
+          dynamic="${RUNNER_TEMP}/fluxdns-openwrt-dynamic.txt"
+          readelf --program-headers --wide "${binary}" > "${headers}"
+          readelf --dynamic --wide "${binary}" > "${dynamic}"
+          # 能在 Ubuntu 执行不代表能在 OpenWrt 执行，必须拒绝动态加载依赖。
+          if grep -q 'INTERP' "${headers}" || grep -Fq '(NEEDED)' "${dynamic}"; then
+            echo "OpenWrt binary must not require an ELF interpreter or shared libraries." >&2
+            cat "${headers}" "${dynamic}" >&2
+            exit 1
+          fi
 
       - name: Package and verify release binary
         id: package
