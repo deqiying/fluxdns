@@ -2,17 +2,17 @@
 
 > 文档状态：有效
 >
-> 适用范围：正式 Management listener、认证、配置写入、只读查询与内嵌资源接线
+> 适用范围：正式 Management listener、认证、配置写入、HTTP/WS 查询与内嵌资源接线
 >
-> 最后核对：2026-09-08（P3 十模块写入、保留预览与联合验收）
+> 最后核对：2026-09-09（P4 指标/记录 WS、replay/resync 与联合验收）
 >
-> 核对基线：`6eab5599f009aa154c14a0a03b50c21a0c074793` 加本次 P3 文档工作树
+> 核对基线：`309f49bbd22dc725bd54ecf6d8cc213251b63773` 加本次 P4 文档工作树
 >
 > 时间存储补充核对：2026-09-05，`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加业务时间迁移工作树；不扩大其他管理功能审计范围
 
 ## 入口与生命周期
 
-[`app::run_command`](../../../backend/src/app.rs) 在 DNS candidate 绑定、coordinator 和 DnsService 创建并挂接日志 owner 后调用 [`ManagementService::bind_with_config_store`](../../../backend/src/management/server.rs)。后者消费 v2 loader 原文建立的 active ConfigStore 和 `service.control()`，调用 feature-aware 资源检查并要求 origin，创建 AuthState、SessionStore、配置事务 owner、只读 SQLite adapter 与 query service，最后绑定独立 HTTP listener。
+[`app::run_command`](../../../backend/src/app.rs) 在 DNS candidate 绑定、coordinator 和 DnsService 创建并挂接日志 owner 后调用 [`ManagementService::bind_with_config_store`](../../../backend/src/management/server.rs)。后者消费 v2 loader 原文建立的 active ConfigStore 和 `service.control()`，调用 feature-aware 资源检查并要求 origin，创建 AuthState、SessionStore、配置事务 owner、只读 SQLite adapter、query service 与 EventServices，最后绑定提供 HTTP/WS 的独立 listener。
 
 `DnsService::attach_management` 持有管理状态并注册受监督 task。不是 DoH listener 的附加路由；`webui.enable: false` 不创建此链。`ManagementRuntime::reconcile_users` 识别内部写入指纹，并只在实际认证内容改变时撤销 session；普通配置指纹变化或用户排序不撤销会话，`shutdown` 仍撤销会话。
 
@@ -20,7 +20,7 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 
 ## P0 v2 契约
 
-目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。除指标、配置只读、保留和历史端点外，正式 router 已注册组合与十模块配置校验/应用、operation 查询、保留预览、外部差异、文件还原和持久化重试。它们均受 Bearer 保护，写请求额外要求 Origin/Fetch Metadata；WS 仍未注册。
+目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。正式 router 已注册指标、配置、保留、历史、组合与十模块配置写入、operation、文件处理、WS ticket 和 events upgrade。HTTP 业务端点均受 Bearer 保护，写请求及 ticket 额外要求 Origin/Fetch Metadata；WS upgrade 使用下述单次 ticket 与精确 Origin。
 
 P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测、验证票据和操作记录已有 ConfigStore 内部入口，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。下表的 P0 decoder 不因此成为已接线的写入服务；BC-12 只开放读取，异步应用、外部差异与普通配置写入仍未注册。
 
@@ -29,13 +29,13 @@ P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/
 | 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新不含 `client_id`；系统只读投影不含 users/hash | 组合与单模块入口都消费相同 decoder/owner；单模块只接受一项且 module 必须与 URL 一致 |
 | 活动配置与文件 | active/runtime/persisted revision 分离；组合文件观测 token；源表达、生效值/来源、引用和独立 runtime 投影；外部差异、还原、同步重试请求 | 状态、差异、还原和重试已接线；DTO 不接受路径、整份 YAML 或 Secret 实际值 |
 | 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、校验 token、明确确认清单 | ConfigMutationOwner 独立于 HTTP 请求推进 Runtime 与持久化；运行成功不等于文件同步，unknown 不能自动重放 |
-| 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-09 已实现分片 storage 读口、cursor 上下文/水位完整性和 commit 后通知；BC-13 已接入当前名称投影与 Bearer HTTP，WS 鉴权/队列/replay 待 BC-24/25 |
+| 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-13 Bearer HTTP 与 BC-24/25 指标/记录 WS 均已接线；记录 subscription 绑定 snapshot cursor 和 retention revision |
 
 大计数/序列使用十进制 `u64` 字符串，Rust 和 schema 均拒绝溢出与前导零；安全整数时间采用 UTC ms，耗时采用 us。请求中的安全时间上界由 REST/WS 共用验证器执行；输出时间仍为 Rust `u64`，生产投影接线时必须保持 schema 的安全整数边界。源 DTO 的相对路径、SecretRef 来源和缺失继承保留，duration 序列化为精确 ns 字符串；这不是可回写的完整 YAML 语法树，不能据此丢弃原注释或显式源表达。
 
-所有预算在 OpenAPI `x-limits` 和字段 schema 中维护。已执行入站保护包括配置 4 MiB、变更 2 MiB/128 项、cursor 2048 bytes、历史查询 16 KiB/100 行/3650 天、WS 入站帧 128 KiB；BC-23 的在线身份表上限为 4096，超限窗口显式返回 `observation_gap`。文件读取以及 WS 连接/队列/replay 限额仍仅为契约，不能据此宣称运行时已受保护。
+所有预算在 OpenAPI `x-limits` 和字段 schema 中维护。已执行入站保护包括配置 4 MiB、变更 2 MiB/128 项、cursor 2048 bytes、历史查询 16 KiB/100 行/3650 天、WS 入站帧 128 KiB；BC-23 的在线身份表上限为 4096，超限窗口显式返回 `observation_gap`。WS 连接、订阅、队列、心跳、速率和 replay 预算均由运行时 owner 执行，具体值见 P4 小节。
 
-验证使用 [Rust 契约测试](../../../backend/src/management/contract/tests.rs)、[共享夹具](../../../backend/tests/fixtures/management-v2.json) 和 [Node schema 测试](../../../frontend/tests/contract-v2.node.mjs)：覆盖多态源值往返、只读注入、ID 修改、null、预算、精度、状态互斥及正式路由清单。真实 P3 HTTP/Runtime 证据见下述配置事务接线；WS 仍未实现。
+验证使用 [Rust 契约测试](../../../backend/src/management/contract/tests.rs)、[共享夹具](../../../backend/tests/fixtures/management-v2.json) 和 [Node schema 测试](../../../frontend/tests/contract-v2.node.mjs)：覆盖多态源值往返、只读注入、ID 修改、null、预算、精度、状态互斥及正式路由清单。真实 P3 HTTP/Runtime 与 P4 WS 证据见对应小节。
 
 ## P1 配置状态内部投影（2026-09-07）
 
@@ -91,7 +91,7 @@ P3 Windows 联合验收使用内嵌 debug binary、`_fluxdns/p3-live/` 真实 Co
 
 ## 路由与保护
 
-[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout、受 Bearer 保护的 session、[`query.rs`](../../../backend/src/management/query.rs) 查询路由和 P1 配置事务路由；未知 API 与 SPA fallback 隔离。既有页面字段/状态码以 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，v2 端点以 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
+[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout、受 Bearer 保护的 session、[`query.rs`](../../../backend/src/management/query.rs) 查询、配置事务和 [`events.rs`](../../../backend/src/management/events.rs) ticket/WS 路由；未知 API 与 SPA fallback 隔离。既有兼容端点以 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，v2 端点以 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
 
 router 固定保护包括普通 JSON body 16 KiB、P1 配置候选 2 MiB、URI 4 KiB、64 个 header/16 KiB header bytes、256 个并发请求和 15 秒总请求 timeout。另有 setup/login 限流、写请求 Origin/Fetch Metadata、request ID 和统一错误处理。这些是实现常量，不是额外 YAML 字段。
 
@@ -101,7 +101,7 @@ router 固定保护包括普通 JSON body 16 KiB、P1 配置候选 2 MiB、URI 4
 
 ## P1 Bearer 业务鉴权（2026-09-08）
 
-按用户追加决定，正式 `/api/v1` 的受保护 session 与全部业务查询均只读取 Authorization Bearer，不接受 Cookie、URL query、重复或非法 Authorization 作为后备。初始化/登录返回 `AuthSession`，包含无凭据 session、短期 access token、Bearer 类型与安全整数 UTC ms 过期时间；同时设置独立的 HttpOnly 刷新 Cookie。`POST /auth/refresh` 只接受该 Cookie 并校验 Origin/Fetch Metadata。`/auth/logout` 用有效 Bearer 撤销关联会话并清除 Cookie，无有效凭据时仍幂等，不用 Cookie/query 选择会话。API 响应 no-store，401 带 Bearer challenge。
+按用户追加决定，正式 `/api/v1` 和 `/api/v2` 的受保护 HTTP session 与全部业务查询均只读取 Authorization Bearer，不接受 Cookie、URL query、重复或非法 Authorization 作为后备。初始化/登录返回 `AuthSession`，包含无凭据 session、短期 access token、Bearer 类型与安全整数 UTC ms 过期时间；同时设置独立的 HttpOnly 刷新 Cookie。`POST /auth/refresh` 只接受该 Cookie 并校验 Origin/Fetch Metadata。`/auth/logout` 用有效 Bearer 撤销关联会话并清除 Cookie，无有效凭据时仍幂等，不用 Cookie/query 选择会话。API 响应 no-store，401 带 Bearer challenge。
 
 SessionStore 复用原 24 小时绝对/30 分钟空闲期限、4096 全局/16 单用户容量。访问凭据 5 分钟有效，剩余 30 秒内换发；并发刷新复用当前值，旧值只活到原期限，每会话最多两项访问索引。到达会话绝对期限不反复生成新凭据；过期、容量淘汰、认证更新、登出和进程关闭同时回收相关索引。两类随机凭据不互换，刷新凭据不进入响应正文。没有新增依赖或持久会话存储。
 
@@ -122,6 +122,16 @@ Windows 使用 Bearer 子项当时的内嵌 binary、独立 `_fluxdns/p1-bearer-
 `GET /api/v2/service/metrics` 与 `GET /api/v2/system/runtime` 复用同一 `MetricsOwner` 和 RSS 快照并要求 Bearer。受控时钟测试覆盖精确窗口、趋势、NAT、同 IP 不同 ID、unknown、mapped IPv4、容量恢复和采样缺口；跨 transport 真实 socket 测试核对 16 个接纳请求只计 16 次，Windows 测试读取真实 RSS/CPU/thread。
 
 Windows 使用当时 debug binary、`_fluxdns/p1-metrics-http-20260908/` 独立配置和 loopback 端口 `18123`/`15399` 完成生产链启动：配置 validate 通过，Bearer 请求两个指标端点均为 200，QPS/RPM/在线身份在未满窗口时返回 `warmup` 与覆盖秒数；两处 RSS 值相同且大于 0，CPU/thread 可用且非负。该历史检查发生在 BC-12 前，不能作为新增配置端点证据；Linux、浏览器、性能和 BC-24 WebSocket 本批未验证。
+
+## P4 实时事件与断线补齐（2026-09-09）
+
+[`events.rs`](../../../backend/src/management/events.rs) 提供正式 `POST /api/v2/events/ticket` 和 `GET /api/v2/events`。ticket 端点要求内存 Bearer、精确 Origin/Fetch Metadata，签发 30 秒单次随机凭据；每 session 最多 4 个、全局最多 128 个。浏览器把 `fluxdns.v1` 和 `fluxdns.ticket.<ticket>` 作为 subprotocol 发送，服务端只协商回显 `fluxdns.v1`。upgrade 拒绝错误 Origin、缺失/重复/无效 ticket 和任何 query；Cookie 与 Authorization 都不参与 upgrade 鉴权，ticket 消费后不可重用。
+
+长连接由独立容量 owner 管理：全局 32 个、每 session 4 个连接；每连接 8 个订阅、128 KiB 入站帧、每分钟 64 条入站消息、64 条或 1 MiB 发送队列、15 秒 ping、45 秒无有效 pong 空闲和 5 秒单次写超时。握手后每个心跳持续检查 SessionStore；登出、到期或认证内容变化以 4401 关闭，慢消费者/队列或写超时以 1013 关闭。指标订阅每秒从同一 MetricsOwner 取样，不为连接启动新的 OS sampler。
+
+记录事件 owner 消费 `DetailShardStore` 的 commit 后广播并使用与 HTTP 相同的 `QueryFilter`/目录快照投影。共享 replay 受 60 秒、5000 条和保守 JSON 估算 8 MiB 三个边界约束；订阅同时提交 snapshot cursor 与 retention revision。epoch 不同、cursor 已过期、提交通知缺口、缓冲溢出或共同保留 revision 变化分别返回明确 `resync_required`，不拼接不连续数据。服务停止先停止 collector、撤销 session 并关闭连接，不让网络发送反压 DNS/detail writer。
+
+Rust 真实 socket 测试覆盖 HTTP ticket、Origin、URL token、Cookie-only、ticket 单次消费、指标消息、登出 4401，以及查询 HTTP cursor 基线、在线 push、断线写入、重连 replay 和 retention revision 变化 resync；有界 owner 测试覆盖连接/订阅/帧/入站速率、慢消费者、心跳和 replay 淘汰。Windows `_fluxdns/p4-live/` debug embed 进程又完成真实登录、Bearer 指标、UDP DNS、HTTP 历史、WS 在线 push、断线 replay 和登出 4401。最终 Cargo 全量为 844 passed、3 ignored，fmt 与全目标 `webui-embed` check 通过；Clippy 的两项 P4 告警已修复，`-D warnings` 仍被开工基线已有的 6 项告警阻断。浏览器证据见[前端应用](../frontend/application.md#p4-共享实时连接2026-09-09)。外部 HTTPS 反向代理、Linux/macOS、真实网络慢读者饱和、约 10 客户端和 2ms 性能未验证。
 
 ## 首次用户写入
 
@@ -152,6 +162,8 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 | system | 版本、进程/构建与功能元数据 | 不提供配置秘密或绝对路径 |
 | service metrics（v2） | `MetricsOwner` 的请求窗口、在线身份和共享 RSS 快照 | 暖机、容量截断及采样缺口显式不可用；不返回原始身份 |
 | system runtime（v2） | `MetricsOwner` 的共享 OS 采样快照 | 仅 Windows 实测；Linux 条件编译实现未实测 |
+| events metrics（v2 WS） | `EventServices` 读取共享 MetricsOwner | 每秒推送；独立连接/队列/心跳预算；会话持续复核 |
+| events queries（v2 WS） | DetailShardStore commit stream、共享 replay 与 active 目录快照 | 绑定 HTTP cursor/retention revision；缺口或水位变化要求 resync |
 | config state/system/modules（v2） | active ConfigStore 与同 revision RuntimeSnapshot | 系统字段白名单；模块集合最多 1024，revision 冲突返回 503 |
 | retention（v2） | 生产 RetentionCoordinator、stats layout、详情分片与 manifest | 主文件加 WAL；下一次为服务器时区本地 01:00；只读不触发回收 |
 | queries（v2） | active ConfigStore 目录快照与 DetailShardStore 跨日读口 | 过滤先于 keyset 分页；原始/历史事实不重匹配；cursor 绑定过滤、水位和进程 epoch |
@@ -170,9 +182,10 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | P1 Bearer 定向测试、真实 HTTP 和浏览器 Network/Storage；P3 v2 写请求复核 | 未验证外部 HTTPS 代理及 WS |
+| setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | P1 Bearer 定向测试；P4 ticket/WS、登出 4401 与浏览器 Network/Storage | 未验证外部 HTTPS 代理 |
 | users 事务 | source_edit、ConfigStore、journal recovery | setup 写入，run 启动恢复，watcher 对账 | 本轮核对；存在双路径恢复与 Busy 竞争测试 | 完整跨平台 crash/权限矩阵待验收 |
-| 七个 v1、两个指标、配置/保留与历史 v2 API | ManagementQueryService + StorageRead port + DetailShardStore + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/DB/telemetry/metrics/retention/detail store | BC-12/13 与 P3 使用真实临时 SQLite、UDP 和 Bearer HTTP | WS 未注册；外部 HTTPS 代理未验证 |
+| v1 兼容查询与配置/保留/历史/指标 v2 API | ManagementQueryService + StorageRead port + DetailShardStore + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/DB/telemetry/metrics/retention/detail store | BC-12/13、P3 与 P4 使用真实 SQLite、UDP 和 Bearer HTTP | v1 退出归 P5/BC-27；外部 HTTPS 代理未验证 |
+| v2 实时事件 | EventServices + ticket/session + replay owner | `/api/v2/events/ticket` 与 `/api/v2/events` | Rust 真实 socket；Windows UDP/HTTP/WS；浏览器 ticket/WS/reconnect | 外部 HTTPS、真实网络慢读饱和及跨平台未验证 |
 | v2 配置写入与文件处理 | ConfigMutationOwner + ConfigStore + ServiceControl | 全局/十模块 validate/apply、operation、diff、restore/retry | P3 十模块 `applied_synced`、外改组合采用、二次冲突与回显 | Linux、磁盘满和 service commit 后响应丢失未验证 |
 | 内嵌 SPA | assets + build feature | bind 前 ensure_available | P3 debug embed 的 12 路由和两档视口真实浏览器 | release 三阶段、Actions/Linux/macOS 发布未验证 |
 

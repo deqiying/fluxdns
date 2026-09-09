@@ -118,7 +118,7 @@
 
 沿原表单范围返回白名单源路径、env 名称和 SecretRef file 引用；管理员身份不等于开放任意文件读取。实际 Secret、代理凭据、password hash、认证 token 不进入配置/session/业务投影；不发送全量 resolved config。`database/webui/work` 本期只读，`logs` 可编辑。
 
-2026-09-08 用户追加确认：登录后的业务接口只使用 `Authorization: Bearer <token>`，WebUI 管理 token 不放 URL query，不以 Cookie 作为业务鉴权后备。为保留页面重载后的登录恢复，访问凭据只存在前端内存；独立 HttpOnly Cookie 仅用于同源 POST 刷新，初始化/登录/刷新成功响应是返回 access token 的唯一例外。实施与验证边界见[Management 实现](../implementation/backend/management.md#p1-bearer-业务鉴权2026-09-08)，本项不授权提前开发 BC-24/25 WS。
+2026-09-08 用户追加确认：登录后的业务接口只使用 `Authorization: Bearer <token>`，WebUI 管理 token 不放 URL query，不以 Cookie 作为业务鉴权后备。为保留页面重载后的登录恢复，访问凭据只存在前端内存；独立 HttpOnly Cookie 仅用于同源 POST 刷新，初始化/登录/刷新成功响应是返回 access token 的唯一例外。2026-09-09 的 P4 在此边界内核定浏览器 WS：Bearer 只用于同源 POST 签发短期单次 ticket，ticket 通过 `Sec-WebSocket-Protocol` 传递，upgrade 不读取 query、Cookie 或 Authorization。
 
 ### D-08 技术选型与依赖审批
 
@@ -183,7 +183,7 @@ P0 技术核定：
 - T-02 已冻结 [v2 HTTP/WS schema](../../frontend/openapi/management-api-v2.yaml)、双 revision、操作状态、源/生效/运行投影和 12 路由；当前未注册 v2 handler，正式切换须一并处理 auth/client/代理/fallback。
 - T-03 已固定配置/候选/查询/内联/cursor 预算和错误码/HTTP 映射，并测试本阶段 parser/decoder 超限；实际文件读取、分页 cursor 签名/过滤水位和 deadline 留 BE-02/05/07/08 接线。
 - T-06 仅为现有 Rust 依赖启用 serde feature，以及将现有锁定版本的 schema 测试依赖显式列为 devDependencies；版本/许可证/体积边界见[交付实现](../implementation/delivery.md#前端与接口生成)，未升级工具链。
-- T-04、T-05 的 owner/采样/WS 运行限额、T-07 的实际表单交互、T-08 的 Windows 流量与 2ms 测量仍未实施；T-05 初始数值已进入 schema，但未用真实连接验证。后续核定仍由实施者负责，不重新询问 D-01 至 D-12。
+- 该 P0 时点 T-04、T-05 的 owner/采样/WS 运行限额、T-07 的实际表单交互、T-08 的 Windows 流量与 2ms 测量均未实施；后续阶段的落实记录见下文，不从这条历史状态推断当前剩余范围。
 
 P1 追加核定（2026-09-07）：T-03 的双文件观测已执行 4 MiB 上限、Windows FileId 与 SHA-256 校验，journal 读取为 16 KiB；写入增加父目录/权限/旁文件核对和 OS 锁，cursor 与实际配置事务调度预算仍待接线。T-04 已实现物理 SocketSpec 差量复用、CAS 前任务预注册，以及已接纳请求按原 deadline drain，真实 Windows 证据见[生命周期实现](../implementation/backend/lifecycle.md#p1-请求-drain-子项2026-09-07)。服务队列为一个排队候选加一个当前应用槽；PREPARED/COMMIT_DECIDED 内部文件事务及 4 个子进程退出点见[持久化事实](../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。T-06 为既有 windows-sys 增加安全 API feature、无版本升级。日志/新存储 owner、启动恢复接线和活动源/operation 到服务的完整链仍未核定完成；T-05/07/08 不随这些子项关闭。
 
@@ -193,6 +193,8 @@ P1 追加核定（2026-09-07）：T-03 的双文件观测已执行 4 MiB 上限�
 
 2026-09-08 T-06 壳层补充：按 D-08 锁定 `lucide-react 1.41.0`（ISC）作为直接生产依赖，静态导入 16 个壳层图标；必要性、完整包 unpacked size 与未单测的 bundle 增量见[交付实现](../implementation/delivery.md#前端与接口生成)。未升级 React、Ant Design、Node.js 或 pnpm。
 
-2026-09-08 T-05/T-06 指标补充：在线身份容量固定 4096，进程采样周期 1 秒，快照超过 3 秒未更新即返回 `observation_gap`；这些是 owner 内部保护，不新增 YAML 配置。Windows 复用 `windows-sys 0.61.2` 的现有锁定版本并增加进程 API feature，Linux 使用 procfs，无新增 crate；依赖和未实测边界见[交付实现](../implementation/delivery.md#前端与接口生成)。T-05 的 WS 帧、连接、心跳和慢消费者限额仍未关闭。
+2026-09-08 T-05/T-06 指标补充：在线身份容量固定 4096，进程采样周期 1 秒，快照超过 3 秒未更新即返回 `observation_gap`；这些是 owner 内部保护，不新增 YAML 配置。Windows 复用 `windows-sys 0.61.2` 的现有锁定版本并增加进程 API feature，Linux 使用 procfs，无新增 crate；依赖和未实测边界见[交付实现](../implementation/delivery.md#前端与接口生成)。
+
+2026-09-09 T-05 已关闭：WS 使用 128 KiB 帧、32 个全局连接、每 session 4 个连接、每连接 8 个订阅、64 条/1 MiB 发送队列、每分钟 64 条入站消息、15 秒心跳、45 秒空闲和 5 秒写超时；ticket TTL 30 秒、全局 128/每 session 4；记录 replay 为 60 秒/5000 条/8 MiB，前端缓冲为 500 条/2 MiB。慢消费者关闭为 1013，会话撤销关闭为 4401。真实 adapter、HTTP/WS 和浏览器证据见[Management 实现](../implementation/backend/management.md#p4-实时事件与断线补齐2026-09-09)与[前端应用](../implementation/frontend/application.md#p4-共享实时连接2026-09-09)；这些值仍不是超高负载容量结论。
 
 确认后的技术细节同步对应任务和正式 schema，不在多处维护相互冲突的默认值。实施完成后按项目规则沉淀架构/实现事实，再删除本决策文件及相应活动计划；Git 保存历史，不另建归档。

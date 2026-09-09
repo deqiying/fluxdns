@@ -49,13 +49,15 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BC-26
 
 同日用户授权 P3 后，BC-14 至 BC-22 与 FC-05 至 FC-13 已按代理、Hosts、规则集、上游/组、策略、Listener、客户端、DNS/保留和 logs 的依赖完成；十模块共用单模块预校验/热应用/持久化/冲突/回显，FC-16 补齐字段级差异和跨模块组合采用。`_fluxdns/p3-live/` 的真实文件、SQLite、UDP、Bearer HTTP 和内嵌浏览器联合验收通过；P4/P5、WS、BC-27 和旧数据兼容未进入。
 
+2026-09-09 用户授权 P4 后，BC-24、FC-03、BC-25、FC-04 已按依赖完成。Management 以 Bearer 签发 30 秒单次 WS ticket，浏览器经 `Sec-WebSocket-Protocol` 传递且服务端只回显 `fluxdns.v1`；WS upgrade 不接受 URL token、业务 Cookie 或 Authorization 后备。服务指标、提交后记录、60 秒/5000 条/8 MiB replay、共同保留水位 resync、前端 500 条/2 MiB 缓冲、指数退避重连和稳定记录详情已接入正式链。真实 Windows HTTP/UDP/SQLite/WS 和内嵌浏览器验证通过；P5、BC-27、旧数据兼容、约 10 客户端及 2ms 性能未进入。
+
 ## 2. 当前基线与改造范围
 
 ### 2.1 已核对的工程入口
 
 | 领域 | 当前事实与证据 | 计划影响 |
 | --- | --- | --- |
-| 前端 | [App](../../frontend/src/app/App.tsx) 和 [AppLayout](../../frontend/src/shared/components/AppLayout.tsx) 已注册 12 个目标入口；只有 dashboard/queries 接当前 v1 数据，其余为空态 | 继续接入 v2 与业务模块，保留认证边界，不并存两套正式后台 |
+| 前端 | [App](../../frontend/src/app/App.tsx) 和 [AppLayout](../../frontend/src/shared/components/AppLayout.tsx) 已注册 12 个目标入口；dashboard/queries 与配置页面均接 v2，system runtime 仍复用少量 v1 基础信息 | P5 按引用退出兼容源码/API，保留认证边界，不并存两套正式后台 |
 | 前端基础 | [package.json](../../frontend/package.json) 已有 React、TypeScript、Vite、Ant Design、TanStack Query、Router、Vitest/MSW | 复用工程和状态分层，不借重构更换整套技术栈 |
 | API | [router](../../backend/src/management/router.rs)、[query](../../backend/src/management/query.rs) 和 [OpenAPI](../../frontend/openapi/management-api-v1.yaml) 为认证与只读查询；统计查询限制 31 天 | 增加受限配置读写、身份过滤、跨日查询、实时指标和 WebSocket |
 | 配置写入 | [ConfigStore](../../backend/src/config/store.rs) 只有首用户定向写入、fingerprint/journal 与恢复 | 保存活动源表达，重建“先应用后持久化”事务及恢复门槛 |
@@ -116,7 +118,7 @@ D-01 至 D-12 的方向均已确认，T-01 至 T-08 按具体任务核定，不�
 | P1 公共底座 | BE-02 活动源/应用/持久化/watcher/日志；BE-03 身份；BE-09 指标可独立推进 | FE-01 壳层认证；FE-02 公共表单；FC-16 差异处理基础 | 正常热更新、失败事实、文件只提示、还原及日志关开可验证；mock 隔离 |
 | P2 核心数据 | BE-04 快照；BE-05 分片后推进 BE-06 保留；BE-07 按就绪数据源分批完成 | FE-03/FE-04 在固定契约 fixture 下开发；FE-07/FE-11 做只读与编辑状态 | 快照与历史分离；分片和水位有真实 SQLite 测试；配置读接口不泄露秘密 |
 | P3 配置模块 | BE-08 按下述依赖顺序逐组交付；CR-04 多模块采用随表单补齐 | FE-09/FE-10 基础资源，继而 FE-06、FE-08、FE-05 和客户端；FE-07/FE-11 随后端交付 | 每组读取、预校验、应用、持久化、冲突、外部差异处理及回显闭环 |
-| P4 实时与查询 | BE-07 最终查询；BE-10 推送接入 BE-05 提交流和 BE-09 指标 | FE-03 实时服务状态；FE-04 实时记录、详情冻结、补齐；FE-11 进程信息 | 真 HTTP/WS 交错、重连、会话失效、保留清理和目录变更联合验证通过 |
+| P4 实时与查询（已完成） | BE-07 最终查询；BE-10 推送接入 BE-05 提交流和 BE-09 指标 | FE-03 实时服务状态；FE-04 实时记录、详情冻结、补齐；FE-11 进程信息 | 真 HTTP/WS 交错、重连、会话失效、保留水位和目录快照联合验证已通过 |
 | P5 验收与收口 | BE-11 新基线/旧路径退出；BE-12 Windows 组合与 2ms 检查 | FE-12 全模块浏览器、响应式、安全与内嵌交付验收 | 新版冷启/重启及关键失败矩阵通过；Linux 未实测单列，不阻塞；文档沉淀 |
 
 P2、P3 中不互相依赖的分支可交错推进，但“可先做界面”不等于后端链路已交付。每次模块联调都使用同一 API 契约版本。
@@ -250,7 +252,7 @@ BE-03/04/05/06 + BE-11 -> BE-12 + FE-12 -> 联合交付
 | P1 | BC-02/03/29/30/31 生产链与 FC-01/02/16 全局文件处理已提交；BC-04/05 身份与 BC-23 指标已提交 | 配置热应用、持久化、只提示 watcher、还原/重试及全局 UI 已闭合；组合采用随 P3 表单补齐 |
 | P2 | BC-06/07 快照；BC-08/09 分片；BC-10/11 保留；BC-12/13 查询 | 每条数据分支独立提交，真实 adapter 通过后再交给页面联调 |
 | P3 | 已完成：BC-14 至 BC-22；FC-12/09/10 -> FC-06 -> FC-08 -> FC-05/11；FC-07/13；FC-16 组合采用与联合验收 | 十模块分项提交；真实文件/SQLite/UDP/Bearer HTTP/浏览器闭环，未扩展 P4/P5 |
-| P4 | BC-24/25 实时通道；FC-03/04 实时页面；FC-14 进程状态已提前交付；必要的联调修复分别提交 | 真 HTTP/WS 和页面语义闭合，模块改动已有历史节点 |
+| P4 | 已完成：BC-24/25 实时通道；FC-03/04 实时页面；FC-14 进程状态已提前交付；联调缺陷分别提交 | 真 HTTP/WS、会话回收、断线 replay/resync、稳定详情和两档浏览器语义已闭合 |
 | P5 | BC-27 旧路径退出；BC-28 Windows 集成；FC-15 旧 UI 退出；GC-02 联合验证；GC-03 文档收口 | 新基线/安全/配置同步/2ms 验收完成，不用最终提交代替开发历史 |
 
 同一行内只代表可以处于同阶段，实际依赖仍以上下游表格为准。没有必要的新改动时不为“打点”创建空提交；联合验证发现缺陷时先提交具体修复及回归测试，不能只提交一个通过说明。

@@ -4,9 +4,9 @@
 >
 > 适用范围：前端生成/构建、内嵌打包、开发进程、版本脚本与 Release workflow 行为
 >
-> 最后核对：2026-09-08（P1 前端依赖、构建与既有交付入口核对）
+> 最后核对：2026-09-09（P4 WS 依赖、内嵌调试构建与浏览器验证）
 >
-> 核对基线：`0c1b8171f335c49c57cfb525bab98605923533bd`
+> 核对基线：`309f49bbd22dc725bd54ecf6d8cc213251b63773` 加本次 P4 文档工作树
 
 ## 工具与命令边界
 
@@ -27,6 +27,8 @@ P1 文件事务依赖核定（2026-09-07）：既有 `windows-sys 0.61.2`（MIT 
 P1 壳层依赖核定（2026-09-08）：新增锁定的 `lucide-react 1.41.0` 生产依赖，复用图稿采用的 Lucide 图标体系，供 12 个导航入口及折叠、移动菜单、登出控件使用，避免维护手绘 SVG。许可证为 ISC；registry 报告的完整包 unpacked size 为 32,023,893 bytes，实际只静态导入 16 个图标并由 Vite tree-shake，本轮不把完整包大小当成生产 bundle 增量，也未单独测量依赖增量。未增加构建脚本或工具链。
 
 P1 指标采样依赖核定（2026-09-08）：未新增 crate 或升级锁定版本。Windows 复用既有 `windows-sys 0.61.2`（MIT OR Apache-2.0），增加 `Win32_Foundation`、`Win32_System_Diagnostics_ToolHelp`、`Win32_System_ProcessStatus` 和 `Win32_System_Threading` feature；Linux 使用 Rust 标准库读取 procfs。新增 feature 只参与对应目标编译，未测量其独立构建物字节增量；Linux 条件编译代码本批未实测。
+
+P4 WS 依赖核定（2026-09-09）：为锁定的 `axum 0.8.9` 启用 `ws` feature，并将 `futures-util 0.3.34` 作为直接生产依赖，用于拆分有界 WS sink/stream；`tokio-tungstenite 0.29.0` 仅作为 dev-dependency 驱动真实 socket 测试。`axum` 与 `tokio-tungstenite` 为 MIT，`futures-util` 为 MIT OR Apache-2.0。未升级 Rust/Node/pnpm，也未新增前端图表库；服务状态图表使用现有 React/SVG。单独 feature/依赖体积增量未测量。
 
 [`vite.config.ts`](../../frontend/vite.config.ts) 在开发时把 `/api` 代理到 `http://127.0.0.1:8080`；浏览器仍请求同源相对路径。`VITE_USE_MOCK_API=true` 只在 DEV bootstrap 启用 MSW，生产构建不携带 mock worker 或 source map。完整生成与验证命令见[前端 README](../../frontend/README.md)。
 
@@ -88,9 +90,9 @@ pwsh -File script/dev.ps1 stop
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| 前端构建 | `pnpm run build` | frontend package script | P3 工作树 typecheck 与 Vite production build 通过 | 未运行 release 三阶段打包 |
+| 前端构建 | `pnpm run build` | frontend package script | P4 工作树 typecheck、23 文件 99 项 Vitest、4 项 schema 与 Vite production build 通过 | 未运行 release 三阶段打包 |
 | 本地打包 | package-embedded 三阶段 | 仓库根脚本 | 本轮静态检查顺序、产物和平台 gate | 未运行完整打包 |
-| 显式启动/身份检查 | dev start/status/stop | debug embed binary + P3 ConfigV2 | 真实 start/status、Bearer/UDP/SQLite/浏览器；最终实例留供本地复核 | 未作为 release binary 验收 |
+| 显式启动/身份检查 | dev start/status/stop | debug embed binary + P4 ConfigV2 | 真实 start/status/stop、Bearer/UDP/SQLite/HTTP/WS 与两档浏览器 | 未作为 release binary 验收 |
 | 版本提交/三平台发布 | set-version、release.yml | main + tag gates | 本轮静态 | 未创建提交/tag、push、Actions 或 Release |
 
 历史记录：迁移前 v2 方案在 2026-09-04 报告 Windows x86_64 三阶段打包、发布物 SHA-256 对齐 target binary、配置 validate、移出外部 dist 后的 SPA/API HTTP smoke、dev start/status/stop、CSP/nosniff/cache/ETag/304，以及 in-app browser 的初始化深链接/表单/Console 检查。**这是原文报告，本轮未复核**；测试所用源码提交未完整记录，不能把本页核对基线视为当时测试基线。过时的 v2 方案已按用户要求移除，历史原文由 Git 追溯。
@@ -98,3 +100,5 @@ pwsh -File script/dev.ps1 stop
 2026-09-08 Bearer 子项使用当批工作树执行前端构建、`cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，并启动独立 loopback 测试实例；真实 HTTP 和浏览器 Cookie/Network/Storage 证据见[Management 实现](backend/management.md#p1-bearer-业务鉴权2026-09-08)及[前端应用](frontend/application.md#p1-bearer-接线2026-09-08)。后续壳层子项执行 `pnpm run test` 9 文件 55 项和 `pnpm run build`，并用 Vite fixture 检查桌面、390×844、Drawer、上游 tab 与 Console；这不复核内嵌 binary、真实 v2 API、外部 HTTPS 代理、GitHub Actions 或 Linux/macOS 发布。
 
 2026-09-08 P3 使用当批工作树执行 `pnpm run build` 与 `cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，由 debug 内嵌 binary 显式加载 `_fluxdns/p3-live/config.yaml`。真实 Bearer module/global HTTP、operation 轮询、文件持久化、UDP、SQLite、外改组合采用和两档浏览器视口证据见[Management 实现](backend/management.md#p1-配置事务与文件操作2026-09-08)与[前端应用](frontend/application.md#p3-联合验收2026-09-08)。该验证不等于 release 三阶段打包、HTTPS 反向代理、Linux/macOS、GitHub Actions 或发布授权。
+
+2026-09-09 P4 使用当批工作树执行 `pnpm run test`、`test:contract:v2`、`build` 和 `cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，由 debug 内嵌 binary 显式加载 `_fluxdns/p4-live/config.yaml`。真实 HTTP/UDP/SQLite/WS smoke 返回指标 200、Cookie-only 401、DNS `NOERROR`、online push、断线 replay、协议 `fluxdns.v1` 和登出 4401；内嵌浏览器核对 Network/Storage、ticket subprotocol、实时 dashboard、稳定详情、1440×900 与 390×844 无页面级溢出。具体证据见[Management 实现](backend/management.md#p4-实时事件与断线补齐2026-09-09)与[前端应用](frontend/application.md#p4-共享实时连接2026-09-09)。这不等于 release 三阶段打包、HTTPS 反向代理、Linux/macOS、GitHub Actions、约 10 客户端或 2ms 性能验收。

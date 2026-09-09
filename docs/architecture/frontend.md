@@ -4,7 +4,7 @@
 >
 > 适用范围：WebUI 分层、状态所有权、路由、接口与展示约束
 >
-> 最后评审：2026-09-08（P1 路由壳层、响应式导航与主题边界）
+> 最后评审：2026-09-09（P4 共享实时连接、记录缓冲与稳定详情）
 
 ## 设计结论
 
@@ -24,6 +24,7 @@ app: providers / router / error boundary
 - `app` 只组装 provider、路由、错误边界和应用生命周期，不包含页面业务。
 - `modules` 按页面领域组织，查询键覆盖过滤/分页参数；页面不直接散落 fetch。
 - `shared/api` 集中同源路径、内存 Bearer、认证刷新、取消、超时与错误转换；业务请求不携带 Cookie，不内置任意生产 baseURL。
+- `shared/api` 还持有唯一按需 WS client：页面只注册订阅，不各自维护 socket、ticket、认证代次或重连循环；最后一个订阅退出后关闭连接。
 - OpenAPI 是接口字段唯一权威，生成的 TypeScript 不手工改；fixture 遵守同一契约但不能作为服务已接线的证据。
 - 后端状态保持 `available/unavailable`、健康、stale、gap 等语义，不能把不可用数据显示为正常零值。
 
@@ -35,10 +36,14 @@ app: providers / router / error boundary
 
 Bearer、刷新 Cookie、密码、Origin 与会话安全唯一维护于 [Management 设计](management.md)。AuthProvider 只持有无 token 的 session 投影；客户端共享刷新有独立有界 deadline，各等待者取消互不影响，业务写请求不会自动重放。实际行为见[应用实现](../implementation/frontend/application.md)。
 
+浏览器 WS 不持久化 access token，也不把 token 放入 URL。共享 client 使用现有内存 Bearer 调用 ticket 端点，并以固定协议名和短期单次 ticket 两个 subprotocol 创建连接；认证代次变化立即丢弃 socket、重连计时器和旧消息。401/4401 统一进入现有会话失效边界，不能在 WS 层建立第二套登录状态。
+
 ## 查询与呈现
 
 - 摘要可以在页面可见时轮询，后台窗口停止定时请求；详情/筛选页面以显式参数和用户刷新为主。
 - 查询 key 包含分页、排序、过滤和时间范围，不能让旧请求覆盖新条件；取消、认证失败和不可重试错误不机械重试。
+- 服务状态先读 HTTP 权威快照再订阅实时指标；页面隐藏时释放订阅，恢复可见时重新取快照后再接续，不能用零填补断流区间。
+- 解析记录默认关闭实时。开启后以 HTTP snapshot cursor 和 retention revision 订阅；500 条或 2 MiB 客户端缓冲先到者触发 resync。浮层或历史页打开时新记录只进入缓冲，固定记录 ID、目录快照和当前列表，显式操作后才回到最新首屏。
 - 错误保留安全 request ID 与 retry 语义，loading/error/empty/unavailable 分开呈现；时间和 duration 由统一 formatter 转换。
 - 不渲染后端返回的 HTML；qname、answer 等请求内容作为文本显示。历史空详情明确标识，不构造虚假的域名或响应。
 - 页面应支持窄屏、表格横向查看、键盘访问与明确状态，不用营销式大块说明替代管理操作。
@@ -49,6 +54,6 @@ Bearer、刷新 Cookie、密码、Origin 与会话安全唯一维护于 [Managem
 
 ## 交付与验证边界
 
-开发代理和 mock 只是工程模式。正式 v2 切换后浏览器应访问同源 `/api/v2`，鉴权、client、代理、mock 与 SPA fallback 必须成套切换，不保留双轨兼容；当前仍使用 v1 的实现边界见[应用实现](../implementation/frontend/application.md)。SPA 通过 `webui-embed` 内嵌发布，API 与静态 fallback 独立分流；操作步骤见[交付实现](../implementation/delivery.md)。
+开发代理和 mock 只是工程模式。P4 服务状态、解析记录及全部配置页面访问同源 `/api/v2`；仍保留的 v1 基础信息只待 P5/BC-27 退出，不是运行时版本开关。鉴权、client、代理、mock 与 SPA fallback 必须成套维护。SPA 通过 `webui-embed` 内嵌发布，API 与静态 fallback 独立分流；操作步骤见[交付实现](../implementation/delivery.md)。
 
 组件测试、schema 类型生成和 mock 不能替代真实浏览器的 Cookie、Network/Storage、初始化跳转和安全观察。验证边界见[交付实现](../implementation/delivery.md)，页面与查询接线见[页面实现](../implementation/frontend/pages.md)。

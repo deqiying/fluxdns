@@ -313,6 +313,8 @@ QPS/RPM、趋势、在线身份、暖机和内存单位按[已确认 D-04](webui
 
 用真实 HTTP/WS 覆盖快照期间并发提交、迟到事件、去重、过滤变化、断线补齐、重启、新用户会话、Origin 伪造、缓冲/帧超限、慢消费者、心跳断开和 shutdown。有界 fixture 测试与真实连接测试分别记证据。
 
+2026-09-09 BC-24/25 已完成：正式 Axum WS 使用 Bearer 保护的 ticket 端点与单次短期 subprotocol ticket，upgrade 严格校验 Origin，忽略 Cookie 且拒绝 query token。T-05 固定为 128 KiB 帧、32 个全局连接、每 session 4 个连接、每连接 8 个订阅、64 条/1 MiB 发送队列、每分钟 64 条入站消息、15 秒心跳、45 秒空闲和 5 秒写超时；ticket 为 30 秒、全局 128/每 session 4。服务指标每秒推送；记录只在 SQLite commit 后发布，按 `stream_epoch + sequence` 提供 60 秒/5000 条/8 MiB replay，epoch、cursor、缺口、溢出或共同保留 revision 变化均返回明确 resync。真实 HTTP/UDP/SQLite/WS 覆盖单次 ticket、Origin/URL/Cookie 边界、在线提交、断线补发、保留变化及登出后 4401；慢消费者和入站/连接/帧限额由同一真实 adapter/有界队列测试覆盖。P5、BC-27、约 10 客户端和 2ms 性能未进入。
+
 ## 13. BE-11：新基线初始化与旧路径退出
 
 2026-09-07 P0 源码核定：BC-26 完整生产初始化不能独立于 BC-04/07/08 至 BC-11 完成。当前 `StorageRuntime::open` 仍初始化统计/详情单库 v6，cache 仍装配可自动升级的 SQLite adapter；把 v2 字段接入这些 owner 会错误保留旧语义。P0 的 v2 拒绝规则/离线夹具随 BC-01 交付，不另造无消费者的空 layout/marker，也不将 BC-26 标为完成。完整空目录启动、重复启动、旧路径拒绝和新格式恢复待这些 owner 就绪后单独验证、提交；不删除个人运行数据。

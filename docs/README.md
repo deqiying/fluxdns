@@ -21,7 +21,7 @@
 | 后端跨模块设计 / 模块契约 | [后端总览](architecture/backend/overview.md) / [模块索引](architecture/backend/modules/README.md) |
 | 前端分层 / Management 安全设计 | [前端设计](architecture/frontend.md) / [Management 设计](architecture/management.md) |
 | 配置字段、默认值、路径和运行支持 | [配置参考](implementation/configuration.md)，与 [model](../backend/src/config/model.rs)、[resolve](../backend/src/config/resolve.rs)、[validate](../backend/src/config/validate.rs) 同步 |
-| Management API 字段与状态码 | [OpenAPI](../frontend/openapi/management-api-v1.yaml)；[生成类型](../frontend/src/shared/api/generated.ts) 不人工维护 |
+| Management API 字段与状态码 | [v1 OpenAPI](../frontend/openapi/management-api-v1.yaml) / [v2 OpenAPI](../frontend/openapi/management-api-v2.yaml)；对应生成类型不人工维护 |
 | 后端与前端实际接线 | [后端实现](implementation/backend/README.md) / [前端实现](implementation/frontend/README.md) |
 | 构建、启动与发布脚本行为 | [交付实现](implementation/delivery.md)；版本与命令以 manifest 和脚本为准 |
 | 文档分类、状态与维护流程 | [文档维护规则](rules/documentation-maintenance.md) |

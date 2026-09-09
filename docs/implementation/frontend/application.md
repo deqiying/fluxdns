@@ -4,9 +4,9 @@
 >
 > 适用范围：前端 bootstrap、provider、路由鉴权、HTTP client 与会话回收
 >
-> 最后核对：2026-09-08（P3 十模块页面、组合采用与真实浏览器验收）
+> 最后核对：2026-09-09（P4 共享 WS、实时服务状态与记录交互）
 >
-> 核对基线：`6eab5599f009aa154c14a0a03b50c21a0c074793` 加本次 P3 文档工作树
+> 核对基线：`309f49bbd22dc725bd54ecf6d8cc213251b63773` 加本次 P4 文档工作树
 
 ## 入口
 
@@ -29,7 +29,7 @@
 
 [`apiRequest`](../../../frontend/src/shared/api/client.ts) 固定 `/api/v1` 前缀，[`apiV2Request`](../../../frontend/src/shared/api/client.ts)固定 `/api/v2` 前缀；二者共用默认 10 秒 timeout、调用者 AbortSignal、内存 Bearer 和错误处理，但 v2 调用不会改变认证刷新仍使用 v1 专用端点。P1 业务请求使用 Bearer 且 `credentials: omit`，认证专用请求才携带同源 Cookie，详见下节。client 校验 JSON Content-Type、解析错误 envelope，保留 request ID/retry-after 及受限字段错误；非鉴权请求 `401` 通知统一监听者。普通成功值最终是泛型断言，不是完整 OpenAPI 响应运行时 validator。
 
-既有接口类型来自 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 生成的 [`generated.ts`](../../../frontend/src/shared/api/generated.ts)，P3 配置和保留类型来自 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成的 [`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts)；[`types.ts`](../../../frontend/src/shared/api/types.ts) 只提供既有前端投影。schema 改动后使用 `generate:api`，命令见[前端 README](../../../frontend/README.md)。
+兼容接口类型来自 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 生成的 [`generated.ts`](../../../frontend/src/shared/api/generated.ts)，配置、保留、指标、历史与实时消息来自 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成的 [`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts)；[`types.ts`](../../../frontend/src/shared/api/types.ts) 只提供仍在使用的 v1 前端投影。schema 改动后使用 `generate:api`，命令见[前端 README](../../../frontend/README.md)。
 
 ## P1 Bearer 接线（2026-09-08）
 
@@ -83,7 +83,7 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`mocks/fixtures.ts`](../../../frontend/src/mocks/fixtures.ts) 新增严格绑定生成 v2 DTO 的服务指标、跨日记录、配置模块、系统白名单和保留状态样本。指标样本包含峰值、warmup 与观测缺口；记录样本包含同毫秒稳定 ID、原始身份与历史匹配分离、缓存生产者和截断 Answer。MSW 对应路由只返回固定契约数据，使用 Bearer 并保持 v2 `field_errors` 错误 envelope，不模拟分页、过滤或运行时 owner 已交付。
 
-[`modules/dns-settings/api.ts`](../../../frontend/src/modules/dns-settings/api.ts) 暴露 DNS、统计、保留状态和正式 preview，[`modules/system-settings/api.ts`](../../../frontend/src/modules/system-settings/api.ts) 暴露系统白名单与 logs 模块读取；两者直接复用 `apiV2Request` 和配置模块 API。P3 页面已替换对应空态并接入编辑；FE-03/04 的 WS 实时能力仍不因此完成。
+[`modules/dns-settings/api.ts`](../../../frontend/src/modules/dns-settings/api.ts) 暴露 DNS、统计、保留状态和正式 preview，[`modules/system-settings/api.ts`](../../../frontend/src/modules/system-settings/api.ts) 暴露系统白名单与 logs 模块读取；两者直接复用 `apiV2Request` 和配置模块 API。P3 页面已替换对应空态并接入编辑；P4 又将服务状态与解析记录接到同一 v2 契约。
 
 ## P3 单模块写入与代理配置（2026-09-08）
 
@@ -115,7 +115,17 @@ Windows 内嵌 WebUI 连接 `_fluxdns/p3-live/` 的真实 ConfigV2 进程。脚�
 
 浏览器在 1440×900 逐项进入 12 个一级路由，均出现正式标题且无 `PendingModulePage` 或页面级横向溢出。日志表单真实保存发出 Bearer module GET、validate 200、apply 202、operation 200 和回显 200；DNS 保留表单确认 preview 200 严格先于 statistics validate/apply。真实外改后的 Drawer 显示 Hosts 与 logs 字段级差异，2 项全局组合采用经确认成功并自动关闭。390×844 下 DNS/Hosts 无页面级横向溢出，导航使用移动 Drawer，表格仅在自身容器滚动，编辑弹窗完整可操作；Console error/warning 为空。
 
-本次不实现或验证 WS/P4、P5、BC-27、HTTPS 反向代理、Linux/macOS、磁盘满和约 10 客户端/core 2ms 性能。浏览器使用 loopback HTTP 与测试账号，未把 access token 写入日志、文档或浏览器持久存储。
+该 P3 批次未实现或验证 WS/P4、P5、BC-27、HTTPS 反向代理、Linux/macOS、磁盘满和约 10 客户端/core 2ms 性能。P4 后续证据见下节；浏览器使用 loopback HTTP 与测试账号，未把 access token 写入日志、文档或浏览器持久存储。
+
+## P4 共享实时连接（2026-09-09）
+
+[`shared/api/events.ts`](../../../frontend/src/shared/api/events.ts) 维护唯一按需 `ManagementEventClient`。首次订阅先用现有内存 Bearer 调用 `POST /api/v2/events/ticket`，再以 `fluxdns.v1` 和 `fluxdns.ticket.<ticket>` 创建同源 WebSocket；URL 不含凭据，业务 Cookie 被省略且浏览器持久存储不保存 token。连接打开后按页面注册 metrics/query 订阅，最后一个订阅退出即关闭 socket；认证代次变化清理连接和退避计时，4401/401 进入已有 unauthorized 边界。
+
+非正常断开且仍有订阅时按 500 ms、1 s、2 s 递增，最高 10 s 重连，每次重新签发 ticket。metrics 重连后重新订阅最新快照；queries 保留 HTTP 返回的 `snapshot_cursor`、`retention_revision` 和过滤条件，收到 replay 后推进 cursor，收到 epoch/cursor/overflow/gap/retention resync 则重新读取 HTTP 权威首屏。页面隐藏会取消订阅，恢复后先 refetch 再连接，避免把断流补成零值或继续使用过期水位。
+
+[`DashboardPage`](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 已切换 `/api/v2/service/metrics`，显示 RSS、最近 60 秒 QPS、最近 600 秒 RPM、在线身份及共同时间轴图表。自绘 SVG 曲线提供可访问名称/数值表，不跨不可用点连线；warming 和 observation gap 保留后端语义。`QueriesPage` 的 v2 HTTP/WS、500 条/2 MiB 缓冲与稳定详情见[页面实现](pages.md#查询与缓存行为)。
+
+Windows `_fluxdns/p4-live/` 内嵌 debug binary 的独立真实 socket smoke 覆盖 UDP DNS、HTTP 快照、WS 在线推送、断线 replay 和登出 4401。浏览器验证页面重载后的 Bearer、空 localStorage/sessionStorage/Cookie 可读值、带 Bearer 的 ticket 请求和无 token 的 WS URL；真实 DNS 使 dashboard QPS/RPM/在线身份变化，queries 自动刷新收到新记录。详情打开期间新增记录只进入提示，固定 record ID 不变，显式查看后才更新首屏；1440×900 与 390×844 均无页面级横向溢出，移动 Answer 修复后可读，Console 无 warning/error。页面可见性恢复由组件测试覆盖。外部 HTTPS 反向代理、Linux/macOS、真实网络慢读饱和、约 10 客户端和 2ms 性能未验证。
 
 ## 能力与证据
 
@@ -132,11 +142,14 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | P1 认证测试及真实初始化/登录/刷新/登出；P3 内嵌深链接重载恢复 | 外部 HTTPS 代理未验收 |
 | 同源请求/取消 | `apiRequest`、unauthorized listener | 各 module API 共用 client | P1 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
 | 退出数据清理 | `performLogout` finally | AppLayout 使用 auth logout | 本轮核对实际分支 | 401 与 logout 清理行为不同，不能混写 |
-| P3 v2 配置页面 | 九个领域页面、generated-v2、module hooks | 受保护路由与十模块正式 API | MSW/完整 Vitest、真实 Bearer/文件/SQLite/UDP/浏览器，见 P3 联合验收 | 不包含 WS/P4 或 P5 收口 |
+| P3 v2 配置页面 | 九个领域页面、generated-v2、module hooks | 受保护路由与十模块正式 API | MSW/完整 Vitest、真实 Bearer/文件/SQLite/UDP/浏览器，见 P3 联合验收 | 不包含 P5 收口 |
+| 共享实时连接 | events client、认证代次与订阅 owner | v2 ticket + WS | Vitest；真实 ticket/WS、断线 replay、登出 4401 与 Network/Storage | 外部 HTTPS 与真实网络慢读饱和未验证 |
+| 服务状态 | DashboardPage/hooks/chart | v2 HTTP metrics + WS metrics | 真实 DNS 流量、指标变化、可访问图表、桌面视口 | 真实 OS failure 样本与深色样例未复核 |
+| 解析记录 | QueriesPage/hooks/realtime/detail | v2 HTTP search/detail + WS queries | Vitest；真实 UDP/HTTP/WS、稳定详情与桌面/移动浏览器 | P5 全路由收口与性能未验证 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
-| 12 路由壳层 | route-contract、App、AppLayout、九个配置页 | 受保护路由与分组导航 | 1440×900 逐路由标题/溢出检查和 390×844 移动导航 | Dashboard/queries 的 WS 实时能力未进入 P3 |
+| 12 路由壳层 | route-contract、App、AppLayout、九个配置页 | 受保护路由与分组导航 | 1440×900 逐路由标题/溢出检查和 390×844 移动导航 | FC-15/P5 旧源码与兼容 API 收口未进入 |
 | 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 全局 state/operation 与十模块领域表单 | 91 项完整 Vitest、typecheck/build、真实 Bearer 单模块读写回显 | 运行时响应仍由后端 schema/owner 权威校验 |
 | 外部变化处理 | ConfigFileStatus、external adoption、Banner/Drawer | 轮询、差异、还原/retry、覆盖确认和组合采用 | MSW 二次冲突；真实双模块外改/采用/冲突/restore 与浏览器 Drawer | WS 文件通知未授权，仍以 HTTP 轮询 |
 | 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取 v2 进程指标和 v1 基础信息 | FC-14 测试及 Windows 真实浏览器/后端可用样本；P3 窄屏无溢出 | 真实不可用 OS 样本和 Linux 未做浏览器验收 |
 
-2026-09-05 原核对未运行 pnpm 或浏览器；P1/P2 历史证据及 P3 联合验收分别见上节。环境与打包边界见[交付证据](../delivery.md)，P3 真实证据不外推为 P4/P5 或跨平台完成。
+2026-09-05 原核对未运行 pnpm 或浏览器；P1-P4 的分批证据分别见上节。环境与打包边界见[交付证据](../delivery.md)，P4 真实证据不外推为 P5、release 或跨平台完成。
