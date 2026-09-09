@@ -89,6 +89,8 @@ BC-07 交付验证在 Windows、Rust/Cargo 1.98.0 执行：全量 `cargo test --
 
 [`observability.rs`](../../../backend/src/observability.rs) 的 `TelemetryWriter`、`StructuredTelemetryOutput` 和 health registry 使用低基数、有界内存与安全 typed event；Application 在配置校验后切换正式日志目标和过滤器。P1 日志 owner 接线后，正式 app 始终创建 writer；`logs.enable` 只影响日志接纳及文件输出，不关闭指标和 health，见[日志热切换](#p1-日志热切换2026-09-07)。
 
+P5 新目录 release 冷启回归发现日志文件早于其父目录创建，已统一通过 `open_log_file` 创建所需父目录并以追加模式打开。bootstrap 与热切换预开共用此入口；既有文件不截断，父路径为文件、权限或其他 I/O 失败继续返回错误。Windows 定向 Observability 25 项通过，包含缺失父目录、重开追加和非法父路径；修复后的内嵌 release 已从新目录完成启动及首次管理员初始化。
+
 [`service.rs`](../../../backend/src/service.rs) 为启用的 writer 创建 `TelemetrySampler`，在既有 5 秒周期 flush 前采样：
 
 - 从同一个 `ResolutionPipelineMetrics` Arc 读取 accepted，将与共享游标的差值记录为 `ResolutionEventsAccepted`；仅成功后推进游标。重复采样、reload 与最终采样不会重复累计，源倒退/溢出明确报错。
@@ -114,7 +116,7 @@ BC-07 交付验证在 Windows、Rust/Cargo 1.98.0 执行：全量 `cargo test --
 
 Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独立子进程、真实日志文件/Windows 占用失败、off/on、level/path、filter 失败和补偿失败区别；`service::` 筛选 70 项通过、3 项保持原有忽略标记，`app::` 13 项、`management::` 18 项通过。`cargo check`、全部测试目标 `--all-targets --no-run`、fmt 和文档检查通过；未改 schema、前端或依赖，本批未重跑前端验证。真实 UDP/SQLite service 联合测试通过连续五次日志切换和坏路径拒绝，DNS 持续查询，writer、sampler 和 Resolution metrics Source Arc 保持相同。测试目录为 `_fluxdns/p1-logging-tests/`、`_fluxdns/p1-logging-dns-tests/`；既有临时文件测试运行时将 TEMP/TMP 限定到 `_fluxdns/test-temp/`。
 
-2026-09-08，v2 ConfigMutationOwner 已把组合/单模块 apply、ServiceControl 回执和应用后持久化接到该日志 owner。真实 Bearer HTTP 将 logs 从关闭切为 `debug` 和新路径，Runtime revision 递增、双配置文件同步，重启后继续使用新配置；父目录缺失时返回 `APPLY_FAILED` 且旧 Runtime/文件保留。P3 日志表单又在真实内嵌浏览器完成 validate/apply/operation/回显，外改 logs 与 Hosts 可一次组合采用。filter/CAS 补偿失败测试使用真实 reload handle 和故意撤销的测试 subscriber，不能视为生产 subscriber 曾失效。日志目标与其他受保护文件的完整物理 alias 防护、OS 文件调用强制中断、Unix、日志轮转、磁盘满和性能仍未验证。
+2026-09-08，v2 ConfigMutationOwner 已把组合/单模块 apply、ServiceControl 回执和应用后持久化接到该日志 owner。真实 Bearer HTTP 将 logs 从关闭切为 `debug` 和新路径，Runtime revision 递增、双配置文件同步，重启后继续使用新配置；当时父目录缺失的拒绝行为已由 P5 统一建目录修复取代。P3 日志表单又在真实内嵌浏览器完成 validate/apply/operation/回显，外改 logs 与 Hosts 可一次组合采用。filter/CAS 补偿失败测试使用真实 reload handle 和故意撤销的测试 subscriber，不能视为生产 subscriber 曾失效。日志目标与其他受保护文件的完整物理 alias 防护、OS 文件调用强制中断、Unix、日志轮转、磁盘满和性能仍未验证。
 
 ## 能力与证据
 

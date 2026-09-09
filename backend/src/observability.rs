@@ -95,7 +95,7 @@ pub fn configure_final_output(
     let target = if !enable {
         OutputTarget::Sink
     } else {
-        OutputTarget::File(OpenOptions::new().create(true).append(true).open(path)?)
+        OutputTarget::File(open_log_file(path.as_ref())?)
     };
     let filter = BOOTSTRAP_FILTER.get().ok_or_else(|| {
         io::Error::new(
@@ -131,6 +131,17 @@ enum OutputTarget {
     Stderr,
     File(std::fs::File),
     Sink,
+}
+
+/// 冷启动先创建日志父目录；文件打开失败仍保留原始 I/O 错误供启动边界分类。
+fn open_log_file(path: &Path) -> io::Result<std::fs::File> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    OpenOptions::new().create(true).append(true).open(path)
 }
 
 struct SharedOutputWriter(Arc<Mutex<OutputTarget>>);
@@ -301,7 +312,7 @@ impl StructuredTelemetryOutput {
     }
 
     pub fn file(path: impl AsRef<Path>) -> io::Result<Self> {
-        let writer = OpenOptions::new().create(true).append(true).open(path)?;
+        let writer = open_log_file(path.as_ref())?;
         Ok(Self::from_writer_with_fallback(
             Box::new(writer),
             Some(Box::new(io::stderr())),
@@ -1104,6 +1115,35 @@ impl<T> fmt::Display for Sensitive<T> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cold_start_log_creates_parent_and_reopen_appends() {
+        use std::io::Write;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_fluxdns/tests/logging-startup")
+            .join(format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let path = root.join("nested/service.log");
+        super::open_log_file(&path)
+            .unwrap()
+            .write_all(b"first\n")
+            .unwrap();
+        super::open_log_file(&path)
+            .unwrap()
+            .write_all(b"second\n")
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first\nsecond\n");
+        assert!(super::open_log_file(&path.join("child.log")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"first\nsecond\n");
+    }
+
     use std::{
         fs,
         io::{self, Write},
