@@ -67,6 +67,28 @@ DoH 测试至少覆盖当前实现支持的 GET 和 POST 入口；HTTP 层错误
 
 ## 4. 结果记录
 
+### WebUI 真实 HTTP/WS 联合验收
+
+复用 [webui-local.yaml](../../backend/tests/fixtures/webui-local.yaml)：复制到独立 `_fluxdns/<run>/config.yaml` 后显式启动内嵌 release，通过 WebUI 初始化临时管理员。不得直接在受跟踪夹具目录运行；端口冲突时只调整该副本，并同步下面的本地上下文。fixture 的 guard/local/default 和十个客户端是断言对象，不使用个人或生产配置。
+
+在同一目录创建不提交的 `test-context.json`，将占位值换成本次临时管理员凭据：
+
+```json
+{"kind":"fluxdns-webui-local-acceptance","username":"<local-user>","password":"<local-password>","webPort":18085,"dnsPort":15355,"dohPort":18086}
+```
+
+从仓库根目录执行以下集成脚本；这是 Node 项目命令从 frontend 执行规则之外的显式仓库级测试入口，仍使用 mise 声明的 Node，且不安装依赖：
+
+```powershell
+node script/test-webui-http.mjs _fluxdns/<run>
+pwsh -File script/test-webui-events.ps1 -WorkDirectory _fluxdns/<run>
+pwsh -File script/test-backend-contracts.ps1 -Suite WebUI
+```
+
+[HTTP 脚本](../../script/test-webui-http.mjs) 会修改并恢复 fixture 的 Hosts、上游名称、客户端名称及本地文件注释，写入真实解析记录，并创建/撤销自己的测试会话；失败时保留当前运行态与报告供检查，不用盲目重试覆盖未处理的外改。[WS 脚本](../../script/test-webui-events.ps1) 发送少量 UDP 查询，验证 ticket、push/replay 和会话撤销。二者只连接声明的 loopback 端口，报告写入该目录，不输出凭据；测试上下文不得指向其他服务。
+
+`-Suite WebUI` 复用既有 Cargo 记录器与 service 测试，强制 Windows release，自动创建独立 `_fluxdns/test-temp/` 夹具。它逐个检查命中样本的 2ms 上限，保存全部超限项，不能把失败的轮次删除后仅报告较快的一轮。实际矩阵与平台限制见[WebUI 联合验收](../implementation/webui-acceptance.md)。
+
 每次本地验证至少记录以下信息：
 
 - 配置文件路径及 `work.path` 的解析结果；

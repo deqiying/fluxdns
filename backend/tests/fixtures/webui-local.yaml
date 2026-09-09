@@ -1,0 +1,53 @@
+# 复制到独立 _fluxdns/<run>/config.yaml 后再启动；不得直接在本夹具目录运行。
+# 仅使用本机 loopback 和保留测试地址，首次管理员从 WebUI 初始化。
+version: 2
+work: {path: ., rules_path: ./rules}
+database: {type: sqlite, path: ./data/statistics.sqlite3, records_path: ./data/queries}
+logs: {enable: true, level: info, path: ./logs/fluxdns.log}
+webui:
+  enable: true
+  address: 127.0.0.1
+  port: 18085
+  public_origin: http://127.0.0.1:18085
+  users: []
+dns:
+  cache:
+    enabled: true
+    memory: {max_size_bytes: 67108864}
+    failure_ttl: 5s
+    optimistic: {enabled: false, answer_ttl: 10s, max_age: 1d}
+    persistence: {enabled: true, path: ./data/cache.snapshot, snapshot_interval: 1s}
+  resolve_log: {enable: true}
+statistics:
+  retention: {days: 7, grace_days: 3, reference_size_bytes: 1073741824}
+listener:
+  - {name: p5-udp, type: udp, addresses: [127.0.0.1], port: 15355, strategy: default}
+  - {name: p5-tcp, type: tcp, addresses: [127.0.0.1], port: 15355, strategy: default}
+  - name: p5-doh
+    type: doh
+    routes: [{path: '/dns-query/{client_id}', strategy: default}]
+    endpoints:
+      - name: loopback
+        addresses: [127.0.0.1]
+        port: 18086
+        tls: {mode: external}
+        client_ip: {source: peer}
+upstreams:
+  - {name: local, type: hosts, format: hosts, hosts: '198.51.100.9 cache.p5.test'}
+strategy:
+  - name: default
+    rules: [{hosts: guard}]
+    default_upstream: local
+hosts:
+  - {name: guard, type: const, format: hosts, hosts: '192.0.2.1 sentinel.p5.test'}
+clients:
+  - {name: client-01, client_id: client-01, match: {ips: [127.0.0.1]}}
+  - {name: client-02, client_id: client-02}
+  - {name: client-03, client_id: client-03}
+  - {name: client-04, client_id: client-04}
+  - {name: client-05, client_id: client-05}
+  - {name: client-06, client_id: client-06}
+  - {name: client-07, client_id: client-07}
+  - {name: client-08, client_id: client-08}
+  - {name: client-09, client_id: client-09}
+  - {name: client-10, client_id: client-10}
