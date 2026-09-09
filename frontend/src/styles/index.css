@@ -282,13 +282,6 @@ select {
   padding: 40px;
 }
 
-.pending-upstreams-page > h2 {
-  margin: 0 0 20px;
-  color: #202124;
-  font-size: 26px;
-  font-weight: 650;
-}
-
 .ant-result-title h2,
 .ant-result-title h3 {
   margin: 0;

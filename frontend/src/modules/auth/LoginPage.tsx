@@ -67,7 +67,7 @@ export function LoginPage() {
           <span className="login-kicker">Secure DNS observability</span>
           <h1>清晰掌握每一次运行状态。</h1>
           <p>
-            FluxDNS WebUI 提供受控、只读的运行时视图。所有管理请求保持同源，查询数据由服务端聚合并完成安全投影。
+            查看服务状态与解析记录，管理 DNS 配置。配置变更经过校验后应用，页面持续显示运行与文件同步状态。
           </p>
         </div>
         <Typography.Text style={{ color: "#62758c" }}>FluxDNS Management Console</Typography.Text>
@@ -76,7 +76,7 @@ export function LoginPage() {
       <section className="login-panel">
         <Card className="login-card">
           <Space orientation="vertical" size={6} style={{ width: "100%", marginBottom: 28 }}>
-            <Typography.Text type="secondary">只读管理界面</Typography.Text>
+            <Typography.Text type="secondary">DNS 管理界面</Typography.Text>
             <Typography.Title level={2} style={{ margin: 0 }}>
               登录 FluxDNS
             </Typography.Title>

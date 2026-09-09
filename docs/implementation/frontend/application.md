@@ -14,6 +14,8 @@
 
 [`App.tsx`](../../../frontend/src/app/App.tsx) lazy-load 页面，由 Suspense 展示加载态；`/login` 和 `/initialize` 在 guard 外，其他页面进入 `ProtectedRoute -> AppLayout`。根路径转 `/dashboard`，未知受保护路径展示 NotFound。受保护壳层消费 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 注册 12 个一级路径，具体接线见[页面与查询](pages.md)。
 
+正式路由已全部接线，移除空 pending route 分支、旧占位页面和专用 CSS；登录页按当前能力说明 DNS 管理、配置校验与同步状态，不再标为只读界面。最终内嵌 release 已回读新文案，97 项前端测试与完整三阶段打包通过。
+
 ## 认证状态
 
 [`AuthProvider`](../../../frontend/src/modules/auth/AuthProvider.tsx) 首先请求 `authKeys.setup`；只有 setup 为 ready 才启用 session query。两者都关闭自动重试，并以 provider 的 loading/error/setupRequired/session 向页面提供状态。
@@ -45,7 +47,7 @@ mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状�
 
 [`AppLayout`](../../../frontend/src/shared/components/AppLayout.tsx) 从同一 `managementRoutes` 契约生成“监控 / DNS 管理 / 系统”三组 12 个一级入口，使用 Lucide 图标、浅色侧栏、面包屑、当前用户与图标化登出/折叠控件。桌面侧栏独立滚动；小于 720px 时改用 Drawer，不缩放固定宽画布。未知路径不选择任一菜单项，旧 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 路径不兼容跳转。
 
-`/dashboard`、`/queries` 和 `/system-runtime` 使用 v2 真实指标/记录；其余九个配置入口使用 v2 类型化读写，不再挂载 [`PendingModulePage`](../../../frontend/src/app/PendingModulePage.tsx)。`/upstreams` 的“上游 / 上游组”tab 以 `tab=groups` 进入浏览器历史。主题 token 使用浅灰导航、白工作区、蓝色主操作及独立成功/警告/错误色；未增加暗色全站主题。
+`/dashboard`、`/queries` 和 `/system-runtime` 使用 v2 真实指标/记录；其余九个配置入口使用 v2 类型化读写，旧占位页面与空 pending route 分支已删除。`/upstreams` 的“上游 / 上游组”tab 以 `tab=groups` 进入浏览器历史。主题 token 使用浅灰导航、白工作区、蓝色主操作及独立成功/警告/错误色；未增加暗色全站主题。
 
 P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个路由分别在 1600×1040、1280×800、768×1024、390×844 直接进入，48 项均呈现预期标题且无页面级横向溢出或错误提示。窄屏导航、Hosts 编辑弹窗、Tab、Escape 与关闭后编辑按钮焦点恢复通过；Console warning/error 为 0。localStorage/sessionStorage 为空，脚本不可读刷新 Cookie，生产没有 service worker 接管。前端 23 文件 96 项测试、类型生成、typecheck 与构建通过；完整联合验收另按 P5 范围记录。
 
