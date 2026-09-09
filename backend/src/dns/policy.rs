@@ -2286,7 +2286,7 @@ mod tests {
         ResolvedRuleSet, ResolvedRuleSetRef, ResolvedSecretRef, ResolvedStrategyRule,
         ResolvedTtlOverride, ResolvedUpstream, ResolvedUpstreamMember, ValueSource,
     };
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, Cancellation, CanonicalQuery, CanonicalResponse, ClientId,
         CoreOutcome, Deadline, DnsCore, DnsRequest, ListenerId, MatchedRuleSource, RequestContext,
@@ -3955,16 +3955,17 @@ mod tests {
 
     fn config() -> std::sync::Arc<crate::config::ResolvedConfig> {
         let work_path = crate::config::test_support::absolute_path("policy-core");
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -4066,13 +4067,14 @@ strategy:
         let work_path = crate::config::test_support::absolute_path("policy-doh");
         let source = format!(
             r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -4107,7 +4109,7 @@ hosts:
         "#
         )
         .replace("__DOH_ADDRESS__", address);
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("policy DoH fixture must be valid")
             .resolved
@@ -4223,16 +4225,17 @@ hosts:
 
     fn group_config() -> std::sync::Arc<crate::config::ResolvedConfig> {
         let work_path = crate::config::test_support::absolute_path("policy-group");
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -4720,16 +4723,17 @@ strategy:
     #[tokio::test]
     async fn policy_executes_fallback_after_primary_servfail() {
         let work_path = crate::config::test_support::absolute_path("policy-fallback");
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info

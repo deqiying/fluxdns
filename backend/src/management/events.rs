@@ -895,7 +895,7 @@ mod tests {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     use super::*;
-    use crate::config::migrate::deterministic_hash;
+    use crate::config::hash::deterministic_hash;
     use crate::config::store::ConfigStore;
     use crate::management::auth::AuthState;
     use crate::management::contract::{ClientMessage, ServerMessage, WebSocketTicket};

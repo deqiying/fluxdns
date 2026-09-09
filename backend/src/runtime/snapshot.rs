@@ -268,23 +268,24 @@ fn resource_metadata<T>(snapshot: &ResourceSnapshot<T>) -> ResourceSnapshot<()> 
 mod tests {
     use std::sync::Arc;
 
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::dns::RuntimeRevision;
 
     use super::RuntimeSnapshot;
 
     fn config() -> Arc<crate::config::ResolvedConfig> {
         let work_path = crate::config::test_support::absolute_path("runtime-snapshot");
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info

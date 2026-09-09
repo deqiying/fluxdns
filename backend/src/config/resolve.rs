@@ -11,16 +11,16 @@ use ipnet::IpNet;
 use url::Url;
 
 use super::contract::{ClientV2, ConfigV2, GlobalCacheV2, ResolveLogV2};
-use super::migrate::deterministic_hash;
+use super::hash::deterministic_hash;
 use super::model::{
-    CacheOverrideDto, ClientDto, ClientIpDto, ClientIpSource, ConfigDto, DatabaseType, EcsDto,
-    EcsMode, ForwardedDisposition, ForwardedHeader, GlobalCacheDto, HostsResourceDto, ListenerDto,
-    LogLevelDto, MAX_RULE_SET_SELECTOR_BYTES, OptimisticDto, OutboundDto, RuleSetDto, StrategyDto,
-    TlsMode, UpstreamDto, normalize_rule_set_selector,
+    CacheOverrideDto, ClientIpDto, ClientIpSource, DatabaseType, EcsDto, EcsMode,
+    ForwardedDisposition, ForwardedHeader, HostsResourceDto, ListenerDto, LogLevelDto,
+    MAX_RULE_SET_SELECTOR_BYTES, OptimisticDto, OutboundDto, RuleSetDto, StrategyDto, TlsMode,
+    UpstreamDto, normalize_rule_set_selector,
 };
 use super::validate::{
     BindPlan, ConfigError, ConfigErrorKind, ConfigErrorReport, DohBindingRef, ResourceConfig,
-    build_bind_plan, build_resource_bind_plan, validate_config,
+    build_resource_bind_plan,
 };
 
 struct SafeUrl<'a>(&'a Url);
@@ -770,174 +770,6 @@ pub struct ValidatedConfig {
     pub resolved: Arc<ResolvedConfig>,
 }
 
-/// Normalize, validate and compile the current DTO into immutable runtime input.
-pub fn resolve_config(
-    config: &ConfigDto,
-    input_hash: impl Into<String>,
-) -> Result<ValidatedConfig, ConfigErrorReport> {
-    resolve_config_with_base_dir(config, input_hash, None)
-}
-
-/// Normalize, validate and compile a DTO with an optional configuration-file base directory.
-///
-/// A relative `work.path` is only valid when `config_dir` is present and absolute. Keeping the
-/// no-base wrapper above preserves callers that provide an already-absolute work path.
-pub(crate) fn resolve_config_with_base_dir(
-    config: &ConfigDto,
-    input_hash: impl Into<String>,
-    config_dir: Option<&Path>,
-) -> Result<ValidatedConfig, ConfigErrorReport> {
-    validate_config(config)?;
-    let work_path = resolve_work_path(&config.work.path, config_dir)?;
-    let bind_plan = build_bind_plan(config)?;
-    let work = ResolvedWork {
-        rules_path: resolve_path(&work_path, &config.work.rules_path),
-        snapshot_path: work_path.join("config.yaml"),
-        path: work_path.clone(),
-    };
-    let database = ResolvedDatabase {
-        kind: config.database.kind,
-        path: resolve_path(&work.path, &config.database.path),
-        records_path: resolve_path(&work.path, &config.database.path)
-            .parent()
-            .unwrap_or_else(|| Path::new(""))
-            .join("queries"),
-    };
-    let logs = ResolvedLogs {
-        enable: config.logs.enable,
-        level: config.logs.level,
-        path: resolve_path(&work.path, &config.logs.path),
-    };
-    let webui = ResolvedWebUi {
-        enable: config.webui.enable,
-        address: config.webui.address,
-        port: config.webui.port,
-        public_origin: config.webui.public_origin.clone(),
-        users: config
-            .webui
-            .users
-            .iter()
-            .map(|user| ResolvedWebUiUser {
-                name: user.name.clone(),
-                password_hash: user.password_hash.clone(),
-            })
-            .collect(),
-    };
-    let dns = resolve_dns(
-        config.dns.cache.as_ref(),
-        config.dns.ttl_override.as_ref(),
-        config.dns.edns_client_subnet.as_ref(),
-        config.dns.resolve_log.as_ref(),
-        &work.path,
-    );
-    let statistics = ResolvedStatistics {
-        retention_days: 7,
-        retention_grace_days: 3,
-        retention_reference_size_bytes: 1 << 30,
-    };
-    let strategies = config
-        .strategy
-        .iter()
-        .map(|strategy| {
-            resolve_strategy(
-                strategy,
-                &dns.ttl_override,
-                &dns.edns_client_subnet,
-                &dns.cache.optimistic,
-            )
-        })
-        .collect();
-    let listeners = config
-        .listener
-        .iter()
-        .map(|listener| resolve_listener(listener, &work.path))
-        .collect();
-    let upstreams = config
-        .upstreams
-        .iter()
-        .map(|upstream| resolve_upstream(upstream, &dns.edns_client_subnet))
-        .collect();
-    let hosts = config
-        .hosts
-        .iter()
-        .map(|resource| resolve_hosts(resource, &work.path))
-        .collect();
-    let outbounds: Vec<ResolvedOutbound> = config
-        .outbound
-        .iter()
-        .map(|outbound| resolve_outbound(outbound, &work.path))
-        .collect();
-    let rule_sets = config
-        .rule_set
-        .iter()
-        .map(|resource| resolve_rule_set(resource, &work.path))
-        .collect();
-    let clients = config
-        .clients
-        .iter()
-        .map(|client| {
-            resolve_client(
-                client,
-                &dns.ttl_override,
-                &dns.edns_client_subnet,
-                &dns.cache.optimistic,
-            )
-        })
-        .collect();
-    let input_hash = input_hash.into();
-    let secret_material = outbounds
-        .iter()
-        .map(|outbound| {
-            let source = match (&outbound.proxy_url.env, &outbound.proxy_url.file) {
-                (Some(name), None) => format!("env:{name}"),
-                (None, Some(path)) => format!("file:{path:?}"),
-                _ => "invalid".to_owned(),
-            };
-            format!("{}={source}", outbound.id.as_str())
-        })
-        .collect::<Vec<_>>()
-        .join("|");
-    let password_material = config
-        .webui
-        .users
-        .iter()
-        .map(|user| {
-            format!(
-                "{}={}",
-                user.name,
-                deterministic_hash(user.password_hash.as_bytes())
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("|");
-    let normalized_material = format!(
-        "version={}|work={work:?}|db={database:?}|logs={logs:?}|webui={webui:?}|dns={dns:?}|listeners={listeners:?}|upstreams={upstreams:?}|strategies={strategies:?}|hosts={hosts:?}|outbounds={outbounds:?}|rule_sets={rule_sets:?}|clients={clients:?}|bind={bind_plan:?}|secret_refs={secret_material}|password_hashes={password_material}",
-        config.version
-    );
-    let normalized_hash = deterministic_hash(normalized_material.as_bytes());
-    Ok(ValidatedConfig {
-        resolved: Arc::new(ResolvedConfig {
-            version: config.version,
-            work,
-            database,
-            logs,
-            webui,
-            dns,
-            statistics,
-            listeners,
-            upstreams,
-            strategies,
-            hosts,
-            outbounds,
-            rule_sets,
-            clients,
-            bind_plan,
-            input_hash,
-            normalized_hash,
-        }),
-    })
-}
-
 /// 直接把 v2 契约编译为运行时配置；不经过 v1 DTO、迁移或兼容默认值。
 pub(crate) fn resolve_config_v2(
     config: &ConfigV2,
@@ -1103,68 +935,6 @@ pub(crate) fn resolve_config_v2(
     })
 }
 
-fn resolve_work_path(
-    value: &Path,
-    config_dir: Option<&Path>,
-) -> Result<PathBuf, ConfigErrorReport> {
-    if value.is_absolute() {
-        return Ok(lexical_normalize(value));
-    }
-
-    let Some(config_dir) = config_dir else {
-        let mut report = ConfigErrorReport::default();
-        report.push(ConfigError::new(
-            ConfigErrorKind::InvalidValue,
-            "work.path",
-            "relative work.path requires a configuration file base directory",
-        ));
-        return Err(report);
-    };
-    if !config_dir.is_absolute() {
-        let mut report = ConfigErrorReport::default();
-        report.push(ConfigError::new(
-            ConfigErrorKind::InvalidValue,
-            "work.path",
-            "configuration file base directory must be absolute",
-        ));
-        return Err(report);
-    }
-    Ok(lexical_normalize(&config_dir.join(value)))
-}
-
-fn resolve_dns(
-    cache: Option<&GlobalCacheDto>,
-    ttl: Option<&super::model::TtlOverrideDto>,
-    ecs: Option<&EcsDto>,
-    resolve_log: Option<&super::model::ResolveLogDto>,
-    work_path: &Path,
-) -> ResolvedDns {
-    let cache = cache.map_or_else(
-        || default_global_cache(work_path),
-        |value| ResolvedGlobalCache {
-            enabled: value.enabled,
-            memory_max_size_bytes: value.memory.max_size_bytes,
-            failure_ttl: value.failure_ttl,
-            optimistic: resolve_optimistic(&value.optimistic),
-            persistence_enabled: value.enabled,
-            persistence_path: resolve_path(work_path, &value.persistence.path),
-            snapshot_interval: Duration::from_secs(300),
-            persistence_max_size_bytes: value.persistence.max_size_bytes,
-        },
-    );
-    ResolvedDns {
-        cache,
-        ttl_override: resolve_ttl(ttl, None, ValueSource::Global),
-        edns_client_subnet: resolve_ecs(ecs, None, ValueSource::Global),
-        resolve_log: resolve_log.map_or_else(default_resolve_log, |value| ResolvedResolveLog {
-            enable: value.enable,
-            eviction_threshold_records: value.eviction_threshold_records,
-            max_records: value.max_records,
-            max_record_age: value.max_record_age,
-        }),
-    }
-}
-
 fn resolve_dns_v2(
     cache: Option<&GlobalCacheV2>,
     ttl: Option<&super::model::TtlOverrideDto>,
@@ -1193,32 +963,6 @@ fn resolve_dns_v2(
             max_records: 0,
             max_record_age: Duration::ZERO,
         },
-    }
-}
-
-fn default_global_cache(work_path: &Path) -> ResolvedGlobalCache {
-    ResolvedGlobalCache {
-        enabled: false,
-        memory_max_size_bytes: 64 * 1024 * 1024,
-        failure_ttl: Duration::from_secs(5),
-        optimistic: ResolvedOptimistic {
-            enabled: false,
-            answer_ttl: Duration::from_secs(10),
-            max_age: Duration::from_secs(86_400),
-        },
-        persistence_enabled: false,
-        persistence_path: work_path.join("cache.db"),
-        snapshot_interval: Duration::from_secs(300),
-        persistence_max_size_bytes: 8 * 1024 * 1024,
-    }
-}
-
-fn default_resolve_log() -> ResolvedResolveLog {
-    ResolvedResolveLog {
-        enable: false,
-        eviction_threshold_records: 90_000,
-        max_records: 100_000,
-        max_record_age: Duration::from_secs(7 * 86_400),
     }
 }
 
@@ -1599,38 +1343,6 @@ fn resolve_rule_set(resource: &RuleSetDto, work_path: &Path) -> ResolvedRuleSet 
             auto_update: *auto_update,
             update_interval: *update_interval,
         },
-    }
-}
-
-fn resolve_client(
-    client: &ClientDto,
-    global_ttl: &ResolvedTtlOverride,
-    global_ecs: &ResolvedEcs,
-    global_optimistic: &ResolvedOptimistic,
-) -> ResolvedClient {
-    ResolvedClient {
-        name: ConfigId::new(client.name.clone()).expect("validated client name"),
-        client_ids: client.r#match.ids.clone(),
-        ips: client.r#match.ips.clone(),
-        strategy: client
-            .strategy
-            .as_ref()
-            .map(|value| ConfigId::new(value.clone()).expect("validated strategy id")),
-        cache: resolve_cache(
-            client.cache.as_ref(),
-            global_optimistic,
-            ValueSource::Client,
-        ),
-        ttl_override: resolve_ttl(
-            client.ttl_override.as_ref(),
-            Some(global_ttl),
-            ValueSource::Client,
-        ),
-        edns_client_subnet: resolve_ecs(
-            client.edns_client_subnet.as_ref(),
-            Some(global_ecs),
-            ValueSource::Client,
-        ),
     }
 }
 

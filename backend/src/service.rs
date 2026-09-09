@@ -2948,7 +2948,7 @@ mod tests {
         spawn_telemetry_task, spawn_transport_task, task_failure, telemetry_component_for_task,
     };
     use crate::cache::{CachePersistenceRunSummary, CacheSnapshotShutdownSummary};
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::dns::{
         CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, CanonicalResponse,
         ClientIdentity, CoreError, CoreOutcome, Deadline, DnsCore, DnsCoreCompletion, DnsMessageId,
@@ -3868,16 +3868,17 @@ mod tests {
         port: u16,
         answer: &str,
     ) -> Arc<crate::config::resolve::ResolvedConfig> {
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -3927,16 +3928,17 @@ clients: []
         port: u16,
         auto_update: bool,
     ) -> Arc<crate::config::resolve::ResolvedConfig> {
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {root}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -4219,16 +4221,17 @@ clients: []
             .map(|suffix| format!("198.51.100.{suffix} large.transport.test"))
             .collect::<Vec<_>>()
             .join("\n      ");
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -6127,7 +6130,7 @@ clients: []
     #[test]
     fn webui_users_reload_dynamically_but_origin_requires_restart() {
         let (source, _) = crate::config::test_support::portable_example();
-        let current = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let current = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .unwrap()
             .resolved;
@@ -6135,7 +6138,7 @@ clients: []
             "  users: []",
             "  users:\n    - name: admin\n      password_hash: '$2b$04$QEeYuMZftq59wD41AcT2ruVzQinG4azJldvj/LXO7u9bzmP6dX6ri'",
         );
-        let candidate = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let candidate = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&with_user)
             .unwrap()
             .resolved;
@@ -6145,7 +6148,7 @@ clients: []
             None
         );
 
-        let mut changed_origin = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let mut changed_origin = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&with_user)
             .unwrap()
             .resolved;

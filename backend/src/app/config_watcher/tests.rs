@@ -10,7 +10,7 @@ use super::*;
 use crate::app::tests::{reload_source, udp_query};
 use crate::config::contract::MAX_CONFIG_BYTES;
 use crate::config::store::observation::FileObservation;
-use crate::config::{ConfigLoader, LoadOptions};
+use crate::config::{ConfigV2Loader, LoadOptions};
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::runtime::{PreparedRuntime, RuntimeCoordinator, SystemSocketFactory, bind_prepared};
 use crate::service::DnsService;
@@ -188,7 +188,7 @@ async fn production_service_loop_keeps_dns_and_revision_during_external_changes(
     let original = reload_source(&fixture.root, port).replace(constant_hosts, &file_hosts);
     fs::write(&fixture.source, &original).unwrap();
     fs::write(&fixture.derived, &original).unwrap();
-    let initial = ConfigLoader::new(LoadOptions::default().without_snapshot())
+    let initial = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
         .load_from_path(&fixture.source)
         .unwrap()
         .resolved;

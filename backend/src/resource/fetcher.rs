@@ -11,7 +11,7 @@ use std::time::Instant;
 use thiserror::Error;
 use url::Url;
 
-use crate::config::migrate::deterministic_hash;
+use crate::config::hash::deterministic_hash;
 use crate::config::resolve::ResolvedOutbound;
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::effects::{

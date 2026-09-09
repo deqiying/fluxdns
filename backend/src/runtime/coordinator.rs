@@ -917,7 +917,7 @@ mod tests {
 
     use crate::cache::{CachePersistenceRunSummary, CacheSnapshotOwner, CacheSnapshotSettings};
     use crate::config::resolve::ConfigId;
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::dns::{Cancellation, Deadline, RuntimeRevision};
     use crate::ports::effects::{
         ActivatedSocket, ActivatedSocketHandle, PreparedSocket, SocketFactory, SocketKind,
@@ -932,7 +932,7 @@ mod tests {
 
     fn candidate(revision: u64) -> crate::runtime::BoundCandidate {
         let (source, _) = crate::config::test_support::portable_example();
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("repository example must remain a valid runtime fixture")
             .resolved;
@@ -979,13 +979,14 @@ mod tests {
         let work_path = crate::config::test_support::absolute_path("coordinator-finalizer");
         let source = format!(
             r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -1023,7 +1024,7 @@ clients: []
 "#,
             work_path = work_path,
         );
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("policy finalizer fixture must be valid")
             .resolved;
@@ -1237,16 +1238,17 @@ clients: []
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("hosts.txt");
         std::fs::write(&path, "192.0.2.10 old.example\n").unwrap();
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {root}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -1506,7 +1508,7 @@ outbound: []
     async fn bind_and_activate_publishes_a_prepared_candidate_after_binding() {
         let coordinator = RuntimeCoordinator::new(candidate(1));
         let (source, _) = crate::config::test_support::portable_example();
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .unwrap()
             .resolved;
@@ -1530,7 +1532,7 @@ outbound: []
     async fn bind_and_activate_returns_bound_candidate_when_activation_cas_loses() {
         let coordinator = RuntimeCoordinator::new(candidate(1));
         let (source, _) = crate::config::test_support::portable_example();
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .unwrap()
             .resolved;

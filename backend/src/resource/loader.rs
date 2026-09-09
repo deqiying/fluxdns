@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use thiserror::Error;
 
-use crate::config::migrate::deterministic_hash;
+use crate::config::hash::deterministic_hash;
 use crate::config::model::HostsFormat;
 use crate::config::resolve::{ConfigId, ResolvedHostsResource, ResolvedRuleSet};
 

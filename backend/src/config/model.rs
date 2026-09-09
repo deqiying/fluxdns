@@ -1,4 +1,4 @@
-//! Strict version 1 configuration DTOs.
+//! v2 配置复用的资源 DTO、协议类型和严格字段解析。
 
 use std::fmt;
 use std::net::IpAddr;
@@ -9,12 +9,6 @@ use ipnet::IpNet;
 use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
 use url::Url;
-
-/// The schema revision implemented by this module.
-pub const CURRENT_CONFIG_VERSION: u32 = 1;
-
-/// Raw/current DTO. Semantic validation is intentionally performed after deserialization.
-pub type RawConfig = ConfigDto;
 
 pub type DohUpstreamDetails<'a> = (
     &'a Url,
@@ -55,65 +49,11 @@ impl fmt::Debug for SafeUrl<'_> {
     }
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ConfigDto {
-    pub version: u32,
-    pub work: WorkDto,
-    pub database: DatabaseDto,
-    pub logs: LogsDto,
-    pub webui: WebUiDto,
-    pub dns: DnsDto,
-    #[serde(default)]
-    pub listener: Vec<ListenerDto>,
-    #[serde(default)]
-    pub upstreams: Vec<UpstreamDto>,
-    #[serde(default)]
-    pub strategy: Vec<StrategyDto>,
-    #[serde(default)]
-    pub hosts: Vec<HostsResourceDto>,
-    #[serde(default)]
-    pub outbound: Vec<OutboundDto>,
-    #[serde(default)]
-    pub rule_set: Vec<RuleSetDto>,
-    #[serde(default)]
-    pub clients: Vec<ClientDto>,
-}
-
-impl fmt::Debug for ConfigDto {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ConfigDto")
-            .field("version", &self.version)
-            .field("work", &self.work)
-            .field("database", &self.database)
-            .field("logs", &self.logs)
-            .field("webui", &self.webui)
-            .field("dns", &self.dns)
-            .field("listener", &self.listener)
-            .field("upstreams", &self.upstreams)
-            .field("strategy", &self.strategy)
-            .field("hosts", &self.hosts)
-            .field("outbound", &self.outbound)
-            .field("rule_set", &self.rule_set)
-            .field("clients", &self.clients)
-            .finish()
-    }
-}
-
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkDto {
     pub path: PathBuf,
     pub rules_path: PathBuf,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DatabaseDto {
-    #[serde(rename = "type")]
-    pub kind: DatabaseType,
-    pub path: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -204,40 +144,9 @@ impl fmt::Debug for WebUiUserDto {
     }
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DnsDto {
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    pub cache: Option<GlobalCacheDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    pub ttl_override: Option<TtlOverrideDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    pub edns_client_subnet: Option<EcsDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    pub resolve_log: Option<ResolveLogDto>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GlobalCacheDto {
-    pub enabled: bool,
-    pub memory: CacheMemoryDto,
-    #[serde(deserialize_with = "deserialize_duration")]
-    pub failure_ttl: Duration,
-    pub optimistic: OptimisticDto,
-    pub persistence: CachePersistenceDto,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheMemoryDto {
-    pub max_size_bytes: u64,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CachePersistenceDto {
-    pub path: PathBuf,
     pub max_size_bytes: u64,
 }
 
@@ -320,20 +229,6 @@ pub enum EcsMode {
     Custom,
 }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResolveLogDto {
-    pub enable: bool,
-    pub eviction_threshold_records: u64,
-    pub max_records: u64,
-    #[serde(
-        deserialize_with = "deserialize_duration",
-        serialize_with = "serialize_duration"
-    )]
-    pub max_record_age: Duration,
-}
-
-/// Listener variants are internally tagged so each variant has an independent strict field set.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", deny_unknown_fields)]
 pub enum ListenerDto {
@@ -994,54 +889,6 @@ pub enum RuleSetFormat {
     Dat,
 }
 
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClientDto {
-    pub name: String,
-    pub r#match: ClientMatchDto,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    pub strategy: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    pub cache: Option<CacheOverrideDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    pub ttl_override: Option<TtlOverrideDto>,
-    #[serde(default, deserialize_with = "deserialize_optional_non_null")]
-    pub edns_client_subnet: Option<EcsDto>,
-}
-
-impl fmt::Debug for ClientDto {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ClientDto")
-            .field("name", &self.name)
-            .field("match", &self.r#match)
-            .field("strategy", &self.strategy)
-            .field("cache", &self.cache)
-            .field("ttl_override", &self.ttl_override)
-            .field("edns_client_subnet", &self.edns_client_subnet)
-            .finish()
-    }
-}
-
-#[derive(Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ClientMatchDto {
-    #[serde(default)]
-    pub ids: Vec<String>,
-    #[serde(default, deserialize_with = "deserialize_cidr_vec")]
-    pub ips: Vec<IpNet>,
-}
-
-impl fmt::Debug for ClientMatchDto {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ClientMatchDto")
-            .field("id_count", &self.ids.len())
-            .field("ip_count", &self.ips.len())
-            .finish()
-    }
-}
-
 /// A secret source. Its debug representation intentionally omits source details and value.
 #[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -1182,20 +1029,6 @@ where
         .parse()
         .map(Some)
         .map_err(|error| de::Error::custom(format!("invalid CIDR: {error}")))
-}
-
-fn deserialize_cidr_vec<'de, D>(deserializer: D) -> Result<Vec<IpNet>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Vec::<String>::deserialize(deserializer)?
-        .into_iter()
-        .map(|value| {
-            value
-                .parse()
-                .map_err(|error| de::Error::custom(format!("invalid CIDR: {error}")))
-        })
-        .collect()
 }
 
 fn deserialize_optional_cidr_vec<'de, D>(deserializer: D) -> Result<Option<Vec<IpNet>>, D::Error>

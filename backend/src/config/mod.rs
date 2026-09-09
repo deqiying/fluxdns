@@ -3,19 +3,15 @@
 pub mod contract;
 pub(crate) mod doh_route;
 pub(crate) mod edit;
+pub(crate) mod hash;
 pub mod load;
-pub mod migrate;
 pub mod model;
 pub mod resolve;
 pub(crate) mod source_edit;
 pub(crate) mod store;
 pub mod validate;
 
-pub use load::{
-    ConfigLoadError, ConfigLoadOutput, ConfigLoader, ConfigV2LoadOutput, ConfigV2Loader,
-    LoadOptions, SnapshotStatus, load_from_bytes, load_from_path, load_from_str,
-};
-pub use model::{ConfigDto, RawConfig};
+pub use load::{ConfigLoadError, ConfigV2LoadOutput, ConfigV2Loader, LoadOptions, SnapshotStatus};
 pub use resolve::{
     ProxyScheme, ResolvedClientIp, ResolvedConfig, ResolvedRuleSetRef, ResolvedSecretRef,
     ResolvedSecretValue, SecretResolveError, SecretSourceKind, SecretValidationError,
@@ -42,7 +38,7 @@ pub(crate) mod test_support {
 
     pub(crate) fn portable_example() -> (String, PathBuf) {
         let path = absolute_path("example");
-        let source = include_str!("../../tests/fixtures/config-v1.yaml")
+        let source = include_str!("../../../config-example.yaml")
             .replace("path: /etc/fluxdns", &format!("path: {path}"));
         (source, PathBuf::from(path))
     }

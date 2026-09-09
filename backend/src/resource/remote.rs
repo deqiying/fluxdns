@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 use url::Url;
 
-use crate::config::migrate::deterministic_hash;
+use crate::config::hash::deterministic_hash;
 use crate::config::model::RuleSetFormat;
 use crate::config::resolve::{ConfigId, ResolvedRuleSet};
 use crate::dns::{CancelReason, Cancellation, Deadline};

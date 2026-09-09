@@ -530,13 +530,13 @@ mod tests {
     /// V1-O04：分别在三个正式 worker 返回后模拟 join panic，owner 必须报告未完成并收齐句柄。
     #[tokio::test]
     async fn contract_v1_resolution_owner_join_panics_report_incomplete() {
-        use crate::config::{ConfigLoader, LoadOptions};
+        use crate::config::{ConfigV2Loader, LoadOptions};
         use crate::dns::Deadline;
         use std::time::{Duration, Instant};
 
         for owner in ["dispatcher", "cache", "detail"] {
             let (source, work_path) = crate::config::test_support::portable_example();
-            let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+            let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
                 .load_str(&source)
                 .unwrap()
                 .resolved;

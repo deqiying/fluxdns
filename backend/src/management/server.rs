@@ -199,7 +199,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{ManagementService, build_router};
-    use crate::config::migrate::deterministic_hash;
+    use crate::config::hash::deterministic_hash;
     use crate::config::store::ConfigStore;
     use crate::dns::Cancellation;
     use crate::management::ManagementRuntime;

@@ -17,7 +17,7 @@ use super::{
 };
 use crate::config::contract::ConfigV2;
 use crate::config::edit::{ConfigChange, EditError, SourceCandidate, build_candidate};
-use crate::config::migrate::deterministic_hash;
+use crate::config::hash::deterministic_hash;
 use crate::config::resolve::resolve_config_v2;
 use crate::config::source_edit::{InitialWebUiUser, create_initial_webui_user};
 

@@ -322,7 +322,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision};
     use crate::ports::effects::{
         ActivatedSocket, PreparedSocket, SocketFactory, SocketHandle, SocketKind, SocketSpec,
@@ -488,16 +488,17 @@ mod tests {
 
     fn prepared_fixture_at(udp_name: &str, udp_port: u16, tcp_port: u16) -> PreparedRuntime {
         let work_path = crate::config::test_support::absolute_path("runtime-bind");
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info

@@ -557,7 +557,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime};
 
-    use crate::config::{ConfigLoader, ConfigV2Loader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::dns::Deadline;
     use crate::ports::PortFuture;
     use crate::ports::storage::{
@@ -673,7 +673,7 @@ mod tests {
     #[tokio::test]
     async fn contract_v1_detail_owner_panic_preserves_stats_and_safe_error() {
         let (source, work_path) = crate::config::test_support::portable_example();
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .unwrap()
             .resolved;
@@ -730,7 +730,7 @@ mod tests {
         ] {
             for expire in [false, true] {
                 let (source, work_path) = crate::config::test_support::portable_example();
-                let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+                let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
                     .load_str(&source)
                     .unwrap()
                     .resolved;
@@ -985,7 +985,7 @@ mod tests {
                 "eviction_threshold_records: 2",
             )
             .replace("max_records: 100000", "max_records: 3");
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("storage runtime fixture must be valid")
             .resolved;
@@ -1061,7 +1061,7 @@ mod tests {
     #[tokio::test]
     async fn storage_runtime_restores_persisted_retention_watermark() {
         let (source, work_path) = crate::config::test_support::portable_example();
-        let config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("storage runtime fixture must be valid")
             .resolved;

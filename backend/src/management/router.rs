@@ -771,9 +771,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{AuthServices, build_router};
-    use crate::config::migrate::deterministic_hash;
+    use crate::config::hash::deterministic_hash;
     use crate::config::store::ConfigStore;
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::management::ManagementRuntime;
     use crate::management::auth::AuthState;
     use crate::management::session::SessionStore;
@@ -993,7 +993,7 @@ mod tests {
         assert!(source.contains("$argon2id$"));
         assert!(!source.contains("correct horse battery staple"));
 
-        let loaded = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let loaded = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_from_path(&source_path)
             .unwrap();
         runtime.reconcile_users(&loaded.resolved.webui.users, &loaded.resolved.input_hash);
@@ -1018,12 +1018,16 @@ mod tests {
             name: "second".to_owned(),
             password_hash: config.webui.users[0].password_hash.clone(),
         });
-        let users = crate::config::resolve::resolve_config(&config, "users-added")
-            .unwrap()
-            .resolved
-            .webui
-            .users
-            .clone();
+        let users = crate::config::resolve::resolve_config_v2(
+            &config,
+            "users-added",
+            &config.work.path.join("config.yaml"),
+        )
+        .unwrap()
+        .resolved
+        .webui
+        .users
+        .clone();
         runtime.reconcile_users(&users, "users-added");
         assert!(services.sessions.lookup(&token).unwrap().is_none());
         let issued = services.sessions.issue("admin".to_owned()).unwrap();
@@ -1038,12 +1042,16 @@ mod tests {
         );
         config.webui.users[0].password_hash =
             super::super::auth::hash_password("a replacement test password").unwrap();
-        let users = crate::config::resolve::resolve_config(&config, "password-changed")
-            .unwrap()
-            .resolved
-            .webui
-            .users
-            .clone();
+        let users = crate::config::resolve::resolve_config_v2(
+            &config,
+            "password-changed",
+            &config.work.path.join("config.yaml"),
+        )
+        .unwrap()
+        .resolved
+        .webui
+        .users
+        .clone();
         runtime.reconcile_users(&users, "password-changed");
         assert!(
             services

@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::load::{ConfigLoader, LoadOptions};
-use super::migrate::deterministic_hash;
+use super::hash::deterministic_hash;
+use super::load::{ConfigV2Loader, LoadOptions};
 use super::resolve::ResolvedWebUiUser;
 use super::source_edit::{InitialWebUiUser, create_initial_webui_user};
 
@@ -99,7 +99,7 @@ impl ConfigStore {
             _ => ConfigStoreError::UnsupportedSource,
         })?;
         let candidate_bytes = candidate.as_bytes();
-        let loaded = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let loaded = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_candidate_bytes(candidate_bytes, &self.source_path)
             .map_err(|_| ConfigStoreError::CandidateRejected)?;
         if loaded.resolved.webui.users.len() != 1 || loaded.resolved.webui.users[0].name != name {
@@ -468,7 +468,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{ConfigStore, TransactionJournal};
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
 
     #[test]
     fn initial_user_commit_updates_source_and_snapshot_once() {
@@ -480,11 +480,11 @@ mod tests {
         let test_work_path = root.to_string_lossy().replace('\\', "/");
         let source = source.replace(&original_work_path, &test_work_path);
         std::fs::write(&source_path, source).unwrap();
-        let loaded = ConfigLoader::new(LoadOptions::default())
+        let loaded = ConfigV2Loader::new(LoadOptions::default())
             .load_from_path(&source_path)
             .unwrap();
         let store = Arc::new(ConfigStore::new(
-            loaded.source_path.unwrap(),
+            loaded.source_path,
             loaded.resolved.work.snapshot_path.clone(),
             loaded.resolved.input_hash.clone(),
         ));

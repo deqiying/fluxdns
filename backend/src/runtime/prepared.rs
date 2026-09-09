@@ -949,7 +949,7 @@ mod tests {
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     use crate::config::resolve::{ConfigId, ResolvedHostsResource, ResolvedUpstream};
-    use crate::config::{BindPlan, ConfigLoader, LoadOptions};
+    use crate::config::{BindPlan, ConfigV2Loader, LoadOptions};
     use crate::dns::{Cancellation, Deadline, RuntimeRevision};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -958,16 +958,17 @@ mod tests {
 
     fn config() -> Arc<crate::config::ResolvedConfig> {
         let work_path = crate::config::test_support::absolute_path("runtime");
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {work_path}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -1006,16 +1007,17 @@ strategy:
     }
 
     fn remote_config(port: u16, work: &std::path::Path) -> Arc<crate::config::ResolvedConfig> {
-        ConfigLoader::new(LoadOptions::default().without_snapshot())
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&format!(
                 r#"
-version: 1
+version: 2
 work:
   path: {}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info

@@ -2,9 +2,9 @@
 
 > 文档状态：有效
 >
-> 适用范围：配置加载、迁移、归一化、校验、引用图和安全快照
+> 适用范围：v2 配置加载、归一化、校验、引用图和安全快照
 >
-> 最后评审：2026-09-08（BC-26 正式 v2 loader、快照和 active source 接线）
+> 最后评审：2026-09-09（旧配置与迁移路径退出）
 >
 > 关联实现：[load.rs](../../../../backend/src/config/load.rs)、[resolve.rs](../../../../backend/src/config/resolve.rs)、[validate.rs](../../../../backend/src/config/validate.rs)、[store.rs](../../../../backend/src/config/store.rs)
 >
@@ -33,9 +33,9 @@ Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 pre
 | --- | --- |
 | `doh_route.rs` | DoH path 模板的共享编译、匹配和语义重叠检测 |
 | `contract.rs` | 正式 v2 DTO、新字段预算、客户端身份与两级路径碰撞检查 |
-| `model.rs` | v2 复用的资源 DTO；旧 v1 顶层 DTO 仅留 BC-27 前的测试路径 |
-| `load.rs` | v2 文件读取、大小/编码检查、直接 resolve 和安全配置快照；旧 loader 仅供测试 |
-| `migrate.rs` | 旧 v1 `MigrationStep` 注册表，仅留回归测试 |
+| `model.rs` | 资源 DTO、协议类型与严格字段 parser |
+| `load.rs` | v2 文件读取、大小/编码检查、直接 resolve 和安全配置快照 |
+| `hash.rs` | 运行态和资源比较使用的非加密内容指纹 |
 | `resolve.rs` | 默认值、三态、继承和来源信息归一化 |
 | `validate.rs` | 名称、引用图、循环、条件字段和 bind |
 | `store.rs` | 首用户配置事务、fingerprint 冲突、journal 与恢复 |
@@ -57,31 +57,13 @@ read bounded UTF-8 bytes
   → optionally create a safe work-directory config snapshot
 ```
 
-YAML 文件必须是 UTF-8。正式 v2 loader 以 4 MiB 限制输入，避免在解析前无界分配；同时拒绝空输入、重复 document、显式 `null`、YAML tag 和未知字段，并保留安全字段路径。旧 8 MiB loader 不从生产 `run`/`validate` 可达。
+YAML 文件必须是 UTF-8。唯一 v2 loader 以 4 MiB 限制输入，避免在解析前无界分配；同时拒绝空输入、重复 document、显式 `null`、YAML tag 和未知字段，并保留安全字段路径。
 
 所有 DTO 使用 `deny_unknown_fields` 或等价严格机制。tagged variant 只接受自身字段，不能把拼写错误吞入扁平 map。配置示例的 strict load 只使用离线 fixture，不访问远程资源。
 
-## 4. 旧 Migration 测试边界
+## 4. 版本拒绝边界
 
-旧迁移注册表仍按单步链组织，但只服务 BC-27 前的回归测试，不是 v2 生产兼容能力：
-
-```text
-MigrationStep {
-  id,
-  from_version,
-  to_version,
-  transform,
-}
-```
-
-约束：
-
-- 单步转换无网络、数据库、Secret 或系统时间依赖；
-- 输入相同则输出和报告相同；
-- 缺步、分叉、重复 version 或结果版本不符时失败；
-- 有损删除必须产生 warning，服务启动不自动确认有损迁移；
-- migration report 记录 step IDs、变更摘要、warning、输入 hash 和输出 hash；归一化后的 `ResolvedConfig` 另行记录 `normalized_hash`；
-- 当前只有 version 1 时仍建立空链测试，防止未来把兼容逻辑散落到字段解析中。
+只有 v2 配置参与加载和候选校验。旧版本、未来版本或缺失版本直接报错；不映射旧字段、不拆分旧客户端、不创建迁移报告，也不修改原文件。测试使用同一正式 loader，不另留兼容入口。新格式自身的快照和 journal 恢复保持独立，不以拒绝旧版本为由省略。
 
 ## 5. 归一化
 
@@ -101,7 +83,7 @@ MigrationStep {
 
 ## 6. 校验顺序
 
-`resolve_config_with_base_dir` 先调用 `validate_config`，再解析工作目录、构造 `BindPlan` 和归一化模型。`validate_config` 聚合基础值、集合、引用、upstream cycle 与 bind 校验错误；严格反序列化或这轮语义校验失败后，不继续生成 `ResolvedConfig`。
+`resolve_config_v2` 先调用 `ConfigV2::validate`，再解析工作目录、构造 `BindPlan` 和归一化模型。校验聚合基础值、集合、引用、upstream cycle 与 bind 错误；严格反序列化或语义校验失败后，不继续生成 `ResolvedConfig`。
 
 检查内容包括 exactly-one-of/required-if、cache/TTL/ECS 阈值、WebUI origin/users、SecretRef source、DoH 模板重叠，以及 IPv4/IPv6 和 Management/DNS TCP 地址冲突。实际输出是 `ValidatedConfig { resolved: Arc<ResolvedConfig> }`，其中含 `BindPlan`；没有独立的 `BindPlanInput`、`ResourcePlan`、`StoragePlan` 类型，也没有通用“跳过 pass”报告。
 

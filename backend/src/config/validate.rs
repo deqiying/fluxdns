@@ -3,15 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::IpAddr;
-use std::time::Duration;
-
-use ipnet::IpNet;
 
 use super::doh_route::{DohPathPattern, DohPathPatternError};
 use super::model::{
-    ClientIpSource, ConfigDto, EcsDto, EcsMode, HostsResourceDto, ListenerDto,
-    MAX_RULE_SET_SELECTOR_BYTES, OutboundDto, RuleSetDto, StrategyDto, TlsMode, UpstreamDto,
-    UpstreamMode, is_non_empty_path, normalize_rule_set_selector,
+    ClientIpSource, EcsDto, EcsMode, HostsResourceDto, ListenerDto, MAX_RULE_SET_SELECTOR_BYTES,
+    OutboundDto, RuleSetDto, StrategyDto, TlsMode, UpstreamDto, UpstreamMode, is_non_empty_path,
+    normalize_rule_set_selector,
 };
 
 /// Stable categories used by callers and tests; messages are deliberately non-sensitive.
@@ -215,28 +212,6 @@ impl BindPlan {
 }
 
 /// Validate all semantic constraints that do not require external resource I/O.
-pub fn validate_config(config: &ConfigDto) -> Result<(), ConfigErrorReport> {
-    let mut report = ConfigErrorReport::default();
-    validate_basic(config, &mut report);
-    let resources = ResourceConfig::from(config);
-    validate_collections(&resources, &mut report);
-    validate_clients(config, &mut report);
-    validate_references(&resources, &mut report);
-    for (index, client) in config.clients.iter().enumerate() {
-        validate_client_strategy(client.strategy.as_deref(), index, &resources, &mut report);
-    }
-    validate_upstream_cycles(&resources, &mut report);
-    if let Err(bind_errors) = build_bind_plan(config) {
-        report.extend(bind_errors);
-    }
-    report.sort_deterministically();
-    if report.is_empty() {
-        Ok(())
-    } else {
-        Err(report)
-    }
-}
-
 /// 借用未改变的资源契约，供当前加载器与 v2 候选共同校验，不转换配置版本。
 pub(super) struct ResourceConfig<'a> {
     pub work: &'a super::model::WorkDto,
@@ -251,8 +226,8 @@ pub(super) struct ResourceConfig<'a> {
     pub rule_set: &'a [RuleSetDto],
 }
 
-impl<'a> From<&'a ConfigDto> for ResourceConfig<'a> {
-    fn from(config: &'a ConfigDto) -> Self {
+impl<'a> From<&'a super::contract::ConfigV2> for ResourceConfig<'a> {
+    fn from(config: &'a super::contract::ConfigV2) -> Self {
         Self {
             work: &config.work,
             database_path: &config.database.path,
@@ -277,19 +252,6 @@ pub(super) fn validate_resources(config: &ResourceConfig<'_>, report: &mut Confi
     if let Err(errors) = build_resource_bind_plan(config) {
         report.extend(errors);
     }
-}
-
-fn validate_basic(config: &ConfigDto, report: &mut ConfigErrorReport) {
-    if config.version != super::model::CURRENT_CONFIG_VERSION {
-        report.push(ConfigError::new(
-            ConfigErrorKind::UnsupportedVersion,
-            "version",
-            "only configuration version 1 is supported",
-        ));
-    }
-
-    validate_startup(&ResourceConfig::from(config), report);
-    validate_dns(config, report);
 }
 
 fn validate_startup(config: &ResourceConfig<'_>, report: &mut ConfigErrorReport) {
@@ -384,73 +346,6 @@ fn validate_startup(config: &ResourceConfig<'_>, report: &mut ConfigErrorReport)
                 ConfigErrorKind::InvalidValue,
                 format!("{path}.password_hash"),
                 "password_hash must use a supported one-way hash format",
-            ));
-        }
-    }
-}
-
-fn validate_dns(config: &ConfigDto, report: &mut ConfigErrorReport) {
-    if let Some(cache) = &config.dns.cache {
-        if cache.memory.max_size_bytes == 0 {
-            report.push(ConfigError::new(
-                ConfigErrorKind::InvalidValue,
-                "dns.cache.memory.max_size_bytes",
-                "size must be greater than zero",
-            ));
-        }
-        if !(Duration::from_secs(1)..=Duration::from_secs(300)).contains(&cache.failure_ttl) {
-            report.push(ConfigError::new(
-                ConfigErrorKind::InvalidValue,
-                "dns.cache.failure_ttl",
-                "failure_ttl must be between 1s and 5m",
-            ));
-        }
-        validate_optimistic(&cache.optimistic, "dns.cache.optimistic", report);
-        if cache.persistence.max_size_bytes == 0 {
-            report.push(ConfigError::new(
-                ConfigErrorKind::InvalidValue,
-                "dns.cache.persistence.max_size_bytes",
-                "size must be greater than zero",
-            ));
-        }
-        if !is_non_empty_path(&cache.persistence.path) {
-            report.push(ConfigError::new(
-                ConfigErrorKind::MissingField,
-                "dns.cache.persistence.path",
-                "path must not be empty",
-            ));
-        }
-    }
-    if let Some(ttl) = &config.dns.ttl_override {
-        validate_ttl(ttl, "dns.ttl_override", report);
-    }
-    validate_ecs(
-        config.dns.edns_client_subnet.as_ref(),
-        "dns.edns_client_subnet",
-        report,
-    );
-    if let Some(resolve_log) = &config.dns.resolve_log {
-        if resolve_log.eviction_threshold_records == 0
-            || resolve_log.eviction_threshold_records >= resolve_log.max_records
-        {
-            report.push(ConfigError::new(
-                ConfigErrorKind::Constraint,
-                "dns.resolve_log.eviction_threshold_records",
-                "eviction threshold must be greater than zero and less than max_records",
-            ));
-        }
-        if resolve_log.max_records == 0 {
-            report.push(ConfigError::new(
-                ConfigErrorKind::InvalidValue,
-                "dns.resolve_log.max_records",
-                "max_records must be greater than zero",
-            ));
-        }
-        if resolve_log.max_record_age.is_zero() {
-            report.push(ConfigError::new(
-                ConfigErrorKind::InvalidValue,
-                "dns.resolve_log.max_record_age",
-                "duration must be greater than zero",
             ));
         }
     }
@@ -707,75 +602,6 @@ fn validate_collections(config: &ResourceConfig<'_>, report: &mut ConfigErrorRep
             ));
         }
         validate_rule_set(rule_set, &path, report);
-    }
-}
-
-fn validate_clients(config: &ConfigDto, report: &mut ConfigErrorReport) {
-    let mut clients = BTreeSet::new();
-    let mut ids: BTreeMap<String, String> = BTreeMap::new();
-    let mut cidrs: BTreeMap<IpNet, String> = BTreeMap::new();
-    for (index, client) in config.clients.iter().enumerate() {
-        let path = format!("clients[{index}]");
-        validate_name(&client.name, format!("{path}.name"), report);
-        if !clients.insert(client.name.clone()) {
-            report.push(ConfigError::new(
-                ConfigErrorKind::Duplicate,
-                format!("{path}.name"),
-                "client name is duplicated",
-            ));
-        }
-        if client.r#match.ids.is_empty() && client.r#match.ips.is_empty() {
-            report.push(ConfigError::new(
-                ConfigErrorKind::Constraint,
-                format!("{path}.match"),
-                "at least one id or IP range is required",
-            ));
-        }
-        for (id_index, id) in client.r#match.ids.iter().enumerate() {
-            if id.trim().is_empty() || id.chars().any(char::is_control) {
-                report.push(ConfigError::new(
-                    ConfigErrorKind::InvalidValue,
-                    format!("{path}.match.ids[{id_index}]"),
-                    "client id must be non-empty and printable",
-                ));
-            }
-            if let Some(previous) = ids.insert(id.clone(), client.name.clone()) {
-                report.push(ConfigError::new(
-                    ConfigErrorKind::Duplicate,
-                    format!("{path}.match.ids[{id_index}]"),
-                    format!("client id conflicts with `{previous}`"),
-                ));
-            }
-        }
-        for (ip_index, ip) in client.r#match.ips.iter().enumerate() {
-            if let Some(previous) = cidrs.insert(*ip, client.name.clone()) {
-                report.push(ConfigError::new(
-                    ConfigErrorKind::Duplicate,
-                    format!("{path}.match.ips[{ip_index}]"),
-                    format!("client CIDR conflicts with `{previous}`"),
-                ));
-            }
-        }
-        if let Some(strategy) = &client.strategy
-            && strategy.trim().is_empty()
-        {
-            report.push(ConfigError::new(
-                ConfigErrorKind::InvalidValue,
-                format!("{path}.strategy"),
-                "strategy reference must not be empty",
-            ));
-        }
-        if let Some(cache) = &client.cache {
-            validate_cache_override(cache, format!("{path}.cache"), report);
-        }
-        if let Some(ttl) = &client.ttl_override {
-            validate_ttl(ttl, format!("{path}.ttl_override"), report);
-        }
-        validate_ecs(
-            client.edns_client_subnet.as_ref(),
-            format!("{path}.edns_client_subnet"),
-            report,
-        );
     }
 }
 
@@ -1631,7 +1457,8 @@ fn validate_upstream_cycles(config: &ResourceConfig<'_>, report: &mut ConfigErro
 }
 
 /// Build and validate the expanded socket bind plan.
-pub fn build_bind_plan(config: &ConfigDto) -> Result<BindPlan, ConfigErrorReport> {
+#[cfg(test)]
+fn build_bind_plan(config: &super::contract::ConfigV2) -> Result<BindPlan, ConfigErrorReport> {
     build_resource_bind_plan(&ResourceConfig::from(config))
 }
 
@@ -1896,7 +1723,7 @@ fn rule_set_name(value: &RuleSetDto) -> &str {
 mod tests {
     use std::net::{IpAddr, Ipv4Addr};
 
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
 
     use super::{
         BindProtocol, BindTransport, ConfigErrorKind, ConfigErrorReport, DohBindingRef,
@@ -1925,7 +1752,7 @@ mod tests {
     #[test]
     fn bind_plan_retains_doh_transport_without_confusing_tcp() {
         let (source, _) = crate::config::test_support::portable_example();
-        let output = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let output = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("repository example must remain a valid configuration");
 
@@ -1969,7 +1796,7 @@ mod tests {
     #[test]
     fn management_endpoint_conflicts_with_tcp_but_not_udp() {
         let (source, _) = crate::config::test_support::portable_example();
-        let mut config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let mut config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("repository example must remain a valid configuration")
             .config;
@@ -1995,7 +1822,7 @@ mod tests {
     #[test]
     fn webui_public_origin_accepts_http_and_rejects_missing_or_path() {
         let (source, _) = crate::config::test_support::portable_example();
-        let mut config = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let mut config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("repository example must remain a valid configuration")
             .config;
@@ -2003,7 +1830,7 @@ mod tests {
 
         config.webui.public_origin = Some("http://127.0.0.1:8080".parse().unwrap());
         let mut report = ConfigErrorReport::default();
-        super::validate_basic(&config, &mut report);
+        super::validate_startup(&super::ResourceConfig::from(&config), &mut report);
         assert!(
             !report
                 .errors
@@ -2016,14 +1843,14 @@ mod tests {
 
         config.webui.public_origin = None;
         let mut report = ConfigErrorReport::default();
-        super::validate_basic(&config, &mut report);
+        super::validate_startup(&super::ResourceConfig::from(&config), &mut report);
         assert!(report.errors.iter().any(|error| {
             error.kind == ConfigErrorKind::MissingField && error.path == "webui.public_origin"
         }));
 
         config.webui.public_origin = Some("https://dns.example.com/admin".parse().unwrap());
         let mut report = ConfigErrorReport::default();
-        super::validate_basic(&config, &mut report);
+        super::validate_startup(&super::ResourceConfig::from(&config), &mut report);
         assert!(report.errors.iter().any(|error| {
             error.kind == ConfigErrorKind::InvalidValue && error.path == "webui.public_origin"
         }));

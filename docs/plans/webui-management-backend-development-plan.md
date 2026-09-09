@@ -29,7 +29,7 @@
 
 | 任务 | 内容 | 主要现有入口 | 依赖 |
 | --- | --- | --- | --- |
-| BE-01 | 版本、配置与 API 契约 | [model](../../backend/src/config/model.rs)、[resolve](../../backend/src/config/resolve.rs)、[validate](../../backend/src/config/validate.rs)、[migrate](../../backend/src/config/migrate.rs)、[OpenAPI](../../frontend/openapi/management-api-v1.yaml) | 总计划 D-01 至 D-07 |
+| BE-01 | 版本、配置与 API 契约 | [model](../../backend/src/config/model.rs)、[resolve](../../backend/src/config/resolve.rs)、[validate](../../backend/src/config/validate.rs)、[OpenAPI](../../frontend/openapi/management-api-v1.yaml) | 总计划 D-01 至 D-07 |
 | BE-02 | 活动配置、应用后持久化、外部差异与热日志 | [store](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs)、[service](../../backend/src/service.rs)、[app](../../backend/src/app.rs)、[observability](../../backend/src/observability.rs) | BE-01、配置专项 |
 | BE-03 | 客户端身份和匹配 | [DNS context](../../backend/src/dns/context.rs)、[client](../../backend/src/policy/client.rs)、[DNS Policy](../../backend/src/dns/policy.rs)、[observation](../../backend/src/ports/observation.rs)、[resolve_log](../../backend/src/storage/resolve_log.rs) | BE-01 |
 | BE-04 | 独立缓存快照 | [cache service](../../backend/src/cache/service.rs)、[memory](../../backend/src/cache/memory.rs)、[moka](../../backend/src/cache/moka.rs)、[persistence](../../backend/src/cache/persistence.rs)、[cache runtime](../../backend/src/cache/runtime.rs) | BE-01；与 BE-03 共同核验 fingerprint |
@@ -316,6 +316,8 @@ QPS/RPM、趋势、在线身份、暖机和内存单位按[已确认 D-04](webui
 2026-09-09 BC-24/25 已完成：正式 Axum WS 使用 Bearer 保护的 ticket 端点与单次短期 subprotocol ticket，upgrade 严格校验 Origin，忽略 Cookie 且拒绝 query token。T-05 固定为 128 KiB 帧、32 个全局连接、每 session 4 个连接、每连接 8 个订阅、64 条/1 MiB 发送队列、每分钟 64 条入站消息、15 秒心跳、45 秒空闲和 5 秒写超时；ticket 为 30 秒、全局 128/每 session 4。服务指标每秒推送；记录只在 SQLite commit 后发布，按 `stream_epoch + sequence` 提供 60 秒/5000 条/8 MiB replay，epoch、cursor、缺口、溢出或共同保留 revision 变化均返回明确 resync。真实 HTTP/UDP/SQLite/WS 覆盖单次 ticket、Origin/URL/Cookie 边界、在线提交、断线补发、保留变化及登出后 4401；慢消费者和入站/连接/帧限额由同一真实 adapter/有界队列测试覆盖。P5、BC-27、约 10 客户端和 2ms 性能未进入。
 
 ## 13. BE-11：新基线初始化与旧路径退出
+
+2026-09-09 BC-27 配置部分已删除旧 loader、DTO、迁移注册表及 v1 fixture，保留通用 parser 和 [hash](../../backend/src/config/hash.rs)；全量 Cargo 测试 838 项通过、3 项显式忽略。测试统一使用正式 v2。单库详情与 legacy API 退出继续由本检查点跟踪。
 
 2026-09-07 P0 源码核定：BC-26 完整生产初始化不能独立于 BC-04/07/08 至 BC-11 完成。当前 `StorageRuntime::open` 仍初始化统计/详情单库 v6，cache 仍装配可自动升级的 SQLite adapter；把 v2 字段接入这些 owner 会错误保留旧语义。P0 的 v2 拒绝规则/离线夹具随 BC-01 交付，不另造无消费者的空 layout/marker，也不将 BC-26 标为完成。完整空目录启动、重复启动、旧路径拒绝和新格式恢复待这些 owner 就绪后单独验证、提交；不删除个人运行数据。
 

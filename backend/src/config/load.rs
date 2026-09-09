@@ -1,8 +1,4 @@
-//! Bounded, version-aware configuration loading.
-//!
-//! The loader parses and migrates the strict DTO, builds an immutable
-//! `ResolvedConfig`, and optionally creates a work-directory snapshot. Secret
-//! values are not read during ordinary YAML loading.
+//! 有界 v2 配置加载与快照；拒绝旧格式，不读取 Secret 实值或执行迁移。
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -11,18 +7,16 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use serde::{Deserialize, de::DeserializeOwned};
 use thiserror::Error;
 
 use super::{
     contract::ConfigV2,
-    migrate::{self, MigrationError, MigrationRegistry, MigrationReport},
-    model::RawConfig,
+    hash::deterministic_hash,
     resolve::{self, ResolvedConfig},
     validate::ConfigErrorReport,
 };
 
-pub const DEFAULT_MAX_CONFIG_BYTES: usize = 8 * 1024 * 1024;
+pub const DEFAULT_MAX_CONFIG_BYTES: usize = super::contract::MAX_CONFIG_BYTES;
 static TEMP_FILE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,16 +53,6 @@ pub enum SnapshotStatus {
     Created { path: PathBuf },
 }
 
-#[derive(Clone, Debug)]
-pub struct ConfigLoadOutput {
-    pub config: RawConfig,
-    pub resolved: std::sync::Arc<ResolvedConfig>,
-    pub source_path: Option<PathBuf>,
-    pub source_version: u32,
-    pub migration_report: MigrationReport,
-    pub snapshot: SnapshotStatus,
-}
-
 /// 正式 v2 启动产物，保留生成运行态的原始配置正文供活动源初始化。
 #[derive(Clone, Debug)]
 pub struct ConfigV2LoadOutput {
@@ -89,6 +73,45 @@ impl ConfigV2Loader {
         Self { options }
     }
 
+    /// 在已知源路径下校验候选；只编译运行态，不读写源文件或快照。
+    pub(crate) fn load_candidate_bytes(
+        &self,
+        bytes: &[u8],
+        source_path: &Path,
+    ) -> Result<ConfigV2LoadOutput, ConfigLoadError> {
+        let bytes = bounded_bytes(bytes, self.options.max_bytes)?;
+        let source_path = absolute_config_path(source_path)?;
+        let config = ConfigV2::parse(bytes).map_err(ConfigLoadError::Validation)?;
+        let resolved = resolve::resolve_config_v2(&config, deterministic_hash(bytes), &source_path)
+            .map_err(ConfigLoadError::Validation)?
+            .resolved;
+        Ok(ConfigV2LoadOutput {
+            config,
+            resolved,
+            source_path,
+            source: std::sync::Arc::from(std::str::from_utf8(bytes).expect("bounded UTF-8 input")),
+            snapshot: SnapshotStatus::Skipped,
+        })
+    }
+
+    /// 无物理来源的测试配置必须给出绝对 work.path，不能借进程 cwd 解析相对路径。
+    #[cfg(test)]
+    pub(crate) fn load_str(&self, source: &str) -> Result<ConfigV2LoadOutput, ConfigLoadError> {
+        let bytes = bounded_bytes(source.as_bytes(), self.options.max_bytes)?;
+        let config = ConfigV2::parse(bytes).map_err(ConfigLoadError::Validation)?;
+        if !config.work.path.is_absolute() {
+            let mut report = ConfigErrorReport::default();
+            report.push(super::validate::ConfigError::new(
+                super::validate::ConfigErrorKind::InvalidValue,
+                "work.path",
+                "relative work.path requires a configuration file base directory",
+            ));
+            return Err(ConfigLoadError::Validation(report));
+        }
+        self.load_candidate_bytes(bytes, &config.work.path.join("config.yaml"))
+    }
+
+    /// 从配置文件加载并按选项建立内容一致的工作目录快照。
     pub fn load_from_path<P: AsRef<Path>>(
         &self,
         path: P,
@@ -102,7 +125,7 @@ impl ConfigV2Loader {
             })?
             .to_owned();
         let resolved =
-            resolve::resolve_config_v2(&config, migrate::deterministic_hash(&bytes), &source_path)
+            resolve::resolve_config_v2(&config, deterministic_hash(&bytes), &source_path)
                 .map_err(ConfigLoadError::Validation)?
                 .resolved;
         let snapshot = if self.options.create_snapshot {
@@ -131,163 +154,6 @@ impl Default for ConfigV2Loader {
     }
 }
 
-pub struct ConfigLoader {
-    options: LoadOptions,
-    registry: MigrationRegistry,
-}
-
-impl ConfigLoader {
-    pub fn new(options: LoadOptions) -> Self {
-        Self {
-            options,
-            registry: migrate::current_registry(),
-        }
-    }
-
-    pub fn with_registry(options: LoadOptions, registry: MigrationRegistry) -> Self {
-        Self { options, registry }
-    }
-
-    pub fn options(&self) -> LoadOptions {
-        self.options
-    }
-    pub fn registry(&self) -> &MigrationRegistry {
-        &self.registry
-    }
-
-    pub fn load_from_path<P: AsRef<Path>>(
-        &self,
-        path: P,
-    ) -> Result<ConfigLoadOutput, ConfigLoadError> {
-        self.load_path(path)
-    }
-
-    pub fn load_from_bytes(&self, bytes: &[u8]) -> Result<ConfigLoadOutput, ConfigLoadError> {
-        self.load_bytes(bytes)
-    }
-
-    pub fn load_from_str(&self, source: &str) -> Result<ConfigLoadOutput, ConfigLoadError> {
-        self.load_str(source)
-    }
-
-    /// 使用指定源路径作为相对路径基准校验候选内容，但不读取或写入该路径。
-    pub(crate) fn load_candidate_bytes(
-        &self,
-        bytes: &[u8],
-        source_path: &Path,
-    ) -> Result<ConfigLoadOutput, ConfigLoadError> {
-        let bytes = bounded_bytes(bytes, self.options.max_bytes)?;
-        let source_path = absolute_config_path(source_path)?;
-        let mut output = self.load_bytes_inner(bytes, Some(source_path))?;
-        output.snapshot = SnapshotStatus::Skipped;
-        Ok(output)
-    }
-
-    pub fn load_path<P: AsRef<Path>>(&self, path: P) -> Result<ConfigLoadOutput, ConfigLoadError> {
-        let source_path = absolute_config_path(path.as_ref())?;
-        let bytes = read_bounded_file(&source_path, self.options.max_bytes)?;
-        let mut output = self.load_bytes_inner(&bytes, Some(source_path.clone()))?;
-        if self.options.create_snapshot {
-            output.snapshot = create_snapshot(
-                &output.resolved.work.path,
-                &source_path,
-                &bytes,
-                self.options.max_bytes,
-            )?;
-        }
-        Ok(output)
-    }
-
-    pub fn load_bytes(&self, bytes: &[u8]) -> Result<ConfigLoadOutput, ConfigLoadError> {
-        let bytes = bounded_bytes(bytes, self.options.max_bytes)?;
-        let mut output = self.load_bytes_inner(bytes, None)?;
-        output.snapshot = SnapshotStatus::Skipped;
-        Ok(output)
-    }
-
-    pub fn load_str(&self, source: &str) -> Result<ConfigLoadOutput, ConfigLoadError> {
-        self.load_bytes(source.as_bytes())
-    }
-
-    fn load_bytes_inner(
-        &self,
-        bytes: &[u8],
-        source_path: Option<PathBuf>,
-    ) -> Result<ConfigLoadOutput, ConfigLoadError> {
-        let header: VersionHeader = deserialize_yaml(bytes, ParseStage::VersionHeader)?;
-        let migration = self
-            .registry
-            .migrate(header.version, bytes)
-            .map_err(ConfigLoadError::Migration)?;
-        if migration.document.len() > self.options.max_bytes {
-            return Err(ConfigLoadError::TooLarge {
-                limit: self.options.max_bytes,
-            });
-        }
-        let config: RawConfig = deserialize_yaml(&migration.document, ParseStage::Config)?;
-        if config.version != self.registry.current_version() {
-            return Err(ConfigLoadError::VersionMismatch {
-                expected: self.registry.current_version(),
-                actual: config.version,
-            });
-        }
-        let config_dir = source_path.as_deref().and_then(Path::parent);
-        let resolved = resolve::resolve_config_with_base_dir(
-            &config,
-            migration.report.input_hash.clone(),
-            config_dir,
-        )
-        .map_err(ConfigLoadError::Validation)?
-        .resolved;
-        Ok(ConfigLoadOutput {
-            config,
-            resolved,
-            source_path,
-            source_version: header.version,
-            migration_report: migration.report,
-            snapshot: SnapshotStatus::Skipped,
-        })
-    }
-}
-
-impl Default for ConfigLoader {
-    fn default() -> Self {
-        Self::new(LoadOptions::default())
-    }
-}
-
-pub fn load_from_path<P: AsRef<Path>>(path: P) -> Result<ConfigLoadOutput, ConfigLoadError> {
-    ConfigLoader::default().load_path(path)
-}
-
-pub fn load_from_bytes(bytes: &[u8]) -> Result<ConfigLoadOutput, ConfigLoadError> {
-    ConfigLoader::default().load_bytes(bytes)
-}
-
-pub fn load_from_str(source: &str) -> Result<ConfigLoadOutput, ConfigLoadError> {
-    ConfigLoader::default().load_str(source)
-}
-
-#[derive(Clone, Copy, Debug)]
-enum ParseStage {
-    VersionHeader,
-    Config,
-}
-
-impl ParseStage {
-    fn message(self) -> &'static str {
-        match self {
-            Self::VersionHeader => "invalid or missing configuration schema version",
-            Self::Config => "configuration does not match the strict schema",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct VersionHeader {
-    version: u32,
-}
-
 #[derive(Debug, Error)]
 pub enum ConfigLoadError {
     #[error("configuration is empty")]
@@ -296,17 +162,6 @@ pub enum ConfigLoadError {
     TooLarge { limit: usize },
     #[error("configuration is not valid UTF-8 at byte {valid_up_to}")]
     InvalidUtf8 { valid_up_to: usize },
-    #[error("{stage}: path={path}{location}", location = format_location(*line, *column))]
-    Parse {
-        stage: &'static str,
-        path: String,
-        line: Option<usize>,
-        column: Option<usize>,
-    },
-    #[error("migration failed: {0}")]
-    Migration(MigrationError),
-    #[error("migrated configuration version mismatch: expected {expected}, got {actual}")]
-    VersionMismatch { expected: u32, actual: u32 },
     #[error("configuration validation failed: {0}")]
     Validation(ConfigErrorReport),
     #[error("configuration path must be absolute for a work snapshot: {path}")]
@@ -334,15 +189,6 @@ pub enum ConfigLoadError {
         #[source]
         source: io::Error,
     },
-}
-
-fn format_location(line: Option<usize>, column: Option<usize>) -> String {
-    match (line, column) {
-        (Some(line), Some(column)) => format!(" at line {line}, column {column}"),
-        (Some(line), None) => format!(" at line {line}"),
-        (None, Some(column)) => format!(" at column {column}"),
-        (None, None) => String::new(),
-    }
 }
 
 fn absolute_config_path(path: &Path) -> Result<PathBuf, ConfigLoadError> {
@@ -392,22 +238,6 @@ fn read_bounded_file(path: &Path, limit: usize) -> Result<Vec<u8>, ConfigLoadErr
         })?;
     bounded_bytes(&bytes, limit)?;
     Ok(bytes)
-}
-
-fn deserialize_yaml<T: DeserializeOwned>(
-    bytes: &[u8],
-    stage: ParseStage,
-) -> Result<T, ConfigLoadError> {
-    let deserializer = yaml_serde::Deserializer::from_slice(bytes);
-    serde_path_to_error::deserialize(deserializer).map_err(|error| {
-        let location = error.inner().location();
-        ConfigLoadError::Parse {
-            stage: stage.message(),
-            path: error.path().to_string(),
-            line: location.as_ref().map(yaml_serde::Location::line),
-            column: location.as_ref().map(yaml_serde::Location::column),
-        }
-    })
 }
 
 fn create_snapshot(
@@ -827,13 +657,13 @@ mod tests {
 
     #[test]
     fn repository_example_is_strictly_loaded_and_resolved_without_external_io() {
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let (source, work) = crate::config::test_support::portable_example();
         let output = loader
             .load_str(&source)
-            .expect("repository configuration example should satisfy the v1 contract");
-        assert_eq!(output.config.version, 1);
-        assert_eq!(output.resolved.version, 1);
+            .expect("repository configuration example should satisfy the v2 contract");
+        assert_eq!(output.config.version, 2);
+        assert_eq!(output.resolved.version, 2);
         assert_eq!(output.resolved.listeners.len(), 3);
         assert_eq!(output.resolved.upstreams.len(), 7);
         let defaulted_members = output
@@ -889,7 +719,7 @@ mod tests {
 
     #[test]
     fn dat_selector_accepts_special_ascii_and_is_canonicalized() {
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let (source, _) = crate::config::test_support::portable_example();
         let source = source.replace("geosite:cn", "geosite:GEOLOCATION-!CN");
         let output = loader.load_str(&source).unwrap();
@@ -913,7 +743,7 @@ mod tests {
 
     #[test]
     fn overlapping_doh_routes_are_rejected() {
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let (source, _) = crate::config::test_support::portable_example();
         let source = source.replace("path: /dns/outside/{client_id}", "path: /dns/inner");
         let error = loader.load_str(&source).unwrap_err();
@@ -930,72 +760,59 @@ mod tests {
 
     #[test]
     fn strict_loader_rejects_unknown_fields_and_duplicate_documents() {
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let unknown = format!(
             "{}\nunknown: true\n",
-            include_str!("../../tests/fixtures/config-v1.yaml")
+            include_str!("../../../config-example.yaml")
         );
         assert!(matches!(
             loader.load_str(&unknown),
-            Err(ConfigLoadError::Parse { .. })
+            Err(ConfigLoadError::Validation(_))
         ));
 
         let duplicate = format!(
             "{}\nversion: 1\n",
-            include_str!("../../tests/fixtures/config-v1.yaml")
+            include_str!("../../../config-example.yaml")
         );
         assert!(matches!(
             loader.load_str(&duplicate),
-            Err(ConfigLoadError::Parse { .. })
+            Err(ConfigLoadError::Validation(_))
         ));
 
         let multiple = format!(
             "{}\n---\nversion: 1\n",
-            include_str!("../../tests/fixtures/config-v1.yaml")
+            include_str!("../../../config-example.yaml")
         );
         assert!(matches!(
             loader.load_str(&multiple),
-            Err(ConfigLoadError::Parse { .. })
+            Err(ConfigLoadError::Validation(_))
         ));
 
         for source in ["null", "[]", "scalar"] {
             assert!(matches!(
                 loader.load_str(source),
-                Err(ConfigLoadError::Parse { .. })
+                Err(ConfigLoadError::Validation(_))
             ));
         }
     }
 
     #[test]
-    fn loader_rejects_future_schema_versions_before_current_dto_validation() {
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
-        let error = loader.load_str("version: 2\n").unwrap_err();
-        assert!(matches!(
-            error,
-            ConfigLoadError::Migration(super::super::migrate::MigrationError::FutureVersion {
-                input: 2,
-                current: 1
-            })
-        ));
-    }
-
-    #[test]
     fn strict_loader_rejects_explicit_null_instead_of_treating_it_as_missing() {
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
-        let source = include_str!("../../tests/fixtures/config-v1.yaml").replacen(
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
+        let source = include_str!("../../../config-example.yaml").replacen(
             "  cache:\n",
             "  cache: null\n",
             1,
         );
         assert!(matches!(
             loader.load_str(&source),
-            Err(ConfigLoadError::Parse { .. })
+            Err(ConfigLoadError::Validation(_))
         ));
     }
 
     #[test]
     fn loader_normalizes_case_insensitive_log_level() {
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let (source, _) = crate::config::test_support::portable_example();
         let source = source.replace("level: info", "level: INFO");
         let output = loader.load_str(&source).unwrap();
@@ -1007,8 +824,8 @@ mod tests {
 
     #[test]
     fn loader_rejects_empty_tls_certificate_path() {
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
-        let source = include_str!("../../tests/fixtures/config-v1.yaml").replace(
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
+        let source = include_str!("../../../config-example.yaml").replace(
             "certificate_file: ./tls/fullchain.pem",
             "certificate_file: \"\"",
         );
@@ -1020,7 +837,7 @@ mod tests {
 
     #[test]
     fn configuration_debug_is_redacted_and_normalized_hash_tracks_secret_metadata() {
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let (source, _) = crate::config::test_support::portable_example();
         let output = loader.load_str(&source).unwrap();
         let debug = format!("{:?}", output.config);
@@ -1044,7 +861,10 @@ mod tests {
 
         let equivalent_source = source
             .replace("rules_path: ./rules", "rules_path: rules")
-            .replace("path: ./data/fluxdns.sqlite3", "path: data/fluxdns.sqlite3")
+            .replace(
+                "path: ./data/statistics.sqlite3",
+                "path: data/statistics.sqlite3",
+            )
             .replace("path: ./logs/fluxdns.log", "path: logs/fluxdns.log");
         let equivalent = loader.load_str(&equivalent_source).unwrap();
         assert_eq!(
@@ -1059,30 +879,30 @@ mod tests {
         let config_dir = root.join("bootstrap");
         let config_path = config_dir.join("config.yaml");
         fs::create_dir_all(&config_dir).unwrap();
-        let source = include_str!("../../tests/fixtures/config-v1.yaml")
+        let source = include_str!("../../../config-example.yaml")
             .replace("path: /etc/fluxdns", "path: ../runtime")
             .replace("rules_path: ./rules", "rules_path: ./rules/../rules")
             .replace(
-                "path: ./data/fluxdns.sqlite3",
-                "path: ./data/./fluxdns.sqlite3",
+                "path: ./data/statistics.sqlite3",
+                "path: ./data/./statistics.sqlite3",
             );
         fs::write(&config_path, source).unwrap();
 
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let output = loader.load_from_path(&config_path).unwrap();
         let work = root.join("runtime");
         assert_eq!(output.resolved.work.path, work);
         assert_eq!(output.resolved.work.rules_path, work.join("rules"));
         assert_eq!(
             output.resolved.database.path,
-            work.join("data/fluxdns.sqlite3")
+            work.join("data/statistics.sqlite3")
         );
         assert_eq!(output.resolved.logs.path, work.join("logs/fluxdns.log"));
         assert_eq!(
             output.resolved.dns.cache.persistence_path,
-            work.join("cache.db")
+            work.join("data/dns-cache.snapshot")
         );
-        assert_eq!(output.source_path, Some(config_path));
+        assert_eq!(output.source_path, config_path);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1092,11 +912,11 @@ mod tests {
         let config_dir = root.join("bootstrap");
         let config_path = config_dir.join("input.yaml");
         fs::create_dir_all(&config_dir).unwrap();
-        let source = include_str!("../../tests/fixtures/config-v1.yaml")
+        let source = include_str!("../../../config-example.yaml")
             .replace("path: /etc/fluxdns", "path: ../runtime");
         fs::write(&config_path, source.as_bytes()).unwrap();
 
-        let output = super::ConfigLoader::default()
+        let output = super::ConfigV2Loader::default()
             .load_from_path(&config_path)
             .unwrap();
         let snapshot = root.join("runtime/config.yaml");
@@ -1111,9 +931,9 @@ mod tests {
 
     #[test]
     fn load_without_source_rejects_relative_work_path() {
-        let source = include_str!("../../tests/fixtures/config-v1.yaml")
-            .replace("path: /etc/fluxdns", "path: ./");
-        let loader = super::ConfigLoader::new(super::LoadOptions::default().without_snapshot());
+        let source =
+            include_str!("../../../config-example.yaml").replace("path: /etc/fluxdns", "path: ./");
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let error = loader.load_str(&source).unwrap_err();
         match error {
             ConfigLoadError::Validation(report) => {
@@ -1165,7 +985,11 @@ mod tests {
         let source_path = root.join("input.yaml");
         fs::write(
             &source_path,
-            include_str!("../../tests/fixtures/config-v1.yaml"),
+            include_str!("../../../config-example.yaml").replacen(
+                "version: 2\n",
+                "version: 1\n",
+                1,
+            ),
         )
         .unwrap();
 

@@ -4,9 +4,9 @@
 >
 > 适用范围：本文与当前模板同步，描述配置契约、校验和已实现运行时边界；未定义行为不应视为已支持。
 >
-> 最后核对：2026-09-08（BC-03/29/30/31 配置事务生产接线）
+> 最后核对：2026-09-09（P5 配置旧路径退出；其余分批证据保留原日期）
 >
-> 核对基线：`4a5a5a7b13896f3b4c1d86fe4469a3afae38ac10` 加本次 P1 工作树
+> 核对基线：`48c81b20e4bd3222bb8d806781aec9573cb5ef4c` 加本次 P5 工作树
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
@@ -41,7 +41,13 @@
 
 [`ResolvedClient`](../../backend/src/config/resolve.rs) 与 [`ClientRule`](../../backend/src/policy/client.rs) 已把配置管理 `name` 和请求身份 `client_ids` 明确分离，`ClientIndex` 同时构建 name/exact ID 索引并拒绝重复 name、重复 ID、重复规范化 CIDR 和空 matcher。请求匹配仍固定为大小写敏感的 ID 优先、最长 CIDR 回退；IPv4-mapped IPv6 地址在 CIDR 匹配及客户端 cache digest 前归一化为 IPv4，因此与对应 IPv4 使用同一客户端池。
 
-v2 配置边界只允许单个唯一 `clients[].client_id`，生产 resolver 将其直接编译为唯一请求身份；`ResolvedClient` 的复数容器暂为运行时内部形态，旧 `match.ids` 只存在于 BC-27 待删除的 v1 测试 loader。历史记录仍只保留请求发生时已经冻结的匹配事实，不补造或重匹配旧身份。
+v2 配置边界只允许单个唯一 `clients[].client_id`，生产 resolver 将其直接编译为唯一请求身份；`ResolvedClient` 的复数容器是运行时内部形态，不提供 `match.ids` 配置入口。历史记录仍只保留请求发生时已经冻结的匹配事实，不补造或重匹配旧身份。
+
+### 配置旧路径退出（2026-09-09）
+
+旧 `ConfigLoader`、v1 顶层/客户端/缓存/详情 DTO、迁移注册表和独立 v1 fixture 已删除。`run`、`validate`、显式内部 reload、首次用户候选和配置回归测试统一使用 `ConfigV2Loader`；通用资源 DTO、严格字段 parser 和安全快照继续复用。无物理来源的测试输入要求绝对 `work.path`，实际加载仍以源文件目录解析两级路径。内容比较使用的非加密 FNV-1a 移至 [`hash.rs`](../../backend/src/config/hash.rs)，认证和受管文件身份继续使用 SHA-256。
+
+Windows Rust 1.98.0 执行 `cargo test --manifest-path backend/Cargo.toml -- --nocapture`：838 项通过、3 项显式忽略。覆盖 v2 拒绝旧配置、源路径/快照、真实双文件 journal、启动/reload 和认证候选；该次结果不代表 P5 的完整性能或浏览器验收。
 
 ### P1 活动源与候选内部底座（2026-09-07）
 
@@ -124,7 +130,7 @@ Windows 真实联合验证使用 `_fluxdns/p1-config-runtime-live/` 的 v2 源�
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| 严格配置与路径 | ConfigV2Loader、ConfigV2、ResolvedConfig | run/validate 共用 v2 加载 | loader、根模板、路径与旧版本拒绝测试 | v1 loader 仅留测试，待 BC-27 删除 |
+| 严格配置与路径 | ConfigV2Loader、ConfigV2、ResolvedConfig | run/validate/reload/首用户候选共用 v2 加载 | loader、根模板、路径与旧版本拒绝测试；2026-09-09 全量 Cargo | 无旧版本转换 |
 | 资源与缓存 | async PreparedRuntime、PolicyDnsCore | run 加载后 prepare | 本轮核对生产接线 | 能解析不表示网络/文件/SQLite 已成功打开 |
 | WebUI | webui model + ManagementService | enable 时创建服务 | P3 内嵌 debug binary 的真实 Bearer HTTP 与浏览器 | origin、DB 与 bind 必须可用；默认 binary 可仅提供 API，SPA 需要 embed feature，详见[管理端](backend/management.md) |
 | 首用户写回 | active ConfigStore + source-preserving editor | setup，run 前恢复 journal | v2 active source 双文件提交测试 | HTTP 断连与磁盘故障组合仍需更高层验收 |
@@ -256,9 +262,9 @@ ConfigV2
   → ResolvedConfig
 ```
 
-- v1 DTO/migration 仅留给 BC-27 前的内部回归测试，不从生产 `run`/`validate` 可达。
+- v1 顶层 DTO、迁移注册表和测试加载路径已删除；测试复用正式 v2 配置。
 - 缺失、显式 `null`、空数组和空对象的区别由严格 v2 parser 保留；cache/TTL/ECS 继承和来源信息在 `ResolvedConfig` 阶段一次性确定。
-- 原始配置文件不被自动覆盖。实现 `validate`/`migrate`/`print-normalized`/`diff`/`rollback` 命令时，输出应写到新文件或显式指定的目标，并保存输入/输出 hash、step IDs 和变更摘要。
+- `validate` 不写入原始配置或快照；不提供旧配置迁移命令。
 - 配置 schema 版本、SQLite schema 版本、资源 parser/compiler 版本和 cache key format 版本彼此独立；升级一个版本不能隐式宣称其他版本兼容。
 - 运行时升级沿用 `prepare candidate → preflight → atomic activate/keep old`：可热更新项替换 `RuntimeSnapshot`，需要重新绑定的项 drain 后切换，无法安全切换的项拒绝候选并保留旧运行时。
 

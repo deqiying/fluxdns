@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::model::LogLevelDto;
 use crate::config::resolve::SecretValidationError;
-use crate::config::{ConfigLoadError, ConfigLoader, ConfigV2Loader, LoadOptions};
+use crate::config::{ConfigLoadError, ConfigV2Loader, LoadOptions};
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::observability;
 use crate::ports::effects::SocketFactory;
@@ -325,7 +325,7 @@ async fn prepare_reload_candidate(
     cancellation: Cancellation,
     allow_logging_change: bool,
 ) -> Result<PreparedRuntime, ApplicationReloadError> {
-    let output = ConfigLoader::new(LoadOptions::default().without_snapshot())
+    let output = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
         .load_from_path(path)
         .map_err(ApplicationReloadError::Config)?;
     output
@@ -674,7 +674,7 @@ mod tests {
     use hickory_proto::rr::{Name, RData, RecordType};
     use tokio::net::UdpSocket;
 
-    use crate::config::{ConfigLoader, LoadOptions};
+    use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::dns::{Cancellation, Deadline, RuntimeRevision};
     use crate::ports::effects::{
         ActivatedSocket, ActivatedSocketHandle, PreparedSocket, SocketFactory, SocketKind,
@@ -743,13 +743,14 @@ mod tests {
     pub(super) fn reload_source(work: &std::path::Path, port: u16) -> String {
         format!(
             r#"
-version: 1
+version: 2
 work:
   path: {}
   rules_path: ./rules
 database:
   type: sqlite
   path: ./data.sqlite
+  records_path: ./queries
 logs:
   enable: false
   level: info
@@ -894,7 +895,7 @@ clients: []
         let path = root.join("reload.yaml");
         std::fs::write(&path, reload_source(&root, 5300)).unwrap();
 
-        let initial = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let initial = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_from_path(&path)
             .unwrap()
             .resolved;
@@ -938,7 +939,7 @@ clients: []
         let path = root.join("reload.yaml");
         std::fs::write(&path, reload_source(&root, 5300)).unwrap();
 
-        let initial = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let initial = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_from_path(&path)
             .unwrap()
             .resolved;
@@ -985,7 +986,7 @@ clients: []
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("reload.yaml");
         std::fs::write(&path, reload_source(&root, 5300)).unwrap();
-        let initial = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let initial = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_from_path(&path)
             .unwrap()
             .resolved;
@@ -1062,7 +1063,7 @@ clients: []
         let initial_port = 44_000 + (std::process::id() as u16 % 400) * 2;
         std::fs::write(&path, reload_source(&root, initial_port)).unwrap();
 
-        let initial = ConfigLoader::new(LoadOptions::default().without_snapshot())
+        let initial = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_from_path(&path)
             .unwrap()
             .resolved;
