@@ -18,6 +18,13 @@ pub type DohUpstreamDetails<'a> = (
     Option<&'a EcsDto>,
 );
 
+/// 规则资源读取、下载和解析的默认有界大小，单位为字节。
+pub const DEFAULT_RULE_SET_MAX_SIZE_BYTES: usize = 16 * 1024 * 1024;
+
+fn default_rule_set_max_size_bytes() -> usize {
+    DEFAULT_RULE_SET_MAX_SIZE_BYTES
+}
+
 pub type UpstreamGroupDetails<'a> = (
     &'a [UpstreamMemberDto],
     &'a UpstreamMode,
@@ -54,6 +61,8 @@ impl fmt::Debug for SafeUrl<'_> {
 pub struct WorkDto {
     pub path: PathBuf,
     pub rules_path: PathBuf,
+    #[serde(default = "default_rule_set_max_size_bytes")]
+    pub rule_set_max_size_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

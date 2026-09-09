@@ -20,6 +20,8 @@ work:
   path: /etc/fluxdns # 示例路径；部署时替换为实际绝对路径。
   # 规则资源的落盘目录，相对于 work.path。
   rules_path: ./rules
+  # 规则资源读取、下载和解析的单资源大小上限，单位为字节；默认 16 MiB。
+  rule_set_max_size_bytes: 16777216
 
 # 数据库配置。聚合统计和解析详情使用相互独立的新布局，不读取旧单库数据。
 database:

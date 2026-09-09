@@ -75,6 +75,7 @@ pub struct ResolvedWork {
     pub path: PathBuf,
     pub rules_path: PathBuf,
     pub snapshot_path: PathBuf,
+    pub rule_set_max_size_bytes: usize,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -791,6 +792,7 @@ pub(crate) fn resolve_config_v2(
         rules_path: resolve_path(&paths.work, &config.work.rules_path),
         snapshot_path: paths.work.join("config.yaml"),
         path: paths.work,
+        rule_set_max_size_bytes: config.work.rule_set_max_size_bytes,
     };
     let database = ResolvedDatabase {
         kind: config.database.kind,

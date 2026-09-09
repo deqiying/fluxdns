@@ -273,8 +273,12 @@ impl PolicyIndex {
     }
 
     pub fn from_config(config: &ResolvedConfig) -> Result<Self, PolicyBuildError> {
-        let (hosts, rule_sets) =
-            compile_resources(&config.hosts, &config.rule_sets, &BTreeMap::new())?;
+        let (hosts, rule_sets) = compile_resources(
+            &config.hosts,
+            &config.rule_sets,
+            &BTreeMap::new(),
+            RuleLimits::default().with_max_input_bytes(config.work.rule_set_max_size_bytes),
+        )?;
         validate_rule_set_selectors(config, &rule_sets)?;
         Self::build_with_resources(
             config.listeners.clone(),
@@ -297,6 +301,7 @@ impl PolicyIndex {
             &config.rule_sets,
             supplied_hosts,
             supplied_rule_indexes,
+            RuleLimits::default().with_max_input_bytes(config.work.rule_set_max_size_bytes),
         )?;
         validate_rule_set_selectors(config, &rule_sets)?;
         Self::build_with_resources(
@@ -658,8 +663,15 @@ fn compile_resources(
     hosts: &[ResolvedHostsResource],
     rule_sets: &[ResolvedRuleSet],
     remote_rule_indexes: &BTreeMap<ConfigId, Arc<RuleIndex>>,
+    rule_limits: RuleLimits,
 ) -> Result<ResourceIndexes, PolicyBuildError> {
-    compile_resources_with_supplied(hosts, rule_sets, &BTreeMap::new(), remote_rule_indexes)
+    compile_resources_with_supplied(
+        hosts,
+        rule_sets,
+        &BTreeMap::new(),
+        remote_rule_indexes,
+        rule_limits,
+    )
 }
 
 fn compile_resources_with_supplied(
@@ -667,6 +679,7 @@ fn compile_resources_with_supplied(
     rule_sets: &[ResolvedRuleSet],
     supplied_hosts: &BTreeMap<ConfigId, Arc<HostsIndex>>,
     supplied_rule_indexes: &BTreeMap<ConfigId, Arc<RuleIndex>>,
+    rule_limits: RuleLimits,
 ) -> Result<ResourceIndexes, PolicyBuildError> {
     let mut host_indexes = BTreeMap::new();
     for resource in hosts {
@@ -712,7 +725,7 @@ fn compile_resources_with_supplied(
                     });
                 }
                 ResolvedRuleSet::Const { .. } | ResolvedRuleSet::File { .. } => Arc::new(
-                    load_rule_set(resource, RuleLimits::default())
+                    load_rule_set(resource, rule_limits)
                         .map_err(|source| match source {
                             RuleResourceLoadError::Parse { source, .. } => {
                                 PolicyBuildError::RuleSetParse {
@@ -1391,6 +1404,7 @@ mod tests {
                 rule: r#"{"domain":"rule.example"}"#.to_owned(),
             }],
             &BTreeMap::new(),
+            crate::resource::RuleLimits::default(),
         )
         .unwrap();
 

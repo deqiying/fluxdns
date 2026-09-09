@@ -184,12 +184,16 @@ impl PreparedRuntime {
                 },
             )?,
         );
-        let (host_snapshots, mut rule_snapshots) = load_initial_file_snapshots(&config)?;
+        let rule_limits =
+            RuleLimits::default().with_max_input_bytes(config.work.rule_set_max_size_bytes);
+        let (host_snapshots, mut rule_snapshots) =
+            load_initial_file_snapshots(&config, rule_limits)?;
         for resource in &config.rule_sets {
             let crate::config::resolve::ResolvedRuleSet::Remote { id, .. } = resource else {
                 continue;
             };
-            let options = remote_resource_options(&config, id, deadline, cancellation.clone());
+            let options =
+                remote_resource_options(&config, id, rule_limits, deadline, cancellation.clone());
             let loaded = match restore_remote_rule_set(resource, options.clone()) {
                 Ok(loaded) => loaded,
                 Err(restore_error) => {
@@ -219,6 +223,7 @@ impl PreparedRuntime {
             Arc::clone(&resource_fetcher),
             &host_snapshots,
             &rule_snapshots,
+            rule_limits,
         )?;
         let snapshot = Arc::new(RuntimeSnapshot::with_policy_core_and_resources(
             revision,
@@ -438,6 +443,8 @@ impl PreparedRuntime {
                 let options = remote_resource_options(
                     self.snapshot.config_arc().as_ref(),
                     resource,
+                    RuleLimits::default()
+                        .with_max_input_bytes(self.snapshot.config().work.rule_set_max_size_bytes),
                     deadline,
                     cancellation,
                 );
@@ -684,6 +691,7 @@ fn build_resource_workers(
     fetcher: Arc<dyn ResourceFetcher>,
     host_snapshots: &BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>>,
     rule_snapshots: &BTreeMap<ConfigId, ResourceSnapshot<RuleIndex>>,
+    rule_limits: RuleLimits,
 ) -> Result<BTreeMap<ConfigId, PreparedResourceWorker>, PrepareError> {
     let initial_due = unix_seconds();
     let mut workers = BTreeMap::new();
@@ -780,7 +788,7 @@ fn build_resource_workers(
             ResourceRefreshRuntime::new(registry, policy, initial_due.saturating_add(interval));
         let worker = match resource {
             ResolvedRuleSet::File { .. } => PreparedResourceWorker::FileRule(
-                FileRuleSetRefreshWorker::new(runtime, resource.clone()),
+                FileRuleSetRefreshWorker::new(runtime, resource.clone(), rule_limits),
             ),
             ResolvedRuleSet::Remote { .. } => PreparedResourceWorker::RemoteRule(
                 ResourceRefreshWorker::new(runtime, Arc::clone(&fetcher)),
@@ -794,6 +802,7 @@ fn build_resource_workers(
 
 fn load_initial_file_snapshots(
     config: &ResolvedConfig,
+    rule_limits: RuleLimits,
 ) -> Result<InitialFileSnapshots, PrepareError> {
     let mut hosts = BTreeMap::new();
     for resource in &config.hosts {
@@ -814,7 +823,7 @@ fn load_initial_file_snapshots(
         let ResolvedRuleSet::File { id, .. } = resource else {
             continue;
         };
-        let loaded = load_rule_set(resource, RuleLimits::default()).map_err(|error| {
+        let loaded = load_rule_set(resource, rule_limits).map_err(|error| {
             PrepareError::FileRuleSetResource {
                 resource: id.as_str().to_owned(),
                 reason: error.to_string(),
@@ -892,6 +901,7 @@ fn resolved_rule_set_id(
 fn remote_resource_options(
     config: &ResolvedConfig,
     resource: &crate::config::resolve::ConfigId,
+    rule_limits: RuleLimits,
     deadline: Deadline,
     cancellation: Cancellation,
 ) -> RemoteResourceOptions {
@@ -904,7 +914,7 @@ fn remote_resource_options(
         .rules_path
         .join(format!("{}.manifest", resource.as_str()));
     RemoteResourceOptions::new(
-        crate::resource::RuleLimits::default().max_input_bytes,
+        rule_limits.max_input_bytes,
         content_path,
         manifest_path,
         deadline,

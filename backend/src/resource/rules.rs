@@ -9,10 +9,11 @@ use thiserror::Error;
 
 use super::hosts::CanonicalDomain;
 use crate::config::model::{
-    MAX_RULE_SET_SELECTOR_BYTES, RuleSetFormat, normalize_rule_set_selector,
+    DEFAULT_RULE_SET_MAX_SIZE_BYTES, MAX_RULE_SET_SELECTOR_BYTES, RuleSetFormat,
+    normalize_rule_set_selector,
 };
 
-const DEFAULT_MAX_INPUT_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_INPUT_BYTES: usize = DEFAULT_RULE_SET_MAX_SIZE_BYTES;
 const DEFAULT_MAX_RULES: usize = 131_072;
 const DEFAULT_MAX_RULE_BYTES: usize = 4 * 1024;
 const DEFAULT_MAX_REGEX_BYTES: usize = 2 * 1024;
@@ -45,6 +46,13 @@ impl Default for RuleLimits {
             max_selectors: DEFAULT_MAX_SELECTORS,
             max_selector_bytes: MAX_RULE_SET_SELECTOR_BYTES,
         }
+    }
+}
+
+impl RuleLimits {
+    pub const fn with_max_input_bytes(mut self, max_input_bytes: usize) -> Self {
+        self.max_input_bytes = max_input_bytes;
+        self
     }
 }
 

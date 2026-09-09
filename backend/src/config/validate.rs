@@ -269,6 +269,13 @@ fn validate_startup(config: &ResourceConfig<'_>, report: &mut ConfigErrorReport)
             "path must not be empty",
         ));
     }
+    if config.work.rule_set_max_size_bytes == 0 {
+        report.push(ConfigError::new(
+            ConfigErrorKind::InvalidValue,
+            "work.rule_set_max_size_bytes",
+            "rule-set size limit must be greater than zero",
+        ));
+    }
     if !is_non_empty_path(config.database_path) {
         report.push(ConfigError::new(
             ConfigErrorKind::MissingField,

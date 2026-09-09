@@ -428,11 +428,20 @@ impl FileHostsRefreshWorker {
 pub struct FileRuleSetRefreshWorker {
     runtime: ResourceRefreshRuntime<RuleIndex>,
     resource: ResolvedRuleSet,
+    rule_limits: RuleLimits,
 }
 
 impl FileRuleSetRefreshWorker {
-    pub fn new(runtime: ResourceRefreshRuntime<RuleIndex>, resource: ResolvedRuleSet) -> Self {
-        Self { runtime, resource }
+    pub fn new(
+        runtime: ResourceRefreshRuntime<RuleIndex>,
+        resource: ResolvedRuleSet,
+        rule_limits: RuleLimits,
+    ) -> Self {
+        Self {
+            runtime,
+            resource,
+            rule_limits,
+        }
     }
 
     pub fn runtime(&self) -> &ResourceRefreshRuntime<RuleIndex> {
@@ -468,7 +477,7 @@ impl FileRuleSetRefreshWorker {
             .begin_due(resource_id, now)
             .map_err(LocalResourceRefreshWorkerError::Begin)?;
         let cleanup = permit.clone();
-        let loaded = match load_rule_set(&self.resource, RuleLimits::default()) {
+        let loaded = match load_rule_set(&self.resource, self.rule_limits) {
             Ok(loaded) => loaded,
             Err(error) => {
                 if let Err(release) = self.runtime.fail(cleanup, now) {
@@ -815,7 +824,7 @@ mod tests {
             policy(),
             0,
         );
-        let worker = FileRuleSetRefreshWorker::new(runtime, resource);
+        let worker = FileRuleSetRefreshWorker::new(runtime, resource, RuleLimits::default());
 
         std::fs::write(&path, "DOMAIN-SUFFIX,new.example\n").unwrap();
         let refreshed = worker.refresh(0).unwrap();
