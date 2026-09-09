@@ -78,6 +78,24 @@ describe("QueriesPage 展示语义", () => {
     expect(requests[1].cursor).toBeNull();
   });
 
+  it("触摸点击固定详情，Escape 关闭并恢复触发按钮焦点；恶意 Answer 只作为文本", async () => {
+    const user = userEvent.setup();
+    const malicious = "<img src=x onerror=alert(1)>";
+    const record = { ...direct, answers: { state: "available" as const, total_count: 1,
+      records: [{ name: direct.qname, type: "TXT", ttl_seconds: 60, data: malicious }] } };
+    server.use(http.post("/api/v2/queries/search", () => HttpResponse.json({ ...v2QueryPageFixture, items: [record] })));
+    renderPage();
+    const trigger = await screen.findByRole("button", { name: `查看 ${record.qname} 的详情` });
+    await user.pointer([{ keys: "[TouchA>]", target: trigger }, { keys: "[/TouchA]", target: trigger }]);
+    const detail = await screen.findByRole("dialog", { name: `${record.qname} 解析详情` });
+    expect(detail).toHaveTextContent(record.id);
+    expect(detail).toHaveTextContent(malicious);
+    expect(detail.querySelector("img,[onerror]")).toBeNull();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: `${record.qname} 解析详情` })).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: `查看 ${record.qname} 的详情` })).toHaveFocus());
+  });
+
   it("详情打开时缓冲去重，关闭后才按事件时间应用新记录", async () => {
     const user = userEvent.setup();
     let push: ((batch: QueryBatch) => void) | undefined;

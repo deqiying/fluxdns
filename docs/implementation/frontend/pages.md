@@ -43,6 +43,8 @@ dashboard 先取 v2 HTTP 快照再订阅 WS metrics，system runtime 和全局�
 
 详情显示 canonical qname、Answer 截断计数、strategy/upstream/cache producer 与原始/历史/当前三层客户端事实。qname/Answer 只按文本渲染，缺失耗时不伪造为零；共同保留水位使记录过期时显示明确状态，不按行号寻找替代记录。
 
+P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关闭后必须在渲染完成时按稳定 record ID 重新取得当前 DOM 节点再恢复焦点，不能缓存即将移除的按钮。新增 TouchA 点击、恶意 Answer 文本、Escape 与焦点恢复联合测试，前端 97 项通过。
+
 [`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 以 `/api/v2/system/runtime` 为进程读数权威，显示运行时长、RSS、CPU、线程和采样时间；RSS 从十进制 u64 字符串按 BigInt 换算为 MiB。measurement 不可用时保留后端 reason，不能以零代替。运行时长只从成功响应的 `uptime_seconds` 与前端接收时刻递增，页面隐藏时停止逐秒渲染，重新可见后校正；30 秒采样或手动刷新会按后端基准重置。版本和启动时间同样来自该 v2 响应，进程状态不再依赖旧 system 查询。
 
 [`PageState`](../../../frontend/src/shared/components/PageState.tsx) 与 [formatters](../../../frontend/src/shared/formatters/index.ts) 处理错误/加载和时间/耗时格式；各页面直接展示对应 v2 响应的采样信息，不复制整份后端配置到全局 store。

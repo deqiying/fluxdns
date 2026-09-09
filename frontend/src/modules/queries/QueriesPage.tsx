@@ -67,11 +67,12 @@ export function QueriesPage() {
     if (!detail) return;
     const close = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      const trigger = detailTriggers.current.get(detail.record.id);
+      const recordId = detail.record.id;
       suppressedDetailOpen.current = detail.record.id;
       setDetail(undefined);
       setDetailPinned(false);
-      window.setTimeout(() => trigger?.focus(), 0);
+      // Popover 的开闭 key 会替换触发节点，提交关闭渲染后再按稳定 ID 取当前按钮。
+      window.setTimeout(() => detailTriggers.current.get(recordId)?.focus(), 0);
     };
     document.addEventListener("keydown", close);
     return () => document.removeEventListener("keydown", close);
