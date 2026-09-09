@@ -1,30 +1,23 @@
 import { http, HttpResponse, ws } from "msw";
 import type { AuthSession } from "@/shared/api/types";
 import {
-  healthFixture,
   hostsConfigReadFixture,
   configStateFixture,
   clientsConfigReadFixture,
   dnsConfigReadFixture,
   logsConfigReadFixture,
   listenersConfigReadFixture,
-  overviewFixture,
   outboundConfigReadFixture,
   processMetricsFixture,
-  queryPageFixture,
   ruleSetsConfigReadFixture,
   retentionStatusFixture,
-  resourceFixture,
-  runtimeFixture,
   sessionFixture,
   serviceMetricsFixture,
   setupReadyFixture,
   setupRequiredFixture,
   statisticsConfigReadFixture,
-  statisticsFixture,
   strategiesConfigReadFixture,
   systemConfigReadFixture,
-  systemFixture,
   upstreamsConfigReadFixture,
   v2QueryPageFixture,
   v2QueryRecordsFixture,
@@ -76,15 +69,8 @@ export function resetMockState() {
 
 function unauthorized() {
   return HttpResponse.json(
-    { code: "AUTH_REQUIRED", message: "session required", request_id: "mock-auth-401", retryable: false },
+    { code: "AUTH_REQUIRED", message: "session required", request_id: "mock-auth-401", retryable: false, field_errors: [] },
     { status: 401, headers: { "X-Request-Id": "mock-auth-401" } },
-  );
-}
-
-function invalidArgument(message: string) {
-  return HttpResponse.json(
-    { code: "INVALID_ARGUMENT", message, request_id: "mock-invalid-400", retryable: false },
-    { status: 400, headers: { "X-Request-Id": "mock-invalid-400" } },
   );
 }
 
@@ -115,14 +101,14 @@ export const handlers = [
   http.post("/api/v2/auth/setup", async ({ request }) => {
     if (!setupRequired) {
       return HttpResponse.json(
-        { code: "SETUP_ALREADY_COMPLETED", message: "setup already completed", request_id: "mock-setup-409", retryable: false },
+        { code: "SETUP_ALREADY_COMPLETED", message: "setup already completed", request_id: "mock-setup-409", retryable: false, field_errors: [] },
         { status: 409 },
       );
     }
     const body = (await request.json()) as { username?: string; password?: string };
     if (!body.username || !body.password || body.password.length < 12) {
       return HttpResponse.json(
-        { code: "VALIDATION_FAILED", message: "invalid setup credentials", request_id: "mock-setup-400", retryable: false },
+        { code: "INVALID_ARGUMENT", message: "invalid setup credentials", request_id: "mock-setup-400", retryable: false, field_errors: [] },
         { status: 400 },
       );
     }
@@ -135,7 +121,7 @@ export const handlers = [
     const body = (await request.json()) as { username?: string; password?: string };
     if (!body.username || !body.password) {
       return HttpResponse.json(
-        { code: "AUTH_INVALID_CREDENTIALS", message: "invalid credentials", request_id: "mock-login-401", retryable: false },
+        { code: "AUTH_INVALID_CREDENTIALS", message: "invalid credentials", request_id: "mock-login-401", retryable: false, field_errors: [] },
         { status: 401 },
       );
     }
@@ -147,31 +133,6 @@ export const handlers = [
     if (authorized(request)) authenticated = false;
     return new HttpResponse(null, { status: 204 });
   }),
-  http.get("/api/v1/overview", readOnly(overviewFixture)),
-  http.get("/api/v1/runtime", readOnly(runtimeFixture)),
-  http.get("/api/v1/health", readOnly(healthFixture)),
-  http.get("/api/v1/statistics", ({ request }) => {
-    if (!authorized(request)) return unauthorized();
-    const url = new URL(request.url);
-    const page = Number(url.searchParams.get("page") ?? "1");
-    const pageSize = Number(url.searchParams.get("page_size") ?? "20");
-    if (page < 1 || pageSize < 1 || pageSize > 100) return invalidArgument("pagination outside contract");
-    const dimension = url.searchParams.get("dimension") ?? "total";
-    const items = statisticsFixture.items.map((item) => ({ ...item, dimension_kind: dimension, dimension_value: dimension === "total" ? "all" : "fixture" }));
-    return HttpResponse.json({ ...statisticsFixture, page, page_size: pageSize, items });
-  }),
-  http.get("/api/v1/queries", ({ request }) => {
-    if (!authorized(request)) return unauthorized();
-    const url = new URL(request.url);
-    const page = Number(url.searchParams.get("page") ?? "1");
-    const pageSize = Number(url.searchParams.get("page_size") ?? "20");
-    if (page < 1 || pageSize < 1 || pageSize > 100) return invalidArgument("pagination outside contract");
-    const start = (page - 1) * pageSize;
-    const items = queryPageFixture.items.slice(start, start + pageSize);
-    return HttpResponse.json({ ...queryPageFixture, page, page_size: pageSize, items });
-  }),
-  http.get("/api/v1/resources", readOnly(resourceFixture)),
-  http.get("/api/v1/system", readOnly(systemFixture)),
   http.get("/api/v2/system/runtime", readOnlyV2(processMetricsFixture)),
   http.get("/api/v2/service/metrics", readOnlyV2(serviceMetricsFixture)),
   http.post("/api/v2/events/ticket", ({ request }) => authorized(request)

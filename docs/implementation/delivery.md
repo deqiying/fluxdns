@@ -16,7 +16,7 @@
 
 ## 前端与接口生成
 
-[`frontend/package.json`](../../frontend/package.json) 定义 `dev`、`generate:api`、`typecheck`、`test` 和 `build`。`generate:api` 顺序执行 `generate:api:current` 与 `generate:api:v2`：当前 [v1 OpenAPI](../../frontend/openapi/management-api-v1.yaml) 生成 [`generated.ts`](../../frontend/src/shared/api/generated.ts)，P0 [v2 目标契约](../../frontend/openapi/management-api-v2.yaml) 生成 [`generated-v2.ts`](../../frontend/src/shared/api/generated-v2.ts)。生成文件不人工编辑；独立产物只服务分阶段编译，不代表运行时双版本兼容，正式切换时删除被替代的 v1 产物。
+[`frontend/package.json`](../../frontend/package.json) 定义 `dev`、`generate:api`、`typecheck`、`test` 和 `build`。`generate:api` 执行 `generate:api:v2`：唯一 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml) 生成 [`generated-v2.ts`](../../frontend/src/shared/api/generated-v2.ts)。认证与业务共用该契约；生成文件不人工编辑，v1 schema/类型和旧页面 fixture 已删除。
 
 `test:contract:v2` 用 Node 自带 test runner 运行 OpenAPI 3.1 schema 校验，与 Rust 消费同一个 [JSON 夹具](../../backend/tests/fixtures/management-v2.json)。它独立于 Vitest UI suite；`test` 不会自动包含该检查，契约变化必须额外执行。该检查不启动服务，不验证真实 HTTP/WS 或完整配置引用语义。
 

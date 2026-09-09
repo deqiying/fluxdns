@@ -13,7 +13,7 @@
 同一事实只在一个位置完整维护，其余入口给摘要和链接。权威文档清单以[总索引](../README.md)为准，尤其：
 
 - 配置字段/默认值/路径/校验只在 [implementation/configuration.md](../implementation/configuration.md) 完整描述，并同步 model、resolve、validate 与示例。
-- API 字段以 [OpenAPI](../../frontend/openapi/management-api-v1.yaml) 为准，生成的 TypeScript 不人工编辑，Markdown 不复制全套 schema。
+- API 字段以 [OpenAPI](../../frontend/openapi/management-api-v2.yaml) 为准，生成的 TypeScript 不人工编辑，Markdown 不复制全套 schema。
 - 工具来源、版本与安装/缓存规则放在 rules；产品构建、运行和发布脚本的实际步骤、产物与限制放在 [implementation/delivery.md](../implementation/delivery.md)。文档检查器由[项目文档维护技能](../../.agents/skills/project-doc-maintenance/SKILL.md)维护，支持范围以本规则为准。
 - 根/前端 README 是最短使用入口；AGENTS 是强制路由；项目 skill 执行本规则，不复制状态枚举、完整目录树和第二套权威表。
 

@@ -3,9 +3,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { setMockAuthenticated } from "@/mocks/handlers";
 import { server } from "@/mocks/server";
 import { ApiError, getSafeErrorMessage } from "./errors";
-import { apiRequest, apiV2Request, createSearchParams, onUnauthorized } from "./client";
+import { apiV2Request, onUnauthorized } from "./client";
 
-describe("apiRequest", () => {
+describe("apiV2Request", () => {
   beforeEach(() => setMockAuthenticated(true));
   it("业务请求使用 Bearer 和 JSON，不附带 Cookie", async () => {
     server.use(
@@ -14,7 +14,7 @@ describe("apiRequest", () => {
       ),
     );
 
-    await expect(apiRequest("/probe")).resolves.toEqual({
+    await expect(apiV2Request("/probe")).resolves.toEqual({
       credentials: "omit",
       accept: "application/json",
       authorization: `Bearer ${"A".repeat(43)}`,
@@ -44,20 +44,20 @@ describe("apiRequest", () => {
       ),
     );
 
-    await expect(apiRequest("/failure")).rejects.toMatchObject({ status, code, requestId: `req-${status}` });
+    await expect(apiV2Request("/failure")).rejects.toMatchObject({ status, code, requestId: `req-${status}` });
   });
 
   it("拒绝将 HTML 错误页当作 API 成功", async () => {
     server.use(http.get("/api/v2/html", () => new HttpResponse("<html>fallback</html>", { headers: { "Content-Type": "text/html" } })));
-    await expect(apiRequest("/html")).rejects.toMatchObject({ code: "INVALID_RESPONSE", kind: "invalid-response" });
+    await expect(apiV2Request("/html")).rejects.toMatchObject({ code: "INVALID_RESPONSE", kind: "invalid-response" });
   });
 
   it("区分超时和调用方取消", async () => {
     server.use(http.get("/api/v2/slow", async () => { await delay("infinite"); return HttpResponse.json({}); }));
-    await expect(apiRequest("/slow", { timeoutMs: 5 })).rejects.toMatchObject({ code: "REQUEST_TIMEOUT", kind: "timeout" });
+    await expect(apiV2Request("/slow", { timeoutMs: 5 })).rejects.toMatchObject({ code: "REQUEST_TIMEOUT", kind: "timeout" });
 
     const controller = new AbortController();
-    const request = apiRequest("/slow", { signal: controller.signal, timeoutMs: 1_000 });
+    const request = apiV2Request("/slow", { signal: controller.signal, timeoutMs: 1_000 });
     controller.abort();
     await expect(request).rejects.toMatchObject({ code: "REQUEST_CANCELLED", kind: "cancelled" });
   });
@@ -67,11 +67,11 @@ describe("apiRequest", () => {
     const unsubscribe = onUnauthorized(listener);
     server.use(http.get("/api/v2/private", () => HttpResponse.json({ code: "AUTH_REQUIRED", message: "required", request_id: "req-401", retryable: false }, { status: 401 })));
 
-    await expect(apiRequest("/private")).rejects.toBeInstanceOf(ApiError);
+    await expect(apiV2Request("/private")).rejects.toBeInstanceOf(ApiError);
     expect(listener).toHaveBeenCalledOnce();
 
     listener.mockClear();
-    await expect(apiRequest("/private", { handleUnauthorized: false })).rejects.toBeInstanceOf(ApiError);
+    await expect(apiV2Request("/private", { handleUnauthorized: false })).rejects.toBeInstanceOf(ApiError);
     expect(listener).not.toHaveBeenCalled();
     unsubscribe();
   });
@@ -97,11 +97,5 @@ describe("apiRequest", () => {
       requestId: "request-422",
       fieldErrors: [{ path: "/changes/0/change/path", code: "INVALID_ARGUMENT" }],
     });
-  });
-});
-
-describe("createSearchParams", () => {
-  it("忽略 undefined 并稳定保留服务端参数", () => {
-    expect(createSearchParams({ page: 2, transport: undefined, order: "desc" })).toBe("page=2&order=desc");
   });
 });

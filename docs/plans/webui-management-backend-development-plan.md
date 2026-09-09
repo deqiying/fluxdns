@@ -29,7 +29,7 @@
 
 | 任务 | 内容 | 主要现有入口 | 依赖 |
 | --- | --- | --- | --- |
-| BE-01 | 版本、配置与 API 契约 | [model](../../backend/src/config/model.rs)、[resolve](../../backend/src/config/resolve.rs)、[validate](../../backend/src/config/validate.rs)、[OpenAPI](../../frontend/openapi/management-api-v1.yaml) | 总计划 D-01 至 D-07 |
+| BE-01 | 版本、配置与 API 契约 | [model](../../backend/src/config/model.rs)、[resolve](../../backend/src/config/resolve.rs)、[validate](../../backend/src/config/validate.rs)、[OpenAPI](../../frontend/openapi/management-api-v2.yaml) | 总计划 D-01 至 D-07 |
 | BE-02 | 活动配置、应用后持久化、外部差异与热日志 | [store](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs)、[service](../../backend/src/service.rs)、[app](../../backend/src/app.rs)、[observability](../../backend/src/observability.rs) | BE-01、配置专项 |
 | BE-03 | 客户端身份和匹配 | [DNS context](../../backend/src/dns/context.rs)、[client](../../backend/src/policy/client.rs)、[DNS Policy](../../backend/src/dns/policy.rs)、[observation](../../backend/src/ports/observation.rs)、[resolve_log](../../backend/src/storage/resolve_log.rs) | BE-01 |
 | BE-04 | 独立缓存快照 | [cache service](../../backend/src/cache/service.rs)、[memory](../../backend/src/cache/memory.rs)、[moka](../../backend/src/cache/moka.rs)、[codec](../../backend/src/cache/codec.rs)、[snapshot owner](../../backend/src/cache/snapshot_owner.rs) | BE-01；与 BE-03 共同核验 fingerprint |
@@ -62,7 +62,7 @@ BE-01 中“新 fixture 可直接启动”的联合验收依赖 BC-26；当前 f
 4. 定义资源读取/预校验/应用保存、active/file revision、旧 name、operation 查询、外部差异/还原/组合采用和重试同步；payload 使用严格模块类型，不接收任意 JSON Patch 或整份 YAML。
 5. 定义身份 DTO、稳定记录 ID、历史分页 cursor、提交序列 cursor、保留预览/状态、指标单位与可用性。WS 消息体的 schema 与 HTTP DTO 共用唯一类型权威，不另手写一套前端事件模型。
 6. 明确有效载荷、分页、天数、查询时间、WS 帧/速率/队列、在线身份数量等保护值及超限错误。详情条数业务配额删除不等于取消资源保护。
-7. 同批更新正式 OpenAPI、类型生成脚本输入和生成类型、合法/非法 fixture；不手工编辑 `generated.ts`。API 切换同步考虑 auth client、Vite 开发代理、mock、SPA API fallback。
+7. 同批更新正式 OpenAPI、类型生成脚本输入和生成类型、合法/非法 fixture；不手工编辑 `generated-v2.ts`。API 切换同步考虑 auth client、Vite 开发代理、mock、SPA API fallback。
 
 ### 交付与验收
 

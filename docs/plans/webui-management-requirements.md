@@ -10,7 +10,7 @@
 
 ## 1. 背景与目标
 
-当前 WebUI 是临时性的只读浏览界面，需要升级为能够查看运行状态、浏览解析记录并按模块管理配置的后台。现有页面与接口入口见 [App](../../frontend/src/app/App.tsx)、[Management 查询路由](../../backend/src/management/query.rs) 和 [OpenAPI](../../frontend/openapi/management-api-v1.yaml)；首次初始化、登录和登出不属于这里所说的只读查询。
+当前 WebUI 是临时性的只读浏览界面，需要升级为能够查看运行状态、浏览解析记录并按模块管理配置的后台。现有页面与接口入口见 [App](../../frontend/src/app/App.tsx)、[Management 查询路由](../../backend/src/management/query.rs) 和 [OpenAPI](../../frontend/openapi/management-api-v2.yaml)；首次初始化、登录和登出不属于这里所说的只读查询。
 
 本文维护需求与视觉草案，按[用户确认决策](webui-management-decisions.md)修订；配套[后端方案](webui-management-backend-refactor.md)维护身份/缓存/保留，[配置专项](webui-management-config-runtime-plan.md)维护热更新和文件同步。本轮不修改产品代码，新增实现细节仍是待评审草案。
 
@@ -135,7 +135,7 @@
 
 上游及缓存记录在来源列保持两行结构：第一行标明“上游”“缓存命中”或“过期缓存”；第二行显示实际产生该答案的上游名称。命中缓存时使用 `upstream_used_id` 所记录的缓存生产上游，与普通上游响应保持相同排版，不以“缓存响应”替代名称，也不将上游组目标当作实际上游。该名称表示写入缓存时的来源，不代表本次请求再次访问该上游；记录缺失时明确显示“上游未保留”，不猜测或补造名称。Hosts、规则等本地响应的展示不受此要求影响。
 
-图中同时包含正常答案、缓存命中、Hosts、规则负响应、超时、答案截断、过期缓存与历史脱敏记录，状态文字不只依赖颜色。用于对照的现有字段见 [QueryRecord / QueryAnswer](../../frontend/openapi/management-api-v1.yaml) 与 [QueriesPage](../../frontend/src/modules/queries/QueriesPage.tsx)；现有页面采用行展开，尚非图中的结果列悬浮交互。域名/客户端搜索与 WebSocket 自动刷新属于目标能力，现有 `/queries` 查询参数未包含该搜索条件，本轮不新增参数或实现这些能力。
+图中同时包含正常答案、缓存命中、Hosts、规则负响应、超时、答案截断、过期缓存与历史脱敏记录，状态文字不只依赖颜色。用于对照的现有字段见 [QueryRecord / QueryAnswer](../../frontend/openapi/management-api-v2.yaml) 与 [QueriesPage](../../frontend/src/modules/queries/QueriesPage.tsx)；现有页面采用行展开，尚非图中的结果列悬浮交互。域名/客户端搜索与 WebSocket 自动刷新属于目标能力，现有 `/queries` 查询参数未包含该搜索条件，本轮不新增参数或实现这些能力。
 
 ![解析记录列表视觉草案](webui-management-designs/webui-query-records.svg)
 
@@ -221,7 +221,7 @@ WebUI 公开 Origin 与 HTTP 监听分别展示，不能暗示管理服务本身
 
 ### 7.17 本轮覆盖与边界
 
-此前补齐的 22 张图稿于 2026-09-05 静态核对 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 下的 [配置模型](../../backend/src/config/model.rs)、[配置参考](../implementation/configuration.md)和 [OpenAPI](../../frontend/openapi/management-api-v1.yaml)，不修改本文原始页面入口核对基线。
+此前补齐的 22 张图稿于 2026-09-05 静态核对 `f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 下的 [配置模型](../../backend/src/config/model.rs)、[配置参考](../implementation/configuration.md)和 [OpenAPI](../../frontend/openapi/management-api-v2.yaml)，不修改本文原始页面入口核对基线。
 
 本次按“原始 ID/IP＋最小匹配结果”重画客户端、解析记录和 DNS 配置相关视图，新增 IP 匹配详情，以统计保留弹窗替代旧解析记录配置图，并同步系统存储只读信息及弹窗背景。全套现为 29 张，未受影响的图稿保持原样；相关源码差异与本次静态核对基线见[配套后端方案](webui-management-backend-refactor.md#2-现状与差异)。
 

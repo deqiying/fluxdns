@@ -4,7 +4,7 @@
 >
 > 适用范围：前端 bootstrap、provider、路由鉴权、HTTP client 与会话回收
 >
-> 最后核对：2026-09-09（P4 共享 WS、实时服务状态与记录交互）
+> 最后核对：2026-09-09（P5 移除旧页面与 v1 API）
 >
 > 核对基线：`309f49bbd22dc725bd54ecf6d8cc213251b63773` 加本次 P4 文档工作树
 
@@ -27,9 +27,9 @@
 
 ## HTTP client 与类型
 
-[`apiRequest`](../../../frontend/src/shared/api/client.ts) 固定 `/api/v1` 前缀，[`apiV2Request`](../../../frontend/src/shared/api/client.ts)固定 `/api/v2` 前缀；二者共用默认 10 秒 timeout、调用者 AbortSignal、内存 Bearer 和错误处理，但 v2 调用不会改变认证刷新仍使用 v1 专用端点。P1 业务请求使用 Bearer 且 `credentials: omit`，认证专用请求才携带同源 Cookie，详见下节。client 校验 JSON Content-Type、解析错误 envelope，保留 request ID/retry-after 及受限字段错误；非鉴权请求 `401` 通知统一监听者。普通成功值最终是泛型断言，不是完整 OpenAPI 响应运行时 validator。
+[`apiV2Request`](../../../frontend/src/shared/api/client.ts) 固定 `/api/v2` 前缀，认证也使用该版本；默认 10 秒 timeout，支持调用者 AbortSignal、内存 Bearer 和统一错误处理。业务请求使用 Bearer 且 `credentials: omit`，认证专用请求才携带同源 Cookie，详见下节。client 校验 JSON Content-Type、解析错误 envelope，保留 request ID/retry-after 及受限字段错误；非鉴权请求 `401` 通知统一监听者。普通成功值最终是泛型断言，不是完整 OpenAPI 响应运行时 validator。
 
-兼容接口类型来自 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 生成的 [`generated.ts`](../../../frontend/src/shared/api/generated.ts)，配置、保留、指标、历史与实时消息来自 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成的 [`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts)；[`types.ts`](../../../frontend/src/shared/api/types.ts) 只提供仍在使用的 v1 前端投影。schema 改动后使用 `generate:api`，命令见[前端 README](../../../frontend/README.md)。
+认证、配置、保留、指标、历史与实时消息均来自 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成的 [`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts)；[`types.ts`](../../../frontend/src/shared/api/types.ts) 只提供认证与错误的别名。schema 改动后使用 `generate:api`，命令见[前端 README](../../../frontend/README.md)。v1 schema、生成文件、client、fixture 与旧页面已删除。
 
 ## P1 Bearer 接线（2026-09-08）
 
@@ -37,7 +37,7 @@
 
 同一认证代次内所有请求共享一次在途刷新，刷新最多 5 秒且各等待方仍受自己的 10 秒/调用者取消约束。一个请求取消不终止其他等待者；登出/401 增加认证代次并禁止迟到刷新恢复会话，新登录不受旧请求迟到 401 影响。刷新只发生在业务请求发送前；已发出的请求返回 401/500 或结果未知均不自动重放。登出仍清空本地状态，失败不等于服务端已撤销，沿用上节的错误边界。
 
-mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状态模拟，不充当生产替代。Vite 继续把 `/api` 透明代理到既有后端，未硬编码令牌或生产 baseURL；现有页面与认证 handler 保持 v1，配置公共 client 明确选择 v2，不提供运行时任意版本开关。Bearer 测试覆盖并发、取消、迟到结果、写请求不重放、无 token session 投影和登录/登出流程。
+mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状态模拟，不充当生产替代。Vite 把 `/api` 透明代理到后端，未硬编码令牌或生产 baseURL；页面、认证与 mock handler 均使用 v2，不提供运行时版本开关。Bearer 测试覆盖并发、取消、迟到结果、写请求不重放、无 token session 投影和登录/登出流程。
 
 真实内嵌 WebUI 的浏览器验证覆盖初始化、页面重载后的 Cookie 刷新/Bearer 业务请求、登出后刷新保持未登录、再次登录及 Cookie 清除。开发者接口只读确认 localStorage/sessionStorage 条目均为 0，`document.cookie` 不可读刷新凭据；Network 只记录请求头是否存在，不输出 token。该验证使用旧壳层的真实后端数据，不证明 FC-01 十二路由、FC-02 公共表单或 v2 配置接口完成。
 
@@ -45,9 +45,9 @@ mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状�
 
 [`AppLayout`](../../../frontend/src/shared/components/AppLayout.tsx) 从同一 `managementRoutes` 契约生成“监控 / DNS 管理 / 系统”三组 12 个一级入口，使用 Lucide 图标、浅色侧栏、面包屑、当前用户与图标化登出/折叠控件。桌面侧栏独立滚动；小于 720px 时改用 Drawer，不缩放固定宽画布。未知路径不选择任一菜单项，旧 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 路径不兼容跳转。
 
-`/dashboard` 和 `/queries` 继续消费当前 v1 真实只读数据，`/system-runtime` 接入 v2 进程读数；P3 已让其余九个配置入口全部消费 v2 类型化读写，不再挂载 [`PendingModulePage`](../../../frontend/src/app/PendingModulePage.tsx)。`/upstreams` 的“上游 / 上游组”tab 仍以 `tab=groups` 进入浏览器历史。主题 token 使用浅灰导航、白工作区、蓝色主操作及独立成功/警告/错误色；未增加暗色全站主题。
+`/dashboard`、`/queries` 和 `/system-runtime` 使用 v2 真实指标/记录；其余九个配置入口使用 v2 类型化读写，不再挂载 [`PendingModulePage`](../../../frontend/src/app/PendingModulePage.tsx)。`/upstreams` 的“上游 / 上游组”tab 以 `tab=groups` 进入浏览器历史。主题 token 使用浅灰导航、白工作区、蓝色主操作及独立成功/警告/错误色；未增加暗色全站主题。
 
-Windows 浏览器 fixture 验证覆盖默认桌面、390×844、移动 Drawer 跳转、上游 tab URL、Console warning/error 为空；Vitest 定向路由测试 22 项通过。fixture 不证明 v2 handler、真实配置页面、深链接静态 fallback 或生产内嵌资源已接线；已接入页面仍使用 `/api/v1`。
+P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个路由分别在 1600×1040、1280×800、768×1024、390×844 直接进入，48 项均呈现预期标题且无页面级横向溢出或错误提示。窄屏导航、Hosts 编辑弹窗、Tab、Escape 与关闭后编辑按钮焦点恢复通过；Console warning/error 为 0。localStorage/sessionStorage 为空，脚本不可读刷新 Cookie，生产没有 service worker 接管。前端 23 文件 96 项测试、类型生成、typecheck 与构建通过；完整联合验收另按 P5 范围记录。
 
 ## P1 配置交互基础（2026-09-08）
 
@@ -156,4 +156,8 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 
 ## 认证与系统信息统一 v2（2026-09-09）
 
-BC-27 切换后，初始化、登录、刷新、登出和 session 统一请求 `/api/v2/auth/*`；共享 client 的内存凭据、取消与认证代次规则保持不变。系统运行页从唯一 `/api/v2/system/runtime` 响应读取版本、启动时间和进程采样，删除独立的旧 system query/hook。旧页面及生成产物退出由 FC-15 继续跟踪。
+BC-27 切换后，初始化、登录、刷新、登出和 session 统一请求 `/api/v2/auth/*`；共享 client 的内存凭据、取消与认证代次规则保持不变。系统运行页从唯一 `/api/v2/system/runtime` 响应读取版本、启动时间和进程采样，删除独立的旧 system query/hook。FC-15 已删除无路由的 runtime/health/statistics/resources 页面、专用展示组件、API/hooks、v1 生成产物和 fixture；公共认证类型只别名到 v2。
+
+## 旧页面退出验证（2026-09-09）
+
+`df1a145` 加 FC-15 工作树：生成唯一 v2 类型后 typecheck、23 文件 96 项 Vitest 和生产 build 通过；删除旧 fixture 的专用断言，保留 v2 查询键、页大小、身份和敏感字段覆盖。浏览器与四档视口验收继续在 P5 联合验证中记录。

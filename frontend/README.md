@@ -4,7 +4,7 @@
 >
 > 适用范围：前端工程最短开发入口与导航
 
-React + TypeScript + Vite WebUI。实际认证、路由和页面接线见[前端实现](../docs/implementation/frontend/README.md)，设计见[前端架构](../docs/architecture/frontend.md)；兼容接口与正式管理接口字段分别以 [v1 OpenAPI](openapi/management-api-v1.yaml) 和 [v2 OpenAPI](openapi/management-api-v2.yaml) 为准。
+React + TypeScript + Vite WebUI。实际认证、路由和页面接线见[前端实现](../docs/implementation/frontend/README.md)，设计见[前端架构](../docs/architecture/frontend.md)；全部认证与管理接口字段以 [v2 OpenAPI](openapi/management-api-v2.yaml) 为准。
 
 ## 开发
 
@@ -37,4 +37,4 @@ pnpm run test
 pnpm run build
 ```
 
-生成类型不手工修改。正式配置、指标、解析记录和 WS 契约由 [v2 OpenAPI](openapi/management-api-v2.yaml) 生成到 `generated-v2.ts`；dashboard/queries、`/system-runtime` 与十模块配置页均显式选择 v2 client，system runtime 仍复用 v1 基础信息等待 P5 收口。浏览器 WS 使用 Bearer ticket 端点和 subprotocol 单次凭据，禁止 URL token 或业务 Cookie 鉴权。`generate:api` 同时更新当前与 v2 产物，`test:contract:v2` 单独校验跨端夹具。上述为操作命令，不是通过记录。内嵌打包、显式配置启动、版本与自动发布，以及浏览器/原生平台的现有验收边界，统一见[交付实现](../docs/implementation/delivery.md)。
+生成类型不手工修改。正式配置、指标、解析记录和 WS 契约由 [v2 OpenAPI](openapi/management-api-v2.yaml) 生成到 `generated-v2.ts`；dashboard/queries、`/system-runtime` 与十模块配置页均显式选择 v2 client；认证、系统基础信息与业务已统一 v2。浏览器 WS 使用 Bearer ticket 端点和 subprotocol 单次凭据，禁止 URL token 或业务 Cookie 鉴权。`generate:api` 只生成 v2 类型，旧页面、v1 schema/类型、API/hooks/fixture 已删除，`test:contract:v2` 单独校验跨端夹具。上述为操作命令，不是通过记录。内嵌打包、显式配置启动、版本与自动发布，以及浏览器/原生平台的现有验收边界，统一见[交付实现](../docs/implementation/delivery.md)。

@@ -10,8 +10,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "generate:api": "pnpm run generate:api:current && pnpm run generate:api:v2",
-    "generate:api:current": "openapi-typescript openapi/management-api-v1.yaml -o src/shared/api/generated.ts",
+    "generate:api": "pnpm run generate:api:v2",
     "generate:api:v2": "openapi-typescript openapi/management-api-v2.yaml -o src/shared/api/generated-v2.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

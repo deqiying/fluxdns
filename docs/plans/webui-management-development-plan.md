@@ -59,7 +59,7 @@ P0 已落实 BC-01 配置、HTTP/WS、生成类型与路由/表单契约；BC-26
 | --- | --- | --- |
 | 前端 | [App](../../frontend/src/app/App.tsx) 和 [AppLayout](../../frontend/src/shared/components/AppLayout.tsx) 已注册 12 个目标入口；dashboard/queries 与配置页面均接 v2，system runtime 仍复用少量 v1 基础信息 | P5 按引用退出兼容源码/API，保留认证边界，不并存两套正式后台 |
 | 前端基础 | [package.json](../../frontend/package.json) 已有 React、TypeScript、Vite、Ant Design、TanStack Query、Router、Vitest/MSW | 复用工程和状态分层，不借重构更换整套技术栈 |
-| API | [router](../../backend/src/management/router.rs)、[query](../../backend/src/management/query.rs) 和 [OpenAPI](../../frontend/openapi/management-api-v1.yaml) 为认证与只读查询；统计查询限制 31 天 | 增加受限配置读写、身份过滤、跨日查询、实时指标和 WebSocket |
+| API | [router](../../backend/src/management/router.rs)、[query](../../backend/src/management/query.rs) 和 [OpenAPI](../../frontend/openapi/management-api-v2.yaml) 为认证与只读查询；统计查询限制 31 天 | 增加受限配置读写、身份过滤、跨日查询、实时指标和 WebSocket |
 | 配置写入 | [ConfigStore](../../backend/src/config/store.rs) 只有首用户定向写入、fingerprint/journal 与恢复 | 保存活动源表达，重建“先应用后持久化”事务及恢复门槛 |
 | 文件与日志 | [app](../../backend/src/app.rs) watcher 已只提示；日志 owner 已复用现有 filter/输出并保持 writer，支持 service 热切换 | 继续闭合 v2 事务/持久化与 HTTP/UI；Windows 子项证据见[日志热切换](../implementation/backend/background-services.md#p1-日志热切换2026-09-07) |
 | 客户端与详情 | [model](../../backend/src/config/model.rs)、[Policy](../../backend/src/policy/client.rs)、[observation](../../backend/src/ports/observation.rs) 使用名称、多 ID 匹配与 `client_bucket`；详情来源无原始 ID 字段 | 建立单 ID 主键及原始身份、当时匹配、当前显示信息三层语义 |

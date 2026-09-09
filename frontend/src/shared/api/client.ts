@@ -52,7 +52,7 @@ async function accessForRequest(signal: AbortSignal): Promise<{ token: string; e
   if (!refreshAllowed) throw new ApiError({ code: "AUTH_REQUIRED", message: "session required", kind: "http", status: 401 });
   if (access && access.expiresAt > Date.now() + 30_000) return { token: access.token, epoch };
   if (!refreshing || refreshing.epoch !== epoch) {
-    const promise = apiRequest<AuthSession>("/auth/refresh", {
+    const promise = apiV2Request<AuthSession>("/auth/refresh", {
       method: "POST", auth: "refresh", timeoutMs: 5_000, handleUnauthorized: false,
     }).then((value) => {
       if (epoch !== authEpoch) throw new ApiError({ code: "REQUEST_CANCELLED", message: "session changed", kind: "cancelled" });
@@ -93,10 +93,6 @@ export function onAuthSessionChange(listener: () => void): () => void {
 export function reportUnauthorized(): void {
   clearAccessSession();
   unauthorizedListeners.forEach((listener) => listener());
-}
-
-export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
-  return requestWithPrefix<T>(API_V2_PREFIX, path, options);
 }
 
 /** 唯一 v2 同源契约入口，认证和业务共用取消及会话边界。 */
@@ -217,16 +213,6 @@ async function requestWithPrefix<T>(prefix: string, path: string, options: ApiRe
     window.clearTimeout(timeout);
     options.signal?.removeEventListener("abort", abortFromCaller);
   }
-}
-
-export function createSearchParams(values: Record<string, string | number | undefined>): string {
-  const params = new URLSearchParams();
-  Object.entries(values).forEach(([key, value]) => {
-    if (value !== undefined && value !== "") {
-      params.set(key, String(value));
-    }
-  });
-  return params.toString();
 }
 
 function defaultHttpErrorCode(status: number): string {

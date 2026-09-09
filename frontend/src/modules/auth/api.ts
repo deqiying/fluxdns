@@ -1,5 +1,5 @@
 import { ApiError } from "@/shared/api/errors";
-import { acceptAuthSession, apiRequest, clearAccessSession } from "@/shared/api/client";
+import { acceptAuthSession, apiV2Request, clearAccessSession } from "@/shared/api/client";
 import type { AuthSession, LoginRequest, Session, SetupRequest, SetupStatus } from "@/shared/api/types";
 
 export const authKeys = {
@@ -9,7 +9,7 @@ export const authKeys = {
 };
 
 export function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus> {
-  return apiRequest<SetupStatus>("/auth/setup", {
+  return apiV2Request<SetupStatus>("/auth/setup", {
     signal,
     handleUnauthorized: false,
     auth: "public",
@@ -18,7 +18,7 @@ export function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus> {
 
 export async function getSession(signal?: AbortSignal): Promise<Session | null> {
   try {
-    return await apiRequest<Session>("/auth/session", {
+    return await apiV2Request<Session>("/auth/session", {
       signal,
       handleUnauthorized: false,
     });
@@ -32,7 +32,7 @@ export async function getSession(signal?: AbortSignal): Promise<Session | null> 
 
 export async function login(credentials: LoginRequest): Promise<Session> {
   clearAccessSession();
-  const response = await apiRequest<AuthSession>("/auth/login", {
+  const response = await apiV2Request<AuthSession>("/auth/login", {
     method: "POST",
     body: credentials,
     handleUnauthorized: false,
@@ -43,7 +43,7 @@ export async function login(credentials: LoginRequest): Promise<Session> {
 
 export async function initializeWebUi(credentials: SetupRequest): Promise<Session> {
   clearAccessSession();
-  const response = await apiRequest<AuthSession>("/auth/setup", {
+  const response = await apiV2Request<AuthSession>("/auth/setup", {
     method: "POST",
     body: credentials,
     handleUnauthorized: false,
@@ -54,7 +54,7 @@ export async function initializeWebUi(credentials: SetupRequest): Promise<Sessio
 
 export async function logout(): Promise<void> {
   try {
-    await apiRequest<void>("/auth/logout", { method: "POST", auth: "logout" });
+    await apiV2Request<void>("/auth/logout", { method: "POST", auth: "logout" });
   } finally {
     clearAccessSession();
   }
