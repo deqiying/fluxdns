@@ -13,8 +13,8 @@ use thiserror::Error;
 use crate::dns::Deadline;
 use crate::ports::cache::{CacheKey, CacheRecord, CacheRecoverySummary};
 
+use super::codec::{CodecError, decode_record, encode_record, encode_storage_key};
 use super::moka::{MokaCacheStore, SnapshotVisitError};
-use super::persistence::{CodecError, decode_record, encode_record, encode_storage_key};
 
 const MAGIC: &[u8; 4] = b"FDCS";
 const FORMAT_VERSION: u16 = 1;

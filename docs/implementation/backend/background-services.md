@@ -73,11 +73,13 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 [`CacheSnapshotOwner`](../../../backend/src/cache/snapshot_owner.rs) 是唯一进程级持有者。正式 app 在 Policy core 完成 prepare 后、listener bind 前把 `FDCS` 分批恢复到该 core 的 Moka；缺失、损坏、不兼容、超时或内存预算不足分别形成冷启/部分恢复状态，不阻止启动。恢复完成后 owner 启动一个周期 worker；内存 commit 不再产生逐条磁盘队列，Moka 仍是运行权威。
 
-BC-26 后生产 loader 直接消费 v2 `dns.cache.persistence.enabled/path/snapshot_interval`，快照启用与全局内存池开关相互独立。旧 `persistence.max_size_bytes` 不再属于生产 schema；SQLite cache adapter 仅留兼容测试，待 BC-27 删除。
+BC-26 后生产 loader 直接消费 v2 `dns.cache.persistence.enabled/path/snapshot_interval`，快照启用与全局内存池开关相互独立。旧 `persistence.max_size_bytes` 不再属于生产 schema；旧 SQLite cache adapter 已删除。
 
 [`RuntimeCoordinator`](../../../backend/src/runtime/coordinator.rs) 只登记一个 owner，并核对它与活动 revision/Moka source 一致。reload 在候选发布前校验新路径，Runtime CAS 成功后同步递增 generation 并切换 source；不从磁盘恢复候选，也不让旧写任务覆盖新代。发布前再次检查路径链接/文件身份及受保护文件 alias。shutdown 先排空历史和当前 [`LateCacheFinalizer`](../../../backend/src/cache/service.rs)，再在同一总 deadline 内 best-effort 写当前 Moka 的最终快照；Cache health 分别汇总 finalizer 与 snapshot gap，不记录 key、response、路径或底层原始错误。
 
-旧 [`CachePersistenceRuntime`](../../../backend/src/cache/runtime.rs)、[`SqlitePersistentCacheStore`](../../../backend/src/cache/sqlite.rs)、文件 adapter 和确定性 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs) 仍保留给既有契约测试及 P5 BC-27 删除工作，生产 `app/runtime/dns/service` 路径不再创建或挂接 SQLite cache persistence。统计主库与详情日分片均和缓存快照文件隔离，不受本次缓存切换影响。
+旧 CachePersistenceRuntime、SQLite/FDCP adapter、逐条增量队列及其专用 port 已删除。新快照需要的 canonical record 编解码保持原实现并移入 [`codec.rs`](../../../backend/src/cache/codec.rs)，由 FDCS 文件协议复用；确定性 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs) 仍服务内存契约测试。finalizer 只负责有界内存提交任务，周期/最终持久化由独立快照 owner 完成。
+
+2026-09-09 / `785811b` 加 BC-27 工作树：完整串行 Cargo 测试 789 项通过、3 项按原规则忽略。FDCS 重启恢复、损坏/预算/TTL、owner generation、finalizer 和分片/保留继续通过；删除的是旧持久化契约专用测试。相邻停机健康测试使用词法作用域释放 MutexGuard 后才 await，消除原 `await_holding_lock` 告警。该回归不代替 release 2ms 或约 10 客户端验收。
 
 Windows `_fluxdns/p2-cache-tests/`、`_fluxdns/p2-cache-owner-tests/` 和 `_fluxdns/p2-cache-owner-policy-tests/` 真实文件测试覆盖流式往返、停机 TTL、损坏/未知版本/文件预算、失败保留旧文件、周期跳过未变化代、预算缩小后的部分预热、reload/clear 代际仲裁与清理后不复活、路径 hard-link/alias、超时 shutdown，以及两个真实 `PolicyDnsCore` 之间的 `FDCS` 重启命中。后者直接核对文件头且确认没有 SQLite `-wal`/`-shm` sidecar；未执行真实权限/磁盘满、Unix 或个人配置启动。
 
@@ -120,7 +122,6 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 | --- | --- | --- | --- | --- |
 | remote/file 刷新 | 条件 fetch、manifest v2、epoch/CAS、scheduler | async prepare + service resource task | loopback 200/304 与真实条件头；重复 304、坏 pair/响应、旧 manifest、换代及同预算重试 | 未执行真实远程/代理组合 |
 | stats/detail | 统计 schema v9 + v2 layout marker、详情分片 layout v1、registry/lease、稳定 ID、跨日 cursor、commit stream、共同水位/manifest/run state、StorageRuntime、ResolutionRuntime | app 从 v2 配置打开独立统计库/records_path 并恢复水位；唯一 01:00 retention owner 消费配置 R/G/T | 真实布局初始化/重开/旧库拒绝、R/G/T、水位、调度与回收回归 | HTTP/WS 待 BC-13/25；未验证 Linux、真实权限/磁盘满 |
-| legacy cache persistence | schema v2、增量 upsert、CachePersistenceRuntime | 仅保留 adapter/契约测试，生产不再挂接 | v1 升级、增量触发器、失败回滚与坏行清理既有测试 | 待 P5 BC-27 删除；不代表当前生产路径 |
 | cache 二进制快照 owner | `FDCS` header/SHA-256、Moka 分批导出/恢复、周期 worker、generation | app 从 v2 enabled/path/interval 启动恢复 + coordinator reload + service shutdown | Windows 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际/超时定向测试 | 未验证真实权限/磁盘满或 Unix |
 | telemetry lifecycle / 聚合 | histogram、typed writer、registry、sampler | dispatcher + app/service 周期及最终 flush | 固定桶/标签、溢出原子性、拥塞下聚合、关闭详情、输出重试、reload 与最终快照 | 没有 exporter/逐 attempt 流；长期负载与全部输出故障未验收 |
 

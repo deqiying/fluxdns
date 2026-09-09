@@ -32,7 +32,7 @@
 | BE-01 | 版本、配置与 API 契约 | [model](../../backend/src/config/model.rs)、[resolve](../../backend/src/config/resolve.rs)、[validate](../../backend/src/config/validate.rs)、[OpenAPI](../../frontend/openapi/management-api-v1.yaml) | 总计划 D-01 至 D-07 |
 | BE-02 | 活动配置、应用后持久化、外部差异与热日志 | [store](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs)、[service](../../backend/src/service.rs)、[app](../../backend/src/app.rs)、[observability](../../backend/src/observability.rs) | BE-01、配置专项 |
 | BE-03 | 客户端身份和匹配 | [DNS context](../../backend/src/dns/context.rs)、[client](../../backend/src/policy/client.rs)、[DNS Policy](../../backend/src/dns/policy.rs)、[observation](../../backend/src/ports/observation.rs)、[resolve_log](../../backend/src/storage/resolve_log.rs) | BE-01 |
-| BE-04 | 独立缓存快照 | [cache service](../../backend/src/cache/service.rs)、[memory](../../backend/src/cache/memory.rs)、[moka](../../backend/src/cache/moka.rs)、[persistence](../../backend/src/cache/persistence.rs)、[cache runtime](../../backend/src/cache/runtime.rs) | BE-01；与 BE-03 共同核验 fingerprint |
+| BE-04 | 独立缓存快照 | [cache service](../../backend/src/cache/service.rs)、[memory](../../backend/src/cache/memory.rs)、[moka](../../backend/src/cache/moka.rs)、[codec](../../backend/src/cache/codec.rs)、[snapshot owner](../../backend/src/cache/snapshot_owner.rs) | BE-01；与 BE-03 共同核验 fingerprint |
 | BE-05 | 详情日分片和提交读口 | [storage service](../../backend/src/storage/service.rs)、[sqlite](../../backend/src/storage/sqlite.rs)、[writer](../../backend/src/storage/writer.rs)、[storage port](../../backend/src/ports/storage.rs) | BE-01、BE-03 |
 | BE-06 | 统一保留协调器 | [stats](../../backend/src/storage/stats.rs)、[statistics](../../backend/src/storage/statistics.rs)、[ledger](../../backend/src/storage/ledger.rs)、storage service | BE-05、D-06/D-08 |
 | BE-07 | 配置与观测查询 | [query](../../backend/src/management/query.rs)、[router](../../backend/src/management/router.rs) | 配置读依赖 BE-02；历史读依赖 BE-03/05/06 |
@@ -152,7 +152,7 @@ BC-26 Windows 验证：真实 `StorageRuntime` 临时文件覆盖空目录初始
 
 ### 开发步骤
 
-1. 审核 `cache/persistence.rs` 的现有 codec，保留可复用的版本、TTL、fingerprint、canonical wire 与 provenance；替换其第二份全量集合和文件容量逻辑，不直接将旧 adapter 改名接入。
+1. 审核 `cache/codec.rs` 的共用条目 codec，保留可复用的版本、TTL、fingerprint、canonical wire 与 provenance；替换其第二份全量集合和文件容量逻辑，不直接将旧 adapter 改名接入。
 2. 为共享内存缓存提供有界分批遍历，包含全局/策略/客户端池。释放查询锁后编码，限制单条长度和并发快照任务，不全量复制缓存再生成大 buffer。
 3. 实现完整快照头、版本、生成时间、长度/校验；同目录临时写入、flush/sync、发布仲裁和完整文件替换。失败保留上一份可用快照。
 4. 增加进程级快照 owner，定期覆盖，无变化可跳过；reload 重用/切换 owner，旧 epoch/generation 不能覆盖新文件。移除生产装配中的 SQLite 缓存增量写队列。
@@ -317,7 +317,7 @@ QPS/RPM、趋势、在线身份、暖机和内存单位按[已确认 D-04](webui
 
 ## 13. BE-11：新基线初始化与旧路径退出
 
-2026-09-09 BC-27 已删除旧 loader、DTO、迁移注册表及 v1 fixture，保留通用 parser 和 [hash](../../backend/src/config/hash.rs)。legacy API、旧只读 adapter、单库详情 writer 和主库旧迁移链已退出，认证统一 v2。配置全量回归 838 通过/3 忽略、Management 串行 49 通过、存储串行 72 通过；下一步核对旧缓存 adapter 引用，再进入 FC-15。
+2026-09-09 BC-27 已删除旧 loader、DTO、迁移注册表及 v1 fixture，保留通用 parser 和 [hash](../../backend/src/config/hash.rs)。legacy API、旧只读 adapter、单库详情 writer 和主库旧迁移链已退出，认证统一 v2。配置全量回归 838 通过/3 忽略、Management 串行 49 通过、存储串行 72 通过；旧缓存 SQLite/FDCP adapter、增量 owner/port 也已删除，共用 codec 保留；BC-27 退出后进入 FC-15。
 
 2026-09-07 P0 源码核定：BC-26 完整生产初始化不能独立于 BC-04/07/08 至 BC-11 完成。当前 `StorageRuntime::open` 仍初始化统计/详情单库 v6，cache 仍装配可自动升级的 SQLite adapter；把 v2 字段接入这些 owner 会错误保留旧语义。P0 的 v2 拒绝规则/离线夹具随 BC-01 交付，不另造无消费者的空 layout/marker，也不将 BC-26 标为完成。完整空目录启动、重复启动、旧路径拒绝和新格式恢复待这些 owner 就绪后单独验证、提交；不删除个人运行数据。
 

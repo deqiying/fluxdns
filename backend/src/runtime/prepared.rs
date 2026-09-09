@@ -1112,7 +1112,6 @@ clients: []
         .await
         .unwrap();
         let core = candidate.snapshot().policy_core().unwrap();
-        assert!(!core.finalizer_owner().has_persistence_runtime());
         assert!(
             core.finalizer_owner()
                 .shutdown_until(deadline)

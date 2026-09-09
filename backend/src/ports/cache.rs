@@ -562,34 +562,12 @@ pub trait CacheStore: Send + Sync {
     fn shutdown(&self, deadline: Deadline) -> PortFuture<'_, Result<(), PortError>>;
 }
 
-#[derive(Clone, Debug)]
-pub struct PersistentCacheBatch {
-    pub records: Vec<(CacheKey, CacheRecord)>,
-}
-
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CacheRecoverySummary {
     pub loaded: u64,
     pub expired: u64,
     pub corrupt: u64,
     pub incompatible: u64,
-}
-
-pub trait PersistentCacheStore: Send + Sync {
-    fn recover(
-        &self,
-        deadline: Deadline,
-    ) -> PortFuture<'_, Result<(PersistentCacheBatch, CacheRecoverySummary), PortError>>;
-
-    fn persist(
-        &self,
-        batch: PersistentCacheBatch,
-        deadline: Deadline,
-    ) -> PortFuture<'_, Result<(), PortError>>;
-
-    fn maintain_capacity(&self, deadline: Deadline) -> PortFuture<'_, Result<u64, PortError>>;
-
-    fn shutdown(&self, deadline: Deadline) -> PortFuture<'_, Result<(), PortError>>;
 }
 
 #[cfg(test)]

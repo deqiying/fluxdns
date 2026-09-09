@@ -7,9 +7,9 @@ use arc_swap::ArcSwap;
 use thiserror::Error;
 
 use crate::cache::{
-    CachePersistenceRunSummary, CacheSnapshotOwner, CacheSnapshotOwnerBuildError,
-    CacheSnapshotOwnerStatus, CacheSnapshotSettings, CacheSnapshotShutdownSummary,
-    LateCacheFinalizer, PreparedCacheSnapshotSwitch,
+    CacheSnapshotOwner, CacheSnapshotOwnerBuildError, CacheSnapshotOwnerStatus,
+    CacheSnapshotSettings, CacheSnapshotShutdownSummary, LateCacheFinalizer,
+    PreparedCacheSnapshotSwitch,
 };
 use crate::config::resolve::ConfigId;
 use crate::dns::{PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, RuntimeRevision};
@@ -370,8 +370,6 @@ pub(crate) struct CacheFinalizerShutdownSummary {
     pub completed: bool,
     /// 本次关闭覆盖的 owner 数量。
     pub owners: u64,
-    /// 所有 owner 的 persistence 安全计数。
-    pub persistence: CachePersistenceRunSummary,
 }
 
 impl RuntimeCoordinator {
@@ -610,13 +608,11 @@ impl RuntimeCoordinator {
         let mut summary = CacheFinalizerShutdownSummary {
             completed: true,
             owners: 0,
-            persistence: CachePersistenceRunSummary::default(),
         };
         for owner in owners {
             let owner_summary = owner.shutdown_until(deadline).await;
             summary.completed &= owner_summary.completed;
             summary.owners = summary.owners.saturating_add(1);
-            summary.persistence.merge(owner_summary.persistence);
         }
         summary
     }
@@ -915,7 +911,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-    use crate::cache::{CachePersistenceRunSummary, CacheSnapshotOwner, CacheSnapshotSettings};
+    use crate::cache::{CacheSnapshotOwner, CacheSnapshotSettings};
     use crate::config::resolve::ConfigId;
     use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::dns::{Cancellation, Deadline, RuntimeRevision};
@@ -1470,7 +1466,6 @@ outbound: []
 
         assert!(summary.completed);
         assert_eq!(summary.owners, 2);
-        assert_eq!(summary.persistence, CachePersistenceRunSummary::default());
     }
 
     // V2-O01：旧/新 revision 已接收但尚未 poll 的任务，也必须在过期停机后释放 owner。

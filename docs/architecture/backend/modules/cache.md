@@ -89,7 +89,7 @@ finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明�
 
 内存 commit 不再产生逐条 persistence 队列。周期任务覆盖当时的完整可见集合，被内存预算淘汰或显式清理的记录会从下一份快照消失。owner/path 切换和未来 clear 必须递增 generation，使旧任务失去发布权；正常 shutdown 只在统一剩余预算内尽力补写，不无限延长退出。
 
-BC-07 已将正式 app/runtime/dns/service 切换到一个进程级 owner：初次启动恢复、周期完整覆盖、reload generation/source 切换和 finalizer 后最终写入均已接线。BC-26 已由正式 v2 loader 提供独立 `persistence.enabled/path/snapshot_interval`；旧 SQLite 增量 persistence 仅保留给契约测试并等待 BC-27 删除。
+BC-07 已将正式 app/runtime/dns/service 切换到一个进程级 owner：初次启动恢复、周期完整覆盖、reload generation/source 切换和 finalizer 后最终写入均已接线。BC-26 已由正式 v2 loader 提供独立 `persistence.enabled/path/snapshot_interval`；旧 SQLite/FDCP adapter 和增量 persistence port 已删除；快照文件与共用条目 codec 独立于内存 finalizer。
 
 ## 8. 显式失效
 

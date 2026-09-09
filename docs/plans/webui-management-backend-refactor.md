@@ -33,8 +33,8 @@
 | [客户端模型](../../backend/src/config/model.rs)、[匹配索引](../../backend/src/policy/client.rs) | 以资源名称定位，`match.ids` 为数组，ID 匹配后可回退 CIDR | name 仍是唯一管理键；单 client_id 为匹配身份；保留最长前缀 |
 | [观测事件](../../backend/src/ports/observation.rs)、[详情投影](../../backend/src/storage/resolve_log.rs) | `ResolutionDetailSource` 有 IP，无请求原始 ID；详情保存匹配后的 `client_bucket` | 接入时捕获原始 ID/IP，Policy 另行冻结实际匹配 ID/来源，两者分别传至详情存储 |
 | [分片查询读口](../../backend/src/storage/detail_query.rs)、[响应映射](../../backend/src/management/query.rs) | 新读口已返回原始身份与当前名称；旧单库读口已删除 | 返回原始身份、当时匹配结果和当前显示名称，不重算历史 IP 匹配 |
-| [缓存装配](../../backend/src/dns/policy.rs)、[SQLite 缓存](../../backend/src/cache/sqlite.rs) | 生产链使用独立 SQLite 缓存及异步增量写入，有持久化编码预算 | 内存为权威，后台周期性生成完整二进制快照，不保留增量数据库镜像 |
-| [文件缓存 adapter](../../backend/src/cache/persistence.rs) | 已有 `FDCP` magic、版本与条目 codec，但维护第二份记录集合，并受文件容量限制 | 复用经审查的编码能力；不能只更换扩展名或直接替换为现有 adapter 就宣称完成 |
+| [缓存装配](../../backend/src/dns/policy.rs)、[快照 owner](../../backend/src/cache/snapshot_owner.rs) | 生产链已使用 FDCS 完整快照；旧 SQLite adapter 已删除 | 内存为权威，后台周期性生成完整二进制快照，不保留增量数据库镜像 |
+| [条目 codec](../../backend/src/cache/codec.rs) | 共用条目 codec 已抽出；旧 FDCP adapter 与第二份记录集合已删除 | 复用经审查的编码能力；不能只更换扩展名或直接替换为现有 adapter 就宣称完成 |
 | [详情写入](../../backend/src/storage/sqlite.rs) | `apply_resolve_records_with_limits` 在批写事务内按年龄删除、计数、按条数淘汰并计算可写余量 | 批写只做有界入队/插入，移除按条数扫描与历史清理；独立后台任务回收日期分片 |
 | [业务存储](../../backend/src/storage/service.rs)、[v2 统计布局](../../backend/migrations/0001_statistics.sql) | 统计与详情已分离，事件时间为 UTC 毫秒，统计按 UTC 日聚合 | 保留统计 SQLite；详情迁往 UTC 日分片目录，统一保留协调器 |
 | [现有 API](../../frontend/openapi/management-api-v1.yaml) | 配置查询/写入、原始客户端 ID、保留状态等目标能力尚不完整；统计窗口固定上限另有校验 | 同批修改 ports、DTO、OpenAPI 和生成类型，不只修改页面 |

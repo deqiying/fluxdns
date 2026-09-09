@@ -2585,7 +2585,6 @@ mod tests {
         assert_eq!(first_transport.calls.load(Ordering::Acquire), 1);
         let first_shutdown = first.finalizer_owner().shutdown_until(deadline()).await;
         assert!(first_shutdown.completed, "shutdown: {first_shutdown:?}");
-        assert_eq!(first_shutdown.persistence.persisted_batches, 0);
         let snapshot_shutdown = first_owner.shutdown(deadline()).await;
         assert!(
             snapshot_shutdown.completed,
