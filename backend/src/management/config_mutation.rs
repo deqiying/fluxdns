@@ -110,7 +110,7 @@ impl ConfigMutationOwner {
                 let initial = operation_result(&self.store, &actor, &query_operation_id)?;
                 let owner = self.clone();
                 tokio::spawn(async move {
-                    owner.run_apply(actor, query_operation_id, permit).await;
+                    owner.run_apply(actor, query_operation_id, *permit).await;
                 });
                 Ok(initial)
             }
@@ -326,9 +326,9 @@ async fn post_validate(
     let Some(owner) = &services.config_mutations else {
         return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
     };
-    let body = match body_bytes(body, &request_id) {
+    let body = match body_bytes(body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(error) => return v2_error_response(error, &request_id),
     };
     let candidate = match decode_candidate(&body) {
         Ok(candidate) => candidate,
@@ -355,9 +355,9 @@ async fn post_apply(
     let Some(owner) = &services.config_mutations else {
         return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
     };
-    let body = match body_bytes(body, &request_id) {
+    let body = match body_bytes(body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(error) => return v2_error_response(error, &request_id),
     };
     let request = match decode_apply(&body, None) {
         Ok(request) => request,
@@ -390,9 +390,9 @@ async fn post_module_validate(
     let Some(owner) = &services.config_mutations else {
         return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
     };
-    let body = match body_bytes(body, &request_id) {
+    let body = match body_bytes(body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(error) => return v2_error_response(error, &request_id),
     };
     let candidate = match decode_module_candidate(&body, module) {
         Ok(candidate) => candidate,
@@ -424,9 +424,9 @@ async fn post_module_apply(
     let Some(owner) = &services.config_mutations else {
         return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
     };
-    let body = match body_bytes(body, &request_id) {
+    let body = match body_bytes(body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(error) => return v2_error_response(error, &request_id),
     };
     let request = match decode_apply(&body, Some(module)) {
         Ok(request) => request,
@@ -499,9 +499,9 @@ async fn post_restore(
     let Some(owner) = &services.config_mutations else {
         return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
     };
-    let body = match body_bytes(body, &request_id) {
+    let body = match body_bytes(body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(error) => return v2_error_response(error, &request_id),
     };
     let request = match decode_file_sync(&body) {
         Ok(request) => request,
@@ -528,9 +528,9 @@ async fn post_retry(
     let Some(owner) = &services.config_mutations else {
         return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
     };
-    let body = match body_bytes(body, &request_id) {
+    let body = match body_bytes(body) {
         Ok(body) => body,
-        Err(response) => return response,
+        Err(error) => return v2_error_response(error, &request_id),
     };
     let request = match decode_file_sync(&body) {
         Ok(request) => request,
@@ -552,17 +552,13 @@ fn v2_result<T: serde::Serialize>(
     }
 }
 
-fn body_bytes(
-    body: Result<Bytes, BytesRejection>,
-    request_id: &RequestId,
-) -> Result<Bytes, Response> {
+fn body_bytes(body: Result<Bytes, BytesRejection>) -> Result<Bytes, ErrorCode> {
     body.map_err(|error| {
-        let code = if error.into_response().status() == StatusCode::PAYLOAD_TOO_LARGE {
+        if error.into_response().status() == StatusCode::PAYLOAD_TOO_LARGE {
             ErrorCode::PayloadTooLarge
         } else {
             ErrorCode::InvalidArgument
-        };
-        v2_error_response(code, request_id)
+        }
     })
 }
 

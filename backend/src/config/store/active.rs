@@ -200,7 +200,7 @@ pub(crate) struct ApplyPermit {
 }
 
 pub(crate) enum BeginApply {
-    Accepted(ApplyPermit),
+    Accepted(Box<ApplyPermit>),
     Existing(OperationPhase),
 }
 
@@ -479,6 +479,10 @@ impl ConfigStore {
     }
 
     /// 幂等检查先于过期版本检查；相同操作只返回既有结果，不再次执行新增或改名。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "操作身份、候选、双版本与验证确认必须在同一事务入口显式绑定"
+    )]
     pub(crate) fn begin_apply(
         self: &Arc<Self>,
         actor: &str,
@@ -543,14 +547,14 @@ impl ConfigStore {
             },
         );
         state.snapshot.operation_id = Some(operation_id.to_owned());
-        Ok(BeginApply::Accepted(ApplyPermit {
+        Ok(BeginApply::Accepted(Box::new(ApplyPermit {
             store: Arc::clone(self),
             operation_id: operation_id.into(),
             expected: expected.clone(),
             next_revision,
             candidate,
             completed: false,
-        }))
+        })))
     }
 
     /// 未知/过期不能被解释成“从未执行”；进行中的记录不随 TTL 淘汰。

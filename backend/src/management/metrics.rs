@@ -500,7 +500,7 @@ mod platform {
             }
             let now = Instant::now();
             let ticks = filetime_ticks(kernel).saturating_add(filetime_ticks(user));
-            let value = match self.previous_cpu.replace((now, ticks)) {
+            match self.previous_cpu.replace((now, ticks)) {
                 Some((previous_at, previous_ticks)) => {
                     let elapsed = now.saturating_duration_since(previous_at).as_secs_f64();
                     let consumed = ticks.saturating_sub(previous_ticks) as f64 / 10_000_000.0;
@@ -511,8 +511,7 @@ mod platform {
                     }
                 }
                 None => SampleValue::Warmup,
-            };
-            value
+            }
         }
     }
 

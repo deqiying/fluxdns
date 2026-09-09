@@ -1630,16 +1630,13 @@ fn late_response_preference(class: crate::dns::ResponseClass) -> CacheQuality {
 
 const DEFAULT_LATE_CACHE_FINALIZER_CAPACITY: usize = 64;
 const OPTIMISTIC_REFRESH_TIMEOUT_SECS: u64 = 2;
-fn build_cache_facade(
-    config: &ResolvedConfig,
-) -> Result<
-    (
-        Arc<CacheFacade>,
-        Arc<MokaCacheStore>,
-        Arc<LateCacheFinalizer>,
-    ),
-    PolicyCoreBuildError,
-> {
+type CacheAssembly = (
+    Arc<CacheFacade>,
+    Arc<MokaCacheStore>,
+    Arc<LateCacheFinalizer>,
+);
+
+fn build_cache_facade(config: &ResolvedConfig) -> Result<CacheAssembly, PolicyCoreBuildError> {
     let store = MokaCacheStore::with_max_weight(config.dns.cache.memory_max_size_bytes).map_err(
         |error| PolicyCoreBuildError::Cache {
             reason: error.to_string(),

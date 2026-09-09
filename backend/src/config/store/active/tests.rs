@@ -394,7 +394,7 @@ impl Fixture {
         else {
             panic!("new operation expected");
         };
-        permit
+        *permit
     }
 }
 

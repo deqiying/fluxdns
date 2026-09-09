@@ -245,15 +245,9 @@ impl StorageRuntime {
             return Err(StorageRuntimeBuildError::DatabaseType);
         }
         let backend = Arc::new(
-            if config.version == crate::config::contract::CONFIG_VERSION {
-                SqliteStorageBackend::connect_with_deadline(config.database.path.clone(), deadline)
-                    .await
-                    .map_err(StorageRuntimeBuildError::Connect)?
-            } else {
-                SqliteStorageBackend::connect_with_deadline(config.database.path.clone(), deadline)
-                    .await
-                    .map_err(StorageRuntimeBuildError::Connect)?
-            },
+            SqliteStorageBackend::connect_with_deadline(config.database.path.clone(), deadline)
+                .await
+                .map_err(StorageRuntimeBuildError::Connect)?,
         );
         backend
             .migrate(STORAGE_SCHEMA_VERSION, deadline)

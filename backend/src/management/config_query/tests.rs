@@ -88,7 +88,7 @@ impl Fixture {
         else {
             panic!("expected new operation");
         };
-        permit
+        *permit
     }
 
     fn state(&self) -> Value {
