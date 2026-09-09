@@ -22,7 +22,7 @@
 
 - 初始化：`initializeMutation` 成功后写入 setup ready 和新 session；[`InitializePage`](../../../frontend/src/modules/auth/InitializePage.tsx) 负责表单与冲突后的状态刷新。
 - 登录：`performLogin` 将返回 session 写入查询缓存，清除 sessionExpired 标志。
-- API `401`：`onUnauthorized` 取消查询、设置 sessionExpired、把 session 置 null，由 guard 统一跳转；这个分支没有调用 `queryClient.clear()`，不能描述为清空全部查询缓存。
+- API `401` 或 WS `4401`：统一认证失效边界撤销内存凭据/连接，`onUnauthorized` 取消并清空 QueryClient，设置 sessionExpired、把 session 置 null，由 guard 统一跳转；重新登录不复用上一会话的数据。此清理有独立 AuthProvider 回归。
 - 退出：`performLogout` 的 finally 取消查询、清空 query client、将 session 置 null，然后跳转 login；即使网络退出失败也回收本地状态。
 
 [`ProtectedRoute`](../../../frontend/src/modules/auth/ProtectedRoute.tsx) 按 loading -> error -> setup-required -> no-session -> Outlet 处理。鉴权错误先显示错误页，不直接假定未登录；跳转携带来源 pathname。
@@ -75,7 +75,7 @@ P3 全局协调器已把选择结果作为一次 typed Candidate 交给正式 va
 
 ## P1 系统运行状态（2026-09-08）
 
-[`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 已从旧 `/system` 路由退出后的未挂载源码转为 `/system-runtime` 正式页面。进程数据由 [`getProcessMetrics`](../../../frontend/src/modules/system/api.ts) 读取 BC-23 的 `/api/v2/system/runtime`，沿共享 Bearer client 展示运行时长、RSS、CPU、线程与采样时间；现有 `/api/v1/system` 只补版本、启动时间和管理能力，两路失败可独立降级。
+[`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 由 `/system-runtime` 挂载。进程数据由 [`getProcessMetrics`](../../../frontend/src/modules/system/api.ts) 读取唯一 `/api/v2/system/runtime`，沿共享 Bearer client 展示版本、启动时间、运行时长、RSS、CPU、线程与采样时间；旧 system 请求及管理能力列表已删除。
 
 [`useProcessMetrics`](../../../frontend/src/modules/system/hooks.ts) 复用 30 秒可见性轮询和手动刷新；uptime 只从有效响应基准按接收时刻本地递增，隐藏页不逐秒渲染。RSS 格式化保留十进制 u64 字符串到 BigInt 的精度并统一显示 MiB；后端 measurement 的 `warmup`、`observation_gap`、`sampling_failed`、`unsupported` 原因显式呈现，不映射为零。页面没有 QPS/RPM、停止、重启或日志写操作。
 
@@ -142,8 +142,8 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | P1 认证测试及真实初始化/登录/刷新/登出；P3 内嵌深链接重载恢复 | 外部 HTTPS 代理未验收 |
-| 同源请求/取消 | `apiRequest`、unauthorized listener | 各 module API 共用 client | P1 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
-| 退出数据清理 | `performLogout` finally | AppLayout 使用 auth logout | 本轮核对实际分支 | 401 与 logout 清理行为不同，不能混写 |
+| 同源请求/取消 | `apiV2Request`、unauthorized listener | 各 module API 共用 client | 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
+| 退出数据清理 | `performLogout` finally、`onUnauthorized` | logout 与 HTTP/WS 认证失效统一回收 | 认证失效清空业务缓存的组件回归、真实登出撤销与重启后登录 | 网络 logout 失败仍不能证明服务端已撤销 |
 | P3 v2 配置页面 | 九个领域页面、generated-v2、module hooks | 受保护路由与十模块正式 API | MSW/完整 Vitest、真实 Bearer/文件/SQLite/UDP/浏览器，见 P3 联合验收 | 不包含 P5 收口 |
 | 共享实时连接 | events client、认证代次与订阅 owner | v2 ticket + WS | Vitest；真实 ticket/WS、断线 replay、登出 4401 与 Network/Storage | 外部 HTTPS 与真实网络慢读饱和未验证 |
 | 服务状态 | DashboardPage/hooks/chart | v2 HTTP metrics + WS metrics | 真实 DNS 流量、指标变化、可访问图表、桌面视口 | 真实 OS failure 样本与深色样例未复核 |

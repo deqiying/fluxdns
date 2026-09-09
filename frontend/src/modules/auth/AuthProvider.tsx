@@ -57,6 +57,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     () =>
       onUnauthorized(() => {
         void queryClient.cancelQueries();
+        // 与登出一样回收上一会话的数据，避免重新登录后同名 query key 复用旧值。
+        queryClient.clear();
         // 由 ProtectedRoute 统一跳转，避免命令式导航与 session 更新产生竞争。
         setSessionExpired(true);
         queryClient.setQueryData(authKeys.session, null);
