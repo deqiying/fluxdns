@@ -197,7 +197,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update
+          # 预装的 Chrome 源可能在镜像同步期间返回 Hash Sum mismatch，构建不依赖它。
+          sudo rm -f \
+            /etc/apt/sources.list.d/*google* \
+            /etc/apt/sources.list.d/*chrome*
+          for attempt in 1 2 3; do
+            if sudo apt-get update; then
+              break
+            fi
+            if [[ "${attempt}" -eq 3 ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
           sudo apt-get install --yes --no-install-recommends musl-tools binutils
           # SQLite 和 ring 的 C 代码及最终链接均使用 musl 工具链。
           echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "${GITHUB_ENV}"
