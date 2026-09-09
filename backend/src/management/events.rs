@@ -556,7 +556,7 @@ impl EventHub {
                                     }
                                     let mut subscription = QuerySubscription {
                                         subscription_id,
-                                        filter,
+                                        filter: *filter,
                                         after,
                                         retention_revision,
                                     };
@@ -850,13 +850,12 @@ fn ticket_from_protocols(websocket: &WebSocketUpgrade) -> Option<String> {
                 return None;
             }
             protocol = true;
-        } else if let Some(value) = value.strip_prefix(WS_TICKET_PROTOCOL_PREFIX) {
+        } else {
+            let value = value.strip_prefix(WS_TICKET_PROTOCOL_PREFIX)?;
             if ticket.is_some() || !valid_token(value) {
                 return None;
             }
             ticket = Some(value.to_owned());
-        } else {
-            return None;
         }
     }
     protocol.then_some(ticket).flatten()
@@ -1246,7 +1245,7 @@ mod tests {
             .send(ClientFrame::Text(
                 serde_json::to_string(&ClientMessage::SubscribeQueries {
                     subscription_id: Revision::try_from("queries-2".to_owned()).unwrap(),
-                    filter: query_filter(),
+                    filter: Box::new(query_filter()),
                     after: first_cursor.clone(),
                     retention_revision: Revision::try_from(retention_revision.to_string()).unwrap(),
                 })
@@ -1271,7 +1270,7 @@ mod tests {
             .send(ClientFrame::Text(
                 serde_json::to_string(&ClientMessage::SubscribeQueries {
                     subscription_id: Revision::try_from("queries-retention".to_owned()).unwrap(),
-                    filter: query_filter(),
+                    filter: Box::new(query_filter()),
                     after: first_cursor,
                     retention_revision: Revision::try_from(retention_revision.to_string()).unwrap(),
                 })
@@ -1379,7 +1378,7 @@ mod tests {
     ) -> ClientMessage {
         ClientMessage::SubscribeQueries {
             subscription_id: Revision::try_from(subscription_id.to_owned()).unwrap(),
-            filter: query_filter(),
+            filter: Box::new(query_filter()),
             after: commit_cursor(after).unwrap(),
             retention_revision: Revision::try_from(retention_revision.to_string()).unwrap(),
         }

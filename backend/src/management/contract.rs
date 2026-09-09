@@ -791,7 +791,7 @@ pub enum ClientMessage {
     },
     SubscribeQueries {
         subscription_id: Revision,
-        filter: QueryFilter,
+        filter: Box<QueryFilter>,
         after: CommitCursor,
         retention_revision: Revision,
     },
