@@ -345,8 +345,11 @@ fn unknown_external_content_or_identity_prevents_all_replacements() {
         let fixture = Fixture::new();
         let mut transaction = fixture.prepare();
         if replace_identity {
+            // 替代文件先与原文件同时存在，避免 Unix 文件系统立即复用刚释放的 inode。
+            let replacement = fixture.root.join("identity-replacement.yaml");
+            fs::write(&replacement, OLD).unwrap();
             fs::remove_file(&fixture.derived).unwrap();
-            fs::write(&fixture.derived, OLD).unwrap();
+            fs::rename(replacement, &fixture.derived).unwrap();
         } else {
             fs::write(&fixture.derived, b"external").unwrap();
         }
