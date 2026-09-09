@@ -107,8 +107,14 @@ describe("QueriesPage 展示语义", () => {
     expect(await screen.findByText("有 1 条新记录")).toBeInTheDocument();
     expect(screen.queryByText("live.example.test.")).not.toBeInTheDocument();
 
-    await user.keyboard("{Escape}");
+    server.use(http.post("/api/v2/queries/search", () => HttpResponse.json({
+      ...v2QueryPageFixture,
+      items: [liveRecord, ...v2QueryPageFixture.items],
+      snapshot_cursor: { epoch: "stream-1", sequence: "43" },
+    })));
+    await user.click(screen.getByRole("button", { name: "查看新记录" }));
     expect(await screen.findByText("live.example.test.")).toBeInTheDocument();
     expect(screen.queryByText("有 1 条新记录")).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "example.test. 解析详情" })).not.toBeInTheDocument());
   });
 });

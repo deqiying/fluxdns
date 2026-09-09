@@ -1049,6 +1049,11 @@ select {
     grid-template-columns: 54px minmax(0, 1fr);
   }
 
+  .query-answer-row > code:nth-of-type(2),
+  .query-answer-row > span:last-child {
+    grid-column: 2;
+  }
+
   .query-pagination {
     align-items: flex-start;
     flex-direction: column;

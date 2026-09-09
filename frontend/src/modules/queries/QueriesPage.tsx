@@ -50,6 +50,7 @@ export function QueriesPage() {
   const [detail, setDetail] = useState<DetailSnapshot>();
   const [detailPinned, setDetailPinned] = useState(false);
   const detailTriggers = useRef(new Map<string, HTMLButtonElement>());
+  const suppressedDetailOpen = useRef<string | undefined>(undefined);
   const request = useMemo<QueryRequest>(() => ({
     filter,
     cursor: navigation.cursor,
@@ -67,6 +68,7 @@ export function QueriesPage() {
     const close = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       const trigger = detailTriggers.current.get(detail.record.id);
+      suppressedDetailOpen.current = detail.record.id;
       setDetail(undefined);
       setDetailPinned(false);
       window.setTimeout(() => trigger?.focus(), 0);
@@ -76,6 +78,7 @@ export function QueriesPage() {
   }, [detail]);
 
   const resetContext = () => {
+    if (detail) suppressedDetailOpen.current = detail.record.id;
     setDetail(undefined);
     setDetailPinned(false);
     setNavigation({ cursor: null, direction: "older" });
@@ -109,6 +112,7 @@ export function QueriesPage() {
       if (!detailPinned && detail?.record.id === record.id) setDetail(undefined);
       return;
     }
+    if (suppressedDetailOpen.current === record.id) return;
     if (detailPinned && detail?.record.id !== record.id) return;
     setDetail({
       record,
@@ -118,10 +122,12 @@ export function QueriesPage() {
 
   const pinDetail = (record: QueryRecord) => {
     if (detailPinned && detail?.record.id === record.id) {
+      suppressedDetailOpen.current = record.id;
       setDetail(undefined);
       setDetailPinned(false);
       return;
     }
+    if (suppressedDetailOpen.current === record.id) suppressedDetailOpen.current = undefined;
     setDetailPinned(true);
     openDetail(record, true);
   };
@@ -158,6 +164,7 @@ export function QueriesPage() {
       width: 340,
       render: (_, record) => (
         <Popover
+          key={`${record.id}:${detail?.record.id === record.id ? "open" : "closed"}`}
           placement="bottom"
           trigger="hover"
           open={detail?.record.id === record.id}
@@ -173,6 +180,9 @@ export function QueriesPage() {
             type="button"
             className="query-result-trigger"
             aria-label={`查看 ${record.qname} 的详情`}
+            onPointerEnter={() => {
+              if (suppressedDetailOpen.current === record.id) suppressedDetailOpen.current = undefined;
+            }}
             onClick={() => pinDetail(record)}
           >
             <ResponseCell record={record} />
@@ -191,6 +201,7 @@ export function QueriesPage() {
   ], [detail, page?.directory_revision, query.directoryRevisions]);
 
   const showLatest = () => {
+    if (detail) suppressedDetailOpen.current = detail.record.id;
     setDetail(undefined);
     setDetailPinned(false);
     if (!latestPage) setNavigation({ cursor: null, direction: "older" });
@@ -293,13 +304,13 @@ export function QueriesPage() {
                 aria-label="上一页"
                 icon={<ChevronLeft size={16} />}
                 disabled={!page.previous_cursor || query.isFetching}
-                onClick={() => { setDetail(undefined); setDetailPinned(false); setNavigation({ cursor: page.previous_cursor, direction: "newer" }); }}
+                onClick={() => { if (detail) suppressedDetailOpen.current = detail.record.id; setDetail(undefined); setDetailPinned(false); setNavigation({ cursor: page.previous_cursor, direction: "newer" }); }}
               />
               <Button
                 aria-label="下一页"
                 icon={<ChevronRight size={16} />}
                 disabled={!page.next_cursor || query.isFetching}
-                onClick={() => { setDetail(undefined); setDetailPinned(false); setNavigation({ cursor: page.next_cursor, direction: "older" }); }}
+                onClick={() => { if (detail) suppressedDetailOpen.current = detail.record.id; setDetail(undefined); setDetailPinned(false); setNavigation({ cursor: page.next_cursor, direction: "older" }); }}
               />
             </Space>
           </div>
