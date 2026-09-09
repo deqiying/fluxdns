@@ -5,7 +5,6 @@
 mod detail_query;
 mod detail_shards;
 mod ledger;
-mod management_read;
 mod resolve_log;
 mod retention;
 mod service;
@@ -29,7 +28,6 @@ pub use detail_shards::{
     ShardedResolveDetailWriterBuildError,
 };
 pub use ledger::{BatchDecision, BatchLedger, BatchLedgerError, BatchReceipt, PendingStatsBatch};
-pub use management_read::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
 pub use resolve_log::ResolveDetailRecord;
 pub use retention::{
     DEFAULT_RETENTION_DAYS, DEFAULT_RETENTION_GRACE_DAYS, DEFAULT_RETENTION_OPERATION_TIMEOUT,

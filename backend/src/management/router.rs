@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 use super::assets;
 use super::auth::{AuthError, AuthState, hash_password, validate_setup_credentials};
 use super::config_mutation::ConfigMutationOwner;
+use super::contract::{ErrorCode, ErrorEnvelope};
 use super::query;
 use super::query::ManagementQueryService;
 use super::session::{SessionStore, SessionView, valid_token};
@@ -131,21 +132,13 @@ struct SetupStatus {
     state: &'static str,
 }
 
-#[derive(Serialize)]
-struct ErrorEnvelope {
-    code: &'static str,
-    message: &'static str,
-    request_id: String,
-    retryable: bool,
-}
-
 struct BoundaryState {
     requests: Arc<tokio::sync::Semaphore>,
 }
 
 pub(crate) fn build_router(services: Arc<AuthServices>) -> Router {
     let protected = Router::new()
-        .route("/api/v1/auth/session", get(get_session))
+        .route("/api/v2/auth/session", get(get_session))
         .merge(query::routes())
         .merge(super::config_mutation::routes())
         .merge(super::events::protected_routes())
@@ -158,10 +151,10 @@ pub(crate) fn build_router(services: Arc<AuthServices>) -> Router {
     });
 
     Router::new()
-        .route("/api/v1/auth/setup", get(get_setup).post(post_setup))
-        .route("/api/v1/auth/login", post(post_login))
-        .route("/api/v1/auth/refresh", post(post_refresh))
-        .route("/api/v1/auth/logout", post(post_logout))
+        .route("/api/v2/auth/setup", get(get_setup).post(post_setup))
+        .route("/api/v2/auth/login", post(post_login))
+        .route("/api/v2/auth/refresh", post(post_refresh))
+        .route("/api/v2/auth/logout", post(post_logout))
         .merge(super::events::upgrade_routes())
         .merge(protected)
         .fallback(fallback)
@@ -180,7 +173,7 @@ async fn request_boundary(
     if request.version() != Version::HTTP_11 {
         return error_response(
             StatusCode::HTTP_VERSION_NOT_SUPPORTED,
-            "HTTP_VERSION_NOT_SUPPORTED",
+            ErrorCode::HttpVersionNotSupported,
             "only HTTP/1.1 is supported",
             false,
             &request_id,
@@ -193,7 +186,7 @@ async fn request_boundary(
     {
         return error_response(
             StatusCode::URI_TOO_LONG,
-            "URI_TOO_LONG",
+            ErrorCode::UriTooLong,
             "request URI is too long",
             false,
             &request_id,
@@ -204,7 +197,7 @@ async fn request_boundary(
     {
         return error_response(
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
-            "HEADERS_TOO_LARGE",
+            ErrorCode::HeadersTooLarge,
             "request headers are too large",
             false,
             &request_id,
@@ -222,7 +215,7 @@ async fn request_boundary(
         }
         return error_response(
             StatusCode::PAYLOAD_TOO_LARGE,
-            "PAYLOAD_TOO_LARGE",
+            ErrorCode::PayloadTooLarge,
             "request body is too large",
             false,
             &request_id,
@@ -231,7 +224,7 @@ async fn request_boundary(
     let Ok(_permit) = Arc::clone(&state.requests).try_acquire_owned() else {
         return error_response(
             StatusCode::TOO_MANY_REQUESTS,
-            "RATE_LIMITED",
+            ErrorCode::RateLimited,
             "management request capacity is exhausted",
             true,
             &request_id,
@@ -242,7 +235,7 @@ async fn request_boundary(
         Ok(response) => response,
         Err(_) => error_response(
             StatusCode::REQUEST_TIMEOUT,
-            "REQUEST_TIMEOUT",
+            ErrorCode::RequestTimeout,
             "management request timed out",
             true,
             &request_id,
@@ -286,14 +279,10 @@ async fn require_session(
     next: Next,
 ) -> Response {
     let request_id = request_id(&request);
-    let v2 = request.uri().path().starts_with("/api/v2/");
     let Some(token) = session_token(request.headers()) else {
-        if v2 {
-            return v2_error_response(super::contract::ErrorCode::AuthRequired, &request_id);
-        }
         return error_response(
             StatusCode::UNAUTHORIZED,
-            "AUTH_REQUIRED",
+            ErrorCode::AuthRequired,
             "session required",
             false,
             &request_id,
@@ -304,20 +293,16 @@ async fn require_session(
             request.extensions_mut().insert(session);
             next.run(request).await
         }
-        Ok(None) if v2 => v2_error_response(super::contract::ErrorCode::AuthRequired, &request_id),
         Ok(None) => error_response(
             StatusCode::UNAUTHORIZED,
-            "AUTH_REQUIRED",
+            ErrorCode::AuthRequired,
             "session required",
             false,
             &request_id,
         ),
-        Err(_) if v2 => {
-            v2_error_response(super::contract::ErrorCode::ServiceUnavailable, &request_id)
-        }
         Err(_) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "INTERNAL_ERROR",
+            ErrorCode::InternalError,
             "management service is unavailable",
             true,
             &request_id,
@@ -365,7 +350,7 @@ async fn post_setup(
         Err(_) => {
             return error_response(
                 StatusCode::BAD_REQUEST,
-                "VALIDATION_FAILED",
+                ErrorCode::InvalidArgument,
                 "username or password does not satisfy setup policy",
                 false,
                 &request_id,
@@ -375,7 +360,7 @@ async fn post_setup(
     if !services.auth.setup_required() {
         return error_response(
             StatusCode::CONFLICT,
-            "SETUP_ALREADY_COMPLETED",
+            ErrorCode::SetupAlreadyCompleted,
             "WebUI setup has already completed",
             false,
             &request_id,
@@ -433,7 +418,7 @@ async fn post_login(
     if services.auth.setup_required() {
         return error_response(
             StatusCode::UNAUTHORIZED,
-            "AUTH_INVALID_CREDENTIALS",
+            ErrorCode::AuthInvalidCredentials,
             "invalid credentials",
             false,
             &request_id,
@@ -448,7 +433,7 @@ async fn post_login(
         }
         Ok(Err(AuthError::InvalidCredentials)) => error_response(
             StatusCode::UNAUTHORIZED,
-            "AUTH_INVALID_CREDENTIALS",
+            ErrorCode::AuthInvalidCredentials,
             "invalid credentials",
             false,
             &request_id,
@@ -499,7 +484,7 @@ async fn post_refresh(
         Ok(Some(Some(view))) => Json(view).into_response(),
         Ok(_) => error_response(
             StatusCode::UNAUTHORIZED,
-            "AUTH_REQUIRED",
+            ErrorCode::AuthRequired,
             "session required",
             false,
             &request_id,
@@ -513,7 +498,7 @@ async fn fallback(request: Request<Body>) -> Response {
         let request_id = request_id(&request);
         return error_response(
             StatusCode::NOT_FOUND,
-            "NOT_FOUND",
+            ErrorCode::NotFound,
             "API route was not found",
             false,
             &request_id,
@@ -532,7 +517,7 @@ pub(super) fn validate_mutating_request(
     }
     Some(error_response(
         StatusCode::BAD_REQUEST,
-        "ORIGIN_REJECTED",
+        ErrorCode::OriginRejected,
         "request origin was rejected",
         false,
         request_id,
@@ -611,14 +596,14 @@ fn config_store_error(error: ConfigStoreError, request_id: &RequestId) -> Respon
     match error {
         ConfigStoreError::AlreadyInitialized => error_response(
             StatusCode::CONFLICT,
-            "SETUP_ALREADY_COMPLETED",
+            ErrorCode::SetupAlreadyCompleted,
             "WebUI setup has already completed",
             false,
             request_id,
         ),
         ConfigStoreError::Conflict | ConfigStoreError::Busy => error_response(
             StatusCode::CONFLICT,
-            "CONFIG_CONFLICT",
+            ErrorCode::ConfigConflict,
             "configuration changed while setup was in progress",
             true,
             request_id,
@@ -630,7 +615,7 @@ fn config_store_error(error: ConfigStoreError, request_id: &RequestId) -> Respon
 fn invalid_json(request_id: &RequestId) -> Response {
     error_response(
         StatusCode::BAD_REQUEST,
-        "VALIDATION_FAILED",
+        ErrorCode::InvalidArgument,
         "request body is invalid",
         false,
         request_id,
@@ -640,24 +625,13 @@ fn invalid_json(request_id: &RequestId) -> Response {
 pub(super) fn internal_error(request_id: &RequestId) -> Response {
     error_response(
         StatusCode::INTERNAL_SERVER_ERROR,
-        "INTERNAL_ERROR",
+        ErrorCode::InternalError,
         "management service is unavailable",
         true,
         request_id,
     )
 }
 
-pub(super) fn invalid_argument(request_id: &RequestId) -> Response {
-    error_response(
-        StatusCode::BAD_REQUEST,
-        "INVALID_ARGUMENT",
-        "query parameters are invalid",
-        false,
-        request_id,
-    )
-}
-
-/// v2 业务接口统一使用固定文案与 field_errors，避免落回 v1 错误形状。
 pub(super) fn v2_error_response(
     code: super::contract::ErrorCode,
     request_id: &RequestId,
@@ -692,7 +666,7 @@ pub(super) fn v2_error_response(
 fn rate_limited(request_id: &RequestId) -> Response {
     let mut response = error_response(
         StatusCode::TOO_MANY_REQUESTS,
-        "RATE_LIMITED",
+        ErrorCode::RateLimited,
         "too many authentication attempts",
         true,
         request_id,
@@ -705,7 +679,7 @@ fn rate_limited(request_id: &RequestId) -> Response {
 
 fn error_response(
     status: StatusCode,
-    code: &'static str,
+    code: ErrorCode,
     message: &'static str,
     retryable: bool,
     request_id: &RequestId,
@@ -715,9 +689,10 @@ fn error_response(
             status,
             Json(ErrorEnvelope {
                 code,
-                message,
+                message: message.to_owned(),
                 request_id: request_id.0.clone(),
                 retryable,
+                field_errors: Vec::new(),
             }),
         )
             .into_response(),
@@ -854,7 +829,7 @@ mod tests {
             Some("Basic invalid".to_owned()),
         ] {
             let mut request = Request::builder()
-                .uri("/api/v1/auth/session")
+                .uri("/api/v2/auth/session")
                 .header(COOKIE, &cookie);
             if let Some(value) = value {
                 request = request.header(AUTHORIZATION, value);
@@ -869,7 +844,7 @@ mod tests {
         for key in ["token", "access_token", "session_token", "fluxdns_session"] {
             let request = Request::builder()
                 .uri(format!(
-                    "/api/v1/auth/session?{key}={}",
+                    "/api/v2/auth/session?{key}={}",
                     query_session.view.access_token
                 ))
                 .body(Body::empty())
@@ -885,7 +860,7 @@ mod tests {
 
         let request = Request::builder()
             .uri(format!(
-                "/api/v1/auth/session?token={}",
+                "/api/v2/auth/session?token={}",
                 query_session.view.access_token
             ))
             .header(AUTHORIZATION, &authorization)
@@ -903,7 +878,7 @@ mod tests {
         assert!(!body.to_string().contains(&query_session.view.access_token));
 
         // query 不能选择被注销的会话，也不能绕过已有 Origin 防护。
-        let logout_path = format!("/api/v1/auth/logout?token={}", query_session.token);
+        let logout_path = format!("/api/v2/auth/logout?token={}", query_session.token);
         let mut request = post(&logout_path, "");
         request
             .headers_mut()
@@ -967,7 +942,7 @@ mod tests {
         let response = app
             .clone()
             .oneshot(post(
-                "/api/v1/auth/setup",
+                "/api/v2/auth/setup",
                 r#"{"username":"admin","password":"correct horse battery staple"}"#,
             ))
             .await
@@ -1000,7 +975,7 @@ mod tests {
         assert!(services.sessions.lookup(&token).unwrap().is_some());
 
         let request = Request::builder()
-            .uri("/api/v1/auth/session")
+            .uri("/api/v2/auth/session")
             .header(AUTHORIZATION, format!("Bearer {token}"))
             .body(Body::empty())
             .unwrap();
@@ -1068,7 +1043,7 @@ mod tests {
     async fn unknown_api_never_falls_back_to_spa() {
         let (services, root, _) = test_services();
         let request = Request::builder()
-            .uri("/api/v1/not-found")
+            .uri("/api/v2/not-found")
             .body(Body::empty())
             .unwrap();
         let response = build_router(services).oneshot(request).await.unwrap();

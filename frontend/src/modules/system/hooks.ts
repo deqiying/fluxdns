@@ -1,15 +1,7 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getSummaryPollInterval } from "@/app/query-client";
-import { getProcessMetrics, getSystem, processMetricsKey, systemKey } from "./api";
-
-export function useSystem() {
-  return useQuery({
-    queryKey: systemKey,
-    queryFn: ({ signal }) => getSystem(signal),
-    staleTime: 5 * 60_000,
-  });
-}
+import { getProcessMetrics, processMetricsKey } from "./api";
 
 export function useProcessMetrics() {
   return useQuery({

@@ -9,7 +9,7 @@ describe("apiRequest", () => {
   beforeEach(() => setMockAuthenticated(true));
   it("业务请求使用 Bearer 和 JSON，不附带 Cookie", async () => {
     server.use(
-      http.get("/api/v1/probe", ({ request }) =>
+      http.get("/api/v2/probe", ({ request }) =>
         HttpResponse.json({ credentials: request.credentials, accept: request.headers.get("accept"), authorization: request.headers.get("authorization") }),
       ),
     );
@@ -21,7 +21,7 @@ describe("apiRequest", () => {
     });
   });
 
-  it("v2 client 复用 Bearer，但不改变 v1 认证刷新路径", async () => {
+  it("v2 client 与认证刷新共用 Bearer 生命周期", async () => {
     server.use(
       http.get("/api/v2/probe", ({ request }) =>
         HttpResponse.json({ authorization: request.headers.get("authorization"), credentials: request.credentials }),
@@ -39,7 +39,7 @@ describe("apiRequest", () => {
     [503, "SERVICE_UNAVAILABLE"],
   ])("保留 HTTP %s 的稳定错误分类", async (status, code) => {
     server.use(
-      http.get("/api/v1/failure", () =>
+      http.get("/api/v2/failure", () =>
         HttpResponse.json({ code, message: "server detail", request_id: `req-${status}`, retryable: status >= 429 }, { status }),
       ),
     );
@@ -48,12 +48,12 @@ describe("apiRequest", () => {
   });
 
   it("拒绝将 HTML 错误页当作 API 成功", async () => {
-    server.use(http.get("/api/v1/html", () => new HttpResponse("<html>fallback</html>", { headers: { "Content-Type": "text/html" } })));
+    server.use(http.get("/api/v2/html", () => new HttpResponse("<html>fallback</html>", { headers: { "Content-Type": "text/html" } })));
     await expect(apiRequest("/html")).rejects.toMatchObject({ code: "INVALID_RESPONSE", kind: "invalid-response" });
   });
 
   it("区分超时和调用方取消", async () => {
-    server.use(http.get("/api/v1/slow", async () => { await delay("infinite"); return HttpResponse.json({}); }));
+    server.use(http.get("/api/v2/slow", async () => { await delay("infinite"); return HttpResponse.json({}); }));
     await expect(apiRequest("/slow", { timeoutMs: 5 })).rejects.toMatchObject({ code: "REQUEST_TIMEOUT", kind: "timeout" });
 
     const controller = new AbortController();
@@ -65,7 +65,7 @@ describe("apiRequest", () => {
   it("只对普通接口的 401 广播 session 过期", async () => {
     const listener = vi.fn();
     const unsubscribe = onUnauthorized(listener);
-    server.use(http.get("/api/v1/private", () => HttpResponse.json({ code: "AUTH_REQUIRED", message: "required", request_id: "req-401", retryable: false }, { status: 401 })));
+    server.use(http.get("/api/v2/private", () => HttpResponse.json({ code: "AUTH_REQUIRED", message: "required", request_id: "req-401", retryable: false }, { status: 401 })));
 
     await expect(apiRequest("/private")).rejects.toBeInstanceOf(ApiError);
     expect(listener).toHaveBeenCalledOnce();

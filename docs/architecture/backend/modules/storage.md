@@ -33,7 +33,6 @@ Storage 模块实现两个相互隔离的持久化 owner：
 | `stats.rs` | StatsAccumulator epoch snapshot、BatchLedger 顺序提交与失败重试 worker |
 | `statistics.rs` / `ledger.rs` | sharded counters/epoch checkpoint 与 pending batch ledger |
 | `resolve_log.rs` | 从 typed `ResolutionEvent` 投影、校验和裁剪 `ResolveDetailRecord` |
-| `management_read.rs` | Management overview、统计和解析详情的独立只读 SQLite adapter、安全投影与固定查询模板 |
 | `writer.rs` | 无外部依赖的事务/幂等 writer contract 实现与 focused tests |
 
 ## 2. Storage 初始化

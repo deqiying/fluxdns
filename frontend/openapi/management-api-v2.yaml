@@ -70,6 +70,15 @@ x-limits:
   frontend_buffer_bytes: 2097152
 # 仅为 ErrorEnvelope 映射；已受理操作的终态使用 OperationResult，不以 200 推断成功。
 x-error-statuses:
+  HTTP_VERSION_NOT_SUPPORTED: 505
+  URI_TOO_LONG: 414
+  HEADERS_TOO_LARGE: 431
+  REQUEST_TIMEOUT: 408
+  INTERNAL_ERROR: 500
+  SETUP_ALREADY_COMPLETED: 409
+  AUTH_INVALID_CREDENTIALS: 401
+  ORIGIN_REJECTED: 400
+  CONFIG_CONFLICT: 409
   INVALID_ARGUMENT: 400
   VALIDATION_FAILED: 422
   PAYLOAD_TOO_LARGE: 413
@@ -1031,7 +1040,7 @@ components:
         discard_external_changes: {type: boolean}
     ErrorCode:
       type: string
-      enum: [INVALID_ARGUMENT, VALIDATION_FAILED, PAYLOAD_TOO_LARGE, VERSION_UNSUPPORTED, AUTH_REQUIRED, FORBIDDEN, NOT_FOUND, ACTIVE_REVISION_CONFLICT, FILE_REVISION_CONFLICT, EXTERNAL_CHANGES_REQUIRE_CONFIRMATION, OPERATION_ID_REUSED, OPERATION_BUSY, VALIDATION_EXPIRED, PERSISTENCE_FAILED, APPLY_FAILED, COMPENSATION_FAILED, CURSOR_EXPIRED, RATE_LIMITED, SERVICE_UNAVAILABLE]
+      enum: [HTTP_VERSION_NOT_SUPPORTED, URI_TOO_LONG, HEADERS_TOO_LARGE, REQUEST_TIMEOUT, INTERNAL_ERROR, SETUP_ALREADY_COMPLETED, AUTH_INVALID_CREDENTIALS, ORIGIN_REJECTED, CONFIG_CONFLICT, INVALID_ARGUMENT, VALIDATION_FAILED, PAYLOAD_TOO_LARGE, VERSION_UNSUPPORTED, AUTH_REQUIRED, FORBIDDEN, NOT_FOUND, ACTIVE_REVISION_CONFLICT, FILE_REVISION_CONFLICT, EXTERNAL_CHANGES_REQUIRE_CONFIRMATION, OPERATION_ID_REUSED, OPERATION_BUSY, VALIDATION_EXPIRED, PERSISTENCE_FAILED, APPLY_FAILED, COMPENSATION_FAILED, CURSOR_EXPIRED, RATE_LIMITED, SERVICE_UNAVAILABLE]
     ErrorEnvelope:
       type: object
       additionalProperties: false
@@ -1384,8 +1393,10 @@ components:
     ProcessMetrics:
       type: object
       additionalProperties: false
-      required: [sampled_at_ms, uptime_seconds, rss_bytes, cpu_percent, threads]
+      required: [version, started_at_ms, sampled_at_ms, uptime_seconds, rss_bytes, cpu_percent, threads]
       properties:
+        version: {type: string, maxLength: 64}
+        started_at_ms: {$ref: "#/components/schemas/SafeInteger"}
         sampled_at_ms: {$ref: "#/components/schemas/SafeInteger"}
         uptime_seconds: {$ref: "#/components/schemas/SafeInteger"}
         rss_bytes: {$ref: "#/components/schemas/BytesMeasurement"}

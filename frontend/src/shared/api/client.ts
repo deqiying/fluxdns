@@ -1,7 +1,6 @@
 import { ApiError, isErrorEnvelope } from "./errors";
 import type { AuthSession, Session } from "./types";
 
-const API_V1_PREFIX = "/api/v1";
 const API_V2_PREFIX = "/api/v2";
 const DEFAULT_TIMEOUT_MS = 10_000;
 
@@ -97,10 +96,10 @@ export function reportUnauthorized(): void {
 }
 
 export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
-  return requestWithPrefix<T>(API_V1_PREFIX, path, options);
+  return requestWithPrefix<T>(API_V2_PREFIX, path, options);
 }
 
-/** 新版配置和管理能力的同源入口；不会改变现有 v1 页面或认证刷新路径。 */
+/** 唯一 v2 同源契约入口，认证和业务共用取消及会话边界。 */
 export async function apiV2Request<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   return requestWithPrefix<T>(API_V2_PREFIX, path, options);
 }

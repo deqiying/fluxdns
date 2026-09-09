@@ -951,7 +951,7 @@ export interface components {
             discard_external_changes: boolean;
         };
         /** @enum {string} */
-        ErrorCode: "INVALID_ARGUMENT" | "VALIDATION_FAILED" | "PAYLOAD_TOO_LARGE" | "VERSION_UNSUPPORTED" | "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND" | "ACTIVE_REVISION_CONFLICT" | "FILE_REVISION_CONFLICT" | "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION" | "OPERATION_ID_REUSED" | "OPERATION_BUSY" | "VALIDATION_EXPIRED" | "PERSISTENCE_FAILED" | "APPLY_FAILED" | "COMPENSATION_FAILED" | "CURSOR_EXPIRED" | "RATE_LIMITED" | "SERVICE_UNAVAILABLE";
+        ErrorCode: "HTTP_VERSION_NOT_SUPPORTED" | "URI_TOO_LONG" | "HEADERS_TOO_LARGE" | "REQUEST_TIMEOUT" | "INTERNAL_ERROR" | "SETUP_ALREADY_COMPLETED" | "AUTH_INVALID_CREDENTIALS" | "ORIGIN_REJECTED" | "CONFIG_CONFLICT" | "INVALID_ARGUMENT" | "VALIDATION_FAILED" | "PAYLOAD_TOO_LARGE" | "VERSION_UNSUPPORTED" | "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND" | "ACTIVE_REVISION_CONFLICT" | "FILE_REVISION_CONFLICT" | "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION" | "OPERATION_ID_REUSED" | "OPERATION_BUSY" | "VALIDATION_EXPIRED" | "PERSISTENCE_FAILED" | "APPLY_FAILED" | "COMPENSATION_FAILED" | "CURSOR_EXPIRED" | "RATE_LIMITED" | "SERVICE_UNAVAILABLE";
         ErrorEnvelope: {
             code: components["schemas"]["ErrorCode"];
             request_id: string;
@@ -1212,6 +1212,8 @@ export interface components {
             rpm_trend: components["schemas"]["RateSample"][];
         };
         ProcessMetrics: {
+            version: string;
+            started_at_ms: components["schemas"]["SafeInteger"];
             sampled_at_ms: components["schemas"]["SafeInteger"];
             uptime_seconds: components["schemas"]["SafeInteger"];
             rss_bytes: components["schemas"]["BytesMeasurement"];

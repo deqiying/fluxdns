@@ -202,6 +202,8 @@ impl MetricsOwner {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let uptime_seconds = self.elapsed_seconds(now);
         ProcessMetrics {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            started_at_ms: unix_millis(self.started_at),
             sampled_at_ms: snapshot.sampled_at_ms,
             uptime_seconds,
             rss_bytes: map_process_bytes(snapshot, now, uptime_seconds),

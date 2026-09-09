@@ -91,7 +91,7 @@ P3 Windows 联合验收使用内嵌 debug binary、`_fluxdns/p3-live/` 真实 Co
 
 ## 路由与保护
 
-[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout、受 Bearer 保护的 session、[`query.rs`](../../../backend/src/management/query.rs) 查询、配置事务和 [`events.rs`](../../../backend/src/management/events.rs) ticket/WS 路由；未知 API 与 SPA fallback 隔离。既有兼容端点以 [v1 OpenAPI](../../../frontend/openapi/management-api-v1.yaml) 为准，v2 端点以 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
+[`router.rs`](../../../backend/src/management/router.rs) 的 `build_router` 组装 setup/login/refresh/logout、受 Bearer 保护的 session、[`query.rs`](../../../backend/src/management/query.rs) 查询、配置事务和 [`events.rs`](../../../backend/src/management/events.rs) ticket/WS 路由；未知 API 与 SPA fallback 隔离。正式接口只使用 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，旧版本端点返回 JSON 404。
 
 router 固定保护包括普通 JSON body 16 KiB、P1 配置候选 2 MiB、URI 4 KiB、64 个 header/16 KiB header bytes、256 个并发请求和 15 秒总请求 timeout。另有 setup/login 限流、写请求 Origin/Fetch Metadata、request ID 和统一错误处理。这些是实现常量，不是额外 YAML 字段。
 
@@ -101,7 +101,7 @@ router 固定保护包括普通 JSON body 16 KiB、P1 配置候选 2 MiB、URI 4
 
 ## P1 Bearer 业务鉴权（2026-09-08）
 
-按用户追加决定，正式 `/api/v1` 和 `/api/v2` 的受保护 HTTP session 与全部业务查询均只读取 Authorization Bearer，不接受 Cookie、URL query、重复或非法 Authorization 作为后备。初始化/登录返回 `AuthSession`，包含无凭据 session、短期 access token、Bearer 类型与安全整数 UTC ms 过期时间；同时设置独立的 HttpOnly 刷新 Cookie。`POST /auth/refresh` 只接受该 Cookie 并校验 Origin/Fetch Metadata。`/auth/logout` 用有效 Bearer 撤销关联会话并清除 Cookie，无有效凭据时仍幂等，不用 Cookie/query 选择会话。API 响应 no-store，401 带 Bearer challenge。
+按用户追加决定，正式 `/api/v2` 的受保护 HTTP session 与全部业务查询均只读取 Authorization Bearer，不接受 Cookie、URL query、重复或非法 Authorization 作为后备。初始化/登录返回 `AuthSession`，包含无凭据 session、短期 access token、Bearer 类型与安全整数 UTC ms 过期时间；同时设置独立的 HttpOnly 刷新 Cookie。`POST /auth/refresh` 只接受该 Cookie 并校验 Origin/Fetch Metadata。`/auth/logout` 用有效 Bearer 撤销关联会话并清除 Cookie，无有效凭据时仍幂等，不用 Cookie/query 选择会话。API 响应 no-store，401 带 Bearer challenge。
 
 SessionStore 复用原 24 小时绝对/30 分钟空闲期限、4096 全局/16 单用户容量。访问凭据 5 分钟有效，剩余 30 秒内换发；并发刷新复用当前值，旧值只活到原期限，每会话最多两项访问索引。到达会话绝对期限不反复生成新凭据；过期、容量淘汰、认证更新、登出和进程关闭同时回收相关索引。两类随机凭据不互换，刷新凭据不进入响应正文。没有新增依赖或持久会话存储。
 
@@ -153,13 +153,6 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 
 | API 主题 | 实际数据来源 | 限制 |
 | --- | --- | --- |
-| overview | coordinator summary、resolution metrics、只读数据库计数 | 详情关闭或无数据时按响应原因区分不可用，不把缺数当零 |
-| runtime | 当前 RuntimeSnapshot、listener 与摘要 | 不是直接操作 listener 的命令入口 |
-| health | telemetry health snapshot | 缺少观测来源时不能推断健康 |
-| statistics | `ManagementStorageRead` 的聚合查询 | 时间范围与维度校验 |
-| queries | `ManagementStorageRead` 的详情查询 | 有界分页/过滤/排序，历史脱敏行返回 `legacy_redacted` |
-| resources | runtime 资源 snapshot 元数据 | 只读，不触发刷新 |
-| system | 版本、进程/构建与功能元数据 | 不提供配置秘密或绝对路径 |
 | service metrics（v2） | `MetricsOwner` 的请求窗口、在线身份和共享 RSS 快照 | 暖机、容量截断及采样缺口显式不可用；不返回原始身份 |
 | system runtime（v2） | `MetricsOwner` 的共享 OS 采样快照 | 仅 Windows 实测；Linux 条件编译实现未实测 |
 | events metrics（v2 WS） | `EventServices` 读取共享 MetricsOwner | 每秒推送；独立连接/队列/心跳预算；会话持续复核 |
@@ -168,11 +161,17 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 | retention（v2） | 生产 RetentionCoordinator、stats layout、详情分片与 manifest | 主文件加 WAL；下一次为服务器时区本地 01:00；只读不触发回收 |
 | queries（v2） | active ConfigStore 目录快照与 DetailShardStore 跨日读口 | 过滤先于 keyset 分页；原始/历史事实不重匹配；cursor 绑定过滤、水位和进程 epoch |
 
-[`ports/management.rs`](../../../backend/src/ports/management.rs) 定义领域读口；[`SqliteManagementReadModel`](../../../backend/src/storage/management_read.rs) 使用独立只读 pool、绑定参数和固定 SQL。query service 固定 5 秒 deadline、默认 20/最大 100 行分页和最长 31 天统计窗口。
-
-业务 schema v6 直接读取 `event_time_utc_millis` 为 `i64`，overview 范围比较和查询时间排序不再逐行 `CAST`；同毫秒仍以 ID 确定顺序，升降序保持对称。读口的 `occurred_at_millis` 仍为 UTC Unix 毫秒，query service 继续输出原日期格式，不更改 OpenAPI/前端类型。迁移及字段单位见[业务时间存储](background-services.md#业务时间存储)。
+[`DetailShardStore`](../../../backend/src/storage/detail_query.rs) 提供 v2 历史查询，复用分片 lease、共同水位、稳定 ID 和签名 cursor；Management 不再创建旧单库只读 pool。查询有固定 5 秒 deadline，日期和页大小预算由 v2 schema 与 storage 共同校验。
 
 查询详情可供所有已认证用户读取 qname、有效 client IP、配置标识、upstream provenance 与有界 answer；DNS wire、request digest、route 文本和 SecretRef 不进入 API。core duration 的历史缺失值不会补造。
+
+## 旧 Management API 退出（2026-09-09）
+
+认证 setup/login/refresh/logout/session 已切至唯一 `/api/v2/auth/*`；原始 Bearer、刷新 Cookie、Origin、限流和会话撤销机制继续复用。所有错误使用 v2 ErrorEnvelope，认证/请求边界的稳定错误码已补入 OpenAPI。旧 overview/runtime/health/statistics/resources/system/query DTO、`legacy_redacted` 投影、ManagementStorageRead 与 SqliteManagementReadModel 已删除。
+
+`ProcessMetrics` 从同一 MetricsOwner 返回程序 version、started_at_ms、uptime、RSS、CPU、线程和采样时间，系统运行页面只需这一响应，不展示旧兼容 API 能力清单。回归新增旧版本 GET/POST、HTML Accept 仍返回 JSON 404，以及认证错误反序列化检查。内嵌 binary 的完整验收由 P5 联合验证记录。
+
+Windows / `1c58a82` 加本次工作树：`cargo test --manifest-path backend/Cargo.toml management:: -- --test-threads=1` 49 项通过（含真实 HTTP/WS adapter）；前端 99 项 Vitest、4 项 OpenAPI 契约、typecheck/build、文档与 diff 检查通过。一次默认并行 Management 测试在已输出多项成功后异常退出 `0xc0000409 STATUS_STACK_BUFFER_OVERRUN`，未产生失败断言；串行复核成功，不据此认定该 Windows 并行异常已修复。
 
 ## 静态资源与证据
 
@@ -184,7 +183,7 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 | --- | --- | --- | --- | --- |
 | setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | P1 Bearer 定向测试；P4 ticket/WS、登出 4401 与浏览器 Network/Storage | 未验证外部 HTTPS 代理 |
 | users 事务 | source_edit、ConfigStore、journal recovery | setup 写入，run 启动恢复，watcher 对账 | 本轮核对；存在双路径恢复与 Busy 竞争测试 | 完整跨平台 crash/权限矩阵待验收 |
-| v1 兼容查询与配置/保留/历史/指标 v2 API | ManagementQueryService + StorageRead port + DetailShardStore + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/DB/telemetry/metrics/retention/detail store | BC-12/13、P3 与 P4 使用真实 SQLite、UDP 和 Bearer HTTP | v1 退出归 P5/BC-27；外部 HTTPS 代理未验证 |
+| 配置/保留/历史/指标 v2 API | ManagementQueryService + StorageRead port + DetailShardStore + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/DB/telemetry/metrics/retention/detail store | BC-12/13、P3 与 P4 使用真实 SQLite、UDP 和 Bearer HTTP | v1 退出归 P5/BC-27；外部 HTTPS 代理未验证 |
 | v2 实时事件 | EventServices + ticket/session + replay owner | `/api/v2/events/ticket` 与 `/api/v2/events` | Rust 真实 socket；Windows UDP/HTTP/WS；浏览器 ticket/WS/reconnect | 外部 HTTPS、真实网络慢读饱和及跨平台未验证 |
 | v2 配置写入与文件处理 | ConfigMutationOwner + ConfigStore + ServiceControl | 全局/十模块 validate/apply、operation、diff、restore/retry | P3 十模块 `applied_synced`、外改组合采用、二次冲突与回显 | Linux、磁盘满和 service commit 后响应丢失未验证 |
 | 内嵌 SPA | assets + build feature | bind 前 ensure_available | P3 debug embed 的 12 路由和两档视口真实浏览器 | release 三阶段、Actions/Linux/macOS 发布未验证 |

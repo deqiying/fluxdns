@@ -1,32 +1,20 @@
 import type { ReactNode } from "react";
-import { Badge, Button, Descriptions, Flex, Space, Tag, Typography } from "antd";
+import { Badge, Button, Descriptions, Flex, Space, Typography } from "antd";
 import { RefreshCw } from "lucide-react";
-import { ApiError } from "@/shared/api/errors";
 import type { components } from "@/shared/api/generated-v2";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { InlineUnavailable, PageState } from "@/shared/components/PageState";
 import {
   formatBytesMiB,
   formatCount,
-  formatDateTime,
   formatEpochMillis,
   formatPercent,
   formatUptimeClock,
 } from "@/shared/formatters";
-import { useDisplayedUptime, useProcessMetrics, useSystem } from "./hooks";
+import { useDisplayedUptime, useProcessMetrics } from "./hooks";
 
 type Schemas = components["schemas"];
 type Unavailable = Schemas["Unavailable"];
-
-const capabilityLabels: Record<string, string> = {
-  "read:overview": "总览",
-  "read:runtime": "Runtime",
-  "read:health": "健康状态",
-  "read:statistics": "统计",
-  "read:queries": "解析记录",
-  "read:resources": "资源",
-  "read:system": "系统",
-};
 
 function measurementValue<T extends number | string>(
   measurement: { state: "available"; value: T } | Unavailable,
@@ -38,22 +26,14 @@ function measurementValue<T extends number | string>(
   return format(measurement.value);
 }
 
-function optionalSystemValue(value: ReactNode, loading: boolean, error: unknown): ReactNode {
-  if (value) return value;
-  if (loading) return <Typography.Text type="secondary">加载中</Typography.Text>;
-  return <InlineUnavailable reasonCode={error instanceof ApiError ? error.code : undefined} />;
-}
-
 export function SystemPage() {
-  const systemQuery = useSystem();
   const metricsQuery = useProcessMetrics();
-  const system = systemQuery.data;
   const metrics = metricsQuery.data;
   const displayedUptime = useDisplayedUptime(metrics?.uptime_seconds, metricsQuery.dataUpdatedAt);
-  const refreshing = metricsQuery.isFetching || systemQuery.isFetching;
+  const refreshing = metricsQuery.isFetching;
 
   const refresh = () => {
-    void Promise.all([metricsQuery.refetch(), systemQuery.refetch()]);
+    void metricsQuery.refetch();
   };
 
   return (
@@ -107,27 +87,12 @@ export function SystemPage() {
             <Descriptions className="system-runtime-descriptions" column={{ xs: 1, md: 2 }} colon={false}>
               <Descriptions.Item label="程序">FluxDNS</Descriptions.Item>
               <Descriptions.Item label="版本">
-                {optionalSystemValue(system?.version || undefined, systemQuery.isLoading, systemQuery.error)}
+                {metrics.version}
               </Descriptions.Item>
               <Descriptions.Item label="启动时间">
-                {optionalSystemValue(system?.started_at ? formatDateTime(system.started_at) : undefined, systemQuery.isLoading, systemQuery.error)}
+                {formatEpochMillis(metrics.started_at_ms)}
               </Descriptions.Item>
               <Descriptions.Item label="采样时间">{formatEpochMillis(metrics.sampled_at_ms)}</Descriptions.Item>
-              <Descriptions.Item label="管理能力" span={2}>
-                {optionalSystemValue(
-                  system ? (
-                    system.capabilities.length ? (
-                      <Space size={[6, 6]} wrap>
-                        {system.capabilities.map((capability) => (
-                          <Tag key={capability}>{capabilityLabels[capability] ?? capability}</Tag>
-                        ))}
-                      </Space>
-                    ) : <Typography.Text type="secondary">未声明</Typography.Text>
-                  ) : undefined,
-                  systemQuery.isLoading,
-                  systemQuery.error,
-                )}
-              </Descriptions.Item>
             </Descriptions>
           </section>
         </Space>

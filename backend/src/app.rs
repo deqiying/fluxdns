@@ -414,12 +414,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                     1,
                 )
                 .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
-                Some((
-                    output.resolved.webui.clone(),
-                    Arc::new(store),
-                    output.resolved.database.path.clone(),
-                    output.resolved.dns.resolve_log.enable,
-                ))
+                Some((output.resolved.webui.clone(), Arc::new(store)))
             } else {
                 None
             };
@@ -496,7 +491,6 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             )
             .await
             .map_err(map_storage_prepare_error)?;
-            let resolution_metrics = storage.resolution_metrics();
             let retention = storage.retention_coordinator();
             let detail_store = storage.detail_store();
             let candidate = crate::runtime::bind_prepared(
@@ -514,7 +508,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             let metrics = Arc::new(crate::management::MetricsOwner::new());
             let configuration_store = management_bootstrap
                 .as_ref()
-                .map(|(_, store, _, _)| Arc::clone(store));
+                .map(|(_, store)| Arc::clone(store));
             let mut service =
                 DnsService::with_default_timeout_from_coordinator_storage_telemetry_and_metrics(
                     coordinator,
@@ -526,9 +520,7 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             service
                 .attach_logging(logging)
                 .map_err(map_service_start_error)?;
-            if let Some((config, config_store, database_path, resolve_log_enabled)) =
-                management_bootstrap
-            {
+            if let Some((config, config_store)) = management_bootstrap {
                 let control = service.control();
                 let management = crate::management::ManagementService::bind_with_config_store(
                     &config,
@@ -536,10 +528,6 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                     control,
                     crate::management::ManagementQueryDependencies::new(
                         Arc::clone(service.coordinator()),
-                        database_path,
-                        resolve_log_enabled,
-                        Some(Arc::clone(&telemetry)),
-                        resolution_metrics,
                         Arc::clone(&metrics),
                         crate::management::ManagementHistoryDependencies::new(
                             retention,

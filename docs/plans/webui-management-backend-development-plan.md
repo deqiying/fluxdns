@@ -33,9 +33,9 @@
 | BE-02 | 活动配置、应用后持久化、外部差异与热日志 | [store](../../backend/src/config/store.rs)、[source_edit](../../backend/src/config/source_edit.rs)、[service](../../backend/src/service.rs)、[app](../../backend/src/app.rs)、[observability](../../backend/src/observability.rs) | BE-01、配置专项 |
 | BE-03 | 客户端身份和匹配 | [DNS context](../../backend/src/dns/context.rs)、[client](../../backend/src/policy/client.rs)、[DNS Policy](../../backend/src/dns/policy.rs)、[observation](../../backend/src/ports/observation.rs)、[resolve_log](../../backend/src/storage/resolve_log.rs) | BE-01 |
 | BE-04 | 独立缓存快照 | [cache service](../../backend/src/cache/service.rs)、[memory](../../backend/src/cache/memory.rs)、[moka](../../backend/src/cache/moka.rs)、[persistence](../../backend/src/cache/persistence.rs)、[cache runtime](../../backend/src/cache/runtime.rs) | BE-01；与 BE-03 共同核验 fingerprint |
-| BE-05 | 详情日分片和提交读口 | [storage service](../../backend/src/storage/service.rs)、[sqlite](../../backend/src/storage/sqlite.rs)、[writer](../../backend/src/storage/writer.rs)、[management_read](../../backend/src/storage/management_read.rs)、[storage port](../../backend/src/ports/storage.rs) | BE-01、BE-03 |
+| BE-05 | 详情日分片和提交读口 | [storage service](../../backend/src/storage/service.rs)、[sqlite](../../backend/src/storage/sqlite.rs)、[writer](../../backend/src/storage/writer.rs)、[storage port](../../backend/src/ports/storage.rs) | BE-01、BE-03 |
 | BE-06 | 统一保留协调器 | [stats](../../backend/src/storage/stats.rs)、[statistics](../../backend/src/storage/statistics.rs)、[ledger](../../backend/src/storage/ledger.rs)、storage service | BE-05、D-06/D-08 |
-| BE-07 | 配置与观测查询 | [management port](../../backend/src/ports/management.rs)、[query](../../backend/src/management/query.rs)、management_read、[router](../../backend/src/management/router.rs) | 配置读依赖 BE-02；历史读依赖 BE-03/05/06 |
+| BE-07 | 配置与观测查询 | [query](../../backend/src/management/query.rs)、[router](../../backend/src/management/router.rs) | 配置读依赖 BE-02；历史读依赖 BE-03/05/06 |
 | BE-08 | 模块级受限写接口 | router、ConfigStore、source_edit、config validate/resolve | BE-02、BE-07 配置读；按模块接入 BE-03/04/06 |
 | BE-09 | 实时指标与进程采样 | [DNS service](../../backend/src/service.rs)、[telemetry port](../../backend/src/ports/telemetry.rs)、query、management server | BE-01、D-04/D-08 |
 | BE-10 | WebSocket 与补齐 | management router/server、management port、详情提交事件、指标采样 | BE-05、BE-07、BE-09、D-05/D-08 |
@@ -317,7 +317,7 @@ QPS/RPM、趋势、在线身份、暖机和内存单位按[已确认 D-04](webui
 
 ## 13. BE-11：新基线初始化与旧路径退出
 
-2026-09-09 BC-27 配置部分已删除旧 loader、DTO、迁移注册表及 v1 fixture，保留通用 parser 和 [hash](../../backend/src/config/hash.rs)；全量 Cargo 测试 838 项通过、3 项显式忽略。测试统一使用正式 v2。单库详情与 legacy API 退出继续由本检查点跟踪。
+2026-09-09 BC-27 配置部分已删除旧 loader、DTO、迁移注册表及 v1 fixture，保留通用 parser 和 [hash](../../backend/src/config/hash.rs)；全量 Cargo 测试 838 项通过、3 项显式忽略。测试统一使用正式 v2。legacy API 和旧只读 adapter 已退出，认证统一 v2；单库详情写入退出继续由本检查点跟踪。
 
 2026-09-07 P0 源码核定：BC-26 完整生产初始化不能独立于 BC-04/07/08 至 BC-11 完成。当前 `StorageRuntime::open` 仍初始化统计/详情单库 v6，cache 仍装配可自动升级的 SQLite adapter；把 v2 字段接入这些 owner 会错误保留旧语义。P0 的 v2 拒绝规则/离线夹具随 BC-01 交付，不另造无消费者的空 layout/marker，也不将 BC-26 标为完成。完整空目录启动、重复启动、旧路径拒绝和新格式恢复待这些 owner 就绪后单独验证、提交；不删除个人运行数据。
 

@@ -18,14 +18,14 @@ it("并发业务请求共享一次刷新，各自用 Bearer 且不携带 Cookie"
   const gate = deferred();
   let refreshes = 0;
   server.use(
-    http.post("/api/v1/auth/refresh", async ({ request }) => {
+    http.post("/api/v2/auth/refresh", async ({ request }) => {
       refreshes++;
       expect(request.credentials).toBe("same-origin");
       expect(request.headers.has("authorization")).toBe(false);
       await gate.promise;
       return HttpResponse.json(authentication());
     }),
-    http.get("/api/v1/probe", ({ request }) => HttpResponse.json({ auth: request.headers.get("authorization"), credentials: request.credentials })),
+    http.get("/api/v2/probe", ({ request }) => HttpResponse.json({ auth: request.headers.get("authorization"), credentials: request.credentials })),
   );
   const first = apiRequest("/probe");
   const second = apiRequest("/probe");
@@ -42,8 +42,8 @@ it("单个等待方取消不取消共享刷新，登出则拒绝迟到结果恢�
   let refreshes = 0;
   let requests = 0;
   server.use(
-    http.post("/api/v1/auth/refresh", async () => { refreshes++; await gate.promise; return HttpResponse.json(authentication()); }),
-    http.get("/api/v1/probe", () => { requests++; return HttpResponse.json({ ok: true }); }),
+    http.post("/api/v2/auth/refresh", async () => { refreshes++; await gate.promise; return HttpResponse.json(authentication()); }),
+    http.get("/api/v2/probe", () => { requests++; return HttpResponse.json({ ok: true }); }),
   );
   const controller = new AbortController();
   const cancelled = expect(apiRequest("/probe", { signal: controller.signal })).rejects.toMatchObject({ kind: "cancelled" });
@@ -57,7 +57,7 @@ it("单个等待方取消不取消共享刷新，登出则拒绝迟到结果恢�
 
   clearAccessSession(true);
   const secondGate = deferred();
-  server.use(http.post("/api/v1/auth/refresh", async () => { refreshes++; await secondGate.promise; return HttpResponse.json(authentication()); }));
+  server.use(http.post("/api/v2/auth/refresh", async () => { refreshes++; await secondGate.promise; return HttpResponse.json(authentication()); }));
   const stale = expect(apiRequest("/probe")).rejects.toMatchObject({ kind: "cancelled" });
   await vi.waitFor(() => expect(refreshes).toBe(2));
   clearAccessSession();
@@ -74,8 +74,8 @@ it("旧会话迟到的 401 不清除后来登录的新 Bearer", async () => {
   const listener = vi.fn();
   const unsubscribe = onUnauthorized(listener);
   server.use(
-    http.get("/api/v1/old", async () => { started = true; await gate.promise; return HttpResponse.json({}, { status: 401 }); }),
-    http.get("/api/v1/probe", ({ request }) => HttpResponse.json({ auth: request.headers.get("authorization") })),
+    http.get("/api/v2/old", async () => { started = true; await gate.promise; return HttpResponse.json({}, { status: 401 }); }),
+    http.get("/api/v2/probe", ({ request }) => HttpResponse.json({ auth: request.headers.get("authorization") })),
   );
   try {
     const old = expect(apiRequest("/old")).rejects.toMatchObject({ status: 401 });
@@ -103,8 +103,8 @@ it("业务 deadline 包含刷新等待，超时不终止其他等待方", async 
   let started = false;
   let requests = 0;
   server.use(
-    http.post("/api/v1/auth/refresh", async () => { started = true; await gate.promise; return HttpResponse.json(authentication()); }),
-    http.get("/api/v1/probe", () => { requests++; return HttpResponse.json({ ok: true }); }),
+    http.post("/api/v2/auth/refresh", async () => { started = true; await gate.promise; return HttpResponse.json(authentication()); }),
+    http.get("/api/v2/probe", () => { requests++; return HttpResponse.json({ ok: true }); }),
   );
   const timedOut = expect(apiRequest("/probe", { timeoutMs: 20 })).rejects.toMatchObject({ kind: "timeout" });
   const surviving = apiRequest("/probe");
@@ -120,8 +120,8 @@ it.each([401, 500])("业务写请求返回 %s 后不刷新或自动重放", asyn
   let writes = 0;
   let refreshes = 0;
   server.use(
-    http.post("/api/v1/write", () => { writes++; return HttpResponse.json({}, { status }); }),
-    http.post("/api/v1/auth/refresh", () => { refreshes++; return HttpResponse.json(authentication()); }),
+    http.post("/api/v2/write", () => { writes++; return HttpResponse.json({}, { status }); }),
+    http.post("/api/v2/auth/refresh", () => { refreshes++; return HttpResponse.json(authentication()); }),
   );
   await expect(apiRequest("/write", { method: "POST", body: { operation_id: "test-operation" } })).rejects.toMatchObject({ status });
   expect(writes).toBe(1);

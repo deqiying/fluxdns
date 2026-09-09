@@ -49,8 +49,8 @@ describe("application routes", () => {
     let setupState: "required" | "ready" = "required";
     setMockSetupRequired(true);
     server.use(
-      http.get("/api/v1/auth/setup", () => HttpResponse.json({ state: setupState })),
-      http.post("/api/v1/auth/setup", () => {
+      http.get("/api/v2/auth/setup", () => HttpResponse.json({ state: setupState })),
+      http.post("/api/v2/auth/setup", () => {
         setupState = "ready";
         return HttpResponse.json(
           { code: "SETUP_ALREADY_COMPLETED", message: "setup already completed", request_id: "mock-setup-409", retryable: false },
@@ -477,7 +477,7 @@ describe("application routes", () => {
     expect(await screen.findByText("186.4 MiB")).toBeInTheDocument();
     expect(screen.getByText("1.25%")).toBeInTheDocument();
     expect(screen.getByText("18")).toBeInTheDocument();
-    expect(screen.getByText("0.1.0-dev")).toBeInTheDocument();
+    expect(screen.getByText(processMetricsFixture.version)).toBeInTheDocument();
     expect(screen.getByText(/02:00:/)).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "刷新" }));

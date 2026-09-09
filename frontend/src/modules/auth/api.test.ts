@@ -17,12 +17,12 @@ it("登录签发的 Bearer 仅在内存使用，业务请求不携带 Cookie 或
     await logout();
 
     expect(fetchSpy.mock.calls.map(([input]) => String(input))).toEqual([
-      "/api/v1/auth/setup",
-      "/api/v1/auth/setup",
-      "/api/v1/auth/session",
-      "/api/v1/auth/logout",
-      "/api/v1/auth/login",
-      "/api/v1/auth/logout",
+      "/api/v2/auth/setup",
+      "/api/v2/auth/setup",
+      "/api/v2/auth/session",
+      "/api/v2/auth/logout",
+      "/api/v2/auth/login",
+      "/api/v2/auth/logout",
     ]);
     for (const [input, options] of fetchSpy.mock.calls) {
       expect(new URL(String(input), window.location.origin).search).toBe("");

@@ -32,9 +32,9 @@ async fn refresh_requires_cookie_and_origin_and_never_accepts_bearer_or_query_as
         (Some((COOKIE, cookie.clone())), false, StatusCode::OK),
     ] {
         let path = if query {
-            format!("/api/v1/auth/refresh?token={}", issued.token)
+            format!("/api/v2/auth/refresh?token={}", issued.token)
         } else {
-            "/api/v1/auth/refresh".to_owned()
+            "/api/v2/auth/refresh".to_owned()
         };
         let mut request = post(&path, "");
         if let Some((key, value)) = header {
@@ -52,7 +52,7 @@ async fn refresh_requires_cookie_and_origin_and_never_accepts_bearer_or_query_as
         }
     }
     for foreign in [None, Some("https://foreign.example.test")] {
-        let mut request = post("/api/v1/auth/refresh", "");
+        let mut request = post("/api/v2/auth/refresh", "");
         request
             .headers_mut()
             .insert(COOKIE, cookie.parse().unwrap());
@@ -85,7 +85,7 @@ async fn duplicate_malformed_and_revoked_authorization_never_fall_back_to_cookie
         vec![format!("Basic {}", issued.view.access_token)],
     ] {
         let mut request = Request::builder()
-            .uri("/api/v1/auth/session")
+            .uri("/api/v2/auth/session")
             .header(COOKIE, &cookie);
         for value in headers {
             request = request.header(AUTHORIZATION, value);
@@ -99,7 +99,7 @@ async fn duplicate_malformed_and_revoked_authorization_never_fall_back_to_cookie
     }
     services.sessions.revoke(&issued.view.access_token);
     let request = Request::builder()
-        .uri("/api/v1/auth/session")
+        .uri("/api/v2/auth/session")
         .header(COOKIE, &cookie)
         .header(
             AUTHORIZATION,

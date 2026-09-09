@@ -1,7 +1,6 @@
 //! 独立 HTTP Management listener 与 Supervisor task 适配。
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
@@ -18,12 +17,8 @@ use super::session::SessionStore;
 use crate::config::resolve::ResolvedWebUi;
 use crate::config::store::ConfigStore;
 use crate::dns::Cancellation;
-use crate::observability::TelemetryWriter;
-use crate::ports::management::ManagementStorageRead;
-use crate::resolution::ResolutionPipelineMetrics;
 use crate::runtime::{RuntimeCoordinator, TaskError};
 use crate::service::ServiceControl;
-use crate::storage::{SqliteManagementReadModel, SqliteManagementReadModelBuildError};
 
 pub(crate) struct ManagementService {
     listener: tokio::net::TcpListener,
@@ -34,10 +29,6 @@ pub(crate) struct ManagementService {
 
 pub(crate) struct ManagementQueryDependencies {
     coordinator: Arc<RuntimeCoordinator>,
-    database_path: PathBuf,
-    resolve_log_enabled: bool,
-    telemetry: Option<Arc<TelemetryWriter>>,
-    resolution_metrics: Arc<ResolutionPipelineMetrics>,
     metrics: Arc<MetricsOwner>,
     history: ManagementHistoryDependencies,
 }
@@ -45,19 +36,11 @@ pub(crate) struct ManagementQueryDependencies {
 impl ManagementQueryDependencies {
     pub(crate) fn new(
         coordinator: Arc<RuntimeCoordinator>,
-        database_path: PathBuf,
-        resolve_log_enabled: bool,
-        telemetry: Option<Arc<TelemetryWriter>>,
-        resolution_metrics: Arc<ResolutionPipelineMetrics>,
         metrics: Arc<MetricsOwner>,
         history: ManagementHistoryDependencies,
     ) -> Self {
         Self {
             coordinator,
-            database_path,
-            resolve_log_enabled,
-            telemetry,
-            resolution_metrics,
             metrics,
             history,
         }
@@ -80,17 +63,8 @@ impl ManagementService {
         let auth = Arc::new(AuthState::new(&config.users).map_err(ManagementBuildError::Auth)?);
         let sessions = Arc::new(SessionStore::new(origin.scheme() == "https"));
         let metrics = Arc::clone(&dependencies.metrics);
-        let read_model: Arc<dyn ManagementStorageRead> = Arc::new(
-            SqliteManagementReadModel::connect(dependencies.database_path)
-                .await
-                .map_err(ManagementBuildError::ReadModel)?,
-        );
         let queries = Arc::new(ManagementQueryService::new(
             dependencies.coordinator,
-            read_model,
-            dependencies.telemetry,
-            dependencies.resolve_log_enabled,
-            dependencies.resolution_metrics,
             dependencies.metrics,
             dependencies.history,
         ));
@@ -182,8 +156,6 @@ pub(crate) enum ManagementBuildError {
     MissingPublicOrigin,
     #[error("management authentication initialization failed")]
     Auth(#[source] AuthError),
-    #[error("management read model initialization failed")]
-    ReadModel(#[source] SqliteManagementReadModelBuildError),
     #[error("management WebSocket initialization failed: {0}")]
     Events(&'static str),
     #[error("management WebUI assets are unavailable: {0}")]
@@ -242,7 +214,7 @@ mod tests {
         let mut stream = tokio::net::TcpStream::connect(address).await.unwrap();
         stream
             .write_all(
-                b"GET /api/v1/auth/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                b"GET /api/v2/auth/setup HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
             )
             .await
             .unwrap();

@@ -153,3 +153,7 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取 v2 进程指标和 v1 基础信息 | FC-14 测试及 Windows 真实浏览器/后端可用样本；P3 窄屏无溢出 | 真实不可用 OS 样本和 Linux 未做浏览器验收 |
 
 2026-09-05 原核对未运行 pnpm 或浏览器；P1-P4 的分批证据分别见上节。环境与打包边界见[交付证据](../delivery.md)，P4 真实证据不外推为 P5、release 或跨平台完成。
+
+## 认证与系统信息统一 v2（2026-09-09）
+
+BC-27 切换后，初始化、登录、刷新、登出和 session 统一请求 `/api/v2/auth/*`；共享 client 的内存凭据、取消与认证代次规则保持不变。系统运行页从唯一 `/api/v2/system/runtime` 响应读取版本、启动时间和进程采样，删除独立的旧 system query/hook。旧页面及生成产物退出由 FC-15 继续跟踪。

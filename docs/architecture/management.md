@@ -8,9 +8,9 @@
 
 ## 设计结论
 
-Management 使用独立 HTTP listener 与 Axum router，不扩展 DoH 的有界 DNS parser。框架类型限定在 adapter 内；Runtime、Storage、Resource 和 DNS ports 只暴露领域类型。读数据通过 snapshot 或 `ManagementStorageRead`，不让 handler 持有 SQLx pool。
+Management 使用独立 HTTP listener 与 Axum router，不扩展 DoH 的有界 DNS parser。框架类型限定在 adapter 内；Runtime、Storage、Resource 和 DNS ports 只暴露领域类型。读数据通过 snapshot 或 `DetailShardStore`，不让 handler 持有 SQLx pool。
 
-既有兼容页面 API 字段、状态码和错误 envelope 的权威为 [v1 OpenAPI](../../frontend/openapi/management-api-v1.yaml)，P0 冻结并由 P1-P4 接入的配置、保留、历史、指标和实时事件契约以 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml) 为权威；本文不复制 schema。P4 已注册服务指标和解析记录 WS；分阶段接入不承诺长期维护 v1/v2 并行兼容服务，旧路径退出仍归 P5/BC-27，实际边界见[管理端实现](../implementation/backend/management.md#p0-v2-契约)。
+认证、配置、保留、历史、指标和实时事件统一使用 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml)。旧 API 不重定向、不兼容，统一返回 JSON 404；认证与新页面必须成套切换。
 
 v2 配置读写以活动源表达为权威，模块严格白名单，`name` 为管理/引用键，`client_id` 只负责请求身份且普通编辑不可修改。配置先运行时应用后持久化，操作结果和文件同步状态分开；外部变化只提示，不自动 reload。正式链路已把 Bearer/Origin、handler、ConfigMutationOwner、typed client 与 SPA fallback 一并接入；不新增角色管理。
 
@@ -59,10 +59,10 @@ HTTP 直连不提供传输加密，只适用于 loopback/可信隔离管理网�
 
 ## 路由、数据与静态文件
 
-路由优先级是 setup/auth、受保护的 `/api/v1/*` 兼容查询、正式 `/api/v2/*` 配置/历史/指标、WS ticket 与 upgrade、未知 `/api/*` 的 JSON 错误、内嵌静态资源、满足条件的 SPA fallback。只有接受 HTML 的无扩展名 GET/HEAD 前端路径可以回退 `index.html`；资源缺失和未知 API 不得伪装成成功页面。
+路由优先级是 setup/auth、正式 `/api/v2/*` 配置/历史/指标、WS ticket 与 upgrade、未知 `/api/*` 的 JSON 错误、内嵌静态资源、满足条件的 SPA fallback。只有接受 HTML 的无扩展名 GET/HEAD 前端路径可以回退 `index.html`；资源缺失和未知 API 不得伪装成成功页面。
 
 API 使用统一 request ID、错误 envelope 和有界安全错误；错误正文不返回 SQL、绝对配置路径、SecretRef、hash、token 或 backtrace。仅认证专用成功响应返回 access token，刷新凭据永不进入正文。查询使用只读连接、固定模板、参数绑定、分页和时间窗口上限。
 
-所有 authenticated WebUI 用户可以读取 canonical qname、有效 client IP、真实配置 ID、upstream provenance 与有界 answer。该授权范围不等同普通日志/metrics允许这些内容。历史已脱敏记录保留 `legacy_redacted` 和空详情；不得伪造丢失字段。始终禁止 DNS wire、request digest、route 原文与秘密配置进入 API。
+所有 authenticated WebUI 用户可以读取 canonical qname、有效 client IP、真实配置 ID、upstream provenance 与有界 answer。该授权范围不等同普通日志/metrics允许这些内容。不读取旧版脱敏详情；新记录的缺失或截断状态必须据实展示。始终禁止 DNS wire、request digest、route 原文与秘密配置进入 API。
 
 静态响应提供 CSP、`nosniff`、正确 MIME、ETag/HEAD/条件缓存；HTML 与 API 使用保守缓存策略，带内容 hash 的资源可长期缓存。生产构建不包含 source map 或 mock worker。是否真的在无外部资源机器上可用由[交付证据](../implementation/delivery.md)证明，不能由 `webui-embed` 名称推断。

@@ -233,6 +233,15 @@ pub struct FileSyncRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ErrorCode {
+    HttpVersionNotSupported,
+    UriTooLong,
+    HeadersTooLarge,
+    RequestTimeout,
+    InternalError,
+    SetupAlreadyCompleted,
+    AuthInvalidCredentials,
+    OriginRejected,
+    ConfigConflict,
     InvalidArgument,
     ValidationFailed,
     PayloadTooLarge,
@@ -258,6 +267,15 @@ impl ErrorCode {
     /// 仅用于 ErrorEnvelope；已受理操作的失败状态仍由 OperationResult 返回。
     pub fn http_status(&self) -> u16 {
         match self {
+            Self::HttpVersionNotSupported => 505,
+            Self::UriTooLong => 414,
+            Self::HeadersTooLarge => 431,
+            Self::RequestTimeout => 408,
+            Self::InternalError => 500,
+            Self::SetupAlreadyCompleted => 409,
+            Self::AuthInvalidCredentials => 401,
+            Self::OriginRejected => 400,
+            Self::ConfigConflict => 409,
             Self::InvalidArgument => 400,
             Self::ValidationFailed | Self::VersionUnsupported => 422,
             Self::PayloadTooLarge => 413,
@@ -740,6 +758,8 @@ pub struct ServiceMetrics {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProcessMetrics {
+    pub version: String,
+    pub started_at_ms: u64,
     pub sampled_at_ms: u64,
     pub uptime_seconds: u64,
     pub rss_bytes: Measurement<DecimalU64>,

@@ -3,9 +3,9 @@ import { acceptAuthSession, apiRequest, clearAccessSession } from "@/shared/api/
 import type { AuthSession, LoginRequest, Session, SetupRequest, SetupStatus } from "@/shared/api/types";
 
 export const authKeys = {
-  all: ["api", "v1", "auth"] as const,
-  setup: ["api", "v1", "auth", "setup"] as const,
-  session: ["api", "v1", "auth", "session"] as const,
+  all: ["api", "v2", "auth"] as const,
+  setup: ["api", "v2", "auth", "setup"] as const,
+  session: ["api", "v2", "auth", "session"] as const,
 };
 
 export function getSetupStatus(signal?: AbortSignal): Promise<SetupStatus> {

@@ -112,7 +112,7 @@ async fn off_on_level_and_path_switch_keep_metrics_and_never_replay_disabled_log
             safe_reason: None,
         })
         .unwrap();
-    assert_eq!(writer.health_snapshot().len(), 1);
+    assert_eq!(writer.health.lock().unwrap().len(), 1);
     assert_eq!(writer.metric_snapshot().len(), 1);
     assert_eq!(writer.stats().pending(), 1);
 

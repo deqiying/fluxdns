@@ -108,11 +108,11 @@ function readOnlyV2<T extends object>(fixture: T) {
 
 export const handlers = [
   eventSocketHandler,
-  http.get("/api/v1/auth/setup", () => HttpResponse.json(setupRequired ? setupRequiredFixture : setupReadyFixture)),
-  http.get("/api/v1/auth/session", ({ request }) => (authorized(request) ? HttpResponse.json(authSession().session) : unauthorized())),
+  http.get("/api/v2/auth/setup", () => HttpResponse.json(setupRequired ? setupRequiredFixture : setupReadyFixture)),
+  http.get("/api/v2/auth/session", ({ request }) => (authorized(request) ? HttpResponse.json(authSession().session) : unauthorized())),
   // mock 的 authenticated 仅模拟浏览器刷新会话；真实 Cookie/Origin 防护由后端与浏览器联测验证。
-  http.post("/api/v1/auth/refresh", () => (authenticated ? HttpResponse.json(authSession()) : unauthorized())),
-  http.post("/api/v1/auth/setup", async ({ request }) => {
+  http.post("/api/v2/auth/refresh", () => (authenticated ? HttpResponse.json(authSession()) : unauthorized())),
+  http.post("/api/v2/auth/setup", async ({ request }) => {
     if (!setupRequired) {
       return HttpResponse.json(
         { code: "SETUP_ALREADY_COMPLETED", message: "setup already completed", request_id: "mock-setup-409", retryable: false },
@@ -131,7 +131,7 @@ export const handlers = [
     authenticatedName = body.username;
     return HttpResponse.json(authSession(), { status: 201 });
   }),
-  http.post("/api/v1/auth/login", async ({ request }) => {
+  http.post("/api/v2/auth/login", async ({ request }) => {
     const body = (await request.json()) as { username?: string; password?: string };
     if (!body.username || !body.password) {
       return HttpResponse.json(
@@ -143,7 +143,7 @@ export const handlers = [
     authenticatedName = body.username;
     return HttpResponse.json(authSession());
   }),
-  http.post("/api/v1/auth/logout", ({ request }) => {
+  http.post("/api/v2/auth/logout", ({ request }) => {
     if (authorized(request)) authenticated = false;
     return new HttpResponse(null, { status: 204 });
   }),

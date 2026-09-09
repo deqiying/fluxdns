@@ -18,7 +18,7 @@
 | `/login` | [LoginPage](../../../frontend/src/modules/auth/LoginPage.tsx) | 登录签发内存 Bearer，HttpOnly Cookie 仅用于认证刷新 |
 | `/dashboard` | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) | v2 HTTP/WS 的 RSS、QPS、RPM、在线身份和双单位趋势图 |
 | `/queries` | [QueriesPage](../../../frontend/src/modules/queries/QueriesPage.tsx) | v2 cursor 查询、身份/来源/Answer、实时缓冲和稳定详情 |
-| `/system-runtime` | [SystemPage](../../../frontend/src/modules/system/SystemPage.tsx) | v2 进程采样，以及现有 v1 版本、启动时间和管理能力 |
+| `/system-runtime` | [SystemPage](../../../frontend/src/modules/system/SystemPage.tsx) | v2 进程采样、版本和启动时间 |
 | `/listeners` | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx) | UDP/TCP/DoH 类型化列表、Runtime binding 与编辑 |
 | `/upstreams` | [UpstreamsPage](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx) | Hosts/DoH/Group 类型化读写及“上游 / 上游组”URL tab |
 | `/dns-settings` | [DnsSettingsPage](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) | DNS/cache/TTL/ECS/详情与 R/G/T 预览保存 |
@@ -29,7 +29,7 @@
 | `/proxies` | [ProxiesPage](../../../frontend/src/modules/proxies/ProxiesPage.tsx) | SOCKS5 SecretRef env/file，不回显实际秘密 |
 | `/system-settings` | [SystemSettingsPage](../../../frontend/src/modules/system-settings/SystemSettingsPage.tsx) | 启动字段只读、logs enable/level/path 热编辑 |
 
-12 个目标入口都已进入 router；`/dashboard` 与 `/queries` 已接入 v2 HTTP/WS，`/system-runtime` 接入 BC-23 的 v2 进程查询并复用当前 v1 system 基础信息，其余九个 P3 配置入口接入 v2 typed module API。原 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 不再注册且返回正常 404；对应源码和仍被基础信息消费的兼容 API 留供 FC-15/P5 按引用收口，不代表仍有正式入口。
+12 个目标入口都已进入 router；`/dashboard` 与 `/queries` 已接入 v2 HTTP/WS，`/system-runtime` 接入 BC-23 的 v2 进程查询并统一返回版本与启动时间，其余九个 P3 配置入口接入 v2 typed module API。原 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 不再注册且返回正常 404；兼容 API 已删除，旧页面源码留供 FC-15 按引用收口，不代表仍有正式入口。
 
 ## 查询与缓存行为
 
@@ -43,7 +43,7 @@ dashboard 先取 v2 HTTP 快照再订阅 WS metrics，system runtime 和全局�
 
 详情显示 canonical qname、Answer 截断计数、strategy/upstream/cache producer 与原始/历史/当前三层客户端事实。qname/Answer 只按文本渲染，缺失耗时不伪造为零；共同保留水位使记录过期时显示明确状态，不按行号寻找替代记录。
 
-[`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 以 `/api/v2/system/runtime` 为进程读数权威，显示运行时长、RSS、CPU、线程和采样时间；RSS 从十进制 u64 字符串按 BigInt 换算为 MiB。measurement 不可用时保留后端 reason，不能以零代替。运行时长只从成功响应的 `uptime_seconds` 与前端接收时刻递增，页面隐藏时停止逐秒渲染，重新可见后校正；30 秒采样或手动刷新会按后端基准重置。版本、启动时间和管理能力继续独立读取现有 v1 system，失败时只降级这些信息，不隐藏仍有效的 v2 进程读数。
+[`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 以 `/api/v2/system/runtime` 为进程读数权威，显示运行时长、RSS、CPU、线程和采样时间；RSS 从十进制 u64 字符串按 BigInt 换算为 MiB。measurement 不可用时保留后端 reason，不能以零代替。运行时长只从成功响应的 `uptime_seconds` 与前端接收时刻递增，页面隐藏时停止逐秒渲染，重新可见后校正；30 秒采样或手动刷新会按后端基准重置。版本和启动时间同样来自该 v2 响应，进程状态不再依赖旧 system 查询。
 
 [`PageState`](../../../frontend/src/shared/components/PageState.tsx)、[`SnapshotMeta`](../../../frontend/src/shared/components/SnapshotMeta.tsx) 与 [formatters](../../../frontend/src/shared/formatters/index.ts) 分别处理错误/加载、快照信息与时间/耗时格式。模块直接使用自己的 API 返回值，不复制整份后端配置到全局 store。
 
@@ -53,7 +53,7 @@ dashboard 先取 v2 HTTP 快照再订阅 WS metrics，system runtime 和全局�
 | --- | --- | --- | --- | --- |
 | 12 入口导航 | route-contract、AppLayout | 三组菜单与受保护路由 | 应用测试；1440×900 真实内嵌浏览器逐路由和 390×844 移动 Drawer | FC-15/P5 收口未进入 |
 | 实时服务状态 | dashboard Page/hooks/chart | v2 metrics HTTP + WS | Vitest；真实 DNS 流量、浏览器指标变化与可访问图表 | 深色样例和真实 OS failure 未复核 |
-| 进程状态 | system Page/hooks/api、formatters | `/system-runtime` 已注册 | FC-14 测试；Windows 真实浏览器/后端可用样本与刷新；P3 窄屏无溢出 | 基础信息仍复用 v1；真实不可用 OS 样本未做浏览器验收 |
+| 进程状态 | system Page/hooks/api、formatters | `/system-runtime` 已注册 | FC-14 测试；Windows 真实浏览器/后端可用样本与刷新；P3 窄屏无溢出 | 真实不可用 OS 样本未做浏览器验收 |
 | v2 查询与实时记录 | QueriesPage、cursor hooks、realtime buffer | v2 search/detail HTTP + queries WS | Vitest；真实 UDP/SQLite/HTTP/WS、断线 replay/resync | 真实网络慢读饱和和性能未验证 |
 | 稳定详情 | record-keyed Popover、detail formatter | 列表结果与按 ID detail | 持续写入下固定 ID、显式查看新记录、桌面/移动浏览器 | 不重建已过期或历史丢失值 |
 | P3 配置管理 | 九个 Page、v2 module hooks、ConfigFileStatus | 十模块读写、保留 preview、文件差异/组合采用 | 91 项 P3 Vitest；真实文件/SQLite/UDP/Bearer HTTP/两档浏览器 | P5、Linux/macOS 与性能未验证 |
