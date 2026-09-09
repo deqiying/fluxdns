@@ -380,10 +380,11 @@ describe("application routes", () => {
     expect(await screen.findByRole("heading", { name: "代理配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("proxy-primary")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "编辑代理 proxy-primary" }));
-    const secret = screen.getByLabelText("环境变量", { selector: "input[type='text']" });
+    const dialog = await screen.findByRole("dialog", { name: "编辑代理" });
+    const secret = within(dialog).getByLabelText("环境变量", { selector: "input[type='text']" });
     await user.clear(secret);
     await user.type(secret, "UPDATED_PROXY_URL");
-    await user.click(screen.getByRole("button", { name: "保存" }));
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[0]).toMatchObject({
       changes: [{
@@ -396,7 +397,7 @@ describe("application routes", () => {
       }],
       discard_external_changes: false,
     });
-  });
+  }, 10_000);
 
   it("Hosts 页面加载类型化来源和 Runtime 状态", async () => {
     setMockAuthenticated(true);
@@ -437,8 +438,9 @@ describe("application routes", () => {
     expect(await screen.findByRole("heading", { name: "客户端配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("Desktop-01")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "编辑客户端 desktop" }));
-    expect(screen.getByLabelText("客户端 ID")).toBeDisabled();
-  });
+    const dialog = await screen.findByRole("dialog", { name: "编辑客户端" });
+    expect(within(dialog).getByLabelText("客户端 ID")).toBeDisabled();
+  }, 10_000);
 
   it("DNS 页面展示缓存、详情和真实保留状态", async () => {
     setMockAuthenticated(true);

@@ -76,7 +76,7 @@ export function ExternalChangeDrawer({
       className="external-change-drawer"
       open={state.open}
       title="配置文件变化"
-      width={640}
+      size={640}
       destroyOnHidden
       keyboard={!closeBlocked}
       mask={{ closable: !closeBlocked }}
