@@ -293,6 +293,7 @@ ConfigV2
 | `work.path` | string | 必填 | 工作目录；绝对路径直接使用，相对路径以启动配置文件所在目录为基准。 |
 | `work.rules_path` | string | 必填 | 规则资源落盘目录；相对路径以 `work.path` 为基准。 |
 | `work.rule_set_max_size_bytes` | integer | 可选 | 每个规则资源读取、下载和解析的大小上限，单位为字节；必须大于 0，缺失时默认为 `16777216`（16 MiB）。 |
+| `work.rule_set_max_rules` | integer | 可选 | 每个规则资源允许索引的规则数量上限；必须大于 0，缺失时默认为 `131072`。 |
 
 启动时，应先得到绝对的 `resolved_work_path` 并确保目录存在；如果配置文件不在该目录中，再将其复制为 `<resolved_work_path>/config.yaml`。数据库、日志、缓存和证书等其他相对路径均以 `resolved_work_path` 为基准。
 

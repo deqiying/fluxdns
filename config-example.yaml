@@ -22,6 +22,8 @@ work:
   rules_path: ./rules
   # 规则资源读取、下载和解析的单资源大小上限，单位为字节；默认 16 MiB。
   rule_set_max_size_bytes: 16777216
+  # 每个规则资源允许索引的规则数量上限；默认 131072。
+  rule_set_max_rules: 131072
 
 # 数据库配置。聚合统计和解析详情使用相互独立的新布局，不读取旧单库数据。
 database:

@@ -184,8 +184,9 @@ impl PreparedRuntime {
                 },
             )?,
         );
-        let rule_limits =
-            RuleLimits::default().with_max_input_bytes(config.work.rule_set_max_size_bytes);
+        let rule_limits = RuleLimits::default()
+            .with_max_input_bytes(config.work.rule_set_max_size_bytes)
+            .with_max_rules(config.work.rule_set_max_rules);
         let (host_snapshots, mut rule_snapshots) =
             load_initial_file_snapshots(&config, rule_limits)?;
         for resource in &config.rule_sets {
@@ -444,7 +445,8 @@ impl PreparedRuntime {
                     self.snapshot.config_arc().as_ref(),
                     resource,
                     RuleLimits::default()
-                        .with_max_input_bytes(self.snapshot.config().work.rule_set_max_size_bytes),
+                        .with_max_input_bytes(self.snapshot.config().work.rule_set_max_size_bytes)
+                        .with_max_rules(self.snapshot.config().work.rule_set_max_rules),
                     deadline,
                     cancellation,
                 );

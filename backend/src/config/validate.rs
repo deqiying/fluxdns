@@ -276,6 +276,13 @@ fn validate_startup(config: &ResourceConfig<'_>, report: &mut ConfigErrorReport)
             "rule-set size limit must be greater than zero",
         ));
     }
+    if config.work.rule_set_max_rules == 0 {
+        report.push(ConfigError::new(
+            ConfigErrorKind::InvalidValue,
+            "work.rule_set_max_rules",
+            "rule-set rule limit must be greater than zero",
+        ));
+    }
     if !is_non_empty_path(config.database_path) {
         report.push(ConfigError::new(
             ConfigErrorKind::MissingField,

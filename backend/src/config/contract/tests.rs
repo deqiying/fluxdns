@@ -10,6 +10,7 @@ fn fixture() -> ConfigV2 {
 fn strict_v2_fixture_and_defaults() {
     let config = fixture();
     assert_eq!(config.work.rule_set_max_size_bytes, 16 * 1024 * 1024);
+    assert_eq!(config.work.rule_set_max_rules, 131_072);
     assert!(config.dns.cache.is_none());
     assert!(config.dns.resolve_log.is_none());
     let cache = GlobalCacheV2::default();
@@ -37,6 +38,16 @@ fn rule_set_size_limit_is_configurable() {
     );
     let config = ConfigV2::parse(source.as_bytes()).unwrap();
     assert_eq!(config.work.rule_set_max_size_bytes, 32 * 1024 * 1024);
+}
+
+#[test]
+fn rule_set_rule_limit_is_configurable() {
+    let source = FIXTURE.replace(
+        "  rules_path: ./rules",
+        "  rules_path: ./rules\n  rule_set_max_rules: 600000",
+    );
+    let config = ConfigV2::parse(source.as_bytes()).unwrap();
+    assert_eq!(config.work.rule_set_max_rules, 600_000);
 }
 
 #[test]

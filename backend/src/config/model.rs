@@ -20,9 +20,15 @@ pub type DohUpstreamDetails<'a> = (
 
 /// 规则资源读取、下载和解析的默认有界大小，单位为字节。
 pub const DEFAULT_RULE_SET_MAX_SIZE_BYTES: usize = 16 * 1024 * 1024;
+/// 每个规则资源读取、解析和索引的默认规则数量上限。
+pub const DEFAULT_RULE_SET_MAX_RULES: usize = 131_072;
 
 fn default_rule_set_max_size_bytes() -> usize {
     DEFAULT_RULE_SET_MAX_SIZE_BYTES
+}
+
+fn default_rule_set_max_rules() -> usize {
+    DEFAULT_RULE_SET_MAX_RULES
 }
 
 pub type UpstreamGroupDetails<'a> = (
@@ -63,6 +69,8 @@ pub struct WorkDto {
     pub rules_path: PathBuf,
     #[serde(default = "default_rule_set_max_size_bytes")]
     pub rule_set_max_size_bytes: usize,
+    #[serde(default = "default_rule_set_max_rules")]
+    pub rule_set_max_rules: usize,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

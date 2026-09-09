@@ -277,7 +277,9 @@ impl PolicyIndex {
             &config.hosts,
             &config.rule_sets,
             &BTreeMap::new(),
-            RuleLimits::default().with_max_input_bytes(config.work.rule_set_max_size_bytes),
+            RuleLimits::default()
+                .with_max_input_bytes(config.work.rule_set_max_size_bytes)
+                .with_max_rules(config.work.rule_set_max_rules),
         )?;
         validate_rule_set_selectors(config, &rule_sets)?;
         Self::build_with_resources(
@@ -301,7 +303,9 @@ impl PolicyIndex {
             &config.rule_sets,
             supplied_hosts,
             supplied_rule_indexes,
-            RuleLimits::default().with_max_input_bytes(config.work.rule_set_max_size_bytes),
+            RuleLimits::default()
+                .with_max_input_bytes(config.work.rule_set_max_size_bytes)
+                .with_max_rules(config.work.rule_set_max_rules),
         )?;
         validate_rule_set_selectors(config, &rule_sets)?;
         Self::build_with_resources(

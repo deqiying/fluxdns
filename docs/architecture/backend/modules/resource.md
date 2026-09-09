@@ -29,7 +29,7 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 
 查询热路径只读取编译后的不可变索引，不访问文件、网络或 parser。
 
-规则资源的读取、下载和解析共用 `work.rule_set_max_size_bytes` 上限；缺失时使用 16 MiB 默认值，避免传输和 parser 使用不一致的限额。
+规则资源的读取、下载和解析共用 `work.rule_set_max_size_bytes` 与 `work.rule_set_max_rules` 上限；缺失时分别使用 16 MiB 和 131072 默认值，避免传输和 parser 使用不一致的限额。
 
 ## 2. ResourceSnapshot
 
