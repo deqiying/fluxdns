@@ -17,7 +17,7 @@
 1. 仅 `run` 先执行 `recover_pending_transaction`；`validate` 关闭 snapshot 写入，不恢复写事务。
 2. `ConfigV2Loader::load_from_path` 只加载 `version: 2`，`run` 先恢复已知配置文件事务并建立 active `ConfigStore`，再检查 SecretRef、配置正式日志输出并始终创建 telemetry writer 和日志 owner。
 3. 调用 `PreparedRuntime::prepare_with_policy_core_and_remote_resources`，准备资源、Policy core 和 upstream；候选 prepare 不读写 cache snapshot。
-4. `StorageRuntime::open` 在共享 deadline 内建目录、打开统计/详情数据库、迁移并执行独立事务写入/回滚探针；失败映射为 prepare 错误，不创建服务 owner。
+4. `StorageRuntime::open` 在共享 deadline 内建目录、初始化/校验 v2 统计与日分片布局并执行独立事务写入/回滚探针；失败映射为 prepare 错误，不创建服务 owner。
 5. app 创建唯一 `CacheSnapshotOwner`，在独立的有界 prepare deadline 内把快照分批恢复到活动 Moka；恢复故障降级冷启。owner 就绪后才继续 bind。
 6. `bind_prepared` 使用 `SystemSocketFactory` 绑定 DNS endpoint，构造 `RuntimeCoordinator` 并登记与活动 core 匹配的 snapshot owner。
 7. 构造 `DnsService` 并通过 `attach_logging` 挂接同一进程日志 owner，再取得有界 `ServiceControl`。

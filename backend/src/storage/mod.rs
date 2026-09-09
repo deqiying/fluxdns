@@ -45,9 +45,8 @@ pub use service::{
     StorageRuntimeBuildError, StorageService, StorageServiceError, StorageServiceFlushSummary,
 };
 pub use sqlite::{
-    SqliteResolveDetailFlushSummary, SqliteResolveDetailLimits, SqliteResolveDetailRunSummary,
-    SqliteResolveDetailWorker, SqliteResolveDetailWriter, SqliteResolveDetailWriterBuildError,
-    SqliteStorageBackend, SqliteStorageBackendBuildError,
+    SqliteResolveDetailFlushSummary, SqliteResolveDetailRunSummary, SqliteStorageBackend,
+    SqliteStorageBackendBuildError,
 };
 pub use statistics::{
     DimensionCount, PersistenceGapState, StatsAccumulator, StatsAccumulatorError, StatsSnapshot,

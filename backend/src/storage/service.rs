@@ -14,9 +14,8 @@ use super::{
     RetentionCoordinator, RetentionPolicy, RetentionScheduler, RetentionSchedulerSummary,
     STORAGE_SCHEMA_VERSION, ShardedResolveDetailWorker, ShardedResolveDetailWriter,
     ShardedResolveDetailWriterBuildError, SqliteResolveDetailFlushSummary,
-    SqliteResolveDetailRunSummary, SqliteResolveDetailWorker, SqliteStorageBackend,
-    SqliteStorageBackendBuildError, StatsPersistenceError, StatsPersistenceFlushSummary,
-    StatsPersistenceWorker,
+    SqliteResolveDetailRunSummary, SqliteStorageBackend, SqliteStorageBackendBuildError,
+    StatsPersistenceError, StatsPersistenceFlushSummary, StatsPersistenceWorker,
 };
 
 pub const DEFAULT_STORAGE_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
@@ -157,7 +156,6 @@ pub enum StorageRuntimeBuildError {
 pub struct StorageService {
     backend: Arc<dyn StorageBackend>,
     stats_worker: Option<Arc<StatsPersistenceWorker>>,
-    detail_worker: Option<SqliteResolveDetailWorker>,
 }
 
 impl StorageService {
@@ -165,7 +163,6 @@ impl StorageService {
         Self {
             backend,
             stats_worker: None,
-            detail_worker: None,
         }
     }
 
@@ -174,17 +171,8 @@ impl StorageService {
         self
     }
 
-    pub fn with_detail_worker(mut self, worker: SqliteResolveDetailWorker) -> Self {
-        self.detail_worker = Some(worker);
-        self
-    }
-
     pub fn has_stats_worker(&self) -> bool {
         self.stats_worker.is_some()
-    }
-
-    pub fn has_detail_worker(&self) -> bool {
-        self.detail_worker.is_some()
     }
 
     /// 返回由 resolution dispatcher 共享的同步 stats recorder。
@@ -198,7 +186,7 @@ impl StorageService {
         self.stats_worker.as_ref().map(Arc::clone)
     }
 
-    /// 先提交 stats，再 checkpoint backend，最后提交当前 detail batch。
+    /// 提交 stats 后 checkpoint 统计 backend；日分片 worker 由 StorageRuntime 单独持有。
     pub async fn flush(
         &mut self,
         deadline: Deadline,
@@ -215,21 +203,14 @@ impl StorageService {
             .flush(deadline)
             .await
             .map_err(StorageServiceError::Backend)?;
-        let detail = match self.detail_worker.as_mut() {
-            Some(worker) => worker
-                .flush(deadline)
-                .await
-                .map_err(StorageServiceError::Detail)?,
-            None => SqliteResolveDetailFlushSummary::default(),
-        };
         Ok(StorageServiceFlushSummary {
             stats,
             storage,
-            detail,
+            detail: SqliteResolveDetailFlushSummary::default(),
         })
     }
 
-    /// 在同一 deadline 内提交 stats、drain detail，再关闭 backend。
+    /// 在同一 deadline 内提交 stats 并关闭统计 backend。
     pub async fn shutdown(
         &mut self,
         deadline: Deadline,
@@ -238,35 +219,18 @@ impl StorageService {
             Some(worker) => worker.flush(deadline).await,
             None => Ok(StatsPersistenceFlushSummary::default()),
         };
-        let detail = match self.detail_worker.take() {
-            Some(worker) => worker.shutdown(deadline).await,
-            None => Ok(SqliteResolveDetailFlushSummary::default()),
-        };
         let storage = self.backend.shutdown(deadline).await;
-
-        match (stats, detail, storage) {
-            (Ok(stats), Ok(detail), Ok(storage)) => Ok(StorageServiceFlushSummary {
+        match (stats, storage) {
+            (Ok(stats), Ok(storage)) => Ok(StorageServiceFlushSummary {
                 stats,
                 storage,
-                detail,
+                detail: SqliteResolveDetailFlushSummary::default(),
             }),
-            (Err(stats), Err(detail), Err(backend)) => Err(StorageServiceError::All {
-                stats,
-                detail,
-                backend,
-            }),
-            (Err(stats), Err(detail), Ok(_)) => {
-                Err(StorageServiceError::StatsAndDetail { stats, detail })
-            }
-            (Err(stats), Ok(_), Err(backend)) => {
+            (Err(stats), Err(backend)) => {
                 Err(StorageServiceError::StatsAndBackend { stats, backend })
             }
-            (Err(stats), Ok(_), Ok(_)) => Err(StorageServiceError::Stats(stats)),
-            (Ok(_), Err(detail), Ok(_)) => Err(StorageServiceError::Detail(detail)),
-            (Ok(_), Ok(_), Err(backend)) => Err(StorageServiceError::Backend(backend)),
-            (Ok(_), Err(detail), Err(backend)) => {
-                Err(StorageServiceError::Both { detail, backend })
-            }
+            (Err(stats), Ok(_)) => Err(StorageServiceError::Stats(stats)),
+            (Ok(_), Err(backend)) => Err(StorageServiceError::Backend(backend)),
         }
     }
 }
@@ -282,12 +246,9 @@ impl StorageRuntime {
         }
         let backend = Arc::new(
             if config.version == crate::config::contract::CONFIG_VERSION {
-                SqliteStorageBackend::connect_v2_with_deadline(
-                    config.database.path.clone(),
-                    deadline,
-                )
-                .await
-                .map_err(StorageRuntimeBuildError::Connect)?
+                SqliteStorageBackend::connect_with_deadline(config.database.path.clone(), deadline)
+                    .await
+                    .map_err(StorageRuntimeBuildError::Connect)?
             } else {
                 SqliteStorageBackend::connect_with_deadline(config.database.path.clone(), deadline)
                     .await
@@ -547,7 +508,6 @@ impl std::fmt::Debug for StorageService {
             .debug_struct("StorageService")
             .field("backend", &"StorageBackend")
             .field("has_stats_worker", &self.has_stats_worker())
-            .field("has_detail_worker", &self.has_detail_worker())
             .finish()
     }
 }
@@ -845,7 +805,7 @@ mod tests {
                         .await
                         .unwrap();
                 assert_eq!(total, 1);
-                let legacy_details: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+                let legacy_details: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'resolve_log'")
                     .fetch_one(&stats_verification)
                     .await
                     .unwrap();
@@ -977,14 +937,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn storage_runtime_separates_stats_and_ignores_v1_detail_record_limits() {
+    async fn storage_runtime_separates_stats_and_writes_all_details_to_day_shards() {
         let (source, work_path) = crate::config::test_support::portable_example();
-        let source = source
-            .replace(
-                "eviction_threshold_records: 90000",
-                "eviction_threshold_records: 2",
-            )
-            .replace("max_records: 100000", "max_records: 3");
         let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&source)
             .expect("storage runtime fixture must be valid")
@@ -1049,10 +1003,12 @@ mod tests {
             )
             .await
             .unwrap();
-        let legacy_detail_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
-            .fetch_one(&stats_verification)
-            .await
-            .unwrap();
+        let legacy_detail_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'resolve_log'",
+        )
+        .fetch_one(&stats_verification)
+        .await
+        .unwrap();
         assert_eq!(legacy_detail_count, 0);
         stats_verification.close().await;
         let _ = std::fs::remove_dir_all(work_path);

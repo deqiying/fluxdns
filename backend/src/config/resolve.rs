@@ -146,7 +146,6 @@ pub struct ResolvedGlobalCache {
     pub persistence_enabled: bool,
     pub persistence_path: PathBuf,
     pub snapshot_interval: Duration,
-    pub persistence_max_size_bytes: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -198,9 +197,6 @@ pub enum ValueSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedResolveLog {
     pub enable: bool,
-    pub eviction_threshold_records: u64,
-    pub max_records: u64,
-    pub max_record_age: Duration,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -952,16 +948,11 @@ fn resolve_dns_v2(
             persistence_enabled: cache.persistence.enabled,
             persistence_path: resolve_path(work_path, &cache.persistence.path),
             snapshot_interval: cache.persistence.snapshot_interval,
-            // v2 快照格式自身受 1 GiB 硬上限约束，不再从配置接受旧大小字段。
-            persistence_max_size_bytes: 1 << 30,
         },
         ttl_override: resolve_ttl(ttl, None, ValueSource::Global),
         edns_client_subnet: resolve_ecs(ecs, None, ValueSource::Global),
         resolve_log: ResolvedResolveLog {
             enable: resolve_log.is_some_and(|value| value.enable),
-            eviction_threshold_records: 0,
-            max_records: 0,
-            max_record_age: Duration::ZERO,
         },
     }
 }

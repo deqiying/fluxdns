@@ -21,7 +21,6 @@ pub struct SchemaVersion(pub u32);
 #[derive(Clone, Debug)]
 pub enum StorageOperation {
     StatsBatch(StatsBatch),
-    ResolveBatch(Vec<ResolveEvent>),
 }
 
 #[derive(Clone, Debug)]

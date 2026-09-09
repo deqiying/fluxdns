@@ -42,30 +42,28 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 详情由 [`resolve_log.rs`](../../../backend/src/storage/resolve_log.rs) 投影，再交 [`detail_shards.rs`](../../../backend/src/storage/detail_shards.rs) 的唯一有界 detail worker 批写。worker 按事件 UTC 日选择 `<records_path>/YYYY-MM-DD.sqlite3`，满批立即提交，低流量尾批由周期 flush 处理；一次事务只处理队首同日记录。registry 以日锁串行同一分片、全局最多 4 个活动单连接 pool，读 lease 缺文件时不建库，retirement 先阻止新 lease 再等待已有 lease。`writer.rs` 是内存 contract 实现，不是正式 SQLite writer。[`detail_query.rs`](../../../backend/src/storage/detail_query.rs) 提供跨分片 storage 读口并已由 BC-13 的正式 v2 历史 API 消费；旧单库 Management 读模型已删除。
 
-[主库迁移目录](../../../backend/migrations)的前向链为 0001 基础表至 0008 retention watermark，统计库当前 schema 为 v8；其中旧 `resolve_log` 暂留兼容读口/测试，生产不再写入。0008 新增单例 `retention_state` 与按日 `retention_detail_manifest`，不搬迁或重匹配旧详情。新详情文件使用 [`migrations/detail`](../../../backend/migrations/detail) 的 layout v1：`detail_meta` 固定版本和唯一 UTC 日，`resolve_log` 保持当前有效字段，日归属 trigger 约束记录只能属于该文件日期；时间、耗时及 client ID/IP、历史匹配 ID、qname 使用查询索引。两类 SQLite 均使用 WAL、NORMAL synchronous 和 busy timeout；统计库保留串行 operation lock，详情连接由 registry lease 管理。
+[统计主库初始化 SQL](../../../backend/migrations/0001_statistics.sql) 直接创建 v2 layout、当前 schema 9、统计/ledger 和共同保留状态，不创建旧单库详情表，也不执行旧版升级。已有 v2 标记和 schema 9 的库直接校验并重开；未标记或其他 schema 拒绝，不转换或清库。新详情文件使用 [`migrations/detail`](../../../backend/migrations/detail) 的 layout v1：`detail_meta` 固定版本和唯一 UTC 日，`resolve_log` 保持当前有效字段，日归属 trigger 约束记录只能属于该文件日期；时间、耗时及 client ID/IP、历史匹配 ID、qname 使用查询索引。两类 SQLite 均使用 WAL、NORMAL synchronous 和 busy timeout；统计库保留串行 operation lock，详情连接由 registry lease 管理。
 
-主库升级由 adapter 手动执行 `include_str!` SQL 并更新 `storage_meta`，不是 SQLx Migrator。`connect_with_deadline` 将建目录、连接和迁移纳入 open 的同一预算；随后 `startup_write_probe` 在独立事务中实际更新 metadata 并回滚，不提交统计或详情。详情目录只在首个写 lease 时创建；已有日期文件必须声明匹配的 layout/day 和完整表、索引、trigger，普通外部 SQLite 或路径/文件身份异常会被拒绝。失败/超时不产生可服务 lease。
+主库首次初始化在一个事务执行完整 SQL、layout 和 metadata；版本不符直接失败。`connect_with_deadline` 将建目录、连接和初始化纳入 open 的同一预算；随后 `startup_write_probe` 在独立事务中实际更新 metadata 并回滚，不提交统计或详情。详情目录只在首个写 lease 时创建；已有日期文件必须声明匹配的 layout/day 和完整表、索引、trigger，普通外部 SQLite 或路径/文件身份异常会被拒绝。失败/超时不产生可服务 lease。
 
 停机时 `run_until_stopped` 关闭详情输入并将剩余 worker/队列交回 owner；正在执行的批次先结束，其余详情不抢先排空。`StorageService::shutdown` 提交统计并关闭主 pool，随后 `StorageRuntime` 用剩余时间排空分片详情、拒绝新 lease 并等待活动连接归还。启动/停机 deadline 不重置，但不能强制中断已进入 OS/SQLite worker 的操作；超时不伪装为成功或零丢失。
 
 ### 业务时间存储
 
+2026-09-09 / `6595cef` 加 BC-27 工作树：统计库直接初始化当前 schema，单库详情 writer/配额、旧迁移 SQL 和 `ResolveBatch` 已删除。首次完整串行 Cargo 回归为 813 通过、2 个旧表断言失败、3 忽略；将断言改为检查统计库确实没有详情表后，`cargo test --manifest-path backend/Cargo.toml storage:: -- --test-threads=1` 的 72 项全部通过，覆盖真实 SQLite 重开、旧库拒绝、锁/空间故障、时间边界、日分片、保留与关闭。没有执行个人数据迁移或删除。
+
 | 表 | 当前字段 | 类型与单位 |
 | --- | --- | --- |
 | `storage_meta` | `created_at_utc_millis`、`migrated_at_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64` |
 | `stats_batch_ledger` | `committed_at_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64` |
-| 主库旧 `resolve_log` / 日分片 `resolve_log` | `event_time_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64`；生产只写日分片 |
+| 日分片 `resolve_log` | `event_time_utc_millis` | `INTEGER`，Unix UTC 毫秒，非负 `i64`；生产只写日分片 |
 | `stats_daily_total` / `stats_daily_dimension` | `day_utc` | `INTEGER`，epoch 起算的 UTC 自然日编号，语义不变 |
 | 日分片 `detail_meta` | `day_utc`、`created_at_utc_millis` | 文件归属的 epoch UTC 日和 layout 创建时间 |
-| 主库旧 `resolve_log` / 日分片 `resolve_log` | `duration_millis`、`dns_core_duration_micros` | `INTEGER` 耗时，分别为毫秒/微秒；旧历史主链耗时可为空 |
+| 日分片 `resolve_log` | `duration_millis`、`dns_core_duration_micros` | `INTEGER` 耗时，分别为毫秒/微秒；只保存实际测得的主链耗时 |
 
-[`0006_integer_business_timestamps.sql`](../../../backend/migrations/0006_integer_business_timestamps.sql) 只迁移原四个绝对时间字段，不修改 0001–0005。它在同一事务中创建目标表、按完整字段复制、检查时间无损往返、替换表并重建 `(event_time_utc_millis, id)` 索引；stats 日表不重写，ledger hash/序号、详情 ID/其他字段/空值和 AUTOINCREMENT 历史高水位保留。最后才推进 schema version，并将 migrated time 更新为本次升级时间；重开和写探针不刷新该时间。
+新写入由 `system_time_utc_millis` 转为 `i64`，亚毫秒截断、epoch 前归零，溢出显式错误。时间列具有 integer 类型与非负约束；旧字符串时间转换、详情配额 writer、`ResolveBatch` 单库操作与兼容 DTO 已删除。
 
-[`0007_client_identity.sql`](../../../backend/migrations/0007_client_identity.sql) 只为 `resolve_log` 增加可空 `client_id`、受限为 `id`/`ip` 的 `client_match_source` 和 `matched_client_id`。writer 要求匹配来源与匹配 ID 同时存在或同时缺失，并按配置 ID 长度规则校验两个 ID；旧行保持 null，不从 `client_bucket` 或 client IP 反推历史身份。
-
-旧 writer 产生的规范非负十进制毫秒字符串可无损转换。空串、非数字、小数、指数格式、负值和超出 `i64` 的值不静默 `CAST` 成零或饱和值，迁移失败并回滚该步全部变更；不删除坏行或推测历史时间。新写入由 `system_time_utc_millis` 转为 `i64`，亚毫秒截断、epoch 前归零保留旧行为，溢出显式错误。时间列有 `typeof(...)='integer'` 与非负约束，不能保存不合法 TEXT/REAL 值。
-
-分片 writer 用整数毫秒计算 UTC 日；文件内 trigger 再校验 `event_time_utc_millis / 86400000 == detail_meta.day_utc`。生产 v2 只接受详情 `enable`，批写不执行历史 `COUNT`、按年龄/条数 `DELETE` 或 `VACUUM`。BC-10 的 `RetentionCoordinator` 按配置 R/G/T 冻结详情主文件+WAL 大小、在 stats 事务内发布单调共同水位、清理旧统计与确认 replay floor 以前的 ledger，并登记待物理回收详情日；stats pending 和迟到详情均受同一水位约束。BC-11 的唯一 `RetentionScheduler` 已由 `StorageRuntime` 正式持有：每分钟用 Jiff 重读服务器时区，按本地 01:00 单日运行，失败五分钟重试，启动核对补跑，shutdown 先停止该 owner。manifest 回收等待分片 lease、checkpoint/关闭后删除确切主文件和 sidecar，失败持久化 attempts/安全错误码；缓存路径是 protected file，不参与采样或删除。BC-09 storage 读口已按日 lease、分页前 filter、稳定 ID 和双向 keyset cursor 查询，并在事务 commit 后发布独立序列通知；对外 HTTP 仍暂走旧读口，不能据此宣称跨日 API 或 WS replay 已接线。
+分片 writer 用整数毫秒计算 UTC 日；文件内 trigger 再校验 `event_time_utc_millis / 86400000 == detail_meta.day_utc`。生产 v2 只接受详情 `enable`，批写不执行历史 `COUNT`、按年龄/条数 `DELETE` 或 `VACUUM`。BC-10 的 `RetentionCoordinator` 按配置 R/G/T 冻结详情主文件+WAL 大小、在 stats 事务内发布单调共同水位、清理旧统计与确认 replay floor 以前的 ledger，并登记待物理回收详情日；stats pending 和迟到详情均受同一水位约束。BC-11 的唯一 `RetentionScheduler` 已由 `StorageRuntime` 正式持有：每分钟用 Jiff 重读服务器时区，按本地 01:00 单日运行，失败五分钟重试，启动核对补跑，shutdown 先停止该 owner。manifest 回收等待分片 lease、checkpoint/关闭后删除确切主文件和 sidecar，失败持久化 attempts/安全错误码；缓存路径是 protected file，不参与采样或删除。BC-09 storage 读口已按日 lease、分页前 filter、稳定 ID 和双向 keyset cursor 查询，并在事务 commit 后发布独立序列通知；正式 v2 HTTP 与 WS 都消费该提交读口。
 
 ## Cache persistence
 

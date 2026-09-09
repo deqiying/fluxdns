@@ -317,7 +317,7 @@ QPS/RPM、趋势、在线身份、暖机和内存单位按[已确认 D-04](webui
 
 ## 13. BE-11：新基线初始化与旧路径退出
 
-2026-09-09 BC-27 配置部分已删除旧 loader、DTO、迁移注册表及 v1 fixture，保留通用 parser 和 [hash](../../backend/src/config/hash.rs)；全量 Cargo 测试 838 项通过、3 项显式忽略。测试统一使用正式 v2。legacy API 和旧只读 adapter 已退出，认证统一 v2；单库详情写入退出继续由本检查点跟踪。
+2026-09-09 BC-27 已删除旧 loader、DTO、迁移注册表及 v1 fixture，保留通用 parser 和 [hash](../../backend/src/config/hash.rs)。legacy API、旧只读 adapter、单库详情 writer 和主库旧迁移链已退出，认证统一 v2。配置全量回归 838 通过/3 忽略、Management 串行 49 通过、存储串行 72 通过；下一步核对旧缓存 adapter 引用，再进入 FC-15。
 
 2026-09-07 P0 源码核定：BC-26 完整生产初始化不能独立于 BC-04/07/08 至 BC-11 完成。当前 `StorageRuntime::open` 仍初始化统计/详情单库 v6，cache 仍装配可自动升级的 SQLite adapter；把 v2 字段接入这些 owner 会错误保留旧语义。P0 的 v2 拒绝规则/离线夹具随 BC-01 交付，不另造无消费者的空 layout/marker，也不将 BC-26 标为完成。完整空目录启动、重复启动、旧路径拒绝和新格式恢复待这些 owner 就绪后单独验证、提交；不删除个人运行数据。
 

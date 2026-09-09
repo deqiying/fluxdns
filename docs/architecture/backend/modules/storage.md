@@ -14,7 +14,7 @@
 
 Storage 模块实现两个相互隔离的持久化 owner：
 
-- schema migration；
+- 当前布局初始化与版本拒绝；
 - 默认开启的聚合统计；
 - 可选解析详情 UTC 日分片；
 - writer 健康状态、flush 和 shutdown。
@@ -28,7 +28,7 @@ Storage 模块实现两个相互隔离的持久化 owner：
 | `detail_shards.rs` | 日分片 layout、日期路径、受限连接 registry、读写/退役 lease、唯一 bounded 生产 detail writer 与关闭边界 |
 | `detail_query.rs` | 稳定 opaque 记录 ID、进程绑定 keyset cursor、跨分片有界读取、retention revision 和 commit cursor/通知基础 |
 | `retention.rs` | R/G/T 纯计算、受管文件大小采样、共同水位发布，以及 stats/detail owner 的一致性边界 |
-| `sqlite.rs` | 统计 SQLx pool、PRAGMA、migration、统计 transaction、health/checkpoint/shutdown；旧单库详情 adapter 仅保留给兼容测试，待 BC-27 删除 |
+| `sqlite.rs` | 统计 SQLx pool、当前布局初始化/拒绝旧库、统计 transaction、health/checkpoint/shutdown；日分片复用有界 insert helper |
 | `service.rs` | `StorageRuntime` 组装、分片详情 worker task、统计 backend/detail store 的 shutdown 顺序、resolution metrics owner |
 | `stats.rs` | StatsAccumulator epoch snapshot、BatchLedger 顺序提交与失败重试 worker |
 | `statistics.rs` / `ledger.rs` | sharded counters/epoch checkpoint 与 pending batch ledger |
@@ -43,7 +43,7 @@ prepare 阶段先初始化统计库：
 2. 以读写/创建模式打开文件；
 3. 显式设置 WAL，busy timeout 取 2 秒与剩余启动预算的较小值，连接池最多 4 个连接；
 4. 使用 `synchronous=NORMAL` 作为吞吐与崩溃恢复折中；
-5. 空库在同一事务创建 `fluxdns_layout(kind=statistics-v2, layout_version=1)`、基础表和 metadata；已有库必须先带匹配标记，未标记旧 schema 或错误标记直接拒绝；随后按 `storage_meta.schema_version` 执行前向 migration；
+5. 空库在同一事务创建 `fluxdns_layout(kind=statistics-v2, layout_version=1)`、基础表和 metadata；已有库必须先带匹配标记，未标记旧 schema 或错误标记直接拒绝；直接创建或核对当前 `storage_meta.schema_version=9`，不执行旧版本迁移；
 6. `StorageRuntime::open` 调用 `migrate` 核对当前 schema version，在独立事务内更新 singleton metadata 并显式回滚，验证真实写入路径；
 7. 建立 stats worker；
 8. 校验详情受管目录与统计库、缓存快照不存在词法包含或物理文件别名，再建立最多 4 个活动连接的分片 registry；
@@ -52,7 +52,7 @@ prepare 阶段先初始化统计库：
 
 详情第一次写某个事件 UTC 日时，registry 仅由已解析的 `database.records_path` 和日期生成 `YYYY-MM-DD.sqlite3`，以 WAL、`synchronous=NORMAL`、单连接 pool 打开，在同一事务创建 `detail_meta`、`resolve_log`、日归属 trigger、时间/耗时索引及 client ID/IP、历史匹配 ID、qname 查询索引。已有文件必须声明匹配的 layout version/day 且具备完整 schema；普通外部 SQLite、错误日期 metadata、symlink/reparse point、hard link 及统计/缓存文件别名均拒绝采用。不会扫描或迁移旧单库详情。
 
-建目录、connect/schema/migration、写探针共用调用方 deadline，不逐阶段重置。探针不提交业务统计或详情，也不永久修改 metadata；失败或预算耗尽不创建可服务的 Storage owner，并作为启动错误返回。deadline 限制异步等待与后续步骤，不承诺强制中断已进入 OS/SQLite worker 的操作；真实介质故障仍需环境验收。
+建目录、connect/schema 校验、写探针共用调用方 deadline，不逐阶段重置。探针不提交业务统计或详情，也不永久修改 metadata；失败或预算耗尽不创建可服务的 Storage owner，并作为启动错误返回。deadline 限制异步等待与后续步骤，不承诺强制中断已进入 OS/SQLite worker 的操作；真实介质故障仍需环境验收。
 
 ## 3. Schema 职责
 

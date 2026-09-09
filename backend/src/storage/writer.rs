@@ -34,7 +34,6 @@ struct State {
     daily_totals: BTreeMap<i32, u64>,
     daily_dimensions: HashMap<(i32, crate::ports::storage::StatsDimension), u64>,
     committed_batches: BTreeMap<u64, CommittedBatch>,
-    detail_records: u64,
 }
 
 impl Default for State {
@@ -45,7 +44,6 @@ impl Default for State {
             daily_totals: BTreeMap::new(),
             daily_dimensions: HashMap::new(),
             committed_batches: BTreeMap::new(),
-            detail_records: 0,
         }
     }
 }
@@ -124,13 +122,6 @@ impl InMemoryStorageBackend {
             })
     }
 
-    pub fn detail_record_count(&self) -> u64 {
-        self.state
-            .lock()
-            .expect("storage state lock poisoned")
-            .detail_records
-    }
-
     fn check_deadline(deadline: Deadline, operation: &'static str) -> Result<(), PortError> {
         if deadline.is_expired(Instant::now()) {
             Err(PortError::new(PortErrorClass::Timeout, operation))
@@ -199,13 +190,6 @@ impl InMemoryStorageBackend {
         for operation in transaction.operations {
             match operation {
                 StorageOperation::StatsBatch(batch) => apply_stats_batch(&mut candidate, &batch)?,
-                StorageOperation::ResolveBatch(_) => {
-                    return Err(PortError::new(
-                        PortErrorClass::Unavailable,
-                        "resolve detail writer",
-                    )
-                    .with_safe_context("deferred"));
-                }
             }
         }
         *state = candidate;
@@ -367,23 +351,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn migration_declares_business_tables_and_dimension_allowlist() {
-        let sql = include_str!("../../migrations/0001_storage.sql");
-        for table in [
-            "storage_meta",
-            "stats_daily_total",
-            "stats_daily_dimension",
-            "stats_batch_ledger",
-            "resolve_log",
-        ] {
-            assert!(sql.contains(&format!("CREATE TABLE {table}")));
-        }
-        assert!(sql.contains("'client_bucket'"));
-        assert!(sql.contains("'attempt_outcome'"));
-        assert!(sql.contains("PRIMARY KEY (day_utc, dimension_kind, dimension_value)"));
-    }
-
     #[tokio::test]
     async fn migrates_and_commits_stats_batch_atomically() {
         let backend = InMemoryStorageBackend::new();
@@ -467,7 +434,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn detail_operations_are_explicitly_deferred_and_do_not_partially_commit() {
+    async fn invalid_second_stats_batch_does_not_partially_commit() {
         let backend = InMemoryStorageBackend::new();
         backend
             .migrate(STORAGE_SCHEMA_VERSION, deadline())
@@ -483,15 +450,19 @@ mod tests {
             idempotency_key: Arc::from("stats-and-details"),
             operations: vec![
                 StorageOperation::StatsBatch(stats),
-                StorageOperation::ResolveBatch(Vec::new()),
+                StorageOperation::StatsBatch(StatsBatch {
+                    batch_id: 0,
+                    max_event_sequence: 0,
+                    counter_epoch: 0,
+                    events: Vec::new(),
+                }),
             ],
         };
         let error = backend.execute(transaction, deadline()).await.unwrap_err();
         assert!(matches!(
             error.class(),
-            crate::ports::PortErrorClass::Unavailable
+            crate::ports::PortErrorClass::InvalidInput
         ));
         assert_eq!(backend.total_for_day(20_260_902), 0);
-        assert_eq!(backend.detail_record_count(), 0);
     }
 }

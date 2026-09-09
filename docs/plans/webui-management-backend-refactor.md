@@ -36,7 +36,7 @@
 | [缓存装配](../../backend/src/dns/policy.rs)、[SQLite 缓存](../../backend/src/cache/sqlite.rs) | 生产链使用独立 SQLite 缓存及异步增量写入，有持久化编码预算 | 内存为权威，后台周期性生成完整二进制快照，不保留增量数据库镜像 |
 | [文件缓存 adapter](../../backend/src/cache/persistence.rs) | 已有 `FDCP` magic、版本与条目 codec，但维护第二份记录集合，并受文件容量限制 | 复用经审查的编码能力；不能只更换扩展名或直接替换为现有 adapter 就宣称完成 |
 | [详情写入](../../backend/src/storage/sqlite.rs) | `apply_resolve_records_with_limits` 在批写事务内按年龄删除、计数、按条数淘汰并计算可写余量 | 批写只做有界入队/插入，移除按条数扫描与历史清理；独立后台任务回收日期分片 |
-| [业务存储](../../backend/src/storage/service.rs)、[schema v6](../../backend/migrations/0006_integer_business_timestamps.sql) | 统计和详情同处业务 SQLite，事件时间为 UTC 毫秒，统计按 UTC 日聚合 | 保留统计 SQLite；详情迁往 UTC 日分片目录，统一保留协调器 |
+| [业务存储](../../backend/src/storage/service.rs)、[v2 统计布局](../../backend/migrations/0001_statistics.sql) | 统计与详情已分离，事件时间为 UTC 毫秒，统计按 UTC 日聚合 | 保留统计 SQLite；详情迁往 UTC 日分片目录，统一保留协调器 |
 | [现有 API](../../frontend/openapi/management-api-v1.yaml) | 配置查询/写入、原始客户端 ID、保留状态等目标能力尚不完整；统计窗口固定上限另有校验 | 同批修改 ports、DTO、OpenAPI 和生成类型，不只修改页面 |
 
 上述为定向静态核对，不覆盖全仓库行为或运行验收。现有 [Config](../architecture/backend/modules/config.md)、[Policy](../architecture/backend/modules/policy.md)、[Cache](../architecture/backend/modules/cache.md)、[Storage](../architecture/backend/modules/storage.md) 仍描述已接受的旧契约；本方案实施时再同步这些文档，不能提前把计划写成实现事实。
