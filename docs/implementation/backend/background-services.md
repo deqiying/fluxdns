@@ -4,9 +4,9 @@
 >
 > 适用范围：资源刷新、解析完成事件、统计/详情、缓存持久化和观测的实际所有权
 >
-> 最后核对：2026-09-05（UTC；业务时间、升级矩阵、SQL/flush 停机交错与本机契约验证）
+> 最后核对：2026-09-09（P5 当前布局、旧路径退出、Clippy 和 Windows 主链路验收）
 >
-> 核对基线：`f65fb3f8bd68e1a40ca041d9a380859b44a3da0c` 加本次契约验证工作树
+> 核对基线：`417cc32`；当前完整回归见 [WebUI 联合验收](../webui-acceptance.md)
 >
 > 2026-09-06 增量核对：仅更新连接/负载驱动、命令和本次开发验证；其余正文保留上述历史核对范围
 >
@@ -183,17 +183,17 @@ pwsh -File script/test-backend-contracts.ps1 -Suite Connections -Repeat 3
 
 | 用例 | 前置与故障点 | 断言与边界 |
 | --- | --- | --- |
-| V4-M01 | `sqlite::tests::contract_v4_all_legacy_versions_preserve_rows_and_nulls_on_reopen`；用原 migration 构造 v1–v5，各自空库/含数据 | 每个起点升级后两次打开，对照 metadata、全部详情字段/历史 NULL、统计总数/维度、ledger hash/序号、删除后的自增高水位和 integrity check；不重写旧 migration |
-| V4-M02 | `contract_v4_each_migration_failure_preserves_last_committed_step`；从 v1 出发，分别让 v2–v5 metadata update trigger 失败及 v6 时间转换失败；v7 从真实 v6 起点让 metadata update trigger 失败 | schema version 和已提交字段保留在失败前一步，该步新增列不残留；解除故障后可升级。v1 建库失败另复用原 DDL 回滚测试 |
-| V4-M03 | `contract_v4_newer_schema_is_rejected_without_mutation` | v8 被拒绝，schema SQL 与版本保持原样；不自动降级 |
+| v2 布局 | `sqlite::tests::v2_layout_initializes_reopens_and_rejects_legacy_database` | 新库直接初始化、当前 v2 重开、旧库拒绝且不创建单库详情表 |
+| v2 部分文件 | `unmarked_partial_layout_is_rejected_without_initialization` | 未标记的非空/部分 schema 拒绝，不当成新目录初始化或补造数据 |
+| V4-M03 | `contract_v4_newer_schema_is_rejected_without_mutation` | 比当前 schema 更新的文件被拒，schema SQL 与版本保持原样；不自动降级 |
 | V4-S01 / V9-S-local | `contract_v4_midnight_late_events_and_repeated_sqlite_recovery`；真实 SQLite，三轮事务 trigger 失败/解除/重试 | `day_utc` 从午夜两侧事件时间计算日桶；乱序与 late event 分属两个 epoch，失败不写 ledger，恢复后无重复总数，pending/gap 清除，重开及 integrity check 通过。trigger 不等价 disk-full 或介质 I/O 故障 |
 | V4-S02 | `stats::tests::contract_v4_pending_event_limit_preserves_active_epoch`；内存 backend 拒绝提交 | 分别达到 65,535/65,536 pending events，再产生两条 active event，保护错误保留 pending 与 active；batch 数上限继续复用原 64-batch 用例 |
 | V4-S03 | `storage::service::tests::contract_v4_sql_stages_share_shutdown_budget_and_reclaim_owner`；正式 StorageRuntime、真实日分片 SQLite，SQL 前/已 INSERT 未提交/已提交待回收 × 放行/截止超时 | 当前详情事务先回收，owner 尚未进入统计提交；正常释放后 stats/detail 均完成，超时报告失败且不延长预算。未提交详情回滚、已提交详情保留，pending 统计可在显式新预算下幂等恢复；主库无详情新行、channel/句柄/lease 回收及 integrity check 均断言 |
-| P2-S08 | `detail_shards::tests` 与 `storage_runtime_separates_stats_and_ignores_v1_detail_record_limits`；真实 UTC 日文件、迟到/错误日、缺失读取、外部库、连接和退役交错 | 文件名和 metadata 日一致，错误日由 trigger 回滚；只读不创建、连接受全局上限、shutdown 等待 lease；生产主库详情保持空，小 v1 条数/年龄配置不触发分片 COUNT/DELETE 配额路径 |
+| P2-S08 | `detail_shards::tests` 与 `storage_runtime_separates_stats_and_writes_all_details_to_day_shards`；真实 UTC 日文件、迟到/错误日、缺失读取、外部库、连接和退役交错 | 文件名和 metadata 日一致，错误日由 trigger 回滚；只读不创建、连接受全局上限、shutdown 等待 lease；全部详情进入分片，主库没有详情表 |
 | P2-S09 | `detail_query::tests`；真实双日 SQLite、同毫秒记录、前后 cursor、复合 filter、重启和 commit gate | 稳定 ID 跨重启不变；keyset 分页不重不漏且 filter 先于 limit；cursor 绑定上下文/进程/水位；事务 commit 前不通知，失败不推进提交序列；空读不建库 |
 | V4-S04 | `stats::tests::contract_v4_concurrent_flush_wait_preserves_deadline_and_active_epoch`；显式持有上一轮 flush 的串行锁 | 新调用的 20ms 预算耗尽即返回 Timeout，未提前交换 active epoch；放锁后可且仅可提交一次 |
 
-历史 v5 的完整非 NULL 字段、异常时间/INTEGER 约束、自增删除高水位及时间排序/索引用例继续复用。主库 SQLite operation lock/pool wait、同批幂等提交和旧单库详情配额测试仍作为兼容 adapter 回归，不能代表生产分片仍按条数/年龄清理。分片满批/尾批和 stats-first shutdown 由 P2-S08/V4-S03 覆盖。V4-S03 的暂停点仅在 `cfg(test)` 的单个分片 store 实例启用，分别位于真实 SQL 前、commit 前和 commit 后；不把同步点或 Tokio future 取消描述为可强制抢占 SQLite 系统调用。
+旧升级矩阵与单库配额 adapter 测试已删除；当前字段/INTEGER 约束、时间排序/索引、主库 operation lock/pool wait 和幂等 ledger 由现有真实 adapter 用例覆盖。分片满批/尾批和 stats-first shutdown 由 P2-S08/V4-S03 覆盖。V4-S03 的暂停点仅在 `cfg(test)` 的单个分片 store 实例启用，分别位于真实 SQL 前、commit 前和 commit 后；不把同步点或 Tokio future 取消描述为可强制抢占 SQLite 系统调用。
 
 V4-S04 在修复前等待至 200ms watchdog，而没有在 20ms 调用预算内结束。[`StatsPersistenceWorker::flush`](../../../backend/src/storage/stats.rs) 现对 `flush_lock` 的排队使用原 deadline，超时返回 `Timeout / stats_persistence.flush_lock`；拿锁后的 epoch、pending、ledger 与提交顺序保持不变，没有增加重试、持久化主链或内存上限。
 

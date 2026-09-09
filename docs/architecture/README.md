@@ -10,7 +10,7 @@
 | --- | --- |
 | [系统设计](system.md) | DNS 数据面、Management 控制面、前端与交付边界 |
 | [后端设计](backend/README.md) | 运行时所有权、核心管线和 12 个模块契约 |
-| [Management 设计](management.md) | 认证、同源保护、只读查询和内嵌 SPA |
+| [Management 设计](management.md) | 认证、同源保护、配置事务、查询/实时通道和内嵌 SPA |
 | [前端设计](frontend.md) | 分层、查询状态、路由与呈现约束 |
 
 代码入口和能力限制见[当前实现](../implementation/README.md)。已验收 D1-D9 的组合、环境与长期负载证据边界见[验证范围与收口](../implementation/backend/background-services.md#验证范围与收口)；结束验证专项不等于全部验收通过，证据缺口也不等同功能未接线。

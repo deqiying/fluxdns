@@ -12,7 +12,7 @@
 
 ## 1. 职责
 
-v2 重构采用“唯一 name 管理键、独立 client_id、活动源优先、应用后持久化、外部文件只提示”。BC-26 已把 [`contract.rs`](../../../../backend/src/config/contract.rs) 直接接入生产 loader/resolve/快照和 active `ConfigStore`；契约默认值和边界见[配置参考](../../../implementation/configuration.md#v2-契约与生产基线2026-09-08)。普通配置写接口和完整服务控制事务仍按[活动专项](../../../plans/webui-management-config-runtime-plan.md)实施。
+v2 采用“唯一 name 管理键、独立 client_id、活动源优先、应用后持久化、外部文件只提示”。[`contract.rs`](../../../../backend/src/config/contract.rs) 直接接入生产 loader/resolve/快照和 active `ConfigStore`；契约默认值和边界见[配置参考](../../../implementation/configuration.md#v2-契约与生产基线2026-09-08)。普通配置写接口与完整服务控制事务沿[Management 实现](../../../implementation/backend/management.md#p1-配置事务与文件操作2026-09-08)的唯一 owner 链路执行，不保留旧 loader 或迁移入口。
 
 Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 prepare 的 `ResolvedConfig`。资源内容首次 snapshot 与 listener 装配属于 Resource/Runtime/Application，不是 YAML loader 的职责。
 

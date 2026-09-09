@@ -17,10 +17,10 @@ DNS client -> UDP / TCP / DoH adapter -> DNS / Policy -> Cache / Upstream
                                                |
                                     Stats / Detail / Cache worker
 
-Browser -> SPA -> same-origin /api/v1 -> Management adapter
+Browser -> SPA -> same-origin /api/v2 -> Management adapter
                                         | Runtime / Telemetry snapshot
-                                        | ManagementStorageRead
-                                        | initial-user ConfigStore
+                                        | DetailShardStore / Retention / Metrics
+                                        | ConfigMutationOwner -> ConfigStore / ServiceControl
 ```
 
 箭头表示请求或数据流，不是允许反向依赖具体 adapter 的许可。

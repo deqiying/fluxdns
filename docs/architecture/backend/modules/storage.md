@@ -160,7 +160,7 @@ writer 周期性执行：
 
 ## 7. 保留边界
 
-生产分片批写只执行有界入队、字段校验和 `INSERT`，不执行历史 `COUNT`、按条数淘汰、按年龄 `DELETE` 或 `VACUUM`。v2 已删除 `eviction_threshold_records`、`max_records`、`max_record_age`；旧字段只由 BC-27 待删除的测试 loader/单库 adapter 覆盖，不代表生产契约。
+生产分片批写只执行有界入队、字段校验和 `INSERT`，不执行历史 `COUNT`、按条数淘汰、按年龄 `DELETE` 或 `VACUUM`。旧 `eviction_threshold_records`、`max_records`、`max_record_age`、测试 loader 和单库 adapter 均已退出；统一 R/G/T owner 负责共同水位与后台回收。
 
 BC-10 按冻结的 `reference_day_utc` 与受管详情大小 `S` 计算共同水位：`S > T` 取 R 天，否则取 R+G 天，等于阈值仍享有宽限；保留范围包含当前 UTC 日，只退役严格早于 `keep_from_day_utc` 的数据。策略限制为 R 至少 1 天、R+G 最多 3650 天、T 为 1 byte 至 1 TiB，大小只累计规范详情主文件与 WAL，不计 stats、cache、SHM、备份或其他文件；采样失败或整数溢出会终止本轮，不解释为 0。
 
@@ -218,18 +218,14 @@ shutdown：
 
 ## 11. Migration
 
-- migration 文件只前进，不在运行时自动 down；
-- 每个 migration 在空库和上一版本库测试；
-- 破坏性表重建使用新表 → copy/validate → rename；
-- schema version 与配置/cache/resource version 独立；
-- migration 失败保留原库并阻止启动；
-- backup/rollback CLI 属于后续独立契约。
+- 新统计文件在一个事务内创建当前 schema 与 `statistics-v2` 布局标记，不创建单库详情表。
+- 只接受当前布局和 schema 的既有文件；未知/旧版/更新版本明确拒绝，不自动升级、降级、转换或清库。
+- schema version 与配置/cache/resource version 独立；初始化失败回滚并阻止启动。
+- 新日分片由 owner 创建 layout v1，已有文件必须通过归属、日期和完整 schema 校验，不搬入旧单库行。
 
-当前统计库仍走原前向升级链并保留旧详情表；BC-08 不迁移、复制、删除或重新匹配旧详情。新日分片仅接受 layout v1 空文件或由 owner 新建的文件，不把单库旧行搬入分片。正式新数据基线和旧格式拒绝由 BC-26 完成。
+不读取或补造 legacy 身份/详情；缺失主链耗时或 Answer 的事实仍按 null/状态表达。实际初始化 SQL 与当前版本见[后台服务实现](../../../implementation/backend/background-services.md)，不保留旧版升级矩阵或迁移入口。
 
-新增可空详情字段不补造历史事实；历史脱敏记录由 read model 明确标为 legacy_redacted，缺失主链耗时保持 null。升级会一次性复制相关表并重建时间索引，需要额外临时空间，仍使用原启动 deadline；不擅自延长预算。旧 binary 不支持新 schema，不自动 down。实际 migration 文件和 schema 版本见[后台服务实现](../../../implementation/backend/background-services.md)，不在设计中重复逐版本清单。
-
-只读 Management pool 必须在业务 migration 完成后创建，通过 ManagementStorageRead 使用固定 filter/sort 模板与参数绑定。范围过滤、时间排序和详情清理直接比较整数时间列，不再依赖逐行 `CAST` 或文本字典序。返回 opaque ID，不暴露数据库 row ID、wire、request digest 或内部脱敏占位符。详情校验/裁剪在受限 projector/writer 边界完成，Debug 只展示存在性、长度和计数。
+Management 通过 `DetailShardStore` 的领域读口取得记录，不拥有 SQLx pool。范围过滤、时间排序和清理直接比较整数时间列，使用固定模板、绑定参数、读 lease 和共同水位。返回 opaque ID，不暴露 row ID、wire、request digest 或内部占位符；详情裁剪在受限 projector/writer 边界完成，Debug 只展示存在性、长度和计数。
 
 ## 12. 契约验证要求
 

@@ -59,7 +59,7 @@ DoH route 在 adapter 用共享模板匹配一次，Policy 按 typed route ID �
 
 - 核心返回后、transport 编码前，最多无等待发布一次完成事件。ingress、cache commit 与详情队列的 gap 分别计数，不把丢失伪装为已落库。
 - Stats 使用有界维度、UTC day、epoch snapshot 和 batch ledger；同一批重试幂等，一次请求只增加一次请求数，parallel attempt 不扩成多条请求。
-- 启动时统计数据库打开/migration 失败为 fatal；缓存恢复失败可降级为纯内存。运行期普通数据库错误保留 pending 重试，超过内存保护或不可恢复错误升级处理。
+- 启动时统计数据库打开、初始化或当前布局/schema 校验失败为 fatal；缓存恢复失败可降级为纯内存。运行期普通数据库错误保留 pending 重试，超过内存保护或不可恢复错误升级处理。
 - Supervisor 注册入口、刷新和周期 flush 任务；Resolution、SQLite detail、cache finalizer 等内部任务由各自 owner 回收。request drain、后台排空与最终 flush 共用总 deadline；当前取消可中止正在处理的请求，不承诺已读请求必然完成响应。
 - 一般日志和 metrics 不记录 qname、原始 IP、Secret 或高基数内容；受保护的查询详情属于独立受限数据集，见 [Management](../management.md) 与 [Storage](modules/storage.md)。
 

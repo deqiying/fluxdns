@@ -4,25 +4,25 @@
 >
 > 适用范围：正式 Management listener、认证、配置写入、HTTP/WS 查询与内嵌资源接线
 >
-> 最后核对：2026-09-09（P4 指标/记录 WS、replay/resync 与联合验收）
+> 最后核对：2026-09-09（P5 当前契约、旧路径退出与联合验收收口）
 >
-> 核对基线：`309f49bbd22dc725bd54ecf6d8cc213251b63773` 加本次 P4 文档工作树
+> 核对基线：`d7296fd`；本轮核对 P5 变更与联合验收，分批历史结果按原日期和基线解释
 >
 > 时间存储补充核对：2026-09-05，`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加业务时间迁移工作树；不扩大其他管理功能审计范围
 
 ## 入口与生命周期
 
-[`app::run_command`](../../../backend/src/app.rs) 在 DNS candidate 绑定、coordinator 和 DnsService 创建并挂接日志 owner 后调用 [`ManagementService::bind_with_config_store`](../../../backend/src/management/server.rs)。后者消费 v2 loader 原文建立的 active ConfigStore 和 `service.control()`，调用 feature-aware 资源检查并要求 origin，创建 AuthState、SessionStore、配置事务 owner、只读 SQLite adapter、query service 与 EventServices，最后绑定提供 HTTP/WS 的独立 listener。
+[`app::run_command`](../../../backend/src/app.rs) 在 DNS candidate 绑定、coordinator 和 DnsService 创建并挂接日志 owner 后调用 [`ManagementService::bind_with_config_store`](../../../backend/src/management/server.rs)。后者消费 v2 loader 原文建立的 active ConfigStore 和 `service.control()`，调用 feature-aware 资源检查并要求 origin，创建 AuthState、SessionStore、配置事务 owner、领域 query service 与 EventServices，最后绑定提供 HTTP/WS 的独立 listener；不创建单库只读 pool。
 
 `DnsService::attach_management` 持有管理状态并注册受监督 task。不是 DoH listener 的附加路由；`webui.enable: false` 不创建此链。`ManagementRuntime::reconcile_users` 识别内部写入指纹，并只在实际认证内容改变时撤销 session；普通配置指纹变化或用户排序不撤销会话，`shutdown` 仍撤销会话。
 
-P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后比较用户名和 password hash，返回是否变化，不输出 hash。既有 setup/router 用例扩充覆盖内部首次写入、普通配置指纹变化、用户增加、顺序变化和密码 hash 改变，`management::` 18 项通过；测试文件转入 `_fluxdns/p1-management-auth/` 的独立用例目录并核对清理边界。此处是显式应用后的认证回报边界；正式 app watcher 已改为[仅提示观测](lifecycle.md#p1-仅提示文件观测2026-09-07)，不会调用 `reconcile_users`。尚未提供 v2 配置状态端点或浏览器全局提示。
+P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后比较用户名和 password hash，返回是否变化，不输出 hash。既有 setup/router 用例扩充覆盖内部首次写入、普通配置指纹变化、用户增加、顺序变化和密码 hash 改变，`management::` 18 项通过；测试文件转入 `_fluxdns/p1-management-auth/` 的独立用例目录并核对清理边界。此处是显式应用后的认证回报边界；正式 app watcher 已改为[仅提示观测](lifecycle.md#p1-仅提示文件观测2026-09-07)，不会调用 `reconcile_users`。该 P1 早期结果不代表完整管理面；v2 配置状态和浏览器全局提示现已接线，当前联合证据见验收入口。
 
 ## P0 v2 契约
 
 目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。正式 router 已注册指标、配置、保留、历史、组合与十模块配置写入、operation、文件处理、WS ticket 和 events upgrade。HTTP 业务端点均受 Bearer 保护，写请求及 ticket 额外要求 Origin/Fetch Metadata；WS upgrade 使用下述单次 ticket 与精确 Origin。
 
-P1 BC-02 补充：严格变更类型已移到 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测、验证票据和操作记录已有 ConfigStore 内部入口，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。下表的 P0 decoder 不因此成为已接线的写入服务；BC-12 只开放读取，异步应用、外部差异与普通配置写入仍未注册。
+严格变更类型位于 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测、验证票据和操作记录由 ConfigStore 提供，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。decoder 经 ConfigMutationOwner 接入正式组合/单模块 validate/apply、外部差异和文件处理；单独解析成功不代表运行态已经应用。
 
 | 契约 | 已落实的内部能力 | 正式接线与剩余边界 |
 | --- | --- | --- |
@@ -131,7 +131,7 @@ Windows 使用当时 debug binary、`_fluxdns/p1-metrics-http-20260908/` 独立�
 
 记录事件 owner 消费 `DetailShardStore` 的 commit 后广播并使用与 HTTP 相同的 `QueryFilter`/目录快照投影。共享 replay 受 60 秒、5000 条和保守 JSON 估算 8 MiB 三个边界约束；订阅同时提交 snapshot cursor 与 retention revision。epoch 不同、cursor 已过期、提交通知缺口、缓冲溢出或共同保留 revision 变化分别返回明确 `resync_required`，不拼接不连续数据。服务停止先停止 collector、撤销 session 并关闭连接，不让网络发送反压 DNS/detail writer。
 
-Rust 真实 socket 测试覆盖 HTTP ticket、Origin、URL token、Cookie-only、ticket 单次消费、指标消息、登出 4401，以及查询 HTTP cursor 基线、在线 push、断线写入、重连 replay 和 retention revision 变化 resync；有界 owner 测试覆盖连接/订阅/帧/入站速率、慢消费者、心跳和 replay 淘汰。Windows `_fluxdns/p4-live/` debug embed 进程又完成真实登录、Bearer 指标、UDP DNS、HTTP 历史、WS 在线 push、断线 replay 和登出 4401。最终 Cargo 全量为 844 passed、3 ignored，fmt 与全目标 `webui-embed` check 通过；Clippy 的两项 P4 告警已修复，`-D warnings` 仍被开工基线已有的 6 项告警阻断。浏览器证据见[前端应用](../frontend/application.md#p4-共享实时连接2026-09-09)。外部 HTTPS 反向代理、Linux/macOS、真实网络慢读者饱和、约 10 客户端和 2ms 性能未验证。
+Rust 真实 socket 测试覆盖 HTTP ticket、Origin、URL token、Cookie-only、ticket 单次消费、指标消息、登出 4401，以及查询 HTTP cursor 基线、在线 push、断线写入、重连 replay 和 retention revision 变化 resync；有界 owner 测试覆盖连接/订阅/帧/入站速率、慢消费者、心跳和 replay 淘汰。Windows `_fluxdns/p4-live/` debug embed 进程又完成真实登录、Bearer 指标、UDP DNS、HTTP 历史、WS 在线 push、断线 replay 和登出 4401。最终 Cargo 全量为 844 passed、3 ignored，fmt 与全目标 `webui-embed` check 通过；Clippy 的两项 P4 告警已修复，当时 `-D warnings` 被开工基线已有的 6 项告警阻断，P5 已全部处理并通过严格 Clippy。浏览器证据见[前端应用](../frontend/application.md#p4-共享实时连接2026-09-09)。外部 HTTPS 反向代理、Linux/macOS、真实网络慢读者饱和、约 10 客户端和 2ms 性能未验证。
 
 ## 首次用户写入
 
@@ -140,7 +140,7 @@ Rust 真实 socket 测试覆盖 HTTP ticket、Origin、URL token、Cookie-only�
 ```text
 try_lock -> ConfigFileLock -> reread source / fingerprint check
  -> source_edit::create_initial_webui_user
- -> ConfigLoader::load_candidate_bytes without snapshot
+ -> ConfigV2Loader::load_candidate_bytes without snapshot
  -> commit_candidate: stages / journal / two target replacements
  -> publish expected + self-written fingerprint -> update auth / session
 ```
@@ -183,11 +183,11 @@ Windows / `1c58a82` 加本次工作树：`cargo test --manifest-path backend/Car
 | --- | --- | --- | --- | --- |
 | setup/auth/session | router、AuthState、SessionStore | ManagementService -> DnsService | P1 Bearer 定向测试；P4 ticket/WS、登出 4401 与浏览器 Network/Storage | 未验证外部 HTTPS 代理 |
 | users 事务 | source_edit、ConfigStore、journal recovery | setup 写入，run 启动恢复，watcher 对账 | 本轮核对；存在双路径恢复与 Busy 竞争测试 | 完整跨平台 crash/权限矩阵待验收 |
-| 配置/保留/历史/指标 v2 API | ManagementQueryService + StorageRead port + DetailShardStore + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/DB/telemetry/metrics/retention/detail store | BC-12/13、P3 与 P4 使用真实 SQLite、UDP 和 Bearer HTTP | v1 退出归 P5/BC-27；外部 HTTPS 代理未验证 |
+| 配置/保留/历史/指标 v2 API | ManagementQueryService + DetailShardStore + MetricsOwner + RetentionCoordinator | app 注入 active ConfigStore、真实 coordinator/telemetry/metrics/retention/detail store | P5 release 的真实 SQLite、UDP/TCP/DoH 与 Bearer HTTP，见联合验收 | 外部 HTTPS 代理未验证 |
 | v2 实时事件 | EventServices + ticket/session + replay owner | `/api/v2/events/ticket` 与 `/api/v2/events` | Rust 真实 socket；Windows UDP/HTTP/WS；浏览器 ticket/WS/reconnect | 外部 HTTPS、真实网络慢读饱和及跨平台未验证 |
 | v2 配置写入与文件处理 | ConfigMutationOwner + ConfigStore + ServiceControl | 全局/十模块 validate/apply、operation、diff、restore/retry | P3 十模块 `applied_synced`、外改组合采用、二次冲突与回显 | Linux、磁盘满和 service commit 后响应丢失未验证 |
-| 内嵌 SPA | assets + build feature | bind 前 ensure_available | P3 debug embed 的 12 路由和两档视口真实浏览器 | release 三阶段、Actions/Linux/macOS 发布未验证 |
+| 内嵌 SPA | assets + build feature | bind 前 ensure_available | P5 release 三阶段打包、12 路由四档视口与浅深样例，见联合验收 | Actions/Linux/macOS 发布未验证 |
 
 本页 2026-09-05 原核对仅有静态证据；后续 P1 的运行证据分别列在对应小节。已执行的 Bearer HTTP/浏览器验证不等于反向代理或完整配置事务故障矩阵均已验证。
 
-本次时间改型补充了真实 SQLite 定向用例：跨位数升降序、同时间 ID 顺序、overview 包含边界和查询计划中的时间索引。完整 Cargo 结果见[后台服务验证](background-services.md#本次验证)，不等价浏览器 smoke。
+当前完整默认/全特性 Cargo、前端和 Windows release 联合结果统一见 [WebUI 联合验收](../webui-acceptance.md)。原文分阶段测试数量只说明对应历史基线；旧 overview/单库 API 及其专用用例已删除，不作为当前查询证据。

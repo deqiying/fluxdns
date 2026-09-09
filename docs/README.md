@@ -24,6 +24,7 @@
 | Management API 字段与状态码 | [v2 OpenAPI](../frontend/openapi/management-api-v2.yaml)；对应生成类型不人工维护 |
 | 后端与前端实际接线 | [后端实现](implementation/backend/README.md) / [前端实现](implementation/frontend/README.md) |
 | 构建、启动与发布脚本行为 | [交付实现](implementation/delivery.md)；版本与命令以 manifest 和脚本为准 |
+| WebUI Windows 联合验收与平台边界 | [WebUI 联合验收](implementation/webui-acceptance.md)，复现规则见 [本地测试](rules/local-testing.md) |
 | 文档分类、状态与维护流程 | [文档维护规则](rules/documentation-maintenance.md) |
 
 源码、schema、配置和实际输出证明现状；架构记录接受的设计。两者冲突时记录差距并进入活动计划，不能靠改文档把缺陷变成契约。其他入口只给摘要和链接，不重复维护整套事实。

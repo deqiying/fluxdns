@@ -6,9 +6,9 @@
 
 面向策略分流的 DNS 服务，采用 Rust 后端与 React WebUI，可将管理界面内嵌为单个发布二进制。
 
-正式后端入口已连接 UDP/TCP/DoH、Policy、真实上游 connector、Moka/SQLite 缓存、资源刷新、聚合统计和可选解析详情。独立 Management HTTP 服务提供首次初始化、Cookie session、七个只读 API 与 SPA。上述为源码接线摘要，不表示所有平台、故障或浏览器场景已经验收。
+正式后端入口连接 UDP/TCP/DoH、Policy、真实上游 connector、Moka 与 FDCS 缓存快照、资源刷新、聚合统计和日分片解析详情。独立 Management 服务提供首次初始化、内存 Bearer/认证专用 Cookie 刷新、v2 配置事务、查询/实时事件及 12 路由内嵌 SPA。仅接受新版配置和数据布局，不迁移旧数据；Windows 联合验证及平台边界见 [WebUI 验收](docs/implementation/webui-acceptance.md)。
 
-能力与证据见[当前实现](docs/implementation/README.md)，剩余差距见[活动计划](docs/plans/README.md)。DoT/DoQ、主动上游健康检查和通用配置编辑不属于当前已接线能力。
+能力与证据见[当前实现](docs/implementation/README.md)，后续变更见[活动计划](docs/plans/README.md)。DoT/DoQ、主动上游健康检查和通用 YAML 编辑不属于当前已接线能力。
 
 ## 使用入口
 

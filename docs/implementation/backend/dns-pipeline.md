@@ -38,7 +38,7 @@ SystemSocketFactory / typed binding
 
 配置 route 由 [`config/doh_route.rs`](../../../backend/src/config/doh_route.rs) 共享编译，DoH adapter 匹配真实路径后传 typed route ID，Policy 不重新匹配 URL。资源-only publish 更新 core 内的资源 snapshot，后续请求使用新 hash；不依靠全局 cache clear。
 
-`dns/policy.rs` 同时含具体 adapter 的构造代码，包括 `UpstreamRegistry` 和 Moka cache；解析方法通过 port 使用它们，并把具体 Moka source 交给进程级 snapshot owner。不能把设计中的“公共接口不泄漏 adapter 类型”扩大为“整个 dns 源目录不 import adapter”。SQLite cache adapter 只保留在 legacy 契约测试，不由 Policy core 或 async prepare 创建。
+`dns/policy.rs` 同时含具体 adapter 的构造代码，包括 `UpstreamRegistry` 和 Moka cache；解析方法通过 port 使用它们，并把具体 Moka source 交给进程级 snapshot owner。不能把设计中的“公共接口不泄漏 adapter 类型”扩大为“整个 dns 源目录不 import adapter”。旧 SQLite/File cache adapter 与增量持久化链已删除，只保留 FDCS 使用的记录编码和进程级快照 owner。
 
 `MemoryCacheStore`、`InMemoryStorageBackend` 和 `HostsCore`/`ServFailCore` 不在正式请求装配中。前两者用于与 Moka/SQLite 共用的 adapter 契约测试；后两者用于简化解析、dispatch/Transport 测试。它们不是查询性能优化，也不应为了清理名称相似的代码而删除生产 `MokaCacheStore`、`SqliteStorageBackend`、`PolicyDnsCore` 或 hosts upstream 使用的 `HostsTable`。
 

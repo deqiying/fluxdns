@@ -4,9 +4,9 @@
 >
 > 适用范围：前端 bootstrap、provider、路由鉴权、HTTP client 与会话回收
 >
-> 最后核对：2026-09-09（P5 移除旧页面与 v1 API）
+> 最后核对：2026-09-09（P5 当前契约、旧路径退出与联合验收收口）
 >
-> 核对基线：`309f49bbd22dc725bd54ecf6d8cc213251b63773` 加本次 P4 文档工作树
+> 核对基线：`d7296fd`；本轮核对 P5 变更与联合验收，分批历史结果按原日期和基线解释
 
 ## 入口
 
@@ -14,7 +14,7 @@
 
 [`App.tsx`](../../../frontend/src/app/App.tsx) lazy-load 页面，由 Suspense 展示加载态；`/login` 和 `/initialize` 在 guard 外，其他页面进入 `ProtectedRoute -> AppLayout`。根路径转 `/dashboard`，未知受保护路径展示 NotFound。受保护壳层消费 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 注册 12 个一级路径，具体接线见[页面与查询](pages.md)。
 
-正式路由已全部接线，移除空 pending route 分支、旧占位页面和专用 CSS；登录页按当前能力说明 DNS 管理、配置校验与同步状态，不再标为只读界面。最终内嵌 release 已回读新文案，97 项前端测试与完整三阶段打包通过。
+正式路由已全部接线，移除空 pending route 分支、旧占位页面和专用 CSS；登录页按当前能力说明 DNS 管理、配置校验与同步状态，不再标为只读界面。最终内嵌 release 已回读新文案，98 项前端测试与完整三阶段打包通过。
 
 ## 认证状态
 
@@ -49,7 +49,7 @@ mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状�
 
 `/dashboard`、`/queries` 和 `/system-runtime` 使用 v2 真实指标/记录；其余九个配置入口使用 v2 类型化读写，旧占位页面与空 pending route 分支已删除。`/upstreams` 的“上游 / 上游组”tab 以 `tab=groups` 进入浏览器历史。主题 token 使用浅灰导航、白工作区、蓝色主操作及独立成功/警告/错误色；未增加暗色全站主题。
 
-P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个路由分别在 1600×1040、1280×800、768×1024、390×844 直接进入，48 项均呈现预期标题且无页面级横向溢出或错误提示。窄屏导航、Hosts 编辑弹窗、Tab、Escape 与关闭后编辑按钮焦点恢复通过；Console warning/error 为 0。localStorage/sessionStorage 为空，脚本不可读刷新 Cookie，生产没有 service worker 接管。前端 23 文件 96 项测试、类型生成、typecheck 与构建通过；完整联合验收另按 P5 范围记录。
+P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个路由分别在 1600×1040、1280×800、768×1024、390×844 直接进入，48 项均呈现预期标题且无页面级横向溢出或错误提示。窄屏导航、Hosts 编辑弹窗、Tab、Escape 与关闭后编辑按钮焦点恢复通过；Console warning/error 为 0。localStorage/sessionStorage 为空，脚本不可读刷新 Cookie，生产没有 service worker 接管。该轮前端 23 文件 96 项通过；后续安全和焦点修复后的 24 文件 98 项、最终快速切换 Busy 恢复和触控限制见 [WebUI 联合验收](../webui-acceptance.md)。
 
 ## P1 配置交互基础（2026-09-08）
 
@@ -144,17 +144,17 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | P1 认证测试及真实初始化/登录/刷新/登出；P3 内嵌深链接重载恢复 | 外部 HTTPS 代理未验收 |
 | 同源请求/取消 | `apiV2Request`、unauthorized listener | 各 module API 共用 client | 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
 | 退出数据清理 | `performLogout` finally、`onUnauthorized` | logout 与 HTTP/WS 认证失效统一回收 | 认证失效清空业务缓存的组件回归、真实登出撤销与重启后登录 | 网络 logout 失败仍不能证明服务端已撤销 |
-| P3 v2 配置页面 | 九个领域页面、generated-v2、module hooks | 受保护路由与十模块正式 API | MSW/完整 Vitest、真实 Bearer/文件/SQLite/UDP/浏览器，见 P3 联合验收 | 不包含 P5 收口 |
+| P3 v2 配置页面 | 九个领域页面、generated-v2、module hooks | 受保护路由与十模块正式 API | MSW/完整 Vitest、真实 Bearer/文件/SQLite/UDP/浏览器，见 P3 联合验收 | 跨平台与原生触控边界见联合验收 |
 | 共享实时连接 | events client、认证代次与订阅 owner | v2 ticket + WS | Vitest；真实 ticket/WS、断线 replay、登出 4401 与 Network/Storage | 外部 HTTPS 与真实网络慢读饱和未验证 |
 | 服务状态 | DashboardPage/hooks/chart | v2 HTTP metrics + WS metrics | 真实 DNS 流量、指标变化、可访问图表、桌面视口 | 真实 OS failure 样本与深色样例未复核 |
-| 解析记录 | QueriesPage/hooks/realtime/detail | v2 HTTP search/detail + WS queries | Vitest；真实 UDP/HTTP/WS、稳定详情与桌面/移动浏览器 | P5 全路由收口与性能未验证 |
+| 解析记录 | QueriesPage/hooks/realtime/detail | v2 HTTP search/detail + WS queries | Vitest；真实 UDP/HTTP/WS、稳定详情与桌面/移动浏览器 | 原生触控限制与性能测点见联合验收 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
-| 12 路由壳层 | route-contract、App、AppLayout、九个配置页 | 受保护路由与分组导航 | 1440×900 逐路由标题/溢出检查和 390×844 移动导航 | FC-15/P5 旧源码与兼容 API 收口未进入 |
+| 12 路由壳层 | route-contract、App、AppLayout、九个配置页 | 受保护路由与分组导航 | 1440×900 逐路由标题/溢出检查和 390×844 移动导航 | 旧占位/页面/API 已退出，平台边界见联合验收 |
 | 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 全局 state/operation 与十模块领域表单 | 91 项完整 Vitest、typecheck/build、真实 Bearer 单模块读写回显 | 运行时响应仍由后端 schema/owner 权威校验 |
 | 外部变化处理 | ConfigFileStatus、external adoption、Banner/Drawer | 轮询、差异、还原/retry、覆盖确认和组合采用 | MSW 二次冲突；真实双模块外改/采用/冲突/restore 与浏览器 Drawer | WS 文件通知未授权，仍以 HTTP 轮询 |
-| 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取 v2 进程指标和 v1 基础信息 | FC-14 测试及 Windows 真实浏览器/后端可用样本；P3 窄屏无溢出 | 真实不可用 OS 样本和 Linux 未做浏览器验收 |
+| 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取唯一 v2 进程指标及基础信息 | FC-14 测试及 Windows 真实浏览器/后端可用样本；P3 窄屏无溢出 | 真实不可用 OS 样本和 Linux 未做浏览器验收 |
 
-2026-09-05 原核对未运行 pnpm 或浏览器；P1-P4 的分批证据分别见上节。环境与打包边界见[交付证据](../delivery.md)，P4 真实证据不外推为 P5、release 或跨平台完成。
+当前完整前端、release、浏览器及端到端证据统一见 [WebUI 联合验收](../webui-acceptance.md)。上节带日期的 P1-P4 数量是历史批次结果；平台与原生触控限制不由 mock 或组件测试替代。
 
 ## 认证与系统信息统一 v2（2026-09-09）
 
@@ -162,4 +162,4 @@ BC-27 切换后，初始化、登录、刷新、登出和 session 统一请求 `
 
 ## 旧页面退出验证（2026-09-09）
 
-`df1a145` 加 FC-15 工作树：生成唯一 v2 类型后 typecheck、23 文件 96 项 Vitest 和生产 build 通过；删除旧 fixture 的专用断言，保留 v2 查询键、页大小、身份和敏感字段覆盖。浏览器与四档视口验收继续在 P5 联合验证中记录。
+`df1a145` 加 FC-15 工作树：生成唯一 v2 类型后 typecheck、23 文件 96 项 Vitest 和生产 build 通过；删除旧 fixture 的专用断言，保留 v2 查询键、页大小、身份和敏感字段覆盖。后续四档浏览器、深色样例和认证/焦点修复后的完整验证见 [WebUI 联合验收](../webui-acceptance.md)。

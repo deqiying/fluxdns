@@ -4,9 +4,9 @@
 >
 > 适用范围：前端生成/构建、内嵌打包、开发进程、版本脚本与 Release workflow 行为
 >
-> 最后核对：2026-09-09（P4 WS 依赖、内嵌调试构建与浏览器验证）
+> 最后核对：2026-09-09（P5 当前契约、旧路径退出与联合验收收口）
 >
-> 核对基线：`309f49bbd22dc725bd54ecf6d8cc213251b63773` 加本次 P4 文档工作树
+> 核对基线：`d7296fd`；本轮核对 P5 变更与联合验收，分批历史结果按原日期和基线解释
 
 ## 工具与命令边界
 
@@ -90,15 +90,10 @@ pwsh -File script/dev.ps1 stop
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| 前端构建 | `pnpm run build` | frontend package script | P4 工作树 typecheck、23 文件 99 项 Vitest、4 项 schema 与 Vite production build 通过 | 未运行 release 三阶段打包 |
-| 本地打包 | package-embedded 三阶段 | 仓库根脚本 | 本轮静态检查顺序、产物和平台 gate | 未运行完整打包 |
-| 显式启动/身份检查 | dev start/status/stop | debug embed binary + P4 ConfigV2 | 真实 start/status/stop、Bearer/UDP/SQLite/HTTP/WS 与两档浏览器 | 未作为 release binary 验收 |
-| 版本提交/三平台发布 | set-version、release.yml | main + tag gates | 本轮静态 | 未创建提交/tag、push、Actions 或 Release |
+| 前端构建 | package scripts | 唯一 v2 类型生成与 Vite production build | 24 文件 98 项 Vitest、4 项 schema、typecheck/build | 不以 mock 代替真实后端 |
+| 本地打包 | package-embedded 三阶段 | 仓库根脚本、Windows target 与 deploy | 完整三阶段成功，deploy 与 target SHA-256 相同 | 未执行 Actions/Linux/macOS 发布 |
+| 显式启动/身份检查 | dev start/status/stop | 最终 release embed 与独立 ConfigV2 | 新目录启动、受控重启、文件摘要不变、FDCS 恢复及旧分片 ID 可读 | 原生触控和外部 HTTPS 代理限制见联合验收 |
+| 本地 HTTP/WS 验收 | test-webui-http.mjs、test-webui-events.ps1 | loopback 夹具与管理账号 | 四种 DNS 请求、配置/文件/安全、WS replay 与撤销 | 仅使用独立测试配置，不访问生产或公网 |
+| 版本与远端发布 | set-version、release.yml | main + tag gates | 本轮不执行 | 没有 tag、push、Actions 或 Release 授权 |
 
-历史记录：迁移前 v2 方案在 2026-09-04 报告 Windows x86_64 三阶段打包、发布物 SHA-256 对齐 target binary、配置 validate、移出外部 dist 后的 SPA/API HTTP smoke、dev start/status/stop、CSP/nosniff/cache/ETag/304，以及 in-app browser 的初始化深链接/表单/Console 检查。**这是原文报告，本轮未复核**；测试所用源码提交未完整记录，不能把本页核对基线视为当时测试基线。过时的 v2 方案已按用户要求移除，历史原文由 Git 追溯。
-
-2026-09-08 Bearer 子项使用当批工作树执行前端构建、`cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，并启动独立 loopback 测试实例；真实 HTTP 和浏览器 Cookie/Network/Storage 证据见[Management 实现](backend/management.md#p1-bearer-业务鉴权2026-09-08)及[前端应用](frontend/application.md#p1-bearer-接线2026-09-08)。后续壳层子项执行 `pnpm run test` 9 文件 55 项和 `pnpm run build`，并用 Vite fixture 检查桌面、390×844、Drawer、上游 tab 与 Console；这不复核内嵌 binary、真实 v2 API、外部 HTTPS 代理、GitHub Actions 或 Linux/macOS 发布。
-
-2026-09-08 P3 使用当批工作树执行 `pnpm run build` 与 `cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，由 debug 内嵌 binary 显式加载 `_fluxdns/p3-live/config.yaml`。真实 Bearer module/global HTTP、operation 轮询、文件持久化、UDP、SQLite、外改组合采用和两档浏览器视口证据见[Management 实现](backend/management.md#p1-配置事务与文件操作2026-09-08)与[前端应用](frontend/application.md#p3-联合验收2026-09-08)。该验证不等于 release 三阶段打包、HTTPS 反向代理、Linux/macOS、GitHub Actions 或发布授权。
-
-2026-09-09 P4 使用当批工作树执行 `pnpm run test`、`test:contract:v2`、`build` 和 `cargo build --manifest-path backend/Cargo.toml --bin fluxdns --features webui-embed`，由 debug 内嵌 binary 显式加载 `_fluxdns/p4-live/config.yaml`。真实 HTTP/UDP/SQLite/WS smoke 返回指标 200、Cookie-only 401、DNS `NOERROR`、online push、断线 replay、协议 `fluxdns.v1` 和登出 4401；内嵌浏览器核对 Network/Storage、ticket subprotocol、实时 dashboard、稳定详情、1440×900 与 390×844 无页面级溢出。具体证据见[Management 实现](backend/management.md#p4-实时事件与断线补齐2026-09-09)与[前端应用](frontend/application.md#p4-共享实时连接2026-09-09)。这不等于 release 三阶段打包、HTTPS 反向代理、Linux/macOS、GitHub Actions、约 10 客户端或 2ms 性能验收。
+当前命令、运行产物、29 图映射、E2E 矩阵与平台边界以 [WebUI 联合验收](webui-acceptance.md) 为准。本地脚本的夹具和凭据准备遵循[本地测试规范](../rules/local-testing.md#webui-真实-httpws-联合验收)；测试报告和密码留在忽略目录，不复制进 Git。历史批次日志由 Git 与原任务记录追溯，不把旧 debug 样本当作当前 release 的证明。
