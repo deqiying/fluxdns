@@ -1,4 +1,5 @@
-import { Alert, Typography } from "antd";
+import { useState } from "react";
+import { Alert, Button, Typography } from "antd";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState, InlineUnavailable } from "@/shared/components/PageState";
 import { formatBytesMiB, formatCount, formatEpochMillis } from "@/shared/formatters";
@@ -9,29 +10,34 @@ import { useServiceMetrics } from "./hooks";
 type Measurement = ServiceMetrics["qps"] | ServiceMetrics["online_clients"] | ServiceMetrics["rss_bytes"];
 
 export function DashboardPage() {
+  // 深色样例只属于当前服务状态页，不持久化偏好或改变其他路由的主题。
+  const [darkPreview, setDarkPreview] = useState(false);
   const query = useServiceMetrics();
   const metrics = query.data;
 
   return (
-    <PageFrame
-      title="服务状态"
-      description="主实例 · 最近十分钟"
-      meta={metrics ? <Typography.Text type="secondary">采样：{formatEpochMillis(metrics.sampled_at_ms)}</Typography.Text> : undefined}
-    >
-      <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
-      {metrics ? (
-        <div className="service-status-content">
-          {query.stale ? <Alert className="service-status-alert" type="warning" showIcon title="实时指标暂时不可用，当前显示最后一次有效快照" /> : null}
-          <div className="service-status-metrics">
-            <Metric label="当前内存" measurement={metrics.rss_bytes} formatter={(value) => formatBytesMiB(String(value))} />
-            <Metric label="平均 QPS" measurement={metrics.qps} formatter={(value) => formatRate(Number(value))} />
-            <Metric label="平均 RPM" measurement={metrics.rpm} formatter={(value) => formatRate(Number(value))} />
-            <Metric label="在线客户端" measurement={metrics.online_clients} formatter={(value) => formatCount(Number(value))} />
+    <div className={darkPreview ? "service-status-preview service-status-preview-dark" : "service-status-preview"}>
+      <PageFrame
+        title="服务状态"
+        description="主实例 · 最近十分钟"
+        meta={metrics ? <Typography.Text type="secondary">采样：{formatEpochMillis(metrics.sampled_at_ms)}</Typography.Text> : undefined}
+        actions={<Button aria-pressed={darkPreview} onClick={() => setDarkPreview((value) => !value)}>{darkPreview ? "浅色显示" : "深色样例"}</Button>}
+      >
+        <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
+        {metrics ? (
+          <div className="service-status-content">
+            {query.stale ? <Alert className="service-status-alert" type="warning" showIcon title="实时指标暂时不可用，当前显示最后一次有效快照" /> : null}
+            <div className="service-status-metrics">
+              <Metric label="当前内存" measurement={metrics.rss_bytes} formatter={(value) => formatBytesMiB(String(value))} />
+              <Metric label="平均 QPS" measurement={metrics.qps} formatter={(value) => formatRate(Number(value))} />
+              <Metric label="平均 RPM" measurement={metrics.rpm} formatter={(value) => formatRate(Number(value))} />
+              <Metric label="在线客户端" measurement={metrics.online_clients} formatter={(value) => formatCount(Number(value))} />
+            </div>
+            <MetricsTrendChart metrics={metrics} />
           </div>
-          <MetricsTrendChart metrics={metrics} />
-        </div>
-      ) : null}
-    </PageFrame>
+        ) : null}
+      </PageFrame>
+    </div>
   );
 }
 
