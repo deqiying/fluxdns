@@ -5089,6 +5089,319 @@ clients: []
         }
     }
 
+    /// Windows P5 验收复用真实 service/详情测点；客户端 I/O 不进入 core 耗时。
+    /// 热更新允许产生冷 miss，但全部请求必须落库，所有命中样本逐个遵守 2ms 门槛。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manual Windows release 10-client core acceptance"]
+    async fn acceptance_p5_warm_core_with_background_work() {
+        use std::time::UNIX_EPOCH;
+        #[expect(
+            clippy::assertions_on_constants,
+            reason = "普通 debug/跨平台编译保留用例，只在显式执行验收时拒绝错误环境"
+        )]
+        {
+            assert!(cfg!(windows), "本入口的验收平台是 Windows");
+            assert!(!cfg!(debug_assertions), "必须使用 --release");
+        }
+        use crate::storage::{
+            DetailPageDirection, DetailQuery, DetailQueryCacheOutcome, DetailQueryFilter,
+            DetailQuerySort, DetailSortOrder, RetentionPolicy,
+        };
+        const CLIENTS: usize = 10;
+        const PER_CLIENT: usize = 100;
+        let deadline = || Deadline::new(Instant::now() + Duration::from_secs(10));
+        let work_path = crate::config::test_support::absolute_path("p5-core-acceptance");
+        let port = available_transport_ports()[0];
+        let clients = (1..=CLIENTS)
+            .map(|id| format!("  - {{name: client-{id}, client_id: client-{id}, match: {{ips: [127.0.0.{id}]}}}}\n"))
+            .collect::<String>();
+        let source = format!(
+            r#"
+version: 2
+work: {{path: '{work_path}', rules_path: ./rules}}
+database: {{type: sqlite, path: ./data.sqlite, records_path: ./queries}}
+logs: {{enable: false, level: info, path: ./service.log}}
+webui: {{enable: false, address: 127.0.0.1, port: 8080, users: []}}
+dns:
+  cache:
+    enabled: true
+    memory: {{max_size_bytes: 67108864}}
+    failure_ttl: 5s
+    optimistic: {{enabled: false, answer_ttl: 10s, max_age: 1d}}
+    persistence: {{enabled: true, path: ./cache.snapshot, snapshot_interval: 1s}}
+  resolve_log: {{enable: true}}
+listener:
+  - {{name: p5-udp, type: udp, addresses: [127.0.0.1], port: {port}, strategy: default}}
+upstreams:
+  - {{name: local, type: hosts, format: hosts, hosts: '198.51.100.9 cache.p5.test'}}
+hosts:
+  - {{name: guard, type: const, format: hosts, hosts: '192.0.2.1 sentinel.p5.test'}}
+strategy:
+  - {{name: default, rules: [{{hosts: guard}}], default_upstream: local}}
+clients:
+{clients}
+"#
+        );
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .unwrap()
+            .resolved;
+        let storage = StorageRuntime::open(&config, deadline()).await.unwrap();
+        let details = storage.detail_store();
+        let retention = storage.retention_coordinator();
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config.clone(), RuntimeRevision(1)).unwrap();
+        let snapshot_owner = crate::cache::CacheSnapshotOwner::start(
+            RuntimeRevision(1),
+            prepared
+                .snapshot()
+                .policy_core()
+                .unwrap()
+                .cache_snapshot_source(),
+            crate::cache::CacheSnapshotSettings::from_current_config(&config).unwrap(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &SystemSocketFactory::new(),
+            deadline(),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        coordinator
+            .attach_cache_snapshot_owner(snapshot_owner.clone())
+            .unwrap();
+        let writer = Arc::new(
+            TelemetryWriter::new(
+                256,
+                Arc::new(
+                    crate::observability::StructuredTelemetryOutput::from_writer(Box::new(
+                        std::io::sink(),
+                    )),
+                ),
+            )
+            .unwrap(),
+        );
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                coordinator.clone(),
+                storage,
+                writer,
+            )
+            .unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let wire = query_wire_with_type(1, "cache.p5.test.", RecordType::A);
+        let mut sockets = Vec::new();
+        for id in 1..=CLIENTS {
+            let socket = UdpSocket::bind(format!("127.0.0.{id}:0")).await.unwrap();
+            udp_round_trip(&socket, address, &wire).await;
+            sockets.push(socket);
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while service
+                .resolution_runtime
+                .as_ref()
+                .unwrap()
+                .metrics()
+                .snapshot()
+                .cache_commit_stored
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // 留出毫秒边界，确保详情查询不把预热请求计入本轮样本。
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let from_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let today = i32::try_from(from_ms / 86_400_000).unwrap();
+        // 在当前保留窗口内创建真实受管空分片；收紧到 R=1 后必须物理回收。
+        let old_day = today - 2;
+        drop(details.acquire_write(old_day, deadline()).await.unwrap());
+        let old_path = details.shard_path(old_day).unwrap();
+        assert!(old_path.is_file());
+        let mut tasks = tokio::task::JoinSet::new();
+        for socket in sockets {
+            let query = wire.clone();
+            tasks.spawn(async move {
+                for _ in 0..PER_CLIENT {
+                    udp_round_trip(&socket, address, &query).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let cleanup_started_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        retention
+            .run_daily(
+                RetentionPolicy::new(1, 0, 1 << 30).unwrap(),
+                today,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let reclaimed = retention.reclaim_pending(deadline()).await.unwrap();
+        assert_eq!(reclaimed.failed, 0);
+        assert!(reclaimed.reclaimed >= 1 && !old_path.exists());
+        let mut next_config = Arc::try_unwrap(
+            ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+                .load_str(&source)
+                .unwrap()
+                .resolved,
+        )
+        .unwrap();
+        next_config.statistics.retention_days = 6;
+        let next =
+            PreparedRuntime::prepare_with_policy_core(Arc::new(next_config), RuntimeRevision(2))
+                .unwrap();
+        service
+            .reload_prepared(
+                next,
+                &SystemSocketFactory::new(),
+                deadline(),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        while let Some(joined) = tasks.join_next().await {
+            joined.unwrap();
+        }
+        let to_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 1;
+        let snapshot = snapshot_owner.status();
+        assert!(
+            snapshot
+                .last_success_at_utc_millis
+                .is_some_and(|at| at >= from_ms && at <= to_ms)
+        );
+        assert!(snapshot.last_error.is_none());
+        assert_eq!(service.runtime().revision(), RuntimeRevision(2));
+        let mut records = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                records.clear();
+                let mut cursor = None;
+                loop {
+                    let page = details
+                        .query_details(
+                            DetailQuery {
+                                filter: DetailQueryFilter {
+                                    from_utc_millis: from_ms,
+                                    to_utc_millis: to_ms,
+                                    qname: Some("cache.p5.test.".into()),
+                                    ..Default::default()
+                                },
+                                cursor,
+                                direction: DetailPageDirection::Older,
+                                page_size: 100,
+                                sort: DetailQuerySort::OccurredAt,
+                                order: DetailSortOrder::Desc,
+                            },
+                            deadline(),
+                        )
+                        .await
+                        .unwrap();
+                    records.extend(page.items);
+                    cursor = page.next_cursor;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                if records.len() >= CLIENTS * PER_CLIENT {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(records.len(), CLIENTS * PER_CLIENT);
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            records.len()
+        );
+        let mut per_client = std::collections::BTreeMap::new();
+        for record in &records {
+            *per_client
+                .entry(record.matched_client_id.clone().unwrap())
+                .or_insert(0_usize) += 1;
+        }
+        assert_eq!(per_client.len(), CLIENTS);
+        assert!(per_client.values().all(|count| *count == PER_CLIENT));
+        let mut hit_us = records
+            .iter()
+            .filter(|r| r.cache == DetailQueryCacheOutcome::Hit)
+            .map(|r| r.dns_core_duration_micros.expect("生产 core 测点必须存在"))
+            .collect::<Vec<_>>();
+        hit_us.sort_unstable();
+        assert!(
+            hit_us.len() >= CLIENTS * PER_CLIENT * 9 / 10,
+            "预热后命中率异常"
+        );
+        let over_2ms = records
+            .iter()
+            .filter(|r| {
+                r.cache == DetailQueryCacheOutcome::Hit
+                    && r.dns_core_duration_micros.unwrap() > 2000
+            })
+            .map(|r| {
+                serde_json::json!({"id": r.id.as_str(), "at_ms": r.occurred_at_millis,
+                "client": r.matched_client_id, "core_us": r.dns_core_duration_micros})
+            })
+            .collect::<Vec<_>>();
+        let percentile = |percent: usize| hit_us[(hit_us.len() * percent).div_ceil(100) - 1];
+        let pipeline = service
+            .resolution_runtime
+            .as_ref()
+            .unwrap()
+            .metrics()
+            .snapshot();
+        assert_eq!(pipeline.dropped, 0);
+        let shutdown = service
+            .shutdown(&SystemClock::new(), deadline())
+            .await
+            .unwrap();
+        assert!(!shutdown.deadline_expired);
+        let report = serde_json::json!({
+            "platform": std::env::consts::OS, "build": "release", "clients": CLIENTS,
+            "samples": records.len(), "cache_hits": hit_us.len(), "cache_hit_rate": hit_us.len() as f64 / records.len() as f64,
+            "p50_us": percentile(50), "p95_us": percentile(95), "p99_us": percentile(99), "max_us": hit_us.last(),
+            "over_2ms": over_2ms, "per_client": per_client, "from_ms": from_ms, "to_ms": to_ms,
+            "cleanup_started_ms": cleanup_started_ms, "reclaimed_shards": reclaimed.reclaimed,
+            "snapshot_written_ms": snapshot.last_success_at_utc_millis, "runtime_revision": 2,
+            "measurement": "EventPublishingDnsCore: resolve_with_completion, excluding client I/O and outer codec/publish",
+        });
+        std::fs::write(
+            std::path::Path::new(&work_path).join("core-report.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        println!("P5_CORE {}", report);
+        println!("P5_ARTIFACT {work_path}");
+        assert!(
+            over_2ms.is_empty(),
+            "存在超过 2ms 的命中；不得按平均值或分位数认领通过"
+        );
+    }
+
     /// 本地手工性能 profile：固定单并发、复用 UDP socket，比较详情 off/on 的三个主路径。
     ///
     /// 计时包含 loopback client send/receive，因此只是服务端 SLO 的保守上界；发布验收仍需在

@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidateSet("Local", "Connections")]
+    [ValidateSet("Local", "Connections", "WebUI")]
     [string]$Suite = "Local",
     [ValidateRange(1, 20)]
     [int]$Repeat = 1,
@@ -26,7 +26,7 @@ $report = [ordered]@{
     os = [System.Runtime.InteropServices.RuntimeInformation]::OSDescription
     architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
     logicalProcessors = [Environment]::ProcessorCount
-    build = "debug; default features; locked dependencies"
+    build = if ($Suite -eq "WebUI") { "release; default features; locked dependencies" } else { "debug; default features; locked dependencies" }
     temporaryDirectory = $temporaryDirectory
     commands = $records
 }
@@ -115,7 +115,11 @@ try {
     }
     for ($iteration = 1; $iteration -le $Repeat; $iteration++) {
         $arguments = @("test", "--manifest-path", "backend/Cargo.toml", "--locked")
-        $arguments += if ($Suite -eq "Connections") {
+        $arguments += if ($Suite -eq "WebUI") {
+            @("--release", "service::tests::acceptance_p5_warm_core_with_background_work",
+                "--", "--ignored", "--exact", "--nocapture", "--test-threads=1")
+        }
+        elseif ($Suite -eq "Connections") {
             @("service::tests::contract_v6_real_session_capacity_releases_and_recovers",
                 "--", "--ignored", "--exact", "--nocapture", "--test-threads=1")
         }

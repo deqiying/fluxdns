@@ -158,6 +158,16 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 
 ## 契约验证运行入口
 
+### Windows WebUI 主链路验收
+
+`pwsh -File script/test-backend-contracts.ps1 -Suite WebUI` 复用下述记录器，以 `--release --locked` 单独执行 `service::tests::acceptance_p5_warm_core_with_background_work`。该手动用例在普通 Cargo suite 中忽略，显式执行时拒绝 debug/非 Windows 环境；不使用旧 UDP 往返 profile 的客户端计时。
+
+夹具使用正式 v2 loader、Policy core、10 个 `127.0.0.1..10` UDP 客户端及客户端 IP 索引、真实详情/统计 SQLite、Resolution dispatcher、Telemetry 采样和 FDCS owner。每个客户端预热后发出 100 次查询，间隔 50ms；同时执行 1 秒快照周期、受管旧日空分片的真实逻辑退役/物理回收以及 Runtime revision 1→2 的热更新。最后通过正式分片查询口回读全部 1000 条，核对稳定 ID 无重复、每个客户端恰好 100 条、ingress 无丢弃和后台完成事实。
+
+耗时复用 `EventPublishingDnsCore::resolve` 对 `resolve_with_completion` 的生产测点，包含该边界内 Policy、cache 和内部观测，排除客户端 socket I/O、边界外 codec 和完成事件发布。报告全部请求数/命中率，以及命中样本的 P50/P95/P99/max 和每一条 `>2000μs`；任何超出均使测试失败。热更新建立新 core 后允许冷 miss，不能删去这些请求再宣称 100% 命中。
+
+2026-09-09 Windows、Rust 1.98.0 首轮有效 release 结果：1000 请求、990 次命中（99%），P50/P95/P99 为 5/37/44μs，max 56μs，超过 2ms 为 0；1 个真实分片已回收，快照在请求窗口内成功写入，Runtime revision=2，完整用例 10.15 秒。脚本证据位于 `_fluxdns/contract-validation/20260909T034945513Z-56004/`，逐样本超限列表及统计位于其 stdout 和 `_fluxdns/test-temp/fluxdns-p5-core-acceptance-81840-1/core-report.json`。此前夹具缺少必需策略规则的首次执行在发出流量前失败，已修正；不算有效性能样本。该结果只证明当前 Windows 短时低并发场景，不外推其他硬件、Linux、远程链路、真实磁盘满或长期压测。
+
 [`script/test-backend-contracts.ps1`](../../../script/test-backend-contracts.ps1) 是显式本机验证与证据收集入口，不安装工具、不改变用户配置，不运行真实磁盘故障、远程请求、Unix 信号或长期性能实验。从仓库根目录执行：
 
 ```powershell
