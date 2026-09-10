@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "fluxdns"
-version = "0.2.8"
+version = "0.2.9"
 dependencies = [
  "arc-swap",
  "argon2",
