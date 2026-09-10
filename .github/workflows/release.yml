@@ -13,12 +13,14 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  quality:
-    name: Static checks and tests
+  prepare:
+    name: Validate release metadata
     runs-on: ubuntu-latest
     outputs:
       release_version: ${{ steps.release-version.outputs.release_version }}
       rust_version: ${{ steps.tool-versions.outputs.rust_version }}
+      node_version: ${{ steps.tool-versions.outputs.node_version }}
+      pnpm_version: ${{ steps.tool-versions.outputs.pnpm_version }}
 
     steps:
       - name: Checkout
@@ -58,26 +60,6 @@ jobs:
           echo "node_version=${node_version}" >> "${GITHUB_OUTPUT}"
           echo "pnpm_version=${pnpm_version}" >> "${GITHUB_OUTPUT}"
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v6
-        with:
-          version: ${{ steps.tool-versions.outputs.pnpm_version }}
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: ${{ steps.tool-versions.outputs.node_version }}
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: ${{ steps.tool-versions.outputs.rust_version }}
-          components: clippy, rustfmt
-          cache-workspaces: backend -> target
-          rustflags: ""
-
       - name: Verify release version
         id: release-version
         shell: bash
@@ -100,11 +82,12 @@ jobs:
             exit 1
           fi
 
-          metadata_file="${RUNNER_TEMP}/fluxdns-cargo-metadata.json"
-          cargo metadata --locked --no-deps --format-version 1 \
-            --manifest-path backend/Cargo.toml > "${metadata_file}"
-          cargo_version="$(node -e 'const fs = require("fs"); const metadata = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const pkg = metadata.packages.find((item) => item.name === "fluxdns"); if (!pkg) process.exit(2); process.stdout.write(pkg.version);' "${metadata_file}")"
-          frontend_version="$(node -p "require('./frontend/package.json').version")"
+          cargo_version="$(awk '
+            /^\[package\]$/ { in_package=1; next }
+            /^\[/ { in_package=0 }
+            in_package && /^version[[:space:]]*=/ { gsub(/["[:space:]]/, "", $3); print $3; exit }
+          ' backend/Cargo.toml)"
+          frontend_version="$(awk -F '"' '/^[[:space:]]*"version"[[:space:]]*:/ { print $4; exit }' frontend/package.json)"
 
           if [[ "${tag_version}" != "${project_version}" ]]; then
             echo "Tag version ${tag_version} does not match VERSION ${project_version}." >&2
@@ -121,24 +104,36 @@ jobs:
 
           echo "release_version=${project_version}" >> "${GITHUB_OUTPUT}"
 
+  frontend:
+    name: Test and build WebUI
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ needs.prepare.outputs.pnpm_version }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ needs.prepare.outputs.node_version }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
       - name: Install frontend dependencies
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
-      - name: Check and test frontend
+      - name: Check and build frontend
         working-directory: frontend
         run: |
           pnpm run test
           pnpm run build
-
-      - name: Check Rust formatting
-        run: cargo fmt --manifest-path backend/Cargo.toml -- --check
-
-      - name: Run Rust static checks
-        run: cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets --all-features -- -D warnings
-
-      - name: Test Rust backend
-        run: cargo test --manifest-path backend/Cargo.toml --locked --all-features
 
       - name: Upload tested WebUI
         uses: actions/upload-artifact@v6
@@ -149,13 +144,89 @@ jobs:
           compression-level: 0
           retention-days: 1
 
+  rust-quality:
+    name: Check Rust backend
+    needs: prepare
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.prepare.outputs.rust_version }}
+          components: clippy, rustfmt
+          cache: false
+          rustflags: ""
+
+      - name: Cache Rust target artifacts
+        uses: actions/cache@v4
+        with:
+          path: backend/target
+          key: rust-target-${{ runner.os }}-quality-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            rust-target-${{ runner.os }}-quality-
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path backend/Cargo.toml -- --check
+
+      - name: Run Rust static checks
+        run: cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
+      - name: Test Rust backend
+        run: cargo test --manifest-path backend/Cargo.toml --locked --all-features
+
+  create-release:
+    name: Create draft GitHub Release
+    needs: [prepare, frontend, rust-quality]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Create draft release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            is_draft="$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq '.isDraft')"
+            if [[ "${is_draft}" != "true" ]]; then
+              echo "Release ${GITHUB_REF_NAME} already exists and is published." >&2
+              exit 1
+            fi
+            echo "Draft release ${GITHUB_REF_NAME} already exists; reusing it."
+          else
+            gh release create "${GITHUB_REF_NAME}" \
+              --draft \
+              --verify-tag \
+              --title "${GITHUB_REF_NAME}" \
+              --generate-notes
+          fi
+
   build:
     name: Build ${{ matrix.id }}
-    needs: quality
+    needs: [prepare, frontend, rust-quality, create-release]
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
-      # 四个平台仅依赖共享 quality 门禁，彼此之间没有构建依赖。
+      # 四个平台仅依赖共享门禁，彼此之间没有构建依赖。
       max-parallel: 4
       matrix:
         include:
@@ -215,14 +286,31 @@ jobs:
           echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "${GITHUB_ENV}"
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "${GITHUB_ENV}"
 
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ needs.quality.outputs.rust_version }}
+          toolchain: ${{ needs.prepare.outputs.rust_version }}
           target: ${{ matrix.target }}
-          cache-workspaces: backend -> target
-          cache-key: ${{ matrix.id }}
+          cache: false
           rustflags: ${{ matrix.id == 'openwrt-x86_64' && '-C target-feature=+crt-static' || '' }}
+
+      - name: Cache Rust target artifacts
+        uses: actions/cache@v4
+        with:
+          path: backend/target
+          key: rust-target-${{ runner.os }}-${{ matrix.id }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            rust-target-${{ runner.os }}-${{ matrix.id }}-
 
       - name: Download tested WebUI
         uses: actions/download-artifact@v7
@@ -257,7 +345,7 @@ jobs:
           ARCHITECTURE_NAME: ${{ matrix.architecture_name }}
           ARCHIVE_EXTENSION: ${{ matrix.archive_extension }}
           PLATFORM_NAME: ${{ matrix.platform_name }}
-          RELEASE_VERSION: ${{ needs.quality.outputs.release_version }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
           SOURCE_NAME: ${{ matrix.source_name }}
           TARGET_TRIPLE: ${{ matrix.target }}
         run: |
@@ -291,7 +379,7 @@ jobs:
               throw "Expected '$expectedVersion', got '$actualVersion'."
           }
 
-          $assetPath = Join-Path deploy "$archiveBase.$env:ARCHIVE_EXTENSION"
+          $assetPath = Join-Path "deploy" "$archiveBase.$env:ARCHIVE_EXTENSION"
           if ($env:ARCHIVE_EXTENSION -eq "zip") {
               Compress-Archive -Path (Join-Path $packageDirectory "*") -DestinationPath $assetPath -CompressionLevel Optimal
           }
@@ -306,44 +394,50 @@ jobs:
           }
           "asset_path=$assetPath" >> $env:GITHUB_OUTPUT
 
-      - name: Upload release artifact
-        uses: actions/upload-artifact@v6
-        with:
-          name: release-${{ matrix.id }}
-          path: ${{ steps.package.outputs.asset_path }}
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
+      - name: Upload release asset
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+          ASSET_PATH: ${{ steps.package.outputs.asset_path }}
+        shell: pwsh
+        run: |
+          gh release upload $env:GITHUB_REF_NAME $env:ASSET_PATH --clobber
+          if ($LASTEXITCODE -ne 0) {
+              throw "Failed to upload release asset."
+          }
 
-  release:
+  finalize-release:
     name: Publish GitHub Release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
-      - name: Download release artifacts
-        uses: actions/download-artifact@v7
-        with:
-          pattern: release-*
-          path: deploy
-          merge-multiple: true
-
-      - name: Create checksums
-        shell: bash
-        run: |
-          set -euo pipefail
-          (cd deploy && sha256sum fluxdns_*.zip fluxdns_*.tar.gz > checksums.txt)
-
-      - name: Create GitHub Release
+      - name: Download uploaded release assets
         env:
           GH_REPO: ${{ github.repository }}
           GH_TOKEN: ${{ github.token }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release create "${GITHUB_REF_NAME}" deploy/* \
-            --verify-tag \
-            --title "${GITHUB_REF_NAME}" \
-            --generate-notes
+          mkdir -p deploy
+          gh release download "${GITHUB_REF_NAME}" \
+            --pattern "fluxdns_${{ needs.prepare.outputs.release_version }}_*" \
+            --dir deploy
+          mapfile -t assets < <(find deploy -maxdepth 1 -type f \( -name '*.zip' -o -name '*.tar.gz' \))
+          if [[ "${#assets[@]}" -ne 4 ]]; then
+            echo "Expected four platform archives, found ${#assets[@]}." >&2
+            exit 1
+          fi
+          (cd deploy && sha256sum fluxdns_*.zip fluxdns_*.tar.gz > checksums.txt)
+
+      - name: Upload checksums and publish release
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "${GITHUB_REF_NAME}" deploy/checksums.txt --clobber
+          gh release edit "${GITHUB_REF_NAME}" --draft=false --latest

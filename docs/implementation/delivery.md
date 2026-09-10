@@ -4,9 +4,9 @@
 >
 > 适用范围：前端生成/构建、内嵌打包、开发进程、版本脚本与 Release workflow 行为
 >
-> 最后核对：2026-09-09（P5 当前契约、旧路径退出与联合验收收口）
+> 最后核对：2026-09-10（Release workflow 并行门禁、草稿发布与依赖缓存）
 >
-> 核对基线：`d7296fd`；本轮核对 P5 变更与联合验收，分批历史结果按原日期和基线解释
+> 核对基线：`fcbb128`；本轮核对 Release workflow 的依赖关系、缓存边界和发布脚本路径，历史运行结果按原日期和基线解释
 
 ## 工具与命令边界
 
@@ -77,13 +77,14 @@ pwsh -File script/dev.ps1 stop
 
 已有 tag、版本未变或默认工作树不干净时停止。`-IgnoreUncommittedChanges` 只绕过工作树保护，不扩大四文件提交范围，但这四文件中已有修改会一并进入版本提交。脚本不会 push。另行获准推送时应先推 `main`，再推该 tag，确保远端 main 已包含版本提交。
 
-[`.github/workflows/release.yml`](../../.github/workflows/release.yml) 由 `v*` tag 触发：
+[`.github/workflows/release.yml`](../../.github/workflows/release.yml) 由 `v*` tag 触发，流程按依赖拆成 `prepare`、`frontend`、`rust-quality`、`create-release`、`build` 和 `finalize-release`：
 
-1. 校验 tag 提交属于 `main`，且 tag、VERSION、Cargo 与前端 package 版本一致。
-2. 共享门禁执行前端测试/构建、Rust fmt/Clippy/全 feature 测试。
-3. `build` matrix 的 Windows x86_64、Linux x86_64、OpenWrt x86_64、macOS ARM64 四项只依赖共享 `quality`，彼此没有 `needs` 关系；`max-parallel: 4` 允许同时构建，`fail-fast: false` 保留其他平台的执行机会。实际调度仍受 GitHub runner 可用性与账户并发配额限制。
-4. 四项消费同一份已测试前端产物，分别构建内嵌 binary，并使用独立的 matrix artifact/cache key。OpenWrt 在 Ubuntu runner 上使用 musl，其他三项保持各自现有 target。
-5. 归档平台 binary、根 README 与配置示例，Unix 保留 executable 权限；`release` 等待整个 `build` matrix 成功后，统一汇总 artifacts 与 `checksums.txt` 并创建 GitHub Release。
+1. `prepare` 只校验 tag 提交属于 `main`、工具版本和 tag/VERSION/Cargo/前端 package 版本，不再为元数据校验提前安装 Rust 或 Node。
+2. `frontend` 与 `rust-quality` 都只依赖 `prepare`，因此前端 pnpm 安装/测试/构建和 Rust fmt/Clippy/全 feature 测试并行执行。pnpm 依赖只在 `frontend` 安装一次，构建后的 `frontend/dist/` 通过短期 artifact 供所有平台复用。
+3. Rust job 使用按 runner OS 和 `Cargo.lock` 哈希命名的 `actions/cache` 复用 Cargo registry/git 源；平台 target 的 `target/` 仍按 target 独立缓存，因为不同 OS/target 的编译产物不可安全混用。Linux 的 GNU 与 musl job 可以复用同一份依赖源缓存，Windows/macOS 仍使用各自 runner 的缓存空间。
+4. `create-release` 在两类质量门禁都成功后创建 draft Release。四项 `build` matrix 只依赖共享门禁和这个草稿，`max-parallel: 4`、`fail-fast: false` 允许 Windows x86_64、Linux x86_64、OpenWrt x86_64、macOS ARM64 同时执行；实际调度仍受 GitHub runner 可用性与账户并发配额限制。
+5. 每个平台完成打包和 `--version` 校验后立即通过 `gh release upload` 上传自己的 archive，使用 `--clobber` 支持失败重跑。平台上传不再等待其他二进制完成，因此 Release 草稿可以逐步看到已完成的资产；OpenWrt 仍在 Ubuntu runner 上使用 musl，其他三项保持各自现有 target。
+6. `finalize-release` 只在四项 matrix 全部成功后下载四个 archive，生成并上传 `checksums.txt`，再把 draft Release 发布。也就是说，上传资产不必等待四个平台全部完成，但正式发布仍保留“四个平台完整且校验和齐全”的门禁。
 
 | 平台 | Rust target | Release 归档 |
 | --- | --- | --- |
@@ -102,7 +103,7 @@ OpenWrt 构建项在临时 Ubuntu runner 安装 `musl-tools` 与 `binutils`，�
 | --- | --- | --- | --- | --- |
 | 前端构建 | package scripts | 唯一 v2 类型生成与 Vite production build | 24 文件 98 项 Vitest、4 项 schema、typecheck/build | 不以 mock 代替真实后端 |
 | 本地打包 | package-embedded 三阶段 | 仓库根脚本、Windows target 与 deploy | 完整三阶段成功，deploy 与 target SHA-256 相同 | 未执行 Actions/Linux/macOS 发布 |
-| OpenWrt 发布项 | release.yml 的 musl matrix 与 ELF 检查 | 共享 quality 后四项并行，全部成功后统一发布 | 2026-09-09 Windows：YAML 结构及原三项/共享门禁不变检查、Bash/PowerShell 语法检查、4 项 ELF 判定模拟通过 | 未执行 musl 编译、GitHub Actions 或 OpenWrt 设备运行 |
+| Release 多平台发布 | release.yml 的 prepare/frontend/rust-quality/build/finalize DAG、草稿 Release 与四项 matrix | 前端产物一次构建后复用；平台完成即上传，四项齐全后生成 checksums 并发布 | 本轮完成静态 YAML/脚本审查；未执行 GitHub Actions | 未执行真实 runner 调度、musl 编译、GitHub Release API 或 OpenWrt 设备运行 |
 | 显式启动/身份检查 | dev start/status/stop | 最终 release embed 与独立 ConfigV2 | 新目录启动、受控重启、文件摘要不变、FDCS 恢复及旧分片 ID 可读 | 原生触控和外部 HTTPS 代理限制见联合验收 |
 | 本地 HTTP/WS 验收 | test-webui-http.mjs、test-webui-events.ps1 | loopback 夹具与管理账号 | 四种 DNS 请求、配置/文件/安全、WS replay 与撤销 | 仅使用独立测试配置，不访问生产或公网 |
 | 版本与远端发布 | set-version、release.yml | main + tag gates | 本轮不执行 | 没有 tag、push、Actions 或 Release 授权 |
