@@ -4,9 +4,9 @@
 >
 > 适用范围：前端生成/构建、内嵌打包、开发进程、版本脚本与 Release workflow 行为
 >
-> 最后核对：2026-09-10（Release workflow 并行门禁、草稿发布与依赖缓存）
+> 最后核对：2026-09-10（Release workflow 的 WebUI 产物依赖与代理页测试超时修复）
 >
-> 核对基线：`fcbb128`；本轮核对 Release workflow 的依赖关系、缓存边界和发布脚本路径，历史运行结果按原日期和基线解释
+> 核对基线：`6e4c50d` 与本次修复；本轮核对 Release workflow 的 WebUI 产物依赖和代理页测试，历史运行结果按原日期和基线解释
 
 ## 工具与命令边界
 
@@ -80,7 +80,7 @@ pwsh -File script/dev.ps1 stop
 [`.github/workflows/release.yml`](../../.github/workflows/release.yml) 由 `v*` tag 触发，流程按依赖拆成 `prepare`、`frontend`、`rust-quality`、`create-release`、`build` 和 `finalize-release`：
 
 1. `prepare` 只校验 tag 提交属于 `main`、工具版本和 tag/VERSION/Cargo/前端 package 版本，不再为元数据校验提前安装 Rust 或 Node。
-2. `frontend` 与 `rust-quality` 都只依赖 `prepare`，因此前端 pnpm 安装/测试/构建和 Rust fmt/Clippy/全 feature 测试并行执行。pnpm 依赖只在 `frontend` 安装一次，构建后的 `frontend/dist/` 通过短期 artifact 供所有平台复用。
+2. `frontend` 依赖 `prepare`，完成 pnpm 安装、测试和构建后上传 `webui-dist`。`rust-quality` 依赖 `prepare` 和 `frontend`，在 Clippy/测试前把同一 artifact 下载到 `frontend/dist/`：`--all-features` 会启用 `webui-embed`，RustEmbed 在编译时就需要真实 WebUI，不能与该产物的生成完全并行。pnpm 依赖仍只安装一次，WebUI 仍只构建一次，Rust 质量门禁和所有平台共用同一产物。
 3. Rust job 使用按 runner OS 和 `Cargo.lock` 哈希命名的 `actions/cache` 复用 Cargo registry/git 源；平台 target 的 `target/` 仍按 target 独立缓存，因为不同 OS/target 的编译产物不可安全混用。Linux 的 GNU 与 musl job 可以复用同一份依赖源缓存，Windows/macOS 仍使用各自 runner 的缓存空间。
 4. `create-release` 在两类质量门禁都成功后创建 draft Release。四项 `build` matrix 只依赖共享门禁和这个草稿，`max-parallel: 4`、`fail-fast: false` 允许 Windows x86_64、Linux x86_64、OpenWrt x86_64、macOS ARM64 同时执行；实际调度仍受 GitHub runner 可用性与账户并发配额限制。
 5. 每个平台完成打包和 `--version` 校验后立即通过 `gh release upload` 上传自己的 archive，使用 `--clobber` 支持失败重跑。平台上传不再等待其他二进制完成，因此 Release 草稿可以逐步看到已完成的资产；OpenWrt 仍在 Ubuntu runner 上使用 musl，其他三项保持各自现有 target。
@@ -101,9 +101,9 @@ OpenWrt 构建项在临时 Ubuntu runner 安装 `musl-tools` 与 `binutils`，�
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
-| 前端构建 | package scripts | 唯一 v2 类型生成与 Vite production build | 24 文件 98 项 Vitest、4 项 schema、typecheck/build | 不以 mock 代替真实后端 |
+| 前端构建 | package scripts | 唯一 v2 类型生成与 Vite production build | 本轮 Windows：24 文件 98 项 Vitest、typecheck/build 通过 | 不以 mock 代替真实后端；本轮未重跑独立 schema suite |
 | 本地打包 | package-embedded 三阶段 | 仓库根脚本、Windows target 与 deploy | 完整三阶段成功，deploy 与 target SHA-256 相同 | 未执行 Actions/Linux/macOS 发布 |
-| Release 多平台发布 | release.yml 的 prepare/frontend/rust-quality/build/finalize DAG、草稿 Release 与四项 matrix | 前端产物一次构建后复用；平台完成即上传，四项齐全后生成 checksums 并发布 | 本轮完成静态 YAML/脚本审查；未执行 GitHub Actions | 未执行真实 runner 调度、musl 编译、GitHub Release API 或 OpenWrt 设备运行 |
+| Release 多平台发布 | release.yml 的 WebUI artifact 依赖、草稿 Release 与四项 matrix | Rust 质量门禁和平台构建复用一次生成的 WebUI；平台完成即上传，四项齐全后生成 checksums 并发布 | 本轮 YAML/DAG 检查、Windows 全 feature Clippy 和 Cargo 测试通过（795 项通过、4 项忽略） | 未执行真实 runner 调度、musl 编译、GitHub Release API 或 OpenWrt 设备运行 |
 | 显式启动/身份检查 | dev start/status/stop | 最终 release embed 与独立 ConfigV2 | 新目录启动、受控重启、文件摘要不变、FDCS 恢复及旧分片 ID 可读 | 原生触控和外部 HTTPS 代理限制见联合验收 |
 | 本地 HTTP/WS 验收 | test-webui-http.mjs、test-webui-events.ps1 | loopback 夹具与管理账号 | 四种 DNS 请求、配置/文件/安全、WS replay 与撤销 | 仅使用独立测试配置，不访问生产或公网 |
 | 版本与远端发布 | set-version、release.yml | main + tag gates | 本轮不执行 | 没有 tag、push、Actions 或 Release 授权 |

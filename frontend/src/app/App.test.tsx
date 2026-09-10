@@ -379,7 +379,8 @@ describe("application routes", () => {
     renderApp("/proxies");
     expect(await screen.findByRole("heading", { name: "代理配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("proxy-primary")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "编辑代理 proxy-primary" }));
+    // 使用按钮已有的 aria-label，避免 jsdom 为整页按钮计算可访问名称和样式。
+    await user.click(screen.getByLabelText("编辑代理 proxy-primary"));
     const dialog = await screen.findByRole("dialog", { name: "编辑代理" });
     const secret = within(dialog).getByLabelText("环境变量", { selector: "input[type='text']" });
     await user.clear(secret);

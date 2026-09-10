@@ -28,7 +28,7 @@
 | `docs/` | [plans、architecture、implementation、rules](docs/README.md) |
 | `script/` | 本地打包、版本与进程管理入口 |
 | `.agents/skills/project-doc-maintenance/` | 文档维护技能与检查器 |
-| `.github/workflows/release.yml` | 并行质量门禁、四平台构建、平台完成即上传及完整性校验后发布 |
+| `.github/workflows/release.yml` | 共享质量门禁、四平台并行构建、平台完成即上传及完整性校验后发布 |
 | `VERSION` | 发布版本的唯一入口 |
 | `deploy/`、`_fluxdns/` | 忽略的发布物与本地运行数据 |
 

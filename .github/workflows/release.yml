@@ -146,7 +146,8 @@ jobs:
 
   rust-quality:
     name: Check Rust backend
-    needs: prepare
+    # --all-features 会启用 webui-embed，必须先取得本次构建的真实 WebUI。
+    needs: [prepare, frontend]
     runs-on: ubuntu-latest
 
     steps:
@@ -181,6 +182,12 @@ jobs:
 
       - name: Check Rust formatting
         run: cargo fmt --manifest-path backend/Cargo.toml -- --check
+
+      - name: Download tested WebUI
+        uses: actions/download-artifact@v7
+        with:
+          name: webui-dist
+          path: frontend/dist
 
       - name: Run Rust static checks
         run: cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets --all-features -- -D warnings
