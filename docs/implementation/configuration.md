@@ -8,6 +8,10 @@
 >
 > 核对基线：`d7296fd`；本轮核对 P5 变更与联合验收，分批历史结果按原日期和基线解释
 >
+> 2026-09-21 增量核对（本机日期）：仅核对 DNS 缓存的 group ECS、Resolved fingerprint、stale refresh 与 late-result 语义；其余正文保留原历史核对范围
+>
+> 增量核对基线：`e50b948edb4699f58a1e57039fb56442ab228687` 加本次缓存修复工作树；静态编译与前期定向测试证据见[DNS 管线](backend/dns-pipeline.md#缓存修复验证)，未部署或实测 OpenWrt
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -235,7 +239,7 @@ strategy.rules[].edns_client_subnet
 - `client` 优先使用并规范化请求携带的合法 ECS；没有时按客户端地址推导 IPv4 `/24` 或 IPv6 `/56` 前缀，避免向上游传递完整客户端地址；
 - `custom` 使用 `custom_ip`，因此 `custom_ip` 必填。
 
-当策略目标是 group 时，rule/strategy/client 的显式 ECS 继续覆盖所有成员；否则每个 direct member 使用自身 `upstreams[].edns_client_subnet`，再回退到全局 ECS。成员在 cache lookup 后才由 group 选择，因此存在显式 member ECS 的 group 当前绕过内部缓存，避免不同成员的 ECS 响应共用同一 group key。
+当策略目标是 group 时，rule/strategy/client 的显式 ECS 继续覆盖所有成员。只有请求级结果来自 global/default 时，运行时才遍历 group 的全部可达 direct leaves（含 nested group、fallback，以及未显式配置而继承请求级 ECS 的成员），为每个 leaf 计算并规范化最终 ECS query。所有成员 query 相同时，group 使用这一统一 query 并允许 `Resolved` response cache；即使成员显式 ECS 不同于 global，只要所有成员最终一致也可缓存。只有最终 query 真正异构时才为成员保留独立 query，并绕过 cache lookup、single-flight 和 commit。Fast eligibility 仍保守：策略可达 target 只要存在显式成员 ECS 就不使用 Fast，后续完整决策仍可进入 Resolved。
 
 #### 缓存和 TTL
 
@@ -379,11 +383,13 @@ strategy[].cache.enabled == true  → 策略池
 strategy[].cache 整块缺失          → dns.cache.enabled 为 true 时使用全局池，否则不缓存
 ```
 
-cache key format v2 显式区分逐规则匹配前的 `Fast` 模式和完整决策后的 `Resolved` 模式，二者不能 alias。除 pool namespace 与 canonical query 外，key 包含 transport compatibility，以及 opaque 的 policy/request/target/ECS fingerprint；不包含 DNS ID、原始 client 地址、整个配置 revision 或资源 generation。policy fingerprint 只覆盖会改变答案的已解析配置、相关 hosts/rule 内容 hash 和选择安全性，不包含 `logs`、`webui`、`database` 等纯观测/管理配置。请求 fingerprint 对有效 ECS 使用规范化网段；没有 ECS 时只使用脱敏的客户端 `/24`（IPv4）或 `/56`（IPv6）网段。group member ECS 无法在成员选择前安全确定，因此该路径不使用 fast key，并继续绕过 response cache。
+cache key format v2 显式区分逐规则匹配前的 `Fast` 模式和完整决策后的 `Resolved` 模式，二者不能 alias。除 pool namespace 与 canonical query 外，key 包含 transport compatibility，以及 opaque 的 policy/request/target/ECS fingerprint；不包含 DNS ID、原始 client 地址、整个配置 revision 或资源 generation。Fast 与 Resolved 的 policy 维度都使用 `cache_semantics_fingerprint`，覆盖会改变答案的已解析配置、当前 PolicyState 中全部 hosts/rule-set content hash 和请求上下文；Resolved 另加入最终 target/ECS，不再只用 strategy ID 摘要。请求 fingerprint 对有效请求 ECS 使用规范化网段；没有 ECS 时只使用脱敏的客户端 `/24`（IPv4）或 `/56`（IPv6）网段。
 
-规则或 hosts 的变化不会扫描或清空缓存，但会改变 policy fingerprint，使后续请求不再命中旧语义 entry；旧 entry 继续占用容量并按自身 TTL/optimistic 生命周期淘汰。请求先按最新 runtime snapshot 计算客户端、生效策略、ECS、namespace 和 policy/request fingerprint，fast miss 后才执行 rules、hosts 和 upstream target 决策。`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache；`upstreams[type=hosts]` 属于 upstream connector，其结果按普通上游响应处理。启用 optimistic cache 时，后台刷新重新读取当前 Policy/资源 snapshot 并完整执行 route 与上游选择，不能沿用旧 entry 的目标。后续 WebUI 的清除缓存功能属于显式 `namespace/key/predicate` 操作，不由普通资源刷新隐式触发。
+规则或 hosts 的变化不会扫描或清空缓存，但会改变 policy fingerprint，使后续请求不再命中旧语义 entry；旧 entry 继续占用容量并按自身 TTL/optimistic 生命周期淘汰。请求先按最新 runtime snapshot 计算客户端、生效策略、ECS、namespace 和 policy/request fingerprint，fast miss 后才执行 rules、hosts 和 upstream target 决策。策略可达 target 存在显式成员 ECS 时 Fast eligibility 保守禁用；完整决策后若全部 direct leaf 的最终 query 相同，仍可使用 Resolved key，只有真正异构时才绕过 response cache。`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache；`upstreams[type=hosts]` 属于 upstream connector，其结果按普通上游响应处理。启用 optimistic cache 时，Fast/Resolved stale 都按最新 Policy/资源重新执行 route、ECS 与上游选择，不能沿用旧 entry 的目标；失败不会延长旧 stale。后续 WebUI 的清除缓存功能属于显式 `namespace/key/predicate` 操作，不由普通资源刷新隐式触发。
 
-policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；它不是通用配置 revision，也不替代显式清理接口。旧格式 key 不能与 v2 恢复记录混用，持久化 adapter 将其按不兼容记录隔离。
+本轮仍使用 cache key format v2 和现有 `FDCS` snapshot format，不需要文件格式升级。Resolved 的 policy fingerprint 已扩充；Fast/Resolved 共用的语义摘要还显式纳入完整 DoH endpoint（包括 path/query），避免 `SafeUrl` 的脱敏 Debug 隐去实际分流差异。URL 明文只在计算摘要时读取，不进入 cache key 或日志。升级前的相关条目仍可按原格式解码，但新请求生成不同 key，会出现一次自然冷启动，旧项随后按 TTL/容量淘汰。
+
+policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；它不是通用配置 revision，也不替代显式清理接口。真正旧格式的 key 仍不能与 v2 恢复记录混用，持久化 adapter 将其按不兼容记录隔离。
 
 #### 响应缓存语义
 
@@ -394,7 +400,7 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 - 缓存保存不含客户端 DNS ID 和传输 envelope 的 canonical response。若本地 UDP 输出因本次客户端 advertised size 而截断，应保存完整 canonical response，并在每次发送时重新编码；只有上游本身返回的 `TC=1` 才保存截断条目。
 - 写入按响应质量做 compare-and-replace：完整 `NOERROR/TC=0` 可以提升并替换未过期的 NXDOMAIN/SERVFAIL/TC 条目，SERVFAIL/TC 不能覆盖未过期的完整回答；同质量条目在过期前不因后到竞态反复覆盖。
 - optimistic/stale 只适用于已经按上述规则准入的条目；缓存返回时按剩余 TTL 和当前请求重新生成响应。
-- 同一 key 的并发 miss/optimistic refresh 通过 single-flight 合并。leader 得到可缓存结果后先形成持有 lease 的 `CacheCommitCandidate` 并返回共享响应；后台 worker 使用独立 100ms deadline 完成 admission/CAS 并唤醒 waiter，进程快照由独立周期 owner 覆盖。客户端响应不等待 commit；candidate 被队列丢弃、取消或直接 drop 时，RAII lease 必须发布失败终态，不能永久挂住 follower。
+- 同一 key 的并发 miss 通过 single-flight 合并。leader 得到可缓存结果后先形成持有 lease 的 `CacheCommitCandidate` 并返回共享响应；后台 worker 使用独立 100ms deadline 完成 admission/CAS 并唤醒 waiter，进程快照由独立周期 owner 覆盖。客户端响应不等待 commit；candidate 被队列丢弃、取消或直接 drop 时，RAII lease 必须发布失败终态，不能永久挂住 follower。optimistic stale 由一次性 refresh permit 去重并进入统一后台刷新流程，不复用 miss 的 lease。
 
 ### 8.2 `dns.ttl_override`
 

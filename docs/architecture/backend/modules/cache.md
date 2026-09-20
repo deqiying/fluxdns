@@ -6,6 +6,10 @@
 >
 > 最后评审：2026-09-08（内存权威与独立完整快照；其余基线见[模块索引](README.md)，实际接线见[后台服务](../../../implementation/backend/background-services.md#cache-persistence)）
 >
+> 2026-09-20 局部评审：仅核对 group ECS、Resolved fingerprint、stale refresh 与 late-result 约束；不代表整篇重审或运行验收
+>
+> 局部评审基线：`fcbb12831c66e81e02108ccd030ac3c2a1e08f56` 加本次工作树；仅用于上述范围
+>
 > 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[snapshot.rs](../../../../backend/src/cache/snapshot.rs)、[snapshot_owner.rs](../../../../backend/src/cache/snapshot_owner.rs)
 >
 > 关联文档：[后端设计](../overview.md) · [配置参考](../../../implementation/configuration.md) · [DNS 管线](../../../implementation/backend/dns-pipeline.md) · [后台服务](../../../implementation/backend/background-services.md)
@@ -30,9 +34,11 @@ namespace 使用稳定 typed components，不拼接可伪造原始 client ID。c
 
 key format v2 包含 namespace、canonical query wire、opaque transport compatibility、Fast/Resolved mode byte、可选的 policy/request/target/ECS 32-byte fingerprint 与版本。不得包含客户端 DNS ID、整个 runtime revision、全局 resource generation、HTTP header/URL 或原始 client address。
 
-Fast 在逐规则 matcher 前构造，fingerprint 覆盖策略语义与当前 PolicyState 中全部 hosts/rule-set content hash；Resolved 在完整决策后加入 target/final ECS。两种编码不能 alias。资源变化切换 key 而不主动扫描清空全库；旧项继续占容量到自然过期/淘汰。当前失效粒度可能大于实际依赖资源集合，见 [Policy](policy.md)。
+Fast 在逐规则 matcher 前构造；Fast 与 Resolved 的 policy 维度都必须使用同一 `cache_semantics_fingerprint`，覆盖会改变答案的已解析配置语义、请求上下文与当前 PolicyState 中全部 hosts/rule-set content hash。Resolved 不得退化为 strategy ID 摘要，而是在相同语义 fingerprint 上增加 target/final ECS。两种编码不能 alias。资源变化切换 key 而不主动扫描清空全库；旧项继续占容量到自然过期/淘汰。当前失效粒度可能大于实际依赖资源集合，见 [Policy](policy.md)。
 
-group member ECS 在选择后才确定且无上层覆盖时，必须绕过不安全的 lookup、single-flight 和写入，不能仅按 group ID 复用不同成员答案。
+DoH endpoint 的 path/query 可能改变答案语义，必须将完整 URL 直接输入摘要，不能依赖会隐藏路径和查询参数的 `SafeUrl` Debug。完整 URL 不进入缓存键明文或日志。
+
+Fast eligibility 对策略可达 target 保持保守：只要任一可达 group direct leaf 有显式成员 ECS，就不在规则匹配前使用 Fast。Upstream runtime 必须预记录 primary、fallback、nested group 与隐式继承请求级 ECS 的全部 direct leaves；请求级 ECS 来自 global/default 时，完整决策比较各 leaf 规范化后的最终 query。所有 query 相同时使用统一 query 和 Resolved cache，只有真正异构时才绕过 lookup、single-flight 和写入。显式成员 ECS 不同于 global 但所有成员最终一致，也属于可缓存路径；rule/strategy/client 显式 ECS 直接统一覆盖成员。
 
 ## 3. Entry、TTL 与质量
 
@@ -62,9 +68,11 @@ single-flight key 与 cache key 一致：
 
 只有 optimistic 开启、未超过 stale-until、transport compatible、响应类允许且 refresh admission 有容量时才可先返回 stale。共享 store 可按启用池中最大 max_age 保留候选，实际返回仍按当前所选池的 max_age 与 answer TTL 限制，再应用输出 TTL override。
 
-refresh 应捕获启动时最新可用 RuntimeSnapshot，完整重跑 client/policy/resource/upstream，不复用 entry 中的旧 connector/rule pointer。写回按 key、quality 和 producer revision CAS，旧 producer 不能覆盖新完整答案。资源更新与跨 revision finalizer 的实际接线见[DNS 管线](../../../implementation/backend/dns-pipeline.md)；组合证据见[Late-window 与 owner](../../../implementation/backend/dns-pipeline.md#late-window-与-owner)，不以设计句子宣称全部组合验收完成。
+Fast/Resolved stale 必须共用刷新流程：切到最新可用 core 后重新执行完整 `prepare_cache_query`，不得复用 entry 中的旧 connector/rule pointer。同一 `Arc` store 且 key 相同时以 stale version 做 `Version` CAS；store 或 key 不同时先读取目标，Miss 使用 `Absent`、Stale 使用目标 version、Fresh 跳过。上游返回后、写入前再次核对 semantics/key；任一准备、交换、匹配或写入失败都只放弃刷新，不延长旧 entry 的 stale 窗口。
 
-finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明确拒绝；shutdown 取消并等待已接收任务，晚到结果不改变已返回客户端的 response。exchange、question mismatch 或 CAS 失败只放弃刷新，不延长旧 entry 的 stale 窗口。
+`PolicyLateResultSink` 必须保存生产请求的 semantics。切换 latest core 后，只有重新准备的 semantics、key 和最终 ECS 全部一致，才允许旧响应跨 runtime 继续写入；任何配置、资源、目标或 ECS 变化都丢弃。目标缓存已有同等或更高质量结果时不覆盖，写前再次核对 semantics/key。finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明确拒绝；shutdown 取消并等待已接收任务，晚到结果不改变已返回客户端的 response。
+
+缓存调试日志使用 `reason = "group_ecs_differs"`、`operation = "cache_refresh"`、`operation = "cache_late"` 等低基数 reason/outcome，不得输出明文 ECS 或客户端 IP。资源更新与跨 revision finalizer 的实际接线见[DNS 管线](../../../implementation/backend/dns-pipeline.md)；组合证据见[Late-window 与 owner](../../../implementation/backend/dns-pipeline.md#late-window-与-owner)，设计约束本身不表示全部组合已经验收。
 
 ## 6. Memory store
 
@@ -87,6 +95,8 @@ finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明�
 
 快照没有用户可配置的磁盘大小配额，也不承诺文件大小等于 Moka weight 或 RSS。读取仍受文件字节数、单条大小、记录数、批次和 deadline 保护；先验证整个文件的长度与摘要，再分批解码。恢复逐条检查 key/entry version、checksum、绝对 expiry/stale-until 和当前内存预算，停机时间不会重新补满 TTL。损坏、未知版本、超时或预算不足只形成冷启/部分恢复状态，不阻止 DNS 服务。
 
+本次语义调整不提升 cache key format v2 或 `FDCS` snapshot format。Resolved 纳入完整 policy fingerprint，Fast/Resolved 共用的语义摘要新增完整 DoH endpoint；升级前的相关记录仍可按原格式解码，但新请求使用不同 key，因此自然冷启动并按原 TTL 或容量策略淘汰。不能把这种 key 切换误报为快照格式不兼容，具体兼容性说明见[配置参考](../../../implementation/configuration.md)。
+
 内存 commit 不再产生逐条 persistence 队列。周期任务覆盖当时的完整可见集合，被内存预算淘汰或显式清理的记录会从下一份快照消失。owner/path 切换和未来 clear 必须递增 generation，使旧任务失去发布权；正常 shutdown 只在统一剩余预算内尽力补写，不无限延长退出。
 
 BC-07 已将正式 app/runtime/dns/service 切换到一个进程级 owner：初次启动恢复、周期完整覆盖、reload generation/source 切换和 finalizer 后最终写入均已接线。BC-26 已由正式 v2 loader 提供独立 `persistence.enabled/path/snapshot_interval`；旧 SQLite/FDCP adapter 和增量 persistence port 已删除；快照文件与共用条目 codec 独立于内存 finalizer。
@@ -97,12 +107,12 @@ Facade 提供 exact key、namespace、typed predicate 和 all 失效。普通资
 
 ## 9. 契约验证要求
 
-- namespace、Fast/Resolved 不 alias、fingerprint include/exclude 与资源更新不全局 clear。
+- namespace、Fast/Resolved 不 alias、两种 mode 共用完整 policy semantics fingerprint、target/ECS 维度和资源更新不全局 clear。
 - 正/负/failure TTL、REFUSED 拒绝、质量 CAS、并发乱序和 client-visible TTL 隔离。
 - 多 waiter 取消、candidate drop、commit 终态、占位上限和关闭后拒绝。
-- optimistic 最新资源/目标、跨 runtime late-window、独立 deadline 和失败不延长 stale。
+- uniform/heterogeneous group ECS、Fast 保守禁用但 Resolved 可用、Fast/Resolved optimistic 的同 store/key 与跨 store/key CAS、跨 runtime late-result 语义接纳、独立 deadline 和失败不延长 stale。
 - Moka weight/expiry、分批导出、format/header/checksum/recovery、内存预算与实际文件大小的区别。
 - 真实替换/权限/空间失败与恢复不破坏上一份快照、不阻塞 DNS；测试 hook 不替代真实介质。
-- 显式失效范围、历史 owner drain、失败摘要和秘密不进入日志。
+- 显式失效范围、历史 owner drain、失败摘要，以及 ECS/IP/Secret 不进入普通缓存日志。
 
 这些是验证要求，不是本次通过记录。当前构造与证据见[后台服务实现](../../../implementation/backend/background-services.md)。

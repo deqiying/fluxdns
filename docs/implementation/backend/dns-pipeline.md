@@ -11,6 +11,10 @@
 > 2026-09-06 增量核对：仅更新真实会话边界的连续恢复与 reload 驱动；其余正文保留上述历史核对范围
 >
 > 同日文档收口：结束剩余验证专项，维持 body 断流分类与重试行为；本次仅核对源码分类和文档引用，未新增运行验收
+>
+> 2026-09-21 增量核对（本机日期）：仅核对 `dns/policy.rs` 的 group ECS、Resolved key、optimistic refresh 与 late-result 接纳；未刷新其余历史验收结论
+>
+> 增量核对基线：`e50b948edb4699f58a1e57039fb56442ab228687`（v0.2.9）加本次缓存修复工作树；最终验收仅静态检查/编译，范围见[缓存修复验证](#缓存修复验证)
 
 ## 入口与调用链
 
@@ -46,15 +50,38 @@ SystemSocketFactory / typed binding
 
 ## Cache 与 TTL
 
-`build_cache_facade` 的生产默认是 [`MokaCacheStore::with_max_weight`](../../../backend/src/cache/moka.rs)，不是测试用 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs)。共享 store 通过 namespace 形成逻辑池；`cache/key.rs` 的 v2 编码隔离 Fast/Resolved。当前 fingerprint 包含 PolicyState 中全部 hosts/rule-set hash，不仅限于本请求依赖的资源；纯观测或整个 runtime revision 不直接作为全局失效维度。
+`build_cache_facade` 的生产默认是 [`MokaCacheStore::with_max_weight`](../../../backend/src/cache/moka.rs)，不是测试用 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs)。共享 store 通过 namespace 形成逻辑池；`cache/key.rs` 的 v2 编码隔离 Fast/Resolved。两种 mode 的 policy 维度都来自 `PolicyState::cache_semantics_fingerprint`：它组合会改变答案的已解析配置语义、listener/route/strategy/client 上下文与 PolicyState 中全部 hosts/rule-set content hash；纯观测配置和整个 runtime revision 不直接作为失效维度。Resolved 不再只放 strategy ID 摘要，而是在同一语义 fingerprint 上增加 target 与最终 ECS。
+
+`cache_semantics_base` 显式将完整 DoH endpoint（含 path/query）输入 SHA-256，避免 `SafeUrl` 的脱敏 Debug 隐去分流差异。端点明文不进入日志或缓存键；升级时相关旧 key 自然失效，格式和兼容性见[配置参考](../configuration.md)。
 
 - listener/strategy hosts 本地回答绕过 response cache；upstream hosts 按普通上游响应处理。
-- group member ECS 在选择前不确定且无上层覆盖时，绕过 lookup、single-flight 和写入，避免只按 group ID 混用响应。
+- `UpstreamRuntime` 构造时记录 group 全部可达 direct leaves，覆盖 primary、fallback、nested group 与隐式继承请求级 ECS 的成员；请求级 ECS 来自 global/default 时，`prepare_query` 用该集合计算并比较规范化后的最终 ECS。所有成员 query 相同时使用统一 query 和 Resolved cache；只有真正异构时才携带 per-member query，并绕过 lookup、single-flight 与 commit。显式成员 ECS 即使不同于 global，只要各成员最终 query 相同也属于可缓存路径；rule/strategy/client 显式 ECS 则直接统一覆盖成员。
+- Fast eligibility 仍按策略可达 target 保守计算：存在任一显式成员 ECS 就禁用 Fast；这不妨碍 fast miss 后的完整决策证明 query 一致并使用 Resolved。
 - 缓存候选使用 canonical upstream response 与 origin TTL；返回时递减 TTL 或应用 effective override。stale 返回受当前 pool 的 optimistic max age 与 answer TTL 限制。
-- optimistic refresh 通过有界 finalizer 重新使用 core 的最新资源/策略决策，不复用 entry 保存的旧 connector。配置切换期间的候选和 owner 行为见 lifecycle/background 文档；不能把“最新资源”推断为所有 late-window 跨 revision 场景均已验收。
+- Fast/Resolved stale 共用 `schedule_optimistic_refresh`，切到最新可用 core 后重新执行 `prepare_cache_query`，不复用 entry 保存的旧 connector/rule pointer。同一 `Arc` store 且 key 相同时以 `Version(stale_version)` CAS；store 或 key 不同时先读目标，Miss 使用 `Absent`、Stale 使用目标 `Version`、Fresh 直接跳过。exchange 后写回前再次核对 semantics/key，任一步失败都不延长旧 stale。
+- `PolicyLateResultSink` 保存生产请求的 semantics，并在切换 latest core 后仅当重新准备的 semantics、key 和最终 ECS 与原请求一致时接纳旧响应；配置、资源、目标或 ECS 改变时丢弃。写回前再次检查 semantics/key，目标已有同等或更高质量结果时不覆盖。
+- `reason = "group_ecs_differs"`、`operation = "cache_refresh"` 与 `operation = "cache_late"` 的 debug 事件只记录低基数 reason/outcome 及配置 ID，不输出明文 ECS 或客户端 IP。
 - Core 将持有 single-flight lease 的 `CacheCommitCandidate` 随完成事件交出；[`resolution.rs`](../../../backend/src/resolution.rs) 的 cache worker 在独立 deadline 内 CAS。candidate drop 必须唤醒 waiter，响应不等待写回。
 
 进程快照的恢复、周期、generation 和失败见[后台服务](background-services.md)；准入与终态约束见 [Cache 设计](../../architecture/backend/modules/cache.md)。
+
+### 缓存修复验证
+
+本机 Windows、Rust/Cargo 1.98.0，最终编译基线为 `e50b948edb4699f58a1e57039fb56442ab228687` 加本次工作树。分析起点为 `fcbb128`；期间已发布的版本/交付变更未触及 DNS 缓存链路，验证使用实际当前 manifest（v0.2.9）。
+
+[`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 通过正式 `ConfigV2Loader` 加载脱敏 YAML，并使用带 origin TTL 的模拟 DoH 回答、真实缓存 facade 与有界 finalizer 等待。八组回归覆盖：等价 ECS 的 A/HTTPS 缓存、嵌套/重复成员与隐式 fallback、统一成员 ECS 不同于全局、真正异构 ECS 绕过和 client 子网规范化、覆盖优先级、当前 core 已发布时 Fast/Resolved stale 刷新、新 runtime 已有 fresh/stale 的更新，以及同语义/不同主机、路径、查询参数的 late-result 隔离。
+
+前期开发阶段已实际执行 `cargo test --offline --locked --manifest-path backend/Cargo.toml --bin fluxdns <filter>`：`dns::policy::` 46 项、`cache::` 52 项、`runtime::` 61 项、`resolution::` 6 项，均为 0 failed、0 ignored。Policy 包含上述八组新增回归和既有快照、资源发布、并发及停机相关用例。这些是当时工作树的定向结果，不代表全量或目标平台验收。
+
+用户随后明确本次只需静态编译，不进行完整服务启动测试。最后清理测试未使用导入后，于本机 2026-09-21 执行：
+
+| 命令（仓库根目录） | 结果 |
+| --- | --- |
+| `cargo fmt --manifest-path backend/Cargo.toml -- --check` | 通过 |
+| `cargo check --offline --locked --manifest-path backend/Cargo.toml --all-targets` | 通过，无编译告警 |
+| `cargo test --offline --locked --manifest-path backend/Cargo.toml --bin fluxdns --no-run` | 通过，无编译告警；只构建测试程序，未执行测试体 |
+
+最终没有启动独立 FluxDNS 服务、连接 OpenWrt、修改其配置或部署二进制；没有重新执行运行型测试、全套后端测试或前端测试，也没有交叉编译 OpenWrt target。实际设备上的命中率、长期刷新表现及资源占用尚未测量。用户将本次验收限定为静态编译，代码和文档任务据此收口，不将上述现场边界记作通过。
 
 ## Upstream 与出站
 

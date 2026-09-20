@@ -6,6 +6,10 @@
 >
 > 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
+> 2026-09-20 局部评审：仅核对 group ECS、Resolved key、stale refresh 与 late-result 编排；不代表整篇重审或运行验收
+>
+> 局部评审基线：`fcbb12831c66e81e02108ccd030ac3c2a1e08f56` 加本次工作树；仅用于上述范围
+>
 > 关联实现：[policy.rs](../../../../backend/src/dns/policy.rs)、[handler.rs](../../../../backend/src/dns/handler.rs)、[service.rs](../../../../backend/src/service.rs)、[resolution.rs](../../../../backend/src/resolution.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
@@ -82,16 +86,20 @@ Core 不再次计算继承，也不把 rule 文本写入日志。
 
 当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 对 eligible 请求先执行 `prepare_context → fast lookup`，miss 后再执行 `evaluate_route → resolved lookup/upstream`；stale 命中先返回并在后台按最新 Policy/资源重新刷新，`hosts[]` 本地命中绕过 response cache。`DnsCore::resolve_with_completion` 返回响应、当前 strategy/target/actual/matched resource/cache lookup observation、取消原因和可选 commit candidate；fresh/stale/single-flight cache hit 从 entry provenance 恢复缓存生产 target/actual，不使用当前 route 猜测来源。
 
+Upstream runtime 预记录 group 全部可达 direct leaves（含 primary、fallback、nested 与隐式继承请求级 ECS 的成员）。RouteDecision 确定上游后，若请求级 ECS 来自 global/default，Core 的 `prepare_query` 使用该集合计算并比较规范化最终 ECS；rule/strategy/client 显式 ECS 则直接统一覆盖成员。成员 query 全部相同时使用统一 query 和 Resolved cache；真正异构时才把 per-member query 交给 executor，并绕过 lookup、single-flight 与 commit。策略存在显式成员 ECS 时 Fast eligibility 仍保守禁用，但不阻止后续 Resolved 命中。
+
 ## 6. Cache 交互
 
 只有需要上游交换的路径进入 CacheFacade：
 
-- lookup key 由 Cache 模块根据 `PolicyContext`、可选 `RouteDecision` 和 query 构造；`Fast`/`Resolved` 模式显式隔离；
+- lookup key 由 Cache 模块根据 `PolicyContext`、可选 `RouteDecision` 和 query 构造；`Fast`/`Resolved` 模式显式隔离，并共用完整 `cache_semantics_fingerprint` 作为 policy 维度，Resolved 另加入 target/final ECS；
 - fresh hit 直接使用 canonical response；
-- stale hit 可以先返回，并启动捕获最新 snapshot 的 refresh；
+- stale hit 可以先返回，并进入 Fast/Resolved 共用的 `schedule_optimistic_refresh`；
 - miss 进入 single-flight；
 - waiter 取消只释放自身，不取消仍有其他 waiter 的 exchange；
 - Core 把上游结果与 single-flight lease 封装为 `CacheCommitCandidate`，由统一解析事件移交后台 worker；worker 用独立 100ms deadline 完成准入、质量 CAS 和 follower completion。进程快照不在请求完成链逐条 enqueue。
+- optimistic refresh 切到 latest core 后重新执行 `prepare_cache_query`。同一 `Arc` store 且 key 相同使用 stale version CAS；跨 store/key 先读取目标，Miss/Stale 分别使用 `Absent`/目标 `Version`，Fresh 跳过。写回前再次核对 semantics/key，失败不延长旧 stale。
+- late-result 保存生产请求 semantics；切换 latest core 后只有 semantics、key、最终 ECS 一致才接纳旧响应，changed 时丢弃。相同语义允许跨 runtime 继续写入，不能仅凭相同 group ID 接纳。
 
 Core 不直接调用 Moka 或持久化 store。
 
@@ -105,7 +113,7 @@ ECS 处理顺序：
 4. `custom` 使用已验证 CIDR；
 5. 对前缀长度进行 family 合法性检查；
 6. canonical query 中只保留最终 ECS；
-7. fast key 包含提前可确定的 ECS/request fingerprint；group member ECS 因成员在 lookup 后选择而不使用 fast key，并继续绕过 response cache。
+7. 策略可达 target 存在显式成员 ECS 时 Fast key 保守禁用；完整决策后收集全部 direct leaves，规范化最终 ECS 并比较 query，统一时进入 Resolved cache，异构时绕过 response cache；
 
 客户端地址不可用且 mode=client 时，不伪造 `0.0.0.0/0`；按“无 ECS”继续并记录低基数原因。
 
@@ -167,10 +175,10 @@ resolution ingress 满时 DNS 响应照常编码，但整个 envelope 被丢弃�
 - opcode、question count、EDNS version 和 canonical normalization；
 - 同一 query 经 UDP/TCP/DoH 得到同一 Core 决策；
 - client/strategy/rule/hosts/upstream 管线顺序；
-- ECS 各层覆盖与 cache key；
-- fast/resolved key v2 隔离、fingerprint 语义变化与纯观测配置排除；
+- ECS 各层覆盖、全部 direct leaf 的最终 query 一致性与 cache key；
+- Fast/Resolved key v2 隔离、共用 policy semantics fingerprint、target/ECS 维度变化与纯观测配置排除；
 - local hosts 绕过 cache 且资源更新立即生效；
-- fresh/stale/miss/single-flight/cancellation；
+- fresh/stale/miss/single-flight/cancellation，以及 Fast/Resolved 共用刷新流程；
 - 异步 commit 成功唤醒 follower，candidate drop 释放 lease；
 - NXDOMAIN/NODATA/SERVFAIL/REFUSED/TC 分类；
 - TTL override 不延长 cache expiry；
@@ -178,3 +186,4 @@ resolution ingress 满时 DNS 响应照常编码，但整个 envelope 被丢弃�
 - 一请求只记录一次 total stats。
 - 一请求只发布一次 typed completion，响应对象与详情 source 共享同一 `Arc`；
 - resolution ingress/detail/cache commit 有界队列的丢弃与独立计数。
+- refresh/late-result 在 latest core 重新准备并按 semantics/key/ECS 一致性接纳，失败不延长 stale。

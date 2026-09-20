@@ -499,9 +499,19 @@ fn cache_semantics_base(config: &ResolvedConfig) -> [u8; 32] {
         update_fingerprint_component(&mut hasher, material.as_bytes());
     }
     for upstream in &config.upstreams {
-        if let ResolvedUpstream::Hosts { id, hosts, .. } = upstream {
-            update_fingerprint_component(&mut hasher, id.as_str().as_bytes());
-            update_fingerprint_component(&mut hasher, hosts.as_bytes());
+        match upstream {
+            ResolvedUpstream::Hosts { id, hosts, .. } => {
+                update_fingerprint_component(&mut hasher, id.as_str().as_bytes());
+                update_fingerprint_component(&mut hasher, hosts.as_bytes());
+            }
+            ResolvedUpstream::Doh { id, address, .. } => {
+                // Debug 的 SafeUrl 会隐藏路径和查询参数；它们可能决定不同的 DoH 策略。
+                // 完整 URL 只进入摘要，不写入 cache key 明文或诊断日志。
+                update_fingerprint_component(&mut hasher, b"doh-endpoint");
+                update_fingerprint_component(&mut hasher, id.as_str().as_bytes());
+                update_fingerprint_component(&mut hasher, address.as_str().as_bytes());
+            }
+            ResolvedUpstream::Group { .. } => {}
         }
     }
     hasher.finalize().into()
@@ -598,10 +608,18 @@ fn fast_cache_strategies(
         .collect()
 }
 
+/// 后台刷新与晚到结果使用同一份完整决策，避免复用旧 plan 或只比较组 ID。
+struct PreparedCacheQuery {
+    key: crate::ports::cache::CacheKey,
+    query: super::CanonicalQuery,
+    upstream: ConfigId,
+    semantics: CacheFingerprint,
+}
+
 struct PolicyLateResultSink {
-    cache: Arc<CacheFacade>,
-    finalizer: Arc<LateCacheFinalizer>,
-    runtime_cell: Arc<ArcSwap<RuntimeCoreCell>>,
+    core: PolicyDnsCore,
+    request: DnsRequest,
+    semantics: Option<CacheFingerprint>,
     key: crate::ports::cache::CacheKey,
     upstream_target_id: CacheUpstreamId,
     producer_revision: crate::dns::RuntimeRevision,
@@ -626,24 +644,34 @@ impl LateResultSink for PolicyLateResultSink {
         if !response.matches_query(&query) {
             return;
         }
-        let target = self.runtime_cell.load().current();
-        let (cache, finalizer, producer_revision) = target.map_or_else(
-            || {
-                (
-                    Arc::clone(&self.cache),
-                    Arc::clone(&self.finalizer),
-                    self.producer_revision,
-                )
-            },
-            |target| {
-                (
-                    Arc::clone(&target.core.cache),
-                    Arc::clone(&target.core.late_cache_finalizer),
-                    target.revision,
-                )
-            },
+        let (core, producer_revision) = self.core.latest_runtime_target().map_or_else(
+            || (Arc::new(self.core.clone()), self.producer_revision),
+            |target| (Arc::clone(&target.core), target.revision),
         );
-        let key = self.key.clone();
+        let Some(prepared) = core.prepare_cache_query(&self.request) else {
+            tracing::debug!(
+                operation = "cache_late",
+                reason = "cache_ineligible",
+                "跳过晚到缓存结果"
+            );
+            return;
+        };
+        // 即使 Resolved key 字节相同，也必须证明上游配置和资源依赖没有改变。
+        if Some(prepared.semantics) != self.semantics
+            || prepared.key != self.key
+            || ecs_cache_fingerprint(&prepared.query) != ecs_cache_fingerprint(&query)
+        {
+            tracing::debug!(
+                operation = "cache_late",
+                reason = "semantics_changed",
+                "丢弃旧语义的晚到响应"
+            );
+            return;
+        }
+        let cache = Arc::clone(&core.cache);
+        let finalizer = Arc::clone(&core.late_cache_finalizer);
+        let request = self.request.clone();
+        let key = prepared.key;
         let upstream = CacheUpstreamProvenance::new(
             self.upstream_target_id.clone(),
             Some(
@@ -653,13 +681,16 @@ impl LateResultSink for PolicyLateResultSink {
         );
         let deadline = self.deadline;
         let response = Arc::new(response);
-        let _ = finalizer.submit_task(async move {
+        if let Err(error) = finalizer.submit_task(async move {
             let current = match cache.lookup(&key, deadline).await {
                 Ok(CacheLookup::Fresh(record)) | Ok(CacheLookup::Stale { record, .. }) => {
                     Some(record)
                 }
                 Ok(CacheLookup::Miss) => None,
-                Ok(CacheLookup::Disabled) | Ok(CacheLookup::StoreUnavailable) | Err(_) => return,
+                other => {
+                    tracing::debug!(operation = "cache_late", outcome = ?other, "晚到结果无法读取目标缓存");
+                    return;
+                }
             };
             let condition = match current {
                 None => crate::ports::cache::CacheCondition::Absent,
@@ -670,7 +701,13 @@ impl LateResultSink for PolicyLateResultSink {
                 }
                 Some(_) => return,
             };
-            let _ = cache
+            if !core.prepare_cache_query(&request).is_some_and(|current| {
+                current.key == key && current.semantics == prepared.semantics
+            }) {
+                tracing::debug!(operation = "cache_late", reason = "semantics_changed", "放弃晚到响应写回");
+                return;
+            }
+            let outcome = cache
                 .write_response(CacheWriteRequest {
                     key,
                     condition,
@@ -681,11 +718,20 @@ impl LateResultSink for PolicyLateResultSink {
                     deadline,
                 })
                 .await;
-        });
+            tracing::debug!(operation = "cache_late", ?outcome, "晚到缓存写回完成");
+        }) {
+            tracing::debug!(operation = "cache_late", ?error, "晚到缓存任务未获接纳");
+        }
     }
 
     fn spawn_drain(&self, task: Pin<Box<dyn Future<Output = ()> + Send + 'static>>) {
-        let _ = self.finalizer.submit_task(task);
+        if let Err(error) = self.core.late_cache_finalizer.submit_task(task) {
+            tracing::debug!(
+                operation = "cache_late_drain",
+                ?error,
+                "晚到结果收集任务未获接纳"
+            );
+        }
     }
 }
 
@@ -890,7 +936,7 @@ impl PolicyDnsCore {
                         let mut response = (*record.entry.response).clone();
                         response.set_ttl(answer_ttl);
                         if refresh.try_consume() {
-                            self.schedule_fast_optimistic_refresh(
+                            self.schedule_optimistic_refresh(
                                 key.clone(),
                                 refresh.version(),
                                 request,
@@ -915,6 +961,7 @@ impl PolicyDnsCore {
             Ok(decision) => decision,
             Err(_error) => return (servfail(request), None, None, None),
         };
+        let semantics = policy.cache_semantics_fingerprint(&context);
         let plan = context.into_resolution_plan(decision);
         let matched_rule = matched_rule_observation(&policy, plan.matched_rule.as_ref());
 
@@ -962,19 +1009,8 @@ impl PolicyDnsCore {
             );
         }
 
-        let upstream_query = effective_upstream_query(
-            &request.query,
-            &plan.edns_client_subnet,
-            request.context.client.client_addr,
-        );
         let Some(outcome) = self
-            .resolve_upstream(
-                request,
-                &plan,
-                &upstream_query,
-                fast_key,
-                fast_lookup_completed,
-            )
+            .resolve_upstream(request, &plan, semantics, fast_key, fast_lookup_completed)
             .await
         else {
             return (
@@ -1037,22 +1073,43 @@ impl PolicyDnsCore {
         &self,
         request: &DnsRequest,
         plan: &crate::policy::ResolutionPlan,
-        query: &crate::dns::CanonicalQuery,
+        semantics: CacheFingerprint,
         prepared_key: Option<crate::ports::cache::CacheKey>,
         lookup_completed: bool,
     ) -> Option<PolicyUpstreamResult> {
-        let member_queries = self.upstreams.member_queries(
+        let prepared = self.upstreams.prepare_query(
             &plan.upstream,
             &request.query,
             &plan.edns_client_subnet,
             request.context.client.client_addr,
         );
+        let query = &prepared.query;
+        let member_queries = prepared.member_queries;
         let key = if member_queries.is_some() {
+            tracing::debug!(
+                strategy = plan.strategy.id.as_str(),
+                upstream = plan.upstream.as_str(),
+                reason = "group_ecs_differs",
+                "成员最终 ECS 不同，绕过响应缓存"
+            );
             None
         } else {
-            prepared_key.or_else(|| cache_key_for_query(plan, request, query))
+            prepared_key.or_else(|| cache_key_for_query(semantics, plan, request, query))
         };
         let Some(key) = key else {
+            if member_queries.is_none() {
+                let reason = if plan.cache.is_enabled() {
+                    "key_unavailable"
+                } else {
+                    "cache_disabled"
+                };
+                tracing::debug!(
+                    strategy = plan.strategy.id.as_str(),
+                    upstream = plan.upstream.as_str(),
+                    reason,
+                    "绕过响应缓存"
+                );
+            }
             return self
                 .upstreams
                 .exchange(
@@ -1065,7 +1122,6 @@ impl PolicyDnsCore {
                 .await
                 .map(|outcome| PolicyUpstreamResult::upstream(outcome, CacheStatus::Disabled));
         };
-        let late_sink = self.late_result_sink(&key, request, &plan.upstream);
         let deadline = request.context.meta.deadline;
         if !lookup_completed {
             match self.cache.lookup(&key, deadline).await {
@@ -1087,8 +1143,6 @@ impl PolicyDnsCore {
                                 key.clone(),
                                 refresh.version(),
                                 request,
-                                plan,
-                                query,
                             );
                         }
                         return Some(PolicyUpstreamResult::cache(
@@ -1105,6 +1159,7 @@ impl PolicyDnsCore {
             }
         }
 
+        let late_sink = self.late_result_sink(&key, request, &plan.upstream);
         let reservation = match self.cache.reserve_load(key.clone(), deadline).await {
             Ok(reservation) => reservation,
             Err(_) => {
@@ -1239,40 +1294,15 @@ impl PolicyDnsCore {
         }
     }
 
-    /// fast stale hit 立即返回；后台任务用最新 Policy snapshot 重新完成完整规则决策。
-    fn schedule_fast_optimistic_refresh(
-        &self,
-        stale_key: crate::ports::cache::CacheKey,
-        stale_version: crate::ports::cache::CacheVersion,
-        request: &DnsRequest,
-    ) {
-        let (core, producer_revision, refreshes_same_store) =
-            self.latest_runtime_target().map_or_else(
-                || {
-                    (
-                        Arc::new(self.clone()),
-                        request.context.runtime_revision,
-                        true,
-                    )
-                },
-                |target| (Arc::clone(&target.core), target.revision, false),
-            );
-        let finalizer = Arc::clone(&core.late_cache_finalizer);
-        let mut request = request.clone();
-        request.context = optimistic_refresh_context(&request.context);
-        request.context.runtime_revision = producer_revision;
-        let _ = finalizer.submit_task(async move {
-            let Some(listener_id) =
-                ConfigId::new(request.context.meta.listener_id.as_ref().to_owned()).ok()
-            else {
-                return;
-            };
-            let Ok(qname) = CanonicalDomain::parse(&request.query.question().name().to_ascii())
-            else {
-                return;
-            };
-            let policy = core.policy.load();
-            let policy_request = PolicyRequest {
+    /// 重新执行当前策略/资源决策；只有成员 query 等价时才准备后台缓存写回。
+    fn prepare_cache_query(&self, request: &DnsRequest) -> Option<PreparedCacheQuery> {
+        let listener_id =
+            ConfigId::new(request.context.meta.listener_id.as_ref().to_owned()).ok()?;
+        let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).ok()?;
+        let policy = self.policy.load();
+        let context = policy
+            .index
+            .prepare_context(&PolicyRequest {
                 listener_id: &listener_id,
                 doh_route_id: request.context.meta.route_id.as_ref(),
                 client_id: request
@@ -1280,151 +1310,107 @@ impl PolicyDnsCore {
                     .client
                     .client_id
                     .as_ref()
-                    .map(|client_id| client_id.as_str()),
+                    .map(|id| id.as_str()),
                 client_addr: request.context.client.client_addr,
                 client_digest: None,
                 qname: Some(&qname),
-            };
-            let Ok(context) = policy.index.prepare_context(&policy_request) else {
-                return;
-            };
-            let fast_eligible = policy.fast_cache_eligible(&context);
-            let fast_key = fast_eligible.then(|| fast_cache_key(&policy, &context, &request));
-            let Ok(decision) = policy.index.evaluate_route(&context, Some(&qname)) else {
-                return;
-            };
-            if decision.hosts.is_some() {
-                return;
-            }
-            let plan = context.into_resolution_plan(decision);
-            let query = effective_upstream_query(
-                &request.query,
-                &plan.edns_client_subnet,
-                request.context.client.client_addr,
-            );
-            if core
-                .upstreams
-                .member_queries(
-                    &plan.upstream,
-                    &request.query,
-                    &plan.edns_client_subnet,
-                    request.context.client.client_addr,
-                )
-                .is_some()
-            {
-                return;
-            }
-            let Some(key) = fast_key
-                .flatten()
-                .or_else(|| cache_key_for_query(&plan, &request, &query))
-            else {
-                return;
-            };
-            let condition = if refreshes_same_store && key == stale_key {
-                CacheCondition::Version(stale_version)
-            } else {
-                CacheCondition::Absent
-            };
-            let deadline = request.context.meta.deadline;
-            let Some(UpstreamExecutionResult {
-                outcome: UpstreamOutcome::Response(response),
-                target_id,
-                used_id,
-            }) = core
-                .upstreams
-                .exchange(&plan.upstream, &query, &request.context, None, None)
-                .await
-            else {
-                return;
-            };
-            if !response.matches_query(&query) {
-                return;
-            }
-            let _ = core
-                .cache
-                .write_response(CacheWriteRequest {
-                    key,
-                    condition,
-                    response: Arc::new(response),
-                    upstream: cache_upstream_provenance(target_id.as_ref(), used_id.as_deref()),
-                    now: Instant::now(),
-                    producer_revision,
-                    deadline,
-                })
-                .await;
-        });
+            })
+            .ok()?;
+        let semantics = policy.cache_semantics_fingerprint(&context);
+        let fast_key = policy
+            .fast_cache_eligible(&context)
+            .then(|| fast_cache_key(&policy, &context, request))
+            .flatten();
+        let decision = policy.index.evaluate_route(&context, Some(&qname)).ok()?;
+        if decision.hosts.is_some() {
+            return None;
+        }
+        let plan = context.into_resolution_plan(decision);
+        let prepared = self.upstreams.prepare_query(
+            &plan.upstream,
+            &request.query,
+            &plan.edns_client_subnet,
+            request.context.client.client_addr,
+        );
+        if prepared.member_queries.is_some() {
+            return None;
+        }
+        let key =
+            fast_key.or_else(|| cache_key_for_query(semantics, &plan, request, &prepared.query))?;
+        Some(PreparedCacheQuery {
+            key,
+            query: prepared.query,
+            upstream: plan.upstream,
+            semantics,
+        })
     }
 
+    /// Fast/Resolved stale 共用刷新流程；store 身份和 key 决定 CAS，不能用 target 是否存在代替。
     fn schedule_optimistic_refresh(
         &self,
-        key: crate::ports::cache::CacheKey,
+        stale_key: crate::ports::cache::CacheKey,
         stale_version: crate::ports::cache::CacheVersion,
         request: &DnsRequest,
-        plan: &crate::policy::ResolutionPlan,
-        query: &crate::dns::CanonicalQuery,
     ) {
-        let query = query.clone();
-        let context = optimistic_refresh_context(&request.context);
-        let upstream = plan.upstream.clone();
-        let target = self.latest_runtime_target();
-        let (upstreams, cache, finalizer, producer_revision, condition) = target.map_or_else(
-            || {
-                (
-                    self.upstreams.clone(),
-                    Arc::clone(&self.cache),
-                    Arc::clone(&self.late_cache_finalizer),
-                    request.context.runtime_revision,
-                    crate::ports::cache::CacheCondition::Version(stale_version),
-                )
-            },
-            |target| {
-                (
-                    target.core.upstreams.clone(),
-                    Arc::clone(&target.core.cache),
-                    Arc::clone(&target.core.late_cache_finalizer),
-                    target.revision,
-                    crate::ports::cache::CacheCondition::Absent,
-                )
-            },
+        let (core, producer_revision) = self.latest_runtime_target().map_or_else(
+            || (Arc::new(self.clone()), request.context.runtime_revision),
+            |target| (Arc::clone(&target.core), target.revision),
         );
-        if upstreams
-            .member_queries(
-                &upstream,
-                &request.query,
-                &plan.edns_client_subnet,
-                request.context.client.client_addr,
-            )
-            .is_some()
-        {
-            return;
-        }
-        let deadline = context.meta.deadline;
-        let _ = finalizer.submit_task(async move {
-            let Some(UpstreamExecutionResult {
-                outcome: UpstreamOutcome::Response(response),
-                target_id,
-                used_id,
-            }) = upstreams
-                .exchange(&upstream, &query, &context, None, None)
-                .await
-            else {
+        let same_store = Arc::ptr_eq(self.cache.store(), core.cache.store());
+        let finalizer = Arc::clone(&core.late_cache_finalizer);
+        let mut request = request.clone();
+        request.context = optimistic_refresh_context(&request.context);
+        request.context.runtime_revision = producer_revision;
+        if let Err(error) = finalizer.submit_task(async move {
+            let Some(prepared) = core.prepare_cache_query(&request) else {
+                tracing::debug!(operation = "cache_refresh", reason = "cache_ineligible", "跳过缓存刷新");
                 return;
             };
-            if !response.matches_query(&query) {
+            let deadline = request.context.meta.deadline;
+            let condition = if same_store && prepared.key == stale_key {
+                CacheCondition::Version(stale_version)
+            } else {
+                // 新 store 的版本独立；已有 fresh 不回源，stale 只替换刚读到的版本。
+                match core.cache.lookup(&prepared.key, deadline).await {
+                    Ok(CacheLookup::Miss) => CacheCondition::Absent,
+                    Ok(CacheLookup::Stale { record, .. }) => CacheCondition::Version(record.version),
+                    Ok(CacheLookup::Fresh(_)) => {
+                        tracing::debug!(operation = "cache_refresh", reason = "already_fresh", "目标缓存已更新");
+                        return;
+                    }
+                    other => {
+                        tracing::debug!(operation = "cache_refresh", outcome = ?other, "无法读取刷新目标缓存");
+                        return;
+                    }
+                }
+            };
+            let Some(UpstreamExecutionResult {
+                outcome: UpstreamOutcome::Response(response), target_id, used_id,
+            }) = core.upstreams.exchange(
+                &prepared.upstream, &prepared.query, &request.context, None, None,
+            ).await else {
+                tracing::debug!(operation = "cache_refresh", reason = "upstream_failed", "缓存刷新未取得响应");
+                return;
+            };
+            if !response.matches_query(&prepared.query) {
+                tracing::debug!(operation = "cache_refresh", reason = "question_mismatch", "拒绝不匹配的刷新响应");
                 return;
             }
-            let _ = cache
-                .write_response(CacheWriteRequest {
-                    key,
-                    condition,
-                    response: Arc::new(response),
-                    upstream: cache_upstream_provenance(target_id.as_ref(), used_id.as_deref()),
-                    now: Instant::now(),
-                    producer_revision,
-                    deadline,
-                })
-                .await;
-        });
+            if !core.prepare_cache_query(&request).is_some_and(|current| {
+                current.key == prepared.key && current.semantics == prepared.semantics
+            }) {
+                tracing::debug!(operation = "cache_refresh", reason = "semantics_changed", "放弃旧语义的刷新响应");
+                return;
+            }
+            let outcome = core.cache.write_response(CacheWriteRequest {
+                key: prepared.key, condition, response: Arc::new(response),
+                upstream: cache_upstream_provenance(target_id.as_ref(), used_id.as_deref()),
+                now: Instant::now(), producer_revision, deadline,
+            }).await;
+            tracing::debug!(operation = "cache_refresh", ?outcome, "缓存刷新写回完成");
+        }) {
+            tracing::debug!(operation = "cache_refresh", ?error, "缓存刷新任务未获接纳");
+        }
     }
 
     fn late_result_sink(
@@ -1434,9 +1420,12 @@ impl PolicyDnsCore {
         upstream: &ConfigId,
     ) -> Arc<dyn LateResultSink> {
         Arc::new(PolicyLateResultSink {
-            cache: Arc::clone(&self.cache),
-            finalizer: Arc::clone(&self.late_cache_finalizer),
-            runtime_cell: Arc::clone(&self.runtime_cell),
+            core: self.clone(),
+            request: request.clone(),
+            semantics: self
+                .prepare_cache_query(request)
+                .filter(|prepared| prepared.key == *key && prepared.upstream == *upstream)
+                .map(|prepared| prepared.semantics),
             key: key.clone(),
             upstream_target_id: CacheUpstreamId::from_validated_config_id(upstream.as_str())
                 .expect("resolved upstream ID must be valid cache provenance"),
@@ -1704,37 +1693,11 @@ fn optimistic_refresh_context(context: &crate::dns::RequestContext) -> crate::dn
 #[cfg(test)]
 fn cache_key(
     core: &PolicyDnsCore,
-    plan: &crate::policy::ResolutionPlan,
+    _plan: &crate::policy::ResolutionPlan,
     request: &DnsRequest,
 ) -> Option<crate::ports::cache::CacheKey> {
-    let listener_id = ConfigId::new(request.context.meta.listener_id.as_ref().to_owned()).ok()?;
-    let qname = CanonicalDomain::parse(&request.query.question().name().to_ascii()).ok()?;
-    let policy = core.policy.load();
-    let context = policy
-        .index
-        .prepare_context(&PolicyRequest {
-            listener_id: &listener_id,
-            doh_route_id: request.context.meta.route_id.as_ref(),
-            client_id: request
-                .context
-                .client
-                .client_id
-                .as_ref()
-                .map(|client_id| client_id.as_str()),
-            client_addr: request.context.client.client_addr,
-            client_digest: None,
-            qname: Some(&qname),
-        })
-        .ok()?;
-    if policy.fast_cache_eligible(&context) {
-        return fast_cache_key(&policy, &context, request);
-    }
-    let query = effective_upstream_query(
-        &request.query,
-        &plan.edns_client_subnet,
-        request.context.client.client_addr,
-    );
-    cache_key_for_query(plan, request, &query)
+    core.prepare_cache_query(request)
+        .map(|prepared| prepared.key)
 }
 
 /// 构造逐规则匹配前可安全 lookup 的 v2 key；policy fingerprint 已覆盖全部规则与资源内容。
@@ -1778,6 +1741,7 @@ fn request_policy_fingerprint(request: &DnsRequest) -> Option<CacheFingerprint> 
 
 /// 使用已应用最终 ECS 的 query 构造 cache key，避免不同客户端地址共享错误条目。
 fn cache_key_for_query(
+    semantics: CacheFingerprint,
     plan: &crate::policy::ResolutionPlan,
     request: &DnsRequest,
     query: &crate::dns::CanonicalQuery,
@@ -1789,7 +1753,7 @@ fn cache_key_for_query(
         request.context.transport.cache_compatibility,
         CacheKeyDimensions {
             mode: CacheKeyMode::Resolved,
-            policy: Some(cache_fingerprint(plan.strategy.id.as_str().as_bytes())),
+            policy: Some(semantics),
             request: None,
             target: Some(cache_fingerprint(plan.upstream.as_str().as_bytes())),
             ecs: ecs_cache_fingerprint(query),
@@ -1829,7 +1793,13 @@ struct UpstreamRuntime {
     direct: BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
     groups: BTreeMap<ConfigId, Arc<UpstreamGroupExecutor>>,
     all: BTreeMap<ConfigId, Arc<dyn DnsExchange>>,
-    group_member_ecs: BTreeMap<ConfigId, Arc<BTreeMap<ConfigId, ResolvedEcs>>>,
+    group_member_ecs: BTreeMap<ConfigId, Arc<BTreeMap<ConfigId, Option<ResolvedEcs>>>>,
+}
+
+/// 等价成员共用 query；异构成员保留逐 connector 查询并禁止组级缓存。
+struct PreparedUpstreamQuery {
+    query: super::CanonicalQuery,
+    member_queries: Option<Arc<HashMap<ConnectorId, super::CanonicalQuery>>>,
 }
 
 /// 一次上游执行的终态和实际选中的配置成员 ID。
@@ -1937,42 +1907,58 @@ impl UpstreamRuntime {
     fn has_member_specific_ecs(&self, upstream: &ConfigId) -> bool {
         self.group_member_ecs
             .get(upstream)
-            .is_some_and(|members| !members.is_empty())
+            .is_some_and(|members| members.values().any(Option::is_some))
     }
 
-    /// 为 group 中显式配置 ECS 的 direct member 构造请求级 query。
-    ///
-    /// rule、strategy 或 client 已提供更高优先级 ECS 时返回 `None`，确保成员配置
-    /// 不会反向覆盖请求级决策。
-    fn member_queries(
+    /// 比较所有可达成员（含继承全局的 fallback）的最终 ECS，保持既有覆盖优先级。
+    fn prepare_query(
         &self,
         upstream: &ConfigId,
         original_query: &super::CanonicalQuery,
         selected_ecs: &ResolvedEcs,
         client_addr: Option<IpAddr>,
-    ) -> Option<Arc<HashMap<ConnectorId, super::CanonicalQuery>>> {
+    ) -> PreparedUpstreamQuery {
+        let query = effective_upstream_query(original_query, selected_ecs, client_addr);
+        let uniform = |query| PreparedUpstreamQuery {
+            query,
+            member_queries: None,
+        };
         if !matches!(
             selected_ecs.source,
             ValueSource::Default | ValueSource::Global
         ) {
-            return None;
+            return uniform(query);
         }
-        let member_ecs = self.group_member_ecs.get(upstream)?;
-        if member_ecs.is_empty() {
-            return None;
+        let Some(members) = self.group_member_ecs.get(upstream) else {
+            return uniform(query);
+        };
+        if !members.values().any(Option::is_some) {
+            return uniform(query);
         }
-        let queries = member_ecs
+        let queries: HashMap<_, _> = members
             .iter()
             .map(|(member, ecs)| {
                 let connector = ConnectorId::new(member.as_str().to_owned())
                     .expect("validated upstream ID must be a connector ID");
-                (
-                    connector,
-                    effective_upstream_query(original_query, ecs, client_addr),
-                )
+                let member_query = ecs.as_ref().map_or_else(
+                    || query.clone(),
+                    |ecs| effective_upstream_query(original_query, ecs, client_addr),
+                );
+                (connector, member_query)
             })
             .collect();
-        Some(Arc::new(queries))
+        // 所有 query 均由同一原始请求只改 ECS 生成，比较规范化后的 ECS 即足够。
+        if let Some(first) = queries.values().next()
+            && queries
+                .values()
+                .all(|member| member.edns_client_subnet() == first.edns_client_subnet())
+        {
+            return uniform(first.clone());
+        }
+        PreparedUpstreamQuery {
+            query,
+            member_queries: Some(Arc::new(queries)),
+        }
     }
 
     /// 执行 direct upstream 或 group，并把成员级 query 交给 group executor。
@@ -2171,13 +2157,13 @@ fn group_member_exchanges(
         .collect()
 }
 
-/// 收集一个 group（含嵌套和 fallback）可到达的显式 direct member ECS。
+/// 收集 group（含嵌套和 fallback）的全部 direct member；None 表示继承请求级 ECS。
 fn collect_group_member_ecs(
     group: &ConfigId,
     definitions: &BTreeMap<ConfigId, &ResolvedUpstream>,
     explicit: &BTreeMap<ConfigId, ResolvedEcs>,
     visited: &mut HashSet<ConfigId>,
-    collected: &mut BTreeMap<ConfigId, ResolvedEcs>,
+    collected: &mut BTreeMap<ConfigId, Option<ResolvedEcs>>,
 ) {
     if !visited.insert(group.clone()) {
         return;
@@ -2191,13 +2177,13 @@ fn collect_group_member_ecs(
         return;
     };
     for member in upstreams.iter().chain(fallbacks) {
-        if let Some(ecs) = explicit.get(&member.name) {
-            collected.insert(member.name.clone(), ecs.clone());
-        } else if matches!(
+        if matches!(
             definitions.get(&member.name).copied(),
             Some(ResolvedUpstream::Group { .. })
         ) {
             collect_group_member_ecs(&member.name, definitions, explicit, visited, collected);
+        } else {
+            collected.insert(member.name.clone(), explicit.get(&member.name).cloned());
         }
     }
 }
@@ -2256,6 +2242,10 @@ fn servfail(request: &DnsRequest) -> Result<CoreOutcome, CoreError> {
         .map(CoreOutcome::Response)
         .map_err(CoreError::ResponseConstruction)
 }
+
+#[cfg(test)]
+#[path = "policy_cache_tests.rs"]
+mod cache_regression_tests;
 
 #[cfg(test)]
 mod tests {
@@ -2766,7 +2756,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn group_member_ecs_overrides_global_ecs_and_disables_group_cache() {
+    async fn group_member_ecs_overrides_global_ecs_and_caches_uniform_group() {
         let mut config = Arc::try_unwrap(doh_config()).unwrap();
         let global_ecs = ResolvedEcs {
             mode: EcsMode::Custom,
@@ -2803,7 +2793,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(transport.calls.load(Ordering::Acquire), 2);
+        assert_eq!(transport.calls.load(Ordering::Acquire), 1);
         let observation = observation.expect("group member ECS must report metadata");
         assert_eq!(observation.upstream_id.as_deref(), Some("group"));
         assert_eq!(observation.upstream_member_id.as_deref(), Some("inner"));
