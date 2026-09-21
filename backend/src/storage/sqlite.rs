@@ -885,9 +885,17 @@ impl SqliteStorageBackend {
                 if matches!(error.class(), PortErrorClass::Unavailable) {
                     self.mark_degraded();
                 }
+                // 显式回滚并等待完成：仅依赖 Drop 的异步回滚会让残留写事务与后续操作并发，
+                // 使同一个库上的其他连接在 busy_timeout 内拿不到写锁而失败。回滚失败不覆盖
+                // 原始错误，此时连接可能已损坏，健康状态已在上面按错误类降级。
+                let _ = sql_transaction.rollback().await;
                 return Err(error);
             }
-            check_deadline(deadline, "sqlite_storage.execute")?;
+            if let Err(error) = check_deadline(deadline, "sqlite_storage.execute") {
+                // 超时路径同样显式回滚，避免留下未撤销的写事务。
+                let _ = sql_transaction.rollback().await;
+                return Err(error);
+            }
         }
         sql_transaction
             .commit()
@@ -1111,6 +1119,42 @@ impl StorageBackend for SqliteStorageBackend {
     }
 }
 
+/// 把统计批次事务内的 sqlx 错误压缩为有界的静态原因。
+///
+/// 这些位置原先只保留 `Unavailable` 类并丢弃底层原因，导致 busy、磁盘满和 IO 错误无法区分，
+/// 线上与 CI 都只能看到“不可用”。safe_context 只记录 SQLite 结果码类别，不含 SQL 或数据。
+fn stats_batch_sqlx_error(error: sqlx::Error) -> PortError {
+    let reason = match &error {
+        sqlx::Error::Io(_) => "sqlite io error",
+        sqlx::Error::PoolTimedOut => "sqlite pool timeout",
+        sqlx::Error::PoolClosed => "sqlite pool closed",
+        sqlx::Error::Database(database) => {
+            match sqlite_primary_result_code(database.code().as_deref()) {
+                Some(5) => "sqlite busy",
+                Some(6) => "sqlite locked",
+                Some(8) => "sqlite readonly",
+                Some(10) => "sqlite io error",
+                Some(11) => "sqlite corrupt",
+                Some(13) => "sqlite full",
+                Some(14) => "sqlite cantopen",
+                Some(19) => "sqlite constraint",
+                _ => "sqlite error",
+            }
+        }
+        _ => "sqlite error",
+    };
+    PortError::new(PortErrorClass::Unavailable, "sqlite_storage.stats_batch")
+        .with_safe_context(reason)
+}
+
+/// 取 SQLite 主结果码。
+///
+/// sqlx 上报的是 extended result code（如 `SQLITE_BUSY_SNAPSHOT` 为 517、`SQLITE_CONSTRAINT_UNIQUE` 为 2067），
+/// 只有低字节是 `SQLITE_BUSY`、`SQLITE_CONSTRAINT` 这类主码；按主码归类才能稳定区分错误条件。
+fn sqlite_primary_result_code(code: Option<&str>) -> Option<i32> {
+    code?.parse::<i32>().ok().map(|code| code & 0xff)
+}
+
 async fn apply_stats_batch(
     transaction: &mut sqlx::Transaction<'_, Sqlite>,
     batch: &StatsBatch,
@@ -1134,7 +1178,7 @@ async fn apply_stats_batch(
     })?)
     .fetch_optional(&mut **transaction)
     .await
-    .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.stats_batch"))?
+    .map_err(stats_batch_sqlx_error)?
     {
         let stored_max = row.try_get::<i64, _>("max_event_seq").unwrap_or_default();
         let stored_epoch = row.try_get::<i64, _>("counter_epoch").unwrap_or_default();
@@ -1176,7 +1220,7 @@ async fn apply_stats_batch(
     )
     .fetch_optional(&mut **transaction)
     .await
-    .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.stats_batch"))?;
+    .map_err(stats_batch_sqlx_error)?;
     for event in batch.events.iter().filter(|event| {
         retired_before_day_utc.is_none_or(|watermark| i64::from(event.day_utc()) >= watermark)
     }) {
@@ -1187,7 +1231,7 @@ async fn apply_stats_batch(
         .bind(i64::from(event.day_utc()))
         .execute(&mut **transaction)
         .await
-        .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.stats_batch"))?;
+        .map_err(stats_batch_sqlx_error)?;
         for dimension in event.dimensions() {
             let (kind, value) = dimension.database_parts();
             sqlx::query(
@@ -1201,9 +1245,7 @@ async fn apply_stats_batch(
             .bind(value)
             .execute(&mut **transaction)
             .await
-            .map_err(|_| {
-                PortError::new(PortErrorClass::Unavailable, "sqlite_storage.stats_batch")
-            })?;
+            .map_err(stats_batch_sqlx_error)?;
         }
     }
     sqlx::query(
@@ -1236,7 +1278,7 @@ async fn apply_stats_batch(
     .bind(fingerprint.to_be_bytes().to_vec())
     .execute(&mut **transaction)
     .await
-    .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.stats_batch"))?;
+    .map_err(stats_batch_sqlx_error)?;
     Ok(())
 }
 
