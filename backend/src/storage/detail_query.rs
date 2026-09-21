@@ -160,6 +160,7 @@ pub enum DetailQueryOutcome {
 pub enum DetailQueryCacheOutcome {
     Hit,
     Stale,
+    Expired,
     Miss,
     Bypass,
 }
@@ -347,6 +348,8 @@ impl DetailCommittedRecord {
         let cache = match record.cache_status() {
             CacheStatus::Fresh => DetailQueryCacheOutcome::Hit,
             CacheStatus::Stale => DetailQueryCacheOutcome::Stale,
+            // 条目过期后回源与从未有过条目是两种不同原因，不能都记为 miss。
+            CacheStatus::Expired => DetailQueryCacheOutcome::Expired,
             CacheStatus::Miss => DetailQueryCacheOutcome::Miss,
             CacheStatus::Disabled | CacheStatus::StoreUnavailable | CacheStatus::WriteRejected => {
                 DetailQueryCacheOutcome::Bypass
@@ -983,6 +986,7 @@ fn map_row(row: &sqlx::sqlite::SqliteRow, day_utc: i32) -> Result<LocatedRecord,
     let cache = match required_text(row, "cache_status", operation)?.as_str() {
         "fresh" => DetailQueryCacheOutcome::Hit,
         "stale" => DetailQueryCacheOutcome::Stale,
+        "expired" => DetailQueryCacheOutcome::Expired,
         "miss" => DetailQueryCacheOutcome::Miss,
         "disabled" | "store_unavailable" | "write_rejected" => DetailQueryCacheOutcome::Bypass,
         _ => return Err(corrupt(operation)),
@@ -1115,6 +1119,9 @@ fn push_cache_filter(sql: &mut QueryBuilder<Sqlite>, value: DetailQueryCacheOutc
         }
         DetailQueryCacheOutcome::Stale => {
             sql.push(" AND cache_status = 'stale'");
+        }
+        DetailQueryCacheOutcome::Expired => {
+            sql.push(" AND cache_status = 'expired'");
         }
         DetailQueryCacheOutcome::Miss => {
             sql.push(" AND cache_status = 'miss'");

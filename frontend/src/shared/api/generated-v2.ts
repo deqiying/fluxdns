@@ -1101,8 +1101,11 @@ export interface components {
         QuerySource: "cache" | "hosts" | "rule" | "upstream" | "synthetic";
         /** @enum {string} */
         QueryOutcome: "answered" | "negative" | "timeout" | "rejected" | "failed";
-        /** @enum {string} */
-        CacheOutcome: "hit" | "stale" | "miss" | "bypass";
+        /**
+         * @description hit=条目未过期；stale=条目已过期但按乐观缓存返回；expired=条目已过期且不可乐观返回，本次回源；miss=无条目；bypass=缓存未启用或查询被绕过
+         * @enum {string}
+         */
+        CacheOutcome: "hit" | "stale" | "expired" | "miss" | "bypass";
         /** @enum {string} */
         Transport: "udp" | "tcp" | "doh";
         RequestIdentity: {

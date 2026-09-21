@@ -10,6 +10,8 @@
 >
 > 2026-09-06 增量核对：仅更新真实会话边界的连续恢复与 reload 驱动；其余正文保留上述历史核对范围
 >
+> 2026-09-21 增量核对：仅更新缓存 `expired` 状态、过期保留期与相关写回 CAS 语义；其余正文沿用上述历史核对范围
+>
 > 同日文档收口：结束剩余验证专项，维持 body 断流分类与重试行为；本次仅核对源码分类和文档引用，未新增运行验收
 >
 > 2026-09-21 增量核对（本机日期）：仅核对 `dns/policy.rs` 的 group ECS、Resolved key、optimistic refresh 与 late-result 接纳；未刷新其余历史验收结论
@@ -57,9 +59,9 @@ SystemSocketFactory / typed binding
 - listener/strategy hosts 本地回答绕过 response cache；upstream hosts 按普通上游响应处理。
 - `UpstreamRuntime` 构造时记录 group 全部可达 direct leaves，覆盖 primary、fallback、nested group 与隐式继承请求级 ECS 的成员；请求级 ECS 来自 global/default 时，`prepare_query` 用该集合计算并比较规范化后的最终 ECS。所有成员 query 相同时使用统一 query 和 Resolved cache；只有真正异构时才携带 per-member query，并绕过 lookup、single-flight 与 commit。显式成员 ECS 即使不同于 global，只要各成员最终 query 相同也属于可缓存路径；rule/strategy/client 显式 ECS 则直接统一覆盖成员。
 - Fast eligibility 仍按策略可达 target 保守计算：存在任一显式成员 ECS 就禁用 Fast；这不妨碍 fast miss 后的完整决策证明 query 一致并使用 Resolved。
-- 缓存候选使用 canonical upstream response 与 origin TTL；返回时递减 TTL 或应用 effective override。stale 返回受当前 pool 的 optimistic max age 与 answer TTL 限制。
-- Fast/Resolved stale 共用 `schedule_optimistic_refresh`，切到最新可用 core 后重新执行 `prepare_cache_query`，不复用 entry 保存的旧 connector/rule pointer。同一 `Arc` store 且 key 相同时以 `Version(stale_version)` CAS；store 或 key 不同时先读目标，Miss 使用 `Absent`、Stale 使用目标 `Version`、Fresh 直接跳过。exchange 后写回前再次核对 semantics/key，任一步失败都不延长旧 stale。
-- `PolicyLateResultSink` 保存生产请求的 semantics，并在切换 latest core 后仅当重新准备的 semantics、key 和最终 ECS 与原请求一致时接纳旧响应；配置、资源、目标或 ECS 改变时丢弃。写回前再次检查 semantics/key，目标已有同等或更高质量结果时不覆盖。
+- 缓存候选使用 canonical upstream response 与 origin TTL；返回时递减 TTL 或应用 effective override。stale 返回受当前 pool 的 optimistic max age 与 answer TTL 限制。条目越过应答窗口（乐观未启用或已超出 max age）后仍按保留期可见，lookup 返回 `Expired` 而不是 `Miss`：本次照常回源，但 `cache_status` 记录为 `expired`，与「从未缓存」分开。
+- Fast/Resolved stale 共用 `schedule_optimistic_refresh`，切到最新可用 core 后重新执行 `prepare_cache_query`，不复用 entry 保存的旧 connector/rule pointer。同一 `Arc` store 且 key 相同时以 `Version(stale_version)` CAS；store 或 key 不同时先读目标，Miss 使用 `Absent`、Stale/Expired 使用目标 `Version`、Fresh 直接跳过。exchange 后写回前再次核对 semantics/key，任一步失败都不延长旧 stale。
+- `PolicyLateResultSink` 保存生产请求的 semantics，并在切换 latest core 后仅当重新准备的 semantics、key 和最终 ECS 与原请求一致时接纳旧响应；配置、资源、目标或 ECS 改变时丢弃。写回前再次检查 semantics/key，目标已有同等或更高质量结果时不覆盖；目标条目已过期时不适用该质量比较，直接按其版本替换，否则刷新结果会因 CAS 冲突无法写回。
 - `reason = "group_ecs_differs"`、`operation = "cache_refresh"` 与 `operation = "cache_late"` 的 debug 事件只记录低基数 reason/outcome 及配置 ID，不输出明文 ECS 或客户端 IP。
 - Core 将持有 single-flight lease 的 `CacheCommitCandidate` 随完成事件交出；[`resolution.rs`](../../../backend/src/resolution.rs) 的 cache worker 在独立 deadline 内 CAS。candidate drop 必须唤醒 waiter，响应不等待写回。
 

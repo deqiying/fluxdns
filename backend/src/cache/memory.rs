@@ -202,7 +202,15 @@ fn enforce_capacity(state: &mut MemoryState, max_weight: Option<u64>) {
     refresh_stats(state);
 }
 
+/// store 可见性只取决于条目保留截止；「是否可用于应答」由 `CacheFacade` 判定。
 fn is_visible(record: &CacheRecord, now: Instant) -> bool {
+    now < record.entry.retention_deadline()
+}
+
+/// 条目是否仍可用于应答：未过 TTL，或仍在乐观窗口内。
+///
+/// 与 `is_visible` 的区别是它排除了「仅为过期诊断而保留」的条目。
+fn is_answerable(record: &CacheRecord, now: Instant) -> bool {
     now < record.entry.expires_at
         || record
             .entry
@@ -341,7 +349,12 @@ impl CacheStore for MemoryCacheStore {
                 .map(|record| (is_visible(record, now), record.clone()));
             match visibility {
                 Some((true, record)) => {
-                    state.stats.hits = state.stats.hits.saturating_add(1);
+                    // 仅为过期诊断保留的条目不算命中，避免污染缓存命中统计。
+                    if is_answerable(&record, now) {
+                        state.stats.hits = state.stats.hits.saturating_add(1);
+                    } else {
+                        state.stats.misses = state.stats.misses.saturating_add(1);
+                    }
                     Ok(Some(record))
                 }
                 Some((false, _)) => {
@@ -702,6 +715,21 @@ mod tests {
             )
             .await
             .unwrap();
+        store
+            .compare_and_swap(
+                key("beyond-retention"),
+                CacheCondition::Absent,
+                record(
+                    4,
+                    CacheQuality::Failure,
+                    now - crate::ports::cache::EXPIRED_ENTRY_RETENTION - Duration::from_secs(1),
+                    None,
+                )
+                .entry,
+                deadline(),
+            )
+            .await
+            .unwrap();
 
         assert!(
             store
@@ -717,16 +745,25 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+        // 过期但仍在保留窗口内的条目必须保持可见，Facade 才能区分「条目过期」与「从未缓存」。
         assert!(
             store
                 .get(&key("expired"), deadline())
                 .await
                 .unwrap()
+                .is_some()
+        );
+        // 超出保留窗口的条目按不存在处理，并在读取时移出内存。
+        assert!(
+            store
+                .get(&key("beyond-retention"), deadline())
+                .await
+                .unwrap()
                 .is_none()
         );
         assert_eq!(store.stats().hits, 2);
-        assert_eq!(store.stats().misses, 1);
-        assert_eq!(store.len(), 2);
+        assert_eq!(store.stats().misses, 2);
+        assert_eq!(store.len(), 3);
     }
 
     #[tokio::test]

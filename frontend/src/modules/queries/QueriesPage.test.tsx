@@ -9,7 +9,7 @@ import { setMockAuthenticated } from "@/mocks/handlers";
 import { acceptAuthSession } from "@/shared/api/client";
 import { managementEvents, type QueryBatch } from "@/shared/api/events";
 import type { QueryRequest } from "./api";
-import { formatClient, formatDurationSummary, formatResponseSummary, formatRoute, QueriesPage } from "./QueriesPage";
+import { formatClientIdentity, formatDurationSummary, formatResponseSummary, formatRoute, QueriesPage, sourceLabel } from "./QueriesPage";
 
 function renderPage() {
   setMockAuthenticated(true);
@@ -23,16 +23,37 @@ function renderPage() {
   return render(<QueryClientProvider client={queryClient}><QueriesPage /></QueryClientProvider>);
 }
 
+/**
+ * jsdom 的 matchMedia 默认全部不匹配，antd 会按 responsive 过滤掉「时间」「路由」两列；
+ * 需要断言完整列顺序时先让所有断点命中，返回的函数用于恢复全局 mock。
+ */
+function openAllBreakpoints(): () => void {
+  const original = window.matchMedia;
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    writable: true,
+    value: (query: string) => ({
+      matches: true,
+      media: query,
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    }),
+  });
+  return () => Object.defineProperty(window, "matchMedia", { configurable: true, writable: true, value: original });
+}
+
 describe("QueriesPage 展示语义", () => {
   const [direct, cache] = v2QueryRecordsFixture;
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("区分 cache producer、direct、原始身份和两种耗时", () => {
+  it("区分 cache producer、direct 与两种耗时", () => {
     expect(formatRoute(cache)).toBe("缓存生产：public → public-2");
     expect(formatRoute(direct)).toBe("public → public-1");
-    expect(formatClient(direct)).toEqual({ primary: "unknown-id", secondary: "192.0.2.10", muted: false });
-    expect(formatClient(cache)).toEqual({ primary: "未传入原始 ID", secondary: "192.0.2.20", muted: true });
     expect(formatDurationSummary(direct)).toEqual({ total: "总耗时 0.12 ms", dnsCore: "主链 0.1 ms" });
   });
 
@@ -134,5 +155,56 @@ describe("QueriesPage 展示语义", () => {
     expect(await screen.findByText("live.example.test.")).toBeInTheDocument();
     expect(screen.queryByText("有 1 条新记录")).not.toBeInTheDocument();
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "example.test. 解析详情" })).not.toBeInTheDocument());
+  });
+});
+
+describe("QueriesPage 身份与来源标签", () => {
+  const [direct, cache] = v2QueryRecordsFixture;
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("身份列优先当前客户端名称，缺失时回退历史匹配 ID，再回退未匹配占位", () => {
+    const named = formatClientIdentity(direct);
+    expect(named.primary).toBe("workstation");
+    expect(named.clientIp).toBe("192.0.2.10");
+    expect(named.detail).toContain("当时按 IP 匹配 Desktop-01");
+    expect(named.detail).toContain("当前 workstation");
+
+    const historical = formatClientIdentity({ ...direct, current_client_name: null });
+    expect(historical.primary).toBe("Desktop-01");
+    expect(historical.clientIp).toBe("192.0.2.10");
+    expect(historical.detail).toBe("当时按 IP 匹配 Desktop-01");
+
+    const unmatched = formatClientIdentity(cache);
+    expect(unmatched.primary).toBe("未匹配客户端");
+    expect(unmatched.clientIp).toBe("192.0.2.20");
+    expect(unmatched.detail).toBe("当时未匹配");
+  });
+
+  it("来源标签先按缓存结果分类，再回退到 source", () => {
+    expect(sourceLabel({ ...direct, cache: "hit", source: "cache" })).toEqual({ label: "命中缓存", color: "green" });
+    expect(sourceLabel({ ...direct, cache: "stale", source: "cache" })).toEqual({ label: "乐观缓存", color: "gold" });
+    expect(sourceLabel({ ...direct, cache: "expired", source: "upstream" })).toEqual({ label: "缓存过期", color: "orange" });
+    expect(sourceLabel({ ...direct, cache: "miss", source: "upstream" })).toEqual({ label: "请求上游", color: "blue" });
+    expect(sourceLabel({ ...direct, cache: "bypass", source: "hosts" })).toEqual({ label: "hosts", color: "purple" });
+    expect(sourceLabel({ ...direct, cache: "miss", source: "rule" })).toEqual({ label: "规则", color: "blue" });
+    expect(sourceLabel({ ...direct, cache: "bypass", source: "synthetic" })).toEqual({ label: "synthetic", color: "blue" });
+  });
+
+  it("按 时间/请求/结果/路由/身份 渲染，身份列展示客户端名称与客户端 IP", async () => {
+    const restoreMatchMedia = openAllBreakpoints();
+    const record = { ...direct, identity: { client_id: "raw-client-id", client_ip: "192.0.2.55" } };
+    server.use(http.post("/api/v2/queries/search", () => HttpResponse.json({ ...v2QueryPageFixture, items: [record] })));
+    try {
+      renderPage();
+      const identity = await screen.findByText("workstation");
+      expect(screen.getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["时间", "请求", "结果", "路由", "身份"]);
+      const row = identity.closest("tr");
+      expect(row).not.toBeNull();
+      expect(row).toHaveTextContent("192.0.2.55");
+      expect(row).not.toHaveTextContent("raw-client-id");
+    } finally {
+      restoreMatchMedia();
+    }
   });
 });

@@ -51,6 +51,8 @@ pub enum CacheStatus {
     Miss,
     Fresh,
     Stale,
+    /// 条目存在但已过期且不可乐观返回；本次解析回源。
+    Expired,
     StoreUnavailable,
     WriteRejected,
 }

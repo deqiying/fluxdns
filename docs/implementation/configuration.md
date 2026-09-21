@@ -4,11 +4,11 @@
 >
 > 适用范围：本文与当前模板同步，描述配置契约、校验和已实现运行时边界；未定义行为不应视为已支持。
 >
-> 最后核对：2026-09-09（P5 当前契约、旧路径退出与联合验收收口）
+> 最后核对：2026-09-21（DNS 缓存 `expired` 状态与过期保留期定向核对，基于本次工作树；其余正文沿用原核对范围）
 >
 > 核对基线：`d7296fd`；本轮核对 P5 变更与联合验收，分批历史结果按原日期和基线解释
 >
-> 2026-09-21 增量核对（本机日期）：仅核对 DNS 缓存的 group ECS、Resolved fingerprint、stale refresh 与 late-result 语义；其余正文保留原历史核对范围
+> 2026-09-21 增量核对（本机日期）：仅核对 DNS 缓存的 group ECS、Resolved fingerprint、stale refresh、late-result 语义与条目过期状态 `expired`；其余正文保留原历史核对范围
 >
 > 增量核对基线：`e50b948edb4699f58a1e57039fb56442ab228687` 加本次缓存修复工作树；静态编译与前期定向测试证据见[DNS 管线](backend/dns-pipeline.md#缓存修复验证)，未部署或实测 OpenWrt
 >
@@ -400,6 +400,7 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 - 缓存保存不含客户端 DNS ID 和传输 envelope 的 canonical response。若本地 UDP 输出因本次客户端 advertised size 而截断，应保存完整 canonical response，并在每次发送时重新编码；只有上游本身返回的 `TC=1` 才保存截断条目。
 - 写入按响应质量做 compare-and-replace：完整 `NOERROR/TC=0` 可以提升并替换未过期的 NXDOMAIN/SERVFAIL/TC 条目，SERVFAIL/TC 不能覆盖未过期的完整回答；同质量条目在过期前不因后到竞态反复覆盖。
 - optimistic/stale 只适用于已经按上述规则准入的条目；缓存返回时按剩余 TTL 和当前请求重新生成响应。
+- 条目已过期且不可乐观返回时，本次解析按 `expired` 记录并照常回源；该状态与「缓存从未存在该条目」分开保存，便于区分回源原因。
 - 同一 key 的并发 miss 通过 single-flight 合并。leader 得到可缓存结果后先形成持有 lease 的 `CacheCommitCandidate` 并返回共享响应；后台 worker 使用独立 100ms deadline 完成 admission/CAS 并唤醒 waiter，进程快照由独立周期 owner 覆盖。客户端响应不等待 commit；candidate 被队列丢弃、取消或直接 drop 时，RAII lease 必须发布失败终态，不能永久挂住 follower。optimistic stale 由一次性 refresh permit 去重并进入统一后台刷新流程，不复用 miss 的 lease。
 
 ### 8.2 `dns.ttl_override`

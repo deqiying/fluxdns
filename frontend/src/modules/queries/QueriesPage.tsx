@@ -26,7 +26,7 @@ const DAY_MS = 86_400_000;
 const transports = ["udp", "tcp", "doh"] as const;
 const sources = ["cache", "hosts", "rule", "upstream", "synthetic"] as const;
 const outcomes = ["answered", "negative", "timeout", "rejected", "failed"] as const;
-const caches = ["hit", "stale", "miss", "bypass"] as const;
+const caches = ["hit", "stale", "expired", "miss", "bypass"] as const;
 const rcodes = ["NOERROR", "FORMERR", "SERVFAIL", "NXDOMAIN", "NOTIMP", "REFUSED", "OTHER"];
 
 type DatePreset = "24h" | "7d" | "custom";
@@ -154,12 +154,6 @@ export function QueriesPage() {
       ),
     },
     {
-      title: "身份",
-      key: "identity",
-      width: 260,
-      render: (_, record) => <IdentityCell record={record} />,
-    },
-    {
       title: "结果",
       key: "result",
       width: 340,
@@ -198,6 +192,12 @@ export function QueriesPage() {
       width: 250,
       responsive: ["lg"],
       render: (_, record) => <CellStack primary={record.strategy_name ?? "无策略"} secondary={formatRoute(record)} mono />,
+    },
+    {
+      title: "身份",
+      key: "identity",
+      width: 260,
+      render: (_, record) => <IdentityCell record={record} />,
     },
   ], [detail, page?.directory_revision, query.directoryRevisions]);
 
@@ -328,13 +328,12 @@ function TimeCell({ value }: { value: number }) {
 }
 
 function IdentityCell({ record }: { record: QueryRecord }) {
-  const matched = record.matched.source === "none"
-    ? "当时未匹配"
-    : `当时按 ${record.matched.source.toUpperCase()} 匹配 ${record.matched.matched_client_id}`;
+  const identity = formatClientIdentity(record);
+  // 次文本保持两个并列段落：IP 一行，匹配结论一行。
   return (
     <CellStack
-      primary={record.identity.client_id ?? "未传入原始 ID"}
-      secondary={<><span>{record.identity.client_ip}</span><span>{matched}{record.current_client_name ? ` · 当前 ${record.current_client_name}` : ""}</span></>}
+      primary={identity.primary}
+      secondary={<><span>{identity.clientIp}</span><span>{identity.detail}</span></>}
       mono
     />
   );
@@ -343,10 +342,11 @@ function IdentityCell({ record }: { record: QueryRecord }) {
 function ResponseCell({ record }: { record: QueryRecord }) {
   const summary = formatResponseSummary(record);
   const durations = formatDurationSummary(record);
+  const source = sourceLabel(record);
   return (
     <CellStack
       primary={summary.primary}
-      secondary={<Space size={6} wrap><span>{durations.total}</span><span>{durations.dnsCore}</span><span>{summary.meta}</span><Tag color={record.source === "cache" ? "green" : "blue"}>{sourceLabel(record)}</Tag></Space>}
+      secondary={<Space size={6} wrap><span>{durations.total}</span><span>{durations.dnsCore}</span><span>{summary.meta}</span><Tag color={source.color}>{source.label}</Tag></Space>}
       mono={record.answers.state !== "unavailable" && record.answers.records.length > 0}
     />
   );
@@ -367,7 +367,7 @@ function QueryDetails({ snapshot }: { snapshot: DetailSnapshot }) {
         <Descriptions.Item label="原始身份">{record.identity.client_id ?? "未传入 ID"} · {record.identity.client_ip}</Descriptions.Item>
         <Descriptions.Item label="当时匹配">{formatHistoricalMatch(record)}</Descriptions.Item>
         <Descriptions.Item label="当前名称">{record.current_client_name ?? "配置中已无对应名称"}</Descriptions.Item>
-        <Descriptions.Item label="响应">{record.rcode} / {record.outcome} / {record.cache}</Descriptions.Item>
+        <Descriptions.Item label="响应">{record.rcode} / {record.outcome} / {sourceLabel(record).label}</Descriptions.Item>
         <Descriptions.Item label="耗时">{formatDurationSummary(record).total} · {formatDurationSummary(record).dnsCore}</Descriptions.Item>
         <Descriptions.Item label="路由">{record.strategy_name ?? "无策略"} · {formatRoute(record)}</Descriptions.Item>
         <Descriptions.Item label="目录快照">{snapshot.directoryRevision}</Descriptions.Item>
@@ -407,11 +407,26 @@ export function formatRoute(record: QueryRecord): string {
     : "upstream 未确定";
 }
 
-export function formatClient(record: QueryRecord): { primary: string; secondary: string; muted: boolean } {
+/**
+ * 身份列文本：主文本优先当前客户端名称，其次历史匹配到的客户端 ID，都没有时给出未匹配占位。
+ *
+ * 次文本拆成两段是因为 `.query-cell-secondary` 按列排布：`clientIp` 独占一行，
+ * `detail` 放匹配结论，保持原有上下两行的展示结构。
+ */
+export function formatClientIdentity(record: QueryRecord): {
+  primary: string;
+  clientIp: string;
+  detail: string;
+} {
+  const matched = record.matched;
+  const primary = record.current_client_name ?? (matched.source === "none" ? "未匹配客户端" : matched.matched_client_id);
+  const matchedLabel = matched.source === "none"
+    ? "当时未匹配"
+    : `当时按 ${matched.source.toUpperCase()} 匹配 ${matched.matched_client_id}`;
   return {
-    primary: record.identity.client_id ?? "未传入原始 ID",
-    secondary: record.identity.client_ip,
-    muted: record.identity.client_id === null,
+    primary,
+    clientIp: record.identity.client_ip,
+    detail: record.current_client_name ? `${matchedLabel} · 当前 ${record.current_client_name}` : matchedLabel,
   };
 }
 
@@ -437,9 +452,14 @@ function formatHistoricalMatch(record: QueryRecord): string {
     : `${record.matched.matched_client_id}（${record.matched.source.toUpperCase()}）`;
 }
 
-function sourceLabel(record: QueryRecord): string {
-  if (record.source === "cache") return record.cache === "stale" ? "过期缓存" : "缓存命中";
-  return record.source === "rule" ? "规则" : record.source;
+export function sourceLabel(record: QueryRecord): { label: string; color: string } {
+  if (record.cache === "hit") return { label: "命中缓存", color: "green" };
+  if (record.cache === "stale") return { label: "乐观缓存", color: "gold" };
+  if (record.cache === "expired") return { label: "缓存过期", color: "orange" };
+  if (record.source === "upstream") return { label: "请求上游", color: "blue" };
+  if (record.source === "hosts") return { label: "hosts", color: "purple" };
+  if (record.source === "rule") return { label: "规则", color: "blue" };
+  return { label: record.source, color: "blue" };
 }
 
 function CellStack({ primary, secondary, muted = false, mono = false }: { primary: ReactNode; secondary?: ReactNode; muted?: boolean; mono?: boolean }) {

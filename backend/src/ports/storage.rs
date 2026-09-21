@@ -191,6 +191,7 @@ impl StatsDimension {
                 CacheStatus::Miss => "miss".to_owned(),
                 CacheStatus::Fresh => "fresh".to_owned(),
                 CacheStatus::Stale => "stale".to_owned(),
+                CacheStatus::Expired => "expired".to_owned(),
                 CacheStatus::StoreUnavailable => "store_unavailable".to_owned(),
                 CacheStatus::WriteRejected => "write_rejected".to_owned(),
             },

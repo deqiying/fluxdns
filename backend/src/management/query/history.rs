@@ -279,6 +279,7 @@ fn storage_filter(
         cache: filter.cache.map(|value| match value {
             CacheOutcome::Hit => DetailQueryCacheOutcome::Hit,
             CacheOutcome::Stale => DetailQueryCacheOutcome::Stale,
+            CacheOutcome::Expired => DetailQueryCacheOutcome::Expired,
             CacheOutcome::Miss => DetailQueryCacheOutcome::Miss,
             CacheOutcome::Bypass => DetailQueryCacheOutcome::Bypass,
         }),
@@ -389,6 +390,7 @@ fn query_record(
         cache: match record.cache {
             DetailQueryCacheOutcome::Hit => CacheOutcome::Hit,
             DetailQueryCacheOutcome::Stale => CacheOutcome::Stale,
+            DetailQueryCacheOutcome::Expired => CacheOutcome::Expired,
             DetailQueryCacheOutcome::Miss => CacheOutcome::Miss,
             DetailQueryCacheOutcome::Bypass => CacheOutcome::Bypass,
         },

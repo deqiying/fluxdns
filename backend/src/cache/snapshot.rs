@@ -231,7 +231,7 @@ impl CacheSnapshotReader {
                         self.summary.corrupt = self.summary.corrupt.saturating_add(1);
                         continue;
                     }
-                    if is_visible(&record, self.now) {
+                    if is_answerable(&record, self.now) {
                         self.summary.loaded = self.summary.loaded.saturating_add(1);
                         batch.push((key, record));
                     } else {
@@ -372,8 +372,16 @@ fn read_u32(reader: &mut File) -> Result<u32, CacheSnapshotError> {
     Ok(u32::from_be_bytes(bytes))
 }
 
-fn is_visible(record: &CacheRecord, now: Instant) -> bool {
-    now < record.entry.expires_at || record.entry.stale_until.is_some_and(|until| now < until)
+/// 恢复阶段只装载仍可用于应答的条目：启动时已经过期的条目不再补回内存。
+///
+/// 这是写入口径（store 可见性）与读入口径（是否值得恢复）的差异：过期诊断保留窗口
+/// 足以让运行中的 Facade 区分回源原因，但不值得在冷启动时重新占用量。
+fn is_answerable(record: &CacheRecord, now: Instant) -> bool {
+    now < record.entry.expires_at
+        || record
+            .entry
+            .stale_until
+            .is_some_and(|stale_until| now < stale_until)
 }
 
 fn map_codec_error(error: CodecError) -> CacheSnapshotError {

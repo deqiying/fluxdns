@@ -4,7 +4,7 @@
 >
 > 适用范围：tracing、metrics、health、脱敏、backpressure 和 telemetry 生命周期
 >
-> 最后评审：2026-09-05（完成事件后台 histogram/outcome/cache status 聚合；运行证据见[后台服务](../../../implementation/backend/background-services.md)）
+> 最后评审：2026-09-21（`CacheOperations` 新增 `expired` cache status，完成事件 series 由 14 增至 15；2026-09-05 的 histogram/outcome/cache status 聚合结论沿用原文，运行证据见[后台服务](../../../implementation/backend/background-services.md)）
 >
 > 关联实现：[observability.rs](../../../../backend/src/observability.rs)、[ports/telemetry.rs](../../../../backend/src/ports/telemetry.rs)、[resolution.rs](../../../../backend/src/resolution.rs)、[service.rs](../../../../backend/src/service.rs)
 >
@@ -63,11 +63,11 @@ v1 日志级别固定接受 `trace`、`debug`、`info`、`warn`、`error`，大�
 
 Service 在既有 5 秒 flush 周期中采样，复用进程级 Source Arc 和共享游标；只在增量成功记录后推进游标，重复/最终采样不重复累计，源倒退明确报错。没有 Resolution owner 时只采样队列深度。正式 app 在 `logs.enable=false` 时仍保留 writer/sampler 与周期任务，但不创建日志文件。
 
-后台 `ResolutionRuntime` dispatcher 在更新 stats 后，将同一完成事件交给 `TelemetryWriter::record_resolution`，增加固定 14 个 series：`RequestLatency`、`DnsCoreLatency` 两个 histogram，`RequestsTotal` 六种 outcome 与 `CacheOperations` 六种 cache status 计数。每项只使用固定 Component 和枚举标签，不为配置 ID、请求字段或逐 attempt 创建维度。请求包装层与 publisher 仍只有原有无等待移交；关闭详情不影响这些指标。
+后台 `ResolutionRuntime` dispatcher 在更新 stats 后，将同一完成事件交给 `TelemetryWriter::record_resolution`，增加固定 15 个 series：`RequestLatency`、`DnsCoreLatency` 两个 histogram，`RequestsTotal` 六种 outcome 与 `CacheOperations` 七种 cache status（`disabled`/`miss`/`fresh`/`stale`/`expired`/`store_unavailable`/`write_rejected`）计数。每项只使用固定 Component 和枚举标签，不为配置 ID、请求字段或逐 attempt 创建维度。请求包装层与 publisher 仍只有原有无等待移交；关闭详情不影响这些指标。
 
 histogram 统一以微秒累计 count/sum，桶上界为 1/5/10/25/50/100/250/500/1000/2500/5000ms 与 `+Inf`。`RequestLatency` 来自既有毫秒字段，不因此提高采样精度；`DnsCoreLatency` 来自既有微秒字段。累计桶包含所有小于等于上界的样本。结构化快照增加 outcome/cache_status 与 histogram 的 unit/count/sum/buckets，temporality 为 cumulative，不导出原始样本。
 
-两类聚合共享 128 series 硬上限，当前已接线的集合最多 16 项。`MetricsSink::record` 的通用入口仍仅开放上述两个周期采样描述符，完成事件使用专用 typed 入口。未知名称、错误类型/标签、溢出和容量耗尽明确拒绝，并增加固定 `rejected_metrics`；单个完成事件的多项更新全部成功才提交，不产生部分 histogram/count。所有快照 I/O 均在状态/registry 锁外执行。
+两类聚合共享 128 series 硬上限，当前已接线的集合最多 17 项。`MetricsSink::record` 的通用入口仍仅开放上述两个周期采样描述符，完成事件使用专用 typed 入口。未知名称、错误类型/标签、溢出和容量耗尽明确拒绝，并增加固定 `rejected_metrics`；单个完成事件的多项更新全部成功才提交，不产生部分 histogram/count。所有快照 I/O 均在状态/registry 锁外执行。
 
 输出重试可能再次写出相同累计值，消费者应按 writer 实例读取最新快照或求差，不能将周期快照相加。实例标识仅是输出元数据，不作为 label。输出失败保留聚合状态，下次只重试最新快照，不累积待发快照队列；Gauge 中间样本允许合并。
 

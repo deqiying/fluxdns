@@ -1347,6 +1347,7 @@ fn cache_status_name(value: crate::ports::telemetry::CacheStatus) -> &'static st
         crate::ports::telemetry::CacheStatus::Miss => "miss",
         crate::ports::telemetry::CacheStatus::Fresh => "fresh",
         crate::ports::telemetry::CacheStatus::Stale => "stale",
+        crate::ports::telemetry::CacheStatus::Expired => "expired",
         crate::ports::telemetry::CacheStatus::StoreUnavailable => "store_unavailable",
         crate::ports::telemetry::CacheStatus::WriteRejected => "write_rejected",
     }

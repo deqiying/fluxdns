@@ -13,7 +13,7 @@ use crate::ports::telemetry::{
 use super::lock_unpoisoned;
 
 const MAX_METRIC_SERIES: usize = 128;
-const REQUEST_SERIES: usize = 14;
+const REQUEST_SERIES: usize = 15;
 const OUTCOMES: [OutcomeClass; 6] = [
     OutcomeClass::Success,
     OutcomeClass::Failure,
@@ -22,11 +22,12 @@ const OUTCOMES: [OutcomeClass; 6] = [
     OutcomeClass::Rejected,
     OutcomeClass::Dropped,
 ];
-const CACHE_STATUSES: [CacheStatus; 6] = [
+const CACHE_STATUSES: [CacheStatus; 7] = [
     CacheStatus::Disabled,
     CacheStatus::Miss,
     CacheStatus::Fresh,
     CacheStatus::Stale,
+    CacheStatus::Expired,
     CacheStatus::StoreUnavailable,
     CacheStatus::WriteRejected,
 ];
@@ -78,7 +79,7 @@ struct RequestMetrics {
     latency: LatencyHistogram,
     core_latency: LatencyHistogram,
     outcomes: [u64; 6],
-    cache: [u64; 6],
+    cache: [u64; 7],
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]

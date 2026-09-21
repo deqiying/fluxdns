@@ -10,6 +10,12 @@ use crate::dns::{CancelReason, Cancellation, CanonicalResponse, Deadline, Runtim
 use super::{PortError, PortFuture};
 
 /// 当前 cache entry payload 格式版本。
+/// 条目在“不再可用于应答”之后仍保留在 store 中的时长。
+///
+/// 过期条目必须仍能被观察，才能把「条目已过期后回源」与「从未有过条目」区分为不同观测结果；
+/// 否则 store 会在 `expires_at`（或乐观窗口结束）时删除条目，两种回源原因不可区分。
+/// 该窗口只影响诊断与写回条件，不影响任何可返回给客户端的答案。
+pub const EXPIRED_ENTRY_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
 pub const CACHE_ENTRY_FORMAT_VERSION: u16 = 2;
 
 /// 缓存策略的稳定标识。
@@ -256,6 +262,21 @@ impl fmt::Debug for CacheEntry {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct CacheVersion(pub u64);
+
+impl CacheEntry {
+    /// 条目对 store 可见的截止时刻：可用于应答的窗口（含乐观窗口）再加过期观察保留期。
+    ///
+    /// 超过该时刻后 store 视为条目不存在；在此之前过期条目仍然可见，由 `CacheFacade`
+    /// 判定为不可应答并记为“条目已过期”。
+    pub fn retention_deadline(&self) -> Instant {
+        let answerable_until = self.stale_until.map_or(self.expires_at, |stale_until| {
+            self.expires_at.max(stale_until)
+        });
+        answerable_until
+            .checked_add(EXPIRED_ENTRY_RETENTION)
+            .unwrap_or(answerable_until)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct CacheRecord {

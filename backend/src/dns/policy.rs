@@ -682,11 +682,13 @@ impl LateResultSink for PolicyLateResultSink {
         let deadline = self.deadline;
         let response = Arc::new(response);
         if let Err(error) = finalizer.submit_task(async move {
-            let current = match cache.lookup(&key, deadline).await {
+            // 已过期条目不再提供任何答案，晚到结果无需比较质量即可替换它。
+            let (current, superseded) = match cache.lookup(&key, deadline).await {
                 Ok(CacheLookup::Fresh(record)) | Ok(CacheLookup::Stale { record, .. }) => {
-                    Some(record)
+                    (Some(record), false)
                 }
-                Ok(CacheLookup::Miss) => None,
+                Ok(CacheLookup::Expired(record)) => (Some(record), true),
+                Ok(CacheLookup::Miss) => (None, false),
                 other => {
                     tracing::debug!(operation = "cache_late", outcome = ?other, "晚到结果无法读取目标缓存");
                     return;
@@ -694,6 +696,10 @@ impl LateResultSink for PolicyLateResultSink {
             };
             let condition = match current {
                 None => crate::ports::cache::CacheCondition::Absent,
+                // 过期条目仍占用该 key，写回必须按版本替换而不是当作不存在。
+                Some(record) if superseded => {
+                    crate::ports::cache::CacheCondition::Version(record.version)
+                }
                 Some(record)
                     if late_response_preference(response.class()) > record.entry.quality =>
                 {
@@ -765,6 +771,26 @@ impl DnsCore for PolicyDnsCore {
                 cache_commit,
             }
         })
+    }
+}
+
+/// Fast 预查已执行但没有可用答案时的原因。
+///
+/// 它既决定回源请求记录为「无条目」还是「条目已过期」，也决定写回使用 `Absent` 还是版本 CAS：
+/// 过期条目仍占用该 key，当作不存在会与并发写回冲突。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CacheLookupMiss {
+    Absent,
+    Expired(crate::ports::cache::CacheVersion),
+}
+
+impl CacheLookupMiss {
+    /// 回源时对外记录的缓存状态。
+    const fn status(self) -> CacheStatus {
+        match self {
+            Self::Absent => CacheStatus::Miss,
+            Self::Expired(_) => CacheStatus::Expired,
+        }
     }
 }
 
@@ -915,9 +941,8 @@ impl PolicyDnsCore {
             .fast_cache_eligible(&context)
             .then(|| fast_cache_key(&policy, &context, request))
             .flatten();
-        let mut fast_lookup_completed = false;
+        let mut fast_lookup_miss: Option<CacheLookupMiss> = None;
         if let Some(key) = &fast_key {
-            fast_lookup_completed = true;
             match self.cache.lookup(key, meta.deadline).await {
                 Ok(CacheLookup::Fresh(record)) => {
                     let response = fresh_cache_response(&record);
@@ -950,11 +975,16 @@ impl PolicyDnsCore {
                             CacheStatus::Stale,
                         );
                     }
+                    // 乐观窗口已结束：本次必须回源，但原因是条目过期而非从未缓存。
+                    fast_lookup_miss = Some(CacheLookupMiss::Expired(record.version));
+                }
+                Ok(CacheLookup::Expired(record)) => {
+                    fast_lookup_miss = Some(CacheLookupMiss::Expired(record.version));
                 }
                 Ok(CacheLookup::Disabled)
                 | Ok(CacheLookup::Miss)
                 | Ok(CacheLookup::StoreUnavailable)
-                | Err(_) => {}
+                | Err(_) => fast_lookup_miss = Some(CacheLookupMiss::Absent),
             }
         }
         let decision = match policy.index.evaluate_route(&context, Some(&qname)) {
@@ -1010,7 +1040,7 @@ impl PolicyDnsCore {
         }
 
         let Some(outcome) = self
-            .resolve_upstream(request, &plan, semantics, fast_key, fast_lookup_completed)
+            .resolve_upstream(request, &plan, semantics, fast_key, fast_lookup_miss)
             .await
         else {
             return (
@@ -1075,7 +1105,7 @@ impl PolicyDnsCore {
         plan: &crate::policy::ResolutionPlan,
         semantics: CacheFingerprint,
         prepared_key: Option<crate::ports::cache::CacheKey>,
-        lookup_completed: bool,
+        fast_lookup_miss: Option<CacheLookupMiss>,
     ) -> Option<PolicyUpstreamResult> {
         let prepared = self.upstreams.prepare_query(
             &plan.upstream,
@@ -1123,8 +1153,9 @@ impl PolicyDnsCore {
                 .map(|outcome| PolicyUpstreamResult::upstream(outcome, CacheStatus::Disabled));
         };
         let deadline = request.context.meta.deadline;
-        if !lookup_completed {
-            match self.cache.lookup(&key, deadline).await {
+        let lookup_miss = match fast_lookup_miss {
+            Some(miss) => miss,
+            None => match self.cache.lookup(&key, deadline).await {
                 Ok(CacheLookup::Fresh(record)) => {
                     return Some(PolicyUpstreamResult::cache(
                         UpstreamOutcome::Response(fresh_cache_response(&record)),
@@ -1151,13 +1182,17 @@ impl PolicyDnsCore {
                             CacheStatus::Stale,
                         ));
                     }
+                    // 乐观窗口已结束：本次必须回源，但原因是条目过期而非从未缓存。
+                    CacheLookupMiss::Expired(record.version)
                 }
+                Ok(CacheLookup::Expired(record)) => CacheLookupMiss::Expired(record.version),
                 Ok(CacheLookup::Disabled)
                 | Ok(CacheLookup::Miss)
                 | Ok(CacheLookup::StoreUnavailable)
-                | Err(_) => {}
-            }
-        }
+                | Err(_) => CacheLookupMiss::Absent,
+            },
+        };
+        let miss_status = lookup_miss.status();
 
         let late_sink = self.late_result_sink(&key, request, &plan.upstream);
         let reservation = match self.cache.reserve_load(key.clone(), deadline).await {
@@ -1195,7 +1230,7 @@ impl PolicyDnsCore {
                             UpstreamOutcome::Cancelled(reason),
                             Arc::from(plan.upstream.as_str()),
                             None,
-                            CacheStatus::Miss,
+                            miss_status,
                         ))
                     }
                     Ok(CacheLoadCompletion::Miss) | Ok(CacheLoadCompletion::Failed(_)) | Err(_) => {
@@ -1208,9 +1243,7 @@ impl PolicyDnsCore {
                                 member_queries.clone(),
                             )
                             .await
-                            .map(|outcome| {
-                                PolicyUpstreamResult::upstream(outcome, CacheStatus::Miss)
-                            })
+                            .map(|outcome| PolicyUpstreamResult::upstream(outcome, miss_status))
                     }
                 }
             }
@@ -1242,7 +1275,7 @@ impl PolicyDnsCore {
                                 UpstreamOutcome::Response(response),
                                 target_id,
                                 used_id,
-                                CacheStatus::Miss,
+                                miss_status,
                             ));
                         }
                         let response = Arc::new(response);
@@ -1250,7 +1283,15 @@ impl PolicyDnsCore {
                             Arc::clone(&self.cache),
                             CacheWriteRequest {
                                 key: key.clone(),
-                                condition: crate::ports::cache::CacheCondition::Absent,
+                                // 过期条目仍占用该 key，必须按版本替换，否则 CAS 冲突会让刷新结果无法写回。
+                                condition: match lookup_miss {
+                                    CacheLookupMiss::Expired(version) => {
+                                        crate::ports::cache::CacheCondition::Version(version)
+                                    }
+                                    CacheLookupMiss::Absent => {
+                                        crate::ports::cache::CacheCondition::Absent
+                                    }
+                                },
                                 response: Arc::clone(&response),
                                 upstream: cache_upstream_provenance(
                                     target_id.as_ref(),
@@ -1267,7 +1308,7 @@ impl PolicyDnsCore {
                             upstream_target_id: Some(target_id),
                             upstream_used_id: used_id,
                             source: StatsSource::Upstream,
-                            cache_status: CacheStatus::Miss,
+                            cache_status: miss_status,
                             cache_commit: Some(cache_commit),
                         })
                     }
@@ -1277,7 +1318,7 @@ impl PolicyDnsCore {
                             UpstreamOutcome::Cancelled(reason),
                             target_id,
                             used_id,
-                            CacheStatus::Miss,
+                            miss_status,
                         ))
                     }
                     UpstreamOutcome::TransportFailure(failure) => {
@@ -1286,7 +1327,7 @@ impl PolicyDnsCore {
                             UpstreamOutcome::TransportFailure(failure),
                             target_id,
                             used_id,
-                            CacheStatus::Miss,
+                            miss_status,
                         ))
                     }
                 }
@@ -1373,7 +1414,10 @@ impl PolicyDnsCore {
                 // 新 store 的版本独立；已有 fresh 不回源，stale 只替换刚读到的版本。
                 match core.cache.lookup(&prepared.key, deadline).await {
                     Ok(CacheLookup::Miss) => CacheCondition::Absent,
-                    Ok(CacheLookup::Stale { record, .. }) => CacheCondition::Version(record.version),
+                    // 过期条目同样占用该 key：按版本替换，不能当作不存在。
+                    Ok(CacheLookup::Stale { record, .. }) | Ok(CacheLookup::Expired(record)) => {
+                        CacheCondition::Version(record.version)
+                    }
                     Ok(CacheLookup::Fresh(_)) => {
                         tracing::debug!(operation = "cache_refresh", reason = "already_fresh", "目标缓存已更新");
                         return;

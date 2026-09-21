@@ -379,7 +379,9 @@ async fn cache_record(
         .await
         .unwrap()
     {
-        CacheLookup::Fresh(record) | CacheLookup::Stale { record, .. } => record,
+        CacheLookup::Fresh(record)
+        | CacheLookup::Stale { record, .. }
+        | CacheLookup::Expired(record) => record,
         other => panic!("expected cache record, got {other:?}"),
     }
 }
@@ -416,6 +418,48 @@ async fn force_stale(
     {
         CacheWriteOutcome::Replaced(version) => version,
         other => panic!("forcing stale entry must replace the record: {other:?}"),
+    };
+    let updated = cache_record(core, key).await;
+    assert_eq!(updated.version, version);
+    updated
+}
+
+/// 把现有条目改成「TTL 已过期且不可乐观返回」，用于验证 `Expired` 分支。
+///
+/// `stale_until` 保持 `None`，等价于乐观缓存未启用时准入的条目；调用方必须用关闭 optimistic 的
+/// 配置构造 core，否则该状态与准入规则不一致（乐观开启时准入必然写入 stale 窗口）。
+async fn force_expired(
+    core: &PolicyDnsCore,
+    key: &crate::ports::cache::CacheKey,
+) -> crate::ports::cache::CacheRecord {
+    let record = cache_record(core, key).await;
+    let now = Instant::now();
+    let expired = Arc::new(crate::ports::cache::CacheEntry {
+        response: Arc::clone(&record.entry.response),
+        upstream: record.entry.upstream.clone(),
+        inserted_at: now - Duration::from_secs(31),
+        expires_at: now - Duration::from_millis(1),
+        stale_until: None,
+        response_class: record.entry.response_class,
+        producer_revision: record.entry.producer_revision,
+        quality: record.entry.quality,
+        checksum: record.entry.checksum,
+        format_version: record.entry.format_version,
+    });
+    let version = match core
+        .cache()
+        .store()
+        .compare_and_swap(
+            key.clone(),
+            CacheCondition::Version(record.version),
+            expired,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap()
+    {
+        CacheWriteOutcome::Replaced(version) => version,
+        other => panic!("forcing expired entry must replace the record: {other:?}"),
     };
     let updated = cache_record(core, key).await;
     assert_eq!(updated.version, version);
@@ -772,6 +816,54 @@ async fn steady_state_refresh_case(resolved: bool) {
 async fn published_current_core_refreshes_fast_and_resolved_stale_entries() {
     steady_state_refresh_case(false).await;
     steady_state_refresh_case(true).await;
+}
+
+/// 条目过期后必须记为 `Expired` 并回源，而不是 `Miss`；写回要按版本 CAS 成功替换过期条目。
+///
+/// 这是「缓存过期」与「请求上游」在观测上可区分的关键链路：lookup 状态、观测值、写回条件三者
+/// 必须一致，否则要么标签失真，要么新结果因 CAS 冲突无法入缓存。
+#[tokio::test]
+async fn expired_entry_is_reported_as_expired_and_replaced_by_upstream() {
+    // 关闭乐观缓存：准入条目自然不带 stale 窗口，TTL 过期后只能回源。
+    let mut config = Arc::try_unwrap(load_fixture(Fixture {
+        name: "policy-cache-expired-fast",
+        global_ecs: EcsSpec::Disabled,
+        upstreams: doh("remote", "remote.example.test", EcsSpec::Inherit),
+        default_upstream: "remote",
+        strategy_ecs: EcsSpec::Inherit,
+        rules: String::new(),
+        rule_sets: String::new(),
+        clients: String::new(),
+    }))
+    .unwrap();
+    config.dns.cache.optimistic.enabled = false;
+    let config = Arc::new(config);
+
+    let transport = Arc::new(RecordingDohTransport::new(19));
+    let core = core_with_transport(&config, Arc::clone(&transport));
+    let request = request("expired.example.", RecordType::A);
+    let plan = plan_for(&core, &request);
+    let key = cache_key(&core, &plan, &request).unwrap();
+
+    assert_upstream(
+        &resolve_and_commit(&core, &request).await,
+        CacheStatus::Miss,
+    );
+    assert_eq!(transport.calls(), 1);
+
+    let expired = force_expired(&core, &key).await;
+
+    let observation = resolve_and_commit(&core, &request).await;
+    assert_eq!(observation.source, StatsSource::Upstream);
+    assert_eq!(observation.cache_status, CacheStatus::Expired);
+    assert_eq!(transport.calls(), 2);
+
+    // 过期条目仍占用该 key，写回必须替换成功；否则缓存会一直停在过期状态并反复回源。
+    let refreshed = cache_record(&core, &key).await;
+    assert!(refreshed.version.0 > expired.version.0);
+    assert!(refreshed.entry.expires_at > Instant::now());
+    assert_fresh(&resolve_and_commit(&core, &request).await);
+    assert_eq!(transport.calls(), 2);
 }
 
 async fn cross_runtime_pair(

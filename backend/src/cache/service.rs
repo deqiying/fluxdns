@@ -325,12 +325,15 @@ impl fmt::Debug for CacheFacade {
 #[derive(Debug)]
 pub enum CacheLookup {
     Disabled,
+    /// store 中没有该 key 的条目。
     Miss,
     Fresh(CacheRecord),
     Stale {
         record: CacheRecord,
         refresh: CacheRefreshPermit,
     },
+    /// 条目存在但已过 TTL，且当前不允许乐观返回；调用方必须回源并替换该版本。
+    Expired(CacheRecord),
     StoreUnavailable,
 }
 
@@ -393,7 +396,33 @@ impl CacheCommitCandidate {
     pub async fn commit(mut self, timeout: Duration) -> CacheCommitOutcome {
         let deadline = crate::dns::Deadline::new(Instant::now() + timeout);
         self.request.deadline = deadline;
+        // 版本 CAS 可能正好落在目标条目被保留期结束或容量淘汰清除之后。此时 store 里确实没有
+        // 可见记录，按「无条目」重试一次，否则本次已经取回的结果会被静默丢弃，并让等待该 lease
+        // 的 follower 重复回源。仅在原条件是版本 CAS 时重试：`Absent` 得到 `Conflict(None)`
+        // 属于异常，不应掩盖。
+        let absent_retry =
+            matches!(self.request.condition, CacheCondition::Version(_)).then(|| {
+                CacheWriteRequest {
+                    key: self.request.key.clone(),
+                    condition: CacheCondition::Absent,
+                    response: Arc::clone(&self.request.response),
+                    upstream: self.request.upstream.clone(),
+                    now: self.request.now,
+                    producer_revision: self.request.producer_revision,
+                    deadline,
+                }
+            });
         let write = self.facade.write_response(self.request).await;
+        let write = match (write, absent_retry) {
+            (
+                Ok(CacheWriteResult::Stored {
+                    outcome: CacheWriteOutcome::Conflict(None),
+                    ..
+                }),
+                Some(retry),
+            ) => self.facade.write_response(retry).await,
+            (write, _) => write,
+        };
         let (outcome, completion) = match write {
             Ok(CacheWriteResult::Stored {
                 outcome: CacheWriteOutcome::Inserted(_) | CacheWriteOutcome::Replaced(_),
@@ -572,7 +601,7 @@ impl CacheFacade {
                 record,
             });
         }
-        Ok(CacheLookup::Miss)
+        Ok(CacheLookup::Expired(record))
     }
 
     pub fn write_response<'a>(
@@ -693,8 +722,8 @@ mod tests {
     };
     use crate::dns::{Cancellation, CanonicalQuery, CanonicalResponse, Deadline, RuntimeRevision};
     use crate::ports::cache::{
-        CacheCondition, CacheKey, CacheLoadCompletion, CacheLoadFailure, CacheLoadReservation,
-        CacheNamespace, CacheStore,
+        CacheCondition, CacheInvalidation, CacheKey, CacheLoadCompletion, CacheLoadFailure,
+        CacheLoadReservation, CacheNamespace, CacheStore,
     };
 
     fn key() -> CacheKey {
@@ -754,6 +783,65 @@ mod tests {
             .commit(Duration::from_secs(1))
             .await;
         assert_eq!(outcome, CacheCommitOutcome::Stored);
+        assert!(matches!(
+            facade
+                .wait_load(waiter, deadline(), &Cancellation::new())
+                .await
+                .unwrap(),
+            CacheLoadCompletion::Ready(_)
+        ));
+    }
+
+    /// 版本 CAS 的目标条目在写回前已消失时，commit 必须按「无条目」重试，不能静默丢弃结果。
+    ///
+    /// 真实触发场景：回源途中过期条目越过保留期被 store 清除（或被容量淘汰），此时按旧版本
+    /// 写回会得到 `Conflict(None)`；若不重试，本次结果不入缓存，等待该 lease 的 follower 还会
+    /// 各自重复回源。
+    #[tokio::test]
+    async fn cache_commit_retries_as_absent_when_versioned_target_disappeared() {
+        let facade = Arc::new(CacheFacade::new(
+            Arc::new(MemoryCacheStore::default()),
+            CacheFacadeOptions::default(),
+        ));
+        let stored = facade.write_response(write_request()).await.unwrap();
+        let CacheWriteResult::Stored {
+            record: Some(record),
+            ..
+        } = stored
+        else {
+            panic!("first write must store a record");
+        };
+        assert_eq!(
+            facade
+                .store()
+                .invalidate(CacheInvalidation::Exact(key()), deadline())
+                .await
+                .unwrap(),
+            1
+        );
+
+        let lease = match facade.reserve_load(key(), deadline()).await.unwrap() {
+            CacheLoadReservation::Leader(lease) => lease,
+            CacheLoadReservation::Follower(_) => panic!("first reservation must be leader"),
+        };
+        let waiter = match facade.reserve_load(key(), deadline()).await.unwrap() {
+            CacheLoadReservation::Follower(waiter) => waiter,
+            CacheLoadReservation::Leader(_) => panic!("second reservation must be follower"),
+        };
+        let mut request = write_request();
+        request.condition = CacheCondition::Version(record.version);
+
+        assert_eq!(
+            CacheCommitCandidate::new(Arc::clone(&facade), request, lease)
+                .commit(Duration::from_secs(1))
+                .await,
+            CacheCommitOutcome::Stored
+        );
+        // 重试必须真正写入，且 follower 拿到 Ready，而不是被误导为 Miss 后自行回源。
+        assert!(matches!(
+            facade.lookup(&key(), deadline()).await.unwrap(),
+            CacheLookup::Fresh(_)
+        ));
         assert!(matches!(
             facade
                 .wait_load(waiter, deadline(), &Cancellation::new())
@@ -961,6 +1049,81 @@ mod tests {
         };
         assert!(refresh.try_consume());
         assert!(!refresh.try_consume());
+    }
+
+    /// 条目过期后必须报 `Expired`，否则调用方无法区分「条目过期回源」与「从未缓存」。
+    #[tokio::test]
+    async fn lookup_reports_expired_entry_when_it_cannot_be_answered() {
+        let now = Instant::now();
+        let expired = |stale_until: Option<Instant>| crate::ports::cache::CacheEntry {
+            response: Arc::new(response(ResponseCode::NXDomain)),
+            upstream:
+                crate::ports::cache::CacheUpstreamProvenance::direct_from_validated_config_id(
+                    "test-upstream",
+                )
+                .unwrap(),
+            inserted_at: now - Duration::from_secs(120),
+            expires_at: now - Duration::from_secs(1),
+            stale_until,
+            response_class: crate::ports::cache::CacheResponseClass::NxDomain,
+            producer_revision: RuntimeRevision(1),
+            quality: crate::ports::cache::CacheQuality::Negative,
+            checksum: 1,
+            format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
+        };
+
+        // 未启用乐观缓存：过期即不可应答。
+        let without_optimistic = CacheFacade::new(
+            Arc::new(MemoryCacheStore::default()),
+            CacheFacadeOptions::default(),
+        );
+        without_optimistic
+            .store()
+            .compare_and_swap(
+                key(),
+                CacheCondition::Absent,
+                Arc::new(expired(None)),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            without_optimistic
+                .lookup_at(&key(), deadline(), now)
+                .await
+                .unwrap(),
+            CacheLookup::Expired(_)
+        ));
+
+        // 启用乐观缓存但乐观窗口已结束：同样只回源，不再返回 stale。
+        let after_optimistic = CacheFacade::new(
+            Arc::new(MemoryCacheStore::default()),
+            CacheFacadeOptions {
+                optimistic_enabled: true,
+                admission: CacheAdmissionPolicy::new(
+                    Duration::from_secs(5),
+                    Some(Duration::from_secs(30)),
+                ),
+                ..CacheFacadeOptions::default()
+            },
+        );
+        after_optimistic
+            .store()
+            .compare_and_swap(
+                key(),
+                CacheCondition::Absent,
+                Arc::new(expired(Some(now - Duration::from_secs(1)))),
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            after_optimistic
+                .lookup_at(&key(), deadline(), now)
+                .await
+                .unwrap(),
+            CacheLookup::Expired(_)
+        ));
     }
 
     #[tokio::test]

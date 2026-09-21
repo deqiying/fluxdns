@@ -54,12 +54,7 @@ impl Expiry<CacheKey, CacheRecord> for MokaExpiry {
         value: &CacheRecord,
         created_at: Instant,
     ) -> Option<Duration> {
-        let end = value
-            .entry
-            .stale_until
-            .map_or(value.entry.expires_at, |stale_until| {
-                value.entry.expires_at.max(stale_until)
-            });
+        let end = value.entry.retention_deadline();
         Some(end.saturating_duration_since(created_at))
     }
 }
@@ -80,7 +75,15 @@ fn moka_weight(key: &CacheKey, record: &CacheRecord) -> u32 {
     weight(key, record).min(u32::MAX as u64) as u32
 }
 
+/// store 可见性只取决于条目保留截止；「是否可用于应答」由 `CacheFacade` 判定。
 fn is_visible(record: &CacheRecord, now: Instant) -> bool {
+    now < record.entry.retention_deadline()
+}
+
+/// 条目是否仍可用于应答：未过 TTL，或仍在乐观窗口内。
+///
+/// 与 `is_visible` 的区别是它排除了「仅为过期诊断而保留」的条目。
+fn is_answerable(record: &CacheRecord, now: Instant) -> bool {
     now < record.entry.expires_at
         || record
             .entry
@@ -269,12 +272,17 @@ impl CacheStore for MokaCacheStore {
             if deadline.is_expired(Instant::now()) {
                 return Err(timeout("moka_cache.get"));
             }
-            let record = self.visible_record(key, Instant::now());
+            let now = Instant::now();
+            let record = self.visible_record(key, now);
             let mut state = lock(&self.state, "moka_cache.get")?;
             if state.shutting_down {
                 return Err(unavailable("moka_cache.get"));
             }
-            if record.is_some() {
+            // 仅为过期诊断保留的条目不算命中，避免污染缓存命中统计。
+            if record
+                .as_ref()
+                .is_some_and(|record| is_answerable(record, now))
+            {
                 state.hits = state.hits.saturating_add(1);
             } else {
                 state.misses = state.misses.saturating_add(1);
@@ -510,8 +518,9 @@ mod tests {
         Deadline::new(Instant::now() + Duration::from_secs(2))
     }
 
+    /// 乐观窗口内保持可见；窗口结束后仍按保留期可见，供 Facade 记为「条目已过期」。
     #[tokio::test]
-    async fn stores_fresh_and_stale_entries_until_stale_window_ends() {
+    async fn keeps_fresh_stale_and_expired_entries_visible_until_retention_ends() {
         let store = MokaCacheStore::with_max_weight(4096).expect("weight is valid");
         let cache_key = key(b"fresh-stale");
         let result = store
@@ -531,8 +540,10 @@ mod tests {
         assert!(store.get(&cache_key, deadline()).await.unwrap().is_some());
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(store.get(&cache_key, deadline()).await.unwrap().is_some());
+        // 已越过乐观窗口，但仍在过期保留期内：store 仍返回条目，只是不再算命中。
         tokio::time::sleep(Duration::from_millis(90)).await;
-        assert!(store.get(&cache_key, deadline()).await.unwrap().is_none());
+        assert!(store.get(&cache_key, deadline()).await.unwrap().is_some());
+        assert_eq!(store.stats().misses, 1);
     }
 
     #[tokio::test]

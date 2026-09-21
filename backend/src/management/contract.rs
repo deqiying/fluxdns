@@ -606,6 +606,7 @@ pub enum QueryOutcome {
 pub enum CacheOutcome {
     Hit,
     Stale,
+    Expired,
     Miss,
     Bypass,
 }

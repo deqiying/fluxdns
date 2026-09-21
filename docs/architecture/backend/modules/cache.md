@@ -10,6 +10,8 @@
 >
 > 局部评审基线：`fcbb12831c66e81e02108ccd030ac3c2a1e08f56` 加本次工作树；仅用于上述范围
 >
+> 2026-09-21 局部评审：仅核对条目保留期、`Expired` lookup 状态、过期条目的写回 CAS 与快照恢复口径；不代表整篇重审或运行验收
+>
 > 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[snapshot.rs](../../../../backend/src/cache/snapshot.rs)、[snapshot_owner.rs](../../../../backend/src/cache/snapshot_owner.rs)
 >
 > 关联文档：[后端设计](../overview.md) · [配置参考](../../../implementation/configuration.md) · [DNS 管线](../../../implementation/backend/dns-pipeline.md) · [后台服务](../../../implementation/backend/background-services.md)
@@ -52,7 +54,7 @@ entry 保存 canonical response、inserted/expiry/stale-until、原始 RR TTL、
 
 ## 4. Lookup 与 single-flight
 
-Facade 区分 Disabled、Miss、Fresh、Stale+一次性 refresh permit、StoreUnavailable。store unavailable 时继续解析，不能把存储错误伪装成正常命中。
+Facade 区分 Disabled、Miss、Fresh、Stale+一次性 refresh permit、Expired、StoreUnavailable。store unavailable 时继续解析，不能把存储错误伪装成正常命中。Expired 表示条目存在但已过期且当前不可乐观返回：本次必须回源，观测值也必须据此记录为「条目过期」，不能与「从未缓存」合并成同一个状态。
 
 single-flight key 与 cache key 一致：
 
@@ -68,6 +70,8 @@ single-flight key 与 cache key 一致：
 
 只有 optimistic 开启、未超过 stale-until、transport compatible、响应类允许且 refresh admission 有容量时才可先返回 stale。共享 store 可按启用池中最大 max_age 保留候选，实际返回仍按当前所选池的 max_age 与 answer TTL 限制，再应用输出 TTL override。
 
+乐观缓存未启用或乐观窗口已经结束时，lookup 返回 Expired 而不是 Miss；两者都要回源，但必须保留这一区分，否则无法判断某次解析是因为条目过期还是因为从未缓存。过期条目仍占用 key，写回必须按版本 CAS 替换，不能当作不存在写入。
+
 Fast/Resolved stale 必须共用刷新流程：切到最新可用 core 后重新执行完整 `prepare_cache_query`，不得复用 entry 中的旧 connector/rule pointer。同一 `Arc` store 且 key 相同时以 stale version 做 `Version` CAS；store 或 key 不同时先读取目标，Miss 使用 `Absent`、Stale 使用目标 version、Fresh 跳过。上游返回后、写入前再次核对 semantics/key；任一准备、交换、匹配或写入失败都只放弃刷新，不延长旧 entry 的 stale 窗口。
 
 `PolicyLateResultSink` 必须保存生产请求的 semantics。切换 latest core 后，只有重新准备的 semantics、key 和最终 ECS 全部一致，才允许旧响应跨 runtime 继续写入；任何配置、资源、目标或 ECS 变化都丢弃。目标缓存已有同等或更高质量结果时不覆盖，写前再次核对 semantics/key。finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明确拒绝；shutdown 取消并等待已接收任务，晚到结果不改变已返回客户端的 response。
@@ -80,7 +84,7 @@ Fast/Resolved stale 必须共用刷新流程：切到最新可用 core 后重新
 
 - 所有 namespace 共享一个 weight 预算；计入 key、wire、索引/元数据，不承诺等于 RSS。
 - oversized entry 在 CAS 前明确拒绝，不能绕过全局预算。
-- 物理 expiry 取 expires_at/stale_until 中较晚者，保证 Facade 能观察合法 stale。
+- 条目可见截止为应答窗口（`expires_at` 与 `stale_until` 中较晚者）再加固定过期保留期：窗口内可观察合法 stale，窗口结束后仍可短暂观察已过期条目，用于区分回源原因。保留期内的过期条目不计入命中，也不改变任何可返回给客户端的答案。
 - size eviction 单独计数，不混入显式失效、替换和 TTL 过期。
 - single-flight reservation/wait/publish/abandon 与 record 存储解耦，不向 Core 暴露 Moka guard/future。
 - shutdown 清理记录、唤醒 waiter，后续操作返回关闭状态。
@@ -93,7 +97,7 @@ Fast/Resolved stale 必须共用刷新流程：切到最新可用 core 后重新
 
 一个进程级 owner 从 Moka 当前可见集合分批取得记录，释放查询锁后编码并顺序写入同目录临时文件。单条和总记录数有内部上界；同一轮按完整 key 摘要去重。并发更新、淘汰可能让本轮少量记录未被捕获，这是允许的弱一致性，不得通过保留旧磁盘条目补齐。完成 header、长度和摘要后 flush/sync，再经过 owner generation 仲裁发布；失败保留上一份完整文件。
 
-快照没有用户可配置的磁盘大小配额，也不承诺文件大小等于 Moka weight 或 RSS。读取仍受文件字节数、单条大小、记录数、批次和 deadline 保护；先验证整个文件的长度与摘要，再分批解码。恢复逐条检查 key/entry version、checksum、绝对 expiry/stale-until 和当前内存预算，停机时间不会重新补满 TTL。损坏、未知版本、超时或预算不足只形成冷启/部分恢复状态，不阻止 DNS 服务。
+快照没有用户可配置的磁盘大小配额，也不承诺文件大小等于 Moka weight 或 RSS。读取仍受文件字节数、单条大小、记录数、批次和 deadline 保护；先验证整个文件的长度与摘要，再分批解码。恢复逐条检查 key/entry version、checksum、绝对 expiry/stale-until 和当前内存预算，只装载仍可用于应答的条目（写入侧可见的过期条目计入 `expired`，不补回内存），停机时间不会重新补满 TTL。损坏、未知版本、超时或预算不足只形成冷启/部分恢复状态，不阻止 DNS 服务。
 
 本次语义调整不提升 cache key format v2 或 `FDCS` snapshot format。Resolved 纳入完整 policy fingerprint，Fast/Resolved 共用的语义摘要新增完整 DoH endpoint；升级前的相关记录仍可按原格式解码，但新请求使用不同 key，因此自然冷启动并按原 TTL 或容量策略淘汰。不能把这种 key 切换误报为快照格式不兼容，具体兼容性说明见[配置参考](../../../implementation/configuration.md)。
 

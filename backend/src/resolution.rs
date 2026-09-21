@@ -791,7 +791,8 @@ mod tests {
         assert_eq!(summary.snapshot.accepted, 3);
         assert_eq!(summary.snapshot.detail_accepted, 0);
         let snapshot = writer.metric_snapshot();
-        assert_eq!(snapshot.len(), 14);
+        // 每个 cache 状态一条 CacheOperations series；新增 expired 后总 series 为 15。
+        assert_eq!(snapshot.len(), 15);
         let histogram = snapshot
             .iter()
             .find(|item| item.name == MetricName::RequestLatency)
