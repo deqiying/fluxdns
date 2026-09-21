@@ -4,7 +4,11 @@
 >
 > 适用范围：尚需实施、决策或验收的独立变更
 
-当前没有活动计划。WebUI 的当前实现与平台边界见[实现入口](../implementation/README.md)和[联合验收](../implementation/webui-acceptance.md)；接受的职责与约束见[架构入口](../architecture/README.md)。
+| 计划 | 状态 | 剩余范围 |
+| --- | --- | --- |
+| [解析记录缓存标签与身份列收口](queries-cache-labels.md) | 待验收 | 浏览器验收 `/queries` 的来源标签、身份列与缓存状态筛选展示 |
+
+WebUI 的当前实现与平台边界见[实现入口](../implementation/README.md)和[联合验收](../implementation/webui-acceptance.md)；接受的职责与约束见[架构入口](../architecture/README.md)。
 
 计划以问题、相对当前基线的变化、步骤、风险和退出条件为中心。长期设计和实现分别放入 [architecture](../architecture/README.md) 与 [implementation](../implementation/README.md)，不保留已完成的阶段清单或总体进度文档。
 

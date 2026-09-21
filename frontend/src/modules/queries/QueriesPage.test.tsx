@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
@@ -54,6 +54,7 @@ describe("QueriesPage 展示语义", () => {
   it("区分 cache producer、direct 与两种耗时", () => {
     expect(formatRoute(cache)).toBe("缓存生产：public → public-2");
     expect(formatRoute(direct)).toBe("public → public-1");
+    expect(formatRoute({ ...direct, upstream_target_name: null })).toBe("上游未确定");
     expect(formatDurationSummary(direct)).toEqual({ total: "总耗时 0.12 ms", dnsCore: "主链 0.1 ms" });
   });
 
@@ -167,8 +168,8 @@ describe("QueriesPage 身份与来源标签", () => {
     const named = formatClientIdentity(direct);
     expect(named.primary).toBe("workstation");
     expect(named.clientIp).toBe("192.0.2.10");
-    expect(named.detail).toContain("当时按 IP 匹配 Desktop-01");
-    expect(named.detail).toContain("当前 workstation");
+    // 主文本已是当前名称，次文本只保留当时的匹配结论，不重复“当前 workstation”。
+    expect(named.detail).toBe("当时按 IP 匹配 Desktop-01");
 
     const historical = formatClientIdentity({ ...direct, current_client_name: null });
     expect(historical.primary).toBe("Desktop-01");
@@ -186,9 +187,31 @@ describe("QueriesPage 身份与来源标签", () => {
     expect(sourceLabel({ ...direct, cache: "stale", source: "cache" })).toEqual({ label: "乐观缓存", color: "gold" });
     expect(sourceLabel({ ...direct, cache: "expired", source: "upstream" })).toEqual({ label: "缓存过期", color: "orange" });
     expect(sourceLabel({ ...direct, cache: "miss", source: "upstream" })).toEqual({ label: "请求上游", color: "blue" });
-    expect(sourceLabel({ ...direct, cache: "bypass", source: "hosts" })).toEqual({ label: "hosts", color: "purple" });
+    expect(sourceLabel({ ...direct, cache: "bypass", source: "hosts" })).toEqual({ label: "Hosts", color: "purple" });
     expect(sourceLabel({ ...direct, cache: "miss", source: "rule" })).toEqual({ label: "规则", color: "blue" });
     expect(sourceLabel({ ...direct, cache: "bypass", source: "synthetic" })).toEqual({ label: "synthetic", color: "blue" });
+  });
+
+  it("缓存状态筛选用分类名称展示，提交值仍是枚举原文", async () => {
+    const user = userEvent.setup();
+    const requests: QueryRequest[] = [];
+    server.use(http.post("/api/v2/queries/search", async ({ request }) => {
+      requests.push(await request.json() as QueryRequest);
+      return HttpResponse.json(v2QueryPageFixture);
+    }));
+    renderPage();
+    await screen.findByText("example.test.");
+    await user.click(screen.getByRole("button", { name: "高级筛选" }));
+    // antd Select 在 jsdom 中按 mousedown 展开，选项文本即分类名称。
+    fireEvent.mouseDown(screen.getByLabelText("缓存状态"));
+    for (const label of ["命中缓存", "乐观缓存", "缓存过期", "未命中", "未启用"]) {
+      expect(await screen.findByTitle(label)).toBeInTheDocument();
+    }
+    fireEvent.click(screen.getByTitle("乐观缓存"));
+    expect(screen.getByLabelText("缓存状态").closest(".ant-select")).toHaveTextContent("乐观缓存");
+    await user.click(screen.getByRole("button", { name: "查询" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[1].filter.cache).toBe("stale");
   });
 
   it("按 时间/请求/结果/路由/身份 渲染，身份列展示客户端名称与客户端 IP", async () => {

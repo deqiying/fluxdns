@@ -27,6 +27,14 @@ const transports = ["udp", "tcp", "doh"] as const;
 const sources = ["cache", "hosts", "rule", "upstream", "synthetic"] as const;
 const outcomes = ["answered", "negative", "timeout", "rejected", "failed"] as const;
 const caches = ["hit", "stale", "expired", "miss", "bypass"] as const;
+/** 缓存状态筛选显示名与结果列来源标签一致；筛选值仍提交枚举原文。 */
+const cacheLabels: Record<(typeof caches)[number], string> = {
+  hit: "命中缓存",
+  stale: "乐观缓存",
+  expired: "缓存过期",
+  miss: "未命中",
+  bypass: "未启用",
+};
 const rcodes = ["NOERROR", "FORMERR", "SERVFAIL", "NXDOMAIN", "NOTIMP", "REFUSED", "OTHER"];
 
 type DatePreset = "24h" | "7d" | "custom";
@@ -261,7 +269,7 @@ export function QueriesPage() {
             <FilterInput label="QTYPE" value={draft.qtype} placeholder="A" onChange={(qtype) => setDraft((value) => ({ ...value, qtype }))} />
             <FilterSelect label="RCODE" value={draft.rcode} values={rcodes} onChange={(rcode) => setDraft((value) => ({ ...value, rcode }))} />
             <FilterSelect label="结果状态" value={draft.outcome} values={outcomes} onChange={(outcome) => setDraft((value) => ({ ...value, outcome }))} />
-            <FilterSelect label="缓存状态" value={draft.cache} values={caches} onChange={(cache) => setDraft((value) => ({ ...value, cache }))} />
+            <FilterSelect label="缓存状态" value={draft.cache} values={caches} labels={cacheLabels} onChange={(cache) => setDraft((value) => ({ ...value, cache }))} />
             <FilterSelect label="排序字段" value={sort} values={["occurred_at", "duration"] as const} onChange={(value) => { setSort(value ?? "occurred_at"); resetContext(); }} />
             <FilterSelect label="排序方向" value={order} values={["desc", "asc"] as const} onChange={(value) => { setOrder(value ?? "desc"); resetContext(); }} />
           </div>
@@ -404,14 +412,15 @@ export function formatRoute(record: QueryRecord): string {
   }
   return record.upstream_target_name
     ? formatUpstream(record.upstream_target_name, record.upstream_used_name)
-    : "upstream 未确定";
+    : "上游未确定";
 }
 
 /**
  * 身份列文本：主文本优先当前客户端名称，其次历史匹配到的客户端 ID，都没有时给出未匹配占位。
  *
+ * 主文本已是当前名称时，`detail` 不再重复“当前 X”，避免同一事实在一列内出现两次；
  * 次文本拆成两段是因为 `.query-cell-secondary` 按列排布：`clientIp` 独占一行，
- * `detail` 放匹配结论，保持原有上下两行的展示结构。
+ * `detail` 放当时的匹配结论。
  */
 export function formatClientIdentity(record: QueryRecord): {
   primary: string;
@@ -420,13 +429,13 @@ export function formatClientIdentity(record: QueryRecord): {
 } {
   const matched = record.matched;
   const primary = record.current_client_name ?? (matched.source === "none" ? "未匹配客户端" : matched.matched_client_id);
-  const matchedLabel = matched.source === "none"
+  const detail = matched.source === "none"
     ? "当时未匹配"
     : `当时按 ${matched.source.toUpperCase()} 匹配 ${matched.matched_client_id}`;
   return {
     primary,
     clientIp: record.identity.client_ip,
-    detail: record.current_client_name ? `${matchedLabel} · 当前 ${record.current_client_name}` : matchedLabel,
+    detail,
   };
 }
 
@@ -457,7 +466,7 @@ export function sourceLabel(record: QueryRecord): { label: string; color: string
   if (record.cache === "stale") return { label: "乐观缓存", color: "gold" };
   if (record.cache === "expired") return { label: "缓存过期", color: "orange" };
   if (record.source === "upstream") return { label: "请求上游", color: "blue" };
-  if (record.source === "hosts") return { label: "hosts", color: "purple" };
+  if (record.source === "hosts") return { label: "Hosts", color: "purple" };
   if (record.source === "rule") return { label: "规则", color: "blue" };
   return { label: record.source, color: "blue" };
 }
@@ -480,11 +489,11 @@ function FilterInput({ label, value, placeholder, onChange }: { label: string; v
   );
 }
 
-function FilterSelect<T extends string>({ label, value, values, onChange }: { label: string; value: T | undefined; values: readonly T[]; onChange: (value: T | undefined) => void }) {
+function FilterSelect<T extends string>({ label, value, values, labels, onChange }: { label: string; value: T | undefined; values: readonly T[]; labels?: Partial<Record<T, string>>; onChange: (value: T | undefined) => void }) {
   return (
     <div className="filter-field">
       <label>{label}</label>
-      <Select allowClear aria-label={label} placeholder="全部" value={value} options={values.map((item) => ({ value: item, label: item.toUpperCase() }))} onChange={onChange} />
+      <Select allowClear aria-label={label} placeholder="全部" value={value} options={values.map((item) => ({ value: item, label: labels?.[item] ?? item.toUpperCase() }))} onChange={onChange} />
     </div>
   );
 }
