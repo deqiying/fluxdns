@@ -1287,8 +1287,12 @@ components:
     QueryRecord:
       type: object
       additionalProperties: false
-      required: [id, occurred_at_ms, identity, matched, current_client_name, qname, qtype, transport, rcode, source, outcome, cache, strategy_name, upstream_target_name, upstream_used_name, cache_producer, duration_us, dns_core_duration_us, answers]
+      required: [id, occurred_at_ms, identity, matched, current_client_name, qname, qtype, transport, rcode, source, outcome, cache, strategy_name, upstream_target_name, upstream_used_name, cache_producer, duration_us, dns_core_duration_us, answers, listener_name, response_duration_us, response_status, cache_activity]
       properties:
+        listener_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}], description: 本次请求的监听入口；历史缺失时为 null}
+        response_duration_us: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}], description: 完整请求接收至服务端响应写出成功的耗时，不包括后台刷新；不表示客户端收到确认}
+        response_status: {type: string, enum: [unrecorded, pending, sent, failed, cancelled]}
+        cache_activity: {oneOf: [{$ref: "#/components/schemas/CacheActivity"}, {type: "null"}]}
         id: {$ref: "#/components/schemas/RecordId"}
         occurred_at_ms: {$ref: "#/components/schemas/SafeInteger"}
         identity: {$ref: "#/components/schemas/RequestIdentity"}
@@ -1308,6 +1312,15 @@ components:
         duration_us: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
         dns_core_duration_us: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
         answers: {$ref: "#/components/schemas/AnswerSummary"}
+    CacheActivity:
+      type: object
+      additionalProperties: false
+      required: [kind, outcome, upstream_target_name, upstream_used_name]
+      properties:
+        kind: {type: string, enum: [write, refresh]}
+        outcome: {type: string, enum: [pending, inserted, updated, rejected, conflict, failed, skipped, coalesced, dropped, unrecorded]}
+        upstream_target_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+        upstream_used_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
     CacheProducer:
       type: object
       additionalProperties: false

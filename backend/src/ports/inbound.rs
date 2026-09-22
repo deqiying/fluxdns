@@ -192,11 +192,22 @@ impl ResponseHandle {
         // 进入 encoder 前先消费唯一响应权。即使 encoder 失败，也保持 Responded，
         // 因为 socket/stream 可能已经发生部分写入，自动重试会破坏 exactly-once。
         self.claim(ResponseState::Responded)?;
-        self.inner
+        let result = self
+            .inner
             .encoder
             .encode(&self.inner.request, response)
             .await
-            .map_err(EncodeError::encoder_failure)
+            .map_err(EncodeError::encoder_failure);
+        let meta = &self.inner.request.context.meta;
+        meta.completion.finish_response(
+            if result.is_ok() {
+                crate::dns::ResponseDelivery::Sent
+            } else {
+                crate::dns::ResponseDelivery::Failed
+            },
+            meta.received_at,
+        );
+        result
     }
 
     pub fn mark_client_gone(&self) -> Result<(), EncodeError> {
@@ -229,6 +240,15 @@ impl ResponseHandle {
             )
             .map(|_| ())
             .map_err(|observed| EncodeError::completed(ResponseState::from_raw(observed)))
+    }
+}
+
+impl Drop for ResponseHandleInner {
+    fn drop(&mut self) {
+        // 任务取消、无响应及发送 future 被丢弃都必须结束观察，不能挂住详情投影。
+        let meta = &self.request.context.meta;
+        meta.completion
+            .finish_response(crate::dns::ResponseDelivery::Cancelled, meta.received_at);
     }
 }
 
@@ -289,6 +309,7 @@ mod tests {
         let now = Instant::now();
         let context = RequestContext {
             meta: RequestMeta {
+                completion: crate::dns::RequestTrace::new(now),
                 request_id: RequestId(1),
                 trace_id: None,
                 received_at: now,
@@ -332,6 +353,7 @@ mod tests {
     #[tokio::test]
     async fn cloned_handles_encode_exactly_once() {
         let (request, response) = fixture();
+        let trace = request.context.meta.completion.clone();
         let response = Arc::new(response);
         let encoder = Arc::new(FakeResponseEncoder::default());
         let inbound = InboundRequest::new(request, encoder.clone());
@@ -348,6 +370,9 @@ mod tests {
         assert_eq!(duplicate.class(), EncodeErrorClass::AlreadyResponded);
         assert_eq!(encoder.encoded_count(), 1);
         assert_eq!(handle.state(), ResponseState::Responded);
+        let snapshot = trace.settled().await;
+        assert_eq!(snapshot.response_status, crate::dns::ResponseDelivery::Sent);
+        assert!(snapshot.response_duration_us.is_some());
     }
 
     #[tokio::test]
@@ -420,6 +445,7 @@ mod tests {
     #[tokio::test]
     async fn encoder_failure_consumes_response_right_without_retry() {
         let (request, response) = fixture();
+        let trace = request.context.meta.completion.clone();
         let response = Arc::new(response);
         let inbound = InboundRequest::new(request, Arc::new(FailingEncoder));
         let handle = inbound.response().clone();
@@ -430,6 +456,12 @@ mod tests {
         assert_eq!(failure.class(), EncodeErrorClass::EncoderFailure);
         assert_eq!(retry.class(), EncodeErrorClass::AlreadyResponded);
         assert_eq!(handle.state(), ResponseState::Responded);
+        let snapshot = trace.settled().await;
+        assert_eq!(
+            snapshot.response_status,
+            crate::dns::ResponseDelivery::Failed
+        );
+        assert_eq!(snapshot.response_duration_us, None);
     }
 
     #[tokio::test]

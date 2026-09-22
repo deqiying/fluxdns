@@ -5,6 +5,12 @@ mod handler;
 mod hosts;
 mod message;
 mod policy;
+mod trace;
+
+pub use trace::{
+    CacheActivity, CacheActivityGuard, CacheActivityKind, CacheActivityOutcome, RequestTrace,
+    RequestTraceSnapshot, ResponseDelivery,
+};
 
 pub use context::{
     CacheCompatibilityKey, CancelReason, Cancellation, ClientId, ClientIdentity, ConnectionId,

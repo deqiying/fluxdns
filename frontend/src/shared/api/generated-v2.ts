@@ -1136,6 +1136,13 @@ export interface components {
             state: "unavailable";
         };
         QueryRecord: {
+            /** @description 本次请求的监听入口；历史缺失时为 null */
+            listener_name: components["schemas"]["Name"] | null;
+            /** @description 完整请求接收至服务端响应写出成功的耗时，不包括后台刷新；不表示客户端收到确认 */
+            response_duration_us: components["schemas"]["SafeInteger"] | null;
+            /** @enum {string} */
+            response_status: "unrecorded" | "pending" | "sent" | "failed" | "cancelled";
+            cache_activity: components["schemas"]["CacheActivity"] | null;
             id: components["schemas"]["RecordId"];
             occurred_at_ms: components["schemas"]["SafeInteger"];
             identity: components["schemas"]["RequestIdentity"];
@@ -1155,6 +1162,14 @@ export interface components {
             duration_us: components["schemas"]["SafeInteger"] | null;
             dns_core_duration_us: components["schemas"]["SafeInteger"] | null;
             answers: components["schemas"]["AnswerSummary"];
+        };
+        CacheActivity: {
+            /** @enum {string} */
+            kind: "write" | "refresh";
+            /** @enum {string} */
+            outcome: "pending" | "inserted" | "updated" | "rejected" | "conflict" | "failed" | "skipped" | "coalesced" | "dropped" | "unrecorded";
+            upstream_target_name: components["schemas"]["Name"] | null;
+            upstream_used_name: components["schemas"]["Name"] | null;
         };
         CacheProducer: {
             strategy_name: components["schemas"]["Name"] | null;

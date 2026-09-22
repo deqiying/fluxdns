@@ -268,6 +268,7 @@ fn request(name: &str, record_type: RecordType) -> DnsRequest {
         query,
         context: RequestContext {
             meta: RequestMeta {
+                completion: Default::default(),
                 request_id: RequestId(1),
                 trace_id: None,
                 received_at: now,
@@ -780,7 +781,7 @@ async fn steady_state_refresh_case(resolved: bool) {
     };
     let transport = Arc::new(RecordingDohTransport::new(if resolved { 18 } else { 17 }));
     let core = core_with_transport(&config, Arc::clone(&transport));
-    let request = request(
+    let mut request = request(
         if resolved {
             "steady-resolved.example."
         } else {
@@ -798,10 +799,21 @@ async fn steady_state_refresh_case(resolved: bool) {
     let stale_expiry = stale.entry.expires_at;
     let _cell = publish_current(&core, 1);
 
+    request.context.meta.completion = crate::dns::RequestTrace::new(Instant::now());
+    request
+        .context
+        .meta
+        .completion
+        .finish_response(crate::dns::ResponseDelivery::Sent, Instant::now());
     let observation = resolve_and_commit(&core, &request).await;
     assert_eq!(observation.source, StatsSource::Cache);
     assert_eq!(observation.cache_status, CacheStatus::Stale);
     drain(&core).await;
+    let execution = request.context.meta.completion.settled().await;
+    let activity = execution.cache_activity.unwrap();
+    assert_eq!(activity.kind, crate::dns::CacheActivityKind::Refresh);
+    assert_eq!(activity.outcome, crate::dns::CacheActivityOutcome::Updated);
+    assert!(activity.upstream_target_name.is_some());
 
     let refreshed = cache_record(&core, &key).await;
     assert!(refreshed.version.0 > stale.version.0);

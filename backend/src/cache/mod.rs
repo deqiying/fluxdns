@@ -19,6 +19,7 @@ pub use key::{
 };
 pub use memory::{MemoryCacheStore, MemoryCacheStoreBuildError};
 pub use moka::{MokaCacheStore, MokaCacheStoreBuildError};
+pub(crate) use service::cache_activity_outcome;
 pub use service::{
     CacheCommitCandidate, CacheCommitOutcome, CacheFacade, CacheFacadeBuildError, CacheFacadeError,
     CacheFacadeOptions, CacheLookup, CacheRefreshPermit, CacheWriteRequest, CacheWriteResult,

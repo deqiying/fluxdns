@@ -1015,7 +1015,8 @@ mod tests {
             .load_str(&source)
             .expect("storage runtime fixture must be valid")
             .resolved;
-        let reference_day = 20_710;
+        // 启动会按真实日期推进保留水位，固定历史日期会令本测试随时间失效。
+        let reference_day = crate::storage::day_utc(SystemTime::now()).unwrap();
         let plan = crate::storage::RetentionPlan::calculate(
             crate::storage::RetentionPolicy::new(3, 0, 1 << 30).unwrap(),
             reference_day,

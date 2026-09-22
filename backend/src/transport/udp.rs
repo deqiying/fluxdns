@@ -135,6 +135,7 @@ impl InboundAdapter for UdpAdapter {
                     Err(error) => return Err(error),
                 };
 
+                let response_received_at = Instant::now();
                 let parsed = match decode_query(&datagram.payload, MAX_DNS_WIRE_BYTES) {
                     Ok(parsed) => parsed,
                     Err(error) => {
@@ -157,6 +158,7 @@ impl InboundAdapter for UdpAdapter {
                 let original_dns_id = parsed.id.value();
                 let context = RequestContext {
                     meta: RequestMeta {
+                        completion: crate::dns::RequestTrace::new(response_received_at),
                         request_id,
                         trace_id: None,
                         received_at,

@@ -660,6 +660,10 @@ pub enum AnswerSummary {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryRecord {
+    pub listener_name: Option<String>,
+    pub response_duration_us: Option<u64>,
+    pub response_status: crate::dns::ResponseDelivery,
+    pub cache_activity: Option<crate::dns::CacheActivity>,
     pub id: RecordId,
     pub occurred_at_ms: u64,
     pub identity: RequestIdentity,

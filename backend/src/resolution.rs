@@ -343,19 +343,52 @@ async fn run_detail_projector(
     writer: ShardedResolveDetailWriter,
     metrics: Arc<ResolutionPipelineMetrics>,
 ) {
-    while let Some(event) = receiver.recv().await {
-        match ResolveDetailRecord::from_resolution_event(&event) {
-            Ok(record) => match writer.try_write(record) {
-                Ok(()) => {}
-                Err(error) if matches!(error.class(), PortErrorClass::ResourceExhausted) => {
-                    metrics.detail_dropped.fetch_add(1, Ordering::Relaxed);
+    // 有界并发等待请求发送和缓存任务完成，慢刷新不能阻塞其后所有详情。
+    let mut pending = tokio::task::JoinSet::new();
+    let mut closed = false;
+    while !closed || !pending.is_empty() {
+        tokio::select! {
+            event = receiver.recv(), if !closed && pending.len() < 128 => {
+                if let Some(event) = event {
+                    pending.spawn(async move {
+                        let execution = if let Some(detail) = &event.detail {
+                            Some(detail.completion.settled().await)
+                        } else {
+                            None
+                        };
+                        let mut record = ResolveDetailRecord::from_resolution_event(&event)?;
+                        if let Some(execution) = execution {
+                            record.set_execution(execution);
+                        }
+                        Ok::<_, PortError>(record)
+                    });
+                } else {
+                    closed = true;
                 }
-                Err(_) => {
-                    metrics.detail_failed.fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            completed = pending.join_next(), if !pending.is_empty() => {
+                let record = match completed {
+                    Some(Ok(record)) => record,
+                    _ => {
+                        metrics.detail_failed.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
+                };
+                match record {
+                    Ok(record) => match writer.try_write(record) {
+                        Ok(()) => {}
+                        Err(error) if matches!(error.class(), PortErrorClass::ResourceExhausted) => {
+                            metrics.detail_dropped.fetch_add(1, Ordering::Relaxed);
+                        }
+                        Err(_) => {
+                            metrics.detail_failed.fetch_add(1, Ordering::Relaxed);
+                        }
+                    },
+                    Err(_) => {
+                        metrics.detail_failed.fetch_add(1, Ordering::Relaxed);
+                    }
                 }
-            },
-            Err(_) => {
-                metrics.detail_failed.fetch_add(1, Ordering::Relaxed);
             }
         }
     }

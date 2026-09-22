@@ -950,16 +950,31 @@ select {
   width: 100%;
 }
 
+.query-page .page-heading {
+  align-items: center;
+  margin-bottom: 32px;
+}
+
+.query-page .page-heading h2.ant-typography {
+  margin-top: 0;
+  color: #1d1d1f;
+  font-size: 34px;
+  font-weight: 650;
+  letter-spacing: -1px;
+}
+
 .query-filter-panel {
   margin-bottom: 18px;
-  padding: 18px 0;
-  border-block: 1px solid #e0e2e6;
+  padding: 20px 24px;
+  border: 1px solid #e9e9ed;
+  border-radius: 16px;
+  background: #fff;
 }
 
 .query-filter-primary,
 .query-filter-advanced {
   display: grid;
-  grid-template-columns: repeat(6, minmax(140px, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 14px;
 }
 
@@ -1029,28 +1044,61 @@ select {
 .query-records {
   overflow: hidden;
   border: 1px solid #e0e2e6;
-  border-radius: 6px;
+  border-radius: 16px;
   background: #fff;
 }
 
 .query-cell {
-  display: flex;
+  display: grid;
   min-width: 0;
-  flex-direction: column;
+  height: 48px;
+  grid-template-rows: 22px 22px;
   gap: 4px;
 }
 
-.query-cell > .ant-typography {
+.query-cell-primary {
+  display: block;
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  line-height: 22px;
+  font-weight: 500;
 }
 
 .query-cell-secondary {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  min-width: 0;
+  overflow: hidden;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: #73737d;
   font-size: 12px;
 }
+
+.query-cell-secondary .ant-tag { margin-inline-end: 0; flex-shrink: 0; }
+.query-cell-secondary > svg { flex-shrink: 0; }
+.query-cell-muted { color: #73737d; }
+
+.query-records .ant-table-tbody > tr > td {
+  height: 76px;
+  padding: 13px 16px;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.query-records .ant-table-tbody > .query-row-active > td { background: #f5f9ff; }
+.query-row-active .query-result-trigger { background: #eaf3ff; }
+.query-records .ant-table-thead > tr > th { color: #73737d; background: #fafafb; }
+.query-records .ant-table-tbody > tr > td.query-result-cell { padding: 0; }
+
+.query-route-chain { display: flex; position: relative; width: 100%; min-width: 0; gap: 6px; }
+.query-route-measure { position: absolute; visibility: hidden; width: max-content; pointer-events: none; }
+.query-route-full, .query-route-endpoint { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.query-route-endpoint { flex: 0 1 auto; }
+.query-route-gap { flex-shrink: 0; color: #92929c; }
 
 .query-mono {
   font-family: "Cascadia Code", Consolas, monospace;
@@ -1060,12 +1108,13 @@ select {
   display: grid;
   width: 100%;
   min-width: 0;
-  padding: 5px 4px;
+  height: 75px;
+  padding: 13px 16px;
   grid-template-columns: minmax(0, 1fr) 20px;
   align-items: center;
   gap: 8px;
   border: 0;
-  border-radius: 4px;
+  border-radius: 8px;
   background: transparent;
   color: inherit;
   text-align: start;
@@ -1078,11 +1127,11 @@ select {
 
 .query-result-trigger:focus-visible {
   outline: 2px solid #1769aa;
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
 .query-details-popover {
-  width: min(620px, calc(100vw - 48px));
+  width: min(710px, calc(100vw - 64px));
   max-height: min(680px, 70vh);
   padding: 2px;
   overflow: auto;
@@ -1093,9 +1142,19 @@ select {
   display: flex;
   align-items: start;
   justify-content: space-between;
-  gap: 20px;
+  gap: 12px;
   margin-bottom: 12px;
 }
+
+.query-detail-heading .ant-tag { flex-shrink: 0; }
+.query-detail-id { display: block; overflow-wrap: anywhere; margin-bottom: 14px; }
+.query-detail-route { overflow-wrap: anywhere; }
+.query-detail-durations { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); padding: 16px 0; margin-bottom: 18px; border-radius: 8px; background: #f7f8fa; }
+.query-detail-durations > div { display: grid; gap: 8px; padding: 0 16px; border-inline-start: 1px solid #e3e6ed; }
+.query-detail-durations > div:first-child { border: 0; }
+.query-detail-durations span { color: #73737d; font-size: 12px; }
+.query-detail-durations strong { font-size: 19px; font-weight: 600; overflow-wrap: anywhere; }
+.query-detail-durations > div:last-child strong { color: #176ac2; }
 
 .query-detail-heading h5.ant-typography {
   min-width: 0;

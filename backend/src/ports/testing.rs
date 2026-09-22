@@ -730,6 +730,7 @@ mod tests {
         let deadline = Deadline::new(Instant::now() + Duration::from_secs(30));
         let context = RequestContext {
             meta: RequestMeta {
+                completion: Default::default(),
                 request_id: RequestId(1),
                 trace_id: None,
                 received_at: Instant::now(),

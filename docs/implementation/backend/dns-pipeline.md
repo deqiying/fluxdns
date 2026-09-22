@@ -20,6 +20,8 @@
 
 ## 入口与调用链
 
+> 2026-09-22 增量核对：`2b3b160` 加本次工作树。入站请求新增共享 `RequestTrace`，transport 写出结束后冻结响应耗时，后台 cache write/refresh 记录各自实际结果；不改变 core 完成事件、响应选择或缓存准入。详情聚合、持久化及验证证据统一见[执行事实与后台分发](background-services.md#完成事件与后台分发)。
+
 [`service.rs`](../../../backend/src/service.rs) 根据 typed binding 启动 UDP、TCP 和 DoH task；`run_adapter_loop` 把 adapter 产出的请求交给 instrumented core，再编码写回。TCP/DoH listener 用内部 `JoinSet` 管理 session，不把 DoH 当成 raw DNS/TCP。
 
 ```text

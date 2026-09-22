@@ -432,6 +432,7 @@ mod tests {
         let now = Instant::now();
         RequestContext {
             meta: RequestMeta {
+                completion: Default::default(),
                 request_id: RequestId(1),
                 trace_id: None,
                 received_at: now,

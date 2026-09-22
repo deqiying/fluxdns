@@ -4,9 +4,9 @@
 >
 > 适用范围：已接入路由、页面数据源、查询状态和实际能力范围
 >
-> 最后核对：2026-09-22（服务状态卡片、双折线、UTC 时间与实时连接展示定向核对；解析记录沿用 2026-09-21，其余内容沿用原核对范围）
+> 最后核对：2026-09-23（解析记录两行布局、详情交互与默认实时订阅定向核对；其余内容沿用原核对范围）
 >
-> 核对基线：`2e84b14` 加本次工作树变更；本轮核对服务状态展示，分批历史结果按原日期和基线解释
+> 核对基线：`2b3b160` 加本次工作树变更；本轮核对解析记录，服务状态及分批历史结果按原日期和基线解释
 
 ## 路由与数据源
 
@@ -45,11 +45,17 @@ DashboardPage 的“深色样例/浅色显示”只切换本页 CSS 外观，指
 
 [`QueriesPage`](../../../frontend/src/modules/queries/QueriesPage.tsx) 使用 `POST /api/v2/queries/search` 的 opaque previous/next cursor，默认最近 7 天、20 条、发生时间降序；域名、当前匹配客户端、原始 ID/IP、协议、来源、rcode 与结果状态均在服务端分页前过滤，不伪造页码或总数。query key 包含规范化请求，过滤或页大小变化清除 cursor、实时缓冲和详情；旧请求取消，翻页不复用不匹配的数据。
 
-解析记录自动刷新默认关闭。开启后共享 events client 携带快照 cursor、retention revision 和同一过滤器订阅；收到记录按稳定 ID 去重。首页默认倒序且无详情时可直接合并，详情打开或浏览历史 cursor 时只进入 500 条/2 MiB 缓冲并显示待更新；超限或服务端 resync 改为未知数量并重新取 HTTP 首屏。非模态 Popover 以稳定 record ID 和目录快照为键，支持 hover、click/touch、focus 与 Escape；新记录、refetch 和延迟 hover 回调都不能把它换成另一行。
+解析记录自动刷新默认开启。初次 HTTP 快照后共享 events client 携带快照 cursor、retention revision 和同一过滤器订阅后端 WebSocket 增量，不轮询整个列表；收到记录按稳定 ID 去重。首页默认倒序且无详情时直接合并，详情打开或浏览历史 cursor 时只进入 500 条/2 MiB 缓冲并显示待更新；超限或服务端 resync 重新取 HTTP 首屏。用户关闭自动刷新或页面不可见时释放订阅，恢复可见先重新同步快照。
+
+非模态 Popover 冻结 record ID 与目录快照。鼠标进入结果单元格 120ms 后打开预览，移到浮窗内仍可查看，离开两者 180ms 后关闭；点击结果固定，点击另一结果切换，浮窗内点击和选择文本不关闭，外部点击关闭。键盘聚焦也可打开，Escape 关闭并恢复原触发按钮焦点。后台新记录、refetch 和旧行的延迟关闭回调不能替换当前详情。
 
 详情显示 canonical qname、Answer 截断计数、strategy/upstream/cache producer 与原始/历史/当前三层客户端事实。qname/Answer 只按文本渲染，缺失耗时不伪造为零；共同保留水位使记录过期时显示明确状态，不按行号寻找替代记录。
 
-解析记录列表按时间、请求、结果、路由、身份排列。身份列以客户端名称为主文本（当前目录已无对应名称时回退到历史匹配 ID，仍无匹配时显示未匹配占位），次文本上下两行分别是客户端 IP 和当时的匹配结论；当前名称已出现在主文本，次文本不再重复；原始请求 ID 只在详情中展示。结果列的来源标签先按 `cache` 分类、再回退到 `source`：命中缓存（`hit`，条目未过 TTL）、乐观缓存（`stale`，条目已过期但按乐观缓存返回）、缓存过期（`expired`，条目已过期且不可乐观返回，本次回源）、请求上游（无条目或缓存未启用的 `upstream` 请求）；`Hosts` 保留原标签并首字母大写，`规则` 与 `synthetic` 同样不由缓存分类覆盖。高级筛选的「缓存状态」下拉用同一套分类名称展示（命中缓存/乐观缓存/缓存过期/未命中/未启用），提交值仍是枚举原文。路由列对本地来源显示“本地响应”，对缓存命中显示缓存生产上游，直接上游缺少目标名时显示“上游未确定”。
+解析记录页沿用服务状态的大标题、单句说明和浅色圆角卡片。列表按时间、请求、结果、路由、客户端排列，行高固定为 76px，每个单元格保留两行，超出宽度以省略号显示；窄屏保持表格内部横向滚动。客户端仅显示名称和请求 IP，名称丢失显示未命名/未匹配占位，历史匹配 ID 保留在详情。主筛选为域名、客户端、请求 IP、协议和来源，原始 ID 移到高级筛选。
+
+列表结果第二行仅显示响应耗时与来源标签；详情保留总耗时、主链耗时、响应耗时、发送状态及原始/历史/当前身份。三种耗时来自各自后端测点，不能互相相减或以 HTTP 拉取时间代替；历史未记录的响应耗时显示“未记录”，失败发送不显示成功响应耗时。来源标签保留命中缓存、乐观缓存、缓存过期、请求上游及 Hosts；高级缓存筛选保留相同分类名称，提交值仍为原枚举。
+
+路由第一行从 `listener_name` 经策略和上游目标到实际出口；缓存命中沿用缓存生产出口，详情明确它不是当前后台刷新路由。`RouteChain` 根据实际列宽选择完整链路或“入口 → … → 出口”，首尾名称各自可省略，完整内容仍在 title、无障碍名称及详情中保留。第二行单独显示 `cache_activity`：后台刷新和实际新建/更新/冲突/失败等结果；不能由 miss/expired 推断写入成功，Hosts 不显示无意义的未写入标签。后台刷新实际目标和出口在详情中单独展示。
 
 P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关闭后必须在渲染完成时按稳定 record ID 重新取得当前 DOM 节点再恢复焦点，不能缓存即将移除的按钮。新增 TouchA 点击、恶意 Answer 文本、Escape 与焦点恢复联合测试，该轮前端 97 项通过；加入认证缓存回归后的最终套件为 98 项。
 
@@ -66,6 +72,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | 服务状态视觉与品牌更新 | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx)、[MetricsTrendChart](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx)、[AppLayout](../../../frontend/src/shared/components/AppLayout.tsx) | 原 `/dashboard` 数据链路及 Vite 图标资源 | 2026-09-22：完整前端 26 文件 110 项测试、typecheck 和生产构建通过；Windows Chromium 生产预览在 1600/1024/768/390/320px 验证布局、键盘/指针选点、浅深色、图标资源及模拟 WS 停止后的过期提示 | 浏览器数据为模拟 HTTP/WS；本轮未重新验证真实 DNS 后端和内嵌 release |
 | 进程状态 | system Page/hooks/api、formatters | `/system-runtime` 已注册 | FC-14 测试；Windows 真实浏览器/后端可用样本与刷新；P3 窄屏无溢出 | 真实不可用 OS 样本未做浏览器验收 |
 | v2 查询与实时记录 | QueriesPage、cursor hooks、realtime buffer | v2 search/detail HTTP + queries WS | Vitest；真实 UDP/SQLite/HTTP/WS、断线 replay/resync | 真实网络慢读饱和和性能未验证 |
+| 解析记录设计与执行事实 | QueriesPage、RequestTrace、详情投影 | 默认 WS、三项耗时、监听入口和缓存操作结果 | 2026-09-22～23：前端 114 项、schema 4 项、生产构建；Chromium 在 1600/1024/768/390/320px 验证固定行高、首尾省略、浮窗与模拟 WS；本机真实 UDP/TCP/DoH、HTTP/WS 及 TTL 过期刷新验证 | 浏览器使用模拟 API；真实后端使用独立 loopback 夹具，未覆盖远程客户端或生产负载 |
 | 稳定详情 | record-keyed Popover、detail formatter | 列表结果与按 ID detail | 持续写入下固定 ID、显式查看新记录、桌面/移动浏览器 | 不重建已过期或历史丢失值 |
 | P3 配置管理 | 九个 Page、v2 module hooks、ConfigFileStatus | 十模块读写、保留 preview、文件差异/组合采用 | 91 项 P3 Vitest；真实文件/SQLite/UDP/Bearer HTTP/两档浏览器 | Linux/macOS 未验证；Windows 主链路结果见联合验收 |
 

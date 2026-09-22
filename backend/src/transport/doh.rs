@@ -734,6 +734,7 @@ impl DohSession {
                 }
                 match try_parse_request(&self.read_buffer) {
                     Ok(Some(parsed)) => {
+                        let response_received_at = Instant::now();
                         self.read_buffer.drain(..parsed.consumed_bytes);
                         let route = self
                             .routes
@@ -772,6 +773,7 @@ impl DohSession {
                         let request_cancellation = Cancellation::new();
                         let context = RequestContext {
                             meta: RequestMeta {
+                                completion: crate::dns::RequestTrace::new(response_received_at),
                                 request_id,
                                 trace_id: None,
                                 received_at,

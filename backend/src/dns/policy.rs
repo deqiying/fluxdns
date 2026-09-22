@@ -966,6 +966,13 @@ impl PolicyDnsCore {
                                 refresh.version(),
                                 request,
                             );
+                        } else {
+                            request
+                                .context
+                                .meta
+                                .completion
+                                .begin_cache(crate::dns::CacheActivityKind::Refresh)
+                                .finish(crate::dns::CacheActivityOutcome::Coalesced);
                         }
                         return cached_completion(
                             request,
@@ -1175,6 +1182,13 @@ impl PolicyDnsCore {
                                 refresh.version(),
                                 request,
                             );
+                        } else {
+                            request
+                                .context
+                                .meta
+                                .completion
+                                .begin_cache(crate::dns::CacheActivityKind::Refresh)
+                                .finish(crate::dns::CacheActivityOutcome::Coalesced);
                         }
                         return Some(PolicyUpstreamResult::cache(
                             UpstreamOutcome::Response(stale_response),
@@ -1402,9 +1416,15 @@ impl PolicyDnsCore {
         let mut request = request.clone();
         request.context = optimistic_refresh_context(&request.context);
         request.context.runtime_revision = producer_revision;
+        let refresh_observation = request
+            .context
+            .meta
+            .completion
+            .begin_cache(crate::dns::CacheActivityKind::Refresh);
         if let Err(error) = finalizer.submit_task(async move {
             let Some(prepared) = core.prepare_cache_query(&request) else {
                 tracing::debug!(operation = "cache_refresh", reason = "cache_ineligible", "跳过缓存刷新");
+                refresh_observation.finish(crate::dns::CacheActivityOutcome::Skipped);
                 return;
             };
             let deadline = request.context.meta.deadline;
@@ -1420,10 +1440,12 @@ impl PolicyDnsCore {
                     }
                     Ok(CacheLookup::Fresh(_)) => {
                         tracing::debug!(operation = "cache_refresh", reason = "already_fresh", "目标缓存已更新");
+                        refresh_observation.finish(crate::dns::CacheActivityOutcome::Skipped);
                         return;
                     }
                     other => {
                         tracing::debug!(operation = "cache_refresh", outcome = ?other, "无法读取刷新目标缓存");
+                        refresh_observation.finish(crate::dns::CacheActivityOutcome::Failed);
                         return;
                     }
                 }
@@ -1434,24 +1456,29 @@ impl PolicyDnsCore {
                 &prepared.upstream, &prepared.query, &request.context, None, None,
             ).await else {
                 tracing::debug!(operation = "cache_refresh", reason = "upstream_failed", "缓存刷新未取得响应");
+                refresh_observation.finish(crate::dns::CacheActivityOutcome::Failed);
                 return;
             };
             if !response.matches_query(&prepared.query) {
                 tracing::debug!(operation = "cache_refresh", reason = "question_mismatch", "拒绝不匹配的刷新响应");
+                refresh_observation.finish(crate::dns::CacheActivityOutcome::Rejected);
                 return;
             }
             if !core.prepare_cache_query(&request).is_some_and(|current| {
                 current.key == prepared.key && current.semantics == prepared.semantics
             }) {
                 tracing::debug!(operation = "cache_refresh", reason = "semantics_changed", "放弃旧语义的刷新响应");
+                refresh_observation.finish(crate::dns::CacheActivityOutcome::Skipped);
                 return;
             }
+            refresh_observation.route(Some(target_id.as_ref()), used_id.as_deref());
             let outcome = core.cache.write_response(CacheWriteRequest {
                 key: prepared.key, condition, response: Arc::new(response),
                 upstream: cache_upstream_provenance(target_id.as_ref(), used_id.as_deref()),
                 now: Instant::now(), producer_revision, deadline,
             }).await;
             tracing::debug!(operation = "cache_refresh", ?outcome, "缓存刷新写回完成");
+            refresh_observation.finish(crate::cache::cache_activity_outcome(&outcome));
         }) {
             tracing::debug!(operation = "cache_refresh", ?error, "缓存刷新任务未获接纳");
         }
@@ -4325,6 +4352,7 @@ strategy:
             query,
             context: RequestContext {
                 meta: RequestMeta {
+                    completion: Default::default(),
                     request_id: RequestId(1),
                     trace_id: None,
                     received_at: now,

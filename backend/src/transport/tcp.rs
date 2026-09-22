@@ -236,6 +236,7 @@ impl TcpSession {
             let Some(payload) = read_frame(&self.connection, deadline, cancellation).await? else {
                 return Ok(None);
             };
+            let response_received_at = Instant::now();
             let parsed = match super::wire::decode_query(&payload, MAX_DNS_WIRE_BYTES) {
                 Ok(parsed) => parsed,
                 Err(error) => {
@@ -262,6 +263,7 @@ impl TcpSession {
             );
             let context = RequestContext {
                 meta: RequestMeta {
+                    completion: crate::dns::RequestTrace::new(response_received_at),
                     request_id,
                     trace_id: None,
                     received_at,

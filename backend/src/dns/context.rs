@@ -220,6 +220,8 @@ impl fmt::Debug for Cancellation {
 
 #[derive(Clone, Debug)]
 pub struct RequestMeta {
+    /// 响应写出与缓存后台处理共享的请求详情观察，不影响 DNS 决策。
+    pub completion: super::RequestTrace,
     pub request_id: RequestId,
     pub trace_id: Option<TraceId>,
     pub received_at: Instant,

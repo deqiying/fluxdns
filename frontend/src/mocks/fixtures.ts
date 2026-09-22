@@ -252,6 +252,10 @@ export const v2QueryRecordsFixture = [
     cache_producer: null,
     duration_us: 123,
     dns_core_duration_us: 100,
+    listener_name: 'doh-in',
+    response_duration_us: 180,
+    response_status: 'sent',
+    cache_activity: { kind: 'write', outcome: 'inserted', upstream_target_name: null, upstream_used_name: null },
     answers: {
       state: "available",
       total_count: 1,
@@ -281,6 +285,10 @@ export const v2QueryRecordsFixture = [
     },
     duration_us: 42,
     dns_core_duration_us: 30,
+    listener_name: 'udp-in',
+    response_duration_us: 60,
+    response_status: 'sent',
+    cache_activity: { kind: 'refresh', outcome: 'updated', upstream_target_name: 'public', upstream_used_name: 'public-2' },
     answers: { state: "truncated", total_count: 20, records: [] },
   },
 ] satisfies V2Schemas["QueryRecord"][];

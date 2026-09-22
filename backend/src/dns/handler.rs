@@ -372,6 +372,7 @@ mod tests {
             query,
             context: RequestContext {
                 meta: RequestMeta {
+                    completion: Default::default(),
                     request_id: RequestId(1),
                     trace_id: None,
                     received_at: now,

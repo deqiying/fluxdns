@@ -292,6 +292,11 @@ fn query_record(
 ) -> Result<QueryRecord, ErrorCode> {
     if record.occurred_at_millis > MAX_SAFE_INTEGER
         || record
+            .execution
+            .as_ref()
+            .and_then(|value| value.response_duration_us)
+            .is_some_and(|value| value > MAX_SAFE_INTEGER)
+        || record
             .dns_core_duration_micros
             .is_some_and(|value| value > MAX_SAFE_INTEGER)
     {
@@ -355,7 +360,12 @@ fn query_record(
             total_count: record.answer_count,
         }
     };
+    let execution = record.execution.unwrap_or_default();
     Ok(QueryRecord {
+        listener_name: record.listener_id,
+        response_duration_us: execution.response_duration_us,
+        response_status: execution.response_status,
+        cache_activity: execution.cache_activity,
         id: RecordId::try_from(record.id.as_str().to_owned())
             .map_err(|_| ErrorCode::ServiceUnavailable)?,
         occurred_at_ms: record.occurred_at_millis,

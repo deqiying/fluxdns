@@ -24,6 +24,7 @@ const MAX_ANSWER_JSON_BYTES: usize = 4_096;
 /// strategy/upstream ID 和有界 answer 摘要；`Debug` 仍不得打印这些请求级内容。
 #[derive(Clone)]
 pub struct ResolveDetailRecord {
+    execution: Option<crate::dns::RequestTraceSnapshot>,
     occurred_at: SystemTime,
     duration_millis: u64,
     dns_core_duration_micros: u64,
@@ -157,6 +158,7 @@ impl ResolveDetailRecord {
         let (answers, answers_truncated) = bounded_answers(event.answers)?;
 
         Ok(Self {
+            execution: None,
             occurred_at: event.occurred_at,
             duration_millis: event.duration_millis,
             dns_core_duration_micros: event.dns_core_duration_micros,
@@ -194,6 +196,14 @@ impl ResolveDetailRecord {
 
     pub const fn occurred_at(&self) -> SystemTime {
         self.occurred_at
+    }
+
+    pub(crate) fn set_execution(&mut self, execution: crate::dns::RequestTraceSnapshot) {
+        self.execution = Some(execution);
+    }
+
+    pub fn execution(&self) -> Option<&crate::dns::RequestTraceSnapshot> {
+        self.execution.as_ref()
     }
 
     pub const fn duration_millis(&self) -> u64 {

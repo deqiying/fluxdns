@@ -12,6 +12,8 @@
 
 ## 1. 职责与边界
 
+> 2026-09-23 局部评审：仅补充完整请求接收到响应写出的详情计时边界。
+
 Transport 模块实现 UDP、TCP、DoH、TLS 和客户端身份恢复 adapter。它把网络输入转换成统一 `DnsRequest`，并把 `CanonicalResponse` 编码回对应 transport。
 
 它负责 framing、协议限制、client IP trust boundary、连接生命周期和 response envelope；不负责策略、缓存、上游或 SQLite。
@@ -55,6 +57,8 @@ forwarded header 和 PROXY 前导解析均限定在 `doh.rs` 的 typed 边界内
 请求将 protocol class、UDP payload 能力和 opaque cache compatibility 等表示为 `TransportCapabilities`；Core 不读取 certificate、HTTP method 或 proxy header。有效 client address 则通过 `RequestContext.client` 提供给策略和 ECS，不等同 socket/HTTP 对象泄漏。
 
 ## 4. 统一入站流程
+
+解析详情的响应计时从完整请求接收开始，在共享 `ResponseHandle` 的 encoder 成功写出后冻结；它与 core 完成时的总/主链耗时独立。发送失败或任务取消必须结束观察且不产生成功响应耗时。该测量不包含连接空闲、后台缓存刷新，也不能声称客户端已经收到或确认响应；当前适用于完整 datagram/frame/DoH 请求的服务端处理边界。
 
 ```text
 receive / accept

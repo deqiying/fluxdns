@@ -8,6 +8,8 @@
 
 ## 职责与依赖
 
+> 2026-09-23 局部评审：仅补充响应写出/缓存终态的详情关联边界，其余设计沿原评审范围。
+
 Application 是装配入口，Runtime 管理候选、活动实例、bind、任务监督与关闭；领域逻辑通过 ports 使用 transport、upstream、cache、storage 和 telemetry adapter。
 
 | 层 | 负责 | 不允许 |
@@ -58,6 +60,7 @@ DoH route 在 adapter 用共享模板匹配一次，Policy 按 typed route ID �
 ## 副作用、失败与监督
 
 - 核心返回后、transport 编码前，最多无等待发布一次完成事件。ingress、cache commit 与详情队列的 gap 分别计数，不把丢失伪装为已落库。
+- 响应写出和异步缓存结果通过共享请求观察关联到详情，在独立有界 projector 中收集；不延迟客户端响应、不重复增加请求统计。成功写出不等价于客户端确认，未知结果不能由 lookup 状态推断。
 - Stats 使用有界维度、UTC day、epoch snapshot 和 batch ledger；同一批重试幂等，一次请求只增加一次请求数，parallel attempt 不扩成多条请求。
 - 启动时统计数据库打开、初始化或当前布局/schema 校验失败为 fatal；缓存恢复失败可降级为纯内存。运行期普通数据库错误保留 pending 重试，超过内存保护或不可恢复错误升级处理。
 - Supervisor 注册入口、刷新和周期 flush 任务；Resolution、SQLite detail、cache finalizer 等内部任务由各自 owner 回收。request drain、后台排空与最终 flush 共用总 deadline；当前取消可中止正在处理的请求，不承诺已读请求必然完成响应。

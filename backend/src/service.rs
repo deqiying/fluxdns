@@ -1311,6 +1311,7 @@ impl EventPublishingDnsCore {
             .resolution_event_sink
             .detail_enabled()
             .then(|| ResolutionDetailSource {
+                completion: request.context.meta.completion.clone(),
                 request_id: request.context.meta.request_id,
                 client_id: request.context.client.client_id.clone(),
                 client_ip: request.context.client.client_addr,
@@ -1381,7 +1382,8 @@ impl EventPublishingDnsCore {
         };
         let _ = self.resolution_event_sink.try_publish(ResolutionEnvelope {
             event: Arc::new(event),
-            cache_commit,
+            cache_commit: cache_commit
+                .map(|candidate| candidate.observe(&request.context.meta.completion)),
         });
         result
     }
@@ -3043,6 +3045,7 @@ mod tests {
             query,
             context: RequestContext {
                 meta: RequestMeta {
+                    completion: Default::default(),
                     request_id: RequestId(9),
                     trace_id: None,
                     received_at,

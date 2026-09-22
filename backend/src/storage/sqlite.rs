@@ -1365,6 +1365,19 @@ pub(super) async fn apply_resolve_records(
         .execute(&mut **transaction)
         .await
         .map_err(|_| PortError::new(PortErrorClass::Unavailable, "sqlite_storage.resolve_batch"))?;
+        if let Some(execution) = record.execution() {
+            let json = serde_json::to_string(execution).map_err(|_| {
+                PortError::new(PortErrorClass::InvalidInput, "sqlite_storage.execution")
+            })?;
+            sqlx::query("UPDATE resolve_log SET execution_json = ? WHERE id = ?")
+                .bind(json)
+                .bind(result.last_insert_rowid())
+                .execute(&mut **transaction)
+                .await
+                .map_err(|_| {
+                    PortError::new(PortErrorClass::Unavailable, "sqlite_storage.execution")
+                })?;
+        }
         row_ids.push(result.last_insert_rowid());
     }
     Ok(row_ids)

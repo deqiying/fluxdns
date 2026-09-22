@@ -252,6 +252,8 @@ pub struct DetailCommitCursor {
 
 #[derive(Clone, PartialEq)]
 pub struct DetailQueryRecord {
+    pub listener_id: Option<String>,
+    pub execution: Option<crate::dns::RequestTraceSnapshot>,
     pub id: DetailRecordId,
     pub occurred_at_millis: u64,
     pub duration_millis: u64,
@@ -356,6 +358,8 @@ impl DetailCommittedRecord {
             }
         };
         Ok(DetailQueryRecord {
+            listener_id: Some(record.listener_id().to_owned()),
+            execution: record.execution().cloned(),
             id: self.id.clone(),
             occurred_at_millis,
             duration_millis: record.duration_millis(),
@@ -401,6 +405,8 @@ impl DetailCommittedRecord {
         .map(json_string_budget)
         .sum::<usize>();
         512_usize
+            .saturating_add(json_string_budget(record.listener_id()))
+            .saturating_add(record.execution().map_or(0, |_| 4096))
             .saturating_add(json_string_budget(self.id.as_str()))
             .saturating_add(json_string_budget(record.qname()))
             .saturating_add(optional)
@@ -778,17 +784,9 @@ impl DetailShardStore {
     }
 }
 
-const SELECT_COLUMNS: &str = "SELECT id, event_time_utc_millis, duration_millis, \
-    dns_core_duration_micros, client_id, client_ip, client_match_source, matched_client_id, \
-    canonical_qname, qtype, transport, rcode, source, failure_class, cache_status, strategy_id, \
-    upstream_id, upstream_used_id, answer_count, answers_truncated, answer_summary_json \
-    FROM resolve_log WHERE id = ?";
+const SELECT_COLUMNS: &str = "SELECT * FROM resolve_log WHERE id = ?";
 
-const QUERY_COLUMNS: &str = "SELECT id, event_time_utc_millis, duration_millis, \
-    dns_core_duration_micros, client_id, client_ip, client_match_source, matched_client_id, \
-    canonical_qname, qtype, transport, rcode, source, failure_class, cache_status, strategy_id, \
-    upstream_id, upstream_used_id, answer_count, answers_truncated, answer_summary_json \
-    FROM resolve_log WHERE event_time_utc_millis >= ";
+const QUERY_COLUMNS: &str = "SELECT * FROM resolve_log WHERE event_time_utc_millis >= ";
 
 #[derive(Clone, Copy)]
 struct RecordLocation {
@@ -932,6 +930,15 @@ async fn query_shard(
 
 fn map_row(row: &sqlx::sqlite::SqliteRow, day_utc: i32) -> Result<LocatedRecord, PortError> {
     let operation = "detail_query.row";
+    // 旧只读分片尚无扩展列；不迁移历史文件，也不猜测发送/写入结果。
+    let execution = match row.try_get::<Option<String>, _>("execution_json") {
+        Ok(Some(json)) if json.len() <= 4096 => {
+            Some(serde_json::from_str(&json).map_err(|_| corrupt(operation))?)
+        }
+        Ok(None) | Err(sqlx::Error::ColumnNotFound(_)) => None,
+        _ => return Err(corrupt(operation)),
+    };
+    let listener_id = optional_text(row, "listener_id", operation)?;
     let row_id = positive_i64(row, "id", operation)?;
     let occurred_at_millis = nonnegative_u64(row, "event_time_utc_millis", operation)?;
     if utc_day(occurred_at_millis)? != day_utc {
@@ -1020,6 +1027,8 @@ fn map_row(row: &sqlx::sqlite::SqliteRow, day_utc: i32) -> Result<LocatedRecord,
     let location = RecordLocation { day_utc, row_id };
     Ok(LocatedRecord {
         record: DetailQueryRecord {
+            listener_id,
+            execution,
             id: DetailRecordId::from_location(day_utc, row_id),
             occurred_at_millis,
             duration_millis,
@@ -1505,6 +1514,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execution_round_trip_preserves_ids_and_reads_unextended_history() {
+        let root = test_root("execution");
+        let store = DetailShardStore::new(root.clone(), Vec::new(), 2).unwrap();
+        let mut sample = record(FIRST_DAY, 100, 7, "trace.example.", "client", "client");
+        let execution = crate::dns::RequestTraceSnapshot {
+            response_status: crate::dns::ResponseDelivery::Sent,
+            response_duration_us: Some(7_321),
+            cache_activity: Some(crate::dns::CacheActivity {
+                kind: crate::dns::CacheActivityKind::Refresh,
+                outcome: crate::dns::CacheActivityOutcome::Updated,
+                upstream_target_name: Some("public".to_owned()),
+                upstream_used_name: Some("alidns".to_owned()),
+            }),
+        };
+        sample.set_execution(execution.clone());
+        store
+            .write_records(FIRST_DAY, &[sample], deadline())
+            .await
+            .unwrap();
+        let id = DetailRecordId::from_location(FIRST_DAY, 1);
+        let saved = store.read_detail(&id, deadline()).await.unwrap().unwrap();
+        assert_eq!(saved.execution, Some(execution));
+        assert_eq!(saved.listener_id.as_deref(), Some("udp-main"));
+        // 模拟同 layout 的旧分片：只读查询不要求新列，之后写入才进行可空扩展。
+        let lease = store.acquire_write(FIRST_DAY, deadline()).await.unwrap();
+        sqlx::query("ALTER TABLE resolve_log DROP COLUMN execution_json")
+            .execute(lease.pool())
+            .await
+            .unwrap();
+        lease.close(deadline()).await.unwrap();
+        let old = store.read_detail(&id, deadline()).await.unwrap().unwrap();
+        assert_eq!(old.execution, None);
+        assert_eq!(old.id, id);
+        store
+            .write_records(
+                FIRST_DAY,
+                &[record(
+                    FIRST_DAY,
+                    200,
+                    8,
+                    "new.example.",
+                    "client",
+                    "client",
+                )],
+                deadline(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .read_detail(&id, deadline())
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            id
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn real_sqlite_query_pages_across_days_and_reverses_without_gaps() {
         let root = test_root("pagination");
         let store = DetailShardStore::new(root.clone(), Vec::new(), 2).unwrap();
@@ -1843,6 +1913,8 @@ mod tests {
     #[test]
     fn query_record_debug_does_not_expose_request_values() {
         let record = super::DetailQueryRecord {
+            listener_id: None,
+            execution: None,
             id: DetailRecordId::from_location(FIRST_DAY, 1),
             occurred_at_millis: 1,
             duration_millis: 2,

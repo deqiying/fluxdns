@@ -4,9 +4,7 @@
 >
 > 适用范围：尚需实施、决策或验收的独立变更
 
-| 计划 | 状态 | 剩余范围 |
-| --- | --- | --- |
-| [解析记录缓存标签与身份列收口](queries-cache-labels.md) | 待验收 | 浏览器验收 `/queries` 的来源标签、身份列与缓存状态筛选展示 |
+当前无活动计划。解析记录页面与缓存标签已按最终设计完成，行为与验证边界见[前端页面实现](../implementation/frontend/pages.md)。
 
 WebUI 的当前实现与平台边界见[实现入口](../implementation/README.md)和[联合验收](../implementation/webui-acceptance.md)；接受的职责与约束见[架构入口](../architecture/README.md)。
 

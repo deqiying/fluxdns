@@ -146,7 +146,11 @@ event name 以实际调用点为准，例如 `configuration_validated`、`runtim
 
 resolve log 的服务端总耗时和 DNS 主链耗时在 core 完成时冻结，异步队列和持久化不改变其数值。它们是 authenticated 请求详情字段，不作为 metrics label，避免把高精度请求值引入无界指标维度。
 
+响应耗时另在 transport 成功写出后冻结，只用于受保护详情，不替换上述聚合口径。缓存 lookup 和实际写入/刷新终态必须分别记录；多个后台阶段通过同一请求观察关联，取消/丢弃不能假装成功。详情等待有并发与时间上限，未知状态明确保留，不能延长 DNS 响应或让慢刷新串行阻塞全部记录。
+
 ## 11. Flush 与失败
+
+> 2026-09-23 局部评审：前节新增响应耗时与异步缓存事实，沿用现有聚合指标和 shutdown 边界。
 
 `flush(deadline)` 在 deadline 内逐项输出，成功项计入 emitted，失败项重排队并保留 pending；超时显式返回，不能静默丢弃。`shutdown(deadline)` 先关闭新事件，再复用 flush。周期 task 与最终 flush 必须由进程 owner 管理，实际间隔和接线见[后台服务](../../../implementation/backend/background-services.md)。
 

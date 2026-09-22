@@ -12,6 +12,8 @@
 
 ## 1. 职责与边界
 
+> 2026-09-23 局部评审：仅补充请求诊断快照、已验证分片可空扩列及旧记录兼容。
+
 Storage 模块实现两个相互隔离的持久化 owner：
 
 - 当前布局初始化与版本拒绝；
@@ -100,6 +102,8 @@ prepare 阶段先初始化统计库：
 - 创建时间。
 
 ### 分片 `resolve_log`
+
+响应发送及异步缓存结果使用可空诊断快照，历史缺失不补造事实。扩展已有分片必须先通过 layout、日期和对象校验，仅在写 lease 内幂等增加可空列，保留现有 record ID；只读历史查询必须兼容缺列。详情等待这些终态采用独立有界并发和时间预算，不阻塞请求或统计。当前接线和精确边界见[完成事件与后台分发](../../../implementation/backend/background-services.md#完成事件与后台分发)。
 
 - event time、从 transport 接入到 core 完成的 request duration，以及微秒精度的 DNS core 主链耗时；
 - request ID digest；

@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
@@ -51,11 +51,12 @@ describe("QueriesPage 展示语义", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("区分 cache producer、direct 与两种耗时", () => {
-    expect(formatRoute(cache)).toBe("缓存生产：public → public-2");
-    expect(formatRoute(direct)).toBe("public → public-1");
-    expect(formatRoute({ ...direct, upstream_target_name: null })).toBe("上游未确定");
-    expect(formatDurationSummary(direct)).toEqual({ total: "总耗时 0.12 ms", dnsCore: "主链 0.1 ms" });
+  it("区分缓存生产出口、直接上游与三种耗时", () => {
+    expect(formatRoute(cache)).toBe("udp-in → default → public → public-2");
+    expect(formatRoute(direct)).toBe("doh-in → default → public → public-1");
+    expect(formatRoute({ ...direct, upstream_target_name: null, upstream_used_name: null })).toBe("doh-in → default → 上游未确定");
+    expect(formatDurationSummary(direct)).toEqual({ total: "总耗时 0.12 ms", dnsCore: "主链耗时 0.1 ms", response: "响应耗时 0.18 ms" });
+    expect(formatDurationSummary({ ...direct, response_duration_us: null }).response).toBe("响应耗时 未记录");
   });
 
   it("显示首条 Answer 与截断总数", () => {
@@ -63,7 +64,79 @@ describe("QueriesPage 展示语义", () => {
     expect(formatResponseSummary(cache)).toEqual({ primary: "NOERROR · answered", meta: "保留 0 条，共 20 条" });
   });
 
-  it("默认关闭实时更新，以 opaque cursor 翻页并按稳定 ID 打开详情", async () => {
+  it("悬停预览离开后关闭，点击固定可切换记录，内部点击保留、外部点击关闭", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    const first = await screen.findByRole("button", { name: "查看 example.test. 的详情" });
+    const second = screen.getByRole("button", { name: "查看 cached.example.test. 的详情" });
+    await user.hover(first);
+    expect(await screen.findByRole("dialog")).toHaveTextContent("悬停预览");
+    await user.unhover(first);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await user.click(first);
+    await user.unhover(first);
+    const detail = await screen.findByRole("dialog", { name: "example.test. 解析详情" });
+    expect(detail).toHaveTextContent("点击固定");
+    expect(detail).toHaveTextContent("总耗时");
+    expect(detail).toHaveTextContent("主链耗时");
+    expect(detail).toHaveTextContent("响应耗时");
+    await user.click(within(detail).getByText("总耗时"));
+    expect(detail).toBeInTheDocument();
+    await user.click(second);
+    expect(await screen.findByRole("dialog", { name: "cached.example.test. 解析详情" })).toHaveTextContent("后台刷新");
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    await user.click(screen.getByRole("heading", { name: "解析记录" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("Hosts 不显示写入标签，未知写入结果不会被 miss 推断为新建成功", async () => {
+    server.use(http.post("/api/v2/queries/search", () => HttpResponse.json({ ...v2QueryPageFixture, items: [
+      { ...direct, source: "hosts", cache: "bypass", cache_activity: null },
+      { ...cache, source: "upstream", cache: "miss", cache_activity: null },
+    ] })));
+    renderPage();
+    await screen.findByText("example.test.");
+    expect(screen.queryByText("新建缓存")).not.toBeInTheDocument();
+    expect(screen.queryByText("未写入缓存")).not.toBeInTheDocument();
+    expect(screen.getByText("Hosts", { selector: ".ant-tag" })).toBeInTheDocument();
+  });
+
+  it("鼠标 focus 不提前展开浮窗抢占点击，完整点击后固定详情", async () => {
+    const matches = Element.prototype.matches;
+    vi.spyOn(Element.prototype, "matches").mockImplementation(function (this: Element, selector: string) {
+      return selector === ":focus-visible" ? false : matches.call(this, selector);
+    });
+    renderPage();
+    const trigger = await screen.findByRole("button", { name: "查看 example.test. 的详情" });
+    fireEvent.pointerDown(trigger, { pointerType: "mouse" });
+    fireEvent.focus(trigger);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    fireEvent.pointerUp(trigger, { pointerType: "mouse" });
+    fireEvent.click(trigger);
+    expect(await screen.findByRole("dialog")).toHaveTextContent("点击固定");
+  });
+
+  it("首次快照后自动订阅增量，首页无详情时插入新记录，关闭开关释放订阅", async () => {
+    const user = userEvent.setup();
+    let push: ((batch: QueryBatch) => void) | undefined;
+    const release = vi.fn();
+    const subscribe = vi.spyOn(managementEvents, "subscribeQueries").mockImplementation((_options, onData, _resync, onState) => {
+      push = onData;
+      onState("open");
+      return release;
+    });
+    renderPage();
+    await waitFor(() => expect(subscribe).toHaveBeenCalled());
+    expect(subscribe.mock.calls[0][0].after).toEqual(v2QueryPageFixture.snapshot_cursor);
+    act(() => push?.({ cursor: { epoch: "stream-1", sequence: "43" }, directoryRevision: "clients-13", items: [
+      { ...direct, id: "new-auto", qname: "auto.example.test.", occurred_at_ms: direct.occurred_at_ms + 1_000 },
+    ] }));
+    expect(await screen.findByText("auto.example.test.")).toBeInTheDocument();
+    await user.click(screen.getByRole("switch", { name: "自动刷新" }));
+    await waitFor(() => expect(release).toHaveBeenCalled());
+  });
+
+  it("默认开启实时更新，以 opaque cursor 翻页并按稳定 ID 打开详情", async () => {
     const user = userEvent.setup();
     const requests: QueryRequest[] = [];
     server.use(http.post("/api/v2/queries/search", async ({ request }) => {
@@ -73,7 +146,7 @@ describe("QueriesPage 展示语义", () => {
     renderPage();
 
     expect(await screen.findByText("example.test.")).toBeInTheDocument();
-    expect(screen.getByText("已关闭")).toBeInTheDocument();
+    expect(screen.getByRole("switch", { name: "自动刷新" })).toBeChecked();
     await user.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[1]).toMatchObject({ cursor: v2QueryPageFixture.next_cursor, direction: "older" });
@@ -130,7 +203,6 @@ describe("QueriesPage 展示语义", () => {
     await screen.findByText("example.test.");
     await user.click(screen.getAllByRole("button", { name: /查看 .* 的详情/ })[0]);
     await screen.findByRole("dialog", { name: "example.test. 解析详情" });
-    await user.click(screen.getByRole("switch", { name: "自动刷新" }));
     await waitFor(() => expect(push).toBeDefined());
 
     const liveRecord = {
@@ -164,7 +236,7 @@ describe("QueriesPage 身份与来源标签", () => {
 
   afterEach(() => vi.restoreAllMocks());
 
-  it("身份列优先当前客户端名称，缺失时回退历史匹配 ID，再回退未匹配占位", () => {
+  it("客户端列只显示名称，缺失名称时不把历史匹配 ID 当名称", () => {
     const named = formatClientIdentity(direct);
     expect(named.primary).toBe("workstation");
     expect(named.clientIp).toBe("192.0.2.10");
@@ -172,7 +244,7 @@ describe("QueriesPage 身份与来源标签", () => {
     expect(named.detail).toBe("当时按 IP 匹配 Desktop-01");
 
     const historical = formatClientIdentity({ ...direct, current_client_name: null });
-    expect(historical.primary).toBe("Desktop-01");
+    expect(historical.primary).toBe("未命名客户端");
     expect(historical.clientIp).toBe("192.0.2.10");
     expect(historical.detail).toBe("当时按 IP 匹配 Desktop-01");
 
@@ -214,18 +286,22 @@ describe("QueriesPage 身份与来源标签", () => {
     expect(requests[1].filter.cache).toBe("stale");
   });
 
-  it("按 时间/请求/结果/路由/身份 渲染，身份列展示客户端名称与客户端 IP", async () => {
+  it("客户端列仅保留名称与 IP，列表只保留响应耗时", async () => {
     const restoreMatchMedia = openAllBreakpoints();
     const record = { ...direct, identity: { client_id: "raw-client-id", client_ip: "192.0.2.55" } };
     server.use(http.post("/api/v2/queries/search", () => HttpResponse.json({ ...v2QueryPageFixture, items: [record] })));
     try {
       renderPage();
       const identity = await screen.findByText("workstation");
-      expect(screen.getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["时间", "请求", "结果", "路由", "身份"]);
+      expect(screen.getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["时间", "请求", "结果", "路由", "客户端"]);
       const row = identity.closest("tr");
       expect(row).not.toBeNull();
       expect(row).toHaveTextContent("192.0.2.55");
       expect(row).not.toHaveTextContent("raw-client-id");
+      expect(row).not.toHaveTextContent("Desktop-01");
+      expect(row).not.toHaveTextContent("总耗时");
+      expect(row).not.toHaveTextContent("主链耗时");
+      expect(row).toHaveTextContent("响应耗时 0.18 ms");
     } finally {
       restoreMatchMedia();
     }

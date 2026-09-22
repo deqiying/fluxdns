@@ -26,9 +26,21 @@ manifest v2 保存源身份 digest、fetcher 代际及不透明验证器，不�
 
 ## 完成事件与后台分发
 
+> 2026-09-22 增量核对：`2b3b160` 加本次工作树，仅核对响应/缓存执行事实与详情投影；其余历史验证边界保留。
+
 [`ResolutionRuntime::start_with_metrics`](../../../backend/src/resolution.rs) 在进程级创建 ingress、cache commit 和详情投影队列。`ResolutionPublisher::try_publish` 无等待接收 `ResolutionEnvelope`，`run_dispatcher` 尝试分发 cache candidate、更新 stats、交给启用的 writer 聚合请求指标，再在启用详情时尝试入队；各项失败独立计数。
 
 `run_cache_worker` 执行异步缓存 CAS，`run_detail_projector` 构造有界详情并提交 writer。这些任务句柄由 `ResolutionRuntime` 持有，随 service 关闭，不是请求线程中的 SQLite 或详情格式化操作。
+
+[`RequestTrace`](../../../backend/src/dns/trace.rs) 在实际 UDP/TCP/DoH 入站创建，记录完整请求接收的单调时钟起点；[`ResponseHandle::respond`](../../../backend/src/ports/inbound.rs) 在 encoder 成功完成写出后冻结响应微秒耗时，失败、取消和未记录明确区分，不将后台刷新、连接空闲或客户端 ACK 计入。原有 `duration_millis` 和 `dns_core_duration_micros` 仍在 core 完成时冻结，用于总/主链耗时及现有聚合统计。
+
+同一 trace 关联普通 cache candidate 与 optimistic refresh：`CacheCommitCandidate::observe` 在无等待发布前设置写入任务；`schedule_optimistic_refresh` 设置刷新任务及实际回源目标/出口。guard 按真实 CAS 结果保存 inserted/updated/conflict/rejected/failed，队列拒绝、取消或丢弃保存 dropped；去重 follower 标记 coalesced，不声称它新建了刷新任务，已无须刷新标记 skipped。刷新路由与旧 cache producer provenance 独立，lookup miss/expired 不等价于写入成功。
+
+详情 projector 用 owner 持有的 `JoinSet` 最多并发等待 128 个请求的响应与缓存终态，每项最多 6 秒；超时字段记为 unrecorded，慢刷新不串行阻塞后续详情。该等待不进入 DNS 主链，stats/telemetry 仍在 dispatcher 即时消费。记录包含完整执行事实后一次写入并通过既有 commit/replay 增量推送，因此后台刷新较慢时详情记录可晚于客户端响应出现；本次没有另建按请求更新的事件流。shutdown 中 JoinSet 随 owner 取消，保留现有 ingress/详情丢弃计数边界。
+
+诊断快照经 `ResolveDetailRecord.execution` 序列化为日分片的可空 `execution_json`。仅在写 lease 完成既有 layout/day/对象校验后幂等添加此列，不改变 layout 或 record ID；旧只读分片不迁移，缺列读取为未记录。监听入口直接投影原有 `listener_id`。replay 字节预算包含监听入口与诊断快照上界，HTTP search/detail 和 WS 使用同一记录投影。
+
+2026-09-22 验证：Windows 后端全量 807 项通过、4 项既有忽略；全 target/feature Clippy 无警告。新增覆盖响应耗时冻结、失败发送、guard 丢弃、等待上限、真实刷新更新和旧分片读取/扩列后稳定 ID。本机独立夹具验证 UDP/TCP/DoH、HTTP 详情、新建/命中缓存及真实 60 秒 TTL 过期后的乐观缓存更新；WS 推送、断线 replay 与会话撤销使用项目脚本验证。未重跑忽略的性能/长期压力专项，不外推到远程网络。
 
 service 在 core 返回时冻结 port 字段 `duration_millis` 和 `dns_core_duration_micros`：前者从 transport 接入计时点到 core 完成，后者仅 core 主链；都不包含响应编码/写回或后台排队、详情投影和数据库写入。DoH 总耗时可能包含入站 TLS 与 HTTP 读取/解析。dispatcher 的 `attempt_outcome` 维度也来自这一请求终态，不是独立的逐 upstream attempt 事件。
 

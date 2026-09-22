@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -14,7 +14,7 @@ import {
   Typography,
   type TableColumnsType,
 } from "antd";
-import { ChevronLeft, ChevronRight, Eye, RotateCw, Search, SlidersHorizontal } from "lucide-react";
+import { ChevronLeft, ChevronRight, Clock3, Eye, RotateCw, Search, SlidersHorizontal } from "lucide-react";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { formatDuration, formatEpochMillis } from "@/shared/formatters";
@@ -54,11 +54,27 @@ export function QueriesPage() {
   const [sort, setSort] = useState<QueryRequest["sort"]>("occurred_at");
   const [order, setOrder] = useState<QueryRequest["order"]>("desc");
   const [navigation, setNavigation] = useState<Navigation>({ cursor: null, direction: "older" });
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [detail, setDetail] = useState<DetailSnapshot>();
   const [detailPinned, setDetailPinned] = useState(false);
   const detailTriggers = useRef(new Map<string, HTMLButtonElement>());
   const suppressedDetailOpen = useRef<string | undefined>(undefined);
+  const detailContent = useRef<HTMLDivElement>(null);
+  const hoverCloseTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const hoverOpenTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pinnedRef = useRef(detailPinned);
+  pinnedRef.current = detailPinned;
+  const cancelHoverClose = () => { clearTimeout(hoverCloseTimer.current); };
+  const scheduleHoverClose = (record: QueryRecord) => {
+    cancelHoverClose();
+    hoverCloseTimer.current = setTimeout(() => {
+      if (!pinnedRef.current) setDetail((current) => current?.record.id === record.id ? undefined : current);
+    }, 180);
+  };
+  useEffect(() => () => {
+    clearTimeout(hoverCloseTimer.current);
+    clearTimeout(hoverOpenTimer.current);
+  }, []);
   const request = useMemo<QueryRequest>(() => ({
     filter,
     cursor: navigation.cursor,
@@ -79,11 +95,23 @@ export function QueriesPage() {
       suppressedDetailOpen.current = detail.record.id;
       setDetail(undefined);
       setDetailPinned(false);
-      // Popover 的开闭 key 会替换触发节点，提交关闭渲染后再按稳定 ID 取当前按钮。
+      // 关闭后按稳定 ID 重新取得触发节点，避免列表合并时恢复到失效 DOM。
       window.setTimeout(() => detailTriggers.current.get(recordId)?.focus(), 0);
     };
     document.addEventListener("keydown", close);
-    return () => document.removeEventListener("keydown", close);
+    const outside = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node) || detailContent.current?.contains(target)
+        || (target instanceof Element && target.closest(".query-result-trigger"))) return;
+      suppressedDetailOpen.current = detail.record.id;
+      setDetail(undefined);
+      setDetailPinned(false);
+    };
+    document.addEventListener("pointerdown", outside, true);
+    return () => {
+      document.removeEventListener("keydown", close);
+      document.removeEventListener("pointerdown", outside, true);
+    };
   }, [detail]);
 
   const resetContext = () => {
@@ -118,62 +146,61 @@ export function QueriesPage() {
 
   const openDetail = (record: QueryRecord, open: boolean) => {
     if (!open) {
-      if (!detailPinned && detail?.record.id === record.id) setDetail(undefined);
+      if (!detailPinned) setDetail((current) => current?.record.id === record.id ? undefined : current);
       return;
     }
     if (suppressedDetailOpen.current === record.id) return;
-    if (detailPinned && detail?.record.id !== record.id) return;
-    setDetail({
+    if (detailPinned) return;
+    setDetail((current) => current?.record.id === record.id ? current : {
       record,
       directoryRevision: query.directoryRevisions.get(record.id) ?? page?.directory_revision ?? "unknown",
     });
   };
 
   const pinDetail = (record: QueryRecord) => {
-    if (detailPinned && detail?.record.id === record.id) {
-      suppressedDetailOpen.current = record.id;
-      setDetail(undefined);
-      setDetailPinned(false);
-      return;
-    }
-    if (suppressedDetailOpen.current === record.id) suppressedDetailOpen.current = undefined;
+    clearTimeout(hoverOpenTimer.current);
+    cancelHoverClose();
+    suppressedDetailOpen.current = undefined;
     setDetailPinned(true);
-    openDetail(record, true);
+    // 点击必须能够切换已固定记录，不能走仅处理 hover 的 pinned 防护。
+    setDetail((current) => current?.record.id === record.id ? current : {
+      record,
+      directoryRevision: query.directoryRevisions.get(record.id) ?? page?.directory_revision ?? "unknown",
+    });
   };
 
-  const columns = useMemo<TableColumnsType<QueryRecord>>(() => [
+  const columns: TableColumnsType<QueryRecord> = [
     {
       title: "时间",
       dataIndex: "occurred_at_ms",
-      width: 168,
-      responsive: ["sm"],
+      width: 145,
       render: (value: number) => <TimeCell value={value} />,
     },
     {
       title: "请求",
       key: "request",
-      width: 270,
+      width: 260,
       render: (_, record) => (
         <CellStack
           primary={record.qname}
-          secondary={<Space size={6} wrap><span>{record.qtype}</span><Tag color="cyan">{record.transport.toUpperCase()}</Tag></Space>}
-          mono
+          secondary={<><span>{record.qtype}</span><Tag color="cyan">{record.transport.toUpperCase()}</Tag></>}
         />
       ),
     },
     {
       title: "结果",
       key: "result",
+      className: "query-result-cell",
       width: 340,
       render: (_, record) => (
         <Popover
-          key={`${record.id}:${detail?.record.id === record.id ? "open" : "closed"}`}
+          key={record.id}
           placement="bottom"
-          trigger="hover"
+          trigger={[]}
+          fresh
           open={detail?.record.id === record.id}
-          onOpenChange={(open) => openDetail(record, open)}
           destroyOnHidden
-          content={detail?.record.id === record.id ? <QueryDetails snapshot={detail} /> : null}
+          content={detail?.record.id === record.id ? <div ref={detailContent} onPointerEnter={cancelHoverClose} onPointerLeave={() => scheduleHoverClose(record)}><QueryDetails snapshot={detail} pinned={detailPinned} /></div> : null}
         >
           <button
             ref={(node) => {
@@ -183,10 +210,25 @@ export function QueriesPage() {
             type="button"
             className="query-result-trigger"
             aria-label={`查看 ${record.qname} 的详情`}
-            onPointerEnter={() => {
+            aria-expanded={detail?.record.id === record.id}
+            aria-haspopup="dialog"
+            onPointerEnter={(event) => {
+              if (event.pointerType !== "mouse") return;
               if (suppressedDetailOpen.current === record.id) suppressedDetailOpen.current = undefined;
+              cancelHoverClose();
+              clearTimeout(hoverOpenTimer.current);
+              hoverOpenTimer.current = setTimeout(() => {
+                if (!pinnedRef.current) openDetail(record, true);
+              }, 120);
             }}
+            onPointerLeave={() => { clearTimeout(hoverOpenTimer.current); scheduleHoverClose(record); }}
+            onPointerDown={() => clearTimeout(hoverOpenTimer.current)}
             onClick={() => pinDetail(record)}
+            onFocus={(event) => {
+              // 鼠标/触摸按下的 focus 不能提前弹出并挡住随后的 pointerup/click。
+              if (event.currentTarget.matches(":focus-visible")) openDetail(record, true);
+            }}
+            onBlur={() => openDetail(record, false)}
           >
             <ResponseCell record={record} />
             <Eye size={16} aria-hidden />
@@ -197,17 +239,16 @@ export function QueriesPage() {
     {
       title: "路由",
       key: "route",
-      width: 250,
-      responsive: ["lg"],
-      render: (_, record) => <CellStack primary={record.strategy_name ?? "无策略"} secondary={formatRoute(record)} mono />,
+      width: 300,
+      render: (_, record) => <CellStack primary={<RouteChain record={record} />} secondary={<CacheActivityTags record={record} />} />,
     },
     {
-      title: "身份",
+      title: "客户端",
       key: "identity",
-      width: 260,
+      width: 200,
       render: (_, record) => <IdentityCell record={record} />,
     },
-  ], [detail, page?.directory_revision, query.directoryRevisions]);
+  ];
 
   const showLatest = () => {
     if (detail) suppressedDetailOpen.current = detail.record.id;
@@ -218,15 +259,10 @@ export function QueriesPage() {
   };
 
   return (
+    <div className="query-page">
     <PageFrame
       title="解析记录"
-      description="按提交后的解析事实查询请求、身份匹配、响应来源与实际路由。"
-      meta={page ? (
-        <Space size={12} wrap className="query-page-meta">
-          <Typography.Text type="secondary">目录版本 {page.directory_revision}</Typography.Text>
-          <Typography.Text type="secondary">可用起点 {formatEpochMillis(page.available_from_ms)}</Typography.Text>
-        </Space>
-      ) : undefined}
+      description="每一次请求，清晰可循。"
       actions={(
         <Space className="query-live-control" size={10} wrap>
           <Switch aria-label="自动刷新" checked={autoRefresh} onChange={setAutoRefresh} />
@@ -238,9 +274,8 @@ export function QueriesPage() {
       <section className="query-filter-panel" aria-label="解析记录筛选">
         <div className="query-filter-primary">
           <FilterInput label="域名" value={draft.qname} placeholder="example.com" onChange={(qname) => setDraft((value) => ({ ...value, qname }))} />
-          <FilterInput label="匹配客户端" value={draft.client_name} placeholder="客户端名称" onChange={(client_name) => setDraft((value) => ({ ...value, client_name }))} />
-          <FilterInput label="原始 ID" value={draft.client_id} placeholder="client_id" onChange={(client_id) => setDraft((value) => ({ ...value, client_id }))} />
-          <FilterInput label="原始 IP" value={draft.client_ip} placeholder="192.0.2.10" onChange={(client_ip) => setDraft((value) => ({ ...value, client_ip }))} />
+          <FilterInput label="客户端" value={draft.client_name} placeholder="客户端名称" onChange={(client_name) => setDraft((value) => ({ ...value, client_name }))} />
+          <FilterInput label="请求 IP" value={draft.client_ip} placeholder="192.0.2.10" onChange={(client_ip) => setDraft((value) => ({ ...value, client_ip }))} />
           <FilterSelect label="协议" value={draft.transport} values={transports} onChange={(transport) => setDraft((value) => ({ ...value, transport }))} />
           <FilterSelect label="来源" value={draft.source} values={sources} onChange={(source) => setDraft((value) => ({ ...value, source }))} />
         </div>
@@ -265,6 +300,7 @@ export function QueriesPage() {
         </div>
         {advanced ? (
           <div className="query-filter-advanced">
+            <FilterInput label="原始 ID" value={draft.client_id} placeholder="client_id" onChange={(client_id) => setDraft((value) => ({ ...value, client_id }))} />
             <FilterInput label="历史匹配 ID" value={draft.matched_client_id} placeholder="matched_client_id" onChange={(matched_client_id) => setDraft((value) => ({ ...value, matched_client_id }))} />
             <FilterInput label="QTYPE" value={draft.qtype} placeholder="A" onChange={(qtype) => setDraft((value) => ({ ...value, qtype }))} />
             <FilterSelect label="RCODE" value={draft.rcode} values={rcodes} onChange={(rcode) => setDraft((value) => ({ ...value, rcode }))} />
@@ -295,7 +331,9 @@ export function QueriesPage() {
               rowKey="id"
               columns={columns}
               dataSource={query.items}
-              scroll={{ x: 1_150 }}
+              tableLayout="fixed"
+              rowClassName={(record) => record.id === detail?.record.id ? "query-row-active" : ""}
+              scroll={{ x: 1_245 }}
               pagination={false}
               loading={query.isFetching && !query.isLoading}
             />
@@ -326,6 +364,7 @@ export function QueriesPage() {
         </section>
       ) : null}
     </PageFrame>
+    </div>
   );
 }
 
@@ -337,12 +376,10 @@ function TimeCell({ value }: { value: number }) {
 
 function IdentityCell({ record }: { record: QueryRecord }) {
   const identity = formatClientIdentity(record);
-  // 次文本保持两个并列段落：IP 一行，匹配结论一行。
   return (
     <CellStack
       primary={identity.primary}
-      secondary={<><span>{identity.clientIp}</span><span>{identity.detail}</span></>}
-      mono
+      secondary={identity.clientIp}
     />
   );
 }
@@ -354,20 +391,28 @@ function ResponseCell({ record }: { record: QueryRecord }) {
   return (
     <CellStack
       primary={summary.primary}
-      secondary={<Space size={6} wrap><span>{durations.total}</span><span>{durations.dnsCore}</span><span>{summary.meta}</span><Tag color={source.color}>{source.label}</Tag></Space>}
-      mono={record.answers.state !== "unavailable" && record.answers.records.length > 0}
+      secondary={<><Clock3 size={13} aria-hidden /><span>{durations.response}</span><Tag color={source.color}>{source.label}</Tag></>}
     />
   );
 }
 
-function QueryDetails({ snapshot }: { snapshot: DetailSnapshot }) {
+function QueryDetails({ snapshot, pinned }: { snapshot: DetailSnapshot; pinned: boolean }) {
   const { record } = snapshot;
   const answers = record.answers.state === "unavailable" ? [] : record.answers.records;
+  const durations = formatDurationSummary(record);
   return (
     <div className="query-details-popover" role="dialog" aria-label={`${record.qname} 解析详情`}>
       <div className="query-detail-heading">
         <Typography.Title level={5}>{record.qname}</Typography.Title>
-        <Typography.Text type="secondary" code>{record.id}</Typography.Text>
+        <Tag color={pinned ? "blue" : undefined}>{pinned ? "点击固定" : "悬停预览"}</Tag>
+      </div>
+      <Typography.Text type="secondary" className="query-detail-id" code>{record.id}</Typography.Text>
+      <div className="query-detail-durations">
+        {[durations.total, durations.dnsCore, durations.response].map((duration) => {
+          const [label, ...value] = duration.split(" ");
+          const hint = label === "响应耗时" ? "收到完整请求至服务端成功写出响应，不含后台刷新，也不是客户端接收确认" : label === "总耗时" ? "Transport 接入计时点至 DNS core 完成" : "仅 DNS core 主链解析耗时";
+          return <div key={label} title={hint}><span>{label}</span><strong>{value.join(" ")}</strong></div>;
+        })}
       </div>
       <Descriptions size="small" column={1} colon={false}>
         <Descriptions.Item label="发生时间">{formatEpochMillis(record.occurred_at_ms)}</Descriptions.Item>
@@ -376,11 +421,15 @@ function QueryDetails({ snapshot }: { snapshot: DetailSnapshot }) {
         <Descriptions.Item label="当时匹配">{formatHistoricalMatch(record)}</Descriptions.Item>
         <Descriptions.Item label="当前名称">{record.current_client_name ?? "配置中已无对应名称"}</Descriptions.Item>
         <Descriptions.Item label="响应">{record.rcode} / {record.outcome} / {sourceLabel(record).label}</Descriptions.Item>
-        <Descriptions.Item label="耗时">{formatDurationSummary(record).total} · {formatDurationSummary(record).dnsCore}</Descriptions.Item>
-        <Descriptions.Item label="路由">{record.strategy_name ?? "无策略"} · {formatRoute(record)}</Descriptions.Item>
+        <Descriptions.Item label="发送状态">{responseStatusLabel(record)}</Descriptions.Item>
+        <Descriptions.Item label="路由链路"><span className="query-detail-route">{formatRoute(record)}</span></Descriptions.Item>
+        <Descriptions.Item label="缓存变化"><CacheActivityTags record={record} />{!record.cache_activity ? "无记录" : null}</Descriptions.Item>
+        {record.cache_activity?.upstream_target_name ? <Descriptions.Item label="刷新链路">{[record.listener_name, record.cache_activity.upstream_target_name, record.cache_activity.upstream_used_name].filter(Boolean).join(" → ")}</Descriptions.Item> : null}
         <Descriptions.Item label="目录快照">{snapshot.directoryRevision}</Descriptions.Item>
       </Descriptions>
-      {record.source === "cache" ? <Alert type="info" showIcon title="上游信息来自缓存生产请求，本次解析未再次访问上游" /> : null}
+      {record.source === "cache" ? <Alert type="info" showIcon title={record.cache === "stale"
+        ? "本次先返回过期缓存，后台尝试刷新；响应耗时不包含后台刷新。链路出口来自旧缓存生产请求，刷新链路单独展示。"
+        : "链路出口来自缓存生产请求，本次直接命中缓存。"} /> : null}
       <div className="query-answer-list">
         <Typography.Text strong>Answer</Typography.Text>
         {record.answers.state === "unavailable" ? <Typography.Text type="secondary">结果未保留</Typography.Text> : null}
@@ -396,39 +445,72 @@ function QueryDetails({ snapshot }: { snapshot: DetailSnapshot }) {
   );
 }
 
-export function formatDurationSummary(record: QueryRecord): { total: string; dnsCore: string } {
+export function formatDurationSummary(record: QueryRecord): { total: string; dnsCore: string; response: string } {
   return {
     total: `总耗时 ${formatDuration(record.duration_us === null ? null : record.duration_us / 1_000)}`,
-    dnsCore: `主链 ${formatDuration(record.dns_core_duration_us === null ? null : record.dns_core_duration_us / 1_000)}`,
+    dnsCore: `主链耗时 ${formatDuration(record.dns_core_duration_us === null ? null : record.dns_core_duration_us / 1_000)}`,
+    response: `响应耗时 ${record.response_duration_us == null ? "未记录" : formatDuration(record.response_duration_us / 1_000)}`,
   };
 }
 
 export function formatRoute(record: QueryRecord): string {
-  if (record.source === "hosts" || record.source === "rule" || record.source === "synthetic") return "本地响应";
-  if (record.source === "cache") {
-    const producer = record.cache_producer;
-    if (!producer?.upstream_target_name) return "缓存生产上游未确定";
-    return `缓存生产：${formatUpstream(producer.upstream_target_name, producer.upstream_used_name)}`;
-  }
-  return record.upstream_target_name
-    ? formatUpstream(record.upstream_target_name, record.upstream_used_name)
-    : "上游未确定";
+  return routeNodes(record).join(" → ");
 }
 
-/**
- * 身份列文本：主文本优先当前客户端名称，其次历史匹配到的客户端 ID，都没有时给出未匹配占位。
- *
- * 主文本已是当前名称时，`detail` 不再重复“当前 X”，避免同一事实在一列内出现两次；
- * 次文本拆成两段是因为 `.query-cell-secondary` 按列排布：`clientIp` 独占一行，
- * `detail` 放当时的匹配结论。
- */
+/** 链路保留真实入口和出口；缓存来源不改写成虚构的“缓存”节点。 */
+function routeNodes(record: QueryRecord): string[] {
+  const producer = record.source === "cache" ? record.cache_producer : record;
+  const nodes: (string | null | undefined)[] = [record.listener_name ?? "入口未记录", record.strategy_name];
+  if (["hosts", "rule", "synthetic"].includes(record.source)) nodes.push(record.source === "hosts" ? "Hosts" : "本地响应");
+  else nodes.push(producer?.upstream_target_name, producer?.upstream_used_name ?? "上游未确定");
+  return nodes.filter((value): value is string => !!value).filter((value, index, values) => index === 0 || value !== values[index - 1]);
+}
+
+/** 根据实际列宽决定中间省略；首尾各自可截断，但不会把出口挤出列。 */
+function RouteChain({ record }: { record: QueryRecord }) {
+  const host = useRef<HTMLSpanElement>(null);
+  const measure = useRef<HTMLSpanElement>(null);
+  const [compact, setCompact] = useState(false);
+  const nodes = routeNodes(record);
+  const full = nodes.join(" → ");
+  useLayoutEffect(() => {
+    const update = () => setCompact((measure.current?.scrollWidth ?? 0) > (host.current?.clientWidth ?? 0));
+    update();
+    const observer = new ResizeObserver(update);
+    if (host.current) observer.observe(host.current);
+    return () => observer.disconnect();
+  }, [full]);
+  return <span className="query-route-chain" ref={host} title={full} aria-label={full}>
+    <span className="query-route-measure" ref={measure} aria-hidden>{full}</span>
+    {compact ? <><span className="query-route-endpoint">{nodes[0]}</span><span className="query-route-gap">{nodes.length > 2 ? "→ … →" : "→"}</span><span className="query-route-endpoint">{nodes.at(-1)}</span></> : <span className="query-route-full">{full}</span>}
+  </span>;
+}
+
+/** 仅使用后端写入结果展示变更；Hosts、本地响应或历史无记录不增加无意义标签。 */
+function CacheActivityTags({ record }: { record: QueryRecord }) {
+  const activity = record.cache_activity;
+  if (!activity || ["hosts", "rule", "synthetic"].includes(record.source)) return null;
+  const labels: Record<typeof activity.outcome, string> = {
+    pending: "等待写入", inserted: "新建缓存", updated: "更新缓存", rejected: "写入拒绝",
+    conflict: "写入冲突", failed: "写入失败", skipped: "跳过刷新", coalesced: "合并刷新",
+    dropped: "任务丢弃", unrecorded: "结果未知",
+  };
+  return <>{activity.kind === "refresh" ? <Tag color="blue">后台刷新</Tag> : null}
+    <Tag color={activity.outcome === "inserted" ? "green" : activity.outcome === "updated" ? "blue" : ["failed", "dropped"].includes(activity.outcome) ? "orange" : "default"}>{labels[activity.outcome]}</Tag></>;
+}
+
+function responseStatusLabel(record: QueryRecord): string {
+  return ({ sent: "已写出", failed: "发送失败", cancelled: "已取消", pending: "发送中", unrecorded: "未记录" })[record.response_status];
+}
+
+/** 列表仅展示名称与 IP，历史匹配 ID 保留在详情中。 */
 export function formatClientIdentity(record: QueryRecord): {
   primary: string;
   clientIp: string;
   detail: string;
 } {
   const matched = record.matched;
-  const primary = record.current_client_name ?? (matched.source === "none" ? "未匹配客户端" : matched.matched_client_id);
+  const primary = record.current_client_name ?? (matched.source === "none" ? "未匹配客户端" : "未命名客户端");
   const detail = matched.source === "none"
     ? "当时未匹配"
     : `当时按 ${matched.source.toUpperCase()} 匹配 ${matched.matched_client_id}`;
@@ -451,10 +533,6 @@ export function formatResponseSummary(record: QueryRecord): { primary: string; m
   };
 }
 
-function formatUpstream(target: string, used: string | null): string {
-  return used && used !== target ? `${target} → ${used}` : used ?? `${target} → 未确定`;
-}
-
 function formatHistoricalMatch(record: QueryRecord): string {
   return record.matched.source === "none"
     ? "未匹配"
@@ -474,8 +552,8 @@ export function sourceLabel(record: QueryRecord): { label: string; color: string
 function CellStack({ primary, secondary, muted = false, mono = false }: { primary: ReactNode; secondary?: ReactNode; muted?: boolean; mono?: boolean }) {
   return (
     <div className={`query-cell${mono ? " query-mono" : ""}`}>
-      <Typography.Text type={muted ? "secondary" : undefined}>{primary}</Typography.Text>
-      {secondary ? <Typography.Text type="secondary" className="query-cell-secondary">{secondary}</Typography.Text> : null}
+      <span className={`query-cell-primary${muted ? " query-cell-muted" : ""}`} title={typeof primary === "string" ? primary : undefined}>{primary}</span>
+      <span className="query-cell-secondary">{secondary}</span>
     </div>
   );
 }

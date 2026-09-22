@@ -53,6 +53,10 @@
     "cache_producer": null,
     "duration_us": 123,
     "dns_core_duration_us": 100,
+    "listener_name": "doh-in",
+    "response_duration_us": 180,
+    "response_status": "sent",
+    "cache_activity": null,
     "answers": {"state": "available", "total_count": 1, "records": [{"name": "example.test.", "type": "A", "ttl_seconds": 30, "data": "192.0.2.1"}]}
   },
   "metrics": {

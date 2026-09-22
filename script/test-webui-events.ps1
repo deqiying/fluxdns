@@ -138,6 +138,9 @@ Send-Json $socket $subscription
 Send-DnsQuery "cache.p5.test" 0x4102
 $first = Receive-Event $socket
 Assert-True ($first.type -eq "queries" -and $first.items.qname -contains "cache.p5.test.") "WebSocket did not push the committed record"
+Assert-True ($first.items[0].response_status -eq "sent") "WebSocket record did not include successful transport delivery"
+Assert-True ($null -ne $first.items[0].response_duration_us -and $first.items[0].response_duration_us -ge 0) "WebSocket record did not include response duration"
+Assert-True ($first.items[0].listener_name -eq "p5-udp") "WebSocket record did not preserve the listener entry"
 $firstCursor = $first.cursor
 $firstRecordId = $first.items[0].id
 $socket.Dispose()

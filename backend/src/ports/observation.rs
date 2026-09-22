@@ -22,6 +22,7 @@ use super::telemetry::{CacheStatus, OutcomeClass};
 /// 必须由后台详情 projector 完成。
 #[derive(Clone)]
 pub struct ResolutionDetailSource {
+    pub completion: crate::dns::RequestTrace,
     pub request_id: RequestId,
     pub client_id: Option<ClientId>,
     pub client_ip: Option<IpAddr>,

@@ -355,6 +355,7 @@ pub struct CacheCommitCandidate {
     facade: Arc<CacheFacade>,
     request: CacheWriteRequest,
     lease: CacheLoadLease,
+    observation: Option<crate::dns::CacheActivityGuard>,
 }
 
 impl fmt::Debug for CacheCommitCandidate {
@@ -387,7 +388,14 @@ impl CacheCommitCandidate {
             facade,
             request,
             lease,
+            observation: None,
         }
+    }
+
+    /// 同一候选的实际写入结果供详情消费；队列丢弃由 guard 终结。
+    pub fn observe(mut self, trace: &crate::dns::RequestTrace) -> Self {
+        self.observation = Some(trace.begin_cache(crate::dns::CacheActivityKind::Write));
+        self
     }
 
     /// 使用独立短 deadline 完成内存提交并发布 single-flight 终态。
@@ -423,6 +431,9 @@ impl CacheCommitCandidate {
             ) => self.facade.write_response(retry).await,
             (write, _) => write,
         };
+        if let Some(observation) = self.observation.take() {
+            observation.finish(cache_activity_outcome(&write));
+        }
         let (outcome, completion) = match write {
             Ok(CacheWriteResult::Stored {
                 outcome: CacheWriteOutcome::Inserted(_) | CacheWriteOutcome::Replaced(_),
@@ -452,6 +463,29 @@ impl CacheCommitCandidate {
             return CacheCommitOutcome::Unavailable;
         }
         outcome
+    }
+}
+
+/// 根据实际 CAS 写入结果分类，不能用 lookup miss/expired 推断写入成功。
+pub(crate) fn cache_activity_outcome(
+    result: &Result<CacheWriteResult, CacheFacadeError>,
+) -> crate::dns::CacheActivityOutcome {
+    use crate::dns::CacheActivityOutcome as Outcome;
+    match result {
+        Ok(CacheWriteResult::Stored {
+            outcome: CacheWriteOutcome::Inserted(_),
+            ..
+        }) => Outcome::Inserted,
+        Ok(CacheWriteResult::Stored {
+            outcome: CacheWriteOutcome::Replaced(_),
+            ..
+        }) => Outcome::Updated,
+        Ok(CacheWriteResult::Stored {
+            outcome: CacheWriteOutcome::Conflict(_),
+            ..
+        }) => Outcome::Conflict,
+        Ok(_) => Outcome::Rejected,
+        Err(_) => Outcome::Failed,
     }
 }
 
@@ -779,10 +813,17 @@ mod tests {
             CacheLoadReservation::Leader(_) => panic!("second reservation must be follower"),
         };
 
+        let trace = crate::dns::RequestTrace::new(Instant::now());
+        trace.finish_response(crate::dns::ResponseDelivery::Sent, Instant::now());
         let outcome = CacheCommitCandidate::new(Arc::clone(&facade), write_request(), lease)
+            .observe(&trace)
             .commit(Duration::from_secs(1))
             .await;
         assert_eq!(outcome, CacheCommitOutcome::Stored);
+        assert_eq!(
+            trace.settled().await.cache_activity.unwrap().outcome,
+            crate::dns::CacheActivityOutcome::Inserted
+        );
         assert!(matches!(
             facade
                 .wait_load(waiter, deadline(), &Cancellation::new())
