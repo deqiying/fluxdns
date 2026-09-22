@@ -25,6 +25,7 @@ import { managementRoutes, type ManagementPath } from "@/app/route-contract";
 import { getSafeErrorMessage } from "@/shared/api/errors";
 import { useAuth } from "@/modules/auth/AuthProvider";
 import { ConfigFileStatus } from "./ConfigFileStatus";
+import brandIcon from "@/assets/fluxdns-icon.svg?no-inline";
 
 const { Header, Content, Sider } = Layout;
 
@@ -127,10 +128,10 @@ export function AppLayout() {
   return (
     <Layout className="app-shell">
       {messageContext}
-      <Sider className="app-sider" theme="light" width={244} collapsedWidth={72} collapsed={collapsed} trigger={null}>
+      <Sider className="app-sider" theme="light" width={232} collapsedWidth={72} collapsed={collapsed} trigger={null}>
         <div className="app-sidebar-content">
           <div className="brand">
-            <span className="brand-mark"><Network size={20} strokeWidth={1.9} aria-hidden="true" /></span>
+            <img className="brand-mark" src={brandIcon} alt={collapsed ? "FluxDNS" : ""} width={40} height={40} />
             {!collapsed ? <strong>FluxDNS</strong> : null}
           </div>
           <div className="sidebar-navigation">{navigationMenu("app-menu")}</div>
@@ -150,7 +151,7 @@ export function AppLayout() {
       </Sider>
       <Drawer
         className="mobile-navigation-drawer"
-        title="FluxDNS"
+        title={<div className="brand brand-mobile"><img className="brand-mark" src={brandIcon} alt="" width={40} height={40} /><strong>FluxDNS</strong></div>}
         placement="left"
         size={280}
         open={mobileNavigationOpen}

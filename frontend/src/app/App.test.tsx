@@ -532,9 +532,9 @@ describe("application routes", () => {
     renderApp("/dashboard");
 
     expect(await screen.findByText("当前内存")).toBeInTheDocument();
-    expect(screen.getByText("186.4 MiB")).toBeInTheDocument();
-    expect(screen.getByText("4.25")).toBeInTheDocument();
-    expect(screen.getByText("255")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "当前内存" })).toHaveTextContent("186.4 MiB");
+    expect(screen.getByRole("group", { name: "平均 QPS" })).toHaveTextContent("4.25 请求/秒");
+    expect(screen.getByRole("group", { name: "平均 RPM" })).toHaveTextContent("255 请求/分钟");
     expect(screen.getByRole("img", { name: /QPS 与 RPM 请求趋势/ })).toBeInTheDocument();
     expect(document.querySelectorAll(".metrics-chart-qps-line")).toHaveLength(2);
     expect(document.querySelectorAll(".metrics-chart-rpm-line")).toHaveLength(1);

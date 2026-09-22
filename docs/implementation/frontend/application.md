@@ -4,9 +4,9 @@
 >
 > 适用范围：前端 bootstrap、provider、路由鉴权、HTTP client 与会话回收
 >
-> 最后核对：2026-09-09（P5 当前契约、旧路径退出与联合验收收口）
+> 最后核对：2026-09-22（品牌资源、桌面侧栏和移动导航局部核对；认证等其余内容沿用 2026-09-09 核对范围）
 >
-> 核对基线：`d7296fd`；本轮核对 P5 变更与联合验收，分批历史结果按原日期和基线解释
+> 核对基线：`2e84b14` 加本次工作树变更；本轮仅核对品牌资源与导航展示，分批历史结果按原日期和基线解释
 
 ## 入口
 
@@ -15,6 +15,8 @@
 [`App.tsx`](../../../frontend/src/app/App.tsx) lazy-load 页面，由 Suspense 展示加载态；`/login` 和 `/initialize` 在 guard 外，其他页面进入 `ProtectedRoute -> AppLayout`。根路径转 `/dashboard`，未知受保护路径展示 NotFound。受保护壳层消费 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 注册 12 个一级路径，具体接线见[页面与查询](pages.md)。
 
 正式路由已全部接线，移除空 pending route 分支、旧占位页面和专用 CSS；登录页按当前能力说明 DNS 管理、配置校验与同步状态，不再标为只读界面。最终内嵌 release 已回读新文案，98 项前端测试与完整三阶段打包通过。
+
+[`AppLayout`](../../../frontend/src/shared/components/AppLayout.tsx) 的桌面侧栏和移动 Drawer 共用[寻址小章鱼 SVG](../../../frontend/src/assets/fluxdns-icon.svg)，[`index.html`](../../../frontend/index.html) 将同一资源设为 favicon。两处均使用 Vite 的 `?no-inline` 资源入口，生成同一哈希 SVG；不依赖生产构建中已禁用的 `public/` 复制，也不携带 mock worker。2026-09-22 的生产预览已验证资源返回成功、两处 URL 一致及移动导航显示；本轮未重新构建或验证后端内嵌 release。
 
 ## 认证状态
 

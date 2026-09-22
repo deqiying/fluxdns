@@ -4,9 +4,9 @@
 >
 > 适用范围：已接入路由、页面数据源、查询状态和实际能力范围
 >
-> 最后核对：2026-09-21（解析记录列顺序、身份列文本、来源标签分类与缓存状态筛选定向核对，基于 `aa65fcb` 之后的本次工作树；其余正文沿用原核对范围）
+> 最后核对：2026-09-22（服务状态卡片、双折线、UTC 时间与实时连接展示定向核对；解析记录沿用 2026-09-21，其余内容沿用原核对范围）
 >
-> 核对基线：`aa65fcb`；本轮核对解析记录展示语义，分批历史结果按原日期和基线解释
+> 核对基线：`2e84b14` 加本次工作树变更；本轮核对服务状态展示，分批历史结果按原日期和基线解释
 
 ## 路由与数据源
 
@@ -39,6 +39,10 @@ dashboard 先取 v2 HTTP 快照再订阅 WS metrics，system runtime 和全局�
 
 DashboardPage 的“深色样例/浅色显示”只切换本页 CSS 外观，指标和共享订阅保持不变；离开页面不保存主题。深色文字、缺数提示、双曲线/轴线和按钮采用独立对比色，沿用图表键盘名称与响应式容器。
 
+[`DashboardPage`](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 将 RSS、QPS、RPM 和在线身份显示为四张独立卡片，窄屏排列成两列；大号数值与单位分开排版，不可用时保留原始原因说明。页头“实时连接正常”仅在 WS 为 `open`、快照未过期且查询无错误时出现；延迟、中断和重连分别提示，不用设计稿的正常状态覆盖真实数据。
+
+[`MetricsTrendChart`](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx) 在同一绘图区显示 QPS 蓝线和 RPM 青绿色线，分别标注左轴请求/秒、右轴请求/分钟；两个轴独立线性缩放并采用易读刻度。采样时间、时间范围、横轴和提示框统一为 UTC。窗口外样本不参与刻度或选点，不可用区间不连接，孤立有效样本保留为圆端点；空趋势和全不可用趋势有明确提示。提示框由悬停、点按或键盘聚焦显示，离开交互后收起，避免常驻遮挡窄屏曲线；方向键、Home/End 沿共享时间轴选择各序列最近样本，圆点位于该样本实际时间。ResizeObserver 让 SVG 使用容器像素宽度，保持轴文字大小，并在窄屏减少时间刻度。
+
 [`QueriesPage`](../../../frontend/src/modules/queries/QueriesPage.tsx) 使用 `POST /api/v2/queries/search` 的 opaque previous/next cursor，默认最近 7 天、20 条、发生时间降序；域名、当前匹配客户端、原始 ID/IP、协议、来源、rcode 与结果状态均在服务端分页前过滤，不伪造页码或总数。query key 包含规范化请求，过滤或页大小变化清除 cursor、实时缓冲和详情；旧请求取消，翻页不复用不匹配的数据。
 
 解析记录自动刷新默认关闭。开启后共享 events client 携带快照 cursor、retention revision 和同一过滤器订阅；收到记录按稳定 ID 去重。首页默认倒序且无详情时可直接合并，详情打开或浏览历史 cursor 时只进入 500 条/2 MiB 缓冲并显示待更新；超限或服务端 resync 改为未知数量并重新取 HTTP 首屏。非模态 Popover 以稳定 record ID 和目录快照为键，支持 hover、click/touch、focus 与 Escape；新记录、refetch 和延迟 hover 回调都不能把它换成另一行。
@@ -59,6 +63,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | --- | --- | --- | --- | --- |
 | 12 入口导航 | route-contract、AppLayout | 三组菜单与受保护路由 | 应用测试；1440×900 真实内嵌浏览器逐路由和 390×844 移动 Drawer | 旧页面/API 已退出；四档最终视口见联合验收 |
 | 实时服务状态 | dashboard Page/hooks/chart | v2 metrics HTTP + WS | Vitest；真实 DNS 流量、浏览器指标变化与可访问图表 | 深色样例和真实 OS failure 未复核 |
+| 服务状态视觉与品牌更新 | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx)、[MetricsTrendChart](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx)、[AppLayout](../../../frontend/src/shared/components/AppLayout.tsx) | 原 `/dashboard` 数据链路及 Vite 图标资源 | 2026-09-22：完整前端 26 文件 110 项测试、typecheck 和生产构建通过；Windows Chromium 生产预览在 1600/1024/768/390/320px 验证布局、键盘/指针选点、浅深色、图标资源及模拟 WS 停止后的过期提示 | 浏览器数据为模拟 HTTP/WS；本轮未重新验证真实 DNS 后端和内嵌 release |
 | 进程状态 | system Page/hooks/api、formatters | `/system-runtime` 已注册 | FC-14 测试；Windows 真实浏览器/后端可用样本与刷新；P3 窄屏无溢出 | 真实不可用 OS 样本未做浏览器验收 |
 | v2 查询与实时记录 | QueriesPage、cursor hooks、realtime buffer | v2 search/detail HTTP + queries WS | Vitest；真实 UDP/SQLite/HTTP/WS、断线 replay/resync | 真实网络慢读饱和和性能未验证 |
 | 稳定详情 | record-keyed Popover、detail formatter | 列表结果与按 ID detail | 持续写入下固定 ID、显式查看新记录、桌面/移动浏览器 | 不重建已过期或历史丢失值 |
@@ -66,4 +71,4 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 
 P4 完整 Vitest 为 23 文件 99 项，v2 schema contract 4 项、typecheck 与 production build 通过。Windows 使用 `_fluxdns/p4-live/` ConfigV2 和内嵌 debug binary 完成真实登录、Bearer ticket、UDP/SQLite/HTTP/WS、断线 replay、会话失效、稳定详情以及桌面/390×844 验收，浏览器 Console 无 error/warning。P3 配置验收仍见[前端应用](application.md#p3-联合验收2026-09-08)，P4 安全和实时证据见[共享实时连接](application.md#p4-共享实时连接2026-09-09)。
 
-当前最终 release、四视口、服务状态深色样例、触控证据和 98 项前端回归统一见 [WebUI 联合验收](../webui-acceptance.md)。
+历史 P5 内嵌 release、四视口、服务状态深色样例、触控证据和 98 项前端回归见 [WebUI 联合验收](../webui-acceptance.md)；本轮视觉更新的验证范围见上表，不将历史内嵌验收作为本轮结果。
