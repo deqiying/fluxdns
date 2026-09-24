@@ -57,12 +57,28 @@ export const BYTE_UNIT_OPTIONS: { value: ByteUnit; label: string }[] = [
 /** 回显的单位阶梯，从大到小；MAX_BYTES 恰好是 1 TiB，再大没有可表示的单位。 */
 const BYTE_DISPLAY_UNITS: readonly ByteUnit[] = ["TB", "GB", "MB", "KB", "B"];
 
-/** 回显数值允许的小数位上限：更细的分辨率对配置字段没有意义，只会让用户看到长尾小数。 */
-const DISPLAY_SCALE = 100n;
+/**
+ * 回显数值允许的小数位上限。
+ *
+ * 编辑框回显必须无损：用户没改该字段时再次保存不得改变字节数，因此只允许精确可表示的有限小数，
+ * 不能四舍五入——否则一次提交就把配置改成了另一个字节数。位数上限本身是「可读性 vs 回落成整数字节」
+ * 的折中：上限过低（例如 2 位）时 807306368 这类值在任何单位下都无法精确表示，只能回落成
+ * `807306368 B`；上限过高则让用户面对长尾小数。超出上限时退到更小单位，最终退到整数 `B`。
+ * 挑选单位时只考虑数值 ≥ 1 的单位，避免 `0.0625 GB` 这类不适合阅读的写法：
+ * 可读性优先于「进位到更大单位」。
+ * 注意：`bytesFromForm` 的编码能力远大于此上限（B 之外的单位可表示任意位小数），
+ * 该常量只约束回显，不影响用户键入值的精度。
+ */
+export const BYTE_DISPLAY_MAX_FRACTION_DIGITS = 6;
+
+/** 回显判定的等比放大倍数：乘上它后能被换算因子整除，等价于该单位下数值精确且小数不超过上限。 */
+const DISPLAY_SCALE = 10n ** BigInt(BYTE_DISPLAY_MAX_FRACTION_DIGITS);
 
 /**
- * 接口返回的字节数换算成「数值 + 单位」：从大到小挑选能精确表示且小数不超过两位的最大单位，
- * 保证回显无损——用户不动该字段时再次保存不会把字节数改掉；B 是所有单位的公约数，必定命中。
+ * 接口返回的字节数换算成「数值 + 单位」：先从大到小只保留数值 ≥ 1 的单位（可读性优先，
+ * 不把 64 MiB 写成 0.0625 GB），再在这些候选里挑第一个小数不超过
+ * BYTE_DISPLAY_MAX_FRACTION_DIGITS 位且能精确表示的；候选都不满足时退到整数 `B`。
+ * 保证回显无损——用户不动该字段时再次保存不会把字节数改掉；`B` 必定在候选内，必定命中。
  * 非安全整数或超出 schema 上限时抛错，由调用方决定提示方式。
  */
 export function bytesToDisplay(bytes: number): { value: string; unit: ByteUnit } {
@@ -70,8 +86,10 @@ export function bytesToDisplay(bytes: number): { value: string; unit: ByteUnit }
     throw new Error("bytes out of range");
   }
   const scaled = BigInt(bytes) * DISPLAY_SCALE;
-  // 乘 100 后能被换算因子整除，等价于该单位下的数值精确且最多两位小数。
-  const unit = BYTE_DISPLAY_UNITS.find((candidate) => scaled % BYTE_FACTORS[candidate] === 0n) ?? "B";
+  // 候选不含数值 < 1 的单位；放大 10^BYTE_DISPLAY_MAX_FRACTION_DIGITS 后能被换算因子整除，
+  // 等价于该单位下的数值精确且小数不超过上限。
+  const candidates = BYTE_DISPLAY_UNITS.filter((candidate) => BigInt(bytes) >= BYTE_FACTORS[candidate]);
+  const unit = candidates.find((candidate) => scaled % BYTE_FACTORS[candidate] === 0n) ?? "B";
   return { value: bytesToForm(bytes, unit), unit };
 }
 

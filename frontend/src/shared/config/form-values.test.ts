@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  BYTE_DISPLAY_MAX_FRACTION_DIGITS,
   BYTE_UNIT_OPTIONS,
   bytesFromForm,
   bytesToDisplay,
@@ -37,7 +38,7 @@ describe("配置表单共享值转换", () => {
     expect(() => bytesFromForm("1.5", "B")).toThrow();
   });
 
-  it("字节回显挑选能精确表示的最大单位，保证无损且不超过两位小数", () => {
+  it("字节回显挑选能精确表示的最大单位，保证无损且小数不超过上限", () => {
     expect(BYTE_UNIT_OPTIONS).toEqual([
       { value: "B", label: "B" },
       { value: "KB", label: "KB" },
@@ -45,6 +46,9 @@ describe("配置表单共享值转换", () => {
       { value: "GB", label: "GB" },
       { value: "TB", label: "TB" },
     ]);
+    // 回显小数位上限是显式常量：从 2 位放宽到 6 位，避免 807306368 这类值只能回落成整数字节。
+    expect(BYTE_DISPLAY_MAX_FRACTION_DIGITS).toBe(6);
+    // 单位阶梯从大到小，但只考虑数值 ≥ 1 的单位：64 MiB 优先 64 MB，而不是更难受的 0.0625 GB。
     expect(bytesToDisplay(67_108_864)).toEqual({ value: "64", unit: "MB" });
     expect(bytesToDisplay(1_073_741_824)).toEqual({ value: "1", unit: "GB" });
     // 1 TiB 回显为 1 TB，不再退化成 1024 GB。
@@ -52,18 +56,41 @@ describe("配置表单共享值转换", () => {
     // 小数回显与摘要 formatBytes 口径一致：1.5 MB 而不是 1536 KB，也不是 0.0014 GB。
     expect(bytesToDisplay(1_572_864)).toEqual({ value: "1.5", unit: "MB" });
     expect(bytesToDisplay(1_536)).toEqual({ value: "1.5", unit: "KB" });
-    // 两位小数上限内可精确表示时优先选更大单位（768 MB = 0.75 GB）。
-    expect(bytesToDisplay(805_306_368)).toEqual({ value: "0.75", unit: "GB" });
+    // 数值 ≥ 1 且能精确表示时优先选更大单位：768 MiB 回显 768 MB（0.75 GB 数值不足 1，不采用）。
+    expect(bytesToDisplay(805_306_368)).toEqual({ value: "768", unit: "MB" });
     expect(bytesToDisplay(1)).toEqual({ value: "1", unit: "B" });
-    // 807306368 在任何单位下都无法用两位小数精确表示，回落到 B 才是无损表示。
-    expect(bytesToDisplay(807_306_368)).toEqual({ value: "807306368", unit: "B" });
+    // 807306368 B 在 MB 下需要 10 位小数（769.9072265625），超过 6 位上限；同为大单位的 GB 数值不足 1，
+    // 因此退到 KB（3 位小数），仍然无损且可读，而不是回落成 `807306368 B`。
+    expect(bytesToDisplay(807_306_368)).toEqual({ value: "788385.125", unit: "KB" });
+    // 4 位小数够用时仍选更大单位：807337984 B = 769.9375 MB。
+    expect(bytesToDisplay(807_337_984)).toEqual({ value: "769.9375", unit: "MB" });
+    // 极端值需要 10 位小数（1048577 B = 1024.0009765625 KB），超过上限只能回落成整数 B。
+    expect(bytesToDisplay(1_048_577)).toEqual({ value: "1048577", unit: "B" });
     expect(() => bytesToDisplay(0)).toThrow();
     expect(() => bytesToDisplay(1_099_511_627_777)).toThrow();
     expect(() => bytesToDisplay(1.5)).toThrow();
   });
 
-  it("字节回显可无损换算回原始字节数", () => {
-    for (const bytes of [1, 1_024, 1_536, 1_048_576, 1_572_864, 67_108_864, 805_306_368, 807_306_368, 1_073_741_824, 1_099_511_627_776]) {
+  it("字节回显可无损换算回原始字节数，且小数位不超过上限", () => {
+    const samples = [
+      1, 1_024, 1_536, 1_048_576, 1_048_577, 1_572_864, 67_108_864, 805_306_368, 807_306_368, 807_337_984,
+      1_073_741_824, 1_099_511_627_776,
+    ];
+    // 稀疏扫描覆盖到 schema 上限：无损往返只依赖单位阶梯，不应挑值成立。
+    const scanned: number[] = [...samples];
+    for (let bytes = 1_048_577; bytes <= 1_099_511_627_776; bytes += 33_554_432) scanned.push(bytes);
+    for (const bytes of scanned) {
+      const { value, unit } = bytesToDisplay(bytes);
+      const label = `${bytes} → ${value} ${unit}`;
+      expect(bytesFromForm(value, unit), label).toBe(bytes);
+      // 逆运算同样精确：回显文本就是该单位下的精确表示，不含四舍五入。
+      expect(bytesToForm(bytes, unit), label).toBe(value);
+      expect(value.split(".")[1]?.length ?? 0, label).toBeLessThanOrEqual(BYTE_DISPLAY_MAX_FRACTION_DIGITS);
+      // 数值 ≥ 1：可读性规则不允许回显成 0.0625 GB 这类写法。
+      expect(Number(value), label).toBeGreaterThanOrEqual(1);
+    }
+    // 1..4096 逐字节穷举，覆盖 B/KB 进位边界。
+    for (let bytes = 1; bytes <= 4_096; bytes += 1) {
       const { value, unit } = bytesToDisplay(bytes);
       expect(bytesFromForm(value, unit), `${bytes} → ${value} ${unit}`).toBe(bytes);
     }

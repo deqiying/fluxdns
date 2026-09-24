@@ -759,14 +759,10 @@ select {
   font-size: 12px;
 }
 
-.system-runtime-content {
-  width: 100%;
-}
-
 .system-runtime-metrics {
   display: grid;
   width: 100%;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border-block: 1px solid #e8e9ec;
 }
 
@@ -794,24 +790,47 @@ select {
   font-weight: 400;
 }
 
+.system-runtime-value-compact {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.system-runtime-value-note {
+  display: block;
+  margin-top: 4px;
+  color: #73737d;
+  font-size: 13px;
+  font-weight: 400;
+}
+
 .system-runtime-sampled-at.ant-typography {
+  display: block;
+  padding: 18px 28px 16px;
   color: #73737d;
   font-size: 13px;
 }
 
-.system-runtime-details {
+/* 指标、采样说明与版本信息合并为同一张卡片；内部横线由各段落自己的边框提供。 */
+.system-runtime-card {
   width: 100%;
+  overflow: hidden;
+  border: 1px solid #e8e9ec;
+  border-radius: 12px;
+  background: #fff;
 }
 
-.system-runtime-details h4.ant-typography {
+.system-runtime-card-head {
+  padding: 18px 24px;
+}
+
+.system-runtime-card-head h4.ant-typography {
   margin: 0;
   font-size: 18px;
 }
 
 .system-runtime-descriptions {
-  margin-top: 14px;
   padding-block: 4px;
-  border-block: 1px solid #e8e9ec;
+  border-top: 1px solid #e8e9ec;
 }
 
 .system-runtime-descriptions .ant-descriptions-row > th,
@@ -1335,7 +1354,7 @@ select {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .system-runtime-metric:nth-child(3) {
+  .system-runtime-metric:nth-child(odd) {
     border-inline-start: 0;
   }
 

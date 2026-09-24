@@ -47,13 +47,19 @@ function unitOf(label: string) {
 
 it("回显时挑选能精确表示的最大单位", () => {
   const { rerender } = render(<App><ByteSizeInput label="内存上限" value={67_108_864} /></App>);
+  // 数值 ≥ 1 优先：64 MiB 回显 64 MB，而不是数值不足 1 的 0.0625 GB。
   expect(screen.getByLabelText("内存上限")).toHaveValue("64");
   expect(unitOf("内存上限")).toBe("MB");
 
-  // 小数回显无损：768 MB 用 0.75 GB 表示，与摘要 formatBytes 的量级一致。
+  // 小数回显无损且数值 ≥ 1：768 MiB 用 768 MB 表示，而不是 0.75 GB。
   rerender(<App><ByteSizeInput label="内存上限" value={805_306_368} /></App>);
-  expect(screen.getByLabelText("内存上限")).toHaveValue("0.75");
-  expect(unitOf("内存上限")).toBe("GB");
+  expect(screen.getByLabelText("内存上限")).toHaveValue("768");
+  expect(unitOf("内存上限")).toBe("MB");
+
+  // 超过 2 位小数但不超过 6 位：807306368 B 退到 KB 而不是整数字节。
+  rerender(<App><ByteSizeInput label="内存上限" value={807_306_368} /></App>);
+  expect(screen.getByLabelText("内存上限")).toHaveValue("788385.125");
+  expect(unitOf("内存上限")).toBe("KB");
 
   rerender(<App><ByteSizeInput label="内存上限" value={1_073_741_824} /></App>);
   expect(screen.getByLabelText("内存上限")).toHaveValue("1");
