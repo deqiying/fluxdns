@@ -524,7 +524,10 @@ describe("application routes", () => {
     renderApp("/dns-settings");
     expect(await screen.findByRole("heading", { name: "DNS 配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("数据保留")).toBeInTheDocument();
-    expect(await screen.findByText(/805306368/)).toBeInTheDocument();
+    // 存储大小一律以人类可读单位展示，不再暴露原始字节数。
+    expect(await screen.findByText("详情 768 MB")).toBeInTheDocument();
+    expect(await screen.findByText("64 MB")).toBeInTheDocument();
+    expect(await screen.findByText("1 GB")).toBeInTheDocument();
 
     // 所有 Duration 字段按「数值 + 单位」回显，单位从纳秒串换算成最大整单位。
     await user.click(screen.getByRole("button", { name: "编辑 DNS" }));

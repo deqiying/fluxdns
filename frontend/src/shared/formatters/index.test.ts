@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatBytes,
   formatBytesMiB,
   formatCount,
   formatDateTime,
@@ -32,5 +33,21 @@ describe("formatters", () => {
     expect(formatBytesMiB("18446744073709551615")).toMatch(/MiB$/);
     expect(formatBytesMiB("18446744073709551616")).toBe("—");
     expect(formatBytesMiB("01")).toBe("—");
+  });
+  it("按人类可读单位格式化字节数", () => {
+    expect(formatBytes(512)).toBe("512 B");
+    expect(formatBytes(1024)).toBe("1 KB");
+    expect(formatBytes(32_768)).toBe("32 KB");
+    expect(formatBytes(67_108_864)).toBe("64 MB");
+    expect(formatBytes("805306368")).toBe("768 MB");
+    expect(formatBytes("195454566")).toBe("186.4 MB");
+    expect(formatBytes(1_073_741_824)).toBe("1 GB");
+    // 四舍五入到 1024 个单位时进位到更大单位，避免出现「1,024 MB」。
+    expect(formatBytes(1_073_689_396)).toBe("1 GB");
+    expect(formatBytes(null)).toBe("—");
+    expect(formatBytes(-1)).toBe("—");
+    expect(formatBytes(Number.MAX_SAFE_INTEGER + 1)).toBe("—");
+    expect(formatBytes("01")).toBe("—");
+    expect(formatBytes("18446744073709551616")).toBe("—");
   });
 });

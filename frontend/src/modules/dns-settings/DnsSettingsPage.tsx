@@ -10,6 +10,7 @@ import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
 import { normalizeDuration } from "@/shared/config/form-values";
+import { formatBytes } from "@/shared/formatters";
 import { getRetentionStatus, previewRetention, retentionStatusKey } from "./api";
 
 type Schemas = components["schemas"];
@@ -120,7 +121,7 @@ export function DnsSettingsPage() {
         expected: { active_revision: statisticsQuery.data.state.active_revision, observed_file_revision: statisticsQuery.data.state.observed_file_revision },
         policy: value,
       });
-      const detail = `候选截止日期 ${preview.proposed_cutoff_utc_date}，当前详情文件 ${preview.detail_bytes} bytes。保存不会立即删除数据。`;
+      const detail = `候选截止日期 ${preview.proposed_cutoff_utc_date}，当前详情文件 ${formatBytes(preview.detail_bytes)}。保存不会立即删除数据。`;
       const operation = await statisticsMutation.mutateAsync({
         change: { module: "statistics", change: value },
         state: statisticsQuery.data.state,
@@ -139,8 +140,8 @@ export function DnsSettingsPage() {
       <PageState loading={loading} error={error} onRetry={() => { void dnsQuery.refetch(); void statisticsQuery.refetch(); }} />
       {dns && statistics && dnsQuery.data && statisticsQuery.data ? (
         <div className="settings-sections">
-          <section className="settings-section"><div><Typography.Title level={4}>缓存与解析</Typography.Title><Typography.Text type="secondary">缓存容量、失败 TTL、乐观缓存及持久化快照</Typography.Text></div><Descriptions column={{ xs: 1, sm: 2, md: 4 }}><Descriptions.Item label="缓存">{dns.cache?.enabled ? "启用" : "禁用"}</Descriptions.Item><Descriptions.Item label="内存上限">{dns.cache?.memory.max_size_bytes ?? "默认"} bytes</Descriptions.Item><Descriptions.Item label="快照">{dns.cache?.persistence?.enabled ? dns.cache.persistence.path : "禁用"}</Descriptions.Item><Descriptions.Item label="详情记录">{dns.resolve_log?.enable ? "启用" : "禁用"}</Descriptions.Item></Descriptions><Button icon={<Pencil size={16} />} disabled={!configStateEditable(dnsQuery.data.state)} onClick={() => setEditor("dns")}>编辑 DNS</Button></section>
-          <section className="settings-section"><div><Typography.Title level={4}>数据保留</Typography.Title><Typography.Text type="secondary">R/G/T 使用服务端真实 SQLite 与 WAL 长度预览</Typography.Text></div><Descriptions column={{ xs: 1, sm: 2, md: 4 }}><Descriptions.Item label="R">{statistics.retention?.days ?? 7} 天</Descriptions.Item><Descriptions.Item label="G">{statistics.retention?.grace_days ?? 3} 天</Descriptions.Item><Descriptions.Item label="T">{statistics.retention?.reference_size_bytes ?? 1_073_741_824} bytes</Descriptions.Item><Descriptions.Item label="已发布截止">{retentionQuery.data?.cutoff_utc_date ?? "尚未发布"}</Descriptions.Item></Descriptions><Space wrap>{retentionQuery.data ? <Tag>详情 {retentionQuery.data.detail_bytes} bytes</Tag> : null}<Button icon={<Pencil size={16} />} disabled={!configStateEditable(statisticsQuery.data.state)} onClick={() => setEditor("retention")}>编辑保留策略</Button></Space></section>
+          <section className="settings-section"><div><Typography.Title level={4}>缓存与解析</Typography.Title><Typography.Text type="secondary">缓存容量、失败 TTL、乐观缓存及持久化快照</Typography.Text></div><Descriptions column={{ xs: 1, sm: 2, md: 4 }}><Descriptions.Item label="缓存">{dns.cache?.enabled ? "启用" : "禁用"}</Descriptions.Item><Descriptions.Item label="内存上限">{dns.cache ? formatBytes(dns.cache.memory.max_size_bytes) : "默认"}</Descriptions.Item><Descriptions.Item label="快照">{dns.cache?.persistence?.enabled ? dns.cache.persistence.path : "禁用"}</Descriptions.Item><Descriptions.Item label="详情记录">{dns.resolve_log?.enable ? "启用" : "禁用"}</Descriptions.Item></Descriptions><Button icon={<Pencil size={16} />} disabled={!configStateEditable(dnsQuery.data.state)} onClick={() => setEditor("dns")}>编辑 DNS</Button></section>
+          <section className="settings-section"><div><Typography.Title level={4}>数据保留</Typography.Title><Typography.Text type="secondary">R/G/T 使用服务端真实 SQLite 与 WAL 长度预览</Typography.Text></div><Descriptions column={{ xs: 1, sm: 2, md: 4 }}><Descriptions.Item label="R">{statistics.retention?.days ?? 7} 天</Descriptions.Item><Descriptions.Item label="G">{statistics.retention?.grace_days ?? 3} 天</Descriptions.Item><Descriptions.Item label="T">{formatBytes(statistics.retention?.reference_size_bytes ?? 1_073_741_824)}</Descriptions.Item><Descriptions.Item label="已发布截止">{retentionQuery.data?.cutoff_utc_date ?? "尚未发布"}</Descriptions.Item></Descriptions><Space wrap>{retentionQuery.data ? <Tag>详情 {formatBytes(retentionQuery.data.detail_bytes)}</Tag> : null}<Button icon={<Pencil size={16} />} disabled={!configStateEditable(statisticsQuery.data.state)} onClick={() => setEditor("retention")}>编辑保留策略</Button></Space></section>
         </div>
       ) : null}
       <ConfigFormModal open={editor === "dns"} title="编辑 DNS 配置" dirty={dirty} busy={dnsMutation.isPending} error={dnsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveDns()}>

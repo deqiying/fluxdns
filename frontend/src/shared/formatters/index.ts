@@ -66,3 +66,48 @@ export function formatBytesMiB(value: string | null | undefined): string {
   const fraction = tenths % 10n;
   return `${integerFormatter.format(whole)}${fraction === 0n ? "" : `.${fraction}`} MiB`;
 }
+
+/** 配置展示用的字节单位阶梯，按 1024 进制递进；标签与用户阅读习惯一致。 */
+const BYTE_UNITS = [
+  { label: "TB", factor: 1_099_511_627_776n },
+  { label: "GB", factor: 1_073_741_824n },
+  { label: "MB", factor: 1_048_576n },
+  { label: "KB", factor: 1_024n },
+  { label: "B", factor: 1n },
+] as const;
+
+/** 以 0.1 个单位为精度四舍五入，返回十倍值，避免浮点误差。 */
+function roundTenths(bytes: bigint, factor: bigint): bigint {
+  return (bytes * 10n + factor / 2n) / factor;
+}
+
+/** 十进制 u64 字符串或安全整数统一转 BigInt；超出 u64 或格式非法时返回 null。 */
+function toByteCount(value: number | string | null | undefined): bigint | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : null;
+  }
+  if (!/^(0|[1-9][0-9]{0,19})$/.test(value)) return null;
+  const bytes = BigInt(value);
+  return bytes > U64_MAX ? null : bytes;
+}
+
+/**
+ * 配置字段的字节数格式化：按 1024 进制自适应到最大可读单位，整数不显示小数。
+ * 与固定 MiB 的 formatBytesMiB 并存，后者服务于进程指标既有展示契约。
+ */
+export function formatBytes(value: number | string | null | undefined): string {
+  const bytes = toByteCount(value);
+  if (bytes === null) return "—";
+  let index = BYTE_UNITS.findIndex((unit) => bytes >= unit.factor);
+  if (index < 0) index = BYTE_UNITS.length - 1;
+  let tenths = roundTenths(bytes, BYTE_UNITS[index].factor);
+  // 四舍五入可能补足到 1024，此时进位到更大单位，避免出现「1,024 KB」这类边界写法。
+  if (tenths >= 10_240n && index > 0) {
+    index -= 1;
+    tenths = roundTenths(bytes, BYTE_UNITS[index].factor);
+  }
+  const whole = tenths / 10n;
+  const fraction = tenths % 10n;
+  return `${integerFormatter.format(whole)}${fraction === 0n ? "" : `.${fraction}`} ${BYTE_UNITS[index].label}`;
+}
