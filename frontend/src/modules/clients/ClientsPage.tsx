@@ -4,9 +4,11 @@ import { Pencil, Plus, Search } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { DurationInput, durationOptionalRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { clientEditValue } from "@/shared/config/contract";
+import { normalizeDuration } from "@/shared/config/form-values";
 import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
@@ -53,8 +55,8 @@ export function ClientsPage() {
         strategy: editing.strategy,
         cache_mode: editing.cache ? (editing.cache.enabled ? "enabled" : "disabled") : "inherit",
         ttl_mode: editing.ttl_override ? (editing.ttl_override.enabled === false ? "disabled" : "enabled") : "inherit",
-        ttl_min: editing.ttl_override?.min,
-        ttl_max: editing.ttl_override?.max,
+        ttl_min: normalizeDuration(editing.ttl_override?.min),
+        ttl_max: normalizeDuration(editing.ttl_override?.max),
         ecs_mode: editing.edns_client_subnet?.mode ?? "inherit",
         ecs_custom_ip: editing.edns_client_subnet?.custom_ip,
       });
@@ -103,7 +105,7 @@ export function ClientsPage() {
           <Form.Item name="strategy" label="策略"><Select allowClear showSearch options={strategyOptions} placeholder="继承默认" /></Form.Item>
           <Form.Item name="cache_mode" label="缓存覆盖" rules={[{ required: true }]}><Select options={[{ label: "继承", value: "inherit" }, { label: "启用", value: "enabled" }, { label: "禁用", value: "disabled" }]} /></Form.Item>
           <Form.Item name="ttl_mode" label="TTL 覆盖" rules={[{ required: true }]}><Select options={[{ label: "继承", value: "inherit" }, { label: "启用覆盖", value: "enabled" }, { label: "禁用覆盖", value: "disabled" }]} /></Form.Item>
-          {ttlMode === "enabled" ? <Space className="paired-fields" align="start"><Form.Item name="ttl_min" label="最小 TTL"><Input placeholder="30s" /></Form.Item><Form.Item name="ttl_max" label="最大 TTL"><Input placeholder="1h" /></Form.Item></Space> : null}
+          {ttlMode === "enabled" ? <Space className="paired-fields" align="start"><Form.Item name="ttl_min" label="最小 TTL" rules={durationOptionalRules}><DurationInput label="最小 TTL" /></Form.Item><Form.Item name="ttl_max" label="最大 TTL" rules={durationOptionalRules}><DurationInput label="最大 TTL" /></Form.Item></Space> : null}
           <Form.Item name="ecs_mode" label="ECS 覆盖" rules={[{ required: true }]}><Select options={[{ label: "继承", value: "inherit" }, { label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }]} /></Form.Item>
           {ecsMode === "custom" ? <Form.Item name="ecs_custom_ip" label="自定义 ECS" rules={[{ required: true }]}><Input /></Form.Item> : null}
         </Form>

@@ -4,9 +4,9 @@
 >
 > 适用范围：已接入路由、页面数据源、查询状态和实际能力范围
 >
-> 最后核对：2026-09-24（监听入口标题区文案、同步胶囊、表头列名与页面级样式核对；解析记录、服务状态及分批历史结果沿用原核对范围）
+> 最后核对：2026-09-24（监听入口标题区文案、同步胶囊、表头列名与页面级样式核对，以及全部配置 Duration 字段的时长单位统一；解析记录、服务状态及分批历史结果沿用原核对范围）
 >
-> 核对基线：`2b3b160` 加本次工作树变更；本轮核对监听入口标题区，解析记录、服务状态及分批历史结果按原日期和基线解释
+> 核对基线：`2b3b160` 加本次工作树变更；本轮核对监听入口标题区和 Duration 单位统一，解析记录、服务状态及分批历史结果按原日期和基线解释
 
 ## 路由与数据源
 
@@ -20,7 +20,7 @@
 | `/queries` | [QueriesPage](../../../frontend/src/modules/queries/QueriesPage.tsx) | v2 cursor 查询、身份/来源/Answer、实时缓冲和稳定详情 |
 | `/system-runtime` | [SystemPage](../../../frontend/src/modules/system/SystemPage.tsx) | v2 进程采样、版本和启动时间 |
 | `/listeners` | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx) | UDP/TCP/DoH 类型化列表、运行状态列与编辑；标题区与 服务状态／解析记录 同构，只显示同步胶囊，不显示 revision |
-| `/upstreams` | [UpstreamsPage](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx) | Hosts/DoH/Group 类型化读写及“上游 / 上游组”URL tab |
+| `/upstreams` | [UpstreamsPage](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx) | Hosts/DoH/Group 类型化读写及“上游 / 上游组”URL tab；上游组超时用“数字 + 单位”编辑，默认秒 |
 | `/dns-settings` | [DnsSettingsPage](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) | DNS/cache/TTL/ECS/详情与 R/G/T 预览保存 |
 | `/strategies` | [StrategiesPage](../../../frontend/src/modules/strategies/StrategiesPage.tsx) | 有序规则和 cache/TTL/ECS 继承/覆盖 |
 | `/hosts` | [HostsPage](../../../frontend/src/modules/hosts/HostsPage.tsx) | const/file 来源、运行状态与类型化编辑 |
@@ -30,6 +30,8 @@
 | `/system-settings` | [SystemSettingsPage](../../../frontend/src/modules/system-settings/SystemSettingsPage.tsx) | 启动字段只读、logs enable/level/path 热编辑 |
 
 12 个目标入口都已进入 router；`/dashboard` 与 `/queries` 已接入 v2 HTTP/WS，`/system-runtime` 接入 BC-23 的 v2 进程查询并统一返回版本与启动时间，其余九个 P3 配置入口接入 v2 typed module API。原 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 不再注册且返回正常 404；旧页面源码、API/hooks、兼容 fixture 和 v1 类型已删除。
+
+所有配置 Duration 字段（DNS 缓存失败 TTL／乐观回答 TTL／最大陈旧时间／快照周期／TTL 覆盖上下限、Hosts 检查周期、规则集更新周期、客户端与策略 TTL 覆盖、上游组主要超时与回退超时）统一用共享 [`DurationInput`](../../../frontend/src/shared/components/DurationInput.tsx) 的「数值 + 单位」编辑，单位只提供毫秒/秒/分钟/小时/天且默认秒；规则集刷新列等摘要展示经 [`formatDurationText`](../../../frontend/src/shared/config/form-values.ts) 输出可感知单位，回填时把后端恒为纳秒的串归一化成紧凑 duration。
 
 ## 查询与缓存行为
 
@@ -76,6 +78,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | 稳定详情 | record-keyed Popover、detail formatter | 列表结果与按 ID detail | 持续写入下固定 ID、显式查看新记录、桌面/移动浏览器 | 不重建已过期或历史丢失值 |
 | P3 配置管理 | 九个 Page、v2 module hooks、ConfigFileStatus | 十模块读写、保留 preview、文件差异/组合采用 | 91 项 P3 Vitest；真实文件/SQLite/UDP/Bearer HTTP/两档浏览器 | Linux/macOS 未验证；Windows 主链路结果见联合验收 |
 | 监听入口标题区统一 | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx)、`ConfigSyncBadge`、[useConfigState](../../../frontend/src/shared/config/hooks.ts)、[index.css](../../../frontend/src/styles/index.css) | `/listeners` 标题区不再消费 `ConfigStateSummary` 的 revision；胶囊读全局轮询状态，编辑禁用仍按模块读取判定 | 2026-09-24：前端 26 文件 115 项 Vitest 与 `pnpm run typecheck`、生产构建通过；新增用例断言同构短句副标题、胶囊 pending 色调、搜索占位、弹窗标题与 revision 不再渲染 | 未在真实浏览器复验 34px／字距／胶囊尺寸等视觉数值；其他配置页仍保留 revision，未一并调整 |
+| Duration 单位统一 | [DurationInput](../../../frontend/src/shared/components/DurationInput.tsx)、[form-values](../../../frontend/src/shared/config/form-values.ts)、`DnsSettingsPage`／`HostsPage`／`RuleSetsPage`／`ClientsPage`／`StrategiesPage`／`UpstreamsPage` | `/upstreams` 上游组超时、`/dns-settings` 六个时长字段（缓存失败 TTL／乐观回答 TTL／最大陈旧时间／快照周期／TTL 上下限）、`/hosts` 与 `/rule-sets` 更新周期、`/clients` 与 `/strategies` TTL 上下限改用「数值 + 单位」，默认秒；规则集刷新列改显示 `1 天` 一类文本 | 2026-09-24：前端 27 文件 120 项 Vitest 与 `pnpm run typecheck`、生产构建通过；用例断言 `5000000000ns`→5 秒、`300000000000ns`→5 分钟、`86400000000000ns`→1 天、键入 `1.5` 不被回显改写单位、未编辑字段归一化后提交 `"1500ms"`／`"3s"`、DNS 弹窗四个必填时长字段单位正确、策略弹窗 `0s` 上下限可保存为 `ttl_override.min = "0s"` | 未在真实浏览器复验控件外观；后端字段上下界（如 `failure_ttl` 1s–5m、`snapshot_interval` 1s–1d）仍只在后端校验，前端只拦必填空值、必填零值与不可表示量级；DNS 保存分支与 `/hosts`、`/clients` 弹窗仅由回填断言覆盖，未逐页断言提交报文 |
 
 P4 完整 Vitest 为 23 文件 99 项，v2 schema contract 4 项、typecheck 与 production build 通过。Windows 使用 `_fluxdns/p4-live/` ConfigV2 和内嵌 debug binary 完成真实登录、Bearer ticket、UDP/SQLite/HTTP/WS、断线 replay、会话失效、稳定详情以及桌面/390×844 验收，浏览器 Console 无 error/warning。P3 配置验收仍见[前端应用](application.md#p3-联合验收2026-09-08)，P4 安全和实时证据见[共享实时连接](application.md#p4-共享实时连接2026-09-09)。
 

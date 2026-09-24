@@ -71,6 +71,110 @@ export function durationFromNanoseconds(value: bigint): string {
   }
   return parts.join("");
 }
+/** 时长可选单位：只覆盖人可感知的量级，刻意不提供 ns/us，避免暴露不可感知的纳秒值。 */
+export const DURATION_UNITS = ["ms", "s", "m", "h", "d"] as const;
+
+export type DurationUnit = (typeof DURATION_UNITS)[number];
+
+/** 空值与新建记录的默认单位固定为秒。 */
+export const DEFAULT_DURATION_UNIT: DurationUnit = "s";
+
+export const DURATION_UNIT_LABELS: Record<DurationUnit, string> = {
+  ms: "毫秒",
+  s: "秒",
+  m: "分钟",
+  h: "小时",
+  d: "天",
+};
+
+/** 回显时从大到小挑选可整除的单位，天数等大单位不会退化成 86400 秒这样的数字。 */
+const WHOLE_DURATION_UNITS: readonly DurationUnit[] = ["d", "h", "m", "s"];
+
+export interface DurationFormValue {
+  /** 十进制数值字符串，保留用户输入精度，不经过浮点数往返。 */
+  amount: string;
+  unit: DurationUnit;
+}
+
+/**
+ * 接口返回的紧凑 duration（后端恒为纳秒串）换算成「数值 + 单位」：
+ * 优先用能整除的最大单位，不足一秒才按毫秒精确展开。语法非法时抛错，由调用方决定提示方式。
+ */
+export function durationToForm(value: string | undefined): DurationFormValue {
+  if (value === undefined || value === "") return { amount: "", unit: DEFAULT_DURATION_UNIT };
+  const nanos = durationToNanoseconds(value);
+  if (nanos === 0n) return { amount: "0", unit: DEFAULT_DURATION_UNIT };
+  for (const unit of WHOLE_DURATION_UNITS) {
+    const factor = DURATION_FACTORS[unit];
+    if (nanos % factor === 0n) return { amount: exactDecimal(nanos, factor), unit };
+  }
+  return { amount: exactDecimal(nanos, DURATION_FACTORS.ms), unit: "ms" };
+}
+
+/**
+ * 摘要与表格展示用文本：把纳秒串显示成最大整单位（`300000000000ns` → `5 分钟`）。
+ * 语法非法时原样返回，避免展示层静默改写后端事实。
+ */
+export function formatDurationText(value: string | undefined): string {
+  if (value === undefined || value === "") return "";
+  try {
+    const form = durationToForm(value);
+    return form.amount === "" ? value : `${form.amount} ${DURATION_UNIT_LABELS[form.unit]}`;
+  } catch {
+    return value;
+  }
+}
+
+/**
+ * 「数值 + 单位」组合回紧凑 duration，只校验精确可表示性与语法；
+ * 正数、上下界等字段语义仍由后端权威校验。
+ */
+export function durationFromForm(amount: string, unit: DurationUnit): string {
+  const trimmed = amount.trim();
+  if (trimmed === "" || trimmed.length > 64) throw new Error("invalid duration");
+  const factor = DURATION_FACTORS[unit];
+  const decimal = exactDecimal(parseExactDecimal(trimmed, factor), factor);
+  // 后端 parse_duration 只接受 1..9 位小数，超出时抛错让控件保留原文并由表单校验提示。
+  if (/\.\d{10,}$/.test(decimal)) throw new Error("invalid duration");
+  return `${decimal}${unit}`;
+}
+
+/**
+ * 把接口的纳秒串归一化成与表单等价的紧凑串（5000000000ns → 5s），
+ * 用于表单回填：用户未编辑该字段时也不会把纳秒量级写回变更报文。
+ * 语法非法时原样返回，交由控件与校验处理。
+ */
+export function normalizeDuration(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const form = durationToForm(value);
+    return form.amount === "" ? value : durationFromForm(form.amount, form.unit);
+  } catch {
+    return value;
+  }
+}
+/** 供表单校验使用：语法合法且严格大于 0（后端拒绝零值超时）。 */
+export function isPositiveDuration(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    return durationToNanoseconds(value) > 0n;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 供表单校验使用：语法合法且允许 0。
+ * TTL 上下限的 `0s` 在后端与配置文档中表示“该边界不设限”，不能当非法值拒绝。
+ */
+export function isNonNegativeDuration(value: string | undefined): boolean {
+  if (!value) return false;
+  try {
+    return durationToNanoseconds(value) >= 0n;
+  } catch {
+    return false;
+  }
+}
 
 /** 只负责 IP/CIDR 词法检查；业务冲突与网段归一化仍由后端权威校验。 */
 export function isIpOrCidr(value: string): boolean {

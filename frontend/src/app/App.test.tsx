@@ -409,20 +409,75 @@ describe("application routes", () => {
   });
 
   it("规则集页面区分远程来源和陈旧快照", async () => {
+    const user = userEvent.setup();
     setMockAuthenticated(true);
     renderApp("/rule-sets");
     expect(await screen.findByRole("heading", { name: "规则集", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("domains")).toBeInTheDocument();
     expect(screen.getByText("stale")).toBeInTheDocument();
-  });
+    // 刷新列显示可感知单位，不再直接暴露后端的纳秒串。
+    expect(screen.getByText("1 天")).toBeInTheDocument();
+    expect(screen.queryByText("86400000000000ns")).toBeNull();
+
+    await user.click(screen.getByLabelText("编辑规则集 domains"));
+    const dialog = await screen.findByRole("dialog", { name: "编辑规则集" });
+    expect(within(dialog).getByLabelText("更新周期")).toHaveValue("1");
+    expect(within(dialog).getByLabelText("更新周期单位").closest(".ant-select")?.textContent).toBe("天");
+  }, 10_000);
 
   it("策略页面展示有序规则和覆盖来源", async () => {
+    const user = userEvent.setup();
+    const requests: unknown[] = [];
     setMockAuthenticated(true);
+    server.use(
+      http.post("/api/v2/config/modules/strategy/validate", async ({ request }) => {
+        const candidate = await request.json() as { expected: unknown };
+        requests.push(candidate);
+        return HttpResponse.json({
+          validation_token: "validation-strategy",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: [],
+          affected_names: ["default"],
+        });
+      }),
+      http.post("/api/v2/config/modules/strategy/apply", async ({ request }) => {
+        const body = await request.json() as { operation_id: string };
+        requests.push(body);
+        return HttpResponse.json({
+          operation_id: body.operation_id,
+          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
+        });
+      }),
+    );
     renderApp("/strategies");
     expect(await screen.findByRole("heading", { name: "DNS 分流策略", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("default-group")).toBeInTheDocument();
     expect(screen.getByText("2 条")).toBeInTheDocument();
-  });
+
+    // 可选 TTL 覆盖同样按「数值 + 单位」回显；0 表示该边界不设限，必须允许保存。
+    await user.click(screen.getByLabelText("编辑策略 default"));
+    const dialog = await screen.findByRole("dialog", { name: "编辑策略" });
+    const min = within(dialog).getByLabelText("最小 TTL");
+    expect(min).toHaveValue("30");
+    expect(within(dialog).getByLabelText("最小 TTL单位").closest(".ant-select")?.textContent).toBe("秒");
+    expect(within(dialog).getByLabelText("最大 TTL")).toHaveValue("1");
+    expect(within(dialog).getByLabelText("最大 TTL单位").closest(".ant-select")?.textContent).toBe("小时");
+    await user.clear(min);
+    await user.type(min, "0");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]).toMatchObject({
+      changes: [{
+        module: "strategy",
+        change: {
+          action: "update",
+          original_name: "default",
+          value: { ttl_override: { enabled: true, min: "0s", max: "1h" } },
+        },
+      }],
+    });
+  }, 10_000);
 
   it("Listener 页面展示真实绑定接纳状态", async () => {
     setMockAuthenticated(true);
@@ -464,12 +519,25 @@ describe("application routes", () => {
   }, 10_000);
 
   it("DNS 页面展示缓存、详情和真实保留状态", async () => {
+    const user = userEvent.setup();
     setMockAuthenticated(true);
     renderApp("/dns-settings");
     expect(await screen.findByRole("heading", { name: "DNS 配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("数据保留")).toBeInTheDocument();
     expect(await screen.findByText(/805306368/)).toBeInTheDocument();
-  });
+
+    // 所有 Duration 字段按「数值 + 单位」回显，单位从纳秒串换算成最大整单位。
+    await user.click(screen.getByRole("button", { name: "编辑 DNS" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 DNS 配置" });
+    expect(within(dialog).getByLabelText("失败 TTL")).toHaveValue("5");
+    expect(within(dialog).getByLabelText("失败 TTL单位").closest(".ant-select")?.textContent).toBe("秒");
+    expect(within(dialog).getByLabelText("回答 TTL")).toHaveValue("10");
+    expect(within(dialog).getByLabelText("快照周期")).toHaveValue("5");
+    expect(within(dialog).getByLabelText("快照周期单位").closest(".ant-select")?.textContent).toBe("分钟");
+    expect(within(dialog).getByLabelText("最大陈旧时间")).toHaveValue("1");
+    expect(within(dialog).getByLabelText("最大陈旧时间单位").closest(".ant-select")?.textContent).toBe("天");
+    expect(within(dialog).queryByDisplayValue("5000000000ns")).toBeNull();
+  }, 10_000);
 
   it("系统配置页面区分只读启动配置和可编辑日志", async () => {
     const user = userEvent.setup();
@@ -576,6 +644,62 @@ describe("application routes", () => {
     await waitFor(() => expect(window.location.search).toBe(""));
     await waitFor(() => expect(screen.getByRole("tab", { name: "上游" })).toHaveAttribute("aria-selected", "true"));
   });
+
+  it("上游组超时按秒回显并以紧凑 duration 提交", async () => {
+    const user = userEvent.setup();
+    const requests: unknown[] = [];
+    setMockAuthenticated(true);
+    server.use(
+      http.post("/api/v2/config/modules/upstreams/validate", async ({ request }) => {
+        const candidate = await request.json() as { expected: unknown };
+        requests.push(candidate);
+        return HttpResponse.json({
+          validation_token: "validation-upstreams",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: [],
+          affected_names: ["default-group"],
+        });
+      }),
+      http.post("/api/v2/config/modules/upstreams/apply", async ({ request }) => {
+        const body = await request.json() as { operation_id: string };
+        requests.push(body);
+        return HttpResponse.json({
+          operation_id: body.operation_id,
+          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
+        });
+      }),
+    );
+    renderApp("/upstreams?tab=groups");
+    expect(await screen.findByText("default-group")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("编辑上游 default-group"));
+    const dialog = await screen.findByRole("dialog", { name: "编辑上游" });
+
+    // 后端回显的纳秒串换算成「秒」，界面不再出现纳秒量级文本。
+    expect(within(dialog).getByLabelText("主要超时")).toHaveValue("5");
+    expect(within(dialog).getByLabelText("主要超时单位").closest(".ant-select")?.textContent).toBe("秒");
+    expect(within(dialog).getByLabelText("Fallback 超时")).toHaveValue("3");
+    expect(within(dialog).queryByDisplayValue("5000000000ns")).toBeNull();
+
+    // 改成毫秒单位后提交仍是紧凑 duration 串，不写裸数字。
+    const timeout = within(dialog).getByLabelText("主要超时");
+    await user.clear(timeout);
+    await user.type(timeout, "1500");
+    await user.click(within(dialog).getByLabelText("主要超时单位"));
+    await user.click(await screen.findByTitle("毫秒"));
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]).toMatchObject({
+      changes: [{
+        module: "upstreams",
+        change: {
+          action: "update",
+          original_name: "default-group",
+          value: { type: "group", timeout: "1500ms", fallback_timeout: "3s" },
+        },
+      }],
+    });
+  }, 10_000);
 
   it("普通 API 返回 401 时只跳转一次并显示 session 过期提示", async () => {
     setMockAuthenticated(true);

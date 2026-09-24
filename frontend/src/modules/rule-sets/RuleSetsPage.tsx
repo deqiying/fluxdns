@@ -4,8 +4,10 @@ import { Pencil, Plus, Search } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { DurationInput, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
+import { formatDurationText, normalizeDuration } from "@/shared/config/form-values";
 import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
@@ -45,9 +47,9 @@ export function RuleSetsPage() {
     } else if (editing.type === "const") {
       form.setFieldsValue({ name: editing.name, type: "const", format: editing.format, content: editing.rule });
     } else if (editing.type === "file") {
-      form.setFieldsValue({ name: editing.name, type: "file", format: editing.format, path: editing.path, auto_update: editing.auto_update, update_interval: editing.update_interval });
+      form.setFieldsValue({ name: editing.name, type: "file", format: editing.format, path: editing.path, auto_update: editing.auto_update, update_interval: normalizeDuration(editing.update_interval) });
     } else {
-      form.setFieldsValue({ name: editing.name, type: "remote", format: editing.format, url: editing.url, proxy: editing.proxy, auto_update: editing.auto_update, update_interval: editing.update_interval });
+      form.setFieldsValue({ name: editing.name, type: "remote", format: editing.format, url: editing.url, proxy: editing.proxy, auto_update: editing.auto_update, update_interval: normalizeDuration(editing.update_interval) });
     }
   }, [editing, form]);
 
@@ -56,7 +58,7 @@ export function RuleSetsPage() {
     { title: "来源", width: 110, render: (_, item) => <Tag color={item.type === "remote" ? "blue" : undefined}>{sourceTypeLabel(item.type)}</Tag> },
     { title: "格式", dataIndex: "format", width: 100, render: (value: string) => <Tag>{value.toUpperCase()}</Tag> },
     { title: "位置", ellipsis: true, render: (_, item) => <Typography.Text code={item.type !== "const"}>{sourceLabel(item)}</Typography.Text> },
-    { title: "刷新", width: 130, render: (_, item) => item.type !== "const" && item.auto_update ? item.update_interval ?? "默认周期" : "不自动刷新" },
+    { title: "刷新", width: 130, render: (_, item) => item.type !== "const" && item.auto_update ? (item.update_interval ? formatDurationText(item.update_interval) : "默认周期") : "不自动刷新" },
     {
       title: "状态", width: 120, render: (_, item) => {
         const runtime = query.data?.runtime.find((value) => value.module === "rule_set" && value.name === item.name);
@@ -122,7 +124,7 @@ export function RuleSetsPage() {
               ) : <Form.Item name="path" label="文件路径" rules={[{ required: true }, { max: 4096 }]}><Input autoComplete="off" /></Form.Item>}
               <Form.Item name="auto_update" label="自动更新" valuePropName="checked"><Switch /></Form.Item>
               <Form.Item noStyle shouldUpdate={(previous, current) => previous.auto_update !== current.auto_update}>
-                {({ getFieldValue }) => getFieldValue("auto_update") ? <Form.Item name="update_interval" label="更新周期" rules={[{ required: true }]}><Input placeholder="24h" /></Form.Item> : null}
+                {({ getFieldValue }) => getFieldValue("auto_update") ? <Form.Item name="update_interval" label="更新周期" rules={durationRequiredRules}><DurationInput label="更新周期" /></Form.Item> : null}
               </Form.Item>
             </>
           )}

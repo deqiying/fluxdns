@@ -59,9 +59,9 @@ P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个�
 
 [`operation.ts`](../../../frontend/src/shared/config/operation.ts) 要求首次发送前固定 `operation_id`。apply 返回进行中时有界轮询；网络失败或 timeout 后只按同一 ID 查询，不重放 apply；`unknown` 另行回读活动状态，不能推断操作未执行。结果 ID 不一致按非法响应拒绝。表单 phase 保留打开时的双 revision 草稿，settled 前不把结果未知伪装成失败或成功。
 
-[`query-keys.ts`](../../../frontend/src/shared/config/query-keys.ts) 将模块、活动 revision 和文件 revision 纳入 key；保存后只失效目标模块、确定的引用依赖、状态和概览，不清空全部查询。[`form-values.ts`](../../../frontend/src/shared/config/form-values.ts) 用 BigInt 做字节/duration 精确转换，区分继承与显式值、保留已删除引用占位，并在 variant 提交时只选择白名单字段；IP/CIDR helper 只负责词法检查，冲突和规范化仍以服务端为准。
+[`query-keys.ts`](../../../frontend/src/shared/config/query-keys.ts) 将模块、活动 revision 和文件 revision 纳入 key；保存后只失效目标模块、确定的引用依赖、状态和概览，不清空全部查询。[`form-values.ts`](../../../frontend/src/shared/config/form-values.ts) 用 BigInt 做字节/duration 精确转换，区分继承与显式值、保留已删除引用占位，并在 variant 提交时只选择白名单字段；IP/CIDR helper 只负责词法检查，冲突和规范化仍以服务端为准。duration 表单换算只提供毫秒/秒/分钟/小时/天，回填按能整除的最大整单位归一化（`5000000000ns` → `5s`、`300000000000ns` → `5 分钟`，非整秒按毫秒精确展开），摘要展示复用同一换算的 `formatDurationText`，提交仍写回紧凑 duration；前端只拦必填字段的空值与零值、非法串和小数位超过后端 9 位上限的组合，TTL 上下限按后端语义允许 `0s`（表示该边界不设限），字段上下界仍由后端权威校验。
 
-[`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx) 统一受限高度、内部滚动、保存防重、脏关闭确认、安全错误与 request ID 展示，并提供字段路径到 Ant Design Form 的定位转换。它是业务表单容器而非 schema 自动表单；P3 各页面按自身领域上下界和类型分支使用该容器。
+[`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx) 统一受限高度、内部滚动、保存防重、脏关闭确认、安全错误与 request ID 展示，并提供字段路径到 Ant Design Form 的定位转换。它是业务表单容器而非 schema 自动表单；P3 各页面按自身领域上下界和类型分支使用该容器。共享 [`DurationInput`](../../../frontend/src/shared/components/DurationInput.tsx) 用“数字 + 单位”编辑 duration 字段，默认单位为秒，只在回填时换算一次纳秒串，避免把人类不可感知的 ns/us 量级暴露到界面；它已覆盖 DNS 缓存 TTL／快照周期、Hosts 检查周期、规则集更新周期、客户端与策略 TTL 覆盖和上游组超时，必填字段用 `durationRequiredRules`，可选边界用 `durationOptionalRules`（留空表示不设置，`0s` 表示该边界不设限）。
 
 ## P1 外部配置变化基础（2026-09-08）
 
@@ -95,19 +95,19 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 已替换 `/proxies` 空态，提供搜索、新建和按旧 name 编辑。表单只在 env/file 两类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；实际 Secret 值不进入浏览器。MSW 交互测试检查单模块路径、预校验先于 apply、旧 name 和 SecretRef payload；真实后端热应用与文件证据见 P3 联合验收。
 
-[`HostsPage`](../../../frontend/src/modules/hosts/HostsPage.tsx) 已替换 `/hosts` 空态，读取类型化 `const/file` 来源、引用数和 Runtime ready/stale/failed 状态。表单按来源只提交内联正文或文件路径/更新周期，并保留 `json/hosts` 格式；来源切换不会携带隐藏分支字段。
+[`HostsPage`](../../../frontend/src/modules/hosts/HostsPage.tsx) 已替换 `/hosts` 空态，读取类型化 `const/file` 来源、引用数和 Runtime ready/stale/failed 状态。表单按来源只提交内联正文或文件路径/更新周期，并保留 `json/hosts` 格式；来源切换不会携带隐藏分支字段。文件来源的检查周期用共享 `DurationInput`（默认秒），回填把后端的纳秒串归一化成紧凑串。
 
-[`RuleSetsPage`](../../../frontend/src/modules/rule-sets/RuleSetsPage.tsx) 已替换 `/rule-sets` 空态，区分 `const/file/remote` 与 `json/clash/dat`，并显示远程代理、刷新计划及 Runtime stale/failed 状态。表单只提交当前来源字段；`clash` 保持行格式，`dat` 不作为 YAML/JSON 文本解析，也未增加主动刷新端点。
+[`RuleSetsPage`](../../../frontend/src/modules/rule-sets/RuleSetsPage.tsx) 已替换 `/rule-sets` 空态，区分 `const/file/remote` 与 `json/clash/dat`，并显示远程代理、刷新计划及 Runtime stale/failed 状态。表单只提交当前来源字段；`clash` 保持行格式，`dat` 不作为 YAML/JSON 文本解析，也未增加主动刷新端点。自动更新周期同样使用共享 `DurationInput`；列表刷新列经 `formatDurationText` 显示 `1 天` 这类可感知单位，不再直接输出后端纳秒串。
 
-[`UpstreamsPage`](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx) 已替换 `/upstreams` tab 空态，在同一模块读写 Hosts、DoH 和 Group。DoH 只提交当前 address/bootstrap/connect_ip/proxy/ECS 字段；组成员与 fallback 使用有序结构化名称/权重控件，类型和模式切换不携带隐藏字段。嵌套组、循环、模式权重和改名引用仍由后端完整候选权威校验。v2 OpenAPI 同批补充 Listener/Upstream discriminator mapping，生成类型现在使用线上真实 `udp/tcp/doh` 与 `hosts/doh/group`，不再误用 schema 名称作为 type 值。
+[`UpstreamsPage`](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx) 已替换 `/upstreams` tab 空态，在同一模块读写 Hosts、DoH 和 Group。DoH 只提交当前 address/bootstrap/connect_ip/proxy/ECS 字段；组成员与 fallback 使用有序结构化名称/权重控件，类型和模式切换不携带隐藏字段。上游组弹窗的主要超时与回退超时改用共享 `DurationInput`，回填把 `5000000000ns` 显示成 `5 秒`，未编辑字段也在回填时归一化成紧凑串，不再把纳秒量级写回候选。嵌套组、循环、模式权重和改名引用仍由后端完整候选权威校验。v2 OpenAPI 同批补充 Listener/Upstream discriminator mapping，生成类型现在使用线上真实 `udp/tcp/doh` 与 `hosts/doh/group`，不再误用 schema 名称作为 type 值。
 
-[`StrategiesPage`](../../../frontend/src/modules/strategies/StrategiesPage.tsx) 已替换 `/strategies` 空态。规则表单保持顺序并区分 Hosts 本地回答和 rule_set+upstream，两类字段互斥；上移、下移和移除均更新整体候选。cache、TTL、ECS 明确区分继承、启用和禁用，不用空值代替继承。
+[`StrategiesPage`](../../../frontend/src/modules/strategies/StrategiesPage.tsx) 已替换 `/strategies` 空态。规则表单保持顺序并区分 Hosts 本地回答和 rule_set+upstream，两类字段互斥；上移、下移和移除均更新整体候选。cache、TTL、ECS 明确区分继承、启用和禁用，不用空值代替继承。启用 TTL 覆盖时最小/最大 TTL 用共享 `DurationInput`，留空表示不设置该边界，`0s` 表示该边界不设限。
 
 [`ListenersPage`](../../../frontend/src/modules/listeners/ListenersPage.tsx) 已替换 `/listeners` 空态。UDP/TCP 编辑地址、端口、策略和可选 Hosts；DoH 编辑有序 route 及多个 endpoint，并按 TLS terminate/external、peer/forwarded_header/proxy_protocol 选择白名单字段。列表从 Runtime 投影显示实际 binding/accepting，保存后的物理冲突、差量重绑和补偿仍由后端 prepare/owner 决定。标题区与 服务状态／解析记录 共用同一套层级（h2 34px、字重 650、字距 -1px、下边距 32px、操作区垂直居中），副标题为同构短句，右上角只保留 `ConfigSyncBadge` 同步胶囊与主操作按钮，不再展示 active/file revision；胶囊读全局 30 秒轮询的配置状态，避免与全局同步提示给出矛盾结论，而编辑禁用仍沿用模块读取的既有判定；列名、搜索、空态与弹窗标题统一为中文。
 
-[`ClientsPage`](../../../frontend/src/modules/clients/ClientsPage.tsx) 已替换 `/clients` 空态，列表同时展示唯一管理 name、请求匹配 `client_id` 和 IP/CIDR。创建时输入 ID，编辑时 ID 控件只读且 payload 通过 `clientEditValue` 剔除；name、IP、策略及 cache/TTL/ECS 覆盖按旧 name 提交，不重写历史身份。
+[`ClientsPage`](../../../frontend/src/modules/clients/ClientsPage.tsx) 已替换 `/clients` 空态，列表同时展示唯一管理 name、请求匹配 `client_id` 和 IP/CIDR。创建时输入 ID，编辑时 ID 控件只读且 payload 通过 `clientEditValue` 剔除；name、IP、策略及 cache/TTL/ECS 覆盖按旧 name 提交，不重写历史身份。TTL 覆盖的最小/最大值改用共享 `DurationInput`，留空表示不设置该边界，`0s` 表示该边界不设限。
 
-[`DnsSettingsPage`](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) 已替换 `/dns-settings` 空态，分区编辑缓存/快照、TTL、ECS、详情记录和 R/G/T。保留保存前调用正式 preview 获取真实 SQLite/WAL 字节与候选 UTC cutoff，并把结果并入后端 `retention_shortening` 确认；浏览器不自行计算权威水位，保存也不触发立即清理。
+[`DnsSettingsPage`](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) 已替换 `/dns-settings` 空态，分区编辑缓存/快照、TTL、ECS、详情记录和 R/G/T。保留保存前调用正式 preview 获取真实 SQLite/WAL 字节与候选 UTC cutoff，并把结果并入后端 `retention_shortening` 确认；浏览器不自行计算权威水位，保存也不触发立即清理。缓存失败 TTL、乐观回答 TTL、最大陈旧时间、快照周期与 TTL 覆盖上下限统一用共享 `DurationInput`（必填字段要求大于 0，TTL 上下限允许 `0s` 表示不设限），回填不再出现纳秒串；字段上下界仍由后端权威校验。
 
 [`SystemSettingsPage`](../../../frontend/src/modules/system-settings/SystemSettingsPage.tsx) 已替换 `/system-settings` 空态。`work/rules/database/records` 活动源路径表达与 WebUI 监听来自 `SystemConfigRead` 且保持只读，不冒充 Runtime 解析后的绝对路径；日志 `enable/level/path` 单独通过 `logs` 模块候选预校验、热应用、持久化和回显，不向启动配置字段提供伪编辑入口。
 

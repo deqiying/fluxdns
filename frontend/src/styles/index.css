@@ -939,6 +939,12 @@ select {
   width: 100%;
 }
 
+.duration-input {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) 96px;
+}
+
 .doh-route-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(180px, 0.7fr) 36px;

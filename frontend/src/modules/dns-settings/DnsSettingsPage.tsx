@@ -5,9 +5,11 @@ import { Pencil } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { DurationInput, durationOptionalRules, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { normalizeDuration } from "@/shared/config/form-values";
 import { getRetentionStatus, previewRetention, retentionStatusKey } from "./api";
 
 type Schemas = components["schemas"];
@@ -62,16 +64,16 @@ export function DnsSettingsPage() {
       dnsForm.setFieldsValue({
         cache_enabled: cache?.enabled ?? false,
         cache_size_bytes: cache?.memory.max_size_bytes ?? 67_108_864,
-        failure_ttl: cache?.failure_ttl ?? "5s",
+        failure_ttl: normalizeDuration(cache?.failure_ttl) ?? "5s",
         optimistic_enabled: cache?.optimistic.enabled ?? false,
-        optimistic_answer_ttl: cache?.optimistic.answer_ttl ?? "10s",
-        optimistic_max_age: cache?.optimistic.max_age ?? "24h",
+        optimistic_answer_ttl: normalizeDuration(cache?.optimistic.answer_ttl) ?? "10s",
+        optimistic_max_age: normalizeDuration(cache?.optimistic.max_age) ?? "24h",
         snapshot_enabled: cache?.persistence?.enabled ?? false,
         snapshot_path: cache?.persistence?.path ?? "./data/dns-cache.fdcs",
-        snapshot_interval: cache?.persistence?.snapshot_interval ?? "5m",
+        snapshot_interval: normalizeDuration(cache?.persistence?.snapshot_interval) ?? "5m",
         ttl_mode: dns?.ttl_override ? (dns.ttl_override.enabled === false ? "disabled" : "enabled") : "inherit",
-        ttl_min: dns?.ttl_override?.min,
-        ttl_max: dns?.ttl_override?.max,
+        ttl_min: normalizeDuration(dns?.ttl_override?.min),
+        ttl_max: normalizeDuration(dns?.ttl_override?.max),
         ecs_mode: dns?.edns_client_subnet?.mode ?? "disabled",
         ecs_custom_ip: dns?.edns_client_subnet?.custom_ip,
         resolve_log_enable: dns?.resolve_log?.enable ?? false,
@@ -143,10 +145,10 @@ export function DnsSettingsPage() {
       ) : null}
       <ConfigFormModal open={editor === "dns"} title="编辑 DNS 配置" dirty={dirty} busy={dnsMutation.isPending} error={dnsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveDns()}>
         <Form form={dnsForm} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
-          <Form.Item name="cache_enabled" label="启用缓存" valuePropName="checked"><Switch /></Form.Item><Form.Item name="cache_size_bytes" label="内存上限（bytes）" rules={[{ required: true }]}><InputNumber min={1} max={1_099_511_627_776} /></Form.Item><Form.Item name="failure_ttl" label="失败 TTL" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="optimistic_enabled" label="乐观缓存" valuePropName="checked"><Switch /></Form.Item><Space className="paired-fields" align="start"><Form.Item name="optimistic_answer_ttl" label="回答 TTL" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="optimistic_max_age" label="最大陈旧时间" rules={[{ required: true }]}><Input /></Form.Item></Space>
-          <Form.Item name="snapshot_enabled" label="缓存快照" valuePropName="checked"><Switch /></Form.Item><Form.Item name="snapshot_path" label="快照路径" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="snapshot_interval" label="快照周期" rules={[{ required: true }]}><Input /></Form.Item>
-          <Form.Item name="ttl_mode" label="TTL 覆盖"><Select options={[{ label: "使用默认", value: "inherit" }, { label: "启用", value: "enabled" }, { label: "禁用", value: "disabled" }]} /></Form.Item>{ttlMode === "enabled" ? <Space className="paired-fields" align="start"><Form.Item name="ttl_min" label="最小 TTL"><Input /></Form.Item><Form.Item name="ttl_max" label="最大 TTL"><Input /></Form.Item></Space> : null}
+          <Form.Item name="cache_enabled" label="启用缓存" valuePropName="checked"><Switch /></Form.Item><Form.Item name="cache_size_bytes" label="内存上限（bytes）" rules={[{ required: true }]}><InputNumber min={1} max={1_099_511_627_776} /></Form.Item><Form.Item name="failure_ttl" label="失败 TTL" rules={durationRequiredRules}><DurationInput label="失败 TTL" /></Form.Item>
+          <Form.Item name="optimistic_enabled" label="乐观缓存" valuePropName="checked"><Switch /></Form.Item><Space className="paired-fields" align="start"><Form.Item name="optimistic_answer_ttl" label="回答 TTL" rules={durationRequiredRules}><DurationInput label="回答 TTL" /></Form.Item><Form.Item name="optimistic_max_age" label="最大陈旧时间" rules={durationRequiredRules}><DurationInput label="最大陈旧时间" /></Form.Item></Space>
+          <Form.Item name="snapshot_enabled" label="缓存快照" valuePropName="checked"><Switch /></Form.Item><Form.Item name="snapshot_path" label="快照路径" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="snapshot_interval" label="快照周期" rules={durationRequiredRules}><DurationInput label="快照周期" /></Form.Item>
+          <Form.Item name="ttl_mode" label="TTL 覆盖"><Select options={[{ label: "使用默认", value: "inherit" }, { label: "启用", value: "enabled" }, { label: "禁用", value: "disabled" }]} /></Form.Item>{ttlMode === "enabled" ? <Space className="paired-fields" align="start"><Form.Item name="ttl_min" label="最小 TTL" rules={durationOptionalRules}><DurationInput label="最小 TTL" /></Form.Item><Form.Item name="ttl_max" label="最大 TTL" rules={durationOptionalRules}><DurationInput label="最大 TTL" /></Form.Item></Space> : null}
           <Form.Item name="ecs_mode" label="ECS"><Select options={[{ label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }]} /></Form.Item>{ecsMode === "custom" ? <Form.Item name="ecs_custom_ip" label="自定义 ECS" rules={[{ required: true }]}><Input /></Form.Item> : null}<Form.Item name="resolve_log_enable" label="记录解析详情" valuePropName="checked"><Switch /></Form.Item>
         </Form>
       </ConfigFormModal>

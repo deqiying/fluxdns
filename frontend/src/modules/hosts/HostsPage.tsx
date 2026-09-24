@@ -4,8 +4,10 @@ import { Pencil, Plus, Search } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { DurationInput, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
+import { normalizeDuration } from "@/shared/config/form-values";
 import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
@@ -47,7 +49,7 @@ export function HostsPage() {
         format: editing.format,
         path: editing.path,
         auto_update: editing.auto_update,
-        update_interval: editing.update_interval,
+        update_interval: normalizeDuration(editing.update_interval),
       });
     }
   }, [editing, form]);
@@ -132,7 +134,7 @@ export function HostsPage() {
               <Form.Item name="auto_update" label="自动重新加载" valuePropName="checked"><Switch /></Form.Item>
               <Form.Item noStyle shouldUpdate={(previous, current) => previous.auto_update !== current.auto_update}>
                 {({ getFieldValue }) => getFieldValue("auto_update") ? (
-                  <Form.Item name="update_interval" label="检查周期" rules={[{ required: true }]}><Input placeholder="5m" /></Form.Item>
+                  <Form.Item name="update_interval" label="检查周期" rules={durationRequiredRules}><DurationInput label="检查周期" /></Form.Item>
                 ) : null}
               </Form.Item>
             </>

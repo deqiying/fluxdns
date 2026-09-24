@@ -6,8 +6,10 @@ import type { components } from "@/shared/api/generated-v2";
 import { upstreamTabs } from "@/app/route-contract";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { DurationInput, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
+import { normalizeDuration } from "@/shared/config/form-values";
 import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
@@ -87,11 +89,11 @@ export function UpstreamsPage() {
         type: "group",
         upstreams: editing.upstreams,
         upstream_mode: editing.upstream_mode,
-        timeout: editing.timeout,
+        timeout: normalizeDuration(editing.timeout),
         fallback_enabled: Boolean(editing.fallbacks),
         fallbacks: editing.fallbacks,
         fallback_upstream_mode: editing.fallback_upstream_mode,
-        fallback_timeout: editing.fallback_timeout,
+        fallback_timeout: normalizeDuration(editing.fallback_timeout),
       });
     }
   }, [activeTab, editing, form]);
@@ -181,13 +183,13 @@ export function UpstreamsPage() {
             <>
               <MemberList name="upstreams" label="主要成员" options={upstreamOptions} form={form} />
               <Form.Item name="upstream_mode" label="主要模式" rules={[{ required: true }]}><Select options={modeOptions} /></Form.Item>
-              <Form.Item name="timeout" label="主要超时" rules={[{ required: true }]}><Input placeholder="5s" /></Form.Item>
+              <Form.Item name="timeout" label="主要超时" rules={durationRequiredRules}><DurationInput label="主要超时" /></Form.Item>
               <Form.Item name="fallback_enabled" label="启用 fallback" valuePropName="checked"><Switch /></Form.Item>
               {fallbackEnabled ? (
                 <>
                   <MemberList name="fallbacks" label="Fallback 成员" options={upstreamOptions} form={form} />
                   <Form.Item name="fallback_upstream_mode" label="Fallback 模式" rules={[{ required: true }]}><Select options={modeOptions} /></Form.Item>
-                  <Form.Item name="fallback_timeout" label="Fallback 超时" rules={[{ required: true }]}><Input placeholder="5s" /></Form.Item>
+                  <Form.Item name="fallback_timeout" label="Fallback 超时" rules={durationRequiredRules}><DurationInput label="Fallback 超时" /></Form.Item>
                 </>
               ) : null}
             </>
