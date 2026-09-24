@@ -80,7 +80,7 @@ pwsh -File script/dev.ps1 stop
 [`.github/workflows/release.yml`](../../.github/workflows/release.yml) 由 `v*` tag 触发，流程按依赖拆成 `prepare`、`frontend`、`rust-quality`、`create-release`、`build` 和 `finalize-release`：
 
 1. `prepare` 只校验 tag 提交属于 `main`、工具版本和 tag/VERSION/Cargo/前端 package 版本，不再为元数据校验提前安装 Rust 或 Node。
-2. `frontend` 依赖 `prepare`，完成 pnpm 安装、测试和构建后上传 `webui-dist`。`rust-quality` 依赖 `prepare` 和 `frontend`，在 Clippy/测试前把同一 artifact 下载到 `frontend/dist/`：`--all-features` 会启用 `webui-embed`，RustEmbed 在编译时就需要真实 WebUI，不能与该产物的生成完全并行。pnpm 依赖仍只安装一次，WebUI 仍只构建一次，Rust 质量门禁和所有平台共用同一产物。
+2. `frontend` 依赖 `prepare`，完成 pnpm 安装、测试和构建后上传 `webui-dist`。Vitest 的单个用例预算由 [`vite.config.ts`](../../frontend/vite.config.ts) 的 `testTimeout` 统一设为 15000ms：全应用渲染加 MSW 的用例在 2 vCPU runner 上比本地慢一倍以上，沿用 5000ms 默认值会在 CI 偶发超时。`rust-quality` 依赖 `prepare` 和 `frontend`，在 Clippy/测试前把同一 artifact 下载到 `frontend/dist/`：`--all-features` 会启用 `webui-embed`，RustEmbed 在编译时就需要真实 WebUI，不能与该产物的生成完全并行。pnpm 依赖仍只安装一次，WebUI 仍只构建一次，Rust 质量门禁和所有平台共用同一产物。
 3. Rust job 使用按 runner OS 和 `Cargo.lock` 哈希命名的 `actions/cache` 复用 Cargo registry/git 源；平台 target 的 `target/` 仍按 target 独立缓存，因为不同 OS/target 的编译产物不可安全混用。Linux 的 GNU 与 musl job 可以复用同一份依赖源缓存，Windows/macOS 仍使用各自 runner 的缓存空间。
 4. `create-release` 在两类质量门禁都成功后创建 draft Release。四项 `build` matrix 只依赖共享门禁和这个草稿，`max-parallel: 4`、`fail-fast: false` 允许 Windows x86_64、Linux x86_64、OpenWrt x86_64、macOS ARM64 同时执行；实际调度仍受 GitHub runner 可用性与账户并发配额限制。
 5. 每个平台完成打包和 `--version` 校验后立即通过 `gh release upload` 上传自己的 archive，使用 `--clobber` 支持失败重跑。平台上传不再等待其他二进制完成，因此 Release 草稿可以逐步看到已完成的资产；OpenWrt 仍在 Ubuntu runner 上使用 musl，其他三项保持各自现有 target。

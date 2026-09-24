@@ -28,5 +28,7 @@ export default defineConfig({
     clearMocks: true,
     restoreMocks: true,
     css: true,
+    // 全应用渲染加 MSW 的用例在 2 vCPU 的 CI runner 上比本地慢一倍以上，默认 5000ms 会偶发超时，这里放宽到 15000ms。
+    testTimeout: 15_000,
   },
 });
