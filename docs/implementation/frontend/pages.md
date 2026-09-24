@@ -4,9 +4,9 @@
 >
 > 适用范围：已接入路由、页面数据源、查询状态和实际能力范围
 >
-> 最后核对：2026-09-23（解析记录两行布局、详情交互与默认实时订阅定向核对；其余内容沿用原核对范围）
+> 最后核对：2026-09-24（监听入口标题区文案、同步胶囊、表头列名与页面级样式核对；解析记录、服务状态及分批历史结果沿用原核对范围）
 >
-> 核对基线：`2b3b160` 加本次工作树变更；本轮核对解析记录，服务状态及分批历史结果按原日期和基线解释
+> 核对基线：`2b3b160` 加本次工作树变更；本轮核对监听入口标题区，解析记录、服务状态及分批历史结果按原日期和基线解释
 
 ## 路由与数据源
 
@@ -19,7 +19,7 @@
 | `/dashboard` | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) | v2 HTTP/WS 的 RSS、QPS、RPM、在线身份和双单位趋势图 |
 | `/queries` | [QueriesPage](../../../frontend/src/modules/queries/QueriesPage.tsx) | v2 cursor 查询、身份/来源/Answer、实时缓冲和稳定详情 |
 | `/system-runtime` | [SystemPage](../../../frontend/src/modules/system/SystemPage.tsx) | v2 进程采样、版本和启动时间 |
-| `/listeners` | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx) | UDP/TCP/DoH 类型化列表、Runtime binding 与编辑 |
+| `/listeners` | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx) | UDP/TCP/DoH 类型化列表、运行状态列与编辑；标题区与 服务状态／解析记录 同构，只显示同步胶囊，不显示 revision |
 | `/upstreams` | [UpstreamsPage](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx) | Hosts/DoH/Group 类型化读写及“上游 / 上游组”URL tab |
 | `/dns-settings` | [DnsSettingsPage](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) | DNS/cache/TTL/ECS/详情与 R/G/T 预览保存 |
 | `/strategies` | [StrategiesPage](../../../frontend/src/modules/strategies/StrategiesPage.tsx) | 有序规则和 cache/TTL/ECS 继承/覆盖 |
@@ -75,6 +75,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | 解析记录设计与执行事实 | QueriesPage、RequestTrace、详情投影 | 默认 WS、三项耗时、监听入口和缓存操作结果 | 2026-09-22～23：前端 114 项、schema 4 项、生产构建；Chromium 在 1600/1024/768/390/320px 验证固定行高、首尾省略、浮窗与模拟 WS；本机真实 UDP/TCP/DoH、HTTP/WS 及 TTL 过期刷新验证 | 浏览器使用模拟 API；真实后端使用独立 loopback 夹具，未覆盖远程客户端或生产负载 |
 | 稳定详情 | record-keyed Popover、detail formatter | 列表结果与按 ID detail | 持续写入下固定 ID、显式查看新记录、桌面/移动浏览器 | 不重建已过期或历史丢失值 |
 | P3 配置管理 | 九个 Page、v2 module hooks、ConfigFileStatus | 十模块读写、保留 preview、文件差异/组合采用 | 91 项 P3 Vitest；真实文件/SQLite/UDP/Bearer HTTP/两档浏览器 | Linux/macOS 未验证；Windows 主链路结果见联合验收 |
+| 监听入口标题区统一 | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx)、`ConfigSyncBadge`、[useConfigState](../../../frontend/src/shared/config/hooks.ts)、[index.css](../../../frontend/src/styles/index.css) | `/listeners` 标题区不再消费 `ConfigStateSummary` 的 revision；胶囊读全局轮询状态，编辑禁用仍按模块读取判定 | 2026-09-24：前端 26 文件 115 项 Vitest 与 `pnpm run typecheck`、生产构建通过；新增用例断言同构短句副标题、胶囊 pending 色调、搜索占位、弹窗标题与 revision 不再渲染 | 未在真实浏览器复验 34px／字距／胶囊尺寸等视觉数值；其他配置页仍保留 revision，未一并调整 |
 
 P4 完整 Vitest 为 23 文件 99 项，v2 schema contract 4 项、typecheck 与 production build 通过。Windows 使用 `_fluxdns/p4-live/` ConfigV2 和内嵌 debug binary 完成真实登录、Bearer ticket、UDP/SQLite/HTTP/WS、断线 replay、会话失效、稳定详情以及桌面/390×844 验收，浏览器 Console 无 error/warning。P3 配置验收仍见[前端应用](application.md#p3-联合验收2026-09-08)，P4 安全和实时证据见[共享实时连接](application.md#p4-共享实时连接2026-09-09)。
 

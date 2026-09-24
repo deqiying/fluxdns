@@ -432,6 +432,26 @@ describe("application routes", () => {
     expect(screen.getAllByText("1/1 接受中")).toHaveLength(2);
   });
 
+  it("监听入口标题区只保留同构短句和同步状态", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/listeners");
+    expect(await screen.findByText("每一处监听，稳定待命。")).toBeInTheDocument();
+    // 胶囊读全局轮询状态：mock 的 /config/state 为 applied_unpersisted，必须落在 pending 色调而非绿色。
+    const badge = await screen.findByRole("status", { name: /^配置同步状态：/ });
+    expect(badge).toHaveClass("config-sync-badge-pending");
+    // 标题区不再暴露 revision，避免与 服务状态／解析记录 的标题区风格分叉。
+    expect(screen.queryByText(/活动版本|文件版本/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加监听入口" })).toBeInTheDocument();
+    // 搜索、空态与弹窗标题同批转为中文，防止只改按钮的半途状态回归。
+    expect(screen.getByPlaceholderText("搜索监听入口名称")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "添加监听入口" }));
+    expect(await screen.findByRole("dialog", { name: "添加监听入口" })).toBeInTheDocument();
+    // 样式钩子：页面级与胶囊 class 必须存在，否则标题区规则会静默失效。
+    expect(document.querySelector(".listener-page .page-heading")).not.toBeNull();
+    expect(document.querySelector(".config-sync-badge")).not.toBeNull();
+  });
+
   it("客户端编辑时保持 client_id 只读", async () => {
     const user = userEvent.setup();
     setMockAuthenticated(true);

@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { App } from "antd";
+import { getSummaryPollInterval } from "@/app/query-client";
 import { ApiError } from "@/shared/api/errors";
 import type { components } from "@/shared/api/generated-v2";
-import { fetchConfigModule, validateCandidate, type ConfigModule, type ConfigState } from "./api";
+import { fetchConfigModule, fetchConfigState, validateCandidate, type ConfigModule, type ConfigState } from "./api";
 import { invalidationKeysForChanges, configKeys } from "./query-keys";
 import { applyAndSettle, createOperationId } from "./operation";
 
@@ -21,6 +22,15 @@ export function useConfigModule(module: ConfigModule) {
   return useQuery({
     queryKey: configKeys.moduleRoot(module),
     queryFn: ({ signal }) => fetchConfigModule(module, signal),
+  });
+}
+
+/** 标题区只消费全局配置同步状态；与全局提示共用 30 秒轮询和同一 query key，避免同一页出现互相矛盾的同步结论。 */
+export function useConfigState() {
+  return useQuery({
+    queryKey: configKeys.state(),
+    queryFn: ({ signal }) => fetchConfigState(signal),
+    refetchInterval: () => getSummaryPollInterval(),
   });
 }
 

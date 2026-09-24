@@ -3,10 +3,10 @@ import { Button, Form, Input, InputNumber, Segmented, Select, Space, Table, Tag,
 import { Pencil, Plus, Search, Trash2 } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type Listener = Schemas["Listener"];
@@ -39,6 +39,7 @@ interface ListenerFormValues {
 
 export function ListenersPage() {
   const query = useConfigModule("listener");
+  const state = useConfigState();
   const strategies = useConfigModule("strategy");
   const hosts = useConfigModule("hosts");
   const mutation = useConfigChangeMutation("listener");
@@ -76,14 +77,14 @@ export function ListenersPage() {
     { title: "绑定", render: (_, item) => bindingSummary(item) },
     { title: "策略", width: 190, render: (_, item) => item.type === "doh" ? `${item.routes.length} 条路由` : item.strategy },
     {
-      title: "Runtime", width: 140, render: (_, item) => {
+      title: "运行状态", width: 140, render: (_, item) => {
         const runtime = query.data?.runtime.find((value) => value.module === "listener" && value.name === item.name);
         if (!runtime || runtime.module !== "listener") return <Tag>未知</Tag>;
         const accepting = runtime.bindings.filter((binding) => binding.accepting).length;
         return <Tag color={accepting === runtime.bindings.length ? "success" : "warning"}>{accepting}/{runtime.bindings.length} 接受中</Tag>;
       },
     },
-    { title: "操作", width: 72, align: "center", render: (_, item) => <Tooltip title="编辑 Listener"><Button type="text" aria-label={`编辑 Listener ${item.name}`} icon={<Pencil size={17} />} onClick={() => setEditing(item)} /></Tooltip> },
+    { title: "操作", width: 72, align: "center", render: (_, item) => <Tooltip title="编辑监听入口"><Button type="text" aria-label={`编辑监听入口 ${item.name}`} icon={<Pencil size={17} />} onClick={() => setEditing(item)} /></Tooltip> },
   ];
 
   const submit = async () => {
@@ -104,17 +105,28 @@ export function ListenersPage() {
   };
 
   return (
-    <PageFrame title="监听入口" description="管理 UDP、TCP 和 DoH 监听；只有发生变化的物理 endpoint 进入重绑。" meta={query.data ? <ConfigStateSummary state={query.data.state} /> : undefined} actions={<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加 Listener</Button>}>
-      <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
-      {query.data ? <div className="config-module-content"><div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索 Listener 名称" onChange={(event) => setSearch(event.target.value)} /></div><Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 900 }} locale={{ emptyText: search ? "没有匹配的 Listener" : "尚未配置 Listener" }} /></div> : null}
-      <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加 Listener" : "编辑 Listener"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
-        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
-          <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128 }]}><Input /></Form.Item>
-          <Form.Item name="type" label="协议" rules={[{ required: true }]}><Segmented block options={[{ label: "UDP", value: "udp" }, { label: "TCP", value: "tcp" }, { label: "DoH", value: "doh" }]} /></Form.Item>
-          {formType === "doh" ? <DohFields strategyOptions={strategyOptions} /> : <SocketFields strategyOptions={strategyOptions} hostsOptions={hostsOptions} />}
-        </Form>
-      </ConfigFormModal>
-    </PageFrame>
+    <div className="listener-page">
+      <PageFrame
+        title="监听入口"
+        description="每一处监听，稳定待命。"
+        actions={(
+          <Space size={12}>
+            {state.data ? <ConfigSyncBadge state={state.data} /> : null}
+            <Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加监听入口</Button>
+          </Space>
+        )}
+      >
+        <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
+        {query.data ? <div className="config-module-content"><div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索监听入口名称" onChange={(event) => setSearch(event.target.value)} /></div><Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 900 }} locale={{ emptyText: search ? "没有匹配的监听入口" : "尚未配置监听入口" }} /></div> : null}
+        <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加监听入口" : "编辑监听入口"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
+          <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
+            <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128 }]}><Input /></Form.Item>
+            <Form.Item name="type" label="协议" rules={[{ required: true }]}><Segmented block options={[{ label: "UDP", value: "udp" }, { label: "TCP", value: "tcp" }, { label: "DoH", value: "doh" }]} /></Form.Item>
+            {formType === "doh" ? <DohFields strategyOptions={strategyOptions} /> : <SocketFields strategyOptions={strategyOptions} hostsOptions={hostsOptions} />}
+          </Form>
+        </ConfigFormModal>
+      </PageFrame>
+    </div>
   );
 }
 
@@ -169,6 +181,6 @@ function endpointFromForm(value: EndpointFormValue): DohEndpoint {
 }
 
 function bindingSummary(value: Listener): string {
-  if (value.type === "doh") return `${value.endpoints.length} endpoints`;
+  if (value.type === "doh") return `${value.endpoints.length} 个 Endpoint`;
   return `${value.addresses.join(", ")}:${value.port}`;
 }

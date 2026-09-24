@@ -103,7 +103,7 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`StrategiesPage`](../../../frontend/src/modules/strategies/StrategiesPage.tsx) 已替换 `/strategies` 空态。规则表单保持顺序并区分 Hosts 本地回答和 rule_set+upstream，两类字段互斥；上移、下移和移除均更新整体候选。cache、TTL、ECS 明确区分继承、启用和禁用，不用空值代替继承。
 
-[`ListenersPage`](../../../frontend/src/modules/listeners/ListenersPage.tsx) 已替换 `/listeners` 空态。UDP/TCP 编辑地址、端口、策略和可选 Hosts；DoH 编辑有序 route 及多个 endpoint，并按 TLS terminate/external、peer/forwarded_header/proxy_protocol 选择白名单字段。列表从 Runtime 投影显示实际 binding/accepting，保存后的物理冲突、差量重绑和补偿仍由后端 prepare/owner 决定。
+[`ListenersPage`](../../../frontend/src/modules/listeners/ListenersPage.tsx) 已替换 `/listeners` 空态。UDP/TCP 编辑地址、端口、策略和可选 Hosts；DoH 编辑有序 route 及多个 endpoint，并按 TLS terminate/external、peer/forwarded_header/proxy_protocol 选择白名单字段。列表从 Runtime 投影显示实际 binding/accepting，保存后的物理冲突、差量重绑和补偿仍由后端 prepare/owner 决定。标题区与 服务状态／解析记录 共用同一套层级（h2 34px、字重 650、字距 -1px、下边距 32px、操作区垂直居中），副标题为同构短句，右上角只保留 `ConfigSyncBadge` 同步胶囊与主操作按钮，不再展示 active/file revision；胶囊读全局 30 秒轮询的配置状态，避免与全局同步提示给出矛盾结论，而编辑禁用仍沿用模块读取的既有判定；列名、搜索、空态与弹窗标题统一为中文。
 
 [`ClientsPage`](../../../frontend/src/modules/clients/ClientsPage.tsx) 已替换 `/clients` 空态，列表同时展示唯一管理 name、请求匹配 `client_id` 和 IP/CIDR。创建时输入 ID，编辑时 ID 控件只读且 payload 通过 `clientEditValue` 剔除；name、IP、策略及 cache/TTL/ECS 覆盖按旧 name 提交，不重写历史身份。
 

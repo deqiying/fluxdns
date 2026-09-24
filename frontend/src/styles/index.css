@@ -847,6 +847,57 @@ select {
   font-size: 12px;
 }
 
+/* 监听入口标题区与 服务状态／解析记录 对齐；该页不再展示 revision。 */
+.listener-page .page-heading {
+  align-items: center;
+  margin-bottom: 32px;
+}
+
+.listener-page .page-heading h2.ant-typography {
+  margin-top: 0;
+  color: #1d1d1f;
+  font-size: 34px;
+  font-weight: 650;
+  letter-spacing: -1px;
+}
+
+.listener-page .page-heading .ant-typography-secondary {
+  color: #73737d;
+}
+
+.config-sync-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 15px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+}
+
+.config-sync-badge i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.config-sync-badge-synced {
+  color: #287642;
+  background: #e9f5ec;
+}
+
+.config-sync-badge-pending {
+  color: #8b6318;
+  background: #fff4db;
+}
+
+.config-sync-badge-blocked {
+  color: #b23b37;
+  background: #fceceb;
+}
+
 .config-module-content > .ant-tabs {
   padding: 0 16px;
 }

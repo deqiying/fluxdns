@@ -23,3 +23,22 @@ export function ConfigStateSummary({ state }: { state: ConfigState }) {
     </Space>
   );
 }
+
+const syncTones: Record<ConfigState["synchronization"], "synced" | "pending" | "blocked"> = {
+  synced: "synced",
+  applying: "pending",
+  persisting: "pending",
+  applied_unpersisted: "pending",
+  blocked: "blocked",
+};
+
+/** 标题区状态胶囊只表达同步状态，不展示 revision；与 服务状态 的连接状态胶囊同构。 */
+export function ConfigSyncBadge({ state }: { state: ConfigState }) {
+  const label = syncLabels[state.synchronization];
+  return (
+    <span role="status" aria-label={`配置同步状态：${label}`} className={`config-sync-badge config-sync-badge-${syncTones[state.synchronization]}`}>
+      <i aria-hidden="true" />
+      {label}
+    </span>
+  );
+}
