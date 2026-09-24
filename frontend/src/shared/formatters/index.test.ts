@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   formatBytes,
-  formatBytesMiB,
   formatCount,
   formatDateTime,
   formatDuration,
@@ -26,13 +25,9 @@ describe("formatters", () => {
     expect(formatUptimeClock(-1)).toBe("—");
   });
 
-  it("从安全时间戳和十进制 u64 格式化采样时间与 MiB", () => {
+  it("从安全时间戳格式化采样时间", () => {
     expect(formatEpochMillis(Date.parse("2026-09-03T08:09:10Z"))).toContain("2026");
     expect(formatEpochMillis(Number.MAX_SAFE_INTEGER + 1)).toBe("—");
-    expect(formatBytesMiB("195454566")).toBe("186.4 MiB");
-    expect(formatBytesMiB("18446744073709551615")).toMatch(/MiB$/);
-    expect(formatBytesMiB("18446744073709551616")).toBe("—");
-    expect(formatBytesMiB("01")).toBe("—");
   });
   it("按人类可读单位格式化字节数", () => {
     expect(formatBytes(512)).toBe("512 B");

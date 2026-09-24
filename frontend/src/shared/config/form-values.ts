@@ -1,9 +1,12 @@
-export type ByteUnit = "B" | "MiB" | "GiB";
+export type ByteUnit = "B" | "KB" | "MB" | "GB" | "TB";
 
+/** 字节单位一律按 1024 进制递进，标签与展示层 formatBytes 保持同一套口径。 */
 const BYTE_FACTORS: Record<ByteUnit, bigint> = {
   B: 1n,
-  MiB: 1_048_576n,
-  GiB: 1_073_741_824n,
+  KB: 1_024n,
+  MB: 1_048_576n,
+  GB: 1_073_741_824n,
+  TB: 1_099_511_627_776n,
 };
 const MAX_BYTES = 1_099_511_627_776n;
 
@@ -40,6 +43,36 @@ export function bytesToForm(bytes: number, unit: ByteUnit): string {
     throw new Error("bytes out of range");
   }
   return exactDecimal(BigInt(bytes), BYTE_FACTORS[unit]);
+}
+
+/** 表单可选字节单位：value 为配置契约字面量，label 使用 B/KB/MB/GB/TB 标签。 */
+export const BYTE_UNIT_OPTIONS: { value: ByteUnit; label: string }[] = [
+  { value: "B", label: "B" },
+  { value: "KB", label: "KB" },
+  { value: "MB", label: "MB" },
+  { value: "GB", label: "GB" },
+  { value: "TB", label: "TB" },
+];
+
+/** 回显的单位阶梯，从大到小；MAX_BYTES 恰好是 1 TiB，再大没有可表示的单位。 */
+const BYTE_DISPLAY_UNITS: readonly ByteUnit[] = ["TB", "GB", "MB", "KB", "B"];
+
+/** 回显数值允许的小数位上限：更细的分辨率对配置字段没有意义，只会让用户看到长尾小数。 */
+const DISPLAY_SCALE = 100n;
+
+/**
+ * 接口返回的字节数换算成「数值 + 单位」：从大到小挑选能精确表示且小数不超过两位的最大单位，
+ * 保证回显无损——用户不动该字段时再次保存不会把字节数改掉；B 是所有单位的公约数，必定命中。
+ * 非安全整数或超出 schema 上限时抛错，由调用方决定提示方式。
+ */
+export function bytesToDisplay(bytes: number): { value: string; unit: ByteUnit } {
+  if (!Number.isSafeInteger(bytes) || bytes < 1 || BigInt(bytes) > MAX_BYTES) {
+    throw new Error("bytes out of range");
+  }
+  const scaled = BigInt(bytes) * DISPLAY_SCALE;
+  // 乘 100 后能被换算因子整除，等价于该单位下的数值精确且最多两位小数。
+  const unit = BYTE_DISPLAY_UNITS.find((candidate) => scaled % BYTE_FACTORS[candidate] === 0n) ?? "B";
+  return { value: bytesToForm(bytes, unit), unit };
 }
 
 /** 解析紧凑复合 duration 为纳秒；不在前端复制各业务字段的上下界。 */

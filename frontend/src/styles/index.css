@@ -307,8 +307,22 @@ select {
   margin-bottom: 0;
 }
 
+/* 页面标题区：九个页面共用 h2 尺寸与同构副标题；深色样例通过 CSS 变量覆盖颜色。 */
 .page-heading {
-  margin-bottom: 22px;
+  align-items: flex-start;
+  margin-bottom: 32px;
+}
+
+.page-heading h2.ant-typography {
+  margin-top: 0;
+  color: var(--page-heading-text, #1d1d1f);
+  font-size: 34px;
+  font-weight: 650;
+  letter-spacing: -1px;
+}
+
+.page-heading .ant-typography-secondary {
+  color: var(--page-heading-muted, #73737d);
 }
 
 .snapshot-card,
@@ -353,6 +367,8 @@ select {
   --service-qps: #007aff;
   --service-rpm: #149c91;
   --service-cursor: #b8bfca;
+  --page-heading-text: var(--service-text);
+  --page-heading-muted: var(--service-muted);
   color: var(--service-text);
 }
 
@@ -368,19 +384,6 @@ select {
   padding: 24px;
   border-radius: 24px;
   background: #191c23;
-}
-
-.service-status-preview .page-heading {
-  align-items: center;
-  margin-bottom: 32px;
-}
-
-.service-status-preview .page-heading h2.ant-typography {
-  margin-top: 0;
-  color: var(--service-text);
-  font-size: 34px;
-  font-weight: 650;
-  letter-spacing: -1px;
 }
 
 .service-status-preview .ant-typography-secondary,
@@ -791,6 +794,11 @@ select {
   font-weight: 400;
 }
 
+.system-runtime-sampled-at.ant-typography {
+  color: #73737d;
+  font-size: 13px;
+}
+
 .system-runtime-details {
   width: 100%;
 }
@@ -845,24 +853,6 @@ select {
 
 .config-state-summary .ant-typography {
   font-size: 12px;
-}
-
-/* 监听入口标题区与 服务状态／解析记录 对齐；该页不再展示 revision。 */
-.listener-page .page-heading {
-  align-items: center;
-  margin-bottom: 32px;
-}
-
-.listener-page .page-heading h2.ant-typography {
-  margin-top: 0;
-  color: #1d1d1f;
-  font-size: 34px;
-  font-weight: 650;
-  letter-spacing: -1px;
-}
-
-.listener-page .page-heading .ant-typography-secondary {
-  color: #73737d;
 }
 
 .config-sync-badge {
@@ -939,7 +929,8 @@ select {
   width: 100%;
 }
 
-.duration-input {
+.duration-input,
+.byte-size-input {
   display: grid;
   gap: 8px;
   grid-template-columns: minmax(0, 1fr) 96px;
@@ -1005,19 +996,6 @@ select {
 .filter-field .ant-select,
 .filter-field .ant-input {
   width: 100%;
-}
-
-.query-page .page-heading {
-  align-items: center;
-  margin-bottom: 32px;
-}
-
-.query-page .page-heading h2.ant-typography {
-  margin-top: 0;
-  color: #1d1d1f;
-  font-size: 34px;
-  font-weight: 650;
-  letter-spacing: -1px;
 }
 
 .query-filter-panel {

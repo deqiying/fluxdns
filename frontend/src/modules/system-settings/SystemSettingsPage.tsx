@@ -1,13 +1,13 @@
 import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Button, Descriptions, Form, Input, Select, Switch, Typography } from "antd";
+import { Button, Descriptions, Form, Input, Select, Space, Switch, Typography } from "antd";
 import { Pencil } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
 import { getSystemConfig } from "./api";
 
 type Schemas = components["schemas"];
@@ -19,6 +19,7 @@ export function SystemSettingsPage() {
   const systemQuery = useQuery({ queryKey: systemConfigKey, queryFn: ({ signal }) => getSystemConfig(signal) });
   const logsQuery = useConfigModule("logs");
   const mutation = useConfigChangeMutation("logs");
+  const state = useConfigState();
   const [form] = Form.useForm<Logs>();
   const [editing, setEditing] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -49,8 +50,8 @@ export function SystemSettingsPage() {
   return (
     <PageFrame
       title="系统配置"
-      description="查看启动路径与 WebUI 监听；日志级别和文件支持类型化热更新。"
-      meta={logsQuery.data ? <ConfigStateSummary state={logsQuery.data.state} /> : undefined}
+      description="每一处设置，清楚可查。"
+      actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}</Space>}
     >
       <PageState
         loading={systemQuery.isLoading || logsQuery.isLoading}

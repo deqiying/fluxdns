@@ -5,12 +5,12 @@ import { useSearchParams } from "react-router-dom";
 import type { components } from "@/shared/api/generated-v2";
 import { upstreamTabs } from "@/app/route-contract";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { DurationInput, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { normalizeDuration } from "@/shared/config/form-values";
-import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type Upstream = Schemas["Upstream"];
@@ -44,6 +44,7 @@ const modeOptions = [
 ];
 
 export function UpstreamsPage() {
+  const state = useConfigState();
   const query = useConfigModule("upstreams");
   const proxies = useConfigModule("outbound");
   const mutation = useConfigChangeMutation("upstreams");
@@ -152,9 +153,8 @@ export function UpstreamsPage() {
   return (
     <PageFrame
       title="DNS 上游"
-      description="配置 Hosts、DoH 上游及嵌套上游组；名称变化由后端统一维护类型化引用。"
-      meta={query.data ? <ConfigStateSummary state={query.data.state} /> : undefined}
-      actions={<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>{activeTab === "groups" ? "添加上游组" : "添加上游"}</Button>}
+      description="每一次转发，稳定可达。"
+      actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>{activeTab === "groups" ? "添加上游组" : "添加上游"}</Button></Space>}
     >
       <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
       {query.data ? (

@@ -3,7 +3,7 @@ import { Alert, Button, Tooltip } from "antd";
 import { Activity, Cpu, Moon, Sun, Users, type LucideIcon } from "lucide-react";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState, InlineUnavailable } from "@/shared/components/PageState";
-import { formatBytesMiB, formatCount, formatEpochMillis } from "@/shared/formatters";
+import { formatBytes, formatCount, formatEpochMillis } from "@/shared/formatters";
 import type { ServiceMetrics } from "./api";
 import { MetricsTrendChart } from "./MetricsTrendChart";
 import { useServiceMetrics } from "./hooks";
@@ -50,7 +50,7 @@ export function DashboardPage() {
           <div className="service-status-content">
             {query.stale ? <Alert className="service-status-alert" type="warning" showIcon title="实时指标暂时不可用，当前显示最后一次有效快照" /> : null}
             <div className="service-status-metrics">
-              <Metric label="当前内存" measurement={metrics.rss_bytes} formatter={(value) => formatBytesMiB(String(value)).replace(/ MiB$/, "")} unit="MiB" hint="进程驻留内存" icon={Cpu} />
+              <Metric label="当前内存" measurement={metrics.rss_bytes} formatter={(value) => formatBytes(String(value))} hint="进程驻留内存" icon={Cpu} />
               <Metric label="平均 QPS" measurement={metrics.qps} formatter={(value) => formatRate(Number(value))} unit="请求/秒" hint="每秒请求速率" icon={Activity} tone="qps" />
               <Metric label="平均 RPM" measurement={metrics.rpm} formatter={(value) => formatRate(Number(value))} unit="请求/分钟" hint="每分钟请求速率" icon={Activity} tone="rpm" />
               <Metric label="在线客户端" measurement={metrics.online_clients} formatter={(value) => formatCount(Number(value))} unit="个" hint="当前活跃身份" icon={Users} />
@@ -69,7 +69,7 @@ function Metric({ label, measurement, formatter, unit, hint, icon: Icon, tone = 
   label: string;
   measurement: Measurement;
   formatter: (value: string | number) => string;
-  unit: string;
+  unit?: string;
   hint: string;
   icon: LucideIcon;
   tone?: "neutral" | "qps" | "rpm";
@@ -78,7 +78,7 @@ function Metric({ label, measurement, formatter, unit, hint, icon: Icon, tone = 
     <div className="service-status-metric" role="group" aria-label={label}>
       <div className="service-status-metric-heading"><span className="metric-label">{label}</span><Icon className={`metric-icon metric-icon-${tone}`} size={21} strokeWidth={1.7} aria-hidden="true" /></div>
       {measurement.state === "available"
-        ? <div className="service-status-value"><span>{formatter(measurement.value)}</span>{" "}<span className="service-status-unit">{unit}</span></div>
+        ? <div className="service-status-value"><span>{formatter(measurement.value)}</span>{unit ? <>{" "}<span className="service-status-unit">{unit}</span></> : null}</div>
         : <div className="service-status-unavailable"><InlineUnavailable reasonCode={unavailableLabel(measurement.reason, measurement.observed_seconds)} /></div>}
       <div className="service-status-hint">{hint}</div>
     </div>

@@ -5,7 +5,7 @@ import type { components } from "@/shared/api/generated-v2";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { InlineUnavailable, PageState } from "@/shared/components/PageState";
 import {
-  formatBytesMiB,
+  formatBytes,
   formatCount,
   formatEpochMillis,
   formatPercent,
@@ -39,10 +39,7 @@ export function SystemPage() {
   return (
     <PageFrame
       title="系统运行状态"
-      description="主实例的进程与基础运行信息。"
-      meta={metrics ? (
-        <Typography.Text type="secondary">采样：{formatEpochMillis(metrics.sampled_at_ms)}</Typography.Text>
-      ) : undefined}
+      description="每一次采样，如实呈现。"
       actions={(
         <Button icon={<RefreshCw size={16} />} loading={refreshing} onClick={refresh}>
           刷新
@@ -67,7 +64,7 @@ export function SystemPage() {
             </div>
             <div className="system-runtime-metric" role="listitem">
               <Typography.Text type="secondary">常驻内存</Typography.Text>
-              <div className="system-runtime-value">{measurementValue(metrics.rss_bytes, formatBytesMiB)}</div>
+              <div className="system-runtime-value">{measurementValue(metrics.rss_bytes, formatBytes)}</div>
             </div>
             <div className="system-runtime-metric" role="listitem">
               <Typography.Text type="secondary">CPU</Typography.Text>
@@ -78,6 +75,7 @@ export function SystemPage() {
               <div className="system-runtime-value">{measurementValue(metrics.threads, formatCount)}</div>
             </div>
           </div>
+          <Typography.Text className="system-runtime-sampled-at" type="secondary">采样：{formatEpochMillis(metrics.sampled_at_ms)} · 数据来自主实例进程</Typography.Text>
 
           <section className="system-runtime-details" aria-labelledby="process-information-title">
             <Flex justify="space-between" align="center" gap={16} wrap>

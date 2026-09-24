@@ -3,12 +3,12 @@ import { Button, Form, Input, Select, Space, Table, Tag, Tooltip, Typography, ty
 import { ArrowDown, ArrowUp, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { DurationInput, durationOptionalRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { normalizeDuration } from "@/shared/config/form-values";
-import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type Strategy = Schemas["Strategy"];
@@ -36,6 +36,7 @@ export function StrategiesPage() {
   const upstreams = useConfigModule("upstreams");
   const hosts = useConfigModule("hosts");
   const mutation = useConfigChangeMutation("strategy");
+  const state = useConfigState();
   const [form] = Form.useForm<StrategyFormValues>();
   const [editing, setEditing] = useState<Strategy | "create" | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -105,7 +106,16 @@ export function StrategiesPage() {
   };
 
   return (
-    <PageFrame title="DNS 分流策略" description="按顺序匹配 Hosts 或规则集，并为策略设置默认上游及可选覆盖。" meta={query.data ? <ConfigStateSummary state={query.data.state} /> : undefined} actions={<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加策略</Button>}>
+    <PageFrame
+      title="DNS 分流策略"
+      description="每一条规则，各归其位。"
+      actions={(
+        <Space size={12}>
+          {state.data ? <ConfigSyncBadge state={state.data} /> : null}
+          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加策略</Button>
+        </Space>
+      )}
+    >
       <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
       {query.data ? <div className="config-module-content"><div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索策略名称" onChange={(event) => setSearch(event.target.value)} /></div><Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 900 }} locale={{ emptyText: search ? "没有匹配的策略" : "尚未配置策略" }} /></div> : null}
       <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加策略" : "编辑策略"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>

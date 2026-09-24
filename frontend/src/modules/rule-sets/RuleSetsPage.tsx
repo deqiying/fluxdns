@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Form, Input, Segmented, Select, Switch, Table, Tag, Tooltip, Typography, type TableColumnsType } from "antd";
+import { Button, Form, Input, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, type TableColumnsType } from "antd";
 import { Pencil, Plus, Search } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { DurationInput, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { formatDurationText, normalizeDuration } from "@/shared/config/form-values";
-import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type RuleSet = Schemas["RuleSet"];
@@ -29,6 +29,7 @@ export function RuleSetsPage() {
   const query = useConfigModule("rule_set");
   const proxies = useConfigModule("outbound");
   const mutation = useConfigChangeMutation("rule_set");
+  const state = useConfigState();
   const [form] = Form.useForm<RuleSetFormValues>();
   const sourceType = Form.useWatch("type", form);
   const [editing, setEditing] = useState<RuleSet | "create" | null>(null);
@@ -96,9 +97,13 @@ export function RuleSetsPage() {
   return (
     <PageFrame
       title="规则集"
-      description="管理内联、本地和远程规则资源；刷新失败时继续显示后端报告的陈旧快照状态。"
-      meta={query.data ? <ConfigStateSummary state={query.data.state} /> : undefined}
-      actions={<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加规则集</Button>}
+      description="每一份规则，常更常新。"
+      actions={(
+        <Space size={12}>
+          {state.data ? <ConfigSyncBadge state={state.data} /> : null}
+          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加规则集</Button>
+        </Space>
+      )}
     >
       <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
       {query.data ? (

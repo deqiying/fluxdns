@@ -1,6 +1,5 @@
 const integerFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
 const decimalFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
-const MEBIBYTE = 1_048_576n;
 const U64_MAX = 18_446_744_073_709_551_615n;
 const dateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
   timeZone: "UTC",
@@ -56,17 +55,6 @@ export function formatUptimeClock(seconds: number | null | undefined): string {
   return days > 0 ? `${days} 天 ${clock}` : clock;
 }
 
-/** RSS 以 API 的十进制 u64 字符串接收，避免转换为 Number 后丢失精度。 */
-export function formatBytesMiB(value: string | null | undefined): string {
-  if (!value || !/^(0|[1-9][0-9]{0,19})$/.test(value)) return "—";
-  const bytes = BigInt(value);
-  if (bytes > U64_MAX) return "—";
-  const tenths = (bytes * 10n + MEBIBYTE / 2n) / MEBIBYTE;
-  const whole = tenths / 10n;
-  const fraction = tenths % 10n;
-  return `${integerFormatter.format(whole)}${fraction === 0n ? "" : `.${fraction}`} MiB`;
-}
-
 /** 配置展示用的字节单位阶梯，按 1024 进制递进；标签与用户阅读习惯一致。 */
 const BYTE_UNITS = [
   { label: "TB", factor: 1_099_511_627_776n },
@@ -93,8 +81,9 @@ function toByteCount(value: number | string | null | undefined): bigint | null {
 }
 
 /**
- * 配置字段的字节数格式化：按 1024 进制自适应到最大可读单位，整数不显示小数。
- * 与固定 MiB 的 formatBytesMiB 并存，后者服务于进程指标既有展示契约。
+ * 字节数格式化：接受 API 的十进制 u64 字符串或安全整数，全程用 BigInt 避免精度丢失，
+ * 按 1024 进制自适应到最大可读单位（B/KB/MB/GB/TB），整数不显示小数。
+ * 进程 RSS 与配置字节字段统一使用这一套单位标签。
  */
 export function formatBytes(value: number | string | null | undefined): string {
   const bytes = toByteCount(value);

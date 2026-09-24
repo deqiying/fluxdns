@@ -14,10 +14,10 @@ import {
 import { Pencil, Plus, Search } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type Outbound = Schemas["Outbound"];
@@ -31,6 +31,7 @@ interface ProxyFormValues {
 export function ProxiesPage() {
   const query = useConfigModule("outbound");
   const mutation = useConfigChangeMutation("outbound");
+  const state = useConfigState();
   const [form] = Form.useForm<ProxyFormValues>();
   const [editing, setEditing] = useState<Outbound | "create" | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -105,17 +106,19 @@ export function ProxiesPage() {
   return (
     <PageFrame
       title="代理配置"
-      description="管理供上游与远程规则使用的 SOCKS5 SecretRef；实际凭据不会进入 WebUI。"
-      meta={query.data ? <ConfigStateSummary state={query.data.state} /> : undefined}
+      description="每一条代理，凭据自守。"
       actions={(
-        <Button
-          type="primary"
-          icon={<Plus size={17} />}
-          disabled={!query.data || !configStateEditable(query.data.state)}
-          onClick={() => setEditing("create")}
-        >
-          添加代理
-        </Button>
+        <Space size={12}>
+          {state.data ? <ConfigSyncBadge state={state.data} /> : null}
+          <Button
+            type="primary"
+            icon={<Plus size={17} />}
+            disabled={!query.data || !configStateEditable(query.data.state)}
+            onClick={() => setEditing("create")}
+          >
+            添加代理
+          </Button>
+        </Space>
       )}
     >
       <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />

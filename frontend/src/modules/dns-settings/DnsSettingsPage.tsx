@@ -4,11 +4,12 @@ import { Button, Descriptions, Form, Input, InputNumber, Select, Space, Switch, 
 import { Pencil } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
+import { ByteSizeInput } from "@/shared/components/ByteSizeInput";
 import { DurationInput, durationOptionalRules, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
 import { normalizeDuration } from "@/shared/config/form-values";
 import { formatBytes } from "@/shared/formatters";
 import { getRetentionStatus, previewRetention, retentionStatusKey } from "./api";
@@ -19,7 +20,8 @@ type Statistics = Schemas["Statistics"];
 
 interface DnsFormValues {
   cache_enabled: boolean;
-  cache_size_bytes: number;
+  /** 由 ByteSizeInput 写入的整数字节数；undefined 表示当前输入无法换算，交给 required 规则拦截。 */
+  cache_size_bytes: number | undefined;
   failure_ttl: string;
   optimistic_enabled: boolean;
   optimistic_answer_ttl: string;
@@ -38,10 +40,12 @@ interface DnsFormValues {
 interface RetentionFormValues {
   days: number;
   grace_days: number;
-  reference_size_bytes: number;
+  /** 同 cache_size_bytes：undefined 由 required 规则拦截，保存前显式收窄。 */
+  reference_size_bytes: number | undefined;
 }
 
 export function DnsSettingsPage() {
+  const state = useConfigState();
   const dnsQuery = useConfigModule("dns");
   const statisticsQuery = useConfigModule("statistics");
   const retentionQuery = useQuery({ queryKey: retentionStatusKey, queryFn: ({ signal }) => getRetentionStatus(signal) });
@@ -92,10 +96,13 @@ export function DnsSettingsPage() {
   const saveDns = async () => {
     if (!dnsQuery.data) return;
     const values = await dnsForm.validateFields();
+    const cacheSizeBytes = values.cache_size_bytes;
+    // 空值或超出 Bytes 上限的输入已由 required 规则在 validateFields 拦下，此处仅做类型收窄，不掩盖校验失败。
+    if (cacheSizeBytes === undefined) return;
     const value: Dns = {
       cache: {
         enabled: values.cache_enabled,
-        memory: { max_size_bytes: values.cache_size_bytes },
+        memory: { max_size_bytes: cacheSizeBytes },
         failure_ttl: values.failure_ttl,
         optimistic: { enabled: values.optimistic_enabled, answer_ttl: values.optimistic_answer_ttl, max_age: values.optimistic_max_age },
         persistence: { enabled: values.snapshot_enabled, path: values.snapshot_path, snapshot_interval: values.snapshot_interval },
@@ -115,7 +122,10 @@ export function DnsSettingsPage() {
   const saveRetention = async () => {
     if (!statisticsQuery.data) return;
     const values = await retentionForm.validateFields();
-    const value: Statistics = { retention: values };
+    const referenceSizeBytes = values.reference_size_bytes;
+    // 同 saveDns：undefined 已由 required 规则拦下，这里只做类型收窄。
+    if (referenceSizeBytes === undefined) return;
+    const value: Statistics = { retention: { ...values, reference_size_bytes: referenceSizeBytes } };
     try {
       const preview = await previewRetention({
         expected: { active_revision: statisticsQuery.data.state.active_revision, observed_file_revision: statisticsQuery.data.state.observed_file_revision },
@@ -136,7 +146,11 @@ export function DnsSettingsPage() {
   const loading = dnsQuery.isLoading || statisticsQuery.isLoading;
   const error = dnsQuery.error ?? statisticsQuery.error;
   return (
-    <PageFrame title="DNS 配置" description="管理缓存、TTL、ECS、详情记录和统计保留；系统路径仍保持只读。" meta={dnsQuery.data ? <ConfigStateSummary state={dnsQuery.data.state} /> : undefined}>
+    <PageFrame
+      title="DNS 配置"
+      description="每一份缓存，收放自如。"
+      actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}</Space>}
+    >
       <PageState loading={loading} error={error} onRetry={() => { void dnsQuery.refetch(); void statisticsQuery.refetch(); }} />
       {dns && statistics && dnsQuery.data && statisticsQuery.data ? (
         <div className="settings-sections">
@@ -146,7 +160,7 @@ export function DnsSettingsPage() {
       ) : null}
       <ConfigFormModal open={editor === "dns"} title="编辑 DNS 配置" dirty={dirty} busy={dnsMutation.isPending} error={dnsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveDns()}>
         <Form form={dnsForm} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
-          <Form.Item name="cache_enabled" label="启用缓存" valuePropName="checked"><Switch /></Form.Item><Form.Item name="cache_size_bytes" label="内存上限（bytes）" rules={[{ required: true }]}><InputNumber min={1} max={1_099_511_627_776} /></Form.Item><Form.Item name="failure_ttl" label="失败 TTL" rules={durationRequiredRules}><DurationInput label="失败 TTL" /></Form.Item>
+          <Form.Item name="cache_enabled" label="启用缓存" valuePropName="checked"><Switch /></Form.Item><Form.Item name="cache_size_bytes" label="内存上限" rules={[{ required: true }]}><ByteSizeInput label="内存上限" /></Form.Item><Form.Item name="failure_ttl" label="失败 TTL" rules={durationRequiredRules}><DurationInput label="失败 TTL" /></Form.Item>
           <Form.Item name="optimistic_enabled" label="乐观缓存" valuePropName="checked"><Switch /></Form.Item><Space className="paired-fields" align="start"><Form.Item name="optimistic_answer_ttl" label="回答 TTL" rules={durationRequiredRules}><DurationInput label="回答 TTL" /></Form.Item><Form.Item name="optimistic_max_age" label="最大陈旧时间" rules={durationRequiredRules}><DurationInput label="最大陈旧时间" /></Form.Item></Space>
           <Form.Item name="snapshot_enabled" label="缓存快照" valuePropName="checked"><Switch /></Form.Item><Form.Item name="snapshot_path" label="快照路径" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="snapshot_interval" label="快照周期" rules={durationRequiredRules}><DurationInput label="快照周期" /></Form.Item>
           <Form.Item name="ttl_mode" label="TTL 覆盖"><Select options={[{ label: "使用默认", value: "inherit" }, { label: "启用", value: "enabled" }, { label: "禁用", value: "disabled" }]} /></Form.Item>{ttlMode === "enabled" ? <Space className="paired-fields" align="start"><Form.Item name="ttl_min" label="最小 TTL" rules={durationOptionalRules}><DurationInput label="最小 TTL" /></Form.Item><Form.Item name="ttl_max" label="最大 TTL" rules={durationOptionalRules}><DurationInput label="最大 TTL" /></Form.Item></Space> : null}
@@ -154,7 +168,7 @@ export function DnsSettingsPage() {
         </Form>
       </ConfigFormModal>
       <ConfigFormModal open={editor === "retention"} title="编辑数据保留" dirty={dirty} busy={statisticsMutation.isPending} error={statisticsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveRetention()}>
-        <Form form={retentionForm} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}><Form.Item name="days" label="R：基础保留天数" rules={[{ required: true }]}><InputNumber min={1} max={3650} /></Form.Item><Form.Item name="grace_days" label="G：宽限天数" rules={[{ required: true }]}><InputNumber min={0} max={3649} /></Form.Item><Form.Item name="reference_size_bytes" label="T：参考大小（bytes）" rules={[{ required: true }]}><InputNumber min={1} max={1_099_511_627_776} /></Form.Item><Typography.Text type="secondary">保存前由服务端重新采样详情数据库与 WAL；保存只更新策略，不立即清理。</Typography.Text></Form>
+        <Form form={retentionForm} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}><Form.Item name="days" label="R：基础保留天数" rules={[{ required: true }]}><InputNumber min={1} max={3650} /></Form.Item><Form.Item name="grace_days" label="G：宽限天数" rules={[{ required: true }]}><InputNumber min={0} max={3649} /></Form.Item><Form.Item name="reference_size_bytes" label="T：参考大小" rules={[{ required: true }]}><ByteSizeInput label="T：参考大小" /></Form.Item><Typography.Text type="secondary">保存前由服务端重新采样详情数据库与 WAL；保存只更新策略，不立即清理。</Typography.Text></Form>
       </ConfigFormModal>
     </PageFrame>
   );

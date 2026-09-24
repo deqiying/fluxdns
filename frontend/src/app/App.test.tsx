@@ -568,7 +568,7 @@ describe("application routes", () => {
     renderApp("/system-runtime");
 
     expect(await screen.findByRole("heading", { name: "系统运行状态", level: 2 })).toBeInTheDocument();
-    expect(await screen.findByText("186.4 MiB")).toBeInTheDocument();
+    expect(await screen.findByText("186.4 MB")).toBeInTheDocument();
     expect(screen.getByText("1.25%")).toBeInTheDocument();
     expect(screen.getByText("18")).toBeInTheDocument();
     expect(screen.getByText(processMetricsFixture.version)).toBeInTheDocument();
@@ -593,7 +593,7 @@ describe("application routes", () => {
     expect(await screen.findByText("sampling_failed")).toBeInTheDocument();
     expect(screen.getByText("warmup")).toBeInTheDocument();
     expect(screen.getByText("unsupported")).toBeInTheDocument();
-    expect(screen.queryByText("0 MiB")).not.toBeInTheDocument();
+    expect(screen.queryByText("0 MB")).not.toBeInTheDocument();
   });
 
   it("按三组展示十二个入口并保持当前激活态", async () => {
@@ -623,7 +623,7 @@ describe("application routes", () => {
     renderApp("/dashboard");
 
     expect(await screen.findByText("当前内存")).toBeInTheDocument();
-    expect(screen.getByRole("group", { name: "当前内存" })).toHaveTextContent("186.4 MiB");
+    expect(screen.getByRole("group", { name: "当前内存" })).toHaveTextContent("186.4 MB");
     expect(screen.getByRole("group", { name: "平均 QPS" })).toHaveTextContent("4.25 请求/秒");
     expect(screen.getByRole("group", { name: "平均 RPM" })).toHaveTextContent("255 请求/分钟");
     expect(screen.getByRole("img", { name: /QPS 与 RPM 请求趋势/ })).toBeInTheDocument();

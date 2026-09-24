@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+  BYTE_UNIT_OPTIONS,
   bytesFromForm,
+  bytesToDisplay,
   bytesToForm,
   deserializeInheritance,
   durationFromForm,
@@ -18,12 +20,53 @@ import {
 } from "./form-values";
 
 describe("配置表单共享值转换", () => {
-  it("字节与二进制单位精确往返并执行 schema 上限", () => {
-    expect(bytesFromForm("1.5", "MiB")).toBe(1_572_864);
-    expect(bytesToForm(1_572_864, "MiB")).toBe("1.5");
-    expect(bytesFromForm("1024", "GiB")).toBe(1_099_511_627_776);
-    expect(() => bytesFromForm("1024.000000001", "GiB")).toThrow();
+  it("字节按 1024 进制精确往返并执行 schema 上限", () => {
+    expect(bytesFromForm("1.5", "MB")).toBe(1_572_864);
+    expect(bytesToForm(1_572_864, "MB")).toBe("1.5");
+    expect(bytesFromForm("1024", "GB")).toBe(1_099_511_627_776);
+    expect(() => bytesFromForm("1024.000000001", "GB")).toThrow();
     expect(() => bytesFromForm("0", "B")).toThrow();
+    // 单位一律 1024 进制：KB 是 1024 B，而不是十进制 kB。
+    expect(bytesFromForm("1", "KB")).toBe(1_024);
+    expect(bytesToForm(1_024, "KB")).toBe("1");
+    // TB 与 schema 上限同量级：1 TB 合法，1.5 TB 越界。
+    expect(bytesFromForm("1", "TB")).toBe(1_099_511_627_776);
+    expect(bytesToForm(1_099_511_627_776, "TB")).toBe("1");
+    expect(() => bytesFromForm("1.5", "TB")).toThrow();
+    // 不足一个字节的字节数无法精确表示，必须在换算阶段拒绝。
+    expect(() => bytesFromForm("1.5", "B")).toThrow();
+  });
+
+  it("字节回显挑选能精确表示的最大单位，保证无损且不超过两位小数", () => {
+    expect(BYTE_UNIT_OPTIONS).toEqual([
+      { value: "B", label: "B" },
+      { value: "KB", label: "KB" },
+      { value: "MB", label: "MB" },
+      { value: "GB", label: "GB" },
+      { value: "TB", label: "TB" },
+    ]);
+    expect(bytesToDisplay(67_108_864)).toEqual({ value: "64", unit: "MB" });
+    expect(bytesToDisplay(1_073_741_824)).toEqual({ value: "1", unit: "GB" });
+    // 1 TiB 回显为 1 TB，不再退化成 1024 GB。
+    expect(bytesToDisplay(1_099_511_627_776)).toEqual({ value: "1", unit: "TB" });
+    // 小数回显与摘要 formatBytes 口径一致：1.5 MB 而不是 1536 KB，也不是 0.0014 GB。
+    expect(bytesToDisplay(1_572_864)).toEqual({ value: "1.5", unit: "MB" });
+    expect(bytesToDisplay(1_536)).toEqual({ value: "1.5", unit: "KB" });
+    // 两位小数上限内可精确表示时优先选更大单位（768 MB = 0.75 GB）。
+    expect(bytesToDisplay(805_306_368)).toEqual({ value: "0.75", unit: "GB" });
+    expect(bytesToDisplay(1)).toEqual({ value: "1", unit: "B" });
+    // 807306368 在任何单位下都无法用两位小数精确表示，回落到 B 才是无损表示。
+    expect(bytesToDisplay(807_306_368)).toEqual({ value: "807306368", unit: "B" });
+    expect(() => bytesToDisplay(0)).toThrow();
+    expect(() => bytesToDisplay(1_099_511_627_777)).toThrow();
+    expect(() => bytesToDisplay(1.5)).toThrow();
+  });
+
+  it("字节回显可无损换算回原始字节数", () => {
+    for (const bytes of [1, 1_024, 1_536, 1_048_576, 1_572_864, 67_108_864, 805_306_368, 807_306_368, 1_073_741_824, 1_099_511_627_776]) {
+      const { value, unit } = bytesToDisplay(bytes);
+      expect(bytesFromForm(value, unit), `${bytes} → ${value} ${unit}`).toBe(bytes);
+    }
   });
 
   it("复合 duration 不经 Number 丢失精度", () => {

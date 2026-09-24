@@ -36,7 +36,7 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
     const memory = screen.getByRole("group", { name: "当前内存" });
     expect(within(memory).getByText("采样失败")).toBeInTheDocument();
-    expect(within(memory).queryByText("MiB")).not.toBeInTheDocument();
+    expect(within(memory).queryByText("MB")).not.toBeInTheDocument();
     expect(within(memory).queryByText("0")).not.toBeInTheDocument();
   });
 
@@ -47,7 +47,7 @@ describe("DashboardPage", () => {
     expect(screen.getByRole("button", { name: "浅色显示" })).toHaveAttribute("aria-pressed", "true");
     expect(container.querySelector(".service-status-preview-dark")).not.toBeNull();
     expect(screen.getByRole("img", { name: /QPS 与 RPM 请求趋势/ })).toBe(chart);
-    expect(screen.getByRole("group", { name: "当前内存" })).toHaveTextContent("186.4 MiB");
+    expect(screen.getByRole("group", { name: "当前内存" })).toHaveTextContent("186.4 MB");
     unmount();
     render(<DashboardPage />);
     expect(screen.getByRole("button", { name: "深色样例" })).toHaveAttribute("aria-pressed", "false");

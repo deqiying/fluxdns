@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Button, Form, Input, Segmented, Select, Switch, Table, Tag, Tooltip, Typography, type TableColumnsType } from "antd";
+import { Button, Form, Input, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, type TableColumnsType } from "antd";
 import { Pencil, Plus, Search } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { DurationInput, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { normalizeDuration } from "@/shared/config/form-values";
-import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type Hosts = Schemas["Hosts"];
@@ -26,6 +26,7 @@ interface HostsFormValues {
 export function HostsPage() {
   const query = useConfigModule("hosts");
   const mutation = useConfigChangeMutation("hosts");
+  const state = useConfigState();
   const [form] = Form.useForm<HostsFormValues>();
   const sourceType = Form.useWatch("type", form);
   const [editing, setEditing] = useState<Hosts | "create" | null>(null);
@@ -110,9 +111,13 @@ export function HostsPage() {
   return (
     <PageFrame
       title="Hosts 配置"
-      description="管理内联或本地文件 Hosts 资源；运行状态来自当前 Runtime 快照。"
-      meta={query.data ? <ConfigStateSummary state={query.data.state} /> : undefined}
-      actions={<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加 Hosts</Button>}
+      description="每一条映射，优先作答。"
+      actions={(
+        <Space size={12}>
+          {state.data ? <ConfigSyncBadge state={state.data} /> : null}
+          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加 Hosts</Button>
+        </Space>
+      )}
     >
       <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
       {query.data ? (

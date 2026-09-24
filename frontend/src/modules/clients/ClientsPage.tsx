@@ -3,13 +3,13 @@ import { Button, Form, Input, Select, Space, Table, Tag, Tooltip, Typography, ty
 import { Pencil, Plus, Search } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ConfigStateSummary } from "@/shared/components/ConfigStateSummary";
+import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { DurationInput, durationOptionalRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { clientEditValue } from "@/shared/config/contract";
 import { normalizeDuration } from "@/shared/config/form-values";
-import { configStateEditable, useConfigChangeMutation, useConfigModule } from "@/shared/config/hooks";
+import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type Client = Schemas["Client"];
@@ -31,6 +31,7 @@ export function ClientsPage() {
   const query = useConfigModule("clients");
   const strategies = useConfigModule("strategy");
   const mutation = useConfigChangeMutation("clients");
+  const state = useConfigState();
   const [form] = Form.useForm<ClientFormValues>();
   const ttlMode = Form.useWatch("ttl_mode", form);
   const ecsMode = Form.useWatch("ecs_mode", form);
@@ -94,7 +95,16 @@ export function ClientsPage() {
   };
 
   return (
-    <PageFrame title="客户端配置" description="客户端 name 用于管理，client_id 用于请求匹配且普通编辑不可修改。" meta={query.data ? <ConfigStateSummary state={query.data.state} /> : undefined} actions={<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加客户端</Button>}>
+    <PageFrame
+      title="客户端配置"
+      description="每一台终端，各得其所。"
+      actions={(
+        <Space size={12}>
+          {state.data ? <ConfigSyncBadge state={state.data} /> : null}
+          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加客户端</Button>
+        </Space>
+      )}
+    >
       <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
       {query.data ? <div className="config-module-content"><div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索 name、ID 或 IP" onChange={(event) => setSearch(event.target.value)} /></div><Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 920 }} locale={{ emptyText: search ? "没有匹配的客户端" : "尚未配置客户端" }} /></div> : null}
       <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加客户端" : "编辑客户端"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>

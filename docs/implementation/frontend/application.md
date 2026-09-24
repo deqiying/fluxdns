@@ -59,9 +59,9 @@ P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个�
 
 [`operation.ts`](../../../frontend/src/shared/config/operation.ts) 要求首次发送前固定 `operation_id`。apply 返回进行中时有界轮询；网络失败或 timeout 后只按同一 ID 查询，不重放 apply；`unknown` 另行回读活动状态，不能推断操作未执行。结果 ID 不一致按非法响应拒绝。表单 phase 保留打开时的双 revision 草稿，settled 前不把结果未知伪装成失败或成功。
 
-[`query-keys.ts`](../../../frontend/src/shared/config/query-keys.ts) 将模块、活动 revision 和文件 revision 纳入 key；保存后只失效目标模块、确定的引用依赖、状态和概览，不清空全部查询。[`form-values.ts`](../../../frontend/src/shared/config/form-values.ts) 用 BigInt 做字节/duration 精确转换，区分继承与显式值、保留已删除引用占位，并在 variant 提交时只选择白名单字段；IP/CIDR helper 只负责词法检查，冲突和规范化仍以服务端为准。duration 表单换算只提供毫秒/秒/分钟/小时/天，回填按能整除的最大整单位归一化（`5000000000ns` → `5s`、`300000000000ns` → `5 分钟`，非整秒按毫秒精确展开），摘要展示复用同一换算的 `formatDurationText`，提交仍写回紧凑 duration；前端只拦必填字段的空值与零值、非法串和小数位超过后端 9 位上限的组合，TTL 上下限按后端语义允许 `0s`（表示该边界不设限），字段上下界仍由后端权威校验。
+[`query-keys.ts`](../../../frontend/src/shared/config/query-keys.ts) 将模块、活动 revision 和文件 revision 纳入 key；保存后只失效目标模块、确定的引用依赖、状态和概览，不清空全部查询。[`form-values.ts`](../../../frontend/src/shared/config/form-values.ts) 用 BigInt 做字节/duration 精确转换，区分继承与显式值、保留已删除引用占位，并在 variant 提交时只选择白名单字段；IP/CIDR helper 只负责词法检查，冲突和规范化仍以服务端为准。duration 表单换算只提供毫秒/秒/分钟/小时/天，回填按能整除的最大整单位归一化（`5000000000ns` → `5s`、`300000000000ns` → `5 分钟`，非整秒按毫秒精确展开），摘要展示复用同一换算的 `formatDurationText`，提交仍写回紧凑 duration；前端只拦必填字段的空值与零值、非法串和小数位超过后端 9 位上限的组合，TTL 上下限按后端语义允许 `0s`（表示该边界不设限），字段上下界仍由后端权威校验。字节侧对称：`ByteUnit` 只提供 B/KB/MB/GB/TB（1024 进制），`bytesToDisplay` 回填“能精确表示且小数不超过两位”的最大单位（`1_572_864` → `1.5 MB`），`bytesFromForm` 全程 BigInt 并在 1..1 TiB 之外抛错。
 
-[`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx) 统一受限高度、内部滚动、保存防重、脏关闭确认、安全错误与 request ID 展示，并提供字段路径到 Ant Design Form 的定位转换。它是业务表单容器而非 schema 自动表单；P3 各页面按自身领域上下界和类型分支使用该容器。共享 [`DurationInput`](../../../frontend/src/shared/components/DurationInput.tsx) 用“数字 + 单位”编辑 duration 字段，默认单位为秒，只在回填时换算一次纳秒串，避免把人类不可感知的 ns/us 量级暴露到界面；它已覆盖 DNS 缓存 TTL／快照周期、Hosts 检查周期、规则集更新周期、客户端与策略 TTL 覆盖和上游组超时，必填字段用 `durationRequiredRules`，可选边界用 `durationOptionalRules`（留空表示不设置，`0s` 表示该边界不设限）。
+[`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx) 统一受限高度、内部滚动、保存防重、脏关闭确认、安全错误与 request ID 展示，并提供字段路径到 Ant Design Form 的定位转换。它是业务表单容器而非 schema 自动表单；P3 各页面按自身领域上下界和类型分支使用该容器。共享 [`DurationInput`](../../../frontend/src/shared/components/DurationInput.tsx) 用“数字 + 单位”编辑 duration 字段，默认单位为秒，只在回填时换算一次纳秒串，避免把人类不可感知的 ns/us 量级暴露到界面；它已覆盖 DNS 缓存 TTL／快照周期、Hosts 检查周期、规则集更新周期、客户端与策略 TTL 覆盖和上游组超时，必填字段用 `durationRequiredRules`，可选边界用 `durationOptionalRules`（留空表示不设置，`0s` 表示该边界不设限）。共享 [`ByteSizeInput`](../../../frontend/src/shared/components/ByteSizeInput.tsx) 用同样的“数字 + 单位”形态编辑字节字段（`/dns-settings` 的内存上限与 T 参考大小），无法换算时向表单 emit `undefined`，由必填规则报错，而不是静默保留上一个有效值。
 
 ## P1 外部配置变化基础（2026-09-08）
 
@@ -79,7 +79,7 @@ P3 全局协调器已把选择结果作为一次 typed Candidate 交给正式 va
 
 [`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 由 `/system-runtime` 挂载。进程数据由 [`getProcessMetrics`](../../../frontend/src/modules/system/api.ts) 读取唯一 `/api/v2/system/runtime`，沿共享 Bearer client 展示版本、启动时间、运行时长、RSS、CPU、线程与采样时间；旧 system 请求及管理能力列表已删除。
 
-[`useProcessMetrics`](../../../frontend/src/modules/system/hooks.ts) 复用 30 秒可见性轮询和手动刷新；uptime 只从有效响应基准按接收时刻本地递增，隐藏页不逐秒渲染。RSS 格式化保留十进制 u64 字符串到 BigInt 的精度并统一显示 MiB；后端 measurement 的 `warmup`、`observation_gap`、`sampling_failed`、`unsupported` 原因显式呈现，不映射为零。页面没有 QPS/RPM、停止、重启或日志写操作。
+[`useProcessMetrics`](../../../frontend/src/modules/system/hooks.ts) 复用 30 秒可见性轮询和手动刷新；uptime 只从有效响应基准按接收时刻本地递增，隐藏页不逐秒渲染。RSS 格式化保留十进制 u64 字符串到 BigInt 的精度，并复用配置页同一套字节单位（KB/MB/GB/TB）；后端 measurement 的 `warmup`、`observation_gap`、`sampling_failed`、`unsupported` 原因显式呈现，不映射为零。页面没有 QPS/RPM、停止、重启或日志写操作。
 
 Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-setup/` 的 loopback 后端，完成登录、导航、可用进程样本和手动刷新；实际 RSS/CPU/thread 及时间字段正确展示，刷新后 sample/uptime 推进，浏览器日志为空。该证据不覆盖窄屏或真实 OS 采样失败，后者仅由前端 fixture 与 BC-23 后端测试分别覆盖。
 
