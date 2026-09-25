@@ -69,6 +69,8 @@ P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个�
 
 [`ExternalChangeBanner`](../../../frontend/src/shared/components/ExternalChangeBanner.tsx) 和 [`ExternalChangeDrawer`](../../../frontend/src/shared/components/ExternalChangeDrawer.tsx) 提供轻量提示、字段级差异/受保护变化展示、脏关闭确认、文件还原、组合采用及同步重试入口。还原确认明确只覆盖所见文件版本，不回滚运行态。[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 对还原和持久化重试复用单次 mutation + operation 回读，不把“重试文件同步”变成配置重新应用。
 
+抽屉在没有可编辑差异、没有受保护变化也没有解析错误时单独说明：文件字节变化可能只来自空格、缩进、换行、注释、命名顺序或等价表达，此时没有可采用的项、「组合采用」不可用，消除提示只能经「还原文件」以活动配置重写文件；纯格式差异不会呈现为可采用的候选。
+
 [`ConfigFileStatus`](../../../frontend/src/shared/components/ConfigFileStatus.tsx) 已挂入受保护的 `AppLayout`，以 `configKeys.state()` 每 30 秒仅在页面可见时轮询正式 `/api/v2/config/state`；刷新失败显示可重试的全局提示，不阻断当前页面。发现 issue 后才读取绑定双 revision 的差异，外改不会自动进入 Runtime；还原固定新 `operation_id` 并显式确认丢弃外改，`applied_unpersisted` 重试严格复用原 ID、只调用文件 retry route。mutation 结束后失效差异并回读权威状态，Banner 不因 HTTP 成功提前消失；被拒绝、补偿失败、结果未知和版本冲突继续展示事实。
 
 P3 全局协调器已把选择结果作为一次 typed Candidate 交给正式 validate/apply；普通模块保存遇到外改也依赖后端 `discard_external_changes` 确认，不伪造通用 YAML 或自动合并。App/MSW 覆盖组合采用、取消、二次外改冲突、还原和原 ID 持久化重试，纯函数覆盖十模块差异映射。

@@ -134,6 +134,8 @@ function ExternalChangeDrawerBody({
   if (!state.diff) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可显示的差异" />;
 
   const { diff } = state;
+  // 文件字节与基线不同不代表 typed 值有差异：注释、空格和等价表达都会走到这里。
+  const formatOnly = diff.editable.length === 0 && diff.protected_changes.length === 0 && !diff.parse_error;
   return (
     <Space direction="vertical" size={20} className="external-change-content">
       {state.phase === "awaiting_state" ? (
@@ -144,6 +146,14 @@ function ExternalChangeDrawerBody({
         <Descriptions.Item label="文件版本">{diff.expected.observed_file_revision}</Descriptions.Item>
       </Descriptions>
       {diff.parse_error ? <Alert type="error" showIcon message={`文件无法解析：${diff.parse_error}`} /> : null}
+      {formatOnly ? (
+        <Alert
+          type="info"
+          showIcon
+          message="文件字节已变化，但类型化配置值与活动配置一致"
+          description="可能只是空格、缩进、换行、注释、命名顺序或等价表达的差异，因此没有可采用的项，「组合采用」不可用；运行态配置不受影响。如需消除该提示，可用「还原文件」以当前活动配置重写受管文件（不会回滚正在运行的 DNS 配置）。"
+        />
+      ) : null}
       {diff.protected_changes.length > 0 ? (
         <div>
           <Typography.Title level={5}>受保护变化</Typography.Title>
