@@ -89,16 +89,26 @@ describe("QueriesPage 展示语义", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
-  it("Hosts 不显示写入标签，未知写入结果不会被 miss 推断为新建成功", async () => {
+  it("Hosts 在结果列与路由列标签行都显示来源标签，且不出现写入标签", async () => {
+    const restoreMatchMedia = openAllBreakpoints();
     server.use(http.post("/api/v2/queries/search", () => HttpResponse.json({ ...v2QueryPageFixture, items: [
       { ...direct, source: "hosts", cache: "bypass", cache_activity: null },
       { ...cache, source: "upstream", cache: "miss", cache_activity: null },
     ] })));
-    renderPage();
-    await screen.findByText("example.test.");
-    expect(screen.queryByText("新建缓存")).not.toBeInTheDocument();
-    expect(screen.queryByText("未写入缓存")).not.toBeInTheDocument();
-    expect(screen.getByText("Hosts", { selector: ".ant-tag" })).toBeInTheDocument();
+    try {
+      renderPage();
+      await screen.findByText("example.test.");
+      expect(screen.queryByText("新建缓存")).not.toBeInTheDocument();
+      expect(screen.queryByText("未写入缓存")).not.toBeInTheDocument();
+      const row = screen.getByText("example.test.").closest("tr");
+      expect(row).not.toBeNull();
+      // 结果列来源标签与路由列标签行同级别的 Hosts 标签各一个。
+      expect(within(row as HTMLElement).getAllByText("Hosts", { selector: ".ant-tag" })).toHaveLength(2);
+      const routeCell = (row as HTMLElement).querySelector(".query-route-chain")?.closest(".query-cell");
+      expect(routeCell?.querySelector(".query-cell-secondary .ant-tag")).toHaveTextContent("Hosts");
+    } finally {
+      restoreMatchMedia();
+    }
   });
 
   it("鼠标 focus 不提前展开浮窗抢占点击，完整点击后固定详情", async () => {

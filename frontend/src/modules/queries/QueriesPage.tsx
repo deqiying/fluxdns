@@ -240,7 +240,7 @@ export function QueriesPage() {
       title: "路由",
       key: "route",
       width: 300,
-      render: (_, record) => <CellStack primary={<RouteChain record={record} />} secondary={<CacheActivityTags record={record} />} />,
+      render: (_, record) => <CellStack primary={<RouteChain record={record} />} secondary={<><CacheActivityTags record={record} /><RouteSourceTag record={record} /></>} />,
     },
     {
       title: "客户端",
@@ -497,6 +497,11 @@ function CacheActivityTags({ record }: { record: QueryRecord }) {
   };
   return <>{activity.kind === "refresh" ? <Tag color="blue">后台刷新</Tag> : null}
     <Tag color={activity.outcome === "inserted" ? "green" : activity.outcome === "updated" ? "blue" : ["failed", "dropped"].includes(activity.outcome) ? "orange" : "default"}>{labels[activity.outcome]}</Tag></>;
+}
+
+/** 本地来源不产生写入结果，用同级标签补上路由列标签行，避免与缓存标签行排版不一致。 */
+function RouteSourceTag({ record }: { record: QueryRecord }) {
+  return record.source === "hosts" ? <Tag color="purple">Hosts</Tag> : null;
 }
 
 function responseStatusLabel(record: QueryRecord): string {
