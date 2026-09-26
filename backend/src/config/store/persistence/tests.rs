@@ -586,16 +586,20 @@ fn process_crash_matrix_recovers_only_persisted_decisions() {
         "reconfirmed-derived",
     ] {
         let fixture = Fixture::new();
-        let status = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "config::store::persistence::tests::crash_worker",
-                "--nocapture",
-            ])
-            .env("FLUXDNS_P1_JOURNAL_ROOT", &fixture.root)
-            .env("FLUXDNS_P1_JOURNAL_POINT", point)
-            .status()
-            .unwrap();
+        let status = {
+            // 子进程在 fork 到 exec 之间持有本进程 fd 的副本，与文件锁断言互斥。
+            let _child_process = crate::test_support::child_process_window();
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "config::store::persistence::tests::crash_worker",
+                    "--nocapture",
+                ])
+                .env("FLUXDNS_P1_JOURNAL_ROOT", &fixture.root)
+                .env("FLUXDNS_P1_JOURNAL_POINT", point)
+                .status()
+                .unwrap()
+        };
         assert_eq!(status.code(), Some(73), "{point}");
         if point == "reconfirm-before-decision" {
             assert!(matches!(

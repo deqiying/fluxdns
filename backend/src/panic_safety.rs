@@ -79,16 +79,20 @@ mod tests {
     #[test]
     fn real_panic_output_is_redacted_and_unwind_is_preserved() {
         for (mode, success) in [("main", false), ("worker", true)] {
-            let output = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "panic_safety::tests::subprocess_panic_probe",
-                    "--nocapture",
-                ])
-                .env("FLUXDNS_PANIC_PROBE", mode)
-                .env("RUST_BACKTRACE", "1")
-                .output()
-                .unwrap();
+            let output = {
+                // 子进程在 fork 到 exec 之间持有本进程 fd 的副本，与文件锁断言互斥。
+                let _child_process = crate::test_support::child_process_window();
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "panic_safety::tests::subprocess_panic_probe",
+                        "--nocapture",
+                    ])
+                    .env("FLUXDNS_PANIC_PROBE", mode)
+                    .env("RUST_BACKTRACE", "1")
+                    .output()
+                    .unwrap()
+            };
             assert_eq!(output.status.success(), success);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);

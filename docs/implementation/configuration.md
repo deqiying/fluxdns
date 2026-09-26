@@ -71,6 +71,7 @@ BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml 
 
 - `begin_runtime_apply` 在完整候选和版本核对后准备受限同目录 stage、写入 PREPARED journal，再复核两个文件；没有正式文件替换。应用成功回报只推进 active/runtime，`persist_applied` 才写 COMMIT_DECIDED 决策并分别替换源和派生文件。成功更新 persisted revision、最终观测及操作状态；失败保持新活动源和未同步 gate，重试只执行文件操作。
 - 源与派生目标分别持有 `File::try_lock` 的 OS 锁，冲突有界失败；空锁旁文件保留，进程退出释放锁，不按时间删除“过期锁”。每次替换核对固定角色、父目录身份、旧/新文件身份、SHA-256 和权限摘要；journal 不携带可任意指定的目标路径。源即派生文件时只处理一个目标。
+- 测试内派生子进程的用例（panic 探针、日志 bootstrap、持久化崩溃矩阵）与 `try_lock` 断言共用 [`backend/src/test_support.rs`](../../backend/src/test_support.rs) 的进程内读写窗口：Linux 的 `flock` 锁随 open file description 被 `fork` 复制，子进程在 `exec` 前会让并发用例看到假 `Busy`；该窗口只在 `cfg(test)` 下编译，不改变生产语义。
 - 恢复入口只用于新版启动前：PREPARED 清理已知候选、不 roll-forward；COMMIT_DECIDED 在两个目标均为已知旧/新身份与内容时，重新严格校验候选及派生路径，再补齐同一候选。损坏、超限、未知内容/身份、链接或范围不符都拒绝；不在运行进程中调用恢复自动 reload。journal 读取上限 16 KiB，配置/stage 上限 4 MiB。
 - Windows 创建 stage/journal 时即复制 owner/group/DACL 并保护 DACL，拒绝空 DACL；不是先默认继承再写秘密。替换沿用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`，文件先 `sync_all`；实际 DACL 条目、FileId、hard link、junction、ADS 与尾点别名有测试。Unix 使用限制模式、owner 核对和目录 fsync，但未在本批执行；Windows 不声称做了 Unix 目录 fsync 或硬件断电验收。
 

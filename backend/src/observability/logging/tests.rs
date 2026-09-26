@@ -301,15 +301,19 @@ async fn filter_failure_and_failed_compensation_are_distinct() {
 #[test]
 fn process_bootstrap_installs_one_final_layer_even_when_logs_start_disabled() {
     let fixture = Fixture::new();
-    let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args([
-            "--exact",
-            "observability::logging::tests::bootstrap_worker",
-            "--nocapture",
-        ])
-        .env("FLUXDNS_P1_LOGGING_TEST_ROOT", &fixture.root)
-        .status()
-        .unwrap();
+    let status = {
+        // 子进程在 fork 到 exec 之间持有本进程 fd 的副本，与文件锁断言互斥。
+        let _child_process = crate::test_support::child_process_window();
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "observability::logging::tests::bootstrap_worker",
+                "--nocapture",
+            ])
+            .env("FLUXDNS_P1_LOGGING_TEST_ROOT", &fixture.root)
+            .status()
+            .unwrap()
+    };
     assert!(status.success());
     assert!(!fixture.root.join("disabled.log").exists());
     let output = fs::read_to_string(fixture.root.join("enabled.log")).unwrap();

@@ -78,6 +78,10 @@ pub(super) fn acquire_lock_with_permissions(
     source: &Path,
     permissions: Option<&Permissions>,
 ) -> Result<(File, Stamp), PersistenceError> {
+    // 并发子进程在 fork 到 exec 之间持有本进程 fd 的副本；持读锁让该窗口与下面的
+    // try_lock 互斥，避免把继承的 flock 副本当成真实占用（见 crate::test_support）。
+    #[cfg(test)]
+    let _file_lock_window = crate::test_support::file_lock_window();
     let path = super::sibling(source, "lock");
     parent_identity(&path)?;
     if !path.try_exists()? {
