@@ -651,6 +651,7 @@ pub(crate) mod tests {
             "/api/v2/retention",
         ];
         let mut service_rss = None;
+        let mut service_cpu = None;
         for path in paths {
             let response = app
                 .clone()
@@ -672,11 +673,13 @@ pub(crate) mod tests {
                 assert_eq!(body["qps"]["reason"], "warmup");
                 assert!(body["qps"]["observed_seconds"].is_u64());
                 service_rss = Some(body["rss_bytes"].clone());
+                service_cpu = Some(body["cpu_percent"].clone());
             }
             if path == "/api/v2/system/runtime" {
                 assert_eq!(body["cpu_percent"]["value"], 1.25);
                 assert_eq!(body["threads"]["value"], 8);
                 assert_eq!(Some(body["rss_bytes"].clone()), service_rss);
+                assert_eq!(Some(body["cpu_percent"].clone()), service_cpu);
             }
             if path == "/api/v2/config/state" {
                 assert_eq!(body["runtime_revision"], "7");

@@ -65,6 +65,7 @@
     "rpm": {"state": "unavailable", "reason": "observation_gap", "observed_seconds": null},
     "online_clients": {"state": "available", "value": 2},
     "rss_bytes": {"state": "available", "value": "18446744073709551615"},
+    "cpu_percent": {"state": "available", "value": 1.25},
     "qps_trend": [],
     "rpm_trend": []
   },

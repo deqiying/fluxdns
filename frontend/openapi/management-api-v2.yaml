@@ -1394,13 +1394,14 @@ components:
     ServiceMetrics:
       type: object
       additionalProperties: false
-      required: [sampled_at_ms, qps, rpm, online_clients, rss_bytes, qps_trend, rpm_trend]
+      required: [sampled_at_ms, qps, rpm, online_clients, rss_bytes, cpu_percent, qps_trend, rpm_trend]
       properties:
         sampled_at_ms: {$ref: "#/components/schemas/SafeInteger"}
         qps: {$ref: "#/components/schemas/NumberMeasurement"}
         rpm: {$ref: "#/components/schemas/NumberMeasurement"}
         online_clients: {$ref: "#/components/schemas/CountMeasurement"}
         rss_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        cpu_percent: {$ref: "#/components/schemas/NumberMeasurement"}
         qps_trend: {type: array, maxItems: 600, items: {$ref: "#/components/schemas/RateSample"}}
         rpm_trend: {type: array, maxItems: 10, items: {$ref: "#/components/schemas/RateSample"}}
     ProcessMetrics:

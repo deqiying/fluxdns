@@ -4,9 +4,9 @@
 >
 > 适用范围：已接入路由、页面数据源、查询状态和实际能力范围
 >
-> 最后核对：2026-09-25（解析记录路由列标签行新增 Hosts 来源标签，按源码与静态构建核对；监听入口标题区文案、同步胶囊、表头列名、Duration 单位统一、服务状态及分批历史结果沿用原核对范围）
+> 最后核对：2026-09-26（服务状态逐秒 RPM 与 CPU 占用卡片局部核对；解析记录路由列标签行沿用 2026-09-25，其余沿用原核对范围）
 >
-> 核对基线：`2b3b160` 加本次工作树变更；本轮核对范围仅限解析记录路由列标签行，其余范围按原日期和基线解释
+> 核对基线：`c0d6ef9` 加本次工作树变更；本轮核对范围仅限服务状态页面，其余范围按原日期和基线解释
 
 ## 路由与数据源
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | `/initialize` | [InitializePage](../../../frontend/src/modules/auth/InitializePage.tsx) | setup 状态与首用户创建、竞争冲突刷新 |
 | `/login` | [LoginPage](../../../frontend/src/modules/auth/LoginPage.tsx) | 登录签发内存 Bearer，HttpOnly Cookie 仅用于认证刷新 |
-| `/dashboard` | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) | v2 HTTP/WS 的 RSS、QPS、RPM、在线身份和双单位趋势图 |
+| `/dashboard` | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) | v2 HTTP/WS 的 RSS、CPU 占用、QPS、RPM、在线身份和双单位趋势图 |
 | `/queries` | [QueriesPage](../../../frontend/src/modules/queries/QueriesPage.tsx) | v2 cursor 查询、身份/来源/Answer、实时缓冲和稳定详情 |
 | `/system-runtime` | [SystemPage](../../../frontend/src/modules/system/SystemPage.tsx) | v2 进程采样、版本和启动时间 |
 | `/listeners` | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx) | UDP/TCP/DoH 类型化列表、运行状态列与编辑；标题区与 服务状态／解析记录 同构，只显示同步胶囊，不显示 revision |
@@ -41,7 +41,7 @@ dashboard 先取 v2 HTTP 快照再订阅 WS metrics，system runtime 和全局�
 
 DashboardPage 的“深色样例/浅色显示”只切换本页 CSS 外观，指标和共享订阅保持不变；离开页面不保存主题。深色文字、缺数提示、双曲线/轴线和按钮采用独立对比色，沿用图表键盘名称与响应式容器。
 
-[`DashboardPage`](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 将 RSS、QPS、RPM 和在线身份显示为四张独立卡片，窄屏排列成两列；大号数值与单位分开排版，不可用时保留原始原因说明。页头“实时连接正常”仅在 WS 为 `open`、快照未过期且查询无错误时出现；延迟、中断和重连分别提示，不用设计稿的正常状态覆盖真实数据。
+[`DashboardPage`](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 将 RSS、CPU 占用、QPS、RPM 和在线身份显示为五张独立卡片，窄屏排列成两列；大号数值与单位分开排版，不可用时保留原始原因说明。CPU 与 RSS 复用同一进程采样快照，CPU 以占满一个核心为 100%，多线程可超过 100%。页头“实时连接正常”仅在 WS 为 `open`、快照未过期且查询无错误时出现；延迟、中断和重连分别提示，不用设计稿的正常状态覆盖真实数据。
 
 [`MetricsTrendChart`](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx) 在同一绘图区显示 QPS 蓝线和 RPM 青绿色线，分别标注左轴请求/秒、右轴请求/分钟；两条线都逐秒一个点，RPM 由 [`rateTrend`](../../../frontend/src/modules/dashboard/rateTrend.ts) 把快照逐秒 `qps_trend` 与页面本地保留的最近 120 秒缓存合并后按过去 60 秒滚动求和得出，同一秒以最新快照为准，因此不依赖后端分钟级 `rpm_trend`：窗口最左 60 秒历史不足不绘制 RPM，缺口秒会让其后 60 秒断线，相邻可用样本间隔过大也断开连线，都不用部分窗口凑数。两个轴独立线性缩放并采用易读刻度，横轴标签按分钟给出并在窄屏放宽到 2/5 分钟。采样时间、时间范围、横轴和提示框统一为 UTC。窗口外样本不参与刻度或选点，不可用区间不连接，孤立有效样本保留为圆端点；空趋势和全不可用趋势有明确提示。提示框由悬停、点按或键盘聚焦显示，离开交互后收起，避免常驻遮挡窄屏曲线；方向键、Home/End 沿共享时间轴按秒选择各序列最近样本，圆点位于该样本实际时间。ResizeObserver 让 SVG 使用容器像素宽度，保持轴文字大小，并在窄屏减少时间刻度。
 

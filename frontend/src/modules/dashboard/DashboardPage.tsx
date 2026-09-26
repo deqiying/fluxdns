@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Alert, Button, Tooltip } from "antd";
-import { Activity, Cpu, Moon, Sun, Users, type LucideIcon } from "lucide-react";
+import { Activity, Cpu, Gauge, Moon, Sun, Users, type LucideIcon } from "lucide-react";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState, InlineUnavailable } from "@/shared/components/PageState";
 import { formatBytes, formatCount, formatEpochMillis } from "@/shared/formatters";
@@ -53,6 +53,7 @@ export function DashboardPage() {
             {query.stale ? <Alert className="service-status-alert" type="warning" showIcon title="实时指标暂时不可用，当前显示最后一次有效快照" /> : null}
             <div className="service-status-metrics">
               <Metric label="当前内存" measurement={metrics.rss_bytes} formatter={(value) => formatBytes(String(value))} hint="进程驻留内存" icon={Cpu} />
+              <Metric label="CPU 占用" measurement={metrics.cpu_percent} formatter={(value) => formatRate(Number(value))} unit="%" hint="进程 CPU 使用率 · 单核 100%" icon={Gauge} />
               <Metric label="平均 QPS" measurement={metrics.qps} formatter={(value) => formatRate(Number(value))} unit="请求/秒" hint="每秒请求速率" icon={Activity} tone="qps" />
               <Metric label="平均 RPM" measurement={metrics.rpm} formatter={(value) => formatRate(Number(value))} unit="请求/分钟" hint="每分钟请求速率" icon={Activity} tone="rpm" />
               <Metric label="在线客户端" measurement={metrics.online_clients} formatter={(value) => formatCount(Number(value))} unit="个" hint="当前活跃身份" icon={Users} />

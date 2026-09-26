@@ -53,6 +53,19 @@ describe("DashboardPage", () => {
     expect(screen.getByRole("button", { name: "深色样例" })).toHaveAttribute("aria-pressed", "false");
   });
 
+  it("CPU 卡片按进程百分比显示，不可用时保留原因和单位口径", () => {
+    const { rerender } = render(<DashboardPage />);
+    const cpu = screen.getByRole("group", { name: "CPU 占用" });
+    expect(within(cpu).getByText("1.25")).toBeInTheDocument();
+    expect(within(cpu).getByText("%")).toBeInTheDocument();
+
+    mockMetrics({ data: { ...serviceMetricsFixture, cpu_percent: { state: "unavailable", reason: "sampling_failed", observed_seconds: null } } });
+    rerender(<DashboardPage />);
+    const unavailable = screen.getByRole("group", { name: "CPU 占用" });
+    expect(within(unavailable).getByText("采样失败")).toBeInTheDocument();
+    expect(within(unavailable).queryByText("%")).not.toBeInTheDocument();
+  });
+
   it("页面缓存最近 120 秒 QPS，快照只含最新秒点时仍能算出逐秒 RPM", () => {
     const sampled = Date.parse("2026-09-22T13:16:15Z");
     const perSecond = (from: number, count: number) => Array.from({ length: count }, (_, index) => ({

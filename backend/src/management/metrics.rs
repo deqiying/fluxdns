@@ -186,6 +186,12 @@ impl MetricsOwner {
             rpm,
             online_clients,
             rss_bytes: map_process_bytes(process, now, elapsed),
+            cpu_percent: map_process_measurement(
+                process.cpu_percent,
+                process.sampled_instant,
+                now,
+                elapsed,
+            ),
             qps_trend: qps_trend(&state, self.started_at, elapsed),
             rpm_trend: rpm_trend(&state, self.started_at, elapsed),
         }
@@ -788,6 +794,20 @@ mod tests {
     }
 
     #[test]
+    fn service_metrics_reuse_process_snapshot_for_cpu() {
+        let started_at = SystemTime::now();
+        let started = Instant::now();
+        let owner = MetricsOwner::new_at(started_at, started);
+        owner.set_process_sample_for_test(1024, 2.5, 4);
+
+        let metrics = owner.service_metrics_at(
+            started_at + Duration::from_secs(1),
+            started + Duration::from_secs(1),
+        );
+        assert_eq!(metrics.cpu_percent, Measurement::Available { value: 2.5 });
+    }
+
+    #[test]
     fn stale_process_snapshot_reports_observation_gap() {
         let started_at = SystemTime::now();
         let started = Instant::now();
@@ -816,6 +836,23 @@ mod tests {
         );
         assert_eq!(
             metrics.threads,
+            unavailable(UnavailableReason::ObservationGap, None)
+        );
+
+        // 服务状态快照复用同一进程样本，超时后 CPU 与 RSS 同样按 observation_gap 降级。
+        let service = owner.service_metrics_at(
+            started_at + Duration::from_secs(4),
+            started + Duration::from_secs(4),
+        );
+        assert!(matches!(
+            service.rss_bytes,
+            Measurement::Unavailable {
+                reason: UnavailableReason::ObservationGap,
+                observed_seconds: None,
+            }
+        ));
+        assert_eq!(
+            service.cpu_percent,
             unavailable(UnavailableReason::ObservationGap, None)
         );
     }

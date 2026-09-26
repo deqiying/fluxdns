@@ -4,9 +4,9 @@
 >
 > 适用范围：正式 Management listener、认证、配置写入、HTTP/WS 查询与内嵌资源接线
 >
-> 最后核对：2026-09-09（P5 当前契约、旧路径退出与联合验收收口）
+> 最后核对：2026-09-26（service metrics 新增 CPU 字段、与 system runtime 共享 RSS/CPU 快照的局部核对；P5 契约与旧路径退出沿用 2026-09-09 核对范围）
 >
-> 核对基线：`d7296fd`；本轮核对 P5 变更与联合验收，分批历史结果按原日期和基线解释
+> 核对基线：`c0d6ef9` 加本次工作树变更；本轮仅核对 service metrics 的进程字段，其余范围按原日期和基线解释
 >
 > 时间存储补充核对：2026-09-05，`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加业务时间迁移工作树；不扩大其他管理功能审计范围
 
@@ -119,7 +119,7 @@ Windows 使用 Bearer 子项当时的内嵌 binary、独立 `_fluxdns/p1-bearer-
 
 生产 `DnsService` 只启动一个受 Supervisor 管理的 `management.metrics` 任务，每秒更新共享进程快照。Windows 使用既有 `windows-sys` 的 ProcessStatus、Threading 和 ToolHelp API 读取 RSS、进程 CPU 时间与线程数；Linux 条件编译实现读取 `/proc/self/status`、`/proc/self/stat` 和 `/proc/stat`，本批未在 Linux 实测。首次 CPU 样本返回 `warmup`，直接读取失败返回 `sampling_failed`，非 Windows/Linux 返回 `unsupported`，超过 3 秒未刷新返回 `observation_gap`；DNS 请求不等待 OS 采样。
 
-`GET /api/v2/service/metrics` 与 `GET /api/v2/system/runtime` 复用同一 `MetricsOwner` 和 RSS 快照并要求 Bearer。受控时钟测试覆盖精确窗口、趋势、NAT、同 IP 不同 ID、unknown、mapped IPv4、容量恢复和采样缺口；跨 transport 真实 socket 测试核对 16 个接纳请求只计 16 次，Windows 测试读取真实 RSS/CPU/thread。
+`GET /api/v2/service/metrics` 与 `GET /api/v2/system/runtime` 复用同一 `MetricsOwner`、RSS 与 CPU 快照并要求 Bearer，HTTP 用例核对两个端点的 RSS 与 CPU 取值一致。受控时钟测试覆盖精确窗口、趋势、NAT、同 IP 不同 ID、unknown、mapped IPv4、容量恢复和采样缺口；跨 transport 真实 socket 测试核对 16 个接纳请求只计 16 次，Windows 测试读取真实 RSS/CPU/thread。
 
 Windows 使用当时 debug binary、`_fluxdns/p1-metrics-http-20260908/` 独立配置和 loopback 端口 `18123`/`15399` 完成生产链启动：配置 validate 通过，Bearer 请求两个指标端点均为 200，QPS/RPM/在线身份在未满窗口时返回 `warmup` 与覆盖秒数；两处 RSS 值相同且大于 0，CPU/thread 可用且非负。该历史检查发生在 BC-12 前，不能作为新增配置端点证据；Linux、浏览器、性能和 BC-24 WebSocket 本批未验证。
 
@@ -153,7 +153,7 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 
 | API 主题 | 实际数据来源 | 限制 |
 | --- | --- | --- |
-| service metrics（v2） | `MetricsOwner` 的请求窗口、在线身份和共享 RSS 快照 | 暖机、容量截断及采样缺口显式不可用；不返回原始身份 |
+| service metrics（v2） | `MetricsOwner` 的请求窗口、在线身份和共享 RSS/CPU 快照 | 暖机、容量截断及采样缺口显式不可用；不返回原始身份 |
 | system runtime（v2） | `MetricsOwner` 的共享 OS 采样快照 | 仅 Windows 实测；Linux 条件编译实现未实测 |
 | events metrics（v2 WS） | `EventServices` 读取共享 MetricsOwner | 每秒推送；独立连接/队列/心跳预算；会话持续复核 |
 | events queries（v2 WS） | DetailShardStore commit stream、共享 replay 与 active 目录快照 | 绑定 HTTP cursor/retention revision；缺口或水位变化要求 resync |

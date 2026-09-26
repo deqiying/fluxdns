@@ -748,6 +748,7 @@ pub struct RateSample {
     pub value: Measurement<f64>,
 }
 
+/// 服务状态快照：请求窗口与在线身份来自 DNS 接纳计数，RSS 与 CPU 复用同一进程采样快照。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ServiceMetrics {
@@ -756,6 +757,7 @@ pub struct ServiceMetrics {
     pub rpm: Measurement<f64>,
     pub online_clients: Measurement<u32>,
     pub rss_bytes: Measurement<DecimalU64>,
+    pub cpu_percent: Measurement<f64>,
     pub qps_trend: Vec<RateSample>,
     pub rpm_trend: Vec<RateSample>,
 }

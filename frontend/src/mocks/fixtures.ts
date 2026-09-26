@@ -37,6 +37,7 @@ export const serviceMetricsFixture = {
   rpm: { state: "available", value: 255 },
   online_clients: { state: "available", value: 2 },
   rss_bytes: { state: "available", value: "195454566" },
+  cpu_percent: { state: "available", value: 1.25 },
   qps_trend: qpsTrendFixture,
   rpm_trend: [
     { at_ms: serviceMetricsSampledAt - 60_000, value: { state: "unavailable", reason: "warmup", observed_seconds: 300 } },

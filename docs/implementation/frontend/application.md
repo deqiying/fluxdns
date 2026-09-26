@@ -4,9 +4,9 @@
 >
 > 适用范围：前端 bootstrap、provider、路由鉴权、HTTP client 与会话回收
 >
-> 最后核对：2026-09-22（品牌资源、桌面侧栏和移动导航局部核对；认证等其余内容沿用 2026-09-09 核对范围）
+> 最后核对：2026-09-26（服务状态指标来源、逐秒 RPM 与 CPU 字段局部核对；品牌资源与导航沿用 2026-09-22，认证等其余内容沿用 2026-09-09 核对范围）
 >
-> 核对基线：`2e84b14` 加本次工作树变更；本轮仅核对品牌资源与导航展示，分批历史结果按原日期和基线解释
+> 核对基线：`c0d6ef9` 加本次工作树变更；本轮仅核对服务状态指标来源，其余范围按原日期和基线解释
 
 ## 入口
 
@@ -129,7 +129,7 @@ Windows 内嵌 WebUI 连接 `_fluxdns/p3-live/` 的真实 ConfigV2 进程。脚�
 
 非正常断开且仍有订阅时按 500 ms、1 s、2 s 递增，最高 10 s 重连，每次重新签发 ticket。metrics 重连后重新订阅最新快照；queries 保留 HTTP 返回的 `snapshot_cursor`、`retention_revision` 和过滤条件，收到 replay 后推进 cursor，收到 epoch/cursor/overflow/gap/retention resync 则重新读取 HTTP 权威首屏。页面隐藏会取消订阅，恢复后先 refetch 再连接，避免把断流补成零值或继续使用过期水位。
 
-[`DashboardPage`](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 已切换 `/api/v2/service/metrics`，显示 RSS、最近 60 秒 QPS、最近 600 秒 RPM、在线身份及共同时间轴图表。卡片沿用后端 measurement；图表的 RPM 不由快照里的分钟级 `rpm_trend` 绘制，而是把快照逐秒 `qps_trend` 与页面本地缓存的最近 120 秒逐秒 QPS 合并后按过去 60 秒滚动求和，同一秒以最新快照为准，缓存只在快照缺少该秒时补位（跨后端实例的秒点网格不一致时不参与）。自绘 SVG 曲线提供可访问名称/数值表，不跨不可用点或不连续秒点连线；warming 和 observation gap 保留后端语义。`QueriesPage` 的 v2 HTTP/WS、500 条/2 MiB 缓冲与稳定详情见[页面实现](pages.md#查询与缓存行为)。
+[`DashboardPage`](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 已切换 `/api/v2/service/metrics`，显示 RSS、CPU 占用、最近 60 秒 QPS、最近 600 秒 RPM、在线身份及共同时间轴图表；CPU 与 RSS 来自同一进程采样快照，CPU 以占满一个核心为 100%，采样超时按 `observation_gap` 降级。卡片沿用后端 measurement；图表的 RPM 不由快照里的分钟级 `rpm_trend` 绘制，而是把快照逐秒 `qps_trend` 与页面本地缓存的最近 120 秒逐秒 QPS 合并后按过去 60 秒滚动求和，同一秒以最新快照为准，缓存只在快照缺少该秒时补位（跨后端实例的秒点网格不一致时不参与）。自绘 SVG 曲线提供可访问名称/数值表，不跨不可用点或不连续秒点连线；warming 和 observation gap 保留后端语义。`QueriesPage` 的 v2 HTTP/WS、500 条/2 MiB 缓冲与稳定详情见[页面实现](pages.md#查询与缓存行为)。
 
 Windows `_fluxdns/p4-live/` 内嵌 debug binary 的独立真实 socket smoke 覆盖 UDP DNS、HTTP 快照、WS 在线推送、断线 replay 和登出 4401。浏览器验证页面重载后的 Bearer、空 localStorage/sessionStorage/Cookie 可读值、带 Bearer 的 ticket 请求和无 token 的 WS URL；真实 DNS 使 dashboard QPS/RPM/在线身份变化，queries 自动刷新收到新记录。详情打开期间新增记录只进入提示，固定 record ID 不变，显式查看后才更新首屏；1440×900 与 390×844 均无页面级横向溢出，移动 Answer 修复后可读，Console 无 warning/error。页面可见性恢复由组件测试覆盖。外部 HTTPS 反向代理、Linux/macOS、真实网络慢读饱和、约 10 客户端和 2ms 性能未验证。
 

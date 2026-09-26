@@ -14,6 +14,7 @@ it("提供服务指标的峰值、缺口和在线身份固定契约", async () =
   const metrics = await apiV2Request<Schemas["ServiceMetrics"]>("/service/metrics");
 
   expect(metrics.online_clients).toEqual({ state: "available", value: 2 });
+  expect(metrics.cpu_percent).toEqual({ state: "available", value: 1.25 });
   expect(metrics.qps_trend.some(({ value }) => value.state === "unavailable" && value.reason === "observation_gap")).toBe(true);
   expect(metrics.qps_trend.at(-1)?.value).toEqual({ state: "available", value: 12.75 });
 });

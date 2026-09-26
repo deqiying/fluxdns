@@ -1226,6 +1226,7 @@ export interface components {
             rpm: components["schemas"]["NumberMeasurement"];
             online_clients: components["schemas"]["CountMeasurement"];
             rss_bytes: components["schemas"]["BytesMeasurement"];
+            cpu_percent: components["schemas"]["NumberMeasurement"];
             qps_trend: components["schemas"]["RateSample"][];
             rpm_trend: components["schemas"]["RateSample"][];
         };
