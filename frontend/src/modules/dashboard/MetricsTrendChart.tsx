@@ -1,8 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { Clock3 } from "lucide-react";
 import type { ServiceMetrics } from "./api";
-
-type RateSample = ServiceMetrics["qps_trend"][number];
+import { TREND_WINDOW_MS, type RateSample, type RateTrend } from "./rateTrend";
 
 const HEIGHT = 252;
 const LEFT = 42;
@@ -11,30 +10,32 @@ const TOP = 18;
 const BOTTOM = 34;
 const PLOT_HEIGHT = HEIGHT - TOP - BOTTOM;
 const timeFormatter = new Intl.DateTimeFormat("zh-CN", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+/** 逐秒序列允许的最大相邻采样间隔，更宽的间隔按缺口处理。 */
+const SAMPLE_GAP_MS = 1_500;
 
-/** 双折线共享时间轴、各用线性刻度；缺口不插值，键盘和指针共用选点状态。 */
-export function MetricsTrendChart({ metrics }: { metrics: ServiceMetrics }) {
+/** 双折线共享逐秒时间轴、各用线性刻度；RPM 由页面推导的过去 60 秒请求数给出，缺口不插值，键盘和指针共用选点状态。 */
+export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetrics; rateTrend: RateTrend }) {
   const plotRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(1000);
   const plotWidth = width - LEFT - RIGHT;
-  const startAt = metrics.sampled_at_ms - 10 * 60_000;
+  const startAt = metrics.sampled_at_ms - TREND_WINDOW_MS;
   const endAt = metrics.sampled_at_ms;
   const timeline = useMemo(
-    () => [...new Set([...metrics.qps_trend, ...metrics.rpm_trend].map(({ at_ms }) => at_ms))]
+    () => [...new Set([...rateTrend.qps, ...rateTrend.rpm].map(({ at_ms }) => at_ms))]
       .filter((at) => at >= startAt && at <= endAt).sort((a, b) => a - b),
-    [metrics.qps_trend, metrics.rpm_trend, startAt, endAt],
+    [rateTrend.qps, rateTrend.rpm, startAt, endAt],
   );
   const [selectedAt, setSelectedAt] = useState<number | undefined>(() => timeline.at(-1));
   const [followLatest, setFollowLatest] = useState(true);
   const [showTooltip, setShowTooltip] = useState(false);
-  const qpsMax = seriesMaximum(metrics.qps_trend, startAt, endAt);
-  const rpmMax = seriesMaximum(metrics.rpm_trend, startAt, endAt);
+  const qpsMax = seriesMaximum(rateTrend.qps, startAt, endAt);
+  const rpmMax = seriesMaximum(rateTrend.rpm, startAt, endAt);
   const selected = timeline.length === 0 ? undefined : followLatest || selectedAt === undefined ? timeline.at(-1) : nearestTime(timeline, selectedAt);
   const selectedX = selected === undefined ? 0 : xPosition(selected, startAt, endAt, width);
-  const qpsSelected = nearestSample(metrics.qps_trend, selected, startAt, endAt);
-  const rpmSelected = nearestSample(metrics.rpm_trend, selected, startAt, endAt);
-  const hasValues = [...metrics.qps_trend, ...metrics.rpm_trend].some((sample) => sample.at_ms >= startAt && sample.at_ms <= endAt && sample.value.state === "available");
-  const tickCount = width < 600 ? 2 : 5;
+  const qpsSelected = nearestSample(rateTrend.qps, selected, startAt, endAt);
+  const rpmSelected = nearestSample(rateTrend.rpm, selected, startAt, endAt);
+  const hasValues = [...rateTrend.qps, ...rateTrend.rpm].some((sample) => sample.at_ms >= startAt && sample.at_ms <= endAt && sample.value.state === "available");
+  const ticks = axisTicks(startAt, endAt, width);
 
   useEffect(() => {
     const plot = plotRef.current;
@@ -98,7 +99,7 @@ export function MetricsTrendChart({ metrics }: { metrics: ServiceMetrics }) {
       <div className="metrics-chart-plot" ref={plotRef}>
         <svg viewBox={`0 0 ${width} ${HEIGHT}`} role="img" aria-labelledby="metrics-chart-title metrics-chart-description" onPointerMove={selectFromPointer} onPointerDown={selectFromPointer}>
           <title id="metrics-chart-title">QPS 与 RPM 请求趋势</title>
-          <desc id="metrics-chart-description">最近十分钟 UTC 时间轴，左轴 QPS 为每秒请求量，右轴 RPM 为每分钟请求量，均为线性刻度；缺口处不连接。方向键选择采样点，Home 和 End 跳转首尾。</desc>
+          <desc id="metrics-chart-description">最近十分钟 UTC 时间轴，逐秒一个采样点；左轴 QPS 为每秒请求量，右轴 RPM 为过去 60 秒的请求数，均为线性刻度；缺口处不连接，窗口最左 60 秒历史不足时不绘制 RPM。方向键按秒选择采样点，Home 和 End 跳转首尾。</desc>
           {[0, 1, 2, 3, 4].map((step) => {
             const y = TOP + PLOT_HEIGHT * step / 4;
             return <line key={step} className="metrics-chart-grid" x1={LEFT} x2={width - RIGHT} y1={y} y2={y} />;
@@ -112,17 +113,17 @@ export function MetricsTrendChart({ metrics }: { metrics: ServiceMetrics }) {
               </g>
             );
           })}
-          {seriesPaths(metrics.qps_trend, startAt, endAt, qpsMax, width).map((path, index) => (
+          {seriesPaths(rateTrend.qps, startAt, endAt, qpsMax, width).map((path, index) => (
             <path key={`qps-${index}`} className="metrics-chart-qps-line" d={path} />
           ))}
-          {seriesPaths(metrics.rpm_trend, startAt, endAt, rpmMax, width).map((path, index) => (
+          {seriesPaths(rateTrend.rpm, startAt, endAt, rpmMax, width).map((path, index) => (
             <path key={`rpm-${index}`} className="metrics-chart-rpm-line" d={path} />
           ))}
           {selected !== undefined ? <line className="metrics-chart-cursor" x1={selectedX} x2={selectedX} y1={TOP} y2={TOP + PLOT_HEIGHT} /> : null}
           {[{ sample: qpsSelected, maximum: qpsMax, name: "qps" }, { sample: rpmSelected, maximum: rpmMax, name: "rpm" }].map(({ sample, maximum, name }) => sample?.value.state === "available" ? (
             <circle key={name} className={`metrics-chart-point metrics-chart-point-${name}`} cx={xPosition(sample.at_ms, startAt, endAt, width)} cy={TOP + PLOT_HEIGHT - sample.value.value / maximum * PLOT_HEIGHT} r={4} />
           ) : null)}
-          {Array.from({ length: tickCount + 1 }, (_, index) => startAt + (endAt - startAt) * index / tickCount).map((at) => (
+          {ticks.map((at) => (
             <text key={at} className="metrics-chart-axis" x={xPosition(at, startAt, endAt, width)} y={HEIGHT - 10} textAnchor={at === startAt ? "start" : at === endAt ? "end" : "middle"}>{formatTime(at).slice(0, 5)}</text>
           ))}
         </svg>
@@ -135,7 +136,7 @@ export function MetricsTrendChart({ metrics }: { metrics: ServiceMetrics }) {
         ) : null}
         {!hasValues ? <div className="metrics-chart-empty">{timeline.length === 0 ? "最近十分钟暂无趋势样本" : "趋势样本暂不可用，等待有效采样"}</div> : null}
       </div>
-      <div className="metrics-chart-footer">双轴独立刻度 · 悬停或点按查看</div>
+      <div className="metrics-chart-footer">逐秒采样 · RPM 为过去 60 秒请求数 · 悬停或点按查看</div>
     </div>
   );
 }
@@ -150,19 +151,36 @@ function seriesMaximum(samples: RateSample[], startAt: number, endAt: number): n
   return rounded * magnitude * 4;
 }
 
-/** 不跨不可用区间连接；孤立样本用零长度线段配合圆端帽保留可见点。 */
+/** 刻度标签按分钟给出，窄屏逐级放宽到 2/5 分钟；始终保留窗口首尾两个边界标签。 */
+function axisTicks(startAt: number, endAt: number, width: number): number[] {
+  const step = width < 480 ? 300_000 : width < 720 ? 120_000 : 60_000;
+  const ticks: number[] = [];
+  for (let at = startAt; at < endAt; at += step) ticks.push(at);
+  ticks.push(endAt);
+  return ticks;
+}
+
+/** 不跨不可用区间或缺失秒连接；孤立样本用零长度线段配合圆端帽保留可见点。 */
 function seriesPaths(samples: RateSample[], startAt: number, endAt: number, maximum: number, width: number): string[] {
   const paths: string[] = [];
   let points: string[] = [];
+  let previousAt: number | undefined;
   for (const sample of samples) {
     if (sample.value.state !== "available" || sample.at_ms < startAt || sample.at_ms > endAt) {
       if (points.length > 0) paths.push(samplePath(points));
       points = [];
+      previousAt = undefined;
       continue;
+    }
+    // 相邻可用样本间距超过 1.5 秒说明中间缺秒（例如跨后端实例的秒点网格），按缺口断开而不插值。
+    if (points.length > 0 && previousAt !== undefined && sample.at_ms - previousAt > SAMPLE_GAP_MS) {
+      paths.push(samplePath(points));
+      points = [];
     }
     const x = xPosition(sample.at_ms, startAt, endAt, width);
     const y = TOP + PLOT_HEIGHT - sample.value.value / maximum * PLOT_HEIGHT;
     points.push(`${x.toFixed(2)} ${y.toFixed(2)}`);
+    previousAt = sample.at_ms;
   }
   if (points.length > 0) paths.push(samplePath(points));
   return paths;

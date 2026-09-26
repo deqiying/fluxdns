@@ -23,17 +23,21 @@ export const processMetricsFixture = {
 
 const serviceMetricsSampledAt = Date.now();
 
+/** 逐秒 QPS 覆盖完整十分钟窗口，中间保留一秒缺口用于验证断线；末秒值与既有固定契约一致。 */
+const qpsTrendFixture: V2Schemas["ServiceMetrics"]["qps_trend"] = Array.from({ length: 600 }, (_, index) => {
+  const at_ms = serviceMetricsSampledAt - (600 - index) * 1_000;
+  if (index === 290) return { at_ms, value: { state: "unavailable", reason: "observation_gap", observed_seconds: null } };
+  const value = index === 599 ? 12.75 : Math.round(8 * Math.abs(Math.sin(index / 9)) * 100) / 100;
+  return { at_ms, value: { state: "available", value } };
+});
+
 export const serviceMetricsFixture = {
   sampled_at_ms: serviceMetricsSampledAt,
   qps: { state: "available", value: 4.25 },
   rpm: { state: "available", value: 255 },
   online_clients: { state: "available", value: 2 },
   rss_bytes: { state: "available", value: "195454566" },
-  qps_trend: [
-    { at_ms: serviceMetricsSampledAt - 2_000, value: { state: "available", value: 1.5 } },
-    { at_ms: serviceMetricsSampledAt - 1_000, value: { state: "unavailable", reason: "observation_gap", observed_seconds: null } },
-    { at_ms: serviceMetricsSampledAt, value: { state: "available", value: 12.75 } },
-  ],
+  qps_trend: qpsTrendFixture,
   rpm_trend: [
     { at_ms: serviceMetricsSampledAt - 60_000, value: { state: "unavailable", reason: "warmup", observed_seconds: 300 } },
     { at_ms: serviceMetricsSampledAt, value: { state: "available", value: 255 } },

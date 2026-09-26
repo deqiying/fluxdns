@@ -7,6 +7,7 @@ import { formatBytes, formatCount, formatEpochMillis } from "@/shared/formatters
 import type { ServiceMetrics } from "./api";
 import { MetricsTrendChart } from "./MetricsTrendChart";
 import { useServiceMetrics } from "./hooks";
+import { useRateTrend } from "./rateTrend";
 
 type Measurement = ServiceMetrics["qps"] | ServiceMetrics["online_clients"] | ServiceMetrics["rss_bytes"];
 
@@ -16,6 +17,7 @@ export function DashboardPage() {
   const [darkPreview, setDarkPreview] = useState(false);
   const query = useServiceMetrics();
   const metrics = query.data;
+  const rateTrend = useRateTrend(metrics);
   const live = !!metrics && !query.error && !query.stale && query.connectionState === "open";
   const disconnected = !!query.error || query.connectionState === "error" || query.connectionState === "closed";
   const status = disconnected ? "实时连接中断"
@@ -55,7 +57,7 @@ export function DashboardPage() {
               <Metric label="平均 RPM" measurement={metrics.rpm} formatter={(value) => formatRate(Number(value))} unit="请求/分钟" hint="每分钟请求速率" icon={Activity} tone="rpm" />
               <Metric label="在线客户端" measurement={metrics.online_clients} formatter={(value) => formatCount(Number(value))} unit="个" hint="当前活跃身份" icon={Users} />
             </div>
-            <MetricsTrendChart metrics={metrics} />
+            <MetricsTrendChart metrics={metrics} rateTrend={rateTrend} />
             <div className="service-status-footer"><span>主实例</span><span>最近 10 分钟 · UTC</span></div>
           </div>
         ) : null}

@@ -52,4 +52,20 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
     expect(screen.getByRole("button", { name: "深色样例" })).toHaveAttribute("aria-pressed", "false");
   });
+
+  it("页面缓存最近 120 秒 QPS，快照只含最新秒点时仍能算出逐秒 RPM", () => {
+    const sampled = Date.parse("2026-09-22T13:16:15Z");
+    const perSecond = (from: number, count: number) => Array.from({ length: count }, (_, index) => ({
+      at_ms: from + index * 1_000,
+      value: { state: "available" as const, value: 2 },
+    }));
+    mockMetrics({ data: { ...serviceMetricsFixture, sampled_at_ms: sampled, qps_trend: perSecond(sampled - 120_000, 120) } });
+    const { rerender } = render(<DashboardPage />);
+    expect(screen.getByRole("group", { name: /^13:16:14 UTC/ })).toHaveAttribute("aria-label", "13:16:14 UTC，QPS 2，RPM 120");
+
+    // 快照只带同一秒点网格上的最新 30 秒，其余 60 秒窗口由本地缓存的 120 秒补齐。
+    mockMetrics({ data: { ...serviceMetricsFixture, sampled_at_ms: sampled + 30_000, qps_trend: perSecond(sampled, 30) } });
+    rerender(<DashboardPage />);
+    expect(screen.getByRole("group", { name: /^13:16:44 UTC/ })).toHaveAttribute("aria-label", "13:16:44 UTC，QPS 2，RPM 120");
+  });
 });
