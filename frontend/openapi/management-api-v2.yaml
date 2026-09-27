@@ -34,8 +34,8 @@ x-implemented-operations:
   - issueWebSocketTicket
   - subscribeEvents
 x-limits:
-  access_token_ttl_seconds: 300
-  access_renew_window_seconds: 30
+  access_token_ttl_seconds: 3600
+  access_renew_window_seconds: 600
   configuration_bytes: 4194304
   mutation_bytes: 2097152
   external_diff_bytes: 2097152

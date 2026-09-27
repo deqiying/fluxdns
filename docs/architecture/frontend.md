@@ -31,12 +31,12 @@ app: providers / router / error boundary
 ## 认证与路由约束
 
 先查询 setup 状态，再决定初始化、会话恢复与受保护页面。setup 未决时不请求受保护数据；初始化成功发布 setup ready 和 session；竞争冲突重新读取状态，不无限重试写入。
+未认证用户进入登录；请求 `401` 先换发凭据并重放，仍失败才由统一认证边界回收会话、取消查询并交给 guard 跳转。退出需要清理前一个用户的查询数据。loading、error、setup-required、unauthenticated 和正常内容必须有明确状态，不能把失败当成未登录或空数据。
 
-未认证用户进入登录；请求 `401` 由统一认证边界回收会话、取消查询并交给 guard 跳转。退出需要清理前一个用户的查询数据。loading、error、setup-required、unauthenticated 和正常内容必须有明确状态，不能把失败当成未登录或空数据。
 
-Bearer、刷新 Cookie、密码、Origin 与会话安全唯一维护于 [Management 设计](management.md)。AuthProvider 只持有无 token 的 session 投影；客户端共享刷新有独立有界 deadline，各等待者取消互不影响，业务写请求不会自动重放。实际行为见[应用实现](../implementation/frontend/application.md)。
+Bearer、刷新 Cookie、密码、Origin 与会话安全唯一维护于 [Management 设计](management.md)。AuthProvider 只持有无 token 的 session 投影；客户端共享刷新有独立有界 deadline，各等待者取消互不影响，业务请求收到 401 先换发重放一次，未知结果不自动重放。实际行为见[应用实现](../implementation/frontend/application.md)。
 
-浏览器 WS 不持久化 access token，也不把 token 放入 URL。共享 client 使用现有内存 Bearer 调用 ticket 端点，并以固定协议名和短期单次 ticket 两个 subprotocol 创建连接；认证代次变化立即丢弃 socket、重连计时器和旧消息。401/4401 统一进入现有会话失效边界，不能在 WS 层建立第二套登录状态。
+浏览器 WS 不持久化 access token，也不把 token 放入 URL。共享 client 使用现有内存 Bearer 调用 ticket 端点，并以固定协议名和短期单次 ticket 两个 subprotocol 创建连接；认证代次变化立即丢弃 socket、重连计时器和旧消息。401 先换发凭据并重放、仍失败才进入现有会话失效边界，4401 直接进入；不能在 WS 层建立第二套登录状态。
 
 ## 查询与呈现
 

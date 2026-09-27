@@ -1,7 +1,8 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import { onUnauthorized } from "@/shared/api/client";
+import { ApiError } from "@/shared/api/errors";
+import { SESSION_KEEPALIVE_INTERVAL_MS, onUnauthorized, renewAccessSession, reportUnauthorized } from "@/shared/api/client";
 import type { LoginRequest, Session, SetupRequest, SetupStatus } from "@/shared/api/types";
 import {
   authKeys,
@@ -48,6 +49,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     retry: false,
     enabled: setupReady,
   });
+  const hasSession = Boolean(sessionQuery.data);
 
   const initializeMutation = useMutation({ mutationFn: initializeWebUi });
   const loginMutation = useMutation({ mutationFn: requestLogin });
@@ -65,6 +67,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }),
     [queryClient],
   );
+
+  // 空闲保活：同源刷新既提前换发访问凭据，也更新服务端会话活跃时间，
+  // 隐藏标签或休眠回来不会再因服务端空闲期限到达而直接退出到登录页。
+  useEffect(() => {
+    if (!hasSession) return;
+    const keepAlive = () => {
+      void renewAccessSession().catch((error: unknown) => {
+        // 只有刷新凭据失效（401）才是登录态结束；手动登出后的迟到 401 不改写登录页状态，
+        // 网络和超时等瞬时错误留给下一次保活或下一次业务请求重试。
+        if (error instanceof ApiError && error.status === 401 && queryClient.getQueryData(authKeys.session)) {
+          reportUnauthorized();
+        }
+      });
+    };
+    const timer = window.setInterval(keepAlive, SESSION_KEEPALIVE_INTERVAL_MS);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") keepAlive();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("online", keepAlive);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("online", keepAlive);
+    };
+  }, [hasSession, queryClient]);
 
   const performLogin = useCallback(
     async (credentials: LoginRequest) => {

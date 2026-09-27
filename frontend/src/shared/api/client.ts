@@ -3,6 +3,11 @@ import type { AuthSession, Session } from "./types";
 
 const API_V2_PREFIX = "/api/v2";
 const DEFAULT_TIMEOUT_MS = 10_000;
+const REFRESH_TIMEOUT_MS = 5_000;
+/** 提前换发阈值；必须小于后端 renew 窗口，否则服务端不会真正换发新凭据。 */
+const ACCESS_RENEW_MARGIN_MS = 120_000;
+/** 后台保活周期：界面长时间无请求时，同源刷新同时维持服务端会话活跃时间。 */
+export const SESSION_KEEPALIVE_INTERVAL_MS = 10 * 60_000;
 
 type UnauthorizedListener = () => void;
 const unauthorizedListeners = new Set<UnauthorizedListener>();
@@ -19,6 +24,15 @@ export interface ApiRequestOptions {
   timeoutMs?: number;
   handleUnauthorized?: boolean;
   auth?: "required" | "public" | "refresh" | "logout";
+}
+
+type AuthMode = NonNullable<ApiRequestOptions["auth"]>;
+
+/** 单次尝试的会话世代与失败归因，供 requestWithPrefix 判断 401 是否仍属当前登录态、是否值得重放。 */
+interface Attempt {
+  epoch: number;
+  /** 本次 401 是否来自换发访问凭据失败：此时重放没有意义。 */
+  refreshFailed: boolean;
 }
 
 /** 凭据只在模块内存中保存；登出或 401 同时使先前的在途刷新结果失效。 */
@@ -47,17 +61,28 @@ export function acceptAuthSession(value: AuthSession): Session {
   return installAccessSession(value);
 }
 
-async function accessForRequest(signal: AbortSignal): Promise<{ token: string; epoch: number }> {
+/**
+ * 取得业务请求可用的访问凭据。
+ * force 表示调用方已确认当前凭据被服务端拒绝，必须真正换发而不能复用内存值。
+ */
+async function acquireAccess(
+  signal: AbortSignal,
+  force = false,
+): Promise<{ token: string; epoch: number }> {
   const epoch = authEpoch;
   if (!refreshAllowed) throw new ApiError({ code: "AUTH_REQUIRED", message: "session required", kind: "http", status: 401 });
-  if (access && access.expiresAt > Date.now() + 30_000) return { token: access.token, epoch };
+  if (!force && access && access.expiresAt > Date.now() + ACCESS_RENEW_MARGIN_MS) return { token: access.token, epoch };
   if (!refreshing || refreshing.epoch !== epoch) {
     const promise = apiV2Request<AuthSession>("/auth/refresh", {
-      method: "POST", auth: "refresh", timeoutMs: 5_000, handleUnauthorized: false,
+      method: "POST", auth: "refresh", timeoutMs: REFRESH_TIMEOUT_MS,
     }).then((value) => {
       if (epoch !== authEpoch) throw new ApiError({ code: "REQUEST_CANCELLED", message: "session changed", kind: "cancelled" });
       installAccessSession(value);
       return value.access_token;
+    }, (error: unknown) => {
+      // 换发失败同样按代次判定：旧代次的 401 不得被当成当前会话已失效。
+      if (epoch !== authEpoch) throw new ApiError({ code: "REQUEST_CANCELLED", message: "session changed", kind: "cancelled" });
+      throw error;
     }).finally(() => {
       if (refreshing?.epoch === epoch) refreshing = undefined;
     });
@@ -75,6 +100,14 @@ async function accessForRequest(signal: AbortSignal): Promise<{ token: string; e
   } finally {
     signal.removeEventListener("abort", onAbort);
   }
+}
+
+/**
+ * 主动换发访问凭据；同源刷新同时更新服务端会话活跃时间，因此也用于后台保活。
+ * 刷新凭据失效时抛出 401，由调用方决定是否结束登录态。
+ */
+export async function renewAccessSession(): Promise<void> {
+  await acquireAccess(new AbortController().signal, true);
 }
 
 /** 订阅非鉴权接口的 401；AuthProvider 负责统一清理内存 session 和跳转。 */
@@ -100,12 +133,41 @@ export async function apiV2Request<T>(path: string, options: ApiRequestOptions =
   return requestWithPrefix<T>(API_V2_PREFIX, path, options);
 }
 
+/**
+ * 会话型请求的 401 处置：先用刷新凭据换发访问凭据并重放原请求，刷新凭据也失效才结束登录态。
+ * 401 由服务端鉴权在业务处理前返回，重放不会重复执行写操作；配置写操作另带 operation_id 服务端去重。
+ */
 async function requestWithPrefix<T>(prefix: string, path: string, options: ApiRequestOptions): Promise<T> {
+  const mode = options.auth ?? "required";
+  const authenticated = mode === "required" || mode === "logout";
+  const maxAttempts = authenticated ? 2 : 1;
+  const attempt: Attempt = { epoch: authEpoch, refreshFailed: false };
+  for (let count = 1; ; count += 1) {
+    try {
+      return await sendOnce<T>(prefix, path, options, mode, attempt);
+    } catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 401 || !authenticated || attempt.epoch !== authEpoch) throw error;
+      if (count < maxAttempts && refreshAllowed && !attempt.refreshFailed) {
+        try {
+          await renewAccessSession();
+          continue;
+        } catch (refreshError) {
+          // 只有刷新凭据失效才是登录态结束；网络和超时错误原样上报，交给调用方重试。
+          if (!(refreshError instanceof ApiError) || refreshError.status !== 401) throw refreshError;
+        }
+      }
+      if (options.handleUnauthorized === false) clearAccessSession();
+      else reportUnauthorized();
+      throw error;
+    }
+  }
+}
+
+async function sendOnce<T>(prefix: string, path: string, options: ApiRequestOptions, mode: AuthMode, attempt: Attempt): Promise<T> {
   const controller = new AbortController();
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   let timedOut = false;
-  const mode = options.auth ?? "required";
-  let requestEpoch = authEpoch;
+  attempt.epoch = authEpoch;
 
   const abortFromCaller = () => controller.abort(options.signal?.reason);
   if (options.signal?.aborted) {
@@ -121,10 +183,20 @@ async function requestWithPrefix<T>(prefix: string, path: string, options: ApiRe
 
   try {
     controller.signal.throwIfAborted();
-    const authorization = mode === "required" || mode === "logout" ? await accessForRequest(controller.signal) : undefined;
+    attempt.refreshFailed = false;
+    let authorization: { token: string; epoch: number } | undefined;
+    if (mode === "required" || mode === "logout") {
+      try {
+        authorization = await acquireAccess(controller.signal);
+      } catch (error) {
+        // 换发失败已说明刷新凭据不可用，重放一次没有意义。
+        if (error instanceof ApiError && error.status === 401) attempt.refreshFailed = true;
+        throw error;
+      }
+    }
     if (authorization) {
-      requestEpoch = authorization.epoch;
-      if (requestEpoch !== authEpoch) throw new ApiError({ code: "REQUEST_CANCELLED", message: "session changed", kind: "cancelled" });
+      attempt.epoch = authorization.epoch;
+      if (attempt.epoch !== authEpoch) throw new ApiError({ code: "REQUEST_CANCELLED", message: "session changed", kind: "cancelled" });
     }
     controller.signal.throwIfAborted();
     const response = await fetch(`${prefix}${path.startsWith("/") ? path : `/${path}`}`, {
@@ -187,10 +259,7 @@ async function requestWithPrefix<T>(prefix: string, path: string, options: ApiRe
     return payload as T;
   } catch (error) {
     if (error instanceof ApiError) {
-      if (error.status === 401 && (mode === "required" || mode === "logout") && requestEpoch === authEpoch) {
-        if (options.handleUnauthorized === false) clearAccessSession();
-        else reportUnauthorized();
-      }
+      // 401 的重放与登出决策集中在 requestWithPrefix，单次尝试不产生会话副作用。
       throw error;
     }
     if (controller.signal.aborted) {

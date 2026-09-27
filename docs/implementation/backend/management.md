@@ -103,7 +103,7 @@ router 固定保护包括普通 JSON body 16 KiB、P1 配置候选 2 MiB、URI 4
 
 按用户追加决定，正式 `/api/v2` 的受保护 HTTP session 与全部业务查询均只读取 Authorization Bearer，不接受 Cookie、URL query、重复或非法 Authorization 作为后备。初始化/登录返回 `AuthSession`，包含无凭据 session、短期 access token、Bearer 类型与安全整数 UTC ms 过期时间；同时设置独立的 HttpOnly 刷新 Cookie。`POST /auth/refresh` 只接受该 Cookie 并校验 Origin/Fetch Metadata。`/auth/logout` 用有效 Bearer 撤销关联会话并清除 Cookie，无有效凭据时仍幂等，不用 Cookie/query 选择会话。API 响应 no-store，401 带 Bearer challenge。
 
-SessionStore 复用原 24 小时绝对/30 分钟空闲期限、4096 全局/16 单用户容量。访问凭据 5 分钟有效，剩余 30 秒内换发；并发刷新复用当前值，旧值只活到原期限，每会话最多两项访问索引。到达会话绝对期限不反复生成新凭据；过期、容量淘汰、认证更新、登出和进程关闭同时回收相关索引。两类随机凭据不互换，刷新凭据不进入响应正文。没有新增依赖或持久会话存储。
+SessionStore 使用 30 天绝对/24 小时空闲期限、4096 全局/16 单用户容量。访问凭据 60 分钟有效，剩余 10 分钟内换发；并发刷新复用当前值，旧值只活到原期限，每会话最多两项访问索引。到达会话绝对期限不反复生成新凭据；过期、容量淘汰、认证更新、登出和进程关闭同时回收相关索引。两类随机凭据不互换，刷新凭据不进入响应正文。没有新增依赖或持久会话存储。
 
 [`router/tests/bearer.rs`](../../../backend/src/management/router/tests/bearer.rs)、SessionStore 和查询路由测试覆盖两类凭据隔离、重复/非法 header、Origin、期限、索引回收及既有查询；[前端接线](../frontend/application.md#p1-bearer-接线2026-09-08)统一在业务请求中附加 Bearer。当前与目标 v2 OpenAPI/生成类型均已同步；BC-23 后仅两个指标端点已注册，不能由认证或指标验证推断新版配置 owner 已启动。
 

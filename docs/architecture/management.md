@@ -50,7 +50,7 @@ users empty -> setup_required
 - 初始化、登录和同源 POST 刷新接口可以返回短期 access token，前端仅在内存保存；普通 session、配置和业务响应不返回认证 token。刷新凭据只经 HttpOnly Cookie 传输，不能当作 Bearer；Cookie 不再直接授权业务请求。
 - Cookie 固定 `HttpOnly`、`SameSite=Strict`、`Path=/`，不设置 `Domain`。HTTPS origin 使用 `__Host-fluxdns_session` 与 `Secure`；HTTP origin 使用 `fluxdns_session` 且不能设置 `Secure`。
 - session 同时受绝对/空闲期限、全局/单用户容量限制；退出、显式认证内容更新和进程重启使相关 session 失效。具体常量以 [session.rs](../../backend/src/management/session.rs) 为准。
-- 并发刷新复用当前访问凭据，临近过期才换发；旧访问凭据只保留到原期限，避免在途请求或其他 tab 被提前注销。退出/会话失效同时撤销关联凭据；前端拒绝迟到刷新结果恢复已结束会话，也不让旧请求的 401 清除新登录。
+- 并发刷新复用当前访问凭据，临近过期才换发；旧访问凭据只保留到原期限，避免在途请求或其他 tab 被提前注销。退出/会话失效同时撤销关联凭据；前端拒绝迟到刷新结果恢复已结束会话，也不让旧请求的 401 清除新登录。业务请求收到 401 时先换发访问凭据并重放一次，只有刷新凭据也失效才结束登录态；5xx 与结果未知不重放。会话存在期间前端以同一刷新接口保活，界面空闲不再触发服务端空闲回收。
 - Management 在同一独立 listener 提供 HTTP 与 WS；`public_origin` 是浏览器唯一可接受的绝对 HTTP/HTTPS origin，不含凭据、路径、query 或 fragment。WS origin 与 ticket 签发也使用这个权威。
 - 同源判断不能根据 `X-Forwarded-Proto` 或 `X-Forwarded-Host` 放宽。Origin/Fetch Metadata、限流、大小/并发/超时保护必须在统一边界实施。
 - 前端不能把密码、hash、token 存入 URL、localStorage、sessionStorage 或查询缓存。认证响应使用 no-store，访问 token 在进入 AuthProvider 前剥离；业务写请求的未知结果不触发自动刷新重放。未经另行评审不增加通用写 API。

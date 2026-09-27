@@ -14,12 +14,12 @@ use time::format_description::well_known::Rfc3339;
 
 use super::contract::WebSocketTicket;
 
-pub(crate) const SESSION_ABSOLUTE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-pub(crate) const SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+pub(crate) const SESSION_ABSOLUTE_TTL: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+pub(crate) const SESSION_IDLE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 pub(crate) const SESSION_GLOBAL_CAPACITY: usize = 4096;
 pub(crate) const SESSION_PER_USER_CAPACITY: usize = 16;
-pub(crate) const ACCESS_TOKEN_TTL: Duration = Duration::from_secs(5 * 60);
-pub(crate) const ACCESS_RENEW_WINDOW: Duration = Duration::from_secs(30);
+pub(crate) const ACCESS_TOKEN_TTL: Duration = Duration::from_secs(60 * 60);
+pub(crate) const ACCESS_RENEW_WINDOW: Duration = Duration::from_secs(10 * 60);
 pub(crate) const WS_TICKET_TTL: Duration = Duration::from_secs(30);
 pub(crate) const WS_TICKET_GLOBAL_CAPACITY: usize = 128;
 pub(crate) const WS_TICKET_PER_SESSION_CAPACITY: usize = 4;

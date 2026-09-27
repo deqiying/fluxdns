@@ -24,7 +24,7 @@
 
 - 初始化：`initializeMutation` 成功后写入 setup ready 和新 session；[`InitializePage`](../../../frontend/src/modules/auth/InitializePage.tsx) 负责表单与冲突后的状态刷新。
 - 登录：`performLogin` 将返回 session 写入查询缓存，清除 sessionExpired 标志。
-- API `401` 或 WS `4401`：统一认证失效边界撤销内存凭据/连接，`onUnauthorized` 取消并清空 QueryClient，设置 sessionExpired、把 session 置 null，由 guard 统一跳转；重新登录不复用上一会话的数据。此清理有独立 AuthProvider 回归。
+- API `401`（先用刷新凭据换发并重放，仍失败）或 WS `4401`：统一认证失效边界撤销内存凭据/连接，`onUnauthorized` 取消并清空 QueryClient，设置 sessionExpired、把 session 置 null，由 guard 统一跳转；重新登录不复用上一会话的数据。存在 session 时 AuthProvider 每 10 分钟、页面回到前台和网络恢复时调用同一同源刷新保活，只有保活收到 401 才立即进入该边界。此清理有独立 AuthProvider 回归。
 - 退出：`performLogout` 的 finally 取消查询、清空 query client、将 session 置 null，然后跳转 login；即使网络退出失败也回收本地状态。
 
 [`ProtectedRoute`](../../../frontend/src/modules/auth/ProtectedRoute.tsx) 按 loading -> error -> setup-required -> no-session -> Outlet 处理。鉴权错误先显示错误页，不直接假定未登录；跳转携带来源 pathname。
@@ -39,9 +39,9 @@
 
 [`auth/api.ts`](../../../frontend/src/modules/auth/api.ts) 消费初始化/登录的 `AuthSession`，access token 仅存于共享 client 的模块内存；返回 AuthProvider/查询缓存前重新投影 `user/expires_at`，不透传 token 或额外 session 字段。业务请求和 `GET auth/session` 只附加 Authorization Bearer、明确省略 Cookie。页面重载后，client 先调用同源 `POST auth/refresh` 恢复访问凭据，不读取 HttpOnly Cookie 或浏览器持久存储。
 
-同一认证代次内所有请求共享一次在途刷新，刷新最多 5 秒且各等待方仍受自己的 10 秒/调用者取消约束。一个请求取消不终止其他等待者；登出/401 增加认证代次并禁止迟到刷新恢复会话，新登录不受旧请求迟到 401 影响。刷新只发生在业务请求发送前；已发出的请求返回 401/500 或结果未知均不自动重放。登出仍清空本地状态，失败不等于服务端已撤销，沿用上节的错误边界。
+同一认证代次内所有请求共享一次在途刷新，刷新最多 5 秒且各等待方仍受自己的 10 秒/调用者取消约束。一个请求取消不终止其他等待者；登出/401 增加认证代次并禁止迟到刷新恢复会话，新登录不受旧请求迟到 401 影响。凭据在剩余 2 分钟内、以及保活调用时换发；已发出的请求返回 401 时先换发再重放一次（401 由服务端鉴权在业务处理前返回，写请求另带 `operation_id` 服务端去重），只有刷新凭据也失效才结束登录态，此时不再重放；500 和结果未知一律不重放。重放按尝试各自计算 deadline，因此带重放的请求最坏约两倍超时。未到换发窗口的保活仍会更新服务端会话活跃时间，因此界面空闲不再触发空闲回收。登出仍清空本地状态，失败不等于服务端已撤销，沿用上节的错误边界。
 
-mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状态模拟，不充当生产替代。Vite 把 `/api` 透明代理到后端，未硬编码令牌或生产 baseURL；页面、认证与 mock handler 均使用 v2，不提供运行时版本开关。Bearer 测试覆盖并发、取消、迟到结果、写请求不重放、无 token session 投影和登录/登出流程。
+mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状态模拟，不充当生产替代。Vite 把 `/api` 透明代理到后端，未硬编码令牌或生产 baseURL；页面、认证与 mock handler 均使用 v2，不提供运行时版本开关。Bearer 测试覆盖并发、取消、迟到结果、写请求 401 换发后重放、500 不重放、刷新凭据失效结束登录态、保活换发、无 token session 投影和登录/登出流程。
 
 真实内嵌 WebUI 的浏览器验证覆盖初始化、页面重载后的 Cookie 刷新/Bearer 业务请求、登出后刷新保持未登录、再次登录及 Cookie 清除。开发者接口只读确认 localStorage/sessionStorage 条目均为 0，`document.cookie` 不可读刷新凭据；Network 只记录请求头是否存在，不输出 token。该验证使用旧壳层的真实后端数据，不证明 FC-01 十二路由、FC-02 公共表单或 v2 配置接口完成。
 
