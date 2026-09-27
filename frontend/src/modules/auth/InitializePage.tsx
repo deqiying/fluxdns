@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Alert, Button, Card, Form, Input, Space, Spin, Typography } from "antd";
+import { Alert, Button, Form, Input, Space, Spin, Typography } from "antd";
 import { Navigate, useNavigate } from "react-router-dom";
+import brandIcon from "@/assets/fluxdns-icon.svg?no-inline";
 import type { SetupRequest } from "@/shared/api/types";
 import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
 import { useAuth } from "./AuthProvider";
@@ -58,19 +59,27 @@ export function InitializePage() {
   return (
     <main className="login-page">
       <section className="login-visual" aria-label="FluxDNS 初始化介绍">
-        <div>
-          <div className="brand-mark">FD</div>
+        <div className="login-brand">
+          <img className="login-brand-mark" src={brandIcon} alt="" width={40} height={40} />
+          <strong>FluxDNS</strong>
         </div>
+
         <div>
           <span className="login-kicker">Secure DNS observability</span>
           <h1>先创建唯一的管理账号。</h1>
           <p>首次初始化只会写入服务端配置中的 Argon2id hash，明文密码不会被保存或展示。</p>
         </div>
-        <Typography.Text style={{ color: "#62758c" }}>FluxDNS Management Console</Typography.Text>
+
+        <span className="login-footnote">FluxDNS Management Console</span>
       </section>
 
       <section className="login-panel">
-        <Card className="login-card">
+        <div className="login-brand login-brand-mobile">
+          <img className="login-brand-mark" src={brandIcon} alt="" width={32} height={32} />
+          <strong>FluxDNS</strong>
+        </div>
+
+        <div className="login-card">
           <Space orientation="vertical" size={6} style={{ width: "100%", marginBottom: 28 }}>
             <Typography.Text type="secondary">首次初始化</Typography.Text>
             <Typography.Title level={2} style={{ margin: 0 }}>
@@ -125,7 +134,9 @@ export function InitializePage() {
               创建管理账号
             </Button>
           </Form>
-        </Card>
+
+          <p className="login-card-note">会话在有效期内自动续期，长时间操作不会中断。</p>
+        </div>
       </section>
     </main>
   );

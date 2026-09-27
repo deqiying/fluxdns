@@ -1,14 +1,23 @@
 import { useRef, useState } from "react";
-import { Alert, Button, Card, Form, Input, Space, Spin, Typography } from "antd";
+import { Alert, Button, Form, Input, Space, Spin, Typography } from "antd";
+import { Activity, RefreshCw, ShieldCheck, type LucideIcon } from "lucide-react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
-import type { LoginRequest } from "@/shared/api/types";
+import brandIcon from "@/assets/fluxdns-icon.svg?no-inline";
 import { getSafeErrorMessage } from "@/shared/api/errors";
+import type { LoginRequest } from "@/shared/api/types";
 import { useAuth } from "./AuthProvider";
 
 interface LoginLocationState {
   from?: string;
   sessionExpired?: boolean;
 }
+
+/** 左栏三条能力都与当前实现一致，不做未接线的承诺。 */
+const loginHighlights: { icon: LucideIcon; title: string; description: string }[] = [
+  { icon: Activity, title: "实时运行状态", description: "查询速率、缓存命中与上游延迟在同一视图集中呈现。" },
+  { icon: ShieldCheck, title: "配置变更可追溯", description: "改动经过校验后应用，页面持续显示运行与文件同步状态。" },
+  { icon: RefreshCw, title: "会话自动续期", description: "访问凭据在到期前静默刷新，长时间停留不会被打断。" },
+];
 
 export function LoginPage() {
   const [form] = Form.useForm<LoginRequest>();
@@ -60,21 +69,42 @@ export function LoginPage() {
   return (
     <main className="login-page">
       <section className="login-visual" aria-label="FluxDNS 介绍">
-        <div>
-          <div className="brand-mark">FD</div>
+        <div className="login-brand">
+          <img className="login-brand-mark" src={brandIcon} alt="" width={40} height={40} />
+          <strong>FluxDNS</strong>
         </div>
+
         <div>
           <span className="login-kicker">Secure DNS observability</span>
           <h1>清晰掌握每一次运行状态。</h1>
           <p>
             查看服务状态与解析记录，管理 DNS 配置。配置变更经过校验后应用，页面持续显示运行与文件同步状态。
           </p>
+          <ul className="login-highlights">
+            {loginHighlights.map(({ icon: Icon, title, description }) => (
+              <li key={title}>
+                <span className="login-highlight-icon">
+                  <Icon size={18} strokeWidth={1.8} aria-hidden="true" />
+                </span>
+                <div className="login-highlight-copy">
+                  <strong>{title}</strong>
+                  <span className="login-highlight-text">{description}</span>
+                </div>
+              </li>
+            ))}
+          </ul>
         </div>
-        <Typography.Text style={{ color: "#62758c" }}>FluxDNS Management Console</Typography.Text>
+
+        <span className="login-footnote">FluxDNS Management Console</span>
       </section>
 
       <section className="login-panel">
-        <Card className="login-card">
+        <div className="login-brand login-brand-mobile">
+          <img className="login-brand-mark" src={brandIcon} alt="" width={32} height={32} />
+          <strong>FluxDNS</strong>
+        </div>
+
+        <div className="login-card">
           <Space orientation="vertical" size={6} style={{ width: "100%", marginBottom: 28 }}>
             <Typography.Text type="secondary">DNS 管理界面</Typography.Text>
             <Typography.Title level={2} style={{ margin: 0 }}>
@@ -111,7 +141,9 @@ export function LoginPage() {
               登录
             </Button>
           </Form>
-        </Card>
+
+          <p className="login-card-note">会话在有效期内自动续期，长时间操作不会中断。</p>
+        </div>
       </section>
     </main>
   );

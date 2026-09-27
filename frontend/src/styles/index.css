@@ -1342,62 +1342,146 @@ select {
   border-top: 1px solid #e8e9ec;
 }
 
+/* 登录与初始化共用同一套浅色版式：左说明、右表单，颜色与字号对齐登录后的页面层级。 */
 .login-page {
   display: grid;
   min-height: 100vh;
-  grid-template-columns: minmax(0, 1.1fr) minmax(420px, 0.9fr);
-  background: #162131;
+  grid-template-columns: minmax(0, 1.57fr) minmax(420px, 1fr);
+  background: #f7f7f8;
 }
 
 .login-visual {
   display: flex;
   flex-direction: column;
   justify-content: space-between;
+  gap: 32px;
   min-height: 100vh;
-  padding: clamp(42px, 7vw, 92px);
-  color: #fff;
+  padding: clamp(32px, 5vw, 64px);
+}
+
+.login-brand {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  color: #202124;
+}
+
+.login-brand strong {
+  font-size: 23px;
+  font-weight: 650;
+  letter-spacing: -0.6px;
+}
+
+.login-brand-mark {
+  display: block;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+}
+
+.login-brand-mobile {
+  display: none;
 }
 
 .login-kicker {
-  color: #7db7ff;
+  display: block;
+  color: #066bcc;
   font-size: 12px;
   font-weight: 700;
-  letter-spacing: 0;
+  letter-spacing: 1.1px;
   text-transform: uppercase;
 }
 
 .login-visual h1 {
-  max-width: 720px;
-  margin: 22px 0;
-  font-size: 64px;
-  line-height: 1.05;
-  letter-spacing: 0;
+  max-width: 620px;
+  margin: 20px 0 18px;
+  color: #1d1d1f;
+  font-size: 40px;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -1.2px;
 }
 
 .login-visual p {
-  max-width: 600px;
-  color: #a9b9cb;
-  font-size: 17px;
-  line-height: 1.8;
+  max-width: 560px;
+  margin: 0;
+  color: #73737d;
+  font-size: 15px;
+  line-height: 1.75;
+}
+
+.login-highlights {
+  display: grid;
+  gap: 20px;
+  margin: 40px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.login-highlights li {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+
+.login-highlight-icon {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  color: #007aff;
+  background: #e6f0ff;
+  border-radius: 10px;
+}
+
+.login-highlight-copy strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #202124;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.login-highlight-text {
+  color: #73737d;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.login-footnote {
+  display: block;
+  color: #8b8f98;
+  font-size: 12px;
 }
 
 .login-panel {
-  display: grid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   min-height: 100vh;
   padding: 48px;
-  place-items: center;
-  background: #f7f7f8;
-  border-radius: 24px 0 0 24px;
+  background: #fff;
+  border-inline-start: 1px solid #e6e6eb;
 }
 
 .login-card {
-  width: min(420px, 100%);
-  border: 1px solid #e4eaf0;
-  box-shadow: 0 12px 32px rgb(11 28 47 / 10%);
+  width: min(372px, 100%);
 }
 
-.login-card .ant-card-body {
-  padding: 38px;
+.login-card h2.ant-typography {
+  margin: 0;
+  color: #1d1d1f;
+  font-size: 26px;
+  font-weight: 650;
+  letter-spacing: -0.4px;
+}
+
+.login-card-note {
+  margin: 16px 0 0;
+  color: #8b8f98;
+  font-size: 12px;
+  text-align: center;
 }
 
 .login-submit {
@@ -1472,12 +1556,34 @@ select {
   }
 
   .login-panel {
+    flex-direction: column;
+    justify-content: center;
+    gap: 24px;
     padding: 24px;
-    border-radius: 0;
+    background: #f7f7f8;
+    border-inline-start: 0;
   }
 
-  .login-visual h1 {
-    font-size: 48px;
+  .login-brand-mobile {
+    display: flex;
+    width: min(372px, 100%);
+  }
+
+  .login-brand-mobile .login-brand-mark {
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+  }
+
+  .login-brand-mobile strong {
+    font-size: 20px;
+  }
+
+  .login-card {
+    padding: 24px;
+    background: #fff;
+    border: 1px solid #e0e2e6;
+    border-radius: 12px;
   }
 }
 
