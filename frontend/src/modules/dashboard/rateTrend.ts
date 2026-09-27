@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import type { ServiceMetrics } from "./api";
 
 export type RateSample = ServiceMetrics["qps_trend"][number];
+/** 逐秒样本的读数：available 为原始计数，unavailable 保留后端原因。 */
+export type RateMeasurement = RateSample["value"];
 
 /**
  * 绘图窗口长度。后端 `qps_trend` 除该窗口外还多带 60 秒前瞻秒桶，
@@ -19,6 +21,14 @@ export interface RateTrend {
 }
 
 const EMPTY_RATE_TREND: RateTrend = { qps: [], rpm: [] };
+
+/**
+ * 卡片主值用的最新实时读数：QPS 是最近一个完整秒的请求数，RPM 是过去 60 秒请求数（滚动和的末端样本）。
+ * 这里不做除法，也不回退到更早的可用样本：末端样本不可用就按不可用降级，避免把旧值当当前值。
+ */
+export function latestReadouts(trend: RateTrend): { qps: RateMeasurement | undefined; rpm: RateMeasurement | undefined } {
+  return { qps: trend.qps.at(-1)?.value, rpm: trend.rpm.at(-1)?.value };
+}
 
 /** 按秒合并两份逐秒样本，同一秒以 `incoming` 为准；输出按时间升序，且复用原始样本对象。 */
 export function unionSamples(base: RateSample[], incoming: RateSample[]): RateSample[] {

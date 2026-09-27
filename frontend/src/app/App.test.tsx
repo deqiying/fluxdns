@@ -690,8 +690,10 @@ describe("application routes", () => {
 
     expect(await screen.findByText("当前内存")).toBeInTheDocument();
     expect(screen.getByRole("group", { name: "当前内存" })).toHaveTextContent("186.4 MB");
-    expect(screen.getByRole("group", { name: "平均 QPS" })).toHaveTextContent("4.25 请求/秒");
-    expect(screen.getByRole("group", { name: "平均 RPM" })).toHaveTextContent("255 请求/分钟");
+    expect(screen.getByRole("group", { name: "实时 QPS" })).toHaveTextContent("13 请求/秒");
+    expect(screen.getByRole("group", { name: "实时 QPS" })).toHaveTextContent("平均 QPS 4.25");
+    expect(screen.getByRole("group", { name: "实时 RPM" })).toHaveTextContent("314 请求/分钟");
+    expect(screen.getByRole("group", { name: "实时 RPM" })).toHaveTextContent("平均 RPM 255");
     expect(screen.getByRole("group", { name: "CPU 占用" })).toHaveTextContent("1.25 %");
     expect(screen.getByRole("img", { name: /QPS 与 RPM 请求趋势/ })).toBeInTheDocument();
     expect(document.querySelectorAll(".metrics-chart-qps-line")).toHaveLength(2);

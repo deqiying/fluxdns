@@ -367,6 +367,7 @@ select {
   --service-qps: #007aff;
   --service-rpm: #149c91;
   --service-cursor: #b8bfca;
+  --service-strong: #4b4b55;
   --page-heading-text: var(--service-text);
   --page-heading-muted: var(--service-muted);
   color: var(--service-text);
@@ -381,6 +382,7 @@ select {
   --service-qps: #79b7ff;
   --service-rpm: #5bd7c5;
   --service-cursor: #a0aabb;
+  --service-strong: #e5e7ec;
   padding: 24px;
   border-radius: 24px;
   background: #191c23;
@@ -538,11 +540,33 @@ select {
   min-height: 58px;
   margin-top: 12px;
 }
-.service-status-hint {
+/* 卡底行：左侧口径提示、右侧平均值；窄卡放不下时平均值换行并保持右对齐。 */
+.service-status-foot {
+  display: flex;
   margin-top: auto;
   padding-top: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 10px;
+  flex-wrap: wrap;
+}
+
+.service-status-hint {
   color: var(--service-muted);
   font-size: 12px;
+}
+
+.service-status-average {
+  margin-inline-start: auto;
+  color: var(--service-muted);
+  font-size: 12px;
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.service-status-average strong {
+  color: var(--service-strong);
+  font-weight: 600;
 }
 .service-status-preview-dark .reason-code {
   color: #f4d48b !important;

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   QPS_CACHE_SECONDS,
   RPM_WINDOW_SECONDS,
+  latestReadouts,
   mergeQpsCache,
   rollingRpm,
   unionSamples,
@@ -15,6 +16,7 @@ const unavailable = (at: number): RateSample => ({
   at_ms: at,
   value: { state: "unavailable", reason: "observation_gap", observed_seconds: null },
 });
+
 /** 从 `from` 开始每秒一个样本的逐秒 QPS。 */
 const series = (from: number, count: number, value = 1): RateSample[] =>
   Array.from({ length: count }, (_, index) => available(from + index * 1_000, value));
@@ -23,6 +25,32 @@ const reasonAt = (samples: RateSample[], index: number): string | undefined => {
   const value = samples[index]?.value;
   return value?.state === "unavailable" ? value.reason : undefined;
 };
+
+describe("latestReadouts", () => {
+  const trend = (qps: RateSample[], rpm: RateSample[]) => ({ qps, rpm });
+
+  it("取两条序列的末位样本作为实时读数，不做除法", () => {
+    const qps = series(base, 3, 4);
+    const rpm = [...series(base, 2, 0), available(base + 2_000, 240)];
+    expect(latestReadouts(trend(qps, rpm))).toEqual({
+      qps: { state: "available", value: 4 },
+      rpm: { state: "available", value: 240 },
+    });
+  });
+
+  it("末位不可用时不回退到更早的可用样本", () => {
+    const qps = [...series(base, 2, 4), unavailable(base + 2_000)];
+    expect(latestReadouts(trend(qps, qps)).qps).toEqual({
+      state: "unavailable",
+      reason: "observation_gap",
+      observed_seconds: null,
+    });
+  });
+
+  it("空序列没有实时读数，交由页面按暖机降级", () => {
+    expect(latestReadouts(trend([], []))).toEqual({ qps: undefined, rpm: undefined });
+  });
+});
 
 describe("unionSamples", () => {
   it("按时间升序合并，同一秒以新样本为准", () => {

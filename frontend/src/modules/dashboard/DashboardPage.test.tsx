@@ -94,4 +94,57 @@ describe("DashboardPage", () => {
     fireEvent.keyDown(chart, { key: "Home" });
     expect(chart).toHaveAttribute("aria-label", "13:06:15 UTC，QPS 2，RPM 120");
   });
+
+  it("速率卡片主值取窗口内原始计数，右下角显示近 600 秒平均值", () => {
+    const sampled = Date.parse("2026-09-22T13:16:15Z");
+    const perSecond = (from: number, count: number) => Array.from({ length: count }, (_, index) => ({
+      at_ms: from + index * 1_000,
+      value: { state: "available" as const, value: 3 },
+    }));
+    mockMetrics({
+      data: { ...serviceMetricsFixture, sampled_at_ms: sampled, rpm: { state: "available", value: 600 }, qps_trend: perSecond(sampled - 660_000, 660) },
+    });
+    render(<DashboardPage />);
+
+    // 主值是末位逐秒桶的原始计数，不是近 60 秒均值；平均值才除以窗口长度（600 ÷ 60 = 10）。
+    const qps = screen.getByRole("group", { name: "实时 QPS" });
+    expect(within(qps).getByText("3")).toBeInTheDocument();
+    expect(within(qps).getByText("请求/秒")).toBeInTheDocument();
+    expect(within(qps).getByText("最近一秒")).toBeInTheDocument();
+    expect(qps).toHaveTextContent("平均 QPS 10");
+
+    // RPM 主值是过去 60 秒请求数（60 × 3 = 180），平均值直接取近 600 秒的每分钟请求数。
+    const rpm = screen.getByRole("group", { name: "实时 RPM" });
+    expect(within(rpm).getByText("180")).toBeInTheDocument();
+    expect(within(rpm).getByText("请求/分钟")).toBeInTheDocument();
+    expect(within(rpm).getByText("过去一分钟")).toBeInTheDocument();
+    expect(rpm).toHaveTextContent("平均 RPM 600");
+  });
+
+  it("平均值独立降级：rpm 暖机时主值仍给实时计数，右下角保留原因", () => {
+    const sampled = Date.parse("2026-09-22T13:16:15Z");
+    const perSecond = Array.from({ length: 660 }, (_, index) => ({
+      at_ms: sampled - (660 - index) * 1_000,
+      value: { state: "available" as const, value: 3 },
+    }));
+    mockMetrics({
+      data: { ...serviceMetricsFixture, sampled_at_ms: sampled, rpm: { state: "unavailable", reason: "warmup", observed_seconds: 42 }, qps_trend: perSecond },
+    });
+    render(<DashboardPage />);
+
+    const qps = screen.getByRole("group", { name: "实时 QPS" });
+    expect(within(qps).getByText("3")).toBeInTheDocument();
+    expect(qps).toHaveTextContent("平均 QPS 暖机中 · 42s");
+    expect(within(qps).queryByText("10")).not.toBeInTheDocument();
+  });
+
+  it("没有逐秒样本时速率卡片按暖机降级，不显示零值", () => {
+    mockMetrics({ data: { ...serviceMetricsFixture, qps_trend: [] } });
+    render(<DashboardPage />);
+
+    const qps = screen.getByRole("group", { name: "实时 QPS" });
+    expect(within(qps).getByText("暖机中")).toBeInTheDocument();
+    expect(within(qps).queryByText("0")).not.toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "实时 RPM" })).toHaveTextContent("暂不可用");
+  });
 });

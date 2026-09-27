@@ -4,9 +4,9 @@
 >
 > 适用范围：已接入路由、页面数据源、查询状态和实际能力范围
 >
-> 最后核对：2026-09-27（服务状态指标推送改为订阅全量基线加每秒增量、逐秒趋势多带 60 秒前瞻的局部核对；服务状态逐秒 RPM 与 CPU 卡片沿用 2026-09-26，解析记录路由列标签行沿用 2026-09-25，其余沿用原核对范围）
+> 最后核对：2026-09-27（服务状态指标推送改为订阅全量基线加每秒增量、逐秒趋势多带 60 秒前瞻，以及速率卡片改为实时主值加近 600 秒平均值的局部核对；服务状态逐秒 RPM 与 CPU 卡片沿用 2026-09-26，解析记录路由列标签行沿用 2026-09-25，其余沿用原核对范围）
 >
-> 核对基线：`3f1a6be` 加本次工作树变更；本轮核对范围仅限服务状态页面，其余范围按原日期和基线解释
+> 核对基线：`7d5e3f6` 加本次工作树变更；本轮核对范围仅限服务状态页面，其余范围按原日期和基线解释
 
 ## 路由与数据源
 
@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | `/initialize` | [InitializePage](../../../frontend/src/modules/auth/InitializePage.tsx) | setup 状态与首用户创建、竞争冲突刷新 |
 | `/login` | [LoginPage](../../../frontend/src/modules/auth/LoginPage.tsx) | 登录签发内存 Bearer，HttpOnly Cookie 仅用于认证刷新 |
-| `/dashboard` | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) | v2 HTTP/WS 的 RSS、CPU 占用、QPS、RPM、在线身份和双单位趋势图 |
+| `/dashboard` | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) | v2 HTTP/WS 的 RSS、CPU 占用、实时 QPS/RPM（卡底附近 600 秒平均值）、在线身份和双单位趋势图 |
 | `/queries` | [QueriesPage](../../../frontend/src/modules/queries/QueriesPage.tsx) | v2 cursor 查询、身份/来源/Answer、实时缓冲和稳定详情 |
 | `/system-runtime` | [SystemPage](../../../frontend/src/modules/system/SystemPage.tsx) | v2 进程采样、版本和启动时间 |
 | `/listeners` | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx) | UDP/TCP/DoH 类型化列表、运行状态列与编辑；标题区与 服务状态／解析记录 同构，只显示同步胶囊，不显示 revision |
@@ -41,7 +41,7 @@ dashboard 先取 v2 HTTP 快照再订阅 WS metrics；订阅后的逐秒序列�
 
 DashboardPage 的“深色样例/浅色显示”只切换本页 CSS 外观，指标和共享订阅保持不变；离开页面不保存主题。深色文字、缺数提示、双曲线/轴线和按钮采用独立对比色，沿用图表键盘名称与响应式容器。
 
-[`DashboardPage`](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 将 RSS、CPU 占用、QPS、RPM 和在线身份显示为五张独立卡片，窄屏排列成两列；大号数值与单位分开排版，不可用时保留原始原因说明。CPU 与 RSS 复用同一进程采样快照，CPU 以占满一个核心为 100%，多线程可超过 100%。页头“实时连接正常”仅在 WS 为 `open`、快照未过期且查询无错误时出现；过期按本地收到指标的时刻判定，连续 3 个推送周期（3 秒）没有新数据才提示延迟，不与服务端 `sampled_at_ms` 相减，避免两端时钟偏移时状态按推送周期来回切换；延迟、中断和重连分别提示，不用设计稿的正常状态覆盖真实数据。
+[`DashboardPage`](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 将 RSS、CPU 占用、实时 QPS、实时 RPM 和在线身份显示为五张独立卡片，窄屏排列成两列；大号数值与单位分开排版，卡底左对齐写口径提示、右对齐写平均值，不可用时保留原始原因说明。两张速率卡片的主值取窗口内原始计数、不做除法：实时 QPS 是最近一个完整秒的请求数（逐秒桶的末位样本），实时 RPM 是过去 60 秒请求数（滚动求和的末位样本），因此与趋势图两条曲线的末端点同口径；平均值统一取近 600 秒窗口，平均 QPS 由后端 `rpm` 标量 ÷ 60 得到、平均 RPM 直接取 `rpm`，后端 `qps` 标量（近 60 秒均值）不再在本页显示。主值与平均值各自独立降级：末位样本不可用或还没有逐秒样本时按暖机/缺口原因显示，不用 0 或旧值替代；单卡宽度放不下时平均值换行并保持右对齐。CPU 与 RSS 复用同一进程采样快照，CPU 以占满一个核心为 100%，多线程可超过 100%。页头“实时连接正常”仅在 WS 为 `open`、快照未过期且查询无错误时出现；过期按本地收到指标的时刻判定，连续 3 个推送周期（3 秒）没有新数据才提示延迟，不与服务端 `sampled_at_ms` 相减，避免两端时钟偏移时状态按推送周期来回切换；延迟、中断和重连分别提示，不用设计稿的正常状态覆盖真实数据。
 
 [`MetricsTrendChart`](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx) 在同一绘图区显示 QPS 蓝线和 RPM 青绿色线，分别标注左轴请求/秒、右轴请求/分钟；两条线都逐秒一个点，RPM 由 [`rateTrend`](../../../frontend/src/modules/dashboard/rateTrend.ts) 把快照逐秒 `qps_trend`（订阅基线加每秒增量拼装出的序列）与页面本地保留的最近 120 秒缓存合并后按过去 60 秒滚动求和得出，同一秒以最新快照为准，因此不依赖后端分钟级 `rpm_trend`：后端快照自带窗口起点前 60 秒前瞻秒桶，窗口最左一分钟也有完整求和窗口，只有服务启动不足 660 秒时才按 warmup 给出已覆盖秒数；缺口秒会让其后 60 秒断线，相邻可用样本间隔过大也断开连线，都不用部分窗口凑数。两个轴独立线性缩放并采用易读刻度，横轴标签按分钟给出并在窄屏放宽到 2/5 分钟。采样时间、时间范围、横轴和提示框统一为 UTC。窗口外样本不参与刻度或选点，不可用区间不连接，孤立有效样本保留为圆端点；空趋势和全不可用趋势有明确提示。提示框由悬停、点按或键盘聚焦显示，离开交互后收起，避免常驻遮挡窄屏曲线；方向键、Home/End 沿共享时间轴按秒选择各序列最近样本，圆点位于该样本实际时间。ResizeObserver 让 SVG 使用容器像素宽度，保持轴文字大小，并在窄屏减少时间刻度。
 
@@ -85,6 +85,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | 配置页标题区统一 | [PageFrame](../../../frontend/src/shared/components/PageFrame.tsx)、`ConfigSyncBadge`、[index.css](../../../frontend/src/styles/index.css)、九个配置页 | `/dns-settings`／`/system-settings`／`/strategies`／`/clients`／`/hosts`／`/rule-sets`／`/proxies`／`/system-runtime`／`/upstreams` 标题区统一为同构短句副标题 + 全局同步胶囊，不再显示活动/文件 revision；`/system-runtime` 只保留次要按钮「刷新」并把采样时间移入内容区；三处重复标题区 CSS 合并为共享 `.page-heading` 规则，深色样例经 CSS 变量继承 | 2026-09-24：前端 28 文件 129 项 Vitest 与 `pnpm run typecheck`、生产构建通过；`App.test.tsx` 既有断言（各页标题、监听入口无 revision、系统运行状态读数）保持通过 | 未做真实浏览器视觉复验（34px 字号、字距、胶囊尺寸与窄屏 24px 间距未目视）；深色样例仅按变量继承推导；`QueriesPage`／`DashboardPage` 删除页级规则后的回归未目视 |
 | Hosts 命中路由列标签 | [QueriesPage](../../../frontend/src/modules/queries/QueriesPage.tsx) 的路由列 `CellStack` 与 `RouteSourceTag` | `/queries` 路由列第二行在 `cache_activity` 标签之后追加同级 `Hosts` 标签，来源仍取自详情记录的 `source` | 2026-09-25：`pnpm run typecheck` 与 `pnpm run build`（typecheck + vite build）通过；`QueriesPage.test.tsx` 用例断言已同步（打开全部断点后按行断言路由列标签行） | 本轮未运行 Vitest，未在真实浏览器复核标签行高度与窄屏省略；`rule_set`／`synthetic` 来源未加同级标签 |
 | 指标延迟判定改用本地到达时间 | [hooks.ts](../../../frontend/src/modules/dashboard/hooks.ts) 的 `isMetricsStale`、[hooks.test.tsx](../../../frontend/src/modules/dashboard/hooks.test.tsx) | 服务状态页头“实时连接正常/指标更新延迟”改按本地收到指标的时刻（`dataUpdatedAt`）判定，不再用服务端 `sampled_at_ms` 与浏览器时钟相减 | 2026-09-27：前端 31 文件 161 项 Vitest（含新增 4 项：3.5 秒时钟偏移下持续推送保持正常、停止推送超阈值判延迟后恢复、无快照与连接错误分支）与 `tsc --noEmit` 通过；回退到旧公式时 2 项新增用例失败 | 未在真实浏览器或真实后端复验页头状态；3 秒阈值仍是前端常量，后端推送周期变化时需同步调整 |
+| 速率卡片主值与平均值口径 | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 的 `Metric`／`realtimeReadout`／`averageQps`、[rateTrend.ts](../../../frontend/src/modules/dashboard/rateTrend.ts) 的 `latestReadouts`、[index.css](../../../frontend/src/styles/index.css) 的 `.service-status-foot`／`.service-status-average` | `/dashboard` 两张速率卡片主值改为「实时 QPS＝最近一个完整秒的请求数」「实时 RPM＝过去 60 秒请求数」，卡底右对齐显示近 600 秒平均值（平均 QPS＝`rpm` ÷ 60、平均 RPM＝`rpm`）；后端 `qps` 标量不再显示 | 2026-09-27：前端 31 文件 170 项 Vitest（含新增 6 项：末位读数取原始计数、末端不可用不回退、空序列、主值与平均值分别断言、平均值独立降级、无逐秒样本按暖机降级）、`pnpm run typecheck` 与生产构建通过；`App.test.tsx` 断言更新为「13 请求/秒」「平均 QPS 4.25」「314 请求/分钟」「平均 RPM 255」，回退到旧口径时这些断言失败 | 未做真实浏览器视觉复验（本机工作面板浏览器无法访问本地 Vite 端口）：五列卡片底行在 1440 与窄屏的实际换行、深色样例 `--service-strong` 对比度均未目视；仅在等宽设计稿同字体栈下量得底行合计约 124px < 卡内宽 166px |
 
 P4 完整 Vitest 为 23 文件 99 项，v2 schema contract 4 项、typecheck 与 production build 通过。Windows 使用 `_fluxdns/p4-live/` ConfigV2 和内嵌 debug binary 完成真实登录、Bearer ticket、UDP/SQLite/HTTP/WS、断线 replay、会话失效、稳定详情以及桌面/390×844 验收，浏览器 Console 无 error/warning。P3 配置验收仍见[前端应用](application.md#p3-联合验收2026-09-08)，P4 安全和实时证据见[共享实时连接](application.md#p4-共享实时连接2026-09-09)。
 
