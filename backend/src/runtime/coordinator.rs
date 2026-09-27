@@ -1,0 +1,1554 @@
+use std::fmt;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use arc_swap::ArcSwap;
+use thiserror::Error;
+
+use crate::cache::{
+    CacheSnapshotOwner, CacheSnapshotOwnerBuildError, CacheSnapshotOwnerStatus,
+    CacheSnapshotSettings, CacheSnapshotShutdownSummary, LateCacheFinalizer,
+    PreparedCacheSnapshotSwitch,
+};
+use crate::config::resolve::ConfigId;
+use crate::dns::{PolicyDnsCore, RuntimeCoreCell, RuntimeCoreTarget, RuntimeRevision};
+use crate::ports::effects::{ResourceFetcher, SocketFactory};
+use crate::resource::{ResourceScheduleDecision, ResourceSnapshot, RuleIndex};
+
+use super::bind::{BindError, BoundCandidate, BoundListenerSet, bind_prepared};
+use super::prepared::{PreparedRuntime, RefreshedResourceSnapshot, ResourceRefreshError};
+use super::snapshot::RuntimeSnapshot;
+
+/// 已发布、可接收请求的运行时实例。
+pub struct ActiveRuntime {
+    prepared: PreparedRuntime,
+    listeners: Arc<BoundListenerSet>,
+    admission: Arc<AdmissionState>,
+}
+
+impl ActiveRuntime {
+    fn from_candidate(candidate: BoundCandidate) -> Self {
+        let (prepared, listeners) = candidate.into_parts();
+        Self {
+            prepared,
+            listeners: Arc::new(listeners),
+            admission: Arc::new(AdmissionState::default()),
+        }
+    }
+
+    fn from_prepared_and_listeners(
+        prepared: PreparedRuntime,
+        listeners: Arc<BoundListenerSet>,
+    ) -> Self {
+        Self {
+            prepared,
+            listeners,
+            admission: Arc::new(AdmissionState::default()),
+        }
+    }
+
+    pub fn snapshot(&self) -> &RuntimeSnapshot {
+        self.prepared.snapshot()
+    }
+
+    pub fn revision(&self) -> RuntimeRevision {
+        self.snapshot().revision()
+    }
+
+    pub fn listeners(&self) -> &BoundListenerSet {
+        &self.listeners
+    }
+
+    pub fn bind_plan(&self) -> &crate::config::BindPlan {
+        self.prepared.bind_plan()
+    }
+
+    pub fn resource_fetcher(&self) -> Option<Arc<dyn ResourceFetcher>> {
+        self.prepared.resource_fetcher()
+    }
+
+    fn finalizer_owner(&self) -> Option<Arc<LateCacheFinalizer>> {
+        self.snapshot()
+            .policy_core()
+            .map(PolicyDnsCore::finalizer_owner)
+    }
+
+    fn policy_core_arc(&self) -> Option<Arc<PolicyDnsCore>> {
+        self.snapshot().policy_core_arc()
+    }
+
+    pub fn resource_worker_ids(&self) -> Vec<ConfigId> {
+        self.prepared.resource_worker_ids()
+    }
+
+    pub fn resource_refresh_decision(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+    ) -> Option<ResourceScheduleDecision> {
+        self.prepared.resource_refresh_decision(resource, now)
+    }
+
+    pub async fn refresh_remote_rule_set(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+        deadline: crate::dns::Deadline,
+        cancellation: crate::dns::Cancellation,
+    ) -> Result<ResourceSnapshot<RuleIndex>, ResourceRefreshError> {
+        self.prepared
+            .refresh_remote_rule_set(resource, now, deadline, cancellation)
+            .await
+    }
+
+    pub async fn refresh_resource(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+        deadline: crate::dns::Deadline,
+        cancellation: crate::dns::Cancellation,
+    ) -> Result<RefreshedResourceSnapshot, ResourceRefreshError> {
+        self.prepared
+            .refresh_resource(resource, now, deadline, cancellation)
+            .await
+    }
+
+    pub fn shutdown_resource_refresh(&self) {
+        self.prepared.shutdown_resource_refresh();
+    }
+
+    /// 尝试为一个请求建立 guard；drain 开始后不再接收新请求。
+    pub fn try_acquire(&self) -> Result<RequestGuard, AdmissionError> {
+        let mut active = self.admission.active.load(Ordering::Acquire);
+        loop {
+            if self.admission.draining.load(Ordering::Acquire) {
+                return Err(AdmissionError::Draining);
+            }
+            if active == usize::MAX {
+                return Err(AdmissionError::Capacity);
+            }
+            match self.admission.active.compare_exchange_weak(
+                active,
+                active + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    let guard = RequestGuard {
+                        admission: Arc::clone(&self.admission),
+                    };
+                    // 再检查确定接纳边界；并发 drain 拒绝时也由 guard 释放并通知归零。
+                    if self.admission.draining.load(Ordering::Acquire) {
+                        return Err(AdmissionError::Draining);
+                    }
+                    return Ok(guard);
+                }
+                Err(observed) => active = observed,
+            }
+        }
+    }
+
+    pub fn active_requests(&self) -> usize {
+        self.admission.active.load(Ordering::Acquire)
+    }
+
+    /// 标记实例进入 drain；返回值表示本次调用是否完成了状态切换。
+    pub fn begin_drain(&self) -> bool {
+        let changed = self
+            .admission
+            .draining
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok();
+        if changed {
+            self.admission.retiring.notify_waiters();
+        }
+        changed
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.admission.draining.load(Ordering::Acquire)
+    }
+
+    /// 仅唤醒入口和空闲连接退出，不取消已经取得 guard 的请求。
+    pub(crate) async fn wait_for_retirement(&self) {
+        let notified = self.admission.retiring.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.is_draining() {
+            notified.await;
+        }
+    }
+
+    /// 在 deadline 内等待当前 Runtime 的存量请求全部释放。
+    pub async fn wait_for_drain(&self, deadline: crate::dns::Deadline) -> bool {
+        loop {
+            if self.active_requests() == 0 {
+                return true;
+            }
+            let notified = self.admission.drained.notified();
+            if self.active_requests() == 0 {
+                return true;
+            }
+            let remaining = deadline.remaining(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                return false;
+            }
+        }
+    }
+
+    fn into_candidate(self) -> BoundCandidate {
+        let listeners = Arc::try_unwrap(self.listeners)
+            .unwrap_or_else(|_| unreachable!("candidate listener set must be uniquely owned"));
+        BoundCandidate::from_parts(self.prepared, listeners)
+    }
+}
+
+impl fmt::Debug for ActiveRuntime {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ActiveRuntime")
+            .field("revision", &self.revision())
+            .field("listener_count", &self.listeners.len())
+            .field("active_requests", &self.active_requests())
+            .field("draining", &self.is_draining())
+            .finish()
+    }
+}
+
+/// service 持有此准备态时仍由旧实例服务；task 注册成功后才能执行无 await 的同步发布。
+pub(crate) struct ServiceActivation<'a> {
+    coordinator: &'a RuntimeCoordinator,
+    _mutation: tokio::sync::MutexGuard<'a, ()>,
+    current: Arc<ActiveRuntime>,
+    next: Arc<ActiveRuntime>,
+}
+
+impl ServiceActivation<'_> {
+    pub(crate) fn runtime(&self) -> Arc<ActiveRuntime> {
+        Arc::clone(&self.next)
+    }
+
+    /// 只发布已准备实例；失败不改变旧实例的 admission 或 owner 登记。
+    /// 调用方必须在返回成功后同步更新服务任务集合并放行任务，期间不得 await。
+    pub(crate) fn commit(self) -> Result<Arc<ActiveRuntime>, ServiceActivationConflict> {
+        let observed = self
+            .coordinator
+            .active
+            .compare_and_swap(&self.current, Arc::clone(&self.next));
+        if !Arc::ptr_eq(&observed, &self.current) {
+            return Err(ServiceActivationConflict {
+                expected: self.current.revision(),
+                actual: observed.revision(),
+            });
+        }
+        self.coordinator.register_finalizer_owner(&self.next);
+        self.coordinator.register_runtime_core(&self.next);
+        self.coordinator.register_runtime_owner(&self.next);
+        self.coordinator.register_runtime_owner(&self.current);
+        self.current.begin_drain();
+        self.coordinator.prune_finalizer_owners();
+        Ok(Arc::clone(&self.next))
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("service activation revision conflict: expected {expected:?}, current {actual:?}")]
+pub struct ServiceActivationConflict {
+    expected: RuntimeRevision,
+    actual: RuntimeRevision,
+}
+
+struct AdmissionState {
+    draining: AtomicBool,
+    active: AtomicUsize,
+    drained: tokio::sync::Notify,
+    retiring: tokio::sync::Notify,
+}
+
+impl Default for AdmissionState {
+    fn default() -> Self {
+        Self {
+            draining: AtomicBool::new(false),
+            active: AtomicUsize::new(0),
+            drained: tokio::sync::Notify::new(),
+            retiring: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+/// 绑定到单个 ActiveRuntime 的请求生命周期 guard。
+pub struct RequestGuard {
+    admission: Arc<AdmissionState>,
+}
+
+impl fmt::Debug for RequestGuard {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RequestGuard")
+            .field(
+                "active_requests",
+                &self.admission.active.load(Ordering::Acquire),
+            )
+            .finish()
+    }
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        let previous = self.admission.active.fetch_sub(1, Ordering::AcqRel);
+        debug_assert!(previous > 0, "request guard count must not underflow");
+        if previous == 1 {
+            self.admission.drained.notify_waiters();
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum AdmissionError {
+    #[error("runtime is draining and does not accept new requests")]
+    Draining,
+    #[error("runtime request admission capacity is exhausted")]
+    Capacity,
+}
+
+/// 捕获同一个 ActiveRuntime 和对应请求 guard 的 lease。
+pub struct RuntimeLease {
+    runtime: Arc<ActiveRuntime>,
+    _guard: RequestGuard,
+}
+
+impl RuntimeLease {
+    pub fn runtime(&self) -> &ActiveRuntime {
+        &self.runtime
+    }
+
+    pub fn snapshot(&self) -> &RuntimeSnapshot {
+        self.runtime.snapshot()
+    }
+
+    pub fn revision(&self) -> RuntimeRevision {
+        self.runtime.revision()
+    }
+}
+
+impl Deref for RuntimeLease {
+    type Target = ActiveRuntime;
+
+    fn deref(&self) -> &Self::Target {
+        &self.runtime
+    }
+}
+
+impl fmt::Debug for RuntimeLease {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RuntimeLease")
+            .field("revision", &self.revision())
+            .field("active_requests", &self.active_requests())
+            .finish()
+    }
+}
+
+/// 以 ArcSwap 原子持有唯一对外可见的 ActiveRuntime。
+pub struct RuntimeCoordinator {
+    active: ArcSwap<ActiveRuntime>,
+    mutation: tokio::sync::Mutex<()>,
+    finalizer_owners: std::sync::Mutex<Vec<Arc<LateCacheFinalizer>>>,
+    runtime_owners: std::sync::Mutex<Vec<Arc<ActiveRuntime>>>,
+    runtime_core_cell: Arc<RuntimeCoreCell>,
+    cache_snapshot_owner: std::sync::Mutex<Option<Arc<CacheSnapshotOwner>>>,
+}
+
+/// coordinator 汇总所有新旧 Runtime cache finalizer 的停机结果。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct CacheFinalizerShutdownSummary {
+    /// 所有 owner 是否都在统一 deadline 内完成关闭。
+    pub completed: bool,
+    /// 本次关闭覆盖的 owner 数量。
+    pub owners: u64,
+}
+
+impl RuntimeCoordinator {
+    pub fn new(initial: BoundCandidate) -> Self {
+        let active = Arc::new(ActiveRuntime::from_candidate(initial));
+        let coordinator = Self {
+            active: ArcSwap::from(Arc::clone(&active)),
+            mutation: tokio::sync::Mutex::new(()),
+            finalizer_owners: std::sync::Mutex::new(active.finalizer_owner().into_iter().collect()),
+            runtime_owners: std::sync::Mutex::new(vec![Arc::clone(&active)]),
+            runtime_core_cell: Arc::new(RuntimeCoreCell::default()),
+            cache_snapshot_owner: std::sync::Mutex::new(None),
+        };
+        coordinator.register_runtime_core(&active);
+        coordinator
+    }
+
+    pub(crate) fn from_active(initial: Arc<ActiveRuntime>) -> Self {
+        let coordinator = Self {
+            active: ArcSwap::from(Arc::clone(&initial)),
+            mutation: tokio::sync::Mutex::new(()),
+            finalizer_owners: std::sync::Mutex::new(
+                initial.finalizer_owner().into_iter().collect(),
+            ),
+            runtime_owners: std::sync::Mutex::new(vec![Arc::clone(&initial)]),
+            runtime_core_cell: Arc::new(RuntimeCoreCell::default()),
+            cache_snapshot_owner: std::sync::Mutex::new(None),
+        };
+        coordinator.register_runtime_core(&initial);
+        coordinator
+    }
+
+    fn register_runtime_core(&self, runtime: &Arc<ActiveRuntime>) {
+        let Some(core) = runtime.policy_core_arc() else {
+            self.runtime_core_cell.publish(None);
+            return;
+        };
+        core.attach_runtime_cell(Arc::clone(&self.runtime_core_cell));
+        self.runtime_core_cell
+            .publish(Some(Arc::new(RuntimeCoreTarget {
+                core,
+                revision: runtime.revision(),
+            })));
+    }
+
+    /// 启动发布后登记唯一进程级快照 owner；owner 必须已经恢复当前 core。
+    pub(crate) fn attach_cache_snapshot_owner(
+        &self,
+        owner: Arc<CacheSnapshotOwner>,
+    ) -> Result<(), CacheSnapshotOwnerBuildError> {
+        let runtime = self.load();
+        let core = runtime
+            .policy_core_arc()
+            .ok_or(CacheSnapshotOwnerBuildError::MissingSource)?;
+        if !owner.matches_source(runtime.revision(), &core.cache_snapshot_source()) {
+            return Err(CacheSnapshotOwnerBuildError::SourceMismatch);
+        }
+        let mut current = self
+            .cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if current.is_some() {
+            return Err(CacheSnapshotOwnerBuildError::AlreadyAttached);
+        }
+        *current = Some(owner);
+        Ok(())
+    }
+
+    #[allow(dead_code)] // BC-12 将通过只读 Management 投影消费该状态。
+    pub(crate) fn cache_snapshot_status(&self) -> Option<CacheSnapshotOwnerStatus> {
+        self.cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(|owner| owner.status())
+    }
+
+    pub(crate) fn prepare_cache_snapshot_switch(
+        &self,
+        snapshot: &RuntimeSnapshot,
+    ) -> Result<Option<PreparedCacheSnapshotSwitch>, CacheSnapshotOwnerBuildError> {
+        let owner = self
+            .cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let Some(owner) = owner else {
+            return Ok(None);
+        };
+        let core = snapshot
+            .policy_core_arc()
+            .ok_or(CacheSnapshotOwnerBuildError::MissingSource)?;
+        let settings = CacheSnapshotSettings::from_current_config(snapshot.config())?;
+        Ok(Some(owner.prepare_switch(
+            snapshot.revision(),
+            core.cache_snapshot_source(),
+            settings,
+        )))
+    }
+
+    pub(crate) fn publish_cache_snapshot_switch(
+        &self,
+        prepared: Option<PreparedCacheSnapshotSwitch>,
+    ) {
+        let Some(prepared) = prepared else {
+            return;
+        };
+        if let Some(owner) = self
+            .cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            owner.publish_switch(prepared);
+        }
+    }
+
+    pub(crate) async fn shutdown_cache_snapshot(
+        &self,
+        deadline: crate::dns::Deadline,
+    ) -> CacheSnapshotShutdownSummary {
+        let owner = self
+            .cache_snapshot_owner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        match owner {
+            Some(owner) => owner.shutdown(deadline).await,
+            None => CacheSnapshotShutdownSummary {
+                completed: true,
+                ..CacheSnapshotShutdownSummary::default()
+            },
+        }
+    }
+
+    fn register_finalizer_owner(&self, runtime: &ActiveRuntime) {
+        let Some(owner) = runtime.finalizer_owner() else {
+            return;
+        };
+        let mut owners = self
+            .finalizer_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if owners.iter().any(|current| Arc::ptr_eq(current, &owner)) {
+            return;
+        }
+        owners.push(owner);
+    }
+
+    fn register_runtime_owner(&self, runtime: &Arc<ActiveRuntime>) {
+        let mut owners = self
+            .runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        owners.retain(|current| !current.is_draining() || current.active_requests() > 0);
+        if owners.iter().any(|current| Arc::ptr_eq(current, runtime)) {
+            return;
+        }
+        owners.push(Arc::clone(runtime));
+    }
+
+    /// 服务任务换代或回收后释放已 drain 的历史实例；task 自己仍持有所需句柄。
+    pub(crate) fn prune_drained_runtime_owners(&self) {
+        self.runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|runtime| !runtime.is_draining() || runtime.active_requests() > 0);
+        self.prune_finalizer_owners();
+    }
+
+    fn prune_finalizer_owners(&self) {
+        let runtimes = self
+            .runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let active_finalizers = runtimes
+            .iter()
+            .filter_map(|runtime| runtime.finalizer_owner())
+            .collect::<Vec<_>>();
+        self.finalizer_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|owner| {
+                owner.active_tasks() > 0
+                    || active_finalizers
+                        .iter()
+                        .any(|active| Arc::ptr_eq(active, owner))
+            });
+    }
+
+    /// 将当前及 reload 后仍存活的旧 Runtime 统一切换到 drain 状态。
+    pub(crate) fn begin_drain(&self) {
+        let runtimes = self
+            .runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        for runtime in runtimes {
+            runtime.begin_drain();
+        }
+    }
+
+    /// 在统一 deadline 内等待当前及 reload 后仍存活的旧 Runtime drain。
+    pub(crate) async fn wait_for_drain(&self, deadline: crate::dns::Deadline) -> bool {
+        let runtimes = self
+            .runtime_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut completed = true;
+        for runtime in runtimes {
+            if !runtime.wait_for_drain(deadline).await {
+                completed = false;
+            }
+        }
+        if completed {
+            self.runtime_owners
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|runtime| !runtime.is_draining() || runtime.active_requests() > 0);
+        }
+        completed
+    }
+
+    /// 在统一 deadline 内关闭所有曾由该 coordinator 发布的 cache finalizer 并合并摘要。
+    pub(crate) async fn shutdown_finalizers(
+        &self,
+        deadline: crate::dns::Deadline,
+    ) -> CacheFinalizerShutdownSummary {
+        let owners = self
+            .finalizer_owners
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        let mut summary = CacheFinalizerShutdownSummary {
+            completed: true,
+            owners: 0,
+        };
+        for owner in owners {
+            let owner_summary = owner.shutdown_until(deadline).await;
+            summary.completed &= owner_summary.completed;
+            summary.owners = summary.owners.saturating_add(1);
+        }
+        summary
+    }
+
+    pub fn load(&self) -> Arc<ActiveRuntime> {
+        self.active.load_full()
+    }
+
+    pub fn current_revision(&self) -> RuntimeRevision {
+        self.load().revision()
+    }
+
+    pub fn acquire(&self) -> Result<RuntimeLease, AdmissionError> {
+        let runtime = self.load();
+        let guard = runtime.try_acquire()?;
+        Ok(RuntimeLease {
+            runtime,
+            _guard: guard,
+        })
+    }
+
+    pub fn resource_worker_ids(&self) -> Vec<ConfigId> {
+        self.load().resource_worker_ids()
+    }
+
+    pub fn resource_refresh_decision(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+    ) -> Option<ResourceScheduleDecision> {
+        self.load().resource_refresh_decision(resource, now)
+    }
+
+    pub async fn refresh_resource(
+        &self,
+        resource: &ConfigId,
+        now: u64,
+        deadline: crate::dns::Deadline,
+        cancellation: crate::dns::Cancellation,
+    ) -> Result<RefreshedResourceSnapshot, ResourceRefreshError> {
+        let _mutation = self.mutation.lock().await;
+        self.load()
+            .refresh_resource(resource, now, deadline, cancellation)
+            .await
+    }
+
+    pub async fn refresh_resource_if_current(
+        &self,
+        expected: &Arc<ActiveRuntime>,
+        resource: &ConfigId,
+        now: u64,
+        deadline: crate::dns::Deadline,
+        cancellation: crate::dns::Cancellation,
+    ) -> Result<RefreshedResourceSnapshot, ResourceRefreshCoordinatorError> {
+        let _mutation = self.mutation.lock().await;
+        let current = self.load();
+        if !Arc::ptr_eq(&current, expected) {
+            return Err(ResourceRefreshCoordinatorError::Stale {
+                expected: expected.revision(),
+                actual: current.revision(),
+            });
+        }
+        let refreshed = expected
+            .refresh_resource(resource, now, deadline, cancellation)
+            .await
+            .map_err(ResourceRefreshCoordinatorError::Resource)?;
+        let current = self.load();
+        if !Arc::ptr_eq(&current, expected) {
+            return Err(ResourceRefreshCoordinatorError::Stale {
+                expected: expected.revision(),
+                actual: current.revision(),
+            });
+        }
+        Ok(refreshed)
+    }
+
+    pub fn shutdown_resource_refresh(&self) {
+        self.load().shutdown_resource_refresh();
+    }
+
+    pub async fn bind_and_activate(
+        &self,
+        expected: RuntimeRevision,
+        prepared: PreparedRuntime,
+        factory: &dyn SocketFactory,
+        deadline: crate::dns::Deadline,
+        cancellation: &crate::dns::Cancellation,
+    ) -> Result<Arc<ActiveRuntime>, RuntimeReloadError> {
+        let candidate = bind_prepared(prepared, factory, deadline, cancellation)
+            .await
+            .map_err(RuntimeReloadError::Bind)?;
+        self.compare_and_activate_serialized(expected, candidate)
+            .await
+            .map_err(RuntimeReloadError::Activation)?;
+        Ok(self.load())
+    }
+
+    /// 在同一 mutation gate 下合并候选状态并执行 revision CAS。
+    pub async fn compare_and_activate_serialized(
+        &self,
+        expected: RuntimeRevision,
+        candidate: BoundCandidate,
+    ) -> Result<Arc<ActiveRuntime>, ActivationError> {
+        let _mutation = self.mutation.lock().await;
+        self.compare_and_activate(expected, candidate)
+    }
+
+    /// 在资源 mutation gate 下合并候选，但将发布推迟到 service 的可失败任务准备之后。
+    pub(crate) async fn prepare_service_activation(
+        &self,
+        expected: RuntimeRevision,
+        candidate: BoundCandidate,
+    ) -> Result<ServiceActivation<'_>, ServiceActivationConflict> {
+        let mutation = self.mutation.lock().await;
+        let current = self.load();
+        if current.revision() != expected {
+            return Err(ServiceActivationConflict {
+                expected,
+                actual: current.revision(),
+            });
+        }
+        let (mut prepared, listeners) = candidate.into_parts();
+        prepared.merge_state_from(&current.prepared);
+        let next = Arc::new(ActiveRuntime::from_candidate(BoundCandidate::from_parts(
+            prepared, listeners,
+        )));
+        Ok(ServiceActivation {
+            coordinator: self,
+            _mutation: mutation,
+            current,
+            next,
+        })
+    }
+
+    /// 在 BindPlan 未变化时复用当前已激活 listener，只切换 prepared Runtime。
+    pub async fn activate_prepared_reusing_listeners(
+        &self,
+        expected: RuntimeRevision,
+        mut prepared: PreparedRuntime,
+    ) -> Result<Arc<ActiveRuntime>, RuntimeReuseError> {
+        let _mutation = self.mutation.lock().await;
+        let current = self.load();
+        if current.revision() != expected {
+            return Err(RuntimeReuseError::RevisionMismatch {
+                expected,
+                actual: current.revision(),
+            });
+        }
+        if current.bind_plan() != prepared.bind_plan() {
+            return Err(RuntimeReuseError::BindPlanChanged);
+        }
+        prepared.merge_state_from(&current.prepared);
+        let next = Arc::new(ActiveRuntime::from_prepared_and_listeners(
+            prepared,
+            Arc::clone(&current.listeners),
+        ));
+        let observed = self.active.compare_and_swap(&current, Arc::clone(&next));
+        if Arc::ptr_eq(&*observed, &current) {
+            self.register_finalizer_owner(&next);
+            self.register_runtime_core(&next);
+            self.register_runtime_owner(&next);
+            self.register_runtime_owner(&current);
+            current.begin_drain();
+            self.prune_finalizer_owners();
+            return Ok(next);
+        }
+        Err(RuntimeReuseError::RevisionMismatch {
+            expected,
+            actual: observed.revision(),
+        })
+    }
+
+    /// 无条件发布候选，并把旧实例标记为 draining。
+    pub fn activate(&self, candidate: BoundCandidate) -> Arc<ActiveRuntime> {
+        let next = Arc::new(ActiveRuntime::from_candidate(candidate));
+        self.register_finalizer_owner(&next);
+        self.register_runtime_core(&next);
+        let previous = self.active.swap(Arc::clone(&next));
+        self.register_runtime_owner(&next);
+        self.register_runtime_owner(&previous);
+        previous.begin_drain();
+        self.prune_finalizer_owners();
+        previous
+    }
+
+    /// 只有当前 revision 仍与预期一致时才发布候选；失败时返还候选供调用方重试。
+    pub fn compare_and_activate(
+        &self,
+        expected: RuntimeRevision,
+        candidate: BoundCandidate,
+    ) -> Result<Arc<ActiveRuntime>, ActivationError> {
+        let current = self.load();
+        if current.revision() != expected {
+            return Err(ActivationError {
+                expected,
+                actual: current.revision(),
+                candidate: Box::new(candidate),
+            });
+        }
+
+        let (mut prepared, listeners) = candidate.into_parts();
+        prepared.merge_state_from(&current.prepared);
+        let candidate = BoundCandidate::from_parts(prepared, listeners);
+        let next = Arc::new(ActiveRuntime::from_candidate(candidate));
+        let observed = self.active.compare_and_swap(&current, Arc::clone(&next));
+        if Arc::ptr_eq(&*observed, &current) {
+            self.register_finalizer_owner(&next);
+            self.register_runtime_core(&next);
+            self.register_runtime_owner(&next);
+            self.register_runtime_owner(&current);
+            current.begin_drain();
+            self.prune_finalizer_owners();
+            return Ok(current);
+        }
+
+        let actual = observed.revision();
+        let candidate = Arc::try_unwrap(next)
+            .map(ActiveRuntime::into_candidate)
+            .unwrap_or_else(|_| unreachable!("CAS candidate has no other owners"));
+        Err(ActivationError {
+            expected,
+            actual,
+            candidate: Box::new(candidate),
+        })
+    }
+}
+
+#[derive(Debug, Error)]
+#[error("runtime activation CAS lost: expected revision {expected:?}, current revision {actual:?}")]
+pub struct ActivationError {
+    expected: RuntimeRevision,
+    actual: RuntimeRevision,
+    candidate: Box<BoundCandidate>,
+}
+
+impl ActivationError {
+    pub fn expected(&self) -> RuntimeRevision {
+        self.expected
+    }
+
+    pub fn actual(&self) -> RuntimeRevision {
+        self.actual
+    }
+
+    pub fn into_candidate(self) -> BoundCandidate {
+        *self.candidate
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum RuntimeReloadError {
+    #[error("runtime candidate bind failed: {0}")]
+    Bind(#[source] BindError),
+    #[error("runtime candidate activation failed: {0}")]
+    Activation(#[source] ActivationError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum RuntimeReuseError {
+    #[error("runtime reuse requires the same bind plan")]
+    BindPlanChanged,
+    #[error(
+        "runtime reuse observed a different active revision: expected {expected:?}, current {actual:?}"
+    )]
+    RevisionMismatch {
+        expected: RuntimeRevision,
+        actual: RuntimeRevision,
+    },
+}
+
+#[derive(Debug, Error)]
+pub enum ResourceRefreshCoordinatorError {
+    #[error(
+        "resource refresh observed a different active runtime: expected {expected:?}, current {actual:?}"
+    )]
+    Stale {
+        expected: RuntimeRevision,
+        actual: RuntimeRevision,
+    },
+    #[error(transparent)]
+    Resource(#[from] ResourceRefreshError),
+}
+
+impl RuntimeReloadError {
+    pub fn into_candidate(self) -> Option<BoundCandidate> {
+        match self {
+            Self::Bind(_) => None,
+            Self::Activation(error) => Some(error.into_candidate()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+    use crate::cache::{CacheSnapshotOwner, CacheSnapshotSettings};
+    use crate::config::resolve::ConfigId;
+    use crate::config::{ConfigV2Loader, LoadOptions};
+    use crate::dns::{Cancellation, Deadline, RuntimeRevision};
+    use crate::ports::effects::{
+        ActivatedSocket, ActivatedSocketHandle, PreparedSocket, SocketFactory, SocketKind,
+        SocketSpec,
+    };
+    use crate::ports::{PortError, PortErrorClass, PortFuture};
+
+    use super::{
+        AdmissionError, ResourceRefreshCoordinatorError, RuntimeCoordinator, RuntimeReloadError,
+    };
+    use crate::runtime::PreparedRuntime;
+
+    fn candidate(revision: u64) -> crate::runtime::BoundCandidate {
+        let (source, _) = crate::config::test_support::portable_example();
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .expect("repository example must remain a valid runtime fixture")
+            .resolved;
+        let prepared = PreparedRuntime::prepare(config, RuntimeRevision(revision)).unwrap();
+        super::super::bind::test_candidate(prepared)
+    }
+
+    #[tokio::test]
+    async fn service_activation_stages_without_publication_and_rechecks_cas() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let original = coordinator.load();
+        let staged = coordinator
+            .prepare_service_activation(RuntimeRevision(1), candidate(2))
+            .await
+            .unwrap();
+        assert_eq!(staged.runtime().revision(), RuntimeRevision(2));
+        assert!(Arc::ptr_eq(&original, &coordinator.load()));
+        assert!(!original.is_draining());
+        drop(staged);
+        assert!(!original.is_draining());
+
+        let staged = coordinator
+            .prepare_service_activation(RuntimeRevision(1), candidate(2))
+            .await
+            .unwrap();
+        let active = staged.commit().unwrap();
+        assert!(Arc::ptr_eq(&active, &coordinator.load()));
+        assert!(original.is_draining());
+
+        let staged = coordinator
+            .prepare_service_activation(RuntimeRevision(2), candidate(3))
+            .await
+            .unwrap();
+        // 底层非串行发布仍必须被最终 CAS 检出，不能假定持有 mutation gate 就不会竞争。
+        coordinator.activate(candidate(4));
+        let error = staged.commit().unwrap_err();
+        assert_eq!(error.expected, RuntimeRevision(2));
+        assert_eq!(error.actual, RuntimeRevision(4));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(4));
+        assert!(!coordinator.load().is_draining());
+    }
+
+    fn policy_candidate(revision: u64) -> crate::runtime::BoundCandidate {
+        let work_path = crate::config::test_support::absolute_path("coordinator-finalizer");
+        let source = format!(
+            r#"
+version: 2
+work:
+  path: {work_path}
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+  records_path: ./queries
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: 5300
+    strategy: default
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+hosts:
+  - type: const
+    name: local-hosts
+    format: hosts
+    hosts: "127.0.0.1 example.test"
+outbound: []
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+"#,
+            work_path = work_path,
+        );
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .expect("policy finalizer fixture must be valid")
+            .resolved;
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(revision)).unwrap();
+        super::super::bind::test_candidate(prepared)
+    }
+
+    #[tokio::test]
+    async fn process_cache_owner_switches_with_the_committed_runtime() {
+        let initial = policy_candidate(1);
+        let initial_core = initial.snapshot().policy_core().unwrap();
+        let owner = CacheSnapshotOwner::start(
+            RuntimeRevision(1),
+            initial_core.cache_snapshot_source(),
+            CacheSnapshotSettings::from_current_config(initial.snapshot().config()).unwrap(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let coordinator = RuntimeCoordinator::new(initial);
+        coordinator
+            .attach_cache_snapshot_owner(Arc::clone(&owner))
+            .unwrap();
+
+        let candidate = policy_candidate(2);
+        let switch = coordinator
+            .prepare_cache_snapshot_switch(candidate.snapshot())
+            .unwrap();
+        let activation = coordinator
+            .prepare_service_activation(RuntimeRevision(1), candidate)
+            .await
+            .unwrap();
+        let active = activation.commit().unwrap();
+        coordinator.publish_cache_snapshot_switch(switch);
+
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        assert_eq!(owner.status().owner_revision, RuntimeRevision(2));
+        assert_eq!(owner.status().generation, 2);
+        let shutdown = coordinator
+            .shutdown_cache_snapshot(Deadline::new(Instant::now() + Duration::from_secs(5)))
+            .await;
+        assert!(shutdown.completed);
+        assert!(!shutdown.attempted);
+    }
+
+    #[derive(Clone, Copy)]
+    struct TestSocketFactory;
+
+    struct TestPreparedSocket {
+        spec: SocketSpec,
+    }
+
+    struct TestActivatedSocket {
+        spec: SocketSpec,
+    }
+
+    impl SocketFactory for TestSocketFactory {
+        fn prepare<'a>(
+            &'a self,
+            spec: SocketSpec,
+            _deadline: Deadline,
+            _cancellation: &'a Cancellation,
+        ) -> PortFuture<'a, Result<Box<dyn PreparedSocket>, PortError>> {
+            Box::pin(
+                async move { Ok(Box::new(TestPreparedSocket { spec }) as Box<dyn PreparedSocket>) },
+            )
+        }
+    }
+
+    impl PreparedSocket for TestPreparedSocket {
+        fn local_addr(&self) -> Result<SocketAddr, PortError> {
+            Ok(self.spec.address)
+        }
+
+        fn activate(self: Box<Self>) -> Result<Box<dyn ActivatedSocket>, PortError> {
+            Ok(Box::new(TestActivatedSocket { spec: self.spec }))
+        }
+    }
+
+    impl ActivatedSocket for TestActivatedSocket {
+        fn local_addr(&self) -> Result<SocketAddr, PortError> {
+            Ok(self.spec.address)
+        }
+
+        fn kind(&self) -> SocketKind {
+            self.spec.kind
+        }
+
+        fn socket_handle(&self) -> Result<ActivatedSocketHandle, PortError> {
+            Err(PortError::new(
+                PortErrorClass::Unavailable,
+                "test_socket.handle",
+            ))
+        }
+    }
+
+    #[test]
+    fn coordinator_load_and_acquire_capture_one_active_revision() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let lease = coordinator.acquire().unwrap();
+
+        assert_eq!(lease.revision(), RuntimeRevision(1));
+        assert_eq!(lease.active_requests(), 1);
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+        drop(lease);
+        assert_eq!(coordinator.load().active_requests(), 0);
+    }
+
+    #[test]
+    fn draining_runtime_rejects_new_requests_but_releases_existing_guard() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let runtime = coordinator.load();
+        let guard = runtime.try_acquire().unwrap();
+
+        assert!(runtime.begin_drain());
+        assert!(!runtime.begin_drain());
+        assert_eq!(runtime.active_requests(), 1);
+        assert!(matches!(
+            runtime.try_acquire(),
+            Err(AdmissionError::Draining)
+        ));
+        drop(guard);
+        assert_eq!(runtime.active_requests(), 0);
+    }
+
+    #[test]
+    fn activation_swaps_revision_and_drains_previous_runtime() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let previous = coordinator.activate(candidate(2));
+
+        assert_eq!(previous.revision(), RuntimeRevision(1));
+        assert!(previous.is_draining());
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+        assert_eq!(
+            coordinator.acquire().unwrap().revision(),
+            RuntimeRevision(2)
+        );
+    }
+
+    #[test]
+    fn failed_cas_returns_candidate_for_a_deterministic_retry() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let error = coordinator
+            .compare_and_activate(RuntimeRevision(99), candidate(2))
+            .unwrap_err();
+
+        assert_eq!(error.expected(), RuntimeRevision(99));
+        assert_eq!(error.actual(), RuntimeRevision(1));
+        let candidate = error.into_candidate();
+        let previous = coordinator
+            .compare_and_activate(RuntimeRevision(1), candidate)
+            .unwrap();
+
+        assert_eq!(previous.revision(), RuntimeRevision(1));
+        assert!(previous.is_draining());
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+    }
+
+    /// 验证同一基准 revision 的并发候选只允许一个获胜，并完整返还失败候选。
+    #[tokio::test]
+    async fn concurrent_serialized_activation_allows_exactly_one_winner() {
+        let coordinator = Arc::new(RuntimeCoordinator::new(candidate(1)));
+        let initial = coordinator.load();
+        let left = coordinator.compare_and_activate_serialized(RuntimeRevision(1), candidate(2));
+        let right = coordinator.compare_and_activate_serialized(RuntimeRevision(1), candidate(3));
+
+        let (left, right) = tokio::join!(left, right);
+        match (left, right) {
+            (Ok(previous), Err(error)) => {
+                assert!(Arc::ptr_eq(&previous, &initial));
+                assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+                assert_eq!(error.actual(), RuntimeRevision(2));
+                assert_eq!(error.into_candidate().revision(), RuntimeRevision(3));
+            }
+            (Err(error), Ok(previous)) => {
+                assert!(Arc::ptr_eq(&previous, &initial));
+                assert_eq!(coordinator.current_revision(), RuntimeRevision(3));
+                assert_eq!(error.actual(), RuntimeRevision(3));
+                assert_eq!(error.into_candidate().revision(), RuntimeRevision(2));
+            }
+            (Ok(_), Ok(_)) => panic!("同一基准 revision 不能同时发布两个候选"),
+            (Err(_), Err(_)) => panic!("同一基准 revision 必须有一个候选成功"),
+        }
+        assert!(initial.is_draining());
+    }
+
+    #[test]
+    fn lease_keeps_old_runtime_alive_after_atomic_swap() {
+        let coordinator = Arc::new(RuntimeCoordinator::new(candidate(1)));
+        let lease = coordinator.acquire().unwrap();
+        let previous = coordinator.activate(candidate(2));
+
+        assert_eq!(lease.revision(), RuntimeRevision(1));
+        assert!(previous.is_draining());
+        assert_eq!(lease.runtime().active_requests(), 1);
+        drop(lease);
+        assert_eq!(previous.active_requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn coordinator_refreshes_resource_on_current_active_runtime() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-coordinator-resource-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("hosts.txt");
+        std::fs::write(&path, "192.0.2.10 old.example\n").unwrap();
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&format!(
+                r#"
+version: 2
+work:
+  path: {root}
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+  records_path: ./queries
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: 5300
+    strategy: default
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "127.0.0.1 fallback.test"
+hosts:
+  - type: file
+    name: local-hosts
+    format: hosts
+    path: {path}
+    auto_update: true
+    update_interval: 1s
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+outbound: []
+"#,
+                root = root.display(),
+                path = path.display(),
+            ))
+            .unwrap()
+            .resolved;
+        let prepared = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            Arc::clone(&config),
+            RuntimeRevision(7),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = RuntimeCoordinator::new(super::super::bind::test_candidate(prepared));
+
+        std::fs::write(&path, "192.0.2.11 new.example\n").unwrap();
+        let resource = ConfigId::new("local-hosts").unwrap();
+        let refreshed = coordinator
+            .refresh_resource(
+                &resource,
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(refreshed.epoch(), 2);
+        assert_eq!(
+            coordinator
+                .load()
+                .snapshot()
+                .resources()
+                .lookup(&resource)
+                .unwrap()
+                .version(),
+            crate::resource::ResourceVersion::new(2, 0)
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn coordinator_rejects_refresh_for_a_stale_active_runtime() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let expected = coordinator.load();
+        coordinator.activate(candidate(2));
+
+        let error = coordinator
+            .refresh_resource_if_current(
+                &expected,
+                &ConfigId::new("not-configured").unwrap(),
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            ResourceRefreshCoordinatorError::Stale {
+                expected: RuntimeRevision(1),
+                actual: RuntimeRevision(2),
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn runtime_wait_for_drain_completes_after_the_last_guard_is_released() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let runtime = coordinator.load();
+        let guard = runtime.try_acquire().unwrap();
+        runtime.begin_drain();
+
+        let waiting =
+            runtime.wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(1)));
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(guard);
+        assert!(waiting.await);
+    }
+
+    #[tokio::test]
+    async fn coordinator_waits_for_a_previous_runtime_during_drain() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let lease = coordinator.acquire().unwrap();
+        coordinator.activate(candidate(2));
+
+        let waiting =
+            coordinator.wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(1)));
+        tokio::pin!(waiting);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+        drop(lease);
+        assert!(waiting.await);
+    }
+
+    #[test]
+    fn coordinator_begin_drain_marks_current_and_previous_runtimes() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let previous = coordinator.activate(candidate(2));
+
+        coordinator.begin_drain();
+
+        assert!(previous.is_draining());
+        assert!(coordinator.load().is_draining());
+    }
+
+    #[test]
+    fn completed_draining_runtime_owners_are_pruned_on_the_next_activation() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        coordinator.activate(candidate(2));
+        coordinator.activate(candidate(3));
+
+        let owners = coordinator
+            .runtime_owners
+            .lock()
+            .expect("runtime owner lock must not be poisoned");
+        assert_eq!(owners.len(), 2);
+        assert_eq!(owners[0].revision(), RuntimeRevision(2));
+        assert_eq!(owners[1].revision(), RuntimeRevision(3));
+    }
+
+    #[test]
+    fn inactive_finalizer_owners_are_pruned_with_completed_runtime_owners() {
+        let coordinator = RuntimeCoordinator::new(policy_candidate(1));
+        coordinator.activate(policy_candidate(2));
+        coordinator.activate(policy_candidate(3));
+
+        let owners = coordinator
+            .finalizer_owners
+            .lock()
+            .expect("finalizer owner lock must not be poisoned");
+        assert_eq!(owners.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn active_finalizer_owner_survives_runtime_owner_pruning() {
+        let coordinator = RuntimeCoordinator::new(policy_candidate(1));
+        let initial_owner = coordinator
+            .load()
+            .snapshot()
+            .policy_core()
+            .expect("policy core must exist")
+            .finalizer_owner();
+        initial_owner
+            .submit_task(std::future::pending::<()>())
+            .expect("active finalizer task must be accepted");
+
+        coordinator.activate(policy_candidate(2));
+        coordinator.activate(policy_candidate(3));
+
+        {
+            let owners = coordinator
+                .finalizer_owners
+                .lock()
+                .expect("finalizer owner lock must not be poisoned");
+            assert!(
+                owners
+                    .iter()
+                    .any(|owner| Arc::ptr_eq(owner, &initial_owner))
+            );
+        }
+        initial_owner.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_finalizers_reports_all_registered_owners() {
+        let coordinator = RuntimeCoordinator::new(policy_candidate(1));
+        coordinator.activate(policy_candidate(2));
+
+        let summary = coordinator
+            .shutdown_finalizers(Deadline::new(Instant::now() + Duration::from_secs(1)))
+            .await;
+
+        assert!(summary.completed);
+        assert_eq!(summary.owners, 2);
+    }
+
+    // V2-O01：旧/新 revision 已接收但尚未 poll 的任务，也必须在过期停机后释放 owner。
+    #[tokio::test]
+    async fn contract_v2_expired_shutdown_reclaims_unpolled_historical_and_current_tasks() {
+        let coordinator = RuntimeCoordinator::new(policy_candidate(1));
+        let old = coordinator.load();
+        let old_owner = old.finalizer_owner().unwrap();
+        old_owner.submit_task(std::future::pending::<()>()).unwrap();
+        coordinator.activate(policy_candidate(2));
+        let current_owner = coordinator.load().finalizer_owner().unwrap();
+        current_owner
+            .submit_task(std::future::pending::<()>())
+            .unwrap();
+        assert_eq!(old_owner.active_tasks(), 1);
+        assert_eq!(current_owner.active_tasks(), 1);
+        let summary = tokio::time::timeout(
+            Duration::from_secs(5),
+            coordinator.shutdown_finalizers(Deadline::new(Instant::now())),
+        )
+        .await
+        .unwrap();
+        assert!(!summary.completed);
+        assert_eq!(summary.owners, 2);
+        assert_eq!(old_owner.active_tasks(), 0);
+        assert_eq!(current_owner.active_tasks(), 0);
+        assert!(old_owner.is_shutdown());
+        assert!(current_owner.is_shutdown());
+        assert!(old_owner.submit_task(async {}).is_err());
+        assert!(current_owner.submit_task(async {}).is_err());
+        assert_eq!(old.active_requests(), 0);
+    }
+
+    #[tokio::test]
+    async fn bind_and_activate_publishes_a_prepared_candidate_after_binding() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let (source, _) = crate::config::test_support::portable_example();
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .unwrap()
+            .resolved;
+        let prepared = PreparedRuntime::prepare(config, RuntimeRevision(2)).unwrap();
+        let active = coordinator
+            .bind_and_activate(
+                RuntimeRevision(1),
+                prepared,
+                &TestSocketFactory,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+    }
+
+    #[tokio::test]
+    async fn bind_and_activate_returns_bound_candidate_when_activation_cas_loses() {
+        let coordinator = RuntimeCoordinator::new(candidate(1));
+        let (source, _) = crate::config::test_support::portable_example();
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .unwrap()
+            .resolved;
+        let prepared = PreparedRuntime::prepare(config, RuntimeRevision(2)).unwrap();
+        let error = coordinator
+            .bind_and_activate(
+                RuntimeRevision(99),
+                prepared,
+                &TestSocketFactory,
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap_err();
+
+        let RuntimeReloadError::Activation(activation) = error else {
+            panic!("expected activation CAS error");
+        };
+        assert_eq!(activation.expected(), RuntimeRevision(99));
+        assert_eq!(activation.actual(), RuntimeRevision(1));
+        assert_eq!(activation.into_candidate().revision(), RuntimeRevision(2));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+    }
+}

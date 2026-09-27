@@ -1,0 +1,176 @@
+# 前端应用与认证实现
+
+> 文档状态：有效
+>
+> 适用范围：前端 bootstrap、provider、路由鉴权、HTTP client 与会话回收
+>
+> 最后核对：2026-09-27（服务状态指标订阅改为全量基线加每秒增量并带断点重订阅的局部核对；逐秒 RPM 与 CPU 字段沿用 2026-09-26，品牌资源与导航沿用 2026-09-22，认证等其余内容沿用 2026-09-09 核对范围）
+>
+> 核对基线：`3f1a6be` 加本次工作树变更；本轮仅核对服务状态指标订阅的拼装与重订阅边界，其余范围按原日期和基线解释
+
+## 入口
+
+[`main.tsx`](../../../frontend/src/main.tsx) 的 `bootstrap` 仅在 DEV 且 `VITE_USE_MOCK_API=true` 时启动 MSW，再渲染 `AppErrorBoundary -> AppProviders -> App`。[`providers.tsx`](../../../frontend/src/app/providers.tsx) 依次组合 Ant Design、QueryClient、BrowserRouter 与 AuthProvider。
+
+[`App.tsx`](../../../frontend/src/app/App.tsx) lazy-load 页面，由 Suspense 展示加载态；`/login` 和 `/initialize` 在 guard 外，其他页面进入 `ProtectedRoute -> AppLayout`。根路径转 `/dashboard`，未知受保护路径展示 NotFound。受保护壳层消费 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 注册 12 个一级路径，具体接线见[页面与查询](pages.md)。
+
+正式路由已全部接线，移除空 pending route 分支、旧占位页面和专用 CSS；登录页按当前能力说明 DNS 管理、配置校验与同步状态，不再标为只读界面。最终内嵌 release 已回读新文案，98 项前端测试与完整三阶段打包通过。
+
+[`AppLayout`](../../../frontend/src/shared/components/AppLayout.tsx) 的桌面侧栏和移动 Drawer 共用[寻址小章鱼 SVG](../../../frontend/src/assets/fluxdns-icon.svg)，[`index.html`](../../../frontend/index.html) 将同一资源设为 favicon。两处均使用 Vite 的 `?no-inline` 资源入口，生成同一哈希 SVG；不依赖生产构建中已禁用的 `public/` 复制，也不携带 mock worker。2026-09-22 的生产预览已验证资源返回成功、两处 URL 一致及移动导航显示；本轮未重新构建或验证后端内嵌 release。
+
+## 认证状态
+
+[`AuthProvider`](../../../frontend/src/modules/auth/AuthProvider.tsx) 首先请求 `authKeys.setup`；只有 setup 为 ready 才启用 session query。两者都关闭自动重试，并以 provider 的 loading/error/setupRequired/session 向页面提供状态。
+
+- 初始化：`initializeMutation` 成功后写入 setup ready 和新 session；[`InitializePage`](../../../frontend/src/modules/auth/InitializePage.tsx) 负责表单与冲突后的状态刷新。
+- 登录：`performLogin` 将返回 session 写入查询缓存，清除 sessionExpired 标志。
+- API `401` 或 WS `4401`：统一认证失效边界撤销内存凭据/连接，`onUnauthorized` 取消并清空 QueryClient，设置 sessionExpired、把 session 置 null，由 guard 统一跳转；重新登录不复用上一会话的数据。此清理有独立 AuthProvider 回归。
+- 退出：`performLogout` 的 finally 取消查询、清空 query client、将 session 置 null，然后跳转 login；即使网络退出失败也回收本地状态。
+
+[`ProtectedRoute`](../../../frontend/src/modules/auth/ProtectedRoute.tsx) 按 loading -> error -> setup-required -> no-session -> Outlet 处理。鉴权错误先显示错误页，不直接假定未登录；跳转携带来源 pathname。
+
+## HTTP client 与类型
+
+[`apiV2Request`](../../../frontend/src/shared/api/client.ts) 固定 `/api/v2` 前缀，认证也使用该版本；默认 10 秒 timeout，支持调用者 AbortSignal、内存 Bearer 和统一错误处理。业务请求使用 Bearer 且 `credentials: omit`，认证专用请求才携带同源 Cookie，详见下节。client 校验 JSON Content-Type、解析错误 envelope，保留 request ID/retry-after 及受限字段错误；非鉴权请求 `401` 通知统一监听者。普通成功值最终是泛型断言，不是完整 OpenAPI 响应运行时 validator。
+
+认证、配置、保留、指标、历史与实时消息均来自 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成的 [`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts)；[`types.ts`](../../../frontend/src/shared/api/types.ts) 只提供认证与错误的别名。schema 改动后使用 `generate:api`，命令见[前端 README](../../../frontend/README.md)。v1 schema、生成文件、client、fixture 与旧页面已删除。
+
+## P1 Bearer 接线（2026-09-08）
+
+[`auth/api.ts`](../../../frontend/src/modules/auth/api.ts) 消费初始化/登录的 `AuthSession`，access token 仅存于共享 client 的模块内存；返回 AuthProvider/查询缓存前重新投影 `user/expires_at`，不透传 token 或额外 session 字段。业务请求和 `GET auth/session` 只附加 Authorization Bearer、明确省略 Cookie。页面重载后，client 先调用同源 `POST auth/refresh` 恢复访问凭据，不读取 HttpOnly Cookie 或浏览器持久存储。
+
+同一认证代次内所有请求共享一次在途刷新，刷新最多 5 秒且各等待方仍受自己的 10 秒/调用者取消约束。一个请求取消不终止其他等待者；登出/401 增加认证代次并禁止迟到刷新恢复会话，新登录不受旧请求迟到 401 影响。刷新只发生在业务请求发送前；已发出的请求返回 401/500 或结果未知均不自动重放。登出仍清空本地状态，失败不等于服务端已撤销，沿用上节的错误边界。
+
+mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状态模拟，不充当生产替代。Vite 把 `/api` 透明代理到后端，未硬编码令牌或生产 baseURL；页面、认证与 mock handler 均使用 v2，不提供运行时版本开关。Bearer 测试覆盖并发、取消、迟到结果、写请求不重放、无 token session 投影和登录/登出流程。
+
+真实内嵌 WebUI 的浏览器验证覆盖初始化、页面重载后的 Cookie 刷新/Bearer 业务请求、登出后刷新保持未登录、再次登录及 Cookie 清除。开发者接口只读确认 localStorage/sessionStorage 条目均为 0，`document.cookie` 不可读刷新凭据；Network 只记录请求头是否存在，不输出 token。该验证使用旧壳层的真实后端数据，不证明 FC-01 十二路由、FC-02 公共表单或 v2 配置接口完成。
+
+## P1 应用壳层（2026-09-08）
+
+[`AppLayout`](../../../frontend/src/shared/components/AppLayout.tsx) 从同一 `managementRoutes` 契约生成“监控 / DNS 管理 / 系统”三组 12 个一级入口，使用 Lucide 图标、浅色侧栏、面包屑、当前用户与图标化登出/折叠控件。桌面侧栏独立滚动；小于 720px 时改用 Drawer，不缩放固定宽画布。未知路径不选择任一菜单项，旧 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 路径不兼容跳转。
+
+`/dashboard`、`/queries` 和 `/system-runtime` 使用 v2 真实指标/记录；其余九个配置入口使用 v2 类型化读写，旧占位页面与空 pending route 分支已删除。`/upstreams` 的“上游 / 上游组”tab 以 `tab=groups` 进入浏览器历史。主题 token 使用浅灰导航、白工作区、蓝色主操作及独立成功/警告/错误色；未增加暗色全站主题。
+
+P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个路由分别在 1600×1040、1280×800、768×1024、390×844 直接进入，48 项均呈现预期标题且无页面级横向溢出或错误提示。窄屏导航、Hosts 编辑弹窗、Tab、Escape 与关闭后编辑按钮焦点恢复通过；Console warning/error 为 0。localStorage/sessionStorage 为空，脚本不可读刷新 Cookie，生产没有 service worker 接管。该轮前端 23 文件 96 项通过；后续安全和焦点修复后的 24 文件 98 项、最终快速切换 Busy 恢复和触控限制见 [WebUI 联合验收](../webui-acceptance.md)。
+
+## P1 配置交互基础（2026-09-08）
+
+[`shared/config/api.ts`](../../../frontend/src/shared/config/api.ts) 直接消费生成的 v2 DTO，提供状态/模块读取、整体验证/应用、operation 回读、外部差异、文件还原和持久化重试入口；单模块入口把 module 同时绑定在 URL 与 typed payload。写请求仍由调用方决定发起次数，client 不做 mutation retry。
+
+[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 要求首次发送前固定 `operation_id`。apply 返回进行中时有界轮询；网络失败或 timeout 后只按同一 ID 查询，不重放 apply；`unknown` 另行回读活动状态，不能推断操作未执行。结果 ID 不一致按非法响应拒绝。表单 phase 保留打开时的双 revision 草稿，settled 前不把结果未知伪装成失败或成功。
+
+[`query-keys.ts`](../../../frontend/src/shared/config/query-keys.ts) 将模块、活动 revision 和文件 revision 纳入 key；保存后只失效目标模块、确定的引用依赖、状态和概览，不清空全部查询。[`form-values.ts`](../../../frontend/src/shared/config/form-values.ts) 用 BigInt 做字节/duration 精确转换，区分继承与显式值、保留已删除引用占位，并在 variant 提交时只选择白名单字段；IP/CIDR helper 只负责词法检查，冲突和规范化仍以服务端为准。duration 表单换算只提供毫秒/秒/分钟/小时/天，回填按能整除的最大整单位归一化（`5000000000ns` → `5s`、`300000000000ns` → `5 分钟`，非整秒按毫秒精确展开），摘要展示复用同一换算的 `formatDurationText`，提交仍写回紧凑 duration；前端只拦必填字段的空值与零值、非法串和小数位超过后端 9 位上限的组合，TTL 上下限按后端语义允许 `0s`（表示该边界不设限），字段上下界仍由后端权威校验。字节侧对称：`ByteUnit` 只提供 B/KB/MB/GB/TB（1024 进制），`bytesToDisplay` 回填时先只保留数值 ≥ 1 的单位（避免把 64 MiB 写成 `0.0625 GB`），再取其中能精确表示（小数不超过导出的 `BYTE_DISPLAY_MAX_FRACTION_DIGITS`）的最大单位（`67_108_864` → `64 MB`、`1_572_864` → `1.5 MB`、`807_306_368` → `788385.125 KB`），保证用户不动字段时再次保存不改变字节数；`bytesFromForm` 全程 BigInt 并在 1..1 TiB 之外抛错。
+
+[`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx) 统一受限高度、内部滚动、保存防重、脏关闭确认、安全错误与 request ID 展示，并提供字段路径到 Ant Design Form 的定位转换。它是业务表单容器而非 schema 自动表单；P3 各页面按自身领域上下界和类型分支使用该容器。共享 [`DurationInput`](../../../frontend/src/shared/components/DurationInput.tsx) 用“数字 + 单位”编辑 duration 字段，默认单位为秒，只在回填时换算一次纳秒串，避免把人类不可感知的 ns/us 量级暴露到界面；它已覆盖 DNS 缓存 TTL／快照周期、Hosts 检查周期、规则集更新周期、客户端与策略 TTL 覆盖和上游组超时，必填字段用 `durationRequiredRules`，可选边界用 `durationOptionalRules`（留空表示不设置，`0s` 表示该边界不设限）。共享 [`ByteSizeInput`](../../../frontend/src/shared/components/ByteSizeInput.tsx) 用同样的“数字 + 单位”形态编辑字节字段（`/dns-settings` 的内存上限与 T 参考大小），无法换算时向表单 emit `undefined`，由必填规则报错，而不是静默保留上一个有效值。
+
+## P1 外部配置变化基础（2026-09-08）
+
+[`external-change.ts`](../../../frontend/src/shared/config/external-change.ts) 从权威 `ConfigState` 派生文件变化、缺失、不可读、超限、已应用未同步和阻塞事实。关闭提示只记录当前事实 key，不清除 issue；活动/文件 revision 或文件状态变化后重新提示。差异响应必须与当前活动/观察 revision 同时匹配，否则进入冲突；还原返回成功后仍保留 issue 并等待下一份权威状态确认，不自行假定文件已同步。`FILE_REVISION_CONFLICT` 保留当前差异与脏草稿。
+
+[`ExternalChangeBanner`](../../../frontend/src/shared/components/ExternalChangeBanner.tsx) 和 [`ExternalChangeDrawer`](../../../frontend/src/shared/components/ExternalChangeDrawer.tsx) 提供轻量提示、字段级差异/受保护变化展示、脏关闭确认、文件还原、组合采用及同步重试入口。还原确认明确只覆盖所见文件版本，不回滚运行态。[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 对还原和持久化重试复用单次 mutation + operation 回读，不把“重试文件同步”变成配置重新应用。
+
+抽屉在没有可编辑差异、没有受保护变化也没有解析错误时单独说明：文件字节变化可能只来自空格、缩进、换行、注释、命名顺序或等价表达，此时没有可采用的项、「组合采用」不可用，消除提示只能经「还原文件」以活动配置重写文件；纯格式差异不会呈现为可采用的候选。
+
+[`ConfigFileStatus`](../../../frontend/src/shared/components/ConfigFileStatus.tsx) 已挂入受保护的 `AppLayout`，以 `configKeys.state()` 每 30 秒仅在页面可见时轮询正式 `/api/v2/config/state`；刷新失败显示可重试的全局提示，不阻断当前页面。发现 issue 后才读取绑定双 revision 的差异，外改不会自动进入 Runtime；还原固定新 `operation_id` 并显式确认丢弃外改，`applied_unpersisted` 重试严格复用原 ID、只调用文件 retry route。mutation 结束后失效差异并回读权威状态，Banner 不因 HTTP 成功提前消失；被拒绝、补偿失败、结果未知和版本冲突继续展示事实。
+
+P3 全局协调器已把选择结果作为一次 typed Candidate 交给正式 validate/apply；普通模块保存遇到外改也依赖后端 `discard_external_changes` 确认，不伪造通用 YAML 或自动合并。App/MSW 覆盖组合采用、取消、二次外改冲突、还原和原 ID 持久化重试，纯函数覆盖十模块差异映射。
+
+当前 production embed WebUI 连接 `_fluxdns/p1-config-runtime-live/` 的 loopback 后端完成真实登录；外改 logs 后，30 秒全局轮询显示 Banner，Drawer 读取 `logs` 差异和双 revision，确认还原后 Banner/Drawer 依据权威状态消失。源/派生文件恢复为 `debug` 与 `./logs/hot.log`，浏览器 warning/error 为 0，Runtime revision 前后保持 1，随后 UDP `localhost A` 仍返回 `127.0.0.1`，SQLite 布局仍为 `statistics-v2|1`。该浏览器证据未覆盖窄屏、刷新失败、二次冲突、持久化 retry 异常态或 P3 组合采用；这些状态保留自动测试或后续阶段验收。
+
+## P1 系统运行状态（2026-09-08）
+
+[`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 由 `/system-runtime` 挂载。进程数据由 [`getProcessMetrics`](../../../frontend/src/modules/system/api.ts) 读取唯一 `/api/v2/system/runtime`，沿共享 Bearer client 展示版本、启动时间、运行时长、RSS、CPU、线程与采样时间；旧 system 请求及管理能力列表已删除。
+
+[`useProcessMetrics`](../../../frontend/src/modules/system/hooks.ts) 复用 30 秒可见性轮询和手动刷新；uptime 只从有效响应基准按接收时刻本地递增，隐藏页不逐秒渲染。RSS 格式化保留十进制 u64 字符串到 BigInt 的精度，并复用配置页同一套字节单位（KB/MB/GB/TB）；后端 measurement 的 `warmup`、`observation_gap`、`sampling_failed`、`unsupported` 原因显式呈现，不映射为零。页面没有 QPS/RPM、停止、重启或日志写操作。
+
+Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-setup/` 的 loopback 后端，完成登录、导航、可用进程样本和手动刷新；实际 RSS/CPU/thread 及时间字段正确展示，刷新后 sample/uptime 推进，浏览器日志为空。该证据不覆盖窄屏或真实 OS 采样失败，后者仅由前端 fixture 与 BC-23 后端测试分别覆盖。
+
+## 系统运行状态重设计（2026-09-27）
+
+`SystemPage` 把原先「五列指标格 + Descriptions」的拼接改为三段式：4 个同构指标格、与格子共用同一条四列栅格的运行信息行、以及「运行环境」「数据面摘要」两张并排卡片。指标格固定为「13px 标签 / 30px 等宽数值 / 12.5px 口径说明」三段加 12px 间距，数值基线不再受内容长度影响；运行信息行放版本、启动时间、采样时间与采样来源，替代原先标签列固定 132px、右侧整行留白的 Descriptions；采样时间不再同时出现在指标格与底部说明行。
+
+运行环境来自 `/api/v2/system/runtime` 新增的 `host` 对象（操作系统、内核或构建版本、架构、逻辑核心、主机名、进程 ID）与 `/api/v2/config/system` 的 `work_path`；数据面摘要来自 `/config/state`（活动版本 + `ConfigSyncBadge`）、`/config/modules/listener`（绑定列表与传输类型）、`/config/modules/dns`（缓存快照状态/代数/文件大小）、`/config/modules/{hosts,rule_set}`（就绪计数）与 `/service/metrics`（在线身份计数，与服务状态页共用同一 query key，命中同一份缓存）。主指标仍由 [`useProcessMetrics`](../../../frontend/src/modules/system/hooks.ts) 按可见性 30 秒轮询；`host` 字段缺失显示「暂不可用」且不附错误码，次级读取失败显示「暂不可用 + 契约错误码」，尚未返回显示占位符。手动「刷新」改为重取本页全部查询。
+
+## P2 固定契约与只读基础（2026-09-08）
+
+[`mocks/fixtures.ts`](../../../frontend/src/mocks/fixtures.ts) 新增严格绑定生成 v2 DTO 的服务指标、跨日记录、配置模块、系统白名单和保留状态样本。指标样本包含峰值、warmup 与观测缺口；记录样本包含同毫秒稳定 ID、原始身份与历史匹配分离、缓存生产者和截断 Answer。MSW 对应路由只返回固定契约数据，使用 Bearer 并保持 v2 `field_errors` 错误 envelope，不模拟分页、过滤或运行时 owner 已交付。
+
+[`modules/dns-settings/api.ts`](../../../frontend/src/modules/dns-settings/api.ts) 暴露 DNS、统计、保留状态和正式 preview，[`modules/system-settings/api.ts`](../../../frontend/src/modules/system-settings/api.ts) 暴露系统白名单与 logs 模块读取；两者直接复用 `apiV2Request` 和配置模块 API。P3 页面已替换对应空态并接入编辑；P4 又将服务状态与解析记录接到同一 v2 契约。
+
+## P3 单模块写入与代理配置（2026-09-08）
+
+[`shared/config/hooks.ts`](../../../frontend/src/shared/config/hooks.ts) 统一消费模块 `ConfigRead`、双 revision 和正式单模块 validate/apply。每次保存先预校验，再按后端返回的改名、listener 重绑、保留缩短或外部变化覆盖影响确认；`operation_id` 首次发送前固定，网络结果不明时只回读，不自动重放。成功后按类型化依赖失效 query；`applied_unpersisted` 保持独立警告并交给全局文件同步入口。
+
+[`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 已替换 `/proxies` 空态，提供搜索、新建和按旧 name 编辑。表单只在 env/file 两类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；实际 Secret 值不进入浏览器。MSW 交互测试检查单模块路径、预校验先于 apply、旧 name 和 SecretRef payload；真实后端热应用与文件证据见 P3 联合验收。
+
+[`HostsPage`](../../../frontend/src/modules/hosts/HostsPage.tsx) 已替换 `/hosts` 空态，读取类型化 `const/file` 来源、引用数和 Runtime ready/stale/failed 状态。表单按来源只提交内联正文或文件路径/更新周期，并保留 `json/hosts` 格式；来源切换不会携带隐藏分支字段。文件来源的检查周期用共享 `DurationInput`（默认秒），回填把后端的纳秒串归一化成紧凑串。
+
+[`RuleSetsPage`](../../../frontend/src/modules/rule-sets/RuleSetsPage.tsx) 已替换 `/rule-sets` 空态，区分 `const/file/remote` 与 `json/clash/dat`，并显示远程代理、刷新计划及 Runtime stale/failed 状态。表单只提交当前来源字段；`clash` 保持行格式，`dat` 不作为 YAML/JSON 文本解析，也未增加主动刷新端点。自动更新周期同样使用共享 `DurationInput`；列表刷新列经 `formatDurationText` 显示 `1 天` 这类可感知单位，不再直接输出后端纳秒串。
+
+[`UpstreamsPage`](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx) 已替换 `/upstreams` tab 空态，在同一模块读写 Hosts、DoH 和 Group。DoH 只提交当前 address/bootstrap/connect_ip/proxy/ECS 字段；组成员与 fallback 使用有序结构化名称/权重控件，类型和模式切换不携带隐藏字段。上游组弹窗的主要超时与回退超时改用共享 `DurationInput`，回填把 `5000000000ns` 显示成 `5 秒`，未编辑字段也在回填时归一化成紧凑串，不再把纳秒量级写回候选。嵌套组、循环、模式权重和改名引用仍由后端完整候选权威校验。v2 OpenAPI 同批补充 Listener/Upstream discriminator mapping，生成类型现在使用线上真实 `udp/tcp/doh` 与 `hosts/doh/group`，不再误用 schema 名称作为 type 值。
+
+[`StrategiesPage`](../../../frontend/src/modules/strategies/StrategiesPage.tsx) 已替换 `/strategies` 空态。规则表单保持顺序并区分 Hosts 本地回答和 rule_set+upstream，两类字段互斥；上移、下移和移除均更新整体候选。cache、TTL、ECS 明确区分继承、启用和禁用，不用空值代替继承。启用 TTL 覆盖时最小/最大 TTL 用共享 `DurationInput`，留空表示不设置该边界，`0s` 表示该边界不设限。
+
+[`ListenersPage`](../../../frontend/src/modules/listeners/ListenersPage.tsx) 已替换 `/listeners` 空态。UDP/TCP 编辑地址、端口、策略和可选 Hosts；DoH 编辑有序 route 及多个 endpoint，并按 TLS terminate/external、peer/forwarded_header/proxy_protocol 选择白名单字段。列表从 Runtime 投影显示实际 binding/accepting，保存后的物理冲突、差量重绑和补偿仍由后端 prepare/owner 决定。标题区与 服务状态／解析记录 共用同一套层级（h2 34px、字重 650、字距 -1px、下边距 32px、操作区垂直居中），副标题为同构短句，右上角只保留 `ConfigSyncBadge` 同步胶囊与主操作按钮，不再展示 active/file revision；胶囊读全局 30 秒轮询的配置状态，避免与全局同步提示给出矛盾结论，而编辑禁用仍沿用模块读取的既有判定；列名、搜索、空态与弹窗标题统一为中文。
+
+[`ClientsPage`](../../../frontend/src/modules/clients/ClientsPage.tsx) 已替换 `/clients` 空态，列表同时展示唯一管理 name、请求匹配 `client_id` 和 IP/CIDR。创建时输入 ID，编辑时 ID 控件只读且 payload 通过 `clientEditValue` 剔除；name、IP、策略及 cache/TTL/ECS 覆盖按旧 name 提交，不重写历史身份。TTL 覆盖的最小/最大值改用共享 `DurationInput`，留空表示不设置该边界，`0s` 表示该边界不设限。
+
+[`DnsSettingsPage`](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) 已替换 `/dns-settings` 空态，分区编辑缓存/快照、TTL、ECS、详情记录和 R/G/T。保留保存前调用正式 preview 获取真实 SQLite/WAL 字节与候选 UTC cutoff，并把结果并入后端 `retention_shortening` 确认；浏览器不自行计算权威水位，保存也不触发立即清理。缓存失败 TTL、乐观回答 TTL、最大陈旧时间、快照周期与 TTL 覆盖上下限统一用共享 `DurationInput`（必填字段要求大于 0，TTL 上下限允许 `0s` 表示不设限），回填不再出现纳秒串；字段上下界仍由后端权威校验。
+
+[`SystemSettingsPage`](../../../frontend/src/modules/system-settings/SystemSettingsPage.tsx) 已替换 `/system-settings` 空态。`work/rules/database/records` 活动源路径表达与 WebUI 监听来自 `SystemConfigRead` 且保持只读，不冒充 Runtime 解析后的绝对路径；日志 `enable/level/path` 单独通过 `logs` 模块候选预校验、热应用、持久化和回显，不向启动配置字段提供伪编辑入口。
+
+FC-16 组合采用把外部差异中的同名资源转换为带明确 `original_name` 的 update，仅外部资源转换为 create；仅活动资源保持禁选，不推断删除。客户端 update 剔除只读 `client_id`。用户可跨模块勾选白名单变化，一次提交全局 Candidate；未选差异与 `work/database/webui/protected_credentials` 受保护变化通过 `discard_external_changes` 确认后按活动配置还原，二次外改继续由 file revision 冲突阻断。
+
+## P3 联合验收（2026-09-08）
+
+Windows 内嵌 WebUI 连接 `_fluxdns/p3-live/` 的真实 ConfigV2 进程。脚本按依赖对十模块逐一执行 Bearer module GET、validate、202 apply、operation poll 与 GET 回显，全部得到 `applied_synced`；真实 UDP/SQLite/保留/历史结果及外部文件组合采用、二次冲突和 restore 见[后端 Management 实现](../backend/management.md#p1-配置事务与文件操作2026-09-08)。
+
+浏览器在 1440×900 逐项进入 12 个一级路由，均出现正式标题且无 `PendingModulePage` 或页面级横向溢出。日志表单真实保存发出 Bearer module GET、validate 200、apply 202、operation 200 和回显 200；DNS 保留表单确认 preview 200 严格先于 statistics validate/apply。真实外改后的 Drawer 显示 Hosts 与 logs 字段级差异，2 项全局组合采用经确认成功并自动关闭。390×844 下 DNS/Hosts 无页面级横向溢出，导航使用移动 Drawer，表格仅在自身容器滚动，编辑弹窗完整可操作；Console error/warning 为空。
+
+该 P3 批次未实现或验证 WS/P4、P5、BC-27、HTTPS 反向代理、Linux/macOS、磁盘满和约 10 客户端/core 2ms 性能。P4 后续证据见下节；浏览器使用 loopback HTTP 与测试账号，未把 access token 写入日志、文档或浏览器持久存储。
+
+## P4 共享实时连接（2026-09-09）
+
+[`shared/api/events.ts`](../../../frontend/src/shared/api/events.ts) 维护唯一按需 `ManagementEventClient`。首次订阅先用现有内存 Bearer 调用 `POST /api/v2/events/ticket`，再以 `fluxdns.v1` 和 `fluxdns.ticket.<ticket>` 创建同源 WebSocket；URL 不含凭据，业务 Cookie 被省略且浏览器持久存储不保存 token。连接打开后按页面注册 metrics/query 订阅，最后一个订阅退出即关闭 socket；认证代次变化清理连接和退避计时，4401/401 进入已有 unauthorized 边界。
+
+非正常断开且仍有订阅时按 500 ms、1 s、2 s 递增，最高 10 s 重连，每次重新签发 ticket。metrics 每个订阅保留由全量基线和每秒增量帧拼装出的序列，重连或增量与基线不连续（含缺基线、帧内本身有洞）时丢弃本地序列并重新订阅，等新的全量基线重建，不用带洞序列绘图；queries 保留 HTTP 返回的 `snapshot_cursor`、`retention_revision` 和过滤条件，收到 replay 后推进 cursor，收到 epoch/cursor/overflow/gap/retention resync 则重新读取 HTTP 权威首屏。页面隐藏会取消订阅，恢复后先 refetch 再连接，避免把断流补成零值或继续使用过期水位。
+
+[`DashboardPage`](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 已切换 `/api/v2/service/metrics`，显示 RSS、CPU 占用、最近 60 秒 QPS、最近 600 秒 RPM、在线身份及共同时间轴图表；CPU 与 RSS 来自同一进程采样快照，CPU 以占满一个核心为 100%，采样超时按 `observation_gap` 降级。卡片沿用后端 measurement；图表的 RPM 不由快照里的分钟级 `rpm_trend` 绘制，而是把快照逐秒 `qps_trend`（订阅基线加每秒增量拼装出的序列，自带窗口起点前 60 秒前瞻样本）与页面本地缓存的最近 120 秒逐秒 QPS 合并后按过去 60 秒滚动求和，同一秒以最新快照为准，缓存只在快照缺少该秒时补位（跨后端实例的秒点网格不一致时不参与）。自绘 SVG 曲线提供可访问名称/数值表，不跨不可用点或不连续秒点连线；warming 和 observation gap 保留后端语义。`QueriesPage` 的 v2 HTTP/WS、500 条/2 MiB 缓冲与稳定详情见[页面实现](pages.md#查询与缓存行为)。
+
+Windows `_fluxdns/p4-live/` 内嵌 debug binary 的独立真实 socket smoke 覆盖 UDP DNS、HTTP 快照、WS 在线推送、断线 replay 和登出 4401。浏览器验证页面重载后的 Bearer、空 localStorage/sessionStorage/Cookie 可读值、带 Bearer 的 ticket 请求和无 token 的 WS URL；真实 DNS 使 dashboard QPS/RPM/在线身份变化，queries 自动刷新收到新记录。详情打开期间新增记录只进入提示，固定 record ID 不变，显式查看后才更新首屏；1440×900 与 390×844 均无页面级横向溢出，移动 Answer 修复后可读，Console 无 warning/error。页面可见性恢复由组件测试覆盖。外部 HTTPS 反向代理、Linux/macOS、真实网络慢读饱和、约 10 客户端和 2ms 性能未验证。
+
+## 能力与证据
+
+2026-09-07 P0 补充：[`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts) 由 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成，只有新契约模块消费。现有 `apiRequest`、AuthProvider、Vite 代理、mock 和 App 路由未切换；新增 `apiV2Request` 仅由明确的新版模块调用，不提供运行时 v1/v2 选择开关。
+
+[`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 固定 12 个一级路径与配置模块映射，保留 `/dashboard`、`/queries`；上游组仅为 `/upstreams` 页内 tab。App 与导航消费该表，P3 九个配置入口均已挂载领域页面；路径存在仍不能替代其真实读写与浏览器证据。
+
+[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型：草稿固定双 revision，区分预校验/确认/应用/结果未知；客户端普通编辑白名单剔除 `client_id`；操作结果区分同步、仅重试持久化、回读活动值和阻塞；大整数转表单前检查安全范围。FC-02 已补配置 client、操作回读、query key/精确失效、共享值转换和 Modal 容器；全局文件状态由壳层协调器消费 TanStack Query，不另建可变配置权威。P3 各领域表单复用该链路。
+
+FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置 endpoint、operation 单次发送/回读/unknown、query key/失效、单位/duration/IP/继承/variant 及脏关闭确认；与 Rust 共用的 schema 夹具测试见[交付实现](../delivery.md#前端与接口生成)。这些验证使用 MSW/jsdom，不证明后端配置 route、真实文件、浏览器路由离开或内嵌环境已经接线。
+
+| 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
+| --- | --- | --- | --- | --- |
+| setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | P1 认证测试及真实初始化/登录/刷新/登出；P3 内嵌深链接重载恢复 | 外部 HTTPS 代理未验收 |
+| 同源请求/取消 | `apiV2Request`、unauthorized listener | 各 module API 共用 client | 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
+| 退出数据清理 | `performLogout` finally、`onUnauthorized` | logout 与 HTTP/WS 认证失效统一回收 | 认证失效清空业务缓存的组件回归、真实登出撤销与重启后登录 | 网络 logout 失败仍不能证明服务端已撤销 |
+| P3 v2 配置页面 | 九个领域页面、generated-v2、module hooks | 受保护路由与十模块正式 API | MSW/完整 Vitest、真实 Bearer/文件/SQLite/UDP/浏览器，见 P3 联合验收 | 跨平台与原生触控边界见联合验收 |
+| 共享实时连接 | events client、认证代次与订阅 owner | v2 ticket + WS | Vitest；真实 ticket/WS、断线 replay、登出 4401 与 Network/Storage | 外部 HTTPS 与真实网络慢读饱和未验证 |
+| 服务状态 | DashboardPage/hooks/chart | v2 HTTP metrics + WS metrics | 真实 DNS 流量、指标变化、可访问图表、桌面视口 | 真实 OS failure 样本与深色样例未复核 |
+| 系统运行状态布局与主机信息 | system Page/hooks/api、共享 config hooks 与 `ConfigSyncBadge`、[index.css](../../../frontend/src/styles/index.css)、`ProcessMetrics.host` | 4 格指标 + 运行信息行 + 「运行环境」「数据面摘要」卡片 | 2026-09-27：前端 31 文件 164 项 Vitest、`tsc --noEmit`、生产构建与 v2 schema 契约 4 项通过；后端 `cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`（Windows msvc）通过 | 未做真实浏览器视觉复验；Linux/macOS 主机采集分支未在本机编译；在线客户端与缓存快照复用现有模块读取接口 |
+| 解析记录 | QueriesPage/hooks/realtime/detail | v2 HTTP search/detail + WS queries | Vitest；真实 UDP/HTTP/WS、稳定详情与桌面/移动浏览器 | 原生触控限制与性能测点见联合验收 |
+| mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
+| 12 路由壳层 | route-contract、App、AppLayout、九个配置页 | 受保护路由与分组导航 | 1440×900 逐路由标题/溢出检查和 390×844 移动导航 | 旧占位/页面/API 已退出，平台边界见联合验收 |
+| 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 全局 state/operation 与十模块领域表单 | 91 项完整 Vitest、typecheck/build、真实 Bearer 单模块读写回显 | 运行时响应仍由后端 schema/owner 权威校验 |
+| 外部变化处理 | ConfigFileStatus、external adoption、Banner/Drawer | 轮询、差异、还原/retry、覆盖确认和组合采用 | MSW 二次冲突；真实双模块外改/采用/冲突/restore 与浏览器 Drawer | WS 文件通知未授权，仍以 HTTP 轮询 |
+| 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取唯一 v2 进程指标及基础信息 | FC-14 测试及 Windows 真实浏览器/后端可用样本；P3 窄屏无溢出 | 真实不可用 OS 样本和 Linux 未做浏览器验收 |
+
+当前完整前端、release、浏览器及端到端证据统一见 [WebUI 联合验收](../webui-acceptance.md)。上节带日期的 P1-P4 数量是历史批次结果；平台与原生触控限制不由 mock 或组件测试替代。
+
+## 认证与系统信息统一 v2（2026-09-09）
+
+BC-27 切换后，初始化、登录、刷新、登出和 session 统一请求 `/api/v2/auth/*`；共享 client 的内存凭据、取消与认证代次规则保持不变。系统运行页从唯一 `/api/v2/system/runtime` 响应读取版本、启动时间和进程采样，删除独立的旧 system query/hook。FC-15 已删除无路由的 runtime/health/statistics/resources 页面、专用展示组件、API/hooks、v1 生成产物和 fixture；公共认证类型只别名到 v2。
+
+## 旧页面退出验证（2026-09-09）
+
+`df1a145` 加 FC-15 工作树：生成唯一 v2 类型后 typecheck、23 文件 96 项 Vitest 和生产 build 通过；删除旧 fixture 的专用断言，保留 v2 查询键、页大小、身份和敏感字段覆盖。后续四档浏览器、深色样例和认证/焦点修复后的完整验证见 [WebUI 联合验收](../webui-acceptance.md)。

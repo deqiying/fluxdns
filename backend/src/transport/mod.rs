@@ -1,0 +1,31 @@
+//! 入站 transport 的共享协议边界。
+
+use crate::dns::{CacheCompatibilityKey, TransportCapabilities, TransportClass};
+
+pub mod doh;
+mod tcp;
+mod udp;
+mod wire;
+
+pub use doh::{
+    DohHttpError, DohHttpMethod, DohHttpStatus, DohRouteError, DohRouteMatch, DohRoutePattern,
+    MAX_DOH_GET_DNS_CHARS, MAX_DOH_HEADER_BYTES, MAX_DOH_POST_BODY_BYTES,
+    MAX_DOH_REQUEST_TARGET_BYTES, MAX_PROXY_V1_BYTES, MAX_PROXY_V2_BYTES, ParsedDohRequest,
+    encode_dns_response, encode_http_error, encode_http_error_with_close, encode_http_response,
+    try_parse_request,
+};
+
+pub use tcp::{
+    TCP_FRAME_PREFIX_BYTES, TcpAdapter, TcpAdapterError, TcpFrameError, TcpSession,
+    decode_frame_length, encode_frame,
+};
+pub use udp::{DEFAULT_REQUEST_TIMEOUT, UdpAdapter, UdpAdapterError};
+pub use wire::{MAX_DNS_WIRE_BYTES, ParsedQuery, WireError, decode_query, encode_response};
+
+/// 返回 v1 各入站协议共享的固定能力摘要，供 adapter 构造和 cache key 复用。
+pub const fn transport_capabilities(class: TransportClass) -> TransportCapabilities {
+    TransportCapabilities {
+        class,
+        cache_compatibility: CacheCompatibilityKey(1),
+    }
+}

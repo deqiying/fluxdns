@@ -1,0 +1,10 @@
+packages:
+  - "."
+
+# 前端缓存统一留在本工程且已忽略的 `.cache/`，不依赖用户级目录。
+cacheDir: .cache/pnpm-cache
+storeDir: .cache/pnpm-store
+
+# MSW 的 postinstall 仅输出项目信息，mock transport 不依赖该脚本。
+allowBuilds:
+  msw: false

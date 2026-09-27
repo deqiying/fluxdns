@@ -1,0 +1,216 @@
+# Config 模块设计
+
+> 文档状态：有效
+>
+> 适用范围：v2 配置加载、归一化、校验、引用图和安全快照
+>
+> 最后评审：2026-09-09（旧配置与迁移路径退出）
+>
+> 关联实现：[load.rs](../../../../backend/src/config/load.rs)、[resolve.rs](../../../../backend/src/config/resolve.rs)、[validate.rs](../../../../backend/src/config/validate.rs)、[store.rs](../../../../backend/src/config/store.rs)
+>
+> 关联文档：[配置字段参考](../../../implementation/configuration.md) · [后端架构](../overview.md)
+
+## 1. 职责
+
+v2 采用“唯一 name 管理键、独立 client_id、活动源优先、应用后持久化、外部文件只提示”。[`contract.rs`](../../../../backend/src/config/contract.rs) 直接接入生产 loader/resolve/快照和 active `ConfigStore`；契约默认值和边界见[配置参考](../../../implementation/configuration.md#v2-契约与生产基线2026-09-08)。普通配置写接口与完整服务控制事务沿[Management 实现](../../../implementation/backend/management.md#p1-配置事务与文件操作2026-09-08)的唯一 owner 链路执行，不保留旧 loader 或迁移入口。
+
+Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 prepare 的 `ResolvedConfig`。资源内容首次 snapshot 与 listener 装配属于 Resource/Runtime/Application，不是 YAML loader 的职责。
+
+它负责：
+
+- schema version 识别与旧版本拒绝；
+- 严格 DTO 反序列化和字段路径错误；
+- 路径、URL、CIDR、duration、SecretRef source 和默认值归一化；SecretRef 实际值只通过显式 accessor 读取；
+- 引用、循环、条件字段、继承和 bind 冲突校验；
+- 生成配置摘要并保留产生运行态的源正文；
+- 安全地维护工作目录中的 `config.yaml` 快照。
+
+字段含义和默认值只在[配置参考](../../../implementation/configuration.md)定义，本模块文档说明解析、信任边界和写入不变量。
+
+## 2. 内部结构
+
+| 文件 | 职责 |
+| --- | --- |
+| `doh_route.rs` | DoH path 模板的共享编译、匹配和语义重叠检测 |
+| `contract.rs` | 正式 v2 DTO、新字段预算、客户端身份与两级路径碰撞检查 |
+| `model.rs` | 资源 DTO、协议类型与严格字段 parser |
+| `load.rs` | v2 文件读取、大小/编码检查、直接 resolve 和安全配置快照 |
+| `hash.rs` | 运行态和资源比较使用的非加密内容指纹 |
+| `resolve.rs` | 默认值、三态、继承和来源信息归一化 |
+| `validate.rs` | 名称、引用图、循环、条件字段和 bind |
+| `store.rs` | 首用户配置事务、fingerprint 冲突、journal 与恢复 |
+| `source_edit.rs` | 保留源 YAML 表达的定向 users 编辑 |
+
+DTO、ValidatedConfig 和 ResolvedConfig 必须是不同类型，不能用布尔字段表示“也许已校验”。
+
+## 3. 加载流水线
+
+```text
+read bounded UTF-8 bytes
+  → parse minimal version header
+  → require version: 2 without migration
+  → deserialize strict ConfigV2
+  → validate DTO values, references, cycles and bind conflicts
+  → resolve config_dir and work.path, build BindPlan
+  → normalize project paths, SecretRef sources and inheritance
+  → build immutable ResolvedConfig + reports
+  → optionally create a safe work-directory config snapshot
+```
+
+YAML 文件必须是 UTF-8。唯一 v2 loader 以 4 MiB 限制输入，避免在解析前无界分配；同时拒绝空输入、重复 document、显式 `null`、YAML tag 和未知字段，并保留安全字段路径。
+
+所有 DTO 使用 `deny_unknown_fields` 或等价严格机制。tagged variant 只接受自身字段，不能把拼写错误吞入扁平 map。配置示例的 strict load 只使用离线 fixture，不访问远程资源。
+
+## 4. 版本拒绝边界
+
+只有 v2 配置参与加载和候选校验。旧版本、未来版本或缺失版本直接报错；不映射旧字段、不拆分旧客户端、不创建迁移报告，也不修改原文件。测试使用同一正式 loader，不另留兼容入口。新格式自身的快照和 journal 恢复保持独立，不以拒绝旧版本为由省略。
+
+## 5. 归一化
+
+`resolve.rs` 一次性完成：
+
+- 先以启动配置文件所在目录解析相对 `work.path`，得到绝对的 `resolved_work_path`；
+- 再以 `resolved_work_path` 为唯一基准，将其他相对项目路径规范化为绝对路径；
+- duration、URL、CIDR 和枚举转换为强类型；
+- group member 缺失的 `weight` 在 DTO 输入边界归一化为 `1`；
+- `resource:selector` 引用中的 selector 使用与 Resource dat parser 相同的规则规范化为 lowercase canonical key；
+- cache、TTL、ECS 的缺失/显式禁用/字段继承；
+- client、strategy、route、resource 和 upstream 名称转换为 typed ID；
+- SecretRef source 归一化为 env/file 引用；实际值不会在普通 YAML load 中读取，只能由后续 adapter 通过 `ResolvedSecretRef::resolve` 或 `resolve_proxy_url` 等显式 accessor 请求，并包装为 Debug/Display 脱敏、不可 Serialize 的 secret 类型；
+- cache/TTL/ECS 等继承相关值保留 `ValueSource`；不是所有字段都有完整来源追踪。
+
+请求热路径禁止再次读取 YAML、解析 duration 或计算继承。loader 不负责资源内容首次加载和 `ResourceSnapshot` 发布。
+
+## 6. 校验顺序
+
+`resolve_config_v2` 先调用 `ConfigV2::validate`，再解析工作目录、构造 `BindPlan` 和归一化模型。校验聚合基础值、集合、引用、upstream cycle 与 bind 错误；严格反序列化或语义校验失败后，不继续生成 `ResolvedConfig`。
+
+检查内容包括 exactly-one-of/required-if、cache/TTL/ECS 阈值、WebUI origin/users、SecretRef source、DoH 模板重叠，以及 IPv4/IPv6 和 Management/DNS TCP 地址冲突。实际输出是 `ValidatedConfig { resolved: Arc<ResolvedConfig> }`，其中含 `BindPlan`；没有独立的 `BindPlanInput`、`ResourcePlan`、`StoragePlan` 类型，也没有通用“跳过 pass”报告。
+
+资源内容和 dat selector 是否存在，以及 SecretRef 解析后的代理组合是否合法，仍须在后续 Resource/Upstream prepare 或显式 SecretRef 检查中确认，不能由 YAML 校验成功推断。
+
+## 7. 引用图
+
+名称先在各自命名空间构建 symbol table，再解析引用。错误区分：
+
+- duplicate definition；
+- missing reference；
+- wrong target kind；
+- cycle；
+- unsupported selector。
+
+当前循环检测覆盖 DoH bootstrap 与 group 主成员/fallback 的 upstream 依赖图；对节点和边排序后用 DFS 输出发现的闭环路径，不承诺图论上的最短环。outbound/resource 引用另行检查，不存在另一套统一依赖图。
+
+## 8. 工作目录与配置快照
+
+路径解析必须显式携带配置来源，顺序固定如下：
+
+1. `load_from_path(path)` 先把启动配置路径转换为词法归一化的绝对路径，并取其父目录作为 `config_dir`；只有启动配置路径本身允许在这一步使用进程启动时的当前工作目录。
+2. `work.path` 为绝对路径时直接词法归一化；为相对路径时按 `config_dir.join(work.path)` 解析，结果记为 `resolved_work_path`。
+3. 其余项目路径为绝对路径时直接词法归一化；为相对路径时按 `resolved_work_path.join(value)` 解析。实现不得将这些路径直接拼到原始 `work.path`、`config_dir` 或当时的进程当前工作目录。
+4. `load_from_bytes`/`load_from_str` 没有物理配置来源。若 DTO 中的 `work.path` 是相对路径，应返回缺少配置基准的稳定错误；需要支持该场景的调用方必须显式传入来源路径/目录，或使用绝对 `work.path`。
+5. 解析使用词法归一化，使尚未创建的工作目录也能参与计算；目录创建、symlink/special-file 拒绝和权限检查仍放在有文件系统副作用的 prepare/快照边界执行。
+
+例如启动文件为 `/opt/_fluxdns/config.yaml`、`work.path: ./` 时，`resolved_work_path` 是 `/opt/_fluxdns`；随后 `database.path: ./data/fluxdns.sqlite3` 解析为 `/opt/_fluxdns/data/fluxdns.sqlite3`，而不是相对于进程当前工作目录或再次相对于配置文件路径拼接。
+
+当启动配置本身不等于 `<resolved_work_path>/config.yaml` 时，按契约复制到该固定路径；同目录不同文件名仍必须创建派生快照。快照逻辑只能接收已经解析完成的绝对工作目录，不能再次解释原始 `work.path`。为避免覆盖用户已有配置，采用：
+
+1. 创建工作目录和父目录；
+2. 对输入字节计算 hash；
+3. 目标不存在时，在同目录写临时文件、flush/fsync 后原子 no-replace 发布；
+4. 目标存在且 hash 相同时不操作；
+5. 目标存在但内容不同时拒绝启动，并提示显式处理，不自动覆盖；
+6. 不把 SecretRef 解析后的值写回配置快照。
+
+实现使用同目录临时文件、`create_new`、hard-link no-replace 发布、文件和目录同步；目标 symlink/special file 会拒绝，Unix 临时快照使用 owner-only 权限。临时文件、错误消息和日志不得包含 secret。快照只保存输入 YAML 的 SecretRef 占位符，不保存解析后的实际值。
+
+## 9. 输出模型
+
+`ResolvedConfig` 应满足：
+
+- 所有引用已解析为 typed handle/ID；
+- 资源级默认值和字段继承已展开；client/strategy 的请求级优先级由后续 Policy prepare 在 typed `Resolved*` 上组合，不重新解析 YAML；
+- 路径、URL、CIDR、duration 已强类型化；
+- secret 只能通过受控 accessor 使用；普通 YAML load 不读取实际值，读取动作留给后续 adapter 边界；
+- `ResolvedConfig` 保留 `input_hash`、`normalized_hash`，loader 输出保留源路径；错误携带字段路径及可用行列，不提供覆盖所有 resolved 字段的 source span map；
+- 可安全输出 redacted view，但不能直接 Serialize 原对象。
+
+Runtime 只能接收 `Arc<ResolvedConfig>` 和 prepare plans，不能接收原始 YAML DTO。
+
+## 10. 错误与安全
+
+配置错误包含：
+
+- schema version；
+- 稳定分类；
+- YAML/逻辑字段路径；
+- 可选行列；
+- 安全的 expected/actual 摘要；
+- 修复提示。
+
+SecretRef 的实际值、proxy credential、password hash 全文和证书私钥不出现在 Debug、Display、日志或 migration report 中。
+
+## 11. 契约验证要求
+
+- 当前示例配置可离线严格解析并得到稳定 normalized snapshot；其中远程规则、本地资源和代理 SecretRef 只做配置级校验，不执行网络或资源首次 snapshot；
+- 未知字段、错误 variant 字段、空/`null`/缺失差异；
+- 所有 exactly-one-of 和 required-if；
+- 名称重复、缺失引用、类型错误和确定性的闭环路径；
+- cache/TTL/ECS 全继承矩阵；
+- group member 缺省 `weight: 1` 及各 mode 的显式权重约束；
+- 包含 `!` 等可打印 ASCII 的 dat selector canonicalization；
+- DoH 尾部 `{client_id}` 裸路径和 route 语义重叠拒绝；
+- IPv4/IPv6 bind 冲突；
+- SecretRef env/file、缺失、空值、非法 scheme 和脱敏；
+- migration golden test、空链幂等和有损 warning 边界；
+- 配置快照创建、相同内容 no-op、不同内容拒绝覆盖、并发 no-replace、symlink 防护、目录同步和临时文件不污染目标。
+- 路径解析矩阵：配置文件参数为绝对/相对路径，`work.path` 为绝对/`.`/含 `..` 的相对路径，项目路径为绝对/相对路径，以及无来源 bytes/string 加载时的错误边界。
+
+实际加载与支持边界见[配置参考](../../../implementation/configuration.md)；本节是验证要求，不代表本次执行结果。
+
+## 12. 首用户配置写入
+
+`ConfigStore` 只修改 CLI 源 YAML 的 `webui.users`，不序列化 ResolvedConfig；后者已丢失原始路径/SecretRef 表达。源文件之外的 `<work.path>/config.yaml` 是派生 snapshot，写入时必须同步，否则下次启动会被 no-replace 冲突保护拒绝。
+
+写入不变量：
+
+1. 获取进程内排他锁与跨进程 lock，竞争有界失败，不无限等待。
+2. 重读源配置和 snapshot，比较预期 fingerprint；拒绝覆盖外部编辑，确认 users 仍为空。
+3. 使用 source-preserving YAML adapter 只替换/新增 users；不支持的表达明确失败，不能退回整份 resolved 序列化。
+4. 候选重新走同一严格 parser/validator，验证用户与其他配置语义未被意外改变。
+5. 在目标同目录创建受限临时文件，write/flush/fsync；写入并同步 journal 后再替换两个目标。
+6. 只有文件提交完成才发布认证快照、内部 fingerprint 和新 session。
+
+两个目录的两次 rename 不是整体原子事务。journal 必须记录旧/新 fingerprint、目标与 staged candidate，启动加载前恢复：都已是新内容则清理；只完成一个目标则验证 staged 内容后补完；出现未知内容或损坏 journal 时 fail-closed，不猜测或覆盖外部修改。
+
+源与 snapshot 是同一文件时去重，不生成虚假的双文件事务。临时文件、journal 和最终文件不得放宽原权限；Unix/Windows 替换、目录同步、权限和 crash point 需要各自的验证证据。
+
+source-preserving 验收至少覆盖注释、键序、未知字段拒绝、块/流格式、引号、锚点/别名与不支持语法、SecretRef 原样保留、路径表达不变、双路径竞争、journal 损坏和中断恢复。无法安全修改的输入必须显式拒绝。
+
+真实入口、writer 与 loader 大小上限差异及故障验证边界见[管理端实现](../../../implementation/backend/management.md)。
+
+## 13. v2 活动配置与候选边界
+
+ConfigStore 同时仲裁首用户事务和新版活动配置，不建立第二份 Management 配置权威。活动源保留产生当前运行态的原始表达；外部文件仅进入观测状态。候选以旧 name 定位，在一份活动快照上完成类型化引用编辑，严格语义及路径校验后再提交服务控制 owner。Config 层不依赖 HTTP handler；Management 复用 Config 的变更类型并负责鉴权和协议投影。
+
+活动、运行和持久化 revision 各自独立；验证票据绑定调用者、候选、双 revision 和影响。同 operation ID 不同命令拒绝；未同步、补偿失败及中断结果未知时阻止叠加写入。源文档编辑不能将未变字段的缺失继承、SecretRef 或路径改为 resolved 值，不支持的语法明确拒绝。
+
+操作结果必须冻结该次状态转移的版本和安全错误类别，不能在查询时借用后来活动配置的 revision。运行应用成功、等待文件提交与实际提交失败是不同状态。进行中结果保持可查询；完成后的保留窗口从完成时起算。对外查询只读状态快照，不同步扫描文件，也不能返回源正文或底层错误。
+
+这些是接受的内部边界，不证明正式 loader、Runtime 或 v2 API 已接线。当前实现和证据统一见[配置参考](../../../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)；后续应用/同步必须以真实 owner 成功为准。
+
+差异输入只来自固定受管源，与生成文件观测摘要的字节一致；派生副本仅参与冲突判断。完整语义/词法路径检查后复核双文件及活动版本，不把预览视为候选已可应用，也不凭类型化相等宣称原始文件未变。文件读取必须由有界后台 owner 调度，见[差异输入事实](../../../implementation/configuration.md#p1-外部差异输入内部能力2026-09-08)。
+
+## 14. v2 文件事务与恢复
+
+普通配置不沿用首用户的“文件成功后发布认证”顺序。ConfigStore 在运行应用前建立 PREPARED 候选，只有应用成功回报后才能持久化 COMMIT_DECIDED 并逐个替换受管目标。失败不回滚 DNS，也不释放未同步 gate；重试持久化原活动源，不重复新增、改名或 Runtime 激活。
+
+每个受管目标使用固定角色和 OS 锁；journal 记录父目录/文件身份、内容和权限摘要，不提供任意路径操作。源和派生副本先整体核对，再逐文件核对、替换和复读，不能宣称双文件原子或跨进程 CAS。Windows 受限创建和同目录替换、Unix 目录同步分别实现，平台证据分开。
+
+自写识别逐目标匹配已完成提交或当前 journal 绑定的文件身份及内容摘要；相同内容的新文件身份仍是外部变更。持久化结果与外部文件状态分别投影，不能将提交后读到的任意文件替换为自写基线，也不忽略下一次文件事件。
+
+恢复只在新进程 loader/owner 启动之前执行。PREPARED 不代表旧进程曾完成应用，必须丢弃；COMMIT_DECIDED 仅补齐已知候选，随后仍需正常启动新 Runtime。未知内容/身份、损坏 journal、链接和候选校验失败时保持文件，不做历史自愈。具体实现、Windows crash point 和未接线范围见[持久化事实](../../../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。
+
+确认还原是独立文件操作：双 revision 和调用者/operation 绑定仍有效，数据只来自当前活动原文，不再次激活 DNS。仅受管叶节点缺失时可以重建，权限取自进程捕获的上次受管状态，父目录身份必须不变；不从请求传入 ACL、不用任意目录继承代替权限能力。journal 明确区分旧文件存在和缺失；已确认的缺失状态不允许覆盖后来出现的新目标。状态、失败重试和平台边界见[还原事实](../../../implementation/configuration.md#p1-受管文件还原内部能力2026-09-07)。
+
+未同步期间的新外改必须再次绑定双版本并明确确认。重新确认只重建同一活动源的文件决策，以新 COMMIT_DECIDED 原子替换旧 journal，不能删除旧决策后另起不持久的事务。新决策携带最多 3 个旧旁文件的固定角色和身份，不接收清理路径、不删除身份已变化的文件。普通 I/O 失败与清理未核清、决策结果未知必须分开，后两者保持阻塞，见[外改确认重试](../../../implementation/configuration.md#p1-外改确认重试内部能力2026-09-07)。

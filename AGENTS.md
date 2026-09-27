@@ -1,0 +1,61 @@
+# FluxDNS 项目级协作规范
+
+> 文档状态：有效
+>
+> 适用范围：FluxDNS 仓库及其所有子目录的协作、变更与验证基线
+
+本文档适用于 FluxDNS 仓库及其所有子目录。更具体的目录级 `AGENTS.md`（如后续新增）优先于本文档；用户明确要求优先于本文档和其他项目文档。
+
+## 文档路由
+
+开始修改前，按任务范围读取对应文档；涉及多个范围时同时读取相关文档：
+
+| 任务范围 | 必读文档 |
+| --- | --- |
+| 文档目录结构、新增、迁移、重命名、状态维护和废弃 | [`docs/rules/documentation-maintenance.md`](docs/rules/documentation-maintenance.md)，并从 [`docs/README.md`](docs/README.md)确认权威文档与目录职责 |
+| 项目工具链、构建物、缓存、命令调用和工具安装边界 | [`docs/rules/environment-usage.md`](docs/rules/environment-usage.md) |
+| 本地测试配置、运行时文件、DoH smoke test 和测试结果记录 | [`docs/rules/local-testing.md`](docs/rules/local-testing.md) |
+| 规范文档索引及新增规范的存放位置 | [`docs/rules/README.md`](docs/rules/README.md) |
+| 活动需求、实施步骤和剩余验收 | [`docs/plans/README.md`](docs/plans/README.md) 及对应计划 |
+| 系统、管理面和前端架构 | [`docs/architecture/README.md`](docs/architecture/README.md) 及对应设计 |
+| 配置字段、路径解析、校验和迁移 | [`docs/implementation/configuration.md`](docs/implementation/configuration.md)，设计约束见 [`Config`](docs/architecture/backend/modules/config.md) |
+| 后端总体架构、运行时边界和跨模块契约 | [`docs/architecture/backend/overview.md`](docs/architecture/backend/overview.md) 及对应的 [`模块设计`](docs/architecture/backend/modules/README.md) |
+| 后端实现、调用链和能力边界 | [`docs/implementation/backend/README.md`](docs/implementation/backend/README.md) 及对应链路文档 |
+| 前端实现、页面和查询状态 | [`docs/implementation/frontend/README.md`](docs/implementation/frontend/README.md)；最短工程命令见 [`frontend/README.md`](frontend/README.md) |
+| 构建、开发进程、版本与发布脚本行为 | [`docs/implementation/delivery.md`](docs/implementation/delivery.md)，并遵守环境/本地测试规则 |
+
+`docs/README.md` 是文档总入口；`plans/` 管理活动变更，`architecture/` 保存接受的设计，`implementation/` 记录源码事实与证据，`rules/` 保存可执行项目规则，不是 DNS 规则集。文档目录、职责和生命周期遵循 `docs/rules/documentation-maintenance.md`；新增规则时同步索引和本表。
+
+方案执行完成后，按文档维护规则将新逻辑沉淀到对应 `docs/implementation/` 文档；若改变原有设计，同步更新对应 `docs/architecture/` 文档，然后在同一交付批次删除方案及索引项。不得保留已完成方案作为长期实现或设计来源。
+
+## 本地文件与路径
+
+- 本地测试配置、规则、数据库、日志、临时证书及其他运行时文件统一放在仓库根目录的 `_fluxdns/`，不得散落到仓库根目录或源码目录；项目工具链缓存按 [`docs/rules/environment-usage.md`](docs/rules/environment-usage.md) 管理。
+- `_fluxdns/` 是本地专用目录，已加入 `.gitignore`，不得提交其中的个人配置或运行数据。
+- 配置路径遵循两级基准：相对 `work.path` 以启动配置文件所在目录为基准；其他配置中的相对路径以解析后的 `work.path` 为基准。具体规则以 `docs/implementation/configuration.md` 为准。
+
+## 构建与验证
+
+- 后端命令从仓库根目录执行，并通过 `--manifest-path backend/Cargo.toml` 指定 Rust manifest；项目 Rust、Node、pnpm 工具链调用、构建物、缓存和安装边界遵循 [`docs/rules/environment-usage.md`](docs/rules/environment-usage.md)。
+- 本地测试配置、DoH 工具和测试结果记录遵循 [`docs/rules/local-testing.md`](docs/rules/local-testing.md)。构建物和依赖目录必须由 `.gitignore` 覆盖；提交前检查 `git status --short`，不要使用 `git add -f` 提交本地产物。
+- 文档或规则修改后执行 `pwsh -File .agents/skills/project-doc-maintenance/scripts/check-docs.ps1` 和 `git diff --check`；检查器由该技能维护，并按改动范围追加最小充分验证，不维护独立测试版本。不要把未执行的测试描述为已通过。
+
+## 代码注释
+
+- 代码注释统一使用简体中文；类型名、方法名、配置键、协议名、API 和其他技术标识保留原文。
+- 新增或修改方法、函数时应按职责复杂度补充适当注释：公开 API 使用文档注释说明用途和关键契约；非显而易见的内部方法说明设计意图、边界条件、重要副作用或失败语义。
+- 注释重点解释“为什么”和调用约束，不重复代码已经清楚表达的语法。简单 getter、直接转换和含义明确的测试辅助函数无需机械补充注释。
+- 修改行为或失败语义时同步校正相邻注释，禁止保留与实现不一致的过期说明。
+
+## 工具安装规则（强制）
+
+- 禁止未经批准安装额外工具。
+- 项目当前确实需要且本机缺失的工具（例如检查 SQLite 数据库所需的 SQLite CLI）可以自行安装，但仅限于当前 `mise` 支持管理的工具，并必须通过 `mise` 安装或切换版本。
+- `mise` 不支持的工具、与当前项目任务无关的工具以及其他依赖工具，安装前必须获得明确批准；不得用其他包管理器绕过这条规则。
+- 如需把工具版本纳入项目共享基线，应同步更新 `mise.toml`；个人临时工具不得写入仓库配置。
+
+## 变更边界
+
+- 保持配置契约、文档路由和现有目录职责一致；行为变化必须同步更新直接受影响的文档、示例和测试说明。
+- 优先做最小范围修改，不顺手重构无关代码或格式化整个仓库。
+- 提交前审查真实 diff，精确暂存当前任务文件；未明确要求时不执行 push。

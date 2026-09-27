@@ -1,0 +1,7129 @@
+//! Application 使用的 DNS service task 编排。
+
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use thiserror::Error;
+use tokio::task::JoinSet;
+
+use crate::cache::CacheSnapshotShutdownSummary;
+use crate::config::resolve::ConfigId;
+use crate::config::{BindTransport, ResolvedConfig};
+use crate::dns::{
+    CancelReason, Cancellation, CoreError, CoreOutcome, Deadline, DispatchError, DnsCore,
+    DnsRequest, ResponseClass, RuntimeRevision, TransportClass, dispatch_inbound,
+};
+use crate::management::{ManagementRuntime, ManagementService, MetricsOwner};
+use crate::observability::TelemetryWriter;
+use crate::ports::effects::SocketFactory;
+use crate::ports::effects::{ActivatedSocketHandle, Clock};
+use crate::ports::inbound::InboundAdapter;
+use crate::ports::observation::{
+    ResolutionDetailSource, ResolutionEnvelope, ResolutionEvent, ResolutionEventSink,
+    ResolutionTerminal,
+};
+use crate::ports::storage::ResolveRuleSource;
+use crate::ports::telemetry::{
+    CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
+    HealthSink, LogSink, MetricEvent, MetricLabel, MetricLabelKey, MetricLabelValue, MetricName,
+    MetricValue, MetricsSink, OutcomeClass,
+};
+use crate::ports::{PortError, PortErrorClass};
+use crate::resolution::{ResolutionPipelineMetrics, ResolutionRuntime};
+use crate::runtime::{
+    ActiveRuntime, AdmissionError, BindError, BoundEndpointHandle, BoundListenerSet,
+    CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime, RefreshedResourceSnapshot,
+    ResourceRefreshCoordinatorError, RestartPolicy, RuntimeCoordinator, ServiceActivationConflict,
+    ShutdownPhaseStatus, ShutdownReport, Supervisor, SupervisorError, SystemClock, TaskCompletion,
+    TaskError, TaskErrorKind, TaskExit, TaskSpec,
+};
+#[cfg(test)]
+use crate::storage::StatsPersistenceWorker;
+use crate::storage::{
+    DEFAULT_STORAGE_FLUSH_INTERVAL, DEFAULT_STORAGE_OPERATION_TIMEOUT, StorageRuntime,
+    StorageServiceError, StorageServiceFlushSummary,
+};
+use crate::transport::doh::{DohAdapter, DohAdapterError, DohSession, DohSessionEvent};
+use crate::transport::{
+    DEFAULT_REQUEST_TIMEOUT, TcpAdapter, TcpAdapterError, TcpSession, UdpAdapter, UdpAdapterError,
+    transport_capabilities,
+};
+
+#[derive(Debug, Error)]
+pub enum ServiceStartError {
+    #[error("logging owner does not match the process telemetry or current configuration")]
+    LoggingOwnerMismatch,
+    #[error("active runtime snapshot is missing its DNS core")]
+    MissingDnsCore,
+    #[error("could not obtain active listener handles: {class} ({operation})")]
+    ListenerHandles {
+        class: &'static str,
+        operation: &'static str,
+    },
+    #[error("endpoint {index} could not create {kind} adapter: {reason}")]
+    Endpoint {
+        index: usize,
+        kind: &'static str,
+        reason: String,
+    },
+    #[error("could not register service task: {0}")]
+    Task(#[source] SupervisorError),
+}
+
+#[derive(Debug, Error)]
+pub enum ServiceReloadError {
+    #[error("logging configuration could not be applied: {0}")]
+    Logging(#[source] crate::observability::LoggingError),
+    #[error("runtime activation failed and the previous logging filter could not be restored: {0}")]
+    LoggingCompensation(#[source] ServiceActivationConflict),
+    #[error("runtime reload activation deadline exceeded")]
+    Timeout,
+    #[error("runtime reload bind failed: {0}")]
+    Bind(#[source] BindError),
+    #[error("runtime reload activation failed: {0}")]
+    Activation(#[source] ServiceActivationConflict),
+    #[error("active runtime snapshot is missing its DNS core")]
+    MissingDnsCore,
+    #[error(
+        "runtime reload revision must increment by one: expected {expected:?}, actual {actual:?}"
+    )]
+    InvalidRevision {
+        expected: RuntimeRevision,
+        actual: RuntimeRevision,
+    },
+    #[error("runtime reload listener preparation failed: {0}")]
+    Endpoint(#[source] ServiceStartError),
+    #[error("runtime reload task registration failed: {0}")]
+    Task(#[source] SupervisorError),
+    #[error("cache snapshot owner could not prepare the reload switch")]
+    CacheSnapshot,
+    #[error(
+        "runtime reload changes process-owned {component} configuration and requires process restart"
+    )]
+    RestartRequired { component: &'static str },
+}
+
+/// 表示热重载是否需要替换网络 listener。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServiceReloadMode {
+    ReuseListeners,
+    RebindListeners,
+}
+
+/// 根据新旧配置选择 service 热重载路径。
+///
+/// 由进程启动阶段持有的资源当前不能原位替换；检测到相关配置变化时必须拒绝
+/// 热重载，使调用方保留旧 Runtime 并提示重启进程。
+fn classify_service_reload(
+    current: &ResolvedConfig,
+    candidate: &ResolvedConfig,
+) -> Result<ServiceReloadMode, ServiceReloadError> {
+    if let Some(component) = process_owned_reload_change(current, candidate) {
+        return Err(ServiceReloadError::RestartRequired { component });
+    }
+    if current.bind_plan == candidate.bind_plan {
+        Ok(ServiceReloadMode::ReuseListeners)
+    } else {
+        Ok(ServiceReloadMode::RebindListeners)
+    }
+}
+
+/// 返回阻止当前候选热重载的进程持有配置组件。
+pub(crate) fn process_owned_reload_change(
+    current: &ResolvedConfig,
+    candidate: &ResolvedConfig,
+) -> Option<&'static str> {
+    if current.database != candidate.database {
+        Some("database")
+    } else if current.webui.enable != candidate.webui.enable
+        || current.webui.address != candidate.webui.address
+        || current.webui.port != candidate.webui.port
+        || current.webui.public_origin != candidate.webui.public_origin
+    {
+        Some("webui")
+    } else if current.dns.resolve_log != candidate.dns.resolve_log {
+        Some("dns.resolve_log")
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ServiceError {
+    #[error("shutdown signal could not be installed")]
+    Signal,
+    #[error("service shutdown deadline expired")]
+    ShutdownDeadline,
+    #[error("service task {task_id} ({component}) failed at {fault_level:?}: {exit:?}")]
+    TaskFailure {
+        task_id: String,
+        component: &'static str,
+        fault_level: FaultLevel,
+        exit: TaskExit,
+    },
+    #[error("storage shutdown failed: {source}")]
+    Storage {
+        #[source]
+        source: Box<StorageServiceError>,
+        report: Box<ShutdownReport>,
+    },
+    #[error("telemetry shutdown failed: {source}")]
+    Telemetry {
+        #[source]
+        source: crate::ports::PortError,
+        report: Box<ShutdownReport>,
+    },
+}
+
+impl ServiceError {
+    /// 返回失败前已完成的分项停机报告；非停机阶段错误没有该报告。
+    pub fn shutdown_report(&self) -> Option<&ShutdownReport> {
+        match self {
+            Self::Storage { report, .. } | Self::Telemetry { report, .. } => Some(report.as_ref()),
+            Self::Signal | Self::ShutdownDeadline | Self::TaskFailure { .. } => None,
+        }
+    }
+}
+
+const RESOURCE_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+const TRANSPORT_RESTART_LIMIT: u32 = 3;
+const MAX_CONCURRENT_STREAM_SESSIONS: usize = 1_024;
+const TELEMETRY_FLUSH_INTERVAL: Duration = Duration::from_secs(5);
+const TELEMETRY_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+type ServiceReloadFuture<'a> = Pin<Box<dyn Future<Output = Result<(), ServiceError>> + 'a>>;
+
+mod control;
+pub(crate) use control::{ControlError, ServiceControl};
+
+/// 已绑定 listener 的 DNS service；所有 receive loop 都由同一个 Supervisor 持有。
+pub struct DnsService {
+    runtime: Arc<ActiveRuntime>,
+    coordinator: Arc<RuntimeCoordinator>,
+    supervisor: Supervisor,
+    transport_tasks: Vec<TransportTask>,
+    resource_tasks: Vec<ResourceTask>,
+    request_timeout: Duration,
+    storage: Option<Arc<tokio::sync::Mutex<StorageRuntime>>>,
+    #[cfg(test)]
+    stats_worker: Option<Arc<StatsPersistenceWorker>>,
+    resolution_runtime: Option<ResolutionRuntime>,
+    resolution_event_sink: Option<Arc<dyn ResolutionEventSink>>,
+    telemetry: Option<Arc<TelemetryWriter>>,
+    telemetry_sampler: Option<Arc<TelemetrySampler>>,
+    metrics: Arc<MetricsOwner>,
+    logging: Option<Arc<crate::observability::LoggingOwner>>,
+    management: Option<Arc<ManagementRuntime>>,
+    management_cancellation: Option<Cancellation>,
+    control: ServiceControl,
+    control_commands: tokio::sync::mpsc::Receiver<control::ApplyCommand>,
+}
+
+#[derive(Clone)]
+struct ResourceTask {
+    resource: ConfigId,
+    cancellation: Cancellation,
+}
+
+/// 当前 Runtime 的 transport task 身份、逻辑 listener 归属和取消句柄。
+#[derive(Clone)]
+struct TransportTask {
+    task_id: String,
+    owner: String,
+    cancellation: Cancellation,
+}
+
+/// reload 的任务可先注册，但发布前不能执行 receive/accept 或资源刷新。
+/// 准备失败时 sender 随栈释放，所有候选任务按 Cancelled 退出，不影响旧任务。
+#[derive(Clone, Default)]
+struct TaskStartGate(Option<tokio::sync::watch::Receiver<bool>>);
+
+impl TaskStartGate {
+    async fn wait(mut self) -> Result<(), TaskError> {
+        if let Some(receiver) = &mut self.0 {
+            receiver
+                .wait_for(|started| *started)
+                .await
+                .map_err(|_| TaskError::Cancelled)?;
+        }
+        Ok(())
+    }
+}
+
+impl DnsService {
+    pub fn start(
+        runtime: Arc<ActiveRuntime>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+    ) -> Result<Self, ServiceStartError> {
+        let coordinator = Arc::new(RuntimeCoordinator::from_active(Arc::clone(&runtime)));
+        Self::start_with_coordinator(coordinator, core, request_timeout)
+    }
+
+    pub fn start_with_coordinator(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage(coordinator, core, request_timeout, None)
+    }
+
+    pub fn start_with_coordinator_and_storage(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: StorageRuntime,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage(coordinator, core, request_timeout, Some(storage))
+    }
+
+    pub fn start_with_coordinator_storage_and_telemetry(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: StorageRuntime,
+        telemetry: Arc<TelemetryWriter>,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage_and_telemetry(
+            coordinator,
+            core,
+            request_timeout,
+            Some(storage),
+            Some(telemetry),
+        )
+    }
+
+    fn start_with_optional_storage(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: Option<StorageRuntime>,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage_and_telemetry(
+            coordinator,
+            core,
+            request_timeout,
+            storage,
+            None,
+        )
+    }
+
+    fn start_with_optional_storage_and_telemetry(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: Option<StorageRuntime>,
+        telemetry: Option<Arc<TelemetryWriter>>,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start_with_optional_storage_telemetry_and_metrics(
+            coordinator,
+            core,
+            request_timeout,
+            storage,
+            telemetry,
+            Arc::new(MetricsOwner::new()),
+            false,
+        )
+    }
+
+    fn start_with_optional_storage_telemetry_and_metrics(
+        coordinator: Arc<RuntimeCoordinator>,
+        core: Arc<dyn DnsCore>,
+        request_timeout: Duration,
+        storage: Option<StorageRuntime>,
+        telemetry: Option<Arc<TelemetryWriter>>,
+        metrics: Arc<MetricsOwner>,
+        enable_process_sampler: bool,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
+        let mut supervisor = Supervisor::new();
+        let (storage, stats_worker, detail_writer, resolution_metrics) = match storage {
+            Some(storage) => {
+                let stats_worker = storage.stats_worker();
+                let detail_writer = storage.detail_writer();
+                let resolution_metrics = storage.resolution_metrics();
+                let storage = Arc::new(tokio::sync::Mutex::new(storage));
+                (
+                    Some(storage),
+                    Some(stats_worker),
+                    detail_writer,
+                    Some(resolution_metrics),
+                )
+            }
+            None => (None, None, None, None),
+        };
+        let resolution_runtime = stats_worker.as_ref().map(|stats| {
+            ResolutionRuntime::start_with_metrics(
+                Arc::clone(stats),
+                detail_writer,
+                telemetry.clone(),
+                resolution_metrics.expect("storage-backed pipeline always has metrics"),
+            )
+        });
+        let resolution_event_sink = resolution_runtime
+            .as_ref()
+            .map(ResolutionRuntime::publisher);
+        let core = instrumented_core(core, resolution_event_sink.clone());
+        let telemetry_sampler = telemetry.as_ref().map(|_| {
+            Arc::new(TelemetrySampler::new(
+                resolution_runtime.as_ref().map(ResolutionRuntime::metrics),
+            ))
+        });
+        if let Some(storage) = &storage {
+            spawn_storage_task(&mut supervisor, Arc::clone(storage), telemetry.clone())?;
+        }
+        if let Some(telemetry) = &telemetry {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Telemetry,
+                ComponentHealthState::Healthy,
+                None,
+            );
+            if storage.is_some() {
+                publish_component_health(
+                    telemetry,
+                    TelemetryComponent::Storage,
+                    ComponentHealthState::Healthy,
+                    None,
+                );
+            }
+            spawn_telemetry_task(
+                &mut supervisor,
+                Arc::clone(telemetry),
+                telemetry_sampler.as_ref().unwrap().clone(),
+            )?;
+        }
+        if enable_process_sampler {
+            spawn_metrics_task(&mut supervisor, Arc::clone(&metrics))?;
+        }
+        let transport_plans = prepare_transport_plans(
+            runtime.listeners(),
+            runtime.snapshot().config(),
+            runtime.revision(),
+            request_timeout,
+        )?;
+        let transport_tasks = spawn_transport_plans(
+            &mut supervisor,
+            transport_plans,
+            Arc::clone(&core),
+            Arc::clone(&runtime),
+            Arc::clone(&metrics),
+            TaskStartGate::default(),
+        )?;
+        if let Some(telemetry) = &telemetry
+            && !transport_tasks.is_empty()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Listener,
+                ComponentHealthState::Healthy,
+                None,
+            );
+        }
+
+        let resource_worker_ids = runtime.resource_worker_ids();
+        if let Some(telemetry) = &telemetry
+            && !resource_worker_ids.is_empty()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Resource,
+                ComponentHealthState::Healthy,
+                None,
+            );
+        }
+        let resource_tasks = spawn_resource_tasks(
+            &mut supervisor,
+            Arc::clone(&coordinator),
+            runtime.revision(),
+            resource_worker_ids,
+            telemetry.clone(),
+        )?;
+
+        let (control, control_commands) = control::channel();
+        Ok(Self {
+            runtime,
+            coordinator,
+            supervisor,
+            transport_tasks,
+            resource_tasks,
+            request_timeout,
+            storage,
+            #[cfg(test)]
+            stats_worker,
+            resolution_runtime,
+            resolution_event_sink,
+            telemetry,
+            telemetry_sampler,
+            metrics,
+            logging: None,
+            management: None,
+            management_cancellation: None,
+            control,
+            control_commands,
+        })
+    }
+
+    pub fn with_default_timeout(
+        runtime: Arc<ActiveRuntime>,
+        core: Arc<dyn DnsCore>,
+    ) -> Result<Self, ServiceStartError> {
+        Self::start(runtime, core, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub fn with_default_timeout_from_runtime(
+        runtime: Arc<ActiveRuntime>,
+    ) -> Result<Self, ServiceStartError> {
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::with_default_timeout(runtime, core)
+    }
+
+    pub fn with_default_timeout_from_coordinator(
+        coordinator: Arc<RuntimeCoordinator>,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::start_with_coordinator(coordinator, core, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    pub fn with_default_timeout_from_coordinator_and_storage(
+        coordinator: Arc<RuntimeCoordinator>,
+        storage: StorageRuntime,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::start_with_coordinator_and_storage(
+            coordinator,
+            core,
+            DEFAULT_REQUEST_TIMEOUT,
+            storage,
+        )
+    }
+
+    pub fn with_default_timeout_from_coordinator_storage_and_telemetry(
+        coordinator: Arc<RuntimeCoordinator>,
+        storage: StorageRuntime,
+        telemetry: Arc<TelemetryWriter>,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::start_with_coordinator_storage_and_telemetry(
+            coordinator,
+            core,
+            DEFAULT_REQUEST_TIMEOUT,
+            storage,
+            telemetry,
+        )
+    }
+
+    pub(crate) fn with_default_timeout_from_coordinator_storage_telemetry_and_metrics(
+        coordinator: Arc<RuntimeCoordinator>,
+        storage: StorageRuntime,
+        telemetry: Arc<TelemetryWriter>,
+        metrics: Arc<MetricsOwner>,
+    ) -> Result<Self, ServiceStartError> {
+        let runtime = coordinator.load();
+        let core = runtime
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceStartError::MissingDnsCore)?;
+        Self::start_with_optional_storage_telemetry_and_metrics(
+            coordinator,
+            core,
+            DEFAULT_REQUEST_TIMEOUT,
+            Some(storage),
+            Some(telemetry),
+            metrics,
+            true,
+        )
+    }
+
+    pub fn runtime(&self) -> &Arc<ActiveRuntime> {
+        &self.runtime
+    }
+
+    /// 管理事务只取得命令句柄，不取得 service 或 Supervisor 的可变所有权。
+    pub(crate) fn control(&self) -> ServiceControl {
+        self.control.clone()
+    }
+
+    /// 日志 owner 必须与服务已有 writer 和活动配置一致，不在热更新时另建指标/任务。
+    pub(crate) fn attach_logging(
+        &mut self,
+        owner: Arc<crate::observability::LoggingOwner>,
+    ) -> Result<(), ServiceStartError> {
+        if self.logging.is_some()
+            || !self
+                .telemetry
+                .as_ref()
+                .is_some_and(|writer| owner.matches(&self.runtime.snapshot().config().logs, writer))
+        {
+            return Err(ServiceStartError::LoggingOwnerMismatch);
+        }
+        self.logging = Some(owner);
+        Ok(())
+    }
+
+    async fn apply_control_command(&mut self, command: control::ApplyCommand) {
+        let result = if command.deadline.is_expired(Instant::now()) {
+            Err(control::ControlError::Expired)
+        } else {
+            let actual = self.coordinator.current_revision();
+            if command.expected != actual || self.runtime.revision() != actual {
+                Err(control::ControlError::RevisionConflict {
+                    expected: command.expected,
+                    actual,
+                })
+            } else {
+                self.reload_prepared(
+                    command.prepared,
+                    &crate::runtime::SystemSocketFactory::new(),
+                    command.deadline,
+                    Cancellation::new(),
+                )
+                .await
+                .map(|runtime| runtime.revision())
+                .map_err(control::ControlError::Apply)
+            }
+        };
+        // 接收方离开不能回滚已应用运行态；配置事务 owner 必须保留自己的 operation 记录。
+        if command.reply.send(result).is_err() {
+            tracing::debug!(
+                event = "configuration_receipt_dropped",
+                component = "service",
+                "configuration caller no longer awaits the service receipt"
+            );
+        }
+    }
+
+    pub fn coordinator(&self) -> &Arc<RuntimeCoordinator> {
+        &self.coordinator
+    }
+
+    pub fn task_count(&self) -> usize {
+        self.supervisor.task_count()
+    }
+
+    /// 将已完成 bind 的 Management Server 纳入同一个 Supervisor。
+    pub(crate) fn attach_management(
+        &mut self,
+        management: ManagementService,
+    ) -> Result<(), ServiceStartError> {
+        let runtime = management.runtime();
+        let spec = TaskSpec::new(
+            "management.http",
+            "management",
+            FaultLevel::Fatal,
+            RestartPolicy::Never,
+        )
+        .expect("static management task id must be valid");
+        let cancellation = self
+            .supervisor
+            .spawn_scoped(spec, move |cancellation| {
+                Box::pin(management.serve(cancellation))
+            })
+            .map_err(ServiceStartError::Task)?;
+        self.management = Some(runtime);
+        self.management_cancellation = Some(cancellation);
+        if let Some(telemetry) = &self.telemetry {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Management,
+                ComponentHealthState::Healthy,
+                None,
+            );
+        }
+        Ok(())
+    }
+
+    /// 返回当前 Runtime 仍可服务的 transport endpoint task 数量。
+    pub fn transport_task_count(&self) -> usize {
+        self.transport_tasks.len()
+    }
+
+    /// 取消当前 Runtime 的 transport task；旧 revision 的 task 已由 reload 单独取消。
+    pub fn cancel_transport_tasks(&self) {
+        for task in &self.transport_tasks {
+            task.cancellation.cancel(CancelReason::Shutdown);
+        }
+    }
+
+    pub fn resource_task_count(&self) -> usize {
+        self.resource_tasks.len()
+    }
+
+    pub fn cancel_resource_tasks(&self) {
+        for task in &self.resource_tasks {
+            task.cancellation.cancel(CancelReason::Shutdown);
+        }
+    }
+
+    fn prepare_resource_tasks(
+        &mut self,
+        runtime: &Arc<ActiveRuntime>,
+        start: TaskStartGate,
+    ) -> Result<Vec<ResourceTask>, ServiceStartError> {
+        let resources = runtime.resource_worker_ids();
+        let previous = self.resource_tasks.clone();
+        let mut next = Vec::with_capacity(resources.len());
+        let mut spawned = Vec::new();
+        for (index, resource) in resources.iter().cloned().enumerate() {
+            if let Some(existing) = previous.iter().find(|task| task.resource == resource) {
+                next.push(existing.clone());
+                continue;
+            }
+            match spawn_resource_task(
+                &mut self.supervisor,
+                Arc::clone(&self.coordinator),
+                runtime.revision(),
+                index,
+                resource,
+                self.telemetry.clone(),
+                start.clone(),
+            ) {
+                Ok(task) => {
+                    spawned.push(task.clone());
+                    next.push(task);
+                }
+                Err(error) => {
+                    for task in spawned {
+                        task.cancellation.cancel(CancelReason::Shutdown);
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(next)
+    }
+
+    /// 切换一个新 Runtime，并按配置差异复用或重建 UDP/TCP/DoH listener task。
+    ///
+    /// 资源与 transport task 在 CAS 前注册并等待启动闸门，准备失败不取消旧集合。
+    /// 提交后同步换代并放行新任务，不再保留 CAS 后可失败的注册步骤。
+    /// 进程级资源配置变化仍拒绝；等待资源 mutation gate 共享调用方原 deadline。
+    pub async fn reload_prepared(
+        &mut self,
+        prepared: PreparedRuntime,
+        factory: &dyn SocketFactory,
+        deadline: Deadline,
+        cancellation: Cancellation,
+    ) -> Result<Arc<ActiveRuntime>, ServiceReloadError> {
+        if deadline.is_expired(Instant::now()) {
+            return Err(ServiceReloadError::Timeout);
+        }
+        let expected = self.coordinator.current_revision();
+        let actual = prepared.snapshot().revision();
+        let expected_next = expected
+            .0
+            .checked_add(1)
+            .map(RuntimeRevision)
+            .ok_or(ServiceReloadError::InvalidRevision { expected, actual })?;
+        if actual != expected_next {
+            return Err(ServiceReloadError::InvalidRevision { expected, actual });
+        }
+        classify_service_reload(
+            self.runtime.snapshot().config(),
+            prepared.snapshot().config(),
+        )?;
+        let cache_snapshot_switch = self
+            .coordinator
+            .prepare_cache_snapshot_switch(prepared.snapshot())
+            .map_err(|_| ServiceReloadError::CacheSnapshot)?;
+        let logging = if self.runtime.snapshot().config().logs != prepared.snapshot().config().logs
+        {
+            Some(
+                self.logging
+                    .as_ref()
+                    .ok_or(ServiceReloadError::Logging(
+                        crate::observability::LoggingError::Unavailable,
+                    ))?
+                    .prepare(
+                        &self.runtime.snapshot().config().logs,
+                        prepared.snapshot().config().logs.clone(),
+                        deadline,
+                    )
+                    .await
+                    .map_err(ServiceReloadError::Logging)?,
+            )
+        } else {
+            None
+        };
+        let candidate = crate::runtime::bind_prepared_reusing(
+            prepared,
+            self.runtime.listeners(),
+            factory,
+            deadline,
+            &cancellation,
+        )
+        .await
+        .map_err(ServiceReloadError::Bind)?;
+        let transport_plans = prepare_transport_plans(
+            candidate.listeners(),
+            candidate.snapshot().config(),
+            candidate.revision(),
+            self.request_timeout,
+        )
+        .map_err(ServiceReloadError::Endpoint)?;
+        let core = candidate
+            .snapshot()
+            .dns_core()
+            .ok_or(ServiceReloadError::MissingDnsCore)?;
+        let core = self.instrument_core(core);
+
+        let coordinator = Arc::clone(&self.coordinator);
+        let activation = tokio::time::timeout(
+            deadline.remaining(Instant::now()),
+            coordinator.prepare_service_activation(expected, candidate),
+        )
+        .await
+        .map_err(|_| ServiceReloadError::Timeout)?
+        .map_err(ServiceReloadError::Activation)?;
+        let runtime = activation.runtime();
+        let (start, receiver) = tokio::sync::watch::channel(false);
+        let start_gate = TaskStartGate(Some(receiver));
+        let transport_tasks = spawn_transport_plans(
+            &mut self.supervisor,
+            transport_plans,
+            core,
+            Arc::clone(&runtime),
+            Arc::clone(&self.metrics),
+            start_gate.clone(),
+        )
+        .map_err(map_reload_spawn_error)?;
+        let resource_tasks = self
+            .prepare_resource_tasks(&runtime, start_gate)
+            .map_err(map_reload_spawn_error)?;
+
+        if deadline.is_expired(Instant::now()) {
+            return Err(ServiceReloadError::Timeout);
+        }
+        if cancellation.is_cancelled() {
+            return Err(ServiceReloadError::Bind(BindError::Cancelled(
+                cancellation.reason().unwrap_or(CancelReason::Shutdown),
+            )));
+        }
+        let runtime = match logging {
+            Some(logging) => logging
+                .publish_with(|| activation.commit())
+                .map_err(|error| match error {
+                    crate::observability::LoggingPublishError::Logging(error) => {
+                        ServiceReloadError::Logging(error)
+                    }
+                    crate::observability::LoggingPublishError::Application(error) => {
+                        ServiceReloadError::Activation(error)
+                    }
+                    crate::observability::LoggingPublishError::CompensationFailed(error) => {
+                        ServiceReloadError::LoggingCompensation(error)
+                    }
+                })?,
+            None => activation
+                .commit()
+                .map_err(ServiceReloadError::Activation)?,
+        };
+        self.coordinator
+            .publish_cache_snapshot_switch(cache_snapshot_switch);
+        // commit 已通知旧 Runtime 退出入口；保留已接纳请求，不能使用停机 cancellation。
+        self.coordinator.prune_drained_runtime_owners();
+        for task in &self.resource_tasks {
+            if !resource_tasks
+                .iter()
+                .any(|next| next.resource == task.resource)
+            {
+                task.cancellation.cancel(CancelReason::Shutdown);
+            }
+        }
+        self.transport_tasks = transport_tasks;
+        self.resource_tasks = resource_tasks;
+        self.runtime = Arc::clone(&runtime);
+        self.reconcile_management_users(&runtime);
+        start.send_replace(true);
+        if let Some(telemetry) = &self.telemetry
+            && !self.transport_tasks.is_empty()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Listener,
+                ComponentHealthState::Healthy,
+                None,
+            );
+        }
+        Ok(runtime)
+    }
+
+    fn instrument_core(&self, core: Arc<dyn DnsCore>) -> Arc<dyn DnsCore> {
+        instrumented_core(core, self.resolution_event_sink.clone())
+    }
+
+    fn reconcile_management_users(&self, runtime: &ActiveRuntime) {
+        if let Some(management) = &self.management {
+            management.reconcile_users(
+                &runtime.snapshot().config().webui.users,
+                &runtime.snapshot().config().input_hash,
+            );
+        }
+    }
+
+    pub async fn shutdown(
+        &mut self,
+        clock: &dyn Clock,
+        deadline: crate::dns::Deadline,
+    ) -> Result<ShutdownReport, ServiceError> {
+        self.control_commands.close();
+        while let Ok(command) = self.control_commands.try_recv() {
+            let _ = command.reply.send(Err(control::ControlError::Unavailable));
+        }
+        if let Some(management) = &self.management {
+            management.shutdown();
+        }
+        if let Some(telemetry) = &self.telemetry
+            && self.management.is_some()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Management,
+                ComponentHealthState::Stopping,
+                None,
+            );
+        }
+        if let Some(cancellation) = &self.management_cancellation {
+            cancellation.cancel(CancelReason::Shutdown);
+        }
+        self.coordinator.begin_drain();
+        if let Some(telemetry) = &self.telemetry
+            && !self.transport_tasks.is_empty()
+        {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Listener,
+                ComponentHealthState::Stopping,
+                None,
+            );
+        }
+        self.cancel_transport_tasks();
+        self.cancel_resource_tasks();
+        let mut report = self.supervisor.shutdown(clock, deadline).await;
+        if self.coordinator.wait_for_drain(deadline).await {
+            report.request_drain = ShutdownPhaseStatus::Completed;
+        } else {
+            report.request_drain = ShutdownPhaseStatus::TimedOut;
+            report.deadline_expired = true;
+        }
+        let resolution_summary = match self.resolution_runtime.as_mut() {
+            Some(runtime) => runtime.shutdown(deadline).await,
+            None => crate::resolution::ResolutionPipelineShutdownSummary {
+                completed: true,
+                snapshot: crate::resolution::ResolutionPipelineSnapshot::default(),
+            },
+        };
+        tracing::info!(
+            event = "resolution_pipeline_shutdown_summary",
+            component = "resolution",
+            completed = resolution_summary.completed,
+            accepted = resolution_summary.snapshot.accepted,
+            dropped = resolution_summary.snapshot.dropped,
+            cache_commit_stored = resolution_summary.snapshot.cache_commit_stored,
+            cache_commit_dropped = resolution_summary.snapshot.cache_commit_dropped,
+            detail_dropped = resolution_summary.snapshot.detail_dropped,
+            detail_failed = resolution_summary.snapshot.detail_failed,
+            "resolution_pipeline_shutdown_summary"
+        );
+        if !resolution_summary.completed {
+            report.deadline_expired = true;
+        }
+        let cache_summary = self.coordinator.shutdown_finalizers(deadline).await;
+        if cache_summary.completed {
+            report.cache_finalizers = ShutdownPhaseStatus::Completed;
+        } else {
+            report.cache_finalizers = ShutdownPhaseStatus::TimedOut;
+            report.deadline_expired = true;
+        }
+        log_cache_shutdown_summary(cache_summary);
+        let snapshot_summary = self.coordinator.shutdown_cache_snapshot(deadline).await;
+        report.cache_snapshot = if !snapshot_summary.attempted {
+            ShutdownPhaseStatus::Skipped
+        } else if snapshot_summary.completed {
+            ShutdownPhaseStatus::Completed
+        } else if matches!(
+            snapshot_summary.error,
+            Some(crate::cache::CacheSnapshotFailure::Timeout)
+        ) {
+            report.deadline_expired = true;
+            ShutdownPhaseStatus::TimedOut
+        } else {
+            ShutdownPhaseStatus::Failed
+        };
+        if let Some(telemetry) = &self.telemetry {
+            publish_cache_shutdown_health(telemetry, cache_summary, snapshot_summary);
+        }
+        log_cache_snapshot_shutdown_summary(snapshot_summary);
+        let storage_error = match self.storage.take() {
+            Some(storage) => {
+                if let Some(telemetry) = &self.telemetry {
+                    publish_component_health(
+                        telemetry,
+                        TelemetryComponent::Storage,
+                        ComponentHealthState::Stopping,
+                        None,
+                    );
+                }
+                match storage.lock().await.shutdown(deadline).await {
+                    Ok(summary) => {
+                        report.storage = ShutdownPhaseStatus::Completed;
+                        log_storage_shutdown_summary(summary);
+                        None
+                    }
+                    Err(error) => {
+                        let timeout = error.is_timeout();
+                        report.storage = if timeout {
+                            ShutdownPhaseStatus::TimedOut
+                        } else {
+                            ShutdownPhaseStatus::Failed
+                        };
+                        report.deadline_expired |= timeout;
+                        Some(error)
+                    }
+                }
+            }
+            None => {
+                report.storage = ShutdownPhaseStatus::Skipped;
+                None
+            }
+        };
+        let telemetry_error = match self.telemetry.take() {
+            Some(telemetry) => {
+                publish_component_health(
+                    &telemetry,
+                    TelemetryComponent::Telemetry,
+                    ComponentHealthState::Stopping,
+                    None,
+                );
+                let sampled = self
+                    .telemetry_sampler
+                    .as_ref()
+                    .map_or(Ok(()), |sampler| sampler.sample(&telemetry));
+                // 即使采样失败仍关闭并排空 writer；不延长共享停机 deadline。
+                let flushed = telemetry.shutdown(deadline);
+                match flushed.and_then(|summary| sampled.map(|()| summary)) {
+                    Ok(_summary) => {
+                        report.telemetry = ShutdownPhaseStatus::Completed;
+                        None
+                    }
+                    Err(error) => {
+                        let timeout = matches!(error.class(), PortErrorClass::Timeout);
+                        report.telemetry = if timeout {
+                            ShutdownPhaseStatus::TimedOut
+                        } else {
+                            ShutdownPhaseStatus::Failed
+                        };
+                        report.deadline_expired |= timeout;
+                        Some(error)
+                    }
+                }
+            }
+            None => {
+                report.telemetry = ShutdownPhaseStatus::Skipped;
+                None
+            }
+        };
+        if let Some(source) = storage_error {
+            return Err(ServiceError::Storage {
+                source: Box::new(source),
+                report: Box::new(report),
+            });
+        }
+        if let Some(source) = telemetry_error {
+            return Err(ServiceError::Telemetry {
+                source,
+                report: Box::new(report),
+            });
+        }
+        Ok(report)
+    }
+
+    /// 运行期 task 失败后执行有界收尾；清理异常只记录，调用方仍返回原始 task 错误。
+    async fn shutdown_after_runtime_failure(&mut self, grace_period: Duration) {
+        let clock = SystemClock::new();
+        let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
+        match self.shutdown(&clock, deadline).await {
+            Ok(report) if report.deadline_expired => {
+                tracing::error!(
+                    event = "runtime_failure_shutdown_timeout",
+                    component = "runtime",
+                    "runtime_failure_shutdown_timeout"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::error!(
+                    event = "runtime_failure_shutdown_failed",
+                    component = "runtime",
+                    reason = %error,
+                    "runtime_failure_shutdown_failed"
+                );
+            }
+        }
+    }
+
+    /// 等待进程终止信号后执行有界 graceful shutdown。
+    pub async fn wait_for_ctrl_c(
+        &mut self,
+        grace_period: Duration,
+    ) -> Result<ShutdownReport, ServiceError> {
+        self.wait_for_ctrl_c_with_reload(grace_period, Duration::from_secs(86_400), |_service| {
+            Box::pin(async { Ok(()) })
+        })
+        .await
+    }
+
+    /// 等待终止信号、受管 task 故障或配置变更轮询回调。
+    ///
+    /// 主配置轮询只生成文件提示；显式热更新由有界控制队列消费。
+    /// 回调不能同步等待文件 I/O 或因无效外部配置终止当前可用的 Runtime。
+    pub(crate) async fn wait_for_ctrl_c_with_reload<F>(
+        &mut self,
+        grace_period: Duration,
+        poll_interval: Duration,
+        on_poll: F,
+    ) -> Result<ShutdownReport, ServiceError>
+    where
+        F: for<'a> FnMut(&'a mut DnsService) -> ServiceReloadFuture<'a>,
+    {
+        self.run_with_reload(
+            grace_period,
+            poll_interval,
+            on_poll,
+            wait_for_termination_signal(),
+        )
+        .await
+    }
+
+    /// 与生产相同的控制循环；允许本机验证注入终止信号，不发送真实进程信号。
+    pub(crate) async fn run_with_reload<F, S>(
+        &mut self,
+        grace_period: Duration,
+        poll_interval: Duration,
+        mut on_poll: F,
+        signal: S,
+    ) -> Result<ShutdownReport, ServiceError>
+    where
+        F: for<'a> FnMut(&'a mut DnsService) -> ServiceReloadFuture<'a>,
+        S: Future<Output = Result<(), ServiceError>>,
+    {
+        if poll_interval.is_zero() {
+            return Err(ServiceError::Signal);
+        }
+        tokio::pin!(signal);
+        let mut poll = tokio::time::interval(poll_interval);
+        poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                result = &mut signal => {
+                    result?;
+                    return self.shutdown_with_second_signal(grace_period).await;
+                }
+                completion = self.supervisor.join_next() => {
+                    self.coordinator.prune_drained_runtime_owners();
+                    let Some(completion) = completion else {
+                        let error = ServiceError::TaskFailure {
+                            task_id: "supervisor".to_owned(),
+                            component: "runtime",
+                            fault_level: FaultLevel::Fatal,
+                            exit: TaskExit::Panicked,
+                        };
+                        self.shutdown_after_runtime_failure(grace_period).await;
+                        return Err(error);
+                    };
+                    if let Some(error) = task_failure(&completion) {
+                        if is_exhausted_endpoint(&completion) {
+                            match retire_current_transport_task(
+                                &mut self.transport_tasks,
+                                &completion,
+                            ) {
+                                Some(remaining) if remaining > 0 => {
+                                    if let Some(telemetry) = &self.telemetry {
+                                        publish_component_health(
+                                            telemetry,
+                                            TelemetryComponent::Listener,
+                                            ComponentHealthState::Degraded,
+                                            Some("listener endpoint exhausted retries"),
+                                        );
+                                    }
+                                    tracing::warn!(
+                                        event = "listener_endpoint_unavailable",
+                                        component = completion.spec.component,
+                                        task_id = %completion.spec.id,
+                                        remaining,
+                                        "listener_endpoint_unavailable"
+                                    );
+                                    continue;
+                                }
+                                None => {
+                                    tracing::debug!(
+                                        event = "stale_listener_failure_ignored",
+                                        component = completion.spec.component,
+                                        task_id = %completion.spec.id,
+                                        "stale_listener_failure_ignored"
+                                    );
+                                    continue;
+                                }
+                                Some(0) => {}
+                                Some(_) => unreachable!(),
+                            }
+                        }
+                        if let Some(telemetry) = &self.telemetry {
+                            publish_component_health(
+                                telemetry,
+                                telemetry_component_for_task(completion.spec.component),
+                                ComponentHealthState::Failed,
+                                Some("supervisor task failed"),
+                            );
+                        }
+                        self.shutdown_after_runtime_failure(grace_period).await;
+                        return Err(error);
+                    }
+                }
+                _ = poll.tick() => {
+                    on_poll(self).await?;
+                }
+                Some(command) = self.control_commands.recv() => {
+                    // 等待提交锁期间仍响应退出；中断回执只能报告未知，不能重放命令。
+                    tokio::select! {
+                        biased;
+                        result = &mut signal => {
+                            result?;
+                            return self.shutdown_with_second_signal(grace_period).await;
+                        }
+                        _ = self.apply_control_command(command) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn shutdown_with_second_signal(
+        &mut self,
+        grace_period: Duration,
+    ) -> Result<ShutdownReport, ServiceError> {
+        let deadline = crate::dns::Deadline::new(Instant::now() + grace_period);
+        let clock = SystemClock::new();
+        let shutdown = self.shutdown(&clock, deadline);
+        tokio::pin!(shutdown);
+        let second_signal = wait_for_termination_signal();
+        tokio::pin!(second_signal);
+        tokio::select! {
+            result = &mut shutdown => {
+                let report = result?;
+                if report.deadline_expired {
+                    return Err(ServiceError::ShutdownDeadline);
+                }
+                Ok(report)
+            }
+            result = &mut second_signal => {
+                result?;
+                Err(ServiceError::Signal)
+            }
+        }
+    }
+}
+
+fn instrumented_core(
+    core: Arc<dyn DnsCore>,
+    resolution_event_sink: Option<Arc<dyn ResolutionEventSink>>,
+) -> Arc<dyn DnsCore> {
+    let Some(resolution_event_sink) = resolution_event_sink else {
+        return core;
+    };
+    Arc::new(EventPublishingDnsCore {
+        inner: core,
+        resolution_event_sink,
+    })
+}
+
+struct EventPublishingDnsCore {
+    inner: Arc<dyn DnsCore>,
+    resolution_event_sink: Arc<dyn ResolutionEventSink>,
+}
+
+impl DnsCore for EventPublishingDnsCore {
+    fn resolve<'a>(
+        &'a self,
+        request: &'a DnsRequest,
+    ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
+        Box::pin(async move {
+            let dns_core_started_at = Instant::now();
+            let completion = self.inner.resolve_with_completion(request).await;
+            let completed_at = Instant::now();
+            let (duration_millis, dns_core_duration_micros) = frozen_resolution_durations(
+                request.context.meta.received_at,
+                dns_core_started_at,
+                completed_at,
+            );
+            self.publish(
+                request,
+                completion,
+                duration_millis,
+                dns_core_duration_micros,
+            )
+        })
+    }
+}
+
+impl EventPublishingDnsCore {
+    fn publish(
+        &self,
+        request: &DnsRequest,
+        completion: crate::dns::DnsCoreCompletion,
+        duration_millis: u64,
+        dns_core_duration_micros: u64,
+    ) -> Result<CoreOutcome, CoreError> {
+        let crate::dns::DnsCoreCompletion {
+            result,
+            observation,
+            cancellation_reason,
+            cache_commit,
+        } = completion;
+        let outcome = outcome_class(request, &result, cancellation_reason);
+        let terminal = match &result {
+            Ok(CoreOutcome::Response(response)) => ResolutionTerminal::Response {
+                class: response.class(),
+                rcode: u16::from(response.as_message().metadata.response_code),
+            },
+            Ok(CoreOutcome::NoResponse) => ResolutionTerminal::NoResponse {
+                reason: cancellation_reason.or_else(|| request.context.meta.cancellation.reason()),
+            },
+            Err(_) => ResolutionTerminal::CoreFailure,
+        };
+        let detail = self
+            .resolution_event_sink
+            .detail_enabled()
+            .then(|| ResolutionDetailSource {
+                completion: request.context.meta.completion.clone(),
+                request_id: request.context.meta.request_id,
+                client_id: request.context.client.client_id.clone(),
+                client_ip: request.context.client.client_addr,
+                question: request.query.question().clone(),
+                response: match &result {
+                    Ok(CoreOutcome::Response(response)) => Some(Arc::clone(response)),
+                    Ok(CoreOutcome::NoResponse) | Err(_) => None,
+                },
+            });
+        let event = ResolutionEvent {
+            occurred_at: SystemTime::now(),
+            duration_millis,
+            dns_core_duration_micros,
+            listener_id: Arc::from(request.context.meta.listener_id.as_ref()),
+            route_id: request
+                .context
+                .meta
+                .route_id
+                .as_ref()
+                .map(|route| Arc::from(route.as_ref())),
+            client_match: observation
+                .as_ref()
+                .and_then(|value| value.client_match.clone()),
+            client_bucket: observation
+                .as_ref()
+                .and_then(|value| value.client_bucket.clone()),
+            strategy_id: observation
+                .as_ref()
+                .and_then(|value| value.strategy_id.clone()),
+            upstream_id: observation
+                .as_ref()
+                .and_then(|value| value.upstream_id.clone()),
+            upstream_member_id: observation
+                .as_ref()
+                .and_then(|value| value.upstream_member_id.clone()),
+            upstream_used_id: observation
+                .as_ref()
+                .and_then(|value| value.upstream_used_id.clone()),
+            matched_rule_source: observation
+                .as_ref()
+                .and_then(|value| value.matched_rule.as_ref())
+                .map(|matched| resolve_rule_source(matched.source)),
+            matched_resource_id: observation
+                .as_ref()
+                .and_then(|value| value.matched_rule.as_ref())
+                .map(|matched| Arc::clone(&matched.resource_id)),
+            matched_rule_ordinal: observation
+                .as_ref()
+                .and_then(|value| value.matched_rule.as_ref())
+                .and_then(|matched| matched.ordinal),
+            resource_version: observation
+                .as_ref()
+                .and_then(|value| value.matched_rule.as_ref())
+                .and_then(|matched| matched.resource_version),
+            transport: request.context.transport.class,
+            terminal,
+            outcome,
+            source: observation
+                .as_ref()
+                .map(|value| value.source)
+                .unwrap_or(crate::ports::storage::StatsSource::Upstream),
+            cache_lookup_status: observation
+                .as_ref()
+                .map(|value| value.cache_status)
+                .unwrap_or(CacheStatus::Disabled),
+            runtime_revision: request.context.runtime_revision,
+            detail,
+        };
+        let _ = self.resolution_event_sink.try_publish(ResolutionEnvelope {
+            event: Arc::new(event),
+            cache_commit: cache_commit
+                .map(|candidate| candidate.observe(&request.context.meta.completion)),
+        });
+        result
+    }
+}
+
+fn bounded_millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn bounded_micros(duration: Duration) -> u64 {
+    u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
+}
+
+fn frozen_resolution_durations(
+    received_at: Instant,
+    dns_core_started_at: Instant,
+    completed_at: Instant,
+) -> (u64, u64) {
+    (
+        bounded_millis(completed_at.saturating_duration_since(received_at)),
+        bounded_micros(completed_at.saturating_duration_since(dns_core_started_at)),
+    )
+}
+
+/// 将 DNS policy 的规则来源映射为稳定的存储契约，避免存储层依赖 policy 内部类型。
+fn resolve_rule_source(source: crate::dns::MatchedRuleSource) -> ResolveRuleSource {
+    match source {
+        crate::dns::MatchedRuleSource::ListenerHosts => ResolveRuleSource::ListenerHosts,
+        crate::dns::MatchedRuleSource::StrategyHosts => ResolveRuleSource::StrategyHosts,
+        crate::dns::MatchedRuleSource::RuleSet => ResolveRuleSource::RuleSet,
+    }
+}
+
+/// 仅从实际 DNS 响应提取完整 RCODE；无响应或 Core 错误不伪造统计值。
+#[cfg(test)]
+fn response_rcode(result: &Result<CoreOutcome, CoreError>) -> Option<u16> {
+    match result {
+        Ok(CoreOutcome::Response(response)) => {
+            Some(u16::from(response.as_message().metadata.response_code))
+        }
+        Ok(CoreOutcome::NoResponse) | Err(_) => None,
+    }
+}
+
+fn outcome_class(
+    request: &DnsRequest,
+    result: &Result<CoreOutcome, CoreError>,
+    cancellation_reason: Option<CancelReason>,
+) -> OutcomeClass {
+    match result {
+        Ok(CoreOutcome::Response(response)) => match response.class() {
+            ResponseClass::Positive | ResponseClass::NoData | ResponseClass::NxDomain => {
+                OutcomeClass::Success
+            }
+            ResponseClass::Refused => OutcomeClass::Rejected,
+            ResponseClass::ServFail | ResponseClass::Truncated | ResponseClass::Other(_) => {
+                OutcomeClass::Failure
+            }
+        },
+        Ok(CoreOutcome::NoResponse) => {
+            if cancellation_reason.is_some() || request.context.meta.cancellation.is_cancelled() {
+                if matches!(
+                    cancellation_reason.or_else(|| request.context.meta.cancellation.reason()),
+                    Some(CancelReason::DeadlineExceeded)
+                ) {
+                    OutcomeClass::Timeout
+                } else {
+                    OutcomeClass::Cancelled
+                }
+            } else if request.context.meta.deadline.is_expired(Instant::now()) {
+                OutcomeClass::Timeout
+            } else {
+                OutcomeClass::Dropped
+            }
+        }
+        Err(_) => OutcomeClass::Failure,
+    }
+}
+
+async fn wait_for_termination_signal() -> Result<(), ServiceError> {
+    #[cfg(unix)]
+    {
+        let mut terminate =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .map_err(|_| ServiceError::Signal)?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.map_err(|_| ServiceError::Signal),
+            result = terminate.recv() => result.ok_or(ServiceError::Signal),
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .map_err(|_| ServiceError::Signal)
+    }
+}
+
+fn publish_component_health(
+    telemetry: &TelemetryWriter,
+    component: TelemetryComponent,
+    state: ComponentHealthState,
+    safe_reason: Option<&'static str>,
+) {
+    let now = Instant::now();
+    if let Err(error) = HealthSink::update(
+        telemetry,
+        ComponentHealthEvent {
+            component,
+            state,
+            first_seen: now,
+            last_changed: now,
+            last_success: (state == ComponentHealthState::Healthy).then_some(now),
+            retry_count: 0,
+            stale_age_micros: None,
+            persistence_gap: false,
+            safe_reason,
+        },
+    ) {
+        tracing::debug!(
+            event = "telemetry_health_publish_failed",
+            component = ?component,
+            class = error.class().as_str(),
+            operation = error.operation(),
+            "telemetry_health_publish_failed"
+        );
+    }
+}
+
+fn telemetry_component_for_task(component: &'static str) -> TelemetryComponent {
+    match component {
+        "storage" => TelemetryComponent::Storage,
+        "resource" => TelemetryComponent::Resource,
+        "udp" | "tcp" | "doh" => TelemetryComponent::Listener,
+        "telemetry" => TelemetryComponent::Telemetry,
+        "management" => TelemetryComponent::Management,
+        _ => TelemetryComponent::Runtime,
+    }
+}
+
+/// 发布 cache finalizer 与进程快照的停机健康状态，不把 key、响应或底层错误写入 telemetry。
+fn publish_cache_shutdown_health(
+    telemetry: &TelemetryWriter,
+    summary: CacheFinalizerShutdownSummary,
+    snapshot: CacheSnapshotShutdownSummary,
+) {
+    let now = Instant::now();
+    let finalizer_gap = !summary.completed;
+    let snapshot_gap = snapshot.attempted && !snapshot.completed;
+    let persistence_gap = finalizer_gap || snapshot_gap;
+    let safe_reason = match (finalizer_gap, snapshot_gap) {
+        (true, true) => Some("cache finalizer and snapshot shutdown have gaps"),
+        (true, false) => Some("cache finalizer shutdown has gaps"),
+        (false, true) => Some("cache snapshot shutdown has gaps"),
+        (false, false) => None,
+    };
+    let event = ComponentHealthEvent {
+        component: TelemetryComponent::Cache,
+        state: if persistence_gap {
+            ComponentHealthState::Degraded
+        } else {
+            ComponentHealthState::Stopping
+        },
+        first_seen: now,
+        last_changed: now,
+        last_success: None,
+        retry_count: u64::from(snapshot.attempted && !snapshot.completed),
+        stale_age_micros: None,
+        persistence_gap,
+        safe_reason,
+    };
+    if let Err(error) = HealthSink::update(telemetry, event) {
+        tracing::debug!(
+            event = "telemetry_health_publish_failed",
+            component = ?TelemetryComponent::Cache,
+            class = error.class().as_str(),
+            operation = error.operation(),
+            "telemetry_health_publish_failed"
+        );
+    }
+}
+
+/// 输出不含缓存 key 或响应内容的停机摘要，供核对 best-effort 持久化缺口。
+fn log_cache_shutdown_summary(summary: CacheFinalizerShutdownSummary) {
+    tracing::info!(
+        event = "cache_shutdown_summary",
+        component = "cache",
+        owners = summary.owners,
+        completed = summary.completed,
+        persistence_gap = !summary.completed,
+        "cache_shutdown_summary"
+    );
+}
+
+fn log_cache_snapshot_shutdown_summary(summary: CacheSnapshotShutdownSummary) {
+    tracing::info!(
+        event = "cache_snapshot_shutdown_summary",
+        component = "cache",
+        completed = summary.completed,
+        attempted = summary.attempted,
+        written = summary.written,
+        failure = ?summary.error,
+        "cache_snapshot_shutdown_summary"
+    );
+}
+
+/// 输出不含请求内容的存储停机摘要，供正常停机后核对持久化缺口。
+fn log_storage_shutdown_summary(summary: StorageServiceFlushSummary) {
+    tracing::info!(
+        event = "storage_shutdown_summary",
+        component = "storage",
+        stats_batches_committed = summary.stats.batches_committed,
+        stats_events_committed = summary.stats.events_committed,
+        stats_pending_batches = summary.stats.pending_batches,
+        stats_persistence_gap = summary.stats.persistence_gap,
+        backend_stats_committed = summary.storage.stats_committed,
+        backend_details_committed = summary.storage.details_committed,
+        backend_details_dropped = summary.storage.details_dropped,
+        backend_persistence_gap = summary.storage.persistence_gap,
+        detail_committed = summary.detail.committed,
+        detail_evicted = summary.detail.evicted,
+        detail_dropped = summary.detail.dropped,
+        "storage_shutdown_summary"
+    );
+}
+
+async fn storage_flush_task(
+    storage: Arc<tokio::sync::Mutex<StorageRuntime>>,
+    cancellation: Cancellation,
+    telemetry: Option<Arc<TelemetryWriter>>,
+) -> Result<(), TaskError> {
+    let mut interval = tokio::time::interval(DEFAULT_STORAGE_FLUSH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            _ = interval.tick() => {
+                let deadline = Deadline::new(Instant::now() + DEFAULT_STORAGE_OPERATION_TIMEOUT);
+                let mut storage = storage.lock().await;
+                match storage.flush(deadline).await {
+                    Ok(_) => {
+                        if let Some(telemetry) = &telemetry {
+                            publish_component_health(
+                                telemetry,
+                                TelemetryComponent::Storage,
+                                ComponentHealthState::Healthy,
+                                None,
+                            );
+                        }
+                    }
+                    Err(error) if error.is_fatal() => {
+                        if let Some(telemetry) = &telemetry {
+                            publish_component_health(
+                                telemetry,
+                                TelemetryComponent::Storage,
+                                ComponentHealthState::Failed,
+                                Some("storage flush reached fatal limit"),
+                            );
+                        }
+                        tracing::error!(
+                            event = "storage_pending_limit_exceeded",
+                            component = "storage",
+                            error = %error,
+                            "storage_pending_limit_exceeded"
+                        );
+                        return Err(TaskError::Fatal);
+                    }
+                    Err(error) => {
+                        if let Some(telemetry) = &telemetry {
+                            publish_component_health(
+                                telemetry,
+                                TelemetryComponent::Storage,
+                                ComponentHealthState::Degraded,
+                                Some("storage flush failed"),
+                            );
+                        }
+                        tracing::warn!(
+                            event = "storage_flush_failed",
+                            component = "storage",
+                            error = %error,
+                            "storage_flush_failed"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn spawn_storage_task(
+    supervisor: &mut Supervisor,
+    storage: Arc<tokio::sync::Mutex<StorageRuntime>>,
+    telemetry: Option<Arc<TelemetryWriter>>,
+) -> Result<Cancellation, ServiceStartError> {
+    let spec = TaskSpec::new(
+        "storage.writer",
+        "storage",
+        FaultLevel::Fatal,
+        RestartPolicy::Never,
+    )
+    .map_err(|error| ServiceStartError::Endpoint {
+        index: 0,
+        kind: "storage",
+        reason: error.to_string(),
+    })?;
+    supervisor
+        .spawn_scoped(spec, move |cancellation| {
+            Box::pin(storage_flush_task(storage, cancellation, telemetry))
+        })
+        .map_err(ServiceStartError::Task)
+}
+
+/// 后台采样复用唯一计数源，周期与最终 flush 共用游标；不改变 DNS producer。
+struct TelemetrySampler {
+    resolution: Option<Arc<ResolutionPipelineMetrics>>,
+    accepted: Mutex<Option<u64>>,
+}
+
+impl TelemetrySampler {
+    fn new(resolution: Option<Arc<ResolutionPipelineMetrics>>) -> Self {
+        Self {
+            resolution,
+            accepted: Mutex::new(None),
+        }
+    }
+
+    fn sample(&self, telemetry: &TelemetryWriter) -> Result<(), PortError> {
+        let mut accepted = self
+            .accepted
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(resolution) = &self.resolution {
+            let current = resolution.snapshot().accepted;
+            let delta = current.checked_sub(accepted.unwrap_or(0)).ok_or_else(|| {
+                telemetry.record_metric_rejection();
+                PortError::new(PortErrorClass::InvalidInput, "telemetry.sample")
+                    .with_safe_context("resolution counter moved backwards")
+            })?;
+            if accepted.is_none() || delta != 0 {
+                telemetry.record(sampled_metric(
+                    MetricName::ResolutionEventsAccepted,
+                    TelemetryComponent::Resolution,
+                    MetricValue::Counter(delta),
+                ))?;
+                *accepted = Some(current);
+            }
+        }
+        let pending = i64::try_from(telemetry.stats().pending()).map_err(|_| {
+            telemetry.record_metric_rejection();
+            PortError::new(PortErrorClass::ResourceExhausted, "telemetry.sample")
+        })?;
+        telemetry.record(sampled_metric(
+            MetricName::WriterQueueDepth,
+            TelemetryComponent::Telemetry,
+            MetricValue::Gauge(pending),
+        ))
+    }
+}
+
+fn sampled_metric(
+    name: MetricName,
+    component: TelemetryComponent,
+    value: MetricValue,
+) -> MetricEvent {
+    let label = MetricLabel::new(
+        MetricLabelKey::Component,
+        MetricLabelValue::Component(component),
+    )
+    .expect("fixed metric component label is valid");
+    MetricEvent::new(name, vec![label], value).expect("fixed metric descriptor is valid")
+}
+
+async fn telemetry_flush_task(
+    telemetry: Arc<TelemetryWriter>,
+    sampler: Arc<TelemetrySampler>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    let mut interval = tokio::time::interval(TELEMETRY_FLUSH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = cancellation.cancelled() => return Ok(()),
+            _ = interval.tick() => {
+                flush_telemetry_once(&telemetry, Some(&sampler)).await;
+            }
+        }
+    }
+}
+
+/// 执行一次有界 Telemetry flush，并把当前输出结果映射为 health 生命周期。
+async fn flush_telemetry_once(telemetry: &TelemetryWriter, sampler: Option<&TelemetrySampler>) {
+    let deadline = Deadline::new(Instant::now() + TELEMETRY_OPERATION_TIMEOUT);
+    let sampled = sampler.map_or(Ok(()), |sampler| sampler.sample(telemetry));
+    let flushed = LogSink::flush(telemetry, deadline).await;
+    match flushed.and_then(|summary| sampled.map(|()| summary)) {
+        Ok(_) => publish_component_health(
+            telemetry,
+            TelemetryComponent::Telemetry,
+            ComponentHealthState::Healthy,
+            None,
+        ),
+        Err(error) => {
+            publish_component_health(
+                telemetry,
+                TelemetryComponent::Telemetry,
+                ComponentHealthState::Failed,
+                Some("telemetry flush failed"),
+            );
+            tracing::warn!(
+                event = "telemetry_flush_failed",
+                component = "telemetry",
+                class = error.class().as_str(),
+                operation = error.operation(),
+                "telemetry_flush_failed"
+            );
+        }
+    }
+}
+
+fn spawn_telemetry_task(
+    supervisor: &mut Supervisor,
+    telemetry: Arc<TelemetryWriter>,
+    sampler: Arc<TelemetrySampler>,
+) -> Result<Cancellation, ServiceStartError> {
+    let spec = TaskSpec::new(
+        "telemetry.flush",
+        "telemetry",
+        FaultLevel::Degraded,
+        RestartPolicy::Never,
+    )
+    .map_err(|error| ServiceStartError::Endpoint {
+        index: 0,
+        kind: "telemetry",
+        reason: error.to_string(),
+    })?;
+    supervisor
+        .spawn_scoped(spec, move |cancellation| {
+            Box::pin(telemetry_flush_task(telemetry, sampler, cancellation))
+        })
+        .map_err(ServiceStartError::Task)
+}
+
+fn spawn_metrics_task(
+    supervisor: &mut Supervisor,
+    metrics: Arc<MetricsOwner>,
+) -> Result<Cancellation, ServiceStartError> {
+    let spec = TaskSpec::new(
+        "management.metrics",
+        "management",
+        FaultLevel::Degraded,
+        RestartPolicy::Never,
+    )
+    .expect("static metrics task id must be valid");
+    supervisor
+        .spawn_scoped(spec, move |cancellation| {
+            Box::pin(metrics.run_process_sampler(cancellation))
+        })
+        .map_err(ServiceStartError::Task)
+}
+
+fn map_reload_spawn_error(error: ServiceStartError) -> ServiceReloadError {
+    match error {
+        ServiceStartError::Task(source) => ServiceReloadError::Task(source),
+        other => ServiceReloadError::Endpoint(other),
+    }
+}
+
+enum TransportTaskPlan {
+    Udp {
+        index: usize,
+        owner: String,
+        adapter: UdpAdapter,
+    },
+    Tcp {
+        index: usize,
+        owner: String,
+        adapter: TcpAdapter,
+    },
+    Doh {
+        index: usize,
+        owner: String,
+        adapter: DohAdapter,
+    },
+}
+
+fn prepare_transport_plans(
+    listeners: &BoundListenerSet,
+    config: &crate::config::resolve::ResolvedConfig,
+    revision: RuntimeRevision,
+    request_timeout: Duration,
+) -> Result<Vec<TransportTaskPlan>, ServiceStartError> {
+    let endpoints =
+        listeners
+            .endpoint_handles()
+            .map_err(|error| ServiceStartError::ListenerHandles {
+                class: error.class().as_str(),
+                operation: error.operation(),
+            })?;
+    endpoints
+        .into_iter()
+        .enumerate()
+        .map(|(index, endpoint)| {
+            let BoundEndpointHandle { entry, socket } = endpoint;
+            let owner = entry.owner.clone();
+            if entry.transport == BindTransport::Doh {
+                let adapter = DohAdapter::from_endpoint(
+                    BoundEndpointHandle { entry, socket },
+                    config,
+                    revision,
+                    transport_capabilities(TransportClass::Multiplexed),
+                    request_timeout,
+                )
+                .map_err(|reason| ServiceStartError::Endpoint {
+                    index,
+                    kind: "DoH",
+                    reason: reason.to_string(),
+                })?;
+                return Ok(TransportTaskPlan::Doh {
+                    index,
+                    owner,
+                    adapter,
+                });
+            }
+            match socket {
+                ActivatedSocketHandle::Udp(socket) => {
+                    let adapter = UdpAdapter::from_endpoint(
+                        BoundEndpointHandle {
+                            entry,
+                            socket: ActivatedSocketHandle::Udp(socket),
+                        },
+                        revision,
+                        transport_capabilities(TransportClass::Datagram),
+                        request_timeout,
+                    )
+                    .map_err(|reason| ServiceStartError::Endpoint {
+                        index,
+                        kind: "UDP",
+                        reason: reason.to_string(),
+                    })?;
+                    Ok(TransportTaskPlan::Udp {
+                        index,
+                        owner,
+                        adapter,
+                    })
+                }
+                ActivatedSocketHandle::Tcp(listener) => {
+                    let adapter = TcpAdapter::from_endpoint(
+                        BoundEndpointHandle {
+                            entry,
+                            socket: ActivatedSocketHandle::Tcp(listener),
+                        },
+                        revision,
+                        transport_capabilities(TransportClass::Stream),
+                        request_timeout,
+                    )
+                    .map_err(|reason| ServiceStartError::Endpoint {
+                        index,
+                        kind: "TCP",
+                        reason: reason.to_string(),
+                    })?;
+                    Ok(TransportTaskPlan::Tcp {
+                        index,
+                        owner,
+                        adapter,
+                    })
+                }
+            }
+        })
+        .collect()
+}
+
+/// 注册 transport task，并保留 current-revision 故障聚合所需的身份和 owner。
+fn spawn_transport_plans(
+    supervisor: &mut Supervisor,
+    plans: Vec<TransportTaskPlan>,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
+    start: TaskStartGate,
+) -> Result<Vec<TransportTask>, ServiceStartError> {
+    let revision = runtime.revision().0;
+    let mut tasks = Vec::with_capacity(plans.len());
+    for plan in plans {
+        let (task_id, owner, cancellation) = match plan {
+            TransportTaskPlan::Udp {
+                index,
+                owner,
+                adapter,
+            } => {
+                let task_core = Arc::clone(&core);
+                let task_runtime = Arc::clone(&runtime);
+                let task_metrics = Arc::clone(&metrics);
+                let task_id = format!("transport.udp.{revision}.{index}");
+                let cancellation = spawn_transport_task(
+                    supervisor,
+                    task_id.clone(),
+                    "udp",
+                    start.clone(),
+                    move |cancellation| {
+                        service_task(
+                            adapter.clone(),
+                            Arc::clone(&task_core),
+                            Arc::clone(&task_runtime),
+                            Arc::clone(&task_metrics),
+                            cancellation,
+                        )
+                    },
+                )?;
+                (task_id, owner, cancellation)
+            }
+            TransportTaskPlan::Tcp {
+                index,
+                owner,
+                adapter,
+            } => {
+                let task_core = Arc::clone(&core);
+                let task_runtime = Arc::clone(&runtime);
+                let task_metrics = Arc::clone(&metrics);
+                let task_id = format!("transport.tcp.{revision}.{index}");
+                let cancellation = spawn_transport_task(
+                    supervisor,
+                    task_id.clone(),
+                    "tcp",
+                    start.clone(),
+                    move |cancellation| {
+                        tcp_listener_task(
+                            adapter.clone(),
+                            Arc::clone(&task_core),
+                            Arc::clone(&task_runtime),
+                            Arc::clone(&task_metrics),
+                            cancellation,
+                        )
+                    },
+                )?;
+                (task_id, owner, cancellation)
+            }
+            TransportTaskPlan::Doh {
+                index,
+                owner,
+                adapter,
+            } => {
+                let task_core = Arc::clone(&core);
+                let task_runtime = Arc::clone(&runtime);
+                let task_metrics = Arc::clone(&metrics);
+                let task_id = format!("transport.doh.{revision}.{index}");
+                let cancellation = spawn_transport_task(
+                    supervisor,
+                    task_id.clone(),
+                    "doh",
+                    start.clone(),
+                    move |cancellation| {
+                        doh_listener_task(
+                            adapter.clone(),
+                            Arc::clone(&task_core),
+                            Arc::clone(&task_runtime),
+                            Arc::clone(&task_metrics),
+                            cancellation,
+                        )
+                    },
+                )?;
+                (task_id, owner, cancellation)
+            }
+        };
+        tasks.push(TransportTask {
+            task_id,
+            owner,
+            cancellation,
+        });
+    }
+    Ok(tasks)
+}
+
+/// 判断 transport endpoint 是否已耗尽瞬时重试，且应进入 endpoint 聚合判定。
+fn is_exhausted_endpoint(completion: &TaskCompletion) -> bool {
+    completion.spec.fault_level == FaultLevel::FatalEndpoint && completion.restart_exhausted()
+}
+
+/// 从当前 Runtime 移除已失效 endpoint，返回同一逻辑 listener 的剩余 endpoint 数量。
+///
+/// 返回 `None` 表示完成事件属于旧 Runtime；reload 后的迟到事件不能影响新 Runtime。
+fn retire_current_transport_task(
+    tasks: &mut Vec<TransportTask>,
+    completion: &TaskCompletion,
+) -> Option<usize> {
+    let index = tasks
+        .iter()
+        .position(|task| task.task_id == completion.spec.id.as_str())?;
+    let retired = tasks.swap_remove(index);
+    Some(
+        tasks
+            .iter()
+            .filter(|task| task.owner == retired.owner)
+            .count(),
+    )
+}
+
+fn task_failure(completion: &TaskCompletion) -> Option<ServiceError> {
+    let terminal = match completion.exit {
+        TaskExit::Completed | TaskExit::Cancelled => false,
+        TaskExit::Panicked => true,
+        TaskExit::Failed(TaskErrorKind::Fatal) => true,
+        TaskExit::Failed(TaskErrorKind::Panicked) => true,
+        TaskExit::Failed(TaskErrorKind::Transient) => match completion.spec.restart_policy {
+            RestartPolicy::Never => true,
+            RestartPolicy::Transient { .. } => completion.restart_exhausted(),
+        },
+    };
+    if !terminal {
+        return None;
+    }
+
+    let fatal_level = matches!(
+        completion.spec.fault_level,
+        FaultLevel::FatalCandidate | FaultLevel::FatalEndpoint | FaultLevel::Fatal
+    );
+    if !fatal_level && !matches!(completion.exit, TaskExit::Panicked) {
+        tracing::warn!(
+            event = "service_task_degraded",
+            component = completion.spec.component,
+            task_id = %completion.spec.id,
+            exit = ?completion.exit,
+            "service_task_degraded"
+        );
+        return None;
+    }
+
+    Some(ServiceError::TaskFailure {
+        task_id: completion.spec.id.to_string(),
+        component: completion.spec.component,
+        fault_level: completion.spec.fault_level,
+        exit: completion.exit.clone(),
+    })
+}
+
+fn spawn_transport_task<F>(
+    supervisor: &mut Supervisor,
+    task_id: String,
+    component: &'static str,
+    start: TaskStartGate,
+    factory: F,
+) -> Result<Cancellation, ServiceStartError>
+where
+    F: Fn(Cancellation) -> crate::runtime::TaskFuture + Send + Sync + 'static,
+{
+    let spec = TaskSpec::new(
+        task_id,
+        component,
+        FaultLevel::FatalEndpoint,
+        RestartPolicy::Transient {
+            max_restarts: TRANSPORT_RESTART_LIMIT,
+        },
+    )
+    .map_err(|error| ServiceStartError::Endpoint {
+        index: 0,
+        kind: component,
+        reason: error.to_string(),
+    })?;
+    let factory = Arc::new(factory);
+    supervisor
+        .spawn_scoped_with_factory(spec, move |cancellation| {
+            let start = start.clone();
+            let factory = Arc::clone(&factory);
+            Box::pin(async move {
+                start.wait().await?;
+                factory(cancellation).await
+            })
+        })
+        .map_err(ServiceStartError::Task)
+}
+
+fn spawn_resource_tasks(
+    supervisor: &mut Supervisor,
+    coordinator: Arc<RuntimeCoordinator>,
+    revision: RuntimeRevision,
+    resources: Vec<ConfigId>,
+    telemetry: Option<Arc<TelemetryWriter>>,
+) -> Result<Vec<ResourceTask>, ServiceStartError> {
+    let mut cancellations = Vec::with_capacity(resources.len());
+    for (index, resource) in resources.into_iter().enumerate() {
+        cancellations.push(spawn_resource_task(
+            supervisor,
+            Arc::clone(&coordinator),
+            revision,
+            index,
+            resource,
+            telemetry.clone(),
+            TaskStartGate::default(),
+        )?);
+    }
+    Ok(cancellations)
+}
+
+fn spawn_resource_task(
+    supervisor: &mut Supervisor,
+    coordinator: Arc<RuntimeCoordinator>,
+    revision: RuntimeRevision,
+    index: usize,
+    resource: ConfigId,
+    telemetry: Option<Arc<TelemetryWriter>>,
+    start: TaskStartGate,
+) -> Result<ResourceTask, ServiceStartError> {
+    let spec = TaskSpec::new(
+        format!("resource.refresh.{}.{index}", revision.0),
+        "resource",
+        FaultLevel::Degraded,
+        RestartPolicy::Never,
+    )
+    .map_err(|error| ServiceStartError::Endpoint {
+        index,
+        kind: "resource",
+        reason: error.to_string(),
+    })?;
+    let task_coordinator = Arc::clone(&coordinator);
+    let task_resource = resource.clone();
+    let cancellation = supervisor
+        .spawn_scoped(spec, move |cancellation| {
+            Box::pin(async move {
+                start.wait().await?;
+                resource_refresh_task(task_coordinator, task_resource, cancellation, telemetry)
+                    .await
+            })
+        })
+        .map_err(ServiceStartError::Task)?;
+    Ok(ResourceTask {
+        resource,
+        cancellation,
+    })
+}
+
+fn resource_refresh_task(
+    coordinator: Arc<RuntimeCoordinator>,
+    resource: ConfigId,
+    cancellation: Cancellation,
+    telemetry: Option<Arc<TelemetryWriter>>,
+) -> crate::runtime::TaskFuture {
+    Box::pin(async move {
+        run_resource_refresh_loop(coordinator, resource, cancellation, telemetry).await
+    })
+}
+
+async fn run_resource_refresh_loop(
+    coordinator: Arc<RuntimeCoordinator>,
+    resource: ConfigId,
+    cancellation: Cancellation,
+    telemetry: Option<Arc<TelemetryWriter>>,
+) -> Result<(), TaskError> {
+    loop {
+        if cancellation.is_cancelled() {
+            return Err(TaskError::Cancelled);
+        }
+        let now = unix_seconds();
+        let runtime = coordinator.load();
+        let Some(decision) = runtime.resource_refresh_decision(&resource, now) else {
+            if !cancellation.is_cancelled()
+                && let Some(telemetry) = &telemetry
+            {
+                publish_component_health(
+                    telemetry,
+                    TelemetryComponent::Resource,
+                    ComponentHealthState::Failed,
+                    Some("resource worker is not configured"),
+                );
+            }
+            return if cancellation.is_cancelled() {
+                Err(TaskError::Cancelled)
+            } else {
+                Err(TaskError::Fatal)
+            };
+        };
+        if decision.is_due() {
+            let deadline = Deadline::new(Instant::now() + RESOURCE_REFRESH_TIMEOUT);
+            match coordinator
+                .refresh_resource_if_current(
+                    &runtime,
+                    &resource,
+                    now,
+                    deadline,
+                    cancellation.clone(),
+                )
+                .await
+            {
+                Ok(snapshot) => {
+                    if let Some(telemetry) = &telemetry {
+                        publish_component_health(
+                            telemetry,
+                            TelemetryComponent::Resource,
+                            ComponentHealthState::Healthy,
+                            None,
+                        );
+                    }
+                    tracing::info!(
+                        event = "resource_refresh_published",
+                        component = "resource",
+                        resource = %resource.as_str(),
+                        epoch = snapshot.epoch(),
+                        revision = snapshot.revision(),
+                        kind = match snapshot {
+                            RefreshedResourceSnapshot::Hosts(_) => "hosts",
+                            RefreshedResourceSnapshot::RuleSet(_) => "rule_set",
+                        },
+                        "resource_refresh_published"
+                    )
+                }
+                Err(ResourceRefreshCoordinatorError::Stale { .. }) => continue,
+                Err(_error) if cancellation.is_cancelled() => {
+                    runtime.shutdown_resource_refresh();
+                    return Err(TaskError::Cancelled);
+                }
+                Err(error) => {
+                    if let Some(telemetry) = &telemetry {
+                        publish_component_health(
+                            telemetry,
+                            TelemetryComponent::Resource,
+                            ComponentHealthState::Degraded,
+                            Some("resource refresh failed"),
+                        );
+                    }
+                    tracing::warn!(
+                        event = "resource_refresh_failed",
+                        component = "resource",
+                        resource = %resource.as_str(),
+                        error = %error,
+                        "resource_refresh_failed"
+                    )
+                }
+            }
+            continue;
+        }
+
+        let Some(next_due) = decision.next_due() else {
+            runtime.shutdown_resource_refresh();
+            return Err(TaskError::Cancelled);
+        };
+        let wait = Duration::from_secs(next_due.saturating_sub(now).max(1));
+        tokio::select! {
+            _ = cancellation.cancelled() => {
+                runtime.shutdown_resource_refresh();
+                return Err(TaskError::Cancelled);
+            }
+            _ = tokio::time::sleep(wait) => {}
+        }
+    }
+}
+
+fn unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn service_task<A>(
+    adapter: A,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
+    cancellation: Cancellation,
+) -> crate::runtime::TaskFuture
+where
+    A: InboundAdapter + 'static,
+{
+    Box::pin(async move { run_adapter_loop(adapter, core, runtime, metrics, cancellation).await })
+}
+
+fn tcp_listener_task(
+    adapter: TcpAdapter,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
+    cancellation: Cancellation,
+) -> crate::runtime::TaskFuture {
+    Box::pin(
+        async move { run_tcp_listener_loop(adapter, core, runtime, metrics, cancellation).await },
+    )
+}
+
+fn doh_listener_task(
+    adapter: DohAdapter,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
+    cancellation: Cancellation,
+) -> crate::runtime::TaskFuture {
+    Box::pin(
+        async move { run_doh_listener_loop(adapter, core, runtime, metrics, cancellation).await },
+    )
+}
+
+async fn run_tcp_listener_loop(
+    adapter: TcpAdapter,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    let mut sessions = JoinSet::new();
+    let session_cancellation = Cancellation::new();
+    let mut listener_failure = None;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                session_cancellation.cancel(CancelReason::Shutdown);
+                break;
+            }
+            _ = runtime.wait_for_retirement() => break,
+            joined = sessions.join_next(), if !sessions.is_empty() => {
+                observe_tcp_session(joined);
+            }
+            accepted = adapter.accept_session(&cancellation),
+                if !cancellation.is_cancelled() && can_accept_stream_session(sessions.len()) => {
+                match accepted {
+                    Ok(Some(session)) => {
+                        let session_core = Arc::clone(&core);
+                        let session_runtime = Arc::clone(&runtime);
+                        let session_metrics = Arc::clone(&metrics);
+                        let session_cancellation = session_cancellation.clone();
+                        sessions.spawn(async move {
+                            run_tcp_connection(
+                                session,
+                                session_core,
+                                session_runtime,
+                                session_metrics,
+                                session_cancellation,
+                            )
+                            .await
+                        });
+                    }
+                    Ok(None) => {
+                        listener_failure = (!cancellation.is_cancelled()).then_some(TaskError::Transient);
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                    Err(error) if is_cancelled_error(&error, &cancellation) => {
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                    Err(error) if is_listener_idle_timeout(&error) => continue,
+                    Err(error) => {
+                        tracing::error!(
+                            event = "tcp_listener_failed",
+                            component = "service",
+                            class = error.class().as_str(),
+                            operation = error.operation(),
+                        );
+                        listener_failure = Some(TaskError::Transient);
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if !runtime.is_draining() || cancellation.is_cancelled() || listener_failure.is_some() {
+        session_cancellation.cancel(CancelReason::Shutdown);
+    }
+    while let Some(joined) = sessions.join_next().await {
+        observe_tcp_session(Some(joined));
+    }
+
+    if let Some(error) = listener_failure {
+        return Err(error);
+    }
+    Err(TaskError::Cancelled)
+}
+
+async fn run_doh_listener_loop(
+    adapter: DohAdapter,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    let mut sessions = JoinSet::new();
+    let session_cancellation = Cancellation::new();
+    let mut listener_failure = None;
+
+    loop {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                session_cancellation.cancel(CancelReason::Shutdown);
+                break;
+            }
+            _ = runtime.wait_for_retirement() => break,
+            joined = sessions.join_next(), if !sessions.is_empty() => {
+                observe_doh_session(joined);
+            }
+            accepted = adapter.accept_session(&cancellation),
+                if !cancellation.is_cancelled() && can_accept_stream_session(sessions.len()) => {
+                match accepted {
+                    Ok(Some(session)) => {
+                        let session_core = Arc::clone(&core);
+                        let session_runtime = Arc::clone(&runtime);
+                        let session_metrics = Arc::clone(&metrics);
+                        let session_cancellation = session_cancellation.clone();
+                        sessions.spawn(async move {
+                            run_doh_connection(
+                                session,
+                                session_core,
+                                session_runtime,
+                                session_metrics,
+                                session_cancellation,
+                            )
+                            .await
+                        });
+                    }
+                    Ok(None) => {
+                        listener_failure = (!cancellation.is_cancelled()).then_some(TaskError::Transient);
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                    Err(error) if is_cancelled_error(&error, &cancellation) => {
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                    Err(error) if is_listener_idle_timeout(&error) => continue,
+                    Err(error) => {
+                        tracing::error!(
+                            event = "doh_listener_failed",
+                            component = "service",
+                            class = error.class().as_str(),
+                            operation = error.operation(),
+                        );
+                        listener_failure = Some(TaskError::Transient);
+                        session_cancellation.cancel(CancelReason::Shutdown);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if !runtime.is_draining() || cancellation.is_cancelled() || listener_failure.is_some() {
+        session_cancellation.cancel(CancelReason::Shutdown);
+    }
+    while let Some(joined) = sessions.join_next().await {
+        observe_doh_session(Some(joined));
+    }
+
+    if let Some(error) = listener_failure {
+        return Err(error);
+    }
+    Err(TaskError::Cancelled)
+}
+
+fn observe_tcp_session(joined: Option<Result<Result<(), TaskError>, tokio::task::JoinError>>) {
+    match joined {
+        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Err(TaskError::Cancelled))) => {}
+        Some(Ok(Err(error))) => {
+            tracing::debug!(
+                event = "tcp_session_failed",
+                component = "service",
+                error = %error,
+            );
+        }
+        Some(Err(error)) => {
+            tracing::error!(
+                event = "tcp_session_panicked",
+                component = "service",
+                panicked = error.is_panic(),
+            );
+        }
+    }
+}
+
+fn observe_doh_session(joined: Option<Result<Result<(), TaskError>, tokio::task::JoinError>>) {
+    match joined {
+        Some(Ok(Ok(()))) | None => {}
+        Some(Ok(Err(TaskError::Cancelled))) => {}
+        Some(Ok(Err(error))) => {
+            tracing::debug!(
+                event = "doh_session_failed",
+                component = "service",
+                error = %error,
+            );
+        }
+        Some(Err(error)) => {
+            tracing::error!(
+                event = "doh_session_panicked",
+                component = "service",
+                panicked = error.is_panic(),
+            );
+        }
+    }
+}
+
+async fn run_tcp_connection(
+    mut session: TcpSession,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    loop {
+        let received = tokio::select! {
+            biased;
+            _ = runtime.wait_for_retirement() => {
+                session.close().await;
+                return Ok(());
+            }
+            received = session.receive(&cancellation) => received,
+        };
+        let inbound = match received {
+            Ok(Some(inbound)) => inbound,
+            Ok(None) => {
+                session.close().await;
+                return if cancellation.is_cancelled() {
+                    Err(TaskError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+            Err(error) => {
+                let cancelled = is_cancelled_error(&error, &cancellation);
+                if !cancelled {
+                    tracing::debug!(
+                        event = "tcp_session_closed",
+                        component = "service",
+                        class = error.class().as_str(),
+                        operation = error.operation(),
+                    );
+                }
+                session.close().await;
+                return if cancelled {
+                    Err(TaskError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+        };
+
+        let guard = match runtime.try_acquire() {
+            Ok(guard) => guard,
+            Err(AdmissionError::Draining) => {
+                let _ = inbound.response().cancel(CancelReason::Shutdown);
+                session.close().await;
+                return Ok(());
+            }
+            Err(AdmissionError::Capacity) => {
+                let _ = inbound.response().cancel(CancelReason::GroupPolicy);
+                session.close().await;
+                return Ok(());
+            }
+        };
+        metrics.record_request(&inbound.request().context.client);
+        let response_handle = inbound.response().clone();
+        let deadline = inbound.request().context.meta.deadline;
+        let request_cancellation = inbound.request().context.meta.cancellation.clone();
+        let result = tokio::select! {
+            biased;
+            _ = tokio::time::sleep(deadline.remaining(Instant::now())) => {
+                request_cancellation.cancel(CancelReason::DeadlineExceeded);
+                let _ = response_handle.cancel(CancelReason::DeadlineExceeded);
+                drop(guard);
+                session.close().await;
+                return Ok(());
+            }
+            result = dispatch_inbound(core.as_ref(), inbound) => result,
+            _ = cancellation.cancelled() => {
+                let _ = response_handle.cancel(CancelReason::Shutdown);
+                drop(guard);
+                session.close().await;
+                return Err(TaskError::Cancelled);
+            }
+        };
+        drop(guard);
+
+        if let Err(error) = result {
+            handle_dispatch_error(error);
+            session.close().await;
+            return if cancellation.is_cancelled() {
+                Err(TaskError::Cancelled)
+            } else {
+                Ok(())
+            };
+        }
+    }
+}
+
+async fn run_doh_connection(
+    mut session: DohSession,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError> {
+    loop {
+        let received = tokio::select! {
+            biased;
+            _ = runtime.wait_for_retirement() => {
+                session.close().await;
+                return Ok(());
+            }
+            received = session.receive(&cancellation) => received,
+        };
+        let event = match received {
+            Ok(event) => event,
+            Err(error) => {
+                let cancelled = is_cancelled_error(&error, &cancellation);
+                if !cancelled {
+                    tracing::debug!(
+                        event = "doh_session_closed",
+                        component = "service",
+                        class = error.class().as_str(),
+                        operation = error.operation(),
+                    );
+                }
+                session.close().await;
+                return if cancelled {
+                    Err(TaskError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+        };
+
+        match event {
+            DohSessionEvent::CleanEof => {
+                session.close().await;
+                return if cancellation.is_cancelled() {
+                    Err(TaskError::Cancelled)
+                } else {
+                    Ok(())
+                };
+            }
+            DohSessionEvent::HttpError { error, close } => {
+                if let Err(write_error) =
+                    session.write_http_error(error, close, &cancellation).await
+                {
+                    let cancelled = is_cancelled_error(&write_error, &cancellation);
+                    if !cancelled {
+                        tracing::debug!(
+                            event = "doh_http_error_write_failed",
+                            component = "service",
+                            class = write_error.class().as_str(),
+                            operation = write_error.operation(),
+                        );
+                    }
+                    session.close().await;
+                    return if cancelled {
+                        Err(TaskError::Cancelled)
+                    } else {
+                        Ok(())
+                    };
+                }
+                if close {
+                    session.close().await;
+                    return Ok(());
+                }
+            }
+            DohSessionEvent::Request(inbound) => {
+                let close_after_response = session.response_should_close();
+                let guard = match runtime.try_acquire() {
+                    Ok(guard) => guard,
+                    Err(AdmissionError::Draining) => {
+                        let _ = inbound.response().cancel(CancelReason::Shutdown);
+                        session.close().await;
+                        return Ok(());
+                    }
+                    Err(AdmissionError::Capacity) => {
+                        let _ = inbound.response().cancel(CancelReason::GroupPolicy);
+                        session.close().await;
+                        return Ok(());
+                    }
+                };
+                metrics.record_request(&inbound.request().context.client);
+                let response_handle = inbound.response().clone();
+                let deadline = inbound.request().context.meta.deadline;
+                let request_cancellation = inbound.request().context.meta.cancellation.clone();
+                let result = tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep(deadline.remaining(Instant::now())) => {
+                        request_cancellation.cancel(CancelReason::DeadlineExceeded);
+                        let _ = response_handle.cancel(CancelReason::DeadlineExceeded);
+                        drop(guard);
+                        session.close().await;
+                        return Ok(());
+                    }
+                    result = dispatch_inbound(core.as_ref(), inbound) => result,
+                    _ = cancellation.cancelled() => {
+                        let _ = response_handle.cancel(CancelReason::Shutdown);
+                        drop(guard);
+                        session.close().await;
+                        return Err(TaskError::Cancelled);
+                    }
+                };
+                drop(guard);
+
+                if let Err(error) = result {
+                    handle_dispatch_error(error);
+                    session.close().await;
+                    return if cancellation.is_cancelled() {
+                        Err(TaskError::Cancelled)
+                    } else {
+                        Ok(())
+                    };
+                }
+                if close_after_response {
+                    session.close().await;
+                    return Ok(());
+                }
+            }
+        }
+    }
+}
+
+fn is_cancelled_error(error: &crate::ports::PortError, cancellation: &Cancellation) -> bool {
+    cancellation.is_cancelled() || matches!(error.class(), PortErrorClass::Cancelled(_))
+}
+
+/// 判断 TCP/DoH listener 是否仍可接收新 session，避免慢连接无限扩张 task 集合。
+fn can_accept_stream_session(active_sessions: usize) -> bool {
+    active_sessions < MAX_CONCURRENT_STREAM_SESSIONS
+}
+
+/// 识别 listener 在无流量期间的正常 deadline 轮询，不把空闲误计为 endpoint 故障。
+fn is_listener_idle_timeout(error: &crate::ports::PortError) -> bool {
+    matches!(error.class(), PortErrorClass::Timeout)
+}
+
+async fn run_adapter_loop<A>(
+    adapter: A,
+    core: Arc<dyn DnsCore>,
+    runtime: Arc<ActiveRuntime>,
+    metrics: Arc<MetricsOwner>,
+    cancellation: Cancellation,
+) -> Result<(), TaskError>
+where
+    A: InboundAdapter + 'static,
+{
+    loop {
+        let received = tokio::select! {
+            biased;
+            _ = runtime.wait_for_retirement() => return Ok(()),
+            received = adapter.receive(&cancellation) => received,
+        };
+        let inbound = match received {
+            Ok(Some(inbound)) => inbound,
+            Ok(None) => return Err(TaskError::Cancelled),
+            Err(error) => {
+                if cancellation.is_cancelled()
+                    || matches!(error.class(), PortErrorClass::Cancelled(_))
+                {
+                    return Err(TaskError::Cancelled);
+                }
+                if is_listener_idle_timeout(&error) {
+                    continue;
+                }
+                return Err(TaskError::Transient);
+            }
+        };
+
+        let guard = match runtime.try_acquire() {
+            Ok(guard) => guard,
+            Err(AdmissionError::Draining) => {
+                let _ = inbound.response().cancel(CancelReason::Shutdown);
+                continue;
+            }
+            Err(AdmissionError::Capacity) => {
+                let _ = inbound.response().cancel(CancelReason::GroupPolicy);
+                continue;
+            }
+        };
+        metrics.record_request(&inbound.request().context.client);
+        let response_handle = inbound.response().clone();
+        let deadline = inbound.request().context.meta.deadline;
+        let request_cancellation = inbound.request().context.meta.cancellation.clone();
+        let result = tokio::select! {
+            biased;
+            _ = tokio::time::sleep(deadline.remaining(Instant::now())) => {
+                request_cancellation.cancel(CancelReason::DeadlineExceeded);
+                let _ = response_handle.cancel(CancelReason::DeadlineExceeded);
+                drop(guard);
+                continue;
+            }
+            result = dispatch_inbound(core.as_ref(), inbound) => result,
+            _ = cancellation.cancelled() => {
+                let _ = response_handle.cancel(CancelReason::Shutdown);
+                return Err(TaskError::Cancelled);
+            }
+        };
+        drop(guard);
+
+        if let Err(error) = result {
+            handle_dispatch_error(error);
+        }
+    }
+}
+
+fn handle_dispatch_error(error: DispatchError) {
+    match error {
+        DispatchError::Core(_) | DispatchError::Encode { .. } => {
+            tracing::debug!(event = "request_not_responded", component = "service");
+        }
+    }
+}
+
+impl From<UdpAdapterError> for ServiceStartError {
+    fn from(error: UdpAdapterError) -> Self {
+        Self::Endpoint {
+            index: 0,
+            kind: "UDP",
+            reason: error.to_string(),
+        }
+    }
+}
+
+impl From<TcpAdapterError> for ServiceStartError {
+    fn from(error: TcpAdapterError) -> Self {
+        Self::Endpoint {
+            index: 0,
+            kind: "TCP",
+            reason: error.to_string(),
+        }
+    }
+}
+
+impl From<DohAdapterError> for ServiceStartError {
+    fn from(error: DohAdapterError) -> Self {
+        Self::Endpoint {
+            index: 0,
+            kind: "DoH",
+            reason: error.to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod logging_tests;
+
+#[cfg(test)]
+mod tests {
+    use std::net::{
+        Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, UdpSocket as StdUdpSocket,
+    };
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, Ordering},
+    };
+    use std::time::{Duration, Instant, SystemTime};
+
+    use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
+    use hickory_proto::rr::{Name, RData, RecordType};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpStream, UdpSocket};
+
+    use super::{
+        MAX_CONCURRENT_STREAM_SESSIONS, ServiceError, TransportTask, can_accept_stream_session,
+        flush_telemetry_once, is_exhausted_endpoint, publish_cache_shutdown_health,
+        publish_component_health, response_rcode, retire_current_transport_task,
+        spawn_telemetry_task, spawn_transport_task, task_failure, telemetry_component_for_task,
+    };
+    use crate::cache::CacheSnapshotShutdownSummary;
+    use crate::config::{ConfigV2Loader, LoadOptions};
+    use crate::dns::{
+        CacheCompatibilityKey, CancelReason, Cancellation, CanonicalQuery, CanonicalResponse,
+        ClientIdentity, CoreError, CoreOutcome, Deadline, DnsCore, DnsCoreCompletion, DnsMessageId,
+        DnsRequest, DnsResolutionObservation, ListenerId, MatchedRuleObservation,
+        MatchedRuleSource, RequestContext, RequestId, RequestMeta, ResponseClass, RuntimeRevision,
+        TransportCapabilities, TransportClass,
+    };
+    use crate::observability::{TelemetryOutput, TelemetryWriter};
+    use crate::ports::observation::{
+        ResolutionEnvelope, ResolutionEvent, ResolutionEventSink, ResolutionPublishDisposition,
+        ResolutionTerminal,
+    };
+    use crate::ports::telemetry::{
+        CacheStatus, Component as TelemetryComponent, ComponentHealthEvent, ComponentHealthState,
+        LogEvent, LogLevel, MetricEvent,
+    };
+    use crate::runtime::{
+        CacheFinalizerShutdownSummary, FaultLevel, PreparedRuntime, RestartPolicy,
+        RuntimeCoordinator, ShutdownPhaseStatus, Supervisor, SystemClock, SystemSocketFactory,
+        TaskCompletion, TaskError, TaskErrorKind, TaskExit, TaskSpec,
+    };
+    use crate::storage::StorageRuntime;
+    use crate::transport::transport_capabilities;
+
+    #[derive(Default)]
+    struct CountingTelemetryOutput {
+        fail: AtomicBool,
+        logs: AtomicUsize,
+        metrics: AtomicUsize,
+        health: AtomicUsize,
+        health_events: Mutex<Vec<ComponentHealthEvent>>,
+        snapshots: Mutex<Vec<crate::observability::MetricSnapshot>>,
+    }
+
+    /// 为真实跨 transport 测试生成稳定的 SERVFAIL/REFUSED 响应。
+    struct CrossTransportErrorCore;
+
+    impl DnsCore for CrossTransportErrorCore {
+        /// A 查询返回 SERVFAIL，AAAA 查询返回 REFUSED，避免测试依赖外部上游。
+        fn resolve<'a>(
+            &'a self,
+            request: &'a DnsRequest,
+        ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
+            Box::pin(async move {
+                let code = match request.query.question().query_type() {
+                    RecordType::A => ResponseCode::ServFail,
+                    RecordType::AAAA => ResponseCode::Refused,
+                    record_type => panic!("unexpected error-contract record type: {record_type}"),
+                };
+                CanonicalResponse::empty_response(&request.query, code)
+                    .map(Arc::new)
+                    .map(CoreOutcome::Response)
+                    .map_err(CoreError::ResponseConstruction)
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturingResolutionSink {
+        events: Mutex<Vec<Arc<ResolutionEvent>>>,
+    }
+
+    impl ResolutionEventSink for CapturingResolutionSink {
+        fn try_publish(
+            &self,
+            envelope: ResolutionEnvelope,
+        ) -> Result<ResolutionPublishDisposition, crate::ports::PortError> {
+            self.events.lock().unwrap().push(envelope.event);
+            Ok(ResolutionPublishDisposition::Accepted)
+        }
+
+        fn detail_enabled(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn resolution_durations_are_frozen_at_core_completion() {
+        let received_at = Instant::now();
+        let dns_core_started_at = received_at + Duration::from_millis(12);
+        let completed_at = dns_core_started_at + Duration::from_micros(345);
+
+        assert_eq!(
+            super::frozen_resolution_durations(received_at, dns_core_started_at, completed_at,),
+            (12, 345)
+        );
+    }
+
+    #[test]
+    fn event_publisher_emits_one_typed_completion_before_returning_response() {
+        let mut message = Message::new(7, MessageType::Query, OpCode::Query);
+        message.add_query(Query::query(
+            Name::from_ascii("private.example.test.").unwrap(),
+            RecordType::A,
+        ));
+        let query = CanonicalQuery::from_message(message).unwrap();
+        let received_at = Instant::now();
+        let request = DnsRequest {
+            query,
+            context: RequestContext {
+                meta: RequestMeta {
+                    completion: Default::default(),
+                    request_id: RequestId(9),
+                    trace_id: None,
+                    received_at,
+                    received_at_utc: SystemTime::now(),
+                    deadline: Deadline::new(received_at + Duration::from_secs(1)),
+                    cancellation: Cancellation::new(),
+                    connection_id: None,
+                    stream_id: None,
+                    listener_id: ListenerId::from("dns"),
+                    route_id: Some(crate::dns::RouteId::from("route")),
+                    original_dns_id: Some(7),
+                },
+                client: ClientIdentity {
+                    peer_addr: None,
+                    client_addr: Some(Ipv4Addr::new(192, 0, 2, 10).into()),
+                    client_id: Some(crate::dns::ClientId::from("Original-01")),
+                },
+                transport: TransportCapabilities {
+                    class: TransportClass::Datagram,
+                    cache_compatibility: CacheCompatibilityKey(1),
+                },
+                runtime_revision: RuntimeRevision(3),
+            },
+        };
+        let response = Arc::new(
+            CanonicalResponse::empty_response(&request.query, ResponseCode::NoError).unwrap(),
+        );
+        let sink = Arc::new(CapturingResolutionSink::default());
+        let publisher = super::EventPublishingDnsCore {
+            inner: Arc::new(CrossTransportErrorCore),
+            resolution_event_sink: sink.clone(),
+        };
+
+        let outcome = publisher
+            .publish(
+                &request,
+                DnsCoreCompletion {
+                    result: Ok(CoreOutcome::Response(Arc::clone(&response))),
+                    observation: Some(DnsResolutionObservation {
+                        client_match: Some(crate::ports::observation::ClientMatchObservation {
+                            source: crate::ports::observation::ClientMatchSource::Id,
+                            matched_client_id: Arc::from("Original-01"),
+                        }),
+                        client_bucket: Some(Arc::from("client")),
+                        strategy_id: Some(Arc::from("strategy")),
+                        matched_rule: Some(MatchedRuleObservation {
+                            source: MatchedRuleSource::RuleSet,
+                            resource_id: Arc::from("rules"),
+                            resource_version: Some(crate::resource::ResourceVersion::new(2, 4)),
+                            ordinal: Some(1),
+                        }),
+                        upstream_id: Some(Arc::from("upstream")),
+                        upstream_member_id: None,
+                        upstream_used_id: Some(Arc::from("upstream")),
+                        source: crate::ports::storage::StatsSource::Upstream,
+                        cache_status: CacheStatus::Fresh,
+                    }),
+                    cancellation_reason: None,
+                    cache_commit: None,
+                },
+                12,
+                345,
+            )
+            .unwrap();
+        let CoreOutcome::Response(returned) = outcome else {
+            panic!("publisher must preserve the response outcome");
+        };
+        assert!(Arc::ptr_eq(&returned, &response));
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.listener_id.as_ref(), "dns");
+        assert_eq!(event.route_id.as_deref(), Some("route"));
+        assert_eq!(
+            event
+                .client_match
+                .as_ref()
+                .map(|value| (value.source, value.matched_client_id.as_ref())),
+            Some((
+                crate::ports::observation::ClientMatchSource::Id,
+                "Original-01"
+            ))
+        );
+        assert_eq!(event.strategy_id.as_deref(), Some("strategy"));
+        assert_eq!(event.cache_lookup_status, CacheStatus::Fresh);
+        assert_eq!(event.runtime_revision, RuntimeRevision(3));
+        assert_eq!(event.duration_millis, 12);
+        assert_eq!(event.dns_core_duration_micros, 345);
+        assert!(matches!(
+            event.terminal,
+            ResolutionTerminal::Response {
+                class: ResponseClass::NoData,
+                rcode: 0
+            }
+        ));
+        let detail = event.detail.as_ref().unwrap();
+        assert_eq!(detail.request_id, RequestId(9));
+        assert_eq!(
+            detail.client_id.as_ref().map(|id| id.as_str()),
+            Some("Original-01")
+        );
+        assert_eq!(detail.question.name().to_ascii(), "private.example.test.");
+        assert!(Arc::ptr_eq(detail.response.as_ref().unwrap(), &response));
+    }
+
+    #[test]
+    fn response_rcode_only_reports_actual_dns_responses() {
+        let mut message = Message::new(9, MessageType::Query, OpCode::Query);
+        message.add_query(Query::query(
+            Name::from_ascii("rcode.example.").unwrap(),
+            RecordType::A,
+        ));
+        let query = CanonicalQuery::from_message(message).unwrap();
+        let response = CanonicalResponse::empty_response(&query, ResponseCode::Refused).unwrap();
+
+        assert_eq!(
+            response_rcode(&Ok(CoreOutcome::Response(Arc::new(response)))),
+            Some(5)
+        );
+        assert_eq!(response_rcode(&Ok(CoreOutcome::NoResponse)), None);
+    }
+
+    impl TelemetryOutput for CountingTelemetryOutput {
+        fn write_metric_snapshot(
+            &self,
+            _instance: &str,
+            metric: &crate::observability::MetricSnapshot,
+        ) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.metric_snapshot")?;
+            self.snapshots.lock().unwrap().push(*metric);
+            Ok(())
+        }
+
+        fn write_log(&self, _event: &LogEvent) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.log")?;
+            self.logs.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn write_metric(&self, _event: &MetricEvent) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.metric")?;
+            self.metrics.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+
+        fn write_health(
+            &self,
+            event: &ComponentHealthEvent,
+        ) -> Result<(), crate::ports::PortError> {
+            self.check("test.telemetry.health")?;
+            self.health.fetch_add(1, Ordering::Relaxed);
+            self.health_events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+    }
+
+    impl CountingTelemetryOutput {
+        /// 为 Service 测试提供可恢复的安全输出故障注入。
+        fn check(&self, operation: &'static str) -> Result<(), crate::ports::PortError> {
+            if self.fail.load(Ordering::Acquire) {
+                Err(crate::ports::PortError::new(
+                    crate::ports::PortErrorClass::Unavailable,
+                    operation,
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn telemetry_log() -> LogEvent {
+        LogEvent {
+            occurred_at: SystemTime::now(),
+            level: LogLevel::Info,
+            name: crate::ports::telemetry::EventName::parse("service.test").unwrap(),
+            component: TelemetryComponent::Application,
+            request_digest: None,
+            configured_id: None,
+            outcome: crate::ports::telemetry::OutcomeClass::Success,
+            runtime_revision: None,
+            message: "service test",
+        }
+    }
+
+    #[tokio::test]
+    async fn telemetry_flush_task_drains_writer_under_supervisor() {
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = Arc::new(TelemetryWriter::new(4, output.clone()).unwrap());
+        crate::ports::telemetry::LogSink::emit(writer.as_ref(), telemetry_log()).unwrap();
+
+        let mut supervisor = Supervisor::new();
+        let cancellation = spawn_telemetry_task(
+            &mut supervisor,
+            writer,
+            Arc::new(super::TelemetrySampler::new(None)),
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(output.logs.load(Ordering::Relaxed), 1);
+
+        cancellation.cancel(CancelReason::Shutdown);
+        let report = supervisor
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(1)),
+            )
+            .await;
+        assert_eq!(report.failed, 0);
+    }
+
+    /// 验证输出故障进入 Failed，恢复后不会被历史累计失败数永久误判。
+    #[tokio::test]
+    async fn telemetry_flush_health_recovers_after_output_returns() {
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(4, output.clone()).unwrap();
+        crate::ports::telemetry::LogSink::emit(&writer, telemetry_log()).unwrap();
+        output.fail.store(true, Ordering::Release);
+
+        flush_telemetry_once(&writer, None).await;
+        assert_eq!(writer.stats().failed(), 1);
+        output.fail.store(false, Ordering::Release);
+        flush_telemetry_once(&writer, None).await;
+        crate::ports::telemetry::LogSink::flush(
+            &writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+
+        let states = output
+            .health_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.component == TelemetryComponent::Telemetry)
+            .map(|event| event.state)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            states,
+            vec![ComponentHealthState::Failed, ComponentHealthState::Healthy]
+        );
+    }
+
+    #[tokio::test]
+    async fn component_health_is_published_as_a_bounded_telemetry_event() {
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(4, output.clone()).unwrap();
+        publish_component_health(
+            &writer,
+            TelemetryComponent::Storage,
+            ComponentHealthState::Degraded,
+            Some("storage flush failed"),
+        );
+        publish_component_health(
+            &writer,
+            TelemetryComponent::Resource,
+            ComponentHealthState::Healthy,
+            None,
+        );
+
+        crate::ports::telemetry::LogSink::flush(
+            &writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(output.health.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn management_task_uses_dedicated_health_component() {
+        assert_eq!(
+            telemetry_component_for_task("management"),
+            TelemetryComponent::Management
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_shutdown_gap_is_published_before_telemetry_closes() {
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = TelemetryWriter::new(4, output.clone()).unwrap();
+        publish_cache_shutdown_health(
+            &writer,
+            CacheFinalizerShutdownSummary {
+                completed: false,
+                owners: 2,
+            },
+            CacheSnapshotShutdownSummary::default(),
+        );
+
+        crate::ports::telemetry::LogSink::flush(
+            &writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        {
+            let health_events = output.health_events.lock().unwrap();
+            assert_eq!(health_events.len(), 1);
+            assert_eq!(health_events[0].component, TelemetryComponent::Cache);
+            assert_eq!(health_events[0].state, ComponentHealthState::Degraded);
+            assert_eq!(health_events[0].retry_count, 0);
+            assert!(health_events[0].persistence_gap);
+            assert_eq!(
+                health_events[0].safe_reason,
+                Some("cache finalizer shutdown has gaps")
+            );
+        }
+        let snapshot_output = Arc::new(CountingTelemetryOutput::default());
+        let snapshot_writer = TelemetryWriter::new(4, snapshot_output.clone()).unwrap();
+        publish_cache_shutdown_health(
+            &snapshot_writer,
+            CacheFinalizerShutdownSummary {
+                completed: true,
+                ..CacheFinalizerShutdownSummary::default()
+            },
+            CacheSnapshotShutdownSummary {
+                completed: false,
+                attempted: true,
+                written: false,
+                error: None,
+            },
+        );
+        crate::ports::telemetry::LogSink::flush(
+            &snapshot_writer,
+            Deadline::new(Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+        let health_events = snapshot_output.health_events.lock().unwrap();
+        assert_eq!(health_events.len(), 1);
+        assert_eq!(health_events[0].retry_count, 1);
+        assert_eq!(
+            health_events[0].safe_reason,
+            Some("cache snapshot shutdown has gaps")
+        );
+    }
+
+    fn completion(
+        fault_level: FaultLevel,
+        restart_policy: RestartPolicy,
+        exit: TaskExit,
+        restart_count: u32,
+    ) -> TaskCompletion {
+        TaskCompletion {
+            spec: TaskSpec::new("test.task", "test", fault_level, restart_policy).unwrap(),
+            exit,
+            restart_count,
+        }
+    }
+
+    #[test]
+    fn service_capabilities_are_transport_specific_and_stable() {
+        assert_eq!(
+            transport_capabilities(TransportClass::Datagram),
+            crate::dns::TransportCapabilities {
+                class: TransportClass::Datagram,
+                cache_compatibility: CacheCompatibilityKey(1),
+            }
+        );
+        assert_eq!(
+            transport_capabilities(TransportClass::Stream),
+            crate::dns::TransportCapabilities {
+                class: TransportClass::Stream,
+                cache_compatibility: CacheCompatibilityKey(1),
+            }
+        );
+        assert_eq!(
+            transport_capabilities(TransportClass::Multiplexed),
+            crate::dns::TransportCapabilities {
+                class: TransportClass::Multiplexed,
+                cache_compatibility: CacheCompatibilityKey(1),
+            }
+        );
+    }
+
+    /// 验证 TCP/DoH session 并发上限在边界前允许接收，达到边界后暂停 accept。
+    #[test]
+    fn stream_session_limit_is_enforced_at_accept_boundary() {
+        assert!(can_accept_stream_session(
+            MAX_CONCURRENT_STREAM_SESSIONS - 1
+        ));
+        assert!(!can_accept_stream_session(MAX_CONCURRENT_STREAM_SESSIONS));
+        assert!(!can_accept_stream_session(usize::MAX));
+    }
+
+    #[test]
+    fn degraded_terminal_task_is_observed_without_stopping_the_service() {
+        let completion = completion(
+            FaultLevel::Degraded,
+            RestartPolicy::Never,
+            TaskExit::Failed(TaskErrorKind::Transient),
+            0,
+        );
+
+        assert!(task_failure(&completion).is_none());
+    }
+
+    #[test]
+    fn fatal_endpoint_task_failure_is_promoted_to_service_error() {
+        let completion = completion(
+            FaultLevel::FatalEndpoint,
+            RestartPolicy::Never,
+            TaskExit::Failed(TaskErrorKind::Transient),
+            0,
+        );
+
+        assert!(matches!(
+            task_failure(&completion),
+            Some(ServiceError::TaskFailure {
+                task_id,
+                component: "test",
+                fault_level: FaultLevel::FatalEndpoint,
+                exit: TaskExit::Failed(TaskErrorKind::Transient),
+            }) if task_id == "test.task"
+        ));
+    }
+
+    #[test]
+    fn storage_pending_limit_task_failure_is_promoted_to_service_error() {
+        let completion = completion(
+            FaultLevel::Fatal,
+            RestartPolicy::Never,
+            TaskExit::Failed(TaskErrorKind::Fatal),
+            0,
+        );
+
+        assert!(matches!(
+            task_failure(&completion),
+            Some(ServiceError::TaskFailure {
+                fault_level: FaultLevel::Fatal,
+                exit: TaskExit::Failed(TaskErrorKind::Fatal),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn bounded_restart_failure_is_only_promoted_after_exhaustion() {
+        let running = completion(
+            FaultLevel::FatalEndpoint,
+            RestartPolicy::Transient { max_restarts: 2 },
+            TaskExit::Failed(TaskErrorKind::Transient),
+            1,
+        );
+        assert!(task_failure(&running).is_none());
+
+        let exhausted = completion(
+            FaultLevel::FatalEndpoint,
+            RestartPolicy::Transient { max_restarts: 2 },
+            TaskExit::Failed(TaskErrorKind::Transient),
+            2,
+        );
+        assert!(matches!(
+            task_failure(&exhausted),
+            Some(ServiceError::TaskFailure { .. })
+        ));
+    }
+
+    #[test]
+    fn task_panic_is_fatal_even_for_a_degraded_component() {
+        let completion = completion(
+            FaultLevel::Degraded,
+            RestartPolicy::Never,
+            TaskExit::Panicked,
+            0,
+        );
+
+        assert!(matches!(
+            task_failure(&completion),
+            Some(ServiceError::TaskFailure {
+                exit: TaskExit::Panicked,
+                ..
+            })
+        ));
+    }
+
+    #[tokio::test]
+    async fn transport_task_is_registered_with_a_scoped_cancellation() {
+        let mut supervisor = Supervisor::new();
+        let cancellation = spawn_transport_task(
+            &mut supervisor,
+            "transport.test".to_owned(),
+            "test",
+            super::TaskStartGate::default(),
+            |cancellation| {
+                Box::pin(async move {
+                    cancellation.cancelled().await;
+                    Err(TaskError::Cancelled)
+                })
+            },
+        )
+        .unwrap();
+
+        cancellation.cancel(CancelReason::Shutdown);
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.spec.id.as_str(), "transport.test");
+        assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn staged_transport_starts_only_after_commit_and_abandoned_gate_cancels() {
+        for commit in [false, true] {
+            let mut supervisor = Supervisor::new();
+            let starts = Arc::new(AtomicU32::new(0));
+            let observed_starts = Arc::clone(&starts);
+            let (sender, receiver) = tokio::sync::watch::channel(false);
+            spawn_transport_task(
+                &mut supervisor,
+                "transport.staged".to_owned(),
+                "test",
+                super::TaskStartGate(Some(receiver)),
+                move |_| {
+                    observed_starts.fetch_add(1, Ordering::AcqRel);
+                    Box::pin(async { Ok(()) })
+                },
+            )
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            assert_eq!(starts.load(Ordering::Acquire), 0);
+            if commit {
+                sender.send_replace(true);
+            }
+            drop(sender);
+            let completion = tokio::time::timeout(Duration::from_secs(1), supervisor.join_next())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                completion.exit,
+                if commit {
+                    TaskExit::Completed
+                } else {
+                    TaskExit::Cancelled
+                },
+            );
+            assert_eq!(starts.load(Ordering::Acquire), u32::from(commit));
+            assert_eq!(supervisor.task_count(), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_task_retries_transient_failure_before_scoped_shutdown() {
+        let mut supervisor = Supervisor::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        let cancellation = spawn_transport_task(
+            &mut supervisor,
+            "transport.retry".to_owned(),
+            "test",
+            super::TaskStartGate::default(),
+            move |cancellation| {
+                let attempt = factory_attempts.fetch_add(1, Ordering::AcqRel);
+                if attempt == 0 {
+                    Box::pin(async { Err(TaskError::Transient) }) as crate::runtime::TaskFuture
+                } else {
+                    Box::pin(async move {
+                        cancellation.cancelled().await;
+                        Err(TaskError::Cancelled)
+                    })
+                }
+            },
+        )
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while attempts.load(Ordering::Acquire) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        cancellation.cancel(CancelReason::Shutdown);
+
+        let completion = supervisor.join_next().await.unwrap();
+        assert_eq!(completion.spec.id.as_str(), "transport.retry");
+        assert_eq!(completion.exit, TaskExit::Cancelled);
+        assert_eq!(completion.restart_count, 1);
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn transport_task_exhaustion_is_promoted_after_configured_retries() {
+        let mut supervisor = Supervisor::new();
+        let attempts = Arc::new(AtomicU32::new(0));
+        let factory_attempts = Arc::clone(&attempts);
+        spawn_transport_task(
+            &mut supervisor,
+            "transport.exhausted".to_owned(),
+            "udp",
+            super::TaskStartGate::default(),
+            move |_cancellation| {
+                factory_attempts.fetch_add(1, Ordering::AcqRel);
+                Box::pin(async { Err(TaskError::Transient) })
+            },
+        )
+        .unwrap();
+
+        let completion = tokio::time::timeout(Duration::from_secs(1), supervisor.join_next())
+            .await
+            .unwrap()
+            .unwrap();
+
+        // max_restarts 不包含初次执行，因此总尝试次数应再加一。
+        assert_eq!(
+            attempts.load(Ordering::Acquire),
+            super::TRANSPORT_RESTART_LIMIT + 1
+        );
+        assert_eq!(completion.restart_count, super::TRANSPORT_RESTART_LIMIT);
+        assert!(completion.restart_exhausted());
+        assert!(matches!(
+            task_failure(&completion),
+            Some(ServiceError::TaskFailure {
+                fault_level: FaultLevel::FatalEndpoint,
+                exit: TaskExit::Failed(TaskErrorKind::Transient),
+                ..
+            })
+        ));
+        assert_eq!(supervisor.task_count(), 0);
+    }
+
+    #[test]
+    fn exhausted_endpoint_only_stops_service_after_listener_group_is_empty() {
+        let mut tasks = vec![
+            TransportTask {
+                task_id: "transport.udp.2.0".to_owned(),
+                owner: "listener.primary".to_owned(),
+                cancellation: Cancellation::new(),
+            },
+            TransportTask {
+                task_id: "transport.tcp.2.1".to_owned(),
+                owner: "listener.primary".to_owned(),
+                cancellation: Cancellation::new(),
+            },
+            TransportTask {
+                task_id: "transport.udp.2.2".to_owned(),
+                owner: "listener.secondary".to_owned(),
+                cancellation: Cancellation::new(),
+            },
+        ];
+        let first = completion(
+            FaultLevel::FatalEndpoint,
+            RestartPolicy::Transient { max_restarts: 3 },
+            TaskExit::Failed(TaskErrorKind::Transient),
+            3,
+        );
+        let first = TaskCompletion {
+            spec: TaskSpec::new(
+                "transport.udp.2.0",
+                "udp",
+                first.spec.fault_level,
+                first.spec.restart_policy,
+            )
+            .unwrap(),
+            ..first
+        };
+
+        assert!(is_exhausted_endpoint(&first));
+        assert_eq!(retire_current_transport_task(&mut tasks, &first), Some(1));
+
+        let stale = TaskCompletion {
+            spec: TaskSpec::new(
+                "transport.udp.1.0",
+                "udp",
+                FaultLevel::FatalEndpoint,
+                RestartPolicy::Transient { max_restarts: 3 },
+            )
+            .unwrap(),
+            exit: TaskExit::Failed(TaskErrorKind::Transient),
+            restart_count: 3,
+        };
+        assert_eq!(retire_current_transport_task(&mut tasks, &stale), None);
+
+        let last = TaskCompletion {
+            spec: TaskSpec::new(
+                "transport.tcp.2.1",
+                "tcp",
+                FaultLevel::FatalEndpoint,
+                RestartPolicy::Transient { max_restarts: 3 },
+            )
+            .unwrap(),
+            exit: TaskExit::Failed(TaskErrorKind::Transient),
+            restart_count: 3,
+        };
+        assert_eq!(retire_current_transport_task(&mut tasks, &last), Some(0));
+        assert_eq!(tasks.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fatal_task_flushes_process_services_before_returning_error() {
+        let base_port = 42_000 + (std::process::id() as u16 % 500) * 2;
+        let work_path = crate::config::test_support::absolute_path("service-fatal-task-shutdown");
+        let initial_config = runtime_config_at(&work_path, base_port);
+        let database_path = initial_config.database.path.clone();
+        let factory = SystemSocketFactory::new();
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            Arc::clone(&initial_config),
+            crate::dns::RuntimeRevision(1),
+        )
+        .unwrap();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            crate::dns::Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let previous = coordinator.load();
+        let storage = StorageRuntime::open(
+            &initial_config,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let telemetry = Arc::new(TelemetryWriter::new(16, output).unwrap());
+        let telemetry_probe = Arc::clone(&telemetry);
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                Arc::clone(&coordinator),
+                storage,
+                telemetry,
+            )
+            .unwrap();
+
+        let response = udp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, base_port)),
+            1,
+            "example.test.",
+        )
+        .await;
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+
+        let next = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, base_port + 1),
+            crate::dns::RuntimeRevision(2),
+        )
+        .unwrap();
+        let next = crate::runtime::bind_prepared(
+            next,
+            &factory,
+            crate::dns::Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        coordinator.activate(next);
+        let current = coordinator.load();
+
+        service
+            .supervisor
+            .spawn(
+                TaskSpec::new(
+                    "fatal.test",
+                    "test",
+                    FaultLevel::Fatal,
+                    RestartPolicy::Never,
+                )
+                .unwrap(),
+                Box::pin(async { Err(TaskError::Fatal) }),
+            )
+            .unwrap();
+        let error = service
+            .wait_for_ctrl_c_with_reload(
+                Duration::from_millis(100),
+                Duration::from_secs(1),
+                |_service| Box::pin(async { Ok(()) }),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, ServiceError::TaskFailure { .. }));
+        assert!(previous.is_draining());
+        assert!(current.is_draining());
+        assert!(telemetry_probe.stats().closed());
+        assert_eq!(sqlite_total_requests(&database_path).await, 1);
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    async fn sqlite_total_requests(path: &std::path::Path) -> i64 {
+        let options = sqlx::sqlite::SqliteConnectOptions::new().filename(path);
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .unwrap();
+        let total =
+            sqlx::query_scalar("SELECT COALESCE(SUM(total_requests), 0) FROM stats_daily_total")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        pool.close().await;
+        total
+    }
+
+    fn runtime_config_at(
+        work_path: &str,
+        port: u16,
+    ) -> Arc<crate::config::resolve::ResolvedConfig> {
+        runtime_config_with_answer_at(work_path, port, "127.0.0.1")
+    }
+
+    /// 构造 bind plan 不变、hosts answer 可变的 reload 测试配置。
+    pub(super) fn runtime_config_with_answer_at(
+        work_path: &str,
+        port: u16,
+        answer: &str,
+    ) -> Arc<crate::config::resolve::ResolvedConfig> {
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&format!(
+                r#"
+version: 2
+work:
+  path: {work_path}
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+  records_path: ./queries
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: {port}
+    strategy: default
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "{answer} example.test"
+hosts:
+  - type: const
+    name: local-hosts
+    format: hosts
+    hosts: "{answer} example.test"
+outbound: []
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+"#,
+                port = port,
+                work_path = work_path,
+                answer = answer,
+            ))
+            .expect("service reload fixture must be valid")
+            .resolved
+    }
+
+    fn resource_runtime_config(
+        root: &std::path::Path,
+        resource_path: &std::path::Path,
+        port: u16,
+        auto_update: bool,
+    ) -> Arc<crate::config::resolve::ResolvedConfig> {
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&format!(
+                r#"
+version: 2
+work:
+  path: {root}
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+  records_path: ./queries
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - type: udp
+    name: dns
+    addresses: [127.0.0.1]
+    port: {port}
+    strategy: default
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "127.0.0.1 fallback.test"
+hosts:
+  - type: file
+    name: local-hosts
+    format: hosts
+    path: {resource_path}
+    auto_update: {auto_update}
+    update_interval: 60s
+outbound: []
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+"#,
+                root = root.display(),
+                resource_path = resource_path.display(),
+                port = port,
+                auto_update = auto_update,
+            ))
+            .expect("resource service reload fixture must be valid")
+            .resolved
+    }
+
+    pub(super) async fn udp_query(address: SocketAddr, id: u16, name: &str) -> Message {
+        udp_query_with_type(address, id, name, RecordType::A).await
+    }
+
+    /// 通过 UDP 发送指定记录类型的真实 DNS 查询。
+    async fn udp_query_with_type(
+        address: SocketAddr,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> Message {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let query = query_wire_with_type(id, name, record_type);
+        socket.send_to(&query, address).await.unwrap();
+        let mut response = [0_u8; 4096];
+        let (size, _) =
+            tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut response))
+                .await
+                .unwrap()
+                .unwrap();
+        Message::from_vec(&response[..size]).unwrap()
+    }
+
+    /// 为指定记录类型生成 DNS query wire。
+    fn query_wire_with_type(id: u16, name: &str, record_type: RecordType) -> Vec<u8> {
+        let mut query = Message::new(id, MessageType::Query, OpCode::Query);
+        query.add_query(Query::query(Name::from_ascii(name).unwrap(), record_type));
+        query.to_vec().unwrap()
+    }
+
+    /// 通过 DNS-over-TCP framing 发送指定记录类型的查询。
+    async fn tcp_query_with_type(
+        address: SocketAddr,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> Message {
+        let query = query_wire_with_type(id, name, record_type);
+        let mut request = Vec::with_capacity(query.len() + 2);
+        request.extend_from_slice(&(query.len() as u16).to_be_bytes());
+        request.extend_from_slice(&query);
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(&request).await.unwrap();
+
+        let mut length = [0_u8; 2];
+        tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut length))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut response = vec![0_u8; u16::from_be_bytes(length) as usize];
+        tokio::time::timeout(Duration::from_secs(1), stream.read_exact(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        Message::from_vec(&response).unwrap()
+    }
+
+    /// 通过 plain HTTP/1.1 POST 发送指定记录类型的 DoH 查询。
+    async fn doh_post_query_with_type(
+        address: SocketAddr,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> Message {
+        let query = query_wire_with_type(id, name, record_type);
+        let mut request = format!(
+            "POST /dns HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            query.len()
+        )
+        .into_bytes();
+        request.extend_from_slice(&query);
+        send_doh_request(address, &request).await
+    }
+
+    /// 通过 plain HTTP/1.1 GET 发送 unpadded base64url DoH 查询。
+    async fn doh_get_query_with_type(
+        address: SocketAddr,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> Message {
+        let query = query_wire_with_type(id, name, record_type);
+        let request = format!(
+            "GET /dns?dns={} HTTP/1.1\r\nHost: localhost\r\nAccept: application/dns-message\r\nConnection: close\r\n\r\n",
+            base64url(&query)
+        );
+        send_doh_request(address, request.as_bytes()).await
+    }
+
+    /// 发送一条 plain DoH HTTP 请求并提取 DNS message body。
+    async fn send_doh_request(address: SocketAddr, request: &[u8]) -> Message {
+        let mut stream = TcpStream::connect(address).await.unwrap();
+        stream.write_all(request).await.unwrap();
+        let mut response = Vec::new();
+        tokio::time::timeout(Duration::from_secs(1), stream.read_to_end(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("DoH response must contain a complete HTTP header");
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+        Message::from_vec(&response[header_end + 4..]).unwrap()
+    }
+
+    /// 将 DNS wire 编码为 DoH GET 使用的 unpadded base64url。
+    fn base64url(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut output = String::new();
+        let mut index = 0;
+        while index < bytes.len() {
+            let first = bytes[index];
+            let second = bytes.get(index + 1).copied();
+            let third = bytes.get(index + 2).copied();
+            output.push(TABLE[(first >> 2) as usize] as char);
+            output.push(TABLE[((first & 0x03) << 4 | second.unwrap_or(0) >> 4) as usize] as char);
+            if let Some(second) = second {
+                output
+                    .push(TABLE[((second & 0x0f) << 2 | third.unwrap_or(0) >> 6) as usize] as char);
+            }
+            if let Some(third) = third {
+                output.push(TABLE[(third & 0x3f) as usize] as char);
+            }
+            index += 3;
+        }
+        output
+    }
+
+    /// 让操作系统选择当前可绑定的 UDP、TCP 和 DoH loopback 端口。
+    fn available_transport_ports() -> [u16; 3] {
+        let udp = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let tcp = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let doh = StdTcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        [
+            udp.local_addr().unwrap().port(),
+            tcp.local_addr().unwrap().port(),
+            doh.local_addr().unwrap().port(),
+        ]
+    }
+
+    /// 对同一问题执行 UDP、TCP、DoH POST 和 DoH GET，并使用不同 ID 验证关联恢复。
+    async fn query_all_transports(
+        ports: [u16; 3],
+        first_id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> [Message; 4] {
+        let udp = udp_query_with_type(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, ports[0])),
+            first_id,
+            name,
+            record_type,
+        )
+        .await;
+        let tcp = tcp_query_with_type(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, ports[1])),
+            first_id + 1,
+            name,
+            record_type,
+        )
+        .await;
+        let doh_post = doh_post_query_with_type(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, ports[2])),
+            first_id + 2,
+            name,
+            record_type,
+        )
+        .await;
+        let doh_get = doh_get_query_with_type(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, ports[2])),
+            first_id + 3,
+            name,
+            record_type,
+        )
+        .await;
+        [udp, tcp, doh_post, doh_get]
+    }
+
+    /// 去除 transport 关联 ID 后，校验三种协议及两种 DoH method 返回同一响应。
+    fn assert_cross_transport_contract(
+        responses: [Message; 4],
+        first_id: u16,
+        name: &str,
+        record_type: RecordType,
+        expected_class: ResponseClass,
+    ) -> CanonicalResponse {
+        let canonical = responses
+            .into_iter()
+            .enumerate()
+            .map(|(index, response)| {
+                canonicalize_response(response, first_id + index as u16, name, record_type)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(canonical[0], canonical[1]);
+        assert_eq!(canonical[0], canonical[2]);
+        assert_eq!(canonical[0], canonical[3]);
+        assert_eq!(canonical[0].class(), expected_class);
+        canonical[0].clone()
+    }
+
+    /// 校验响应 ID 与问题后，转换为不含 transport 关联信息的 canonical response。
+    fn canonicalize_response(
+        response: Message,
+        id: u16,
+        name: &str,
+        record_type: RecordType,
+    ) -> CanonicalResponse {
+        assert_eq!(response.metadata.id, id);
+        let query = Message::from_vec(&query_wire_with_type(id, name, record_type)).unwrap();
+        let query = CanonicalQuery::from_message(query).unwrap();
+        CanonicalResponse::from_message(response, &query, DnsMessageId::new(id)).unwrap()
+    }
+
+    /// 构造同时启用 UDP、TCP 和 plain DoH 的同策略 loopback 配置。
+    fn cross_transport_runtime_config(
+        udp_port: u16,
+        tcp_port: u16,
+        doh_port: u16,
+    ) -> Arc<crate::config::resolve::ResolvedConfig> {
+        let work_path = crate::config::test_support::absolute_path("service-cross-transport");
+        cross_transport_runtime_config_at(&work_path, udp_port, tcp_port, doh_port)
+    }
+
+    /// reload 夹具固定进程级路径，只改变本轮需要重绑的 listener。
+    fn cross_transport_runtime_config_at(
+        work_path: &str,
+        udp_port: u16,
+        tcp_port: u16,
+        doh_port: u16,
+    ) -> Arc<crate::config::resolve::ResolvedConfig> {
+        let large_hosts = (1..=64)
+            .map(|suffix| format!("198.51.100.{suffix} large.transport.test"))
+            .collect::<Vec<_>>()
+            .join("\n      ");
+        ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&format!(
+                r#"
+version: 2
+work:
+  path: {work_path}
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data.sqlite
+  records_path: ./queries
+logs:
+  enable: false
+  level: info
+  path: ./fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 8080
+  users: []
+dns: {{}}
+listener:
+  - name: dns-udp
+    type: udp
+    addresses: [127.0.0.1]
+    port: {udp_port}
+    strategy: default
+  - name: dns-tcp
+    type: tcp
+    addresses: [127.0.0.1]
+    port: {tcp_port}
+    strategy: default
+  - name: dns-doh
+    type: doh
+    routes:
+      - path: /dns
+        strategy: default
+    endpoints:
+      - name: plain
+        addresses: [127.0.0.1]
+        port: {doh_port}
+        tls:
+          mode: external
+        client_ip:
+          source: peer
+upstreams:
+  - type: hosts
+    name: local
+    format: hosts
+    hosts: "192.0.2.25 transport.test"
+hosts:
+  - type: const
+    name: local-hosts
+    format: hosts
+    hosts: |
+      192.0.2.25 transport.test
+      {large_hosts}
+outbound: []
+rule_set: []
+strategy:
+  - name: default
+    rules:
+      - hosts: local-hosts
+    default_upstream: local
+clients: []
+"#,
+            ))
+            .expect("cross-transport fixture must be valid")
+            .resolved
+    }
+
+    #[tokio::test]
+    async fn udp_tcp_and_plain_doh_follow_the_same_dns_contract() {
+        let ports = available_transport_ports();
+        let config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(1)).unwrap();
+        let factory = SystemSocketFactory::new();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let positive = assert_cross_transport_contract(
+            query_all_transports(ports, 41, "transport.test.", RecordType::A).await,
+            41,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+        assert!(positive.as_message().answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(192, 0, 2, 25)
+        )));
+
+        assert_cross_transport_contract(
+            query_all_transports(ports, 51, "transport.test.", RecordType::AAAA).await,
+            51,
+            "transport.test.",
+            RecordType::AAAA,
+            ResponseClass::NoData,
+        );
+        assert_cross_transport_contract(
+            query_all_transports(ports, 61, "missing.transport.test.", RecordType::A).await,
+            61,
+            "missing.transport.test.",
+            RecordType::A,
+            ResponseClass::NxDomain,
+        );
+
+        let [udp, tcp, doh_post, doh_get] =
+            query_all_transports(ports, 71, "large.transport.test.", RecordType::A).await;
+        assert_eq!(udp.metadata.id, 71);
+        assert!(udp.metadata.truncation);
+        assert_eq!(udp.metadata.response_code, ResponseCode::NoError);
+        let tcp = canonicalize_response(tcp, 72, "large.transport.test.", RecordType::A);
+        let doh_post = canonicalize_response(doh_post, 73, "large.transport.test.", RecordType::A);
+        let doh_get = canonicalize_response(doh_get, 74, "large.transport.test.", RecordType::A);
+        assert_eq!(tcp, doh_post);
+        assert_eq!(tcp, doh_get);
+        assert_eq!(tcp.class(), ResponseClass::Positive);
+        assert!(!tcp.as_message().metadata.truncation);
+        assert_eq!(tcp.as_message().answers.len(), 64);
+        assert_eq!(service.metrics.accepted_requests_for_test(), 16);
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    struct ContractSessionCore {
+        accepted: tokio::sync::mpsc::UnboundedSender<tokio::sync::oneshot::Sender<()>>,
+    }
+
+    impl DnsCore for ContractSessionCore {
+        fn resolve<'a>(
+            &'a self,
+            request: &'a DnsRequest,
+        ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
+            Box::pin(async move {
+                let (release, wait) = tokio::sync::oneshot::channel();
+                self.accepted
+                    .send(release)
+                    .expect("session observer must be alive");
+                tokio::time::timeout(
+                    request.context.meta.deadline.remaining(Instant::now()),
+                    wait,
+                )
+                .await
+                .expect("session fixture exceeded the original request budget")
+                .expect("session release sender must be alive");
+                Ok(CoreOutcome::Response(Arc::new(
+                    CanonicalResponse::empty_response(&request.query, ResponseCode::NoError)
+                        .unwrap(),
+                )))
+            })
+        }
+    }
+
+    /// 用真实请求和响应区分旧 Core 与新 Core，不以 guard 归零冒充请求已响应。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reload_drains_admitted_requests_while_new_runtime_serves_all_transports() {
+        for rebind in [false, true] {
+            let ports = available_transport_ports();
+            let work = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("_fluxdns/p1-service-drain")
+                .to_string_lossy()
+                .replace('\\', "/");
+            let factory = SystemSocketFactory::new();
+            let initial = PreparedRuntime::prepare_with_policy_core(
+                cross_transport_runtime_config_at(&work, ports[0], ports[1], ports[2]),
+                RuntimeRevision(1),
+            )
+            .unwrap();
+            let bound = crate::runtime::bind_prepared(
+                initial,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+            let previous = coordinator.load();
+            let (accepted, mut waiting) = tokio::sync::mpsc::unbounded_channel();
+            let mut service = super::DnsService::start_with_coordinator(
+                Arc::clone(&coordinator),
+                Arc::new(ContractSessionCore { accepted }),
+                Duration::from_secs(5),
+            )
+            .unwrap();
+            let udp = tokio::spawn(async move {
+                udp_query_with_type(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, ports[0])),
+                    10,
+                    "transport.test.",
+                    RecordType::A,
+                )
+                .await
+            });
+            let tcp = tokio::spawn(async move {
+                tcp_query_with_type(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, ports[1])),
+                    11,
+                    "transport.test.",
+                    RecordType::A,
+                )
+                .await
+            });
+            let post = tokio::spawn(async move {
+                doh_post_query_with_type(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, ports[2])),
+                    12,
+                    "transport.test.",
+                    RecordType::A,
+                )
+                .await
+            });
+            let get = tokio::spawn(async move {
+                doh_get_query_with_type(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, ports[2])),
+                    13,
+                    "transport.test.",
+                    RecordType::A,
+                )
+                .await
+            });
+            let mut releases = Vec::new();
+            for _ in 0..4 {
+                releases.push(
+                    tokio::time::timeout(Duration::from_secs(2), waiting.recv())
+                        .await
+                        .unwrap()
+                        .unwrap(),
+                );
+            }
+            assert_eq!(previous.active_requests(), 4);
+            let next_ports = if rebind {
+                [available_transport_ports()[0], ports[1], ports[2]]
+            } else {
+                ports
+            };
+            let next = PreparedRuntime::prepare_with_policy_core(
+                cross_transport_runtime_config_at(
+                    &work,
+                    next_ports[0],
+                    next_ports[1],
+                    next_ports[2],
+                ),
+                RuntimeRevision(2),
+            )
+            .unwrap();
+            service
+                .reload_prepared(
+                    next,
+                    &factory,
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                    Cancellation::new(),
+                )
+                .await
+                .unwrap();
+            assert!(previous.is_draining());
+            assert_eq!(previous.active_requests(), 4);
+            let responses =
+                query_all_transports(next_ports, 20, "transport.test.", RecordType::A).await;
+            assert_cross_transport_contract(
+                responses,
+                20,
+                "transport.test.",
+                RecordType::A,
+                ResponseClass::Positive,
+            );
+            for release in releases {
+                release.send(()).expect("reload 不得取消已接纳请求");
+            }
+            let responses = [
+                udp.await.unwrap(),
+                tcp.await.unwrap(),
+                post.await.unwrap(),
+                get.await.unwrap(),
+            ];
+            assert_cross_transport_contract(
+                responses,
+                10,
+                "transport.test.",
+                RecordType::A,
+                ResponseClass::NoData,
+            );
+            assert!(
+                previous
+                    .wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(2)))
+                    .await
+            );
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while service.supervisor.task_count() > 3 {
+                    let completion = service.supervisor.join_next().await.unwrap();
+                    assert!(matches!(
+                        completion.exit,
+                        TaskExit::Completed | TaskExit::Cancelled
+                    ));
+                    coordinator.prune_drained_runtime_owners();
+                }
+            })
+            .await
+            .unwrap();
+            drop(previous);
+            if rebind {
+                StdUdpSocket::bind((Ipv4Addr::LOCALHOST, ports[0]))
+                    .expect("已 drain 的旧端口必须释放");
+            }
+            let report = service
+                .shutdown(
+                    &SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                )
+                .await
+                .unwrap();
+            assert!(!report.deadline_expired);
+        }
+    }
+
+    struct NonCooperativeDrainCore {
+        entered: Arc<tokio::sync::Semaphore>,
+    }
+
+    impl DnsCore for NonCooperativeDrainCore {
+        fn resolve<'a>(
+            &'a self,
+            _: &'a DnsRequest,
+        ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
+            Box::pin(async move {
+                self.entered.add_permits(1);
+                std::future::pending().await
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn reload_drain_obeys_original_deadline_even_when_core_does_not_cooperate() {
+        let ports = available_transport_ports();
+        let work = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_fluxdns/p1-service-drain-deadline")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let factory = SystemSocketFactory::new();
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(&work, ports[0], ports[1], ports[2]),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let bound = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let previous = coordinator.load();
+        let entered = Arc::new(tokio::sync::Semaphore::new(0));
+        let mut service = super::DnsService::start_with_coordinator(
+            Arc::clone(&coordinator),
+            Arc::new(NonCooperativeDrainCore {
+                entered: Arc::clone(&entered),
+            }),
+            Duration::from_millis(200),
+        )
+        .unwrap();
+        let query = query_wire_with_type(1, "transport.test.", RecordType::A);
+        let udp = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        udp.send_to(&query, (Ipv4Addr::LOCALHOST, ports[0]))
+            .await
+            .unwrap();
+        let mut tcp = TcpStream::connect((Ipv4Addr::LOCALHOST, ports[1]))
+            .await
+            .unwrap();
+        tcp.write_all(&(query.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        tcp.write_all(&query).await.unwrap();
+        let mut doh = TcpStream::connect((Ipv4Addr::LOCALHOST, ports[2]))
+            .await
+            .unwrap();
+        doh.write_all(format!(
+            "POST /dns HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\n\r\n",
+            query.len(),
+        ).as_bytes()).await.unwrap();
+        doh.write_all(&query).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(2), entered.acquire_many(3))
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        let next = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(&work, ports[0], ports[1], ports[2]),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        service
+            .reload_prepared(
+                next,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            previous
+                .wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(1)),)
+                .await
+        );
+        let mut byte = [0; 1];
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), doh.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), udp.recv(&mut byte))
+                .await
+                .is_err()
+        );
+        assert_cross_transport_contract(
+            query_all_transports(ports, 30, "transport.test.", RecordType::A).await,
+            30,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+        service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+    }
+
+    /// 每轮等待对端 EOF/reset，避免把 request guard 归零误当作 session 已释放。
+    async fn close_contract_connection(mut connection: TcpStream) {
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            connection.shutdown().await?;
+            let mut response = Vec::new();
+            connection.read_to_end(&mut response).await?;
+            Ok::<(), std::io::Error>(())
+        })
+        .await
+        .expect("connection did not reach EOF/reset within the cycle budget");
+        if let Err(error) = result {
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::NotConnected
+                ),
+                "unexpected connection terminal error: {error}"
+            );
+        }
+    }
+
+    // V6-C01/R01：在同一 service 内重复释放/重连，再覆盖满载失败 reload 与换代恢复。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "explicit local TCP/DoH 1024-session cycles and reload recovery test"]
+    async fn contract_v6_real_session_capacity_releases_and_recovers() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            for doh in [false, true] {
+                let ports = available_transport_ports();
+                let work_path = crate::config::test_support::absolute_path("contract-connections");
+                let config = cross_transport_runtime_config_at(&work_path, ports[0], ports[1], ports[2]);
+                let prepared = PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(1)).unwrap();
+                let bound = crate::runtime::bind_prepared(prepared, &SystemSocketFactory::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)), &Cancellation::new(),
+                ).await.unwrap();
+                let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+                let runtime = coordinator.load();
+                let (accepted, mut sessions) = tokio::sync::mpsc::unbounded_channel();
+                let core = Arc::new(ContractSessionCore { accepted });
+                let mut service = super::DnsService::start_with_coordinator(
+                    Arc::clone(&coordinator), core, crate::transport::DEFAULT_REQUEST_TIMEOUT,
+                ).unwrap();
+                let address = SocketAddr::from((Ipv4Addr::LOCALHOST, ports[if doh { 2 } else { 1 }]));
+                let query = query_wire_with_type(42, "transport.test.", RecordType::A);
+                let mut wire = if doh {
+                    format!("POST /dns HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", query.len()).into_bytes()
+                } else {
+                    (query.len() as u16).to_be_bytes().to_vec()
+                };
+                wire.extend_from_slice(&query);
+                assert_eq!(MAX_CONCURRENT_STREAM_SESSIONS, 1024);
+                for cycle in 1..=3 {
+                    let mut connections = Vec::new();
+                    let mut releases = Vec::new();
+                    for index in 0..MAX_CONCURRENT_STREAM_SESSIONS {
+                        let mut connection = TcpStream::connect(address).await.unwrap();
+                        connection.write_all(&wire).await.unwrap();
+                        let release = tokio::time::timeout(Duration::from_secs(2), sessions.recv()).await
+                            .unwrap_or_else(|_| panic!("session accept timed out: cycle={cycle} index={index} active={} tasks={}",
+                                runtime.active_requests(), service.supervisor.task_count())).unwrap();
+                        connections.push(connection);
+                        releases.push(Some(release));
+                        if index == 1022 || index == 1023 {
+                            assert_eq!(runtime.active_requests(), index + 1);
+                        }
+                    }
+                    let mut queued = TcpStream::connect(address).await.unwrap();
+                    queued.write_all(&wire).await.unwrap();
+                    assert!(tokio::time::timeout(Duration::from_millis(30), sessions.recv()).await.is_err(),
+                        "request beyond session capacity must remain outside the core");
+                    assert_eq!(runtime.active_requests(), 1024);
+                    if cycle == 2 {
+                        let occupied = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+                        let failed = PreparedRuntime::prepare_with_policy_core(
+                            cross_transport_runtime_config_at(&work_path, occupied.local_addr().unwrap().port(), ports[1], ports[2]),
+                            RuntimeRevision(2),
+                        ).unwrap();
+                        assert!(matches!(
+                            service.reload_prepared(failed, &crate::runtime::SystemSocketFactory::new(),
+                                Deadline::new(Instant::now() + Duration::from_secs(2)), Cancellation::new()).await,
+                            Err(super::ServiceReloadError::Bind(_))
+                        ));
+                        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+                        assert!(!runtime.is_draining());
+                        assert_eq!(runtime.active_requests(), 1024);
+                    }
+                    // 精确释放一个已确认进入 core 的连接，不把 backlog 当作已 accept 的 session。
+                    releases[0].take().unwrap().send(()).unwrap();
+                    connections[0].shutdown().await.unwrap();
+                    let queued_release = tokio::time::timeout(Duration::from_secs(2), sessions.recv()).await.unwrap().unwrap();
+                    assert_eq!(runtime.active_requests(), 1024);
+                    queued_release.send(()).unwrap();
+                    let mut response = Vec::new();
+                    if doh {
+                        tokio::time::timeout(Duration::from_secs(2), queued.read_to_end(&mut response)).await.unwrap().unwrap();
+                        let split = response.windows(4).position(|bytes| bytes == b"\r\n\r\n").unwrap();
+                        assert!(response.starts_with(b"HTTP/1.1 200"));
+                        response = response[split + 4..].to_vec();
+                    } else {
+                        let length = tokio::time::timeout(Duration::from_secs(2), queued.read_u16()).await.unwrap().unwrap();
+                        response.resize(usize::from(length), 0);
+                        queued.read_exact(&mut response).await.unwrap();
+                    }
+                    let response = Message::from_vec(&response).unwrap();
+                    assert_eq!(response.metadata.id, 42);
+                    assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+                    if cycle == 3 {
+                        // 仍有 1023 个旧请求时换代；成功 reload 必须取消旧 owner 并恢复新请求。
+                        let candidate = PreparedRuntime::prepare_with_policy_core(
+                            cross_transport_runtime_config_at(&work_path, ports[0], ports[1], ports[2]), RuntimeRevision(2),
+                        ).unwrap();
+                        service.reload_prepared(candidate, &crate::runtime::SystemSocketFactory::new(),
+                            Deadline::new(Instant::now() + Duration::from_secs(2)), Cancellation::new()).await.unwrap();
+                        assert!(runtime.is_draining());
+                        assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+                    } else {
+                        for release in releases.iter_mut().filter_map(Option::take) {
+                            release.send(()).unwrap();
+                        }
+                    }
+                    for connection in connections {
+                        close_contract_connection(connection).await;
+                    }
+                    close_contract_connection(queued).await;
+                    drop(releases);
+                    tokio::time::timeout(Duration::from_secs(2), async {
+                        while runtime.active_requests() != 0 {
+                            tokio::task::yield_now().await;
+                        }
+                    }).await.expect("cycle must release all old request guards");
+                    println!("V6-C01 cycle={cycle} protocol={} accepted=1023,1024 backlog=1 recovered=1 old_requests=0",
+                        if doh { "plain-doh" } else { "tcp" });
+                }
+                let all = query_all_transports(ports, 100, "transport.test.", RecordType::A).await;
+                assert_cross_transport_contract(all, 100, "transport.test.", RecordType::A, ResponseClass::Positive);
+                // 复用换代后再 rebind；畸形连接与慢 body 不应阻断新入口的有效流量。
+                let next_ports = available_transport_ports();
+                let candidate = PreparedRuntime::prepare_with_policy_core(
+                    cross_transport_runtime_config_at(&work_path, next_ports[0], next_ports[1], next_ports[2]), RuntimeRevision(3),
+                ).unwrap();
+                service.reload_prepared(candidate, &crate::runtime::SystemSocketFactory::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(2)), Cancellation::new()).await.unwrap();
+                let next_address = SocketAddr::from((Ipv4Addr::LOCALHOST, next_ports[if doh { 2 } else { 1 }]));
+                let mut slow = Vec::new();
+                for _ in 0..8 {
+                    let mut connection = TcpStream::connect(next_address).await.unwrap();
+                    let prefix = if doh {
+                        b"POST /dns HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/dns-message\r\nContent-Length: 100\r\n\r\nx".as_slice()
+                    } else {
+                        b"\0\x64x".as_slice()
+                    };
+                    connection.write_all(prefix).await.unwrap();
+                    slow.push(connection);
+                    let mut malformed = TcpStream::connect(next_address).await.unwrap();
+                    malformed.write_all(if doh { b"INVALID\r\n\r\n".as_slice() } else { b"\0\x01x".as_slice() }).await.unwrap();
+                    malformed.shutdown().await.unwrap();
+                }
+                let all = query_all_transports(next_ports, 200, "transport.test.", RecordType::A).await;
+                assert_cross_transport_contract(all, 200, "transport.test.", RecordType::A, ResponseClass::Positive);
+                let report = service.shutdown(&SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                ).await.unwrap();
+                assert!(!report.deadline_expired);
+                assert_eq!(runtime.active_requests(), 0);
+                assert_eq!(service.runtime().active_requests(), 0);
+                assert_eq!(service.supervisor.task_count(), 0);
+                drop(slow);
+                drop(service);
+                drop(runtime);
+                drop(coordinator);
+                for address in [address, next_address] {
+                    let listener = tokio::net::TcpListener::bind(address).await.unwrap();
+                    drop(listener);
+                }
+                println!("V6-R01 protocol={} failed_reload_preserved=true reuse=true rebind=true slow=8 malformed=8 requests_after_shutdown=0 ports_rebound=true",
+                    if doh { "plain-doh" } else { "tcp" });
+            }
+        }).await.expect("connection-capacity watchdog expired");
+    }
+    #[tokio::test]
+    async fn telemetry_samples_the_shared_source_across_transports_reload_and_shutdown() {
+        use crate::ports::telemetry::{MetricName, MetricValue, MetricsSink};
+        let ports = available_transport_ports();
+        let mut config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
+        Arc::get_mut(&mut config).unwrap().logs.enable = true;
+        let work_path = config.work.path.clone();
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config.clone(), RuntimeRevision(1)).unwrap();
+        let factory = SystemSocketFactory::new();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let storage = StorageRuntime::open(
+            &config,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let writer = Arc::new(TelemetryWriter::new(32, output.clone()).unwrap());
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                coordinator,
+                storage,
+                writer.clone(),
+            )
+            .unwrap();
+        let sampler = service.telemetry_sampler.as_ref().unwrap().clone();
+        let source = sampler.resolution.as_ref().unwrap().clone();
+        query_all_transports(ports, 81, "transport.test.", RecordType::A).await;
+        assert_eq!(source.snapshot().accepted, 4);
+        sampler.sample(&writer).unwrap();
+        sampler.sample(&writer).unwrap();
+        assert!(
+            writer
+                .metric_snapshot()
+                .iter()
+                .any(|metric| metric.value == MetricValue::Counter(4))
+        );
+
+        // 聚合拒绝时不推进游标，换到可接收的 writer 后仍完整采到同一源。
+        let retry_sampler = super::TelemetrySampler::new(Some(source.clone()));
+        let exhausted =
+            TelemetryWriter::new(1, Arc::new(CountingTelemetryOutput::default())).unwrap();
+        exhausted
+            .record(super::sampled_metric(
+                MetricName::ResolutionEventsAccepted,
+                TelemetryComponent::Resolution,
+                MetricValue::Counter(u64::MAX),
+            ))
+            .unwrap();
+        assert!(retry_sampler.sample(&exhausted).is_err());
+        assert_eq!(*retry_sampler.accepted.lock().unwrap(), None);
+        let retry_writer =
+            TelemetryWriter::new(1, Arc::new(CountingTelemetryOutput::default())).unwrap();
+        retry_sampler.sample(&retry_writer).unwrap();
+        retry_sampler.sample(&retry_writer).unwrap();
+        assert!(
+            retry_writer
+                .metric_snapshot()
+                .iter()
+                .any(|metric| metric.value == MetricValue::Counter(4))
+        );
+        *retry_sampler.accepted.lock().unwrap() = Some(5);
+        assert!(retry_sampler.sample(&retry_writer).is_err());
+        assert_eq!(retry_writer.stats().rejected_metrics(), 1);
+
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(2)).unwrap();
+        service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert!(Arc::ptr_eq(
+            service.telemetry_sampler.as_ref().unwrap(),
+            &sampler
+        ));
+        assert!(Arc::ptr_eq(
+            &service.resolution_runtime.as_ref().unwrap().metrics(),
+            &source
+        ));
+        query_all_transports(ports, 91, "transport.test.", RecordType::A).await;
+        service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(source.snapshot().accepted, 8);
+        assert_eq!(
+            output
+                .snapshots
+                .lock()
+                .unwrap()
+                .iter()
+                .rev()
+                .find(|metric| metric.name == MetricName::ResolutionEventsAccepted)
+                .unwrap()
+                .value,
+            MetricValue::Counter(8)
+        );
+        assert!(writer.stats().closed());
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    #[test]
+    fn telemetry_without_resolution_only_samples_queue_depth() {
+        let writer = TelemetryWriter::new(1, Arc::new(CountingTelemetryOutput::default())).unwrap();
+        super::TelemetrySampler::new(None).sample(&writer).unwrap();
+        let snapshot = writer.metric_snapshot();
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(
+            snapshot[0].name,
+            crate::ports::telemetry::MetricName::WriterQueueDepth
+        );
+    }
+
+    /// 本机 loopback 对比，每秒一批避免触发 Storage 积压上限；不评估极限 QPS/磁盘性能。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manual telemetry sampling performance profile"]
+    async fn benchmark_udp_telemetry_sampling_profile() {
+        for enabled in [false, true] {
+            let port = available_transport_ports()[0];
+            let work_path = crate::config::test_support::absolute_path(if enabled {
+                "telemetry-profile-on"
+            } else {
+                "telemetry-profile-off"
+            });
+            let config = runtime_config_at(&work_path, port);
+            let storage = StorageRuntime::open(
+                &config,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+            let prepared =
+                PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(1)).unwrap();
+            let bound = crate::runtime::bind_prepared(
+                prepared,
+                &SystemSocketFactory::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+            let writer = Arc::new(
+                TelemetryWriter::new(
+                    32,
+                    Arc::new(
+                        crate::observability::StructuredTelemetryOutput::from_writer(Box::new(
+                            std::io::sink(),
+                        )),
+                    ),
+                )
+                .unwrap(),
+            );
+            let mut service = if enabled {
+                super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                    coordinator,
+                    storage,
+                    writer.clone(),
+                )
+                .unwrap()
+            } else {
+                super::DnsService::with_default_timeout_from_coordinator_and_storage(
+                    coordinator,
+                    storage,
+                )
+                .unwrap()
+            };
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let wire = query_wire_with_type(1, "example.test.", RecordType::A);
+            for _ in 0..100 {
+                udp_round_trip(&socket, address, &wire).await;
+            }
+            let started = Instant::now();
+            let mut elapsed = Vec::new();
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            while started.elapsed() < Duration::from_secs(11) {
+                interval.tick().await;
+                elapsed.extend(udp_profile_repeated(&socket, address, &wire, 1000).await);
+            }
+            elapsed.sort_unstable();
+            print_latency_profile(
+                if enabled {
+                    "telemetry-on-hosts"
+                } else {
+                    "telemetry-off-hosts"
+                },
+                false,
+                &elapsed,
+            );
+            let source = service
+                .resolution_runtime
+                .as_ref()
+                .unwrap()
+                .metrics()
+                .snapshot();
+            assert_eq!(source.dropped, 0);
+            service
+                .shutdown(
+                    &SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                )
+                .await
+                .unwrap();
+            eprintln!(
+                "telemetry_profile enabled={enabled} batch_per_second=1000 accepted={} series={} queue_pending={} emitted={} rejected_metrics={}",
+                source.accepted,
+                writer.metric_snapshot().len(),
+                writer.stats().pending(),
+                writer.stats().emitted(),
+                writer.stats().rejected_metrics(),
+            );
+            let _ = std::fs::remove_dir_all(work_path);
+        }
+    }
+
+    /// Windows P5 验收复用真实 service/详情测点；客户端 I/O 不进入 core 耗时。
+    /// 热更新允许产生冷 miss，但全部请求必须落库，所有命中样本逐个遵守 2ms 门槛。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manual Windows release 10-client core acceptance"]
+    async fn acceptance_p5_warm_core_with_background_work() {
+        use std::time::UNIX_EPOCH;
+        #[expect(
+            clippy::assertions_on_constants,
+            reason = "普通 debug/跨平台编译保留用例，只在显式执行验收时拒绝错误环境"
+        )]
+        {
+            assert!(cfg!(windows), "本入口的验收平台是 Windows");
+            assert!(!cfg!(debug_assertions), "必须使用 --release");
+        }
+        use crate::storage::{
+            DetailPageDirection, DetailQuery, DetailQueryCacheOutcome, DetailQueryFilter,
+            DetailQuerySort, DetailSortOrder, RetentionPolicy,
+        };
+        const CLIENTS: usize = 10;
+        const PER_CLIENT: usize = 100;
+        let deadline = || Deadline::new(Instant::now() + Duration::from_secs(10));
+        let work_path = crate::config::test_support::absolute_path("p5-core-acceptance");
+        let port = available_transport_ports()[0];
+        let clients = (1..=CLIENTS)
+            .map(|id| format!("  - {{name: client-{id}, client_id: client-{id}, match: {{ips: [127.0.0.{id}]}}}}\n"))
+            .collect::<String>();
+        let source = format!(
+            r#"
+version: 2
+work: {{path: '{work_path}', rules_path: ./rules}}
+database: {{type: sqlite, path: ./data.sqlite, records_path: ./queries}}
+logs: {{enable: false, level: info, path: ./service.log}}
+webui: {{enable: false, address: 127.0.0.1, port: 8080, users: []}}
+dns:
+  cache:
+    enabled: true
+    memory: {{max_size_bytes: 67108864}}
+    failure_ttl: 5s
+    optimistic: {{enabled: false, answer_ttl: 10s, max_age: 1d}}
+    persistence: {{enabled: true, path: ./cache.snapshot, snapshot_interval: 1s}}
+  resolve_log: {{enable: true}}
+listener:
+  - {{name: p5-udp, type: udp, addresses: [127.0.0.1], port: {port}, strategy: default}}
+upstreams:
+  - {{name: local, type: hosts, format: hosts, hosts: '198.51.100.9 cache.p5.test'}}
+hosts:
+  - {{name: guard, type: const, format: hosts, hosts: '192.0.2.1 sentinel.p5.test'}}
+strategy:
+  - {{name: default, rules: [{{hosts: guard}}], default_upstream: local}}
+clients:
+{clients}
+"#
+        );
+        let config = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .unwrap()
+            .resolved;
+        let storage = StorageRuntime::open(&config, deadline()).await.unwrap();
+        let details = storage.detail_store();
+        let retention = storage.retention_coordinator();
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config.clone(), RuntimeRevision(1)).unwrap();
+        let snapshot_owner = crate::cache::CacheSnapshotOwner::start(
+            RuntimeRevision(1),
+            prepared
+                .snapshot()
+                .policy_core()
+                .unwrap()
+                .cache_snapshot_source(),
+            crate::cache::CacheSnapshotSettings::from_current_config(&config).unwrap(),
+            deadline(),
+        )
+        .await
+        .unwrap();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &SystemSocketFactory::new(),
+            deadline(),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        coordinator
+            .attach_cache_snapshot_owner(snapshot_owner.clone())
+            .unwrap();
+        let writer = Arc::new(
+            TelemetryWriter::new(
+                256,
+                Arc::new(
+                    crate::observability::StructuredTelemetryOutput::from_writer(Box::new(
+                        std::io::sink(),
+                    )),
+                ),
+            )
+            .unwrap(),
+        );
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                coordinator.clone(),
+                storage,
+                writer,
+            )
+            .unwrap();
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let wire = query_wire_with_type(1, "cache.p5.test.", RecordType::A);
+        let mut sockets = Vec::new();
+        for id in 1..=CLIENTS {
+            let socket = UdpSocket::bind(format!("127.0.0.{id}:0")).await.unwrap();
+            udp_round_trip(&socket, address, &wire).await;
+            sockets.push(socket);
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while service
+                .resolution_runtime
+                .as_ref()
+                .unwrap()
+                .metrics()
+                .snapshot()
+                .cache_commit_stored
+                == 0
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // 留出毫秒边界，确保详情查询不把预热请求计入本轮样本。
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        let from_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let today = i32::try_from(from_ms / 86_400_000).unwrap();
+        // 在当前保留窗口内创建真实受管空分片；收紧到 R=1 后必须物理回收。
+        let old_day = today - 2;
+        drop(details.acquire_write(old_day, deadline()).await.unwrap());
+        let old_path = details.shard_path(old_day).unwrap();
+        assert!(old_path.is_file());
+        let mut tasks = tokio::task::JoinSet::new();
+        for socket in sockets {
+            let query = wire.clone();
+            tasks.spawn(async move {
+                for _ in 0..PER_CLIENT {
+                    udp_round_trip(&socket, address, &query).await;
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            });
+        }
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let cleanup_started_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        retention
+            .run_daily(
+                RetentionPolicy::new(1, 0, 1 << 30).unwrap(),
+                today,
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let reclaimed = retention.reclaim_pending(deadline()).await.unwrap();
+        assert_eq!(reclaimed.failed, 0);
+        assert!(reclaimed.reclaimed >= 1 && !old_path.exists());
+        let mut next_config = Arc::try_unwrap(
+            ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+                .load_str(&source)
+                .unwrap()
+                .resolved,
+        )
+        .unwrap();
+        next_config.statistics.retention_days = 6;
+        let next =
+            PreparedRuntime::prepare_with_policy_core(Arc::new(next_config), RuntimeRevision(2))
+                .unwrap();
+        service
+            .reload_prepared(
+                next,
+                &SystemSocketFactory::new(),
+                deadline(),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        while let Some(joined) = tasks.join_next().await {
+            joined.unwrap();
+        }
+        let to_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 1;
+        let snapshot = snapshot_owner.status();
+        assert!(
+            snapshot
+                .last_success_at_utc_millis
+                .is_some_and(|at| at >= from_ms && at <= to_ms)
+        );
+        assert!(snapshot.last_error.is_none());
+        assert_eq!(service.runtime().revision(), RuntimeRevision(2));
+        let mut records = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                records.clear();
+                let mut cursor = None;
+                loop {
+                    let page = details
+                        .query_details(
+                            DetailQuery {
+                                filter: DetailQueryFilter {
+                                    from_utc_millis: from_ms,
+                                    to_utc_millis: to_ms,
+                                    qname: Some("cache.p5.test.".into()),
+                                    ..Default::default()
+                                },
+                                cursor,
+                                direction: DetailPageDirection::Older,
+                                page_size: 100,
+                                sort: DetailQuerySort::OccurredAt,
+                                order: DetailSortOrder::Desc,
+                            },
+                            deadline(),
+                        )
+                        .await
+                        .unwrap();
+                    records.extend(page.items);
+                    cursor = page.next_cursor;
+                    if cursor.is_none() {
+                        break;
+                    }
+                }
+                if records.len() >= CLIENTS * PER_CLIENT {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(records.len(), CLIENTS * PER_CLIENT);
+        assert_eq!(
+            records
+                .iter()
+                .map(|r| r.id.as_str())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            records.len()
+        );
+        let mut per_client = std::collections::BTreeMap::new();
+        for record in &records {
+            *per_client
+                .entry(record.matched_client_id.clone().unwrap())
+                .or_insert(0_usize) += 1;
+        }
+        assert_eq!(per_client.len(), CLIENTS);
+        assert!(per_client.values().all(|count| *count == PER_CLIENT));
+        let mut hit_us = records
+            .iter()
+            .filter(|r| r.cache == DetailQueryCacheOutcome::Hit)
+            .map(|r| r.dns_core_duration_micros.expect("生产 core 测点必须存在"))
+            .collect::<Vec<_>>();
+        hit_us.sort_unstable();
+        assert!(
+            hit_us.len() >= CLIENTS * PER_CLIENT * 9 / 10,
+            "预热后命中率异常"
+        );
+        let over_2ms = records
+            .iter()
+            .filter(|r| {
+                r.cache == DetailQueryCacheOutcome::Hit
+                    && r.dns_core_duration_micros.unwrap() > 2000
+            })
+            .map(|r| {
+                serde_json::json!({"id": r.id.as_str(), "at_ms": r.occurred_at_millis,
+                "client": r.matched_client_id, "core_us": r.dns_core_duration_micros})
+            })
+            .collect::<Vec<_>>();
+        let percentile = |percent: usize| hit_us[(hit_us.len() * percent).div_ceil(100) - 1];
+        let pipeline = service
+            .resolution_runtime
+            .as_ref()
+            .unwrap()
+            .metrics()
+            .snapshot();
+        assert_eq!(pipeline.dropped, 0);
+        let shutdown = service
+            .shutdown(&SystemClock::new(), deadline())
+            .await
+            .unwrap();
+        assert!(!shutdown.deadline_expired);
+        let report = serde_json::json!({
+            "platform": std::env::consts::OS, "build": "release", "clients": CLIENTS,
+            "samples": records.len(), "cache_hits": hit_us.len(), "cache_hit_rate": hit_us.len() as f64 / records.len() as f64,
+            "p50_us": percentile(50), "p95_us": percentile(95), "p99_us": percentile(99), "max_us": hit_us.last(),
+            "over_2ms": over_2ms, "per_client": per_client, "from_ms": from_ms, "to_ms": to_ms,
+            "cleanup_started_ms": cleanup_started_ms, "reclaimed_shards": reclaimed.reclaimed,
+            "snapshot_written_ms": snapshot.last_success_at_utc_millis, "runtime_revision": 2,
+            "measurement": "EventPublishingDnsCore: resolve_with_completion, excluding client I/O and outer codec/publish",
+        });
+        std::fs::write(
+            std::path::Path::new(&work_path).join("core-report.json"),
+            serde_json::to_vec_pretty(&report).unwrap(),
+        )
+        .unwrap();
+        println!("P5_CORE {}", report);
+        println!("P5_ARTIFACT {work_path}");
+        assert!(
+            over_2ms.is_empty(),
+            "存在超过 2ms 的命中；不得按平均值或分位数认领通过"
+        );
+    }
+
+    /// 本地手工性能 profile：固定单并发、复用 UDP socket，比较详情 off/on 的三个主路径。
+    ///
+    /// 计时包含 loopback client send/receive，因此只是服务端 SLO 的保守上界；发布验收仍需在
+    /// 冻结的目标硬件、QPS 和并发 profile 下使用外部压测器复核。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "manual release performance profile"]
+    async fn benchmark_udp_resolution_observation_profile() {
+        const SAMPLES: usize = 1_000;
+        let ports = available_transport_ports();
+        for (detail_enabled, port) in [(false, ports[0]), (true, ports[1])] {
+            let work_path = crate::config::test_support::absolute_path(if detail_enabled {
+                "benchmark-resolution-detail-on"
+            } else {
+                "benchmark-resolution-detail-off"
+            });
+            let mut config = Arc::try_unwrap(runtime_config_at(&work_path, port)).unwrap();
+            config.dns.cache.enabled = true;
+            config.dns.resolve_log.enable = detail_enabled;
+            let config = Arc::new(config);
+            let storage = StorageRuntime::open(
+                &config,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+            let prepared =
+                PreparedRuntime::prepare_with_policy_core(Arc::clone(&config), RuntimeRevision(1))
+                    .unwrap();
+            let bound = crate::runtime::bind_prepared(
+                prepared,
+                &SystemSocketFactory::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+            let mut service = super::DnsService::with_default_timeout_from_coordinator_and_storage(
+                Arc::clone(&coordinator),
+                storage,
+            )
+            .unwrap();
+            let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+            let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+            let cached = query_wire_with_type(1, "fallback.test.", RecordType::A);
+
+            for _ in 0..100 {
+                udp_round_trip(&socket, address, &cached).await;
+                if service
+                    .resolution_runtime
+                    .as_ref()
+                    .unwrap()
+                    .metrics()
+                    .snapshot()
+                    .cache_commit_stored
+                    > 0
+                {
+                    break;
+                }
+            }
+            assert!(
+                service
+                    .resolution_runtime
+                    .as_ref()
+                    .unwrap()
+                    .metrics()
+                    .snapshot()
+                    .cache_commit_stored
+                    > 0,
+                "warm-up must make the cache entry visible"
+            );
+
+            let cache_hit = udp_profile_repeated(&socket, address, &cached, SAMPLES).await;
+            let hosts = query_wire_with_type(2, "example.test.", RecordType::A);
+            let hosts_hit = udp_profile_repeated(&socket, address, &hosts, SAMPLES).await;
+            let upstream_miss_wires = (0..SAMPLES)
+                .map(|index| {
+                    query_wire_with_type(
+                        u16::try_from(index).unwrap_or(u16::MAX),
+                        &format!("miss-{index}.benchmark.test."),
+                        RecordType::A,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let upstream_miss = udp_profile_many(&socket, address, &upstream_miss_wires).await;
+            let snapshot = service
+                .resolution_runtime
+                .as_ref()
+                .unwrap()
+                .metrics()
+                .snapshot();
+            assert_eq!(
+                snapshot.dropped, 0,
+                "single-concurrency profile must not overload ingress"
+            );
+            print_latency_profile("cache-hit", detail_enabled, &cache_hit);
+            print_latency_profile("hosts-hit", detail_enabled, &hosts_hit);
+            print_latency_profile("upstream-miss", detail_enabled, &upstream_miss);
+            print_combined_throughput(
+                detail_enabled,
+                &[
+                    cache_hit.as_slice(),
+                    hosts_hit.as_slice(),
+                    upstream_miss.as_slice(),
+                ],
+            );
+            eprintln!(
+                "resolution_pipeline_profile detail={} accepted={} dropped={} detail_accepted={} detail_dropped={} detail_failed={}",
+                if detail_enabled { "on" } else { "off" },
+                snapshot.accepted,
+                snapshot.dropped,
+                snapshot.detail_accepted,
+                snapshot.detail_dropped,
+                snapshot.detail_failed,
+            );
+
+            let report = service
+                .shutdown(
+                    &SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(10)),
+                )
+                .await
+                .unwrap();
+            assert!(!report.deadline_expired);
+            let _ = std::fs::remove_dir_all(work_path);
+        }
+    }
+
+    async fn udp_profile_repeated(
+        socket: &UdpSocket,
+        address: SocketAddr,
+        wire: &[u8],
+        samples: usize,
+    ) -> Vec<u128> {
+        let mut elapsed = Vec::with_capacity(samples);
+        for _ in 0..samples {
+            let started = Instant::now();
+            udp_round_trip(socket, address, wire).await;
+            elapsed.push(started.elapsed().as_nanos());
+        }
+        elapsed.sort_unstable();
+        elapsed
+    }
+
+    async fn udp_profile_many(
+        socket: &UdpSocket,
+        address: SocketAddr,
+        wires: &[Vec<u8>],
+    ) -> Vec<u128> {
+        let mut elapsed = Vec::with_capacity(wires.len());
+        for wire in wires {
+            let started = Instant::now();
+            udp_round_trip(socket, address, wire).await;
+            elapsed.push(started.elapsed().as_nanos());
+        }
+        elapsed.sort_unstable();
+        elapsed
+    }
+
+    async fn udp_round_trip(socket: &UdpSocket, address: SocketAddr, wire: &[u8]) {
+        socket.send_to(wire, address).await.unwrap();
+        let mut response = [0_u8; 4_096];
+        tokio::time::timeout(Duration::from_secs(1), socket.recv_from(&mut response))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    fn print_latency_profile(scenario: &str, detail_enabled: bool, sorted_nanos: &[u128]) {
+        let percentile = |permille: usize| {
+            let index = (sorted_nanos.len() - 1).saturating_mul(permille) / 1_000;
+            sorted_nanos[index] as f64 / 1_000_000.0
+        };
+        let mean_nanos = sorted_nanos.iter().sum::<u128>() as f64 / sorted_nanos.len() as f64;
+        eprintln!(
+            "resolution_profile scenario={scenario} detail={} samples={} concurrency=1 profile={} os={} arch={} mean_ms={:.6} sequential_qps={:.0} p50_ms={:.6} p95_ms={:.6} p99_ms={:.6} p999_ms={:.6}",
+            if detail_enabled { "on" } else { "off" },
+            sorted_nanos.len(),
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            },
+            std::env::consts::OS,
+            std::env::consts::ARCH,
+            mean_nanos / 1_000_000.0,
+            1_000_000_000.0 / mean_nanos,
+            percentile(500),
+            percentile(950),
+            percentile(990),
+            percentile(999),
+        );
+    }
+
+    fn print_combined_throughput(detail_enabled: bool, profiles: &[&[u128]]) {
+        let samples = profiles.iter().map(|profile| profile.len()).sum::<usize>();
+        let total_nanos = profiles
+            .iter()
+            .flat_map(|profile| profile.iter())
+            .sum::<u128>() as f64;
+        eprintln!(
+            "resolution_combined_profile detail={} samples={} concurrency=1 mean_ms={:.6} sequential_qps={:.0}",
+            if detail_enabled { "on" } else { "off" },
+            samples,
+            total_nanos / samples as f64 / 1_000_000.0,
+            samples as f64 * 1_000_000_000.0 / total_nanos,
+        );
+    }
+
+    #[tokio::test]
+    async fn udp_tcp_and_plain_doh_share_error_response_contract() {
+        let ports = available_transport_ports();
+        let config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
+        let prepared = PreparedRuntime::prepare(config, RuntimeRevision(2)).unwrap();
+        let factory = SystemSocketFactory::new();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let mut service = super::DnsService::start_with_coordinator(
+            Arc::clone(&coordinator),
+            Arc::new(CrossTransportErrorCore),
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert_cross_transport_contract(
+            query_all_transports(ports, 81, "error.transport.test.", RecordType::A).await,
+            81,
+            "error.transport.test.",
+            RecordType::A,
+            ResponseClass::ServFail,
+        );
+        assert_cross_transport_contract(
+            query_all_transports(ports, 91, "error.transport.test.", RecordType::AAAA).await,
+            91,
+            "error.transport.test.",
+            RecordType::AAAA,
+            ResponseClass::Refused,
+        );
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    /// 验证无流量 deadline 只触发 listener 轮询，不消耗 endpoint 重试预算。
+    #[tokio::test]
+    async fn idle_listener_deadlines_do_not_exhaust_transport_tasks() {
+        let ports = available_transport_ports();
+        let config = cross_transport_runtime_config(ports[0], ports[1], ports[2]);
+        let prepared =
+            PreparedRuntime::prepare_with_policy_core(config, RuntimeRevision(3)).unwrap();
+        let factory = SystemSocketFactory::new();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let core = coordinator.load().snapshot().dns_core().unwrap();
+        let mut service = super::DnsService::start_with_coordinator(
+            Arc::clone(&coordinator),
+            core,
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        // 等待时间超过四轮 deadline；旧行为会在此期间耗尽三次重试。
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        let responses = query_all_transports(ports, 101, "transport.test.", RecordType::A).await;
+        assert_cross_transport_contract(
+            responses,
+            101,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+        assert_eq!(report.restarted, 0);
+    }
+
+    #[tokio::test]
+    async fn reload_prepared_rebinds_listener_tasks_to_the_new_runtime() {
+        let base_port = 40_000 + (std::process::id() as u16 % 1_000) * 2;
+        let work_path = crate::config::test_support::absolute_path("service-reload-rebind");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, base_port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, base_port + 1),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let active = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(2));
+        assert_eq!(service.runtime().revision(), RuntimeRevision(2));
+        assert_eq!(service.transport_task_count(), 1);
+        assert_eq!(
+            active.listeners().local_addrs().unwrap()[0].port(),
+            base_port + 1
+        );
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    #[tokio::test]
+    async fn reload_bind_failure_keeps_previous_runtime_and_listener_available() {
+        let initial_port = 41_000 + (std::process::id() as u16 % 500);
+        let occupied = UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let blocked_port = occupied.local_addr().unwrap().port();
+        let work_path = crate::config::test_support::absolute_path("service-reload-bind-failure");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, initial_port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let current = coordinator.load();
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+        let current_address = current.listeners().local_addrs().unwrap()[0];
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, blocked_port),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let error = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, super::ServiceReloadError::Bind(_)));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+        assert_eq!(service.runtime().revision(), RuntimeRevision(1));
+        assert!(!current.is_draining());
+        assert_eq!(service.transport_task_count(), 1);
+        let response = udp_query(current_address, 7, "example.test.").await;
+        assert_eq!(response.metadata.id, 7);
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+
+        drop(occupied);
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    #[tokio::test]
+    async fn service_shutdown_flushes_storage_before_closing_telemetry() {
+        let port = 40_250 + (std::process::id() as u16 % 500);
+        let work_path =
+            crate::config::test_support::absolute_path("service-shutdown-storage-telemetry");
+        let config = runtime_config_at(&work_path, port);
+        let database_path = config.database.path.clone();
+        let initial =
+            PreparedRuntime::prepare_with_policy_core(Arc::clone(&config), RuntimeRevision(1))
+                .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let storage = StorageRuntime::open(
+            coordinator.load().snapshot().config(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let telemetry = Arc::new(TelemetryWriter::new(16, output.clone()).unwrap());
+        let telemetry_probe = Arc::clone(&telemetry);
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                Arc::clone(&coordinator),
+                storage,
+                telemetry,
+            )
+            .unwrap();
+
+        assert_eq!(service.task_count(), 3);
+        let response = udp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            1,
+            "example.test.",
+        )
+        .await;
+        assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+        assert_eq!(report.request_drain, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.cache_finalizers, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.storage, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.telemetry, ShutdownPhaseStatus::Completed);
+        assert!(telemetry_probe.stats().closed());
+        assert!(output.snapshots.lock().unwrap().iter().any(|metric| {
+            metric.name == crate::ports::telemetry::MetricName::ResolutionEventsAccepted
+                && metric.value == crate::ports::telemetry::MetricValue::Counter(1)
+        }));
+        {
+            let health_events = output.health_events.lock().unwrap();
+            assert!(health_events.iter().any(|event| {
+                event.component == TelemetryComponent::Storage
+                    && event.state == ComponentHealthState::Stopping
+            }));
+            assert!(health_events.iter().any(|event| {
+                event.component == TelemetryComponent::Telemetry
+                    && event.state == ComponentHealthState::Stopping
+            }));
+        }
+
+        assert_eq!(sqlite_total_requests(&database_path).await, 1);
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    /// 验证后置阶段失败仍携带此前各停机阶段的完整终态。
+    #[tokio::test]
+    async fn service_shutdown_error_keeps_completed_phase_report() {
+        let port = available_transport_ports()[0];
+        let work_path = crate::config::test_support::absolute_path("service-shutdown-phase-error");
+        let config = runtime_config_at(&work_path, port);
+        let initial =
+            PreparedRuntime::prepare_with_policy_core(Arc::clone(&config), RuntimeRevision(1))
+                .unwrap();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &SystemSocketFactory::new(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let storage = StorageRuntime::open(
+            coordinator.load().snapshot().config(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let telemetry = Arc::new(TelemetryWriter::new(16, output.clone()).unwrap());
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator_storage_and_telemetry(
+                Arc::clone(&coordinator),
+                storage,
+                telemetry,
+            )
+            .unwrap();
+        output.fail.store(true, Ordering::Relaxed);
+
+        let error = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap_err();
+        let report = error
+            .shutdown_report()
+            .expect("shutdown phase failure must preserve its report");
+
+        assert!(matches!(error, ServiceError::Telemetry { .. }));
+        assert!(!report.deadline_expired);
+        assert_eq!(report.request_drain, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.cache_finalizers, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.storage, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.telemetry, ShutdownPhaseStatus::Failed);
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    /// 验证活动请求超过 deadline 时 Service 报告超时，并在 guard 释放后完成 drain。
+    #[tokio::test]
+    async fn service_shutdown_reports_request_drain_timeout() {
+        let port = available_transport_ports()[0];
+        let work_path =
+            crate::config::test_support::absolute_path("service-shutdown-drain-timeout");
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let bound = crate::runtime::bind_prepared(
+            prepared,
+            &SystemSocketFactory::new(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+        let runtime = coordinator.load();
+        let request_guard = runtime.try_acquire().unwrap();
+        let core = runtime.snapshot().dns_core().unwrap();
+        let mut service = super::DnsService::start_with_coordinator(
+            Arc::clone(&coordinator),
+            core,
+            Duration::from_secs(5),
+        )
+        .unwrap();
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_millis(500)),
+            )
+            .await
+            .unwrap();
+
+        assert!(report.deadline_expired);
+        assert_eq!(report.aborted, 0);
+        assert_eq!(report.request_drain, ShutdownPhaseStatus::TimedOut);
+        assert_eq!(report.cache_finalizers, ShutdownPhaseStatus::Completed);
+        assert_eq!(report.storage, ShutdownPhaseStatus::Skipped);
+        assert_eq!(report.telemetry, ShutdownPhaseStatus::Skipped);
+        assert!(runtime.is_draining());
+        assert_eq!(runtime.active_requests(), 1);
+        drop(request_guard);
+        assert!(
+            runtime
+                .wait_for_drain(Deadline::new(Instant::now() + Duration::from_secs(1)))
+                .await
+        );
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    #[tokio::test]
+    async fn reload_prepared_reuses_unchanged_listener_without_rebinding() {
+        let port = 40_500 + (std::process::id() as u16 % 500);
+        let work_path = crate::config::test_support::absolute_path("service-reload-reuse");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+        let initial_response = udp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            1,
+            "example.test.",
+        )
+        .await;
+        assert!(initial_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 1)
+        )));
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_with_answer_at(&work_path, port, "127.0.0.2"),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let active = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(active.revision(), RuntimeRevision(2));
+        assert_eq!(active.listeners().local_addrs().unwrap()[0].port(), port);
+        assert_eq!(service.transport_task_count(), 1);
+        assert_eq!(service.resource_task_count(), 0);
+        let reloaded_response = udp_query(
+            SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+            2,
+            "example.test.",
+        )
+        .await;
+        assert!(reloaded_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 2)
+        )));
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    /// 改动一个物理端口时，保留 TCP/DoH 句柄；候选 bind 失败不能影响当前三种协议。
+    #[tokio::test]
+    async fn reload_one_port_reuses_other_protocols_and_bind_failure_preserves_dns() {
+        let ports = available_transport_ports();
+        let work_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_fluxdns/p1-service-differential")
+            .to_string_lossy()
+            .replace('\\', "/");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(&work_path, ports[0], ports[1], ports[2]),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+        let previous = coordinator.load();
+        let previous_handles = previous.listeners().endpoint_handles().unwrap();
+        let before = assert_cross_transport_contract(
+            query_all_transports(ports, 10, "transport.test.", RecordType::A).await,
+            10,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+
+        let available = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let next_ports = [available.local_addr().unwrap().port(), ports[1], ports[2]];
+        drop(available);
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(
+                &work_path,
+                next_ports[0],
+                next_ports[1],
+                next_ports[2],
+            ),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let next = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(next.revision(), RuntimeRevision(2));
+        assert_eq!(service.transport_task_count(), 3);
+        let next_handles = next.listeners().endpoint_handles().unwrap();
+        for index in [1, 2] {
+            match (&previous_handles[index].socket, &next_handles[index].socket) {
+                (
+                    crate::ports::effects::ActivatedSocketHandle::Tcp(old),
+                    crate::ports::effects::ActivatedSocketHandle::Tcp(new),
+                ) => assert!(Arc::ptr_eq(old, new)),
+                _ => panic!("TCP/DoH 必须保留相同 TCP socket 句柄"),
+            }
+        }
+        let after = assert_cross_transport_contract(
+            query_all_transports(next_ports, 20, "transport.test.", RecordType::A).await,
+            20,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+        assert_eq!(before, after);
+
+        let occupied = StdUdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+        let rejected = PreparedRuntime::prepare_with_policy_core(
+            cross_transport_runtime_config_at(
+                &work_path,
+                occupied.local_addr().unwrap().port(),
+                next_ports[1],
+                next_ports[2],
+            ),
+            RuntimeRevision(3),
+        )
+        .unwrap();
+        assert!(matches!(
+            service
+                .reload_prepared(
+                    rejected,
+                    &factory,
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                    Cancellation::new(),
+                )
+                .await,
+            Err(super::ServiceReloadError::Bind(_))
+        ));
+        assert!(Arc::ptr_eq(&coordinator.load(), &next));
+        assert!(!next.is_draining());
+        let still_active = assert_cross_transport_contract(
+            query_all_transports(next_ports, 30, "transport.test.", RecordType::A).await,
+            30,
+            "transport.test.",
+            RecordType::A,
+            ResponseClass::Positive,
+        );
+        assert_eq!(after, still_active);
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    /// 验证 Listener health 跨启动、降级、成功 reload 和 shutdown 完成闭环。
+    #[tokio::test]
+    async fn listener_health_recovers_on_reload_and_stops_on_shutdown() {
+        let port = 40_750 + (std::process::id() as u16 % 500);
+        let work_path = crate::config::test_support::absolute_path("service-listener-health");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let core = coordinator.load().snapshot().dns_core().unwrap();
+        let output = Arc::new(CountingTelemetryOutput::default());
+        let telemetry = Arc::new(TelemetryWriter::new(16, output.clone()).unwrap());
+        let mut service = super::DnsService::start_with_optional_storage_and_telemetry(
+            Arc::clone(&coordinator),
+            core,
+            Duration::from_secs(5),
+            None,
+            Some(Arc::clone(&telemetry)),
+        )
+        .unwrap();
+        publish_component_health(
+            &telemetry,
+            TelemetryComponent::Listener,
+            ComponentHealthState::Degraded,
+            Some("test listener degradation"),
+        );
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_with_answer_at(&work_path, port, "127.0.0.2"),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+
+        let listener_states = output
+            .health_events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|event| event.component == TelemetryComponent::Listener)
+            .map(|event| event.state)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            listener_states,
+            vec![
+                ComponentHealthState::Healthy,
+                ComponentHealthState::Degraded,
+                ComponentHealthState::Healthy,
+                ComponentHealthState::Stopping,
+            ]
+        );
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    #[tokio::test]
+    async fn reload_reuses_process_owned_stats_worker_for_the_new_core() {
+        let port = 41_000 + (std::process::id() as u16 % 500);
+        let work_path = crate::config::test_support::absolute_path("service-reload-shared-stats");
+        let config = runtime_config_at(&work_path, port);
+        let initial =
+            PreparedRuntime::prepare_with_policy_core(Arc::clone(&config), RuntimeRevision(1))
+                .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let storage = StorageRuntime::open(
+            coordinator.load().snapshot().config(),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+        )
+        .await
+        .unwrap();
+        let mut service = super::DnsService::with_default_timeout_from_coordinator_and_storage(
+            Arc::clone(&coordinator),
+            storage,
+        )
+        .unwrap();
+        let stats_worker = Arc::clone(service.stats_worker.as_ref().unwrap());
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        // 先让 interval 的启动 tick 完成，避免它在第一条请求后立即切换统计 epoch。
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let initial_response = udp_query(address, 1, "example.test.").await;
+        assert_eq!(initial_response.metadata.id, 1);
+        assert_eq!(stats_worker.accumulator().active_event_count(), 1);
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_with_answer_at(&work_path, port, "127.0.0.2"),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(Arc::ptr_eq(
+            &stats_worker,
+            service.stats_worker.as_ref().unwrap()
+        ));
+        let reloaded_response = udp_query(address, 2, "example.test.").await;
+        assert_eq!(reloaded_response.metadata.id, 2);
+        assert!(reloaded_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(127, 0, 0, 2)
+        )));
+        assert_eq!(stats_worker.accumulator().active_event_count(), 2);
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+        let _ = std::fs::remove_dir_all(work_path);
+    }
+
+    #[tokio::test]
+    async fn reload_rejects_process_owned_config_change_without_switching_runtime() {
+        let port = 45_000 + (std::process::id() as u16 % 500);
+        let work_path = crate::config::test_support::absolute_path("service-reload-restart");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let current = coordinator.load();
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let mut candidate_config = Arc::try_unwrap(runtime_config_at(&work_path, port)).unwrap();
+        candidate_config.database.path = candidate_config.work.path.join("other.sqlite");
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            Arc::new(candidate_config),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let error = service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            super::ServiceReloadError::RestartRequired {
+                component: "database"
+            }
+        ));
+        assert_eq!(coordinator.current_revision(), RuntimeRevision(1));
+        assert!(!current.is_draining());
+        assert_eq!(service.runtime().revision(), RuntimeRevision(1));
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+    }
+
+    #[test]
+    fn webui_users_reload_dynamically_but_origin_requires_restart() {
+        let (source, _) = crate::config::test_support::portable_example();
+        let current = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&source)
+            .unwrap()
+            .resolved;
+        let with_user = source.replace(
+            "  users: []",
+            "  users:\n    - name: admin\n      password_hash: '$2b$04$QEeYuMZftq59wD41AcT2ruVzQinG4azJldvj/LXO7u9bzmP6dX6ri'",
+        );
+        let candidate = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&with_user)
+            .unwrap()
+            .resolved;
+
+        assert_eq!(
+            super::process_owned_reload_change(&current, &candidate),
+            None
+        );
+
+        let mut changed_origin = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
+            .load_str(&with_user)
+            .unwrap()
+            .resolved;
+        Arc::get_mut(&mut changed_origin)
+            .unwrap()
+            .webui
+            .public_origin = Some("https://dns.example.com".parse().unwrap());
+        assert_eq!(
+            super::process_owned_reload_change(&current, &changed_origin),
+            Some("webui")
+        );
+    }
+
+    /// V1-R01：正式 service reload 与刷新共享 mutation gate；owner panic 不遗留 task。
+    #[tokio::test]
+    async fn contract_v1_service_reload_serializes_refresh_and_reclaims_both_owners() {
+        use crate::ports::testing::TestGate;
+        use crate::resource::ResourceVersion;
+
+        for rebind in [false, true] {
+            let (_, root) = crate::config::test_support::portable_example();
+            std::fs::create_dir_all(&root).unwrap();
+            let resource_path = root.join("contract-hosts.txt");
+            std::fs::write(&resource_path, "192.0.2.10 old.example\n").unwrap();
+            let reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let port = reservation.local_addr().unwrap().port();
+            drop(reservation);
+            let factory = crate::runtime::SystemSocketFactory::new();
+            let budget = Deadline::new(Instant::now() + Duration::from_secs(5));
+            let resource = crate::config::resolve::ConfigId::new("local-hosts").unwrap();
+            let publication = Arc::new(TestGate::new());
+            let mut initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, port, true),
+                RuntimeRevision(1),
+                budget,
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            initial.set_policy_published_gate_for_test(resource.clone(), publication.clone());
+            let old_owner = initial.snapshot().policy_core().unwrap().finalizer_owner();
+            let old_panic = Arc::new(TestGate::new());
+            let task_gate = old_panic.clone();
+            old_owner
+                .submit_task(async move {
+                    task_gate.pause().await;
+                    panic!("synthetic historical finalizer panic");
+                })
+                .unwrap();
+            let initial =
+                crate::runtime::bind_prepared(initial, &factory, budget, &Cancellation::new())
+                    .await
+                    .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+            let previous = coordinator.load();
+            let mut service =
+                super::DnsService::with_default_timeout_from_coordinator(coordinator.clone())
+                    .unwrap();
+            let next_reservation = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let next_port = if rebind {
+                next_reservation.local_addr().unwrap().port()
+            } else {
+                port
+            };
+            drop(next_reservation);
+            let candidate = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, next_port, true),
+                RuntimeRevision(2),
+                budget,
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let short_candidate = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, next_port, true),
+                RuntimeRevision(2),
+                budget,
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let new_owner = candidate
+                .snapshot()
+                .policy_core()
+                .unwrap()
+                .finalizer_owner();
+            let new_panic = Arc::new(TestGate::new());
+            let task_gate = new_panic.clone();
+            new_owner
+                .submit_task(async move {
+                    task_gate.pause().await;
+                    panic!("synthetic current finalizer panic");
+                })
+                .unwrap();
+            std::fs::write(&resource_path, "192.0.2.11 new.example\n").unwrap();
+            let task_coordinator = coordinator.clone();
+            let expected = previous.clone();
+            let task_resource = resource.clone();
+            let refresh = tokio::spawn(async move {
+                task_coordinator
+                    .refresh_resource_if_current(
+                        &expected,
+                        &task_resource,
+                        u64::MAX,
+                        budget,
+                        Cancellation::new(),
+                    )
+                    .await
+            });
+            publication.wait_reached().await;
+            assert_eq!(
+                previous
+                    .snapshot()
+                    .resources()
+                    .lookup(&resource)
+                    .unwrap()
+                    .version(),
+                ResourceVersion::new(1, 1)
+            );
+            let short_budget = Deadline::new(Instant::now() + Duration::from_millis(20));
+            let timed_out = tokio::time::timeout(
+                Duration::from_millis(200),
+                service.reload_prepared(
+                    short_candidate,
+                    &factory,
+                    short_budget,
+                    Cancellation::new(),
+                ),
+            )
+            .await
+            .expect("reload mutation wait exceeded its original deadline");
+            assert!(matches!(timed_out, Err(super::ServiceReloadError::Timeout)));
+            assert!(Arc::ptr_eq(&coordinator.load(), &previous));
+            // 手动 poll 真实 reload 到等待点，不用 sleep 猜测是否已尝试 activation。
+            let mut reload =
+                Box::pin(service.reload_prepared(candidate, &factory, budget, Cancellation::new()));
+            std::future::poll_fn(|cx| {
+                assert!(reload.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            assert!(Arc::ptr_eq(&coordinator.load(), &previous));
+            publication.release();
+            let refreshed = tokio::time::timeout(Duration::from_secs(5), refresh)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            assert_eq!(refreshed.epoch(), 2);
+            let active = tokio::time::timeout(Duration::from_secs(5), &mut reload)
+                .await
+                .unwrap()
+                .unwrap();
+            drop(reload);
+            assert_eq!(active.revision(), RuntimeRevision(2));
+            assert_eq!(
+                active
+                    .snapshot()
+                    .resources()
+                    .lookup(&resource)
+                    .unwrap()
+                    .version(),
+                ResourceVersion::new(2, 0)
+            );
+            assert!(
+                coordinator
+                    .refresh_resource_if_current(
+                        &previous,
+                        &resource,
+                        u64::MAX,
+                        budget,
+                        Cancellation::new(),
+                    )
+                    .await
+                    .is_err()
+            );
+            let response = udp_query(
+                SocketAddr::from(([127, 0, 0, 1], next_port)),
+                941,
+                "new.example",
+            )
+            .await;
+            assert_eq!(response.response_code, ResponseCode::NoError);
+            assert_eq!(response.answers.len(), 1);
+
+            old_panic.wait_reached().await;
+            new_panic.wait_reached().await;
+            old_panic.release();
+            new_panic.release();
+            old_owner.wait_idle_for_test().await;
+            new_owner.wait_idle_for_test().await;
+            assert_eq!(old_owner.active_tasks(), 0);
+            assert_eq!(new_owner.active_tasks(), 0);
+            assert!(!old_owner.is_shutdown());
+            assert!(!new_owner.is_shutdown());
+
+            // 绑定失败不能替换刚发布的有效 runtime，也不能关闭它的资源 worker。
+            let occupied = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+            let failed = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(
+                    &root,
+                    &resource_path,
+                    occupied.local_addr().unwrap().port(),
+                    true,
+                ),
+                RuntimeRevision(3),
+                budget,
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let result = service
+                .reload_prepared(failed, &factory, budget, Cancellation::new())
+                .await;
+            assert!(matches!(result, Err(super::ServiceReloadError::Bind(_))));
+            assert!(Arc::ptr_eq(&coordinator.load(), &active));
+            let report = service.shutdown(&SystemClock::new(), budget).await.unwrap();
+            assert!(!report.deadline_expired);
+            assert!(old_owner.is_shutdown());
+            assert!(new_owner.is_shutdown());
+            drop((service, active, previous, coordinator, occupied));
+            let rebound = std::net::UdpSocket::bind(("127.0.0.1", next_port)).unwrap();
+            drop(rebound);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn reusing_listener_merges_published_resource_state() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-service-reuse-resource-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let resource_path = root.join("hosts.txt");
+        std::fs::write(&resource_path, "192.0.2.10 old.example\n").unwrap();
+        let port = 42_500 + (std::process::id() as u16 % 500);
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            resource_runtime_config(&root, &resource_path, port, true),
+            RuntimeRevision(1),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = RuntimeCoordinator::new(initial);
+
+        std::fs::write(&resource_path, "192.0.2.11 new.example\n").unwrap();
+        let resource = crate::config::resolve::ConfigId::new("local-hosts").unwrap();
+        let refreshed = coordinator
+            .refresh_resource(
+                &resource,
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(refreshed.epoch(), 2);
+
+        let prepared = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            resource_runtime_config(&root, &resource_path, port, true),
+            RuntimeRevision(2),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let active = coordinator
+            .activate_prepared_reusing_listeners(RuntimeRevision(1), prepared)
+            .await
+            .unwrap();
+
+        assert_eq!(active.listeners().local_addrs().unwrap()[0].port(), port);
+        assert_eq!(
+            active
+                .snapshot()
+                .resources()
+                .lookup(&resource)
+                .unwrap()
+                .version(),
+            crate::resource::ResourceVersion::new(2, 0)
+        );
+        active.shutdown_resource_refresh();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn running_service_observes_published_resource_refresh() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-service-live-resource-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let resource_path = root.join("hosts.txt");
+        std::fs::write(&resource_path, "192.0.2.10 old.example\n").unwrap();
+        let port = 43_000 + (std::process::id() as u16 % 500);
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            resource_runtime_config(&root, &resource_path, port, true),
+            RuntimeRevision(1),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+        let address = service.runtime().listeners().local_addrs().unwrap()[0];
+
+        let initial_response = udp_query(address, 1, "old.example.").await;
+        assert_eq!(initial_response.metadata.id, 1);
+        assert_eq!(
+            initial_response.metadata.response_code,
+            ResponseCode::NoError
+        );
+        assert!(initial_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(192, 0, 2, 10)
+        )));
+
+        std::fs::write(&resource_path, "192.0.2.11 new.example\n").unwrap();
+        let resource = crate::config::resolve::ConfigId::new("local-hosts").unwrap();
+        coordinator
+            .refresh_resource(
+                &resource,
+                u64::MAX,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        let refreshed_response = udp_query(address, 2, "new.example.").await;
+        assert_eq!(refreshed_response.metadata.id, 2);
+        assert_eq!(
+            refreshed_response.metadata.response_code,
+            ResponseCode::NoError
+        );
+        assert!(refreshed_response.answers.iter().any(|record| matches!(
+            &record.data,
+            RData::A(address) if address.0 == Ipv4Addr::new(192, 0, 2, 11)
+        )));
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn shutdown_closes_finalizers_from_previous_and_current_runtime() {
+        let port = 41_500 + (std::process::id() as u16 % 500);
+        let work_path = crate::config::test_support::absolute_path("service-reload-finalizer");
+        let initial = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(1),
+        )
+        .unwrap();
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let old_finalizer = initial.snapshot().policy_core().unwrap().finalizer_owner();
+        old_finalizer
+            .submit_task(std::future::pending::<()>())
+            .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+
+        let prepared = PreparedRuntime::prepare_with_policy_core(
+            runtime_config_at(&work_path, port),
+            RuntimeRevision(2),
+        )
+        .unwrap();
+        let current_finalizer = prepared.snapshot().policy_core().unwrap().finalizer_owner();
+        current_finalizer
+            .submit_task(std::future::pending::<()>())
+            .unwrap();
+        service
+            .reload_prepared(
+                prepared,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!old_finalizer.is_shutdown());
+        assert!(!current_finalizer.is_shutdown());
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+        assert!(old_finalizer.is_shutdown());
+        assert!(current_finalizer.is_shutdown());
+    }
+
+    #[tokio::test]
+    async fn reload_prepared_reconciles_resource_worker_tokens() {
+        let root = std::env::temp_dir().join(format!(
+            "fluxdns-service-resource-reload-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let resource_path = root.join("hosts.txt");
+        std::fs::write(&resource_path, "192.0.2.10 example.test\n").unwrap();
+        let base_port = 41_000 + (std::process::id() as u16 % 1_000) * 2;
+        let factory = crate::runtime::SystemSocketFactory::new();
+        let initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            resource_runtime_config(&root, &resource_path, base_port, true),
+            RuntimeRevision(1),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let initial = crate::runtime::bind_prepared(
+            initial,
+            &factory,
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            &Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        let coordinator = Arc::new(RuntimeCoordinator::new(initial));
+        let mut service =
+            super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                .unwrap();
+        assert_eq!(service.resource_task_count(), 1);
+        let old_token = service.resource_tasks[0].cancellation.clone();
+
+        let next = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            resource_runtime_config(&root, &resource_path, base_port + 1, true),
+            RuntimeRevision(2),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        service
+            .reload_prepared(
+                next,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+
+        assert!(!old_token.is_cancelled());
+        assert_eq!(service.resource_task_count(), 1);
+        assert!(!service.resource_tasks[0].cancellation.is_cancelled());
+
+        let next_without_resource = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            resource_runtime_config(&root, &resource_path, base_port + 2, false),
+            RuntimeRevision(3),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap();
+        service
+            .reload_prepared(
+                next_without_resource,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+        assert!(old_token.is_cancelled());
+        assert_eq!(service.resource_task_count(), 0);
+
+        let report = service
+            .shutdown(
+                &SystemClock::new(),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        assert!(!report.deadline_expired);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// 在真实 Supervisor 注入重复 task ID，覆盖 transport 失败和 transport 已注册后的资源失败。
+    #[tokio::test]
+    async fn reload_task_registration_failure_keeps_old_dns_and_allows_retry() {
+        for duplicate in ["transport.udp.2.0", "resource.refresh.2.0"] {
+            let base = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("_fluxdns/p1-service-stage");
+            let root = base.join(format!(
+                "{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            let resource_path = root.join("hosts.txt");
+            std::fs::write(&resource_path, "192.0.2.10 example.test\n").unwrap();
+            let port = available_transport_ports()[0];
+            let factory = crate::runtime::SystemSocketFactory::new();
+            let initial = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, port, false),
+                RuntimeRevision(1),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let bound = crate::runtime::bind_prepared(
+                initial,
+                &factory,
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                &Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let coordinator = Arc::new(RuntimeCoordinator::new(bound));
+            let original = coordinator.load();
+            let mut service =
+                super::DnsService::with_default_timeout_from_coordinator(Arc::clone(&coordinator))
+                    .unwrap();
+            let collision = service
+                .supervisor
+                .spawn_scoped(
+                    TaskSpec::new(
+                        duplicate,
+                        "test",
+                        FaultLevel::Degraded,
+                        RestartPolicy::Never,
+                    )
+                    .unwrap(),
+                    |_| Box::pin(std::future::pending()),
+                )
+                .unwrap();
+            let next = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, port, true),
+                RuntimeRevision(2),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(
+                service
+                    .reload_prepared(
+                        next,
+                        &factory,
+                        Deadline::new(Instant::now() + Duration::from_secs(5)),
+                        Cancellation::new(),
+                    )
+                    .await,
+                Err(super::ServiceReloadError::Task(
+                    crate::runtime::SupervisorError::DuplicateTask(_),
+                ))
+            ));
+            assert!(Arc::ptr_eq(&coordinator.load(), &original));
+            assert!(Arc::ptr_eq(service.runtime(), &original));
+            assert!(!original.is_draining());
+            assert_eq!(service.transport_task_count(), 1);
+            assert_eq!(service.resource_task_count(), 0);
+            let response = udp_query(
+                SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                1,
+                "example.test.",
+            )
+            .await;
+            assert_eq!(response.metadata.response_code, ResponseCode::NoError);
+            assert_eq!(response.answers.len(), 1);
+
+            collision.cancel(CancelReason::Shutdown);
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while service.supervisor.task_count() > 1 {
+                    let completion = service.supervisor.join_next().await.unwrap();
+                    assert_eq!(completion.exit, TaskExit::Cancelled);
+                }
+            })
+            .await
+            .unwrap();
+            let retry = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+                resource_runtime_config(&root, &resource_path, port, true),
+                RuntimeRevision(2),
+                Deadline::new(Instant::now() + Duration::from_secs(5)),
+                Cancellation::new(),
+            )
+            .await
+            .unwrap();
+            let active = service
+                .reload_prepared(
+                    retry,
+                    &factory,
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                    Cancellation::new(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(active.revision(), RuntimeRevision(2));
+            assert_eq!(service.resource_task_count(), 1);
+            assert_eq!(
+                udp_query(
+                    SocketAddr::from((Ipv4Addr::LOCALHOST, port)),
+                    2,
+                    "example.test."
+                )
+                .await
+                .answers
+                .len(),
+                1,
+            );
+            service
+                .shutdown(
+                    &SystemClock::new(),
+                    Deadline::new(Instant::now() + Duration::from_secs(5)),
+                )
+                .await
+                .unwrap();
+            let target = root.canonicalize().unwrap();
+            assert!(target.starts_with(base.canonicalize().unwrap()));
+            std::fs::remove_dir_all(target).unwrap();
+        }
+    }
+}

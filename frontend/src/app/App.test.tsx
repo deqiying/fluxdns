@@ -1,0 +1,818 @@
+import { QueryClient } from "@tanstack/react-query";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it } from "vitest";
+import { http, HttpResponse } from "msw";
+import { setMockAuthenticated, setMockSetupRequired } from "@/mocks/handlers";
+import { processMetricsFixture } from "@/mocks/fixtures";
+import { server } from "@/mocks/server";
+import type { ApplyRequest, Candidate, ConfigState, FileSyncRequest } from "@/shared/config/api";
+import { AppProviders } from "./providers";
+import { App } from "./App";
+import { managementRoutes } from "./route-contract";
+
+function renderApp(path: string) {
+  window.history.replaceState({}, "", path);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+  return render(
+    <AppProviders queryClient={queryClient}>
+      <App />
+    </AppProviders>,
+  );
+}
+
+describe("application routes", () => {
+  it("未初始化时先进入初始化页且不请求受保护数据", async () => {
+    setMockSetupRequired(true);
+    renderApp("/dashboard");
+    expect(await screen.findByRole("heading", { name: "初始化 FluxDNS" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/initialize");
+  });
+
+  it("初始化成功后自动建立 session 并进入 Dashboard", async () => {
+    const user = userEvent.setup();
+    setMockSetupRequired(true);
+    renderApp("/initialize");
+    await screen.findByRole("heading", { name: "初始化 FluxDNS" });
+    await user.type(screen.getByLabelText("用户名"), "admin");
+    await user.type(screen.getByLabelText("密码"), "correct horse battery staple");
+    await user.type(screen.getByLabelText("确认密码"), "correct horse battery staple");
+    await user.click(screen.getByRole("button", { name: "创建管理账号" }));
+    expect(await screen.findByRole("heading", { name: "服务状态" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/dashboard");
+    expect(window.localStorage.length).toBe(0);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("初始化并发冲突后刷新状态并返回登录页", async () => {
+    const user = userEvent.setup();
+    let setupState: "required" | "ready" = "required";
+    setMockSetupRequired(true);
+    server.use(
+      http.get("/api/v2/auth/setup", () => HttpResponse.json({ state: setupState })),
+      http.post("/api/v2/auth/setup", () => {
+        setupState = "ready";
+        return HttpResponse.json(
+          { code: "SETUP_ALREADY_COMPLETED", message: "setup already completed", request_id: "mock-setup-409", retryable: false },
+          { status: 409 },
+        );
+      }),
+    );
+    renderApp("/initialize");
+    expect(await screen.findByRole("heading", { name: "初始化 FluxDNS" })).toBeInTheDocument();
+    await user.type(screen.getByLabelText("用户名"), "admin");
+    await user.type(screen.getByLabelText("密码"), "correct horse battery staple");
+    await user.type(screen.getByLabelText("确认密码"), "correct horse battery staple");
+    await user.click(screen.getByRole("button", { name: "创建管理账号" }));
+    expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("未登录时保护所有业务路由", async () => {
+    renderApp("/listeners");
+    expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("登录后回跳原受保护路由且不持久化密码", async () => {
+    const user = userEvent.setup();
+    renderApp("/listeners");
+    await screen.findByRole("heading", { name: "登录 FluxDNS" });
+
+    await user.type(screen.getByLabelText("用户名"), "operator");
+    const password = screen.getByLabelText("密码") as HTMLInputElement;
+    await user.type(password, "fixture-password");
+    await user.click(screen.getByRole("button", { name: /登\s*录/ }));
+
+    expect(await screen.findByRole("heading", { name: "监听入口" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/listeners");
+    await waitFor(() => expect(password.value).toBe(""));
+    expect(window.localStorage.length).toBe(0);
+    expect(window.sessionStorage.length).toBe(0);
+  });
+
+  it("有效 session 可直接进入 Dashboard 并读取 v2 服务指标", async () => {
+    setMockAuthenticated(true);
+    renderApp("/dashboard");
+    expect(await screen.findByRole("heading", { name: "服务状态" })).toBeInTheDocument();
+    expect(await screen.findByText("当前内存")).toBeInTheDocument();
+  });
+
+  it("全局提示读取外部差异并在确认后只还原文件", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    const changed: ConfigState = {
+      active_revision: "active-1",
+      runtime_revision: "runtime-1",
+      persisted_revision: "active-1",
+      observed_file_revision: "files-2",
+      files: { source: "changed", derived: "unchanged" },
+      synchronization: "synced",
+      operation_id: null,
+    };
+    let current = changed;
+    const restoreRequests: FileSyncRequest[] = [];
+    server.use(
+      http.get("/api/v2/config/state", () => HttpResponse.json(current)),
+      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
+        expected: { active_revision: "active-1", observed_file_revision: "files-2" },
+        editable: [],
+        protected_changes: ["logs"],
+        parse_error: null,
+      })),
+      http.post("/api/v2/config/files/restore", async ({ request }) => {
+        const restored = await request.json() as FileSyncRequest;
+        restoreRequests.push(restored);
+        current = {
+          ...changed,
+          observed_file_revision: "files-3",
+          files: { source: "unchanged", derived: "unchanged" },
+        };
+        return HttpResponse.json({
+          operation_id: restored.operation_id,
+          status: { state: "applied_synced", active_revision: "active-1", persisted_revision: "active-1" },
+        });
+      }),
+    );
+
+    renderApp("/dashboard");
+    expect(await screen.findByText("配置文件已在外部修改")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看" }));
+    expect(await screen.findByText("logs")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /还原文件/ }));
+    const confirmationButtons = screen.getAllByRole("button", { name: /还原文件/ });
+    await user.click(confirmationButtons[confirmationButtons.length - 1]);
+
+    await waitFor(() => expect(restoreRequests).toHaveLength(1));
+    expect(restoreRequests[0]).toMatchObject({
+      expected: { active_revision: "active-1", observed_file_revision: "files-2" },
+      discard_external_changes: true,
+    });
+    expect(restoreRequests[0]?.operation_id).toBeTruthy();
+    await waitFor(() => expect(screen.queryByText("配置文件已在外部修改")).not.toBeInTheDocument());
+  });
+
+  it("未同步提示使用原 operation_id 重试持久化而不重放 apply", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    const unsynchronized: ConfigState = {
+      active_revision: "active-2",
+      runtime_revision: "runtime-2",
+      persisted_revision: "active-1",
+      observed_file_revision: "files-4",
+      files: { source: "unchanged", derived: "unchanged" },
+      synchronization: "applied_unpersisted",
+      operation_id: "apply-operation-1",
+    };
+    let current = unsynchronized;
+    const retryRequests: FileSyncRequest[] = [];
+    let applyRequests = 0;
+    server.use(
+      http.get("/api/v2/config/state", () => HttpResponse.json(current)),
+      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
+        expected: { active_revision: "active-2", observed_file_revision: "files-4" },
+        editable: [],
+        protected_changes: [],
+        parse_error: null,
+      })),
+      http.post("/api/v2/config/files/retry", async ({ request }) => {
+        const retried = await request.json() as FileSyncRequest;
+        retryRequests.push(retried);
+        current = {
+          ...unsynchronized,
+          persisted_revision: "active-2",
+          observed_file_revision: "files-5",
+          synchronization: "synced",
+          operation_id: null,
+        };
+        return HttpResponse.json({
+          operation_id: "apply-operation-1",
+          status: { state: "applied_synced", active_revision: "active-2", persisted_revision: "active-2" },
+        });
+      }),
+      http.post("/api/v2/config/apply", () => {
+        applyRequests += 1;
+        return HttpResponse.error();
+      }),
+    );
+
+    renderApp("/listeners");
+    expect(await screen.findByText("运行配置已生效，但文件尚未同步")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看" }));
+    await screen.findByText("活动版本");
+    await user.click(screen.getByRole("button", { name: "重试文件同步" }));
+
+    await waitFor(() => expect(retryRequests).toHaveLength(1));
+    expect(retryRequests[0]).toEqual({
+      operation_id: "apply-operation-1",
+      expected: { active_revision: "active-2", observed_file_revision: "files-4" },
+      discard_external_changes: false,
+    });
+    expect(applyRequests).toBe(0);
+    await waitFor(() => expect(screen.queryByText("运行配置已生效，但文件尚未同步")).not.toBeInTheDocument());
+  });
+
+  it("外部差异可将 Hosts 与日志作为一个候选组合采用", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    const changed: ConfigState = {
+      active_revision: "active-3",
+      runtime_revision: "runtime-3",
+      persisted_revision: "active-3",
+      observed_file_revision: "files-6",
+      files: { source: "changed", derived: "unchanged" },
+      synchronization: "synced",
+      operation_id: null,
+    };
+    let current = changed;
+    const candidates: Candidate[] = [];
+    const applies: ApplyRequest[] = [];
+    server.use(
+      http.get("/api/v2/config/state", () => HttpResponse.json(current)),
+      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
+        expected: { active_revision: "active-3", observed_file_revision: "files-6" },
+        editable: [
+          {
+            active: { module: "hosts", value: { name: "local", type: "const", format: "hosts", hosts: "127.0.0.1 localhost" } },
+            external: { module: "hosts", value: { name: "local", type: "const", format: "hosts", hosts: "127.0.0.2 localhost" } },
+          },
+          {
+            active: { module: "logs", value: { enable: true, level: "info", path: "old.log" } },
+            external: { module: "logs", value: { enable: true, level: "debug", path: "new.log" } },
+          },
+        ],
+        protected_changes: ["database"],
+        parse_error: null,
+      })),
+      http.post("/api/v2/config/validate", async ({ request }) => {
+        const candidate = await request.json() as Candidate;
+        candidates.push(candidate);
+        return HttpResponse.json({
+          validation_token: "combo-validation-1",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: ["discard_external_changes"],
+          affected_names: ["local"],
+        });
+      }),
+      http.post("/api/v2/config/apply", async ({ request }) => {
+        const apply = await request.json() as ApplyRequest;
+        applies.push(apply);
+        current = {
+          ...changed,
+          active_revision: "active-4",
+          runtime_revision: "runtime-4",
+          persisted_revision: "active-4",
+          observed_file_revision: "files-7",
+          files: { source: "unchanged", derived: "unchanged" },
+        };
+        return HttpResponse.json({
+          operation_id: apply.operation_id,
+          status: { state: "applied_synced", active_revision: "active-4", persisted_revision: "active-4" },
+        });
+      }),
+    );
+
+    renderApp("/dashboard");
+    expect(await screen.findByText("配置文件已在外部修改")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看" }));
+    expect(await screen.findByText("Hosts / local")).toBeInTheDocument();
+    expect(screen.getByText("日志")).toBeInTheDocument();
+    await user.click(await screen.findByRole("button", { name: "组合采用 2 项" }));
+    expect(await screen.findByText(/未采用可编辑差异 0 项，受保护变化 1 类/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "确认采用" }));
+
+    await waitFor(() => expect(applies).toHaveLength(1));
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({
+      expected: { active_revision: "active-3", observed_file_revision: "files-6" },
+      discard_external_changes: true,
+      changes: [
+        { module: "hosts", change: { action: "update", original_name: "local", value: { hosts: "127.0.0.2 localhost" } } },
+        { module: "logs", change: { level: "debug", path: "new.log" } },
+      ],
+    });
+    expect(applies[0]).toMatchObject({ candidate: candidates[0], validation_token: "combo-validation-1", confirmations: ["discard_external_changes"] });
+    await waitFor(() => expect(screen.queryByText("配置文件已在外部修改")).not.toBeInTheDocument());
+  });
+
+  it("组合采用校验遇到二次外改时停止并要求重读", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    const changed: ConfigState = {
+      active_revision: "active-5",
+      runtime_revision: "runtime-5",
+      persisted_revision: "active-5",
+      observed_file_revision: "files-8",
+      files: { source: "changed", derived: "unchanged" },
+      synchronization: "synced",
+      operation_id: null,
+    };
+    let applyRequests = 0;
+    server.use(
+      http.get("/api/v2/config/state", () => HttpResponse.json(changed)),
+      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
+        expected: { active_revision: "active-5", observed_file_revision: "files-8" },
+        editable: [{
+          active: { module: "logs", value: { enable: true, level: "info", path: "old.log" } },
+          external: { module: "logs", value: { enable: true, level: "warn", path: "new.log" } },
+        }],
+        protected_changes: [],
+        parse_error: null,
+      })),
+      http.post("/api/v2/config/validate", () => HttpResponse.json({
+        code: "FILE_REVISION_CONFLICT",
+        message: "configuration file changed again",
+        request_id: "mock-file-conflict",
+        retryable: true,
+      }, { status: 409 })),
+      http.post("/api/v2/config/apply", () => {
+        applyRequests += 1;
+        return HttpResponse.error();
+      }),
+    );
+
+    renderApp("/dashboard");
+    expect(await screen.findByText("配置文件已在外部修改")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "查看" }));
+    await user.click(await screen.findByRole("button", { name: "组合采用 1 项" }));
+    expect(await screen.findByText("配置文件已再次变化，请重新读取差异。")).toBeInTheDocument();
+    expect(applyRequests).toBe(0);
+  });
+
+  it.each(
+    managementRoutes
+      .filter(({ path }) => path !== "/dashboard" && path !== "/queries" && path !== "/listeners" && path !== "/upstreams" && path !== "/dns-settings" && path !== "/strategies" && path !== "/hosts" && path !== "/rule-sets" && path !== "/clients" && path !== "/proxies" && path !== "/system-settings" && path !== "/system-runtime")
+      .map(({ path, title }) => [path, title]),
+  )("有效 session 可加载未接线入口 %s", async (path, heading) => {
+    setMockAuthenticated(true);
+    renderApp(path);
+    expect(await screen.findByRole("heading", { name: heading, level: 2 })).toBeInTheDocument();
+    expect(screen.getByText("当前版本暂不可用。")).toBeInTheDocument();
+  });
+
+  it("代理页通过单模块接口预校验并保存 SecretRef 引用", async () => {
+    const user = userEvent.setup();
+    const requests: unknown[] = [];
+    setMockAuthenticated(true);
+    server.use(
+      http.post("/api/v2/config/modules/outbound/validate", async ({ request }) => {
+        const candidate = await request.json() as { expected: unknown };
+        requests.push(candidate);
+        return HttpResponse.json({
+          validation_token: "validation-proxy",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: [],
+          affected_names: ["proxy-primary"],
+        });
+      }),
+      http.post("/api/v2/config/modules/outbound/apply", async ({ request }) => {
+        const body = await request.json() as { operation_id: string };
+        requests.push(body);
+        return HttpResponse.json({
+          operation_id: body.operation_id,
+          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
+        });
+      }),
+    );
+    renderApp("/proxies");
+    expect(await screen.findByRole("heading", { name: "代理配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("proxy-primary")).toBeInTheDocument();
+    // 使用按钮已有的 aria-label，避免 jsdom 为整页按钮计算可访问名称和样式。
+    await user.click(screen.getByLabelText("编辑代理 proxy-primary"));
+    const dialog = await screen.findByRole("dialog", { name: "编辑代理" });
+    const secret = within(dialog).getByLabelText("环境变量", { selector: "input[type='text']" });
+    await user.clear(secret);
+    await user.type(secret, "UPDATED_PROXY_URL");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]).toMatchObject({
+      changes: [{
+        module: "outbound",
+        change: {
+          action: "update",
+          original_name: "proxy-primary",
+          value: { name: "proxy-primary", type: "socks5", proxy_url: { env: "UPDATED_PROXY_URL" } },
+        },
+      }],
+      discard_external_changes: false,
+    });
+  }, 10_000);
+
+  it("Hosts 页面加载类型化来源和 Runtime 状态", async () => {
+    setMockAuthenticated(true);
+    renderApp("/hosts");
+    expect(await screen.findByRole("heading", { name: "Hosts 配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("office")).toBeInTheDocument();
+    expect(screen.getByText("stale")).toBeInTheDocument();
+  });
+
+  it("规则集页面区分远程来源和陈旧快照", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/rule-sets");
+    expect(await screen.findByRole("heading", { name: "规则集", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("domains")).toBeInTheDocument();
+    expect(screen.getByText("stale")).toBeInTheDocument();
+    // 刷新列显示可感知单位，不再直接暴露后端的纳秒串。
+    expect(screen.getByText("1 天")).toBeInTheDocument();
+    expect(screen.queryByText("86400000000000ns")).toBeNull();
+
+    await user.click(screen.getByLabelText("编辑规则集 domains"));
+    const dialog = await screen.findByRole("dialog", { name: "编辑规则集" });
+    expect(within(dialog).getByLabelText("更新周期")).toHaveValue("1");
+    expect(within(dialog).getByLabelText("更新周期单位").closest(".ant-select")?.textContent).toBe("天");
+  }, 10_000);
+
+  it("策略页面展示有序规则和覆盖来源", async () => {
+    const user = userEvent.setup();
+    const requests: unknown[] = [];
+    setMockAuthenticated(true);
+    server.use(
+      http.post("/api/v2/config/modules/strategy/validate", async ({ request }) => {
+        const candidate = await request.json() as { expected: unknown };
+        requests.push(candidate);
+        return HttpResponse.json({
+          validation_token: "validation-strategy",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: [],
+          affected_names: ["default"],
+        });
+      }),
+      http.post("/api/v2/config/modules/strategy/apply", async ({ request }) => {
+        const body = await request.json() as { operation_id: string };
+        requests.push(body);
+        return HttpResponse.json({
+          operation_id: body.operation_id,
+          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
+        });
+      }),
+    );
+    renderApp("/strategies");
+    expect(await screen.findByRole("heading", { name: "DNS 分流策略", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("default-group")).toBeInTheDocument();
+    expect(screen.getByText("2 条")).toBeInTheDocument();
+
+    // 可选 TTL 覆盖同样按「数值 + 单位」回显；0 表示该边界不设限，必须允许保存。
+    await user.click(screen.getByLabelText("编辑策略 default"));
+    const dialog = await screen.findByRole("dialog", { name: "编辑策略" });
+    const min = within(dialog).getByLabelText("最小 TTL");
+    expect(min).toHaveValue("30");
+    expect(within(dialog).getByLabelText("最小 TTL单位").closest(".ant-select")?.textContent).toBe("秒");
+    expect(within(dialog).getByLabelText("最大 TTL")).toHaveValue("1");
+    expect(within(dialog).getByLabelText("最大 TTL单位").closest(".ant-select")?.textContent).toBe("小时");
+    await user.clear(min);
+    await user.type(min, "0");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]).toMatchObject({
+      changes: [{
+        module: "strategy",
+        change: {
+          action: "update",
+          original_name: "default",
+          value: { ttl_override: { enabled: true, min: "0s", max: "1h" } },
+        },
+      }],
+    });
+  }, 10_000);
+
+  it("Listener 页面展示真实绑定接纳状态", async () => {
+    setMockAuthenticated(true);
+    renderApp("/listeners");
+    expect(await screen.findByRole("heading", { name: "监听入口", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("127.0.0.1:15353")).toBeInTheDocument();
+    expect(screen.getAllByText("1/1 接受中")).toHaveLength(2);
+  });
+
+  it("监听入口标题区只保留同构短句和同步状态", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/listeners");
+    expect(await screen.findByText("每一处监听，稳定待命。")).toBeInTheDocument();
+    // 胶囊读全局轮询状态：mock 的 /config/state 为 applied_unpersisted，必须落在 pending 色调而非绿色。
+    const badge = await screen.findByRole("status", { name: /^配置同步状态：/ });
+    expect(badge).toHaveClass("config-sync-badge-pending");
+    // 标题区不再暴露 revision，避免与 服务状态／解析记录 的标题区风格分叉。
+    expect(screen.queryByText(/活动版本|文件版本/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加监听入口" })).toBeInTheDocument();
+    // 搜索、空态与弹窗标题同批转为中文，防止只改按钮的半途状态回归。
+    expect(screen.getByPlaceholderText("搜索监听入口名称")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "添加监听入口" }));
+    expect(await screen.findByRole("dialog", { name: "添加监听入口" })).toBeInTheDocument();
+    // 样式钩子：页面级与胶囊 class 必须存在，否则标题区规则会静默失效。
+    expect(document.querySelector(".listener-page .page-heading")).not.toBeNull();
+    expect(document.querySelector(".config-sync-badge")).not.toBeNull();
+  });
+
+  it("客户端编辑时保持 client_id 只读", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/clients");
+    expect(await screen.findByRole("heading", { name: "客户端配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("Desktop-01")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "编辑客户端 desktop" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑客户端" });
+    expect(within(dialog).getByLabelText("客户端 ID")).toBeDisabled();
+  }, 10_000);
+
+  it("DNS 页面展示缓存、详情和真实保留状态", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/dns-settings");
+    expect(await screen.findByRole("heading", { name: "DNS 配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("数据保留")).toBeInTheDocument();
+    // 存储大小一律以人类可读单位展示，不再暴露原始字节数。
+    expect(await screen.findByText("详情 768 MB")).toBeInTheDocument();
+    expect(await screen.findByText("64 MB")).toBeInTheDocument();
+    expect(await screen.findByText("1 GB")).toBeInTheDocument();
+
+    // 所有 Duration 字段按「数值 + 单位」回显，单位从纳秒串换算成最大整单位。
+    await user.click(screen.getByRole("button", { name: "编辑 DNS" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 DNS 配置" });
+    expect(within(dialog).getByLabelText("失败 TTL")).toHaveValue("5");
+    expect(within(dialog).getByLabelText("失败 TTL单位").closest(".ant-select")?.textContent).toBe("秒");
+    expect(within(dialog).getByLabelText("回答 TTL")).toHaveValue("10");
+    expect(within(dialog).getByLabelText("快照周期")).toHaveValue("5");
+    expect(within(dialog).getByLabelText("快照周期单位").closest(".ant-select")?.textContent).toBe("分钟");
+    expect(within(dialog).getByLabelText("最大陈旧时间")).toHaveValue("1");
+    expect(within(dialog).getByLabelText("最大陈旧时间单位").closest(".ant-select")?.textContent).toBe("天");
+    expect(within(dialog).queryByDisplayValue("5000000000ns")).toBeNull();
+  }, 10_000);
+
+  it("系统配置页面区分只读启动配置和可编辑日志", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/system-settings");
+    expect(await screen.findByRole("heading", { name: "系统配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("活动源配置中的只读路径表达")).toBeInTheDocument();
+    expect(await screen.findByText("D:/Projects/Rust/fluxdns/_fluxdns/statistics.db")).toBeInTheDocument();
+    expect(screen.getByText("http://127.0.0.1:8080")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "编辑日志" }));
+    expect(await screen.findByRole("dialog", { name: "编辑日志" })).toBeInTheDocument();
+    expect(screen.getByLabelText("日志文件")).toHaveValue("./logs/fluxdns.log");
+  });
+
+  it("系统运行状态显示 v2 进程采样并可手动刷新", async () => {
+    const user = userEvent.setup();
+    let processRequests = 0;
+    setMockAuthenticated(true);
+    server.use(
+      http.get("/api/v2/system/runtime", () => {
+        processRequests += 1;
+        return HttpResponse.json(processMetricsFixture);
+      }),
+    );
+    renderApp("/system-runtime");
+
+    expect(await screen.findByRole("heading", { name: "系统运行状态", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("186.4 MB")).toBeInTheDocument();
+    expect(screen.getByText("1.25%")).toBeInTheDocument();
+    expect(screen.getByText("18")).toBeInTheDocument();
+    expect(screen.getByText(processMetricsFixture.version)).toBeInTheDocument();
+    expect(screen.getByText(/02:00:/)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(processRequests).toBe(2));
+  });
+
+  it("系统运行状态把指标与运行信息放进同一条四列栅格", async () => {
+    setMockAuthenticated(true);
+    renderApp("/system-runtime");
+    expect(await screen.findByRole("heading", { name: "系统运行状态", level: 2 })).toBeInTheDocument();
+
+    const metricList = await screen.findByRole("list", { name: "进程指标" });
+    // 四个同构格子：多出来的「采样时间」不再以 16px 双行日期混进 30px 数值格。
+    expect(within(metricList).getAllByRole("listitem")).toHaveLength(4);
+    expect(metricList).toHaveTextContent("运行时长");
+    expect(metricList).toHaveTextContent("自启动累计 2 小时 0 分钟");
+    expect(metricList).toHaveTextContent("进程 RSS，含映射页");
+    expect(metricList).toHaveTextContent("相对单核，1 秒采样窗口");
+
+    expect(screen.getByRole("group", { name: "启动时间" })).toHaveTextContent("2026/09/08 20:40:00 UTC");
+    expect(screen.getByRole("group", { name: "采样时间" })).toHaveTextContent("2026/09/03 08:00:00 UTC");
+    expect(screen.getByRole("group", { name: "采样来源" })).toHaveTextContent("主实例进程");
+  });
+
+  it("系统运行状态呈现主机环境与数据面摘要", async () => {
+    setMockAuthenticated(true);
+    renderApp("/system-runtime");
+    expect(await screen.findByRole("heading", { name: "系统运行状态", level: 2 })).toBeInTheDocument();
+
+    expect(await screen.findByRole("group", { name: "操作系统" })).toHaveTextContent("Windows 11 Pro 24H2");
+    expect(screen.getByRole("group", { name: "内核 / 构建版本" })).toHaveTextContent("10.0.26200.5483");
+    expect(screen.getByRole("group", { name: "CPU 架构" })).toHaveTextContent("x86_64 · 16 逻辑核心");
+    expect(screen.getByRole("group", { name: "主机名" })).toHaveTextContent("fluxdns-win");
+    expect(screen.getByRole("group", { name: "进程 ID" })).toHaveTextContent("4,242");
+    expect(screen.getByRole("group", { name: "数据目录" })).toHaveTextContent("D:/Projects/Rust/fluxdns/_fluxdns");
+
+    expect(await screen.findByRole("group", { name: "监听入口" }))
+      .toHaveTextContent("2 个绑定 · UDP 127.0.0.1:15353 · DoH 127.0.0.1:18443");
+    expect(screen.getByRole("group", { name: "在线客户端" })).toHaveTextContent("2 个");
+    expect(screen.getByRole("group", { name: "DNS 缓存快照" })).toHaveTextContent("空闲 · 第 3 代 · 32 KB");
+    const revisionRow = screen.getByRole("group", { name: "配置版本" });
+    expect(revisionRow).toHaveTextContent("active-8");
+    expect(revisionRow).toHaveTextContent("文件未同步");
+    expect(screen.getByRole("group", { name: "资源状态" })).toHaveTextContent("Hosts 1/2 就绪 · 规则集 1/2 就绪");
+  });
+
+  it("系统运行状态保留主机与数据面的降级原因", async () => {
+    setMockAuthenticated(true);
+    server.use(
+      http.get("/api/v2/system/runtime", () => HttpResponse.json({
+        ...processMetricsFixture,
+        host: { ...processMetricsFixture.host, os: null, kernel: null, hostname: null },
+      })),
+      http.get("/api/v2/config/modules/listener", () => HttpResponse.json(
+        { code: "NOT_FOUND", message: "listener state unavailable", request_id: "mock-v2-404", retryable: false, field_errors: [] },
+        { status: 404, headers: { "X-Request-Id": "mock-v2-404" } },
+      )),
+    );
+    renderApp("/system-runtime");
+    expect(await screen.findByRole("heading", { name: "系统运行状态", level: 2 })).toBeInTheDocument();
+
+    // 主机字段读取失败时不伪造值，行高由固定三段式排布保持不变。
+    const osRow = await screen.findByRole("group", { name: "操作系统" });
+    expect(within(osRow).getByText("暂不可用")).toBeInTheDocument();
+    expect(within(screen.getByRole("group", { name: "主机名" })).getByText("暂不可用")).toBeInTheDocument();
+
+    // 数据面读取失败保留契约错误码，而不是显示空值。
+    const listenerRow = screen.getByRole("group", { name: "监听入口" });
+    await waitFor(() => expect(listenerRow).toHaveTextContent("NOT_FOUND"));
+    expect(within(listenerRow).getByText("暂不可用")).toBeInTheDocument();
+  });
+
+  it("系统运行状态不把不可用进程读数伪装为零", async () => {
+    setMockAuthenticated(true);
+    server.use(
+      http.get("/api/v2/system/runtime", () => HttpResponse.json({
+        ...processMetricsFixture,
+        rss_bytes: { state: "unavailable", reason: "sampling_failed", observed_seconds: null },
+        cpu_percent: { state: "unavailable", reason: "warmup", observed_seconds: 1 },
+        threads: { state: "unavailable", reason: "unsupported", observed_seconds: null },
+      })),
+    );
+    renderApp("/system-runtime");
+
+    expect(await screen.findByText("sampling_failed")).toBeInTheDocument();
+    expect(screen.getByText("warmup")).toBeInTheDocument();
+    expect(screen.getByText("unsupported")).toBeInTheDocument();
+    expect(screen.queryByText("0 MB")).not.toBeInTheDocument();
+  });
+
+  it("按三组展示十二个入口并保持当前激活态", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/dashboard");
+    await screen.findByRole("heading", { name: "服务状态" });
+
+    const navigation = screen.getByRole("menu", { name: "主导航" });
+    expect(within(navigation).getByText("监控")).toBeInTheDocument();
+    expect(within(navigation).getByText("DNS 管理")).toBeInTheDocument();
+    expect(within(navigation).getByText("系统")).toBeInTheDocument();
+    for (const route of managementRoutes) {
+      expect(within(navigation).getByText(route.title)).toBeInTheDocument();
+    }
+
+    expect(within(navigation).getByText("服务状态").closest("li")).toHaveClass("ant-menu-item-selected");
+    await user.click(within(navigation).getByText("监听入口"));
+    expect(await screen.findByRole("heading", { name: "监听入口" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/listeners");
+    await user.click(screen.getByRole("button", { name: "收起导航" }));
+    expect(screen.getByRole("button", { name: "展开导航" })).toBeInTheDocument();
+  });
+
+  it("服务状态使用 v2 固定口径并在同一趋势图保留缺口", async () => {
+    setMockAuthenticated(true);
+    renderApp("/dashboard");
+
+    expect(await screen.findByText("当前内存")).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "当前内存" })).toHaveTextContent("186.4 MB");
+    expect(screen.getByRole("group", { name: "平均 QPS" })).toHaveTextContent("4.25 请求/秒");
+    expect(screen.getByRole("group", { name: "平均 RPM" })).toHaveTextContent("255 请求/分钟");
+    expect(screen.getByRole("group", { name: "CPU 占用" })).toHaveTextContent("1.25 %");
+    expect(screen.getByRole("img", { name: /QPS 与 RPM 请求趋势/ })).toBeInTheDocument();
+    expect(document.querySelectorAll(".metrics-chart-qps-line")).toHaveLength(2);
+    expect(document.querySelectorAll(".metrics-chart-rpm-line")).toHaveLength(2);
+  });
+
+  it("DNS 上游页内 tab 使用查询参数并支持返回", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/upstreams");
+    expect(await screen.findByRole("heading", { name: "DNS 上游", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText("secure-dns")).toBeInTheDocument();
+
+    const groupsTab = screen.getByRole("tab", { name: "上游组" });
+    await user.click(groupsTab);
+    expect(groupsTab).toHaveAttribute("aria-selected", "true");
+    expect(window.location.search).toBe("?tab=groups");
+
+    window.history.back();
+    await waitFor(() => expect(window.location.search).toBe(""));
+    await waitFor(() => expect(screen.getByRole("tab", { name: "上游" })).toHaveAttribute("aria-selected", "true"));
+  });
+
+  it("上游组超时按秒回显并以紧凑 duration 提交", async () => {
+    const user = userEvent.setup();
+    const requests: unknown[] = [];
+    setMockAuthenticated(true);
+    server.use(
+      http.post("/api/v2/config/modules/upstreams/validate", async ({ request }) => {
+        const candidate = await request.json() as { expected: unknown };
+        requests.push(candidate);
+        return HttpResponse.json({
+          validation_token: "validation-upstreams",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: [],
+          affected_names: ["default-group"],
+        });
+      }),
+      http.post("/api/v2/config/modules/upstreams/apply", async ({ request }) => {
+        const body = await request.json() as { operation_id: string };
+        requests.push(body);
+        return HttpResponse.json({
+          operation_id: body.operation_id,
+          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
+        });
+      }),
+    );
+    renderApp("/upstreams?tab=groups");
+    expect(await screen.findByText("default-group")).toBeInTheDocument();
+    await user.click(screen.getByLabelText("编辑上游 default-group"));
+    const dialog = await screen.findByRole("dialog", { name: "编辑上游" });
+
+    // 后端回显的纳秒串换算成「秒」，界面不再出现纳秒量级文本。
+    expect(within(dialog).getByLabelText("主要超时")).toHaveValue("5");
+    expect(within(dialog).getByLabelText("主要超时单位").closest(".ant-select")?.textContent).toBe("秒");
+    expect(within(dialog).getByLabelText("Fallback 超时")).toHaveValue("3");
+    expect(within(dialog).queryByDisplayValue("5000000000ns")).toBeNull();
+
+    // 改成毫秒单位后提交仍是紧凑 duration 串，不写裸数字。
+    const timeout = within(dialog).getByLabelText("主要超时");
+    await user.clear(timeout);
+    await user.type(timeout, "1500");
+    await user.click(within(dialog).getByLabelText("主要超时单位"));
+    await user.click(await screen.findByTitle("毫秒"));
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]).toMatchObject({
+      changes: [{
+        module: "upstreams",
+        change: {
+          action: "update",
+          original_name: "default-group",
+          value: { type: "group", timeout: "1500ms", fallback_timeout: "3s" },
+        },
+      }],
+    });
+  }, 10_000);
+
+  it("普通 API 返回 401 时只跳转一次并显示 session 过期提示", async () => {
+    setMockAuthenticated(true);
+    server.use(
+      http.get("/api/v2/service/metrics", () =>
+        HttpResponse.json(
+          { code: "AUTH_SESSION_EXPIRED", message: "expired", request_id: "expired-401", retryable: false },
+          { status: 401 },
+        ),
+      ),
+    );
+    renderApp("/dashboard");
+    expect(await screen.findByText("登录状态已过期，请重新登录。")).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("登出后清理 session 并返回登录页", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/dashboard");
+    await screen.findByRole("heading", { name: "服务状态" });
+    await user.click(screen.getByRole("button", { name: "退出登录" }));
+    expect(await screen.findByRole("heading", { name: "登录 FluxDNS" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/login");
+  });
+
+  it("未知受保护路由显示 404 而不泄漏内部路径", async () => {
+    setMockAuthenticated(true);
+    renderApp("/unknown-route");
+    expect(await screen.findByRole("heading", { name: "页面不存在" })).toBeInTheDocument();
+  });
+
+  it("未知子路径不误选父级菜单", async () => {
+    setMockAuthenticated(true);
+    renderApp("/dashboard/details");
+    expect(await screen.findByRole("heading", { name: "页面不存在" })).toBeInTheDocument();
+    expect(document.querySelectorAll(".ant-menu-item-selected")).toHaveLength(0);
+  });
+
+  it("旧只读路由不提供兼容跳转", async () => {
+    setMockAuthenticated(true);
+    renderApp("/runtime");
+    expect(await screen.findByRole("heading", { name: "页面不存在" })).toBeInTheDocument();
+    expect(window.location.pathname).toBe("/runtime");
+  });
+});

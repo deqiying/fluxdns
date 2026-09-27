@@ -1,0 +1,67 @@
+# 前端设计
+
+> 文档状态：有效
+>
+> 适用范围：WebUI 分层、状态所有权、路由、接口与展示约束
+>
+> 最后评审：2026-09-27（服务状态逐秒序列由订阅全量基线加每秒增量拼装、趋势多带 60 秒前瞻样本的局部评审；逐秒 RPM 口径与 CPU 占用卡片沿用 2026-09-26，解析记录展示沿 2026-09-23，分层与安全沿既有设计）
+
+## 设计结论
+
+前端是 React + TypeScript + Vite 的独立 SPA，使用 React Router、TanStack Query、Ant Design 与 Lucide 图标。它面向反复查看运行状态的管理场景，不承担 DNS 协议、配置继承或上游选择逻辑。确切依赖版本以 [package.json](../../frontend/package.json) 和 [锁文件](../../frontend/pnpm-lock.yaml) 为准。
+
+不为已有查询数据额外建立全局 store。React Context/Hooks 保存会话和局部交互，TanStack Query 管理服务端快照；只有明确的新客户端状态需求才评估新增状态库。
+
+## 分层与所有权
+
+```text
+app: providers / router / error boundary
+ -> modules: page / hook / API projection
+ -> shared: HTTP client / generated types / components / formatters
+ -> same-origin Management API
+```
+
+- `app` 只组装 provider、路由、错误边界和应用生命周期，不包含页面业务。
+- `modules` 按页面领域组织，查询键覆盖过滤/分页参数；页面不直接散落 fetch。
+- `shared/api` 集中同源路径、内存 Bearer、认证刷新、取消、超时与错误转换；业务请求不携带 Cookie，不内置任意生产 baseURL。
+- `shared/api` 还持有唯一按需 WS client：页面只注册订阅，不各自维护 socket、ticket、认证代次或重连循环；最后一个订阅退出后关闭连接。
+- OpenAPI 是接口字段唯一权威，生成的 TypeScript 不手工改；fixture 遵守同一契约但不能作为服务已接线的证据。
+- 后端状态保持 `available/unavailable`、健康、stale、gap 等语义，不能把不可用数据显示为正常零值。
+
+## 认证与路由约束
+
+先查询 setup 状态，再决定初始化、会话恢复与受保护页面。setup 未决时不请求受保护数据；初始化成功发布 setup ready 和 session；竞争冲突重新读取状态，不无限重试写入。
+
+未认证用户进入登录；请求 `401` 由统一认证边界回收会话、取消查询并交给 guard 跳转。退出需要清理前一个用户的查询数据。loading、error、setup-required、unauthenticated 和正常内容必须有明确状态，不能把失败当成未登录或空数据。
+
+Bearer、刷新 Cookie、密码、Origin 与会话安全唯一维护于 [Management 设计](management.md)。AuthProvider 只持有无 token 的 session 投影；客户端共享刷新有独立有界 deadline，各等待者取消互不影响，业务写请求不会自动重放。实际行为见[应用实现](../implementation/frontend/application.md)。
+
+浏览器 WS 不持久化 access token，也不把 token 放入 URL。共享 client 使用现有内存 Bearer 调用 ticket 端点，并以固定协议名和短期单次 ticket 两个 subprotocol 创建连接；认证代次变化立即丢弃 socket、重连计时器和旧消息。401/4401 统一进入现有会话失效边界，不能在 WS 层建立第二套登录状态。
+
+## 查询与呈现
+
+- 摘要可以在页面可见时轮询，后台窗口停止定时请求；详情/筛选页面以显式参数和用户刷新为主。
+- 查询 key 包含分页、排序、过滤和时间范围，不能让旧请求覆盖新条件；取消、认证失败和不可重试错误不机械重试。
+- 服务状态先读 HTTP 权威快照再订阅实时指标；页面隐藏时释放订阅，恢复可见时重新取快照后再接续，不能用零填补断流区间。
+- 解析记录默认开启实时。初次 HTTP 快照后以 snapshot cursor 和 retention revision 订阅后端 WS 增量；500 条或 2 MiB 客户端缓冲先到者触发 resync。浮层或历史页打开时新记录只进入缓冲，固定记录 ID、目录快照和当前列表；关闭首页浮层后应用缓冲，历史页通过显式操作回到最新首屏。
+- 错误保留安全 request ID 与 retry 语义，loading/error/empty/unavailable 分开呈现；时间和 duration 由统一 formatter 转换。
+- 不渲染后端返回的 HTML；qname、answer 等请求内容作为文本显示。历史空详情明确标识，不构造虚假的域名或响应。
+- 页面应支持窄屏、表格横向查看、键盘访问与明确状态，不用营销式大块说明替代管理操作。
+
+浅色是 12 页的共同基线；服务状态另提供本页局部深色样例，使用相同真实指标与图表，不复制演示数据。深色状态只在该页面组件内存中存在，离开路由回到浅色，不建立全站主题、持久偏好或配置字段。
+
+服务状态采用独立指标卡片和紧凑的合并趋势区：QPS、RPM 均使用折线并逐秒采样，共享最近十分钟时间轴，分别使用左右线性刻度，并显式标明单位。内存与 CPU 卡片复用同一进程采样快照，CPU 以占满一个核心为 100%，采样超时按原因码降级而不补零。RPM 的口径是过去 60 秒的请求数，由快照逐秒 QPS 与页面本地保留的 120 秒缓存合并后滚动求和推导；快照自带窗口起点前 60 秒前瞻样本，最左一分钟也有完整求和窗口，只有服务启动不足 660 秒时按暖机处理，缺口秒会让其后 60 秒断线、相邻样本间隔过大也断开，都不用部分窗口或插值掩盖原始采样；不可用区间断线，不用平滑或面积填充。逐秒序列由订阅时的全量基线和之后每秒的增量帧拼成，缺基线或出现断点必须重新订阅取新基线，不拼接带洞序列。采样信息、横轴和提示框统一使用 UTC。实时连接标识同时考虑连接状态与快照新鲜度，不将连接正常解释为 DNS 服务健康。桌面、窄屏与键盘选点使用同一组真实样本。
+
+品牌使用已确认的“寻址小章鱼”矢量图标，桌面侧栏、移动导航和浏览器 favicon 共用同一资源；不引入外部字体、图片服务或新的图表库。
+
+解析记录采用固定 76px 两行列表：链路、响应摘要、客户端名称为主信息，缓存操作标签、响应耗时和 IP 为次信息。链路超宽时优先保留入口与出口、省略中间节点；完整事实在详情中展示。详情区分 core 完成时的总/主链耗时与 transport 成功写出的响应耗时，缓存 lookup 与实际异步写入结果独立呈现；任何缺失测量都不得由其他字段推测。悬停预览可移动进入浮窗，点击固定、切换记录，外部点击或 Escape 关闭。
+
+受保护壳层按监控、DNS 管理、系统三组提供 12 个一级入口；上游组属于 DNS 上游页内 tab，不增加第 13 个入口。未接入真实数据源的页面必须明确不可用，不复制设计图演示内容。桌面侧栏和窄屏 Drawer 使用同一路由契约，具体接线事实见[应用实现](../implementation/frontend/application.md)。唯一目标字段权威仍为 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml)。
+
+目标表单固定打开时的活动/文件 revision，不能被 refetch 覆盖脏草稿；`name` 改名保留 original_name，客户端 ID 编辑只读。响应丢失进入结果未知并查询 operation，不能自动重放；运行成功但文件未同步独立展示并只重试同步。外部差异处理是现有壳层工作区，不新增一级模块；不增加角色、通用 YAML 编辑或顶层删除。
+
+## 交付与验证边界
+
+开发代理和 mock 只是工程模式。全部认证、服务状态、解析记录、系统信息和配置页面只访问同源 `/api/v2`，不保留旧页面或 API client。鉴权、client、代理、mock 与 SPA fallback 必须成套维护。SPA 通过 `webui-embed` 内嵌发布，API 与静态 fallback 独立分流；操作步骤见[交付实现](../implementation/delivery.md)。
+
+组件测试、schema 类型生成和 mock 不能替代真实浏览器的 Cookie、Network/Storage、初始化跳转和安全观察。验证边界见[交付实现](../implementation/delivery.md)，页面与查询接线见[页面实现](../implementation/frontend/pages.md)。
