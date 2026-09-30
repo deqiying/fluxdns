@@ -4,9 +4,9 @@
 >
 > 适用范围：前端 bootstrap、provider、路由鉴权、HTTP client 与会话回收
 >
-> 最后核对：2026-09-27（服务状态指标订阅改为全量基线加每秒增量并带断点重订阅的局部核对；逐秒 RPM 与 CPU 字段沿用 2026-09-26，品牌资源与导航沿用 2026-09-22，认证等其余内容沿用 2026-09-09 核对范围）
+> 最后核对：2026-09-30（前端测试 setup 收尾清理残留定时器的局部核对；服务状态指标订阅沿用 2026-09-27，逐秒 RPM 与 CPU 字段沿用 2026-09-26，品牌资源与导航沿用 2026-09-22，认证等其余内容沿用 2026-09-09 核对范围）
 >
-> 核对基线：`3f1a6be` 加本次工作树变更；本轮仅核对服务状态指标订阅的拼装与重订阅边界，其余范围按原日期和基线解释
+> 核对基线：`e3e21c8` 加本次工作树变更；本轮仅核对前端测试 setup 的定时器收尾清理，其余范围按原日期和基线解释
 
 ## 入口
 
@@ -164,6 +164,7 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 全局 state/operation 与十模块领域表单 | 91 项完整 Vitest、typecheck/build、真实 Bearer 单模块读写回显 | 运行时响应仍由后端 schema/owner 权威校验 |
 | 外部变化处理 | ConfigFileStatus、external adoption、Banner/Drawer | 轮询、差异、还原/retry、覆盖确认和组合采用 | MSW 二次冲突；真实双模块外改/采用/冲突/restore 与浏览器 Drawer | WS 文件通知未授权，仍以 HTTP 轮询 |
 | 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取唯一 v2 进程指标及基础信息 | FC-14 测试及 Windows 真实浏览器/后端可用样本；P3 窄屏无溢出 | 真实不可用 OS 样本和 Linux 未做浏览器验收 |
+| 测试定时器收尾清理 | [setup.ts](../../../frontend/src/test/setup.ts) 的 `pendingTimers` 包装与 `afterAll` 清理 | `vitest run` 的每个测试文件 setup 生效；release workflow 的 frontend job 在该 setup 上执行 `pnpm run test` | 2026-09-30：改前用临时观测统计，31 个文件中 10 个在收尾时仍有未清理定时器（延迟 0/10/100ms，单文件最多 191 个）；改后 `pnpm run test` 连续两次 31 文件 176 项通过，`pnpm run typecheck` 与生产构建通过，收尾均为清除后归零 | 只包装 `setTimeout`，未覆盖 `requestAnimationFrame`／`setInterval`；本机未复现 CI 的未处理错误（本地观测到 0 次拆除后触发），修复效果需下一次 Actions 运行确认 |
 
 当前完整前端、release、浏览器及端到端证据统一见 [WebUI 联合验收](../webui-acceptance.md)。上节带日期的 P1-P4 数量是历史批次结果；平台与原生触控限制不由 mock 或组件测试替代。
 

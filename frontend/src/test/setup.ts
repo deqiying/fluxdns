@@ -90,4 +90,36 @@ afterEach(() => {
   window.sessionStorage.clear();
   window.history.replaceState({}, "", "/");
 });
+
+/**
+ * 收尾时清除本文件仍未触发的定时器。
+ *
+ * antd 的 Button 与 Form 经 @rc-component/util 的 useDelayState 排期 0/10/100ms 定时器，该 hook 只在下一次
+ * 赋值时取消上一个，组件卸载时不清理；测试文件跑完后回调仍会触发，此时本文件的 jsdom 已拆除，回调里的
+ * React setState 会读取 window 并抛 `ReferenceError: window is not defined`，让 vitest 以 exit 1 失败
+ * （CI 上表现为用例全部通过但仍然失败）。此时所有用例与 afterEach 均已完成，不再有代码需要这些定时器。
+ */
+const pendingTimers = new Set<ReturnType<typeof globalThis.setTimeout>>();
+const originalSetTimeout = globalThis.setTimeout;
+const originalClearTimeout = globalThis.clearTimeout;
+
+// 运行期是 jsdom，但本仓库的 setTimeout 类型来自 @types/node，因此这里的包装按运行期实际形状断言。
+globalThis.setTimeout = ((handler: (...handlerArgs: unknown[]) => void, timeout?: number, ...args: unknown[]) => {
+  const handle = originalSetTimeout(() => {
+    pendingTimers.delete(handle);
+    handler(...args);
+  }, timeout);
+  pendingTimers.add(handle);
+  return handle;
+}) as unknown as typeof globalThis.setTimeout;
+
+globalThis.clearTimeout = ((handle: ReturnType<typeof globalThis.setTimeout>) => {
+  pendingTimers.delete(handle);
+  originalClearTimeout(handle);
+}) as unknown as typeof globalThis.clearTimeout;
+
+afterAll(() => {
+  for (const handle of pendingTimers) originalClearTimeout(handle);
+  pendingTimers.clear();
+});
 afterAll(() => server.close());
