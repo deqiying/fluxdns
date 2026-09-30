@@ -106,19 +106,28 @@ describe("MetricsTrendChart", () => {
         ])}
       />,
     );
-    // 窗口内峰值是 2，单格 0.6、上限 2.4；窗口外的 99_999 不参与。
-    expect(container.querySelector(".metrics-chart-axis-qps")).toHaveTextContent("2.4");
+    // 窗口内峰值是 2，计数轴取整数刻度 0/1/2/3/4；窗口外的 99_999 不参与。
+    expect(container.querySelector(".metrics-chart-axis-qps")).toHaveTextContent("4");
     fireEvent.keyDown(screen.getByRole("group"), { key: "Home" });
     expect(screen.getByRole("group")).toHaveAttribute("aria-label", "13:06:15 UTC，QPS 2，RPM 暂不可用");
   });
 
-  it("轴上限贴近窗口峰值，906 的 RPM 不再顶到 1600", () => {
-    const rpmOnly = (value: number): RateTrend => ({ qps: [], rpm: [{ at_ms: sampledAt, value: { state: "available", value } }] });
-    const { container, rerender } = render(<MetricsTrendChart metrics={metrics} rateTrend={rpmOnly(906)} />);
-    // 250 一格的 1000 让曲线占到 90% 高度，而 400 一格的 1600 只用掉 57%。
-    expect(container.querySelector(".metrics-chart-axis-rpm")).toHaveTextContent("1,000");
-    rerender(<MetricsTrendChart metrics={metrics} rateTrend={rpmOnly(1_000)} />);
-    expect(container.querySelector(".metrics-chart-axis-rpm")).toHaveTextContent("1,200");
+  it("计数轴按整数刻度贴近峰值，暖机不出现小数", () => {
+    const rpmLabels = (container: HTMLElement) => [...container.querySelectorAll(".metrics-chart-axis-rpm")].map((node) => node.textContent);
+    const rpmPeak = (value: number): RateTrend => ({ qps: [], rpm: [{ at_ms: sampledAt, value: { state: "available", value } }] });
+    const { container, rerender } = render(<MetricsTrendChart metrics={metrics} rateTrend={rpmPeak(86)} />);
+    // 峰值 86 只需 25 一格的 100；旧规则会跳到 40 一格、上限 160，曲线只占 54% 高度。
+    expect(rpmLabels(container)).toEqual(["100", "75", "50", "25", "0"]);
+    rerender(<MetricsTrendChart metrics={metrics} rateTrend={rpmPeak(906)} />);
+    expect(rpmLabels(container)).toEqual(["1,000", "750", "500", "250", "0"]);
+    // RPM 是请求计数：暖机没有可用样本时轴仍是整数刻度 1/2/3/4，不出现 0.25/0.5/0.75。
+    rerender(
+      <MetricsTrendChart
+        metrics={metrics}
+        rateTrend={{ qps: [], rpm: [{ at_ms: sampledAt, value: { state: "unavailable", reason: "warmup", observed_seconds: 41 } }] }}
+      />,
+    );
+    expect(rpmLabels(container)).toEqual(["4", "3", "2", "1", "0"]);
   });
 
   it("空趋势与全部不可用都有明确提示，不制造折线", () => {

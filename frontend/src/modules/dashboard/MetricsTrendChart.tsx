@@ -13,7 +13,7 @@ const timeFormatter = new Intl.DateTimeFormat("zh-CN", { timeZone: "UTC", hour: 
 /** 逐秒序列允许的最大相邻采样间隔，更宽的间隔按缺口处理。 */
 const SAMPLE_GAP_MS = 1_500;
 
-/** 双折线共享逐秒时间轴、各用线性刻度；RPM 由页面推导的过去 60 秒请求数给出，缺口不插值，键盘和指针共用选点状态。 */
+/** 双折线共享逐秒时间轴、各用独立的整数计数线性刻度；RPM 由页面推导的过去 60 秒请求数给出，缺口不插值，键盘和指针共用选点状态。 */
 export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetrics; rateTrend: RateTrend }) {
   const plotRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(1000);
@@ -28,8 +28,8 @@ export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetr
   const [selectedAt, setSelectedAt] = useState<number | undefined>(() => timeline.at(-1));
   const [followLatest, setFollowLatest] = useState(true);
   const [showTooltip, setShowTooltip] = useState(false);
-  const qpsMax = seriesMaximum(rateTrend.qps, startAt, endAt);
-  const rpmMax = seriesMaximum(rateTrend.rpm, startAt, endAt);
+  const qpsMax = axisMaximum(rateTrend.qps, startAt, endAt);
+  const rpmMax = axisMaximum(rateTrend.rpm, startAt, endAt);
   const selected = timeline.length === 0 ? undefined : followLatest || selectedAt === undefined ? timeline.at(-1) : nearestTime(timeline, selectedAt);
   const selectedX = selected === undefined ? 0 : xPosition(selected, startAt, endAt, width);
   const qpsSelected = nearestSample(rateTrend.qps, selected, startAt, endAt);
@@ -99,7 +99,7 @@ export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetr
       <div className="metrics-chart-plot" ref={plotRef}>
         <svg viewBox={`0 0 ${width} ${HEIGHT}`} role="img" aria-labelledby="metrics-chart-title metrics-chart-description" onPointerMove={selectFromPointer} onPointerDown={selectFromPointer}>
           <title id="metrics-chart-title">QPS 与 RPM 请求趋势</title>
-          <desc id="metrics-chart-description">最近十分钟 UTC 时间轴，逐秒一个采样点；左轴 QPS 为每秒请求量，右轴 RPM 为过去 60 秒的请求数，均为线性刻度；缺口处不连接，快照自带窗口起点前的 60 秒前瞻样本，因此最左一分钟同样绘制 RPM，只有服务启动不足 660 秒时才按不可用处理。方向键按秒选择采样点，Home 和 End 跳转首尾。</desc>
+          <desc id="metrics-chart-description">最近十分钟 UTC 时间轴，逐秒一个采样点；左轴 QPS 为每秒请求量，右轴 RPM 为过去 60 秒的请求数，均为线性刻度，刻度值取整数（两轴都是请求计数）；缺口处不连接，快照自带窗口起点前的 60 秒前瞻样本，因此最左一分钟同样绘制 RPM，只有服务启动不足 660 秒时才按不可用处理。方向键按秒选择采样点，Home 和 End 跳转首尾。</desc>
           {[0, 1, 2, 3, 4].map((step) => {
             const y = TOP + PLOT_HEIGHT * step / 4;
             return <line key={step} className="metrics-chart-grid" x1={LEFT} x2={width - RIGHT} y1={y} y2={y} />;
@@ -141,17 +141,23 @@ export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetr
   );
 }
 
-/** 单格刻度的候选倍率；只用 1/2/4/5/10 会让相邻候选相差一倍，峰值稍高就把轴顶到两倍并留下大片空白。 */
+/** 单格刻度的候选倍率；两轴都是请求计数，只有 10 倍量级下的 1.5/2.5 这类倍率才落在整数上。 */
 const AXIS_STEP_MULTIPLIERS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
 
-/** 为当前窗口预留顶部空间，并按候选倍率把四段线性刻度落在易读的数值上（相邻上限最多相差 1.5 倍）。 */
-function seriesMaximum(samples: RateSample[], startAt: number, endAt: number): number {
-  const maximum = Math.max(0, ...samples.flatMap(({ value, at_ms }) => value.state === "available" && at_ms >= startAt && at_ms <= endAt ? [value.value] : []));
-  if (maximum === 0) return 1;
-  const step = maximum * 1.1 / 4;
-  const magnitude = 10 ** Math.floor(Math.log10(step));
-  const rounded = AXIS_STEP_MULTIPLIERS.find((value) => value * magnitude >= step) ?? 10;
-  return rounded * magnitude * 4;
+/** 两轴共用五条水平网格线（四格），轴上限因此恒为单格刻度的四倍，两侧刻度保持整数并彼此对齐。 */
+const AXIS_INTERVALS = 4;
+
+/** 轴上限：单格刻度取不小于峰值四分之一的易读整数值，不额外留余量，避免曲线被压在下半区。 */
+function axisMaximum(samples: RateSample[], startAt: number, endAt: number): number {
+  const peak = Math.max(0, ...samples.flatMap(({ value, at_ms }) => value.state === "available" && at_ms >= startAt && at_ms <= endAt ? [value.value] : []));
+  // 没有可用样本时同样给出最小整数轴 0–4：回退到 0–1 会显示 0.25/0.5/0.75 这类不存在于计数序列的小数刻度。
+  return integerStep(Math.max(1, Math.ceil(peak)) / AXIS_INTERVALS) * AXIS_INTERVALS;
+}
+
+/** 取不小于 value 的最小易读整数刻度：21.5 → 25、3.2 → 4、0.25 → 1。 */
+function integerStep(value: number): number {
+  const magnitude = 10 ** Math.floor(Math.log10(value));
+  return AXIS_STEP_MULTIPLIERS.map((multiplier) => multiplier * magnitude).find((candidate) => Number.isInteger(candidate) && candidate >= value) ?? 10 * magnitude;
 }
 
 /** 刻度标签按分钟给出，窄屏逐级放宽到 2/5 分钟；始终保留窗口首尾两个边界标签。 */
