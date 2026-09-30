@@ -118,6 +118,11 @@ describe("MetricsTrendChart", () => {
     const { container, rerender } = render(<MetricsTrendChart metrics={metrics} rateTrend={rpmPeak(86)} />);
     // 峰值 86 只需 25 一格的 100；旧规则会跳到 40 一格、上限 160，曲线只占 54% 高度。
     expect(rpmLabels(container)).toEqual(["100", "75", "50", "25", "0"]);
+    // 大值区补上 120/125 一格：峰值 460 从 600 收到 480，峰值 500 正好落在 500，都仍是整数刻度。
+    rerender(<MetricsTrendChart metrics={metrics} rateTrend={rpmPeak(460)} />);
+    expect(rpmLabels(container)).toEqual(["480", "360", "240", "120", "0"]);
+    rerender(<MetricsTrendChart metrics={metrics} rateTrend={rpmPeak(500)} />);
+    expect(rpmLabels(container)).toEqual(["500", "375", "250", "125", "0"]);
     rerender(<MetricsTrendChart metrics={metrics} rateTrend={rpmPeak(906)} />);
     expect(rpmLabels(container)).toEqual(["1,000", "750", "500", "250", "0"]);
     // RPM 是请求计数：暖机没有可用样本时轴仍是整数刻度 1/2/3/4，不出现 0.25/0.5/0.75。
