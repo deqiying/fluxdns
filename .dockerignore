@@ -1,0 +1,19 @@
+# 镜像构建上下文只需要 docker/Dockerfile 与暂存的 deploy/fluxdns。
+# 这里使用黑名单而不是白名单，避免依赖 .dockerignore 的取反语义。
+.git
+.github
+.agents
+.idea
+.vscode
+docs
+script
+_fluxdns
+backend/target
+backend/.cargo-home
+backend/.rustup
+frontend/node_modules
+frontend/dist
+frontend/.cache
+deploy/checksums.txt
+deploy/*.zip
+deploy/*.tar.gz

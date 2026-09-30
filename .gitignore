@@ -29,3 +29,6 @@
 /cache.db
 /_fluxdns
 /_pi_tmp
+
+# 容器部署本地配置（含 SecretRef 实际值）
+/docker/.env

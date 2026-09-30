@@ -4,7 +4,11 @@
 >
 > 适用范围：尚需实施、决策或验收的独立变更
 
-当前无活动计划。解析记录页面与缓存标签已按最终设计完成，行为与验证边界见[前端页面实现](../implementation/frontend/pages.md)。
+| 计划 | 计划状态 | 内容 |
+| --- | --- | --- |
+| [Docker 镜像交付](docker-image.md) | 待验收 | 独立 workflow 响应 tag 推送，自行编译并推送 `linux/amd64` 镜像到 GHCR，不依赖 Release 流程；工作目录固定 `/etc/fluxdns`，附 `docker/` 部署示例、env 模板与镜像冒烟夹具 |
+
+解析记录页面与缓存标签已按最终设计完成，行为与验证边界见[前端页面实现](../implementation/frontend/pages.md)。
 
 WebUI 的当前实现与平台边界见[实现入口](../implementation/README.md)和[联合验收](../implementation/webui-acceptance.md)；接受的职责与约束见[架构入口](../architecture/README.md)。
 

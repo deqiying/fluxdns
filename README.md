@@ -10,10 +10,11 @@
 
 能力与证据见[当前实现](docs/implementation/README.md)，后续变更见[活动计划](docs/plans/README.md)。DoT/DoQ、主动上游健康检查和通用 YAML 编辑不属于当前已接线能力。
 
-## 使用入口
+## 使用入
 
 - 配置格式：[配置参考](docs/implementation/configuration.md) 与 [config-example.yaml](config-example.yaml)。示例值不能直接作为受保护的生产配置。
 - 构建、内嵌打包和显式配置启动：[交付实现](docs/implementation/delivery.md)。
+- 容器部署：[compose 示例](docker/compose-example.yaml) 与 [env 模板](docker/.env.example)；镜像由 [container workflow](.github/workflows/container.yml) 推送到 `ghcr.io/deqiying/fluxdns`。
 - 前端开发：[frontend/README.md](frontend/README.md)。
 - 工具来源和版本：[环境规则](docs/rules/environment-usage.md)；本地配置与运行数据：[本地测试规则](docs/rules/local-testing.md)。
 
@@ -29,6 +30,8 @@
 | `script/` | 本地打包、版本与进程管理入口 |
 | `.agents/skills/project-doc-maintenance/` | 文档维护技能与检查器 |
 | `.github/workflows/release.yml` | 共享质量门禁、四平台并行构建、平台完成即上传及完整性校验后发布 |
+| `.github/workflows/container.yml` | 独立镜像流水线：tag 推送即自行编译并推送 GHCR，不依赖发布流程 |
+| `docker/` | [Dockerfile](docker/Dockerfile)、部署示例与 env 模板、镜像冒烟夹具 |
 | `VERSION` | 发布版本的唯一入口 |
 | `deploy/`、`_fluxdns/` | 忽略的发布物与本地运行数据 |
 

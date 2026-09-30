@@ -1,0 +1,329 @@
+name: Container image
+
+# 独立镜像流水线：与 release.yml 互不依赖，tag 推送即自行编译、构建并推送 GHCR。
+# 它不等待 Release workflow 成功，也不使用其归档或 checksums。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "已存在的 tag，例如 v0.3.5"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: container-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and push image
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Resolve and verify release tag
+        id: release
+        shell: bash
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            tag="${INPUT_TAG}"
+          else
+            tag="${GITHUB_REF_NAME}"
+          fi
+
+          if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "Tag '${tag}' must be a v-prefixed SemVer version." >&2
+            exit 1
+          fi
+          version="${tag#v}"
+
+          # 手动触发时本地可能没有该 tag；显式拉取后再检出，保证版本文件与 tag 一致。
+          git fetch --no-tags origin "+refs/tags/${tag}:refs/tags/${tag}"
+          tag_commit="$(git rev-parse --verify "refs/tags/${tag}^{commit}")"
+          git fetch --no-tags origin "+refs/heads/main:refs/remotes/origin/main"
+          if ! git merge-base --is-ancestor "${tag_commit}" "origin/main"; then
+            echo "Tag ${tag} does not point to a commit on main." >&2
+            exit 1
+          fi
+          git checkout --detach "${tag_commit}"
+
+          mapfile -t version_lines < VERSION
+          if [[ "${#version_lines[@]}" -ne 1 ]]; then
+            echo "VERSION must contain exactly one line." >&2
+            exit 1
+          fi
+          project_version="${version_lines[0]%$'\r'}"
+          cargo_version="$(awk '
+            /^\[package\]$/ { in_package=1; next }
+            /^\[/ { in_package=0 }
+            in_package && /^version[[:space:]]*=/ { gsub(/["[:space:]]/, "", $3); print $3; exit }
+          ' backend/Cargo.toml)"
+          frontend_version="$(awk -F '\"' '/^[[:space:]]*\"version\"[[:space:]]*:/ { print $4; exit }' frontend/package.json)"
+
+          if [[ "${version}" != "${project_version}" ]]; then
+            echo "Tag version ${version} does not match VERSION ${project_version}." >&2
+            exit 1
+          fi
+          if [[ "${cargo_version}" != "${project_version}" ]]; then
+            echo "Backend package version ${cargo_version} does not match VERSION ${project_version}." >&2
+            exit 1
+          fi
+          if [[ "${frontend_version}" != "${project_version}" ]]; then
+            echo "Frontend package version ${frontend_version} does not match VERSION ${project_version}." >&2
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "release_version=${project_version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Read project tool versions
+        id: tool-versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          read_tool_version() {
+            awk -F '"' -v tool="$1" '$0 ~ "^" tool "[[:space:]]*=" { print $2; exit }' mise.toml
+          }
+
+          rust_version="$(read_tool_version rust)"
+          node_version="$(read_tool_version node)"
+          pnpm_version="$(read_tool_version pnpm)"
+          if [[ -z "${rust_version}" || -z "${node_version}" || -z "${pnpm_version}" ]]; then
+            echo "Cannot read Rust, Node.js, or pnpm version from mise.toml." >&2
+            exit 1
+          fi
+
+          {
+            echo "rust_version=${rust_version}"
+            echo "node_version=${node_version}"
+            echo "pnpm_version=${pnpm_version}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: ${{ steps.tool-versions.outputs.pnpm_version }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ steps.tool-versions.outputs.node_version }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      # webui-embed 在编译期需要真实 WebUI，因此先构建 frontend/dist。
+      - name: Build WebUI
+        working-directory: frontend
+        run: pnpm run build
+
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ steps.tool-versions.outputs.rust_version }}
+          cache: false
+          rustflags: ""
+
+      - name: Cache Rust target artifacts
+        uses: actions/cache@v4
+        with:
+          path: backend/target
+          key: rust-target-${{ runner.os }}-container-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            rust-target-${{ runner.os }}-container-
+
+      - name: Build release binary
+        run: cargo build --manifest-path backend/Cargo.toml --locked --release --features webui-embed
+
+      - name: Verify binary and stage build context
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          binary="backend/target/release/fluxdns"
+          if [[ ! -f "${binary}" ]]; then
+            echo "Release binary does not exist: ${binary}" >&2
+            exit 1
+          fi
+
+          actual_version="$(./${binary} --version)"
+          expected_version="fluxdns ${RELEASE_VERSION}"
+          if [[ "${actual_version}" != "${expected_version}" ]]; then
+            echo "Expected '${expected_version}', got '${actual_version}'." >&2
+            exit 1
+          fi
+
+          mkdir -p deploy
+          install --mode 0755 "${binary}" deploy/fluxdns
+          sha256sum deploy/fluxdns
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image reference
+        id: image
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          # ghcr.io 只接受小写仓库名。
+          repository="$(printf '%s' "${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')"
+          image="ghcr.io/${repository}"
+          {
+            echo "name=${image}"
+            echo "tags<<TAGS"
+            echo "${image}:${RELEASE_VERSION}"
+            echo "${image}:${RELEASE_VERSION%.*}"
+            echo "${image}:sha-${GITHUB_SHA::7}"
+            # 预发布 tag 不移动 latest。
+            [[ "${RELEASE_VERSION}" == *-* ]] || echo "${image}:latest"
+            echo "TAGS"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.image.outputs.tags }}
+          build-args: |
+            FLUXDNS_VERSION=${{ steps.release.outputs.release_version }}
+            FLUXDNS_REVISION=${{ github.sha }}
+
+      - name: Verify image version
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:${{ steps.release.outputs.release_version }}
+          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm "${IMAGE}" --version \
+            | grep --fixed-strings --line-regexp "fluxdns ${RELEASE_VERSION}"
+
+      - name: Verify image configuration and service
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:${{ steps.release.outputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          config_dir="${RUNNER_TEMP}/fluxdns-smoke"
+          rm -rf "${config_dir}"
+          mkdir -p "${config_dir}/logs" "${config_dir}/data"
+          cp docker/container-smoke-config.yaml "${config_dir}/config.yaml"
+          # 部署要求：宿主工作目录归 root 所有，才能配合 cap_drop: ALL 运行。
+          sudo chown -R 0:0 "${config_dir}"
+
+          # 配置级检查：validate 不写盘，源配置即 <work.path>/config.yaml。
+          docker run --rm \
+            --volume "${config_dir}:/etc/fluxdns" \
+            "${IMAGE}" validate --config /etc/fluxdns/config.yaml
+
+          yaml_files="$(find "${config_dir}" -maxdepth 1 -name '*.yaml' | wc -l)"
+          if [[ "${yaml_files}" -ne 1 ]]; then
+            echo "Expected one config.yaml in the work directory, found ${yaml_files}." >&2
+            ls -1A "${config_dir}" >&2
+            exit 1
+          fi
+
+          container=fluxdns-smoke
+          docker rm --force "${container}" >/dev/null 2>&1 || true
+          # 与 docker/compose-example.yaml 相同的权限收紧组合：验证只保留 NET_BIND_SERVICE 时仍可绑定 53。
+          docker run --detach --name "${container}" \
+            --volume "${config_dir}:/etc/fluxdns" \
+            --cap-drop ALL \
+            --cap-add NET_BIND_SERVICE \
+            --security-opt no-new-privileges:true \
+            "${IMAGE}"
+
+          log_file="${config_dir}/logs/fluxdns.log"
+          ready=0
+          for _ in $(seq 1 30); do
+            if [[ -f "${log_file}" ]] && grep --quiet "service_ready" "${log_file}"; then
+              ready=1
+              break
+            fi
+            if [[ -z "$(docker ps --quiet --filter "id=${container}")" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${ready}" -ne 1 ]]; then
+            echo "Service did not report service_ready within 30s." >&2
+            docker logs "${container}" >&2 || true
+            [[ -f "${log_file}" ]] && cat "${log_file}" >&2
+            docker rm --force "${container}" >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          started="$(date +%s)"
+          docker stop --time 20 "${container}" >/dev/null
+          elapsed="$(( $(date +%s) - started ))"
+          exit_code="$(docker inspect --format '{{.State.ExitCode}}' "${container}")"
+          docker rm --force "${container}" >/dev/null 2>&1 || true
+
+          if [[ "${exit_code}" -ne 0 ]]; then
+            echo "Container exited with code ${exit_code} after SIGTERM." >&2
+            exit 1
+          fi
+          if [[ "${elapsed}" -gt 15 ]]; then
+            echo "Graceful shutdown took ${elapsed}s, expected within the 5s grace period." >&2
+            exit 1
+          fi
+
+          echo "Container smoke test passed in ${elapsed}s."
+
+      - name: Verify compose example
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cp docker/.env.example docker/.env
+          docker compose --file docker/compose-example.yaml --project-directory docker config >/dev/null
+          rm -f docker/.env
+          echo "docker/compose-example.yaml parses with docker/.env.example."

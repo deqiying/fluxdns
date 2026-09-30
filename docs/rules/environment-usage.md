@@ -83,6 +83,7 @@ mise exec -- node --version
 | 前端依赖 | `frontend/node_modules/` | 已加入 `.gitignore` |
 | 前端构建物 | `frontend/dist/` | 已加入 `.gitignore` |
 | 发布二进制 | `deploy/` | 用于保存本地脚本或自动发布 workflow 生成的内嵌资源二进制；已加入 `.gitignore` |
+| 容器镜像与部署配置 | `docker/`（Dockerfile、部署示例、镜像夹具） | 镜像只在 Actions 的 container workflow 中构建，本地不产生镜像产物；`docker/.env` 已加入 `.gitignore` |
 | Node 编译缓存 | `frontend/.cache/node-compile-cache/` | 由 `mise.toml` 固定，已加入 `.gitignore` |
 | npm 下载缓存 | `frontend/.cache/npm-cache/` | 由 `mise.toml` 固定，已加入 `.gitignore` |
 | pnpm metadata cache | `frontend/.cache/pnpm-cache/` | 由 `mise.toml` 与 `frontend/pnpm-workspace.yaml` 固定，已加入 `.gitignore` |
@@ -93,6 +94,7 @@ mise exec -- node --version
 前端和后端的独立构建物不得重定向到 `deploy/`：`frontend/dist/` 由 Vite 保留，使用默认 feature 的后端 release 保留在 `backend/target/release/`，带 `webui-embed` 的当前平台 Cargo 构建物保留在 `backend/target/<triple>/release/`。发布脚本只复制当前平台最终文件到 `deploy/`，不移动或清理上述目录。
 
 打包步骤、平台产物、显式配置启动、进程身份检查、版本提交与自动发布流程统一见[交付实现](../implementation/delivery.md)。执行这些入口前仍须确认工具和目标环境；不得为了脚本失败擅自安装 target/linker，也不得把说明中的发布步骤视为提交、push 或创建 Release 的授权。
+容器镜像交付是独立入口，不属于上述本地打包流程：它在 `.github/workflows/container.yml` 中自行编译并推送到 GitHub Container Registry，不等待发布 workflow。构建步骤、运行契约与限制见[交付实现](../implementation/delivery.md#容器镜像交付)。
 
 ## 4. 工具安装边界
 
@@ -100,6 +102,7 @@ mise exec -- node --version
 - 项目当前确实需要且本机缺失的工具（例如检查 SQLite 数据库所需的 SQLite CLI）可以自行安装，但必须确认当前 `mise` 支持管理该工具，并通过 `mise` 安装或切换版本。
 - `mise` 不支持的工具、与当前项目任务无关的工具以及其他依赖工具，安装前必须获得明确批准。未经批准不得通过 `cargo install`、`npm install -g`、`pip install`、Scoop、WinGet、Chocolatey 或其他包管理器绕过该规则。
 - 如果工具版本需要成为项目共享基线，应同步更新 `mise.toml`；个人临时工具不写入仓库配置。
+- 容器镜像不作为本地构建目标：镜像只在 `.github/workflows/container.yml` 的 GitHub Actions 运行中构建并推送；本机不要求安装 Docker 或 Buildx，也不产生本地镜像产物。需要在本机用容器验证时，先按本节取得工具安装批准。
 - DoH smoke test 所需的 `doggo`、`curl` 等工具是否存在及缺失时的处理，遵循[本地测试规范](local-testing.md)，不得为了补齐单次测试而自行安装替代工具。
 
 ## 5. 环境核验与记录

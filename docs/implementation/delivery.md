@@ -4,9 +4,9 @@
 >
 > 适用范围：前端生成/构建、内嵌打包、开发进程、版本脚本与 Release workflow 行为
 >
-> 最后核对：2026-09-10（Release workflow 的 WebUI 产物依赖与代理页测试超时修复）
+> 最后核对：2026-09-30（新增容器镜像交付：独立 container workflow、Dockerfile 与部署示例）
 >
-> 核对基线：`6e4c50d` 与本次修复；本轮核对 Release workflow 的 WebUI 产物依赖和代理页测试，历史运行结果按原日期和基线解释
+> 核对基线：`e3e21c8`；本轮核对镜像 workflow、Dockerfile 与本地可执行的配置/文档检查，未执行 Actions、镜像构建或容器内运行，历史运行结果按原日期和基线解释
 
 ## 工具与命令边界
 
@@ -97,6 +97,37 @@ OpenWrt 构建项在临时 Ubuntu runner 安装 `musl-tools` 与 `binutils`，�
 
 上述工具安装属于该 CI 构建项；本地工具安装仍遵循[环境规则](../rules/environment-usage.md)，本地 `package-embedded.ps1` 仍只支持原有 Windows/Linux x86_64。workflow 配置、静态链接检查与版本检查不等同 OpenWrt 上的真实 DNS/DoH 验收；新增平台尚待 GitHub Actions 构建和目标设备运行验证。
 
+## 容器镜像交付
+
+镜像由独立的 [`.github/workflows/container.yml`](../../.github/workflows/container.yml) 构建并推送到 GitHub Container Registry（GHCR）。它是新增文件，与 [`release.yml`](../../.github/workflows/release.yml) 互不依赖：不由发布流程触发，不等待其成功，也不使用其归档或 `checksums.txt`。
+
+workflow 由 `v*` tag 推送或 `workflow_dispatch`（输入已存在的 tag）触发，单 job `publish` 顺序执行：
+
+1. 校验 tag：合法 SemVer、等于 `VERSION`、等于 Cargo manifest 与前端 package 版本、指向属于 `main` 的提交，然后检出该提交，保证版本文件与 tag 一致。
+2. 从 `mise.toml` 读取 Rust/Node/pnpm 版本；先 `pnpm install --frozen-lockfile` 与 `pnpm run build` 生成 `frontend/dist/`（`webui-embed` 编译期需要），再 `cargo build --manifest-path backend/Cargo.toml --locked --release --features webui-embed`。
+3. 校验 `backend/target/release/fluxdns --version` 等于 `fluxdns <version>`，再复制为 `deploy/fluxdns` 作为镜像构建上下文。
+4. 用 `docker/build-push-action` 构建 [`docker/Dockerfile`](../../docker/Dockerfile) 并推送 `linux/amd64`。标签为 `<version>`、`<major>.<minor>`、`sha-<短哈希>`，非预发布 tag 额外推送 `latest`；标签由 workflow 显式计算，不依赖 `metadata-action` 对 `GITHUB_REF` 的解释。
+5. 镜像级验证：`--version` 输出、挂载夹具配置执行 `validate`、以 `--cap-drop ALL --cap-add NET_BIND_SERVICE --security-opt no-new-privileges:true` 启动并等待 `<work.path>/logs/fluxdns.log` 出现 `service_ready`、`docker stop` 后退出码为 0 且耗时不超过 5s 宽限期、`docker compose config` 校验部署示例。
+
+| 镜像契约 | 行为 |
+| --- | --- |
+| 基础镜像 | `debian:trixie-slim` 加 `ca-certificates`；不含编译工具链、init 进程或 shell 诊断工具 |
+| 内容 | 只有 `/usr/local/bin/fluxdns` 与运行期依赖；迁移 SQL 与 SPA 已在编译期内嵌，镜像不携带 `backend/migrations` 或 `frontend/dist` |
+| 用户 | 默认 root（uid 0），以便绑定配置中的 53/443；能力与 `no-new-privileges` 由部署层收紧 |
+| 工作目录 | `/etc/fluxdns`，入口为 `fluxdns run --config /etc/fluxdns/config.yaml`；配置里的 `work.path` 必须同为 `/etc/fluxdns`，否则启动会生成第二份配置快照 |
+| 卷 | 整目录挂载宿主机目录到 `/etc/fluxdns`；不要只挂 `config.yaml`，因为 Management 的配置提交依赖同目录原子替换 |
+| 许可标签 | 不声明 `org.opencontainers.image.licenses`，因为仓库没有 `LICENSE` |
+
+部署示例是 [`docker/compose-example.yaml`](../../docker/compose-example.yaml) 与 [`docker/.env.example`](../../docker/.env.example)：bridge 网络与端口映射（53 UDP/TCP、443、仅回环的 8080）、整目录卷、`env_file` 注入 SecretRef、`cap_drop: ALL` 加 `NET_BIND_SERVICE`、`no-new-privileges`、`stop_grace_period: 20s`，并以二进制自身的 `validate` 作为配置级健康检查。`docker/.env` 已在 `.gitignore` 中忽略；首次启动前宿主工作目录必须存在且包含 `config.yaml`。镜像构建使用的冒烟夹具是 [`docker/container-smoke-config.yaml`](../../docker/container-smoke-config.yaml)，只用于验证，不代表生产配置。
+
+已知边界：
+
+- `cap_drop: ALL` 会让 root 失去 `CAP_DAC_OVERRIDE`，因此宿主工作目录必须归 root 所有；CI 冒烟步骤同样先 `chown 0:0` 再启动容器。
+- bridge 模式下 DNS 客户端的 `peer` 地址是 docker 网关地址，`clients[].match.ips` 无法区分真实局域网客户端，ECS `client` 模式的前缀推导同样失真；需要真实客户端地址时可改用 `network_mode: host`，或对 DoH 使用 `forwarded_header`/`proxy_protocol` 并配置 `trusted_proxies`。
+- 该流水线不运行 Clippy 与测试套件，只做编译、`--version`、`validate` 与启动冒烟，测试职责仍在 `release.yml`。
+- 镜像内二进制与 Release 归档各自编译，字节不保证一致；两者都由同一 tag 源码与 `--version` 校验约束。
+- 健康检查只证明配置可解析、路径合法，不代表 listener 正在服务，也不校验 SecretRef。
+
 ## 证据与验收边界
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
@@ -107,5 +138,6 @@ OpenWrt 构建项在临时 Ubuntu runner 安装 `musl-tools` 与 `binutils`，�
 | 显式启动/身份检查 | dev start/status/stop | 最终 release embed 与独立 ConfigV2 | 新目录启动、受控重启、文件摘要不变、FDCS 恢复及旧分片 ID 可读 | 原生触控和外部 HTTPS 代理限制见联合验收 |
 | 本地 HTTP/WS 验收 | test-webui-http.mjs、test-webui-events.ps1 | loopback 夹具与管理账号 | 四种 DNS 请求、配置/文件/安全、WS replay 与撤销 | 仅使用独立测试配置，不访问生产或公网 |
 | 版本与远端发布 | set-version、release.yml | main + tag gates | 本轮不执行 | 没有 tag、push、Actions 或 Release 授权 |
+| 容器镜像交付 | container.yml、docker/Dockerfile、compose 与 env 示例 | tag 推送或手动触发的独立 workflow，推送 GHCR | 本轮本地：debug binary `validate` 通过新增冒烟夹具、根模板与既有启动夹具；实跑服务后 `service_ready` 在 2s 内写入 `<work.path>/logs/fluxdns.log`；YAML 解析与文档检查通过 | 未执行 Actions、镜像构建/推送或容器内运行；镜像体积、容器内性能与 `latest` 可见性未验证 |
 
 当前命令、运行产物、29 图映射、E2E 矩阵与平台边界以 [WebUI 联合验收](webui-acceptance.md) 为准。本地脚本的夹具和凭据准备遵循[本地测试规范](../rules/local-testing.md#webui-真实-httpws-联合验收)；测试报告和密码留在忽略目录，不复制进 Git。历史批次日志由 Git 与原任务记录追溯，不把旧 debug 样本当作当前 release 的证明。

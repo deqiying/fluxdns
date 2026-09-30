@@ -1,0 +1,62 @@
+# 容器镜像冒烟测试夹具：只用于 .github/workflows/container.yml 的镜像验证，不用于生产部署。
+#
+# 与生产配置的差别：
+# - work.path 与容器内挂载点一致（/etc/fluxdns），源配置即 <work.path>/config.yaml，因此不产生配置快照；
+# - listener 绑定 53（UDP 与 TCP），用于验证权限收紧后仍能绑定特权端口；
+# - logs.enable=true，让 service_ready 等事件写入 <work.path>/logs/fluxdns.log，供 CI 断言；
+# - 上游与 hosts 全部为内联数据，不访问网络，也不需要任何 SecretRef。
+#
+# 结构参照 backend/tests/fixtures/config-v2.yaml 的既有启动夹具。
+version: 2
+work:
+  path: /etc/fluxdns
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data/statistics.sqlite3
+  records_path: ./data/queries
+logs:
+  enable: true
+  level: info
+  path: ./logs/fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 18080
+dns: {}
+statistics:
+  retention:
+    days: 7
+    grace_days: 3
+    reference_size_bytes: 1073741824
+listener:
+  - name: smoke-udp
+    type: udp
+    addresses: [127.0.0.1]
+    port: 53
+    strategy: default
+  - name: smoke-tcp
+    type: tcp
+    addresses: [127.0.0.1]
+    port: 53
+    strategy: default
+upstreams:
+  - name: local
+    type: hosts
+    format: hosts
+    hosts: "127.0.0.1 localhost"
+strategy:
+  - name: default
+    rules:
+      - hosts: local
+    default_upstream: local
+hosts:
+  - name: local
+    type: const
+    format: hosts
+    hosts: "127.0.0.1 localhost"
+clients:
+  - name: desktop
+    client_id: Desktop-01
+    match:
+      ips: [192.0.2.10, "2001:db8::/64"]
