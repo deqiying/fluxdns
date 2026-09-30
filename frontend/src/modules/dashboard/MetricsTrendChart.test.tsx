@@ -106,9 +106,19 @@ describe("MetricsTrendChart", () => {
         ])}
       />,
     );
-    expect(container.querySelector(".metrics-chart-axis-qps")).toHaveTextContent("4");
+    // 窗口内峰值是 2，单格 0.6、上限 2.4；窗口外的 99_999 不参与。
+    expect(container.querySelector(".metrics-chart-axis-qps")).toHaveTextContent("2.4");
     fireEvent.keyDown(screen.getByRole("group"), { key: "Home" });
     expect(screen.getByRole("group")).toHaveAttribute("aria-label", "13:06:15 UTC，QPS 2，RPM 暂不可用");
+  });
+
+  it("轴上限贴近窗口峰值，906 的 RPM 不再顶到 1600", () => {
+    const rpmOnly = (value: number): RateTrend => ({ qps: [], rpm: [{ at_ms: sampledAt, value: { state: "available", value } }] });
+    const { container, rerender } = render(<MetricsTrendChart metrics={metrics} rateTrend={rpmOnly(906)} />);
+    // 250 一格的 1000 让曲线占到 90% 高度，而 400 一格的 1600 只用掉 57%。
+    expect(container.querySelector(".metrics-chart-axis-rpm")).toHaveTextContent("1,000");
+    rerender(<MetricsTrendChart metrics={metrics} rateTrend={rpmOnly(1_000)} />);
+    expect(container.querySelector(".metrics-chart-axis-rpm")).toHaveTextContent("1,200");
   });
 
   it("空趋势与全部不可用都有明确提示，不制造折线", () => {

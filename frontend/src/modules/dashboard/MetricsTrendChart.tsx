@@ -141,13 +141,16 @@ export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetr
   );
 }
 
-/** 为当前窗口预留顶部空间，并使四段线性刻度落在易读的数值上。 */
+/** 单格刻度的候选倍率；只用 1/2/4/5/10 会让相邻候选相差一倍，峰值稍高就把轴顶到两倍并留下大片空白。 */
+const AXIS_STEP_MULTIPLIERS = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10];
+
+/** 为当前窗口预留顶部空间，并按候选倍率把四段线性刻度落在易读的数值上（相邻上限最多相差 1.5 倍）。 */
 function seriesMaximum(samples: RateSample[], startAt: number, endAt: number): number {
   const maximum = Math.max(0, ...samples.flatMap(({ value, at_ms }) => value.state === "available" && at_ms >= startAt && at_ms <= endAt ? [value.value] : []));
   if (maximum === 0) return 1;
   const step = maximum * 1.1 / 4;
   const magnitude = 10 ** Math.floor(Math.log10(step));
-  const rounded = [1, 2, 4, 5, 10].find((value) => value * magnitude >= step) ?? 10;
+  const rounded = AXIS_STEP_MULTIPLIERS.find((value) => value * magnitude >= step) ?? 10;
   return rounded * magnitude * 4;
 }
 
