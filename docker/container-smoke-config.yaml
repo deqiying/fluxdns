@@ -2,8 +2,9 @@
 #
 # 与生产配置的差别：
 # - work.path 与容器内挂载点一致（/etc/fluxdns），源配置即 <work.path>/config.yaml，因此不产生配置快照；
-# - listener 绑定 53（UDP 与 TCP），用于验证权限收紧后仍能绑定特权端口；
-# - logs.enable=true，让 service_ready 等事件写入 <work.path>/logs/fluxdns.log，供 CI 断言；
+# - listener 绑定 0.0.0.0:53（UDP 与 TCP）：端口由宿主映射进容器，不能只听 127.0.0.1，
+#   同时验证权限收紧后仍能绑定特权端口；
+# - logs.enable=true，让 service_ready 等事件写入 <work.path>/logs/fluxdns.log，供 CI 断言就绪；
 # - 上游与 hosts 全部为内联数据，不访问网络，也不需要任何 SecretRef。
 #
 # 结构参照 backend/tests/fixtures/config-v2.yaml 的既有启动夹具。
@@ -32,12 +33,12 @@ statistics:
 listener:
   - name: smoke-udp
     type: udp
-    addresses: [127.0.0.1]
+    addresses: [0.0.0.0]
     port: 53
     strategy: default
   - name: smoke-tcp
     type: tcp
-    addresses: [127.0.0.1]
+    addresses: [0.0.0.0]
     port: 53
     strategy: default
 upstreams:

@@ -43,7 +43,7 @@ FluxDNS 当前只有四平台压缩归档这一种交付形态（见[交付实�
 2. 不修改既有四平台发布矩阵、归档命名、版本门禁与 `checksums.txt` 语义，也不修改 `release.yml`。
 3. 不在本地构建镜像；不引入 GHCR 之外的镜像仓库、Kubernetes/Helm 清单或镜像签名工具。
 4. 不修改 DNS、Management 的运行时行为，不新增配置字段。
-5. 不在镜像流水线内重跑 Clippy 与完整测试套件（属发布流程职责，取舍见 6.1）。
+5. 不做镜像签名、attestation、多平台变体与 Kubernetes/Helm 编排；镜像流水线只做“编译 → 打包 → 推送 → 镜像级验证”，不做压力与性能测试。
 
 ## 3. 已确认决策
 
@@ -233,58 +233,43 @@ FLUXDNS_WEBUI_PORT=8080
 
 新增 `.github/workflows/container.yml`，由 tag 推送独立触发，自己编译、自己构建、自己推送；不使用 Release workflow 的归档，也不等待其成功。
 
-```yaml
-name: Container image
+流水线形态参照 `release.yml`：先做版本门禁，再跑前端与 Rust 门禁，然后编译二进制，最后构建并验证镜像。差别在于**每一步都拆成独立 job 或独立步骤**，让 Actions 页面能直接指出失败环节，而不是在一个长脚本里定位。
 
-on:
-  # 人工推送 tag 触发，与 release.yml 同源但互不依赖。
-  push:
-    tags:
-      - "v*"
-  # 手动补发或重跑指定 tag。
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: "已存在的 tag，例如 v0.3.5"
-        required: true
+| job | 名称 | 依赖 | 职责 |
+| --- | --- | --- | --- |
+| `prepare` | Validate release metadata | — | 解析 tag（`push` 用 `GITHUB_REF_NAME`，手动触发用 `inputs.tag`）；校验合法 SemVer、等于 `VERSION`/Cargo/前端 package 版本、tag 提交属于 `main`；从 `mise.toml` 读取 rust/node/pnpm 版本并作为 job 输出 |
+| `frontend` | Test and build WebUI | prepare | setup-pnpm/setup-node（版本取自 `prepare`）+ `pnpm install --frozen-lockfile`；`pnpm run test` 与 `pnpm run build` 分成两个步骤；上传 `webui-dist` |
+| `rust-quality` | Check Rust backend | prepare, frontend | `cargo fmt --check`；下载 `webui-dist`；`cargo clippy --all-targets --all-features -- -D warnings`；`cargo test --all-features` |
+| `binary` | Build linux x86_64 binary | prepare, rust-quality | `cargo build --locked --release --features webui-embed`；断言 `--version` 等于 `fluxdns <版本>`；暂存 `deploy/fluxdns` 并上传 `fluxdns-linux-x86_64` |
+| `image` | Build and push image | prepare, binary | 校验下载的二进制版本；setup-buildx → 登录 GHCR → 显式标签 → 构建推送；随后 4 项镜像级验证各自成步骤 |
 
-permissions:
-  contents: read
+`image` 内的验证步骤与失败语义：
 
-concurrency:
-  group: container-${{ github.ref }}
-  cancel-in-progress: false
+1. **Verify image version**：`docker run --rm <image> --version` 必须匹配 tag 版本。
+2. **Verify image configuration**：把冒烟夹具挂到 `/etc/fluxdns` 执行 `validate`，并断言挂载目录没有新增第二份 `config.yaml` 快照。
+3. **Verify image runs the DNS service**：以 `cap_drop: ALL` + `cap_add: NET_BIND_SERVICE` + `no-new-privileges` 启动并发布 `127.0.0.1:15353`，按下面的探针判定，最后验证 SIGTERM 优雅停机。
+4. **Verify compose example**：用 `docker/.env.example` 生成 `.env` 后执行 `docker compose config`。
 
-jobs:
-  publish:
-    name: Build and push image
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      # 1. checkout（fetch-depth 0，tag 归属与版本校验需要历史）
-      # 2. 解析 tag：push 用 GITHUB_REF_NAME，手动触发用 inputs.tag
-      # 3. 校验 tag：合法 SemVer、等于 VERSION/Cargo/前端 package 版本、提交属于 main
-      # 4. 从 mise.toml 读取 rust/node/pnpm 版本，保持与项目工具链同一来源
-      # 5. setup-node/setup-pnpm -> pnpm install --frozen-lockfile -> pnpm run build（生成 frontend/dist）
-      # 6. setup-rust-toolchain（含 actions/cache 复用 ~/.cargo 与 backend/target）
-      #    -> cargo build --manifest-path backend/Cargo.toml --locked --release --features webui-embed
-      # 7. 校验 backend/target/release/fluxdns --version 等于 "fluxdns <version>"，并暂存为 deploy/fluxdns
-      # 8. setup-buildx -> login ghcr.io（secrets.GITHUB_TOKEN）-> 显式计算镜像标签 -> build-push-action（linux/amd64）
-      # 9. 镜像级验证：docker run --rm <image> --version；再用挂载的模板配置执行 validate
-```
+镜像启动冒烟的就绪判据（v0.3.6 首次真实运行失败后修正）：
+
+- **就绪用宿主到映射端口的 TCP 连接**（`/dev/tcp/127.0.0.1/15353`，45s 窗口），不用日志文件：生产日志先进入 `TelemetryWriter` 队列，`TELEMETRY_FLUSH_INTERVAL` 为 5s，落盘有固定延迟，日志文件不能代表监听已就绪。
+- **存活判断用 `docker inspect --format '{{.State.Status}}'`**，不用 `docker ps --filter "id=..."`：后者在容器立即退出时返回空值，会把崩溃误判为“仍在运行”。
+- **日志落盘作为第二项证据**，排在 TCP 就绪之后，单独给 30s 窗口；它证明写入确实落到挂载的工作目录，而不是容器可写层。
+- **冒烟夹具的 listener 绑定 `0.0.0.0:53`**：端口由宿主映射进容器，容器内只听 `127.0.0.1` 时宿主侧无法到达。
+- **失败时输出诊断**：`docker inspect` 状态、`docker logs` 与挂载目录内的日志文件一并打印。
 
 | 决策点 | 选择 | 理由 |
 | --- | --- | --- |
 | 触发方式 | `push: tags: v*` 与 `workflow_dispatch` | 人工推 tag 可正常启动独立 workflow；`release: published` 由 `GITHUB_TOKEN` 触发，无法用于此目的 |
+| job 拆分 | 5 个 job，前端/后端门禁与二进制、镜像分开 | 失败环节在 Actions 页面直接可见；下游 job 只在门禁通过后运行，不浪费镜像构建时间 |
 | 编译位置 | runner 上的 pnpm + cargo，Dockerfile 只 COPY | 复用 `release.yml` 已验证的构建步骤与缓存键；镜像内不留工具链 |
 | 编译输入 | `backend/`（含 `migrations/`）与 `frontend/` | 生产路径 `include_str!` 引用 migrations；`webui-embed` 需要 `frontend/dist` |
-| 二进制校验 | `--version` 必须等于 tag 版本后再进镜像 | 阻止镜像内出现与 tag 不符的二进制 |
+| 二进制传递 | `upload-artifact` / `download-artifact` 传 `deploy/fluxdns` | 镜像 job 不重新编译，也避免把二进制混进 Git 工作树 |
+| 二进制校验 | `--version` 在编译 job 与镜像 job 各校验一次 | 阻止镜像内出现与 tag 不符的二进制 |
 | 平台 | `linux/amd64` | 与发布矩阵 x86_64 一致 |
-| 标签 | `<版本>`、`<主>.<次>`、`latest`（仅非预发布）与 `sha-<短哈希>` | 由 workflow 显式计算：检出 tag 后不依赖 `metadata-action` 对 `GITHUB_REF` 的解释 |
+| 标签 | `<版本>`、`<主>.<次>`、`sha-<短哈希>` 与非预发布的 `latest` | 由 workflow 显式计算：detach 检出后不依赖 `metadata-action` 对 `GITHUB_REF` 的解释 |
 | 版本门禁 | 复制 `release.yml` 的 tag/VERSION/Cargo/前端一致性校验 | 独立流水线不能省掉版本门禁；重复的代价见 6.1 |
-| 权限 | `contents: read`、`packages: write` | 检出源码并推送 GHCR |
+| 权限 | `contents: read`、`packages: write`（仅 `image` job） | 检出源码并推送 GHCR；其余 job 不需要包写权限 |
 | 可选增强 | 追加 `id-token: write`、`attestations: write` 输出 provenance/SBOM | 不在首批必需范围内 |
 | 包可见性 | 默认私有；公开需在仓库 Packages 设置或另行调用 API | 不由 workflow 自动变更，避免扩大权限 |
 
@@ -311,7 +296,7 @@ jobs:
 | 重复编译 | 同一个 tag 下 `release.yml` 与容器 workflow 各编译一次 Linux 产物，CI 时间与额度翻倍 | 已接受；这是“完全独立”的必然代价，若改为复用归档则失去独立性 |
 | 产物非同一份字节 | 镜像内二进制与 Release 归档、`checksums.txt` 各自编译，字节不保证一致 | 已接受；两者都由同一 tag 源码与本 workflow 的 `--version` 校验约束 |
 | 版本逻辑重复 | tag/VERSION/Cargo/前端一致性校验在 `release.yml` 与容器 workflow 各有一份 | 保持两份并同步修改；不为此改动 `release.yml`（可后续抽公共脚本，另行评估） |
-| 质量门禁不重叠 | 容器 workflow 默认不跑 Clippy 与测试套件，只做编译与 `--version`/`validate` 检查 | 已接受；由发布流程承担测试职责。若要求镜像自带门禁，需追加 Clippy/测试步骤并计入 CI 时间 |
+| 质量门禁与发布重复 | 容器 workflow 现在也跑 `pnpm run test`、`cargo clippy --all-features` 与 `cargo test --all-features`，与 `release.yml` 各跑一遍 | 已接受：镜像需要独立门禁（独立流水线不能靠发布流程的结果背书），重复的 CI 时间计入 6.2 |
 | glibc 下限 | runner 为 `ubuntu-latest`，若运行镜像 glibc 低于编译产物要求，容器启动即失败 | 使用 `debian:trixie-slim`；更小体积的 distroless/`ubuntu:24.04` 需另行实测 |
 | 客户端地址失真 | bridge 模式下 `peer` 恒为 docker 网关地址 | 已接受；按 4.4 的缓解方式或 host 网络处理，并在交付文档中明确 |
 | 凭据入库 | 部署示例的 `.env` 需要承载 SecretRef 实际值 | `.gitignore` 忽略 `docker/.env`，示例文件只放占位与注释 |
@@ -321,7 +306,7 @@ jobs:
 ### 6.2 未验证项
 
 1. 镜像体积、容器内 DNS/DoH 吞吐与延迟均未测量。
-2. 未执行任何真实 Actions 运行、GHCR 推送、`docker compose` 启动或镜像运行；Rust 在 runner 上的完整编译耗时未测量。
+2. 真实 Actions 运行尚未通过：v0.3.6 的运行在镜像启动冒烟阶段失败（就绪探针误判，已修正），修复后的运行与 GHCR 推送、`docker compose` 启动、镜像运行均待验证；Rust 在 runner 上的完整编译耗时也未测量。
 3. DoH 证书在运行期是否被重新读取未核对，方案按重启容器处理。
 4. 运行根文件系统只读、`tmpfs` 挂载等额外加固组合未验证（生产代码未使用 `std::env::temp_dir`，但仍需实测确认无其他写入路径）。
 5. 备选方案（Dockerfile 内多阶段编译）在 GitHub 托管 runner 上的缓存与耗时未评估。
@@ -331,12 +316,15 @@ jobs:
 
 ### 7.1 CI 内自动化验证（实施批次落地）
 
-1. 容器 workflow 内编译出的 `fluxdns --version` 等于 tag 版本，且 tag 版本与 `VERSION`/Cargo/前端 package 一致。
-2. `docker run --rm <image> --version` 输出等于 `fluxdns <version>`。
-3. 用挂载的模板配置（`config-example.yaml` 复制为 `config.yaml`）执行 `validate`，退出码为 0，且挂载目录没有新增 `config.yaml` 快照（验证 `without_snapshot` 行为与工作目录一致性）。
-4. 以真实 `run` 启动并绑定 53，日志出现 `service_ready` 且无绑定权限错误。
-5. `docker stop` 在 5s 宽限期内完成优雅停机。
-6. `docker compose -f docker/compose-example.yaml config` 在提供 `.env` 后解析成功，证明示例语法与变量引用有效。
+1. tag 与 `VERSION`/Cargo/前端 package 版本一致，且 tag 提交属于 `main`（`prepare`）。
+2. 前端 `pnpm run test` 与 `pnpm run build`、Rust `cargo fmt --check`/`cargo clippy --all-targets --all-features -- -D warnings`/`cargo test --all-features` 全部通过（`frontend`、`rust-quality`）。
+3. 编译出的 `fluxdns --version` 等于 tag 版本，且镜像内二进制来自同一份暂存产物（`binary`、`image` 各校验一次）。
+4. `docker run --rm <image> --version` 输出等于 `fluxdns <version>`（`image`）。
+5. 用挂载的冒烟夹具执行 `validate`，退出码为 0，且挂载目录没有新增 `config.yaml` 快照（验证 `without_snapshot` 行为与工作目录一致性）。
+6. 以真实 `run` 启动并绑定 53：容器保持 `running`、宿主映射端口在 45s 内接受 TCP 连接、挂载目录日志在 30s 内出现 `service_ready`，且无绑定权限错误。
+7. `docker stop` 在 5s 宽限期内完成优雅停机（退出码 0 且耗时不超过 15s）。
+8. `docker compose -f docker/compose-example.yaml config` 在提供 `.env` 后解析成功，证明示例语法与变量引用有效。
+9. 失败时能在 Actions 页面直接定位到具体 job 与步骤，且冒烟步骤失败会打印容器状态、`docker logs` 与挂载日志。
 
 ### 7.2 人工验收（目标主机）
 
@@ -356,20 +344,32 @@ jobs:
 
 ## 8. 实施状态与剩余验收
 
-已落地的文件：`.github/workflows/container.yml`（独立镜像流水线，`release.yml` 零改动）、[`docker/Dockerfile`](../../docker/Dockerfile)、[`.dockerignore`](../../.dockerignore)、[`docker/compose-example.yaml`](../../docker/compose-example.yaml)、[`docker/.env.example`](../../docker/.env.example)、[`docker/container-smoke-config.yaml`](../../docker/container-smoke-config.yaml)、[`.gitignore`](../../.gitignore) 的 `docker/.env` 忽略项，以及[交付实现](../implementation/delivery.md#容器镜像交付)、[环境规则](../rules/environment-usage.md)与 [README](../../README.md) 的同步更新。
+已落地的文件：`.github/workflows/container.yml`（独立镜像流水线，5 个 job；`release.yml` 零改动）、[`docker/Dockerfile`](../../docker/Dockerfile)、[`.dockerignore`](../../.dockerignore)、[`docker/compose-example.yaml`](../../docker/compose-example.yaml)、[`docker/.env.example`](../../docker/.env.example)、[`docker/container-smoke-config.yaml`](../../docker/container-smoke-config.yaml)、[`.gitignore`](../../.gitignore) 的 `docker/.env` 忽略项，以及[交付实现](../implementation/delivery.md#容器镜像交付)、[环境规则](../rules/environment-usage.md)与 [README](../../README.md) 的同步更新。
 
-本批次实际执行的本地验证：
+### 8.1 v0.3.6 真实运行的结果与修正
 
-1. `.github/workflows/container.yml`、`release.yml`、`docker/compose-example.yaml`、`docker/container-smoke-config.yaml`、`config-example.yaml` 用仓库既有 `js-yaml 4.3.1` 解析通过。
-2. Rust 1.98.0 本地 debug 构建成功后，`fluxdns validate` 通过新增冒烟夹具（2 个 listener、1 个 upstream、1 个策略）、根模板与既有启动夹具。
+v0.3.6 推送 tag 后独立 workflow 首次真实运行，在镜像启动冒烟步骤失败，`Build and push image` 的 job 内报 `Service did not report service_ready within 30s.`，而同一容器写进挂载目录的日志里确实有 `service_ready`。
+
+根因（已按源码核对）：生产日志经 `TelemetryWriter` 队列写出，`TELEMETRY_FLUSH_INTERVAL` 为 5s（`DEFAULT_TELEMETRY_QUEUE_CAPACITY = 1024`，见 [service.rs](../../backend/src/service.rs)），因此**日志文件在就绪瞬间不可靠**；同时存活判断用 `docker ps --quiet --filter "id=..."`，容器崩溃时会返回空值，属于错误的存活信号。
+
+已完成的修正：
+
+1. 流水线拆为 5 个 job（`prepare`/`frontend`/`rust-quality`/`binary`/`image`），前端测试、Rust 门禁、二进制校验、镜像构建与 4 项镜像验证各自独立，失败环节在 Actions 页面直接可见。
+2. 就绪探针改为宿主到映射端口的 TCP 连接（45s 窗口），存活判断改为 `docker inspect --format '{{.State.Status}}'`；日志出现 `service_ready` 只作为第二项证据，单独给 30s 窗口。
+3. 冒烟夹具的 listener 改为绑定 `0.0.0.0:53`：原 `127.0.0.1` 无法从宿主映射端口到达。
+4. 冒烟失败时打印容器状态、`docker logs` 与挂载目录内的日志文件。
+
+### 8.2 本批次实际执行的本地验证
+
+1. `.github/workflows/container.yml`、`release.yml`、`docker/compose-example.yaml`、`docker/container-smoke-config.yaml`、`config-example.yaml` 用仓库既有 `js-yaml 4.3.1` 解析通过；另用脚本遍历全部 job 检查步骤结构（`uses`/`run` 互斥、多行脚本首行 `set -euo pipefail`），并把每个 bash 脚本块交给 `bash -n` 做语法校验（17 个块全部通过）。
+2. Rust 1.98.0 本地 debug 构建成功后，`fluxdns validate` 通过新增冒烟夹具（2 个 listener 绑定 `0.0.0.0:53`、1 个 upstream、1 个策略）、根模板与既有启动夹具。
 3. 用同一 debug 二进制在临时目录实跑 `run`：`service_ready` 在 2s 内写入 `<work.path>/logs/fluxdns.log`，工作目录自动生成 `data/`、`logs/`，未出现绑定 53 失败。这一步在 Windows 本机执行，不等同容器内验证。
-
 4. 三个容器相关 action 的主版本按 GitHub Releases 页核对后取当前主版本：`docker/setup-buildx-action@v4`（v4.3.0）、`docker/login-action@v4`（v4.6.0）、`docker/build-push-action@v7`（v7.4.0）；未在真实 runner 上执行验证。
 5. 文档检查器与 `git diff --check` 通过。
 
-尚未完成、决定退出条件的验收：
+### 8.3 尚未完成、决定退出条件的验收
 
-1. tag 推送后的真实 Actions 运行：镜像构建、推送 GHCR、`--version`/`validate`/启动冒烟/`docker stop` 与 `docker compose config` 五类镜像级检查。
+1. 修正后重新推 tag 的真实 Actions 运行：5 个 job 全部通过，镜像推送 GHCR，并完成 7.1 的全部镜像级检查。
 2. 目标主机上的人工验收（7.2 全部 5 项）。
 3. 镜像体积、容器内性能、GHCR 包可见性与 `latest` 拉取行为未测量。
 

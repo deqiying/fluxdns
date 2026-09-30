@@ -2,6 +2,13 @@ name: Container image
 
 # 独立镜像流水线：与 release.yml 互不依赖，tag 推送即自行编译、构建并推送 GHCR。
 # 它不等待 Release workflow 成功，也不使用其归档或 checksums。
+#
+# 阶段按 job 拆分，便于在 Actions 页面直接定位失败环节：
+#   prepare      检查：tag、版本一致性、项目工具版本
+#   frontend     环境准备 + 前端测试 + 构建 WebUI
+#   rust-quality 环境准备 + Rust 格式、静态检查与测试
+#   binary       构建内嵌 WebUI 的 release 二进制
+#   image        构建并推送镜像 + 镜像级验证
 on:
   push:
     tags:
@@ -20,13 +27,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Build and push image
+  prepare:
+    name: Validate release metadata
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-    permissions:
-      contents: read
-      packages: write
+    timeout-minutes: 15
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      release_version: ${{ steps.release.outputs.release_version }}
+      rust_version: ${{ steps.tool-versions.outputs.rust_version }}
+      node_version: ${{ steps.tool-versions.outputs.node_version }}
+      pnpm_version: ${{ steps.tool-versions.outputs.pnpm_version }}
 
     steps:
       - name: Checkout
@@ -64,6 +74,16 @@ jobs:
           fi
           git checkout --detach "${tag_commit}"
 
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "release_version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Verify version files match tag
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+        run: |
+          set -euo pipefail
+
           mapfile -t version_lines < VERSION
           if [[ "${#version_lines[@]}" -ne 1 ]]; then
             echo "VERSION must contain exactly one line." >&2
@@ -77,8 +97,8 @@ jobs:
           ' backend/Cargo.toml)"
           frontend_version="$(awk -F '\"' '/^[[:space:]]*\"version\"[[:space:]]*:/ { print $4; exit }' frontend/package.json)"
 
-          if [[ "${version}" != "${project_version}" ]]; then
-            echo "Tag version ${version} does not match VERSION ${project_version}." >&2
+          if [[ "${RELEASE_VERSION}" != "${project_version}" ]]; then
+            echo "Tag version ${RELEASE_VERSION} does not match VERSION ${project_version}." >&2
             exit 1
           fi
           if [[ "${cargo_version}" != "${project_version}" ]]; then
@@ -89,9 +109,7 @@ jobs:
             echo "Frontend package version ${frontend_version} does not match VERSION ${project_version}." >&2
             exit 1
           fi
-
-          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
-          echo "release_version=${project_version}" >> "${GITHUB_OUTPUT}"
+          echo "Version files match ${project_version}."
 
       - name: Read project tool versions
         id: tool-versions
@@ -117,15 +135,27 @@ jobs:
             echo "pnpm_version=${pnpm_version}"
           } >> "${GITHUB_OUTPUT}"
 
+  frontend:
+    name: Test and build WebUI
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: ${{ steps.tool-versions.outputs.pnpm_version }}
+          version: ${{ needs.prepare.outputs.pnpm_version }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: ${{ steps.tool-versions.outputs.node_version }}
+          node-version: ${{ needs.prepare.outputs.node_version }}
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
@@ -133,10 +163,35 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
-      # webui-embed 在编译期需要真实 WebUI，因此先构建 frontend/dist。
+      - name: Test frontend
+        working-directory: frontend
+        run: pnpm run test
+
       - name: Build WebUI
         working-directory: frontend
         run: pnpm run build
+
+      - name: Upload tested WebUI
+        uses: actions/upload-artifact@v6
+        with:
+          name: webui-dist
+          path: frontend/dist/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  rust-quality:
+    name: Check Rust backend
+    # --all-features 会启用 webui-embed，必须先取得本次构建的真实 WebUI。
+    needs: [prepare, frontend]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
 
       - name: Cache Cargo registry and git sources
         uses: actions/cache@v4
@@ -151,7 +206,8 @@ jobs:
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
-          toolchain: ${{ steps.tool-versions.outputs.rust_version }}
+          toolchain: ${{ needs.prepare.outputs.rust_version }}
+          components: clippy, rustfmt
           cache: false
           rustflags: ""
 
@@ -159,17 +215,75 @@ jobs:
         uses: actions/cache@v4
         with:
           path: backend/target
-          key: rust-target-${{ runner.os }}-container-${{ hashFiles('backend/Cargo.lock') }}
+          key: rust-target-${{ runner.os }}-quality-${{ hashFiles('backend/Cargo.lock') }}
           restore-keys: |
-            rust-target-${{ runner.os }}-container-
+            rust-target-${{ runner.os }}-quality-
 
-      - name: Build release binary
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path backend/Cargo.toml -- --check
+
+      - name: Download tested WebUI
+        uses: actions/download-artifact@v7
+        with:
+          name: webui-dist
+          path: frontend/dist
+
+      - name: Run Rust static checks
+        run: cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets --all-features -- -D warnings
+
+      - name: Test Rust backend
+        run: cargo test --manifest-path backend/Cargo.toml --locked --all-features
+
+  binary:
+    name: Build linux x86_64 binary
+    needs: [prepare, rust-quality]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Cache Cargo registry and git sources
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: cargo-${{ runner.os }}-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: ${{ needs.prepare.outputs.rust_version }}
+          cache: false
+          rustflags: ""
+
+      - name: Cache Rust target artifacts
+        uses: actions/cache@v4
+        with:
+          path: backend/target
+          key: rust-target-${{ runner.os }}-container-binary-${{ hashFiles('backend/Cargo.lock') }}
+          restore-keys: |
+            rust-target-${{ runner.os }}-container-binary-
+
+      - name: Download tested WebUI
+        uses: actions/download-artifact@v7
+        with:
+          name: webui-dist
+          path: frontend/dist
+
+      - name: Build embedded release binary
         run: cargo build --manifest-path backend/Cargo.toml --locked --release --features webui-embed
 
-      - name: Verify binary and stage build context
+      - name: Verify binary version and stage for the image build
         shell: bash
         env:
-          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
         run: |
           set -euo pipefail
 
@@ -190,6 +304,52 @@ jobs:
           install --mode 0755 "${binary}" deploy/fluxdns
           sha256sum deploy/fluxdns
 
+      - name: Upload linux binary
+        uses: actions/upload-artifact@v6
+        with:
+          name: fluxdns-linux-x86_64
+          path: deploy/fluxdns
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  image:
+    name: Build and push image
+    needs: [prepare, binary]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Download linux binary
+        uses: actions/download-artifact@v7
+        with:
+          name: fluxdns-linux-x86_64
+          path: deploy
+
+      - name: Verify downloaded binary
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          chmod 0755 deploy/fluxdns
+          actual_version="$(./deploy/fluxdns --version)"
+          expected_version="fluxdns ${RELEASE_VERSION}"
+          if [[ "${actual_version}" != "${expected_version}" ]]; then
+            echo "Expected '${expected_version}', got '${actual_version}'." >&2
+            exit 1
+          fi
+          sha256sum deploy/fluxdns
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -204,7 +364,7 @@ jobs:
         id: image
         shell: bash
         env:
-          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
         run: |
           set -euo pipefail
 
@@ -231,35 +391,33 @@ jobs:
           push: true
           tags: ${{ steps.image.outputs.tags }}
           build-args: |
-            FLUXDNS_VERSION=${{ steps.release.outputs.release_version }}
+            FLUXDNS_VERSION=${{ needs.prepare.outputs.release_version }}
             FLUXDNS_REVISION=${{ github.sha }}
 
       - name: Verify image version
         shell: bash
         env:
-          IMAGE: ${{ steps.image.outputs.name }}:${{ steps.release.outputs.release_version }}
-          RELEASE_VERSION: ${{ steps.release.outputs.release_version }}
+          IMAGE: ${{ steps.image.outputs.name }}:${{ needs.prepare.outputs.release_version }}
+          RELEASE_VERSION: ${{ needs.prepare.outputs.release_version }}
         run: |
           set -euo pipefail
 
           docker run --rm "${IMAGE}" --version \
             | grep --fixed-strings --line-regexp "fluxdns ${RELEASE_VERSION}"
 
-      - name: Verify image configuration and service
+      - name: Verify image configuration
         shell: bash
         env:
-          IMAGE: ${{ steps.image.outputs.name }}:${{ steps.release.outputs.release_version }}
+          IMAGE: ${{ steps.image.outputs.name }}:${{ needs.prepare.outputs.release_version }}
         run: |
           set -euo pipefail
 
-          config_dir="${RUNNER_TEMP}/fluxdns-smoke"
+          config_dir="${RUNNER_TEMP}/fluxdns-config"
           rm -rf "${config_dir}"
-          mkdir -p "${config_dir}/logs" "${config_dir}/data"
+          mkdir -p "${config_dir}"
           cp docker/container-smoke-config.yaml "${config_dir}/config.yaml"
-          # 部署要求：宿主工作目录归 root 所有，才能配合 cap_drop: ALL 运行。
-          sudo chown -R 0:0 "${config_dir}"
 
-          # 配置级检查：validate 不写盘，源配置即 <work.path>/config.yaml。
+          # validate 不写盘；源配置即 <work.path>/config.yaml，因此不生成第二份快照。
           docker run --rm \
             --volume "${config_dir}:/etc/fluxdns" \
             "${IMAGE}" validate --config /etc/fluxdns/config.yaml
@@ -271,35 +429,85 @@ jobs:
             exit 1
           fi
 
+      - name: Verify image runs the DNS service
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}:${{ needs.prepare.outputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          config_dir="${RUNNER_TEMP}/fluxdns-service"
+          host_port=15353
           container=fluxdns-smoke
+          rm -rf "${config_dir}"
+          mkdir -p "${config_dir}/logs" "${config_dir}/data"
+          cp docker/container-smoke-config.yaml "${config_dir}/config.yaml"
+          # 部署要求：宿主工作目录归 root 所有，才能配合 cap_drop: ALL 运行。
+          sudo chown -R 0:0 "${config_dir}"
+
+          dump_diagnostics() {
+            docker inspect --format 'status={{.State.Status}} exit={{.State.ExitCode}} oom={{.State.OOMKilled}}' "${container}" >&2 || true
+            docker logs "${container}" >&2 || true
+            # 日志文件由容器内 root 创建，宿主侧读取统一走 sudo，避免权限差异导致误判。
+            if [[ -f "${config_dir}/logs/fluxdns.log" ]]; then
+              sudo cat "${config_dir}/logs/fluxdns.log" >&2
+            fi
+          }
+
           docker rm --force "${container}" >/dev/null 2>&1 || true
-          # 与 docker/compose-example.yaml 相同的权限收紧组合：验证只保留 NET_BIND_SERVICE 时仍可绑定 53。
+          # 与 docker/compose-example.yaml 相同的权限收紧组合：只保留 NET_BIND_SERVICE 时仍须能绑定 53。
           docker run --detach --name "${container}" \
+            --publish "127.0.0.1:${host_port}:53/tcp" \
+            --publish "127.0.0.1:${host_port}:53/udp" \
             --volume "${config_dir}:/etc/fluxdns" \
             --cap-drop ALL \
             --cap-add NET_BIND_SERVICE \
             --security-opt no-new-privileges:true \
             "${IMAGE}"
 
-          log_file="${config_dir}/logs/fluxdns.log"
+          # 就绪探针用 TCP 连接而不是日志文件：日志先进入遥测队列，按 5s 周期刷盘。
+          started="${SECONDS}"
           ready=0
-          for _ in $(seq 1 30); do
-            if [[ -f "${log_file}" ]] && grep --quiet "service_ready" "${log_file}"; then
-              ready=1
-              break
+          while (( SECONDS - started < 45 )); do
+            status="$(docker inspect --format '{{.State.Status}}' "${container}" 2>/dev/null || true)"
+            if [[ "${status}" != "running" ]]; then
+              echo "Container is not running (status='${status}')." >&2
+              dump_diagnostics
+              docker rm --force "${container}" >/dev/null 2>&1 || true
+              exit 1
             fi
-            if [[ -z "$(docker ps --quiet --filter "id=${container}")" ]]; then
+            if bash -c "exec 3<>/dev/tcp/127.0.0.1/${host_port}" >/dev/null 2>&1; then
+              ready=1
               break
             fi
             sleep 1
           done
           if [[ "${ready}" -ne 1 ]]; then
-            echo "Service did not report service_ready within 30s." >&2
-            docker logs "${container}" >&2 || true
-            [[ -f "${log_file}" ]] && cat "${log_file}" >&2
+            echo "DNS listener did not accept a TCP connection within 45s." >&2
+            dump_diagnostics
             docker rm --force "${container}" >/dev/null 2>&1 || true
             exit 1
           fi
+          echo "DNS listener accepted a TCP connection after $(( SECONDS - started ))s."
+
+          # 日志落盘证据：刷盘周期是 5s，只有就绪探针通过后才要求它出现。
+          log_file="${config_dir}/logs/fluxdns.log"
+          logged_at="${SECONDS}"
+          logged=0
+          while (( SECONDS - logged_at < 30 )); do
+            if [[ -f "${log_file}" ]] && sudo grep --quiet "service_ready" "${log_file}"; then
+              logged=1
+              break
+            fi
+            sleep 1
+          done
+          if [[ "${logged}" -ne 1 ]]; then
+            echo "service_ready was not flushed to ${log_file} within 30s." >&2
+            dump_diagnostics
+            docker rm --force "${container}" >/dev/null 2>&1 || true
+            exit 1
+          fi
+          echo "service_ready reached ${log_file} after $(( SECONDS - logged_at ))s."
 
           started="$(date +%s)"
           docker stop --time 20 "${container}" >/dev/null
@@ -315,8 +523,7 @@ jobs:
             echo "Graceful shutdown took ${elapsed}s, expected within the 5s grace period." >&2
             exit 1
           fi
-
-          echo "Container smoke test passed in ${elapsed}s."
+          echo "DNS service smoke test passed (graceful stop in ${elapsed}s)."
 
       - name: Verify compose example
         shell: bash
