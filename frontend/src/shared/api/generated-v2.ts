@@ -635,10 +635,13 @@ export interface components {
             token_type: "Bearer";
             access_expires_at_ms: components["schemas"]["SafeInteger"];
         };
-        SecretRef: {
+        /** @description 秘密来源三选一；`url` 形式直接在配置里写入完整代理 URL，读取时会脱敏密码。 */
+        SecretRef: string | {
             env: string;
         } | {
             file: components["schemas"]["Path"];
+        } | {
+            url: string;
         };
         Optimistic: {
             enabled: boolean;

@@ -296,3 +296,126 @@ fn editing_is_repeatable_for_crlf_block_text_and_empty_collections() {
     logs.level = crate::config::model::LogLevelDto::Debug;
     assert!(build(&next.source, &[ConfigChange::Logs(logs)]).is_ok());
 }
+
+#[test]
+fn redacted_inline_proxy_url_is_restored_when_the_edit_does_not_change_it() {
+    const SOURCE: &str = r#"version: 2
+work:
+  path: .
+  rules_path: ./rules
+database:
+  type: sqlite
+  path: ./data/statistics.sqlite3
+  records_path: ./data/queries
+logs:
+  enable: false
+  level: info
+  path: ./logs/fluxdns.log
+webui:
+  enable: false
+  address: 127.0.0.1
+  port: 18080
+dns: {}
+listener:
+  - name: dns
+    type: udp
+    addresses: [127.0.0.1]
+    port: 15353
+    strategy: default
+outbound:
+  - name: sg
+    type: socks5
+    proxy_url: socks5://user:secret@proxy.example:1080
+strategy:
+  - name: default
+    rules:
+      - hosts: local
+    default_upstream: local
+upstreams:
+  - name: local
+    type: hosts
+    format: hosts
+    hosts: "127.0.0.1 localhost"
+hosts:
+  - name: local
+    type: const
+    format: hosts
+    hosts: "127.0.0.1 localhost"
+"#;
+
+    // 模拟 Management 读取：typed 值经序列化再反序列化后只携带脱敏密码。
+    let config = ConfigV2::parse(SOURCE.as_bytes()).unwrap();
+    let redacted = serde_json::to_value(&config.outbound[0]).unwrap()["proxy_url"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        redacted,
+        "socks5://user:FLUXDNS_REDACTED_SECRET@proxy.example:1080"
+    );
+
+    // 用户只改名，未重新输入 URL；展开步骤必须按原 name 找回原密码，而不是写回脱敏值。
+    let mut renamed: OutboundDto =
+        serde_json::from_value(serde_json::to_value(&config.outbound[0]).unwrap()).unwrap();
+    assert_eq!(
+        renamed.proxy_url,
+        crate::config::model::SecretRefDto::Inline { url: redacted }
+    );
+    renamed.name = "sg-renamed".into();
+    let expanded = expand_redacted_changes(
+        SOURCE,
+        &[ConfigChange::Outbound(ResourceMutation::Update {
+            original_name: "sg".into(),
+            value: renamed,
+        })],
+    )
+    .unwrap();
+    let candidate = build(SOURCE, &expanded).unwrap();
+    assert!(
+        candidate
+            .source
+            .contains("socks5://user:secret@proxy.example:1080")
+    );
+    assert!(!candidate.source.contains("FLUXDNS_REDACTED_SECRET"));
+    assert_eq!(
+        yaml_serde::from_str::<Value>(&candidate.source).unwrap()["outbound"][0]["name"],
+        "sg-renamed"
+    );
+
+    // 主机改变后占位符无法按活动源恢复：必须报错让用户重填，不能把占位符写进配置文件。
+    let mut moved: OutboundDto =
+        serde_json::from_value(serde_json::to_value(&config.outbound[0]).unwrap()).unwrap();
+    moved.proxy_url = crate::config::model::SecretRefDto::Inline {
+        url: "socks5://user:FLUXDNS_REDACTED_SECRET@other.example:1080".into(),
+    };
+    let error = expand_redacted_changes(
+        SOURCE,
+        &[ConfigChange::Outbound(ResourceMutation::Update {
+            original_name: "sg".into(),
+            value: moved,
+        })],
+    )
+    .unwrap_err();
+    assert!(
+        error.to_string().contains("outbound[0].proxy_url"),
+        "{error}"
+    );
+
+    // 活动源是同址内联来源时，未改动的密码仍可恢复。
+    let unchanged: OutboundDto =
+        serde_json::from_value(serde_json::to_value(&config.outbound[0]).unwrap()).unwrap();
+    let expanded = expand_redacted_changes(
+        SOURCE,
+        &[ConfigChange::Outbound(ResourceMutation::Update {
+            original_name: "sg".into(),
+            value: unchanged,
+        })],
+    )
+    .unwrap();
+    let candidate = build(SOURCE, &expanded).unwrap();
+    assert!(
+        candidate
+            .source
+            .contains("socks5://user:secret@proxy.example:1080")
+    );
+}

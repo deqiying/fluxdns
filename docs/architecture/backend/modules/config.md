@@ -76,7 +76,7 @@ YAML 文件必须是 UTF-8。唯一 v2 loader 以 4 MiB 限制输入，避免在
 - `resource:selector` 引用中的 selector 使用与 Resource dat parser 相同的规则规范化为 lowercase canonical key；
 - cache、TTL、ECS 的缺失/显式禁用/字段继承；
 - client、strategy、route、resource 和 upstream 名称转换为 typed ID；
-- SecretRef source 归一化为 env/file 引用；实际值不会在普通 YAML load 中读取，只能由后续 adapter 通过 `ResolvedSecretRef::resolve` 或 `resolve_proxy_url` 等显式 accessor 请求，并包装为 Debug/Display 脱敏、不可 Serialize 的 secret 类型；
+- SecretRef source 归一化为 env/file/inline `url` 引用；实际值不会在普通 YAML load 中读取，只能由后续 adapter 通过 `ResolvedSecretRef::resolve` 或 `resolve_proxy_url` 等显式 accessor 请求，并包装为 Debug/Display 脱敏、不可 Serialize 的 secret 类型；内联 `url` 在序列化、Debug 与日志中同样只输出脱敏密码位；
 - cache/TTL/ECS 等继承相关值保留 `ValueSource`；不是所有字段都有完整来源追踪。
 
 请求热路径禁止再次读取 YAML、解析 duration 或计算继承。loader 不负责资源内容首次加载和 `ResourceSnapshot` 发布。
@@ -161,7 +161,7 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - 包含 `!` 等可打印 ASCII 的 dat selector canonicalization；
 - DoH 尾部 `{client_id}` 裸路径和 route 语义重叠拒绝；
 - IPv4/IPv6 bind 冲突；
-- SecretRef env/file、缺失、空值、非法 scheme 和脱敏；
+- SecretRef env/file/inline `url`、缺失、空值、非法 scheme 和脱敏；
 - migration golden test、空链幂等和有损 warning 边界；
 - 配置快照创建、相同内容 no-op、不同内容拒绝覆盖、并发 no-replace、symlink 防护、目录同步和临时文件不污染目标。
 - 路径解析矩阵：配置文件参数为绝对/相对路径，`work.path` 为绝对/`.`/含 `..` 的相对路径，项目路径为绝对/相对路径，以及无来源 bytes/string 加载时的错误边界。

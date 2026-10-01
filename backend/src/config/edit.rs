@@ -9,11 +9,11 @@ use yaml_serde::Value;
 
 use super::contract::{ClientMatchV2, ClientV2, ConfigV2, DnsV2, StatisticsV2};
 use super::model::{
-    CacheOverrideDto, EcsDto, HostsResourceDto, ListenerDto, LogsDto, OutboundDto, RuleSetDto,
-    StrategyDto, TtlOverrideDto, UpstreamDto,
+    CacheOverrideDto, EcsDto, HostsResourceDto, ListenerDto, LogsDto, OutboundDto,
+    REDACTED_INLINE_PASSWORD, RuleSetDto, SecretRefDto, StrategyDto, TtlOverrideDto, UpstreamDto,
 };
 use super::source_edit::edit_document;
-use super::validate::ConfigErrorReport;
+use super::validate::{ConfigError, ConfigErrorKind, ConfigErrorReport};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -147,6 +147,52 @@ impl From<ConfigErrorReport> for EditError {
     fn from(report: ConfigErrorReport) -> Self {
         Self::Validation(report)
     }
+}
+
+/// 内联地址在候选里的真实值只来自脱敏回填或用户新值；这里用活动源恢复未修改的密码，
+/// 使原本只需改名等无关字段的编辑不再要求重新输入完整 URL。摘要与候选共用同一展开结果。
+pub(crate) fn expand_redacted_changes(
+    source: &str,
+    changes: &[ConfigChange],
+) -> Result<Vec<ConfigChange>, EditError> {
+    let original = ConfigV2::parse(source.as_bytes())?;
+    let mut expanded = changes.to_vec();
+    for change in &mut expanded {
+        // 改名编辑的新 name 在活动源中并不存在，必须按 original_name 定位原条目，
+        // 否则脱敏占位符会被当作真实密码写入源文件。
+        let ConfigChange::Outbound(ResourceMutation::Update {
+            original_name,
+            value,
+        }) = change
+        else {
+            continue;
+        };
+        // 原条目缺失由 build_candidate 报 NotFound，这里保持展开步骤的单一职责。
+        let Some(index) = original
+            .outbound
+            .iter()
+            .position(|item| item.name == *original_name)
+        else {
+            continue;
+        };
+        value
+            .proxy_url
+            .restore_redacted_url(&original.outbound[index].proxy_url);
+        // 占位符只有在能按活动源恢复时才有意义。用户改了 scheme/host/port、或原条目不是同址内联
+        // 来源时无法恢复，此时必须让用户重填完整 URL，不能把占位符当作密码写进配置文件。
+        if let SecretRefDto::Inline { url } = &value.proxy_url
+            && url.contains(REDACTED_INLINE_PASSWORD)
+        {
+            let mut report = ConfigErrorReport::default();
+            report.push(ConfigError::new(
+                ConfigErrorKind::Secret,
+                format!("outbound[{index}].proxy_url"),
+                "redacted inline proxy URL cannot be restored; submit the full URL again",
+            ));
+            return Err(EditError::Validation(report));
+        }
+    }
+    Ok(expanded)
 }
 
 /// 所有旧键均相对于同一活动源定位，最后一次性校验整张引用图，允许合法的组合变更。

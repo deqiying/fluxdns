@@ -16,7 +16,9 @@ use super::{
     read_bounded,
 };
 use crate::config::contract::ConfigV2;
-use crate::config::edit::{ConfigChange, EditError, SourceCandidate, build_candidate};
+use crate::config::edit::{
+    ConfigChange, EditError, SourceCandidate, build_candidate, expand_redacted_changes,
+};
 use crate::config::hash::deterministic_hash;
 use crate::config::resolve::resolve_config_v2;
 use crate::config::source_edit::{InitialWebUiUser, create_initial_webui_user};
@@ -450,9 +452,10 @@ impl ConfigStore {
         validate_token(actor)?;
         let snapshot = self.observe_files()?;
         check_expected(&snapshot, expected, discard_external_changes)?;
-        let candidate = build_candidate(&snapshot.source, &self.source_path, changes)?;
+        let expanded = expand_redacted_changes(&snapshot.source, changes)?;
+        let candidate = build_candidate(&snapshot.source, &self.source_path, &expanded)?;
         let impacts = impacts(&snapshot, &candidate)?;
-        let digest = command_digest(actor, expected, changes, discard_external_changes)?;
+        let digest = command_digest(actor, expected, &expanded, discard_external_changes)?;
         let token = random_token()?;
         let mut state = self.active.lock().map_err(|_| ActiveError::Busy)?;
         let state = state.as_mut().ok_or(ActiveError::Unavailable)?;
@@ -496,15 +499,16 @@ impl ConfigStore {
         validate_token(actor)?;
         validate_token(operation_id)?;
         let _transaction = self.transaction.try_lock().map_err(|_| ActiveError::Busy)?;
-        let digest = command_digest(actor, expected, changes, discard_external_changes)?;
+        let mut guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
+        let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
+        let expanded = expand_redacted_changes(&state.snapshot.source, changes)?;
+        let digest = command_digest(actor, expected, &expanded, discard_external_changes)?;
         let operation_digest = sha256_digest(
             &serde_json::to_vec(&(&digest, validation_token, confirmations))
                 .map_err(|_| EditError::UnsupportedSource)?,
         );
         let observation =
             ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
-        let mut guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
-        let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
         let now = Instant::now();
         state.operations.retain(|id, record| {
             record.expires > now || state.snapshot.operation_id.as_ref() == Some(id)
@@ -532,7 +536,7 @@ impl ConfigStore {
         let source = state.snapshot.source.clone();
         // 完整候选验证不持有活动状态锁；transaction 排除 setup 和其他配置写入。
         drop(guard);
-        let candidate = build_candidate(&source, &self.source_path, changes)?;
+        let candidate = build_candidate(&source, &self.source_path, &expanded)?;
         let next_revision = random_token()?;
         let mut guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
         let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;

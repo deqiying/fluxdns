@@ -8,7 +8,7 @@ use serde::Serialize;
 
 use super::{ConfigStore, ErrorCode, error_code, revision};
 use crate::config::{
-    model::{HostsResourceDto, ListenerDto, RuleSetDto, UpstreamDto},
+    model::{HostsResourceDto, ListenerDto, RuleSetDto, SecretRefDto, UpstreamDto},
     store::active::external::ExternalSourceError,
 };
 use crate::management::contract::{
@@ -251,14 +251,23 @@ fn check_source_bounds(value: &ModuleSource) -> Result<(), ErrorCode> {
         ModuleSource::Hosts(HostsResourceDto::File { path, .. })
         | ModuleSource::RuleSet(RuleSetDto::File { path, .. }) => path_bound(path)?,
         ModuleSource::RuleSet(RuleSetDto::Remote { url, .. }) => text_bound(url.as_str(), 4096)?,
-        ModuleSource::Outbound(value) => {
-            if let Some(env) = &value.proxy_url.env {
-                text_bound(env, 256)?;
+        ModuleSource::Outbound(value) => match &value.proxy_url {
+            SecretRefDto::Env { env } => text_bound(env, 256)?,
+            SecretRefDto::File { file } => path_bound(file)?,
+            // 内联地址是普通字符串，沿用上游 URL 的 4096 字节投影上限。
+            SecretRefDto::Inline { url } => text_bound(url, 4096)?,
+            SecretRefDto::Parts { env, file, url } => {
+                if let Some(env) = env {
+                    text_bound(env, 256)?;
+                }
+                if let Some(file) = file {
+                    path_bound(file)?;
+                }
+                if let Some(url) = url {
+                    text_bound(url, 4096)?;
+                }
             }
-            if let Some(path) = &value.proxy_url.file {
-                path_bound(path)?;
-            }
-        }
+        },
         ModuleSource::Dns(value) => {
             if let Some(cache) = &value.cache {
                 path_bound(&cache.persistence.path)?;

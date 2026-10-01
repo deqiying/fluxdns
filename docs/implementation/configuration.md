@@ -214,9 +214,9 @@ listener
 | 字节数 | `8388608` | `max_size_bytes` 使用整数，单位为字节。 |
 | IP/CIDR | `192.168.1.0/24`、`fe80::/10` | 用于监听绑定、客户端匹配、ECS 和可信代理。 |
 | URL | `https://dns.google/dns-query` | 必须按字段要求使用合法 URL。 |
-| SecretRef | `{env: FLUXDNS_OUTBOUND_SG_URL}` | 从环境变量或文件取得完整敏感值，不能把真实凭据写入模板。 |
+| SecretRef | `{env: FLUXDNS_OUTBOUND_SG_URL}` | 从环境变量、文件或内联 `url` 取得完整敏感值；内联形式会把真实凭据写入配置文件，需自行承担。 |
 
-`outbound[].proxy_url` 是 SecretRef 对象，不是明文 URL 字符串。当前契约要求 `env` 与 `file` 二选一；读取结果应为完整代理 URL。
+`outbound[].proxy_url` 接受三种 SecretRef 形式，三选一：对象 `{env: NAME}`、对象 `{file: ./secrets/proxy.txt}`，或直接写完整 URL 字符串 / 对象 `{url: "socks5://user:password@host:1080"}`。内联形式读取结果即该 URL；引用形式读取结果为环境变量或文件内容。三种形式读取后都必须是完整代理 URL。
 
 ### 2.5 覆盖和继承
 
@@ -666,9 +666,8 @@ hosts 与 rule_set 使用相同的 per-resource snapshot 机制：本地文件�
 | --- | --- | --- | --- |
 | `name` | string | 必填 | 出口唯一名称。 |
 | `type` | enum | 必填 | v1 固定为 `socks5`，表示 SOCKS5 协议族。 |
-| `proxy_url` | SecretRef object | 必填 | 通过 `env` 或 `file` 取得完整代理 URL，二选一。 |
-
-SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前者在 FluxDNS 本地解析目标主机名，后者把主机名交给代理解析。实际值可能包含用户名、密码或令牌；不要将环境变量内容、文件内容或真实 URL 写入 Git 跟踪文件。其他代理类型尚未形成配置契约。
+| `proxy_url` | SecretRef | 必填 | `{env}`、`{file}` 或内联 `url`/字符串，三选一，取得完整代理 URL。 |
+SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前者在 FluxDNS 本地解析目标主机名，后者把主机名交给代理解析。实际值可能包含用户名、密码或令牌；不要将环境变量内容或文件内容写入 Git 跟踪文件。内联形式会把明文 URL 写入配置文件，Management API 与 WebUI 只回显脱敏后的密码位（占位符 `FLUXDNS_REDACTED_SECRET`）：编辑仍指向同一 scheme/host/port 时，后端按活动源恢复原密码并只写入用户实际改动的字段；改了 scheme/host/port 或重填则按新值写入；若提交的仍是占位符而无法恢复（含采用外部文件差异、活动源不是同址内联来源），该编辑以 `VALIDATION_FAILED`（HTTP 422）被拒绝，用户需重新提交完整 URL，占位符不会作为密码持久化。其他代理类型尚未形成配置契约。
 
 ## 14. `rule_set[]`
 

@@ -906,27 +906,188 @@ pub enum RuleSetFormat {
     Dat,
 }
 
-/// A secret source. Its debug representation intentionally omits source details and value.
-#[derive(Clone, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct SecretRefDto {
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_non_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub env: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_non_null",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub file: Option<PathBuf>,
+/// 秘密来源引用：`env`、`file`、`url` 三选一，`url` 表示直接写入的完整代理 URL。
+///
+/// 保留非法字段组合而不是在反序列化期报错，是为了让 `validate` 统一给出“exactly one of”
+/// 诊断；Debug、日志和序列化输出只暴露脱敏后的来源，实际值只能由显式 accessor 读取。
+#[derive(Clone, Eq, PartialEq)]
+pub enum SecretRefDto {
+    /// 从环境变量读取完整秘密值。
+    Env { env: String },
+    /// 从文件读取完整秘密值。
+    File { file: PathBuf },
+    /// 直接内联完整秘密值，例如 `socks5://user:password@host:1080`。
+    Inline { url: String },
+    /// 字段组合不满足三选一，仅用于把校验失败传递给上层。
+    Parts {
+        env: Option<String>,
+        file: Option<PathBuf>,
+        url: Option<String>,
+    },
+}
+
+/// 内联 URL 脱敏后替换密码的占位符；回填原样提交时据此恢复真实密码。
+///
+/// 只使用 URL userinfo 不必转义的字符，保证经 `Url::set_password` 后逐字不变，
+/// 既能被前端原样回填，也不会与真实密码在往返中产生歧义。
+pub const REDACTED_INLINE_PASSWORD: &str = "FLUXDNS_REDACTED_SECRET";
+
+/// 只遮蔽 URL 的密码部分，保留 scheme、用户名、主机和端口，便于在 WebUI 中辨认来源。
+///
+/// URL 无法解析或本就没有密码时原样返回：无法解析的值同样不会被恢复，避免静默改写内容。
+pub fn redact_inline_url(value: &str) -> String {
+    let Ok(mut url) = Url::parse(value.trim()) else {
+        return value.to_owned();
+    };
+    if url.password().is_none_or(str::is_empty) {
+        return value.to_owned();
+    }
+    if url.set_password(Some(REDACTED_INLINE_PASSWORD)).is_err() {
+        return value.to_owned();
+    }
+    url.to_string()
+}
+
+impl SecretRefDto {
+    /// 内联来源经脱敏后仍是普通字符串，因此 JSON/YAML 用字符串表达；其余来源保持对象。
+    pub fn is_inline(&self) -> bool {
+        matches!(self, Self::Inline { .. })
+    }
+
+    /// 未编辑的内联地址在提交时仍是脱敏值，用原值替换，避免每次编辑都要求重输密码。
+    ///
+    /// 只在 scheme、主机、端口与原值一致时替换密码；其余情况视为用户新输入的值。
+    pub fn restore_redacted_url(&mut self, original: &Self) {
+        let Self::Inline { url } = self else {
+            return;
+        };
+        let Self::Inline { url: previous } = original else {
+            return;
+        };
+        // 只替换密码片段，保留原字符串的其余表达，避免 Url 归一化改变端口或尾斜杠。
+        let marker = format!(":{REDACTED_INLINE_PASSWORD}@");
+        let Some(marker_start) = url.find(&marker) else {
+            return;
+        };
+        let Ok(parsed) = Url::parse(url.trim()) else {
+            return;
+        };
+        let Ok(previous_url) = Url::parse(previous.trim()) else {
+            return;
+        };
+        let (Some(host), Some(previous_host)) = (parsed.host_str(), previous_url.host_str()) else {
+            return;
+        };
+        // SOCKS5 的默认端口与 outbound profile 一致取 1080，缺省端口才能与原值等价。
+        if parsed.scheme() != previous_url.scheme()
+            || host != previous_host
+            || parsed.port().unwrap_or(1080) != previous_url.port().unwrap_or(1080)
+        {
+            return;
+        }
+        let Some(password) = previous_url.password().filter(|value| !value.is_empty()) else {
+            return;
+        };
+        let password_start = marker_start + 1;
+        let password_end = password_start + REDACTED_INLINE_PASSWORD.len();
+        let mut restored = String::with_capacity(url.len() + password.len());
+        restored.push_str(&url[..password_start]);
+        restored.push_str(password);
+        restored.push_str(&url[password_end..]);
+        *url = restored;
+    }
 }
 
 impl fmt::Debug for SecretRefDto {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("SecretRef([REDACTED])")
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretRefDto {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Reference {
+            #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+            env: Option<String>,
+            #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+            file: Option<PathBuf>,
+            #[serde(default, deserialize_with = "deserialize_optional_non_null")]
+            url: Option<String>,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Inline(String),
+            Reference(Reference),
+        }
+
+        match Wire::deserialize(deserializer)? {
+            Wire::Inline(url) => Ok(Self::Inline { url }),
+            Wire::Reference(reference) => {
+                Ok(match (reference.env, reference.file, reference.url) {
+                    (Some(env), None, None) => Self::Env { env },
+                    (None, Some(file), None) => Self::File { file },
+                    (None, None, Some(url)) => Self::Inline { url },
+                    (env, file, url) => Self::Parts { env, file, url },
+                })
+            }
+        }
+    }
+}
+
+impl Serialize for SecretRefDto {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        #[derive(Serialize)]
+        struct Reference<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            env: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            file: Option<&'a Path>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            url: Option<&'a str>,
+        }
+
+        #[derive(Serialize)]
+        #[serde(untagged)]
+        enum Wire<'a> {
+            Inline(String),
+            Reference(Reference<'a>),
+        }
+
+        match self {
+            Self::Env { env } => Wire::Reference(Reference {
+                env: Some(env),
+                file: None,
+                url: None,
+            })
+            .serialize(serializer),
+            Self::File { file } => Wire::Reference(Reference {
+                env: None,
+                file: Some(file),
+                url: None,
+            })
+            .serialize(serializer),
+            // 脱敏后的内联值仍是普通字符串，前端据此原样回填并可直接再次提交。
+            Self::Inline { url } => Wire::Inline(redact_inline_url(url)).serialize(serializer),
+            Self::Parts { env, file, url } => {
+                let redacted = url.as_deref().map(redact_inline_url);
+                let reference = Reference {
+                    env: env.as_deref(),
+                    file: file.as_deref(),
+                    url: redacted.as_deref(),
+                };
+                Wire::Reference(reference).serialize(serializer)
+            }
+        }
     }
 }
 
@@ -1184,7 +1345,9 @@ mod tests {
 
     use serde::Deserialize;
 
-    use super::{WebUiDto, parse_duration};
+    use super::{
+        REDACTED_INLINE_PASSWORD, SecretRefDto, WebUiDto, parse_duration, redact_inline_url,
+    };
 
     #[test]
     fn parses_compact_and_compound_durations() {
@@ -1222,5 +1385,70 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("invalid type"));
+    }
+
+    #[test]
+    fn inline_source_round_trips_as_a_string_while_redacting_its_password() {
+        let source = "socks5://user:secret@proxy.example:1081";
+        let parsed: SecretRefDto = yaml_serde::from_str(source).unwrap();
+        assert!(parsed.is_inline());
+        let serialized = yaml_serde::to_string(&parsed).unwrap();
+        assert_eq!(
+            serialized.trim(),
+            format!("socks5://user:{REDACTED_INLINE_PASSWORD}@proxy.example:1081")
+        );
+        assert!(!serialized.contains("secret"));
+        // 脱敏输出本身必须仍是合法引用，才能被前端原样回填并再次提交。
+        let reparsed: SecretRefDto = yaml_serde::from_str(&serialized).unwrap();
+        assert!(reparsed.is_inline());
+        // 恢复只在 scheme/host/port 一致时替换密码；脱敏后的序列化输出始终不含明文，
+        // 因此这里直接核对类型化值，而不是再序列化一次。
+        let mut unchanged: SecretRefDto = yaml_serde::from_str(&serialized).unwrap();
+        unchanged.restore_redacted_url(&parsed);
+        let SecretRefDto::Inline { url: restored } = &unchanged else {
+            panic!("expected an inline source");
+        };
+        assert_eq!(restored, source);
+
+        // 主机不同视为用户新输入，保持脱敏值不变。
+        let mut moved: SecretRefDto = yaml_serde::from_str(&format!(
+            "socks5://user:{REDACTED_INLINE_PASSWORD}@other.example:1081"
+        ))
+        .unwrap();
+        moved.restore_redacted_url(&parsed);
+        let SecretRefDto::Inline { url: unchanged_url } = &moved else {
+            panic!("expected an inline source");
+        };
+        assert_eq!(
+            unchanged_url,
+            &format!("socks5://user:{REDACTED_INLINE_PASSWORD}@other.example:1081")
+        );
+    }
+
+    #[test]
+    fn inline_and_reference_sources_are_distinguished() {
+        let object: SecretRefDto = yaml_serde::from_str("{url: socks5h://proxy.example}").unwrap();
+        assert_eq!(
+            object,
+            SecretRefDto::Inline {
+                url: "socks5h://proxy.example".into()
+            }
+        );
+        let env: SecretRefDto = yaml_serde::from_str("{env: PROXY_URL}").unwrap();
+        assert_eq!(
+            env,
+            SecretRefDto::Env {
+                env: "PROXY_URL".into()
+            }
+        );
+        // 非法组合保留为 Parts，交由 validate 统一给出 exactly-one-of 诊断。
+        let mixed: SecretRefDto =
+            yaml_serde::from_str("{env: PROXY_URL, url: socks5://proxy.example}").unwrap();
+        assert!(matches!(mixed, SecretRefDto::Parts { .. }));
+        assert_eq!(
+            redact_inline_url("socks5://user:secret@proxy.example"),
+            format!("socks5://user:{REDACTED_INLINE_PASSWORD}@proxy.example")
+        );
+        assert_eq!(redact_inline_url("not-a-url"), "not-a-url");
     }
 }

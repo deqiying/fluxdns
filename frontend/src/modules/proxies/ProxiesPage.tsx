@@ -22,10 +22,23 @@ import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfi
 type Schemas = components["schemas"];
 type Outbound = Schemas["Outbound"];
 
+type SecretKind = "env" | "file" | "url";
+
 interface ProxyFormValues {
   name: string;
-  secretKind: "env" | "file";
+  secretKind: SecretKind;
   secretValue: string;
+}
+
+/// 内联地址经服务端脱敏，密码位为占位符；用户不改动时后端会恢复原密码。
+const REDACTED_PASSWORD = "FLUXDNS_REDACTED_SECRET";
+
+/// 把秘密来源引用规整成表单可编辑的 kind/值；脱敏内联值原样回填。
+function secretRefOf(proxyUrl: Outbound["proxy_url"]): { kind: SecretKind; value: string } {
+  if (typeof proxyUrl === "string") return { kind: "url", value: proxyUrl };
+  if ("env" in proxyUrl) return { kind: "env", value: proxyUrl.env };
+  if ("file" in proxyUrl) return { kind: "file", value: proxyUrl.file };
+  return { kind: "url", value: proxyUrl.url };
 }
 
 export function ProxiesPage() {
@@ -39,7 +52,7 @@ export function ProxiesPage() {
   const proxies = useMemo(() => query.data?.values.flatMap((item) =>
     item.module === "outbound" ? [item.value] : []) ?? [], [query.data]);
   const visible = proxies.filter((item) =>
-    `${item.name} ${"env" in item.proxy_url ? item.proxy_url.env : item.proxy_url.file}`
+    `${item.name} ${secretRefOf(item.proxy_url).value}`
       .toLocaleLowerCase()
       .includes(search.trim().toLocaleLowerCase()));
 
@@ -50,8 +63,8 @@ export function ProxiesPage() {
     } else {
       form.setFieldsValue({
         name: editing.name,
-        secretKind: "env" in editing.proxy_url ? "env" : "file",
-        secretValue: "env" in editing.proxy_url ? editing.proxy_url.env : editing.proxy_url.file,
+        secretKind: secretRefOf(editing.proxy_url).kind,
+        secretValue: secretRefOf(editing.proxy_url).value,
       });
     }
     setDirty(false);
@@ -63,9 +76,16 @@ export function ProxiesPage() {
     { title: "类型", width: 120, render: () => <Tag>SOCKS5</Tag> },
     {
       title: "SecretRef",
-      render: (_, item) => "env" in item.proxy_url
-        ? <Typography.Text code>env:{item.proxy_url.env}</Typography.Text>
-        : <Typography.Text code>file:{item.proxy_url.file}</Typography.Text>,
+      render: (_, item) => {
+        const secret = secretRefOf(item.proxy_url);
+        if (secret.kind === "url") {
+          const redacted = secret.value.includes(REDACTED_PASSWORD)
+            ? `${secret.value}（密码已脱敏；不改动则保留原密码，改动主机或端口时需重填完整 URL）`
+            : secret.value;
+          return <Typography.Text code>{redacted}</Typography.Text>;
+        }
+        return <Typography.Text code>{secret.kind}:{secret.value}</Typography.Text>;
+      },
     },
     {
       title: "引用",
@@ -90,7 +110,11 @@ export function ProxiesPage() {
     const value: Outbound = {
       name: values.name,
       type: "socks5",
-      proxy_url: values.secretKind === "env" ? { env: values.secretValue } : { file: values.secretValue },
+      proxy_url: values.secretKind === "env"
+        ? { env: values.secretValue }
+        : values.secretKind === "file"
+          ? { file: values.secretValue }
+          : values.secretValue,
     };
     const change: Schemas["ConfigChange"] = editing === "create"
       ? { module: "outbound", change: { action: "create", value } }
@@ -157,21 +181,39 @@ export function ProxiesPage() {
             <Input autoComplete="off" />
           </Form.Item>
           <Form.Item name="secretKind" label="SecretRef 来源" rules={[{ required: true }]}>
-            <Segmented block options={[{ label: "环境变量", value: "env" }, { label: "文件", value: "file" }]} />
+            <Segmented
+              block
+              options={[
+                { label: "环境变量", value: "env" },
+                { label: "文件", value: "file" },
+                { label: "直接填写 URL", value: "url" },
+              ]}
+            />
           </Form.Item>
           <Form.Item noStyle shouldUpdate={(previous, current) => previous.secretKind !== current.secretKind}>
-            {({ getFieldValue }) => (
-              <Form.Item
-                name="secretValue"
-                label={getFieldValue("secretKind") === "file" ? "引用文件" : "环境变量"}
-                rules={[{ required: true }, { max: 4096 }]}
-              >
-                <Input autoComplete="off" placeholder={getFieldValue("secretKind") === "file" ? "./secrets/proxy.txt" : "PROXY_URL"} />
-              </Form.Item>
-            )}
+            {({ getFieldValue }) => {
+              const kind = getFieldValue("secretKind") as SecretKind | undefined;
+              const label = kind === "file" ? "引用文件" : kind === "url" ? "代理 URL" : "环境变量";
+              const placeholder = kind === "file"
+                ? "./secrets/proxy.txt"
+                : kind === "url"
+                  ? "socks5://user:password@host:1080"
+                  : "PROXY_URL";
+              return (
+                <Form.Item
+                  name="secretValue"
+                  label={label}
+                  rules={[{ required: true }, { max: 4096 }]}
+                >
+                  <Input autoComplete="off" placeholder={placeholder} />
+                </Form.Item>
+              );
+            }}
           </Form.Item>
           <Space size={6}>
-            <Typography.Text type="secondary">仅保存引用位置，不显示解析后的 URL、用户名、密码或令牌。</Typography.Text>
+            <Typography.Text type="secondary">
+              环境变量与文件只保存引用位置；直接填写的 URL 会脱敏显示密码，未修改时保留原密码。
+            </Typography.Text>
           </Space>
         </Form>
       </ConfigFormModal>

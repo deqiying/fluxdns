@@ -476,6 +476,7 @@ mod tests {
                 proxy_url: ResolvedSecretRef {
                     env: None,
                     file: Some(path),
+                    url: None,
                 },
             },
             root,
@@ -662,6 +663,7 @@ mod tests {
             proxy_url: ResolvedSecretRef {
                 env: None,
                 file: Some(std::path::PathBuf::from("/missing/proxy")),
+                url: None,
             },
         };
         assert!(matches!(

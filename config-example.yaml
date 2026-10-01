@@ -448,10 +448,12 @@ outbound:
     # 代理类型；当前示例为 SOCKS5 协议族。
     type: socks5
     # 代理连接地址；解析后的 URL 使用 socks5:// 表示本地解析，socks5h:// 表示由代理解析。
-    # SecretRef 通过 env 或 file 提供实际凭据。
+    # SecretRef 三选一：env、file 或内联 url。
+    # 内联形式可写成对象 url:，也可直接写字符串；API 与 WebUI 只回显脱敏后的密码位。
     proxy_url:
       # 从环境变量读取完整代理 URL。
       env: FLUXDNS_OUTBOUND_SG_URL
+    # proxy_url: {url: "socks5://user:password@proxy.example:1080"}
 
 # 规则集资源配置。所有资源必须在监听器绑定前形成有效的首次快照，否则拒绝启动；
 # 运行后的刷新按资源独立版本化，单个资源失败保留该资源上一份有效快照，不触发全局缓存清除。

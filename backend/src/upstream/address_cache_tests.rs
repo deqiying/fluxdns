@@ -332,6 +332,7 @@ async fn socks5_receives_refreshed_target_addresses() {
             proxy_url: crate::config::resolve::ResolvedSecretRef {
                 env: None,
                 file: Some(path),
+                url: None,
             },
         },
         1024,

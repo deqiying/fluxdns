@@ -15,8 +15,8 @@ use super::hash::deterministic_hash;
 use super::model::{
     CacheOverrideDto, ClientIpDto, ClientIpSource, DatabaseType, EcsDto, EcsMode,
     ForwardedDisposition, ForwardedHeader, HostsResourceDto, ListenerDto, LogLevelDto,
-    MAX_RULE_SET_SELECTOR_BYTES, OptimisticDto, OutboundDto, RuleSetDto, StrategyDto, TlsMode,
-    UpstreamDto, normalize_rule_set_selector,
+    MAX_RULE_SET_SELECTOR_BYTES, OptimisticDto, OutboundDto, RuleSetDto, SecretRefDto, StrategyDto,
+    TlsMode, UpstreamDto, normalize_rule_set_selector,
 };
 use super::validate::{
     BindPlan, ConfigError, ConfigErrorKind, ConfigErrorReport, DohBindingRef, ResourceConfig,
@@ -382,6 +382,7 @@ pub struct ResolvedOutbound {
 pub struct ResolvedSecretRef {
     pub env: Option<String>,
     pub file: Option<PathBuf>,
+    pub url: Option<String>,
 }
 
 impl fmt::Debug for ResolvedSecretRef {
@@ -394,6 +395,7 @@ impl fmt::Debug for ResolvedSecretRef {
 pub enum SecretSourceKind {
     Environment,
     File,
+    Inline,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -448,9 +450,20 @@ impl std::error::Error for SecretResolveError {}
 
 impl ResolvedSecretRef {
     pub fn source_kind(&self) -> Option<SecretSourceKind> {
-        match (self.env.is_some(), self.file.is_some()) {
-            (true, false) => Some(SecretSourceKind::Environment),
-            (false, true) => Some(SecretSourceKind::File),
+        match (
+            self.env
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            self.file
+                .as_ref()
+                .is_some_and(|value| !value.as_os_str().is_empty()),
+            self.url
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty()),
+        ) {
+            (true, false, false) => Some(SecretSourceKind::Environment),
+            (false, true, false) => Some(SecretSourceKind::File),
+            (false, false, true) => Some(SecretSourceKind::Inline),
             _ => None,
         }
     }
@@ -458,8 +471,8 @@ impl ResolvedSecretRef {
     /// Resolve a secret only when a caller explicitly requests the side effect.
     /// The normal YAML load path keeps the reference, never the value.
     pub fn resolve(&self, max_bytes: usize) -> Result<ResolvedSecretValue, SecretResolveError> {
-        let (source, bytes) = match (&self.env, &self.file) {
-            (Some(name), None) if !name.trim().is_empty() => {
+        let (source, bytes) = match (&self.env, &self.file, &self.url) {
+            (Some(name), None, None) if !name.trim().is_empty() => {
                 let value = std::env::var_os(name).ok_or(SecretResolveError::Missing {
                     source: SecretSourceKind::Environment,
                 })?;
@@ -469,13 +482,16 @@ impl ResolvedSecretRef {
                     .into_bytes();
                 (SecretSourceKind::Environment, bytes)
             }
-            (None, Some(path)) if !path.as_os_str().is_empty() => {
+            (None, Some(path), None) if !path.as_os_str().is_empty() => {
                 let file = File::open(path).map_err(|_| SecretResolveError::Io)?;
                 let mut bytes = Vec::new();
                 file.take((max_bytes as u64).saturating_add(1))
                     .read_to_end(&mut bytes)
                     .map_err(|_| SecretResolveError::Io)?;
                 (SecretSourceKind::File, bytes)
+            }
+            (None, None, Some(url)) if !url.trim().is_empty() => {
+                (SecretSourceKind::Inline, url.as_bytes().to_vec())
             }
             _ => return Err(SecretResolveError::InvalidReference),
         };
@@ -886,9 +902,17 @@ pub(crate) fn resolve_config_v2(
     let secret_material = outbounds
         .iter()
         .map(|outbound| {
-            let source = match (&outbound.proxy_url.env, &outbound.proxy_url.file) {
-                (Some(name), None) => format!("env:{name}"),
-                (None, Some(path)) => format!("file:{path:?}"),
+            // 内联 URL 的实际值不能进入摘要来源；用其确定性摘要参与，既隐藏秘密又能跟踪变更。
+            let source = match (
+                &outbound.proxy_url.env,
+                &outbound.proxy_url.file,
+                &outbound.proxy_url.url,
+            ) {
+                (Some(name), None, None) => format!("env:{name}"),
+                (None, Some(path), None) => format!("file:{path:?}"),
+                (None, None, Some(url)) => {
+                    format!("inline:{}", deterministic_hash(url.trim().as_bytes()))
+                }
                 _ => "invalid".to_owned(),
             };
             format!("{}={source}", outbound.id.as_str())
@@ -1287,17 +1311,20 @@ fn resolve_hosts(resource: &HostsResourceDto, work_path: &Path) -> ResolvedHosts
 }
 
 fn resolve_outbound(outbound: &OutboundDto, work_path: &Path) -> ResolvedOutbound {
+    let (env, file, url) = match &outbound.proxy_url {
+        SecretRefDto::Env { env } => (Some(env.clone()), None, None),
+        SecretRefDto::File { file } => (None, Some(resolve_path(work_path, file)), None),
+        SecretRefDto::Inline { url } => (None, None, Some(url.clone())),
+        SecretRefDto::Parts { env, file, url } => (
+            env.clone(),
+            file.as_ref().map(|value| resolve_path(work_path, value)),
+            url.clone(),
+        ),
+    };
     ResolvedOutbound {
         id: ConfigId::new(outbound.name.clone()).expect("validated outbound id"),
         kind: outbound.kind,
-        proxy_url: ResolvedSecretRef {
-            env: outbound.proxy_url.env.clone(),
-            file: outbound
-                .proxy_url
-                .file
-                .as_ref()
-                .map(|value| resolve_path(work_path, value)),
-        },
+        proxy_url: ResolvedSecretRef { env, file, url },
     }
 }
 
@@ -1431,6 +1458,7 @@ mod tests {
         let reference = ResolvedSecretRef {
             env: None,
             file: Some(path.clone()),
+            url: None,
         };
         let value = reference.resolve_proxy_url(1024).unwrap();
         assert_eq!(value.expose(), b"socks5h://user:password@example.test:1080");
@@ -1453,5 +1481,40 @@ mod tests {
     fn secret_value_type_does_not_expose_bytes_through_debug() {
         let value = ResolvedSecretValue(Box::from(&b"private"[..]));
         assert!(!format!("{value:?}").contains("private"));
+    }
+
+    #[test]
+    fn inline_secret_reference_resolves_without_reading_the_environment_or_files() {
+        let reference = ResolvedSecretRef {
+            env: None,
+            file: None,
+            url: Some("socks5://user:secret@proxy.example:1080".into()),
+        };
+        assert_eq!(
+            reference.source_kind(),
+            Some(super::SecretSourceKind::Inline)
+        );
+        let value = reference.resolve_proxy_url(1024).unwrap();
+        assert_eq!(value.expose(), b"socks5://user:secret@proxy.example:1080");
+        assert_eq!(
+            reference.proxy_scheme(1024).unwrap(),
+            super::ProxyScheme::Socks5
+        );
+        assert!(!format!("{reference:?}").contains("secret"));
+        // 内联值仍受同一字节上限约束，且空白视为空来源。
+        assert!(matches!(
+            reference.resolve_proxy_url(8),
+            Err(SecretResolveError::TooLarge { limit: 8 })
+        ));
+        let blank = ResolvedSecretRef {
+            env: None,
+            file: None,
+            url: Some("   ".into()),
+        };
+        assert_eq!(blank.source_kind(), None);
+        assert!(matches!(
+            blank.resolve(1024),
+            Err(SecretResolveError::InvalidReference)
+        ));
     }
 }

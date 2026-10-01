@@ -3,12 +3,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::net::IpAddr;
+use std::path::Path;
+
+use url::Url;
 
 use super::doh_route::{DohPathPattern, DohPathPatternError};
 use super::model::{
     ClientIpSource, EcsDto, EcsMode, HostsResourceDto, ListenerDto, MAX_RULE_SET_SELECTOR_BYTES,
-    OutboundDto, RuleSetDto, StrategyDto, TlsMode, UpstreamDto, UpstreamMode, is_non_empty_path,
-    normalize_rule_set_selector,
+    OutboundDto, RuleSetDto, SecretRefDto, StrategyDto, TlsMode, UpstreamDto, UpstreamMode,
+    is_non_empty_path, normalize_rule_set_selector,
 };
 
 /// Stable categories used by callers and tests; messages are deliberately non-sensitive.
@@ -896,36 +899,30 @@ fn validate_hosts_resource(
 }
 
 fn validate_outbound(outbound: &OutboundDto, path: &str, report: &mut ConfigErrorReport) {
-    let has_env = outbound
-        .proxy_url
-        .env
-        .as_ref()
-        .is_some_and(|value| !value.trim().is_empty());
-    let has_file = outbound
-        .proxy_url
-        .file
-        .as_ref()
-        .is_some_and(|value| !value.as_os_str().is_empty());
-    if has_env == has_file {
+    let (env, file, url): (Option<&str>, Option<&Path>, Option<&str>) = match &outbound.proxy_url {
+        SecretRefDto::Env { env } => (Some(env.as_str()), None, None),
+        SecretRefDto::File { file } => (None, Some(file.as_path()), None),
+        SecretRefDto::Inline { url } => (None, None, Some(url.as_str())),
+        SecretRefDto::Parts { env, file, url } => (env.as_deref(), file.as_deref(), url.as_deref()),
+    };
+    let has_env = env.is_some_and(|value| !value.trim().is_empty());
+    let has_file = file.is_some_and(|value| !value.as_os_str().is_empty());
+    let has_url = url.is_some_and(|value| !value.trim().is_empty());
+    if u8::from(has_env) + u8::from(has_file) + u8::from(has_url) != 1 {
         report.push(ConfigError::new(
             ConfigErrorKind::Secret,
             format!("{path}.proxy_url"),
-            "exactly one of env or file is required",
+            "exactly one of env, file or url is required",
         ));
     }
-    if outbound
-        .proxy_url
-        .env
-        .as_ref()
-        .is_some_and(|value| value.trim().is_empty())
-    {
+    if env.is_some_and(|value| value.trim().is_empty()) {
         report.push(ConfigError::new(
             ConfigErrorKind::Secret,
             format!("{path}.proxy_url.env"),
             "environment variable name must not be empty",
         ));
     }
-    if let Some(name) = &outbound.proxy_url.env
+    if let Some(name) = env
         && !is_valid_env_name(name)
     {
         report.push(ConfigError::new(
@@ -934,7 +931,7 @@ fn validate_outbound(outbound: &OutboundDto, path: &str, report: &mut ConfigErro
             "environment variable name contains unsupported characters",
         ));
     }
-    if let Some(file) = &outbound.proxy_url.file
+    if let Some(file) = file
         && !is_non_empty_path(file)
     {
         report.push(ConfigError::new(
@@ -943,6 +940,31 @@ fn validate_outbound(outbound: &OutboundDto, path: &str, report: &mut ConfigErro
             "secret file path must not be empty",
         ));
     }
+    if let Some(message) = inline_proxy_url_error(url) {
+        report.push(ConfigError::new(
+            ConfigErrorKind::Secret,
+            format!("{path}.proxy_url.url"),
+            message,
+        ));
+    }
+}
+
+/// 内联 URL 只在此处做 scheme/host 形状检查，凭据与目标语义仍由运行时 accessor 负责。
+fn inline_proxy_url_error(value: Option<&str>) -> Option<&'static str> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let Ok(url) = Url::parse(value) else {
+        return Some("inline proxy URL must be a valid URL");
+    };
+    if !matches!(url.scheme(), "socks5" | "socks5h") {
+        return Some("inline proxy URL scheme must be socks5 or socks5h");
+    }
+    if url.host_str().is_none() {
+        return Some("inline proxy URL must contain a host");
+    }
+    None
 }
 
 fn validate_rule_set(resource: &RuleSetDto, path: &str, report: &mut ConfigErrorReport) {

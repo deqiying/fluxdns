@@ -101,7 +101,7 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`shared/config/hooks.ts`](../../../frontend/src/shared/config/hooks.ts) 统一消费模块 `ConfigRead`、双 revision 和正式单模块 validate/apply。每次保存先预校验，再按后端返回的改名、listener 重绑、保留缩短或外部变化覆盖影响确认；`operation_id` 首次发送前固定，网络结果不明时只回读，不自动重放。成功后按类型化依赖失效 query；`applied_unpersisted` 保持独立警告并交给全局文件同步入口。
 
-[`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 已替换 `/proxies` 空态，提供搜索、新建和按旧 name 编辑。表单只在 env/file 两类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；实际 Secret 值不进入浏览器。MSW 交互测试检查单模块路径、预校验先于 apply、旧 name 和 SecretRef payload；真实后端热应用与文件证据见 P3 联合验收。
+[`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 已替换 `/proxies` 空态，提供搜索、新建和按旧 name 编辑。表单在 env、file 与内联 URL 三类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；内联 URL 的密码位以占位符 `FLUXDNS_REDACTED_SECRET` 回显，用户未改动时由后端用活动源恢复原密码，实际 Secret 值不进入浏览器。MSW 交互测试检查单模块路径、预校验先于 apply、旧 name 和 SecretRef payload；真实后端热应用与文件证据见 P3 联合验收。
 
 [`HostsPage`](../../../frontend/src/modules/hosts/HostsPage.tsx) 已替换 `/hosts` 空态，读取类型化 `const/file` 来源、引用数和 Runtime ready/stale/failed 状态。表单按来源只提交内联正文或文件路径/更新周期，并保留 `json/hosts` 格式；来源切换不会携带隐藏分支字段。文件来源的检查周期用共享 `DurationInput`（默认秒），回填把后端的纳秒串归一化成紧凑串。
 

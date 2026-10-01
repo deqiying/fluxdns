@@ -384,3 +384,23 @@ fn diff_count_bytes_and_field_limits_reject_whole_response_without_truncation() 
         Err(ErrorCode::PayloadTooLarge)
     ));
 }
+
+#[test]
+fn external_diff_redacts_inline_proxy_credentials_without_losing_the_source() {
+    let mut tree = source_tree();
+    // 活动源保持 env 引用；外部文件改成内联地址，构成一次可编辑的 outbound 变更。
+    let fixture = Fixture::with_source(1, &encoded(&tree));
+    tree["outbound"][0]["proxy_url"] = "socks5://user:secret@proxy.example:1080".into();
+    let external = encoded(&tree);
+    fs::write(&fixture.source, &external).unwrap();
+    let result = serde_json::to_value(external_diff(fixture.store()).unwrap()).unwrap();
+    assert_eq!(result["parse_error"], Value::Null);
+    let proxy_url = &result["editable"][0]["external"]["value"]["proxy_url"];
+    assert_eq!(
+        proxy_url,
+        "socks5://user:FLUXDNS_REDACTED_SECRET@proxy.example:1080"
+    );
+    assert!(!result.to_string().contains("secret"));
+    // 脱敏只影响投影：源文件仍保留真实内联值，编辑展开步骤据此恢复。
+    assert!(external.contains("socks5://user:secret@proxy.example:1080"));
+}

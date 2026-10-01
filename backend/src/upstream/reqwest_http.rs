@@ -654,6 +654,7 @@ mod tests {
             proxy_url: ResolvedSecretRef {
                 env: None,
                 file: Some(path),
+                url: None,
             },
         };
         let profile = OutboundProfile::from_resolved(&outbound, 1024).unwrap();

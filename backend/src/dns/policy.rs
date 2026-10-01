@@ -4260,6 +4260,7 @@ hosts:
             proxy_url: ResolvedSecretRef {
                 env: None,
                 file: Some(secret_path),
+                url: None,
             },
         });
         let ResolvedUpstream::Doh { proxy, .. } = &mut config.upstreams[0] else {

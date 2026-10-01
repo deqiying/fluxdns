@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
 import { setMockAuthenticated, setMockSetupRequired } from "@/mocks/handlers";
-import { processMetricsFixture } from "@/mocks/fixtures";
+import { outboundConfigReadFixture, processMetricsFixture } from "@/mocks/fixtures";
 import { server } from "@/mocks/server";
 import type { ApplyRequest, Candidate, ConfigState, FileSyncRequest } from "@/shared/config/api";
 import { AppProviders } from "./providers";
@@ -397,6 +397,72 @@ describe("application routes", () => {
         },
       }],
       discard_external_changes: false,
+    });
+  }, 10_000);
+
+  it("代理页展示脱敏内联 URL，并在未修改时原样提交引用", async () => {
+    const user = userEvent.setup();
+    const requests: unknown[] = [];
+    setMockAuthenticated(true);
+    // 后端返回内联来源时密码位已脱敏；前端应原样回填，不要求用户重新输入。
+    server.use(
+      http.get("/api/v2/config/modules/outbound", () =>
+        HttpResponse.json({
+          state: outboundConfigReadFixture.state,
+          values: [
+            {
+              module: "outbound",
+              value: {
+                name: "proxy-inline",
+                type: "socks5",
+                proxy_url: "socks5://user:FLUXDNS_REDACTED_SECRET@proxy.example:1080",
+              },
+            },
+          ],
+          effective: [],
+          references: [],
+          runtime: [],
+        }),
+      ),
+      http.post("/api/v2/config/modules/outbound/validate", async ({ request }) => {
+        const candidate = await request.json() as { expected: unknown };
+        requests.push(candidate);
+        return HttpResponse.json({
+          validation_token: "validation-inline",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: [],
+          affected_names: ["proxy-inline"],
+        });
+      }),
+      http.post("/api/v2/config/modules/outbound/apply", async ({ request }) => {
+        const body = await request.json() as { operation_id: string };
+        requests.push(body);
+        return HttpResponse.json({
+          operation_id: body.operation_id,
+          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
+        });
+      }),
+    );
+    renderApp("/proxies");
+    expect(await screen.findByRole("heading", { name: "代理配置", level: 2 })).toBeInTheDocument();
+    expect(await screen.findByText(/FLUXDNS_REDACTED_SECRET/)).toBeInTheDocument();
+    await user.click(screen.getByLabelText("编辑代理 proxy-inline"));
+    const dialog = await screen.findByRole("dialog", { name: "编辑代理" });
+    // 不改动 URL，仅保存，形态保持原样（字符串形式的内联来源，密码仍为占位符）。
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]).toMatchObject({
+      changes: [{
+        module: "outbound",
+        change: {
+          action: "update",
+          original_name: "proxy-inline",
+          value: {
+            proxy_url: "socks5://user:FLUXDNS_REDACTED_SECRET@proxy.example:1080",
+          },
+        },
+      }],
     });
   }, 10_000);
 

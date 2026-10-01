@@ -238,3 +238,34 @@ fn inheritance_and_redaction_are_not_replaced_by_effective_values() {
     );
     assert!(!format!("{config:?}").contains("Desktop-01"));
 }
+
+#[test]
+fn outbound_proxy_url_accepts_inline_urls_and_rejects_invalid_sources() {
+    let mut config = fixture();
+    let proxy = |source: &str| {
+        let outbound: crate::config::model::OutboundDto =
+            yaml_serde::from_str(&format!("name: sg\ntype: socks5\nproxy_url: {source}\n"))
+                .unwrap();
+        outbound.proxy_url
+    };
+    config.outbound = vec![crate::config::model::OutboundDto {
+        name: "sg".into(),
+        kind: crate::config::model::OutboundType::Socks5,
+        proxy_url: proxy("socks5://user:secret@proxy.example:1080"),
+    }];
+    config.validate().unwrap();
+    // 内联值不得经 Debug 泄漏密码。
+    assert!(!format!("{config:?}").contains("secret"));
+
+    for source in [
+        "{env: PROXY_URL, url: socks5://proxy.example}",
+        "{}",
+        "http://proxy.example",
+        "socks5://",
+    ] {
+        let mut invalid = config.clone();
+        invalid.outbound[0].proxy_url = proxy(source);
+        let error = invalid.validate().unwrap_err().to_string();
+        assert!(error.contains("proxy_url"), "{source}: {error}");
+    }
+}

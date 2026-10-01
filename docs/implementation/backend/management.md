@@ -79,7 +79,7 @@ Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/�
 
 [`config_mutation.rs`](../../../backend/src/management/config_mutation.rs) 注册组合配置与文件操作，并在 P3 增加 `POST /api/v2/config/modules/{module}/validate` 和 `POST /api/v2/config/modules/{module}/apply`。单模块入口复用同一 ConfigStore/Runtime/ServiceControl 事务，只接受一项与 URL 相同的 `ConfigChange`；跨模块封套返回 `FORBIDDEN`，未知模块返回 `NOT_FOUND`。没有任意 YAML、PATCH、DELETE、restart 或 stop。写请求复用 v2 Bearer，并返回 v2 同源错误；动态模块候选与组合候选均使用 2 MiB 上限，其余既有路由继续使用 16 KiB 默认上限。
 
-P3 首个消费方为 `outbound`：代理创建/编辑仍由完整 ConfigV2 候选验证 SecretRef 的 env/file 互斥、名称唯一和类型化引用改名，再经过统一 prepare、热应用和文件事务。Management 响应只含 SecretRef 来源，不解析或回显实际代理 URL、用户名、密码或令牌。
+P3 首个消费方为 `outbound`：代理创建/编辑仍由完整 ConfigV2 候选验证 SecretRef 的 env/file/url 三选一、名称唯一和类型化引用改名，再经过统一 prepare、热应用和文件事务。Management 响应只含 SecretRef 来源，内联 URL 仅回显脱敏密码位（占位符 `FLUXDNS_REDACTED_SECRET`），apply 前用活动源恢复未改动的原密码；占位符无法恢复时该编辑以 `VALIDATION_FAILED` 拒绝，不会把占位符持久化为密码。不解析或回显实际代理 URL 的用户名、密码或令牌。
 
 P3 `POST /api/v2/retention/preview` 绑定 active/file revision，调用现有 `RetentionCoordinator::preview` 真实采样详情主文件和 WAL，但不发布水位或创建回收任务。当前与候选策略使用同一次采样计算 cutoff；响应返回十进制字节、候选 UTC 截止日及是否缩短历史，实际保存仍由 `statistics` 单模块事务重新校验且不立即清理。
 

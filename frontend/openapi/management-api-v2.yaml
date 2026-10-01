@@ -648,7 +648,12 @@ components:
         access_expires_at_ms: {$ref: "#/components/schemas/SafeInteger"}
       description: 只在初始化、登录和刷新响应出现；access token 只存前端内存，不进入 URL、持久存储或查询缓存；刷新凭据不进入正文。
     SecretRef:
+      description: 秘密来源三选一；`url` 形式直接在配置里写入完整代理 URL，读取时会脱敏密码。
       oneOf:
+        - type: string
+          minLength: 1
+          maxLength: 4096
+          pattern: '^socks5h?://'
         - type: object
           additionalProperties: false
           required: [env]
@@ -657,6 +662,10 @@ components:
           additionalProperties: false
           required: [file]
           properties: {file: {$ref: "#/components/schemas/Path"}}
+        - type: object
+          additionalProperties: false
+          required: [url]
+          properties: {url: {type: string, minLength: 1, maxLength: 4096, pattern: '^socks5h?://'}}
     Optimistic:
       type: object
       additionalProperties: false
