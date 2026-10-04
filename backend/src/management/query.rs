@@ -81,43 +81,52 @@ impl ManagementQueryService {
         Arc::clone(&self.detail_store)
     }
 
-    pub(super) fn project_committed_records(
+    pub(super) async fn project_committed_records(
         &self,
-        store: &crate::config::store::ConfigStore,
+        store: &Arc<crate::config::store::ConfigStore>,
         filter: super::contract::QueryFilter,
         records: &[crate::storage::DetailCommittedRecord],
     ) -> Result<(super::contract::Revision, Vec<super::contract::QueryRecord>), ErrorCode> {
-        history::project_committed_records(self, store, filter, records)
+        history::project_committed_records(self, store, filter, records).await
     }
 
-    fn config_state(
+    async fn config_state(
         &self,
-        store: &crate::config::store::ConfigStore,
+        store: &Arc<crate::config::store::ConfigStore>,
     ) -> Result<ConfigState, ErrorCode> {
-        config_query::configuration_state(store)
+        config_query::read_async(store, config_query::configuration_state).await
     }
 
-    fn config_module(
+    async fn config_module(
         &self,
-        store: &crate::config::store::ConfigStore,
+        store: &Arc<crate::config::store::ConfigStore>,
         module: ConfigModule,
     ) -> Result<ConfigRead, ErrorCode> {
-        config_query::configuration_module(store, &self.coordinator, module)
+        let coordinator = Arc::clone(&self.coordinator);
+        config_query::read_async(store, move |store| {
+            config_query::configuration_module(store, &coordinator, module)
+        })
+        .await
     }
 
-    fn system_config(
+    async fn system_config(
         &self,
-        store: &crate::config::store::ConfigStore,
+        store: &Arc<crate::config::store::ConfigStore>,
     ) -> Result<SystemConfigRead, ErrorCode> {
-        config_query::system_configuration(store, &self.coordinator)
+        let coordinator = Arc::clone(&self.coordinator);
+        config_query::read_async(store, move |store| {
+            config_query::system_configuration(store, &coordinator)
+        })
+        .await
     }
 
     async fn retention(
         &self,
-        store: &crate::config::store::ConfigStore,
+        store: &Arc<crate::config::store::ConfigStore>,
     ) -> Result<RetentionStatusResponse, ErrorCode> {
         let active = store
-            .active_snapshot()
+            .active_snapshot_async()
+            .await
             .map_err(|_| ErrorCode::ServiceUnavailable)?;
         if active.runtime_revision != self.coordinator.load().revision().0 {
             return Err(ErrorCode::ServiceUnavailable);
@@ -153,10 +162,19 @@ impl ManagementQueryService {
     /// 预览使用真实详情文件采样，但不发布水位、不创建回收任务。
     async fn retention_preview(
         &self,
-        store: &crate::config::store::ConfigStore,
+        store: &Arc<crate::config::store::ConfigStore>,
         request: RetentionPreviewRequest,
     ) -> Result<RetentionPreview, ErrorCode> {
-        let state = config_query::configuration_state(store)?;
+        let (state, active) = config_query::read_async(store, |store| {
+            let status = store
+                .configuration_status()
+                .map_err(config_query::error_code)?;
+            Ok((
+                config_query::configuration_state_from_status(&status)?,
+                status.active,
+            ))
+        })
+        .await?;
         if request.expected.active_revision.as_str() != state.active_revision.as_str() {
             return Err(ErrorCode::ActiveRevisionConflict);
         }
@@ -164,9 +182,6 @@ impl ManagementQueryService {
         {
             return Err(ErrorCode::FileRevisionConflict);
         }
-        let active = store
-            .active_snapshot()
-            .map_err(|_| ErrorCode::ServiceUnavailable)?;
         if active.runtime_revision != self.coordinator.load().revision().0 {
             return Err(ErrorCode::ServiceUnavailable);
         }
@@ -246,7 +261,10 @@ async fn get_config_state(
     let Some(queries) = &services.queries else {
         return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
     };
-    v2_result(queries.config_state(&services.config_store), &request_id)
+    v2_result(
+        queries.config_state(&services.config_store).await,
+        &request_id,
+    )
 }
 
 async fn get_system_config(
@@ -256,7 +274,10 @@ async fn get_system_config(
     let Some(queries) = &services.queries else {
         return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
     };
-    v2_result(queries.system_config(&services.config_store), &request_id)
+    v2_result(
+        queries.system_config(&services.config_store).await,
+        &request_id,
+    )
 }
 
 async fn get_config_module(
@@ -274,7 +295,7 @@ async fn get_config_module(
         return v2_error_response(ErrorCode::NotFound, &request_id);
     };
     v2_result(
-        queries.config_module(&services.config_store, module),
+        queries.config_module(&services.config_store, module).await,
         &request_id,
     )
 }

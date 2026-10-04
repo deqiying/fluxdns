@@ -1,5 +1,6 @@
 import { Space, Tag, Typography } from "antd";
 import type { ConfigState } from "@/shared/config/api";
+import { useConfigState } from "@/shared/config/hooks";
 
 const syncLabels: Record<ConfigState["synchronization"], string> = {
   synced: "已同步",
@@ -34,9 +35,11 @@ const syncTones: Record<ConfigState["synchronization"], "synced" | "pending" | "
 
 /** 标题区状态胶囊只表达同步状态，不展示 revision；与 服务状态 的连接状态胶囊同构。 */
 export function ConfigSyncBadge({ state }: { state: ConfigState }) {
-  const label = syncLabels[state.synchronization];
+  const query = useConfigState();
+  const unavailable = !!query.error;
+  const label = unavailable ? "同步状态暂不可用" : syncLabels[state.synchronization];
   return (
-    <span role="status" aria-label={`配置同步状态：${label}`} className={`config-sync-badge config-sync-badge-${syncTones[state.synchronization]}`}>
+    <span role="status" aria-label={`配置同步状态：${label}`} className={`config-sync-badge config-sync-badge-${unavailable ? "pending" : syncTones[state.synchronization]}`}>
       <i aria-hidden="true" />
       {label}
     </span>

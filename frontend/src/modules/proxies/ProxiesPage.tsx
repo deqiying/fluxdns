@@ -145,7 +145,7 @@ export function ProxiesPage() {
         </Space>
       )}
     >
-      <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
+      <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
       {query.data ? (
         <div className="config-module-content">
           <div className="config-table-toolbar">

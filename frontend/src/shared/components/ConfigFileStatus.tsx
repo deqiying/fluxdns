@@ -1,4 +1,4 @@
-import { useEffect, useReducer } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, App, Button, Space, Typography } from "antd";
 import { RefreshCw } from "lucide-react";
@@ -13,10 +13,12 @@ import {
 } from "@/shared/config/external-change";
 import { configKeys, invalidationKeysForChanges } from "@/shared/config/query-keys";
 import { confirmationLabels } from "@/shared/config/hooks";
+import { assertNoPendingOperation, pendingOperationKey, trackConfigOperation } from "@/shared/config/pending-operation";
 import {
   applyAndSettle, createOperationId,
   restoreFilesAndSettle,
   retryPersistenceAndSettle,
+  resumeOperation,
   type OperationSettlement,
 } from "@/shared/config/operation";
 import { ExternalChangeBanner } from "./ExternalChangeBanner";
@@ -26,6 +28,29 @@ export function ConfigFileStatus() {
   const queryClient = useQueryClient();
   const { message, modal } = App.useApp();
   const [workspace, dispatch] = useReducer(externalWorkspaceReducer, initialExternalWorkspaceState);
+  const [resuming, setResuming] = useState(false);
+  const pendingQuery = useQuery<string | null>({
+    queryKey: pendingOperationKey, queryFn: () => null, initialData: null, enabled: false, gcTime: Infinity,
+  });
+  const continueOperation = async () => {
+    const id = pendingQuery.data;
+    if (!id || resuming) return;
+    setResuming(true);
+    try {
+      const settlement = await trackConfigOperation(queryClient, () => resumeOperation(id));
+      queryClient.setQueryData(pendingOperationKey, null);
+      acceptSettlement(settlement, dispatch);
+      await queryClient.invalidateQueries({ queryKey: ["config-v2"] });
+      const status = settlement.operation.status;
+      if (status.state === "rejected" || status.state === "compensation_failed") {
+        void message.error(getSafeErrorMessage(new ApiError({ code: status.error, message: status.error, kind: "http" })));
+      } else {
+        void message.success("已确认配置操作结果，请刷新并核对配置后继续编辑。");
+      }
+    } catch (error) {
+      void message.warning(getSafeErrorMessage(error));
+    } finally { setResuming(false); }
+  };
   const stateQuery = useQuery({
     queryKey: configKeys.state(),
     queryFn: ({ signal }) => fetchConfigState(signal),
@@ -74,9 +99,10 @@ export function ConfigFileStatus() {
 
     dispatch({ type: "restore" });
     try {
-      const settlement = kind === "restore"
-        ? await restoreFilesAndSettle(request)
-        : await retryPersistenceAndSettle(request);
+      assertNoPendingOperation(queryClient);
+      const settlement = await trackConfigOperation(queryClient, () => kind === "restore"
+        ? restoreFilesAndSettle(request)
+        : retryPersistenceAndSettle(request));
       acceptSettlement(settlement, dispatch);
       await queryClient.invalidateQueries({ queryKey: configKeys.externalDiffs() });
       await stateQuery.refetch();
@@ -94,6 +120,7 @@ export function ConfigFileStatus() {
       discard_external_changes: true,
     };
     try {
+      assertNoPendingOperation(queryClient);
       const validation = await validateCandidate(candidate);
       const omitted = diff.editable.length - changes.length;
       const confirmed = await new Promise<boolean>((resolve) => {
@@ -114,12 +141,12 @@ export function ConfigFileStatus() {
       });
       if (!confirmed) return;
       dispatch({ type: "apply" });
-      const settlement = await applyAndSettle({
+      const settlement = await trackConfigOperation(queryClient, () => applyAndSettle({
         operation_id: createOperationId(),
         candidate,
         validation_token: validation.validation_token,
         confirmations: validation.required_confirmations,
-      });
+      }));
       if (!acceptSettlement(settlement, dispatch)) return;
       await Promise.all(invalidationKeysForChanges(changes).map((queryKey) => queryClient.invalidateQueries({ queryKey })));
       await queryClient.invalidateQueries({ queryKey: configKeys.externalDiffs() });
@@ -137,6 +164,11 @@ export function ConfigFileStatus() {
   const showBanner = isExternalBannerVisible(workspace);
   return (
     <>
+      {pendingQuery.data ? <div className="global-config-status" aria-live="polite"><Alert type="warning" showIcon
+        message="配置操作结果尚未确认"
+        description="已保留原操作，请继续查询。确认结果前不能提交新的配置变更。"
+        action={<Button size="small" loading={resuming} onClick={() => void continueOperation()}>继续查询</Button>}
+      /></div> : null}
       {stateQuery.isError || showBanner ? (
         <div className="global-config-status" aria-live="polite">
           {stateQuery.isError ? (

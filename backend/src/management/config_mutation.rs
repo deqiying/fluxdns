@@ -27,9 +27,12 @@ use super::contract::{
     OperationStatus, Preconditions, Revision, ValidationResult, decode_apply, decode_candidate,
     decode_file_sync, decode_module_candidate,
 };
-use super::router::{AuthServices, RequestId, v2_error_response, validate_v2_mutating_request};
-use super::session::SessionView;
+use super::router::{
+    AuthServices, RequestId, v2_error_response, v2_error_response_with_fields,
+    validate_v2_mutating_request,
+};
 
+use super::session::SessionView;
 const APPLY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -105,9 +108,18 @@ impl ConfigMutationOwner {
         .map_err(error_code)?;
 
         match begin {
-            BeginApply::Existing(_) => operation_result(&self.store, &actor, &query_operation_id),
+            BeginApply::Existing(_) => {
+                super::config_query::read_async(&self.store, move |store| {
+                    operation_result(store, &actor, &query_operation_id)
+                })
+                .await
+            }
             BeginApply::Accepted(permit) => {
-                let initial = operation_result(&self.store, &actor, &query_operation_id)?;
+                // 已受理的工作必须启动，响应读取失败也不能丢弃 permit。
+                let initial = OperationResult {
+                    operation_id: request.operation_id,
+                    status: OperationStatus::Preparing {},
+                };
                 let owner = self.clone();
                 tokio::spawn(async move {
                     owner.run_apply(actor, query_operation_id, *permit).await;
@@ -144,7 +156,10 @@ impl ConfigMutationOwner {
         })
         .await
         .map_err(|_| ErrorCode::ServiceUnavailable)?;
-        mutation_result(&self.store, &actor, &operation_id, result.map(|_| ()))
+        super::config_query::read_async(&self.store, move |store| {
+            mutation_result(store, &actor, &operation_id, result.map(|_| ()))
+        })
+        .await
     }
 
     /// 持久化重试只推进已有 operation，不重新构造或应用 Runtime。
@@ -167,7 +182,10 @@ impl ConfigMutationOwner {
         })
         .await
         .map_err(|_| ErrorCode::ServiceUnavailable)?;
-        mutation_result(&self.store, &actor, &operation_id, result.map(|_| ()))
+        super::config_query::read_async(&self.store, move |store| {
+            mutation_result(store, &actor, &operation_id, result.map(|_| ()))
+        })
+        .await
     }
 
     async fn run_apply(
@@ -200,7 +218,7 @@ impl ConfigMutationOwner {
                 return;
             }
         };
-        let runtime_revision = match self.store.active_snapshot() {
+        let runtime_revision = match self.store.active_snapshot_async().await {
             Ok(snapshot) => RuntimeRevision(snapshot.runtime_revision),
             Err(_) => {
                 let _ = permit.reject_with(OperationFailure::ApplyFailed, true);
@@ -332,7 +350,9 @@ async fn post_validate(
     };
     let candidate = match decode_candidate(&body) {
         Ok(candidate) => candidate,
-        Err(error) => return v2_error_response(error, &request_id),
+        Err(error) => {
+            return v2_error_response_with_fields(error.code, error.field_errors, &request_id);
+        }
     };
     v2_result(
         owner.validate(session.user.name, candidate).await,
@@ -361,7 +381,9 @@ async fn post_apply(
     };
     let request = match decode_apply(&body, None) {
         Ok(request) => request,
-        Err(error) => return v2_error_response(error, &request_id),
+        Err(error) => {
+            return v2_error_response_with_fields(error.code, error.field_errors, &request_id);
+        }
     };
     operation_response(
         owner.start_apply(session.user.name, request).await,
@@ -396,7 +418,9 @@ async fn post_module_validate(
     };
     let candidate = match decode_module_candidate(&body, module) {
         Ok(candidate) => candidate,
-        Err(error) => return v2_error_response(error, &request_id),
+        Err(error) => {
+            return v2_error_response_with_fields(error.code, error.field_errors, &request_id);
+        }
     };
     v2_result(
         owner.validate(session.user.name, candidate).await,
@@ -430,7 +454,9 @@ async fn post_module_apply(
     };
     let request = match decode_apply(&body, Some(module)) {
         Ok(request) => request,
-        Err(error) => return v2_error_response(error, &request_id),
+        Err(error) => {
+            return v2_error_response_with_fields(error.code, error.field_errors, &request_id);
+        }
     };
     operation_response(
         owner.start_apply(session.user.name, request).await,
@@ -469,7 +495,10 @@ async fn get_operation(
         return v2_error_response(ErrorCode::InvalidArgument, &request_id);
     };
     operation_response(
-        operation_result(&services.config_store, &session.user.name, &operation_id),
+        super::config_query::read_async(&services.config_store, move |store| {
+            operation_result(store, &session.user.name, &operation_id)
+        })
+        .await,
         &request_id,
     )
 }

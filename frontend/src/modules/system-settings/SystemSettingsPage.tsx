@@ -56,6 +56,7 @@ export function SystemSettingsPage() {
       <PageState
         loading={systemQuery.isLoading || logsQuery.isLoading}
         error={error}
+        hasData={!!systemQuery.data && !!logsQuery.data}
         onRetry={() => { void systemQuery.refetch(); void logsQuery.refetch(); }}
       />
       {systemQuery.data && logs && logsQuery.data ? (

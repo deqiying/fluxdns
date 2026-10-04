@@ -9,6 +9,8 @@
 > 核对基线：`3f1a6be` 加本次工作树变更；本轮仅核对 service metrics 的趋势口径与指标推送协议，其余范围按原日期和基线解释
 >
 > 时间存储补充核对：2026-09-05，`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加业务时间迁移工作树；不扩大其他管理功能审计范围
+>
+> 2026-10-04 增量核对：`eb428f92cdc3acda836547107ef2f56f6d988249` 加本次工作树；范围限配置读取、搜索与 ECS 字段错误，不扩大历史验收结论
 
 ## 入口与生命周期
 
@@ -41,7 +43,7 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 
 [`config_query.rs`](../../../backend/src/management/config_query.rs) 将真实 ConfigStore 快照映射到既有 `ConfigState` 和 `OperationResult`，不读取外部文件、不从 Runtime 反推配置、不返回活动原文、路径、身份/hash 或底层错误。`runtime_revision` 以十进制字符串表示，测试覆盖 `u64::MAX`；其余 opaque token 由与入站反序列化共用的有界构造器检查，schema 和生成类型无 wire 变化。
 
-操作查询按原调用者返回冻结的版本与安全错误码，不用当前配置状态拼接旧操作结果。不同调用者、未知和过期返回 `Unknown`，不授权自动重放。配置同步状态与外部文件变化独立，精确自写识别及保留期见[配置状态事实](../configuration.md#p1-配置状态与冻结操作结果2026-09-07)。状态锁忙时返回 `OPERATION_BUSY`，不会阻塞 executor 等待同步文件事务。
+操作查询按原调用者返回冻结的版本与安全错误码，不用当前配置状态拼接旧操作结果。不同调用者、未知和过期返回 `Unknown`，不授权自动重放。配置同步状态与外部文件变化独立，精确自写识别及保留期见[配置状态事实](../configuration.md#p1-配置状态与冻结操作结果2026-09-07)。当前状态锁读取允许在阻塞线程池中有界等待；耗尽返回 `SERVICE_UNAVAILABLE`，不阻塞 async executor，也不映射为写事务 `OPERATION_BUSY`。
 
 [`config_query/tests.rs`](../../../backend/src/management/config_query/tests.rs) 使用真实临时双文件与 Windows 文件占用错误，覆盖结果冻结、调用者隔离、全部操作状态、五类文件状态和 u64 字符串边界；输出样本限定 `_fluxdns/p1-config-query-projections/`，不写入 Git。操作应用成功仍由测试模拟，正式写 owner、代理/client 与 HTTP 响应中断继续留待后续检查点。
 
@@ -61,7 +63,7 @@ Windows 使用本批 debug binary 与独立 `_fluxdns/bc12-http/` v2 配置完�
 
 `POST /api/v2/queries/search` 与 `GET /api/v2/queries/{record_id}` 已进入正式 Bearer query router，直接消费 [`DetailShardStore`](../../../backend/src/storage/detail_query.rs) 的跨日读口，不让 handler 持有 SQLx pool。列表先以一次 active ConfigStore 快照把 `client_name` 模糊匹配解析为完整当前 `client_id` 集合，再由 storage 在分页前应用全部过滤；空 ID 集合也显式返回空结果。原始 ID/IP、历史匹配来源和匹配 ID 保持写入时事实，当前名称及 `directory_revision` 只作为同次读取投影，不补造或重匹配历史。
 
-qname 在进入 storage 前归一化为小写绝对名，qtype 接受标准名或 `TYPE<n>`；原总耗时从存储毫秒投影为微秒。2026-09-22 增量核对（`2b3b160` 加工作树）：HTTP search/detail 和 WS 共用 `query_record`，新增真实 `listener_name`、`response_duration_us`、`response_status` 与 `cache_activity`，响应微秒值校验 JavaScript 安全整数上限；旧诊断缺失时为 null/unrecorded，不从 core 耗时推算。缓存命中的顶层 upstream 字段保持空值，旧 producer 的 strategy/目标/实际 upstream 单独放入 `cache_producer`，刷新实际出口保存在 `cache_activity`，不混同历史生产链路。字段与枚举以 OpenAPI 为准，采集和持久化边界见[后台分发](background-services.md#完成事件与后台分发)。记录 ID、前后 cursor、commit cursor 和 retention revision 沿用 BC-09 的 opaque/十进制契约；cursor 篡改或水位失效返回 410 `CURSOR_EXPIRED`，非法 filter/record ID 返回 400，已过期或不存在记录返回 404，storage/目录代次异常返回 503。
+qname 关键词去首尾空白并 ASCII 小写，不再强制解析完整 DNS 名或补尾点；完整 IP 规范化，片段保留为小写文本。SQL 对 qname/IP 使用绑定参数的 `instr(column, ?) > 0`，WS/replay 使用同样的字面 `contains`，`%/_/*` 没有通配含义；客户端名称按当前目录包含匹配。原始输入先检查长度和控制字符，再处理空白，REST/WS 使用同一 decoder。qtype 接受标准名或 `TYPE<n>`；原总耗时从存储毫秒投影为微秒。2026-09-22 增量核对（`2b3b160` 加工作树）：HTTP search/detail 和 WS 共用 `query_record`，新增真实 `listener_name`、`response_duration_us`、`response_status` 与 `cache_activity`，响应微秒值校验 JavaScript 安全整数上限；旧诊断缺失时为 null/unrecorded，不从 core 耗时推算。缓存命中的顶层 upstream 字段保持空值，旧 producer 的 strategy/目标/实际 upstream 单独放入 `cache_producer`，刷新实际出口保存在 `cache_activity`，不混同历史生产链路。字段与枚举以 OpenAPI 为准，采集和持久化边界见[后台分发](background-services.md#完成事件与后台分发)。记录 ID、前后 cursor、commit cursor 和 retention revision 沿用 BC-09 的 opaque/十进制契约；cursor 篡改或水位失效返回 410 `CURSOR_EXPIRED`，非法 filter/record ID 返回 400，已过期或不存在记录返回 404，storage/目录代次异常返回 503。
 
 Windows 定向测试用两个真实 UTC 日 SQLite 分片覆盖跨日稳定分页、分页前名称过滤、无尾点 qname、缓存 provenance、详情定位、非法 qtype/cursor 与 Bearer 拒绝。生产 debug binary 又在独立 `_fluxdns/bc13-http/` 目录完成真实 login、`doggo` UDP 请求、详情分片提交及 Bearer HTTP：列表和详情均为 200，返回同一稳定 ID；无 Bearer 列表为 401。实际两类响应另经当前 OpenAPI AJV 校验。最终完整 Cargo 为 836 passed、3 ignored，全部测试目标编译、build 和 fmt 通过；前端 typecheck、20 文件 84 项 Vitest、build 与 4 项 v2 schema contract 通过。Clippy `-D warnings` 仍被本次改动前已有的 6 项 lint 阻断，本项没有新增 lint；一次此前成功运行后的默认并发 Cargo 重跑发生无具体失败用例的 Windows `STATUS_STACK_BUFFER_OVERRUN`，立即同命令重跑通过。测试进程已停止；这不覆盖浏览器、WS/replay、HTTPS 反向代理、Linux、约 10 客户端或 core 2ms 性能。
 
@@ -84,6 +86,10 @@ P3 首个消费方为 `outbound`：代理创建/编辑仍由完整 ConfigV2 候�
 P3 `POST /api/v2/retention/preview` 绑定 active/file revision，调用现有 `RetentionCoordinator::preview` 真实采样详情主文件和 WAL，但不发布水位或创建回收任务。当前与候选策略使用同一次采样计算 cutoff；响应返回十进制字节、候选 UTC 截止日及是否缩短历史，实际保存仍由 `statistics` 单模块事务重新校验且不立即清理。
 
 组合 apply 在阻塞线程完成 ConfigStore 受理后立即返回 202；后台 owner 完成 Runtime prepare、ServiceControl 回执和持久化，客户端按相同 operation ID 查询。文件还原/重试在阻塞 owner 中执行，HTTP 取消不终止已经开始的写盘；已记录失败优先返回冻结 OperationResult，受理前冲突返回 ErrorEnvelope。operation 按用户名隔离，不在响应或日志中返回源正文、路径身份、底层错误或认证凭据。
+
+2026-10-04：受理 apply 后先启动独立 owner，再直接返回 `preparing`，避免多余的状态回读失败丢失已受理 permit。state/module/system/operation、retention 和历史/WS 的目录快照读取均在 `spawn_blocking` 中调用有界 active 读口。`begin_apply` 在 transaction gate 保护下先观测文件再获取 active guard，保留版本复核；未重构持久化状态机。
+
+本批 Windows debug embed 独立夹具完成 200 次并发配置 GET、validate/apply 期间配置读取与原 ID 轮询、规则 custom ECS 优先于策略 disabled 的真实 DNS 出站、规则 disabled 不发送 ECS、持久化回读，以及域名/客户端名称/IP 三项片段的真实 SQLite、WS push/replay 联合验证。七日 7,000 行 SQLite 测试验证跨三页字面匹配与 replay 集合一致，单次本机样本约 130 ms；此数值不是生产负载容量承诺。浏览器证据及前端回归见[页面实现](../frontend/pages.md)。
 
 P3 Windows 联合验收使用内嵌 debug binary、`_fluxdns/p3-live/` 真实 ConfigV2 和一次性 setup/后续 login 的内存 Bearer。代理、Hosts、规则集、上游/组、策略、Listener、客户端、DNS、statistics 与 logs 按依赖逐一完成单模块 validate、202 apply、operation 轮询、`applied_synced`、源文件持久化和查询回显；代理改名返回 `rename_references`，Listener 端口热切换返回 `listener_rebind`，陈旧双 revision 预校验返回 409。随后真实文件外改 Hosts/logs 未进入活动态，双模块全局 Candidate 经 `discard_external_changes` 组合采用；validate 后二次外改使 apply 返回 `FILE_REVISION_CONFLICT`，正式 restore 恢复 `synced/unchanged`。未验证 HTTPS 反向代理、Linux、磁盘满或响应恰在 service commit 后丢失。
 

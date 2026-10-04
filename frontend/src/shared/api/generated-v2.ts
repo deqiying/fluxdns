@@ -279,7 +279,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 只读查询使用 JSON body，共用 HTTP/WS filter，避免把身份过滤写入 URL。 filter 在分页前应用；时间为 UTC 毫秒半开区间；cursor 与 filter、方向、水位绑定。 无固定 31 天限制，但最大跨度为 3650 天；无 COUNT、页码直跳或伪造总数。 */
+        /** @description 只读查询使用 JSON body，共用 HTTP/WS filter，避免把身份过滤写入 URL。 filter 在分页前应用；时间为 UTC 毫秒半开区间；cursor 与 filter、方向、水位绑定。 qname、client_ip 和 client_name 去除首尾空白并按 ASCII 忽略大小写进行字面包含匹配； 完整 IP 会规范化，地址片段仍按字面包含匹配。无固定 31 天限制，但最大跨度为 3650 天； 无 COUNT、页码直跳或伪造总数。 */
         post: operations["searchQueries"];
         delete?: never;
         options?: never;
@@ -1073,11 +1073,13 @@ export interface components {
             from_ms: components["schemas"]["SafeInteger"];
             to_ms: components["schemas"]["SafeInteger"];
             client_id?: components["schemas"]["ClientId"];
+            /** @description 去除首尾空白并按 ASCII 忽略大小写字面包含匹配；完整 IP 规范化，片段不解释为 CIDR */
             client_ip?: string;
+            /** @description 去除首尾空白并按 ASCII 忽略大小写字面包含匹配；显式尾点按字面保留 */
             qname?: string;
             transport?: components["schemas"]["Transport"];
             matched_client_id?: components["schemas"]["ClientId"];
-            /** @description 在完整当前目录中解析名称匹配集合，再过滤历史 matched_client_id */
+            /** @description 去除首尾空白并按 ASCII 忽略大小写在完整当前目录中做名称包含匹配，再过滤历史 matched_client_id */
             client_name?: string;
             qtype?: string;
             rcode?: string;

@@ -314,6 +314,32 @@ pub struct ErrorEnvelope {
     pub field_errors: Vec<FieldError>,
 }
 
+/// 候选封套的入站错误只公开固定错误码和经白名单校验的 DTO 路径。
+#[derive(Clone, Debug)]
+pub struct MutationDecodeError {
+    pub code: ErrorCode,
+    pub field_errors: Vec<FieldError>,
+}
+
+impl MutationDecodeError {
+    fn new(code: ErrorCode) -> Self {
+        Self {
+            code,
+            field_errors: Vec::new(),
+        }
+    }
+
+    fn ecs_custom_ip(path: String) -> Self {
+        Self {
+            code: ErrorCode::InvalidArgument,
+            field_errors: vec![FieldError {
+                path,
+                code: ErrorCode::InvalidArgument,
+            }],
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
 pub enum OperationStatus {
@@ -915,45 +941,56 @@ pub enum ServerMessage {
 }
 
 /// 供后续 handler 共用的有界 JSON 解码入口；完整候选引用/影响检查由 ConfigStore 执行。
-pub fn decode_candidate(bytes: &[u8]) -> Result<Candidate, ErrorCode> {
-    let tree: serde_json::Value = decode_json(bytes, MAX_MUTATION_BYTES)?;
+pub fn decode_candidate(bytes: &[u8]) -> Result<Candidate, MutationDecodeError> {
+    let tree: serde_json::Value =
+        decode_json(bytes, MAX_MUTATION_BYTES).map_err(MutationDecodeError::new)?;
     if contains_null(&tree) {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }
-    let value: Candidate = serde_json::from_value(tree).map_err(|_| ErrorCode::InvalidArgument)?;
+    let field_error = invalid_rule_ecs_custom_ip_path(&tree, "");
+    let value: Candidate = decode_mutation_value(tree, field_error)?;
     if value.changes.is_empty() || value.changes.len() > MAX_CHANGES {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }
     Ok(value)
 }
 
 /// 普通模块表单不能借通用候选封套修改其他模块；组合采用只走专门的整体入口。
-pub fn decode_module_candidate(bytes: &[u8], module: ConfigModule) -> Result<Candidate, ErrorCode> {
+pub fn decode_module_candidate(
+    bytes: &[u8],
+    module: ConfigModule,
+) -> Result<Candidate, MutationDecodeError> {
     let value = decode_candidate(bytes)?;
     if value.changes.len() != 1 || value.changes[0].module() != module {
-        return Err(ErrorCode::Forbidden);
+        return Err(MutationDecodeError::new(ErrorCode::Forbidden));
     }
     Ok(value)
 }
 
 /// 应用封套沿用候选预算，不在此执行 prepare、文件覆盖或幂等记录。
-pub fn decode_apply(bytes: &[u8], module: Option<ConfigModule>) -> Result<ApplyRequest, ErrorCode> {
-    let tree: serde_json::Value = decode_json(bytes, MAX_MUTATION_BYTES)?;
+pub fn decode_apply(
+    bytes: &[u8],
+    module: Option<ConfigModule>,
+) -> Result<ApplyRequest, MutationDecodeError> {
+    let tree: serde_json::Value =
+        decode_json(bytes, MAX_MUTATION_BYTES).map_err(MutationDecodeError::new)?;
     if contains_null(&tree) {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }
-    let request: ApplyRequest =
-        serde_json::from_value(tree).map_err(|_| ErrorCode::InvalidArgument)?;
+    let field_error = tree
+        .get("candidate")
+        .and_then(|candidate| invalid_rule_ecs_custom_ip_path(candidate, "candidate."));
+    let request: ApplyRequest = decode_mutation_value(tree, field_error)?;
     if request.candidate.changes.is_empty()
         || request.candidate.changes.len() > MAX_CHANGES
         || request.confirmations.len() > 4
     {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }
     if let Some(module) = module
         && (request.candidate.changes.len() != 1 || request.candidate.changes[0].module() != module)
     {
-        return Err(ErrorCode::Forbidden);
+        return Err(MutationDecodeError::new(ErrorCode::Forbidden));
     }
     if request
         .confirmations
@@ -962,9 +999,52 @@ pub fn decode_apply(bytes: &[u8], module: Option<ConfigModule>) -> Result<ApplyR
         .len()
         != request.confirmations.len()
     {
-        return Err(ErrorCode::InvalidArgument);
+        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }
     Ok(request)
+}
+
+/// serde 对 internally tagged mutation enum 的失败路径止于变体边界，因此只重建已知 ECS
+/// custom_ip 的 DTO 路径；其他 serde 细节和提交值均不向调用方暴露。
+fn decode_mutation_value<T: DeserializeOwned>(
+    tree: serde_json::Value,
+    field_error: Option<String>,
+) -> Result<T, MutationDecodeError> {
+    serde_json::from_value(tree).map_err(|_| match field_error {
+        Some(path) => MutationDecodeError::ecs_custom_ip(path),
+        None => MutationDecodeError::new(ErrorCode::InvalidArgument),
+    })
+}
+
+fn invalid_rule_ecs_custom_ip_path(value: &serde_json::Value, root: &str) -> Option<String> {
+    let changes = value.get("changes")?.as_array()?;
+    for (change_index, change) in changes.iter().enumerate() {
+        if change.get("module")?.as_str()? != "strategy" {
+            continue;
+        }
+        let value = change
+            .get("change")?
+            .get("value")?
+            .get("rules")?
+            .as_array()?;
+        for (rule_index, rule) in value.iter().enumerate() {
+            let Some(custom_ip) = rule
+                .get("edns_client_subnet")
+                .and_then(|ecs| ecs.get("custom_ip"))
+            else {
+                continue;
+            };
+            if custom_ip
+                .as_str()
+                .is_none_or(|value| value.parse::<ipnet::IpNet>().is_err())
+            {
+                return Some(format!(
+                    "{root}changes[{change_index}].change.value.rules[{rule_index}].edns_client_subnet.custom_ip"
+                ));
+            }
+        }
+    }
+    None
 }
 
 /// 文件动作只接受固定 operation、双版本和覆盖确认，不接收路径或配置正文。
@@ -991,8 +1071,10 @@ pub fn decode_query(bytes: &[u8]) -> Result<QueryRequest, ErrorCode> {
     if tree.get("filter").is_some_and(contains_null) {
         return Err(ErrorCode::InvalidArgument);
     }
-    let query: QueryRequest =
+    let mut query: QueryRequest =
         serde_json::from_value(tree).map_err(|_| ErrorCode::InvalidArgument)?;
+    validate_query_filter(&query.filter)?;
+    normalize_query_filter(&mut query.filter);
     if query.page_size == 0 || query.page_size > MAX_QUERY_PAGE_SIZE {
         return Err(ErrorCode::InvalidArgument);
     }
@@ -1006,14 +1088,16 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ErrorCode> {
     if contains_null(&tree) {
         return Err(ErrorCode::InvalidArgument);
     }
-    let message: ClientMessage =
+    let mut message: ClientMessage =
         serde_json::from_value(tree).map_err(|_| ErrorCode::InvalidArgument)?;
     if let ClientMessage::SubscribeQueries {
         filter,
         retention_revision,
         ..
-    } = &message
+    } = &mut message
     {
+        validate_query_filter(filter)?;
+        normalize_query_filter(filter);
         validate_query_filter(filter)?;
         retention_revision
             .as_str()
@@ -1021,6 +1105,19 @@ pub fn decode_client_message(bytes: &[u8]) -> Result<ClientMessage, ErrorCode> {
             .map_err(|_| ErrorCode::InvalidArgument)?;
     }
     Ok(message)
+}
+
+fn normalize_query_filter(filter: &mut QueryFilter) {
+    for value in [
+        &mut filter.client_ip,
+        &mut filter.qname,
+        &mut filter.client_name,
+    ] {
+        *value = value.take().and_then(|value| {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_ascii_lowercase())
+        });
+    }
 }
 
 fn validate_query_filter(filter: &QueryFilter) -> Result<(), ErrorCode> {
@@ -1038,13 +1135,15 @@ fn validate_query_filter(filter: &QueryFilter) -> Result<(), ErrorCode> {
         || filter
             .client_ip
             .as_ref()
-            .is_some_and(|ip| ip.parse::<std::net::IpAddr>().is_err())
-        || filter.client_name.as_ref().is_some_and(|name| {
-            name.is_empty() || name.len() > 128 || name.chars().any(char::is_control)
-        })
-        || filter.qname.as_ref().is_some_and(|name| {
-            name.is_empty() || name.len() > 253 || name.chars().any(char::is_control)
-        })
+            .is_some_and(|ip| ip.len() > 64 || ip.chars().any(char::is_control))
+        || filter
+            .client_name
+            .as_ref()
+            .is_some_and(|name| name.len() > 128 || name.chars().any(char::is_control))
+        || filter
+            .qname
+            .as_ref()
+            .is_some_and(|name| name.len() > 253 || name.chars().any(char::is_control))
         || filter
             .qtype
             .as_ref()

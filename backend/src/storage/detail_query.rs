@@ -206,14 +206,16 @@ impl DetailQueryFilter {
                 .client_id
                 .as_ref()
                 .is_none_or(|value| record.client_id.as_ref() == Some(value))
-            && self
-                .client_ip
-                .as_ref()
-                .is_none_or(|value| record.client_ip.as_ref() == Some(value))
+            && self.client_ip.as_ref().is_none_or(|value| {
+                record
+                    .client_ip
+                    .as_ref()
+                    .is_some_and(|client_ip| client_ip.contains(value))
+            })
             && self
                 .qname
                 .as_ref()
-                .is_none_or(|value| record.qname == *value)
+                .is_none_or(|value| record.qname.contains(value))
             && self.transport.is_none_or(|value| record.transport == value)
             && self
                 .matched_client_id
@@ -834,10 +836,14 @@ async fn query_shard(
         sql.push(" AND client_id = ").push_bind(value);
     }
     if let Some(value) = &query.filter.client_ip {
-        sql.push(" AND client_ip = ").push_bind(value);
+        sql.push(" AND instr(client_ip, ")
+            .push_bind(value)
+            .push(") > 0");
     }
     if let Some(value) = &query.filter.qname {
-        sql.push(" AND canonical_qname = ").push_bind(value);
+        sql.push(" AND instr(canonical_qname, ")
+            .push_bind(value)
+            .push(") > 0");
     }
     if let Some(value) = query.filter.transport {
         sql.push(" AND transport = ")
@@ -1063,14 +1069,12 @@ fn validate_query(query: &DetailQuery) -> Result<(), PortError> {
         || filter.to_utc_millis > i64::MAX as u64
         || filter.to_utc_millis - filter.from_utc_millis > MAX_QUERY_SPAN_MILLIS
         || filter.matched_client_ids.len() > MAX_MATCHED_CLIENT_IDS
-        || filter
-            .client_ip
-            .as_ref()
-            .is_some_and(|value| value.parse::<IpAddr>().is_err())
-        || filter
-            .qname
-            .as_ref()
-            .is_some_and(|value| value.is_empty() || value.len() > 1_024)
+        || filter.client_ip.as_ref().is_some_and(|value| {
+            value.is_empty() || value.len() > 64 || value.chars().any(char::is_control)
+        })
+        || filter.qname.as_ref().is_some_and(|value| {
+            value.is_empty() || value.len() > 253 || value.chars().any(char::is_control)
+        })
         || filter
             .client_id
             .as_ref()
@@ -1694,6 +1698,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seven_day_contains_query_keeps_sql_and_replay_results_consistent() {
+        let root = test_root("seven-day-contains");
+        let store = DetailShardStore::new(root.clone(), Vec::new(), 2).unwrap();
+        for day in FIRST_DAY..FIRST_DAY + 7 {
+            let records = (0..1000)
+                .map(|index| {
+                    let name = if index == 500 {
+                        "literal_under%score.example.".to_owned()
+                    } else {
+                        format!("row-{index}.example.")
+                    };
+                    record(day, index + 1, 1, &name, "raw", "client")
+                })
+                .collect::<Vec<_>>();
+            store
+                .write_records(day, &records, deadline())
+                .await
+                .unwrap();
+        }
+        let mut request = query(FIRST_DAY, FIRST_DAY + 6, 3);
+        request.filter.qname = Some("under%score".to_owned());
+        request.filter.client_ip = Some("192.0".to_owned());
+        let started = Instant::now();
+        let mut ids = std::collections::BTreeSet::new();
+        loop {
+            let page = store
+                .query_details(request.clone(), deadline())
+                .await
+                .unwrap();
+            for item in &page.items {
+                assert!(request.filter.matches_record(item));
+                assert!(ids.insert(item.id.as_str().to_owned()));
+            }
+            let Some(cursor) = page.next_cursor else {
+                break;
+            };
+            request.cursor = Some(cursor);
+        }
+        assert_eq!(ids.len(), 7);
+        eprintln!(
+            "seven-day contains: 7000 rows, 7 matches, elapsed {:?}",
+            started.elapsed()
+        );
+        store.shutdown(deadline()).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
     async fn real_sqlite_filters_before_paging_and_merges_duration_order() {
         let root = test_root("filters");
         let store = DetailShardStore::new(root.clone(), Vec::new(), 2).unwrap();
@@ -1722,8 +1774,8 @@ mod tests {
 
         let mut filtered = query(FIRST_DAY, FIRST_DAY + 1, 1);
         filtered.filter.client_id = Some("raw-b".to_owned());
-        filtered.filter.client_ip = Some("192.0.2.10".to_owned());
-        filtered.filter.qname = Some("target.example.".to_owned());
+        filtered.filter.client_ip = Some("192.0".to_owned());
+        filtered.filter.qname = Some("target".to_owned());
         filtered.filter.transport = Some(DetailQueryTransport::Udp);
         filtered.filter.matched_client_ids = vec!["client-b".to_owned(), "missing".to_owned()];
         filtered.filter.require_matched_client_ids = true;
@@ -1741,6 +1793,7 @@ mod tests {
         assert_eq!(first.items.len(), 1);
         assert_eq!(first.items[0].duration_millis, 6);
         assert!(first.next_cursor.is_some());
+        assert!(filtered.filter.matches_record(&first.items[0]));
 
         filtered.cursor = first.next_cursor;
         let second = store.query_details(filtered, deadline()).await.unwrap();
@@ -1753,6 +1806,17 @@ mod tests {
         assert!(
             store
                 .query_details(no_current_name_match, deadline())
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+
+        let mut literal = query(FIRST_DAY, FIRST_DAY + 1, 20);
+        literal.filter.qname = Some("%".to_owned());
+        assert!(
+            store
+                .query_details(literal, deadline())
                 .await
                 .unwrap()
                 .items

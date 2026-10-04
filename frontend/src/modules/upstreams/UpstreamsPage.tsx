@@ -156,7 +156,7 @@ export function UpstreamsPage() {
       description="每一次转发，稳定可达。"
       actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>{activeTab === "groups" ? "添加上游组" : "添加上游"}</Button></Space>}
     >
-      <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
+      <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
       {query.data ? (
         <div className="config-module-content">
           <Tabs activeKey={activeTab} items={[{ key: "upstreams", label: "上游" }, { key: "groups", label: "上游组" }]} onChange={(tab) => setSearchParams(tab === "upstreams" ? {} : { tab })} />

@@ -273,9 +273,9 @@ export function QueriesPage() {
     >
       <section className="query-filter-panel" aria-label="解析记录筛选">
         <div className="query-filter-primary">
-          <FilterInput label="域名" value={draft.qname} placeholder="example.com" onChange={(qname) => setDraft((value) => ({ ...value, qname }))} />
-          <FilterInput label="客户端" value={draft.client_name} placeholder="客户端名称" onChange={(client_name) => setDraft((value) => ({ ...value, client_name }))} />
-          <FilterInput label="请求 IP" value={draft.client_ip} placeholder="192.0.2.10" onChange={(client_ip) => setDraft((value) => ({ ...value, client_ip }))} />
+          <FilterInput label="域名" value={draft.qname} placeholder="域名关键词" onChange={(qname) => setDraft((value) => ({ ...value, qname }))} />
+          <FilterInput label="客户端" value={draft.client_name} placeholder="客户端名称关键词" onChange={(client_name) => setDraft((value) => ({ ...value, client_name }))} />
+          <FilterInput label="请求 IP" value={draft.client_ip} placeholder="IP 或地址片段" onChange={(client_ip) => setDraft((value) => ({ ...value, client_ip }))} />
           <FilterSelect label="协议" value={draft.transport} values={transports} onChange={(transport) => setDraft((value) => ({ ...value, transport }))} />
           <FilterSelect label="来源" value={draft.source} values={sources} onChange={(source) => setDraft((value) => ({ ...value, source }))} />
         </div>

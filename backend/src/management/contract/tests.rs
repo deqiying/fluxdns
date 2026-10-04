@@ -62,8 +62,10 @@ fn mutation_shape_rejects_readonly_identity_delete_and_variant_residue() {
 #[test]
 fn request_budgets_and_tokens_fail_before_handler_work() {
     assert!(matches!(
-        decode_candidate(&vec![b' '; MAX_MUTATION_BYTES + 1]),
-        Err(ErrorCode::PayloadTooLarge)
+        decode_candidate(&vec![b' '; MAX_MUTATION_BYTES + 1])
+            .unwrap_err()
+            .code,
+        ErrorCode::PayloadTooLarge
     ));
     let mut value = fixtures()["candidate"].clone();
     value["changes"] = json!([]);
@@ -81,14 +83,65 @@ fn request_budgets_and_tokens_fail_before_handler_work() {
     let bytes = serde_json::to_vec(&value).unwrap();
     assert!(decode_module_candidate(&bytes, ConfigModule::Clients).is_ok());
     assert!(matches!(
-        decode_module_candidate(&bytes, ConfigModule::Logs),
-        Err(ErrorCode::Forbidden)
+        decode_module_candidate(&bytes, ConfigModule::Logs)
+            .unwrap_err()
+            .code,
+        ErrorCode::Forbidden
     ));
     value["changes"][0]["change"]["value"]["strategy"] = Value::Null;
     assert!(decode_candidate(&serde_json::to_vec(&value).unwrap()).is_err());
     for invalid in ["18446744073709551616", "01", "-1", "1e3", ""] {
         assert!(serde_json::from_value::<DecimalU64>(json!(invalid)).is_err());
     }
+}
+
+#[test]
+fn invalid_rule_ecs_custom_ip_returns_only_its_dto_path() {
+    let candidate = json!({
+        "expected": {"active_revision": "active-7", "observed_file_revision": "files-9"},
+        "changes": [{
+            "module": "strategy",
+            "change": {
+                "action": "update",
+                "original_name": "default",
+                "value": {
+                    "name": "default",
+                    "rules": [
+                        {"hosts": "local"},
+                        {"hosts": "local", "edns_client_subnet": {"mode": "custom", "custom_ip": "192.0.2.0/99"}}
+                    ],
+                    "default_upstream": "public"
+                }
+            }
+        }],
+        "discard_external_changes": false
+    });
+    let bytes = serde_json::to_vec(&candidate).unwrap();
+    let error = decode_candidate(&bytes).unwrap_err();
+    assert!(matches!(error.code, ErrorCode::InvalidArgument));
+    assert_eq!(error.field_errors.len(), 1);
+    assert_eq!(
+        error.field_errors[0].path,
+        "changes[0].change.value.rules[1].edns_client_subnet.custom_ip"
+    );
+    assert!(matches!(
+        error.field_errors[0].code,
+        ErrorCode::InvalidArgument
+    ));
+    assert!(!format!("{error:?}").contains("192.0.2.0/99"));
+
+    let apply = json!({
+        "operation_id": "operation-1",
+        "candidate": candidate,
+        "validation_token": "validation-1",
+        "confirmations": []
+    });
+    let error = decode_apply(&serde_json::to_vec(&apply).unwrap(), None).unwrap_err();
+    assert!(matches!(error.code, ErrorCode::InvalidArgument));
+    assert_eq!(
+        error.field_errors[0].path,
+        "candidate.changes[0].change.value.rules[1].edns_client_subnet.custom_ip"
+    );
 }
 
 #[test]
@@ -104,8 +157,10 @@ fn apply_envelope_and_ws_filters_use_the_same_ingress_boundaries() {
         decode_apply(
             &serde_json::to_vec(&apply).unwrap(),
             Some(ConfigModule::Clients)
-        ),
-        Err(ErrorCode::Forbidden)
+        )
+        .unwrap_err()
+        .code,
+        ErrorCode::Forbidden
     ));
     apply["confirmations"] = json!(["discard_external_changes", "discard_external_changes"]);
     assert!(decode_apply(&serde_json::to_vec(&apply).unwrap(), None).is_err());
@@ -136,7 +191,11 @@ fn apply_envelope_and_ws_filters_use_the_same_ingress_boundaries() {
     for (field, invalid) in [
         ("to_ms", json!(u64::MAX)),
         ("client_id", json!("invalid/id")),
-        ("client_ip", json!("invalid")),
+        ("client_ip", json!("a".repeat(65))),
+        ("client_ip", json!(format!("bad{}ip", char::from(0)))),
+        ("qname", json!("\nexample")),
+        ("client_ip", json!("192.168\t")),
+        ("client_name", json!(" ".repeat(129))),
         ("qname", json!("a".repeat(254))),
         ("qname", Value::Null),
     ] {
@@ -172,13 +231,36 @@ fn query_window_page_size_and_identity_bounds_are_checked() {
         ("from_ms", base["filter"]["to_ms"].clone()),
         ("to_ms", json!(9007199254740992_u64)),
         ("client_id", json!("bad/id")),
-        ("client_ip", json!("not-an-ip")),
+        ("client_ip", json!("a".repeat(65))),
         ("qname", json!("a".repeat(254))),
     ] {
         let mut value = base.clone();
         value["filter"][field] = invalid;
         assert!(decode_query(&serde_json::to_vec(&value).unwrap()).is_err());
     }
+}
+
+#[test]
+fn query_text_filters_trim_lowercase_and_accept_ip_fragments() {
+    let mut query = fixtures()["query"].clone();
+    query["filter"]["qname"] = json!("  ExAmPlE.  ");
+    query["filter"]["client_ip"] = json!("  2001:DB8  ");
+    query["filter"]["client_name"] = json!("  DeskTop  ");
+    let query = decode_query(&serde_json::to_vec(&query).unwrap()).unwrap();
+    assert_eq!(query.filter.qname.as_deref(), Some("example."));
+    assert_eq!(query.filter.client_ip.as_deref(), Some("2001:db8"));
+    assert_eq!(query.filter.client_name.as_deref(), Some("desktop"));
+
+    let mut message = fixtures()["client_messages"][1].clone();
+    message["filter"]["qname"] = json!("   ");
+    message["filter"]["client_ip"] = json!("  192.168  ");
+    let ClientMessage::SubscribeQueries { filter, .. } =
+        decode_client_message(&serde_json::to_vec(&message).unwrap()).unwrap()
+    else {
+        panic!("fixture must subscribe to queries");
+    };
+    assert_eq!(filter.qname, None);
+    assert_eq!(filter.client_ip.as_deref(), Some("192.168"));
 }
 #[test]
 fn shared_source_serialization_preserves_omission_paths_and_duration_shape() {

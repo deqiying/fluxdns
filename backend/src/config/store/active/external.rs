@@ -42,9 +42,7 @@ impl ConfigStore {
 
     fn capture_external_source(&self) -> Result<CapturedSource, ActiveError> {
         let active = self
-            .active
-            .try_lock()
-            .map_err(|_| ActiveError::Busy)?
+            .read_active()?
             .as_ref()
             .ok_or(ActiveError::Unavailable)?
             .snapshot
@@ -91,7 +89,7 @@ impl ConfigStore {
         captured: CapturedSource,
     ) -> Result<ExternalSource, ActiveError> {
         let observed = ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
-        let mut guard = self.active.try_lock().map_err(|_| ActiveError::Busy)?;
+        let mut guard = self.read_active()?;
         let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
         // 运行成功回报可以在文件观测期间发布；不能把旧活动源的 diff 配上新 revision。
         if state.snapshot.revision != captured.active.revision {

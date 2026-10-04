@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Button, Descriptions, Form, Input, InputNumber, Select, Space, Switch, Tag, Typography } from "antd";
 import { Pencil } from "lucide-react";
@@ -57,11 +57,16 @@ export function DnsSettingsPage() {
   const ecsMode = Form.useWatch("ecs_mode", dnsForm);
   const [editor, setEditor] = useState<"dns" | "retention" | null>(null);
   const [dirty, setDirty] = useState(false);
+  const initializedEditor = useRef<typeof editor>(null);
+  const editorState = useRef<Schemas["ConfigState"] | null>(null);
   const dns = dnsQuery.data?.values.find((item) => item.module === "dns")?.value;
   const statistics = statisticsQuery.data?.values.find((item) => item.module === "statistics")?.value;
 
   useEffect(() => {
-    if (!editor) return;
+    if (!editor) { initializedEditor.current = null; editorState.current = null; return; }
+    if (initializedEditor.current === editor) return;
+    initializedEditor.current = editor;
+    editorState.current = (editor === "dns" ? dnsQuery.data?.state : statisticsQuery.data?.state) ?? null;
     setDirty(false);
     if (editor === "dns") {
       dnsMutation.reset();
@@ -94,7 +99,7 @@ export function DnsSettingsPage() {
   }, [dns, editor, dnsForm, retentionForm, statistics]);
 
   const saveDns = async () => {
-    if (!dnsQuery.data) return;
+    if (!editorState.current || dnsQuery.error || state.error) return;
     const values = await dnsForm.validateFields();
     const cacheSizeBytes = values.cache_size_bytes;
     // 空值或超出 Bytes 上限的输入已由 required 规则在 validateFields 拦下，此处仅做类型收窄，不掩盖校验失败。
@@ -112,7 +117,7 @@ export function DnsSettingsPage() {
       resolve_log: { enable: values.resolve_log_enable },
     };
     try {
-      const operation = await dnsMutation.mutateAsync({ change: { module: "dns", change: value }, state: dnsQuery.data.state });
+      const operation = await dnsMutation.mutateAsync({ change: { module: "dns", change: value }, state: editorState.current });
       if (operation) setEditor(null);
     } catch {
       // 失败由表单容器显示。
@@ -120,7 +125,7 @@ export function DnsSettingsPage() {
   };
 
   const saveRetention = async () => {
-    if (!statisticsQuery.data) return;
+    if (!editorState.current || statisticsQuery.error || state.error) return;
     const values = await retentionForm.validateFields();
     const referenceSizeBytes = values.reference_size_bytes;
     // 同 saveDns：undefined 已由 required 规则拦下，这里只做类型收窄。
@@ -128,13 +133,13 @@ export function DnsSettingsPage() {
     const value: Statistics = { retention: { ...values, reference_size_bytes: referenceSizeBytes } };
     try {
       const preview = await previewRetention({
-        expected: { active_revision: statisticsQuery.data.state.active_revision, observed_file_revision: statisticsQuery.data.state.observed_file_revision },
+        expected: { active_revision: editorState.current.active_revision, observed_file_revision: editorState.current.observed_file_revision },
         policy: value,
       });
       const detail = `候选截止日期 ${preview.proposed_cutoff_utc_date}，当前详情文件 ${formatBytes(preview.detail_bytes)}。保存不会立即删除数据。`;
       const operation = await statisticsMutation.mutateAsync({
         change: { module: "statistics", change: value },
-        state: statisticsQuery.data.state,
+        state: editorState.current,
         confirmationDetails: preview.shortens_history ? { retention_shortening: detail } : undefined,
       });
       if (operation) setEditor(null);
@@ -151,14 +156,14 @@ export function DnsSettingsPage() {
       description="每一份缓存，收放自如。"
       actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}</Space>}
     >
-      <PageState loading={loading} error={error} onRetry={() => { void dnsQuery.refetch(); void statisticsQuery.refetch(); }} />
+      <PageState loading={loading} error={error} hasData={!!dns && !!statistics} onRetry={() => { void dnsQuery.refetch(); void statisticsQuery.refetch(); void state.refetch(); }} />
       {dns && statistics && dnsQuery.data && statisticsQuery.data ? (
         <div className="settings-sections">
           <section className="settings-section"><div><Typography.Title level={4}>缓存与解析</Typography.Title><Typography.Text type="secondary">缓存容量、失败 TTL、乐观缓存及持久化快照</Typography.Text></div><Descriptions column={{ xs: 1, sm: 2, md: 4 }}><Descriptions.Item label="缓存">{dns.cache?.enabled ? "启用" : "禁用"}</Descriptions.Item><Descriptions.Item label="内存上限">{dns.cache ? formatBytes(dns.cache.memory.max_size_bytes) : "默认"}</Descriptions.Item><Descriptions.Item label="快照">{dns.cache?.persistence?.enabled ? dns.cache.persistence.path : "禁用"}</Descriptions.Item><Descriptions.Item label="详情记录">{dns.resolve_log?.enable ? "启用" : "禁用"}</Descriptions.Item></Descriptions><Button icon={<Pencil size={16} />} disabled={!configStateEditable(dnsQuery.data.state)} onClick={() => setEditor("dns")}>编辑 DNS</Button></section>
           <section className="settings-section"><div><Typography.Title level={4}>数据保留</Typography.Title><Typography.Text type="secondary">R/G/T 使用服务端真实 SQLite 与 WAL 长度预览</Typography.Text></div><Descriptions column={{ xs: 1, sm: 2, md: 4 }}><Descriptions.Item label="R">{statistics.retention?.days ?? 7} 天</Descriptions.Item><Descriptions.Item label="G">{statistics.retention?.grace_days ?? 3} 天</Descriptions.Item><Descriptions.Item label="T">{formatBytes(statistics.retention?.reference_size_bytes ?? 1_073_741_824)}</Descriptions.Item><Descriptions.Item label="已发布截止">{retentionQuery.data?.cutoff_utc_date ?? "尚未发布"}</Descriptions.Item></Descriptions><Space wrap>{retentionQuery.data ? <Tag>详情 {formatBytes(retentionQuery.data.detail_bytes)}</Tag> : null}<Button icon={<Pencil size={16} />} disabled={!configStateEditable(statisticsQuery.data.state)} onClick={() => setEditor("retention")}>编辑保留策略</Button></Space></section>
         </div>
       ) : null}
-      <ConfigFormModal open={editor === "dns"} title="编辑 DNS 配置" dirty={dirty} busy={dnsMutation.isPending} error={dnsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveDns()}>
+      <ConfigFormModal open={editor === "dns"} title="编辑 DNS 配置" dirty={dirty} busy={dnsMutation.isPending} submitDisabled={!!dnsQuery.error || !!state.error} error={dnsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveDns()}>
         <Form form={dnsForm} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
           <Form.Item name="cache_enabled" label="启用缓存" valuePropName="checked"><Switch /></Form.Item><Form.Item name="cache_size_bytes" label="内存上限" rules={[{ required: true }]}><ByteSizeInput label="内存上限" /></Form.Item><Form.Item name="failure_ttl" label="失败 TTL" rules={durationRequiredRules}><DurationInput label="失败 TTL" /></Form.Item>
           <Form.Item name="optimistic_enabled" label="乐观缓存" valuePropName="checked"><Switch /></Form.Item><Space className="paired-fields" align="start"><Form.Item name="optimistic_answer_ttl" label="回答 TTL" rules={durationRequiredRules}><DurationInput label="回答 TTL" /></Form.Item><Form.Item name="optimistic_max_age" label="最大陈旧时间" rules={durationRequiredRules}><DurationInput label="最大陈旧时间" /></Form.Item></Space>
@@ -167,7 +172,7 @@ export function DnsSettingsPage() {
           <Form.Item name="ecs_mode" label="ECS"><Select options={[{ label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }]} /></Form.Item>{ecsMode === "custom" ? <Form.Item name="ecs_custom_ip" label="自定义 ECS" rules={[{ required: true }]}><Input /></Form.Item> : null}<Form.Item name="resolve_log_enable" label="记录解析详情" valuePropName="checked"><Switch /></Form.Item>
         </Form>
       </ConfigFormModal>
-      <ConfigFormModal open={editor === "retention"} title="编辑数据保留" dirty={dirty} busy={statisticsMutation.isPending} error={statisticsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveRetention()}>
+      <ConfigFormModal open={editor === "retention"} title="编辑数据保留" dirty={dirty} busy={statisticsMutation.isPending} submitDisabled={!!statisticsQuery.error || !!state.error} error={statisticsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveRetention()}>
         <Form form={retentionForm} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}><Form.Item name="days" label="R：基础保留天数" rules={[{ required: true }]}><InputNumber min={1} max={3650} /></Form.Item><Form.Item name="grace_days" label="G：宽限天数" rules={[{ required: true }]}><InputNumber min={0} max={3649} /></Form.Item><Form.Item name="reference_size_bytes" label="T：参考大小" rules={[{ required: true }]}><ByteSizeInput label="T：参考大小" /></Form.Item><Typography.Text type="secondary">保存前由服务端重新采样详情数据库与 WAL；保存只更新策略，不立即清理。</Typography.Text></Form>
       </ConfigFormModal>
     </PageFrame>

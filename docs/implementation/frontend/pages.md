@@ -7,6 +7,8 @@
 > 最后核对：2026-09-30（服务状态趋势图两轴单格候选加密到 1.2/1.25 的局部核对；服务状态指标推送与速率卡片口径沿用 2026-09-27，逐秒 RPM 与 CPU 卡片沿用 2026-09-26，解析记录路由列标签行沿用 2026-09-25，其余沿用原核对范围）
 >
 > 核对基线：`9555c38` 加本次工作树变更；本轮核对范围仅限服务状态趋势图两轴的刻度取值，其余范围按原日期和基线解释
+>
+> 2026-10-04 增量核对：`eb428f92cdc3acda836547107ef2f56f6d988249` 加本次工作树；仅核对三项包含搜索、配置读取恢复与策略覆盖编辑，其余范围沿用上述历史记录
 
 ## 路由与数据源
 
@@ -37,6 +39,10 @@
 
 [`createAppQueryClient`](../../../frontend/src/app/query-client.ts) 默认 staleTime 10 秒、gcTime 5 分钟，重新聚焦/联网可 refetch；mutation 不重试。取消、401、403 不重试，retryable API 错误有限重试并考虑 Retry-After。
 
+配置模块的 `config-v2` 查询通过 [`read-retry.ts`](../../../frontend/src/shared/config/read-retry.ts) 对瞬时 `OPERATION_BUSY`/服务不可用最多重试 3 次，间隔 250/500/1000 ms 加抖动；取消和认证错误不追加该读取重试。已有数据刷新失败时 `PageState.hasData` 保留内容，局部提示读取失败；`ConfigSyncBadge` 显示同步状态暂不可用，保存 hook 和表单阻止新写入。DNS 与策略弹窗只在打开时初始化草稿并固定 revision，refetch 不覆盖输入。
+
+[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 的响应丢失恢复与后续 settlement 共用 `maxPolls`，不重置预算、不重放 apply/restore/retry。结果未决时 `PendingOperationError` 携带原 ID，由 [`pending-operation.ts`](../../../frontend/src/shared/config/pending-operation.ts) 保存在当前 QueryClient 内；页面切换和配置 refetch 不清除它。全局 `ConfigFileStatus` 提供“继续查询”，终态确认前阻止普通保存、外部组合采用和文件操作，确认后刷新配置。此记录是当前应用会话内存状态，不是跨浏览器重启的持久操作日志。
+
 dashboard 先取 v2 HTTP 快照再订阅 WS metrics；订阅后的逐秒序列由全量基线和之后每秒的增量帧拼装（[`metricsSeries`](../../../frontend/src/shared/api/metricsSeries.ts)），缺基线、增量与基线不连续或帧内本身有洞时丢弃本地序列并重新订阅，绝不把带洞序列当连续曲线绘图。system runtime 和全局配置状态仍使用 30 秒可见性轮询；页面隐藏时 dashboard 释放订阅，恢复先 refetch。P3 模块页面按 module query key 读取，保存后只失效目标和类型化依赖，不复制整份配置到全局 store。
 
 DashboardPage 的“深色样例/浅色显示”只切换本页 CSS 外观，指标和共享订阅保持不变；离开页面不保存主题。深色文字、缺数提示、双曲线/轴线和按钮采用独立对比色，沿用图表键盘名称与响应式容器。
@@ -46,6 +52,8 @@ DashboardPage 的“深色样例/浅色显示”只切换本页 CSS 外观，指
 [`MetricsTrendChart`](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx) 在同一绘图区显示 QPS 蓝线和 RPM 青绿色线，分别标注左轴请求/秒、右轴请求/分钟；两条线都逐秒一个点，RPM 由 [`rateTrend`](../../../frontend/src/modules/dashboard/rateTrend.ts) 把快照逐秒 `qps_trend`（订阅基线加每秒增量拼装出的序列）与页面本地保留的最近 120 秒缓存合并后按过去 60 秒滚动求和得出，同一秒以最新快照为准，因此不依赖后端分钟级 `rpm_trend`：后端快照自带窗口起点前 60 秒前瞻秒桶，窗口最左一分钟也有完整求和窗口，只有服务启动不足 660 秒时才按 warmup 给出已覆盖秒数；缺口秒会让其后 60 秒断线，相邻可用样本间隔过大也断开连线，都不用部分窗口凑数。两个轴独立线性缩放，`axisMaximum` 把单格刻度取为不小于峰值四分之一的最小易读整数值：倍数取 1/1.2/1.25/1.5/2/2.5/3/4/5/6/8/10，小量级下非整数倍数被过滤成 1/2/3/4/5/6/8/10，10 倍量级起为 120/125/150/200/250/300/400/500/600/800/1000；轴上限恒为单格的四倍且不额外留余量，因此两轴刻度始终是整数并与同一组五条网格线对齐；横轴标签按分钟给出并在窄屏放宽到 2/5 分钟。采样时间、时间范围、横轴和提示框统一为 UTC。窗口外样本不参与刻度或选点，不可用区间不连接，孤立有效样本保留为圆端点；空趋势和全不可用趋势有明确提示。提示框由悬停、点按或键盘聚焦显示，离开交互后收起，避免常驻遮挡窄屏曲线；方向键、Home/End 沿共享时间轴按秒选择各序列最近样本，圆点位于该样本实际时间。ResizeObserver 让 SVG 使用容器像素宽度，保持轴文字大小，并在窄屏减少时间刻度。
 
 [`QueriesPage`](../../../frontend/src/modules/queries/QueriesPage.tsx) 使用 `POST /api/v2/queries/search` 的 opaque previous/next cursor，默认最近 7 天、20 条、发生时间降序；域名、当前匹配客户端、原始 ID/IP、协议、来源、rcode 与结果状态均在服务端分页前过滤，不伪造页码或总数。query key 包含规范化请求，过滤或页大小变化清除 cursor、实时缓冲和详情；旧请求取消，翻页不复用不匹配的数据。
+
+域名、客户端名称和请求 IP 输入均表示字面包含搜索，输入提示分别为关键词/地址片段；HTTP 与 WS 发送同一过滤条件。匹配和完整 IP 规范化由后端完成，CIDR 不是网段查询，`%/_/*` 不是通配符；前端不按当前页结果做本地过滤。
 
 解析记录自动刷新默认开启。初次 HTTP 快照后共享 events client 携带快照 cursor、retention revision 和同一过滤器订阅后端 WebSocket 增量，不轮询整个列表；收到记录按稳定 ID 去重。首页默认倒序且无详情时直接合并，详情打开或浏览历史 cursor 时只进入 500 条/2 MiB 缓冲并显示待更新；超限或服务端 resync 重新取 HTTP 首屏。用户关闭自动刷新或页面不可见时释放订阅，恢复可见先重新同步快照。
 
@@ -64,6 +72,14 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 [`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 以 `/api/v2/system/runtime` 为进程读数权威：指标区固定为「运行时长／常驻内存／CPU／线程数」四个同构格子（13px 标签、30px 等宽数值、12.5px 口径说明），版本、启动时间、采样时间与采样来源合并为同一卡片内的「运行信息」行，与上方格子共用同一条四列栅格，不再出现 16px 双行日期混进 28px 数值格、或标签列固定 132px 右侧留白的断口。RSS 从十进制 u64 字符串按 BigInt 换算；measurement 不可用时保留后端 reason，不能以零代替。运行时长只从成功响应的 `uptime_seconds` 与前端接收时刻递增，页面隐藏时停止逐秒渲染，重新可见后校正；30 秒轮询或手动刷新会按后端基准重置。同一页再读 `/config/system`（`work_path`）、`/config/state`（活动版本与同步胶囊）、`/config/modules/{listener,dns,hosts,rule_set}`（监听绑定、缓存快照、资源条件）与 `/service/metrics`（在线身份计数），组成「运行环境」与「数据面摘要」两张卡片；进程主机信息随 `/system/runtime` 的 `host` 对象返回，不再单独请求。次级读取失败显示「暂不可用 + 契约错误码」，尚未返回显示占位符，不把加载中渲染成不可用。
 
 [`PageState`](../../../frontend/src/shared/components/PageState.tsx) 与 [formatters](../../../frontend/src/shared/formatters/index.ts) 处理错误/加载和时间/耗时格式；各页面直接展示对应 v2 响应的采样信息，不复制整份后端配置到全局 store。
+
+## 策略覆盖编辑
+
+[`StrategiesPage`](../../../frontend/src/modules/strategies/StrategiesPage.tsx) 使用宽版 `ConfigFormModal` 和有序可折叠规则卡片；Form.List 稳定 key 保持重排后的字段与状态归属，折叠内容仍挂载参与校验。规则层提供 ECS 继承/禁用/客户端地址/自定义四态，Hosts 分支说明本地回答不发送 ECS，并清除 upstream 残留。后端字段错误通过 [`strategyFieldErrors`](../../../frontend/src/modules/strategies/strategy-form.ts) 映射到规则输入，失败后展开以便修正。
+
+[`strategyToForm/strategyFromForm`](../../../frontend/src/modules/strategies/strategy-form.ts) 保留策略 cache.optimistic、TTL 缺失 enabled、显式禁用和 `0s` 的区别。保存先 `validateFields`，再 `getFieldsValue(true)` 取得隐藏字段；未修改覆盖块保留原 DTO，明确清空 TTL 边界会移除该字段。规则层不增加 cache/TTL，ECS 生效优先级由后端决定。
+
+2026-10-04 Windows 验证：完整前端 35 文件 195 项测试、v2 schema 4 项、typecheck 和生产构建通过。最终 debug embed 独立服务完成真实 HTTP/WS/ECS 联合验收，见[Management 实现](../backend/management.md)。本机 Chromium 连接真实服务，在 1440×900、390×844、320×740 验证弹窗无页面横向溢出、正文可滚动和保存按钮处于视口内；另通过已保存 ECS 重新打开、非法 CIDR 从折叠规则自动展开定位、键盘 Enter 切换、规则重排保存后回显，未捕获浏览器运行时异常。截图和测量报告留在本次 `_fluxdns/query-config-1791103465267/`。内置面板截图工具超时，采用独立 Chromium 的 CDP 截图与 DOM 测量；未将截图工具失败记为通过。未验证跨平台、远程代理或生产负载。
 
 ## 证据与限制
 

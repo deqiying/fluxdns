@@ -12,6 +12,8 @@
 >
 > 增量核对基线：`e50b948edb4699f58a1e57039fb56442ab228687` 加本次缓存修复工作树；静态编译与前期定向测试证据见[DNS 管线](backend/dns-pipeline.md#缓存修复验证)，未部署或实测 OpenWrt
 >
+> 2026-10-04 增量核对：基线 `eb428f92cdc3acda836547107ef2f56f6d988249` 加本次工作树，仅更新快照读取等待和策略表单覆盖保真；其他配置契约不变
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -107,7 +109,7 @@ Windows Rust 1.98.0 本批 `config::` 104 项通过，其中 ConfigStore 43 项�
 
 ConfigStore 的操作记录保存 `OperationSnapshot`，在每次状态转移时冻结对应 active/persisted revision 和白名单失败类别；后续其他操作、外部文件变化不改写旧结果。应用成功回报进入 `Persisting`，实际文件提交失败才进入 `AppliedUnpersisted`。已确认运行版本的清理失败保留该版本；运行补偿结果不明则不编造 active revision。完成或已完整补偿的拒绝重新起算 30 分钟保留期，未同步/未知记录继续由当前 gate 固定。
 
-`configuration_status` 与 `operation_snapshot` 只读同一锁内的缓存快照，不执行文件 I/O；锁被文件事务占用时立即返回 `Busy`。这不替代尚未实现的异步事务 owner，正式 HTTP handler 不能直接调用同步写盘方法。Management 到 P0 DTO 的白名单映射、精度与脱敏证据见[内部状态投影](backend/management.md#p1-配置状态内部投影2026-09-07)。
+`configuration_status`、`operation_snapshot` 与 `active_snapshot` 使用同一 active 锁内的缓存快照，不执行文件 I/O。2026-10-04 起，`read_active` 以 5 ms 间隔尝试获取锁，最多等待 1 秒；超时或锁中毒返回 `Unavailable`，Management 映射为 `SERVICE_UNAVAILABLE`。正式 async 读取通过 `spawn_blocking` 调度，等待任务自身有截止时间；写事务 gate 仍保持非阻塞冲突和原有版本保护。白名单映射与接线见[Management 实现](backend/management.md)。
 
 每个文件的已知状态来自上次持久化身份/摘要，或当前 journal 明确绑定的候选身份/摘要。部分提交只将精确匹配的那一个目标识别为自写，不用“忽略下一次事件”或仅内容相同放行。同步成功后以 journal 候选身份建立基线，随后读到的未知外改仍显示 changed；同内容换 FileId 也要求外改确认。`synchronization: synced` 表示上次受管提交完成，外部变化独立通过 `files` 表示，不等于磁盘当前仍与活动源一致。
 
@@ -627,6 +629,8 @@ Transport 只对实际 HTTP path 匹配一次，并把配置模板作为稳定 r
 - `hosts` 规则是本地回答，不应依赖 `upstream`；
 - 所有资源引用必须存在且类型正确。
 
+WebUI 有序规则卡片支持本级 ECS 的继承、禁用、客户端地址和自定义 IP/CIDR；继承提交时省略对象，非 custom 模式省略 `custom_ip`。Hosts 规则可保留 ECS 配置，但本地回答不向上游发送 ECS，提交时清除 `upstream`。规则 DTO 不支持逐规则 cache/TTL；这两项继续在策略或其他既有层级配置。非法规则 CIDR 的管理接口错误包含对应 `rules[index].edns_client_subnet.custom_ip` 字段路径，不返回提交值或底层解析错误。
+
 ### 11.2 策略级 `cache`
 
 策略级缓存只允许以下字段，不包含全局 `memory`、`failure_ttl` 或 `persistence`：
@@ -639,6 +643,8 @@ Transport 只对实际 HTTP path 匹配一次，并把配置模板作为稳定 r
 | `optimistic.max_age` | duration | 过期记录可被乐观返回的最长时间。 |
 
 整个 `strategy[].cache` 缺失时才允许回退到全局池；对象存在时 `enabled` 必填。策略级 `ttl_override` 使用 [`dns.ttl_override`](#82-dnsttl_override) 的相同字段结构和继承语义。
+
+策略表单保存前先校验已挂载字段，再从完整 Form store 取值，因此禁用 TTL 的隐藏上下限不会因只改名称或上游而丢失。未修改覆盖块保留原 DTO；`ttl_override.enabled` 缺失、显式 false、`0s` 以及 cache.optimistic 的继承/显式配置保持区别。编辑与验证证据见[前端页面实现](frontend/pages.md)。
 
 ## 12. `hosts[]`
 

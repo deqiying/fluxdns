@@ -1,10 +1,11 @@
 import { QueryClient } from "@tanstack/react-query";
 import { ApiError } from "@/shared/api/errors";
+import { configReadRetryDelay, retryConfigRead } from "@/shared/config/read-retry";
 
 export const SUMMARY_POLL_INTERVAL_MS = 30_000;
 
 export function createAppQueryClient(): QueryClient {
-  return new QueryClient({
+  const client = new QueryClient({
     defaultOptions: {
       queries: {
         staleTime: 10_000,
@@ -19,6 +20,8 @@ export function createAppQueryClient(): QueryClient {
       },
     },
   });
+  client.setQueryDefaults(["config-v2"], { retry: retryConfigRead, retryDelay: configReadRetryDelay });
+  return client;
 }
 
 /** 页面隐藏时返回 false，确保摘要轮询不会在后台继续占用管理面额度。 */

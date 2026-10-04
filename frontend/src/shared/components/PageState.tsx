@@ -1,4 +1,4 @@
-import { Button, Empty, Result, Skeleton, Space, Typography } from "antd";
+import { Alert, Button, Empty, Result, Skeleton, Space, Typography } from "antd";
 import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
 
 interface PageStateProps {
@@ -8,6 +8,7 @@ interface PageStateProps {
   emptyDescription?: string;
   onRetry?: () => void;
   compact?: boolean;
+  hasData?: boolean;
 }
 
 export function PageState({
@@ -17,6 +18,7 @@ export function PageState({
   emptyDescription = "暂无数据",
   onRetry,
   compact = false,
+  hasData = false,
 }: PageStateProps) {
   if (loading) {
     return <Skeleton active paragraph={{ rows: compact ? 2 : 6 }} />;
@@ -24,10 +26,14 @@ export function PageState({
 
   if (error) {
     const requestId = error instanceof ApiError ? error.requestId : undefined;
+    const message = error instanceof ApiError && error.code === "OPERATION_BUSY"
+      ? "配置读取暂时繁忙，请稍后重试。"
+      : getSafeErrorMessage(error);
+    if (hasData) return <Alert type="warning" showIcon title="刷新失败，当前显示上次读取的内容" description={`${message}${requestId ? ` 请求 ID：${requestId}` : ""}`} action={onRetry ? <Button size="small" onClick={onRetry}>重试</Button> : undefined} />;
     return (
       <Result
         status="warning"
-        title={getSafeErrorMessage(error)}
+        title={message}
         subTitle={requestId ? `请求 ID：${requestId}` : undefined}
         extra={onRetry ? <Button onClick={onRetry}>重试</Button> : undefined}
       />

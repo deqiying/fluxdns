@@ -349,7 +349,7 @@ impl EventHub {
         )
     }
 
-    fn queue_query_updates(
+    async fn queue_query_updates(
         &self,
         subscription: &mut QuerySubscription,
         outbound: &Outbound,
@@ -364,11 +364,15 @@ impl EventHub {
             return QueryUpdate::Resync(ResyncReason::ObservationGap);
         };
         for notification in notifications {
-            let (directory_revision, items) = match source.queries.project_committed_records(
-                &source.config_store,
-                subscription.filter.clone(),
-                &notification.records,
-            ) {
+            let (directory_revision, items) = match source
+                .queries
+                .project_committed_records(
+                    &source.config_store,
+                    subscription.filter.clone(),
+                    &notification.records,
+                )
+                .await
+            {
                 Ok(projected) => projected,
                 Err(_) => return QueryUpdate::Resync(ResyncReason::ObservationGap),
             };
@@ -563,7 +567,7 @@ impl EventHub {
                                         after,
                                         retention_revision,
                                     };
-                                    match self.queue_query_updates(&mut subscription, &outbound) {
+                                    match self.queue_query_updates(&mut subscription, &outbound).await {
                                         QueryUpdate::Active | QueryUpdate::Pending => {
                                             query_subscriptions.insert(id, subscription);
                                         }
@@ -626,7 +630,7 @@ impl EventHub {
                     for id in ids {
                         let update = {
                             let Some(subscription) = query_subscriptions.get_mut(&id) else { continue; };
-                            self.queue_query_updates(subscription, &outbound)
+                            self.queue_query_updates(subscription, &outbound).await
                         };
                         match update {
                             QueryUpdate::Active | QueryUpdate::Pending => {}

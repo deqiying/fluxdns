@@ -116,7 +116,7 @@ export function ListenersPage() {
           </Space>
         )}
       >
-        <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
+        <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
         {query.data ? <div className="config-module-content"><div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索监听入口名称" onChange={(event) => setSearch(event.target.value)} /></div><Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 900 }} locale={{ emptyText: search ? "没有匹配的监听入口" : "尚未配置监听入口" }} /></div> : null}
         <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加监听入口" : "编辑监听入口"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
           <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>

@@ -10,6 +10,8 @@
 
 解析记录页面与缓存标签已按最终设计完成，行为与验证边界见[前端页面实现](../implementation/frontend/pages.md)。
 
+解析记录包含搜索、配置读取恢复和策略规则 ECS 编辑已完成，当前行为与验收证据见[Management 实现](../implementation/backend/management.md)和[前端页面实现](../implementation/frontend/pages.md)。
+
 WebUI 的当前实现与平台边界见[实现入口](../implementation/README.md)和[联合验收](../implementation/webui-acceptance.md)；接受的职责与约束见[架构入口](../architecture/README.md)。
 
 计划以问题、相对当前基线的变化、步骤、风险和退出条件为中心。长期设计和实现分别放入 [architecture](../architecture/README.md) 与 [implementation](../implementation/README.md)，不保留已完成的阶段清单或总体进度文档。

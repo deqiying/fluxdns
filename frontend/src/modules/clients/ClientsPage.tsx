@@ -105,7 +105,7 @@ export function ClientsPage() {
         </Space>
       )}
     >
-      <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
+      <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
       {query.data ? <div className="config-module-content"><div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索 name、ID 或 IP" onChange={(event) => setSearch(event.target.value)} /></div><Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 920 }} locale={{ emptyText: search ? "没有匹配的客户端" : "尚未配置客户端" }} /></div> : null}
       <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加客户端" : "编辑客户端"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
         <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>

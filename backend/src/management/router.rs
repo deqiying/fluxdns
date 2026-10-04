@@ -636,6 +636,14 @@ pub(super) fn v2_error_response(
     code: super::contract::ErrorCode,
     request_id: &RequestId,
 ) -> Response {
+    v2_error_response_with_fields(code, Vec::new(), request_id)
+}
+
+pub(super) fn v2_error_response_with_fields(
+    code: super::contract::ErrorCode,
+    field_errors: Vec<super::contract::FieldError>,
+    request_id: &RequestId,
+) -> Response {
     let status =
         StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     let (message, retryable) = match code {
@@ -655,7 +663,7 @@ pub(super) fn v2_error_response(
                 request_id: request_id.0.clone(),
                 message: message.to_owned(),
                 retryable,
-                field_errors: Vec::new(),
+                field_errors,
             }),
         )
             .into_response(),
@@ -1058,5 +1066,31 @@ mod tests {
         assert_eq!(body["code"], "NOT_FOUND");
 
         cleanup_test_root(&root);
+    }
+
+    #[tokio::test]
+    async fn v2_field_errors_preserve_only_safe_dto_paths() {
+        let request_id = super::RequestId("request-1".to_owned());
+        let response = super::v2_error_response_with_fields(
+            crate::management::contract::ErrorCode::InvalidArgument,
+            vec![crate::management::contract::FieldError {
+                path: "changes[0].change.value.rules[1].edns_client_subnet.custom_ip".to_owned(),
+                code: crate::management::contract::ErrorCode::InvalidArgument,
+            }],
+            &request_id,
+        );
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["code"], "INVALID_ARGUMENT");
+        assert_eq!(body["message"], "request is invalid");
+        assert_eq!(
+            body["field_errors"],
+            serde_json::json!([{
+                "path": "changes[0].change.value.rules[1].edns_client_subnet.custom_ip",
+                "code": "INVALID_ARGUMENT"
+            }])
+        );
+        assert!(!body.to_string().contains("192.0.2.0/99"));
     }
 }

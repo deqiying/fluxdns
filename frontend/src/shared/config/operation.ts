@@ -13,6 +13,7 @@ import {
   type ValidationResult,
 } from "./api";
 import type { ConfigDraft, FormPhase } from "./contract";
+import { isTransientConfigRead } from "./read-retry";
 
 export type OperationSettlement =
   | { kind: "settled"; operation: OperationResult }
@@ -24,6 +25,13 @@ export interface ApplyAndSettleOptions {
   signal?: AbortSignal;
   pollIntervalMs?: number;
   maxPolls?: number;
+}
+
+/** 保存结果未决时保留原 ID；页面只能继续查询，不能把它当成可重新提交的失败。 */
+export class PendingOperationError extends ApiError {
+  constructor(readonly operationId: string, cause?: unknown) {
+    super({ code: "CONFIG_OPERATION_PENDING", message: "配置操作结果尚未确认，请继续查询。", kind: "http", cause });
+  }
 }
 
 export function createOperationId(): string {
@@ -56,7 +64,7 @@ export async function applyAndSettle(
     operation = await applyCandidate(request, { module: options.module, signal: options.signal });
   } catch (error) {
     if (!(error instanceof ApiError) || (error.kind !== "timeout" && error.kind !== "network")) throw error;
-    operation = await fetchConfigOperation(request.operation_id, options.signal);
+    return resumeOperation(request.operation_id, options);
   }
   assertOperationId(request.operation_id, operation);
   return settleOperation(operation, options);
@@ -86,13 +94,19 @@ export async function settleOperation(
 
   for (let poll = 0; isInProgress(operation) && poll < maxPolls; poll += 1) {
     await waitForPoll(pollIntervalMs, options.signal);
-    const next = await fetchConfigOperation(operation.operation_id, options.signal);
-    assertOperationId(operation.operation_id, next);
-    operation = next;
+    try {
+      const next = await fetchConfigOperation(operation.operation_id, options.signal);
+      assertOperationId(operation.operation_id, next);
+      operation = next;
+    } catch (error) {
+      // 短暂读取失败消耗原轮询预算，不能重置计数或重新提交操作。
+      if (!isTransientConfigRead(error)) throw new PendingOperationError(operation.operation_id, error);
+    }
   }
 
   if (operation.status.state === "unknown") {
-    return { kind: "unknown", operation, state: await fetchConfigState(options.signal) };
+    try { return { kind: "unknown", operation, state: await fetchConfigState(options.signal) }; }
+    catch { throw new PendingOperationError(operation.operation_id); }
   }
   if (isInProgress(operation)) return { kind: "pending", operation };
   return { kind: "settled", operation };
@@ -114,10 +128,27 @@ async function runFileMutationAndSettle(
     operation = await mutation(request, options.signal);
   } catch (error) {
     if (!(error instanceof ApiError) || (error.kind !== "timeout" && error.kind !== "network")) throw error;
-    operation = await fetchConfigOperation(request.operation_id, options.signal);
+    return resumeOperation(request.operation_id, options);
   }
   assertOperationId(request.operation_id, operation);
   return settleOperation(operation, options);
+}
+
+/** 恢复查询与随后轮询共用预算；没有成功快照时仍将原操作 ID 交回页面。 */
+export async function resumeOperation(operationId: string, options: ApplyAndSettleOptions = {}): Promise<OperationSettlement> {
+  const attempts = Math.max(0, options.maxPolls ?? 20);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    let operation: OperationResult;
+    try { operation = await fetchConfigOperation(operationId, options.signal); }
+    catch (error) {
+      if (!isTransientConfigRead(error)) throw new PendingOperationError(operationId, error);
+      if (attempt + 1 < attempts) await waitForPoll(options.pollIntervalMs ?? 250, options.signal);
+      continue;
+    }
+    assertOperationId(operationId, operation);
+    return settleOperation(operation, { ...options, maxPolls: attempts - attempt - 1 });
+  }
+  throw new PendingOperationError(operationId);
 }
 
 function assertOperationId(expected: string, operation: OperationResult): void {

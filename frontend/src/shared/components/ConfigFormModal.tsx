@@ -10,6 +10,8 @@ export interface ConfigFormModalProps {
   busy?: boolean;
   submitDisabled?: boolean;
   error?: unknown;
+  /** 仅供内容较长的专用表单启用更宽的可滚动布局。 */
+  layout?: "default" | "wide";
   children: ReactNode;
   onCancel: () => void;
   onSubmit: () => void;
@@ -36,6 +38,7 @@ export function ConfigFormModal({
   busy = false,
   submitDisabled = false,
   error,
+  layout = "default",
   children,
   onCancel,
   onSubmit,
@@ -59,10 +62,10 @@ export function ConfigFormModal({
 
   return (
     <Modal
-      className="config-form-modal"
+      className={`config-form-modal${layout === "wide" ? " config-form-modal-wide" : ""}`}
       open={open}
       title={title}
-      width={720}
+      width={layout === "wide" ? 900 : 720}
       centered
       destroyOnHidden
       keyboard={!busy}

@@ -22,6 +22,17 @@ use crate::runtime::RuntimeCoordinator;
 
 pub(crate) mod external;
 
+/// 有界同步快照读取在 blocking pool 执行，避免配置事务占用 HTTP/WS executor。
+pub(super) async fn read_async<T: Send + 'static>(
+    store: &std::sync::Arc<ConfigStore>,
+    read: impl FnOnce(&ConfigStore) -> Result<T, ErrorCode> + Send + 'static,
+) -> Result<T, ErrorCode> {
+    let store = std::sync::Arc::clone(store);
+    tokio::task::spawn_blocking(move || read(&store))
+        .await
+        .map_err(|_| ErrorCode::ServiceUnavailable)?
+}
+
 /// 状态查询不做文件 I/O；外部差异与持久化结果独立展示，不把文件变化解释成自动应用。
 pub(crate) fn configuration_state(store: &ConfigStore) -> Result<ConfigState, ErrorCode> {
     let status = store.configuration_status().map_err(error_code)?;
@@ -29,7 +40,9 @@ pub(crate) fn configuration_state(store: &ConfigStore) -> Result<ConfigState, Er
 }
 
 /// 从同一次锁内冻结结果投影状态，供模块与系统读取避免二次读取跨代。
-fn configuration_state_from_status(status: &ConfigurationStatus) -> Result<ConfigState, ErrorCode> {
+pub(super) fn configuration_state_from_status(
+    status: &ConfigurationStatus,
+) -> Result<ConfigState, ErrorCode> {
     let active = &status.active;
     let synchronization = match &status.operation {
         Some(OperationSnapshot::Preparing | OperationSnapshot::Applying) => SyncCondition::Applying,

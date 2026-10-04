@@ -303,7 +303,9 @@ paths:
       description: >-
         只读查询使用 JSON body，共用 HTTP/WS filter，避免把身份过滤写入 URL。
         filter 在分页前应用；时间为 UTC 毫秒半开区间；cursor 与 filter、方向、水位绑定。
-        无固定 31 天限制，但最大跨度为 3650 天；无 COUNT、页码直跳或伪造总数。
+        qname、client_ip 和 client_name 去除首尾空白并按 ASCII 忽略大小写进行字面包含匹配；
+        完整 IP 会规范化，地址片段仍按字面包含匹配。无固定 31 天限制，但最大跨度为 3650 天；
+        无 COUNT、页码直跳或伪造总数。
       requestBody:
         required: true
         content: {application/json: {schema: {$ref: "#/components/schemas/QueryRequest"}}}
@@ -1232,11 +1234,11 @@ components:
         from_ms: {$ref: "#/components/schemas/SafeInteger"}
         to_ms: {$ref: "#/components/schemas/SafeInteger"}
         client_id: {$ref: "#/components/schemas/ClientId"}
-        client_ip: {type: string, maxLength: 64}
-        qname: {type: string, minLength: 1, maxLength: 253}
+        client_ip: {type: string, maxLength: 64, description: 去除首尾空白并按 ASCII 忽略大小写字面包含匹配；完整 IP 规范化，片段不解释为 CIDR}
+        qname: {type: string, maxLength: 253, description: 去除首尾空白并按 ASCII 忽略大小写字面包含匹配；显式尾点按字面保留}
         transport: {$ref: "#/components/schemas/Transport"}
         matched_client_id: {$ref: "#/components/schemas/ClientId"}
-        client_name: {type: string, minLength: 1, maxLength: 128, description: 在完整当前目录中解析名称匹配集合，再过滤历史 matched_client_id}
+        client_name: {type: string, maxLength: 128, description: 去除首尾空白并按 ASCII 忽略大小写在完整当前目录中做名称包含匹配，再过滤历史 matched_client_id}
         qtype: {type: string, minLength: 1, maxLength: 16}
         rcode: {type: string, minLength: 1, maxLength: 16}
         source: {$ref: "#/components/schemas/QuerySource"}

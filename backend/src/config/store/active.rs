@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, MutexGuard, TryLockError};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
@@ -26,6 +26,7 @@ use crate::config::source_edit::{InitialWebUiUser, create_initial_webui_user};
 const MAX_RECORDS: usize = 1024;
 const VALIDATION_TTL: Duration = Duration::from_secs(60);
 const OPERATION_TTL: Duration = Duration::from_secs(1800);
+const SNAPSHOT_WAIT: Duration = Duration::from_secs(1);
 
 pub(crate) mod external;
 
@@ -404,19 +405,44 @@ impl ConfigStore {
         Ok(())
     }
 
+    /// 只读快照允许短暂竞争；异步调用者必须使用阻塞线程，等待自身有截止时间。
+    fn read_active(&self) -> Result<MutexGuard<'_, Option<ActiveState>>, ActiveError> {
+        let deadline = Instant::now() + SNAPSHOT_WAIT;
+        loop {
+            match self.active.try_lock() {
+                Ok(guard) => return Ok(guard),
+                Err(TryLockError::Poisoned(_)) => return Err(ActiveError::Unavailable),
+                Err(TryLockError::WouldBlock) => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(ActiveError::Unavailable);
+                    }
+                    std::thread::sleep(remaining.min(Duration::from_millis(5)));
+                }
+            }
+        }
+    }
+
     pub(crate) fn active_snapshot(&self) -> Result<ActiveSnapshot, ActiveError> {
-        self.active
-            .lock()
-            .map_err(|_| ActiveError::Busy)?
+        self.read_active()?
             .as_ref()
             .map(|state| state.snapshot.clone())
             .ok_or(ActiveError::Unavailable)
     }
 
-    /// 仅读取最近观测；不在 HTTP 状态查询中执行同步文件 I/O。
-    /// 未接入异步事务 owner 前，文件事务持锁期间返回 Busy 而不是阻塞 executor。
+    /// 管理面的异步读口只将快照捕获交给阻塞线程，后续查询仍在异步任务执行。
+    pub(crate) async fn active_snapshot_async(
+        self: &Arc<Self>,
+    ) -> Result<ActiveSnapshot, ActiveError> {
+        let store = Arc::clone(self);
+        tokio::task::spawn_blocking(move || store.active_snapshot())
+            .await
+            .map_err(|_| ActiveError::Unavailable)?
+    }
+
+    /// 仅读取最近观测；不读盘，短暂锁竞争不表示有配置操作正在执行。
     pub(crate) fn configuration_status(&self) -> Result<ConfigurationStatus, ActiveError> {
-        let guard = self.active.try_lock().map_err(|_| ActiveError::Busy)?;
+        let guard = self.read_active()?;
         let state = guard.as_ref().ok_or(ActiveError::Unavailable)?;
         let mut known_files = state.snapshot.persisted_observation.clone();
         if let Some(persistence) = state.persistence.as_ref() {
@@ -499,6 +525,8 @@ impl ConfigStore {
         validate_token(actor)?;
         validate_token(operation_id)?;
         let _transaction = self.transaction.try_lock().map_err(|_| ActiveError::Busy)?;
+        let observation =
+            ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
         let mut guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
         let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
         let expanded = expand_redacted_changes(&state.snapshot.source, changes)?;
@@ -507,8 +535,6 @@ impl ConfigStore {
             &serde_json::to_vec(&(&digest, validation_token, confirmations))
                 .map_err(|_| EditError::UnsupportedSource)?,
         );
-        let observation =
-            ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
         let now = Instant::now();
         state.operations.retain(|id, record| {
             record.expires > now || state.snapshot.operation_id.as_ref() == Some(id)
@@ -579,7 +605,7 @@ impl ConfigStore {
     ) -> Result<OperationSnapshot, ActiveError> {
         validate_token(actor)?;
         validate_token(operation_id)?;
-        let guard = self.active.try_lock().map_err(|_| ActiveError::Busy)?;
+        let guard = self.read_active()?;
         let state = guard.as_ref().ok_or(ActiveError::Unavailable)?;
         Ok(state
             .operations

@@ -105,7 +105,7 @@ export function RuleSetsPage() {
         </Space>
       )}
     >
-      <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
+      <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
       {query.data ? (
         <div className="config-module-content">
           <div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索规则集名称或来源" onChange={(event) => setSearch(event.target.value)} /></div>

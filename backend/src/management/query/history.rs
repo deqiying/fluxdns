@@ -10,7 +10,7 @@ use axum::body::Bytes;
 use axum::extract::rejection::{BytesRejection, PathRejection};
 use axum::extract::{Extension, Path, State};
 use axum::response::{IntoResponse, Response};
-use hickory_proto::rr::{Name, RecordType};
+use hickory_proto::rr::RecordType;
 
 use super::ManagementQueryService;
 use crate::config::contract::ConfigV2;
@@ -72,10 +72,10 @@ pub(super) async fn get_query_detail(
 
 async fn search(
     service: &ManagementQueryService,
-    store: &ConfigStore,
+    store: &Arc<ConfigStore>,
     request: QueryRequest,
 ) -> Result<QueryPage, ErrorCode> {
-    let directory = directory_snapshot(service, store)?;
+    let directory = directory_snapshot(service, store).await?;
     let query = storage_query(request, &directory.config)?;
     let page = service
         .detail_store
@@ -112,10 +112,10 @@ async fn search(
 
 async fn detail(
     service: &ManagementQueryService,
-    store: &ConfigStore,
+    store: &Arc<ConfigStore>,
     record_id: String,
 ) -> Result<QueryDetail, ErrorCode> {
-    let directory = directory_snapshot(service, store)?;
+    let directory = directory_snapshot(service, store).await?;
     let storage_id = DetailRecordId::try_from(record_id).map_err(storage_error)?;
     let record = service
         .detail_store
@@ -130,13 +130,13 @@ async fn detail(
 }
 
 /// 将 commit 后通知按 HTTP 相同的目录快照、规范化和过滤规则投影为 WS 记录。
-pub(super) fn project_committed_records(
+pub(super) async fn project_committed_records(
     service: &ManagementQueryService,
-    store: &ConfigStore,
+    store: &Arc<ConfigStore>,
     filter: QueryFilter,
     records: &[DetailCommittedRecord],
 ) -> Result<(Revision, Vec<QueryRecord>), ErrorCode> {
-    let directory = directory_snapshot(service, store)?;
+    let directory = directory_snapshot(service, store).await?;
     let matched_client_ids = filter.client_name.as_ref().map_or_else(Vec::new, |name| {
         let needle = name.to_ascii_lowercase();
         directory
@@ -168,12 +168,13 @@ struct DirectorySnapshot {
 }
 
 /// 当前名称不写回历史；一次请求只消费一个活动目录快照。
-fn directory_snapshot(
+async fn directory_snapshot(
     service: &ManagementQueryService,
-    store: &ConfigStore,
+    store: &Arc<ConfigStore>,
 ) -> Result<DirectorySnapshot, ErrorCode> {
     let active = store
-        .active_snapshot()
+        .active_snapshot_async()
+        .await
         .map_err(|_| ErrorCode::ServiceUnavailable)?;
     if active.runtime_revision != service.coordinator.load().revision().0 {
         return Err(ErrorCode::ServiceUnavailable);
@@ -238,20 +239,11 @@ fn storage_filter(
         from_utc_millis: filter.from_ms,
         to_utc_millis: filter.to_ms,
         client_id: filter.client_id,
-        client_ip: filter
-            .client_ip
-            .map(|value| {
-                value
-                    .parse()
-                    .map(normalize_ip)
-                    .map(|value| value.to_string())
-                    .map_err(|_| ErrorCode::InvalidArgument)
-            })
-            .transpose()?,
-        qname: filter
-            .qname
-            .map(|value| canonical_qname(&value))
-            .transpose()?,
+        client_ip: filter.client_ip.map(|value| match value.parse() {
+            Ok(value) => normalize_ip(value).to_string(),
+            Err(_) => value,
+        }),
+        qname: filter.qname,
         transport: filter.transport.map(|value| match value {
             Transport::Udp => DetailQueryTransport::Udp,
             Transport::Tcp => DetailQueryTransport::Tcp,
@@ -422,12 +414,6 @@ fn parse_qtype(value: &str) -> Result<u16, ErrorCode> {
     RecordType::from_str(&upper)
         .map(u16::from)
         .map_err(|_| ErrorCode::InvalidArgument)
-}
-
-fn canonical_qname(value: &str) -> Result<String, ErrorCode> {
-    let mut name = Name::from_ascii(value).map_err(|_| ErrorCode::InvalidArgument)?;
-    name.set_fqdn(true);
-    Ok(name.to_ascii().to_ascii_lowercase())
 }
 
 fn qtype_name(value: u16) -> String {

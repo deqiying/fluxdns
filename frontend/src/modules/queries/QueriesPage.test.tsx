@@ -176,6 +176,9 @@ describe("QueriesPage 展示语义", () => {
     }));
     renderPage();
     await screen.findByText("example.test.");
+    expect(screen.getByLabelText("域名")).toHaveAttribute("placeholder", "域名关键词");
+    expect(screen.getByLabelText("客户端")).toHaveAttribute("placeholder", "客户端名称关键词");
+    expect(screen.getByLabelText("请求 IP")).toHaveAttribute("placeholder", "IP 或地址片段");
     await user.type(screen.getByLabelText("域名"), "  filtered.example.  ");
     await user.click(screen.getByRole("button", { name: "查询" }));
     await waitFor(() => expect(requests).toHaveLength(2));

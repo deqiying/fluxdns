@@ -73,6 +73,8 @@ const errorMessages: Record<string, string> = {
   SERVICE_UNAVAILABLE: "管理服务暂时不可用，请稍后重试。",
   FILE_REVISION_CONFLICT: "配置文件已再次变化，请重新读取差异。",
   OPERATION_BUSY: "已有配置操作正在执行，请等待其完成。",
+  CONFIG_READ_FAILED: "配置读取失败，请刷新成功后再保存；当前草稿已保留。",
+  CONFIG_OPERATION_PENDING: "配置操作结果尚未确认，请在全局提示中继续查询；当前草稿已保留。",
   PERSISTENCE_FAILED: "运行配置已生效，但配置文件同步失败。",
   APPLY_FAILED: "配置未能应用，运行状态保持不变。",
   COMPENSATION_FAILED: "配置补偿失败，请先核对当前运行状态。",

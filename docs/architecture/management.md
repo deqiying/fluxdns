@@ -4,7 +4,7 @@
 >
 > 适用范围：独立管理面、认证与会话、HTTP/WS API、初始化写入和 SPA 安全边界
 >
-> 最后评审：2026-09-09（P4 实时事件、浏览器 WS 鉴权与断线补齐）
+> 最后评审：2026-10-04（局部：文本包含搜索与配置快照等待；其他范围沿用 2026-09-09）
 
 ## 设计结论
 
@@ -21,6 +21,10 @@ v2 外部差异只投影白名单模块源值；只读字段和认证 hash 仅�
 实时事件使用独立的有界 WS owner。浏览器先以业务 Bearer 向同源 ticket 端点换取 30 秒单次凭据，再通过 `Sec-WebSocket-Protocol` 传递；服务端协商响应只保留固定协议名，不能回显 ticket。upgrade 必须精确校验 `public_origin`，不接受 URL query token、业务 Cookie 或 Authorization 后备。握手后持续复核同一 SessionStore，登出、到期、用户认证变化和 shutdown 都回收连接；长连接不受普通 HTTP 15 秒 timeout 误杀，但仍受连接、订阅、帧、队列、心跳和写入预算约束。
 
 解析记录只在详情事务 commit 后按 `stream_epoch + sequence` 发布。HTTP 快照返回 commit cursor 与共同保留 revision，订阅携带二者，服务端只在 epoch、水位和 replay 范围连续时补发；任何进程重启、cursor 缺口、缓冲溢出或保留 revision 变化都返回 `resync_required`。客户端必须按稳定记录 ID 去重并重新读取 HTTP 权威快照，不能把 event time 当游标或宣称无限回放。
+
+域名、当前客户端名称、请求 IP 采用 ASCII 忽略大小写的字面文本包含搜索，HTTP 历史、WS 在线和 replay 共用规范化及过滤语义。完整 IP 仍先规范化，地址片段不是 CIDR 查询；`%`、`_`、`*` 不解释为通配符。全部过滤在服务端分页前完成，客户端名称先解析为完整当前目录 ID 集合。包含搜索以时间窗口、页大小和 deadline 限制成本，不引入额外全文索引。
+
+配置快照读取在阻塞线程池中等待短暂 active 锁竞争，等待任务自身受 1 秒截止时间约束；耗尽或锁中毒返回可恢复的 `SERVICE_UNAVAILABLE`，不冒充写事务冲突。活动源、版本和文件观测必须来自同一快照，运行代次仍需一致。写事务 gate、operation ID 去重、validation token、双 revision 和外改确认保持独立；真实事务占用仍可返回 `OPERATION_BUSY`。
 
 ## 生命周期与失败
 

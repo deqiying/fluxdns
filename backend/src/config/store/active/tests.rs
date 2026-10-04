@@ -996,19 +996,34 @@ fn operation_retention_restarts_at_completion_and_pins_in_progress_results() {
 }
 
 #[test]
-fn state_and_operation_queries_do_not_wait_for_the_file_transaction_lock() {
+fn snapshot_reads_wait_for_short_contention_and_expire_without_busy() {
     let fixture = Fixture::new();
     let guard = fixture.store.active.lock().unwrap();
+    std::thread::scope(|scope| {
+        let (started, ready) = std::sync::mpsc::channel();
+        let store = &fixture.store;
+        let reader = scope.spawn(move || {
+            started.send(()).unwrap();
+            store.configuration_status()
+        });
+        ready.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        drop(guard);
+        assert!(reader.join().unwrap().is_ok());
+    });
+    let guard = fixture.store.active.lock().unwrap();
+    let started = Instant::now();
     assert!(matches!(
         fixture.store.configuration_status(),
-        Err(ActiveError::Busy)
+        Err(ActiveError::Unavailable)
     ));
+    assert!(started.elapsed() >= SNAPSHOT_WAIT);
+    assert!(started.elapsed() < SNAPSHOT_WAIT + Duration::from_secs(2));
     assert!(matches!(
         fixture.store.operation_snapshot("session-a", "operation"),
-        Err(ActiveError::Busy)
+        Err(ActiveError::Unavailable)
     ));
     drop(guard);
-    assert!(fixture.store.configuration_status().is_ok());
     assert_eq!(
         fixture
             .store
@@ -1016,6 +1031,27 @@ fn state_and_operation_queries_do_not_wait_for_the_file_transaction_lock() {
             .unwrap(),
         OperationSnapshot::Unknown
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn snapshot_wait_does_not_block_async_executor() {
+    let fixture = Fixture::new();
+    let owner = Arc::clone(&fixture.store);
+    let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        let _guard = owner.active.lock().unwrap();
+        locked_tx.send(()).unwrap();
+        release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    });
+    locked_rx.await.unwrap();
+    let store = Arc::clone(&fixture.store);
+    let reader = tokio::spawn(async move { store.active_snapshot_async().await });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(!reader.is_finished());
+    release_tx.send(()).unwrap();
+    assert!(reader.await.unwrap().is_ok());
+    holder.join().unwrap();
 }
 
 #[test]
