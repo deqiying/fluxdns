@@ -7,6 +7,7 @@
 | 计划 | 计划状态 | 内容 |
 | --- | --- | --- |
 | [Docker 镜像交付](docker-image.md) | 待验收 | 独立 workflow 响应 tag 推送，自行编译并推送 `linux/amd64` 镜像到 GHCR，不依赖 Release 流程；工作目录固定 `/etc/fluxdns`，附 `docker/` 部署示例、env 模板与镜像冒烟夹具 |
+| [负缓存新鲜度收敛](negative-cache-freshness.md) | 待验收 | 代码与文档已完成：NODATA/NXDOMAIN 使用独立的短乐观窗口和 TTL 上限，失败类不再乐观返回，后台刷新记录响应类与 TTL；剩余本地可控上游的运行验收 |
 
 解析记录页面与缓存标签已按最终设计完成，行为与验证边界见[前端页面实现](../implementation/frontend/pages.md)。
 

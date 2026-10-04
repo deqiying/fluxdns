@@ -420,6 +420,7 @@ impl CacheCommitCandidate {
                     deadline,
                 }
             });
+        let response_class = self.request.response.class();
         let write = self.facade.write_response(self.request).await;
         let write = match (write, absent_retry) {
             (
@@ -432,6 +433,7 @@ impl CacheCommitCandidate {
             (write, _) => write,
         };
         if let Some(observation) = self.observation.take() {
+            observation.result(response_class.into(), cache_written_ttl_secs(&write));
             observation.finish(cache_activity_outcome(&write));
         }
         let (outcome, completion) = match write {
@@ -486,6 +488,25 @@ pub(crate) fn cache_activity_outcome(
         }) => Outcome::Conflict,
         Ok(_) => Outcome::Rejected,
         Err(_) => Outcome::Failed,
+    }
+}
+
+/// 实际插入或替换的条目生命周期（秒）；未写入时为空，不用请求 TTL 推断。
+pub(crate) fn cache_written_ttl_secs(
+    result: &Result<CacheWriteResult, CacheFacadeError>,
+) -> Option<u64> {
+    match result {
+        Ok(CacheWriteResult::Stored {
+            outcome: CacheWriteOutcome::Inserted(_) | CacheWriteOutcome::Replaced(_),
+            record: Some(record),
+        }) => Some(
+            record
+                .entry
+                .expires_at
+                .saturating_duration_since(record.entry.inserted_at)
+                .as_secs(),
+        ),
+        _ => None,
     }
 }
 

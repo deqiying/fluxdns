@@ -19,13 +19,13 @@ pub use key::{
 };
 pub use memory::{MemoryCacheStore, MemoryCacheStoreBuildError};
 pub use moka::{MokaCacheStore, MokaCacheStoreBuildError};
-pub(crate) use service::cache_activity_outcome;
 pub use service::{
     CacheCommitCandidate, CacheCommitOutcome, CacheFacade, CacheFacadeBuildError, CacheFacadeError,
     CacheFacadeOptions, CacheLookup, CacheRefreshPermit, CacheWriteRequest, CacheWriteResult,
     LateCacheFinalizer, LateCacheFinalizerBuildError, LateCacheFinalizerShutdownSummary,
     LateCacheFinalizerSubmitError,
 };
+pub(crate) use service::{cache_activity_outcome, cache_written_ttl_secs};
 pub use snapshot::{
     CacheSnapshotError, CacheSnapshotReader, CacheSnapshotWriteSummary, open_cache_snapshot,
     write_cache_snapshot,

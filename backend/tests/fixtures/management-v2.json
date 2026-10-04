@@ -117,7 +117,7 @@
     {"module": "rule_set", "value": {"name": "file", "type": "file", "format": "dat", "path": "./rules/site.dat", "auto_update": false}},
     {"module": "rule_set", "value": {"name": "remote", "type": "remote", "format": "json", "url": "https://example.test/rules.json", "auto_update": true, "update_interval": "60000000000ns"}},
     {"module": "clients", "value": {"name": "desktop", "client_id": "Desktop-01", "match": {"ips": []}}},
-    {"module": "dns", "value": {"cache": {"enabled": false, "memory": {"max_size_bytes": 67108864}, "failure_ttl": "5000000000ns", "optimistic": {"enabled": false, "answer_ttl": "10000000000ns", "max_age": "86400000000000ns"}, "persistence": {"enabled": false, "path": "./data/dns-cache.db", "snapshot_interval": "300000000000ns"}}, "resolve_log": {"enable": false}}},
+    {"module": "dns", "value": {"cache": {"enabled": false, "memory": {"max_size_bytes": 67108864}, "failure_ttl": "5000000000ns", "negative_ttl_max": "300000000000ns", "optimistic": {"enabled": false, "answer_ttl": "10000000000ns", "max_age": "86400000000000ns", "negative_max_age": "300000000000ns"}, "persistence": {"enabled": false, "path": "./data/dns-cache.db", "snapshot_interval": "300000000000ns"}}, "resolve_log": {"enable": false}}},
     {"module": "statistics", "value": {"retention": {"days": 7, "grace_days": 3, "reference_size_bytes": 1073741824}}},
     {"module": "logs", "value": {"enable": false, "level": "info", "path": "./logs/fluxdns.log"}}
   ],

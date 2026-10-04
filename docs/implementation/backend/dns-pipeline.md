@@ -61,13 +61,20 @@ SystemSocketFactory / typed binding
 - listener/strategy hosts 本地回答绕过 response cache；upstream hosts 按普通上游响应处理。
 - `UpstreamRuntime` 构造时记录 group 全部可达 direct leaves，覆盖 primary、fallback、nested group 与隐式继承请求级 ECS 的成员；请求级 ECS 来自 global/default 时，`prepare_query` 用该集合计算并比较规范化后的最终 ECS。所有成员 query 相同时使用统一 query 和 Resolved cache；只有真正异构时才携带 per-member query，并绕过 lookup、single-flight 与 commit。显式成员 ECS 即使不同于 global，只要各成员最终 query 相同也属于可缓存路径；rule/strategy/client 显式 ECS 则直接统一覆盖成员。
 - Fast eligibility 仍按策略可达 target 保守计算：存在任一显式成员 ECS 就禁用 Fast；这不妨碍 fast miss 后的完整决策证明 query 一致并使用 Resolved。
-- 缓存候选使用 canonical upstream response 与 origin TTL；返回时递减 TTL 或应用 effective override。stale 返回受当前 pool 的 optimistic max age 与 answer TTL 限制。条目越过应答窗口（乐观未启用或已超出 max age）后仍按保留期可见，lookup 返回 `Expired` 而不是 `Miss`：本次照常回源，但 `cache_status` 记录为 `expired`，与「从未缓存」分开。
+- 缓存候选使用 canonical upstream response 与 origin TTL；返回时递减 TTL 或应用 effective override。负应答（`CanonicalResponse::is_negative`，即 NODATA/NXDOMAIN）在应用 override 前先经 `cap_negative_ttl` 截断：上游直出截到 `dns.cache.negative_ttl_max`，fresh 命中由 `fresh_cache_response` 截到 `min(剩余寿命, negative_ttl_max)`；准入侧 `CacheAdmissionPolicy::with_negative` 同样把负条目寿命截到该上限。stale 返回由 `stale_answer_ttl` 按 entry quality 选窗口：Complete 用当前 pool 的 `max_age`，Negative 用 `CacheDecision::optimistic_negative_max_age`，Failure 不 stale，窗口为零视同关闭；`cache_runtime_options` 汇总各池最大负窗口写入 admission。条目越过应答窗口（乐观未启用或已超出对应窗口）后仍按保留期可见，lookup 返回 `Expired` 而不是 `Miss`：本次照常回源，但 `cache_status` 记录为 `expired`，与「从未缓存」分开。
 - Fast/Resolved stale 共用 `schedule_optimistic_refresh`，切到最新可用 core 后重新执行 `prepare_cache_query`，不复用 entry 保存的旧 connector/rule pointer。同一 `Arc` store 且 key 相同时以 `Version(stale_version)` CAS；store 或 key 不同时先读目标，Miss 使用 `Absent`、Stale/Expired 使用目标 `Version`、Fresh 直接跳过。exchange 后写回前再次核对 semantics/key，任一步失败都不延长旧 stale。
 - `PolicyLateResultSink` 保存生产请求的 semantics，并在切换 latest core 后仅当重新准备的 semantics、key 和最终 ECS 与原请求一致时接纳旧响应；配置、资源、目标或 ECS 改变时丢弃。写回前再次检查 semantics/key，目标已有同等或更高质量结果时不覆盖；目标条目已过期时不适用该质量比较，直接按其版本替换，否则刷新结果会因 CAS 冲突无法写回。
-- `reason = "group_ecs_differs"`、`operation = "cache_refresh"` 与 `operation = "cache_late"` 的 debug 事件只记录低基数 reason/outcome 及配置 ID，不输出明文 ECS 或客户端 IP。
+- `reason = "group_ecs_differs"`、`operation = "cache_refresh"` 与 `operation = "cache_late"` 的 debug 事件只记录低基数 reason/outcome 及配置 ID，不输出明文 ECS 或客户端 IP；`cache_refresh` 额外带写回结果的 `class` 与 `ttl_secs`。
+- `CacheActivity` 的 `response_class`（positive/nodata/nxdomain/servfail/truncated/refused/other）与 `ttl_secs` 由 `CacheCommitCandidate::commit` 和后台刷新在实际得到写回候选时通过 `CacheActivityGuard::result` 记录，TTL 取 `cache_written_ttl_secs`（写入条目的剩余寿命）。两字段在 serde 中带默认值，旧详情 `execution_json` 仍可读取，缺失时为 null。
 - Core 将持有 single-flight lease 的 `CacheCommitCandidate` 随完成事件交出；[`resolution.rs`](../../../backend/src/resolution.rs) 的 cache worker 在独立 deadline 内 CAS。candidate drop 必须唤醒 waiter，响应不等待写回。
 
 进程快照的恢复、周期、generation 和失败见[后台服务](background-services.md)；准入与终态约束见 [Cache 设计](../../architecture/backend/modules/cache.md)。
+
+### 负缓存新鲜度验证
+
+本机 Windows，基线 `e811b713292467ce964534c1cb7e2ef44002cdf6` 加本次工作树。[`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 用可切换应答的模拟 DoH（`SwitchableDohTransport`）驱动正式 core：`nodata_soa_ttl_is_capped_for_cache_lifetime_and_client_ttl` 核对 SOA 1800 被截到上限且客户端 TTL 同步截断；`nodata_beyond_negative_window_resolves_new_record_on_first_query` 核对越过负窗口后首查即同步回源拿到新 A 记录；`nodata_within_negative_window_serves_stale_and_records_refresh_result` 核对窗口内乐观返回并记录刷新得到的响应类与 TTL。准入、计划、配置解析与契约另有单元测试（`cache::admission`、`policy::plan`、`config::resolve`、`config::contract`）。
+
+2026-10-04 实际执行 `cargo fmt -- --check`、`cargo clippy --all-targets -- -D warnings`（均通过）和 `cargo test --manifest-path backend/Cargo.toml`：830 passed、0 failed、4 ignored。同批全量运行中曾出现一次 `service::tests::idle_listener_deadlines_do_not_exhaust_transport_tasks` 在 1s UDP 接收超时处失败，单独重跑 3 次及随后全量重跑均通过，判断为并行负载下的计时抖动，与本变更无直接关系。本地 `_fluxdns/` 运行验收尚未执行，由[负缓存新鲜度计划](../../plans/negative-cache-freshness.md)跟踪。
 
 ### 缓存修复验证
 

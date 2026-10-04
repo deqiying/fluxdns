@@ -48,6 +48,17 @@ export const durationOptionalRules = [
   },
 ];
 
+/** 必填但允许 0 的 duration 字段（如空应答乐观窗口）：`0s` 表示关闭该窗口。 */
+export const durationNonNegativeRequiredRules = [
+  { required: true, message: "请填写时长" },
+  {
+    validator: async (_: unknown, value: string | undefined) => {
+      if (value === undefined || value === "") return;
+      if (!isNonNegativeDuration(value)) throw new Error("请填写大于等于 0 的有效时长");
+    },
+  },
+];
+
 /**
  * 时长输入：数字 + 单位下拉，默认单位为秒。
  * 纳秒只在回显时换算一次，用户看到与输入的都是秒/毫秒等可感知量级，

@@ -373,6 +373,32 @@ impl CanonicalResponse {
         self.ttl = extract_ttl_metadata(&self.message, self.class);
     }
 
+    /// 是否为 NODATA/NXDOMAIN 负应答。
+    pub fn is_negative(&self) -> bool {
+        matches!(self.class, ResponseClass::NoData | ResponseClass::NxDomain)
+    }
+
+    /// 仅对 NODATA/NXDOMAIN 把全部 RR TTL 压到 `max` 以内，并同步刷新派生 TTL 元数据。
+    ///
+    /// 与 [`Self::clamp_ttl`] 不同，`max` 为零时同样生效（条目剩余寿命不足 1 秒）；
+    /// 完整应答、SERVFAIL/TC 保持原样，保证负缓存上限不会波及正常解析。
+    pub(crate) fn cap_negative_ttl(&mut self, max: Duration) {
+        if !self.is_negative() {
+            return;
+        }
+        let max = u32::try_from(max.as_secs()).unwrap_or(u32::MAX);
+        for record in self
+            .message
+            .answers
+            .iter_mut()
+            .chain(&mut self.message.authorities)
+            .chain(&mut self.message.additionals)
+        {
+            record.ttl = record.ttl.min(max);
+        }
+        self.ttl = extract_ttl_metadata(&self.message, self.class);
+    }
+
     pub fn matches_query(&self, query: &CanonicalQuery) -> bool {
         CanonicalQuestion::from_query(&self.message.queries[0]) == *query.question()
     }

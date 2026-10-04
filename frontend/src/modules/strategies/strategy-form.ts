@@ -23,6 +23,8 @@ export interface StrategyFormValues {
   cache_optimistic_mode: "inherit" | "enabled" | "disabled";
   cache_answer_ttl?: string;
   cache_max_age?: string;
+  /** 空应答（NODATA/NXDOMAIN）乐观窗口；`0s` 表示空应答过期即回源。 */
+  cache_negative_max_age?: string;
   ttl_mode: "inherit" | "enabled" | "disabled";
   ttl_min?: string;
   ttl_max?: string;
@@ -71,6 +73,7 @@ export function strategyToForm(strategy?: Strategy): StrategyFormValues {
     cache_optimistic_mode: strategy.cache?.optimistic ? (strategy.cache.optimistic.enabled ? "enabled" : "disabled") : "inherit",
     cache_answer_ttl: normalizeDuration(strategy.cache?.optimistic?.answer_ttl),
     cache_max_age: normalizeDuration(strategy.cache?.optimistic?.max_age),
+    cache_negative_max_age: normalizeDuration(strategy.cache?.optimistic?.negative_max_age),
     ttl_mode: strategy.ttl_override ? (strategy.ttl_override.enabled === false ? "disabled" : "enabled") : "inherit",
     ttl_min: normalizeDuration(strategy.ttl_override?.min),
     ttl_max: normalizeDuration(strategy.ttl_override?.max),
@@ -89,10 +92,12 @@ export function strategyFromForm(values: StrategyFormValues, original?: Strategy
   const cacheUnchanged = values.cache_mode === sourceForm.cache_mode
     && values.cache_optimistic_mode === sourceForm.cache_optimistic_mode
     && sameOptionalDuration(values.cache_answer_ttl, sourceForm.cache_answer_ttl)
-    && sameOptionalDuration(values.cache_max_age, sourceForm.cache_max_age);
+    && sameOptionalDuration(values.cache_max_age, sourceForm.cache_max_age)
+    && sameOptionalDuration(values.cache_negative_max_age, sourceForm.cache_negative_max_age);
   const ttlUnchanged = values.ttl_mode === sourceForm.ttl_mode
     && sameOptionalDuration(values.ttl_min, sourceForm.ttl_min)
     && sameOptionalDuration(values.ttl_max, sourceForm.ttl_max);
+  const negativeMaxAge = values.cache_negative_max_age ?? source?.cache?.optimistic?.negative_max_age;
   const cache = values.cache_mode === "inherit" ? undefined
     : cacheUnchanged ? source?.cache
     : {
@@ -102,6 +107,8 @@ export function strategyFromForm(values: StrategyFormValues, original?: Strategy
           enabled: values.cache_optimistic_mode === "enabled",
           answer_ttl: values.cache_answer_ttl ?? source?.cache?.optimistic?.answer_ttl ?? "0s",
           max_age: values.cache_max_age ?? source?.cache?.optimistic?.max_age ?? "0s",
+          // 字段在契约中可选：未填写且原值缺失时省略，由后端按默认值解析。
+          ...(negativeMaxAge === undefined ? {} : { negative_max_age: negativeMaxAge }),
         },
       }),
     };
@@ -144,7 +151,7 @@ export function strategyFieldErrors(errors: readonly ApiFieldError[]): Parameter
       const key = mapping[rule[2]];
       if (key) fields.push({ name: ["rules", Number(rule[1]), key], errors: [error.code] });
     } else {
-      const mapping: Record<string, Exclude<keyof StrategyFormValues, "rules">> = { name: "name", default_upstream: "default_upstream", "ttl_override.min": "ttl_min", "ttl_override.max": "ttl_max", "edns_client_subnet.custom_ip": "ecs_custom_ip", "edns_client_subnet.mode": "ecs_mode", "cache.optimistic.answer_ttl": "cache_answer_ttl", "cache.optimistic.max_age": "cache_max_age" };
+      const mapping: Record<string, Exclude<keyof StrategyFormValues, "rules">> = { name: "name", default_upstream: "default_upstream", "ttl_override.min": "ttl_min", "ttl_override.max": "ttl_max", "edns_client_subnet.custom_ip": "ecs_custom_ip", "edns_client_subnet.mode": "ecs_mode", "cache.optimistic.answer_ttl": "cache_answer_ttl", "cache.optimistic.max_age": "cache_max_age", "cache.optimistic.negative_max_age": "cache_negative_max_age" };
       const match = Object.keys(mapping).find((suffix) => path === suffix || path.endsWith(`.${suffix}`));
       if (match) fields.push({ name: [mapping[match]], errors: [error.code] });
     }

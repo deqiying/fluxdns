@@ -945,7 +945,7 @@ impl PolicyDnsCore {
         if let Some(key) = &fast_key {
             match self.cache.lookup(key, meta.deadline).await {
                 Ok(CacheLookup::Fresh(record)) => {
-                    let response = fresh_cache_response(&record);
+                    let response = self.fresh_cache_response(&record);
                     return cached_completion(
                         request,
                         &context,
@@ -956,7 +956,7 @@ impl PolicyDnsCore {
                 }
                 Ok(CacheLookup::Stale { record, refresh }) => {
                     if let Some(answer_ttl) =
-                        stale_answer_ttl(&context.cache, record.entry.expires_at, Instant::now())
+                        stale_answer_ttl(&context.cache, &record.entry, Instant::now())
                     {
                         let mut response = (*record.entry.response).clone();
                         response.set_ttl(answer_ttl);
@@ -1080,6 +1080,12 @@ impl PolicyDnsCore {
             PolicyUpstreamOutcome::Response(mut response)
                 if response.matches_query(&request.query) =>
             {
+                if response.is_negative()
+                    && let Some(max) = self.negative_ttl_max()
+                {
+                    // 只压客户端可见 TTL；commit candidate 持有的是共享前的 origin response。
+                    Arc::make_mut(&mut response).cap_negative_ttl(max);
+                }
                 apply_ttl_override(Arc::make_mut(&mut response), &plan.ttl_override);
                 Ok(CoreOutcome::Response(response))
             }
@@ -1165,14 +1171,14 @@ impl PolicyDnsCore {
             None => match self.cache.lookup(&key, deadline).await {
                 Ok(CacheLookup::Fresh(record)) => {
                     return Some(PolicyUpstreamResult::cache(
-                        UpstreamOutcome::Response(fresh_cache_response(&record)),
+                        UpstreamOutcome::Response(self.fresh_cache_response(&record)),
                         &record,
                         CacheStatus::Fresh,
                     ));
                 }
                 Ok(CacheLookup::Stale { record, refresh }) => {
                     if let Some(answer_ttl) =
-                        stale_answer_ttl(&plan.cache, record.entry.expires_at, Instant::now())
+                        stale_answer_ttl(&plan.cache, &record.entry, Instant::now())
                     {
                         let mut stale_response = (*record.entry.response).clone();
                         stale_response.set_ttl(answer_ttl);
@@ -1235,7 +1241,7 @@ impl PolicyDnsCore {
                     .await
                 {
                     Ok(CacheLoadCompletion::Ready(record)) => Some(PolicyUpstreamResult::cache(
-                        UpstreamOutcome::Response(fresh_cache_response(&record)),
+                        UpstreamOutcome::Response(self.fresh_cache_response(&record)),
                         &record,
                         CacheStatus::Fresh,
                     )),
@@ -1400,6 +1406,20 @@ impl PolicyDnsCore {
         })
     }
 
+    /// 当前运行时的负缓存 TTL 上限；来自 `dns.cache.negative_ttl_max`。
+    fn negative_ttl_max(&self) -> Option<Duration> {
+        self.cache
+            .options()
+            .admission
+            .negative_ttl_max
+            .filter(|max| !max.is_zero())
+    }
+
+    /// 以当前负缓存上限构造 fresh 命中响应。
+    fn fresh_cache_response(&self, record: &crate::ports::cache::CacheRecord) -> CanonicalResponse {
+        fresh_cache_response(record, self.negative_ttl_max())
+    }
+
     /// Fast/Resolved stale 共用刷新流程；store 身份和 key 决定 CAS，不能用 target 是否存在代替。
     fn schedule_optimistic_refresh(
         &self,
@@ -1472,12 +1492,15 @@ impl PolicyDnsCore {
                 return;
             }
             refresh_observation.route(Some(target_id.as_ref()), used_id.as_deref());
+            let class = response.class();
             let outcome = core.cache.write_response(CacheWriteRequest {
                 key: prepared.key, condition, response: Arc::new(response),
                 upstream: cache_upstream_provenance(target_id.as_ref(), used_id.as_deref()),
                 now: Instant::now(), producer_revision, deadline,
             }).await;
-            tracing::debug!(operation = "cache_refresh", ?outcome, "缓存刷新写回完成");
+            let ttl_secs = crate::cache::cache_written_ttl_secs(&outcome);
+            tracing::debug!(operation = "cache_refresh", ?class, ?ttl_secs, ?outcome, "缓存刷新写回完成");
+            refresh_observation.result(class.into(), ttl_secs);
             refresh_observation.finish(crate::cache::cache_activity_outcome(&outcome));
         }) {
             tracing::debug!(operation = "cache_refresh", ?error, "缓存刷新任务未获接纳");
@@ -1552,9 +1575,21 @@ fn apply_ttl_override(response: &mut CanonicalResponse, ttl_override: &ResolvedT
 }
 
 /// 从 fresh cache record 构造客户端响应，并按已缓存时间递减 RR TTL。
-fn fresh_cache_response(record: &crate::ports::cache::CacheRecord) -> CanonicalResponse {
+///
+/// 负应答额外压到条目剩余寿命与 `negative_ttl_max` 以内：条目到期后 FluxDNS 会回源，
+/// 客户端不应继续按 SOA 原值（可能长达数小时）缓存“不存在”。
+fn fresh_cache_response(
+    record: &crate::ports::cache::CacheRecord,
+    negative_ttl_max: Option<Duration>,
+) -> CanonicalResponse {
+    let now = Instant::now();
     let mut response = (*record.entry.response).clone();
-    response.age_ttl(Instant::now().saturating_duration_since(record.entry.inserted_at));
+    response.age_ttl(now.saturating_duration_since(record.entry.inserted_at));
+    if response.is_negative() {
+        let remaining = record.entry.expires_at.saturating_duration_since(now);
+        let cap = negative_ttl_max.map_or(remaining, |max| remaining.min(max));
+        response.cap_negative_ttl(cap);
+    }
     response
 }
 
@@ -1615,15 +1650,27 @@ fn cached_completion(
     )
 }
 
-/// 仅在当前 pool 的 optimistic max-age 内返回其 stale answer TTL。
+/// 仅在当前 pool 对该响应质量允许的 optimistic max-age 内返回其 stale answer TTL。
+///
+/// 完整应答使用 `max_age`，NODATA/NXDOMAIN 使用 `negative_max_age`，SERVFAIL/TC 永不乐观返回。
+/// 条目自身的 `stale_until` 由共享 store 按最宽池写入，这里按当前池再次收紧，因此快照恢复的
+/// 旧长窗口负条目也会按当前规则回源。
 fn stale_answer_ttl(
     decision: &crate::policy::CacheDecision,
-    expires_at: Instant,
+    entry: &crate::ports::cache::CacheEntry,
     now: Instant,
 ) -> Option<Duration> {
     let answer_ttl = decision.optimistic_answer_ttl()?;
-    let max_age = decision.optimistic_max_age()?;
-    expires_at
+    let max_age = match entry.quality {
+        CacheQuality::Complete => decision.optimistic_max_age()?,
+        CacheQuality::Negative => decision.optimistic_negative_max_age()?,
+        CacheQuality::Failure => return None,
+    };
+    if max_age.is_zero() {
+        return None;
+    }
+    entry
+        .expires_at
         .checked_add(max_age)
         .is_some_and(|stale_until| now < stale_until)
         .then_some(answer_ttl)
@@ -1718,10 +1765,14 @@ fn build_cache_facade(config: &ResolvedConfig) -> Result<CacheAssembly, PolicyCo
 }
 
 /// 汇总所有逻辑 pool 的运行时能力；`dns.cache.enabled` 只控制全局池。
+///
+/// 完整应答与负应答的乐观窗口分别取各启用池的最大值写入条目，实际返回再由当前池收紧。
 fn cache_runtime_options(config: &ResolvedConfig) -> CacheFacadeOptions {
     let mut enabled = config.dns.cache.enabled;
-    let mut optimistic_max_age = (config.dns.cache.enabled && config.dns.cache.optimistic.enabled)
-        .then_some(config.dns.cache.optimistic.max_age);
+    let global_optimistic = (config.dns.cache.enabled && config.dns.cache.optimistic.enabled)
+        .then_some(&config.dns.cache.optimistic);
+    let mut optimistic_max_age = global_optimistic.map(|optimistic| optimistic.max_age);
+    let mut negative_max_age = global_optimistic.map(|optimistic| optimistic.negative_max_age);
     for cache in config
         .strategies
         .iter()
@@ -1735,20 +1786,26 @@ fn cache_runtime_options(config: &ResolvedConfig) -> CacheFacadeOptions {
         .filter(|cache| cache.enabled)
     {
         enabled = true;
-        if let Some(max_age) = cache
+        if let Some(optimistic) = cache
             .optimistic
             .as_ref()
             .filter(|optimistic| optimistic.enabled)
-            .map(|optimistic| optimistic.max_age)
         {
-            optimistic_max_age =
-                Some(optimistic_max_age.map_or(max_age, |current| current.max(max_age)));
+            optimistic_max_age = Some(optimistic_max_age.map_or(optimistic.max_age, |current| {
+                current.max(optimistic.max_age)
+            }));
+            negative_max_age = Some(
+                negative_max_age.map_or(optimistic.negative_max_age, |current| {
+                    current.max(optimistic.negative_max_age)
+                }),
+            );
         }
     }
     CacheFacadeOptions {
         enabled,
         optimistic_enabled: optimistic_max_age.is_some(),
-        admission: CacheAdmissionPolicy::new(config.dns.cache.failure_ttl, optimistic_max_age),
+        admission: CacheAdmissionPolicy::new(config.dns.cache.failure_ttl, optimistic_max_age)
+            .with_negative(Some(config.dns.cache.negative_ttl_max), negative_max_age),
     }
 }
 
@@ -3151,6 +3208,7 @@ mod tests {
         config.dns.cache.optimistic.enabled = true;
         config.dns.cache.optimistic.answer_ttl = Duration::from_secs(7);
         config.dns.cache.optimistic.max_age = Duration::from_secs(60);
+        config.dns.cache.optimistic.negative_max_age = Duration::from_secs(20);
         let config = Arc::new(config);
         let transport = Arc::new(FakeDohTransport::new());
         let registry =
@@ -3171,15 +3229,6 @@ mod tests {
                 qname: Some(&qname),
             })
             .unwrap();
-        let max_age_now = Instant::now();
-        assert_eq!(
-            stale_answer_ttl(
-                &plan.cache,
-                max_age_now - Duration::from_secs(61),
-                max_age_now,
-            ),
-            None
-        );
         let key = cache_key(&core, &plan, &request).unwrap();
         let response = Arc::new(
             CanonicalResponse::response_with_answers(
@@ -3192,6 +3241,41 @@ mod tests {
             )
             .unwrap(),
         );
+        // 乐观窗口按条目质量选择：完整应答 60s、负应答 20s、失败类不乐观返回。
+        let max_age_now = Instant::now();
+        let entry_with = |quality, class, expired_for: u64| crate::ports::cache::CacheEntry {
+            response: Arc::clone(&response),
+            upstream: cache_upstream_provenance("remote", Some("remote")),
+            inserted_at: max_age_now - Duration::from_secs(expired_for + 10),
+            expires_at: max_age_now - Duration::from_secs(expired_for),
+            // 模拟快照中按旧规则写入的长窗口，验证 lookup 侧按当前池收紧。
+            stale_until: Some(max_age_now + Duration::from_secs(86_400)),
+            response_class: class,
+            producer_revision: RuntimeRevision(1),
+            quality,
+            checksum: 1,
+            format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
+        };
+        use crate::ports::cache::{CacheQuality as Q, CacheResponseClass as C};
+        let cases = [
+            (Q::Complete, C::NoError, 59, Some(Duration::from_secs(7))),
+            (Q::Complete, C::NoError, 61, None),
+            (Q::Negative, C::NoData, 19, Some(Duration::from_secs(7))),
+            (Q::Negative, C::NoData, 21, None),
+            (Q::Negative, C::NxDomain, 21, None),
+            (Q::Failure, C::ServFail, 1, None),
+        ];
+        for (quality, class, expired_for, expected) in cases {
+            assert_eq!(
+                stale_answer_ttl(
+                    &plan.cache,
+                    &entry_with(quality, class, expired_for),
+                    max_age_now
+                ),
+                expected,
+                "quality={quality:?} class={class:?} expired_for={expired_for}"
+            );
+        }
         let now = Instant::now();
         let fresh_entry = Arc::new(crate::ports::cache::CacheEntry {
             response: Arc::clone(&response),

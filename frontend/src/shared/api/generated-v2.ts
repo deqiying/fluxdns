@@ -647,6 +647,8 @@ export interface components {
             enabled: boolean;
             answer_ttl: components["schemas"]["Duration"];
             max_age: components["schemas"]["Duration"];
+            /** @description NODATA/NXDOMAIN 过期后可乐观返回的最长时间；省略时默认 5m，0s 表示负应答不乐观返回，运行时不超过 max_age */
+            negative_max_age?: components["schemas"]["Duration"];
         };
         CacheOverride: {
             enabled: boolean;
@@ -681,6 +683,8 @@ export interface components {
             };
             /** @description 1s 至 5m */
             failure_ttl: components["schemas"]["Duration"];
+            /** @description NODATA/NXDOMAIN 缓存寿命与客户端可见 TTL 上限；省略时默认 5m，范围 1s 至 1d */
+            negative_ttl_max?: components["schemas"]["Duration"];
             optimistic: components["schemas"]["Optimistic"];
             persistence?: components["schemas"]["Snapshot"];
         };
@@ -1175,6 +1179,10 @@ export interface components {
             outcome: "pending" | "inserted" | "updated" | "rejected" | "conflict" | "failed" | "skipped" | "coalesced" | "dropped" | "unrecorded";
             upstream_target_name: components["schemas"]["Name"] | null;
             upstream_used_name: components["schemas"]["Name"] | null;
+            /** @description 本次写入或刷新实际取得的上游响应分类 */
+            response_class: ("positive" | "nodata" | "nxdomain" | "servfail" | "truncated" | "refused" | "other") | null;
+            /** @description 实际写入条目的缓存寿命（秒）；未写入为 null */
+            ttl_secs: components["schemas"]["SafeInteger"] | null;
         };
         CacheProducer: {
             strategy_name: components["schemas"]["Name"] | null;

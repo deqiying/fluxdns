@@ -144,6 +144,8 @@ pub struct ResolvedGlobalCache {
     pub enabled: bool,
     pub memory_max_size_bytes: u64,
     pub failure_ttl: Duration,
+    /// NODATA/NXDOMAIN 条目 fresh 生命周期与客户端可见 TTL 的上限。
+    pub negative_ttl_max: Duration,
     pub optimistic: ResolvedOptimistic,
     pub persistence_enabled: bool,
     pub persistence_path: PathBuf,
@@ -162,6 +164,8 @@ pub struct ResolvedOptimistic {
     pub enabled: bool,
     pub answer_ttl: Duration,
     pub max_age: Duration,
+    /// 已按 `max_age` 截断的负应答乐观窗口；`Duration::ZERO` 表示负应答不乐观返回。
+    pub negative_max_age: Duration,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -972,6 +976,7 @@ fn resolve_dns_v2(
             enabled: cache.enabled,
             memory_max_size_bytes: cache.memory.max_size_bytes,
             failure_ttl: cache.failure_ttl,
+            negative_ttl_max: cache.negative_ttl_max,
             optimistic: resolve_optimistic(&cache.optimistic),
             persistence_enabled: cache.persistence.enabled,
             persistence_path: resolve_path(work_path, &cache.persistence.path),
@@ -990,6 +995,8 @@ fn resolve_optimistic(value: &OptimisticDto) -> ResolvedOptimistic {
         enabled: value.enabled,
         answer_ttl: value.answer_ttl,
         max_age: value.max_age,
+        // 负窗口不能长于正应答窗口；在解析期截断，运行时无需再处理跨字段关系。
+        negative_max_age: value.negative_max_age.min(value.max_age),
     }
 }
 
@@ -1435,7 +1442,27 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{ResolvedSecretRef, ResolvedSecretValue, SecretResolveError, lexical_normalize};
+    use super::{
+        ResolvedSecretRef, ResolvedSecretValue, SecretResolveError, lexical_normalize,
+        resolve_optimistic,
+    };
+
+    /// 负应答乐观窗口在解析期以 `max_age` 为上限，零值保留为“负应答不乐观返回”。
+    #[test]
+    fn negative_optimistic_window_is_capped_by_max_age() {
+        let dto = |max_age: u64, negative: u64| crate::config::model::OptimisticDto {
+            enabled: true,
+            answer_ttl: std::time::Duration::from_secs(10),
+            max_age: std::time::Duration::from_secs(max_age),
+            negative_max_age: std::time::Duration::from_secs(negative),
+        };
+        let secs = |value: &crate::config::model::OptimisticDto| {
+            resolve_optimistic(value).negative_max_age.as_secs()
+        };
+        assert_eq!(secs(&dto(60, 300)), 60);
+        assert_eq!(secs(&dto(3600, 300)), 300);
+        assert_eq!(secs(&dto(3600, 0)), 0);
+    }
 
     #[test]
     fn lexical_path_normalization_does_not_require_existing_files() {

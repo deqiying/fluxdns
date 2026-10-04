@@ -14,6 +14,8 @@
 >
 > 2026-10-04 增量核对：基线 `eb428f92cdc3acda836547107ef2f56f6d988249` 加本次工作树，仅更新快照读取等待和策略表单覆盖保真；其他配置契约不变
 >
+> 2026-10-04 负缓存增量核对：基线 `e811b713292467ce964534c1cb7e2ef44002cdf6` 加本次工作树，仅核对 `dns.cache.negative_ttl_max`、`optimistic.negative_max_age`、按响应质量区分的乐观窗口与缓存活动响应类观测；单元/策略层测试已覆盖，本地运行验收仍由[负缓存新鲜度计划](../plans/negative-cache-freshness.md)跟踪
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -353,9 +355,11 @@ ConfigV2
 | `dns.cache.enabled` | boolean | 是否启用全局缓存池；它不是策略池和客户端池的总开关。 |
 | `dns.cache.memory.max_size_bytes` | integer | 所有逻辑缓存池共享的内存计费容量上限，单位为字节。 |
 | `dns.cache.failure_ttl` | duration | `SERVFAIL`、上游截断响应等无自然可用 TTL 的短期缓存时间；必须在 `1s..=5m`。 |
+| `dns.cache.negative_ttl_max` | duration | `NOERROR/NODATA` 与 `NXDOMAIN` 的缓存寿命及客户端可见 TTL 上限；可省略，默认 `5m`，必须在 `1s..=1d`。只向下压，不影响正应答和失败类。 |
 | `dns.cache.optimistic.enabled` | boolean | 是否允许返回已过期记录并在后台刷新。 |
 | `dns.cache.optimistic.answer_ttl` | duration | 乐观缓存应答使用的 TTL。 |
-| `dns.cache.optimistic.max_age` | duration | 记录过期后仍可乐观返回的最长时间。 |
+| `dns.cache.optimistic.max_age` | duration | 完整正应答过期后仍可乐观返回的最长时间。 |
+| `dns.cache.optimistic.negative_max_age` | duration | NODATA/NXDOMAIN 过期后仍可乐观返回的最长时间；可省略，默认 `5m`，`0s` 表示负应答过期即回源。解析时取 `min(negative_max_age, max_age)`，超出不报错。 |
 | `dns.cache.persistence.enabled` | boolean | 是否启用进程级 `FDCS` 快照；不等同于全局内存缓存开关。 |
 | `dns.cache.persistence.path` | string | 当前进程级 `FDCS` 快照文件路径；相对路径以 `work.path` 为基准。 |
 | `dns.cache.persistence.snapshot_interval` | duration | 完整快照周期，范围 `1s..=1d`。 |
@@ -397,12 +401,13 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 #### 响应缓存语义
 
 - `hosts[]` 产生的本地回答不进入 response cache；它直接读取已编译内存 snapshot，并仍应用 TTL override 和统计。`upstreams[type=hosts]` 不属于此例外。
-- 正常 `NOERROR` 响应按 RR TTL 缓存；`NOERROR/NODATA` 和 `NXDOMAIN` 按负缓存 TTL 缓存，优先使用 SOA TTL 与 SOA.MINIMUM 的较小值。为满足 v1“所有 NODATA/NXDOMAIN 均缓存”的产品语义，没有可用 SOA/负 TTL 时使用 `failure_ttl`；这是对 RFC 2308 “SHOULD NOT cache”建议的有意偏离。
+- 正常 `NOERROR` 响应按 RR TTL 缓存；`NOERROR/NODATA` 和 `NXDOMAIN` 按负缓存 TTL 缓存，优先使用 SOA TTL 与 SOA.MINIMUM 的较小值。为满足 v1“所有 NODATA/NXDOMAIN 均缓存”的产品语义，没有可用 SOA/负 TTL 时使用 `failure_ttl`；这是对 RFC 2308 “SHOULD NOT cache”建议的有意偏离。负缓存 TTL 最终再截到 `negative_ttl_max`，避免 SOA.MINIMUM 很大时新增记录在 FluxDNS 层长期不可见。
+- 负应答的客户端可见 TTL 同样受限：上游直出时先把 SOA/负 TTL 截到 `negative_ttl_max`，fresh 缓存命中时截到 `min(条目剩余寿命, negative_ttl_max)`，之后才应用 TTL override；因此 override 的 `min` 仍可能把 TTL 重新放大。缓存中的 origin response 不改写。answer 段只有 CNAME 链的响应按正应答处理，不受该上限影响。
 - `SERVFAIL` 和直接从上游收到的 `TC=1` 响应使用 `failure_ttl`；`REFUSED` 可作为上游组的终态响应返回，但 v1 不写缓存。上游 TC 条目额外包含当前入口 transport，只允许相同 transport 命中，不能把 UDP 场景的截断结果复用于 TCP/DoH。
 - malformed DNS、问题段不匹配、连接/TLS/HTTP 失败和超时不属于 DNS 响应，不写缓存。
 - 缓存保存不含客户端 DNS ID 和传输 envelope 的 canonical response。若本地 UDP 输出因本次客户端 advertised size 而截断，应保存完整 canonical response，并在每次发送时重新编码；只有上游本身返回的 `TC=1` 才保存截断条目。
 - 写入按响应质量做 compare-and-replace：完整 `NOERROR/TC=0` 可以提升并替换未过期的 NXDOMAIN/SERVFAIL/TC 条目，SERVFAIL/TC 不能覆盖未过期的完整回答；同质量条目在过期前不因后到竞态反复覆盖。
-- optimistic/stale 只适用于已经按上述规则准入的条目；缓存返回时按剩余 TTL 和当前请求重新生成响应。
+所以快照恢复的旧长窗口负条目也按当前规则回源，无需迁移快照格式；这类旧条目已写入的 fresh 寿命不回溯缩短，但客户端可见 TTL 仍按上限截断。
 - 条目已过期且不可乐观返回时，本次解析按 `expired` 记录并照常回源；该状态与「缓存从未存在该条目」分开保存，便于区分回源原因。
 - 同一 key 的并发 miss 通过 single-flight 合并。leader 得到可缓存结果后先形成持有 lease 的 `CacheCommitCandidate` 并返回共享响应；后台 worker 使用独立 100ms deadline 完成 admission/CAS 并唤醒 waiter，进程快照由独立周期 owner 覆盖。客户端响应不等待 commit；candidate 被队列丢弃、取消或直接 drop 时，RAII lease 必须发布失败终态，不能永久挂住 follower。optimistic stale 由一次性 refresh permit 去重并进入统一后台刷新流程，不复用 miss 的 lease。
 
@@ -641,6 +646,7 @@ WebUI 有序规则卡片支持本级 ECS 的继承、禁用、客户端地址和
 | `optimistic.enabled` | boolean | 是否允许过期记录先返回并异步刷新。 |
 | `optimistic.answer_ttl` | duration | 乐观缓存应答 TTL。 |
 | `optimistic.max_age` | duration | 过期记录可被乐观返回的最长时间。 |
+| `optimistic.negative_max_age` | duration | 可选；NODATA/NXDOMAIN 的乐观窗口，语义与 [`dns.cache.optimistic.negative_max_age`](#81-dnscache) 相同。 |
 
 整个 `strategy[].cache` 缺失时才允许回退到全局池；对象存在时 `enabled` 必填。策略级 `ttl_override` 使用 [`dns.ttl_override`](#82-dnsttl_override) 的相同字段结构和继承语义。
 
@@ -736,7 +742,7 @@ v2 配置加载阶段至少执行以下校验：
 7. `ttl_override` 与 `cache` 平级；策略/客户端 cache 对象存在时 `enabled` 必填，显式 `false` 不得回退到全局池。
 8. ECS 块未配置时继承，显式 `mode: disabled` 才停止继续传递。
 9. `webui.users[].password_hash` 必须是受支持算法生成的单向 hash，禁止明文 `password` 字段。
-10. `dns.cache.memory.max_size_bytes` 为正数，`failure_ttl` 在 `1s..=5m`，`persistence.snapshot_interval` 在 `1s..=1d`。
+10. `dns.cache.memory.max_size_bytes` 为正数，`failure_ttl` 在 `1s..=5m`，`negative_ttl_max` 在 `1s..=1d`，`persistence.snapshot_interval` 在 `1s..=1d`。
 11. DoH route 的 path 模板合法且彼此不存在语义重叠；endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段；GET/POST wire、Content-Type 和固定消息上限合法。
 12. `forwarded_header`/`proxy_protocol` 必须配置 `trusted_proxies`，且可信范围只覆盖反代对端；PROXY v1/v2 前导头缺失、未知或非法时拒绝。
 13. DoH 上游的 `bootstrap` 与 `connect_ip` 互斥；SecretRef 解析后的代理 scheme 合法，`socks5h://` 不得同时使用 `bootstrap`。

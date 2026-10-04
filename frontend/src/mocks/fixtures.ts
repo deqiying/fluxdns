@@ -80,7 +80,8 @@ export const dnsConfigReadFixture = {
         enabled: true,
         memory: { max_size_bytes: 67_108_864 },
         failure_ttl: "5000000000ns",
-        optimistic: { enabled: true, answer_ttl: "10000000000ns", max_age: "86400000000000ns" },
+        negative_ttl_max: "300000000000ns",
+        optimistic: { enabled: true, answer_ttl: "10000000000ns", max_age: "86400000000000ns", negative_max_age: "300000000000ns" },
         persistence: { enabled: true, path: "./data/dns-cache.fdcs", snapshot_interval: "300000000000ns" },
       },
       resolve_log: { enable: true },
@@ -268,7 +269,7 @@ export const v2QueryRecordsFixture = [
     listener_name: 'doh-in',
     response_duration_us: 180,
     response_status: 'sent',
-    cache_activity: { kind: 'write', outcome: 'inserted', upstream_target_name: null, upstream_used_name: null },
+    cache_activity: { kind: 'write', outcome: 'inserted', upstream_target_name: null, upstream_used_name: null, response_class: 'positive', ttl_secs: 30 },
     answers: {
       state: "available",
       total_count: 1,
@@ -301,7 +302,7 @@ export const v2QueryRecordsFixture = [
     listener_name: 'udp-in',
     response_duration_us: 60,
     response_status: 'sent',
-    cache_activity: { kind: 'refresh', outcome: 'updated', upstream_target_name: 'public', upstream_used_name: 'public-2' },
+    cache_activity: { kind: 'refresh', outcome: 'updated', upstream_target_name: 'public', upstream_used_name: 'public-2', response_class: 'nodata', ttl_secs: 300 },
     answers: { state: "truncated", total_count: 20, records: [] },
   },
 ] satisfies V2Schemas["QueryRecord"][];

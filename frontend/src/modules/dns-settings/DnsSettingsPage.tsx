@@ -6,7 +6,7 @@ import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { ByteSizeInput } from "@/shared/components/ByteSizeInput";
-import { DurationInput, durationOptionalRules, durationRequiredRules } from "@/shared/components/DurationInput";
+import { DurationInput, durationNonNegativeRequiredRules, durationOptionalRules, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
@@ -23,9 +23,11 @@ interface DnsFormValues {
   /** 由 ByteSizeInput 写入的整数字节数；undefined 表示当前输入无法换算，交给 required 规则拦截。 */
   cache_size_bytes: number | undefined;
   failure_ttl: string;
+  negative_ttl_max: string;
   optimistic_enabled: boolean;
   optimistic_answer_ttl: string;
   optimistic_max_age: string;
+  optimistic_negative_max_age: string;
   snapshot_enabled: boolean;
   snapshot_path: string;
   snapshot_interval: string;
@@ -75,9 +77,11 @@ export function DnsSettingsPage() {
         cache_enabled: cache?.enabled ?? false,
         cache_size_bytes: cache?.memory.max_size_bytes ?? 67_108_864,
         failure_ttl: normalizeDuration(cache?.failure_ttl) ?? "5s",
+        negative_ttl_max: normalizeDuration(cache?.negative_ttl_max) ?? "5m",
         optimistic_enabled: cache?.optimistic.enabled ?? false,
         optimistic_answer_ttl: normalizeDuration(cache?.optimistic.answer_ttl) ?? "10s",
         optimistic_max_age: normalizeDuration(cache?.optimistic.max_age) ?? "24h",
+        optimistic_negative_max_age: normalizeDuration(cache?.optimistic.negative_max_age) ?? "5m",
         snapshot_enabled: cache?.persistence?.enabled ?? false,
         snapshot_path: cache?.persistence?.path ?? "./data/dns-cache.fdcs",
         snapshot_interval: normalizeDuration(cache?.persistence?.snapshot_interval) ?? "5m",
@@ -109,7 +113,8 @@ export function DnsSettingsPage() {
         enabled: values.cache_enabled,
         memory: { max_size_bytes: cacheSizeBytes },
         failure_ttl: values.failure_ttl,
-        optimistic: { enabled: values.optimistic_enabled, answer_ttl: values.optimistic_answer_ttl, max_age: values.optimistic_max_age },
+        negative_ttl_max: values.negative_ttl_max,
+        optimistic: { enabled: values.optimistic_enabled, answer_ttl: values.optimistic_answer_ttl, max_age: values.optimistic_max_age, negative_max_age: values.optimistic_negative_max_age },
         persistence: { enabled: values.snapshot_enabled, path: values.snapshot_path, snapshot_interval: values.snapshot_interval },
       },
       ...(values.ttl_mode === "inherit" ? {} : { ttl_override: values.ttl_mode === "disabled" ? { enabled: false } : { enabled: true, ...(values.ttl_min ? { min: values.ttl_min } : {}), ...(values.ttl_max ? { max: values.ttl_max } : {}) } }),
@@ -165,8 +170,8 @@ export function DnsSettingsPage() {
       ) : null}
       <ConfigFormModal open={editor === "dns"} title="编辑 DNS 配置" dirty={dirty} busy={dnsMutation.isPending} submitDisabled={!!dnsQuery.error || !!state.error} error={dnsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveDns()}>
         <Form form={dnsForm} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
-          <Form.Item name="cache_enabled" label="启用缓存" valuePropName="checked"><Switch /></Form.Item><Form.Item name="cache_size_bytes" label="内存上限" rules={[{ required: true }]}><ByteSizeInput label="内存上限" /></Form.Item><Form.Item name="failure_ttl" label="失败 TTL" rules={durationRequiredRules}><DurationInput label="失败 TTL" /></Form.Item>
-          <Form.Item name="optimistic_enabled" label="乐观缓存" valuePropName="checked"><Switch /></Form.Item><Space className="paired-fields" align="start"><Form.Item name="optimistic_answer_ttl" label="回答 TTL" rules={durationRequiredRules}><DurationInput label="回答 TTL" /></Form.Item><Form.Item name="optimistic_max_age" label="最大陈旧时间" rules={durationRequiredRules}><DurationInput label="最大陈旧时间" /></Form.Item></Space>
+          <Form.Item name="cache_enabled" label="启用缓存" valuePropName="checked"><Switch /></Form.Item><Form.Item name="cache_size_bytes" label="内存上限" rules={[{ required: true }]}><ByteSizeInput label="内存上限" /></Form.Item><Space className="paired-fields" align="start"><Form.Item name="failure_ttl" label="失败 TTL" rules={durationRequiredRules}><DurationInput label="失败 TTL" /></Form.Item><Form.Item name="negative_ttl_max" label="负缓存 TTL 上限" tooltip="空应答（NODATA）与 NXDOMAIN 的缓存时间及返回给客户端的 TTL 上限，不影响正常解析" rules={durationRequiredRules}><DurationInput label="负缓存 TTL 上限" /></Form.Item></Space>
+          <Form.Item name="optimistic_enabled" label="乐观缓存" valuePropName="checked"><Switch /></Form.Item><Space className="paired-fields" align="start"><Form.Item name="optimistic_answer_ttl" label="回答 TTL" rules={durationRequiredRules}><DurationInput label="回答 TTL" /></Form.Item><Form.Item name="optimistic_max_age" label="最大陈旧时间" rules={durationRequiredRules}><DurationInput label="最大陈旧时间" /></Form.Item></Space><Form.Item name="optimistic_negative_max_age" label="空应答最大陈旧时间" tooltip="NODATA/NXDOMAIN 过期后仍可乐观返回的最长时间；0 表示空应答过期即回源，超过最大陈旧时间时按其截断" rules={durationNonNegativeRequiredRules}><DurationInput label="空应答最大陈旧时间" /></Form.Item>
           <Form.Item name="snapshot_enabled" label="缓存快照" valuePropName="checked"><Switch /></Form.Item><Form.Item name="snapshot_path" label="快照路径" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="snapshot_interval" label="快照周期" rules={durationRequiredRules}><DurationInput label="快照周期" /></Form.Item>
           <Form.Item name="ttl_mode" label="TTL 覆盖"><Select options={[{ label: "使用默认", value: "inherit" }, { label: "启用", value: "enabled" }, { label: "禁用", value: "disabled" }]} /></Form.Item>{ttlMode === "enabled" ? <Space className="paired-fields" align="start"><Form.Item name="ttl_min" label="最小 TTL" rules={durationOptionalRules}><DurationInput label="最小 TTL" /></Form.Item><Form.Item name="ttl_max" label="最大 TTL" rules={durationOptionalRules}><DurationInput label="最大 TTL" /></Form.Item></Space> : null}
           <Form.Item name="ecs_mode" label="ECS"><Select options={[{ label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }]} /></Form.Item>{ecsMode === "custom" ? <Form.Item name="ecs_custom_ip" label="自定义 ECS" rules={[{ required: true }]}><Input /></Form.Item> : null}<Form.Item name="resolve_log_enable" label="记录解析详情" valuePropName="checked"><Switch /></Form.Item>

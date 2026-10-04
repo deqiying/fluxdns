@@ -70,6 +70,9 @@ dns:
     # 无自然可用 TTL 的短期响应使用该 TTL，例如 SERVFAIL 和上游 TC=1 响应。
     # v1 要求 1s <= failure_ttl <= 5m。
     failure_ttl: 5s
+    # NODATA/NXDOMAIN 的缓存寿命与返回给客户端的 TTL 上限，范围 1s..=1d；
+    # 只会压低 SOA 给出的负缓存 TTL，正常解析不受影响。缺省为 5m。
+    negative_ttl_max: 5m
     # 过期记录是否允许先返回并异步刷新。
     optimistic:
       # 是否允许返回已过期记录并在后台刷新。
@@ -78,6 +81,9 @@ dns:
       answer_ttl: 10s
       # 记录过期后仍可乐观返回的最长时间。
       max_age: 1d
+      # NODATA/NXDOMAIN 过期后仍可乐观返回的最长时间；0s 表示空应答过期即回源，
+      # 运行时不超过 max_age。SERVFAIL/TC 等失败类不乐观返回。缺省为 5m。
+      negative_max_age: 5m
     # 缓存持久化设置；策略级和客户端级 cache 不包含此部分。
     persistence:
       # 是否启用进程级二进制快照；与内存缓存开关相互独立。
@@ -374,6 +380,8 @@ strategy:
         answer_ttl: 10s
         # 过期记录可被乐观返回的最长时间。
         max_age: 1d
+        # 空应答（NODATA/NXDOMAIN）可被乐观返回的最长时间。
+        negative_max_age: 5m
     # 策略级 TTL 覆写，与 cache 平级。
     ttl_override:
       # 是否在该策略启用 TTL 覆写。
@@ -568,6 +576,8 @@ clients:
         answer_ttl: 10s
         # 过期记录可被乐观返回的最长时间。
         max_age: 1d
+        # 空应答（NODATA/NXDOMAIN）可被乐观返回的最长时间。
+        negative_max_age: 5m
     # 客户端级 TTL 覆写，与 cache 平级。
     ttl_override:
       # 是否在该客户端启用 TTL 覆写。

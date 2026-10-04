@@ -495,8 +495,24 @@ function CacheActivityTags({ record }: { record: QueryRecord }) {
     conflict: "写入冲突", failed: "写入失败", skipped: "跳过刷新", coalesced: "合并刷新",
     dropped: "任务丢弃", unrecorded: "结果未知",
   };
+  const result = formatCacheActivityResult(activity);
   return <>{activity.kind === "refresh" ? <Tag color="blue">后台刷新</Tag> : null}
-    <Tag color={activity.outcome === "inserted" ? "green" : activity.outcome === "updated" ? "blue" : ["failed", "dropped"].includes(activity.outcome) ? "orange" : "default"}>{labels[activity.outcome]}</Tag></>;
+    <Tag color={activity.outcome === "inserted" ? "green" : activity.outcome === "updated" ? "blue" : ["failed", "dropped"].includes(activity.outcome) ? "orange" : "default"}>{labels[activity.outcome]}{result ? ` · ${result}` : null}</Tag></>;
+}
+
+/**
+ * 写入/刷新拿到的响应类与写入 TTL，例如 `NODATA 300s`；
+ * 用于区分“刷新成功但仍是空应答”与真正拿到新记录。旧记录两字段均为 null 时不展示。
+ */
+export function formatCacheActivityResult(activity: NonNullable<QueryRecord["cache_activity"]>): string | null {
+  const classLabels: Record<NonNullable<typeof activity.response_class>, string | null> = {
+    positive: null, nodata: "NODATA", nxdomain: "NXDOMAIN", servfail: "SERVFAIL", truncated: "TC", refused: "REFUSED", other: "其他",
+  };
+  const classLabel = activity.response_class ? classLabels[activity.response_class] : null;
+  const ttl = activity.ttl_secs === null || activity.ttl_secs === undefined ? null : `${activity.ttl_secs}s`;
+  if (classLabel && ttl) return `${classLabel} ${ttl}`;
+  if (classLabel) return classLabel;
+  return ttl ? `TTL ${ttl}` : null;
 }
 
 /** 本地来源不产生写入结果，用同级标签补上路由列标签行，避免与缓存标签行排版不一致。 */
@@ -528,8 +544,10 @@ export function formatClientIdentity(record: QueryRecord): {
 
 export function formatResponseSummary(record: QueryRecord): { primary: string; meta: string } {
   const answer = record.answers.state === "unavailable" ? undefined : record.answers.records[0];
+  // NOERROR 且明确保留了 0 条 Answer 才是空应答；截断/未保留时无法判断，仍按 outcome 展示。
+  const nodata = !answer && record.rcode === "NOERROR" && record.answers.state === "available" && record.answers.total_count === 0;
   return {
-    primary: answer ? `${answer.type}  ${answer.data}` : `${record.rcode} · ${record.outcome}`,
+    primary: answer ? `${answer.type}  ${answer.data}` : nodata ? "NOERROR · NODATA" : `${record.rcode} · ${record.outcome}`,
     meta: record.answers.state === "unavailable"
       ? "结果未保留"
       : record.answers.state === "truncated"

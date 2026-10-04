@@ -10,27 +10,46 @@ use crate::ports::cache::{
 };
 
 /// CacheStore 之外的准入参数；配置校验负责保证 failure TTL 为正数。
+///
+/// 乐观窗口按响应质量区分：完整应答使用 `optimistic_max_age`，NODATA/NXDOMAIN 使用
+/// `negative_optimistic_max_age`，SERVFAIL/TC 不设置 stale 窗口。共享 store 时这里取各启用
+/// 池中的最大值，实际能否返回 stale 仍由当前请求所选池在 lookup 后再次判定。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheAdmissionPolicy {
     pub failure_ttl: Duration,
     pub optimistic_max_age: Option<Duration>,
+    /// NODATA/NXDOMAIN fresh 生命周期上限；`None` 表示完全遵循 SOA 负 TTL。
+    pub negative_ttl_max: Option<Duration>,
+    /// NODATA/NXDOMAIN 过期后的乐观窗口；`None` 或零表示负应答不乐观返回。
+    pub negative_optimistic_max_age: Option<Duration>,
 }
 
 impl CacheAdmissionPolicy {
+    /// 仅设置失败 TTL 与完整应答乐观窗口；负应答不设上限也不乐观返回。
     pub const fn new(failure_ttl: Duration, optimistic_max_age: Option<Duration>) -> Self {
         Self {
             failure_ttl,
             optimistic_max_age,
+            negative_ttl_max: None,
+            negative_optimistic_max_age: None,
         }
+    }
+
+    /// 设置负应答的 TTL 上限与乐观窗口。
+    pub const fn with_negative(
+        mut self,
+        negative_ttl_max: Option<Duration>,
+        negative_optimistic_max_age: Option<Duration>,
+    ) -> Self {
+        self.negative_ttl_max = negative_ttl_max;
+        self.negative_optimistic_max_age = negative_optimistic_max_age;
+        self
     }
 }
 
 impl Default for CacheAdmissionPolicy {
     fn default() -> Self {
-        Self {
-            failure_ttl: Duration::from_secs(5),
-            optimistic_max_age: None,
-        }
+        Self::new(Duration::from_secs(5), None)
     }
 }
 
@@ -90,12 +109,12 @@ pub fn admit_response(
         ResponseClass::NoData => (
             CacheResponseClass::NoData,
             CacheQuality::Negative,
-            negative_ttl(&response, policy.failure_ttl),
+            negative_ttl(&response, policy.failure_ttl, policy.negative_ttl_max),
         ),
         ResponseClass::NxDomain => (
             CacheResponseClass::NxDomain,
             CacheQuality::Negative,
-            negative_ttl(&response, policy.failure_ttl),
+            negative_ttl(&response, policy.failure_ttl, policy.negative_ttl_max),
         ),
         ResponseClass::ServFail => (
             CacheResponseClass::ServFail,
@@ -129,8 +148,13 @@ pub fn admit_response(
         Err(rejection) => return Ok(CacheAdmissionOutcome::Rejected(rejection)),
     };
     let expires_at = now.checked_add(ttl).unwrap_or(now);
-    let stale_until = policy
-        .optimistic_max_age
+    let stale_window = match quality {
+        CacheQuality::Complete => policy.optimistic_max_age,
+        CacheQuality::Negative => policy.negative_optimistic_max_age,
+        // 旧的失败没有可用答案价值，过期后必须回源。
+        CacheQuality::Failure => None,
+    };
+    let stale_until = stale_window
         .filter(|max_age| !max_age.is_zero())
         .and_then(|max_age| expires_at.checked_add(max_age));
     let checksum = canonical_checksum(response.as_ref())?;
@@ -149,17 +173,22 @@ pub fn admit_response(
     })))
 }
 
+/// 负 TTL 依次取 SOA 负 TTL、RR 最小 TTL、failure TTL，再按配置上限截断。
 fn negative_ttl(
     response: &CanonicalResponse,
     failure_ttl: Duration,
+    negative_ttl_max: Option<Duration>,
 ) -> Result<Duration, CacheAdmissionRejection> {
-    response
+    let ttl = response
         .ttl()
         .negative_ttl
         .or(response.ttl().min_ttl)
         .map(|seconds| Duration::from_secs(u64::from(seconds)))
         .or_else(|| (!failure_ttl.is_zero()).then_some(failure_ttl))
-        .ok_or(CacheAdmissionRejection::MissingTtl)
+        .ok_or(CacheAdmissionRejection::MissingTtl)?;
+    Ok(negative_ttl_max
+        .filter(|max| !max.is_zero())
+        .map_or(ttl, |max| ttl.min(max)))
 }
 
 #[cfg(test)]
@@ -170,9 +199,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use hickory_proto::op::{Message, MessageType, OpCode, Query, ResponseCode};
-    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
+    use hickory_proto::rr::{
+        Name, RData, Record, RecordType,
+        rdata::{A, SOA},
+    };
 
-    use crate::dns::{CanonicalQuery, CanonicalResponse, RuntimeRevision};
+    use crate::dns::{CanonicalQuery, CanonicalResponse, DnsMessageId, RuntimeRevision};
     use crate::ports::cache::{CacheQuality, CacheResponseClass, CacheUpstreamProvenance};
 
     use super::{
@@ -203,8 +235,51 @@ mod tests {
         CanonicalResponse::response_with_answers(&query, [answer]).unwrap()
     }
 
+    /// 构造 authority 段带 SOA 的负应答；SOA RR TTL 与 MINIMUM 取较小值作为负 TTL。
+    fn negative_with_soa(code: ResponseCode, soa_ttl: u32, minimum: u32) -> CanonicalResponse {
+        let query = query();
+        let mut message = CanonicalResponse::empty_response(&query, code)
+            .unwrap()
+            .into_message();
+        message.add_authority(Record::from_rdata(
+            Name::from_str("example.com.").unwrap(),
+            soa_ttl,
+            RData::SOA(SOA::new(
+                Name::from_str("ns.example.com.").unwrap(),
+                Name::from_str("dns.example.com.").unwrap(),
+                1,
+                10_000,
+                2_400,
+                604_800,
+                minimum,
+            )),
+        ));
+        CanonicalResponse::from_message(message, &query, DnsMessageId::new(0)).unwrap()
+    }
+
     fn upstream() -> CacheUpstreamProvenance {
         CacheUpstreamProvenance::direct_from_validated_config_id("test-upstream").unwrap()
+    }
+
+    fn accepted(
+        policy: CacheAdmissionPolicy,
+        response: CanonicalResponse,
+        now: Instant,
+    ) -> Arc<crate::ports::cache::CacheEntry> {
+        match admit_response(
+            policy,
+            Arc::new(response),
+            upstream(),
+            now,
+            RuntimeRevision(1),
+        )
+        .unwrap()
+        {
+            CacheAdmissionOutcome::Accepted(entry) => entry,
+            CacheAdmissionOutcome::Rejected(rejection) => {
+                panic!("expected accepted, got {rejection:?}")
+            }
+        }
     }
 
     #[test]
@@ -231,23 +306,85 @@ mod tests {
     }
 
     #[test]
-    fn uses_failure_ttl_for_negative_and_sets_stale_window() {
+    fn uses_failure_ttl_for_negative_and_sets_negative_stale_window() {
         let now = Instant::now();
-        let outcome = admit_response(
-            CacheAdmissionPolicy::new(Duration::from_secs(7), Some(Duration::from_secs(20))),
-            Arc::new(response_with_code(ResponseCode::NXDomain)),
-            upstream(),
-            now,
-            RuntimeRevision(1),
-        )
-        .unwrap();
-        let CacheAdmissionOutcome::Accepted(entry) = outcome else {
-            panic!("expected accepted response");
-        };
+        let policy =
+            CacheAdmissionPolicy::new(Duration::from_secs(7), Some(Duration::from_secs(60)))
+                .with_negative(None, Some(Duration::from_secs(20)));
+        let entry = accepted(policy, response_with_code(ResponseCode::NXDomain), now);
         assert_eq!(entry.response_class, CacheResponseClass::NxDomain);
         assert_eq!(entry.quality, CacheQuality::Negative);
         assert_eq!(entry.expires_at, now + Duration::from_secs(7));
+        // 负应答使用独立窗口，而不是完整应答的 60s。
         assert_eq!(entry.stale_until, Some(now + Duration::from_secs(27)));
+    }
+
+    #[test]
+    fn negative_without_negative_window_is_never_stale() {
+        let now = Instant::now();
+        let policy =
+            CacheAdmissionPolicy::new(Duration::from_secs(7), Some(Duration::from_secs(60)));
+        let entry = accepted(policy, response_with_code(ResponseCode::NoError), now);
+        assert_eq!(entry.response_class, CacheResponseClass::NoData);
+        assert_eq!(entry.stale_until, None);
+    }
+
+    #[test]
+    fn negative_ttl_max_caps_soa_negative_ttl_only_for_negative_classes() {
+        let now = Instant::now();
+        let policy = CacheAdmissionPolicy::new(Duration::from_secs(5), None)
+            .with_negative(Some(Duration::from_secs(300)), None);
+        // SOA 1800/1800：NODATA 与 NXDOMAIN 都被截到 300s。
+        let nodata = accepted(
+            policy,
+            negative_with_soa(ResponseCode::NoError, 1800, 1800),
+            now,
+        );
+        assert_eq!(nodata.response_class, CacheResponseClass::NoData);
+        assert_eq!(nodata.expires_at, now + Duration::from_secs(300));
+        let nxdomain = accepted(
+            policy,
+            negative_with_soa(ResponseCode::NXDomain, 3600, 1800),
+            now,
+        );
+        assert_eq!(nxdomain.expires_at, now + Duration::from_secs(300));
+        // 低于上限的负 TTL 保持原值，上限只往下压。
+        let short = accepted(
+            policy,
+            negative_with_soa(ResponseCode::NoError, 1800, 60),
+            now,
+        );
+        assert_eq!(short.expires_at, now + Duration::from_secs(60));
+
+        // 完整应答不受负 TTL 上限影响。
+        let query = query();
+        let long_answer = Record::from_rdata(
+            Name::from_str("example.com.").unwrap(),
+            3600,
+            RData::A(A(Ipv4Addr::new(192, 0, 2, 1))),
+        );
+        let positive = accepted(
+            policy,
+            CanonicalResponse::response_with_answers(&query, [long_answer]).unwrap(),
+            now,
+        );
+        assert_eq!(positive.expires_at, now + Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn failure_classes_never_get_stale_window_and_positive_keeps_its_window() {
+        let now = Instant::now();
+        let policy =
+            CacheAdmissionPolicy::new(Duration::from_secs(5), Some(Duration::from_secs(60)))
+                .with_negative(
+                    Some(Duration::from_secs(300)),
+                    Some(Duration::from_secs(30)),
+                );
+        let servfail = accepted(policy, response_with_code(ResponseCode::ServFail), now);
+        assert_eq!(servfail.quality, CacheQuality::Failure);
+        assert_eq!(servfail.stale_until, None);
+        let positive = accepted(policy, positive_response(), now);
+        assert_eq!(positive.stale_until, Some(now + Duration::from_secs(90)));
     }
 
     #[test]

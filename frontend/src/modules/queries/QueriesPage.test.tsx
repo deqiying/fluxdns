@@ -9,7 +9,7 @@ import { setMockAuthenticated } from "@/mocks/handlers";
 import { acceptAuthSession } from "@/shared/api/client";
 import { managementEvents, type QueryBatch } from "@/shared/api/events";
 import type { QueryRequest } from "./api";
-import { formatClientIdentity, formatDurationSummary, formatResponseSummary, formatRoute, QueriesPage, sourceLabel } from "./QueriesPage";
+import { formatCacheActivityResult, formatClientIdentity, formatDurationSummary, formatResponseSummary, formatRoute, QueriesPage, sourceLabel } from "./QueriesPage";
 
 function renderPage() {
   setMockAuthenticated(true);
@@ -62,6 +62,16 @@ describe("QueriesPage 展示语义", () => {
   it("显示首条 Answer 与截断总数", () => {
     expect(formatResponseSummary(direct)).toEqual({ primary: "A  192.0.2.1", meta: "1 条结果" });
     expect(formatResponseSummary(cache)).toEqual({ primary: "NOERROR · answered", meta: "保留 0 条，共 20 条" });
+    expect(formatResponseSummary({ ...direct, rcode: "NOERROR", answers: { state: "available", total_count: 0, records: [] } }))
+      .toEqual({ primary: "NOERROR · NODATA", meta: "0 条结果" });
+  });
+
+  it("缓存变化附带响应类与写入 TTL，旧记录缺字段时不展示", () => {
+    const activity = cache.cache_activity!;
+    expect(formatCacheActivityResult(activity)).toBe("NODATA 300s");
+    expect(formatCacheActivityResult({ ...activity, response_class: "positive", ttl_secs: 30 })).toBe("TTL 30s");
+    expect(formatCacheActivityResult({ ...activity, response_class: "servfail", ttl_secs: null })).toBe("SERVFAIL");
+    expect(formatCacheActivityResult({ ...activity, response_class: null, ttl_secs: null })).toBeNull();
   });
 
   it("悬停预览离开后关闭，点击固定可切换记录，内部点击保留、外部点击关闭", async () => {

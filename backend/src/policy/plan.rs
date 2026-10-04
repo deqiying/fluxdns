@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::config::resolve::{
     ConfigId, ResolvedClient, ResolvedConfig, ResolvedEcs, ResolvedGlobalCache,
-    ResolvedHostsResource, ResolvedRuleSet, ResolvedStrategy, ResolvedTtlOverride,
-    ResolvedUpstream, ValueSource,
+    ResolvedHostsResource, ResolvedOptimistic, ResolvedRuleSet, ResolvedStrategy,
+    ResolvedTtlOverride, ResolvedUpstream, ValueSource,
 };
 use crate::dns::RouteId;
 use crate::ports::cache::{CacheNamespace, CacheStrategyId, ClientCacheDigest};
@@ -119,10 +119,23 @@ pub enum CacheDecision {
         namespace: CacheNamespace,
         optimistic_answer_ttl: Option<Duration>,
         optimistic_max_age: Option<Duration>,
+        /// NODATA/NXDOMAIN 的乐观窗口；已按 `optimistic_max_age` 截断，零表示负应答不乐观返回。
+        optimistic_negative_max_age: Option<Duration>,
     },
 }
 
 impl CacheDecision {
+    /// 由池 namespace 与已启用的 optimistic 配置构造缓存决策；未启用时全部乐观参数为空。
+    fn pool(namespace: CacheNamespace, optimistic: Option<&ResolvedOptimistic>) -> Self {
+        let optimistic = optimistic.filter(|value| value.enabled);
+        Self::Pool {
+            namespace,
+            optimistic_answer_ttl: optimistic.map(|value| value.answer_ttl),
+            optimistic_max_age: optimistic.map(|value| value.max_age),
+            optimistic_negative_max_age: optimistic.map(|value| value.negative_max_age),
+        }
+    }
+
     pub fn namespace(&self) -> Option<&CacheNamespace> {
         match self {
             Self::Disabled => None,
@@ -152,6 +165,17 @@ impl CacheDecision {
             Self::Pool {
                 optimistic_max_age, ..
             } => *optimistic_max_age,
+        }
+    }
+
+    /// 返回当前缓存池对 NODATA/NXDOMAIN 允许的最长乐观过期时间。
+    pub const fn optimistic_negative_max_age(&self) -> Option<Duration> {
+        match self {
+            Self::Disabled => None,
+            Self::Pool {
+                optimistic_negative_max_age,
+                ..
+            } => *optimistic_negative_max_age,
         }
     }
 }
@@ -568,57 +592,30 @@ impl PolicyIndex {
             let Some(digest) = digest else {
                 return Ok(CacheDecision::Disabled);
             };
-            return Ok(CacheDecision::Pool {
-                namespace: CacheNamespace::ClientStrategy {
+            return Ok(CacheDecision::pool(
+                CacheNamespace::ClientStrategy {
                     client_digest: digest,
                     strategy: strategy_namespace(strategy)?,
                 },
-                optimistic_answer_ttl: cache
-                    .optimistic
-                    .as_ref()
-                    .filter(|value| value.enabled)
-                    .map(|value| value.answer_ttl),
-                optimistic_max_age: cache
-                    .optimistic
-                    .as_ref()
-                    .filter(|value| value.enabled)
-                    .map(|value| value.max_age),
-            });
+                cache.optimistic.as_ref(),
+            ));
         }
         if let Some(cache) = &strategy.cache {
             if !cache.enabled {
                 return Ok(CacheDecision::Disabled);
             }
-            return Ok(CacheDecision::Pool {
-                namespace: CacheNamespace::Strategy(strategy_namespace(strategy)?),
-                optimistic_answer_ttl: cache
-                    .optimistic
-                    .as_ref()
-                    .filter(|value| value.enabled)
-                    .map(|value| value.answer_ttl),
-                optimistic_max_age: cache
-                    .optimistic
-                    .as_ref()
-                    .filter(|value| value.enabled)
-                    .map(|value| value.max_age),
-            });
+            return Ok(CacheDecision::pool(
+                CacheNamespace::Strategy(strategy_namespace(strategy)?),
+                cache.optimistic.as_ref(),
+            ));
         }
         if !self.global_cache.enabled {
             return Ok(CacheDecision::Disabled);
         }
-        Ok(CacheDecision::Pool {
-            namespace: CacheNamespace::Global,
-            optimistic_answer_ttl: self
-                .global_cache
-                .optimistic
-                .enabled
-                .then_some(self.global_cache.optimistic.answer_ttl),
-            optimistic_max_age: self
-                .global_cache
-                .optimistic
-                .enabled
-                .then_some(self.global_cache.optimistic.max_age),
-        })
+        Ok(CacheDecision::pool(
+            CacheNamespace::Global,
+            Some(&self.global_cache.optimistic),
+        ))
     }
 }
 
@@ -862,6 +859,7 @@ mod tests {
                 enabled: true,
                 answer_ttl: Duration::from_secs(10),
                 max_age: Duration::from_secs(60),
+                negative_max_age: Duration::from_secs(30),
             }),
             source: ValueSource::Strategy,
         }
@@ -925,10 +923,12 @@ mod tests {
             enabled,
             memory_max_size_bytes: 1024,
             failure_ttl: Duration::from_secs(5),
+            negative_ttl_max: Duration::from_secs(300),
             optimistic: ResolvedOptimistic {
                 enabled: false,
                 answer_ttl: Duration::from_secs(10),
                 max_age: Duration::from_secs(60),
+                negative_max_age: Duration::from_secs(30),
             },
             persistence_enabled: enabled,
             persistence_path: PathBuf::from("cache.db"),
@@ -1064,6 +1064,10 @@ mod tests {
         assert_eq!(
             plan.cache.optimistic_max_age(),
             Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            plan.cache.optimistic_negative_max_age(),
+            Some(Duration::from_secs(30))
         );
     }
 

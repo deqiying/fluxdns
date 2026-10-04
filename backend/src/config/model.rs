@@ -181,6 +181,23 @@ pub struct OptimisticDto {
         serialize_with = "serialize_duration"
     )]
     pub max_age: Duration,
+    /// NODATA/NXDOMAIN 过期后仍可乐观返回的最长时间；`0s` 表示负应答不乐观返回。
+    ///
+    /// 缺失时取 [`DEFAULT_OPTIMISTIC_NEGATIVE_MAX_AGE`]，运行时再以 `max_age` 为上限，
+    /// 因此旧配置不需要补字段，也不会因 `max_age` 较小而校验失败。
+    #[serde(
+        default = "default_optimistic_negative_max_age",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
+    pub negative_max_age: Duration,
+}
+
+/// 负应答乐观窗口默认值：覆盖热门 AAAA/HTTPS NODATA 的连续查询，又不让冷门“不存在”长期遮蔽新记录。
+pub const DEFAULT_OPTIMISTIC_NEGATIVE_MAX_AGE: Duration = Duration::from_secs(300);
+
+fn default_optimistic_negative_max_age() -> Duration {
+    DEFAULT_OPTIMISTIC_NEGATIVE_MAX_AGE
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

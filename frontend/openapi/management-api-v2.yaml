@@ -676,6 +676,7 @@ components:
         enabled: {type: boolean}
         answer_ttl: {$ref: "#/components/schemas/Duration"}
         max_age: {$ref: "#/components/schemas/Duration"}
+        negative_max_age: {allOf: [{$ref: "#/components/schemas/Duration"}], description: NODATA/NXDOMAIN 过期后可乐观返回的最长时间；省略时默认 5m，0s 表示负应答不乐观返回，运行时不超过 max_age}
     CacheOverride:
       type: object
       additionalProperties: false
@@ -717,6 +718,7 @@ components:
           required: [max_size_bytes]
           properties: {max_size_bytes: {$ref: "#/components/schemas/Bytes"}}
         failure_ttl: {allOf: [{$ref: "#/components/schemas/Duration"}], description: 1s 至 5m}
+        negative_ttl_max: {allOf: [{$ref: "#/components/schemas/Duration"}], description: NODATA/NXDOMAIN 缓存寿命与客户端可见 TTL 上限；省略时默认 5m，范围 1s 至 1d}
         optimistic: {$ref: "#/components/schemas/Optimistic"}
         persistence: {$ref: "#/components/schemas/Snapshot"}
     Dns:
@@ -1326,12 +1328,14 @@ components:
     CacheActivity:
       type: object
       additionalProperties: false
-      required: [kind, outcome, upstream_target_name, upstream_used_name]
+      required: [kind, outcome, upstream_target_name, upstream_used_name, response_class, ttl_secs]
       properties:
         kind: {type: string, enum: [write, refresh]}
         outcome: {type: string, enum: [pending, inserted, updated, rejected, conflict, failed, skipped, coalesced, dropped, unrecorded]}
         upstream_target_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
         upstream_used_name: {oneOf: [{$ref: "#/components/schemas/Name"}, {type: "null"}]}
+        response_class: {oneOf: [{type: string, enum: [positive, nodata, nxdomain, servfail, truncated, refused, other]}, {type: "null"}], description: 本次写入或刷新实际取得的上游响应分类}
+        ttl_secs: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}], description: 实际写入条目的缓存寿命（秒）；未写入为 null}
     CacheProducer:
       type: object
       additionalProperties: false

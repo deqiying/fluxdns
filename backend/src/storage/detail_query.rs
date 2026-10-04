@@ -1530,8 +1530,18 @@ mod tests {
                 outcome: crate::dns::CacheActivityOutcome::Updated,
                 upstream_target_name: Some("public".to_owned()),
                 upstream_used_name: Some("alidns".to_owned()),
+                response_class: Some(crate::dns::CacheActivityResponseClass::Nodata),
+                ttl_secs: Some(300),
             }),
         };
+        // 升级前写入的 execution_json 不含刷新结果字段，必须仍可读取且字段为空。
+        let legacy: crate::dns::RequestTraceSnapshot = serde_json::from_str(
+            r#"{"response_status":"sent","response_duration_us":1,"cache_activity":{"kind":"refresh","outcome":"updated","upstream_target_name":null,"upstream_used_name":null}}"#,
+        )
+        .unwrap();
+        let legacy_activity = legacy.cache_activity.unwrap();
+        assert_eq!(legacy_activity.response_class, None);
+        assert_eq!(legacy_activity.ttl_secs, None);
         sample.set_execution(execution.clone());
         store
             .write_records(FIRST_DAY, &[sample], deadline())

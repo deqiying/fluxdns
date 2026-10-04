@@ -12,6 +12,8 @@
 >
 > 2026-09-21 局部评审：仅核对条目保留期、`Expired` lookup 状态、过期条目的写回 CAS 与快照恢复口径；不代表整篇重审或运行验收
 >
+> 2026-10-04 局部评审：仅核对负缓存 TTL 上限、按条目质量区分的 stale 窗口与刷新结果观测；不代表整篇重审，本地运行验收见[负缓存新鲜度计划](../../../plans/negative-cache-freshness.md)
+>
 > 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[snapshot.rs](../../../../backend/src/cache/snapshot.rs)、[snapshot_owner.rs](../../../../backend/src/cache/snapshot_owner.rs)
 >
 > 关联文档：[后端设计](../overview.md) · [配置参考](../../../implementation/configuration.md) · [DNS 管线](../../../implementation/backend/dns-pipeline.md) · [后台服务](../../../implementation/backend/background-services.md)
@@ -47,7 +49,7 @@ Fast eligibility 对策略可达 target 保持保守：只要任一可达 group 
 entry 保存 canonical response、inserted/expiry/stale-until、原始 RR TTL、response class、producer revision、quality、checksum/format，以及缓存生产请求的 target/actual upstream provenance。上游 TC 额外受 transport compatibility 限制。policy/resource fingerprint 已在 key 内；producer revision 只用于诊断/CAS，不作为全局失效开关。
 
 - 正常 NOERROR 按可用 RR TTL 决定生命周期，返回时逐 RR 扣减。
-- NODATA/NXDOMAIN 优先取 SOA TTL 与 MINIMUM 较小值，无可用值时用 failure TTL。
+- NODATA/NXDOMAIN 优先取 SOA TTL 与 MINIMUM 较小值，无可用值时用 failure TTL，最终不超过 `negative_ttl_max`。客户端可见负 TTL 在输出阶段截到同一上限（fresh 命中时再与剩余寿命取小），origin response 不改写；answer 只有 CNAME 链的响应属于正应答，不受影响。
 - SERVFAIL/上游 TC 使用 failure TTL；REFUSED、未知类、零/缺失 TTL、malformed、question mismatch、连接/TLS/HTTP failure 或 timeout 不准入。
 - TTL override 只改变 client-visible TTL，不延长 entry expiry；持有 origin response 的候选不得被输出覆写污染。
 - 质量顺序是完整 NOERROR/TC=0、NODATA/NXDOMAIN、SERVFAIL/TC；低质量不得覆盖仍 fresh 的高质量，同质量默认保留先到值到 expiry。
@@ -68,7 +70,9 @@ single-flight key 与 cache key 一致：
 
 ## 5. Optimistic 与 late result
 
-只有 optimistic 开启、未超过 stale-until、transport compatible、响应类允许且 refresh admission 有容量时才可先返回 stale。共享 store 可按启用池中最大 max_age 保留候选，实际返回仍按当前所选池的 max_age 与 answer TTL 限制，再应用输出 TTL override。
+只有 optimistic 开启、未超过 stale-until、transport compatible、响应类允许且 refresh admission 有容量时才可先返回 stale。响应类按 entry quality 决定窗口：完整正应答用 `max_age`，NODATA/NXDOMAIN 用独立且更短的 `negative_max_age`（运行时不超过 `max_age`，`0s` 关闭），SERVFAIL/TC 不允许 stale。共享 store 按启用池中各质量的最大窗口写入 stale-until（admission 宽），实际返回仍按当前所选池与 entry quality 再次收紧并受 answer TTL 限制（lookup 严），再应用输出 TTL override；因此快照恢复的旧长窗口负条目无需迁移格式即按当前规则回源。
+
+负应答不能用长 stale 窗口兜底：冷门 NODATA/NXDOMAIN 一旦越过负窗口必须同步回源一次，避免新生效的记录被很久以前的“不存在”遮蔽；热门负 key 仍在短窗口内由后台刷新维持，常态不增加同步回源。刷新与写入活动记录写入结果的响应类与写入 TTL，用于区分“刷新成功但上游仍返回空应答”与真正拿到新记录。
 
 乐观缓存未启用或乐观窗口已经结束时，lookup 返回 Expired 而不是 Miss；两者都要回源，但必须保留这一区分，否则无法判断某次解析是因为条目过期还是因为从未缓存。过期条目仍占用 key，写回必须按版本 CAS 替换，不能当作不存在写入。
 

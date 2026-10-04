@@ -184,6 +184,36 @@ fn retention_and_snapshot_bounds_are_checked() {
     assert!(yaml_serde::from_str::<RetentionV2>("days: -1").is_err());
 }
 
+/// 负缓存字段缺失时取默认值，显式值可解析；`negative_ttl_max` 越界拒绝，`negative_max_age` 允许 0。
+#[test]
+fn negative_cache_fields_default_parse_and_bound() {
+    let legacy: GlobalCacheV2 = yaml_serde::from_str(
+        "enabled: true\nmemory: {max_size_bytes: 1024}\nfailure_ttl: 5s\noptimistic: {enabled: true, answer_ttl: 10s, max_age: 1m}\n",
+    )
+    .unwrap();
+    assert_eq!(legacy.negative_ttl_max, Duration::from_secs(300));
+    assert_eq!(legacy.optimistic.negative_max_age, Duration::from_secs(300));
+
+    let explicit: GlobalCacheV2 = yaml_serde::from_str(
+        "enabled: true\nmemory: {max_size_bytes: 1024}\nfailure_ttl: 5s\nnegative_ttl_max: 1m\noptimistic: {enabled: true, answer_ttl: 10s, max_age: 1h, negative_max_age: 0s}\n",
+    )
+    .unwrap();
+    assert_eq!(explicit.negative_ttl_max, Duration::from_secs(60));
+    assert_eq!(explicit.optimistic.negative_max_age, Duration::ZERO);
+
+    let mut config = fixture();
+    config.dns.cache = Some(explicit);
+    config.validate().unwrap();
+    for seconds in [0, 86401] {
+        config.dns.cache.as_mut().unwrap().negative_ttl_max = Duration::from_secs(seconds);
+        assert!(config.validate().is_err(), "negative_ttl_max={seconds}s");
+    }
+    // 旧配置的 max_age 小于默认负窗口时不能因新增默认值而校验失败，运行时再截断。
+    let mut config = fixture();
+    config.dns.cache = Some(legacy);
+    config.validate().unwrap();
+}
+
 #[test]
 fn two_level_paths_and_lexical_collisions() {
     let root = PathBuf::from(super::super::test_support::absolute_path("v2-contract"));

@@ -199,6 +199,11 @@ fn effective_values(config: &ResolvedConfig, module: ConfigModule) -> Vec<Effect
                     duration_value(config.dns.cache.failure_ttl),
                 ),
                 field(
+                    "dns.cache.negative_ttl_max",
+                    ValueOrigin::Global,
+                    duration_value(config.dns.cache.negative_ttl_max),
+                ),
+                field(
                     "dns.cache.optimistic.enabled",
                     ValueOrigin::Global,
                     config.dns.cache.optimistic.enabled,

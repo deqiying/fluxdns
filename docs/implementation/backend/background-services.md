@@ -34,7 +34,7 @@ manifest v2 保存源身份 digest、fetcher 代际及不透明验证器，不�
 
 [`RequestTrace`](../../../backend/src/dns/trace.rs) 在实际 UDP/TCP/DoH 入站创建，记录完整请求接收的单调时钟起点；[`ResponseHandle::respond`](../../../backend/src/ports/inbound.rs) 在 encoder 成功完成写出后冻结响应微秒耗时，失败、取消和未记录明确区分，不将后台刷新、连接空闲或客户端 ACK 计入。原有 `duration_millis` 和 `dns_core_duration_micros` 仍在 core 完成时冻结，用于总/主链耗时及现有聚合统计。
 
-同一 trace 关联普通 cache candidate 与 optimistic refresh：`CacheCommitCandidate::observe` 在无等待发布前设置写入任务；`schedule_optimistic_refresh` 设置刷新任务及实际回源目标/出口。guard 按真实 CAS 结果保存 inserted/updated/conflict/rejected/failed，队列拒绝、取消或丢弃保存 dropped；去重 follower 标记 coalesced，不声称它新建了刷新任务，已无须刷新标记 skipped。刷新路由与旧 cache producer provenance 独立，lookup miss/expired 不等价于写入成功。
+同一 trace 关联普通 cache candidate 与 optimistic refresh：`CacheCommitCandidate::observe` 在无等待发布前设置写入任务；`schedule_optimistic_refresh` 设置刷新任务及实际回源目标/出口。guard 按真实 CAS 结果保存 inserted/updated/conflict/rejected/failed，队列拒绝、取消或丢弃保存 dropped；去重 follower 标记 coalesced，不声称它新建了刷新任务，已无须刷新标记 skipped。实际得到写回候选时 guard 另存写入响应类 `response_class` 与写入 TTL `ttl_secs`（见[DNS 管线](dns-pipeline.md#cache-与-ttl)），用于区分刷新拿到的是新记录还是仍为空应答。刷新路由与旧 cache producer provenance 独立，lookup miss/expired 不等价于写入成功。
 
 详情 projector 用 owner 持有的 `JoinSet` 最多并发等待 128 个请求的响应与缓存终态，每项最多 6 秒；超时字段记为 unrecorded，慢刷新不串行阻塞后续详情。该等待不进入 DNS 主链，stats/telemetry 仍在 dispatcher 即时消费。记录包含完整执行事实后一次写入并通过既有 commit/replay 增量推送，因此后台刷新较慢时详情记录可晚于客户端响应出现；本次没有另建按请求更新的事件流。shutdown 中 JoinSet 随 owner 取消，保留现有 ingress/详情丢弃计数边界。
 

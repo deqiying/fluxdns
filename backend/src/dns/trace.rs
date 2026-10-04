@@ -38,6 +38,33 @@ pub enum CacheActivityOutcome {
     Unrecorded,
 }
 
+/// 缓存写入或刷新实际取得的上游响应分类，用于区分“更新为新记录”与“仍为空应答”。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheActivityResponseClass {
+    Positive,
+    Nodata,
+    Nxdomain,
+    Servfail,
+    Truncated,
+    Refused,
+    Other,
+}
+
+impl From<super::ResponseClass> for CacheActivityResponseClass {
+    fn from(value: super::ResponseClass) -> Self {
+        match value {
+            super::ResponseClass::Positive => Self::Positive,
+            super::ResponseClass::NoData => Self::Nodata,
+            super::ResponseClass::NxDomain => Self::Nxdomain,
+            super::ResponseClass::ServFail => Self::Servfail,
+            super::ResponseClass::Truncated => Self::Truncated,
+            super::ResponseClass::Refused => Self::Refused,
+            super::ResponseClass::Other(_) => Self::Other,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheActivity {
@@ -45,6 +72,12 @@ pub struct CacheActivity {
     pub outcome: CacheActivityOutcome,
     pub upstream_target_name: Option<String>,
     pub upstream_used_name: Option<String>,
+    /// 本次写入/刷新取得的响应分类；未取得响应或历史记录缺失时为空。
+    #[serde(default)]
+    pub response_class: Option<CacheActivityResponseClass>,
+    /// 实际写入条目的缓存生命周期（秒）；未写入时为空。
+    #[serde(default)]
+    pub ttl_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -93,6 +126,8 @@ impl RequestTrace {
                     outcome: CacheActivityOutcome::Pending,
                     upstream_target_name: None,
                     upstream_used_name: None,
+                    response_class: None,
+                    ttl_secs: None,
                 })
             });
         }
@@ -156,6 +191,18 @@ impl CacheActivityGuard {
                 if let Some(activity) = &mut value.cache_activity {
                     activity.upstream_target_name = target.map(str::to_owned);
                     activity.upstream_used_name = used.map(str::to_owned);
+                }
+            });
+        }
+    }
+
+    /// 记录本次取得的响应分类与实际写入条目的生命周期，供详情区分刷新结果。
+    pub fn result(&self, class: CacheActivityResponseClass, ttl_secs: Option<u64>) {
+        if let Some(sender) = &self.trace.0 {
+            sender.send_modify(|value| {
+                if let Some(activity) = &mut value.cache_activity {
+                    activity.response_class = Some(class);
+                    activity.ttl_secs = ttl_secs;
                 }
             });
         }

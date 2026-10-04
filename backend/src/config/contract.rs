@@ -10,9 +10,10 @@ use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 
 use super::model::{
-    CacheMemoryDto, CacheOverrideDto, DatabaseType, EcsDto, HostsResourceDto, ListenerDto, LogsDto,
-    OptimisticDto, OutboundDto, RuleSetDto, StrategyDto, TtlOverrideDto, UpstreamDto, WebUiDto,
-    WorkDto, deserialize_duration, deserialize_optional_non_null, serialize_duration,
+    CacheMemoryDto, CacheOverrideDto, DEFAULT_OPTIMISTIC_NEGATIVE_MAX_AGE, DatabaseType, EcsDto,
+    HostsResourceDto, ListenerDto, LogsDto, OptimisticDto, OutboundDto, RuleSetDto, StrategyDto,
+    TtlOverrideDto, UpstreamDto, WebUiDto, WorkDto, deserialize_duration,
+    deserialize_optional_non_null, serialize_duration,
 };
 use super::resolve::lexical_normalize;
 use super::validate::{
@@ -105,6 +106,13 @@ pub struct GlobalCacheV2 {
         serialize_with = "serialize_duration"
     )]
     pub failure_ttl: Duration,
+    /// NODATA/NXDOMAIN 缓存生命周期与客户端可见 TTL 的上限；只作用于负应答。
+    #[serde(
+        default = "default_negative_ttl_max",
+        deserialize_with = "deserialize_duration",
+        serialize_with = "serialize_duration"
+    )]
+    pub negative_ttl_max: Duration,
     pub optimistic: OptimisticDto,
     #[serde(default)]
     pub persistence: SnapshotV2,
@@ -118,14 +126,23 @@ impl Default for GlobalCacheV2 {
                 max_size_bytes: 64 * 1024 * 1024,
             },
             failure_ttl: Duration::from_secs(5),
+            negative_ttl_max: DEFAULT_NEGATIVE_TTL_MAX,
             optimistic: OptimisticDto {
                 enabled: false,
                 answer_ttl: Duration::from_secs(10),
                 max_age: Duration::from_secs(86400),
+                negative_max_age: DEFAULT_OPTIMISTIC_NEGATIVE_MAX_AGE,
             },
             persistence: SnapshotV2::default(),
         }
     }
+}
+
+/// 负缓存 TTL 上限默认值；SOA.MINIMUM 很大的 zone 新增记录最多在该时间后可见。
+pub const DEFAULT_NEGATIVE_TTL_MAX: Duration = Duration::from_secs(300);
+
+fn default_negative_ttl_max() -> Duration {
+    DEFAULT_NEGATIVE_TTL_MAX
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -398,6 +415,12 @@ impl ConfigV2 {
             (Duration::from_secs(1)..=Duration::from_secs(300)).contains(&cache.failure_ttl),
             "dns.cache.failure_ttl",
             "failure TTL must be in 1s..=5m",
+            &mut report,
+        );
+        check(
+            (Duration::from_secs(1)..=Duration::from_secs(86400)).contains(&cache.negative_ttl_max),
+            "dns.cache.negative_ttl_max",
+            "negative TTL max must be in 1s..=1d",
             &mut report,
         );
         validate_optimistic(&cache.optimistic, "dns.cache.optimistic", &mut report);

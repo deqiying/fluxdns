@@ -51,4 +51,16 @@ describe("strategy form conversion", () => {
     const saved = strategyFromForm({ ...form, ttl_min: undefined }, strategy);
     expect(saved.ttl_override).toEqual({ max: "1h" });
   });
+
+  it("空应答乐观窗口零值往返保真，缺失时不凭空写入", () => {
+    const withNegative = { ...strategy, cache: { enabled: true, optimistic: { enabled: true, answer_ttl: "30s", max_age: "1h", negative_max_age: "0s" } } };
+    const form = strategyToForm(withNegative);
+    expect(form.cache_negative_max_age).toBe("0s");
+    expect(strategyFromForm({ ...form, cache_max_age: "2h" }, withNegative).cache?.optimistic).toEqual({ enabled: true, answer_ttl: "30s", max_age: "2h", negative_max_age: "0s" });
+    expect(strategyFromForm({ ...form, cache_negative_max_age: "5m" }, withNegative).cache?.optimistic?.negative_max_age).toBe("5m");
+
+    const legacy = strategyToForm(strategy);
+    expect(legacy.cache_negative_max_age).toBeUndefined();
+    expect(strategyFromForm({ ...legacy, cache_max_age: "2h" }, strategy).cache?.optimistic).toEqual({ enabled: false, answer_ttl: "0s", max_age: "2h" });
+  });
 });

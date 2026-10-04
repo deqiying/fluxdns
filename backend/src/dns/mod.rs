@@ -8,8 +8,8 @@ mod policy;
 mod trace;
 
 pub use trace::{
-    CacheActivity, CacheActivityGuard, CacheActivityKind, CacheActivityOutcome, RequestTrace,
-    RequestTraceSnapshot, ResponseDelivery,
+    CacheActivity, CacheActivityGuard, CacheActivityKind, CacheActivityOutcome,
+    CacheActivityResponseClass, RequestTrace, RequestTraceSnapshot, ResponseDelivery,
 };
 
 pub use context::{
