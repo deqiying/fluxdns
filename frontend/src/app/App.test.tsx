@@ -21,6 +21,7 @@ function renderApp(path: string) {
   );
 }
 
+// 全应用用例统一使用 vite.config.ts 的 CI 超时预算，避免局部旧值覆盖全局设置。
 describe("application routes", () => {
   it("未初始化时先进入初始化页且不请求受保护数据", async () => {
     setMockSetupRequired(true);
@@ -398,7 +399,7 @@ describe("application routes", () => {
       }],
       discard_external_changes: false,
     });
-  }, 10_000);
+  });
 
   it("代理页展示脱敏内联 URL，并在未修改时原样提交引用", async () => {
     const user = userEvent.setup();
@@ -464,7 +465,7 @@ describe("application routes", () => {
         },
       }],
     });
-  }, 10_000);
+  });
 
   it("Hosts 页面加载类型化来源和 Runtime 状态", async () => {
     setMockAuthenticated(true);
@@ -489,7 +490,7 @@ describe("application routes", () => {
     const dialog = await screen.findByRole("dialog", { name: "编辑规则集" });
     expect(within(dialog).getByLabelText("更新周期")).toHaveValue("1");
     expect(within(dialog).getByLabelText("更新周期单位").closest(".ant-select")?.textContent).toBe("天");
-  }, 10_000);
+  });
 
   it("策略页面展示有序规则和覆盖来源", async () => {
     const user = userEvent.setup();
@@ -543,7 +544,7 @@ describe("application routes", () => {
         },
       }],
     });
-  }, 10_000);
+  });
 
   it("Listener 页面展示真实绑定接纳状态", async () => {
     setMockAuthenticated(true);
@@ -582,7 +583,7 @@ describe("application routes", () => {
     await user.click(screen.getByRole("button", { name: "编辑客户端 desktop" }));
     const dialog = await screen.findByRole("dialog", { name: "编辑客户端" });
     expect(within(dialog).getByLabelText("客户端 ID")).toBeDisabled();
-  }, 10_000);
+  });
 
   it("DNS 页面展示缓存、详情和真实保留状态", async () => {
     const user = userEvent.setup();
@@ -606,7 +607,7 @@ describe("application routes", () => {
     expect(within(dialog).getByLabelText("最大陈旧时间")).toHaveValue("1");
     expect(within(dialog).getByLabelText("最大陈旧时间单位").closest(".ant-select")?.textContent).toBe("天");
     expect(within(dialog).queryByDisplayValue("5000000000ns")).toBeNull();
-  }, 10_000);
+  });
 
   it("系统配置页面区分只读启动配置和可编辑日志", async () => {
     const user = userEvent.setup();
@@ -837,7 +838,7 @@ describe("application routes", () => {
         },
       }],
     });
-  }, 10_000);
+  });
 
   it("普通 API 返回 401 时只跳转一次并显示 session 过期提示", async () => {
     setMockAuthenticated(true);
