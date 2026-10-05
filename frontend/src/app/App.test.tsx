@@ -602,15 +602,20 @@ describe("application routes", () => {
     renderApp("/clients");
     expect(await screen.findByRole("heading", { name: "客户端配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("Desktop-01")).toBeInTheDocument();
+    // 概览卡与列表只展示非继承覆盖项；无 IP 的客户端提示仅按 ID 匹配。
+    expect(screen.getByText("其中 1 个仅按 ID 匹配")).toBeInTheDocument();
+    expect(screen.getByText("仅按 ID 匹配")).toBeInTheDocument();
+    expect(screen.getByText("全部继承")).toBeInTheDocument();
     // 整页 getByRole 需计算全部可访问名称，在 jsdom 中耗时数秒；按钮自带 aria-label，直接按标签定位。
     await user.click(screen.getByLabelText("编辑客户端 desktop"));
-    const dialog = await screen.findByRole("dialog", { name: "编辑客户端" });
-    const input = within(dialog).getByLabelText("客户端 ID");
-    expect(input).toBeDisabled();
+    const dialog = await screen.findByRole("dialog", { name: /编辑客户端/ });
+    expect(within(dialog).getByLabelText("客户端 ID")).toHaveAttribute("readonly");
     expect(within(dialog).queryByText("修改客户端 ID 会改变该终端的请求身份")).not.toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "修改客户端 ID" }));
-    expect(input).toBeEnabled();
+    // 解锁后切换为可编辑输入框，需重新获取元素。
+    const input = within(dialog).getByLabelText("客户端 ID");
+    expect(input).not.toHaveAttribute("readonly");
     // 用 paste 一次性写入：逐字 type 会让整页与异步校验重复渲染，在 CI 上超出统一预算。
     await user.clear(input);
     await user.paste("bad id");
@@ -618,12 +623,21 @@ describe("application routes", () => {
     await user.clear(input);
     await user.paste("desktop-home");
     expect(await within(dialog).findByText("修改客户端 ID 会改变该终端的请求身份")).toBeInTheDocument();
+    expect(await within(dialog).findByText("格式有效，且未被其他客户端使用")).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    // ID 变化必须先经过单独确认，确认前不发起校验请求。
-    expect((await screen.findAllByText("确认修改客户端 ID？")).length).toBeGreaterThan(0);
+    // ID 变化必须先经过单独确认，且勾选知情项前不能确认；确认前不发起校验请求。
+    // 测试环境的 useId 固定返回同一值，抽屉与弹窗的 aria-labelledby 会冲突，因此按标题文本定位弹窗。
+    const [confirmTitle] = await screen.findAllByText("确认修改客户端 ID？");
+    const confirm = confirmTitle.closest<HTMLElement>(".ant-modal");
+    if (!confirm) throw new Error("确认弹窗未渲染");
+    expect(within(confirm).getByText("Desktop-01")).toBeInTheDocument();
+    expect(within(confirm).getByText("desktop-home")).toBeInTheDocument();
+    const confirmButton = within(confirm).getByRole("button", { name: "确认修改" });
+    expect(confirmButton).toBeDisabled();
     expect(requests).toHaveLength(0);
-    await user.click(await screen.findByRole("button", { name: "确认修改" }));
+    await user.click(within(confirm).getByRole("checkbox"));
+    await user.click(confirmButton);
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[0]).toMatchObject({
       changes: [{

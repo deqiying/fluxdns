@@ -1,0 +1,538 @@
+/* 客户端配置页：概览卡、列表与编辑抽屉。主题沿用 providers.tsx：主色 #007aff、圆角 6px。 */
+
+.client-summary {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin-bottom: 16px;
+}
+
+.client-summary-card {
+  display: grid;
+  gap: 10px;
+  padding: 16px 20px;
+  border: 1px solid #e0e2e6;
+  border-radius: 6px;
+  background: #fff;
+}
+
+.client-summary-label {
+  color: #4b5563;
+  font-size: 13px;
+}
+
+.client-summary-body {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  min-width: 0;
+}
+
+.client-summary-body strong {
+  color: #202124;
+  font-size: 22px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.client-summary-body span {
+  overflow: hidden;
+  color: #73737d;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-toolbar {
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.client-toolbar .ant-input-affix-wrapper {
+  width: min(320px, 100%);
+}
+
+.client-toolbar-count {
+  margin-inline-start: auto;
+  font-size: 13px;
+}
+
+.client-table .ant-table-tbody > tr.client-row-editing > td {
+  background: #f5f9ff;
+}
+
+.client-table .ant-table-tbody > tr.client-row-highlight > td {
+  background: #eaf3ff;
+  transition: background-color 0.6s ease;
+}
+
+.client-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.client-avatar {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.client-avatar-0 { color: #1d63c9; background: #e8f1fd; }
+.client-avatar-1 { color: #287642; background: #e9f5ec; }
+.client-avatar-2 { color: #b45f06; background: #fff1e0; }
+.client-avatar-3 { color: #6b4fbb; background: #f0ecfb; }
+.client-avatar-4 { color: #0f7a84; background: #e3f5f6; }
+
+.client-identity-text {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.client-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-id-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.client-id-badge {
+  flex-shrink: 0;
+  padding: 0 4px;
+  border-radius: 3px;
+  color: #8a8f98;
+  background: #f1f2f4;
+  font-size: 10px;
+  line-height: 16px;
+}
+
+.client-id-value {
+  overflow: hidden;
+  color: #4b5563;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-copy-button.ant-btn {
+  flex-shrink: 0;
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+  color: #8a8f98;
+}
+
+.client-chip-list {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.client-ip-chip,
+.client-ip-more,
+.client-override-chip {
+  padding: 2px 8px;
+  border: 1px solid #e3e5e8;
+  border-radius: 4px;
+  background: #f7f8f9;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.client-ip-chip {
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.client-ip-more {
+  border-color: #cfe2ff;
+  color: #007aff;
+  background: #eef5ff;
+  cursor: default;
+}
+
+.client-ip-tooltip {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.client-override-chip b {
+  font-weight: 600;
+}
+
+.client-strategy-tag {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px 10px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  color: #0a5cc2;
+  background: #e8f1fd;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.client-strategy-inherit {
+  border: 1px dashed #c9ccd1;
+  color: #73737d;
+  background: transparent;
+  font-weight: 400;
+}
+
+/* 编辑抽屉 */
+
+.client-drawer .ant-drawer-header {
+  align-items: flex-start;
+}
+
+.client-drawer-title {
+  display: grid;
+  gap: 2px;
+}
+
+.client-drawer-title > span:first-child {
+  font-size: 18px;
+}
+
+.client-drawer-title .ant-typography {
+  font-size: 12px;
+  font-weight: 400;
+}
+
+.client-drawer .ant-drawer-body {
+  padding-top: 12px;
+}
+
+.client-drawer-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.client-drawer-status {
+  color: #8b6318;
+  font-size: 13px;
+}
+
+.client-drawer-status-dirty::before {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin-inline-end: 8px;
+  border-radius: 50%;
+  background: #d48806;
+  vertical-align: 1px;
+  content: "";
+}
+
+.client-form-section {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 8px 0 12px;
+  color: #73737d;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.client-form-section::after {
+  flex: 1;
+  height: 1px;
+  background: #ebedf0;
+  content: "";
+}
+
+.client-required-mark::after {
+  margin-inline-start: 4px;
+  color: #ff4d4f;
+  content: "*";
+}
+
+.client-optional-mark {
+  margin-inline-start: 4px;
+  color: #8a8f98;
+  font-weight: 400;
+}
+
+.client-id-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+  padding-bottom: 8px;
+}
+
+.client-id-head-label {
+  display: inline-flex;
+  align-items: center;
+}
+
+.client-id-changed {
+  margin-inline-start: 8px;
+  padding: 0 6px;
+  border-radius: 4px;
+  color: #b45f06;
+  background: #fff1e0;
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.client-id-head .ant-btn-link {
+  height: 24px;
+  padding-inline: 4px;
+}
+
+.client-id-input input {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 13px;
+}
+
+.client-id-locked.ant-input-affix-wrapper {
+  color: #4b5563;
+  background: #f5f6f7;
+}
+
+.client-id-locked .ant-input-prefix {
+  color: #8a8f98;
+}
+
+.client-id-generate.ant-btn {
+  height: 22px;
+  margin-inline-start: 4px;
+  padding-inline: 4px 0;
+  border-inline-start: 1px solid #e3e5e8;
+  border-radius: 0;
+  padding-inline-start: 10px;
+}
+
+.client-id-extra {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.client-id-extra code {
+  font-family: "Cascadia Code", Consolas, monospace;
+}
+
+.client-id-valid {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #287642;
+}
+
+.client-id-impact {
+  margin-bottom: 20px;
+}
+
+/* 影响提示与表单同级，标题不使用 antd 带描述时的放大字号。 */
+.client-id-impact .ant-alert-title {
+  margin-bottom: 0;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.client-id-impact .ant-alert-icon {
+  font-size: 16px;
+}
+
+.client-id-impact ul {
+  margin: 4px 0 0;
+  padding-inline-start: 18px;
+}
+
+.client-id-impact li + li {
+  margin-top: 4px;
+}
+
+.client-id-impact-paths {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.client-id-impact-paths code,
+.client-id-confirm-doh code {
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.client-id-impact-paths code {
+  padding: 1px 8px;
+  border: 1px solid #f1d7a6;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.client-override-panel {
+  overflow: hidden;
+  border: 1px solid #e3e5e8;
+  border-radius: 6px;
+}
+
+.client-override-row + .client-override-row {
+  border-top: 1px solid #ebedf0;
+}
+
+.client-override-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+}
+
+.client-override-body {
+  padding: 0 16px 4px;
+}
+
+.client-override-pair {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.client-override-note.ant-typography {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+/* ID 修改确认 */
+
+.client-id-confirm-title {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.client-id-confirm-title .ant-typography {
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.client-id-confirm-icon {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  color: #d46b08;
+  background: #fff4e5;
+}
+
+.client-id-confirm-ids {
+  display: grid;
+  align-items: center;
+  gap: 10px 16px;
+  grid-template-columns: auto minmax(0, 1fr);
+  margin: 12px 0 16px;
+  padding: 14px 16px;
+  border-radius: 6px;
+  background: #f5f6f7;
+}
+
+.client-id-confirm-ids dt {
+  color: #73737d;
+  font-size: 12px;
+}
+
+.client-id-confirm-ids dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.client-id-chip {
+  display: inline-block;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  padding: 2px 10px;
+  border-radius: 4px;
+  font-family: "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.client-id-chip-old {
+  color: #b23b37;
+  background: #fceceb;
+  text-decoration: line-through;
+}
+
+.client-id-chip-new {
+  color: #287642;
+  background: #e9f5ec;
+}
+
+.client-id-confirm-doh {
+  margin-bottom: 14px;
+}
+
+.client-id-confirm-doh-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.client-id-confirm-doh-head .ant-typography-secondary {
+  font-size: 12px;
+}
+
+.client-id-confirm-doh ul {
+  margin: 0;
+  padding: 0;
+  border: 1px solid #e3e5e8;
+  border-radius: 6px;
+  list-style: none;
+}
+
+.client-id-confirm-doh li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px 6px 14px;
+}
+
+.client-id-confirm-doh li + li {
+  border-top: 1px solid #ebedf0;
+}
+
+@media (max-width: 1100px) {
+  .client-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 640px) {
+  .client-summary {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .client-toolbar-count {
+    margin-inline-start: 0;
+  }
+}

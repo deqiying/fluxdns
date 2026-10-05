@@ -9,6 +9,8 @@
 > 核对基线：`9555c38` 加本次工作树变更；本轮核对范围仅限服务状态趋势图两轴的刻度取值，其余范围按原日期和基线解释
 >
 > 2026-10-04 增量核对：`eb428f92cdc3acda836547107ef2f56f6d988249` 加本次工作树；仅核对三项包含搜索、配置读取恢复与策略覆盖编辑，其余范围沿用上述历史记录
+>
+> 2026-10-06 增量核对：`94dae99` 加本次工作树；仅核对 `/clients` 列表、编辑抽屉与客户端 ID 修改确认的重设计，其余范围沿用上述历史记录
 
 ## 路由与数据源
 
@@ -27,7 +29,7 @@
 | `/strategies` | [StrategiesPage](../../../frontend/src/modules/strategies/StrategiesPage.tsx) | 有序规则和 cache/TTL/ECS 继承/覆盖 |
 | `/hosts` | [HostsPage](../../../frontend/src/modules/hosts/HostsPage.tsx) | const/file 来源、运行状态与类型化编辑 |
 | `/rule-sets` | [RuleSetsPage](../../../frontend/src/modules/rule-sets/RuleSetsPage.tsx) | const/file/remote 与 json/clash/dat 分支 |
-| `/clients` | [ClientsPage](../../../frontend/src/modules/clients/ClientsPage.tsx) | name/client_id 分离、IP/CIDR 和策略覆盖 |
+| `/clients` | [ClientsPage](../../../frontend/src/modules/clients/ClientsPage.tsx) | 概览卡与分段筛选、name/client_id 分离与复制、IP/CIDR 折叠、仅列非继承覆盖项；右侧抽屉编辑，ID 修改需勾选确认 |
 | `/proxies` | [ProxiesPage](../../../frontend/src/modules/proxies/ProxiesPage.tsx) | SOCKS5 SecretRef env/file/内联 URL；内联形式的密码位以占位符 `FLUXDNS_REDACTED_SECRET` 回显，未改动时后端恢复原密码 |
 | `/system-settings` | [SystemSettingsPage](../../../frontend/src/modules/system-settings/SystemSettingsPage.tsx) | 启动字段只读、logs enable/level/path 热编辑 |
 
@@ -105,6 +107,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | 速率卡片主值与平均值口径 | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) 的 `Metric`／`realtimeReadout`／`averageQps`、[rateTrend.ts](../../../frontend/src/modules/dashboard/rateTrend.ts) 的 `latestReadouts`、[index.css](../../../frontend/src/styles/index.css) 的 `.service-status-foot`／`.service-status-average` | `/dashboard` 两张速率卡片主值改为「实时 QPS＝最近一个完整秒的请求数」「实时 RPM＝过去 60 秒请求数」，卡底右对齐显示近 600 秒平均值（平均 QPS＝`rpm` ÷ 60、平均 RPM＝`rpm`）；后端 `qps` 标量不再显示 | 2026-09-27：前端 31 文件 170 项 Vitest（含新增 6 项：末位读数取原始计数、末端不可用不回退、空序列、主值与平均值分别断言、平均值独立降级、无逐秒样本按暖机降级）、`pnpm run typecheck` 与生产构建通过；`App.test.tsx` 断言更新为「13 请求/秒」「平均 QPS 4.25」「314 请求/分钟」「平均 RPM 255」，回退到旧口径时这些断言失败 | 未做真实浏览器视觉复验（本机工作面板浏览器无法访问本地 Vite 端口）：五列卡片底行在 1440 与窄屏的实际换行、深色样例 `--service-strong` 对比度均未目视；仅在等宽设计稿同字体栈下量得底行合计约 124px < 卡内宽 166px |
 | 登录与初始化页重设计 | [LoginPage](../../../frontend/src/modules/auth/LoginPage.tsx)、[InitializePage](../../../frontend/src/modules/auth/InitializePage.tsx)、[index.css](../../../frontend/src/styles/index.css) 的 `.login-*` | 登录页由深色 hero + 浅色卡片改为同侧浅色双栏：左栏品牌章鱼图标 + 蓝色 kicker + 40px 标题 + 三条能力说明（实时运行状态／配置变更可追溯／会话自动续期），右栏白底表单列（26px 标题、40px 输入、44px 主按钮、按钮下方续期说明）；≤900px 隐藏左栏、顶部显示品牌行并把表单改为白底圆角卡片；初始化页沿用同一版式（不含能力清单） | 2026-09-27：前端 31 文件 175 项 Vitest 与 `pnpm run typecheck` 通过，`App.test.tsx` 既有登录/初始化断言（两个标题、三个 label、按钮名、过期提示）保持通过；另在真实 Chromium 用 `_fluxdns/` 下临时 file:// 断点预览实测：1440×900 得 879.7px／560.3px 两列、白底表单列 1px 左边框、卡片 372px 居中于 x=974、三条说明间距 61px 无重叠且未越过页脚、无横向溢出；390×844 得单列、左栏 `display:none`、品牌行与面板同为 #f7f7f8、卡片 342px 圆角 12 带 1px #e0e2e6 边框 | 未在真实浏览器目视 antd 控件外观、密码可见性切换与后端联调登录；断点预览页是手工同步的 markup 副本，与 TSX 存在漂移风险；未覆盖 900px 临界值（898／901）与 320px 极窄屏 |
 | 趋势图轴刻度改为整数计数 | [MetricsTrendChart](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx) 的 `AXIS_STEP_MULTIPLIERS`／`AXIS_INTERVALS`／`axisMaximum`／`integerStep`、[MetricsTrendChart.test.tsx](../../../frontend/src/modules/dashboard/MetricsTrendChart.test.tsx) | `/dashboard` 请求趋势图两轴都是请求计数，单格刻度改为「不小于峰值四分之一的易读整数」，轴上限恒为四倍单格并取消原来的 10% 额外余量；单格倍数再补 1.2/1.25 补上 100→150 的 50% 跨度；两轴仍各自独立缩放，共用五条网格线 | 2026-09-30：前端 31 文件 176 项 Vitest（含 1 项用例：RPM 峰值 86 → 100/75/50/25/0、460 → 480/360/240/120/0、500 → 500/375/250/125/0、906 → 1,000/750/500/250/0、暖机无可用样本 → 4/3/2/1/0）、`pnpm run typecheck` 与生产构建通过；从源码读出候选集与分段数后按同一公式离线复算：改动前规则峰值 21/188/86/906 给 40/400/160/1,600（曲线占 53%/47%/54%/57%），首次整数化给 24/200/100/1,000，本批次把 RPM 峰值 460 由 600 收到 480（77% → 96%）、峰值 500 由 600 收到 500（83% → 100%），RPM 区（峰值 40–4000）最差填充由 66.8%（峰值 401）升到 75.0%（峰值 2401） | 峰值 ≤ 4 时整数刻度只能给 0–4 轴，低流量区间仍偏宽：峰值 1 填充 25%、峰值 5 填充 62.5%，这是「整数刻度 + 四等分」的固定下界；未在真实浏览器复验新刻度观感与窄屏 48px 轴宽下的标签宽度 |
+| 客户端页面重设计 | [ClientsPage](../../../frontend/src/modules/clients/ClientsPage.tsx)、[ClientFormDrawer](../../../frontend/src/modules/clients/ClientFormDrawer.tsx)、[ClientIdConfirmModal](../../../frontend/src/modules/clients/ClientIdConfirmModal.tsx)、[client-view](../../../frontend/src/modules/clients/client-view.ts)、[clients.css](../../../frontend/src/modules/clients/clients.css) | `/clients` 概览卡、筛选、列表列与编辑抽屉；额外只读 `listener` 模块生成 DoH 路径提示 | 2026-10-06：前端 36 文件 202 项 Vitest、`pnpm run typecheck`、生产构建通过；`client-view` 单测覆盖覆盖项摘要（纳秒串转紧凑单位、`0s` 显示不限）、概览统计、DoH 模板提取与代入、UUID v4 生成；应用测试覆盖只读 ID、解锁校验、未勾选知情项时确认按钮禁用及提交报文；mock 模式无头 Edge 1440×900 与 900×900 截图核对列表、抽屉、ID 编辑与确认弹窗 | mock 监听入口没有含 `{client_id}` 的 DoH 路由，DoH 路径区块只由单测覆盖，未在浏览器中渲染核对；复制按钮依赖 `navigator.clipboard`，非安全上下文下只提示失败；未接真实后端做浏览器验收 |
 
 P4 完整 Vitest 为 23 文件 99 项，v2 schema contract 4 项、typecheck 与 production build 通过。Windows 使用 `_fluxdns/p4-live/` ConfigV2 和内嵌 debug binary 完成真实登录、Bearer ticket、UDP/SQLite/HTTP/WS、断线 replay、会话失效、稳定详情以及桌面/390×844 验收，浏览器 Console 无 error/warning。P3 配置验收仍见[前端应用](application.md#p3-联合验收2026-09-08)，P4 安全和实时证据见[共享实时连接](application.md#p4-共享实时连接2026-09-09)。
 
