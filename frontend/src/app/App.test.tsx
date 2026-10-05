@@ -602,7 +602,8 @@ describe("application routes", () => {
     renderApp("/clients");
     expect(await screen.findByRole("heading", { name: "客户端配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("Desktop-01")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "编辑客户端 desktop" }));
+    // 整页 getByRole 需计算全部可访问名称，在 jsdom 中耗时数秒；按钮自带 aria-label，直接按标签定位。
+    await user.click(screen.getByLabelText("编辑客户端 desktop"));
     const dialog = await screen.findByRole("dialog", { name: "编辑客户端" });
     const input = within(dialog).getByLabelText("客户端 ID");
     expect(input).toBeDisabled();
@@ -610,11 +611,12 @@ describe("application routes", () => {
 
     await user.click(within(dialog).getByRole("button", { name: "修改客户端 ID" }));
     expect(input).toBeEnabled();
+    // 用 paste 一次性写入：逐字 type 会让整页与异步校验重复渲染，在 CI 上超出统一预算。
     await user.clear(input);
-    await user.type(input, "bad id");
+    await user.paste("bad id");
     expect(await within(dialog).findByText(/仅支持 A-Z a-z 0-9/)).toBeInTheDocument();
     await user.clear(input);
-    await user.type(input, "desktop-home");
+    await user.paste("desktop-home");
     expect(await within(dialog).findByText("修改客户端 ID 会改变该终端的请求身份")).toBeInTheDocument();
 
     await user.click(within(dialog).getByRole("button", { name: "保存" }));

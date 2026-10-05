@@ -102,7 +102,7 @@ export function ClientsPage() {
       okText: "确认修改",
       cancelText: "取消",
       content: (
-        <Space direction="vertical" size={8}>
+        <Space orientation="vertical" size={8}>
           <Typography.Text>原 ID：<Typography.Text code delete>{previous}</Typography.Text></Typography.Text>
           <Typography.Text>新 ID：<Typography.Text code>{next}</Typography.Text></Typography.Text>
           <Typography.Text type="secondary">终端需改用新的 DoH 路径；使用旧 ID 的请求将不再匹配本客户端。历史查询与统计仍归属旧 ID，不会迁移。</Typography.Text>
@@ -165,21 +165,23 @@ export function ClientsPage() {
       <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加客户端" : "编辑客户端"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
         <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
           <Form.Item name="name" label="管理名称" rules={[{ required: true }, { max: 128 }]}><Input /></Form.Item>
-          <Form.Item name="client_id" label="客户端 ID" rules={clientIdRules} extra="终端的请求身份：DoH 路径中的 {client_id} 段或精确 ID 匹配">
-            <Input
-              disabled={editing !== "create" && !idUnlocked}
-              placeholder="例如 phone-xiao"
-              addonAfter={editing === "create" ? undefined : idUnlocked
-                ? <Button type="link" size="small" icon={<Undo2 size={14} />} aria-label="撤销客户端 ID 修改" onClick={resetClientId}>撤销</Button>
-                : <Button type="link" size="small" icon={<Pencil size={14} />} aria-label="修改客户端 ID" onClick={() => setIdUnlocked(true)}>修改</Button>}
-            />
+          {/* 外层只负责标签、必填标记和错误展示；noStyle 子项承载值与校验，以便与操作按钮组成 Space.Compact。 */}
+          <Form.Item label="客户端 ID" htmlFor="client_id" required extra="终端的请求身份：DoH 路径中的 {client_id} 段或精确 ID 匹配">
+            <Space.Compact block>
+              <Form.Item name="client_id" noStyle rules={clientIdRules}>
+                <Input disabled={editing !== "create" && !idUnlocked} placeholder="例如 phone-xiao" />
+              </Form.Item>
+              {editing === "create" ? null : idUnlocked
+                ? <Button icon={<Undo2 size={14} />} aria-label="撤销客户端 ID 修改" onClick={resetClientId}>撤销</Button>
+                : <Button icon={<Pencil size={14} />} aria-label="修改客户端 ID" onClick={() => setIdUnlocked(true)}>修改</Button>}
+            </Space.Compact>
           </Form.Item>
           {idChanged ? (
             <Alert
               type="warning"
               showIcon
               style={{ marginBottom: 24 }}
-              message="修改客户端 ID 会改变该终端的请求身份"
+              title="修改客户端 ID 会改变该终端的请求身份"
               description="终端需改用新的 DoH 路径，使用旧 ID 的请求将不再匹配本客户端；历史查询与统计仍归属旧 ID，不会迁移；该客户端的缓存将按新身份重新建立。"
             />
           ) : null}
