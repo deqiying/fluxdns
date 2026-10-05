@@ -30,7 +30,7 @@
 | --- | --- |
 | `version` | 只接受 `2`；其他版本在完整解析前拒绝，无转换 |
 | `name` | 各命名空间内唯一，1-128 个 ASCII 字符 `[A-Za-z0-9_.!-]`；上游和组共享空间；不同空间可同名，DoH endpoint 名仅在所属 listener 内唯一 |
-| `clients[].client_id` | 必填、全体客户端唯一、大小写敏感，1-128 个 URL unreserved ASCII `[A-Za-z0-9._~-]`；普通编辑不可改变，name 不派生 ID |
+| `clients[].client_id` | 必填、全体客户端唯一、大小写敏感，1-128 个 URL unreserved ASCII `[A-Za-z0-9._~-]`；普通编辑可显式修改（缺省沿用原值），name 不派生 ID；修改后历史记录仍归属旧 ID |
 | `clients[].match.ips` | 缺省空数组；最多 256 项；地址转 /32 或 /128，CIDR 清除主机位，mapped IPv6 转 IPv4；规范化重复拒绝，包含关系允许 |
 | `dns.cache` | 缺失时全局池关闭，内存 64 MiB，failure TTL 5s，optimistic 关闭/answer TTL 10s/max age 1d；显式对象沿用必填字段规则 |
 | `dns.cache.persistence` | 缺失或空对象为 `enabled: false`、`path: ./data/dns-cache.db`、`snapshot_interval: 5m`；周期 1s-1d；删除旧 `max_size_bytes` |
@@ -61,7 +61,7 @@ Windows Rust 1.98.0 执行 `cargo test --manifest-path backend/Cargo.toml -- --n
 
 [`ConfigStore`](../../backend/src/config/store.rs) 的 [`active`](../../backend/src/config/store/active.rs) 子模块持有唯一 v2 活动源：生产启动把 loader 实际消费的原始正文及 runtime revision 交给 `with_active_source`，并要求源文件和派生快照一致。Management 复用该 active store；首次用户提交在同一 transaction gate 中校验 v2 候选、原子写入两份文件，并同步更新认证用户和活动文件事实。
 
-- [`config/edit.rs`](../../backend/src/config/edit.rs) 承接原 Management 的严格变更类型，Management 重用同一类型，无新增 HTTP 契约。旧 name 相对同一活动快照定位，单候选不重复编辑同一目标；交换名称按一次映射处理，不递归串联改名。上游/组共享空间，客户端更新保留原 `client_id`。
+- [`config/edit.rs`](../../backend/src/config/edit.rs) 承接原 Management 的严格变更类型，Management 重用同一类型，无新增 HTTP 契约。旧 name 相对同一活动快照定位，单候选不重复编辑同一目标；交换名称按一次映射处理，不递归串联改名。上游/组共享空间。客户端更新的 `ClientEdit.client_id` 可选：缺省保留原值，显式提供时替换请求身份，格式与唯一性由整份候选的契约校验统一拒绝，因此同一候选内互换两个客户端的 ID 也合法。
 - 候选依次执行变更预算、活动源定向修改、已知 variant 引用更新、完整 `ConfigV2::parse/validate`、两级路径检查、CST 定位编辑及整树等价复核。覆盖 listener/DoH route、bootstrap、组成员/fallback、策略、Hosts、rule-set selector、proxy 和客户端策略；不对正文、路径、SecretRef 做字符串替换。资源首载、物理 owner 路径、socket 和进程 prepare 仍属于后续运行接线，不能把这一步视为可应用运行态。
 - [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。新增片段经 serializer 转义；支持块/flow、CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验；锚点/别名/merge 等无法安全维护的表达明确拒绝，没有整份重序列化回退。
 - [`observation`](../../backend/src/config/store/observation.rs) 有界读取源与派生文件，各自区分可读/缺失/不可读/超限，组合 token 包含内容指纹和物理文件身份；同内容替换仍产生不同 token。拒绝 hard link、symlink/reparse 路径；读取前后核对身份和元数据。Windows 使用真实 FileId，Unix 代码未在本次执行。此观测不提供 filesystem CAS，正式替换前仍须重新核对；BC-29 的写入身份与旁文件保护见下节。
@@ -726,6 +726,8 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 | `edns_client_subnet` | object | 可选 | 客户端级 ECS 覆盖。 |
 
 匹配优先级固定为：先精确 `client_id`，再按 IP 的最长 CIDR 前缀。在同一优先级出现多个冲突规则时在配置校验阶段报错，不依赖数组顺序。单个客户端可以仅由 `client_id` 标识而没有 IP 条目。
+
+修改 `client_id` 立即替换运行时匹配索引：使用旧 ID 的 DoH 请求不再命中该客户端（可能回落到 IP 匹配），客户端缓存池按新身份重新建立，旧身份的条目不再被命中，按常规过期与容量淘汰回收。已写入的详情和统计保留请求时冻结的旧 ID，不迁移或重写；历史页面按当前目录把 ID 投影为名称，因此旧 ID 的记录不再显示当前名称，按名称筛选也只覆盖新 ID。
 
 客户端级 `cache.enabled: true` 选择“实际客户端身份 + 生效策略”逻辑池，`false` 完全禁用当前请求的缓存；只有整个客户端 `cache` 对象缺失时才继续选择策略池或全局池。客户端级 `ttl_override` 和 `edns_client_subnet` 分别遵循[覆盖和继承](#25-覆盖和继承)中的层级规则。
 

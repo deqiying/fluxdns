@@ -774,6 +774,7 @@ components:
       required: [name]
       properties:
         name: {$ref: "#/components/schemas/Name"}
+        client_id: {allOf: [{$ref: "#/components/schemas/ClientId"}], description: 缺省沿用活动值；提供时替换请求身份，历史记录仍保留写入时的旧 ID}
         match: {$ref: "#/components/schemas/ClientMatch"}
         strategy: {$ref: "#/components/schemas/Name"}
         cache: {$ref: "#/components/schemas/CacheOverride"}

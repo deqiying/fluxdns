@@ -55,11 +55,14 @@ pub enum ResourceMutation<T> {
     Update { original_name: String, value: T },
 }
 
-/// 普通编辑只允许此白名单；client_id 不随改名或差异采用改变。
+/// 普通编辑白名单。`client_id` 可选：缺省沿用活动值，显式提供时替换请求身份；
+/// 格式与唯一性由整份候选的契约校验统一拒绝。历史记录保留写入时的旧 ID，不迁移。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ClientEdit {
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
     #[serde(default)]
     pub r#match: ClientMatchV2,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -250,7 +253,8 @@ pub(crate) fn build_candidate(
                     .find(|item| item.name == *original_name)
                     .ok_or(EditError::NotFound)?;
                 let mut next = to_value(value)?;
-                next["client_id"] = Value::String(old.client_id.clone());
+                let client_id = value.client_id.as_ref().unwrap_or(&old.client_id);
+                next["client_id"] = Value::String(client_id.clone());
                 (Some(original_name.as_str()), next, Some(to_value(old)?))
             }
             ConfigChange::Dns(value) => (None, to_value(value)?, Some(to_value(&original.dns)?)),

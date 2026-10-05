@@ -113,13 +113,13 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`ListenersPage`](../../../frontend/src/modules/listeners/ListenersPage.tsx) 已替换 `/listeners` 空态。UDP/TCP 编辑地址、端口、策略和可选 Hosts；DoH 编辑有序 route 及多个 endpoint，并按 TLS terminate/external、peer/forwarded_header/proxy_protocol 选择白名单字段。列表从 Runtime 投影显示实际 binding/accepting，保存后的物理冲突、差量重绑和补偿仍由后端 prepare/owner 决定。标题区与 服务状态／解析记录 共用同一套层级（h2 34px、字重 650、字距 -1px、下边距 32px、操作区垂直居中），副标题为同构短句，右上角只保留 `ConfigSyncBadge` 同步胶囊与主操作按钮，不再展示 active/file revision；胶囊读全局 30 秒轮询的配置状态，避免与全局同步提示给出矛盾结论，而编辑禁用仍沿用模块读取的既有判定；列名、搜索、空态与弹窗标题统一为中文。
 
-[`ClientsPage`](../../../frontend/src/modules/clients/ClientsPage.tsx) 已替换 `/clients` 空态，列表同时展示唯一管理 name、请求匹配 `client_id` 和 IP/CIDR。创建时输入 ID，编辑时 ID 控件只读且 payload 通过 `clientEditValue` 剔除；name、IP、策略及 cache/TTL/ECS 覆盖按旧 name 提交，不重写历史身份。TTL 覆盖的最小/最大值改用共享 `DurationInput`，留空表示不设置该边界，`0s` 表示该边界不设限。
+[`ClientsPage`](../../../frontend/src/modules/clients/ClientsPage.tsx) 已替换 `/clients` 空态，列表同时展示唯一管理 name、请求匹配 `client_id` 和 IP/CIDR。创建时输入 ID；编辑时 ID 默认锁定，点“修改”后才可编辑，前端按后端规则预检格式（1-128 个 `[A-Za-z0-9._~-]`）和与已加载客户端的唯一性，“撤销”恢复原值。ID 实际变化时表单内显示影响提示，保存前另行弹出新旧 ID 确认；只有变化时 payload 才在 `clientEditValue` 结果上追加 `client_id`。name、IP、策略及 cache/TTL/ECS 覆盖按旧 name 提交，历史记录不迁移。TTL 覆盖的最小/最大值改用共享 `DurationInput`，留空表示不设置该边界，`0s` 表示该边界不设限。
 
 [`DnsSettingsPage`](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) 已替换 `/dns-settings` 空态，分区编辑缓存/快照、TTL、ECS、详情记录和 R/G/T。保留保存前调用正式 preview 获取真实 SQLite/WAL 字节与候选 UTC cutoff，并把结果并入后端 `retention_shortening` 确认；浏览器不自行计算权威水位，保存也不触发立即清理。缓存失败 TTL、乐观回答 TTL、最大陈旧时间、快照周期与 TTL 覆盖上下限统一用共享 `DurationInput`（必填字段要求大于 0，TTL 上下限允许 `0s` 表示不设限），回填不再出现纳秒串；字段上下界仍由后端权威校验。
 
 [`SystemSettingsPage`](../../../frontend/src/modules/system-settings/SystemSettingsPage.tsx) 已替换 `/system-settings` 空态。`work/rules/database/records` 活动源路径表达与 WebUI 监听来自 `SystemConfigRead` 且保持只读，不冒充 Runtime 解析后的绝对路径；日志 `enable/level/path` 单独通过 `logs` 模块候选预校验、热应用、持久化和回显，不向启动配置字段提供伪编辑入口。
 
-FC-16 组合采用把外部差异中的同名资源转换为带明确 `original_name` 的 update，仅外部资源转换为 create；仅活动资源保持禁选，不推断删除。客户端 update 剔除只读 `client_id`。用户可跨模块勾选白名单变化，一次提交全局 Candidate；未选差异与 `work/database/webui/protected_credentials` 受保护变化通过 `discard_external_changes` 确认后按活动配置还原，二次外改继续由 file revision 冲突阻断。
+FC-16 组合采用把外部差异中的同名资源转换为带明确 `original_name` 的 update，仅外部资源转换为 create；仅活动资源保持禁选，不推断删除。客户端 update 剔除 `client_id`，外部 ID 变化不随采用提交，需在客户端页面单独修改并确认。用户可跨模块勾选白名单变化，一次提交全局 Candidate；未选差异与 `work/database/webui/protected_credentials` 受保护变化通过 `discard_external_changes` 确认后按活动配置还原，二次外改继续由 file revision 冲突阻断。
 
 ## P3 联合验收（2026-09-08）
 
@@ -145,7 +145,7 @@ Windows `_fluxdns/p4-live/` 内嵌 debug binary 的独立真实 socket smoke 覆
 
 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 固定 12 个一级路径与配置模块映射，保留 `/dashboard`、`/queries`；上游组仅为 `/upstreams` 页内 tab。App 与导航消费该表，P3 九个配置入口均已挂载领域页面；路径存在仍不能替代其真实读写与浏览器证据。
 
-[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型：草稿固定双 revision，区分预校验/确认/应用/结果未知；客户端普通编辑白名单剔除 `client_id`；操作结果区分同步、仅重试持久化、回读活动值和阻塞；大整数转表单前检查安全范围。FC-02 已补配置 client、操作回读、query key/精确失效、共享值转换和 Modal 容器；全局文件状态由壳层协调器消费 TanStack Query，不另建可变配置权威。P3 各领域表单复用该链路。
+[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型：草稿固定双 revision，区分预校验/确认/应用/结果未知；`clientEditValue` 默认剔除 `client_id`，修改请求身份必须由调用方显式追加；操作结果区分同步、仅重试持久化、回读活动值和阻塞；大整数转表单前检查安全范围。FC-02 已补配置 client、操作回读、query key/精确失效、共享值转换和 Modal 容器；全局文件状态由壳层协调器消费 TanStack Query，不另建可变配置权威。P3 各领域表单复用该链路。
 
 FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置 endpoint、operation 单次发送/回读/unknown、query key/失效、单位/duration/IP/继承/variant 及脏关闭确认；与 Rust 共用的 schema 夹具测试见[交付实现](../delivery.md#前端与接口生成)。这些验证使用 MSW/jsdom，不证明后端配置 route、真实文件、浏览器路由离开或内嵌环境已经接线。
 

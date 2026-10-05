@@ -18,7 +18,7 @@ export type FormPhase =
   | { kind: "result_unknown"; draft: ConfigDraft; operationId: string }
   | { kind: "settled"; draft: ConfigDraft; operation: Schemas["OperationResult"] };
 
-/** 只选普通编辑字段；ID 只用于创建，不能随名称修改或外部差异一起提交。 */
+/** 只选普通编辑字段且不带 ID；修改请求身份必须由调用方显式追加 client_id，避免随改名或外部差异隐式变更。 */
 export function clientEditValue(source: Schemas["Client"]): Schemas["ClientEdit"] {
   const { name, match, strategy, cache, ttl_override, edns_client_subnet } = source;
   return { name, match, strategy, cache, ttl_override, edns_client_subnet };

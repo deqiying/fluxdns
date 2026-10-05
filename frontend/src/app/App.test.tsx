@@ -574,15 +574,61 @@ describe("application routes", () => {
     expect(document.querySelector(".config-sync-badge")).not.toBeNull();
   });
 
-  it("客户端编辑时保持 client_id 只读", async () => {
+  it("客户端 ID 默认锁定，显式修改并确认后随更新提交", async () => {
     const user = userEvent.setup();
+    const requests: unknown[] = [];
     setMockAuthenticated(true);
+    server.use(
+      http.post("/api/v2/config/modules/clients/validate", async ({ request }) => {
+        const candidate = await request.json() as { expected: unknown };
+        requests.push(candidate);
+        return HttpResponse.json({
+          validation_token: "validation-clients",
+          expected: candidate.expected,
+          expires_at_ms: Date.now() + 30_000,
+          required_confirmations: [],
+          affected_names: ["desktop"],
+        });
+      }),
+      http.post("/api/v2/config/modules/clients/apply", async ({ request }) => {
+        const body = await request.json() as { operation_id: string };
+        requests.push(body);
+        return HttpResponse.json({
+          operation_id: body.operation_id,
+          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
+        });
+      }),
+    );
     renderApp("/clients");
     expect(await screen.findByRole("heading", { name: "客户端配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("Desktop-01")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "编辑客户端 desktop" }));
     const dialog = await screen.findByRole("dialog", { name: "编辑客户端" });
-    expect(within(dialog).getByLabelText("客户端 ID")).toBeDisabled();
+    const input = within(dialog).getByLabelText("客户端 ID");
+    expect(input).toBeDisabled();
+    expect(within(dialog).queryByText("修改客户端 ID 会改变该终端的请求身份")).not.toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "修改客户端 ID" }));
+    expect(input).toBeEnabled();
+    await user.clear(input);
+    await user.type(input, "bad id");
+    expect(await within(dialog).findByText(/仅支持 A-Z a-z 0-9/)).toBeInTheDocument();
+    await user.clear(input);
+    await user.type(input, "desktop-home");
+    expect(await within(dialog).findByText("修改客户端 ID 会改变该终端的请求身份")).toBeInTheDocument();
+
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    // ID 变化必须先经过单独确认，确认前不发起校验请求。
+    expect((await screen.findAllByText("确认修改客户端 ID？")).length).toBeGreaterThan(0);
+    expect(requests).toHaveLength(0);
+    await user.click(await screen.findByRole("button", { name: "确认修改" }));
+    await waitFor(() => expect(requests).toHaveLength(2));
+    expect(requests[0]).toMatchObject({
+      changes: [{
+        module: "clients",
+        change: { action: "update", original_name: "desktop", value: { name: "desktop", client_id: "desktop-home" } },
+      }],
+    });
   });
 
   it("DNS 页面展示缓存、详情和真实保留状态", async () => {

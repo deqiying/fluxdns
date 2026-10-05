@@ -50,6 +50,48 @@ fn client_rename_preserves_id_implicit_defaults_and_comments() {
 }
 
 #[test]
+fn client_update_replaces_id_only_when_explicit() {
+    let candidate = build(FIXTURE, &changes(r#"[
+      {"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"desktop","client_id":"desktop-home","match":{"ips":["192.0.2.10","2001:db8::/64"]}}}}
+    ]"#)).unwrap();
+    assert_eq!(candidate.config.clients[0].client_id, "desktop-home");
+    assert!(candidate.source.contains("desktop-home"));
+    assert!(!candidate.source.contains("Desktop-01"));
+}
+
+#[test]
+fn client_id_update_rejects_invalid_format_and_duplicates() {
+    let invalid = build(
+        FIXTURE,
+        &changes(
+            r#"[
+      {"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"desktop","client_id":"has space/1"}}}
+    ]"#,
+        ),
+    );
+    assert!(matches!(invalid, Err(EditError::Validation(_))));
+
+    let source = format!("{FIXTURE}\n  - name: laptop\n    client_id: Laptop-01\n");
+    let duplicate = build(
+        &source,
+        &changes(
+            r#"[
+      {"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"desktop","client_id":"Laptop-01"}}}
+    ]"#,
+        ),
+    );
+    assert!(matches!(duplicate, Err(EditError::Validation(_))));
+
+    // 两个客户端在同一候选里互换 ID 时，按整份候选校验，不因中间状态冲突而拒绝。
+    let swapped = build(&source, &changes(r#"[
+      {"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"desktop","client_id":"Laptop-01"}}},
+      {"module":"clients","change":{"action":"update","original_name":"laptop","value":{"name":"laptop","client_id":"Desktop-01"}}}
+    ]"#)).unwrap();
+    assert_eq!(swapped.config.clients[0].client_id, "Laptop-01");
+    assert_eq!(swapped.config.clients[1].client_id, "Desktop-01");
+}
+
+#[test]
 fn validates_complete_candidate_not_just_shape() {
     for json in [
         r#"[{"module":"listener","change":{"action":"update","original_name":"local","value":{"name":"local","type":"udp","addresses":["127.0.0.1"],"port":15353,"strategy":"missing"}}}]"#,
@@ -151,7 +193,7 @@ fn budget_and_readonly_payloads_are_rejected() {
     ));
     for json in [
         r#"[{"module":"database","change":{"path":"elsewhere"}}]"#,
-        r#"[{"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"new","client_id":"New"}}}]"#,
+        r#"[{"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"new","client_ids":["New"]}}}]"#,
         r#"[{"module":"logs","change":{"enable":true,"level":"info","path":"./logs/other.log","users":[]}}]"#,
     ] {
         assert!(serde_json::from_str::<Vec<ConfigChange>>(json).is_err());

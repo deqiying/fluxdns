@@ -96,7 +96,7 @@ function externalAdoptionItem(entry: ExternalEntry, index: number): ExternalAdop
         ? { module: "clients", change: { action: "update", original_name: active.value.name, value: clientEditValue(external.value) } }
         : { module: "clients", change: { action: "create", value: external.value } });
       if (active && active.value.client_id !== external.value.client_id) {
-        item.note = "client_id 是只读匹配身份，本次采用不会修改";
+        item.note = "client_id 变化不随采用提交，请在客户端页面单独修改";
         item.fields = diffFields(clientEditValue(active.value), clientEditValue(external.value));
       }
       return item;

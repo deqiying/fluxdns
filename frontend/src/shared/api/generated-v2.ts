@@ -730,6 +730,8 @@ export interface components {
         };
         ClientEdit: {
             name: components["schemas"]["Name"];
+            /** @description 缺省沿用活动值；提供时替换请求身份，历史记录仍保留写入时的旧 ID */
+            client_id?: components["schemas"]["ClientId"];
             match?: components["schemas"]["ClientMatch"];
             strategy?: components["schemas"]["Name"];
             cache?: components["schemas"]["CacheOverride"];

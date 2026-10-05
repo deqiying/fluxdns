@@ -17,16 +17,16 @@ describe("P0 v2 路由和表单契约", () => {
     expect(upstreamTabs).toEqual(["upstreams", "groups"]);
   });
 
-  it("客户端编辑移除 ID，保留缺失继承与显式禁用", () => {
+  it("客户端编辑默认移除 ID，保留缺失继承与显式禁用", () => {
     const client = { name: "desktop", client_id: "Desktop-01", cache: {enabled: false} } satisfies Schemas["Client"];
     const value = clientEditValue(client);
     expect(JSON.parse(JSON.stringify(value))).toEqual({name: "desktop", cache: {enabled: false}});
     expect(value).not.toHaveProperty("client_id");
     const change = {module: "clients", change: {action: "update", original_name: "desktop", value: {...value, name: "renamed"}}} satisfies Schemas["ConfigChange"];
     expect(change.change.original_name).toBe("desktop");
-    // @ts-expect-error 普通客户端编辑不接受 client_id。
-    const invalid: Schemas["ClientEdit"] = {name: "desktop", client_id: "altered"};
-    expect(invalid).toBeDefined();
+    // 修改请求身份需要显式追加 client_id。
+    const altered: Schemas["ClientEdit"] = {...value, client_id: "desktop-home"};
+    expect(altered.client_id).toBe("desktop-home");
   });
 
   it("操作状态不把未同步和结果未知误报为成功", () => {

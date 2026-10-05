@@ -46,7 +46,7 @@ fn mutation_shape_rejects_readonly_identity_delete_and_variant_residue() {
         json!({"module":"webui","change":{"users":[]}}),
         json!({"module":"work","change":{"path":"other"}}),
         json!({"module":"clients","change":{"action":"delete","original_name":"desktop"}}),
-        json!({"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"renamed","client_id":"altered"}}}),
+        json!({"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"renamed","client_ids":["altered"]}}}),
         json!({"module":"listener","change":{"action":"create","value":{"type":"udp","name":"dns","addresses":["127.0.0.1"],"port":53,"strategy":"default","enable":true}}}),
         json!({"module":"listener","change":{"action":"create","value":{"type":"udp","name":"dns","addresses":["127.0.0.1"],"port":53,"strategy":"default","routes":[]}}}),
     ] {
@@ -57,6 +57,10 @@ fn mutation_shape_rejects_readonly_identity_delete_and_variant_residue() {
     let mut value = candidate;
     value["unexpected"] = json!(true);
     assert!(decode_candidate(&serde_json::to_vec(&value).unwrap()).is_err());
+    // 客户端更新允许显式提供新的 client_id；格式与唯一性由候选校验负责。
+    value.as_object_mut().unwrap().remove("unexpected");
+    value["changes"] = json!([{"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"desktop","client_id":"altered"}}}]);
+    assert!(decode_candidate(&serde_json::to_vec(&value).unwrap()).is_ok());
 }
 
 #[test]

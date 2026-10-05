@@ -12,7 +12,7 @@ Management 使用独立 HTTP listener 与 Axum router，不扩展 DoH 的有界 
 
 认证、配置、保留、历史、指标和实时事件统一使用 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml)。旧 API 不重定向、不兼容，统一返回 JSON 404；认证与新页面必须成套切换。
 
-v2 配置读写以活动源表达为权威，模块严格白名单，`name` 为管理/引用键，`client_id` 只负责请求身份且普通编辑不可修改。配置先运行时应用后持久化，操作结果和文件同步状态分开；外部变化只提示，不自动 reload。正式链路已把 Bearer/Origin、handler、ConfigMutationOwner、typed client 与 SPA fallback 一并接入；不新增角色管理。
+v2 配置读写以活动源表达为权威，模块严格白名单，`name` 为管理/引用键，`client_id` 只负责请求身份，普通编辑只有显式提供新值时才修改；历史记录保留写入时的旧 ID，不迁移、不重写，修改后旧记录与当前名称的关联随之断开。配置先运行时应用后持久化，操作结果和文件同步状态分开；外部变化只提示，不自动 reload。正式链路已把 Bearer/Origin、handler、ConfigMutationOwner、typed client 与 SPA fallback 一并接入；不新增角色管理。
 
 v2 外部差异只投影白名单模块源值；只读字段和认证 hash 仅显示变化类别。沿 D-07 显示源路径及 SecretRef 引用而不读取实际秘密，普通资源 URL query 与管理认证 token 分开。差异按命名空间/name 配对，不猜改名或授予删除能力；完整输出受项数及实际序列化字节预算限制，不通过截断或伪造替代值制造可采用配置。P3 前端把同名项映射为带旧 name 的 update、仅外部项映射为 create，并以一次全局 Candidate 组合采用；未选和受保护变化只能经覆盖确认还原。
 

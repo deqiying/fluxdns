@@ -44,7 +44,7 @@ manifest v2 保存源身份 digest、fetcher 代际及不透明验证器，不�
 
 service 在 core 返回时冻结 port 字段 `duration_millis` 和 `dns_core_duration_micros`：前者从 transport 接入计时点到 core 完成，后者仅 core 主链；都不包含响应编码/写回或后台排队、详情投影和数据库写入。DoH 总耗时可能包含入站 TLS 与 HTTP 读取/解析。dispatcher 的 `attempt_outcome` 维度也来自这一请求终态，不是独立的逐 upstream attempt 事件。
 
-transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDetailSource` 进入详情链。Policy 在当次 Runtime 内把 `ClientMatchObservation` 冻结为 `Id` 或 `Ip` 来源及匹配时的稳定客户端 ID；事件消费与后续 reload 不重新查询客户端目录。stats 的客户端维度只消费该稳定 ID，不读取可变管理名称；请求原始身份不进入 telemetry label 或事件 `Debug`。生产 v2 配置为每个客户端提供唯一 `client_id`，因此 ID/IP 命中都能冻结同一个稳定身份；旧历史不补造或重匹配。
+transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDetailSource` 进入详情链。Policy 在当次 Runtime 内把 `ClientMatchObservation` 冻结为 `Id` 或 `Ip` 来源及匹配时的客户端 ID；事件消费与后续 reload 不重新查询客户端目录。stats 的客户端维度只消费该冻结 ID，不读取可变管理名称；请求原始身份不进入 telemetry label 或事件 `Debug`。生产 v2 配置为每个客户端提供唯一 `client_id`，因此 ID/IP 命中都能冻结同一个身份；旧历史不补造或重匹配。管理端修改某客户端的 `client_id` 后，新事件冻结新 ID，已写入的详情与统计仍归属旧 ID，二者不合并。
 
 ## Storage
 

@@ -28,7 +28,7 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 
 | 契约 | 已落实的内部能力 | 正式接线与剩余边界 |
 | --- | --- | --- |
-| 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新不含 `client_id`；系统只读投影不含 users/hash | 组合与单模块入口都消费相同 decoder/owner；单模块只接受一项且 module 必须与 URL 一致 |
+| 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新的 `client_id` 可选，缺省保留原值、显式提供时替换请求身份；系统只读投影不含 users/hash | 组合与单模块入口都消费相同 decoder/owner；单模块只接受一项且 module 必须与 URL 一致 |
 | 活动配置与文件 | active/runtime/persisted revision 分离；组合文件观测 token；源表达、生效值/来源、引用和独立 runtime 投影；外部差异、还原、同步重试请求 | 状态、差异、还原和重试已接线；DTO 不接受路径、整份 YAML 或 Secret 实际值 |
 | 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、校验 token、明确确认清单 | ConfigMutationOwner 独立于 HTTP 请求推进 Runtime 与持久化；运行成功不等于文件同步，unknown 不能自动重放 |
 | 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-13 Bearer HTTP 与 BC-24/25 指标/记录 WS 均已接线；记录 subscription 绑定 snapshot cursor 和 retention revision |
