@@ -5,6 +5,8 @@
 /.idea/
 /.vscode/
 /.fleet/
+/.openidea/
+
 
 # Rust 构建产物
 /target/
