@@ -16,6 +16,8 @@
 >
 > 2026-10-04 负缓存增量核对：基线 `e811b713292467ce964534c1cb7e2ef44002cdf6` 加本次工作树，仅核对 `dns.cache.negative_ttl_max`、`optimistic.negative_max_age`、按响应质量区分的乐观窗口与缓存活动响应类观测；单元/策略层测试已覆盖，本地运行验收仍由[负缓存新鲜度计划](../plans/negative-cache-freshness.md)跟踪
 >
+> 2026-11-05 增量核对：基线 `0b93d3816b9ffe95a89966aefa88d77372ba60df` 加本次工作树，仅核对管理候选对顶格列表后续配置项的兼容编辑；验证范围见下文活动源与候选内部底座
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -63,11 +65,13 @@ Windows Rust 1.98.0 执行 `cargo test --manifest-path backend/Cargo.toml -- --n
 
 - [`config/edit.rs`](../../backend/src/config/edit.rs) 承接原 Management 的严格变更类型，Management 重用同一类型，无新增 HTTP 契约。旧 name 相对同一活动快照定位，单候选不重复编辑同一目标；交换名称按一次映射处理，不递归串联改名。上游/组共享空间。客户端更新的 `ClientEdit.client_id` 可选：缺省保留原值，显式提供时替换请求身份，格式与唯一性由整份候选的契约校验统一拒绝，因此同一候选内互换两个客户端的 ID 也合法。
 - 候选依次执行变更预算、活动源定向修改、已知 variant 引用更新、完整 `ConfigV2::parse/validate`、两级路径检查、CST 定位编辑及整树等价复核。覆盖 listener/DoH route、bootstrap、组成员/fallback、策略、Hosts、rule-set selector、proxy 和客户端策略；不对正文、路径、SecretRef 做字符串替换。资源首载、物理 owner 路径、socket 和进程 prepare 仍属于后续运行接线，不能把这一步视为可应用运行态。
-- [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。新增片段经 serializer 转义；支持块/flow、CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验；锚点/别名/merge 等无法安全维护的表达明确拒绝，没有整份重序列化回退。
+- [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。新增片段经 serializer 转义；支持块/flow、CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验。整份 CST 无法安全编辑时，[顶层分段兼容路径](../../backend/src/config/source_edit/sections.rs) 按词法 token 定位块映射项，每段必须独立解析为原语义树中的唯一对应项，再局部编辑并复核整树等价；因此 `outbound` 等顶格列表不会阻断后续 `clients` 的新增和编辑。该路径保留原列表缩进及未修改片段，不是整份重序列化回退；分段边界有歧义、顶层删除，以及锚点/别名/merge 等无法安全维护的表达仍明确拒绝。
 - [`observation`](../../backend/src/config/store/observation.rs) 有界读取源与派生文件，各自区分可读/缺失/不可读/超限，组合 token 包含内容指纹和物理文件身份；同内容替换仍产生不同 token。拒绝 hard link、symlink/reparse 路径；读取前后核对身份和元数据。Windows 使用真实 FileId，Unix 代码未在本次执行。此观测不提供 filesystem CAS，正式替换前仍须重新核对；BC-29 的写入身份与旁文件保护见下节。
 - 60 秒验证票据绑定调用者、候选、双 revision 与影响确认，只缓存 SHA-256 摘要；受管内容/观测 token 同样使用 SHA-256，不复用旧迁移 hash。随机验证票据仍为 256 bit，复用已有 `sha2 0.10.9`，没有依赖变更。操作记录上限 1024、完成后保留 30 分钟，进行中记录不淘汰。同 ID 不同命令拒绝，相同命令返回已有阶段；不同调用者的查询不披露结果。未同步、补偿失败或 permit 中断保持 gate，未知不被视为未执行。普通变更由同一 operation owner 连接 Runtime 与持久化；P3 单模块入口只是在 URL/单变更边界复用该事务。
 
 BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 71 项（含摘要加固后的 SHA-256 固定向量）、`management::` 18 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过。Node/Vite 子进程在沙盒内被 `spawn EPERM` 阻止后，经批准在沙盒外重跑通过。新测试覆盖候选/引用/源表达和真实双文件观测；文件只在 `_fluxdns/p1-config-tests/` 的随机用例目录创建并清理。该批未执行真实 v2 启动、HTTP、DNS 热更新、journal crash point、文件还原/同步重试、日志切换或浏览器验收；后续批次证据单列。当前 schema 和生成类型没有 wire 变化。
+
+2026-11-05 格式兼容回归：Windows Rust 1.98.0 使用脱敏夹具，修复前两个候选构建测试均复现 `UnsupportedSource`，修复后通过。[候选测试](../../backend/src/config/edit/tests.rs)与[格式边界测试](../../backend/src/config/source_edit/sections_tests.rs)覆盖顶格/缩进列表混排、仅 ID 客户端新增、跨模块组合编辑、重复编辑、引号键、多行字符串与块文本、LF/CRLF、无末尾换行、显式文档结束标记、新增顶层模块，以及语义不一致、重复键、多文档和锚点/别名拒绝。未改动 API 错误映射、依赖版本或部署配置；本地测试不等于线上容器验收。
 
 ### P1 应用后持久化内部底座（2026-09-07）
 

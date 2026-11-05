@@ -461,3 +461,72 @@ hosts:
             .contains("socks5://user:secret@proxy.example:1080")
     );
 }
+
+#[test]
+fn client_creation_after_indentless_sequence_preserves_source_and_is_repeatable() {
+    let prefix = "outbound:\n# 代理列表故意不额外缩进，后续顶层键不能被吞入列表。\n- name: proxy\n  type: socks5\n  proxy_url: {env: TEST_PROXY}\n\nrule_set: [] # 保留后续模块\n";
+    for newline in ["\n", "\r\n"] {
+        let source = FIXTURE
+            .replace("clients:\n", &format!("{prefix}clients:\n"))
+            .replace('\n', newline);
+        let candidate = build(&source, &changes(r#"[
+          {"module":"clients","change":{"action":"create","value":{"name":"phone","client_id":"phone-01","match":{"ips":[]}}}}
+        ]"#)).unwrap();
+        assert_eq!(candidate.config.clients.len(), 2);
+        assert!(candidate.config.clients[1].r#match.ips.is_empty());
+        assert!(
+            candidate
+                .source
+                .starts_with(source.split("clients:").next().unwrap())
+        );
+        assert!(candidate.source.contains(&prefix.replace('\n', newline)));
+
+        let renamed = build(&candidate.source, &changes(r#"[
+          {"module":"clients","change":{"action":"update","original_name":"phone","value":{"name":"mobile","match":{"ips":[]}}}}
+        ]"#)).unwrap();
+        assert_eq!(renamed.config.clients[1].name, "mobile");
+        assert_eq!(renamed.config.clients[1].client_id, "phone-01");
+        assert!(renamed.source.contains(&prefix.replace('\n', newline)));
+    }
+}
+
+#[test]
+fn combined_edits_across_indentless_sequence_keep_following_modules() {
+    let source = FIXTURE.replace(
+        "clients:\n",
+        "outbound:\n- name: proxy\n  type: socks5\n  proxy_url: {env: TEST_PROXY}\n\nclients:\n",
+    );
+    let candidate = build(&source, &changes(r#"[
+      {"module":"outbound","change":{"action":"update","original_name":"proxy","value":{"name":"renamed","type":"socks5","proxy_url":{"env":"TEST_PROXY"}}}},
+      {"module":"clients","change":{"action":"create","value":{"name":"phone","client_id":"phone-01"}}}
+    ]"#)).unwrap();
+    assert_eq!(candidate.config.outbound[0].name, "renamed");
+    assert_eq!(candidate.config.clients.len(), 2);
+    assert!(candidate.source.contains("proxy_url: {env: TEST_PROXY}"));
+    assert!(candidate.source.contains("outbound:\n- name:"));
+}
+
+#[test]
+fn first_client_can_be_created_when_module_is_omitted_after_indentless_sequence() {
+    let before_clients = FIXTURE.split("clients:\n").next().unwrap();
+    let prefix = format!(
+        "{before_clients}outbound:\n- name: proxy\n  type: socks5\n  proxy_url: {{env: TEST_PROXY}}\n\nrule_set: [] # 保留尾段\n"
+    );
+    for newline in ["\n", "\r\n"] {
+        for ending in ["", "...\n"] {
+            let source = format!("{prefix}{ending}").replace('\n', newline);
+            let candidate = build(&source, &changes(r#"[
+              {"module":"clients","change":{"action":"create","value":{"name":"phone","client_id":"phone-01"}}}
+            ]"#)).unwrap();
+            assert_eq!(candidate.config.clients.len(), 1);
+            assert_eq!(candidate.config.clients[0].client_id, "phone-01");
+            assert!(candidate.source.starts_with(&prefix.replace('\n', newline)));
+            if !ending.is_empty() {
+                assert!(candidate.source.ends_with(&ending.replace('\n', newline)));
+            }
+            if newline == "\r\n" {
+                assert!(!candidate.source.replace("\r\n", "").contains('\n'));
+            }
+        }
+    }
+}

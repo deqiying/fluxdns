@@ -5,6 +5,11 @@ use std::str::FromStr;
 use thiserror::Error;
 use yaml_edit::Document;
 
+mod sections;
+
+#[cfg(test)]
+mod sections_tests;
+
 /// 根据已校验的源树差异修改 CST；输出必须与目标树完全等价，不能静默损坏不支持的语法。
 pub(crate) fn edit_document(
     source: &str,
@@ -21,6 +26,20 @@ pub(crate) fn edit_document(
     }) {
         return Err(SourceEditError::UnsupportedSyntax);
     }
+    match edit_with_cst(source, original, intended) {
+        // yaml-edit 会把顶格列表之后的同级键归入前一个列表项；分段路径逐项核对语义后再编辑。
+        Err(SourceEditError::UnsupportedSyntax) => {
+            sections::edit_block_sections(source, original, intended)
+        }
+        result => result,
+    }
+}
+
+fn edit_with_cst(
+    source: &str,
+    original: &yaml_serde::Value,
+    intended: &yaml_serde::Value,
+) -> Result<String, SourceEditError> {
     let document = Document::from_str(source).map_err(|_| SourceEditError::InvalidDocument)?;
     let root = document
         .as_mapping()
