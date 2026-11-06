@@ -231,7 +231,7 @@ fn names_are_matched_per_namespace_without_inferred_rename_or_delete_commands() 
     assert_eq!(changes[3]["external"]["value"]["client_id"], "Other-Id");
     // 这是读取差异，不是自动重放的写命令；外部值可以显式作为客户端更新提交，包括新的 client_id。
     assert!(crate::management::contract::decode_candidate(&serde_json::to_vec(&json!({
-        "expected":result["expected"],"discard_external_changes":true,"changes":[{
+        "changes":[{
             "module":"clients","change":{"action":"update","original_name":"desktop","value":changes[3]["external"]["value"]},
         }],
     })).unwrap()).is_ok());

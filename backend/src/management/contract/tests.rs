@@ -102,7 +102,6 @@ fn request_budgets_and_tokens_fail_before_handler_work() {
 #[test]
 fn invalid_rule_ecs_custom_ip_returns_only_its_dto_path() {
     let candidate = json!({
-        "expected": {"active_revision": "active-7", "observed_file_revision": "files-9"},
         "changes": [{
             "module": "strategy",
             "change": {
@@ -117,8 +116,7 @@ fn invalid_rule_ecs_custom_ip_returns_only_its_dto_path() {
                     "default_upstream": "public"
                 }
             }
-        }],
-        "discard_external_changes": false
+        }]
     });
     let bytes = serde_json::to_vec(&candidate).unwrap();
     let error = decode_candidate(&bytes).unwrap_err();
@@ -136,15 +134,14 @@ fn invalid_rule_ecs_custom_ip_returns_only_its_dto_path() {
 
     let apply = json!({
         "operation_id": "operation-1",
-        "candidate": candidate,
-        "validation_token": "validation-1",
+        "changes": candidate["changes"],
         "confirmations": []
     });
     let error = decode_apply(&serde_json::to_vec(&apply).unwrap(), None).unwrap_err();
     assert!(matches!(error.code, ErrorCode::InvalidArgument));
     assert_eq!(
         error.field_errors[0].path,
-        "candidate.changes[0].change.value.rules[1].edns_client_subnet.custom_ip"
+        "changes[0].change.value.rules[1].edns_client_subnet.custom_ip"
     );
 }
 
@@ -152,8 +149,7 @@ fn invalid_rule_ecs_custom_ip_returns_only_its_dto_path() {
 fn apply_envelope_and_ws_filters_use_the_same_ingress_boundaries() {
     let mut apply = json!({
         "operation_id": "operation-1",
-        "candidate": fixtures()["candidate"],
-        "validation_token": "validation-1",
+        "changes": fixtures()["candidate"]["changes"],
         "confirmations": []
     });
     assert!(decode_apply(&serde_json::to_vec(&apply).unwrap(), None).is_ok());
@@ -169,16 +165,12 @@ fn apply_envelope_and_ws_filters_use_the_same_ingress_boundaries() {
     apply["confirmations"] = json!(["discard_external_changes", "discard_external_changes"]);
     assert!(decode_apply(&serde_json::to_vec(&apply).unwrap(), None).is_err());
     apply["confirmations"] = json!([]);
-    apply["candidate"]["changes"][0]["change"]["value"]["strategy"] = Value::Null;
+    apply["changes"][0]["change"]["value"]["strategy"] = Value::Null;
     assert!(decode_apply(&serde_json::to_vec(&apply).unwrap(), None).is_err());
 
     let mut file_sync = json!({
         "operation_id": "file-operation-1",
-        "expected": {
-            "active_revision": "active-1",
-            "observed_file_revision": "files-1"
-        },
-        "discard_external_changes": true
+        "observed_file_revision": "files-1"
     });
     assert!(decode_file_sync(&serde_json::to_vec(&file_sync).unwrap()).is_ok());
     file_sync["path"] = json!("not-accepted.yaml");
@@ -395,4 +387,51 @@ fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_register
     let event_routes = include_str!("../events.rs");
     assert!(event_routes.contains("/api/v2/events/ticket"));
     assert!(event_routes.contains("/api/v2/events"));
+}
+
+#[test]
+fn direct_apply_needs_no_revision_or_validation_ticket_and_rejects_legacy_fields() {
+    let request = json!({"operation_id": "direct", "changes": fixtures()["candidate"]["changes"]});
+    let decoded = decode_apply(&serde_json::to_vec(&request).unwrap(), None).unwrap();
+    assert!(decoded.confirmations.is_empty());
+    assert!(decoded.observed_file_revision.is_none());
+    for (field, value) in [
+        ("active_revision", json!("stale")),
+        (
+            "expected",
+            json!({"active_revision": "stale", "observed_file_revision": "stale"}),
+        ),
+        ("validation_token", json!("old-ticket")),
+        ("candidate", fixtures()["candidate"].clone()),
+        ("discard_external_changes", json!(true)),
+    ] {
+        let mut old = request.clone();
+        old[field] = value;
+        assert!(
+            decode_apply(&serde_json::to_vec(&old).unwrap(), None).is_err(),
+            "{field}"
+        );
+    }
+    let mut overwrite = request;
+    overwrite["confirmations"] = json!(["discard_external_changes"]);
+    assert!(decode_apply(&serde_json::to_vec(&overwrite).unwrap(), None).is_err());
+    overwrite["observed_file_revision"] = json!("files-1");
+    assert!(decode_apply(&serde_json::to_vec(&overwrite).unwrap(), None).is_ok());
+    overwrite["confirmations"] = json!(["rename_references"]);
+    assert!(decode_apply(&serde_json::to_vec(&overwrite).unwrap(), None).is_err());
+}
+
+#[test]
+fn file_actions_and_retention_preview_do_not_accept_active_revision() {
+    let file = json!({"operation_id": "restore", "observed_file_revision": "files-1"});
+    assert!(decode_file_sync(&serde_json::to_vec(&file).unwrap()).is_ok());
+    let mut legacy = file;
+    legacy["active_revision"] = json!("active-1");
+    assert!(decode_file_sync(&serde_json::to_vec(&legacy).unwrap()).is_err());
+    let preview = json!({"policy": {"retention": {"days": 7, "grace_days": 3, "reference_size_bytes": 1073741824}}});
+    assert!(serde_json::from_value::<RetentionPreviewRequest>(preview.clone()).is_ok());
+    let mut legacy = preview;
+    legacy["expected"] =
+        json!({"active_revision": "active-1", "observed_file_revision": "files-1"});
+    assert!(serde_json::from_value::<RetentionPreviewRequest>(legacy).is_err());
 }

@@ -9,7 +9,7 @@ import { setMockAuthenticated } from "@/mocks/handlers";
 import { strategiesConfigReadFixture } from "@/mocks/fixtures";
 import { server } from "@/mocks/server";
 import { configKeys } from "@/shared/config/query-keys";
-import type { Candidate } from "@/shared/config/api";
+import type { ApplyRequest } from "@/shared/config/api";
 import { pendingOperationKey } from "@/shared/config/pending-operation";
 
 function renderStrategies() {
@@ -38,17 +38,17 @@ describe("StrategiesPage rule cards", () => {
     expect(within(dialog).getAllByLabelText("ECS 覆盖").length).toBeGreaterThan(1);
   });
 
-  it("折叠规则重排后保存 ECS，后台刷新保留打开版本", async () => {
+  it("折叠规则重排后保存 ECS，后台刷新不附带全局版本", async () => {
     const user = userEvent.setup();
     const original = { ...strategiesConfigReadFixture.values[0].value, rules: [
       { hosts: "local", edns_client_subnet: { mode: "custom", custom_ip: "2001:db8::/48" } },
       { rule_set: "domains", upstream: "default-group", edns_client_subnet: { mode: "disabled" } },
     ], cache: { enabled: true, optimistic: { enabled: false, answer_ttl: "10s", max_age: "1h" } }, ttl_override: { min: "0s" } };
     let response = { ...strategiesConfigReadFixture, values: [{ module: "strategy", value: original }] };
-    let submitted: Candidate | undefined;
+    let submitted: ApplyRequest | undefined;
     server.use(
       http.get("/api/v2/config/modules/strategy", () => HttpResponse.json(response)),
-      http.post("/api/v2/config/modules/strategy/validate", async ({ request }) => { submitted = await request.json() as Candidate; return HttpResponse.json({ code: "VALIDATION_FAILED", message: "test", request_id: "test", retryable: false, field_errors: [] }, { status: 422 }); }),
+      http.post("/api/v2/config/modules/strategy/apply", async ({ request }) => { submitted = await request.json() as ApplyRequest; return HttpResponse.json({ code: "VALIDATION_FAILED", message: "test", request_id: "test", retryable: false, field_errors: [] }, { status: 422 }); }),
     );
     const client = renderStrategies();
     await user.click(await screen.findByLabelText("编辑策略 default", {}, { timeout: 10_000 }));
@@ -58,7 +58,7 @@ describe("StrategiesPage rule cards", () => {
     await act(async () => { await client.invalidateQueries({ queryKey: configKeys.moduleRoot("strategy") }); });
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
     await waitFor(() => expect(submitted).toBeDefined());
-    expect(submitted?.expected.active_revision).toBe(strategiesConfigReadFixture.state.active_revision);
+    expect(Object.keys(submitted!).sort()).toEqual(["changes", "operation_id"]);
     expect(submitted?.changes[0]).toMatchObject({ change: { value: { rules: [original.rules[1], original.rules[0]], cache: original.cache, ttl_override: original.ttl_override } } });
   });
 
@@ -75,13 +75,13 @@ describe("StrategiesPage rule cards", () => {
   it("仅修改名称时保留禁用 TTL 的隐藏边界", async () => {
     const user = userEvent.setup();
     const ttl = { enabled: false, min: "0s", max: "1h" };
-    let submitted: Candidate | undefined;
+    let submitted: ApplyRequest | undefined;
     server.use(
       http.get("/api/v2/config/modules/strategy", () => HttpResponse.json({ ...strategiesConfigReadFixture,
         values: [{ module: "strategy", value: { ...strategiesConfigReadFixture.values[0].value, ttl_override: ttl } }],
       })),
-      http.post("/api/v2/config/modules/strategy/validate", async ({ request }) => {
-        submitted = await request.json() as Candidate;
+      http.post("/api/v2/config/modules/strategy/apply", async ({ request }) => {
+        submitted = await request.json() as ApplyRequest;
         return HttpResponse.json({ code: "VALIDATION_FAILED", message: "test", request_id: "test", retryable: false, field_errors: [] }, { status: 422 });
       }),
     );
@@ -95,10 +95,10 @@ describe("StrategiesPage rule cards", () => {
 
   it("未决操作阻止新保存，继续查询使用原 ID", async () => {
     const user = userEvent.setup();
-    let validations = 0;
+    let applies = 0;
     let reads = 0;
     server.use(
-      http.post("/api/v2/config/modules/strategy/validate", () => { validations += 1; return HttpResponse.error(); }),
+      http.post("/api/v2/config/modules/strategy/apply", () => { applies += 1; return HttpResponse.error(); }),
       http.get("/api/v2/config/operations/original-pending", () => {
         reads += 1;
         return HttpResponse.json({ operation_id: "original-pending", status: { state: "applied_synced", active_revision: "a2", persisted_revision: "a2" } });
@@ -110,10 +110,10 @@ describe("StrategiesPage rule cards", () => {
     const dialog = await screen.findByRole("dialog", { name: "编辑策略" });
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
     await waitFor(() => expect(within(dialog).getByText(/配置操作结果尚未确认/)).toBeInTheDocument());
-    expect(validations).toBe(0);
+    expect(applies).toBe(0);
     await user.click(screen.getByRole("button", { name: "继续查询" }));
     await waitFor(() => expect(client.getQueryData(pendingOperationKey)).toBeNull());
     expect(reads).toBe(1);
-    expect(validations).toBe(0);
+    expect(applies).toBe(0);
   });
 });

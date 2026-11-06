@@ -3,9 +3,9 @@ import { App } from "antd";
 import { getSummaryPollInterval } from "@/app/query-client";
 import { ApiError } from "@/shared/api/errors";
 import type { components } from "@/shared/api/generated-v2";
-import { fetchConfigModule, fetchConfigState, validateCandidate, type ConfigModule, type ConfigState } from "./api";
+import { fetchConfigModule, fetchConfigState, type ConfigModule, type ConfigState } from "./api";
 import { invalidationKeysForChanges, configKeys } from "./query-keys";
-import { applyAndSettle, createOperationId } from "./operation";
+import { applyWithConfirmation, createOperationId } from "./operation";
 import { assertNoPendingOperation, trackConfigOperation } from "./pending-operation";
 
 type Schemas = components["schemas"];
@@ -13,8 +13,6 @@ type ConfigChange = Schemas["ConfigChange"];
 type OperationResult = Schemas["OperationResult"];
 
 export const confirmationLabels: Record<Schemas["ImpactKind"], string> = {
-  rename_references: "资源改名将同步更新全部类型化引用",
-  listener_rebind: "监听入口将重新绑定发生变化的 socket",
   retention_shortening: "保留范围将缩短，已清理的数据无法恢复",
   discard_external_changes: "尚未采用的外部文件变化将被覆盖",
 };
@@ -39,31 +37,16 @@ export function useConfigChangeMutation(module: ConfigModule) {
   const queryClient = useQueryClient();
   const { message, modal } = App.useApp();
   return useMutation({
-    mutationFn: async ({ change, state, confirmationDetails }: { change: ConfigChange; state: ConfigState; confirmationDetails?: Partial<Record<Schemas["ImpactKind"], string>> }): Promise<OperationResult | null> => {
+    mutationFn: async ({ change, confirmationDetails }: { change: ConfigChange; confirmationDetails?: Partial<Record<Schemas["ImpactKind"], string>> }): Promise<OperationResult | null> => {
       assertNoPendingOperation(queryClient);
       const readError = queryClient.getQueryState(configKeys.moduleRoot(module))?.error
         ?? queryClient.getQueryState(configKeys.state())?.error;
       if (readError) throw new ApiError({ code: "CONFIG_READ_FAILED", message: "配置读取失败，请刷新后保存。", kind: "http" });
-      const discardExternalChanges = hasExternalFileChanges(state);
-      const candidate: Schemas["Candidate"] = {
-        expected: {
-          active_revision: state.active_revision,
-          observed_file_revision: state.observed_file_revision,
-        },
-        changes: [change],
-        discard_external_changes: discardExternalChanges,
-      };
-      const validation = await validateCandidate(candidate, { module });
-      if (validation.required_confirmations.length > 0) {
-        const confirmed = await confirmImpacts(modal.confirm, validation.required_confirmations, confirmationDetails);
-        if (!confirmed) return null;
-      }
-      const settlement = await trackConfigOperation(queryClient, () => applyAndSettle({
+      const settlement = await trackConfigOperation(queryClient, () => applyWithConfirmation({
         operation_id: createOperationId(),
-        candidate,
-        validation_token: validation.validation_token,
-        confirmations: validation.required_confirmations,
-      }, { module }));
+        changes: [change],
+      }, (validation) => confirmImpacts(modal.confirm, validation.required_confirmations, confirmationDetails), { module }));
+      if (!settlement) return null;
       const operation = settlement.operation;
       if (operation.status.state === "rejected" || operation.status.state === "compensation_failed") {
         throw new ApiError({ code: operation.status.error, message: operation.status.error, kind: "http" });
@@ -87,12 +70,7 @@ export function configStateEditable(state: ConfigState): boolean {
   return state.synchronization === "synced";
 }
 
-function hasExternalFileChanges(state: ConfigState): boolean {
-  return state.files.source !== "unchanged"
-    || (state.files.derived !== null && state.files.derived !== "unchanged");
-}
-
-function confirmImpacts(
+export function confirmImpacts(
   confirm: ReturnType<typeof App.useApp>["modal"]["confirm"],
   impacts: Schemas["ImpactKind"][],
   details?: Partial<Record<Schemas["ImpactKind"], string>>,

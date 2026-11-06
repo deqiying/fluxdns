@@ -72,6 +72,8 @@ const errorMessages: Record<string, string> = {
   INVALID_RESPONSE: "管理服务返回了无法识别的响应。",
   SERVICE_UNAVAILABLE: "管理服务暂时不可用，请稍后重试。",
   FILE_REVISION_CONFLICT: "配置文件已再次变化，请重新读取差异。",
+  CONFIRMATION_REQUIRED: "配置影响需要重新确认；当前草稿已保留。",
+  EXTERNAL_CHANGES_REQUIRE_CONFIRMATION: "外部文件变化需要确认覆盖；当前草稿已保留。",
   OPERATION_BUSY: "已有配置操作正在执行，请等待其完成。",
   CONFIG_READ_FAILED: "配置读取失败，请刷新成功后再保存；当前草稿已保留。",
   CONFIG_OPERATION_PENDING: "配置操作结果尚未确认，请在全局提示中继续查询；当前草稿已保留。",

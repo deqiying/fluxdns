@@ -188,26 +188,25 @@ pub struct ConfigState {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Candidate {
-    pub expected: Preconditions,
     pub changes: Vec<ConfigChange>,
-    pub discard_external_changes: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ApplyRequest {
     pub operation_id: OperationId,
-    pub candidate: Candidate,
-    /// 与候选摘要、影响及双版本绑定；prepare 过期后必须重新验证。
-    pub validation_token: Revision,
+    pub changes: Vec<ConfigChange>,
+    /// 仅危险影响需要显式确认；普通保存可省略。
+    #[serde(default)]
     pub confirmations: Vec<ImpactKind>,
+    /// 只在采用或覆盖外部文件时绑定所见文件，不限制普通配置编辑。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_file_revision: Option<Revision>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ImpactKind {
-    RenameReferences,
-    ListenerRebind,
     RetentionShortening,
     DiscardExternalChanges,
 }
@@ -215,9 +214,7 @@ pub enum ImpactKind {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ValidationResult {
-    pub validation_token: Revision,
-    pub expected: Preconditions,
-    pub expires_at_ms: u64,
+    pub observed_file_revision: Revision,
     pub required_confirmations: Vec<ImpactKind>,
     pub affected_names: Vec<String>,
 }
@@ -226,8 +223,7 @@ pub struct ValidationResult {
 #[serde(deny_unknown_fields)]
 pub struct FileSyncRequest {
     pub operation_id: OperationId,
-    pub expected: Preconditions,
-    pub discard_external_changes: bool,
+    pub observed_file_revision: Revision,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -254,7 +250,7 @@ pub enum ErrorCode {
     ExternalChangesRequireConfirmation,
     OperationIdReused,
     OperationBusy,
-    ValidationExpired,
+    ConfirmationRequired,
     PersistenceFailed,
     ApplyFailed,
     CompensationFailed,
@@ -287,7 +283,7 @@ impl ErrorCode {
             | Self::ExternalChangesRequireConfirmation
             | Self::OperationIdReused
             | Self::OperationBusy
-            | Self::ValidationExpired => 409,
+            | Self::ConfirmationRequired => 409,
             Self::CursorExpired => 410,
             Self::RateLimited => 429,
             Self::PersistenceFailed | Self::ApplyFailed | Self::CompensationFailed => 500,
@@ -861,7 +857,6 @@ pub struct RetentionStatus {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionPreview {
-    pub expected: Preconditions,
     pub sampled_at_ms: u64,
     pub detail_bytes: DecimalU64,
     pub proposed_cutoff_utc_date: String,
@@ -871,7 +866,6 @@ pub struct RetentionPreview {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetentionPreviewRequest {
-    pub expected: Preconditions,
     pub policy: StatisticsV2,
 }
 
@@ -977,18 +971,16 @@ pub fn decode_apply(
     if contains_null(&tree) {
         return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }
-    let field_error = tree
-        .get("candidate")
-        .and_then(|candidate| invalid_rule_ecs_custom_ip_path(candidate, "candidate."));
+    let field_error = invalid_rule_ecs_custom_ip_path(&tree, "");
     let request: ApplyRequest = decode_mutation_value(tree, field_error)?;
-    if request.candidate.changes.is_empty()
-        || request.candidate.changes.len() > MAX_CHANGES
-        || request.confirmations.len() > 4
+    if request.changes.is_empty()
+        || request.changes.len() > MAX_CHANGES
+        || request.confirmations.len() > 2
     {
         return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }
     if let Some(module) = module
-        && (request.candidate.changes.len() != 1 || request.candidate.changes[0].module() != module)
+        && (request.changes.len() != 1 || request.changes[0].module() != module)
     {
         return Err(MutationDecodeError::new(ErrorCode::Forbidden));
     }
@@ -998,6 +990,13 @@ pub fn decode_apply(
         .collect::<std::collections::BTreeSet<_>>()
         .len()
         != request.confirmations.len()
+    {
+        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
+    }
+    if request
+        .confirmations
+        .contains(&ImpactKind::DiscardExternalChanges)
+        && request.observed_file_revision.is_none()
     {
         return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }

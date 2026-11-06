@@ -6,8 +6,7 @@ import { restoreFilesAndSettle, retryPersistenceAndSettle } from "./operation";
 
 const request = {
   operation_id: "file-operation-1",
-  expected: { active_revision: "active-1", observed_file_revision: "file-1" },
-  discard_external_changes: true,
+  observed_file_revision: "file-1",
 };
 
 beforeEach(() => setMockAuthenticated(true));
@@ -37,13 +36,13 @@ it("未同步重试只调用专用文件 endpoint", async () => {
   let retries = 0;
   server.use(http.post("/api/v2/config/files/retry", async ({ request: incoming }) => {
     retries += 1;
-    expect(await incoming.json()).toEqual({ ...request, discard_external_changes: false });
+    expect(await incoming.json()).toEqual(request);
     return HttpResponse.json({
       operation_id: "file-operation-1",
       status: { state: "applied_synced", active_revision: "active-1", persisted_revision: "active-1" },
     });
   }));
-  await expect(retryPersistenceAndSettle({ ...request, discard_external_changes: false })).resolves.toMatchObject({
+  await expect(retryPersistenceAndSettle(request)).resolves.toMatchObject({
     kind: "settled",
   });
   expect(retries).toBe(1);

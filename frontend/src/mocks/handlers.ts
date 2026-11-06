@@ -160,14 +160,12 @@ export const handlers = [
   }),
   http.post("/api/v2/config/modules/:module/validate", async ({ request, params }) => {
     if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
-    const candidate = await request.json() as { expected?: unknown; changes?: Array<{ module?: string }> };
+    const candidate = await request.json() as { changes?: Array<{ module?: string }> };
     if (candidate.changes?.length !== 1 || candidate.changes[0]?.module !== String(params.module)) {
       return v2Error(400, "INVALID_ARGUMENT", "module candidate mismatch");
     }
     return HttpResponse.json({
-      validation_token: "validation-1",
-      expected: candidate.expected,
-      expires_at_ms: Date.now() + 30_000,
+      observed_file_revision: configStateFixture.observed_file_revision,
       required_confirmations: [],
       affected_names: [],
     });
@@ -176,9 +174,9 @@ export const handlers = [
     if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
     const body = await request.json() as {
       operation_id?: string;
-      candidate?: { changes?: Array<{ module?: string }> };
+      changes?: Array<{ module?: string }>;
     };
-    if (body.candidate?.changes?.length !== 1 || body.candidate.changes[0]?.module !== String(params.module)) {
+    if (body.changes?.length !== 1 || body.changes[0]?.module !== String(params.module)) {
       return v2Error(400, "INVALID_ARGUMENT", "module apply mismatch");
     }
     return HttpResponse.json({
@@ -189,8 +187,8 @@ export const handlers = [
   http.get("/api/v2/retention", readOnlyV2(retentionStatusFixture)),
   http.post("/api/v2/retention/preview", async ({ request }) => {
     if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
-    const body = await request.json() as { expected: unknown; policy: { retention: { days?: number } } };
-    return HttpResponse.json({ expected: body.expected, sampled_at_ms: Date.now(), detail_bytes: "805306368", proposed_cutoff_utc_date: "2026-09-01", shortens_history: (body.policy.retention.days ?? 7) < 7 });
+    const body = await request.json() as { policy: { retention: { days?: number } } };
+    return HttpResponse.json({ sampled_at_ms: Date.now(), detail_bytes: "805306368", proposed_cutoff_utc_date: "2026-09-01", shortens_history: (body.policy.retention.days ?? 7) < 7 });
   }),
   http.post("/api/v2/queries/search", async ({ request }) => {
     if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");

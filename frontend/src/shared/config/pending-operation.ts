@@ -10,13 +10,13 @@ export function assertNoPendingOperation(client: QueryClient): void {
 }
 
 /** 所有写入口共用未决操作记录；继续查询只使用原 ID。 */
-export async function trackConfigOperation(
+export async function trackConfigOperation<T extends OperationSettlement | null>(
   client: QueryClient,
-  run: () => Promise<OperationSettlement>,
-): Promise<OperationSettlement> {
+  run: () => Promise<T>,
+): Promise<T> {
   try {
     const settlement = await run();
-    if (settlement.kind !== "settled") throw new PendingOperationError(settlement.operation.operation_id);
+    if (settlement && settlement.kind !== "settled") throw new PendingOperationError(settlement.operation.operation_id);
     return settlement;
   } catch (error) {
     if (error instanceof PendingOperationError) client.setQueryData(pendingOperationKey, error.operationId);

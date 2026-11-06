@@ -18,6 +18,8 @@
 >
 > 2026-11-05 增量核对：基线 `0b93d3816b9ffe95a89966aefa88d77372ba60df` 加本次工作树，仅核对管理候选对顶格列表后续配置项的兼容编辑；验证范围见下文活动源与候选内部底座
 >
+> 2026-11-06 增量核对：基线 `3d44dd4` 加本次工作树，仅核对配置单次保存、无状态预览与文件确认边界；验证见 [Management 实现](backend/management.md#单次保存与写接口简化2026-11-06)。
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -61,13 +63,13 @@ Windows Rust 1.98.0 执行 `cargo test --manifest-path backend/Cargo.toml -- --n
 
 ### P1 活动源与候选内部底座（2026-09-07）
 
-[`ConfigStore`](../../backend/src/config/store.rs) 的 [`active`](../../backend/src/config/store/active.rs) 子模块持有唯一 v2 活动源：生产启动把 loader 实际消费的原始正文及 runtime revision 交给 `with_active_source`，并要求源文件和派生快照一致。Management 复用该 active store；首次用户提交在同一 transaction gate 中校验 v2 候选、原子写入两份文件，并同步更新认证用户和活动文件事实。
+[`ConfigStore`](../../backend/src/config/store.rs) 的 [`active`](../../backend/src/config/store/active.rs) 子模块持有唯一 v2 活动源：`ActiveSnapshot` 同时保存完整 YAML 原文 `Arc<str>`、完整 `Arc<ConfigV2>` 及活动/运行/持久化版本；[`RuntimeSnapshot`](../../backend/src/runtime/snapshot.rs) 另保存执行用的 `Arc<ResolvedConfig>`。生产启动把 loader 实际消费的原文交给 `with_active_source`，并要求受管源和派生快照一致。编辑先构造独立候选，运行时应用成功后才发布新活动原文和实体，再持久化整份编辑后的 YAML；不是把 resolved 实体整份重新序列化。Management 复用该 store；首次用户提交仍在同一 transaction gate 中先完成文件事务，再发布认证快照。
 
 - [`config/edit.rs`](../../backend/src/config/edit.rs) 承接原 Management 的严格变更类型，Management 重用同一类型，无新增 HTTP 契约。旧 name 相对同一活动快照定位，单候选不重复编辑同一目标；交换名称按一次映射处理，不递归串联改名。上游/组共享空间。客户端更新的 `ClientEdit.client_id` 可选：缺省保留原值，显式提供时替换请求身份，格式与唯一性由整份候选的契约校验统一拒绝，因此同一候选内互换两个客户端的 ID 也合法。
 - 候选依次执行变更预算、活动源定向修改、已知 variant 引用更新、完整 `ConfigV2::parse/validate`、两级路径检查、CST 定位编辑及整树等价复核。覆盖 listener/DoH route、bootstrap、组成员/fallback、策略、Hosts、rule-set selector、proxy 和客户端策略；不对正文、路径、SecretRef 做字符串替换。资源首载、物理 owner 路径、socket 和进程 prepare 仍属于后续运行接线，不能把这一步视为可应用运行态。
 - [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。新增片段经 serializer 转义；支持块/flow、CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验。整份 CST 无法安全编辑时，[顶层分段兼容路径](../../backend/src/config/source_edit/sections.rs) 按词法 token 定位块映射项，每段必须独立解析为原语义树中的唯一对应项，再局部编辑并复核整树等价；因此 `outbound` 等顶格列表不会阻断后续 `clients` 的新增和编辑。该路径保留原列表缩进及未修改片段，不是整份重序列化回退；分段边界有歧义、顶层删除，以及锚点/别名/merge 等无法安全维护的表达仍明确拒绝。
 - [`observation`](../../backend/src/config/store/observation.rs) 有界读取源与派生文件，各自区分可读/缺失/不可读/超限，组合 token 包含内容指纹和物理文件身份；同内容替换仍产生不同 token。拒绝 hard link、symlink/reparse 路径；读取前后核对身份和元数据。Windows 使用真实 FileId，Unix 代码未在本次执行。此观测不提供 filesystem CAS，正式替换前仍须重新核对；BC-29 的写入身份与旁文件保护见下节。
-- 60 秒验证票据绑定调用者、候选、双 revision 与影响确认，只缓存 SHA-256 摘要；受管内容/观测 token 同样使用 SHA-256，不复用旧迁移 hash。随机验证票据仍为 256 bit，复用已有 `sha2 0.10.9`，没有依赖变更。操作记录上限 1024、完成后保留 30 分钟，进行中记录不淘汰。同 ID 不同命令拒绝，相同命令返回已有阶段；不同调用者的查询不披露结果。未同步、补偿失败或 permit 中断保持 gate，未知不被视为未执行。普通变更由同一 operation owner 连接 Runtime 与持久化；P3 单模块入口只是在 URL/单变更边界复用该事务。
+- 普通保存直接调用 `begin_apply`，在 transaction gate 内以当前活动源构造候选，不接收客户端活动版本，不需要预校验票据；同条目后提交覆盖，其他条目保留。`validate_edit` 仅提供无状态影响预览。缩短保留策略需明确确认，覆盖外改还必须绑定所见组合文件版本。operation 摘要只绑定调用者和原始请求，在展开脱敏字段或解析旧键前先去重；相同 ID 不同命令拒绝，相同请求返回既有结果，不能重新执行已完成的新增/改名。操作上限 1024、完成后保留 30 分钟，进行中记录不淘汰；未同步、补偿失败或结果未知保持 gate。内部捕获版本仍复核运行切换和文件提交，但不再让页面承担全局版本前置条件。
 
 BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 71 项（含摘要加固后的 SHA-256 固定向量）、`management::` 18 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过。Node/Vite 子进程在沙盒内被 `spawn EPERM` 阻止后，经批准在沙盒外重跑通过。新测试覆盖候选/引用/源表达和真实双文件观测；文件只在 `_fluxdns/p1-config-tests/` 的随机用例目录创建并清理。该批未执行真实 v2 启动、HTTP、DNS 热更新、journal crash point、文件还原/同步重试、日志切换或浏览器验收；后续批次证据单列。当前 schema 和生成类型没有 wire 变化。
 
@@ -89,7 +91,7 @@ Windows Rust 1.98.0 本批 `config::` 89 项通过，其中 ConfigStore 28 项�
 
 ### P1 受管文件还原内部能力（2026-09-07）
 
-`ConfigStore::restore_files` 绑定调用者、operation ID、active/file 双 revision 和丢弃外改确认。只从 `active_source` 取原文，同时还原固定源与派生路径，不创建 Runtime、不推进 active/runtime revision，也不触碰 DNS、会话或 Hosts/规则资源文件。重复 operation 只返回既有阶段，不能因文件随后再变而重放还原；未知 ID/不同调用者和不同命令不共用结果。正常完成更新 persisted 状态与组合文件观测。
+`ConfigStore::restore_files` 绑定调用者、operation ID 和客户端确认过的组合文件版本；HTTP 不再要求 active revision 或额外丢弃标记，明确的 restore 请求本身表达覆盖意图，内部捕获活动版本供事务复核。只从 `active_source` 取原文，同时还原固定源与派生路径，不创建 Runtime、不推进 active/runtime revision，也不触碰 DNS、会话或 Hosts/规则资源文件。重复 operation 在版本检查前返回既有阶段，不能因后来活动或文件变化重放还原；未知 ID、不同调用者和不同请求不共用结果。正常完成更新 persisted 状态与组合文件观测。
 
 还原复用 PREPARED/COMMIT_DECIDED journal：确认还原已生效的活动源后才决定文件提交。准备失败且清理已确定完成时记为 Rejected；存在未核清的 journal/旁文件时保留阻塞。决定提交后发生 I/O 失败则保留活动源和 AppliedUnpersisted，禁止叠加变更；现有内部 `persist_applied` 只继续这次已知文件事务，不重新应用 Runtime。
 
@@ -101,7 +103,7 @@ Windows 本批 ConfigStore 36 项、完整 `config::` 97 项通过。新增还�
 
 ### P1 外改确认重试内部能力（2026-09-07）
 
-`retry_persistence` 只继续当前 AppliedUnpersisted operation，核对原调用者和最新 active/file 双 revision；既有操作完成后再次请求只返回既有状态，不覆盖后来出现的外改。journal 已知的逐文件部分提交可以直接继续；遇到未知目标必须显式确认丢弃该次观测到的外改。活动源原文、active/runtime revision 和原 operation 保持不变，不接收替代候选，也不重新 prepare 或应用 DNS。
+`retry_persistence` 只继续当前 AppliedUnpersisted operation，核对原调用者、客户端所见文件版本与内部捕获的活动版本；既有操作完成后再次请求只返回既有状态，不覆盖后来出现的外改。journal 已知的逐文件部分提交可以继续；遇到未知目标必须由用户确认后发起绑定该文件版本的 retry 请求。活动源原文、active/runtime revision 和原 operation 保持不变，不接收替代候选，也不重新 prepare 或应用 DNS。
 
 `Persistence::reconfirm` 对同一活动源摘要重新执行完整配置/路径校验，以受限权限准备新 stage，并在提交决策前再次核对组合文件版本、目录及文件身份。新 COMMIT_DECIDED journal 原子替换旧 journal 后才能按新决策覆盖所见外改；决策未成功持久化时保持旧决策，不先删除旧 journal。缺失叶节点继续使用受管权限能力；不放行不可读、超限、链接或被替换的父目录。
 

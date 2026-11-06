@@ -1,11 +1,9 @@
 {
   "candidate": {
-    "expected": {"active_revision": "active-7", "observed_file_revision": "files-9"},
     "changes": [
       {"module": "clients", "change": {"action": "update", "original_name": "desktop", "value": {"name": "workstation", "match": {"ips": ["192.0.2.10/32"]}, "cache": {"enabled": false}}}},
       {"module": "hosts", "change": {"action": "create", "value": {"name": "local", "type": "const", "format": "hosts", "hosts": "127.0.0.1 localhost"}}}
-    ],
-    "discard_external_changes": true
+    ]
   },
   "state": {
     "active_revision": "active-8",
@@ -93,10 +91,8 @@
     "parse_error":null
   },
   "validation": {
-    "validation_token":"validation-1",
-    "expected":{"active_revision":"active-7","observed_file_revision":"files-9"},
-    "expires_at_ms":1788739261000,
-    "required_confirmations":["rename_references","discard_external_changes"],
+    "observed_file_revision":"files-9",
+    "required_confirmations":["discard_external_changes"],
     "affected_names":["desktop","workstation"]
   },
   "snapshot": {

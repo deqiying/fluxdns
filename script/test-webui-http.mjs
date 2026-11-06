@@ -42,9 +42,8 @@ async function api(path, { method = 'GET', body, auth = true, headers = {}, stat
   return { data, response };
 }
 const get = async path => (await api(path)).data;
-const expected = state => ({ active_revision: state.active_revision, observed_file_revision: state.observed_file_revision });
 async function candidate(changes) {
-  return { expected: expected(await get('/config/state')), changes, discard_external_changes: false };
+  return { changes };
 }
 async function settle(operation) {
   for (let attempt = 0; ['preparing', 'applying', 'persisting'].includes(operation.status.state) && attempt < 50; attempt++) {
@@ -55,10 +54,8 @@ async function settle(operation) {
   return operation;
 }
 async function apply(value) {
-  const validation = (await api('/config/validate', { method: 'POST', body: value })).data;
   return settle((await api('/config/apply', { method: 'POST', status: 202, body: {
-    operation_id: randomUUID(), candidate: value, validation_token: validation.validation_token,
-    confirmations: validation.required_confirmations,
+    operation_id: randomUUID(), changes: value.changes,
   } })).data);
 }
 const update = (module, original_name, value) => ({ module, change: { action: 'update', original_name, value } });
@@ -151,12 +148,15 @@ try {
   const stale = await candidate([update('hosts', 'guard', hosts)]);
   await apply(await candidate([update('hosts', 'guard', changedHosts)]));
   for (const transport of ['udp', 'tcp', 'doh-get', 'doh-post']) await dns(transport, 'sentinel.p5.test', '192.0.2.2');
-  await api('/config/validate', { method: 'POST', body: stale, status: 409 });
+  // 不再以全局 revision 拒绝已打开的草稿；同条目后一次成功提交覆盖。
+  await apply(stale);
+  await dns('udp', 'sentinel.p5.test', '192.0.2.1');
+  await apply(await candidate([update('hosts', 'guard', changedHosts)]));
   const invalid = await candidate([update('hosts', 'guard', { ...hosts, name: '<img src=x onerror=alert(1)>' })]);
   await api('/config/validate', { method: 'POST', body: invalid, status: 422 });
   await dns('udp', 'sentinel.p5.test', '192.0.2.2');
   await apply(await candidate([update('hosts', 'guard', hosts)]));
-  mark('hot-apply-four-transports-conflict-invalid-candidate');
+  mark('hot-apply-four-transports-last-success-wins-invalid-candidate');
   const upstream = (await get('/config/modules/upstreams')).values.find(row => row.value.name === 'local').value;
   await apply(await candidate([update('upstreams', 'local', { ...upstream, name: 'local-renamed' })]));
   assert((await get('/config/modules/strategy')).values.some(row => row.value.default_upstream === 'local-renamed'));
@@ -197,7 +197,7 @@ try {
   assert.equal(observed.files.source, 'changed'); assert.equal(observed.runtime_revision, stateBefore.runtime_revision);
   await get('/config/files/diff');
   await settle((await api('/config/files/restore', { method: 'POST', body: {
-    operation_id: randomUUID(), expected: expected(observed), discard_external_changes: true,
+    operation_id: randomUUID(), observed_file_revision: observed.observed_file_revision,
   } })).data);
   assert.equal((await get('/config/state')).runtime_revision, stateBefore.runtime_revision);
   mark('external-file-observe-restore-without-reload');

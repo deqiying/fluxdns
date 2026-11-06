@@ -36,7 +36,7 @@ export function validateCandidate(
   return apiV2Request(path, { method: "POST", body: candidate, signal: options.signal });
 }
 
-/** operation_id 由调用方固定；失败后只允许查询操作结果，不能自动重放。 */
+/** operation_id 由调用方固定；网络结果不确定时只查询，不重放；受理前确认拒绝由共享 helper 处理。 */
 export function applyCandidate(
   request: ApplyRequest,
   options: { module?: ConfigModule; signal?: AbortSignal } = {},

@@ -1,4 +1,4 @@
-//! ConfigStore 内的 v2 活动源、验证票据、有界操作记录与文件事务；Runtime 由服务 owner 回报。
+//! ConfigStore 内的 v2 活动源、无状态候选预览、有界操作记录与文件事务；Runtime 由服务 owner 回报。
 #![allow(dead_code)] // P3 模块写入仍会继续消费部分细粒度 helper。
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -24,7 +24,6 @@ use crate::config::resolve::resolve_config_v2;
 use crate::config::source_edit::{InitialWebUiUser, create_initial_webui_user};
 
 const MAX_RECORDS: usize = 1024;
-const VALIDATION_TTL: Duration = Duration::from_secs(60);
 const OPERATION_TTL: Duration = Duration::from_secs(1800);
 const SNAPSHOT_WAIT: Duration = Duration::from_secs(1);
 
@@ -38,8 +37,6 @@ pub(crate) struct ExpectedRevisions {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize)]
 pub(crate) enum Impact {
-    RenameReferences,
-    ListenerRebind,
     RetentionShortening,
     DiscardExternalChanges,
 }
@@ -159,16 +156,9 @@ impl ActiveSnapshot {
 
 pub(super) struct ActiveState {
     snapshot: ActiveSnapshot,
-    validations: BTreeMap<String, ValidationRecord>,
     operations: BTreeMap<String, OperationRecord>,
     persistence: Option<Persistence>,
     protection: ManagedProtection,
-}
-
-struct ValidationRecord {
-    digest: String,
-    expires: Instant,
-    impacts: BTreeSet<Impact>,
 }
 
 struct OperationRecord {
@@ -185,11 +175,9 @@ pub(crate) struct ConfigurationStatus {
     pub(crate) operation: Option<OperationSnapshot>,
 }
 
-pub(crate) struct ValidatedCandidate {
-    pub(crate) token: String,
-    pub(crate) expected: ExpectedRevisions,
+pub(crate) struct CandidatePreview {
+    pub(crate) observed_file_revision: String,
     pub(crate) impacts: BTreeSet<Impact>,
-    pub(crate) expires_in: Duration,
 }
 
 /// 只有 begin_apply 可以生成；调用方仍须完成资源/owner/socket prepare 后才能切换运行态。
@@ -219,8 +207,6 @@ pub(crate) enum ActiveError {
     FileConflict,
     #[error("external changes require explicit confirmation")]
     ExternalConfirmation,
-    #[error("validation token expired or is not bound to this command")]
-    ValidationExpired,
     #[error("operation id is already bound to another command")]
     OperationIdReused,
     #[error("invalid operation or actor identifier")]
@@ -280,7 +266,6 @@ impl ConfigStore {
                 observation,
                 operation_id: None,
             },
-            validations: BTreeMap::new(),
             operations: BTreeMap::new(),
             persistence: None,
             protection,
@@ -467,74 +452,41 @@ impl ConfigStore {
         })
     }
 
-    /// 票据绑定调用者、候选摘要、双 revision 和确认影响；只保存摘要，避免积累完整配置副本。
+    /// 可选的无状态影响预览；不签发票据，也不让预览成为保存的前置条件。
     pub(crate) fn validate_edit(
         &self,
-        actor: &str,
-        expected: &ExpectedRevisions,
         changes: &[ConfigChange],
-        discard_external_changes: bool,
-    ) -> Result<ValidatedCandidate, ActiveError> {
-        validate_token(actor)?;
+    ) -> Result<CandidatePreview, ActiveError> {
         let snapshot = self.observe_files()?;
-        check_expected(&snapshot, expected, discard_external_changes)?;
         let expanded = expand_redacted_changes(&snapshot.source, changes)?;
         let candidate = build_candidate(&snapshot.source, &self.source_path, &expanded)?;
-        let impacts = impacts(&snapshot, &candidate)?;
-        let digest = command_digest(actor, expected, &expanded, discard_external_changes)?;
-        let token = random_token()?;
-        let mut state = self.active.lock().map_err(|_| ActiveError::Busy)?;
-        let state = state.as_mut().ok_or(ActiveError::Unavailable)?;
-        check_expected(&state.snapshot, expected, discard_external_changes)?;
-        let now = Instant::now();
-        state.validations.retain(|_, record| record.expires > now);
-        if state.validations.len() >= MAX_RECORDS {
-            return Err(ActiveError::Busy);
-        }
-        state.validations.insert(
-            token.clone(),
-            ValidationRecord {
-                digest,
-                expires: now + VALIDATION_TTL,
-                impacts: impacts.clone(),
-            },
-        );
-        Ok(ValidatedCandidate {
-            token,
-            expected: expected.clone(),
-            impacts,
-            expires_in: VALIDATION_TTL,
+        Ok(CandidatePreview {
+            observed_file_revision: snapshot.observation.revision(),
+            impacts: impacts(&snapshot, &candidate),
         })
     }
 
-    /// 幂等检查先于过期版本检查；相同操作只返回既有结果，不再次执行新增或改名。
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "操作身份、候选、双版本与验证确认必须在同一事务入口显式绑定"
-    )]
+    /// 单次提交始终以当前活动源定位旧名称；同条目后提交覆盖，不覆盖其他条目。
+    /// 幂等摘要只绑定请求而非活动版本，已完成的新增/改名重试必须先返回原结果。
     pub(crate) fn begin_apply(
         self: &Arc<Self>,
         actor: &str,
         operation_id: &str,
-        expected: &ExpectedRevisions,
         changes: &[ConfigChange],
-        discard_external_changes: bool,
-        validation_token: &str,
+        observed_file_revision: Option<&str>,
         confirmations: &BTreeSet<Impact>,
     ) -> Result<BeginApply, ActiveError> {
         validate_token(actor)?;
         validate_token(operation_id)?;
+        let operation_digest = sha256_digest(
+            &serde_json::to_vec(&(actor, changes, observed_file_revision, confirmations))
+                .map_err(|_| EditError::UnsupportedSource)?,
+        );
         let _transaction = self.transaction.try_lock().map_err(|_| ActiveError::Busy)?;
         let observation =
             ManagedObservation::read(&self.source_path, self.snapshot_path.as_deref());
         let mut guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
         let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
-        let expanded = expand_redacted_changes(&state.snapshot.source, changes)?;
-        let digest = command_digest(actor, expected, &expanded, discard_external_changes)?;
-        let operation_digest = sha256_digest(
-            &serde_json::to_vec(&(&digest, validation_token, confirmations))
-                .map_err(|_| EditError::UnsupportedSource)?,
-        );
         let now = Instant::now();
         state.operations.retain(|id, record| {
             record.expires > now || state.snapshot.operation_id.as_ref() == Some(id)
@@ -547,26 +499,33 @@ impl ConfigStore {
             };
         }
         state.snapshot.observation = observation;
-        check_expected(&state.snapshot, expected, discard_external_changes)?;
-        let validation = state
-            .validations
-            .get(validation_token)
-            .filter(|record| record.expires > now && record.digest == digest)
-            .ok_or(ActiveError::ValidationExpired)?;
-        if !validation.impacts.is_subset(confirmations) {
-            return Err(ActiveError::MissingConfirmation);
+        if observed_file_revision
+            .is_some_and(|revision| revision != state.snapshot.observation.revision())
+        {
+            return Err(ActiveError::FileConflict);
         }
+        let discard = confirmations.contains(&Impact::DiscardExternalChanges);
+        // 确认覆盖必须绑定用户实际看过的文件，不能覆盖确认弹窗期间发生的新外改。
+        if discard && observed_file_revision.is_none() {
+            return Err(ActiveError::InvalidToken);
+        }
+        let expected = state.snapshot.expected();
+        check_expected(&state.snapshot, &expected, discard)?;
         if state.operations.len() >= MAX_RECORDS {
             return Err(ActiveError::Busy);
         }
-        let source = state.snapshot.source.clone();
-        // 完整候选验证不持有活动状态锁；transaction 排除 setup 和其他配置写入。
+        let snapshot = state.snapshot.clone();
         drop(guard);
-        let candidate = build_candidate(&source, &self.source_path, &expanded)?;
+        // transaction 串行化候选生成与受理；耗时解析不持有只读快照锁。
+        let expanded = expand_redacted_changes(&snapshot.source, changes)?;
+        let candidate = build_candidate(&snapshot.source, &self.source_path, &expanded)?;
+        if !impacts(&snapshot, &candidate).is_subset(confirmations) {
+            return Err(ActiveError::MissingConfirmation);
+        }
         let next_revision = random_token()?;
         let mut guard = self.active.lock().map_err(|_| ActiveError::Busy)?;
         let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
-        check_expected(&state.snapshot, expected, discard_external_changes)?;
+        check_expected(&state.snapshot, &expected, discard)?;
         state.operations.insert(
             operation_id.to_owned(),
             OperationRecord {
@@ -580,7 +539,7 @@ impl ConfigStore {
         Ok(BeginApply::Accepted(Box::new(ApplyPermit {
             store: Arc::clone(self),
             operation_id: operation_id.into(),
-            expected: expected.clone(),
+            expected,
             next_revision,
             candidate,
             completed: false,
@@ -733,7 +692,7 @@ impl ConfigStore {
         validate_token(actor)?;
         validate_token(operation_id)?;
         let digest = sha256_digest(
-            &serde_json::to_vec(&("restore", actor, expected, discard_external_changes))
+            &serde_json::to_vec(&("restore", actor, &expected.files, discard_external_changes))
                 .map_err(|_| EditError::UnsupportedSource)?,
         );
         let _transaction = self.transaction.try_lock().map_err(|_| ActiveError::Busy)?;
@@ -994,21 +953,8 @@ fn check_expected(
     Ok(())
 }
 
-fn impacts(
-    snapshot: &ActiveSnapshot,
-    candidate: &SourceCandidate,
-) -> Result<BTreeSet<Impact>, ActiveError> {
+fn impacts(snapshot: &ActiveSnapshot, candidate: &SourceCandidate) -> BTreeSet<Impact> {
     let mut impacts = BTreeSet::new();
-    if candidate.renamed {
-        impacts.insert(Impact::RenameReferences);
-    }
-    // 真正物理 endpoint 差异由 BC-03 prepare 裁定；这里使用保守确认，不承诺可热应用。
-    if serde_json::to_value(&snapshot.config.listener).map_err(|_| EditError::UnsupportedSource)?
-        != serde_json::to_value(&candidate.config.listener)
-            .map_err(|_| EditError::UnsupportedSource)?
-    {
-        impacts.insert(Impact::ListenerRebind);
-    }
     let old = &snapshot.config.statistics.retention;
     let new = &candidate.config.statistics.retention;
     if new.days < old.days
@@ -1020,19 +966,7 @@ fn impacts(
     if snapshot.externally_changed() {
         impacts.insert(Impact::DiscardExternalChanges);
     }
-    Ok(impacts)
-}
-
-fn command_digest(
-    actor: &str,
-    expected: &ExpectedRevisions,
-    changes: &[ConfigChange],
-    discard: bool,
-) -> Result<String, ActiveError> {
-    Ok(sha256_digest(
-        &serde_json::to_vec(&(actor, expected, changes, discard))
-            .map_err(|_| EditError::UnsupportedSource)?,
-    ))
+    impacts
 }
 
 fn validate_token(value: &str) -> Result<(), ActiveError> {

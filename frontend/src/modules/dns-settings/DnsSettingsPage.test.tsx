@@ -9,7 +9,7 @@ import { setMockAuthenticated } from "@/mocks/handlers";
 import { dnsConfigReadFixture } from "@/mocks/fixtures";
 import { server } from "@/mocks/server";
 import { configKeys } from "@/shared/config/query-keys";
-import type { Candidate } from "@/shared/config/api";
+import type { ApplyRequest } from "@/shared/config/api";
 
 function mount() {
   setMockAuthenticated(true);
@@ -20,7 +20,7 @@ function mount() {
 }
 
 describe("DNS 配置读取恢复与草稿", () => {
-  it("后台刷新不覆盖草稿，保存固定打开时的版本", async () => {
+  it("后台刷新不覆盖草稿，保存不回传打开时的全局版本", async () => {
     const user = userEvent.setup();
     const client = mount();
     await user.click(await screen.findByRole("button", { name: "编辑 DNS" }, { timeout: 10_000 }));
@@ -32,11 +32,11 @@ describe("DNS 配置读取恢复与草稿", () => {
     updated.state.active_revision = "new-active";
     updated.state.observed_file_revision = "new-files";
     updated.values[0].value.cache.failure_ttl = "9000000000ns";
-    let candidate: Candidate | undefined;
+    let candidate: ApplyRequest | undefined;
     server.use(
       http.get("/api/v2/config/modules/dns", () => HttpResponse.json(updated)),
-      http.post("/api/v2/config/modules/dns/validate", async ({ request }) => {
-        candidate = await request.json() as Candidate;
+      http.post("/api/v2/config/modules/dns/apply", async ({ request }) => {
+        candidate = await request.json() as ApplyRequest;
         return HttpResponse.json({ code: "VALIDATION_FAILED", message: "test rejection", request_id: "draft-check", retryable: false, field_errors: [] }, { status: 400 });
       }),
     );
@@ -44,7 +44,7 @@ describe("DNS 配置读取恢复与草稿", () => {
     expect(ttl).toHaveValue("17");
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
     await waitFor(() => expect(candidate).toBeDefined());
-    expect(candidate?.expected).toEqual({ active_revision: dnsConfigReadFixture.state.active_revision, observed_file_revision: dnsConfigReadFixture.state.observed_file_revision });
+    expect(Object.keys(candidate!).sort()).toEqual(["changes", "operation_id"]);
     expect(candidate?.changes[0]).toMatchObject({ module: "dns", change: { cache: { failure_ttl: "17s" } } });
     expect(ttl).toHaveValue("17");
   });
@@ -64,5 +64,81 @@ describe("DNS 配置读取恢复与草稿", () => {
     expect(screen.getByText("同步状态暂不可用")).toBeInTheDocument();
     expect(within(dialog).getByRole("button", { name: "保存" })).toBeDisabled();
     expect(ttl).toHaveValue("19");
+  });
+  it("保留缩短先 apply 拒绝再确认；预览和确认提交均不携带 active revision", async () => {
+    const user = userEvent.setup();
+    const applies: ApplyRequest[] = [];
+    let validates = 0;
+    server.use(
+      http.post("/api/v2/retention/preview", async ({ request }) => {
+        expect(Object.keys(await request.json() as object)).toEqual(["policy"]);
+        return HttpResponse.json({ sampled_at_ms: 1, detail_bytes: "0", proposed_cutoff_utc_date: "2026-11-01", shortens_history: true });
+      }),
+      http.post("/api/v2/config/modules/statistics/apply", async ({ request }) => {
+        const body = await request.json() as ApplyRequest;
+        applies.push(body);
+        return applies.length === 1
+          ? HttpResponse.json({ code: "CONFIRMATION_REQUIRED", request_id: "retention-confirm", message: "confirm", retryable: false, field_errors: [] }, { status: 409 })
+          : HttpResponse.json({ operation_id: body.operation_id, status: { state: "applied_synced", active_revision: "a2", persisted_revision: "a2" } });
+      }),
+      http.post("/api/v2/config/modules/statistics/validate", async ({ request }) => {
+        validates += 1;
+        expect(applies).toHaveLength(1);
+        expect(await request.json()).toEqual({ changes: applies[0].changes });
+        return HttpResponse.json({ observed_file_revision: "files-new", required_confirmations: ["retention_shortening"], affected_names: [] });
+      }),
+    );
+    mount();
+    await user.click(await screen.findByRole("button", { name: "编辑保留策略" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑数据保留" });
+    const days = within(dialog).getByLabelText("R：基础保留天数");
+    await user.clear(days);
+    await user.type(days, "1");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    expect(await screen.findByText(/候选截止日期 2026-11-01/)).toBeInTheDocument();
+    expect(applies).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "确认应用" }));
+    await waitFor(() => expect(applies).toHaveLength(2));
+    expect(applies[1]).toEqual({ ...applies[0], confirmations: ["retention_shortening"] });
+    expect(Object.keys(applies[0]).sort()).toEqual(["changes", "operation_id"]);
+    expect(validates).toBe(1);
+    expect(await screen.findByText("配置已应用并同步到文件")).toBeInTheDocument();
+  });
+
+  it.each(["cancel", "conflict"] as const)("外改确认 %s 保留 DNS 草稿，不循环重试", async (action) => {
+    const user = userEvent.setup();
+    const applies: ApplyRequest[] = [];
+    let validates = 0;
+    server.use(
+      http.post("/api/v2/config/modules/dns/apply", async ({ request }) => {
+        applies.push(await request.json() as ApplyRequest);
+        return HttpResponse.json({ code: applies.length === 1 ? "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION" : "FILE_REVISION_CONFLICT", request_id: "file-confirm", message: "confirm", retryable: false, field_errors: [] }, { status: 409 });
+      }),
+      http.post("/api/v2/config/modules/dns/validate", () => {
+        validates += 1;
+        return HttpResponse.json({ observed_file_revision: "files-new", required_confirmations: ["discard_external_changes"], affected_names: [] });
+      }),
+    );
+    mount();
+    await user.click(await screen.findByRole("button", { name: "编辑 DNS" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑 DNS 配置" });
+    const ttl = within(dialog).getByLabelText("失败 TTL");
+    await user.clear(ttl);
+    await user.type(ttl, "23");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    expect(await screen.findByText("尚未采用的外部文件变化将被覆盖")).toBeInTheDocument();
+    expect(applies).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: action === "cancel" ? "返回编辑" : "确认应用" }));
+    if (action === "conflict") {
+      expect(await within(dialog).findByText("配置文件已再次变化，请重新读取差异。")).toBeInTheDocument();
+      expect(applies).toEqual([applies[0], { ...applies[0], confirmations: ["discard_external_changes"], observed_file_revision: "files-new" }]);
+    } else {
+      await waitFor(() => expect(within(dialog).getByRole("button", { name: "保存" })).not.toBeDisabled());
+      expect(applies).toHaveLength(1);
+    }
+    expect(validates).toBe(1);
+    expect(ttl).toHaveValue("23");
+    expect(dialog).toBeInTheDocument();
+    expect(screen.queryByText("配置操作结果尚未确认")).not.toBeInTheDocument();
   });
 });

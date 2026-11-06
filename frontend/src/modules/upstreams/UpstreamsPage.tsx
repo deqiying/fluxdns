@@ -143,7 +143,7 @@ export function UpstreamsPage() {
       ? { module: "upstreams", change: { action: "create", value } }
       : { module: "upstreams", change: { action: "update", original_name: editing.name, value } };
     try {
-      const operation = await mutation.mutateAsync({ change, state: query.data.state });
+      const operation = await mutation.mutateAsync({ change });
       if (operation) setEditing(null);
     } catch {
       // 保留草稿和后端字段错误。

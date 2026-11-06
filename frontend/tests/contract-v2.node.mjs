@@ -26,11 +26,11 @@ test("共享 JSON 夹具符合正式 v2 schema", () => {
   validate("Configuration", yaml.load(readFileSync(new URL("../../backend/tests/fixtures/config-v2.yaml", import.meta.url), "utf8")));
 });
 
-test("schema 拒绝只读字段、身份变更、旧字段和类型残留", () => {
+test("schema 拒绝只读字段、非法身份、旧字段和类型残留", () => {
   const candidateValidator = ajv.getSchema("fluxdns-v2#/$defs/Candidate");
   const invalidChanges = [
     {module: "work", change: {path: "other"}},
-    {module: "clients", change: {action: "update", original_name: "desktop", value: {name: "renamed", client_id: "altered"}}},
+    {module: "clients", change: {action: "update", original_name: "desktop", value: {name: "renamed", client_id: "bad id"}}},
     {module: "clients", change: {action: "delete", original_name: "desktop"}},
     {module: "dns", change: {resolve_log: {enable: true, max_records: 100}}},
     {module: "dns", change: {cache: null}},
@@ -106,4 +106,35 @@ test("v2 业务认证只接受 Bearer，Cookie 仅用于认证刷新且 token �
   assert.equal(validator({...auth, access_token: "invalid"}), false);
   assert.deepEqual(openapi.paths["/events"].get.security, []);
   assert.equal(openapi.paths["/events"].get["x-websocket-protocol"], "fluxdns.v1");
+});
+
+test("简化写接口只接受 changes 与显式风险确认，保留只读 revision", () => {
+  const changes = [{module: "logs", change: {enable: true, level: "info", path: "logs/fluxdns.log"}}];
+  const apply = {operation_id: "operation-1", changes};
+  validate("Candidate", {changes});
+  validate("ApplyRequest", apply);
+  validate("ApplyRequest", {...apply, confirmations: ["discard_external_changes"], observed_file_revision: "files-2"});
+  validate("ValidationResult", {observed_file_revision: "files-2", required_confirmations: ["retention_shortening"], affected_names: []});
+  validate("FileSyncRequest", {operation_id: "operation-1", observed_file_revision: "files-2"});
+  validate("RetentionPreviewRequest", {policy: {retention: {days: 7}}});
+  validate("RetentionPreview", {sampled_at_ms: 1, detail_bytes: "0", proposed_cutoff_utc_date: "2026-11-01", shortens_history: false});
+  const rejects = (schema, value) => assert.equal(ajv.getSchema(`fluxdns-v2#/$defs/${schema}`)(value), false, schema);
+  for (const old of [{expected: fixtures.external_diff.expected}, {candidate: {changes}}, {validation_token: "ticket"}, {discard_external_changes: true}]) {
+    rejects("ApplyRequest", {...apply, ...old});
+  }
+  rejects("Candidate", {changes, expected: fixtures.external_diff.expected});
+  for (const impact of ["rename_references", "listener_rebind"]) rejects("ApplyRequest", {...apply, confirmations: [impact]});
+  rejects("ValidationResult", {...fixtures.validation, validation_token: "ticket"});
+  rejects("FileSyncRequest", {operation_id: "operation-1", observed_file_revision: "files-2", expected: fixtures.external_diff.expected});
+  rejects("RetentionPreviewRequest", {policy: {}, expected: fixtures.external_diff.expected});
+  rejects("RetentionPreview", {sampled_at_ms: 1, detail_bytes: "0", proposed_cutoff_utc_date: "2026-11-01", shortens_history: false, expected: fixtures.external_diff.expected});
+  for (const code of ["CONFIRMATION_REQUIRED", "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION"]) {
+    validate("ErrorEnvelope", {code, request_id: "confirm-1", message: "confirmation required", retryable: false, field_errors: []});
+  }
+  assert.ok(definitions.ConfigState.properties.active_revision);
+  assert.ok(definitions.OperationStatus.oneOf.some((variant) => variant.properties.active_revision));
+  assert.ok(definitions.ExternalDiff.properties.expected);
+  assert.ok(definitions.ErrorCode.enum.includes("CONFIRMATION_REQUIRED"));
+  assert.ok(definitions.ErrorCode.enum.includes("ACTIVE_REVISION_CONFLICT"));
+  assert.ok(!definitions.ErrorCode.enum.includes("VALIDATION_EXPIRED"));
 });

@@ -202,7 +202,7 @@ export function ClientFormDrawer({ target, items, strategyOptions, routeTemplate
       change = { module: "clients", change: { action: "update", original_name: target.name, value } };
     }
     try {
-      const operation = await mutation.mutateAsync({ change, state: configState });
+      const operation = await mutation.mutateAsync({ change });
       if (!operation) return;
       if (nextId) void message.success(`客户端 ID 已更新为 ${nextId}`);
       onSaved(values.name);

@@ -3,21 +3,6 @@ import type { components } from "@/shared/api/generated-v2";
 type Schemas = components["schemas"];
 export type ConfigChange = Schemas["ConfigChange"];
 export type ConfigState = Schemas["ConfigState"];
-export type ConfigDraft = {
-  /** 打开草稿时固定，refetch 和外部变化不能替换它。 */
-  expected: Schemas["Preconditions"];
-  change: ConfigChange;
-  dirty: boolean;
-};
-
-export type FormPhase =
-  | { kind: "editing"; draft: ConfigDraft }
-  | { kind: "validating"; draft: ConfigDraft }
-  | { kind: "confirming"; draft: ConfigDraft; validation: Schemas["ValidationResult"] }
-  | { kind: "applying"; draft: ConfigDraft; operationId: string }
-  | { kind: "result_unknown"; draft: ConfigDraft; operationId: string }
-  | { kind: "settled"; draft: ConfigDraft; operation: Schemas["OperationResult"] };
-
 /** 只选普通编辑字段且不带 ID；修改请求身份必须由调用方显式追加 client_id，避免随改名或外部差异隐式变更。 */
 export function clientEditValue(source: Schemas["Client"]): Schemas["ClientEdit"] {
   const { name, match, strategy, cache, ttl_override, edns_client_subnet } = source;

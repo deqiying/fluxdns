@@ -122,7 +122,7 @@ export function DnsSettingsPage() {
       resolve_log: { enable: values.resolve_log_enable },
     };
     try {
-      const operation = await dnsMutation.mutateAsync({ change: { module: "dns", change: value }, state: editorState.current });
+      const operation = await dnsMutation.mutateAsync({ change: { module: "dns", change: value } });
       if (operation) setEditor(null);
     } catch {
       // 失败由表单容器显示。
@@ -138,18 +138,16 @@ export function DnsSettingsPage() {
     const value: Statistics = { retention: { ...values, reference_size_bytes: referenceSizeBytes } };
     try {
       const preview = await previewRetention({
-        expected: { active_revision: editorState.current.active_revision, observed_file_revision: editorState.current.observed_file_revision },
         policy: value,
       });
       const detail = `候选截止日期 ${preview.proposed_cutoff_utc_date}，当前详情文件 ${formatBytes(preview.detail_bytes)}。保存不会立即删除数据。`;
       const operation = await statisticsMutation.mutateAsync({
         change: { module: "statistics", change: value },
-        state: editorState.current,
         confirmationDetails: preview.shortens_history ? { retention_shortening: detail } : undefined,
       });
       if (operation) setEditor(null);
     } catch {
-      // 预览、revision 或应用错误统一保留草稿。
+      // 预览、文件冲突或应用错误统一保留草稿。
     }
   };
 

@@ -165,23 +165,10 @@ impl ManagementQueryService {
         store: &Arc<crate::config::store::ConfigStore>,
         request: RetentionPreviewRequest,
     ) -> Result<RetentionPreview, ErrorCode> {
-        let (state, active) = config_query::read_async(store, |store| {
-            let status = store
-                .configuration_status()
-                .map_err(config_query::error_code)?;
-            Ok((
-                config_query::configuration_state_from_status(&status)?,
-                status.active,
-            ))
-        })
-        .await?;
-        if request.expected.active_revision.as_str() != state.active_revision.as_str() {
-            return Err(ErrorCode::ActiveRevisionConflict);
-        }
-        if request.expected.observed_file_revision.as_str() != state.observed_file_revision.as_str()
-        {
-            return Err(ErrorCode::FileRevisionConflict);
-        }
+        let active = store
+            .active_snapshot_async()
+            .await
+            .map_err(config_query::error_code)?;
         if active.runtime_revision != self.coordinator.load().revision().0 {
             return Err(ErrorCode::ServiceUnavailable);
         }
@@ -209,7 +196,6 @@ impl ManagementQueryService {
             RetentionPlan::calculate(current_policy, reference_day, proposed.sampled_detail_bytes)
                 .map_err(|_| ErrorCode::ServiceUnavailable)?;
         Ok(RetentionPreview {
-            expected: request.expected,
             sampled_at_ms: unix_millis_u64(sampled_at).ok_or(ErrorCode::ServiceUnavailable)?,
             detail_bytes: DecimalU64::from(proposed.sampled_detail_bytes),
             proposed_cutoff_utc_date: format_epoch_day(proposed.keep_from_day_utc),
@@ -962,18 +948,7 @@ pub(crate) mod tests {
             let response = app.clone().oneshot(request).await.unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN, "{path}");
         }
-        let state_response = app
-            .clone()
-            .oneshot(get("/api/v2/config/state", Some(&authorization)))
-            .await
-            .unwrap();
-        let state = to_bytes(state_response.into_body(), 4096).await.unwrap();
-        let state: serde_json::Value = serde_json::from_slice(&state).unwrap();
         let preview = json!({
-            "expected": {
-                "active_revision": state["active_revision"],
-                "observed_file_revision": state["observed_file_revision"]
-            },
             "policy": {"retention": {"days": 1, "grace_days": 0, "reference_size_bytes": 1}}
         });
         let response = app
@@ -988,7 +963,7 @@ pub(crate) mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(body["expected"], preview["expected"]);
+        assert!(body.get("expected").is_none());
         assert!(body["detail_bytes"].is_string());
         assert!(body["proposed_cutoff_utc_date"].is_string());
         assert!(body["shortens_history"].is_boolean());
@@ -1040,26 +1015,19 @@ pub(crate) mod tests {
             "PAYLOAD_TOO_LARGE"
         );
 
-        let expected = services.config_store.observe_files().unwrap().expected();
         let changes = vec![ConfigChange::Logs(LogsDto {
             enable: true,
             level: LogLevelDto::Warn,
             path: "./logs/changed.log".into(),
         })];
-        let validated = services
-            .config_store
-            .validate_edit("test-actor", &expected, &changes, false)
-            .unwrap();
         let BeginApply::Accepted(mut permit) = services
             .config_store
             .begin_apply(
                 "test-actor",
                 "revision-race",
-                &expected,
                 &changes,
-                false,
-                &validated.token,
-                &validated.impacts,
+                None,
+                &Default::default(),
             )
             .unwrap()
         else {

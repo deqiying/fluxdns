@@ -7,7 +7,6 @@ import { applyAndSettle, settleOperation, resumeOperation, restoreFilesAndSettle
 import { QueryClient } from "@tanstack/react-query";
 import { assertNoPendingOperation, pendingOperationKey, trackConfigOperation } from "./pending-operation";
 
-const expected = { active_revision: "active-1", observed_file_revision: "file-1" };
 const state: ConfigState = {
   active_revision: "active-1",
   runtime_revision: "runtime-1",
@@ -21,12 +20,7 @@ const state: ConfigState = {
 function applyRequest(operationId: string): ApplyRequest {
   return {
     operation_id: operationId,
-    candidate: {
-      expected,
-      discard_external_changes: false,
-      changes: [{ module: "logs", change: { enable: true, level: "info", path: "logs/fluxdns.log" } }],
-    },
-    validation_token: "validation-1",
+    changes: [{ module: "logs", change: { enable: true, level: "info", path: "logs/fluxdns.log" } }],
     confirmations: [],
   };
 }
@@ -153,7 +147,7 @@ describe("配置操作回读", () => {
       }),
     );
     const options = { maxPolls: 2, pollIntervalMs: 0 };
-    const request = { operation_id: "shared-budget", expected, discard_external_changes: false };
+    const request = { operation_id: "shared-budget", observed_file_revision: "file-1" };
     const result = kind === "apply" ? applyAndSettle(applyRequest(request.operation_id), options)
       : kind === "restore" ? restoreFilesAndSettle(request, options) : retryPersistenceAndSettle(request, options);
     await expect(result).resolves.toMatchObject({ kind: "pending", operation: { operation_id: request.operation_id } });

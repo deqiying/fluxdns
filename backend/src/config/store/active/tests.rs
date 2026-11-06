@@ -373,23 +373,10 @@ impl Fixture {
     }
 
     fn permit(&self, id: &str) -> ApplyPermit {
-        let expected = self.store.observe_files().unwrap().expected();
         let changes = self.edit();
-        let validation = self
-            .store
-            .validate_edit("session-a", &expected, &changes, false)
-            .unwrap();
         let BeginApply::Accepted(permit) = self
             .store
-            .begin_apply(
-                "session-a",
-                id,
-                &expected,
-                &changes,
-                false,
-                &validation.token,
-                &validation.impacts,
-            )
+            .begin_apply("session-a", id, &changes, None, &BTreeSet::new())
             .unwrap()
         else {
             panic!("new operation expected");
@@ -483,9 +470,13 @@ fn applied_write_failure_preserves_new_active_state_and_retry_never_reapplies() 
         OperationPhase::AppliedUnpersisted
     );
     assert!(matches!(
-        fixture
-            .store
-            .validate_edit("session-a", &failed.expected(), &fixture.edit(), true),
+        fixture.store.begin_apply(
+            "session-a",
+            "blocked",
+            &fixture.edit(),
+            None,
+            &BTreeSet::new()
+        ),
         Err(ActiveError::Busy)
     ));
     assert!(fixture.store.persist_applied("session-b", "retry").is_err());
@@ -596,93 +587,59 @@ fn background_observation_updates_file_state_without_reloading_active_source() {
 }
 
 #[test]
-fn validation_binds_actor_both_revisions_content_and_confirmation() {
+fn optional_preview_is_stateless_and_external_overwrite_requires_the_seen_file() {
     let fixture = Fixture::new();
-    let expected = fixture.store.active_snapshot().unwrap().expected();
+    let initial = fixture.store.active_snapshot().unwrap();
     let changes = fixture.edit();
-    let validation = fixture
-        .store
-        .validate_edit("session-a", &expected, &changes, false)
-        .unwrap();
     assert!(
         fixture
             .store
-            .begin_apply(
-                "session-b",
-                "op",
-                &expected,
-                &changes,
-                false,
-                &validation.token,
-                &validation.impacts
-            )
-            .is_err()
-    );
-    let mut other = changes.clone();
-    if let ConfigChange::Logs(logs) = &mut other[0] {
-        logs.enable = false;
-    }
-    assert!(
-        fixture
-            .store
-            .begin_apply(
-                "session-a",
-                "op",
-                &expected,
-                &other,
-                false,
-                &validation.token,
-                &validation.impacts
-            )
-            .is_err()
+            .validate_edit(&changes)
+            .unwrap()
+            .impacts
+            .is_empty()
     );
     fs::write(&fixture.derived, format!("{FIXTURE}\n# external\n")).unwrap();
     assert!(matches!(
-        fixture.store.begin_apply(
-            "session-a",
-            "op",
-            &expected,
-            &changes,
-            false,
-            &validation.token,
-            &validation.impacts
-        ),
-        Err(ActiveError::FileConflict)
+        fixture
+            .store
+            .begin_apply("session-a", "op", &changes, None, &BTreeSet::new()),
+        Err(ActiveError::ExternalConfirmation)
     ));
-    let expected = fixture.store.observe_files().unwrap().expected();
+    let preview = fixture.store.validate_edit(&changes).unwrap();
+    assert_eq!(
+        preview.impacts,
+        BTreeSet::from([Impact::DiscardExternalChanges])
+    );
     assert!(matches!(
         fixture
             .store
-            .validate_edit("session-a", &expected, &changes, false),
-        Err(ActiveError::ExternalConfirmation)
+            .begin_apply("session-a", "op", &changes, None, &preview.impacts),
+        Err(ActiveError::InvalidToken)
     ));
-    let validation = fixture
-        .store
-        .validate_edit("session-a", &expected, &changes, true)
-        .unwrap();
-    assert!(validation.impacts.contains(&Impact::DiscardExternalChanges));
+    fs::write(&fixture.source, format!("{FIXTURE}\n# changed again\n")).unwrap();
     assert!(matches!(
         fixture.store.begin_apply(
             "session-a",
             "op",
-            &expected,
             &changes,
-            true,
-            &validation.token,
-            &BTreeSet::new()
+            Some(&preview.observed_file_revision),
+            &preview.impacts
         ),
-        Err(ActiveError::MissingConfirmation)
+        Err(ActiveError::FileConflict)
     ));
+    let snapshot = fixture.store.active_snapshot().unwrap();
+    assert_eq!(snapshot.source, initial.source);
+    assert!(snapshot.operation_id.is_none());
+    let preview = fixture.store.validate_edit(&changes).unwrap();
     let BeginApply::Accepted(permit) = fixture
         .store
         .begin_apply(
             "session-a",
             "op",
-            &expected,
             &changes,
-            true,
-            &validation.token,
-            &validation.impacts,
+            Some(&preview.observed_file_revision),
+            &preview.impacts,
         )
         .unwrap()
     else {
@@ -699,49 +656,24 @@ fn validation_binds_actor_both_revisions_content_and_confirmation() {
 #[test]
 fn accepted_operation_is_idempotent_and_dropped_permit_remains_unknown_and_blocked() {
     let fixture = Fixture::new();
-    let expected = fixture.store.active_snapshot().unwrap().expected();
     let changes = fixture.edit();
-    let validation = fixture
-        .store
-        .validate_edit("session", &expected, &changes, false)
-        .unwrap();
     let BeginApply::Accepted(permit) = fixture
         .store
-        .begin_apply(
-            "session",
-            "op",
-            &expected,
-            &changes,
-            false,
-            &validation.token,
-            &validation.impacts,
-        )
+        .begin_apply("session", "op", &changes, None, &BTreeSet::new())
         .unwrap()
     else {
         panic!("not accepted")
     };
     assert!(matches!(
-        fixture.store.begin_apply(
-            "session",
-            "op",
-            &expected,
-            &changes,
-            false,
-            &validation.token,
-            &validation.impacts
-        ),
+        fixture
+            .store
+            .begin_apply("session", "op", &changes, None, &BTreeSet::new()),
         Ok(BeginApply::Existing(OperationPhase::Preparing))
     ));
     assert!(matches!(
-        fixture.store.begin_apply(
-            "other",
-            "op",
-            &expected,
-            &changes,
-            false,
-            &validation.token,
-            &validation.impacts
-        ),
+        fixture
+            .store
+            .begin_apply("other", "op", &changes, None, &BTreeSet::new()),
         Err(ActiveError::OperationIdReused)
     ));
     assert_eq!(
@@ -756,7 +688,7 @@ fn accepted_operation_is_idempotent_and_dropped_permit_remains_unknown_and_block
     assert!(matches!(
         fixture
             .store
-            .validate_edit("session", &expected, &changes, false),
+            .begin_apply("session", "next", &changes, None, &BTreeSet::new()),
         Err(ActiveError::Busy)
     ));
 }
@@ -783,21 +715,9 @@ fn applied_state_is_separate_from_disk_and_failed_compensation_blocks() {
     let fixture = Fixture::new();
     let before = fixture.store.active_snapshot().unwrap();
     let changes = fixture.edit();
-    let validation = fixture
-        .store
-        .validate_edit("session", &before.expected(), &changes, false)
-        .unwrap();
     let BeginApply::Accepted(mut permit) = fixture
         .store
-        .begin_apply(
-            "session",
-            "op",
-            &before.expected(),
-            &changes,
-            false,
-            &validation.token,
-            &validation.impacts,
-        )
+        .begin_apply("session", "op", &changes, None, &BTreeSet::new())
         .unwrap()
     else {
         panic!("not accepted")
@@ -817,27 +737,14 @@ fn applied_state_is_separate_from_disk_and_failed_compensation_blocks() {
     assert!(matches!(
         fixture
             .store
-            .validate_edit("session", &after.expected(), &changes, true),
+            .begin_apply("session", "next", &changes, None, &BTreeSet::new()),
         Err(ActiveError::Busy)
     ));
 
     let fixture = Fixture::new();
-    let expected = fixture.store.active_snapshot().unwrap().expected();
-    let validation = fixture
-        .store
-        .validate_edit("session", &expected, &changes, false)
-        .unwrap();
     let BeginApply::Accepted(permit) = fixture
         .store
-        .begin_apply(
-            "session",
-            "op",
-            &expected,
-            &changes,
-            false,
-            &validation.token,
-            &validation.impacts,
-        )
+        .begin_apply("session", "op", &changes, None, &BTreeSet::new())
         .unwrap()
     else {
         panic!("not accepted")
@@ -858,58 +765,40 @@ fn applied_state_is_separate_from_disk_and_failed_compensation_blocks() {
 }
 
 #[test]
-fn expiration_capacity_and_setup_share_the_operation_boundary() {
+fn operation_capacity_is_bounded_but_optional_preview_has_no_ticket_capacity() {
     let fixture = Fixture::new();
-    let expected = fixture.store.active_snapshot().unwrap().expected();
     let changes = fixture.edit();
-    let validation = fixture
-        .store
-        .validate_edit("session", &expected, &changes, false)
-        .unwrap();
-    fixture
-        .store
-        .active
-        .lock()
-        .unwrap()
-        .as_mut()
-        .unwrap()
-        .validations
-        .get_mut(&validation.token)
-        .unwrap()
-        .expires = Instant::now();
-    assert!(matches!(
-        fixture.store.begin_apply(
-            "session",
-            "op",
-            &expected,
-            &changes,
-            false,
-            &validation.token,
-            &validation.impacts
-        ),
-        Err(ActiveError::ValidationExpired)
-    ));
     {
         let mut state = fixture.store.active.lock().unwrap();
         let state = state.as_mut().unwrap();
-        state.validations.clear();
         for index in 0..MAX_RECORDS {
-            state.validations.insert(
+            state.operations.insert(
                 index.to_string(),
-                ValidationRecord {
+                OperationRecord {
                     digest: String::new(),
-                    expires: Instant::now() + VALIDATION_TTL,
-                    impacts: BTreeSet::new(),
+                    actor: String::new(),
+                    result: OperationSnapshot::Rejected {
+                        error: OperationFailure::ApplyFailed,
+                    },
+                    expires: Instant::now() + OPERATION_TTL,
                 },
             );
         }
     }
+    assert!(fixture.store.validate_edit(&changes).is_ok());
     assert!(matches!(
         fixture
             .store
-            .validate_edit("session", &expected, &changes, false),
+            .begin_apply("session", "op", &changes, None, &BTreeSet::new()),
         Err(ActiveError::Busy)
     ));
+    {
+        let mut state = fixture.store.active.lock().unwrap();
+        for record in state.as_mut().unwrap().operations.values_mut() {
+            record.expires = Instant::now();
+        }
+    }
+    fixture.permit("after-expiration").rejected(true).unwrap();
     let _gate = fixture.store.transaction.lock().unwrap();
     assert!(matches!(
         fixture.store.create_initial_user("admin", "not-a-hash"),
@@ -1059,5 +948,167 @@ fn binding_digest_is_sha256() {
     assert_eq!(
         super::sha256_digest(b"abc"),
         "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+}
+
+fn changes_from_json(value: &str) -> Vec<ConfigChange> {
+    serde_json::from_str(value).unwrap()
+}
+
+// 仅模拟已存在的 Runtime owner 成功回执，真实 HTTP/Runtime 由独立集成测试覆盖。
+fn commit_changes(fixture: &Fixture, id: &str, changes: &[ConfigChange]) {
+    let revision = fixture.store.active_snapshot().unwrap().runtime_revision + 1;
+    let BeginApply::Accepted(mut permit) = fixture
+        .store
+        .begin_apply("session-a", id, changes, None, &BTreeSet::new())
+        .unwrap()
+    else {
+        panic!("new operation expected")
+    };
+    permit.begin_runtime_apply().unwrap();
+    permit.applied(revision).unwrap();
+    fixture.store.persist_applied("session-a", id).unwrap();
+}
+
+#[test]
+fn direct_updates_keep_other_resources_and_same_resource_is_last_write_wins() {
+    let fixture = Fixture::new();
+    let empty_ips = changes_from_json(
+        r#"[{"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"desktop","match":{"ips":[]}}}}]"#,
+    );
+    let new_ips = changes_from_json(
+        r#"[{"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"desktop","match":{"ips":["192.0.2.99"]}}}}]"#,
+    );
+    // 两份客户端表单可以早于日志保存存在；提交时仅覆盖当前目标，不覆盖日志。
+    commit_changes(&fixture, "logs", &fixture.edit());
+    commit_changes(&fixture, "first-client", &new_ips);
+    commit_changes(&fixture, "last-client", &empty_ips);
+    let snapshot = fixture.store.active_snapshot().unwrap();
+    assert!(snapshot.config.clients[0].r#match.ips.is_empty());
+    assert_eq!(snapshot.config.clients[0].client_id, "Desktop-01");
+    assert_eq!(snapshot.config.logs.path.to_str(), Some("./logs/other.log"));
+    assert_eq!(snapshot.runtime_revision, 4);
+    assert_eq!(
+        fs::read_to_string(&fixture.source).unwrap(),
+        snapshot.source.as_ref()
+    );
+}
+
+#[test]
+fn completed_rename_and_create_retries_return_original_results_before_resolving_old_keys() {
+    let fixture = Fixture::new();
+    let rename = changes_from_json(
+        r#"[{"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"AIO","match":{"ips":[]}}}}]"#,
+    );
+    commit_changes(&fixture, "rename", &rename);
+    let create = changes_from_json(
+        r#"[{"module":"clients","change":{"action":"create","value":{"name":"phone","client_id":"phone-01"}}}]"#,
+    );
+    commit_changes(&fixture, "create", &create);
+    commit_changes(&fixture, "other-change", &fixture.edit());
+    let current = fixture.store.active_snapshot().unwrap();
+    for (id, change) in [("rename", &rename), ("create", &create)] {
+        assert!(matches!(
+            fixture
+                .store
+                .begin_apply("session-a", id, change, None, &BTreeSet::new()),
+            Ok(BeginApply::Existing(OperationPhase::AppliedSynced))
+        ));
+        assert!(matches!(
+            fixture
+                .store
+                .begin_apply("session-b", id, change, None, &BTreeSet::new()),
+            Err(ActiveError::OperationIdReused)
+        ));
+    }
+    assert!(matches!(
+        fixture.store.begin_apply(
+            "session-a",
+            "missing-old-key",
+            &rename,
+            None,
+            &BTreeSet::new()
+        ),
+        Err(ActiveError::Candidate(EditError::NotFound))
+    ));
+    assert!(matches!(
+        fixture.store.begin_apply(
+            "session-a",
+            "duplicate-name",
+            &create,
+            None,
+            &BTreeSet::new()
+        ),
+        Err(ActiveError::Candidate(_))
+    ));
+    assert!(matches!(
+        fixture
+            .store
+            .begin_apply("session-a", "rename", &create, None, &BTreeSet::new()),
+        Err(ActiveError::OperationIdReused)
+    ));
+    assert_eq!(
+        fixture.store.active_snapshot().unwrap().revision,
+        current.revision
+    );
+    assert_eq!(current.config.clients.len(), 2);
+}
+
+#[test]
+fn retention_shortening_requires_confirmation_without_reserving_an_operation() {
+    let fixture = Fixture::new();
+    let changes = changes_from_json(
+        r#"[{"module":"statistics","change":{"retention":{"days":1,"grace_days":0,"reference_size_bytes":1048576}}}]"#,
+    );
+    assert!(matches!(
+        fixture
+            .store
+            .begin_apply("session-a", "retention", &changes, None, &BTreeSet::new()),
+        Err(ActiveError::MissingConfirmation)
+    ));
+    assert!(
+        fixture
+            .store
+            .active_snapshot()
+            .unwrap()
+            .operation_id
+            .is_none()
+    );
+    let preview = fixture.store.validate_edit(&changes).unwrap();
+    assert_eq!(
+        preview.impacts,
+        BTreeSet::from([Impact::RetentionShortening])
+    );
+    let BeginApply::Accepted(permit) = fixture
+        .store
+        .begin_apply("session-a", "retention", &changes, None, &preview.impacts)
+        .unwrap()
+    else {
+        panic!("not accepted")
+    };
+    permit.rejected(true).unwrap();
+}
+
+#[test]
+fn file_change_after_acceptance_still_blocks_runtime_application() {
+    let fixture = Fixture::new();
+    let before = fixture.store.active_snapshot().unwrap();
+    let mut permit = fixture.permit("file-race");
+    fs::write(&fixture.source, format!("{FIXTURE}\n# external\n")).unwrap();
+    assert!(matches!(
+        permit.begin_runtime_apply(),
+        Err(ActiveError::FileConflict)
+    ));
+    permit
+        .reject_with(OperationFailure::FileRevisionConflict, true)
+        .unwrap();
+    assert_eq!(
+        fixture.store.active_snapshot().unwrap().revision,
+        before.revision
+    );
+    assert!(
+        fs::read_to_string(&fixture.source)
+            .unwrap()
+            .ends_with("# external\n")
     );
 }

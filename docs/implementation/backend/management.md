@@ -11,6 +11,8 @@
 > 时间存储补充核对：2026-09-05，`43671f1685edcaf271d8e62c184a7f72f5a2cefe` 加业务时间迁移工作树；不扩大其他管理功能审计范围
 >
 > 2026-10-04 增量核对：`eb428f92cdc3acda836547107ef2f56f6d988249` 加本次工作树；范围限配置读取、搜索与 ECS 字段错误，不扩大历史验收结论
+>
+> 2026-11-06 增量核对：基线 `3d44dd4` 加本次工作树，范围限单次保存、无状态预览、文件操作和保留预览的新请求契约；旧批次结果不代表本次验证。
 
 ## 入口与生命周期
 
@@ -24,13 +26,13 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 
 目标字段权威为 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml)，Rust 类型及有界解码位于 [`management::contract`](../../../backend/src/management/contract.rs)。正式 router 已注册指标、配置、保留、历史、组合与十模块配置写入、operation、文件处理、WS ticket 和 events upgrade。HTTP 业务端点均受 Bearer 保护，写请求及 ticket 额外要求 Origin/Fetch Metadata；WS upgrade 使用下述单次 ticket 与精确 Origin。
 
-严格变更类型位于 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测、验证票据和操作记录由 ConfigStore 提供，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。decoder 经 ConfigMutationOwner 接入正式组合/单模块 validate/apply、外部差异和文件处理；单独解析成功不代表运行态已经应用。
+严格变更类型位于 [`config::edit`](../../../backend/src/config/edit.rs)，本模块重用而不另建协议形状。完整候选校验、活动源编辑、双文件观测和有界操作记录由 ConfigStore 提供，事实与验证边界见[配置参考](../configuration.md#p1-活动源与候选内部底座2026-09-07)。decoder 经 ConfigMutationOwner 接入组合/单模块 apply、可选无状态 validate、外部差异和文件处理；单独解析成功不代表运行态已经应用。
 
 | 契约 | 已落实的内部能力 | 正式接线与剩余边界 |
 | --- | --- | --- |
 | 模块配置 | 重用配置 DTO，严格 tagged union；创建/更新，无删除；客户端更新的 `client_id` 可选，缺省保留原值、显式提供时替换请求身份；系统只读投影不含 users/hash | 组合与单模块入口都消费相同 decoder/owner；单模块只接受一项且 module 必须与 URL 一致 |
 | 活动配置与文件 | active/runtime/persisted revision 分离；组合文件观测 token；源表达、生效值/来源、引用和独立 runtime 投影；外部差异、还原、同步重试请求 | 状态、差异、还原和重试已接线；DTO 不接受路径、整份 YAML 或 Secret 实际值 |
-| 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、校验 token、明确确认清单 | ConfigMutationOwner 独立于 HTTP 请求推进 Runtime 与持久化；运行成功不等于文件同步，unknown 不能自动重放 |
+| 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、危险影响确认，无验证票据 | ConfigMutationOwner 独立于 HTTP 请求推进 Runtime 与持久化；运行成功不等于文件同步，unknown 不能自动重放 |
 | 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-13 Bearer HTTP 与 BC-24/25 指标/记录 WS 均已接线；记录 subscription 绑定 snapshot cursor 和 retention revision |
 
 大计数/序列使用十进制 `u64` 字符串，Rust 和 schema 均拒绝溢出与前导零；安全整数时间采用 UTC ms，耗时采用 us。请求中的安全时间上界由 REST/WS 共用验证器执行；输出时间仍为 Rust `u64`，生产投影接线时必须保持 schema 的安全整数边界。源 DTO 的相对路径、SecretRef 来源和缺失继承保留，duration 序列化为精确 ns 字符串；这不是可回写的完整 YAML 语法树，不能据此丢弃原注释或显式源表达。
@@ -83,7 +85,7 @@ Windows 测试使用真实受管文件，覆盖十模块、嵌套 DoH/TLS/组/�
 
 P3 首个消费方为 `outbound`：代理创建/编辑仍由完整 ConfigV2 候选验证 SecretRef 的 env/file/url 三选一、名称唯一和类型化引用改名，再经过统一 prepare、热应用和文件事务。Management 响应只含 SecretRef 来源，内联 URL 仅回显脱敏密码位（占位符 `FLUXDNS_REDACTED_SECRET`），apply 前用活动源恢复未改动的原密码；占位符无法恢复时该编辑以 `VALIDATION_FAILED` 拒绝，不会把占位符持久化为密码。不解析或回显实际代理 URL 的用户名、密码或令牌。
 
-P3 `POST /api/v2/retention/preview` 绑定 active/file revision，调用现有 `RetentionCoordinator::preview` 真实采样详情主文件和 WAL，但不发布水位或创建回收任务。当前与候选策略使用同一次采样计算 cutoff；响应返回十进制字节、候选 UTC 截止日及是否缩短历史，实际保存仍由 `statistics` 单模块事务重新校验且不立即清理。
+`POST /api/v2/retention/preview` 只接收候选 policy，不绑定活动或文件版本；调用现有 `RetentionCoordinator::preview` 真实采样详情主文件和 WAL，不发布水位或创建回收任务。当前与候选策略使用同一次采样计算 cutoff；响应返回十进制字节、候选 UTC 截止日及是否缩短历史。实际保存仍由 statistics 单模块事务基于当前配置重新校验，缩短保留范围需确认且不立即清理。
 
 组合 apply 在阻塞线程完成 ConfigStore 受理后立即返回 202；后台 owner 完成 Runtime prepare、ServiceControl 回执和持久化，客户端按相同 operation ID 查询。文件还原/重试在阻塞 owner 中执行，HTTP 取消不终止已经开始的写盘；已记录失败优先返回冻结 OperationResult，受理前冲突返回 ErrorEnvelope。operation 按用户名隔离，不在响应或日志中返回源正文、路径身份、底层错误或认证凭据。
 
@@ -94,6 +96,18 @@ P3 `POST /api/v2/retention/preview` 绑定 active/file revision，调用现有 `
 P3 Windows 联合验收使用内嵌 debug binary、`_fluxdns/p3-live/` 真实 ConfigV2 和一次性 setup/后续 login 的内存 Bearer。代理、Hosts、规则集、上游/组、策略、Listener、客户端、DNS、statistics 与 logs 按依赖逐一完成单模块 validate、202 apply、operation 轮询、`applied_synced`、源文件持久化和查询回显；代理改名返回 `rename_references`，Listener 端口热切换返回 `listener_rebind`，陈旧双 revision 预校验返回 409。随后真实文件外改 Hosts/logs 未进入活动态，双模块全局 Candidate 经 `discard_external_changes` 组合采用；validate 后二次外改使 apply 返回 `FILE_REVISION_CONFLICT`，正式 restore 恢复 `synced/unchanged`。未验证 HTTPS 反向代理、Linux、磁盘满或响应恰在 service commit 后丢失。
 
 同一进程的 UDP Listener 从 `15389` 热重绑到 `15390` 后，`p3.test A` 返回 `NOERROR`、1 个 `192.0.2.10` 答案。请求写入真实 SQLite：统计库 65536 bytes，详情目录 3 个文件共 73728 bytes；保留 preview 采样详情主文件/WAL 为 40960 bytes，历史 HTTP 返回 1 项。以上大小是本次临时目录样本，不是容量承诺。
+
+## 单次保存与写接口简化（2026-11-06）
+
+普通配置通过整体或单模块 apply 一次提交 `operation_id` 与 `changes`，不再要求 `expected`、嵌套 candidate、`active_revision` 或 `validation_token`。十个可写模块复用相同 decoder 和 owner，模块白名单、预算、null/未知字段拒绝和 ECS 字段路径保留；旧封套严格拒绝，需要前后端同步更新。`ConfigStore::begin_apply` 在事务 gate 中捕获最新活动源：按旧名称定位后替换目标资源值，新增检查名称唯一；不同条目相互保留，同条目后一次成功提交覆盖。内部完整引用校验、CST 编辑、Runtime prepare/切换、应用后文件事务顺序不变。
+
+validate 仅是可选、无状态的影响预览，不签发票据、不记录候选或过期时间。普通改名与 listener 调整不再触发通用确认；缩短保留范围未确认返回 `CONFIRMATION_REQUIRED`，外改未确认返回 `EXTERNAL_CHANGES_REQUIRE_CONFIRMATION`，均在受理前拒绝。覆盖外改必须携带 `discard_external_changes` 确认项及所见 `observed_file_revision`；预览或确认期间再次变更返回 `FILE_REVISION_CONFLICT`，不能自动换新版本覆盖。操作摘要绑定原始请求，先去重再展开脱敏字段/解析旧名称，已完成新增和改名可查询原结果而不重做。
+
+文件 restore/retry 只要求 operation ID 与所见文件版本，明确请求本身表达用户确认的覆盖意图；服务端捕获活动版本用于内部复核，不从请求读取活动版本。retry 继续原 operation，不重新应用 Runtime。只读状态中的 active/runtime/persisted revision 及差异上下文仍保留，不是普通写前置参数。认证、WS ticket 和只读 POST 查询未增加或删除配置前置条件。
+
+本轮 Windows 验证（Rust 1.98.0、Node 26.8.1、pnpm 11.25.0）：配置模块 132 项通过，后端全量 845 项通过、4 项既有显式忽略；fmt、严格 Clippy `--all-targets -- -D warnings` 与 debug 构建通过。前端重新生成类型、typecheck、37 文件 217 项 Vitest、5 项 AJV 契约测试与 build 通过。前端测试仍有既有 Node localStorage、Ant Design 弃用和 React key 警告，不将其描述为无警告验收。
+
+独立 `_fluxdns/` loopback 夹具实跑新 debug API：客户端改名/空 IP 保留 ID、直接保存并持久化、已完成操作同 ID 返回 200/原结果、旧封套拒绝、无状态预览、外改确认和二次外改冲突、无版本保留预览及缩短确认均通过。适配后的 [`test-webui-http.mjs`](../../../script/test-webui-http.mjs) 又验证 UDP/TCP/DoH GET/POST 热应用、同条目后提交覆盖、改名引用、十客户端身份及历史名称、外改还原不 reload、鉴权和登出；测试自有进程已停止。状态机单测另外覆盖写盘失败/同步重试、未知结果 gate、调用者隔离和操作容量；未部署线上，未做浏览器实机、Linux/macOS 或断电验收。
 
 ## 路由与保护
 

@@ -118,27 +118,14 @@ fn a_second_content_or_identity_change_in_either_file_rejects_the_captured_previ
 fn publication_during_preview_rejects_old_active_values_instead_of_assigning_new_revisions() {
     let fixture = Fixture::new();
     let captured = fixture.store.capture_external_source().unwrap();
-    let expected = fixture.store.observe_files().unwrap().expected();
     let changes = [ConfigChange::Logs(LogsDto {
         enable: false,
         level: LogLevelDto::Warn,
         path: "./logs/fluxdns.log".into(),
     })];
-    let validation = fixture
-        .store
-        .validate_edit("actor", &expected, &changes, false)
-        .unwrap();
     let BeginApply::Accepted(mut permit) = fixture
         .store
-        .begin_apply(
-            "actor",
-            "apply",
-            &expected,
-            &changes,
-            false,
-            &validation.token,
-            &validation.impacts,
-        )
+        .begin_apply("actor", "apply", &changes, None, &Default::default())
         .unwrap()
     else {
         panic!("new operation expected");
@@ -171,5 +158,4 @@ fn preview_is_busy_during_transactions_and_does_not_create_files_or_operations()
     let guard = fixture.store.active.lock().unwrap();
     let state = guard.as_ref().unwrap();
     assert!(state.operations.is_empty());
-    assert!(state.validations.is_empty());
 }

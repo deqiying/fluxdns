@@ -38,7 +38,6 @@ export function SystemSettingsPage() {
     try {
       const operation = await mutation.mutateAsync({
         change: { module: "logs", change: value },
-        state: logsQuery.data.state,
       });
       if (operation) setEditing(false);
     } catch {

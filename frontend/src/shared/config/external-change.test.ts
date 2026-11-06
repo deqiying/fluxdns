@@ -68,4 +68,23 @@ describe("外部配置变化状态机", () => {
     expect(state.dirty).toBe(true);
     expect(state.diff).toEqual(diff());
   });
+  it("取消风险确认返回差异并保留脏草稿", () => {
+    let state = externalWorkspaceReducer(initialExternalWorkspaceState, { type: "snapshot", state: configState() });
+    state = externalWorkspaceReducer(state, { type: "loaded", diff: diff() });
+    state = externalWorkspaceReducer(state, { type: "dirty", value: true });
+    state = externalWorkspaceReducer(state, { type: "apply" });
+    state = externalWorkspaceReducer(state, { type: "cancel_apply" });
+    expect(state.phase).toBe("ready");
+    expect(state.dirty).toBe(true);
+    expect(state.diff).toEqual(diff());
+  });
+  it("其他活动条目变化不清除差异草稿或阻止采用", () => {
+    let state = externalWorkspaceReducer(initialExternalWorkspaceState, { type: "snapshot", state: configState() });
+    state = externalWorkspaceReducer(state, { type: "loaded", diff: diff() });
+    state = externalWorkspaceReducer(state, { type: "dirty", value: true });
+    state = externalWorkspaceReducer(state, { type: "snapshot", state: { ...configState(), active_revision: "active-2" } });
+    expect(state.dirty).toBe(true);
+    expect(state.diff).toEqual(diff());
+    expect(externalWorkspaceReducer(state, { type: "loaded", diff: diff() }).phase).toBe("ready");
+  });
 });

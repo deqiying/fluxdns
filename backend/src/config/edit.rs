@@ -129,7 +129,6 @@ impl ConfigChange {
 pub(crate) struct SourceCandidate {
     pub(crate) source: String,
     pub(crate) config: ConfigV2,
-    pub(crate) renamed: bool,
 }
 
 #[derive(Debug, Error)]
@@ -327,7 +326,6 @@ pub(crate) fn build_candidate(
     Ok(SourceCandidate {
         source: edited,
         config,
-        renamed: !renames.is_empty(),
     })
 }
 

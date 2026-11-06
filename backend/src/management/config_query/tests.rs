@@ -63,27 +63,14 @@ impl Fixture {
     }
 
     fn permit(&self, id: &str, level: LogLevelDto) -> ApplyPermit {
-        let expected = self.store().observe_files().unwrap().expected();
         let changes = vec![ConfigChange::Logs(LogsDto {
             enable: false,
             level,
             path: "./logs/fluxdns.log".into(),
         })];
-        let validated = self
-            .store()
-            .validate_edit("actor", &expected, &changes, false)
-            .unwrap();
         let BeginApply::Accepted(permit) = self
             .store()
-            .begin_apply(
-                "actor",
-                id,
-                &expected,
-                &changes,
-                false,
-                &validated.token,
-                &validated.impacts,
-            )
+            .begin_apply("actor", id, &changes, None, &Default::default())
             .unwrap()
         else {
             panic!("expected new operation");

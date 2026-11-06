@@ -38,6 +38,7 @@ export type ExternalWorkspaceAction =
   | { type: "dirty"; value: boolean }
   | { type: "restore" }
   | { type: "apply" }
+  | { type: "cancel_apply" }
   | { type: "operation"; operation: OperationResult }
   | { type: "failure"; error: unknown };
 
@@ -78,7 +79,6 @@ export function externalWorkspaceReducer(
       return { ...current, phase: "loading", error: null };
     case "loaded":
       if (!current.issue
-        || action.diff.expected.active_revision !== current.issue.activeRevision
         || action.diff.expected.observed_file_revision !== current.issue.fileRevision) {
         return { ...current, phase: "conflict", error: null };
       }
@@ -89,6 +89,8 @@ export function externalWorkspaceReducer(
       return { ...current, phase: "restoring", error: null };
     case "apply":
       return { ...current, phase: "applying", error: null };
+    case "cancel_apply":
+      return { ...current, phase: "ready", error: null };
     case "operation":
       return { ...current, phase: "awaiting_state", operation: action.operation, error: null };
     case "failure":
@@ -107,7 +109,6 @@ export function externalIssueFromState(state: ConfigState): ExternalIssue | null
   if (!kind) return null;
   return {
     key: JSON.stringify([
-      state.active_revision,
       state.observed_file_revision,
       state.synchronization,
       state.files.source,

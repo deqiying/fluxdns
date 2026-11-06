@@ -7,6 +7,8 @@
 > 最后核对：2026-09-30（前端测试 setup 收尾清理残留定时器的局部核对；服务状态指标订阅沿用 2026-09-27，逐秒 RPM 与 CPU 字段沿用 2026-09-26，品牌资源与导航沿用 2026-09-22，认证等其余内容沿用 2026-09-09 核对范围）
 >
 > 核对基线：`e3e21c8` 加本次工作树变更；本轮仅核对前端测试 setup 的定时器收尾清理，其余范围按原日期和基线解释
+>
+> 2026-11-06 增量核对：基线 `3d44dd4` 加本次工作树，仅核对单次保存、危险影响确认、文件操作与保留预览；旧批次验证记录不代表本次结果。
 
 ## 入口
 
@@ -57,7 +59,7 @@ P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个�
 
 [`shared/config/api.ts`](../../../frontend/src/shared/config/api.ts) 直接消费生成的 v2 DTO，提供状态/模块读取、整体验证/应用、operation 回读、外部差异、文件还原和持久化重试入口；单模块入口把 module 同时绑定在 URL 与 typed payload。写请求仍由调用方决定发起次数，client 不做 mutation retry。
 
-[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 要求首次发送前固定 `operation_id`。apply 返回进行中时有界轮询；网络失败或 timeout 后只按同一 ID 查询，不重放 apply；`unknown` 另行回读活动状态，不能推断操作未执行。结果 ID 不一致按非法响应拒绝。表单 phase 保留打开时的双 revision 草稿，settled 前不把结果未知伪装成失败或成功。
+[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 要求首次发送前固定 `operation_id`。普通 apply 直接提交业务 changes，无活动版本、候选封套和验证票据；进行中时有界轮询，网络失败或 timeout 后只按同一 ID 查询，不重放 apply，unknown 不能推断从未执行。仅确定的受理前确认错误可经无状态 validate 获取影响、用户确认后补充确认项再提交一次；取消保留草稿，二次冲突不循环重试。结果 ID 不一致按非法响应拒绝，settled 前不把结果未知伪装成失败或成功。
 
 [`query-keys.ts`](../../../frontend/src/shared/config/query-keys.ts) 将模块、活动 revision 和文件 revision 纳入 key；保存后只失效目标模块、确定的引用依赖、状态和概览，不清空全部查询。[`form-values.ts`](../../../frontend/src/shared/config/form-values.ts) 用 BigInt 做字节/duration 精确转换，区分继承与显式值、保留已删除引用占位，并在 variant 提交时只选择白名单字段；IP/CIDR helper 只负责词法检查，冲突和规范化仍以服务端为准。duration 表单换算只提供毫秒/秒/分钟/小时/天，回填按能整除的最大整单位归一化（`5000000000ns` → `5s`、`300000000000ns` → `5 分钟`，非整秒按毫秒精确展开），摘要展示复用同一换算的 `formatDurationText`，提交仍写回紧凑 duration；前端只拦必填字段的空值与零值、非法串和小数位超过后端 9 位上限的组合，TTL 上下限按后端语义允许 `0s`（表示该边界不设限），字段上下界仍由后端权威校验。字节侧对称：`ByteUnit` 只提供 B/KB/MB/GB/TB（1024 进制），`bytesToDisplay` 回填时先只保留数值 ≥ 1 的单位（避免把 64 MiB 写成 `0.0625 GB`），再取其中能精确表示（小数不超过导出的 `BYTE_DISPLAY_MAX_FRACTION_DIGITS`）的最大单位（`67_108_864` → `64 MB`、`1_572_864` → `1.5 MB`、`807_306_368` → `788385.125 KB`），保证用户不动字段时再次保存不改变字节数；`bytesFromForm` 全程 BigInt 并在 1..1 TiB 之外抛错。
 
@@ -65,7 +67,7 @@ P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个�
 
 ## P1 外部配置变化基础（2026-09-08）
 
-[`external-change.ts`](../../../frontend/src/shared/config/external-change.ts) 从权威 `ConfigState` 派生文件变化、缺失、不可读、超限、已应用未同步和阻塞事实。关闭提示只记录当前事实 key，不清除 issue；活动/文件 revision 或文件状态变化后重新提示。差异响应必须与当前活动/观察 revision 同时匹配，否则进入冲突；还原返回成功后仍保留 issue 并等待下一份权威状态确认，不自行假定文件已同步。`FILE_REVISION_CONFLICT` 保留当前差异与脏草稿。
+[`external-change.ts`](../../../frontend/src/shared/config/external-change.ts) 从权威 `ConfigState` 派生文件变化、缺失、不可读、超限、已应用未同步和阻塞事实。关闭提示只记录当前事实 key，不清除 issue；活动/文件 revision 或文件状态变化后重新提示。采用差异绑定所见文件 revision，不以全局活动版本阻止其他条目编辑；还原成功后等待权威状态确认同步，`FILE_REVISION_CONFLICT` 保留当前差异与脏草稿。
 
 [`ExternalChangeBanner`](../../../frontend/src/shared/components/ExternalChangeBanner.tsx) 和 [`ExternalChangeDrawer`](../../../frontend/src/shared/components/ExternalChangeDrawer.tsx) 提供轻量提示、字段级差异/受保护变化展示、脏关闭确认、文件还原、组合采用及同步重试入口。还原确认明确只覆盖所见文件版本，不回滚运行态。[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 对还原和持久化重试复用单次 mutation + operation 回读，不把“重试文件同步”变成配置重新应用。
 
@@ -73,7 +75,7 @@ P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个�
 
 [`ConfigFileStatus`](../../../frontend/src/shared/components/ConfigFileStatus.tsx) 已挂入受保护的 `AppLayout`，以 `configKeys.state()` 每 30 秒仅在页面可见时轮询正式 `/api/v2/config/state`；刷新失败显示可重试的全局提示，不阻断当前页面。发现 issue 后才读取绑定双 revision 的差异，外改不会自动进入 Runtime；还原固定新 `operation_id` 并显式确认丢弃外改，`applied_unpersisted` 重试严格复用原 ID、只调用文件 retry route。mutation 结束后失效差异并回读权威状态，Banner 不因 HTTP 成功提前消失；被拒绝、补偿失败、结果未知和版本冲突继续展示事实。
 
-P3 全局协调器已把选择结果作为一次 typed Candidate 交给正式 validate/apply；普通模块保存遇到外改也依赖后端 `discard_external_changes` 确认，不伪造通用 YAML 或自动合并。App/MSW 覆盖组合采用、取消、二次外改冲突、还原和原 ID 持久化重试，纯函数覆盖十模块差异映射。
+全局协调器把选中的 typed changes 直接交给整体 apply，明确确认未采用和受保护的变化会被活动源覆盖，并从首次提交起绑定差异的文件版本。普通保存和组合采用共用 `applyWithConfirmation`；若仍缺危险影响确认，仅预览并补充一次，不将旧差异的文件基准偷偷换成新版本。取消确认不留下 pending operation，不伪造通用 YAML 或自动合并。
 
 当前 production embed WebUI 连接 `_fluxdns/p1-config-runtime-live/` 的 loopback 后端完成真实登录；外改 logs 后，30 秒全局轮询显示 Banner，Drawer 读取 `logs` 差异和双 revision，确认还原后 Banner/Drawer 依据权威状态消失。源/派生文件恢复为 `debug` 与 `./logs/hot.log`，浏览器 warning/error 为 0，Runtime revision 前后保持 1，随后 UDP `localhost A` 仍返回 `127.0.0.1`，SQLite 布局仍为 `statistics-v2|1`。该浏览器证据未覆盖窄屏、刷新失败、二次冲突、持久化 retry 异常态或 P3 组合采用；这些状态保留自动测试或后续阶段验收。
 
@@ -99,9 +101,9 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 ## P3 单模块写入与代理配置（2026-09-08）
 
-[`shared/config/hooks.ts`](../../../frontend/src/shared/config/hooks.ts) 统一消费模块 `ConfigRead`、双 revision 和正式单模块 validate/apply。每次保存先预校验，再按后端返回的改名、listener 重绑、保留缩短或外部变化覆盖影响确认；`operation_id` 首次发送前固定，网络结果不明时只回读，不自动重放。成功后按类型化依赖失效 query；`applied_unpersisted` 保持独立警告并交给全局文件同步入口。
+[`shared/config/hooks.ts`](../../../frontend/src/shared/config/hooks.ts) 统一消费模块 `ConfigRead` 和单模块 apply，普通保存一次提交，不依赖草稿打开时的全局版本。仅收到 `CONFIRMATION_REQUIRED` 或 `EXTERNAL_CHANGES_REQUIRE_CONFIRMATION` 时读取无状态影响预览并确认；改名和 listener 编辑不再触发通用弹窗。`operation_id` 首次发送前固定，网络结果不明只回读。成功按类型化依赖失效 query；`applied_unpersisted` 保持独立警告并交给文件同步入口。
 
-[`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 已替换 `/proxies` 空态，提供搜索、新建和按旧 name 编辑。表单在 env、file 与内联 URL 三类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；内联 URL 的密码位以占位符 `FLUXDNS_REDACTED_SECRET` 回显，用户未改动时由后端用活动源恢复原密码，实际 Secret 值不进入浏览器。MSW 交互测试检查单模块路径、预校验先于 apply、旧 name 和 SecretRef payload；真实后端热应用与文件证据见 P3 联合验收。
+[`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 提供搜索、新建和按旧 name 编辑。表单在 env、file 与内联 URL 三类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；内联 URL 的密码位以占位符 `FLUXDNS_REDACTED_SECRET` 回显，未改动时由后端从当前活动源恢复原密码，不向浏览器泄漏实际秘密。交互测试检查直接单模块 apply、旧名称和 SecretRef payload，无强制预校验请求；真实热应用和文件行为见本轮 [Management 验证](../backend/management.md#单次保存与写接口简化2026-11-06)。
 
 [`HostsPage`](../../../frontend/src/modules/hosts/HostsPage.tsx) 已替换 `/hosts` 空态，读取类型化 `const/file` 来源、引用数和 Runtime ready/stale/failed 状态。表单按来源只提交内联正文或文件路径/更新周期，并保留 `json/hosts` 格式；来源切换不会携带隐藏分支字段。文件来源的检查周期用共享 `DurationInput`（默认秒），回填把后端的纳秒串归一化成紧凑串。
 
@@ -119,7 +121,7 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`DnsSettingsPage`](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) 已替换 `/dns-settings` 空态，分区编辑缓存/快照、TTL、ECS、详情记录和 R/G/T。保留保存前调用正式 preview 获取真实 SQLite/WAL 字节与候选 UTC cutoff，并把结果并入后端 `retention_shortening` 确认；浏览器不自行计算权威水位，保存也不触发立即清理。缓存失败 TTL、乐观回答 TTL、最大陈旧时间、快照周期与 TTL 覆盖上下限统一用共享 `DurationInput`（必填字段要求大于 0，TTL 上下限允许 `0s` 表示不设限），回填不再出现纳秒串；字段上下界仍由后端权威校验。
 
-[`SystemSettingsPage`](../../../frontend/src/modules/system-settings/SystemSettingsPage.tsx) 已替换 `/system-settings` 空态。`work/rules/database/records` 活动源路径表达与 WebUI 监听来自 `SystemConfigRead` 且保持只读，不冒充 Runtime 解析后的绝对路径；日志 `enable/level/path` 单独通过 `logs` 模块候选预校验、热应用、持久化和回显，不向启动配置字段提供伪编辑入口。
+[`SystemSettingsPage`](../../../frontend/src/modules/system-settings/SystemSettingsPage.tsx) 的 `work/rules/database/records` 活动源路径表达与 WebUI 监听来自 `SystemConfigRead` 且保持只读，不冒充 Runtime 解析后的绝对路径；日志 `enable/level/path` 单独通过 logs 模块单次保存，后端内部完成候选校验、热应用和持久化，不向启动配置字段提供伪编辑入口。
 
 FC-16 组合采用把外部差异中的同名资源转换为带明确 `original_name` 的 update，仅外部资源转换为 create；仅活动资源保持禁选，不推断删除。客户端 update 剔除 `client_id`，外部 ID 变化不随采用提交，需在客户端页面单独修改并确认。用户可跨模块勾选白名单变化，一次提交全局 Candidate；未选差异与 `work/database/webui/protected_credentials` 受保护变化通过 `discard_external_changes` 确认后按活动配置还原，二次外改继续由 file revision 冲突阻断。
 
@@ -147,7 +149,7 @@ Windows `_fluxdns/p4-live/` 内嵌 debug binary 的独立真实 socket smoke 覆
 
 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 固定 12 个一级路径与配置模块映射，保留 `/dashboard`、`/queries`；上游组仅为 `/upstreams` 页内 tab。App 与导航消费该表，P3 九个配置入口均已挂载领域页面；路径存在仍不能替代其真实读写与浏览器证据。
 
-[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型：草稿固定双 revision，区分预校验/确认/应用/结果未知；`clientEditValue` 默认剔除 `client_id`，修改请求身份必须由调用方显式追加；操作结果区分同步、仅重试持久化、回读活动值和阻塞；大整数转表单前检查安全范围。FC-02 已补配置 client、操作回读、query key/精确失效、共享值转换和 Modal 容器；全局文件状态由壳层协调器消费 TanStack Query，不另建可变配置权威。P3 各领域表单复用该链路。
+[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型，草稿不携带写入前置版本；`clientEditValue` 默认剔除 `client_id`，修改请求身份由调用方显式追加。操作结果仍区分同步、仅重试持久化、回读活动值和阻塞，大整数转表单前检查安全范围。全局文件状态由壳层协调器消费 TanStack Query，不另建可变配置权威。
 
 FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置 endpoint、operation 单次发送/回读/unknown、query key/失效、单位/duration/IP/继承/variant 及脏关闭确认；与 Rust 共用的 schema 夹具测试见[交付实现](../delivery.md#前端与接口生成)。这些验证使用 MSW/jsdom，不证明后端配置 route、真实文件、浏览器路由离开或内嵌环境已经接线。
 

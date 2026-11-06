@@ -832,9 +832,9 @@ pub(super) fn error_code(error: ActiveError) -> ErrorCode {
         ActiveError::FileConflict => ErrorCode::FileRevisionConflict,
         ActiveError::Unavailable | ActiveError::Entropy => ErrorCode::ServiceUnavailable,
         ActiveError::ExternalConfirmation => ErrorCode::ExternalChangesRequireConfirmation,
-        ActiveError::ValidationExpired => ErrorCode::ValidationExpired,
         ActiveError::OperationIdReused => ErrorCode::OperationIdReused,
-        ActiveError::MissingConfirmation | ActiveError::Candidate(_) => ErrorCode::ValidationFailed,
+        ActiveError::MissingConfirmation => ErrorCode::ConfirmationRequired,
+        ActiveError::Candidate(_) => ErrorCode::ValidationFailed,
         ActiveError::Persistence(_) => ErrorCode::PersistenceFailed,
     }
 }

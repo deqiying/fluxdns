@@ -20,7 +20,6 @@ fn rename_updates_only_typed_references_and_preserves_unrelated_source() {
     let candidate = build(&source, &changes(r#"[
       {"module":"upstreams","change":{"action":"update","original_name":"local","value":{"name":"new","type":"hosts","format":"hosts","hosts":"127.0.0.1 localhost"}}}
     ]"#)).unwrap();
-    assert!(candidate.renamed);
     assert_eq!(candidate.config.strategy[0].default_upstream, "new");
     assert_eq!(candidate.config.hosts[0].name(), "local");
     assert_eq!(candidate.config.listener[0].name(), "local");

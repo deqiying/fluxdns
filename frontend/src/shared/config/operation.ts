@@ -5,6 +5,7 @@ import {
   fetchConfigState,
   restoreConfigFiles,
   retryConfigPersistence,
+  validateCandidate,
   type ApplyRequest,
   type ConfigModule,
   type ConfigState,
@@ -12,7 +13,6 @@ import {
   type OperationResult,
   type ValidationResult,
 } from "./api";
-import type { ConfigDraft, FormPhase } from "./contract";
 import { isTransientConfigRead } from "./read-retry";
 
 export type OperationSettlement =
@@ -38,22 +38,6 @@ export function createOperationId(): string {
   return crypto.randomUUID();
 }
 
-export function beginValidation(draft: ConfigDraft): FormPhase {
-  return { kind: "validating", draft };
-}
-
-export function phaseAfterValidation(
-  draft: ConfigDraft,
-  validation: ValidationResult,
-): FormPhase {
-  return { kind: "confirming", draft, validation };
-}
-
-export function phaseAfterSettlement(draft: ConfigDraft, settlement: OperationSettlement): FormPhase {
-  if (settlement.kind === "settled") return { kind: "settled", draft, operation: settlement.operation };
-  return { kind: "result_unknown", draft, operationId: settlement.operation.operation_id };
-}
-
 /** apply 只发送一次；timeout/network 后使用同一 operation_id 回读，不重放变更。 */
 export async function applyAndSettle(
   request: ApplyRequest,
@@ -68,6 +52,36 @@ export async function applyAndSettle(
   }
   assertOperationId(request.operation_id, operation);
   return settleOperation(operation, options);
+}
+
+/** 仅首次受理前的确认拒绝可补充确认重试；不确定结果仍交给 applyAndSettle 只查询。
+ * 外部采用传入的文件基准不可被后续 validate 悄悄替换，二次冲突直接交还草稿。
+ */
+export async function applyWithConfirmation(
+  request: ApplyRequest,
+  confirm: (validation: ValidationResult) => Promise<boolean>,
+  options: ApplyAndSettleOptions = {},
+): Promise<OperationSettlement | null> {
+  try {
+    return await applyAndSettle(request, options);
+  } catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 409
+      || (error.code !== "CONFIRMATION_REQUIRED" && error.code !== "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION")) throw error;
+    const validation = await validateCandidate({ changes: request.changes }, options);
+    if (request.observed_file_revision !== undefined
+      && validation.observed_file_revision !== request.observed_file_revision) {
+      throw new ApiError({ code: "FILE_REVISION_CONFLICT", message: "配置文件已再次变化，请重新读取差异。", status: 409, kind: "http" });
+    }
+    if (!await confirm(validation)) return null;
+    const confirmations = [...new Set([...(request.confirmations ?? []), ...validation.required_confirmations])];
+    return applyAndSettle({
+      ...request,
+      confirmations,
+      ...(confirmations.includes("discard_external_changes")
+        ? { observed_file_revision: request.observed_file_revision ?? validation.observed_file_revision }
+        : {}),
+    }, options);
+  }
 }
 
 export function restoreFilesAndSettle(

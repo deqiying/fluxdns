@@ -97,10 +97,10 @@ export function ListenersPage() {
       ? { module: "listener", change: { action: "create", value } }
       : { module: "listener", change: { action: "update", original_name: editing.name, value } };
     try {
-      const operation = await mutation.mutateAsync({ change, state: query.data.state });
+      const operation = await mutation.mutateAsync({ change });
       if (operation) setEditing(null);
     } catch {
-      // 绑定或 revision 失败时保留草稿。
+      // 绑定、文件冲突或应用失败时保留草稿。
     }
   };
 

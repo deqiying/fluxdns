@@ -144,7 +144,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 无应用/写文件副作用；候选基于活动源，整张引用图一次校验。 */
+        /** @description 可选无状态预览，无应用/写文件/操作注册副作用；基于当前活动源一次校验引用图，不返回票据。 */
         post: operations["validateCandidate"];
         delete?: never;
         options?: never;
@@ -161,7 +161,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 普通模块表单入口；候选只能包含一项且 module 必须与 URL 一致，拒绝其他模块混入。 */
+        /** @description 可选单模块无状态校验；候选只能包含一项且 module 必须与 URL 一致，普通表单保存直接 apply。 */
         post: operations["validateModuleCandidate"];
         delete?: never;
         options?: never;
@@ -178,7 +178,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 普通模块表单入口；与组合采用共用应用编排，但只接收一个同模块 change。 */
+        /** @description 普通模块单次保存入口，无需 validate；与组合采用共用应用编排，但只接收一个同模块 change。 */
         post: operations["applyModuleCandidate"];
         delete?: never;
         options?: never;
@@ -195,7 +195,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description operation_id 首次发送前固定；同 ID 不同命令摘要拒绝。非终态返回 202。 已应用但文件未同步也是明确结果，不回滚为旧态，不把重试文件同步变成重新应用。 并发文件变化返回冲突；未知结果先查 operation 和活动资源，不自动重放。 */
+        /** @description operation_id 首次发送前固定；受理后同 ID 不同命令摘要拒绝。非终态返回 202。 缺少危险影响确认返回 409 CONFIRMATION_REQUIRED，未确认外改返回 409 EXTERNAL_CHANGES_REQUIRE_CONFIRMATION；二者均为受理前标准错误，不注册 operation，可确认后用同 ID 再提交一次。 同条目后一次成功提交覆盖，不同条目保留，不传 active_revision。已应用但文件未同步也是明确结果；未知网络结果只查询 operation，不重放。 */
         post: operations["applyCandidate"];
         delete?: never;
         options?: never;
@@ -226,7 +226,7 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** @description 无效外部 YAML 不返回正文；只读/敏感变化仅返回受保护分类。采用使用 Candidate。 */
+        /** @description 无效外部 YAML 不返回正文；只读/敏感变化仅返回受保护分类。采用提交 ApplyRequest，首次即绑定 expected.observed_file_revision，不回传 active_revision。 */
         get: operations["getExternalDiff"];
         put?: never;
         post?: never;
@@ -262,7 +262,7 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 只同步当前已应用源，不重新 prepare 或重放创建/改名。 */
+        /** @description 只同步当前已应用源，不重新 prepare 或重放创建/改名；复用原 operation_id，显式重试确认覆盖 observed_file_revision 对应文件。 */
         post: operations["retryConfigPersistence"];
         delete?: never;
         options?: never;
@@ -915,6 +915,7 @@ export interface components {
             auto_update: boolean;
             update_interval?: components["schemas"]["Duration"];
         };
+        /** @description 仅作 ExternalDiff 的只读双版本上下文；写接口不再接收此封套。 */
         Preconditions: {
             active_revision: components["schemas"]["Revision"];
             observed_file_revision: components["schemas"]["Revision"];
@@ -934,33 +935,32 @@ export interface components {
         };
         /** @enum {string} */
         FileCondition: "unchanged" | "changed" | "missing" | "unreadable" | "oversized";
+        /** @description 可选的无状态校验输入；普通保存直接 apply，无需预校验或票据。 */
         Candidate: {
-            expected: components["schemas"]["Preconditions"];
             changes: components["schemas"]["ConfigChange"][];
-            discard_external_changes: boolean;
         };
+        /** @description 单次提交变更；同条目后一次成功提交覆盖，不同条目保留。仅确认覆盖外部文件时携带 observed_file_revision；外部采用从首次提交绑定已查看的文件版本。确认拒绝发生在受理前，可用同一 operation_id 确认后再提交一次；网络结果不确定时只能查询，不能重放。 */
         ApplyRequest: {
             operation_id: components["schemas"]["OperationId"];
-            candidate: components["schemas"]["Candidate"];
-            validation_token: components["schemas"]["Revision"];
-            confirmations: components["schemas"]["ImpactKind"][];
+            changes: components["schemas"]["ConfigChange"][];
+            /** @description 省略时默认为空数组 */
+            confirmations?: components["schemas"]["ImpactKind"][];
+            observed_file_revision?: components["schemas"]["Revision"];
         };
         /** @enum {string} */
-        ImpactKind: "rename_references" | "listener_rebind" | "retention_shortening" | "discard_external_changes";
+        ImpactKind: "retention_shortening" | "discard_external_changes";
         ValidationResult: {
-            validation_token: components["schemas"]["Revision"];
-            expected: components["schemas"]["Preconditions"];
-            expires_at_ms: components["schemas"]["SafeInteger"];
+            observed_file_revision: components["schemas"]["Revision"];
             required_confirmations: components["schemas"]["ImpactKind"][];
             affected_names: components["schemas"]["Name"][];
         };
+        /** @description 明确还原或重试即确认覆盖已查看的文件版本；retry 复用原 operation_id。 */
         FileSyncRequest: {
             operation_id: components["schemas"]["OperationId"];
-            expected: components["schemas"]["Preconditions"];
-            discard_external_changes: boolean;
+            observed_file_revision: components["schemas"]["Revision"];
         };
         /** @enum {string} */
-        ErrorCode: "HTTP_VERSION_NOT_SUPPORTED" | "URI_TOO_LONG" | "HEADERS_TOO_LARGE" | "REQUEST_TIMEOUT" | "INTERNAL_ERROR" | "SETUP_ALREADY_COMPLETED" | "AUTH_INVALID_CREDENTIALS" | "ORIGIN_REJECTED" | "CONFIG_CONFLICT" | "INVALID_ARGUMENT" | "VALIDATION_FAILED" | "PAYLOAD_TOO_LARGE" | "VERSION_UNSUPPORTED" | "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND" | "ACTIVE_REVISION_CONFLICT" | "FILE_REVISION_CONFLICT" | "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION" | "OPERATION_ID_REUSED" | "OPERATION_BUSY" | "VALIDATION_EXPIRED" | "PERSISTENCE_FAILED" | "APPLY_FAILED" | "COMPENSATION_FAILED" | "CURSOR_EXPIRED" | "RATE_LIMITED" | "SERVICE_UNAVAILABLE";
+        ErrorCode: "HTTP_VERSION_NOT_SUPPORTED" | "URI_TOO_LONG" | "HEADERS_TOO_LARGE" | "REQUEST_TIMEOUT" | "INTERNAL_ERROR" | "SETUP_ALREADY_COMPLETED" | "AUTH_INVALID_CREDENTIALS" | "ORIGIN_REJECTED" | "CONFIG_CONFLICT" | "INVALID_ARGUMENT" | "VALIDATION_FAILED" | "PAYLOAD_TOO_LARGE" | "VERSION_UNSUPPORTED" | "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND" | "ACTIVE_REVISION_CONFLICT" | "FILE_REVISION_CONFLICT" | "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION" | "CONFIRMATION_REQUIRED" | "OPERATION_ID_REUSED" | "OPERATION_BUSY" | "PERSISTENCE_FAILED" | "APPLY_FAILED" | "COMPENSATION_FAILED" | "CURSOR_EXPIRED" | "RATE_LIMITED" | "SERVICE_UNAVAILABLE";
         ErrorEnvelope: {
             code: components["schemas"]["ErrorCode"];
             request_id: string;
@@ -1292,11 +1292,9 @@ export interface components {
             pending_reclaim_bytes: components["schemas"]["DecimalU64"];
         };
         RetentionPreviewRequest: {
-            expected: components["schemas"]["Preconditions"];
             policy: components["schemas"]["Statistics"];
         };
         RetentionPreview: {
-            expected: components["schemas"]["Preconditions"];
             sampled_at_ms: components["schemas"]["SafeInteger"];
             detail_bytes: components["schemas"]["DecimalU64"];
             /** Format: date */
@@ -1588,7 +1586,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description 绑定候选摘要、影响、active/file revision 的短期 token */
+            /** @description 当前影响和最新文件观测版本，不绑定后续提交 */
             200: {
                 headers: {
                     [name: string]: unknown;

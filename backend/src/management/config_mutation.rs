@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::rejection::BytesRejection;
@@ -24,8 +24,8 @@ use crate::service::{ServiceControl, ServiceReloadError};
 use super::config_query::{error_code, operation_result};
 use super::contract::{
     ApplyRequest, Candidate, ErrorCode, FileSyncRequest, ImpactKind, OperationResult,
-    OperationStatus, Preconditions, Revision, ValidationResult, decode_apply, decode_candidate,
-    decode_file_sync, decode_module_candidate,
+    OperationStatus, Revision, ValidationResult, decode_apply, decode_candidate, decode_file_sync,
+    decode_module_candidate,
 };
 use super::router::{
     AuthServices, RequestId, v2_error_response, v2_error_response_with_fields,
@@ -49,24 +49,15 @@ impl ConfigMutationOwner {
     /// 校验可能解析 2 MiB 候选，因此在阻塞线程执行，不占用 Management executor。
     pub(super) async fn validate(
         &self,
-        actor: String,
         candidate: Candidate,
     ) -> Result<ValidationResult, ErrorCode> {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
-            let expected = expected(&candidate.expected);
             let validated = store
-                .validate_edit(
-                    &actor,
-                    &expected,
-                    &candidate.changes,
-                    candidate.discard_external_changes,
-                )
+                .validate_edit(&candidate.changes)
                 .map_err(error_code)?;
             Ok(ValidationResult {
-                validation_token: revision(validated.token)?,
-                expected: candidate.expected,
-                expires_at_ms: expires_at_millis(validated.expires_in)?,
+                observed_file_revision: revision(validated.observed_file_revision)?,
                 required_confirmations: validated.impacts.into_iter().map(impact_kind).collect(),
                 affected_names: affected_names(&candidate.changes),
             })
@@ -85,8 +76,6 @@ impl ConfigMutationOwner {
         let begin_actor = actor.clone();
         let operation_id = request.operation_id.as_str().to_owned();
         let query_operation_id = operation_id.clone();
-        let candidate = request.candidate;
-        let validation_token = request.validation_token.as_str().to_owned();
         let confirmations = request
             .confirmations
             .into_iter()
@@ -96,10 +85,11 @@ impl ConfigMutationOwner {
             store.begin_apply(
                 &begin_actor,
                 &operation_id,
-                &expected(&candidate.expected),
-                &candidate.changes,
-                candidate.discard_external_changes,
-                &validation_token,
+                &request.changes,
+                request
+                    .observed_file_revision
+                    .as_ref()
+                    .map(Revision::as_str),
                 &confirmations,
             )
         })
@@ -150,8 +140,8 @@ impl ConfigMutationOwner {
             store.restore_files(
                 &task_actor,
                 &task_operation_id,
-                &expected(&request.expected),
-                request.discard_external_changes,
+                &file_preconditions(&store, &request.observed_file_revision)?,
+                true,
             )
         })
         .await
@@ -176,8 +166,8 @@ impl ConfigMutationOwner {
             store.retry_persistence(
                 &task_actor,
                 &task_operation_id,
-                &expected(&request.expected),
-                request.discard_external_changes,
+                &file_preconditions(&store, &request.observed_file_revision)?,
+                true,
             )
         })
         .await
@@ -332,7 +322,7 @@ pub(super) fn routes() -> Router<Arc<AuthServices>> {
 async fn post_validate(
     State(services): State<Arc<AuthServices>>,
     Extension(request_id): Extension<RequestId>,
-    Extension(session): Extension<SessionView>,
+    Extension(_session): Extension<SessionView>,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
@@ -354,10 +344,7 @@ async fn post_validate(
             return v2_error_response_with_fields(error.code, error.field_errors, &request_id);
         }
     };
-    v2_result(
-        owner.validate(session.user.name, candidate).await,
-        &request_id,
-    )
+    v2_result(owner.validate(candidate).await, &request_id)
 }
 
 async fn post_apply(
@@ -395,7 +382,7 @@ async fn post_apply(
 async fn post_module_validate(
     State(services): State<Arc<AuthServices>>,
     Extension(request_id): Extension<RequestId>,
-    Extension(session): Extension<SessionView>,
+    Extension(_session): Extension<SessionView>,
     headers: HeaderMap,
     module: Result<Path<String>, axum::extract::rejection::PathRejection>,
     body: Result<Bytes, BytesRejection>,
@@ -422,10 +409,7 @@ async fn post_module_validate(
             return v2_error_response_with_fields(error.code, error.field_errors, &request_id);
         }
     };
-    v2_result(
-        owner.validate(session.user.name, candidate).await,
-        &request_id,
-    )
+    v2_result(owner.validate(candidate).await, &request_id)
 }
 
 async fn post_module_apply(
@@ -633,29 +617,23 @@ fn mutation_result(
     }
 }
 
-fn expected(value: &Preconditions) -> ExpectedRevisions {
-    ExpectedRevisions {
-        active: value.active_revision.as_str().to_owned(),
-        files: value.observed_file_revision.as_str().to_owned(),
-    }
+/// 文件动作只由调用方确认文件版本；活动版本在服务端捕获，供内部事务复核。
+fn file_preconditions(
+    store: &ConfigStore,
+    files: &Revision,
+) -> Result<ExpectedRevisions, ActiveError> {
+    Ok(ExpectedRevisions {
+        active: store.active_snapshot()?.revision,
+        files: files.as_str().to_owned(),
+    })
 }
 
 fn revision(value: String) -> Result<Revision, ErrorCode> {
     Revision::try_from(value).map_err(|_| ErrorCode::ServiceUnavailable)
 }
 
-fn expires_at_millis(ttl: Duration) -> Result<u64, ErrorCode> {
-    SystemTime::now()
-        .checked_add(ttl)
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
-        .and_then(|value| u64::try_from(value.as_millis()).ok())
-        .ok_or(ErrorCode::ServiceUnavailable)
-}
-
 fn impact(value: ImpactKind) -> Impact {
     match value {
-        ImpactKind::RenameReferences => Impact::RenameReferences,
-        ImpactKind::ListenerRebind => Impact::ListenerRebind,
         ImpactKind::RetentionShortening => Impact::RetentionShortening,
         ImpactKind::DiscardExternalChanges => Impact::DiscardExternalChanges,
     }
@@ -663,8 +641,6 @@ fn impact(value: ImpactKind) -> Impact {
 
 fn impact_kind(value: Impact) -> ImpactKind {
     match value {
-        Impact::RenameReferences => ImpactKind::RenameReferences,
-        Impact::ListenerRebind => ImpactKind::ListenerRebind,
         Impact::RetentionShortening => ImpactKind::RetentionShortening,
         Impact::DiscardExternalChanges => ImpactKind::DiscardExternalChanges,
     }
@@ -676,9 +652,7 @@ fn active_failure(error: &ActiveError) -> OperationFailure {
         ActiveError::FileConflict | ActiveError::ExternalConfirmation => {
             OperationFailure::FileRevisionConflict
         }
-        ActiveError::Candidate(_) | ActiveError::ValidationExpired => {
-            OperationFailure::ValidationFailed
-        }
+        ActiveError::Candidate(_) => OperationFailure::ValidationFailed,
         _ => OperationFailure::ApplyFailed,
     }
 }

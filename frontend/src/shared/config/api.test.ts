@@ -6,25 +6,18 @@ import { validateCandidate } from "./api";
 
 beforeEach(() => setMockAuthenticated(true));
 
-it("模块校验使用 v2 typed endpoint 并原样发送双 revision", async () => {
+it("可选模块校验只发送 changes，并返回无状态影响预览", async () => {
   server.use(http.post("/api/v2/config/modules/logs/validate", async ({ request }) => {
     const body = await request.json();
-    expect(body).toMatchObject({
-      expected: { active_revision: "active-1", observed_file_revision: "file-1" },
-      discard_external_changes: false,
-    });
+    expect(Object.keys(body as object)).toEqual(["changes"]);
     return HttpResponse.json({
-      validation_token: "validation-1",
-      expected: { active_revision: "active-1", observed_file_revision: "file-1" },
-      expires_at_ms: 1_000,
+      observed_file_revision: "file-1",
       required_confirmations: [],
       affected_names: [],
     });
   }));
 
   await expect(validateCandidate({
-    expected: { active_revision: "active-1", observed_file_revision: "file-1" },
     changes: [{ module: "logs", change: { enable: false, level: "warn", path: "logs/fluxdns.log" } }],
-    discard_external_changes: false,
-  }, { module: "logs" })).resolves.toMatchObject({ validation_token: "validation-1" });
+  }, { module: "logs" })).resolves.toMatchObject({ observed_file_revision: "file-1" });
 });

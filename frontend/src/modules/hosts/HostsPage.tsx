@@ -101,7 +101,7 @@ export function HostsPage() {
       ? { module: "hosts", change: { action: "create", value } }
       : { module: "hosts", change: { action: "update", original_name: editing.name, value } };
     try {
-      const operation = await mutation.mutateAsync({ change, state: query.data.state });
+      const operation = await mutation.mutateAsync({ change });
       if (operation) setEditing(null);
     } catch {
       // 失败由表单容器呈现并保留草稿。

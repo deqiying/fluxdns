@@ -146,8 +146,7 @@ describe("application routes", () => {
 
     await waitFor(() => expect(restoreRequests).toHaveLength(1));
     expect(restoreRequests[0]).toMatchObject({
-      expected: { active_revision: "active-1", observed_file_revision: "files-2" },
-      discard_external_changes: true,
+      observed_file_revision: "files-2",
     });
     expect(restoreRequests[0]?.operation_id).toBeTruthy();
     await waitFor(() => expect(screen.queryByText("配置文件已在外部修改")).not.toBeInTheDocument());
@@ -206,8 +205,7 @@ describe("application routes", () => {
     await waitFor(() => expect(retryRequests).toHaveLength(1));
     expect(retryRequests[0]).toEqual({
       operation_id: "apply-operation-1",
-      expected: { active_revision: "active-2", observed_file_revision: "files-4" },
-      discard_external_changes: false,
+      observed_file_revision: "files-4",
     });
     expect(applyRequests).toBe(0);
     await waitFor(() => expect(screen.queryByText("运行配置已生效，但文件尚未同步")).not.toBeInTheDocument());
@@ -249,9 +247,7 @@ describe("application routes", () => {
         const candidate = await request.json() as Candidate;
         candidates.push(candidate);
         return HttpResponse.json({
-          validation_token: "combo-validation-1",
-          expected: candidate.expected,
-          expires_at_ms: Date.now() + 30_000,
+          observed_file_revision: "files-6",
           required_confirmations: ["discard_external_changes"],
           affected_names: ["local"],
         });
@@ -284,20 +280,19 @@ describe("application routes", () => {
     await user.click(screen.getByRole("button", { name: "确认采用" }));
 
     await waitFor(() => expect(applies).toHaveLength(1));
-    expect(candidates).toHaveLength(1);
-    expect(candidates[0]).toMatchObject({
-      expected: { active_revision: "active-3", observed_file_revision: "files-6" },
-      discard_external_changes: true,
+    expect(candidates).toHaveLength(0);
+    expect(applies[0]).toMatchObject({
+      observed_file_revision: "files-6",
       changes: [
         { module: "hosts", change: { action: "update", original_name: "local", value: { hosts: "127.0.0.2 localhost" } } },
         { module: "logs", change: { level: "debug", path: "new.log" } },
       ],
     });
-    expect(applies[0]).toMatchObject({ candidate: candidates[0], validation_token: "combo-validation-1", confirmations: ["discard_external_changes"] });
+    expect(applies[0]).toMatchObject({ confirmations: ["discard_external_changes"] });
     await waitFor(() => expect(screen.queryByText("配置文件已在外部修改")).not.toBeInTheDocument());
   });
 
-  it("组合采用校验遇到二次外改时停止并要求重读", async () => {
+  it("组合采用 apply 遇到二次外改时停止并要求重读", async () => {
     const user = userEvent.setup();
     setMockAuthenticated(true);
     const changed: ConfigState = {
@@ -321,15 +316,9 @@ describe("application routes", () => {
         protected_changes: [],
         parse_error: null,
       })),
-      http.post("/api/v2/config/validate", () => HttpResponse.json({
-        code: "FILE_REVISION_CONFLICT",
-        message: "configuration file changed again",
-        request_id: "mock-file-conflict",
-        retryable: true,
-      }, { status: 409 })),
       http.post("/api/v2/config/apply", () => {
         applyRequests += 1;
-        return HttpResponse.error();
+        return HttpResponse.json({ code: "FILE_REVISION_CONFLICT", message: "configuration file changed again", request_id: "mock-file-conflict", retryable: false, field_errors: [] }, { status: 409 });
       }),
     );
 
@@ -337,8 +326,9 @@ describe("application routes", () => {
     expect(await screen.findByText("配置文件已在外部修改")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "查看" }));
     await user.click(await screen.findByRole("button", { name: "组合采用 1 项" }));
+    await user.click(await screen.findByRole("button", { name: "确认采用" }));
     expect(await screen.findByText("配置文件已再次变化，请重新读取差异。")).toBeInTheDocument();
-    expect(applyRequests).toBe(0);
+    expect(applyRequests).toBe(1);
   });
 
   it.each(
@@ -352,21 +342,14 @@ describe("application routes", () => {
     expect(screen.getByText("当前版本暂不可用。")).toBeInTheDocument();
   });
 
-  it("代理页通过单模块接口预校验并保存 SecretRef 引用", async () => {
+  it("代理页不预校验，单次 apply 保存 SecretRef 引用", async () => {
     const user = userEvent.setup();
     const requests: unknown[] = [];
     setMockAuthenticated(true);
     server.use(
-      http.post("/api/v2/config/modules/outbound/validate", async ({ request }) => {
-        const candidate = await request.json() as { expected: unknown };
-        requests.push(candidate);
-        return HttpResponse.json({
-          validation_token: "validation-proxy",
-          expected: candidate.expected,
-          expires_at_ms: Date.now() + 30_000,
-          required_confirmations: [],
-          affected_names: ["proxy-primary"],
-        });
+      http.post("/api/v2/config/modules/outbound/validate", () => {
+        requests.push("unexpected validate");
+        return HttpResponse.error();
       }),
       http.post("/api/v2/config/modules/outbound/apply", async ({ request }) => {
         const body = await request.json() as { operation_id: string };
@@ -387,7 +370,7 @@ describe("application routes", () => {
     await user.clear(secret);
     await user.type(secret, "UPDATED_PROXY_URL");
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(requests).toHaveLength(2));
+    await waitFor(() => expect(requests).toHaveLength(1));
     expect(requests[0]).toMatchObject({
       changes: [{
         module: "outbound",
@@ -397,8 +380,8 @@ describe("application routes", () => {
           value: { name: "proxy-primary", type: "socks5", proxy_url: { env: "UPDATED_PROXY_URL" } },
         },
       }],
-      discard_external_changes: false,
     });
+    expect(Object.keys(requests[0] as object).sort()).toEqual(["changes", "operation_id"]);
   });
 
   it("代理页展示脱敏内联 URL，并在未修改时原样提交引用", async () => {
@@ -425,16 +408,9 @@ describe("application routes", () => {
           runtime: [],
         }),
       ),
-      http.post("/api/v2/config/modules/outbound/validate", async ({ request }) => {
-        const candidate = await request.json() as { expected: unknown };
-        requests.push(candidate);
-        return HttpResponse.json({
-          validation_token: "validation-inline",
-          expected: candidate.expected,
-          expires_at_ms: Date.now() + 30_000,
-          required_confirmations: [],
-          affected_names: ["proxy-inline"],
-        });
+      http.post("/api/v2/config/modules/outbound/validate", () => {
+        requests.push("unexpected validate");
+        return HttpResponse.error();
       }),
       http.post("/api/v2/config/modules/outbound/apply", async ({ request }) => {
         const body = await request.json() as { operation_id: string };
@@ -452,7 +428,7 @@ describe("application routes", () => {
     const dialog = await screen.findByRole("dialog", { name: "编辑代理" });
     // 不改动 URL，仅保存，形态保持原样（字符串形式的内联来源，密码仍为占位符）。
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(requests).toHaveLength(2));
+    await waitFor(() => expect(requests).toHaveLength(1));
     expect(requests[0]).toMatchObject({
       changes: [{
         module: "outbound",
@@ -497,16 +473,9 @@ describe("application routes", () => {
     const requests: unknown[] = [];
     setMockAuthenticated(true);
     server.use(
-      http.post("/api/v2/config/modules/strategy/validate", async ({ request }) => {
-        const candidate = await request.json() as { expected: unknown };
-        requests.push(candidate);
-        return HttpResponse.json({
-          validation_token: "validation-strategy",
-          expected: candidate.expected,
-          expires_at_ms: Date.now() + 30_000,
-          required_confirmations: [],
-          affected_names: ["default"],
-        });
+      http.post("/api/v2/config/modules/strategy/validate", () => {
+        requests.push("unexpected validate");
+        return HttpResponse.error();
       }),
       http.post("/api/v2/config/modules/strategy/apply", async ({ request }) => {
         const body = await request.json() as { operation_id: string };
@@ -533,7 +502,7 @@ describe("application routes", () => {
     await user.clear(min);
     await user.type(min, "0");
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(requests).toHaveLength(2));
+    await waitFor(() => expect(requests).toHaveLength(1));
     expect(requests[0]).toMatchObject({
       changes: [{
         module: "strategy",
@@ -579,16 +548,9 @@ describe("application routes", () => {
     const requests: unknown[] = [];
     setMockAuthenticated(true);
     server.use(
-      http.post("/api/v2/config/modules/clients/validate", async ({ request }) => {
-        const candidate = await request.json() as { expected: unknown };
-        requests.push(candidate);
-        return HttpResponse.json({
-          validation_token: "validation-clients",
-          expected: candidate.expected,
-          expires_at_ms: Date.now() + 30_000,
-          required_confirmations: [],
-          affected_names: ["desktop"],
-        });
+      http.post("/api/v2/config/modules/clients/validate", () => {
+        requests.push("unexpected validate");
+        return HttpResponse.error();
       }),
       http.post("/api/v2/config/modules/clients/apply", async ({ request }) => {
         const body = await request.json() as { operation_id: string };
@@ -638,7 +600,7 @@ describe("application routes", () => {
     expect(requests).toHaveLength(0);
     await user.click(within(confirm).getByRole("checkbox"));
     await user.click(confirmButton);
-    await waitFor(() => expect(requests).toHaveLength(2));
+    await waitFor(() => expect(requests).toHaveLength(1));
     expect(requests[0]).toMatchObject({
       changes: [{
         module: "clients",
@@ -851,16 +813,9 @@ describe("application routes", () => {
     const requests: unknown[] = [];
     setMockAuthenticated(true);
     server.use(
-      http.post("/api/v2/config/modules/upstreams/validate", async ({ request }) => {
-        const candidate = await request.json() as { expected: unknown };
-        requests.push(candidate);
-        return HttpResponse.json({
-          validation_token: "validation-upstreams",
-          expected: candidate.expected,
-          expires_at_ms: Date.now() + 30_000,
-          required_confirmations: [],
-          affected_names: ["default-group"],
-        });
+      http.post("/api/v2/config/modules/upstreams/validate", () => {
+        requests.push("unexpected validate");
+        return HttpResponse.error();
       }),
       http.post("/api/v2/config/modules/upstreams/apply", async ({ request }) => {
         const body = await request.json() as { operation_id: string };
@@ -889,7 +844,7 @@ describe("application routes", () => {
     await user.click(within(dialog).getByLabelText("主要超时单位"));
     await user.click(await screen.findByTitle("毫秒"));
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(requests).toHaveLength(2));
+    await waitFor(() => expect(requests).toHaveLength(1));
     expect(requests[0]).toMatchObject({
       changes: [{
         module: "upstreams",

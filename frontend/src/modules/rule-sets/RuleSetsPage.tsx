@@ -87,7 +87,7 @@ export function RuleSetsPage() {
       ? { module: "rule_set", change: { action: "create", value } }
       : { module: "rule_set", change: { action: "update", original_name: editing.name, value } };
     try {
-      const operation = await mutation.mutateAsync({ change, state: query.data.state });
+      const operation = await mutation.mutateAsync({ change });
       if (operation) setEditing(null);
     } catch {
       // 保留草稿和字段错误。

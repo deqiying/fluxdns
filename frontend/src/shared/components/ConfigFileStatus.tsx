@@ -4,7 +4,7 @@ import { Alert, App, Button, Space, Typography } from "antd";
 import { RefreshCw } from "lucide-react";
 import { getSummaryPollInterval } from "@/app/query-client";
 import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
-import { fetchConfigState, fetchExternalDiff, validateCandidate, type FileSyncRequest, type OperationResult } from "@/shared/config/api";
+import { fetchConfigState, fetchExternalDiff, type FileSyncRequest, type OperationResult } from "@/shared/config/api";
 import type { ConfigChange } from "@/shared/config/contract";
 import {
   externalWorkspaceReducer,
@@ -12,10 +12,10 @@ import {
   isExternalBannerVisible,
 } from "@/shared/config/external-change";
 import { configKeys, invalidationKeysForChanges } from "@/shared/config/query-keys";
-import { confirmationLabels } from "@/shared/config/hooks";
+import { confirmImpacts } from "@/shared/config/hooks";
 import { assertNoPendingOperation, pendingOperationKey, trackConfigOperation } from "@/shared/config/pending-operation";
 import {
-  applyAndSettle, createOperationId,
+  applyWithConfirmation, createOperationId,
   restoreFilesAndSettle,
   retryPersistenceAndSettle,
   resumeOperation,
@@ -90,11 +90,7 @@ export function ConfigFileStatus() {
 
     const request: FileSyncRequest = {
       operation_id: operationId,
-      expected: {
-        active_revision: issue.activeRevision,
-        observed_file_revision: issue.fileRevision,
-      },
-      discard_external_changes: kind === "restore",
+      observed_file_revision: issue.fileRevision,
     };
 
     dispatch({ type: "restore" });
@@ -114,14 +110,8 @@ export function ConfigFileStatus() {
   const runAdoption = async (changes: ConfigChange[]) => {
     const diff = workspace.diff;
     if (!diff || changes.length === 0) return;
-    const candidate = {
-      expected: diff.expected,
-      changes,
-      discard_external_changes: true,
-    };
     try {
       assertNoPendingOperation(queryClient);
-      const validation = await validateCandidate(candidate);
       const omitted = diff.editable.length - changes.length;
       const confirmed = await new Promise<boolean>((resolve) => {
         modal.confirm({
@@ -130,7 +120,6 @@ export function ConfigFileStatus() {
             <Space orientation="vertical" size={8}>
               <Typography.Text>将一次应用 {changes.length} 项类型化变化。</Typography.Text>
               <Typography.Text type="secondary">未采用可编辑差异 {omitted} 项，受保护变化 {diff.protected_changes.length} 类；这些内容会被当前活动配置还原。</Typography.Text>
-              {validation.required_confirmations.length > 0 ? <Typography.Text type="warning">{validation.required_confirmations.map((impact) => confirmationLabels[impact]).join("；")}</Typography.Text> : null}
             </Space>
           ),
           okText: "确认采用",
@@ -141,12 +130,13 @@ export function ConfigFileStatus() {
       });
       if (!confirmed) return;
       dispatch({ type: "apply" });
-      const settlement = await trackConfigOperation(queryClient, () => applyAndSettle({
+      const settlement = await trackConfigOperation(queryClient, () => applyWithConfirmation({
         operation_id: createOperationId(),
-        candidate,
-        validation_token: validation.validation_token,
-        confirmations: validation.required_confirmations,
-      }));
+        changes,
+        confirmations: ["discard_external_changes"],
+        observed_file_revision: diff.expected.observed_file_revision,
+      }, (validation) => confirmImpacts(modal.confirm, validation.required_confirmations)));
+      if (!settlement) { dispatch({ type: "cancel_apply" }); return; }
       if (!acceptSettlement(settlement, dispatch)) return;
       await Promise.all(invalidationKeysForChanges(changes).map((queryKey) => queryClient.invalidateQueries({ queryKey })));
       await queryClient.invalidateQueries({ queryKey: configKeys.externalDiffs() });
