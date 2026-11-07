@@ -11,6 +11,7 @@ import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { normalizeDuration } from "@/shared/config/form-values";
 import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { hostsJsonError } from "./hosts-json";
 
 type Schemas = components["schemas"];
 type Upstream = Schemas["Upstream"];
@@ -112,9 +113,9 @@ export function UpstreamsPage() {
     },
   ];
 
-  const submit = async () => {
+  // 仅由 Form 的校验成功回调提交；字段错误在表单内展示，不产生未处理的校验 Promise。
+  const submit = async (values: UpstreamFormValues) => {
     if (!query.data || !editing) return;
-    const values = await form.validateFields();
     const value: Upstream = values.type === "hosts"
       ? { name: values.name, type: "hosts", format: values.format ?? "hosts", hosts: values.hosts ?? "" }
       : values.type === "doh"
@@ -164,8 +165,8 @@ export function UpstreamsPage() {
           <Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 920 }} locale={{ emptyText: search ? "没有匹配的上游" : activeTab === "groups" ? "尚未配置上游组" : "尚未配置上游" }} />
         </div>
       ) : null}
-      <ConfigFormModal open={editing !== null} title={editing === "create" ? (activeTab === "groups" ? "添加上游组" : "添加上游") : "编辑上游"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
-        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
+      <ConfigFormModal open={editing !== null} title={editing === "create" ? (activeTab === "groups" ? "添加上游组" : "添加上游") : "编辑上游"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => form.submit()}>
+        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)} onFinish={(values) => void submit(values)}>
           <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128 }]}><Input autoComplete="off" /></Form.Item>
           <Form.Item name="type" label="类型" rules={[{ required: true }]}><Segmented block options={[{ label: "Hosts", value: "hosts" }, { label: "DoH", value: "doh" }, { label: "上游组", value: "group" }]} /></Form.Item>
           {formType === "hosts" ? <HostsFields /> : null}
@@ -201,10 +202,37 @@ export function UpstreamsPage() {
 }
 
 function HostsFields() {
+  const format = Form.useWatch("format");
   return (
     <>
       <Form.Item name="format" label="Hosts 格式" rules={[{ required: true }]}><Select options={[{ label: "Hosts 行格式", value: "hosts" }, { label: "JSON", value: "json" }]} /></Form.Item>
-      <Form.Item name="hosts" label="内联映射" rules={[{ required: true }, { max: 262144 }]}><Input.TextArea autoSize={{ minRows: 7, maxRows: 16 }} /></Form.Item>
+      <Form.Item
+        name="hosts"
+        label="内联映射"
+        dependencies={["format"]}
+        validateDebounce={300}
+        validateTrigger={["onChange", "onBlur"]}
+        extra={format === "json" ? "JSON 条目之间用英文逗号分隔，键名和字符串使用双引号；不支持注释或末尾逗号。" : undefined}
+        rules={[
+          { required: true, whitespace: true },
+          { max: 262144 },
+          ({ getFieldValue }) => ({
+            validator: async (_, value?: string) => {
+              if (getFieldValue("format") !== "json" || !value || value.length > 262144) return;
+              const error = hostsJsonError(value);
+              if (error) throw new Error(error);
+            },
+          }),
+        ]}
+      >
+        <Input.TextArea
+          autoSize={{ minRows: 7, maxRows: 16 }}
+          spellCheck={false}
+          placeholder={format === "json"
+            ? '{\n  "first.example": { "A": ["192.0.2.1"] },\n  "second.example": { "AAAA": ["2001:db8::1"] }\n}'
+            : "192.0.2.1 example.test"}
+        />
+      </Form.Item>
     </>
   );
 }
