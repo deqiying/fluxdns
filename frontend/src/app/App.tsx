@@ -1,24 +1,26 @@
-import { lazy, Suspense } from "react";
+import { Suspense } from "react";
 import { Spin } from "antd";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { ProtectedRoute } from "@/modules/auth/ProtectedRoute";
+// 认证入口随主入口加载，避免服务更新使 session 失效后，还要请求已被替换的旧分片。
+import { LoginPage } from "@/modules/auth/LoginPage";
+import { InitializePage } from "@/modules/auth/InitializePage";
+import { lazyPage } from "./lazy-page";
 
-const AppLayout = lazy(() => import("@/shared/components/AppLayout").then((module) => ({ default: module.AppLayout })));
-const DashboardPage = lazy(() => import("@/modules/dashboard/DashboardPage").then((module) => ({ default: module.DashboardPage })));
-const LoginPage = lazy(() => import("@/modules/auth/LoginPage").then((module) => ({ default: module.LoginPage })));
-const InitializePage = lazy(() => import("@/modules/auth/InitializePage").then((module) => ({ default: module.InitializePage })));
-const QueriesPage = lazy(() => import("@/modules/queries/QueriesPage").then((module) => ({ default: module.QueriesPage })));
-const SystemPage = lazy(() => import("@/modules/system/SystemPage").then((module) => ({ default: module.SystemPage })));
-const ProxiesPage = lazy(() => import("@/modules/proxies/ProxiesPage").then((module) => ({ default: module.ProxiesPage })));
-const HostsPage = lazy(() => import("@/modules/hosts/HostsPage").then((module) => ({ default: module.HostsPage })));
-const RuleSetsPage = lazy(() => import("@/modules/rule-sets/RuleSetsPage").then((module) => ({ default: module.RuleSetsPage })));
-const StrategiesPage = lazy(() => import("@/modules/strategies/StrategiesPage").then((module) => ({ default: module.StrategiesPage })));
-const ListenersPage = lazy(() => import("@/modules/listeners/ListenersPage").then((module) => ({ default: module.ListenersPage })));
-const ClientsPage = lazy(() => import("@/modules/clients/ClientsPage").then((module) => ({ default: module.ClientsPage })));
-const DnsSettingsPage = lazy(() => import("@/modules/dns-settings/DnsSettingsPage").then((module) => ({ default: module.DnsSettingsPage })));
-const SystemSettingsPage = lazy(() => import("@/modules/system-settings/SystemSettingsPage").then((module) => ({ default: module.SystemSettingsPage })));
-const UpstreamsPage = lazy(() => import("@/modules/upstreams/UpstreamsPage").then((module) => ({ default: module.UpstreamsPage })));
-const NotFoundPage = lazy(() => import("./NotFoundPage").then((module) => ({ default: module.NotFoundPage })));
+const AppLayout = lazyPage(() => import("@/shared/components/AppLayout").then((module) => ({ default: module.AppLayout })));
+const DashboardPage = lazyPage(() => import("@/modules/dashboard/DashboardPage").then((module) => ({ default: module.DashboardPage })));
+const QueriesPage = lazyPage(() => import("@/modules/queries/QueriesPage").then((module) => ({ default: module.QueriesPage })));
+const SystemPage = lazyPage(() => import("@/modules/system/SystemPage").then((module) => ({ default: module.SystemPage })));
+const ProxiesPage = lazyPage(() => import("@/modules/proxies/ProxiesPage").then((module) => ({ default: module.ProxiesPage })));
+const HostsPage = lazyPage(() => import("@/modules/hosts/HostsPage").then((module) => ({ default: module.HostsPage })));
+const RuleSetsPage = lazyPage(() => import("@/modules/rule-sets/RuleSetsPage").then((module) => ({ default: module.RuleSetsPage })));
+const StrategiesPage = lazyPage(() => import("@/modules/strategies/StrategiesPage").then((module) => ({ default: module.StrategiesPage })));
+const ListenersPage = lazyPage(() => import("@/modules/listeners/ListenersPage").then((module) => ({ default: module.ListenersPage })));
+const ClientsPage = lazyPage(() => import("@/modules/clients/ClientsPage").then((module) => ({ default: module.ClientsPage })));
+const DnsSettingsPage = lazyPage(() => import("@/modules/dns-settings/DnsSettingsPage").then((module) => ({ default: module.DnsSettingsPage })));
+const SystemSettingsPage = lazyPage(() => import("@/modules/system-settings/SystemSettingsPage").then((module) => ({ default: module.SystemSettingsPage })));
+const UpstreamsPage = lazyPage(() => import("@/modules/upstreams/UpstreamsPage").then((module) => ({ default: module.UpstreamsPage })));
+const NotFoundPage = lazyPage(() => import("./NotFoundPage").then((module) => ({ default: module.NotFoundPage })));
 
 export function App() {
   return (

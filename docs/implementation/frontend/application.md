@@ -9,16 +9,32 @@
 > 核对基线：`e3e21c8` 加本次工作树变更；本轮仅核对前端测试 setup 的定时器收尾清理，其余范围按原日期和基线解释
 >
 > 2026-11-06 增量核对：基线 `3d44dd4` 加本次工作树，仅核对单次保存、危险影响确认、文件操作与保留预览；旧批次验证记录不代表本次结果。
+>
+> 2026-11-07 增量核对：基线 `aa0fedf` 加本次工作树，范围限服务更新后的认证入口、页面模块加载失败分类与手动恢复；其余范围沿用原核对记录。
 
 ## 入口
 
 [`main.tsx`](../../../frontend/src/main.tsx) 的 `bootstrap` 仅在 DEV 且 `VITE_USE_MOCK_API=true` 时启动 MSW，再渲染 `AppErrorBoundary -> AppProviders -> App`。[`providers.tsx`](../../../frontend/src/app/providers.tsx) 依次组合 Ant Design、QueryClient、BrowserRouter 与 AuthProvider。
 
-[`App.tsx`](../../../frontend/src/app/App.tsx) lazy-load 页面，由 Suspense 展示加载态；`/login` 和 `/initialize` 在 guard 外，其他页面进入 `ProtectedRoute -> AppLayout`。根路径转 `/dashboard`，未知受保护路径展示 NotFound。受保护壳层消费 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 注册 12 个一级路径，具体接线见[页面与查询](pages.md)。
+[`App.tsx`](../../../frontend/src/app/App.tsx) 将 `/login` 和 `/initialize` 静态导入入口图，二者在 guard 外；受保护壳层、业务页面和 NotFound 通过 [`lazyPage`](../../../frontend/src/app/lazy-page.ts) 按需加载，由 Suspense 展示加载态。其他页面进入 `ProtectedRoute -> AppLayout`，根路径转 `/dashboard`，未知受保护路径展示 NotFound。受保护壳层消费 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 注册 12 个一级路径，具体接线见[页面与查询](pages.md)。
 
 正式路由已全部接线，移除空 pending route 分支、旧占位页面和专用 CSS；登录页按当前能力说明 DNS 管理、配置校验与同步状态，不再标为只读界面。最终内嵌 release 已回读新文案，98 项前端测试与完整三阶段打包通过。
 
 [`AppLayout`](../../../frontend/src/shared/components/AppLayout.tsx) 的桌面侧栏和移动 Drawer 共用[寻址小章鱼 SVG](../../../frontend/src/assets/fluxdns-icon.svg)，[`index.html`](../../../frontend/index.html) 将同一资源设为 favicon。两处均使用 Vite 的 `?no-inline` 资源入口，生成同一哈希 SVG；不依赖生产构建中已禁用的 `public/` 复制，也不携带 mock worker。2026-09-22 的生产预览已验证资源返回成功、两处 URL 一致及移动导航显示；本轮未重新构建或验证后端内嵌 release。
+
+## 服务更新后的页面恢复
+
+后端 session 只在进程内存中保存，重启后失效；前端仍按已有 401/4401 边界清理会话。登录页和初始化页随入口静态加载，避免旧标签在认证失效后才请求已经被新构建替换的认证分片。该改动不持久化服务端 session，也不改变 Cookie/Bearer 协议。
+
+[`lazy-page.ts`](../../../frontend/src/app/lazy-page.ts) 在模块加载函数外统一捕获拒绝（包括动态 JS、CSS 预加载和模块求值失败），包装成保留 `cause` 的 `PageLoadError`。不按浏览器错误字符串猜测原因；模块加载成功后的组件渲染异常不经过该包装。
+
+[`AppErrorBoundary`](../../../frontend/src/app/AppErrorBoundary.tsx) 区分 `PAGE_LOAD_FAILED` 和 `RENDER_FAILED`：前者说明服务可能已更新或连接暂时中断，后者显示普通渲染异常，不再把所有异常解释为“只读会话”。两者均提供手动整页刷新入口；不自动重载、不自动重试失败模块、不写入浏览器存储，避免服务尚未恢复时循环刷新。提示明确刷新会丢弃未保存修改；错误边界替换组件树本身也不提供草稿恢复保证。
+
+应用自己的 Console 诊断只增加稳定分类和组件栈，不主动输出原始 cause、资源 URL、接口数据或 props；原始异常不进入页面或持久化存储。已打开的旧版脚本不会被此次修改热替换，首次升级到修复版本后仍需刷新一次，后续标签才具备新的恢复行为。
+
+2026-11-07 Windows 验证：新增 [`App.recovery.test.tsx`](../../../frontend/src/app/App.recovery.test.tsx) 用“入口加载后移除旧认证模块”的故障注入验证过期回登录和初始化入口；两项在修复前均显示旧全局错误页，修复后通过。[`AppErrorBoundary.test.tsx`](../../../frontend/src/app/AppErrorBoundary.test.tsx) 覆盖正常加载、JS/CSS/非 Error 拒绝、错误分类、安全文案和不重试。定向 5 文件 56 项、全量 42 文件 255 项 Vitest 与包含 typecheck 的生产 build 通过；测试仍有既有 Node localStorage、Ant Design 弃用和 React key 警告。此轮未部署真实服务或重新打包后端内嵌 binary。
+
+同轮使用生产 `dist`、仓库 fixture 和独立 loopback HTTP 模拟服务完成浏览器故障注入：页面已加载后使刷新会话返回 401，并拒绝后续 JS/CSS 请求，仍正常返回登录页，新增代码资源请求和自动重载均为 0；将未加载的解析记录页 JS 返回 404，显示资源加载失败，路径、query 和 hash 保留且无自动重载；恢复资源后点击刷新，只发生一次文档重载并恢复解析记录页。两种路径的 localStorage/sessionStorage 均为空，临时服务已停止。这验证真实浏览器与生产前端资源，不代表真实 Rust 服务的新旧 binary 替换、WS 或外部反向代理验收。
 
 ## 认证状态
 
@@ -156,6 +172,7 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | setup/session gate | AuthProvider + ProtectedRoute | bootstrap 的 provider/router | P1 认证测试及真实初始化/登录/刷新/登出；P3 内嵌深链接重载恢复 | 外部 HTTPS 代理未验收 |
+| 部署后页面恢复 | App 静态认证入口、lazyPage、AppErrorBoundary | bootstrap 与全部懒加载路由 | 2026-11-07：先红后绿回归、全量 Vitest、生产包浏览器 401/分片 404/手动恢复，见[恢复说明](#服务更新后的页面恢复) | 浏览器后端为 fixture；未做真实 binary 升级；旧标签首次需刷新 |
 | 同源请求/取消 | `apiV2Request`、unauthorized listener | 各 module API 共用 client | 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
 | 退出数据清理 | `performLogout` finally、`onUnauthorized` | logout 与 HTTP/WS 认证失效统一回收 | 认证失效清空业务缓存的组件回归、真实登出撤销与重启后登录 | 网络 logout 失败仍不能证明服务端已撤销 |
 | P3 v2 配置页面 | 九个领域页面、generated-v2、module hooks | 受保护路由与十模块正式 API | MSW/完整 Vitest、真实 Bearer/文件/SQLite/UDP/浏览器，见 P3 联合验收 | 跨平台与原生触控边界见联合验收 |
