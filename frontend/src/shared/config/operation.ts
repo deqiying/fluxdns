@@ -1,4 +1,5 @@
 import { ApiError } from "@/shared/api/errors";
+import { generateUuidV4 } from "@/shared/uuid";
 import {
   applyCandidate,
   fetchConfigOperation,
@@ -34,8 +35,9 @@ export class PendingOperationError extends ApiError {
   }
 }
 
+/** 每次保存仅生成一次，确认重试与结果回读继续沿用同一 ID。 */
 export function createOperationId(): string {
-  return crypto.randomUUID();
+  return generateUuidV4();
 }
 
 /** apply 只发送一次；timeout/network 后使用同一 operation_id 回读，不重放变更。 */

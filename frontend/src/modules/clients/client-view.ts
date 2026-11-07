@@ -1,5 +1,6 @@
 import type { components } from "@/shared/api/generated-v2";
 import { durationToNanoseconds, normalizeDuration } from "@/shared/config/form-values";
+import { generateUuidV4 } from "@/shared/uuid";
 
 type Schemas = components["schemas"];
 export type Client = Schemas["Client"];
@@ -81,17 +82,9 @@ export function abbreviateId(id: string, keep = 10): string {
   return id.length <= keep * 2 + 1 ? id : `${id.slice(0, keep)}…${id.slice(-keep)}`;
 }
 
-/**
- * 生成 UUID v4 形式的随机 ID。
- * WebUI 可能经由非安全上下文（局域网 HTTP）访问，此时没有 crypto.randomUUID，
- * 因此直接基于 getRandomValues 组装，结果只含 [0-9a-f-]，满足 client_id 字符集。
- */
+/** 生成 UUID v4 形式的随机 ID，结果只含 [0-9a-f-]，满足 client_id 字符集。 */
 export function generateClientId(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return generateUuidV4();
 }
 
 /** 头像取名称首个字符；颜色按名称稳定散列，避免列表刷新时跳色。 */

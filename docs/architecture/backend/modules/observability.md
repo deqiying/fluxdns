@@ -38,7 +38,13 @@ v1 日志级别固定接受 `trace`、`debug`、`info`、`warn`、`error`，大�
 
 ## 3. 日志格式
 
-正式输出区分 `kind=log/metric/health` 的单行 JSON。log 字段是 `occurred_at_ms`、level、event、component、`has_request_digest`、`has_configured_id`、outcome、runtime_revision 和安全 message；digest/configured ID 在此输出为存在性，而非实际值。metric 输出受校验的 name/labels/value；聚合快照另带 writer_instance、occurred_at_ms 和 temporality，Counter 为 cumulative，Gauge 为 instantaneous。health 输出组件、状态、retry_count、stale_age_micros 和 persistence_gap。
+> 2026-11-07 局部评审：仅调整文本日志的时间表示和字段顺序，聚合、脱敏及生命周期契约不变。
+
+正式输出区分 `kind=log/metric/health` 的单行 JSON，所有记录的第一个字段固定为 `time`，使用服务器本地时区的 `YYYY-MM-DDTHH:mm:ss.SSS±HH:MM`（含毫秒与明确 UTC 偏移）。系统时区识别失败时使用 UTC（`+00:00`）；不新增日志时区配置。log 使用事件发生时间，原始 metric、聚合快照和 health 使用输出时间；bootstrap 文本日志沿用相同时间格式。
+
+log 后续字段为 kind、level、event、component、`has_request_digest`、`has_configured_id`、outcome、runtime_revision 和安全 message；digest/configured ID 仅输出存在性。metric 保留受校验的 name/labels/value；聚合快照依次输出 time、kind、name、labels、value、histogram、temporality、writer_instance，Counter/histogram 为 cumulative，Gauge 为 instantaneous。health 保留组件、状态、retry_count、stale_age_micros 和 persistence_gap。
+
+日志文本中的 `occurred_at_ms` 已由 `time` 替代，采集端需按新字段解析；不得重新按 JSON 字段名称排序后声称保留时间在前的可读性。仅日志展示发生变化，数据库、统计与 Management API 的整数时间契约保持不变。
 
 `TypedTracingLayer::on_event` 只消费受支持字段，忽略任意 Debug payload；实际 LogEvent 的 request_digest/configured_id 在该桥接路径中均为 `None`。tracing 中出现了某个字段，不代表最终 JSON 会保留它。
 

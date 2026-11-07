@@ -332,6 +332,8 @@ ConfigV2
 
 正式 app 关闭日志时仍保持 telemetry 指标/health。enable/level/path 经已有 service 日志 owner 显式热切换；路径预开失败不切 Runtime 或旧输出。当前 v2 表单保存和文件持久化联合接线仍待完成，具体边界见[日志热切换](backend/background-services.md#p1-日志热切换2026-09-07)。
 
+日志保持单行 JSON，行首 `time` 使用服务器本地时区的可读日期时间、毫秒和 UTC 偏移；旧 `occurred_at_ms` 日志字段已替换，不影响数据库/API 时间字段。时区规则与完整字段顺序见 [Observability 日志格式](../architecture/backend/modules/observability.md#3-日志格式)，实现与验证边界见[后台服务](backend/background-services.md#observability)。
+
 ## 7. `webui`
 
 `webui` 控制独立于 DoH 的 Management Server。FluxDNS 在该端口只提供 HTTP，不实现 TLS 终止，也不根据 `X-Forwarded-*` 推断浏览器 origin；公网部署应将监听限制在 loopback 或受保护的内网地址，并由 Nginx 等可信反向代理提供外部 HTTPS。

@@ -1,7 +1,7 @@
 import { QueryClient } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { setMockAuthenticated, setMockSetupRequired } from "@/mocks/handlers";
 import { outboundConfigReadFixture, processMetricsFixture } from "@/mocks/fixtures";
@@ -808,7 +808,10 @@ describe("application routes", () => {
     await waitFor(() => expect(screen.getByRole("tab", { name: "上游" })).toHaveAttribute("aria-selected", "true"));
   });
 
-  it("上游组超时按秒回显并以紧凑 duration 提交", async () => {
+  it("缺少 randomUUID 时上游组仍可保存，超时按秒回显并以紧凑 duration 提交", async ({ onTestFinished }) => {
+    // 模拟局域网 HTTP：保留真实 getRandomValues，但不提供安全上下文专用的 randomUUID。
+    vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto), randomUUID: undefined });
+    onTestFinished(() => { vi.unstubAllGlobals(); });
     const user = userEvent.setup();
     const requests: unknown[] = [];
     setMockAuthenticated(true);
@@ -855,6 +858,11 @@ describe("application routes", () => {
         },
       }],
     });
+    expect(requests[0]).toMatchObject({
+      operation_id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+    });
+    expect(await screen.findByText("配置已应用并同步到文件")).toBeInTheDocument();
+    expect(requests).toHaveLength(1);
   });
 
   it("普通 API 返回 401 时只跳转一次并显示 session 过期提示", async () => {

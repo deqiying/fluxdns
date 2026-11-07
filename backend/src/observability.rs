@@ -52,6 +52,7 @@ static BOOTSTRAP_FILTER: OnceLock<
 pub fn bootstrap_subscriber() -> impl Subscriber + Send + Sync {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
+        .with_timer(LogTimer)
         .with_target(false)
         .with_writer(std::io::stderr)
         .finish()
@@ -68,6 +69,7 @@ pub fn init_bootstrap() -> Result<(), tracing::subscriber::SetGlobalDefaultError
     let (layer, layer_handle) = tracing_subscriber::reload::Layer::new(Box::new(
         tracing_subscriber::fmt::layer()
             .with_target(false)
+            .with_timer(LogTimer)
             .with_writer(move || SharedOutputWriter(Arc::clone(&output))),
     )
         as ReloadableTracingLayer);
@@ -359,8 +361,8 @@ fn write_line_to(writer: &mut dyn Write, line: &str) -> io::Result<()> {
 impl TelemetryOutput for StructuredTelemetryOutput {
     fn write_log(&self, event: &LogEvent) -> Result<(), PortError> {
         self.write_line(&format!(
-            "{{\"kind\":\"log\",\"occurred_at_ms\":{},\"level\":\"{}\",\"event\":{},\"component\":\"{}\",\"has_request_digest\":{},\"has_configured_id\":{},\"outcome\":\"{}\",\"runtime_revision\":{},\"message\":{}}}",
-            system_time_millis(event.occurred_at),
+            "{{\"time\":{},\"kind\":\"log\",\"level\":\"{}\",\"event\":{},\"component\":\"{}\",\"has_request_digest\":{},\"has_configured_id\":{},\"outcome\":\"{}\",\"runtime_revision\":{},\"message\":{}}}",
+            json_escape(&format_log_time(event.occurred_at)?),
             enum_name(event.level),
             json_escape(event.name.as_str()),
             enum_name(event.component),
@@ -382,7 +384,8 @@ impl TelemetryOutput for StructuredTelemetryOutput {
             .collect::<Vec<_>>()
             .join(",");
         self.write_line(&format!(
-            "{{\"kind\":\"metric\",\"name\":\"{}\",\"labels\":[{}],\"value\":\"{:?}\"}}",
+            "{{\"time\":{},\"kind\":\"metric\",\"name\":\"{}\",\"labels\":[{}],\"value\":\"{:?}\"}}",
+            json_escape(&format_log_time(SystemTime::now())?),
             enum_name(event.name()),
             labels,
             event.value(),
@@ -415,24 +418,23 @@ impl TelemetryOutput for StructuredTelemetryOutput {
                 serde_json::json!({"le": if upper == u64::MAX { serde_json::json!("+Inf") } else { serde_json::json!(upper) }, "count": count})
             }).collect::<Vec<_>>(),
         }));
-        self.write_line(
-            &serde_json::json!({
-                "kind": "metric",
-                "writer_instance": instance,
-                "occurred_at_ms": system_time_millis(SystemTime::now()),
-                "name": enum_name(metric.name),
-                "labels": labels,
-                "value": format!("{:?}", metric.value),
-                "histogram": histogram,
-                "temporality": temporality,
-            })
-            .to_string(),
-        )
+        // 顶层字段显式排序，避免 serde_json::Value 将 histogram 等字段排到时间之前。
+        self.write_line(&format!(
+            "{{\"time\":{},\"kind\":\"metric\",\"name\":\"{}\",\"labels\":{},\"value\":\"{:?}\",\"histogram\":{},\"temporality\":\"{}\",\"writer_instance\":{}}}",
+            json_escape(&format_log_time(SystemTime::now())?),
+            enum_name(metric.name),
+            serde_json::json!(labels),
+            metric.value,
+            serde_json::json!(histogram),
+            temporality,
+            json_escape(instance),
+        ))
     }
 
     fn write_health(&self, event: &ComponentHealthEvent) -> Result<(), PortError> {
         self.write_line(&format!(
-            "{{\"kind\":\"health\",\"component\":\"{}\",\"state\":\"{}\",\"retry_count\":{},\"stale_age_micros\":{},\"persistence_gap\":{}}}",
+            "{{\"time\":{},\"kind\":\"health\",\"component\":\"{}\",\"state\":\"{}\",\"retry_count\":{},\"stale_age_micros\":{},\"persistence_gap\":{}}}",
+            json_escape(&format_log_time(SystemTime::now())?),
             enum_name(event.component),
             enum_name(event.state),
             event.retry_count,
@@ -488,10 +490,35 @@ fn json_escape(value: &str) -> String {
     escaped
 }
 
-fn system_time_millis(time: std::time::SystemTime) -> u128 {
-    time.duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_millis())
-        .unwrap_or_default()
+/// 输出服务器本地时间和明确偏移；系统时区不可用时退回 UTC，不能因此丢失日志。
+fn format_log_time(time: SystemTime) -> Result<String, PortError> {
+    let timezone = jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC);
+    format_log_time_in_zone(time, timezone)
+}
+
+/// 只在输出层截断到毫秒，保留事件发生时间；不改动存储和 API 的整数时间契约。
+fn format_log_time_in_zone(
+    time: SystemTime,
+    timezone: jiff::tz::TimeZone,
+) -> Result<String, PortError> {
+    let timestamp = jiff::Timestamp::try_from(time).map_err(|_| {
+        PortError::new(PortErrorClass::InvalidInput, "observability.telemetry.time")
+            .with_safe_context("event time is out of range")
+    })?;
+    Ok(timestamp
+        .to_zoned(timezone)
+        .strftime("%Y-%m-%dT%H:%M:%S%.3f%:z")
+        .to_string())
+}
+
+/// bootstrap 文本日志与正式 JSON 日志共用时间格式和时区。
+struct LogTimer;
+
+impl tracing_subscriber::fmt::time::FormatTime for LogTimer {
+    fn format_time(&self, writer: &mut tracing_subscriber::fmt::format::Writer<'_>) -> fmt::Result {
+        let time = format_log_time(SystemTime::now()).map_err(|_| fmt::Error)?;
+        write!(writer, "{time}")
+    }
 }
 
 enum TelemetryItem {
@@ -1473,6 +1500,134 @@ mod tests {
     }
 
     #[test]
+    fn log_time_preserves_milliseconds_offsets_and_epoch_boundaries() {
+        use jiff::tz::{Offset, TimeZone};
+
+        let time = SystemTime::UNIX_EPOCH + Duration::from_millis(1_794_039_681_586);
+        assert_eq!(
+            super::format_log_time_in_zone(time, TimeZone::fixed(Offset::from_hours(8).unwrap()))
+                .unwrap(),
+            "2026-11-07T16:21:21.586+08:00",
+        );
+        assert_eq!(
+            super::format_log_time_in_zone(time, TimeZone::UTC).unwrap(),
+            "2026-11-07T08:21:21.586+00:00",
+        );
+        assert_eq!(
+            super::format_log_time_in_zone(SystemTime::UNIX_EPOCH, TimeZone::UTC).unwrap(),
+            "1970-01-01T00:00:00.000+00:00",
+        );
+        assert_eq!(
+            super::format_log_time_in_zone(
+                SystemTime::UNIX_EPOCH - Duration::from_millis(1),
+                TimeZone::UTC
+            )
+            .unwrap(),
+            "1969-12-31T23:59:59.999+00:00",
+        );
+        assert_eq!(
+            super::format_log_time_in_zone(time + Duration::from_nanos(999_999), TimeZone::UTC)
+                .unwrap(),
+            "2026-11-07T08:21:21.586+00:00",
+        );
+    }
+
+    #[test]
+    fn log_time_disambiguates_repeated_daylight_saving_hour() {
+        let timezone = jiff::tz::TimeZone::get("America/New_York").unwrap();
+        for (instant, expected) in [
+            ("2026-11-01T05:30:00Z", "2026-11-01T01:30:00.000-04:00"),
+            ("2026-11-01T06:30:00Z", "2026-11-01T01:30:00.000-05:00"),
+        ] {
+            let time = SystemTime::from(instant.parse::<jiff::Timestamp>().unwrap());
+            assert_eq!(
+                super::format_log_time_in_zone(time, timezone.clone()).unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn log_time_reports_out_of_range_instead_of_fabricating_epoch() {
+        let time = SystemTime::from(jiff::Timestamp::MAX) + Duration::from_secs(86_400);
+        let error = super::format_log_time_in_zone(time, jiff::tz::TimeZone::UTC).unwrap_err();
+        assert!(matches!(error.class(), PortErrorClass::InvalidInput));
+        assert_eq!(error.operation(), "observability.telemetry.time");
+    }
+
+    #[test]
+    fn structured_records_start_with_readable_time_and_preserve_json_fields() {
+        let bytes = Arc::new(StdMutex::new(Vec::new()));
+        let output = Arc::new(StructuredTelemetryOutput::from_writer(Box::new(
+            RecordingWriter(bytes.clone()),
+        )));
+        let before = jiff::Timestamp::now().as_millisecond();
+        let mut log = telemetry_log(TelemetryLogLevel::Info);
+        log.occurred_at = SystemTime::UNIX_EPOCH + Duration::from_millis(1_794_039_681_586);
+        log.message = "safe \"quoted\" message\\with\nnewline\tand tab";
+        output.write_log(&log).unwrap();
+        output.write_metric(&accepted_metric(2)).unwrap();
+        let writer = TelemetryWriter::new(1, output.clone()).unwrap();
+        writer.record(accepted_metric(2)).unwrap();
+        let instance = "instance\"\\\n";
+        output
+            .write_metric_snapshot(instance, &writer.metric_snapshot()[0])
+            .unwrap();
+        output.write_health(&telemetry_health()).unwrap();
+        let after = jiff::Timestamp::now().as_millisecond();
+
+        let text = String::from_utf8(bytes.lock().unwrap().clone()).unwrap();
+        let rows: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| {
+                assert!(line.starts_with("{\"time\":\""), "{line}");
+                serde_json::from_str(line).unwrap()
+            })
+            .collect();
+        assert_eq!(rows.len(), 4);
+        for (row, kind) in rows.iter().zip(["log", "metric", "metric", "health"]) {
+            assert_eq!(row["kind"], kind);
+            assert!(row.get("occurred_at_ms").is_none());
+            let time = row["time"].as_str().unwrap();
+            assert_eq!(time.len(), 29);
+            assert_eq!(&time[19..20], ".");
+            let parsed = time.parse::<jiff::Timestamp>().unwrap();
+            if kind != "log" {
+                assert!((before..=after).contains(&parsed.as_millisecond()));
+            }
+        }
+        assert_eq!(
+            rows[0]["time"],
+            super::format_log_time(log.occurred_at).unwrap()
+        );
+        assert_eq!(rows[0]["message"], log.message);
+        assert_eq!(rows[0]["has_request_digest"], false);
+        assert_eq!(rows[0]["has_configured_id"], false);
+        assert_eq!(rows[1]["value"], "Counter(2)");
+        assert_eq!(rows[2]["value"], "Counter(2)");
+        assert_eq!(rows[2]["temporality"], "cumulative");
+        assert_eq!(rows[2]["writer_instance"], instance);
+        assert_eq!(rows[2]["labels"][0]["key"], "component");
+        assert_eq!(rows[2]["labels"][0]["value"], "resolution");
+        assert!(rows[2]["histogram"].is_null());
+        assert_eq!(rows[3]["state"], "healthy");
+    }
+
+    #[test]
+    fn bootstrap_timer_uses_readable_time_with_milliseconds_and_offset() {
+        use tracing_subscriber::fmt::{format::Writer, time::FormatTime};
+
+        let before = jiff::Timestamp::now().as_millisecond();
+        let mut text = String::new();
+        super::LogTimer
+            .format_time(&mut Writer::new(&mut text))
+            .unwrap();
+        assert_eq!(text.len(), 29);
+        let parsed = text.parse::<jiff::Timestamp>().unwrap().as_millisecond();
+        assert!((before..=jiff::Timestamp::now().as_millisecond()).contains(&parsed));
+    }
+
+    #[test]
     fn aggregated_output_declares_temporality_and_writer_identity() {
         let bytes = Arc::new(StdMutex::new(Vec::new()));
         let output = Arc::new(StructuredTelemetryOutput::from_writer(Box::new(
@@ -1725,6 +1880,8 @@ mod tests {
         output.write_health(&telemetry_health()).unwrap();
 
         let content = fs::read_to_string(&path).unwrap();
+        assert!(content.lines().all(|line| line.starts_with("{\"time\":\"")));
+        assert!(!content.contains("occurred_at_ms"));
         assert!(content.contains("\"kind\":\"log\""));
         assert!(content.contains("\"event\":\"dns.request.complete\""));
         assert!(content.contains("\"kind\":\"metric\""));
@@ -1752,6 +1909,7 @@ mod tests {
                 .clone(),
         )
         .unwrap();
+        assert!(content.starts_with("{\"time\":\""));
         assert!(content.contains("\"kind\":\"log\""));
         assert!(content.contains("\"event\":\"dns.request.complete\""));
     }

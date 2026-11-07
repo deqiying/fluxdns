@@ -1,11 +1,12 @@
 import { http, HttpResponse } from "msw";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { server } from "@/mocks/server";
 import { setMockAuthenticated } from "@/mocks/handlers";
 import type { ApplyRequest, ConfigState } from "./api";
-import { applyAndSettle, settleOperation, resumeOperation, restoreFilesAndSettle, retryPersistenceAndSettle } from "./operation";
+import { applyAndSettle, createOperationId, settleOperation, resumeOperation, restoreFilesAndSettle, retryPersistenceAndSettle } from "./operation";
 import { QueryClient } from "@tanstack/react-query";
 import { assertNoPendingOperation, pendingOperationKey, trackConfigOperation } from "./pending-operation";
+import * as uuid from "@/shared/uuid";
 
 const state: ConfigState = {
   active_revision: "active-1",
@@ -27,6 +28,13 @@ function applyRequest(operationId: string): ApplyRequest {
 
 describe("配置操作回读", () => {
   beforeEach(() => setMockAuthenticated(true));
+
+  it("操作 ID 复用共享 UUID v4 生成器，每次调用仅生成一次", () => {
+    const id = "00000000-0000-4000-8000-000000000000";
+    const generate = vi.spyOn(uuid, "generateUuidV4").mockReturnValue(id);
+    expect(createOperationId()).toBe(id);
+    expect(generate).toHaveBeenCalledExactlyOnceWith();
+  });
 
   it("网络结果未知时不重放 apply，只按同一 operation_id 回读", async () => {
     let applies = 0;

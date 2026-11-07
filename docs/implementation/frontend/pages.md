@@ -11,6 +11,8 @@
 > 2026-10-04 增量核对：`eb428f92cdc3acda836547107ef2f56f6d988249` 加本次工作树；仅核对三项包含搜索、配置读取恢复与策略覆盖编辑，其余范围沿用上述历史记录
 >
 > 2026-10-06 增量核对：`94dae99` 加本次工作树；仅核对 `/clients` 列表、编辑抽屉与客户端 ID 修改确认的重设计，其余范围沿用上述历史记录
+>
+> 2026-11-07 增量核对：`1c98be1` 加本次工作树；仅核对局域网 HTTP 下配置操作 ID 与客户端 ID 的共享生成及保存回归，其余范围沿用上述历史记录
 
 ## 路由与数据源
 
@@ -44,6 +46,8 @@
 配置模块的 `config-v2` 查询通过 [`read-retry.ts`](../../../frontend/src/shared/config/read-retry.ts) 对瞬时 `OPERATION_BUSY`/服务不可用最多重试 3 次，间隔 250/500/1000 ms 加抖动；取消和认证错误不追加该读取重试。已有数据刷新失败时 `PageState.hasData` 保留内容，局部提示读取失败；`ConfigSyncBadge` 显示同步状态暂不可用，保存 hook 和表单阻止新写入。DNS 与策略弹窗只在打开时初始化草稿并固定 revision，refetch 不覆盖输入。
 
 [`operation.ts`](../../../frontend/src/shared/config/operation.ts) 的响应丢失恢复与后续 settlement 共用 `maxPolls`，不重置预算、不重放 apply/restore/retry。结果未决时 `PendingOperationError` 携带原 ID，由 [`pending-operation.ts`](../../../frontend/src/shared/config/pending-operation.ts) 保存在当前 QueryClient 内；页面切换和配置 refetch 不清除它。全局 `ConfigFileStatus` 提供“继续查询”，终态确认前阻止普通保存、外部组合采用和文件操作，确认后刷新配置。此记录是当前应用会话内存状态，不是跨浏览器重启的持久操作日志。
+
+配置操作 `createOperationId` 与客户端 `generateClientId` 统一复用 [`generateUuidV4`](../../../frontend/src/shared/uuid/index.ts)，直接使用 `crypto.getRandomValues` 生成 UUID v4，不依赖仅在安全上下文提供的 `crypto.randomUUID`。这使局域网 HTTP 下的配置保存、外部变化采用和文件还原能够在提交前生成 ID；原有单次生成、确认重试和结果回读继续复用同一 ID 的规则不变，没有改动 API 契约或新增依赖。
 
 dashboard 先取 v2 HTTP 快照再订阅 WS metrics；订阅后的逐秒序列由全量基线和之后每秒的增量帧拼装（[`metricsSeries`](../../../frontend/src/shared/api/metricsSeries.ts)），缺基线、增量与基线不连续或帧内本身有洞时丢弃本地序列并重新订阅，绝不把带洞序列当连续曲线绘图。system runtime 和全局配置状态仍使用 30 秒可见性轮询；页面隐藏时 dashboard 释放订阅，恢复先 refetch。P3 模块页面按 module query key 读取，保存后只失效目标和类型化依赖，不复制整份配置到全局 store。
 
@@ -108,6 +112,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | 登录与初始化页重设计 | [LoginPage](../../../frontend/src/modules/auth/LoginPage.tsx)、[InitializePage](../../../frontend/src/modules/auth/InitializePage.tsx)、[index.css](../../../frontend/src/styles/index.css) 的 `.login-*` | 登录页由深色 hero + 浅色卡片改为同侧浅色双栏：左栏品牌章鱼图标 + 蓝色 kicker + 40px 标题 + 三条能力说明（实时运行状态／配置变更可追溯／会话自动续期），右栏白底表单列（26px 标题、40px 输入、44px 主按钮、按钮下方续期说明）；≤900px 隐藏左栏、顶部显示品牌行并把表单改为白底圆角卡片；初始化页沿用同一版式（不含能力清单） | 2026-09-27：前端 31 文件 175 项 Vitest 与 `pnpm run typecheck` 通过，`App.test.tsx` 既有登录/初始化断言（两个标题、三个 label、按钮名、过期提示）保持通过；另在真实 Chromium 用 `_fluxdns/` 下临时 file:// 断点预览实测：1440×900 得 879.7px／560.3px 两列、白底表单列 1px 左边框、卡片 372px 居中于 x=974、三条说明间距 61px 无重叠且未越过页脚、无横向溢出；390×844 得单列、左栏 `display:none`、品牌行与面板同为 #f7f7f8、卡片 342px 圆角 12 带 1px #e0e2e6 边框 | 未在真实浏览器目视 antd 控件外观、密码可见性切换与后端联调登录；断点预览页是手工同步的 markup 副本，与 TSX 存在漂移风险；未覆盖 900px 临界值（898／901）与 320px 极窄屏 |
 | 趋势图轴刻度改为整数计数 | [MetricsTrendChart](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx) 的 `AXIS_STEP_MULTIPLIERS`／`AXIS_INTERVALS`／`axisMaximum`／`integerStep`、[MetricsTrendChart.test.tsx](../../../frontend/src/modules/dashboard/MetricsTrendChart.test.tsx) | `/dashboard` 请求趋势图两轴都是请求计数，单格刻度改为「不小于峰值四分之一的易读整数」，轴上限恒为四倍单格并取消原来的 10% 额外余量；单格倍数再补 1.2/1.25 补上 100→150 的 50% 跨度；两轴仍各自独立缩放，共用五条网格线 | 2026-09-30：前端 31 文件 176 项 Vitest（含 1 项用例：RPM 峰值 86 → 100/75/50/25/0、460 → 480/360/240/120/0、500 → 500/375/250/125/0、906 → 1,000/750/500/250/0、暖机无可用样本 → 4/3/2/1/0）、`pnpm run typecheck` 与生产构建通过；从源码读出候选集与分段数后按同一公式离线复算：改动前规则峰值 21/188/86/906 给 40/400/160/1,600（曲线占 53%/47%/54%/57%），首次整数化给 24/200/100/1,000，本批次把 RPM 峰值 460 由 600 收到 480（77% → 96%）、峰值 500 由 600 收到 500（83% → 100%），RPM 区（峰值 40–4000）最差填充由 66.8%（峰值 401）升到 75.0%（峰值 2401） | 峰值 ≤ 4 时整数刻度只能给 0–4 轴，低流量区间仍偏宽：峰值 1 填充 25%、峰值 5 填充 62.5%，这是「整数刻度 + 四等分」的固定下界；未在真实浏览器复验新刻度观感与窄屏 48px 轴宽下的标签宽度 |
 | 客户端页面重设计 | [ClientsPage](../../../frontend/src/modules/clients/ClientsPage.tsx)、[ClientFormDrawer](../../../frontend/src/modules/clients/ClientFormDrawer.tsx)、[ClientIdConfirmModal](../../../frontend/src/modules/clients/ClientIdConfirmModal.tsx)、[client-view](../../../frontend/src/modules/clients/client-view.ts)、[clients.css](../../../frontend/src/modules/clients/clients.css) | `/clients` 概览卡、筛选、列表列与编辑抽屉；额外只读 `listener` 模块生成 DoH 路径提示 | 2026-10-06：前端 36 文件 202 项 Vitest、`pnpm run typecheck`、生产构建通过；`client-view` 单测覆盖覆盖项摘要（纳秒串转紧凑单位、`0s` 显示不限）、概览统计、DoH 模板提取与代入、UUID v4 生成；应用测试覆盖只读 ID、解锁校验、未勾选知情项时确认按钮禁用及提交报文；mock 模式无头 Edge 1440×900 与 900×900 截图核对列表、抽屉、ID 编辑与确认弹窗 | mock 监听入口没有含 `{client_id}` 的 DoH 路由，DoH 路径区块只由单测覆盖，未在浏览器中渲染核对；复制按钮依赖 `navigator.clipboard`，非安全上下文下只提示失败；未接真实后端做浏览器验收 |
+| 局域网 HTTP 配置保存 | [共享 UUID v4](../../../frontend/src/shared/uuid/index.ts)、[operation.ts](../../../frontend/src/shared/config/operation.ts)、[client-view.ts](../../../frontend/src/modules/clients/client-view.ts) | 配置保存、外部变化采用和文件还原经 `createOperationId` 使用共享随机生成器，客户端 ID 同样复用；不依赖 `randomUUID` | 2026-11-07 Windows：完整前端 38 文件 223 项 Vitest、typecheck 与生产构建通过；新增固定随机字节与真实随机源用例，断言 UUID 版本/variant 位、零填充和调用关系；App 用例禁用 `randomUUID` 后完成上游组编辑、只发出一次 apply 并显示成功，操作回读和确认测试保持通过 | 保存验证使用 jsdom/MSW，不代表用户部署实例或真实局域网浏览器验收；未改动 Clipboard API 兼容性 |
 
 P4 完整 Vitest 为 23 文件 99 项，v2 schema contract 4 项、typecheck 与 production build 通过。Windows 使用 `_fluxdns/p4-live/` ConfigV2 和内嵌 debug binary 完成真实登录、Bearer ticket、UDP/SQLite/HTTP/WS、断线 replay、会话失效、稳定详情以及桌面/390×844 验收，浏览器 Console 无 error/warning。P3 配置验收仍见[前端应用](application.md#p3-联合验收2026-09-08)，P4 安全和实时证据见[共享实时连接](application.md#p4-共享实时连接2026-09-09)。
 

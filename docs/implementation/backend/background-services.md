@@ -101,6 +101,10 @@ BC-07 交付验证在 Windows、Rust/Cargo 1.98.0 执行：全量 `cargo test --
 
 [`observability.rs`](../../../backend/src/observability.rs) 的 `TelemetryWriter`、`StructuredTelemetryOutput` 和 health registry 使用低基数、有界内存与安全 typed event；Application 在配置校验后切换正式日志目标和过滤器。P1 日志 owner 接线后，正式 app 始终创建 writer；`logs.enable` 只影响日志接纳及文件输出，不关闭指标和 health，见[日志热切换](#p1-日志热切换2026-09-07)。
 
+2026-11-07 增量核对（`1c98be1` 加本次工作树，仅日志时间输出）：`StructuredTelemetryOutput` 的 log、原始 metric、聚合快照和 health 共用 `format_log_time`，将可读 `time` 写在 JSON 行首；聚合快照不再交由顶层 `serde_json::Value` 按键排序。`LogTimer` 使 bootstrap 文本日志使用同一格式。格式化复用既有 Jiff，在输出阶段按服务器时区转换，时区不可用退回 UTC；log 保留事件发生时间，超出时间库范围返回安全 `PortError`，不伪造 epoch。字段顺序、时间口径及旧 `occurred_at_ms` 的迁移边界见 [Observability 日志格式](../../architecture/backend/modules/observability.md#3-日志格式)，不改变数据库/API 时间、指标聚合、输出 fallback 或停机流程。
+
+本轮 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --locked observability:: -- --test-threads=4` 的 30 项通过，覆盖三类 JSON 及聚合快照时间在首字段、JSON 转义、毫秒截断、UTC/东八区、epoch 前时间、DST 重复小时、超范围错误、真实文件追加和 stderr fallback；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 通过。测试临时文件限定在 `_fluxdns/test-temp/`；本轮未执行后端全量、Linux/OpenWrt 实机或线上部署验收。
+
 P5 新目录 release 冷启回归发现日志文件早于其父目录创建，已统一通过 `open_log_file` 创建所需父目录并以追加模式打开。bootstrap 与热切换预开共用此入口；既有文件不截断，父路径为文件、权限或其他 I/O 失败继续返回错误。Windows 定向 Observability 25 项通过，包含缺失父目录、重开追加和非法父路径；修复后的内嵌 release 已从新目录完成启动及首次管理员初始化。
 
 [`service.rs`](../../../backend/src/service.rs) 为启用的 writer 创建 `TelemetrySampler`，在既有 5 秒周期 flush 前采样：

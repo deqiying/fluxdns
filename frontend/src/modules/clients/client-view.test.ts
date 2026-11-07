@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { components } from "@/shared/api/generated-v2";
+import * as uuid from "@/shared/uuid";
 import { abbreviateId, clientAvatar, clientDohPaths, clientOverrides, clientRouteTemplates, clientSummary, generateClientId, type Client } from "./client-view";
 
 const clients: Client[] = [
@@ -42,6 +43,13 @@ describe("client view helpers", () => {
     const id = generateClientId();
     expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(generateClientId()).not.toBe(id);
+  });
+
+  it("客户端 ID 复用共享 UUID v4 生成器，不改变结果", () => {
+    const id = "ffffffff-ffff-4fff-bfff-ffffffffffff";
+    const generate = vi.spyOn(uuid, "generateUuidV4").mockReturnValue(id);
+    expect(generateClientId()).toBe(id);
+    expect(generate).toHaveBeenCalledExactlyOnceWith();
   });
 
   it("截断长 ID 与稳定头像", () => {
