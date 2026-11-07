@@ -527,7 +527,8 @@ describe("application routes", () => {
     const user = userEvent.setup();
     setMockAuthenticated(true);
     renderApp("/listeners");
-    await user.click(await screen.findByRole("button", { name: "编辑监听入口 https" }));
+    // 使用显式 aria-label，避免异步加载期间的全页角色枚举拖慢 CI；仍点击真实编辑按钮。
+    await user.click(await screen.findByLabelText("编辑监听入口 https"));
     const dialog = await screen.findByRole("dialog", { name: "编辑监听入口" });
     expect(within(dialog).getByText(/裸路径按来源 IP 识别客户端/)).toBeInTheDocument();
     expect(within(dialog).getByText("{client_id}")).toBeInTheDocument();

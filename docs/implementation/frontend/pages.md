@@ -15,6 +15,8 @@
 > 2026-11-07 增量核对：`1c98be1` 加本次工作树；仅核对局域网 HTTP 下配置操作 ID 与客户端 ID 的共享生成及保存回归，其余范围沿用上述历史记录
 >
 > 2026-11-07 增量核对：`aa0fedf` 加本次工作树；仅核对上游 JSON 内联映射的格式提示、语法校验和保存拦截，以及 DoH 编辑器的显式 IP/ID 入口说明，其余范围沿用上述历史记录
+>
+> 2026-11-07 增量核对：`1a226a8` 加本次工作树；仅核对 DoH 文案回归用例的按钮定位优化与测试证据，页面行为和其余历史范围不变
 
 ## 路由与数据源
 
@@ -120,7 +122,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | 客户端页面重设计 | [ClientsPage](../../../frontend/src/modules/clients/ClientsPage.tsx)、[ClientFormDrawer](../../../frontend/src/modules/clients/ClientFormDrawer.tsx)、[ClientIdConfirmModal](../../../frontend/src/modules/clients/ClientIdConfirmModal.tsx)、[client-view](../../../frontend/src/modules/clients/client-view.ts)、[clients.css](../../../frontend/src/modules/clients/clients.css) | `/clients` 概览卡、筛选、列表列与编辑抽屉；额外只读 `listener` 模块生成 DoH 路径提示 | 2026-10-06：前端 36 文件 202 项 Vitest、`pnpm run typecheck`、生产构建通过；`client-view` 单测覆盖覆盖项摘要（纳秒串转紧凑单位、`0s` 显示不限）、概览统计、DoH 模板提取与代入、UUID v4 生成；应用测试覆盖只读 ID、解锁校验、未勾选知情项时确认按钮禁用及提交报文；mock 模式无头 Edge 1440×900 与 900×900 截图核对列表、抽屉、ID 编辑与确认弹窗 | mock 监听入口没有含 `{client_id}` 的 DoH 路由，DoH 路径区块只由单测覆盖，未在浏览器中渲染核对；复制按钮依赖 `navigator.clipboard`，非安全上下文下只提示失败；未接真实后端做浏览器验收 |
 | 局域网 HTTP 配置保存 | [共享 UUID v4](../../../frontend/src/shared/uuid/index.ts)、[operation.ts](../../../frontend/src/shared/config/operation.ts)、[client-view.ts](../../../frontend/src/modules/clients/client-view.ts) | 配置保存、外部变化采用和文件还原经 `createOperationId` 使用共享随机生成器，客户端 ID 同样复用；不依赖 `randomUUID` | 2026-11-07 Windows：完整前端 38 文件 223 项 Vitest、typecheck 与生产构建通过；新增固定随机字节与真实随机源用例，断言 UUID 版本/variant 位、零填充和调用关系；App 用例禁用 `randomUUID` 后完成上游组编辑、只发出一次 apply 并显示成功，操作回读和确认测试保持通过 | 保存验证使用 jsdom/MSW，不代表用户部署实例或真实局域网浏览器验收；未改动 Clipboard API 兼容性 |
 | 上游 JSON 格式提示与保存拦截 | [UpstreamsPage](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx)、[hosts-json](../../../frontend/src/modules/upstreams/hosts-json.ts) | `/upstreams` 的 Hosts JSON 内联映射增加格式说明、示例、语法位置提示和顶层对象检查；仅表单校验成功后提交，格式切换重新校验 | 2026-11-07 Windows：新增 19 项校验单测与 3 项页面用例通过，完整前端 40 文件 245 项 Vitest、typecheck 和生产构建通过；覆盖缺逗号、尾逗号、单引号、注释、未闭合括号、非对象顶层、位置文案差异、错误零请求、修正后原文提交和 Hosts/JSON 切换 | 页面验证为 jsdom/MSW；未进行真实浏览器或线上部署验收；不替代后端记录语义校验 |
-| DoH 显式 IP/ID 入口说明 | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx)、[App.test.tsx](../../../frontend/src/app/App.test.tsx) | `/listeners` 的 DoH 编辑弹窗在路由列表后说明裸路径按 IP、模板 ID 必填、两种入口分别配置及固定路径优先 | 2026-11-07 Windows：完整前端 40 文件 246 项 Vitest、typecheck 和生产构建通过；新增应用用例打开 DoH 编辑弹窗并断言四项说明 | 页面验证为 jsdom/MSW，未做真实浏览器或部署验收；前端不自动迁移旧路由，后端行为与验证见[DNS 管线](../backend/dns-pipeline.md) |
+| DoH 显式 IP/ID 入口说明 | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx)、[App.test.tsx](../../../frontend/src/app/App.test.tsx) | `/listeners` 的 DoH 编辑弹窗在路由列表后说明裸路径按 IP、模板 ID 必填、两种入口分别配置及固定路径优先 | 2026-11-07 Windows，`1a226a8` 加本次工作树：完整前端 42 文件 255 项 Vitest、typecheck 通过；应用用例按按钮现有 `aria-label` 使用 `findByLabelText`，避免异步加载时的全页角色枚举，保留真实点击、弹窗和四项说明断言，不放宽 15 秒超时；2 个逻辑 CPU、单 worker、`CI=true` 下定向重复 10 次均通过，用例耗时 1.377–1.427 秒 | 页面验证为 jsdom/MSW，本轮未复跑 Ubuntu Actions、生产构建或真实浏览器验收；前端不自动迁移旧路由，后端行为与验证见[DNS 管线](../backend/dns-pipeline.md) |
 
 P4 完整 Vitest 为 23 文件 99 项，v2 schema contract 4 项、typecheck 与 production build 通过。Windows 使用 `_fluxdns/p4-live/` ConfigV2 和内嵌 debug binary 完成真实登录、Bearer ticket、UDP/SQLite/HTTP/WS、断线 replay、会话失效、稳定详情以及桌面/390×844 验收，浏览器 Console 无 error/warning。P3 配置验收仍见[前端应用](application.md#p3-联合验收2026-09-08)，P4 安全和实时证据见[共享实时连接](application.md#p4-共享实时连接2026-09-09)。
 
