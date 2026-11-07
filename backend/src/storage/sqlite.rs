@@ -1956,6 +1956,10 @@ mod tests {
         use crate::storage::{PersistenceGapState, StatsPersistenceWorker, day_utc};
         let backend = Arc::new(SqliteStorageBackend::connect(path()).await.unwrap());
         let worker = StatsPersistenceWorker::new(backend.clone());
+        // 固定触发器 DDL 的连接，避免 DROP 后从池中借到仍持有旧 schema 的连接。
+        let mut trigger_connection = backend.pool.acquire().await.unwrap();
+        // 保留另一条连接的旧 schema，覆盖跨连接视图滞后，而不依赖池的偶然调度。
+        let mut schema_observer = backend.pool.acquire().await.unwrap();
         let midnight = std::time::UNIX_EPOCH + Duration::from_secs(20_001 * 86_400);
         let previous_day = day_utc(midnight - Duration::from_millis(1)).unwrap();
         let current_day = day_utc(midnight).unwrap();
@@ -1967,9 +1971,17 @@ mod tests {
                 "CREATE TRIGGER reject_contract_stats BEFORE INSERT ON stats_daily_total \
                  BEGIN SELECT RAISE(ABORT, 'contract stats failure'); END",
             )
-            .execute(&backend.pool)
+            .execute(&mut *trigger_connection)
             .await
             .unwrap();
+            let observed_trigger_count: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM sqlite_schema \
+                 WHERE type='trigger' AND name='reject_contract_stats'",
+            )
+            .fetch_one(&mut *schema_observer)
+            .await
+            .unwrap();
+            assert_eq!(observed_trigger_count, 1);
             assert!(worker.flush(deadline()).await.is_err());
             assert_eq!(worker.pending_batch_count(), 1);
             let ledger_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM stats_batch_ledger")
@@ -1989,7 +2001,7 @@ mod tests {
                 }
             ));
             sqlx::query("DROP TRIGGER reject_contract_stats")
-                .execute(&backend.pool)
+                .execute(&mut *trigger_connection)
                 .await
                 .unwrap();
             let summary = worker.flush(deadline()).await.unwrap();
@@ -2022,6 +2034,9 @@ mod tests {
                 .all(|rows| rows[0].0 < rows[1].0 && rows[0].1 < rows[1].1)
         );
         let path = backend.path.as_ref().clone();
+        // shutdown 会等待池内连接归还，必须先释放测试持有的连接。
+        drop(schema_observer);
+        drop(trigger_connection);
         backend.shutdown(deadline()).await.unwrap();
         drop(worker);
         drop(backend);
