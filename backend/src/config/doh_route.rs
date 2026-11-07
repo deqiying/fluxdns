@@ -1,5 +1,7 @@
 //! DoH route path 模板的共享解析、匹配与冲突检测。
 
+use std::cmp::Ordering;
+
 const CLIENT_ID_MARKER: &str = "{client_id}";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,11 +67,10 @@ impl DohPathPattern {
         &self.template
     }
 
-    /// 末尾 `{client_id}` 同时接受不带尾斜杠的裸路径，裸路径不产生 client ID。
+    /// 裸路径仅精确匹配；模板中的 `{client_id}` 必须提供一个非空路径段。
     pub(crate) fn matches<'a>(&self, path: &'a str) -> Option<DohPathMatch<'a>> {
         let client_id = match self.placeholder {
             None if path == self.template => None,
-            Some((_start, end)) if end == self.template.len() && path == self.bare_path()? => None,
             Some((start, end)) => {
                 if !path.starts_with(&self.template[..start])
                     || !path.ends_with(&self.template[end..])
@@ -90,41 +91,25 @@ impl DohPathPattern {
 
     /// 判断两个模板是否存在至少一个会同时命中的 HTTP path。
     pub(crate) fn overlaps(&self, other: &Self) -> bool {
-        self.path_variants().iter().any(|left| {
-            other
-                .path_variants()
-                .iter()
-                .any(|right| variants_overlap(left, right))
-        })
+        segments_overlap(&self.segments(), &other.segments())
     }
 
-    fn bare_path(&self) -> Option<&str> {
-        let (start, end) = self.placeholder?;
-        if end != self.template.len() {
-            return None;
-        }
-        let prefix = &self.template[..start];
-        if prefix == "/" {
-            Some(prefix)
-        } else {
-            prefix.strip_suffix('/')
-        }
+    /// 从左到右比较段类型，固定段优先于参数段；值越大越优先，不依赖配置顺序。
+    /// 字面量内容由匹配/重叠检查处理，这里不按路径字符串字典序决定策略。
+    pub(crate) fn specificity_cmp(&self, other: &Self) -> Ordering {
+        self.segments()
+            .iter()
+            .map(|segment| matches!(segment, PathSegment::Literal(_)))
+            .cmp(
+                other
+                    .segments()
+                    .iter()
+                    .map(|segment| matches!(segment, PathSegment::Literal(_))),
+            )
     }
 
-    fn path_variants(&self) -> Vec<Vec<PathSegment<'_>>> {
-        let mut variants = vec![self.segments(false)];
-        if self.bare_path().is_some() {
-            variants.push(self.segments(true));
-        }
-        variants
-    }
-
-    fn segments(&self, bare: bool) -> Vec<PathSegment<'_>> {
-        let path = if bare {
-            self.bare_path().expect("bare variant is available")
-        } else {
-            &self.template
-        };
+    fn segments(&self) -> Vec<PathSegment<'_>> {
+        let path = &self.template;
         path.split('/')
             .skip(1)
             .map(|segment| {
@@ -138,7 +123,7 @@ impl DohPathPattern {
     }
 }
 
-fn variants_overlap(left: &[PathSegment<'_>], right: &[PathSegment<'_>]) -> bool {
+fn segments_overlap(left: &[PathSegment<'_>], right: &[PathSegment<'_>]) -> bool {
     left.len() == right.len()
         && left
             .iter()
@@ -156,7 +141,7 @@ mod tests {
     use super::{DohPathPattern, DohPathPatternError};
 
     #[test]
-    fn terminal_client_id_accepts_value_and_bare_path() {
+    fn terminal_client_id_requires_a_nonempty_segment() {
         let pattern = DohPathPattern::new("/doh-query/inner/{client_id}").unwrap();
 
         assert_eq!(
@@ -166,7 +151,7 @@ mod tests {
                 .client_id,
             Some("client-a")
         );
-        assert_eq!(pattern.matches("/doh-query/inner").unwrap().client_id, None);
+        assert!(pattern.matches("/doh-query/inner").is_none());
         assert!(pattern.matches("/doh-query/inner/").is_none());
         assert!(pattern.matches("/doh-query/inner/a/b").is_none());
     }
@@ -183,10 +168,10 @@ mod tests {
     }
 
     #[test]
-    fn root_is_the_bare_path_for_root_client_id_template() {
+    fn root_client_id_template_does_not_match_root_without_id() {
         let pattern = DohPathPattern::new("/{client_id}").unwrap();
 
-        assert!(pattern.matches("/").is_some());
+        assert!(pattern.matches("/").is_none());
         assert!(pattern.matches("/client-a").is_some());
     }
 
@@ -203,13 +188,45 @@ mod tests {
     }
 
     #[test]
-    fn detects_literal_wildcard_and_bare_path_overlaps() {
+    fn detects_overlaps_without_implicit_bare_paths() {
         let dynamic = DohPathPattern::new("/dns/{client_id}").unwrap();
 
-        assert!(dynamic.overlaps(&DohPathPattern::new("/dns").unwrap()));
+        assert!(!dynamic.overlaps(&DohPathPattern::new("/dns").unwrap()));
         assert!(dynamic.overlaps(&DohPathPattern::new("/dns/client-a").unwrap()));
-        assert!(dynamic.overlaps(&DohPathPattern::new("/dns/client-a/{client_id}").unwrap()));
+        assert!(!dynamic.overlaps(&DohPathPattern::new("/dns/client-a/{client_id}").unwrap()));
         assert!(!dynamic.overlaps(&DohPathPattern::new("/dns/").unwrap()));
         assert!(!dynamic.overlaps(&DohPathPattern::new("/other/{client_id}").unwrap()));
+    }
+
+    #[test]
+    fn fixed_segments_take_priority_from_left_to_right() {
+        let generic = DohPathPattern::new("/doh-query/{client_id}").unwrap();
+        let fixed = DohPathPattern::new("/doh-query/inner").unwrap();
+        assert!(fixed.overlaps(&generic));
+        assert!(fixed.specificity_cmp(&generic).is_gt());
+        assert!(generic.specificity_cmp(&fixed).is_lt());
+        assert!(generic.specificity_cmp(&generic).is_eq());
+
+        let earlier_fixed = DohPathPattern::new("/doh-query/inner/{client_id}").unwrap();
+        let later_fixed = DohPathPattern::new("/doh-query/{client_id}/query").unwrap();
+        assert!(earlier_fixed.overlaps(&later_fixed));
+        assert!(earlier_fixed.specificity_cmp(&later_fixed).is_gt());
+        assert!(earlier_fixed.matches("/doh-query/inner/query").is_some());
+        assert!(later_fixed.matches("/doh-query/inner/query").is_some());
+    }
+
+    #[test]
+    fn bare_paths_and_id_templates_have_separate_id_semantics() {
+        let bare = DohPathPattern::new("/doh-query").unwrap();
+        let identified = DohPathPattern::new("/doh-query/{client_id}").unwrap();
+        assert_eq!(bare.matches("/doh-query").unwrap().client_id, None);
+        assert!(bare.matches("/doh-query/client-a").is_none());
+        assert_eq!(
+            identified.matches("/doh-query/client-a").unwrap().client_id,
+            Some("client-a")
+        );
+        for path in ["/doh-query", "/doh-query/", "/doh-query/a/b"] {
+            assert!(identified.matches(path).is_none(), "{path}");
+        }
     }
 }

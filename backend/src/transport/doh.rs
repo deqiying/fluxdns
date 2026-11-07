@@ -545,7 +545,7 @@ impl DohAdapter {
     fn new_with_tls(
         listener: Arc<dyn TcpListenerHandle>,
         binding: DohBindingRef,
-        routes: Vec<DohRoutePattern>,
+        mut routes: Vec<DohRoutePattern>,
         runtime_revision: RuntimeRevision,
         transport: TransportCapabilities,
         request_timeout: Duration,
@@ -561,6 +561,8 @@ impl DohAdapter {
         if routes.is_empty() {
             return Err(DohAdapterError::InvalidRoute(DohRouteError::InvalidPath));
         }
+        // 在装配阶段固定优先级，请求仍只做一次匹配；固定路径段不会被前面的参数路由抢占。
+        routes.sort_by(|left, right| right.path.specificity_cmp(&left.path));
         Ok(Self {
             listener,
             binding,
@@ -2360,7 +2362,7 @@ mod tests {
         let matched = templated.matches("/dns/abc-123").unwrap();
         assert_eq!(matched.strategy, "inner");
         assert_eq!(matched.client_id.unwrap().as_str(), "abc-123");
-        assert_eq!(templated.matches("/dns").unwrap().client_id, None);
+        assert!(templated.matches("/dns").is_none());
         assert!(templated.matches("/dns/").is_none());
         assert!(templated.matches("/dns/a/b").is_none());
     }
@@ -2489,7 +2491,7 @@ mod tests {
                 listener_id: "doh".to_owned(),
                 endpoint_id: "plain".to_owned(),
             },
-            vec![DohRoutePattern::new("/dns/{client_id}", "default").unwrap()],
+            vec![DohRoutePattern::new("/dns", "default").unwrap()],
             RuntimeRevision(1),
             doh_capabilities(),
             Duration::from_secs(1),
@@ -2512,6 +2514,10 @@ mod tests {
         );
         assert!(inbound.request().context.client.client_id.is_none());
         assert_eq!(
+            inbound.request().context.client.client_addr,
+            Some("127.0.0.1".parse().unwrap())
+        );
+        assert_eq!(
             inbound
                 .request()
                 .context
@@ -2520,7 +2526,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .as_ref(),
-            "/dns/{client_id}"
+            "/dns"
         );
         assert_eq!(
             dispatch_inbound(&ServFailCore, inbound).await.unwrap(),
@@ -2690,45 +2696,197 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn session_reports_route_error_without_confusing_it_with_dns_failure() {
-        let wire = wire();
-        let encoded = base64url(&wire);
-        let request = request("GET", &format!("/unknown?dns={encoded}"), "", &[]);
-        let listener = Arc::new(FakeDohListener::default());
-        listener
-            .connections
-            .lock()
-            .unwrap()
-            .push_back(Box::new(FakeDohConnection {
-                peer: SocketAddr::from(([127, 0, 0, 1], 40000)),
-                chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(request))])),
-                writes: Arc::new(Mutex::new(Vec::new())),
-            }));
-        let adapter = DohAdapter::new(
-            listener,
-            DohBindingRef {
-                listener_id: "doh".to_owned(),
-                endpoint_id: "plain".to_owned(),
+    async fn route_priority_is_order_independent_for_get_post_and_client_identity() {
+        use crate::config::resolve::ConfigId;
+        use crate::policy::{ClientIndex, ClientMatch, ClientMatchKind, ClientRule};
+
+        let clients = ClientIndex::build([
+            ClientRule {
+                name: ConfigId::new("by-ip").unwrap(),
+                client_ids: vec!["network-client".to_owned()],
+                ips: vec!["198.51.100.0/24".parse().unwrap()],
             },
-            vec![DohRoutePattern::new("/dns", "default").unwrap()],
-            RuntimeRevision(1),
-            doh_capabilities(),
-            Duration::from_secs(1),
-        )
+            ClientRule {
+                name: ConfigId::new("by-id").unwrap(),
+                client_ids: vec!["client-a".to_owned()],
+                ips: Vec::new(),
+            },
+        ])
         .unwrap();
-        let cancellation = Cancellation::new();
-        let mut session = adapter
-            .accept_session(&cancellation)
-            .await
-            .unwrap()
-            .unwrap();
-        let event = session.receive(&cancellation).await.unwrap();
-        assert!(matches!(
-            event,
-            DohSessionEvent::HttpError {
-                error: DohHttpError::NotFound,
-                close: false
+        let cases = [
+            ("/doh-query", "/doh-query", None),
+            (
+                "/doh-query/client-a",
+                "/doh-query/{client_id}",
+                Some("client-a"),
+            ),
+            (
+                "/doh-query/unknown-id",
+                "/doh-query/{client_id}",
+                Some("unknown-id"),
+            ),
+            ("/doh-query/inner", "/doh-query/inner", None),
+            (
+                "/doh-query/inner/client-a",
+                "/doh-query/inner/{client_id}",
+                Some("client-a"),
+            ),
+            ("/doh-query/outside", "/doh-query/outside", None),
+            (
+                "/doh-query/outside/client-a",
+                "/doh-query/outside/{client_id}",
+                Some("client-a"),
+            ),
+            (
+                "/doh-query/inner/query",
+                "/doh-query/inner/{client_id}",
+                Some("query"),
+            ),
+            (
+                "/doh-query/other/query",
+                "/doh-query/{client_id}/query",
+                Some("other"),
+            ),
+        ];
+        let peer = SocketAddr::from(([198, 51, 100, 10], 40000));
+        for reverse in [false, true] {
+            let mut routes: Vec<_> = [
+                ("/doh-query/{client_id}", "default"),
+                ("/doh-query", "default"),
+                ("/doh-query/{client_id}/query", "generic-query"),
+                ("/doh-query/inner/{client_id}", "inner"),
+                ("/doh-query/inner", "inner"),
+                ("/doh-query/outside/{client_id}", "outside"),
+                ("/doh-query/outside", "outside"),
+            ]
+            .into_iter()
+            .map(|(path, strategy)| DohRoutePattern::new(path, strategy).unwrap())
+            .collect();
+            if reverse {
+                routes.reverse();
             }
-        ));
+            let listener = Arc::new(FakeDohListener::default());
+            let adapter = DohAdapter::new(
+                listener.clone(),
+                DohBindingRef {
+                    listener_id: "doh".to_owned(),
+                    endpoint_id: "plain".to_owned(),
+                },
+                routes,
+                RuntimeRevision(1),
+                doh_capabilities(),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            for method in ["GET", "POST"] {
+                for &(path, expected_route, expected_id) in &cases {
+                    let wire = wire();
+                    let bytes = if method == "GET" {
+                        request("GET", &format!("{path}?dns={}", base64url(&wire)), "", &[])
+                    } else {
+                        request(
+                            "POST",
+                            path,
+                            &format!(
+                                "Content-Type: application/dns-message\r\nContent-Length: {}\r\n",
+                                wire.len()
+                            ),
+                            &wire,
+                        )
+                    };
+                    listener
+                        .connections
+                        .lock()
+                        .unwrap()
+                        .push_back(Box::new(FakeDohConnection {
+                            peer,
+                            chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(
+                                bytes,
+                            ))])),
+                            writes: Arc::new(Mutex::new(Vec::new())),
+                        }));
+                    let cancellation = Cancellation::new();
+                    let mut session = adapter
+                        .accept_session(&cancellation)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let DohSessionEvent::Request(inbound) =
+                        session.receive(&cancellation).await.unwrap()
+                    else {
+                        panic!("expected valid {method} request at {path}");
+                    };
+                    let context = &inbound.request().context;
+                    assert_eq!(
+                        context.meta.route_id.as_ref().unwrap().as_ref(),
+                        expected_route,
+                        "{method} {path}, reverse={reverse}"
+                    );
+                    let client_id = context.client.client_id.as_ref().map(|id| id.as_str());
+                    assert_eq!(client_id, expected_id);
+                    assert_eq!(context.client.client_addr, Some(peer.ip()));
+                    let ClientMatch::Matched { client, kind } =
+                        clients.match_client(client_id, context.client.client_addr)
+                    else {
+                        panic!("expected client match at {path}");
+                    };
+                    if expected_id == Some("client-a") {
+                        assert_eq!(client.name.as_str(), "by-id");
+                        assert_eq!(kind, ClientMatchKind::ExactId);
+                    } else {
+                        // 裸路径和未注册 ID 仍使用已有的来源 IP/CIDR 回退，不把路径当作认证。
+                        assert_eq!(client.name.as_str(), "by-ip");
+                        assert_eq!(kind, ClientMatchKind::Cidr { prefix_len: 24 });
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reports_route_error_without_confusing_it_with_dns_failure() {
+        let encoded = base64url(&wire());
+        for path in ["/unknown", "/dns", "/dns/", "/dns/a/b"] {
+            let request = request("GET", &format!("{path}?dns={encoded}"), "", &[]);
+            let listener = Arc::new(FakeDohListener::default());
+            listener
+                .connections
+                .lock()
+                .unwrap()
+                .push_back(Box::new(FakeDohConnection {
+                    peer: SocketAddr::from(([127, 0, 0, 1], 40000)),
+                    chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(request))])),
+                    writes: Arc::new(Mutex::new(Vec::new())),
+                }));
+            let adapter = DohAdapter::new(
+                listener,
+                DohBindingRef {
+                    listener_id: "doh".to_owned(),
+                    endpoint_id: "plain".to_owned(),
+                },
+                vec![DohRoutePattern::new("/dns/{client_id}", "default").unwrap()],
+                RuntimeRevision(1),
+                doh_capabilities(),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            let cancellation = Cancellation::new();
+            let mut session = adapter
+                .accept_session(&cancellation)
+                .await
+                .unwrap()
+                .unwrap();
+            let event = session.receive(&cancellation).await.unwrap();
+            assert!(
+                matches!(
+                    event,
+                    DohSessionEvent::HttpError {
+                        error: DohHttpError::NotFound,
+                        close: false
+                    }
+                ),
+                "{path}"
+            );
+        }
     }
 }

@@ -13,6 +13,8 @@
 > 2026-10-06 增量核对：`94dae99` 加本次工作树；仅核对 `/clients` 列表、编辑抽屉与客户端 ID 修改确认的重设计，其余范围沿用上述历史记录
 >
 > 2026-11-07 增量核对：`1c98be1` 加本次工作树；仅核对局域网 HTTP 下配置操作 ID 与客户端 ID 的共享生成及保存回归，其余范围沿用上述历史记录
+>
+> 2026-11-07 增量核对：`aa0fedf` 加本次工作树；仅核对 DoH 编辑器的显式 IP/ID 入口说明，其余范围沿用上述历史记录
 
 ## 路由与数据源
 
@@ -38,6 +40,8 @@
 12 个目标入口都已进入 router；`/dashboard` 与 `/queries` 已接入 v2 HTTP/WS，`/system-runtime` 接入 BC-23 的 v2 进程查询并统一返回版本与启动时间，其余九个 P3 配置入口接入 v2 typed module API。原 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 不再注册且返回正常 404；旧页面源码、API/hooks、兼容 fixture 和 v1 类型已删除。
 
 所有配置 Duration 字段（DNS 缓存失败 TTL／乐观回答 TTL／最大陈旧时间／快照周期／TTL 覆盖上下限、Hosts 检查周期、规则集更新周期、客户端与策略 TTL 覆盖、上游组主要超时与回退超时）统一用共享 [`DurationInput`](../../../frontend/src/shared/components/DurationInput.tsx) 的「数值 + 单位」编辑，单位只提供毫秒/秒/分钟/小时/天且默认秒；规则集刷新列等摘要展示经 [`formatDurationText`](../../../frontend/src/shared/config/form-values.ts) 输出可感知单位，回填时把后端恒为纳秒的串归一化成紧凑 duration。
+
+监听入口的 DoH 路由编辑区在 [`ListenersPage`](../../../frontend/src/modules/listeners/ListenersPage.tsx) 常驻说明：裸路径按来源 IP 识别客户端，`{client_id}` 必须是非空路径段；需要两种入口时分别添加，固定路径优先。该提示不自动改写既有路由，实际匹配、配置校验和旧行为迁移以[配置参考](../configuration.md)为准。
 
 ## 查询与缓存行为
 
@@ -113,6 +117,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | 趋势图轴刻度改为整数计数 | [MetricsTrendChart](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx) 的 `AXIS_STEP_MULTIPLIERS`／`AXIS_INTERVALS`／`axisMaximum`／`integerStep`、[MetricsTrendChart.test.tsx](../../../frontend/src/modules/dashboard/MetricsTrendChart.test.tsx) | `/dashboard` 请求趋势图两轴都是请求计数，单格刻度改为「不小于峰值四分之一的易读整数」，轴上限恒为四倍单格并取消原来的 10% 额外余量；单格倍数再补 1.2/1.25 补上 100→150 的 50% 跨度；两轴仍各自独立缩放，共用五条网格线 | 2026-09-30：前端 31 文件 176 项 Vitest（含 1 项用例：RPM 峰值 86 → 100/75/50/25/0、460 → 480/360/240/120/0、500 → 500/375/250/125/0、906 → 1,000/750/500/250/0、暖机无可用样本 → 4/3/2/1/0）、`pnpm run typecheck` 与生产构建通过；从源码读出候选集与分段数后按同一公式离线复算：改动前规则峰值 21/188/86/906 给 40/400/160/1,600（曲线占 53%/47%/54%/57%），首次整数化给 24/200/100/1,000，本批次把 RPM 峰值 460 由 600 收到 480（77% → 96%）、峰值 500 由 600 收到 500（83% → 100%），RPM 区（峰值 40–4000）最差填充由 66.8%（峰值 401）升到 75.0%（峰值 2401） | 峰值 ≤ 4 时整数刻度只能给 0–4 轴，低流量区间仍偏宽：峰值 1 填充 25%、峰值 5 填充 62.5%，这是「整数刻度 + 四等分」的固定下界；未在真实浏览器复验新刻度观感与窄屏 48px 轴宽下的标签宽度 |
 | 客户端页面重设计 | [ClientsPage](../../../frontend/src/modules/clients/ClientsPage.tsx)、[ClientFormDrawer](../../../frontend/src/modules/clients/ClientFormDrawer.tsx)、[ClientIdConfirmModal](../../../frontend/src/modules/clients/ClientIdConfirmModal.tsx)、[client-view](../../../frontend/src/modules/clients/client-view.ts)、[clients.css](../../../frontend/src/modules/clients/clients.css) | `/clients` 概览卡、筛选、列表列与编辑抽屉；额外只读 `listener` 模块生成 DoH 路径提示 | 2026-10-06：前端 36 文件 202 项 Vitest、`pnpm run typecheck`、生产构建通过；`client-view` 单测覆盖覆盖项摘要（纳秒串转紧凑单位、`0s` 显示不限）、概览统计、DoH 模板提取与代入、UUID v4 生成；应用测试覆盖只读 ID、解锁校验、未勾选知情项时确认按钮禁用及提交报文；mock 模式无头 Edge 1440×900 与 900×900 截图核对列表、抽屉、ID 编辑与确认弹窗 | mock 监听入口没有含 `{client_id}` 的 DoH 路由，DoH 路径区块只由单测覆盖，未在浏览器中渲染核对；复制按钮依赖 `navigator.clipboard`，非安全上下文下只提示失败；未接真实后端做浏览器验收 |
 | 局域网 HTTP 配置保存 | [共享 UUID v4](../../../frontend/src/shared/uuid/index.ts)、[operation.ts](../../../frontend/src/shared/config/operation.ts)、[client-view.ts](../../../frontend/src/modules/clients/client-view.ts) | 配置保存、外部变化采用和文件还原经 `createOperationId` 使用共享随机生成器，客户端 ID 同样复用；不依赖 `randomUUID` | 2026-11-07 Windows：完整前端 38 文件 223 项 Vitest、typecheck 与生产构建通过；新增固定随机字节与真实随机源用例，断言 UUID 版本/variant 位、零填充和调用关系；App 用例禁用 `randomUUID` 后完成上游组编辑、只发出一次 apply 并显示成功，操作回读和确认测试保持通过 | 保存验证使用 jsdom/MSW，不代表用户部署实例或真实局域网浏览器验收；未改动 Clipboard API 兼容性 |
+| DoH 显式 IP/ID 入口说明 | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx)、[App.test.tsx](../../../frontend/src/app/App.test.tsx) | `/listeners` 的 DoH 编辑弹窗在路由列表后说明裸路径按 IP、模板 ID 必填、两种入口分别配置及固定路径优先 | 2026-11-07 Windows：完整前端 40 文件 246 项 Vitest、typecheck 和生产构建通过；新增应用用例打开 DoH 编辑弹窗并断言四项说明 | 页面验证为 jsdom/MSW，未做真实浏览器或部署验收；前端不自动迁移旧路由，后端行为与验证见[DNS 管线](../backend/dns-pipeline.md) |
 
 P4 完整 Vitest 为 23 文件 99 项，v2 schema contract 4 项、typecheck 与 production build 通过。Windows 使用 `_fluxdns/p4-live/` ConfigV2 和内嵌 debug binary 完成真实登录、Bearer ticket、UDP/SQLite/HTTP/WS、断线 replay、会话失效、稳定详情以及桌面/390×844 验收，浏览器 Console 无 error/warning。P3 配置验收仍见[前端应用](application.md#p3-联合验收2026-09-08)，P4 安全和实时证据见[共享实时连接](application.md#p4-共享实时连接2026-09-09)。
 

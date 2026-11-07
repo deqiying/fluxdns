@@ -131,7 +131,11 @@ DoH endpoint 只复用底层 TCP socket，不能被当作 raw DNS/TCP 服务。t
 
 TLS、forwarded header 与 PROXY 的约束见下节；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive。本设计不提供入站 HTTP/2 或证书热加载契约，实际支持和握手/故障验证边界见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)。
 
-route template 由 Config 提供的共享 compiler 校验和匹配。末尾 `/{client_id}` 同时接受去掉该段后的裸路径与带一个非空 client ID 的路径：裸路径不产生 `client_id`，尾斜杠和额外路径段不匹配；非末尾占位符仍要求对应段存在。Transport 对真实 HTTP path 只匹配一次，将配置模板写入稳定 `route_id` 并把可选值写入客户端身份；Policy 只按 route ID 查表，不重建或二次匹配路径。日志不记录实际路径参数或 query string。
+> 2026-11-07 局部评审：路由改为显式裸路径、必填 ID 与固定段优先；TLS、客户端 IP 信任边界和单次匹配职责不变。
+
+route template 由 Config 提供的共享 compiler 校验和匹配。裸路径只精确匹配，不产生 `client_id`；模板中的 `{client_id}` 必须对应一个非空路径段，不再隐式接受省略该段的路径。空 ID 和额外路径段不匹配该模板。若同时命中多条路由，从左到右按固定段优先于参数段确定唯一优先项，不依赖配置顺序；重复模板和同优先级歧义在 Config 阶段拒绝。具体样例与旧配置迁移见[配置参考](../../../implementation/configuration.md)。
+
+Transport 在 adapter 装配时预排序，真实 HTTP path 仍只匹配一次，将选中的配置模板写入稳定 `route_id` 并把提取的 ID 写入客户端身份；Policy 只按 route ID 查表，不重建或二次匹配路径。两类入口都按 endpoint 规则获取来源 IP，ID 缺失不代表忽略可信 Header 校验。日志不记录实际路径参数或 query string。
 
 ## 8. TLS
 
@@ -206,7 +210,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - UDP/TCP canonical equivalence、ID 恢复和 UDP TC；
 - TCP length 分片、半包、EOF、idle timeout 和顺序响应；
 - DoH GET/POST、request-line、Host authority/cardinality、媒体类型、严格十进制 `Content-Length`、`Expect` 拒绝、body framing、header 数量/字节、方法、65,535/87,380 边界、最大 request-target 独立计费和 HTTP/DNS 分层；
-- DoH 精确 route、尾部 client ID route 的裸路径/带 ID/尾斜杠/多段边界，以及 canonical route ID；
+- DoH 显式裸路径、必填 client ID、空段/多段边界、固定段优先与配置顺序无关，以及 canonical route ID 和 IP/ID 客户端匹配；
 - TLS PEM/DER 证书/key 组合、handshake timeout 与坏连接隔离；
 - forwarded header 信任链、伪造 header、missing/invalid policy；
 - PROXY v1/v2 分片、未知 TLV、非法长度、不可信 peer；

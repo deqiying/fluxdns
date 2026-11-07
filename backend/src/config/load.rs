@@ -742,19 +742,31 @@ mod tests {
     }
 
     #[test]
-    fn overlapping_doh_routes_are_rejected() {
+    fn doh_routes_allow_explicit_bare_paths_and_specific_overrides() {
         let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let (source, _) = crate::config::test_support::portable_example();
-        let source = source.replace("path: /dns/outside/{client_id}", "path: /dns/inner");
+        assert!(loader.load_str(&source).is_ok());
+        // 通用 ID 路由与固定 inner/outside 裸路径可共存；优先级由固定段确定。
+        let source = source.replace("path: /dns/inner/{client_id}", "path: /dns/{client_id}");
+        assert!(loader.load_str(&source).is_ok());
+    }
+
+    #[test]
+    fn duplicate_doh_routes_are_still_rejected() {
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
+        let (source, _) = crate::config::test_support::portable_example();
+        let source = source.replace(
+            "path: /dns/outside/{client_id}",
+            "path: /dns/inner/{client_id}",
+        );
         let error = loader.load_str(&source).unwrap_err();
 
         let super::ConfigLoadError::Validation(report) = error else {
-            panic!("expected route overlap validation error");
+            panic!("expected duplicate route validation error");
         };
         assert!(report.errors.iter().any(|error| {
-            error.kind == crate::config::ConfigErrorKind::Constraint
+            error.kind == crate::config::ConfigErrorKind::Duplicate
                 && error.path == "listener[2].routes[1].path"
-                && error.message.contains("overlaps")
         }));
     }
 

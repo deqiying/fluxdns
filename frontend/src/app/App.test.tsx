@@ -523,6 +523,18 @@ describe("application routes", () => {
     expect(screen.getAllByText("1/1 接受中")).toHaveLength(2);
   });
 
+  it("DoH 编辑器说明裸路径按 IP 识别和路径 ID 必填规则", async () => {
+    const user = userEvent.setup();
+    setMockAuthenticated(true);
+    renderApp("/listeners");
+    await user.click(await screen.findByRole("button", { name: "编辑监听入口 https" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑监听入口" });
+    expect(within(dialog).getByText(/裸路径按来源 IP 识别客户端/)).toBeInTheDocument();
+    expect(within(dialog).getByText("{client_id}")).toBeInTheDocument();
+    expect(within(dialog).getByText(/必须填写一个非空路径段/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/需要两种入口时请分别添加，固定路径优先/)).toBeInTheDocument();
+  });
+
   it("监听入口标题区只保留同构短句和同步状态", async () => {
     const user = userEvent.setup();
     setMockAuthenticated(true);

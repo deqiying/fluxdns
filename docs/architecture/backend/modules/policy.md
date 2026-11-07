@@ -175,7 +175,7 @@ optimistic refresh 与 late-result 跨 runtime 切换时必须在 latest core �
 - name 与 client ID 独立索引、ID 优先于 CIDR、IPv4/IPv6 最长前缀、mapped IPv4 和 unknown；
 - 冲突在 prepare 阶段拒绝；
 - base strategy 与 client override；
-- DoH canonical route ID 选择，尾部 `{client_id}` 的裸路径不依赖 client ID 重建；
+- DoH 使用 Transport 按固定段优先选出的 canonical route ID；显式裸路径不携带 ID，参数模板必须携带 ID，客户端仍按精确 ID 优先、IP/CIDR 回退匹配（2026-11-07 局部评审）；
 - listener hosts、strategy first-match、default upstream；
 - exact/suffix/wildcard/regex 优先级；
 - `resource:selector` 解析和不存在错误；

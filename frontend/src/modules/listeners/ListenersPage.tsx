@@ -140,6 +140,9 @@ function DohFields({ strategyOptions }: { strategyOptions: Array<{ label: string
       <Form.List name="routes" rules={[{ validator: async (_, routes) => { if (!routes?.length) throw new Error("至少需要一条 DoH 路由"); } }]}>
         {(fields, { add, remove }, { errors }) => <div className="nested-form-list"><Typography.Text strong>路由</Typography.Text>{fields.map((field, index) => <Space key={field.key} className="doh-route-row" align="start"><Form.Item name={[field.name, "path"]} rules={[{ required: true }]}><Input placeholder="/dns-query" /></Form.Item><Form.Item name={[field.name, "strategy"]} rules={[{ required: true }]}><Select options={strategyOptions} placeholder="策略" /></Form.Item><Tooltip title="移除"><Button type="text" danger aria-label={`移除路由 ${index + 1}`} icon={<Trash2 size={16} />} onClick={() => remove(index)} /></Tooltip></Space>)}<Button icon={<Plus size={16} />} onClick={() => add({ path: "/dns-query", strategy: "" })}>添加路由</Button><Form.ErrorList errors={errors} /></div>}
       </Form.List>
+      <Typography.Paragraph type="secondary">
+        裸路径按来源 IP 识别客户端；<Typography.Text code>{"{client_id}"}</Typography.Text> 必须填写一个非空路径段。需要两种入口时请分别添加，固定路径优先。
+      </Typography.Paragraph>
       <Form.List name="endpoints" rules={[{ validator: async (_, endpoints) => { if (!endpoints?.length) throw new Error("至少需要一个 DoH endpoint"); } }]}>
         {(fields, { add, remove }, { errors }) => <div className="nested-form-list"><Typography.Text strong>Endpoints</Typography.Text>{fields.map((field, index) => <EndpointFields key={field.key} field={field} index={index} remove={remove} />)}<Button icon={<Plus size={16} />} onClick={() => add({ name: "", addresses: ["127.0.0.1"], port: 443, tls_mode: "external", client_ip_source: "peer" })}>添加 Endpoint</Button><Form.ErrorList errors={errors} /></div>}
       </Form.List>

@@ -161,7 +161,7 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - cache/TTL/ECS 全继承矩阵；
 - group member 缺省 `weight: 1` 及各 mode 的显式权重约束；
 - 包含 `!` 等可打印 ASCII 的 dat selector canonicalization；
-- DoH 尾部 `{client_id}` 裸路径和 route 语义重叠拒绝；
+- DoH 显式裸路径与必填 `{client_id}`；允许固定段优先的重叠，拒绝重复模板及同优先级歧义（2026-11-07 局部评审）；
 - IPv4/IPv6 bind 冲突；
 - SecretRef env/file/inline `url`、缺失、空值、非法 scheme 和脱敏；
 - migration golden test、空链幂等和有损 warning 边界；

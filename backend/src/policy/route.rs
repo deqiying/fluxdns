@@ -307,11 +307,18 @@ mod tests {
     }
 
     #[test]
-    fn terminal_client_id_pattern_includes_bare_path() {
+    fn client_id_pattern_requires_a_segment_and_bare_route_is_explicit() {
         let pattern = RoutePattern::new("/clients/{client_id}").unwrap();
+        assert!(pattern.matches("/clients").is_none());
+        let identified = pattern.matches("/clients/client-a").unwrap();
+        assert_eq!(identified.route_id.as_ref(), "/clients/{client_id}");
+        assert_eq!(identified.client_id.unwrap().as_str(), "client-a");
 
-        let bare = pattern.matches("/clients").unwrap();
-        assert_eq!(bare.route_id.as_ref(), "/clients/{client_id}");
+        let bare = RoutePattern::new("/clients")
+            .unwrap()
+            .matches("/clients")
+            .unwrap();
+        assert_eq!(bare.route_id.as_ref(), "/clients");
         assert!(bare.client_id.is_none());
     }
 }

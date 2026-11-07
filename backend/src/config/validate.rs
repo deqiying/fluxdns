@@ -459,13 +459,13 @@ fn validate_collections(config: &ResourceConfig<'_>, report: &mut ConfigErrorRep
                         Ok(pattern) if is_unique => {
                             if let Some((other_index, _)) = compiled_paths
                                 .iter()
-                                .find(|(_, other)| pattern.overlaps(other))
+                                .find(|(_, other)| pattern.overlaps(other) && pattern.specificity_cmp(other).is_eq())
                             {
                                 report.push(ConfigError::new(
                                     ConfigErrorKind::Constraint,
                                     format!("{route_path}.path"),
                                     format!(
-                                        "route path overlaps with {path}.routes[{other_index}].path"
+                                        "route path ambiguously overlaps with {path}.routes[{other_index}].path"
                                     ),
                                 ));
                             }

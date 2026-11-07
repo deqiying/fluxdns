@@ -20,6 +20,8 @@
 >
 > 2026-11-06 增量核对：基线 `3d44dd4` 加本次工作树，仅核对配置单次保存、无状态预览与文件确认边界；验证见 [Management 实现](backend/management.md#单次保存与写接口简化2026-11-06)。
 >
+> 2026-11-07 增量核对：基线 `aa0fedf` 加本次工作树，仅核对 DoH 显式裸路径、必填 `{client_id}`、固定段优先及旧配置迁移；验证范围见 [DNS 管线](backend/dns-pipeline.md#能力与证据)。
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -488,10 +490,25 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `path` | string | HTTP 路径，可使用一次完整路径段形式的 `{client_id}` 占位符。 |
+| `path` | string | HTTP 路径，可使用一次完整路径段形式的 `{client_id}` 占位符；占位符必须提供非空值。 |
 | `strategy` | string | 路由命中的策略，引用 `strategy[].name`。 |
 
-模板示例使用 `/dns/inner/{client_id}` 和 `/dns/outside/{client_id}`。当 `{client_id}` 位于模板末尾时，单条模板同时匹配裸路径 `/dns/inner` 和带一个非空路径段的 `/dns/inner/<client_id>`；裸路径不产生 client ID，`/dns/inner/` 和额外多段路径不匹配。占位符位于中间时仍必须提供对应的非空路径段。不同 route 不能命中同一个实际 HTTP path，例如 `/dns/inner`、`/dns/inner/client-a` 都会与 `/dns/inner/{client_id}` 产生语义重叠并在配置加载时拒绝。
+裸路径与带 ID 的模板分别配置：`/doh-query` 仅匹配该路径，不产生 `client_id`，客户端根据 endpoint 提取的有效来源 IP/CIDR 匹配；`/doh-query/{client_id}` 必须提供一个非空路径段，例如 `/doh-query/client-a`。占位符无论位于末尾还是中间均不可省略；空段、模板之外的额外路径段不匹配该模板。带 ID 请求仍获取来源 IP，客户端精确 ID 优先、未命中时回退最长 CIDR 的规则不变，路径 ID 不是认证凭据。
+
+允许存在能够确定优先级的匹配重叠：从左到右逐段比较，固定段优先于 `{client_id}` 参数段，不依赖路由配置顺序。例如显式配置 `/doh-query/inner` 后，它优先于 `/doh-query/{client_id}`；`/doh-query/inner/{client_id}` 也优先于 `/doh-query/{client_id}/query`，二者同时命中 `/doh-query/inner/query` 时取前者。重复模板和同优先级的歧义仍在配置校验阶段拒绝。
+
+同时配置下列六条路由时，典型匹配结果如下：
+
+| 请求路径 | 命中模板 | 请求 client_id |
+| --- | --- | --- |
+| `/doh-query` | `/doh-query` | 无，按 IP 匹配 |
+| `/doh-query/client-a` | `/doh-query/{client_id}` | `client-a` |
+| `/doh-query/inner` | `/doh-query/inner` | 无，按 IP 匹配 |
+| `/doh-query/inner/client-a` | `/doh-query/inner/{client_id}` | `client-a` |
+| `/doh-query/outside` | `/doh-query/outside` | 无，按 IP 匹配 |
+| `/doh-query/outside/client-a` | `/doh-query/outside/{client_id}` | `client-a` |
+
+**旧行为迁移：** 末尾 `/{client_id}` 不再隐式包含去掉该段的裸路径。若旧配置依赖 `/dns/inner/{client_id}` 同时接受 `/dns/inner`，应显式添加 `/dns/inner` 并绑定原策略；[配置示例](../../config-example.yaml) 已同时列出两种入口。不会自动生成裸路由或改写部署配置；如果没有显式裸路由，该路径可能被其他参数模板命中，不能把所有省略 ID 的请求一概理解为 404。来源 IP 的可信代理及 Header 缺失/非法处理仍按 endpoint 的 `client_ip` 配置执行，与路由是否含 ID 无关。
 
 Transport 只对实际 HTTP path 匹配一次，并把配置模板作为稳定 route ID 传给 Policy；route ID 不包含真实 client ID。`/dns-quer/inner*` 与 `/dns-quer/outside*` 是服务保留路径，不能作为自定义路由；它们与示例中的 `/dns/...` 前缀不是同一组路径。
 
