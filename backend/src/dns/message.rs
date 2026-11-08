@@ -319,6 +319,36 @@ impl CanonicalResponse {
         self.ttl
     }
 
+    /// REFUSED 或 Answer 为空的有效响应只短暂缓存，避免拒绝/空结果长期遮蔽新记录。
+    /// 只包含 CNAME 的成功答案并非空响应；TC 等标志不改变空 Answer 的判定。
+    pub(crate) fn short_cache_ttl(&self) -> Option<Duration> {
+        (self.message.metadata.response_code == ResponseCode::Refused
+            || self.message.answers.is_empty())
+        .then_some(Duration::from_secs(10))
+    }
+
+    /// 同步短期响应的 RR TTL 与 SOA.MINIMUM；无记录时不合成记录或改写 RCODE。
+    /// 命中时传入剩余寿命，零值同样生效，不允许 TTL override 再次延长。
+    pub(crate) fn rewrite_short_cache_ttl(&mut self, ttl: Duration) {
+        if self.short_cache_ttl().is_none() {
+            return;
+        }
+        let ttl = u32::try_from(ttl.as_secs()).unwrap_or(u32::MAX);
+        for record in self
+            .message
+            .answers
+            .iter_mut()
+            .chain(&mut self.message.authorities)
+            .chain(&mut self.message.additionals)
+        {
+            record.ttl = ttl;
+            if let RData::SOA(soa) = &mut record.data {
+                soa.minimum = ttl;
+            }
+        }
+        self.ttl = extract_ttl_metadata(&self.message, self.class);
+    }
+
     /// 对所有客户端可见 RR 应用 TTL 上下界，并同步刷新派生 TTL 元数据。
     ///
     /// `Duration::ZERO` 表示该边界未设置；调用方应在缓存写入完成后再调用，避免

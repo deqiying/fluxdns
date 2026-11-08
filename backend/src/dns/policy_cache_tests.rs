@@ -1071,19 +1071,25 @@ async fn late_result_cross_store_accepts_same_semantics_and_rejects_changed_upst
     }
 }
 
-/// 先返回带 SOA 的 NODATA，`publish_record` 后返回 A 记录，模拟域名新增解析生效。
+/// 可配置空响应的返回码与可选 SOA；发布后返回 A 记录，验证短缓存到期回源。
 struct SwitchableDohTransport {
     calls: AtomicUsize,
     positive: std::sync::atomic::AtomicBool,
-    soa_ttl: u32,
+    soa_ttl: Option<u32>,
+    code: hickory_proto::op::ResponseCode,
 }
 
 impl SwitchableDohTransport {
     fn new(soa_ttl: u32) -> Self {
+        Self::empty(hickory_proto::op::ResponseCode::NoError, Some(soa_ttl))
+    }
+
+    fn empty(code: hickory_proto::op::ResponseCode, soa_ttl: Option<u32>) -> Self {
         Self {
             calls: AtomicUsize::new(0),
             positive: std::sync::atomic::AtomicBool::new(false),
             soa_ttl,
+            code,
         }
     }
 
@@ -1118,23 +1124,24 @@ impl DohHttpTransport for SwitchableDohTransport {
             .unwrap()
             .into_message()
         } else {
-            let mut nodata =
-                CanonicalResponse::empty_response(&query, hickory_proto::op::ResponseCode::NoError)
-                    .unwrap()
-                    .into_message();
-            nodata.add_authority(Record::from_rdata(
-                Name::from_str("example.").unwrap(),
-                self.soa_ttl,
-                RData::SOA(hickory_proto::rr::rdata::SOA::new(
-                    Name::from_str("ns.example.").unwrap(),
-                    Name::from_str("dns.example.").unwrap(),
-                    1,
-                    10_000,
-                    2_400,
-                    604_800,
-                    self.soa_ttl,
-                )),
-            ));
+            let mut nodata = CanonicalResponse::empty_response(&query, self.code)
+                .unwrap()
+                .into_message();
+            if let Some(soa_ttl) = self.soa_ttl {
+                nodata.add_authority(Record::from_rdata(
+                    Name::from_str("example.").unwrap(),
+                    soa_ttl,
+                    RData::SOA(hickory_proto::rr::rdata::SOA::new(
+                        Name::from_str("ns.example.").unwrap(),
+                        Name::from_str("dns.example.").unwrap(),
+                        1,
+                        10_000,
+                        2_400,
+                        604_800,
+                        soa_ttl,
+                    )),
+                ));
+            }
             nodata
         };
         response.metadata.id = message.metadata.id;
@@ -1149,12 +1156,24 @@ impl DohHttpTransport for SwitchableDohTransport {
     }
 }
 
-/// 默认 `negative_ttl_max = 300s`、`negative_max_age = 300s`，完整应答乐观窗口 1h。
-fn negative_core(name: &str, transport: Arc<SwitchableDohTransport>) -> Arc<PolicyDnsCore> {
-    let config = load_fixture(Fixture {
+/// 保留长负缓存窗口并设置放大的 TTL override，验证短期响应不受它们影响。
+fn negative_core(
+    name: &str,
+    transport: Arc<SwitchableDohTransport>,
+    resolved: bool,
+) -> Arc<PolicyDnsCore> {
+    let mut config = load_fixture(Fixture {
         name,
         global_ecs: EcsSpec::Disabled,
-        upstreams: doh("remote", "remote.example.test", EcsSpec::Inherit),
+        upstreams: doh(
+            "remote",
+            "remote.example.test",
+            if resolved {
+                EcsSpec::Custom(MEMBER_ECS)
+            } else {
+                EcsSpec::Inherit
+            },
+        ),
         default_upstream: "remote",
         strategy_ecs: EcsSpec::Inherit,
         rules: String::new(),
@@ -1166,6 +1185,10 @@ fn negative_core(name: &str, transport: Arc<SwitchableDohTransport>) -> Arc<Poli
         config.dns.cache.optimistic.negative_max_age,
         Duration::from_secs(300)
     );
+    let ttl_override = &mut Arc::get_mut(&mut config).unwrap().strategies[0].ttl_override;
+    ttl_override.enabled = true;
+    ttl_override.min = Some(Duration::from_secs(300));
+    ttl_override.max = Some(Duration::from_secs(600));
     let registry =
         UpstreamRegistry::from_resolved_with_doh_transport(&direct_upstreams(&config), transport)
             .unwrap();
@@ -1231,108 +1254,125 @@ fn soa_ttl(response: &CanonicalResponse) -> u32 {
     response.as_message().authorities[0].ttl
 }
 
-/// SOA.MINIMUM 1800 的 NODATA：缓存寿命与客户端可见 TTL 都被压到 300s，乐观窗口使用负应答窗口。
+/// 首答、命中与 SOA.MINIMUM 使用同一短 TTL；缓存仍保留上游原文。
 #[tokio::test]
-async fn nodata_soa_ttl_is_capped_for_cache_lifetime_and_client_ttl() {
+async fn nodata_soa_and_client_ttl_use_ten_seconds_without_stale() {
     let transport = Arc::new(SwitchableDohTransport::new(1800));
-    let core = negative_core("policy-cache-negative-cap", Arc::clone(&transport));
-    let request = request("negative-cap.example.", RecordType::AAAA);
+    let core = negative_core("policy-cache-negative-short", Arc::clone(&transport), false);
+    let request = request("negative-short.example.", RecordType::AAAA);
     let key = cache_key(&core, &plan_for(&core, &request), &request).unwrap();
-
     let (first, observation) = resolve_committed(&core, &request).await;
     assert_upstream(&observation, CacheStatus::Miss);
-    assert_eq!(first.class(), crate::dns::ResponseClass::NoData);
-    assert_eq!(
-        soa_ttl(&first),
-        300,
-        "上游直出的负应答也不能把 1800s 交给客户端"
-    );
-
+    assert_eq!(soa_ttl(&first), 10);
+    assert_eq!(first.ttl().negative_ttl, Some(10));
     let record = cache_record(&core, &key).await;
     assert_eq!(
         record.entry.expires_at - record.entry.inserted_at,
-        Duration::from_secs(300)
+        Duration::from_secs(10)
     );
-    assert_eq!(
-        record.entry.stale_until.unwrap() - record.entry.expires_at,
-        Duration::from_secs(300),
-        "负应答使用 negative_max_age，而不是完整应答的 1h"
-    );
-
+    assert_eq!(record.entry.stale_until, None);
+    assert_eq!(record.entry.response.ttl().negative_ttl, Some(1800));
     let (fresh, observation) = resolve_committed(&core, &request).await;
     assert_fresh(&observation);
-    assert!(soa_ttl(&fresh) <= 300);
+    assert!(soa_ttl(&fresh) <= 10);
+    assert_eq!(fresh.ttl().negative_ttl, Some(soa_ttl(&fresh)));
     assert_eq!(transport.calls(), 1);
 }
 
-/// 复现问题场景：空应答缓存了很久，域名随后新增解析；首查必须同步回源拿到新记录。
+/// Fast/Resolved、A/AAAA、无 SOA/零 TTL/长 TTL；10s 边界后同步回源而非乐观返回。
 #[tokio::test]
-async fn nodata_beyond_negative_window_resolves_new_record_on_first_query() {
-    let transport = Arc::new(SwitchableDohTransport::new(1800));
-    let core = negative_core("policy-cache-negative-expired", Arc::clone(&transport));
-    let request = request("negative-expired.example.", RecordType::A);
-    let key = cache_key(&core, &plan_for(&core, &request), &request).unwrap();
-
-    let (first, _) = resolve_committed(&core, &request).await;
-    assert_eq!(first.class(), crate::dns::ResponseClass::NoData);
-    transport.publish_record();
-    // 已过期 330s，超出 300s 负应答窗口；条目自身 stale_until 仍是旧规则下的 1 天。
-    age_entry(&core, &key, Duration::from_secs(330)).await;
-
-    let (answer, observation) = resolve_committed(&core, &request).await;
-    assert_upstream(&observation, CacheStatus::Expired);
-    assert_eq!(answer.class(), crate::dns::ResponseClass::Positive);
-    assert_eq!(transport.calls(), 2);
-    let (cached, observation) = resolve_committed(&core, &request).await;
-    assert_fresh(&observation);
-    assert_eq!(cached.class(), crate::dns::ResponseClass::Positive);
-    assert_eq!(transport.calls(), 2);
-}
-
-/// 负应答窗口内仍先返回 stale 不增加耗时，后台刷新写入新记录，并在详情中记录刷新结果分类与 TTL。
-#[tokio::test]
-async fn nodata_within_negative_window_serves_stale_and_records_refresh_result() {
-    let transport = Arc::new(SwitchableDohTransport::new(1800));
-    let core = negative_core("policy-cache-negative-stale", Arc::clone(&transport));
-    let mut request = request("negative-stale.example.", RecordType::A);
-    let key = cache_key(&core, &plan_for(&core, &request), &request).unwrap();
-
-    resolve_committed(&core, &request).await;
-    transport.publish_record();
-    age_entry(&core, &key, Duration::from_secs(60)).await;
-    let _cell = publish_current(&core, 1);
-
-    request.context.meta.completion = crate::dns::RequestTrace::new(Instant::now());
-    request
-        .context
-        .meta
-        .completion
-        .finish_response(crate::dns::ResponseDelivery::Sent, Instant::now());
-    let (stale, observation) = resolve_committed(&core, &request).await;
-    assert_eq!(observation.source, StatsSource::Cache);
-    assert_eq!(observation.cache_status, CacheStatus::Stale);
-    assert_eq!(stale.class(), crate::dns::ResponseClass::NoData);
-    assert_eq!(soa_ttl(&stale), 7, "stale 应答使用 answer_ttl");
-
-    drain(&core).await;
-    let activity = request
-        .context
-        .meta
-        .completion
-        .settled()
-        .await
-        .cache_activity
-        .unwrap();
-    assert_eq!(activity.kind, crate::dns::CacheActivityKind::Refresh);
-    assert_eq!(activity.outcome, crate::dns::CacheActivityOutcome::Updated);
-    assert_eq!(
-        activity.response_class,
-        Some(crate::dns::CacheActivityResponseClass::Positive)
-    );
-    assert_eq!(activity.ttl_secs, Some(30));
-
-    let (fresh, observation) = resolve_committed(&core, &request).await;
-    assert_fresh(&observation);
-    assert_eq!(fresh.class(), crate::dns::ResponseClass::Positive);
-    assert_eq!(transport.calls(), 2);
+async fn short_responses_hit_age_and_expire_without_changing_rcode() {
+    use hickory_proto::op::ResponseCode;
+    for resolved in [false, true] {
+        for qtype in [RecordType::A, RecordType::AAAA] {
+            for code in [
+                ResponseCode::NoError,
+                ResponseCode::NXDomain,
+                ResponseCode::Refused,
+                ResponseCode::ServFail,
+                ResponseCode::FormErr,
+                ResponseCode::NotImp,
+            ] {
+                for soa in [None, Some(0), Some(1800)] {
+                    let transport = Arc::new(SwitchableDohTransport::empty(code, soa));
+                    let core = negative_core(
+                        "policy-cache-short-matrix",
+                        Arc::clone(&transport),
+                        resolved,
+                    );
+                    let request = request("short-matrix.example.", qtype);
+                    let key = cache_key(&core, &plan_for(&core, &request), &request).unwrap();
+                    let (first, observation) = resolve_committed(&core, &request).await;
+                    assert_upstream(&observation, CacheStatus::Miss);
+                    assert_eq!(first.as_message().metadata.response_code, code);
+                    assert!(first.as_message().answers.is_empty());
+                    assert_eq!(first.ttl().min_ttl, soa.map(|_| 10));
+                    let record = cache_record(&core, &key).await;
+                    assert_eq!(
+                        record.entry.expires_at - record.entry.inserted_at,
+                        Duration::from_secs(10)
+                    );
+                    assert_eq!(record.entry.stale_until, None);
+                    let now = Instant::now();
+                    let aged = crate::ports::cache::CacheEntry {
+                        response: Arc::clone(&record.entry.response),
+                        upstream: record.entry.upstream.clone(),
+                        inserted_at: now - Duration::from_secs(4),
+                        expires_at: now + Duration::from_secs(6),
+                        stale_until: None,
+                        response_class: record.entry.response_class,
+                        producer_revision: record.entry.producer_revision,
+                        quality: record.entry.quality,
+                        checksum: record.entry.checksum,
+                        format_version: record.entry.format_version,
+                    };
+                    assert!(matches!(
+                        core.cache()
+                            .store()
+                            .compare_and_swap(
+                                key.clone(),
+                                CacheCondition::Version(record.version),
+                                Arc::new(aged),
+                                request.context.meta.deadline
+                            )
+                            .await
+                            .unwrap(),
+                        CacheWriteOutcome::Replaced(_)
+                    ));
+                    let (fresh, observation) = resolve_committed(&core, &request).await;
+                    assert_fresh(&observation);
+                    assert_eq!(fresh.as_message().metadata.response_code, code);
+                    if soa.is_some() {
+                        assert!((1..=6).contains(&soa_ttl(&fresh)));
+                        let RData::SOA(value) = &fresh.as_message().authorities[0].data else {
+                            panic!("expected SOA");
+                        };
+                        assert_eq!(value.minimum, soa_ttl(&fresh));
+                    } else {
+                        assert!(fresh.as_message().authorities.is_empty());
+                        assert_eq!(fresh.ttl().min_ttl, None);
+                    }
+                    assert_eq!(transport.calls(), 1);
+                    // 即使手工保留旧的 1 天 stale 窗口，短结果到期也必须同步回源。
+                    age_entry(&core, &key, Duration::ZERO).await;
+                    transport.publish_record();
+                    let (answer, observation) = resolve_committed(&core, &request).await;
+                    assert_upstream(&observation, CacheStatus::Expired);
+                    assert_eq!(answer.class(), crate::dns::ResponseClass::Positive);
+                    assert_eq!(
+                        answer.ttl().min_ttl,
+                        Some(300),
+                        "正常答案仍应用 TTL override"
+                    );
+                    assert_eq!(transport.calls(), 2);
+                    let positive = cache_record(&core, &key).await;
+                    assert_eq!(
+                        positive.entry.expires_at - positive.entry.inserted_at,
+                        Duration::from_secs(30)
+                    );
+                    assert!(positive.entry.stale_until.is_some());
+                }
+            }
+        }
+    }
 }

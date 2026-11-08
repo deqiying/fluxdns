@@ -946,7 +946,7 @@ mod tests {
     #[tokio::test]
     async fn contract_v2_finalizer_terminal_matrix_releases_moka_waiters() {
         for terminal in [
-            "capacity", "shutdown", "panic", "drop", "success", "rejected",
+            "capacity", "shutdown", "panic", "drop", "success", "refused", "rejected",
         ] {
             let facade = Arc::new(CacheFacade::new(
                 Arc::new(crate::cache::MokaCacheStore::new()),
@@ -964,6 +964,19 @@ mod tests {
             };
             let mut request = write_request();
             if terminal == "rejected" {
+                let mut message = Message::new(0, MessageType::Query, OpCode::Query);
+                message.queries = response(ResponseCode::NoError).as_message().queries.clone();
+                let query = CanonicalQuery::from_message(message).unwrap();
+                let answer = hickory_proto::rr::Record::from_rdata(
+                    query.question().name().clone(),
+                    0,
+                    hickory_proto::rr::RData::A(hickory_proto::rr::rdata::A(
+                        std::net::Ipv4Addr::LOCALHOST,
+                    )),
+                );
+                request.response =
+                    Arc::new(CanonicalResponse::response_with_answers(&query, [answer]).unwrap());
+            } else if terminal == "refused" {
                 request.response = Arc::new(response(ResponseCode::Refused));
             }
             let candidate = CacheCommitCandidate::new(Arc::clone(&facade), request, lease);
@@ -993,11 +1006,11 @@ mod tests {
                     finalizer.wait_idle_for_test().await;
                 }
                 "drop" => drop(candidate),
-                "success" | "rejected" => {
+                "success" | "refused" | "rejected" => {
                     let outcome = candidate.commit(Duration::from_secs(1)).await;
                     assert_eq!(
                         outcome,
-                        if terminal == "success" {
+                        if terminal != "rejected" {
                             CacheCommitOutcome::Stored
                         } else {
                             CacheCommitOutcome::Rejected
@@ -1014,7 +1027,21 @@ mod tests {
             .unwrap()
             .unwrap();
             match terminal {
-                "success" => assert!(matches!(completion, CacheLoadCompletion::Ready(_))),
+                "success" | "refused" => {
+                    let CacheLoadCompletion::Ready(record) = completion else {
+                        panic!("expected shared cached response");
+                    };
+                    assert_eq!(
+                        record.entry.expires_at - record.entry.inserted_at,
+                        Duration::from_secs(10)
+                    );
+                    if terminal == "refused" {
+                        assert_eq!(
+                            record.entry.response.class(),
+                            crate::dns::ResponseClass::Refused
+                        );
+                    }
+                }
                 "rejected" => assert!(matches!(completion, CacheLoadCompletion::Miss)),
                 _ => assert!(matches!(
                     completion,

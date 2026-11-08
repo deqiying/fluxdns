@@ -24,6 +24,8 @@
 >
 > 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，仅核对 DoH 裸路径兼容隐式 ID 后缀、必填显式模板及确定性优先级；本次测试证据见 [DNS 管线](backend/dns-pipeline.md#能力与证据)，其余历史范围未重新核对。
 >
+> 2026-11-08 短响应缓存增量核对：基线 `96daf34` 加本次工作树，仅更新 REFUSED/空 Answer 的固定 10s 缓存、客户端 TTL、禁止 stale 与 entry v3 恢复兼容；验证见 [DNS 管线](backend/dns-pipeline.md#短响应缓存验证)。
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -368,12 +370,12 @@ ConfigV2
 | --- | --- | --- |
 | `dns.cache.enabled` | boolean | 是否启用全局缓存池；它不是策略池和客户端池的总开关。 |
 | `dns.cache.memory.max_size_bytes` | integer | 所有逻辑缓存池共享的内存计费容量上限，单位为字节。 |
-| `dns.cache.failure_ttl` | duration | `SERVFAIL`、上游截断响应等无自然可用 TTL 的短期缓存时间；必须在 `1s..=5m`。 |
-| `dns.cache.negative_ttl_max` | duration | `NOERROR/NODATA` 与 `NXDOMAIN` 的缓存寿命及客户端可见 TTL 上限；可省略，默认 `5m`，必须在 `1s..=1d`。只向下压，不影响正应答和失败类。 |
+| `dns.cache.failure_ttl` | duration | 非空 Answer 的 `SERVFAIL`、上游截断响应等失败类缓存时间；必须在 `1s..=5m`。REFUSED/空 Answer 固定 `10s`，不受此值影响。 |
+| `dns.cache.negative_ttl_max` | duration | 非空 Answer 的 `NXDOMAIN` 缓存寿命及客户端可见 TTL 上限；可省略，默认 `5m`，必须在 `1s..=1d`。NODATA/空 NXDOMAIN 改用固定 `10s`，不受此上限影响。 |
 | `dns.cache.optimistic.enabled` | boolean | 是否允许返回已过期记录并在后台刷新。 |
 | `dns.cache.optimistic.answer_ttl` | duration | 乐观缓存应答使用的 TTL。 |
 | `dns.cache.optimistic.max_age` | duration | 完整正应答过期后仍可乐观返回的最长时间。 |
-| `dns.cache.optimistic.negative_max_age` | duration | NODATA/NXDOMAIN 过期后仍可乐观返回的最长时间；可省略，默认 `5m`，`0s` 表示负应答过期即回源。解析时取 `min(negative_max_age, max_age)`，超出不报错。 |
+| `dns.cache.optimistic.negative_max_age` | duration | 非空 Answer 的 NXDOMAIN 过期后仍可乐观返回的最长时间；可省略，默认 `5m`，`0s` 关闭。解析时取 `min(negative_max_age, max_age)`；REFUSED/空 Answer 到期即回源，不使用该窗口。 |
 | `dns.cache.persistence.enabled` | boolean | 是否启用进程级 `FDCS` 快照；不等同于全局内存缓存开关。 |
 | `dns.cache.persistence.path` | string | 当前进程级 `FDCS` 快照文件路径；相对路径以 `work.path` 为基准。 |
 | `dns.cache.persistence.snapshot_interval` | duration | 完整快照周期，范围 `1s..=1d`。 |
@@ -408,20 +410,19 @@ cache key format v2 显式区分逐规则匹配前的 `Fast` 模式和完整决�
 
 规则或 hosts 的变化不会扫描或清空缓存，但会改变 policy fingerprint，使后续请求不再命中旧语义 entry；旧 entry 继续占用容量并按自身 TTL/optimistic 生命周期淘汰。请求先按最新 runtime snapshot 计算客户端、生效策略、ECS、namespace 和 policy/request fingerprint，fast miss 后才执行 rules、hosts 和 upstream target 决策。策略可达 target 存在显式成员 ECS 时 Fast eligibility 保守禁用；完整决策后若全部 direct leaf 的最终 query 相同，仍可使用 Resolved key，只有真正异构时才绕过 response cache。`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache；`upstreams[type=hosts]` 属于 upstream connector，其结果按普通上游响应处理。启用 optimistic cache 时，Fast/Resolved stale 都按最新 Policy/资源重新执行 route、ECS 与上游选择，不能沿用旧 entry 的目标；失败不会延长旧 stale。后续 WebUI 的清除缓存功能属于显式 `namespace/key/predicate` 操作，不由普通资源刷新隐式触发。
 
-本轮仍使用 cache key format v2 和现有 `FDCS` snapshot format，不需要文件格式升级。Resolved 的 policy fingerprint 已扩充；Fast/Resolved 共用的语义摘要还显式纳入完整 DoH endpoint（包括 path/query），避免 `SafeUrl` 的脱敏 Debug 隐去实际分流差异。URL 明文只在计算摘要时读取，不进入 cache key 或日志。升级前的相关条目仍可按原格式解码，但新请求生成不同 key，会出现一次自然冷启动，旧项随后按 TTL/容量淘汰。
+cache key format v2 和外层 `FDCS` snapshot format 保持不变；entry payload 升为 v3，以区分固定 10s 短响应语义并新增 REFUSED/Other 分类。恢复时，v2 的 REFUSED/空 Answer 条目视为不兼容，不继续使用旧的长 fresh/stale 窗口；v2 的普通非空答案可按同布局恢复并转换为 v3。v3 条目按保存的绝对到期时间恢复，不重新补满 10s。此前的 policy fingerprint 已纳入完整 DoH endpoint（含 path/query），端点明文不进入缓存键或日志。
 
 policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；它不是通用配置 revision，也不替代显式清理接口。真正旧格式的 key 仍不能与 v2 恢复记录混用，持久化 adapter 将其按不兼容记录隔离。
 
 #### 响应缓存语义
 
 - `hosts[]` 产生的本地回答不进入 response cache；它直接读取已编译内存 snapshot，并仍应用 TTL override 和统计。`upstreams[type=hosts]` 不属于此例外。
-- 正常 `NOERROR` 响应按 RR TTL 缓存；`NOERROR/NODATA` 和 `NXDOMAIN` 按负缓存 TTL 缓存，优先使用 SOA TTL 与 SOA.MINIMUM 的较小值。为满足 v1“所有 NODATA/NXDOMAIN 均缓存”的产品语义，没有可用 SOA/负 TTL 时使用 `failure_ttl`；这是对 RFC 2308 “SHOULD NOT cache”建议的有意偏离。负缓存 TTL 最终再截到 `negative_ttl_max`，避免 SOA.MINIMUM 很大时新增记录在 FluxDNS 层长期不可见。
-- 负应答的客户端可见 TTL 同样受限：上游直出时先把 SOA/负 TTL 截到 `negative_ttl_max`，fresh 缓存命中时截到 `min(条目剩余寿命, negative_ttl_max)`，之后才应用 TTL override；因此 override 的 `min` 仍可能把 TTL 重新放大。缓存中的 origin response 不改写。answer 段只有 CNAME 链的响应按正应答处理，不受该上限影响。
-- `SERVFAIL` 和直接从上游收到的 `TC=1` 响应使用 `failure_ttl`；`REFUSED` 可作为上游组的终态响应返回，但 v1 不写缓存。上游 TC 条目额外包含当前入口 transport，只允许相同 transport 命中，不能把 UDP 场景的截断结果复用于 TCP/DoH。
+- 通过协议校验的 `REFUSED`（无论 Answer 是否为空），以及所有 Answer 为空的上游 DNS 响应，统一缓存 **10s**。覆盖 NODATA、空 NXDOMAIN、空 SERVFAIL、空 TC 与其他合法 RCODE 的空响应；即使没有 SOA、没有 TTL 或原 TTL 为零，也使用该期限。仍遵循当前逻辑池的缓存开关和原有安全 key/质量约束，不强行启用已禁用的缓存。
+- 短响应首答的所有 RR TTL 与 SOA.MINIMUM 改写为 10s，fresh 命中时按条目剩余寿命递减（不足 1s 为 0）。没有记录时不伪造记录，仅设置内部期限。该规则优先于 `failure_ttl`、`negative_ttl_max` 和 TTL override，且不允许 stale；到期后的首查必须回源。缓存中的 origin response、RCODE 和 checksum 保持不变。
+- 普通非空 `NOERROR`（包括仅 CNAME 链）仍按 RR TTL 缓存，保留现有 TTL override 与乐观窗口。非空 NXDOMAIN 沿用 SOA/最小 RR TTL/failure TTL 与 `negative_ttl_max`、负乐观窗口；非空 SERVFAIL/上游 TC 沿用 `failure_ttl`。TC 的 transport 隔离不变，不能把 UDP 截断结果复用于 TCP/DoH。
 - malformed DNS、问题段不匹配、连接/TLS/HTTP 失败和超时不属于 DNS 响应，不写缓存。
 - 缓存保存不含客户端 DNS ID 和传输 envelope 的 canonical response。若本地 UDP 输出因本次客户端 advertised size 而截断，应保存完整 canonical response，并在每次发送时重新编码；只有上游本身返回的 `TC=1` 才保存截断条目。
-- 写入按响应质量做 compare-and-replace：完整 `NOERROR/TC=0` 可以提升并替换未过期的 NXDOMAIN/SERVFAIL/TC 条目，SERVFAIL/TC 不能覆盖未过期的完整回答；同质量条目在过期前不因后到竞态反复覆盖。
-所以快照恢复的旧长窗口负条目也按当前规则回源，无需迁移快照格式；这类旧条目已写入的 fresh 寿命不回溯缩短，但客户端可见 TTL 仍按上限截断。
+- 写入仍按响应质量做 compare-and-replace：完整 NOERROR 优于 NODATA/NXDOMAIN，后者优于 SERVFAIL/TC/REFUSED/Other；低质量条目不能覆盖仍 fresh 的完整答案。同质量条目不因晚到竞态反复覆盖。新返回的正答案可以替换短期拒绝/空结果。
 - 条目已过期且不可乐观返回时，本次解析按 `expired` 记录并照常回源；该状态与「缓存从未存在该条目」分开保存，便于区分回源原因。
 - 同一 key 的并发 miss 通过 single-flight 合并。leader 得到可缓存结果后先形成持有 lease 的 `CacheCommitCandidate` 并返回共享响应；后台 worker 使用独立 100ms deadline 完成 admission/CAS 并唤醒 waiter，进程快照由独立周期 owner 覆盖。客户端响应不等待 commit；candidate 被队列丢弃、取消或直接 drop 时，RAII lease 必须发布失败终态，不能永久挂住 follower。optimistic stale 由一次性 refresh permit 去重并进入统一后台刷新流程，不复用 miss 的 lease。
 
@@ -436,6 +437,8 @@ policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；
 | `dns.ttl_override.max` | duration | 最大 TTL；`0s` 表示不设上限。 |
 
 策略和客户端可使用同样的字段结构。省略字段按层级继承，显式 `enabled: false` 停止当前层级的 TTL 覆写。
+
+例外：来自上游或缓存的 REFUSED/空 Answer 使用固定短 TTL 及剩余寿命，不应用 TTL override，避免再次延长客户端的拒绝/空结果缓存。本地 Hosts 路径保持原规则。
 
 ### 8.3 `dns.edns_client_subnet`
 
@@ -646,7 +649,7 @@ Transport 只对实际 HTTP path 匹配一次，并始终把配置 `path` 原文
 
 1. 同时向主组成员发起请求。第一个通过 DNS wire 校验、响应标志校验且问题段与请求匹配的 DNS 响应立即返回客户端；`NXDOMAIN`、`REFUSED`、`SERVFAIL` 和 `TC=1` 都属于终态成功。超时、连接/TLS/HTTP 失败、非法 wire 和问题段不匹配不属于成功。
 2. 若首个终态响应是完整的 `NOERROR/TC=0`，按缓存准入规则写入并取消其余请求；若首个响应是 `NXDOMAIN`、`REFUSED`、`SERVFAIL` 或 `TC=1`，已经发出的其他主组请求继续到各自完成或组 `timeout`，但不改变已经返回给当前客户端的响应，也不触发 fallback。
-3. 对上一条继续运行的后台窗口，收集到全部成员完成或 `timeout` 后再定稿缓存：先从完整的 `NOERROR/TC=0` 响应中按成员配置顺序选择；若没有，再从允许缓存的其他终态响应中按成员配置顺序选择。`REFUSED` 不缓存。这样迟到有效答案仍能写缓存，但缓存结果不由并发完成顺序决定。
+3. 对上一条继续运行的后台窗口，收集到全部成员完成或 `timeout` 后再定稿缓存：先从完整的 `NOERROR/TC=0` 响应中按成员配置顺序选择；若没有，再从允许缓存的其他终态响应中按成员配置顺序选择。`REFUSED` 与空 Answer 按上述短响应规则缓存 10s。这样迟到有效答案仍能写缓存，但缓存结果不由并发完成顺序决定。
 4. 主组只有在 `timeout` 内完全没有终态 DNS 响应时才进入 `fallbacks`；fallback 组使用同样的响应和缓存语义。
 5. `parallel` 不使用权重；该模式下成员应省略 `weight` 或显式设为 `1`，非 `1` 值会被拒绝，避免配置暗示不存在的优先级。
 

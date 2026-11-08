@@ -104,7 +104,7 @@ pub(super) fn decode_record(
     let encoded = Arc::<[u8]>::from(reader.bytes(MAX_COMPONENT_BYTES)?.to_vec());
     let version = CacheVersion(reader.u64()?);
     let entry_format = reader.u16()?;
-    if entry_format != CACHE_ENTRY_FORMAT_VERSION {
+    if entry_format != 2 && entry_format != CACHE_ENTRY_FORMAT_VERSION {
         return Err(CodecError::Incompatible);
     }
     let producer_revision = RuntimeRevision(reader.u64()?);
@@ -141,6 +141,11 @@ pub(super) fn decode_record(
     let query = CanonicalQuery::from_message(query_message).map_err(|_| CodecError::Corrupt)?;
     let response = CanonicalResponse::from_message(message, &query, DnsMessageId::new(0))
         .map_err(|_| CodecError::Corrupt)?;
+    // v2 的空响应可能仍持有数小时的 fresh/stale 窗口，不能作为 v3 短缓存恢复。
+    // 保留同布局的普通 v2 答案，避免升级时无关正缓存全部失效。
+    if entry_format == 2 && response.short_cache_ttl().is_some() {
+        return Err(CodecError::Incompatible);
+    }
     if response_class != response_class_from_response(response.class())
         || checksum
             != super::admission::canonical_checksum(&response).map_err(|_| CodecError::Corrupt)?
@@ -154,6 +159,11 @@ pub(super) fn decode_record(
         encoded,
         format_version: key_format,
     };
+    let stale_until = if response.short_cache_ttl().is_some() {
+        None
+    } else {
+        stale_until
+    };
     let entry = CacheEntry {
         response: Arc::new(response),
         upstream: CacheUpstreamProvenance::new(target_id, used_id),
@@ -164,7 +174,7 @@ pub(super) fn decode_record(
         producer_revision,
         quality,
         checksum,
-        format_version: entry_format,
+        format_version: CACHE_ENTRY_FORMAT_VERSION,
     };
     Ok((
         key,
@@ -232,7 +242,8 @@ fn response_class_from_response(class: ResponseClass) -> CacheResponseClass {
         ResponseClass::NxDomain => CacheResponseClass::NxDomain,
         ResponseClass::ServFail => CacheResponseClass::ServFail,
         ResponseClass::Truncated => CacheResponseClass::Truncated,
-        ResponseClass::Refused | ResponseClass::Other(_) => CacheResponseClass::ServFail,
+        ResponseClass::Refused => CacheResponseClass::Refused,
+        ResponseClass::Other(_) => CacheResponseClass::Other,
     }
 }
 
@@ -256,6 +267,8 @@ fn encode_response_class(class: CacheResponseClass) -> u8 {
         CacheResponseClass::NxDomain => 2,
         CacheResponseClass::ServFail => 3,
         CacheResponseClass::Truncated => 4,
+        CacheResponseClass::Refused => 5,
+        CacheResponseClass::Other => 6,
     }
 }
 
@@ -266,6 +279,8 @@ fn decode_response_class(value: u8) -> Result<CacheResponseClass, CodecError> {
         2 => Ok(CacheResponseClass::NxDomain),
         3 => Ok(CacheResponseClass::ServFail),
         4 => Ok(CacheResponseClass::Truncated),
+        5 => Ok(CacheResponseClass::Refused),
+        6 => Ok(CacheResponseClass::Other),
         _ => Err(CodecError::Corrupt),
     }
 }
@@ -358,5 +373,110 @@ impl<'a> Reader<'a> {
 
     fn is_empty(&self) -> bool {
         self.offset == self.bytes.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cache::{CacheAdmissionOutcome, CacheAdmissionPolicy, admit_response};
+    use hickory_proto::op::{Query, ResponseCode};
+    use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
+
+    fn record(code: ResponseCode, with_answer: bool) -> (CacheKey, CacheRecord) {
+        let mut message = Message::new(0, MessageType::Query, OpCode::Query);
+        message.add_query(Query::query(
+            Name::from_ascii("snapshot.example.").unwrap(),
+            RecordType::A,
+        ));
+        let query = CanonicalQuery::from_message(message).unwrap();
+        let answers = with_answer.then(|| {
+            Record::from_rdata(
+                query.question().name().clone(),
+                30,
+                RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, 1))),
+            )
+        });
+        let response = CanonicalResponse::response_with_code(&query, code, answers).unwrap();
+        let CacheAdmissionOutcome::Accepted(entry) = admit_response(
+            CacheAdmissionPolicy::default(),
+            Arc::new(response),
+            CacheUpstreamProvenance::direct_from_validated_config_id("remote").unwrap(),
+            Instant::now() - Duration::from_secs(4),
+            RuntimeRevision(1),
+        )
+        .unwrap() else {
+            panic!("expected admission");
+        };
+        (
+            CacheKey {
+                namespace: CacheNamespace::Global,
+                encoded: Arc::from([1_u8, 2]),
+                format_version: CACHE_KEY_FORMAT_VERSION,
+            },
+            CacheRecord {
+                version: CacheVersion(1),
+                entry,
+            },
+        )
+    }
+
+    #[test]
+    fn short_response_snapshot_preserves_code_class_and_remaining_lifetime() {
+        for code in [
+            ResponseCode::NoError,
+            ResponseCode::NXDomain,
+            ResponseCode::Refused,
+            ResponseCode::ServFail,
+            ResponseCode::FormErr,
+            ResponseCode::NotImp,
+        ] {
+            let (key, record) = record(code, false);
+            let payload = encode_record(&key, &record, Instant::now()).unwrap();
+            let now = Instant::now();
+            let (restored_key, restored) = decode_record(&payload, now).unwrap();
+            assert_eq!(restored_key, key);
+            assert_eq!(
+                restored.entry.response.as_message().metadata.response_code,
+                code
+            );
+            assert_eq!(restored.entry.response_class, record.entry.response_class);
+            assert_eq!(restored.entry.quality, record.entry.quality);
+            assert_eq!(restored.entry.checksum, record.entry.checksum);
+            assert_eq!(restored.entry.stale_until, None);
+            let remaining = restored.entry.expires_at.saturating_duration_since(now);
+            assert!(remaining <= Duration::from_secs(6));
+            assert!(remaining > Duration::from_secs(4));
+        }
+    }
+
+    #[test]
+    fn legacy_short_entries_are_cold_but_normal_answers_remain_compatible() {
+        for with_answer in [false, true] {
+            let (key, mut record) = record(ResponseCode::NoError, with_answer);
+            Arc::get_mut(&mut record.entry).unwrap().format_version = 2;
+            let payload = encode_record(&key, &record, Instant::now()).unwrap();
+            let decoded = decode_record(&payload, Instant::now());
+            if with_answer {
+                let (_, restored) = decoded.unwrap();
+                assert_eq!(restored.entry.format_version, CACHE_ENTRY_FORMAT_VERSION);
+                assert_eq!(restored.entry.response, record.entry.response);
+            } else {
+                assert!(matches!(decoded, Err(CodecError::Incompatible)));
+            }
+        }
+    }
+
+    #[test]
+    fn expired_short_snapshot_does_not_regain_fresh_or_stale_time() {
+        let (key, mut record) = record(ResponseCode::Refused, false);
+        let entry = Arc::get_mut(&mut record.entry).unwrap();
+        entry.expires_at = Instant::now() - Duration::from_secs(1);
+        entry.stale_until = Some(Instant::now() + Duration::from_secs(3600));
+        let payload = encode_record(&key, &record, Instant::now()).unwrap();
+        let now = Instant::now();
+        let (_, restored) = decode_record(&payload, now).unwrap();
+        assert!(restored.entry.expires_at <= now);
+        assert_eq!(restored.entry.stale_until, None);
     }
 }

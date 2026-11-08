@@ -21,6 +21,8 @@
 > 2026-11-07 增量核对：`aa0fedf` 加本次工作树，仅更新 DoH 显式裸路径、必填 client ID 和路由优先级；其余历史范围沿用原记录
 >
 > 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，仅核对 DoH 裸路由隐式 ID 后缀、必填显式模板与优先级；本次验证见[能力与证据](#能力与证据)，其余历史范围未重新核对。
+>
+> 2026-11-08 短响应缓存增量核对：基线 `96daf34376bcc108efacffdf620144ba5fd0bb54` 加本次工作树，仅核对 REFUSED/空 Answer 的 10s 生命周期、客户端 TTL、无 stale 与 entry v3 恢复；证据见[短响应缓存验证](#短响应缓存验证)。
 
 ## 入口与调用链
 
@@ -65,7 +67,7 @@ SystemSocketFactory / typed binding
 - listener/strategy hosts 本地回答绕过 response cache；upstream hosts 按普通上游响应处理。
 - `UpstreamRuntime` 构造时记录 group 全部可达 direct leaves，覆盖 primary、fallback、nested group 与隐式继承请求级 ECS 的成员；请求级 ECS 来自 global/default 时，`prepare_query` 用该集合计算并比较规范化后的最终 ECS。所有成员 query 相同时使用统一 query 和 Resolved cache；只有真正异构时才携带 per-member query，并绕过 lookup、single-flight 与 commit。显式成员 ECS 即使不同于 global，只要各成员最终 query 相同也属于可缓存路径；rule/strategy/client 显式 ECS 则直接统一覆盖成员。
 - Fast eligibility 仍按策略可达 target 保守计算：存在任一显式成员 ECS 就禁用 Fast；这不妨碍 fast miss 后的完整决策证明 query 一致并使用 Resolved。
-- 缓存候选使用 canonical upstream response 与 origin TTL；返回时递减 TTL 或应用 effective override。负应答（`CanonicalResponse::is_negative`，即 NODATA/NXDOMAIN）在应用 override 前先经 `cap_negative_ttl` 截断：上游直出截到 `dns.cache.negative_ttl_max`，fresh 命中由 `fresh_cache_response` 截到 `min(剩余寿命, negative_ttl_max)`；准入侧 `CacheAdmissionPolicy::with_negative` 同样把负条目寿命截到该上限。stale 返回由 `stale_answer_ttl` 按 entry quality 选窗口：Complete 用当前 pool 的 `max_age`，Negative 用 `CacheDecision::optimistic_negative_max_age`，Failure 不 stale，窗口为零视同关闭；`cache_runtime_options` 汇总各池最大负窗口写入 admission。条目越过应答窗口（乐观未启用或已超出对应窗口）后仍按保留期可见，lookup 返回 `Expired` 而不是 `Miss`：本次照常回源，但 `cache_status` 记录为 `expired`，与「从未缓存」分开。
+- 缓存候选保留 canonical upstream origin response。`CanonicalResponse::short_cache_ttl` 统一识别 REFUSED（包含非空 Answer）和所有空 Answer 响应，[`admit_response`](../../../backend/src/cache/admission.rs) 固定写入 10s 且不设 stale 窗口。上游输出与 Fast/Resolved fresh 命中分别由 `rewrite_short_cache_ttl` 改写 RR TTL/SOA.MINIMUM 为 10s/剩余寿命，无记录时不合成记录；短响应跳过 TTL override。`stale_answer_ttl` 对这类响应直接拒绝，即使旧条目带长 stale 窗口也必须回源。非短响应的 origin TTL、负 TTL 上限、输出 override 与乐观窗口保持原策略。越过应答窗口的可见条目仍返回 `Expired`，不混同 `Miss`。
 - Fast/Resolved stale 共用 `schedule_optimistic_refresh`，切到最新可用 core 后重新执行 `prepare_cache_query`，不复用 entry 保存的旧 connector/rule pointer。同一 `Arc` store 且 key 相同时以 `Version(stale_version)` CAS；store 或 key 不同时先读目标，Miss 使用 `Absent`、Stale/Expired 使用目标 `Version`、Fresh 直接跳过。exchange 后写回前再次核对 semantics/key，任一步失败都不延长旧 stale。
 - `PolicyLateResultSink` 保存生产请求的 semantics，并在切换 latest core 后仅当重新准备的 semantics、key 和最终 ECS 与原请求一致时接纳旧响应；配置、资源、目标或 ECS 改变时丢弃。写回前再次检查 semantics/key，目标已有同等或更高质量结果时不覆盖；目标条目已过期时不适用该质量比较，直接按其版本替换，否则刷新结果会因 CAS 冲突无法写回。
 - `reason = "group_ecs_differs"`、`operation = "cache_refresh"` 与 `operation = "cache_late"` 的 debug 事件只记录低基数 reason/outcome 及配置 ID，不输出明文 ECS 或客户端 IP；`cache_refresh` 额外带写回结果的 `class` 与 `ttl_secs`。
@@ -74,9 +76,19 @@ SystemSocketFactory / typed binding
 
 进程快照的恢复、周期、generation 和失败见[后台服务](background-services.md)；准入与终态约束见 [Cache 设计](../../architecture/backend/modules/cache.md)。
 
+### 短响应缓存验证
+
+2026-11-08，Windows Rust/Cargo 1.98.0，基线 `96daf34` 加本次工作树。实际执行 `cargo test --offline --locked --manifest-path backend/Cargo.toml --bin fluxdns cache:: -- --test-threads=1`（62 项通过）及同参数 `dns::policy::`（49 项通过）。这是本地单元/受控 adapter 验证，未部署或测试生产上游。
+
+同一工作树随后执行全量 `cargo test --offline --locked --manifest-path backend/Cargo.toml -- --test-threads=1`：894 passed、0 failed、4 ignored；`cargo fmt --manifest-path backend/Cargo.toml -- --check`、`cargo clippy --offline --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings`、文档检查器与 `git diff --check` 均通过。工作树同时包含独立的配置写回改动，全量结果属于当时组合工作树；缓存定向证据以上面的两组测试为准。
+
+- [`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 的 `short_responses_hit_age_and_expire_without_changing_rcode` 覆盖 Fast/Resolved × A/AAAA × NOERROR/NXDOMAIN/REFUSED/SERVFAIL/FORMERR/NOTIMP × 无 SOA/零 TTL/1800s SOA：首答与命中返回码不变、短 TTL 不受 300s override 放大、命中时按剩余寿命递减、到期后首查同步取得新记录，正常答案保持 origin TTL 与乐观缓存。`nodata_soa_and_client_ttl_use_ten_seconds_without_stale` 核对 SOA.MINIMUM 与 origin response 隔离。
+- [`admission.rs`](../../../backend/src/cache/admission.rs) 覆盖 REFUSED 非空 Answer、TC 空响应、零/缺失 TTL 短响应准入和非空负/失败响应原策略；[`service.rs`](../../../backend/src/cache/service.rs) 的 finalizer 矩阵覆盖 REFUSED 写入及 single-flight follower 收到 Ready，准入拒绝改用零 TTL 正答案。
+- [`codec.rs`](../../../backend/src/cache/codec.rs) 覆盖短响应 RCODE/class/checksum 往返、保存剩余期限、过期不复活、entry v2 空响应冷启及普通答案兼容恢复。key v2 与 FDCS 外层格式不变，entry v3 新增 Refused/Other 分类。
+
 ### 负缓存新鲜度验证
 
-本机 Windows，基线 `e811b713292467ce964534c1cb7e2ef44002cdf6` 加本次工作树。[`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 用可切换应答的模拟 DoH（`SwitchableDohTransport`）驱动正式 core：`nodata_soa_ttl_is_capped_for_cache_lifetime_and_client_ttl` 核对 SOA 1800 被截到上限且客户端 TTL 同步截断；`nodata_beyond_negative_window_resolves_new_record_on_first_query` 核对越过负窗口后首查即同步回源拿到新 A 记录；`nodata_within_negative_window_serves_stale_and_records_refresh_result` 核对窗口内乐观返回并记录刷新得到的响应类与 TTL。准入、计划、配置解析与契约另有单元测试（`cache::admission`、`policy::plan`、`config::resolve`、`config::contract`）。
+以下为 2026-10-04 的历史负缓存验证，不代表当前空响应仍使用 300s/乐观窗口。原 `nodata_soa_ttl_is_capped_for_cache_lifetime_and_client_ttl`、`nodata_beyond_negative_window_resolves_new_record_on_first_query` 和 `nodata_within_negative_window_serves_stale_and_records_refresh_result` 已被上面的固定短缓存矩阵替代；普通正答案乐观刷新与非空 NXDOMAIN 原策略仍有回归覆盖。
 
 2026-10-04 实际执行 `cargo fmt -- --check`、`cargo clippy --all-targets -- -D warnings`（均通过）和 `cargo test --manifest-path backend/Cargo.toml`：830 passed、0 failed、4 ignored。同批全量运行中曾出现一次 `service::tests::idle_listener_deadlines_do_not_exhaust_transport_tasks` 在 1s UDP 接收超时处失败，单独重跑 3 次及随后全量重跑均通过，判断为并行负载下的计时抖动，与本变更无直接关系。本地 `_fluxdns/` 运行验收尚未执行，由[负缓存新鲜度计划](../../plans/negative-cache-freshness.md)跟踪。
 

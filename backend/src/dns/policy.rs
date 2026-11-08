@@ -1080,13 +1080,20 @@ impl PolicyDnsCore {
             PolicyUpstreamOutcome::Response(mut response)
                 if response.matches_query(&request.query) =>
             {
-                if response.is_negative()
-                    && let Some(max) = self.negative_ttl_max()
-                {
-                    // 只压客户端可见 TTL；commit candidate 持有的是共享前的 origin response。
-                    Arc::make_mut(&mut response).cap_negative_ttl(max);
+                if let Some(ttl) = response.short_cache_ttl() {
+                    if outcome.source != StatsSource::Cache {
+                        // 缓存命中已按剩余寿命改写，不能在输出阶段重新补满 10s。
+                        Arc::make_mut(&mut response).rewrite_short_cache_ttl(ttl);
+                    }
+                } else {
+                    if response.is_negative()
+                        && let Some(max) = self.negative_ttl_max()
+                    {
+                        // 只压客户端可见 TTL；commit candidate 保留 origin response。
+                        Arc::make_mut(&mut response).cap_negative_ttl(max);
+                    }
+                    apply_ttl_override(Arc::make_mut(&mut response), &plan.ttl_override);
                 }
-                apply_ttl_override(Arc::make_mut(&mut response), &plan.ttl_override);
                 Ok(CoreOutcome::Response(response))
             }
             PolicyUpstreamOutcome::Cancelled(_) => Ok(CoreOutcome::NoResponse),
@@ -1576,14 +1583,24 @@ fn apply_ttl_override(response: &mut CanonicalResponse, ttl_override: &ResolvedT
 
 /// 从 fresh cache record 构造客户端响应，并按已缓存时间递减 RR TTL。
 ///
-/// 负应答额外压到条目剩余寿命与 `negative_ttl_max` 以内：条目到期后 FluxDNS 会回源，
-/// 客户端不应继续按 SOA 原值（可能长达数小时）缓存“不存在”。
+/// 短期响应直接使用剩余寿命并同步 SOA.MINIMUM；其余负应答仍按配置上限截断。
+/// 不改写缓存中的 origin response，避免污染 checksum 或客户端之间共享的响应。
 fn fresh_cache_response(
     record: &crate::ports::cache::CacheRecord,
     negative_ttl_max: Option<Duration>,
 ) -> CanonicalResponse {
     let now = Instant::now();
     let mut response = (*record.entry.response).clone();
+    if let Some(ttl) = response.short_cache_ttl() {
+        response.rewrite_short_cache_ttl(
+            record
+                .entry
+                .expires_at
+                .saturating_duration_since(now)
+                .min(ttl),
+        );
+        return response;
+    }
     response.age_ttl(now.saturating_duration_since(record.entry.inserted_at));
     if response.is_negative() {
         let remaining = record.entry.expires_at.saturating_duration_since(now);
@@ -1627,7 +1644,9 @@ fn cached_completion(
         .clone()
         .filter(|selected| upstream_id.as_ref() != selected.as_ref());
     let result = if response.matches_query(&request.query) {
-        apply_ttl_override(&mut response, &context.ttl_override);
+        if response.short_cache_ttl().is_none() {
+            apply_ttl_override(&mut response, &context.ttl_override);
+        }
         Ok(CoreOutcome::Response(Arc::new(response)))
     } else {
         servfail(request)
@@ -1652,14 +1671,16 @@ fn cached_completion(
 
 /// 仅在当前 pool 对该响应质量允许的 optimistic max-age 内返回其 stale answer TTL。
 ///
-/// 完整应答使用 `max_age`，NODATA/NXDOMAIN 使用 `negative_max_age`，SERVFAIL/TC 永不乐观返回。
-/// 条目自身的 `stale_until` 由共享 store 按最宽池写入，这里按当前池再次收紧，因此快照恢复的
-/// 旧长窗口负条目也会按当前规则回源。
+/// REFUSED/空 Answer 到期即回源；其余应答按质量使用当前池窗口，Failure 永不乐观返回。
+/// 即使条目携带旧的长 stale_until，也不能绕过短期响应规则。
 fn stale_answer_ttl(
     decision: &crate::policy::CacheDecision,
     entry: &crate::ports::cache::CacheEntry,
     now: Instant,
 ) -> Option<Duration> {
+    if entry.response.short_cache_ttl().is_some() {
+        return None;
+    }
     let answer_ttl = decision.optimistic_answer_ttl()?;
     let max_age = match entry.quality {
         CacheQuality::Complete => decision.optimistic_max_age()?,
@@ -2429,6 +2450,7 @@ mod tests {
     struct FakeDohTransport {
         request: Mutex<Option<DohHttpRequest>>,
         calls: AtomicUsize,
+        positive: bool,
     }
 
     struct ServFailDohTransport;
@@ -2496,6 +2518,14 @@ mod tests {
             Self {
                 request: Mutex::new(None),
                 calls: AtomicUsize::new(0),
+                positive: false,
+            }
+        }
+
+        fn positive() -> Self {
+            Self {
+                positive: true,
+                ..Self::new()
             }
         }
     }
@@ -2515,6 +2545,13 @@ mod tests {
                 Message::new(query.metadata.id, MessageType::Response, OpCode::Query);
             response.metadata.response_code = ResponseCode::NoError;
             response.add_query(query.queries[0].clone());
+            if self.positive {
+                response.add_answer(Record::from_rdata(
+                    query.queries[0].name().clone(),
+                    30,
+                    RData::A(A(std::net::Ipv4Addr::new(192, 0, 2, 30))),
+                ));
+            }
             let body = response.to_vec().unwrap();
             Box::pin(async move {
                 Ok(DohHttpResponseOwned {
@@ -3345,9 +3382,8 @@ mod tests {
         let mut config = Arc::try_unwrap(doh_config()).unwrap();
         config.dns.cache.enabled = true;
         config.dns.cache.optimistic.enabled = true;
-        config.dns.cache.failure_ttl = Duration::from_millis(20);
         let config = Arc::new(config);
-        let transport = Arc::new(FakeDohTransport::new());
+        let transport = Arc::new(FakeDohTransport::positive());
         let registry = UpstreamRegistry::from_resolved_with_doh_transport(
             &config.upstreams,
             transport.clone(),
@@ -3373,7 +3409,7 @@ mod tests {
         let key = cache_key(&core, &plan, &first_request).unwrap();
         let first = core.resolve(&first_request).await.unwrap();
         assert!(
-            matches!(first, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::NoData)
+            matches!(first, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::Positive)
         );
 
         let record = match core
@@ -3412,7 +3448,7 @@ mod tests {
         let stale_request = request("remote.example.", RecordType::A);
         let stale = core.resolve(&stale_request).await.unwrap();
         assert!(
-            matches!(stale, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::NoData)
+            matches!(stale, CoreOutcome::Response(response) if response.class() == crate::dns::ResponseClass::Positive)
         );
 
         let mut refreshed = false;
@@ -3440,10 +3476,9 @@ mod tests {
         let mut config = Arc::try_unwrap(doh_config()).unwrap();
         config.dns.cache.enabled = true;
         config.dns.cache.optimistic.enabled = true;
-        config.dns.cache.failure_ttl = Duration::from_millis(20);
         let config = Arc::new(config);
-        let old_transport = Arc::new(FakeDohTransport::new());
-        let latest_transport = Arc::new(FakeDohTransport::new());
+        let old_transport = Arc::new(FakeDohTransport::positive());
+        let latest_transport = Arc::new(FakeDohTransport::positive());
         let old_registry = UpstreamRegistry::from_resolved_with_doh_transport(
             &config.upstreams,
             old_transport.clone(),

@@ -11,6 +11,8 @@
 > 关联文档：[Cache 模块设计](../architecture/backend/modules/cache.md) · [配置参考](../implementation/configuration.md) · [DNS 管线](../implementation/backend/dns-pipeline.md)
 >
 > 实施状态（2026-10-04）：§7 步骤 1–6 的代码与文档沉淀已完成，按 §10 建议值实施；当前行为以[配置参考](../implementation/configuration.md#81-dnscache)、[DNS 管线](../implementation/backend/dns-pipeline.md#负缓存新鲜度验证)与[前端页面实现](../implementation/frontend/pages.md)为准。`/clients` 页面没有乐观缓存编辑项，未加入新字段。剩余仅 §9 的本地 `_fluxdns/` 运行验收；完成后删除本方案及索引项。
+>
+> 范围更新（2026-11-08）：用户已确认 REFUSED/所有空 Answer 响应固定缓存 10s、客户端 RR TTL/SOA.MINIMUM 同步改写、到期立即回源且不乐观续用。下文涉及 NODATA/空 NXDOMAIN 的原 300s 与短乐观窗口设计和验收口径由[当前短响应实现](../implementation/backend/dns-pipeline.md#短响应缓存验证)替代；非空 NXDOMAIN 保持既有配置策略。保留待验收状态，剩余本地可控上游现场验收应验证新的 10s 口径、正常答案不受影响及后台写入/刷新观测，不再要求空响应 stale 返回。
 
 ## 1. 问题
 

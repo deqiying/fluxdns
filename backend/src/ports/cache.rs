@@ -16,7 +16,8 @@ use super::{PortError, PortFuture};
 /// 否则 store 会在 `expires_at`（或乐观窗口结束）时删除条目，两种回源原因不可区分。
 /// 该窗口只影响诊断与写回条件，不影响任何可返回给客户端的答案。
 pub const EXPIRED_ENTRY_RETENTION: std::time::Duration = std::time::Duration::from_secs(60);
-pub const CACHE_ENTRY_FORMAT_VERSION: u16 = 2;
+/// v3 新增 REFUSED/其他空响应分类，并标记统一 10s、不乐观续用的短缓存语义。
+pub const CACHE_ENTRY_FORMAT_VERSION: u16 = 3;
 
 /// 缓存策略的稳定标识。
 ///
@@ -229,6 +230,8 @@ pub enum CacheResponseClass {
     NxDomain,
     ServFail,
     Truncated,
+    Refused,
+    Other,
 }
 
 pub struct CacheEntry {

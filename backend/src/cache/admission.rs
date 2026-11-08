@@ -11,9 +11,9 @@ use crate::ports::cache::{
 
 /// CacheStore 之外的准入参数；配置校验负责保证 failure TTL 为正数。
 ///
-/// 乐观窗口按响应质量区分：完整应答使用 `optimistic_max_age`，NODATA/NXDOMAIN 使用
-/// `negative_optimistic_max_age`，SERVFAIL/TC 不设置 stale 窗口。共享 store 时这里取各启用
-/// 池中的最大值，实际能否返回 stale 仍由当前请求所选池在 lookup 后再次判定。
+/// REFUSED 与空 Answer 固定缓存 10s 且不允许 stale，优先于下面的策略参数。
+/// 其余应答按质量选窗口：完整应答使用 `optimistic_max_age`，带 Answer 的 NXDOMAIN 使用
+/// `negative_optimistic_max_age`，SERVFAIL/TC 不设置 stale 窗口；lookup 再按当前池收紧。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheAdmissionPolicy {
     pub failure_ttl: Duration,
@@ -56,7 +56,6 @@ impl Default for CacheAdmissionPolicy {
 /// 不应写入 response cache 的终态。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CacheAdmissionRejection {
-    Refused,
     OtherResponse,
     MissingTtl,
     ZeroTtl,
@@ -96,6 +95,7 @@ pub fn admit_response(
     now: Instant,
     producer_revision: RuntimeRevision,
 ) -> Result<CacheAdmissionOutcome, CacheAdmissionError> {
+    let short_ttl = response.short_cache_ttl();
     let (response_class, quality, ttl) = match response.class() {
         ResponseClass::Positive => (
             CacheResponseClass::NoError,
@@ -126,11 +126,16 @@ pub fn admit_response(
             CacheQuality::Failure,
             Ok(policy.failure_ttl),
         ),
-        ResponseClass::Refused => {
-            return Ok(CacheAdmissionOutcome::Rejected(
-                CacheAdmissionRejection::Refused,
-            ));
-        }
+        ResponseClass::Refused => (
+            CacheResponseClass::Refused,
+            CacheQuality::Failure,
+            Ok(Duration::from_secs(10)),
+        ),
+        ResponseClass::Other(_) if short_ttl.is_some() => (
+            CacheResponseClass::Other,
+            CacheQuality::Failure,
+            Ok(Duration::from_secs(10)),
+        ),
         ResponseClass::Other(_) => {
             return Ok(CacheAdmissionOutcome::Rejected(
                 CacheAdmissionRejection::OtherResponse,
@@ -138,7 +143,7 @@ pub fn admit_response(
         }
     };
 
-    let ttl = match ttl {
+    let ttl = match short_ttl.map(Ok).unwrap_or(ttl) {
         Ok(ttl) if !ttl.is_zero() => ttl,
         Ok(_) => {
             return Ok(CacheAdmissionOutcome::Rejected(
@@ -148,11 +153,15 @@ pub fn admit_response(
         Err(rejection) => return Ok(CacheAdmissionOutcome::Rejected(rejection)),
     };
     let expires_at = now.checked_add(ttl).unwrap_or(now);
-    let stale_window = match quality {
-        CacheQuality::Complete => policy.optimistic_max_age,
-        CacheQuality::Negative => policy.negative_optimistic_max_age,
-        // 旧的失败没有可用答案价值，过期后必须回源。
-        CacheQuality::Failure => None,
+    let stale_window = if short_ttl.is_some() {
+        // 短期拒绝/空结果到期即回源，不允许负缓存乐观窗口继续延长。
+        None
+    } else {
+        match quality {
+            CacheQuality::Complete => policy.optimistic_max_age,
+            CacheQuality::Negative => policy.negative_optimistic_max_age,
+            CacheQuality::Failure => None,
+        }
     };
     let stale_until = stale_window
         .filter(|max_age| !max_age.is_zero())
@@ -306,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn uses_failure_ttl_for_negative_and_sets_negative_stale_window() {
+    fn empty_negative_uses_ten_seconds_without_stale_window() {
         let now = Instant::now();
         let policy =
             CacheAdmissionPolicy::new(Duration::from_secs(7), Some(Duration::from_secs(60)))
@@ -314,9 +323,8 @@ mod tests {
         let entry = accepted(policy, response_with_code(ResponseCode::NXDomain), now);
         assert_eq!(entry.response_class, CacheResponseClass::NxDomain);
         assert_eq!(entry.quality, CacheQuality::Negative);
-        assert_eq!(entry.expires_at, now + Duration::from_secs(7));
-        // 负应答使用独立窗口，而不是完整应答的 60s。
-        assert_eq!(entry.stale_until, Some(now + Duration::from_secs(27)));
+        assert_eq!(entry.expires_at, now + Duration::from_secs(10));
+        assert_eq!(entry.stale_until, None);
     }
 
     #[test]
@@ -330,31 +338,21 @@ mod tests {
     }
 
     #[test]
-    fn negative_ttl_max_caps_soa_negative_ttl_only_for_negative_classes() {
+    fn empty_response_ttl_overrides_soa_and_config_without_affecting_positive() {
         let now = Instant::now();
         let policy = CacheAdmissionPolicy::new(Duration::from_secs(5), None)
-            .with_negative(Some(Duration::from_secs(300)), None);
-        // SOA 1800/1800：NODATA 与 NXDOMAIN 都被截到 300s。
-        let nodata = accepted(
-            policy,
-            negative_with_soa(ResponseCode::NoError, 1800, 1800),
-            now,
-        );
-        assert_eq!(nodata.response_class, CacheResponseClass::NoData);
-        assert_eq!(nodata.expires_at, now + Duration::from_secs(300));
-        let nxdomain = accepted(
-            policy,
-            negative_with_soa(ResponseCode::NXDomain, 3600, 1800),
-            now,
-        );
-        assert_eq!(nxdomain.expires_at, now + Duration::from_secs(300));
-        // 低于上限的负 TTL 保持原值，上限只往下压。
-        let short = accepted(
-            policy,
-            negative_with_soa(ResponseCode::NoError, 1800, 60),
-            now,
-        );
-        assert_eq!(short.expires_at, now + Duration::from_secs(60));
+            .with_negative(Some(Duration::from_secs(3)), Some(Duration::from_secs(300)));
+        for code in [ResponseCode::NoError, ResponseCode::NXDomain] {
+            for origin_ttl in [0, 1, 60, 1800] {
+                let response = negative_with_soa(code, origin_ttl, origin_ttl);
+                let checksum = canonical_checksum(&response).unwrap();
+                let entry = accepted(policy, response, now);
+                assert_eq!(entry.expires_at, now + Duration::from_secs(10));
+                assert_eq!(entry.stale_until, None);
+                assert_eq!(entry.response.ttl().negative_ttl, Some(origin_ttl));
+                assert_eq!(entry.checksum, checksum, "缓存保留 origin response");
+            }
+        }
 
         // 完整应答不受负 TTL 上限影响。
         let query = query();
@@ -388,20 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_refused_and_zero_ttl_responses() {
-        let refused = admit_response(
-            CacheAdmissionPolicy::default(),
-            Arc::new(response_with_code(ResponseCode::Refused)),
-            upstream(),
-            Instant::now(),
-            RuntimeRevision(1),
-        )
-        .unwrap();
-        assert!(matches!(
-            refused,
-            CacheAdmissionOutcome::Rejected(CacheAdmissionRejection::Refused)
-        ));
-
+    fn refuses_zero_ttl_positive_responses() {
         let query = query();
         let answer = Record::from_rdata(
             Name::from_str("example.com.").unwrap(),
@@ -420,6 +405,68 @@ mod tests {
             zero_ttl,
             CacheAdmissionOutcome::Rejected(CacheAdmissionRejection::ZeroTtl)
         ));
+    }
+
+    #[test]
+    fn admits_empty_response_codes_and_refused_with_answers_for_ten_seconds() {
+        let now = Instant::now();
+        let policy =
+            CacheAdmissionPolicy::new(Duration::from_secs(100), Some(Duration::from_secs(60)));
+        for code in [
+            ResponseCode::NoError,
+            ResponseCode::NXDomain,
+            ResponseCode::Refused,
+            ResponseCode::ServFail,
+            ResponseCode::FormErr,
+            ResponseCode::NotImp,
+        ] {
+            for truncated in [false, true] {
+                let mut message = response_with_code(code).into_message();
+                message.metadata.truncation = truncated;
+                let response =
+                    CanonicalResponse::from_message(message, &query(), DnsMessageId::new(0))
+                        .unwrap();
+                let entry = accepted(policy, response, now);
+                assert_eq!(entry.expires_at, now + Duration::from_secs(10));
+                assert_eq!(entry.stale_until, None);
+                assert_eq!(entry.response.as_message().metadata.response_code, code);
+                assert_eq!(entry.response.as_message().metadata.truncation, truncated);
+            }
+        }
+        let mut refused = positive_response().into_message();
+        refused.metadata.response_code = ResponseCode::Refused;
+        let entry = accepted(
+            policy,
+            CanonicalResponse::from_message(refused, &query(), DnsMessageId::new(0)).unwrap(),
+            now,
+        );
+        assert_eq!(entry.response_class, CacheResponseClass::Refused);
+        assert_eq!(entry.quality, CacheQuality::Failure);
+        assert_eq!(entry.expires_at, now + Duration::from_secs(10));
+        assert_eq!(entry.stale_until, None);
+    }
+
+    #[test]
+    fn nonempty_negative_and_failure_keep_existing_policies() {
+        let now = Instant::now();
+        let policy = CacheAdmissionPolicy::new(Duration::from_secs(7), None)
+            .with_negative(Some(Duration::from_secs(20)), Some(Duration::from_secs(40)));
+        for code in [ResponseCode::NXDomain, ResponseCode::ServFail] {
+            let mut message = positive_response().into_message();
+            message.metadata.response_code = code;
+            let entry = accepted(
+                policy,
+                CanonicalResponse::from_message(message, &query(), DnsMessageId::new(0)).unwrap(),
+                now,
+            );
+            let (ttl, stale) = if code == ResponseCode::NXDomain {
+                (20, Some(now + Duration::from_secs(60)))
+            } else {
+                (7, None)
+            };
+            assert_eq!(entry.expires_at, now + Duration::from_secs(ttl));
+            assert_eq!(entry.stale_until, stale);
+        }
     }
 
     #[test]

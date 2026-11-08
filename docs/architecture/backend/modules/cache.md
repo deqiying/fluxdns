@@ -14,6 +14,8 @@
 >
 > 2026-10-04 局部评审：仅核对负缓存 TTL 上限、按条目质量区分的 stale 窗口与刷新结果观测；不代表整篇重审，本地运行验收见[负缓存新鲜度计划](../../../plans/negative-cache-freshness.md)
 >
+> 2026-11-08 局部评审：REFUSED/空 Answer 固定 10s、禁止 stale、客户端 TTL 同步及 entry v3 恢复边界；本次不改变上游响应选择与 fallback。
+>
 > 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[snapshot.rs](../../../../backend/src/cache/snapshot.rs)、[snapshot_owner.rs](../../../../backend/src/cache/snapshot_owner.rs)
 >
 > 关联文档：[后端设计](../overview.md) · [配置参考](../../../implementation/configuration.md) · [DNS 管线](../../../implementation/backend/dns-pipeline.md) · [后台服务](../../../implementation/backend/background-services.md)
@@ -49,10 +51,10 @@ Fast eligibility 对策略可达 target 保持保守：只要任一可达 group 
 entry 保存 canonical response、inserted/expiry/stale-until、原始 RR TTL、response class、producer revision、quality、checksum/format，以及缓存生产请求的 target/actual upstream provenance。上游 TC 额外受 transport compatibility 限制。policy/resource fingerprint 已在 key 内；producer revision 只用于诊断/CAS，不作为全局失效开关。
 
 - 正常 NOERROR 按可用 RR TTL 决定生命周期，返回时逐 RR 扣减。
-- NODATA/NXDOMAIN 优先取 SOA TTL 与 MINIMUM 较小值，无可用值时用 failure TTL，最终不超过 `negative_ttl_max`。客户端可见负 TTL 在输出阶段截到同一上限（fresh 命中时再与剩余寿命取小），origin response 不改写；answer 只有 CNAME 链的响应属于正应答，不受影响。
-- SERVFAIL/上游 TC 使用 failure TTL；REFUSED、未知类、零/缺失 TTL、malformed、question mismatch、连接/TLS/HTTP failure 或 timeout 不准入。
-- TTL override 只改变 client-visible TTL，不延长 entry expiry；持有 origin response 的候选不得被输出覆写污染。
-- 质量顺序是完整 NOERROR/TC=0、NODATA/NXDOMAIN、SERVFAIL/TC；低质量不得覆盖仍 fresh 的高质量，同质量默认保留先到值到 expiry。
+- REFUSED 与所有通过协议校验、Answer 为空的上游响应固定缓存 10s，不依赖 SOA/原 TTL，也不受 failure TTL、negative TTL 上限或 TTL override 改变。客户端首答的 RR TTL 与 SOA.MINIMUM 同步改为 10s，命中时使用剩余寿命；无 RR 时不伪造记录。origin response 与 checksum 保留原文。
+- 非空 NXDOMAIN 仍按 SOA/最小 RR TTL/failure TTL 与负 TTL 上限处理；普通非空 NOERROR（包括仅 CNAME 链）保持原 TTL。非空 SERVFAIL/上游 TC 沿用 failure TTL。非空未知类、正答案零/缺失 TTL、malformed、question mismatch、连接/TLS/HTTP failure 或 timeout 不准入。
+- TTL override 只改变非短响应的 client-visible TTL，不延长 entry expiry；持有 origin response 的候选不得被输出覆写污染。
+- 质量顺序是完整 NOERROR/TC=0、NODATA/NXDOMAIN、SERVFAIL/TC/REFUSED/Other；低质量不得覆盖仍 fresh 的高质量，同质量默认保留先到值到 expiry。
 
 ## 4. Lookup 与 single-flight
 
@@ -70,9 +72,9 @@ single-flight key 与 cache key 一致：
 
 ## 5. Optimistic 与 late result
 
-只有 optimistic 开启、未超过 stale-until、transport compatible、响应类允许且 refresh admission 有容量时才可先返回 stale。响应类按 entry quality 决定窗口：完整正应答用 `max_age`，NODATA/NXDOMAIN 用独立且更短的 `negative_max_age`（运行时不超过 `max_age`，`0s` 关闭），SERVFAIL/TC 不允许 stale。共享 store 按启用池中各质量的最大窗口写入 stale-until（admission 宽），实际返回仍按当前所选池与 entry quality 再次收紧并受 answer TTL 限制（lookup 严），再应用输出 TTL override；因此快照恢复的旧长窗口负条目无需迁移格式即按当前规则回源。
+只有 optimistic 开启、未超过 stale-until、transport compatible、响应类允许且 refresh admission 有容量时才可先返回 stale。REFUSED/空 Answer 永不 stale，10s 到期即回源，即使条目带有旧的长 stale-until 也不能绕过。其余条目按质量选窗口：完整正应答用 `max_age`，非空 NXDOMAIN 用 `negative_max_age`，失败类不允许 stale。共享 store 按启用池的最大窗口写入，lookup 按当前所选池再次收紧。
 
-负应答不能用长 stale 窗口兜底：冷门 NODATA/NXDOMAIN 一旦越过负窗口必须同步回源一次，避免新生效的记录被很久以前的“不存在”遮蔽；热门负 key 仍在短窗口内由后台刷新维持，常态不增加同步回源。刷新与写入活动记录写入结果的响应类与写入 TTL，用于区分“刷新成功但上游仍返回空应答”与真正拿到新记录。
+短期拒绝/空结果不能用长 stale 窗口兜底，以免遮蔽新增记录。后台刷新仍可将旧正答案替换为新的短期结果，但该结果本身到期后必须同步回源。刷新与写入活动保留响应类及实际写入 TTL，用于区分空响应与有效记录。
 
 乐观缓存未启用或乐观窗口已经结束时，lookup 返回 Expired 而不是 Miss；两者都要回源，但必须保留这一区分，否则无法判断某次解析是因为条目过期还是因为从未缓存。过期条目仍占用 key，写回必须按版本 CAS 替换，不能当作不存在写入。
 
@@ -103,7 +105,7 @@ Fast/Resolved stale 必须共用刷新流程：切到最新可用 core 后重新
 
 快照没有用户可配置的磁盘大小配额，也不承诺文件大小等于 Moka weight 或 RSS。读取仍受文件字节数、单条大小、记录数、批次和 deadline 保护；先验证整个文件的长度与摘要，再分批解码。恢复逐条检查 key/entry version、checksum、绝对 expiry/stale-until 和当前内存预算，只装载仍可用于应答的条目（写入侧可见的过期条目计入 `expired`，不补回内存），停机时间不会重新补满 TTL。损坏、未知版本、超时或预算不足只形成冷启/部分恢复状态，不阻止 DNS 服务。
 
-本次语义调整不提升 cache key format v2 或 `FDCS` snapshot format。Resolved 纳入完整 policy fingerprint，Fast/Resolved 共用的语义摘要新增完整 DoH endpoint；升级前的相关记录仍可按原格式解码，但新请求使用不同 key，因此自然冷启动并按原 TTL 或容量策略淘汰。不能把这种 key 切换误报为快照格式不兼容，具体兼容性说明见[配置参考](../../../implementation/configuration.md)。
+cache key format v2 与外层 `FDCS` 格式不变，entry payload 升为 v3：新增 Refused/Other 分类，v3 短响应无 stale 窗口。v2 普通非空条目可按同布局恢复并转换成 v3；v2 REFUSED/空 Answer 条目不兼容并冷启动，不能沿用旧的长 fresh/stale 生命周期。绝对到期时间仍是恢复依据，不因重启补满短 TTL。详细兼容性见[配置参考](../../../implementation/configuration.md)。
 
 内存 commit 不再产生逐条 persistence 队列。周期任务覆盖当时的完整可见集合，被内存预算淘汰或显式清理的记录会从下一份快照消失。owner/path 切换和未来 clear 必须递增 generation，使旧任务失去发布权；正常 shutdown 只在统一剩余预算内尽力补写，不无限延长退出。
 
@@ -116,7 +118,7 @@ Facade 提供 exact key、namespace、typed predicate 和 all 失效。普通资
 ## 9. 契约验证要求
 
 - namespace、Fast/Resolved 不 alias、两种 mode 共用完整 policy semantics fingerprint、target/ECS 维度和资源更新不全局 clear。
-- 正/负/failure TTL、REFUSED 拒绝、质量 CAS、并发乱序和 client-visible TTL 隔离。
+- 正/负/failure TTL、REFUSED/空 Answer 的 10s 准入与到期回源、RR/SOA TTL 同步及 override 隔离、质量 CAS、并发乱序与 entry v2/v3 恢复。
 - 多 waiter 取消、candidate drop、commit 终态、占位上限和关闭后拒绝。
 - uniform/heterogeneous group ECS、Fast 保守禁用但 Resolved 可用、Fast/Resolved optimistic 的同 store/key 与跨 store/key CAS、跨 runtime late-result 语义接纳、独立 deadline 和失败不延长 stale。
 - Moka weight/expiry、分批导出、format/header/checksum/recovery、内存预算与实际文件大小的区别。
