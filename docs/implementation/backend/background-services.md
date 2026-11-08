@@ -15,10 +15,14 @@
 > 2026-09-08 增量核对：BC-11 已核对 schema v9、共同水位、每日 scheduler、manifest 物理回收与生产 owner；其余正文保留原核对范围
 >
 > 2026-11-07 增量核对：`eedc312` 加本次工作树，仅核对 V4-S01 的触发器 DDL 连接生命周期及旧 schema 回归；生产连接池、事务和重试语义不变
+>
+> 2026-11-08 增量核对：`de39a28` 加本次工作树，仅核对 dat selector 按需加载在 prepare、remote 恢复/抓取与 file/remote 刷新链路的接线
 
 ## 资源准备与刷新
 
 [`PreparedRuntime::prepare_with_policy_core_and_remote_resources`](../../../backend/src/runtime/prepared.rs) 装配 [`ReqwestResourceFetcher`](../../../backend/src/resource/fetcher.rs)，先形成 file hosts/rule-set 和 remote rule-set 的可用 snapshot，再创建 core。remote 数据由 [`remote.rs`](../../../backend/src/resource/remote.rs) 恢复或抓取并持久化，解析器在 [`resource/rules.rs`](../../../backend/src/resource/rules.rs) 与 [`hosts.rs`](../../../backend/src/resource/hosts.rs)，不是请求时解析原始文件。
+
+dat 规则集的 [`load_rule_set`](../../../backend/src/resource/loader.rs)、`fetch_remote_rule_set` 与 `restore_remote_rule_set` 都从 `ResolvedRuleSet.selectors` 取引用集合并以 `DatSelection::Only` 解析；file/remote 刷新 worker 持有同一 `ResolvedRuleSet`，因此刷新也只编译被引用的 selector。被引用 selector 缺失时刷新失败并保留旧 snapshot。原始文件或 body 在解析期间仍完整读入内存，解析结束即释放；常驻部分只有被引用 selector 的索引。
 
 `auto_update` 对应的 worker 由 [`service.rs`](../../../backend/src/service.rs) 的 `run_resource_refresh_loop` 纳入 Supervisor，通过 coordinator 查询当前活动实例。刷新在 per-resource epoch/CAS 边界发布，并合并 Policy 内容与 runtime metadata；旧候选/旧 runtime 结果不会直接覆盖新实例。失败保留旧 snapshot，stale/retry 由 [`scheduler.rs`](../../../backend/src/resource/scheduler.rs) 与 [`refresh.rs`](../../../backend/src/resource/refresh.rs) 管理。
 
@@ -141,6 +145,7 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | remote/file 刷新 | 条件 fetch、manifest v2、epoch/CAS、scheduler | async prepare + service resource task | loopback 200/304 与真实条件头；重复 304、坏 pair/响应、旧 manifest、换代及同预算重试 | 未执行真实远程/代理组合 |
+| dat selector 按需加载 | `collect_rule_set_selectors`、`DatSelection`、`RuleIndex::parse_dat_with_limits` | loader/remote 恢复与抓取、file/remote 刷新 worker | 2026-11-08 Windows `cargo test` 全量通过，含选择性索引、计数口径、未引用只校验结构、缺失 selector 诊断、引用变化判定为资源变化；本机 release 加载 Loyalsoldier `geosite.dat` 的内存对比见[配置参考](../configuration.md#14-rule_set) | 未在 Linux/glibc 部署环境复测内存；remote 304 路径仍会解析两次 |
 | stats/detail | 统计 schema v9 + v2 layout marker、详情分片 layout v1、registry/lease、稳定 ID、跨日 cursor、commit stream、共同水位/manifest/run state、StorageRuntime、ResolutionRuntime | app 从 v2 配置打开独立统计库/records_path 并恢复水位；唯一 01:00 retention owner 消费配置 R/G/T | 真实布局初始化/重开/旧库拒绝、R/G/T、水位、调度与回收回归 | HTTP/WS 待 BC-13/25；未验证 Linux、真实权限/磁盘满 |
 | cache 二进制快照 owner | `FDCS` header/SHA-256、Moka 分批导出/恢复、周期 worker、generation | app 从 v2 enabled/path/interval 启动恢复 + coordinator reload + service shutdown | Windows 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际/超时定向测试 | 未验证真实权限/磁盘满或 Unix |
 | telemetry lifecycle / 聚合 | histogram、typed writer、registry、sampler | dispatcher + app/service 周期及最终 flush | 固定桶/标签、溢出原子性、拥塞下聚合、关闭详情、输出重试、reload 与最终快照 | 没有 exporter/逐 attempt 流；长期负载与全部输出故障未验收 |

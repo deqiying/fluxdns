@@ -1,5 +1,6 @@
 //! Normalization and immutable resolved configuration construction.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -552,12 +553,18 @@ pub enum ProxyScheme {
     Socks5h,
 }
 
+/// 已解析的规则集资源。
+///
+/// `selectors` 只对 `dat` 格式有意义：它是全部 strategy 对该资源引用的 canonical
+/// selector 集合，加载/刷新时只为其中的 selector 建索引，未引用的 selector 只做结构
+/// 校验。其他格式恒为空集合。该字段参与相等比较，引用集合变化即视为资源变化并重新解析。
 #[derive(Clone, Eq, PartialEq)]
 pub enum ResolvedRuleSet {
     Const {
         id: ConfigId,
         format: super::model::RuleSetFormat,
         rule: String,
+        selectors: BTreeSet<String>,
     },
     File {
         id: ConfigId,
@@ -565,6 +572,7 @@ pub enum ResolvedRuleSet {
         path: PathBuf,
         auto_update: bool,
         update_interval: Option<Duration>,
+        selectors: BTreeSet<String>,
     },
     Remote {
         id: ConfigId,
@@ -573,17 +581,41 @@ pub enum ResolvedRuleSet {
         proxy: Option<ConfigId>,
         auto_update: bool,
         update_interval: Option<Duration>,
+        selectors: BTreeSet<String>,
     },
+}
+
+impl ResolvedRuleSet {
+    pub fn id(&self) -> &ConfigId {
+        match self {
+            Self::Const { id, .. } | Self::File { id, .. } | Self::Remote { id, .. } => id,
+        }
+    }
+
+    /// strategy 实际引用的 dat selector；非 dat 格式为空。
+    pub fn selectors(&self) -> &BTreeSet<String> {
+        match self {
+            Self::Const { selectors, .. }
+            | Self::File { selectors, .. }
+            | Self::Remote { selectors, .. } => selectors,
+        }
+    }
 }
 
 impl fmt::Debug for ResolvedRuleSet {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Const { id, format, rule } => formatter
+            Self::Const {
+                id,
+                format,
+                rule,
+                selectors,
+            } => formatter
                 .debug_struct("ResolvedRuleSet::Const")
                 .field("id", id)
                 .field("format", format)
                 .field("rule_len", &rule.len())
+                .field("selectors", selectors)
                 .finish(),
             Self::File {
                 id,
@@ -591,6 +623,7 @@ impl fmt::Debug for ResolvedRuleSet {
                 path,
                 auto_update,
                 update_interval,
+                selectors,
             } => formatter
                 .debug_struct("ResolvedRuleSet::File")
                 .field("id", id)
@@ -598,6 +631,7 @@ impl fmt::Debug for ResolvedRuleSet {
                 .field("path", path)
                 .field("auto_update", auto_update)
                 .field("update_interval", update_interval)
+                .field("selectors", selectors)
                 .finish(),
             Self::Remote {
                 id,
@@ -606,6 +640,7 @@ impl fmt::Debug for ResolvedRuleSet {
                 proxy,
                 auto_update,
                 update_interval,
+                selectors,
             } => formatter
                 .debug_struct("ResolvedRuleSet::Remote")
                 .field("id", id)
@@ -614,6 +649,7 @@ impl fmt::Debug for ResolvedRuleSet {
                 .field("proxy", proxy)
                 .field("auto_update", auto_update)
                 .field("update_interval", update_interval)
+                .field("selectors", selectors)
                 .finish(),
         }
     }
@@ -853,7 +889,7 @@ pub(crate) fn resolve_config_v2(
         retention_grace_days: config.statistics.retention.grace_days,
         retention_reference_size_bytes: config.statistics.retention.reference_size_bytes,
     };
-    let strategies = config
+    let strategies: Vec<ResolvedStrategy> = config
         .strategy
         .iter()
         .map(|strategy| {
@@ -865,6 +901,7 @@ pub(crate) fn resolve_config_v2(
             )
         })
         .collect();
+    let referenced_selectors = collect_rule_set_selectors(&strategies);
     let listeners = config
         .listener
         .iter()
@@ -888,7 +925,7 @@ pub(crate) fn resolve_config_v2(
     let rule_sets = config
         .rule_set
         .iter()
-        .map(|resource| resolve_rule_set(resource, &work.path))
+        .map(|resource| resolve_rule_set(resource, &work.path, &referenced_selectors))
         .collect();
     let clients = config
         .clients
@@ -1335,42 +1372,81 @@ fn resolve_outbound(outbound: &OutboundDto, work_path: &Path) -> ResolvedOutboun
     }
 }
 
-fn resolve_rule_set(resource: &RuleSetDto, work_path: &Path) -> ResolvedRuleSet {
+/// 汇总每个规则集资源被 strategy 引用的 canonical selector。
+///
+/// 结果只用于 `dat` 按需加载；无 selector 的引用不进入集合，由 Policy prepare 继续拒绝。
+fn collect_rule_set_selectors(
+    strategies: &[ResolvedStrategy],
+) -> BTreeMap<ConfigId, BTreeSet<String>> {
+    let mut referenced: BTreeMap<ConfigId, BTreeSet<String>> = BTreeMap::new();
+    for reference in strategies
+        .iter()
+        .flat_map(|strategy| &strategy.rules)
+        .filter_map(|rule| rule.rule_set.as_ref())
+    {
+        if let Some(selector) = &reference.selector {
+            referenced
+                .entry(reference.resource.clone())
+                .or_default()
+                .insert(selector.clone());
+        }
+    }
+    referenced
+}
+
+fn resolve_rule_set(
+    resource: &RuleSetDto,
+    work_path: &Path,
+    referenced_selectors: &BTreeMap<ConfigId, BTreeSet<String>>,
+) -> ResolvedRuleSet {
+    let (name, format) = match resource {
+        RuleSetDto::Const { name, format, .. }
+        | RuleSetDto::File { name, format, .. }
+        | RuleSetDto::Remote { name, format, .. } => (name, *format),
+    };
+    let id = ConfigId::new(name.clone()).expect("validated rule_set id");
+    // 只有 dat 是 selector map；其他格式保持空集合，避免无关引用变化触发重新解析。
+    let selectors = if matches!(format, super::model::RuleSetFormat::Dat) {
+        referenced_selectors.get(&id).cloned().unwrap_or_default()
+    } else {
+        BTreeSet::new()
+    };
     match resource {
-        RuleSetDto::Const { name, format, rule } => ResolvedRuleSet::Const {
-            id: ConfigId::new(name.clone()).expect("validated rule_set id"),
-            format: *format,
+        RuleSetDto::Const { rule, .. } => ResolvedRuleSet::Const {
+            id,
+            format,
             rule: rule.clone(),
+            selectors,
         },
         RuleSetDto::File {
-            name,
-            format,
             path,
             auto_update,
             update_interval,
+            ..
         } => ResolvedRuleSet::File {
-            id: ConfigId::new(name.clone()).expect("validated rule_set id"),
-            format: *format,
+            id,
+            format,
             path: resolve_path(work_path, path),
             auto_update: *auto_update,
             update_interval: *update_interval,
+            selectors,
         },
         RuleSetDto::Remote {
-            name,
-            format,
             url,
             proxy,
             auto_update,
             update_interval,
+            ..
         } => ResolvedRuleSet::Remote {
-            id: ConfigId::new(name.clone()).expect("validated rule_set id"),
-            format: *format,
+            id,
+            format,
             url: url.clone(),
             proxy: proxy
                 .as_ref()
                 .map(|value| ConfigId::new(value.clone()).expect("validated outbound id")),
             auto_update: *auto_update,
             update_interval: *update_interval,
+            selectors,
         },
     }
 }

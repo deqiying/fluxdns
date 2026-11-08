@@ -312,11 +312,11 @@ ConfigV2
 | `work.path` | string | 必填 | 工作目录；绝对路径直接使用，相对路径以启动配置文件所在目录为基准。 |
 | `work.rules_path` | string | 必填 | 规则资源落盘目录；相对路径以 `work.path` 为基准。 |
 | `work.rule_set_max_size_bytes` | integer | 可选 | 每个规则资源读取、下载和解析的大小上限，单位为字节；必须大于 0，缺失时默认为 `16777216`（16 MiB）。 |
-| `work.rule_set_max_rules` | integer | 可选 | 每个规则资源允许索引的规则数量上限；必须大于 0，缺失时默认为 `131072`。 |
+| `work.rule_set_max_rules` | integer | 可选 | 每个规则资源实际建索引的规则数量上限；dat 只统计被 strategy 引用的 selector。必须大于 0，缺失时默认为 `131072`。 |
 
 启动时，应先得到绝对的 `resolved_work_path` 并确保目录存在；如果配置文件不在该目录中，再将其复制为 `<resolved_work_path>/config.yaml`。数据库、日志、缓存和证书等其他相对路径均以 `resolved_work_path` 为基准。
 
-2026-11-08 局部核对（`d208820` 加工作树）：远程规则的首次下载、缓存恢复和自动刷新通过 [`remote_resource_options`](../../backend/src/runtime/prepared.rs) 传递完整 `RuleLimits`，不再只传大小而让规则数退回默认值。DAT 的规则数量按整个文件各分类累计。该配置变更不会被文件 watcher 自动应用；当前管理面未提供 `work` 编辑入口，手动修改这两个上限后需重启进程读取实际启动源配置。解析失败会通过[安全错误诊断](backend/management.md#安全错误诊断与操作关联) 返回实际使用的上限，便于确认配置是否生效。
+2026-11-08 局部核对（`d208820` 加工作树）：远程规则的首次下载、缓存恢复和自动刷新通过 [`remote_resource_options`](../../backend/src/runtime/prepared.rs) 传递完整 `RuleLimits`，不再只传大小而让规则数退回默认值。DAT 的规则数量自 2026-11-08（`de39a28` 加工作树）起只累计被 strategy 引用的分类，见本节末尾 `rule_set` 说明。该配置变更不会被文件 watcher 自动应用；当前管理面未提供 `work` 编辑入口，手动修改这两个上限后需重启进程读取实际启动源配置。解析失败会通过[安全错误诊断](backend/management.md#安全错误诊断与操作关联) 返回实际使用的上限，便于确认配置是否生效。
 
 ## 5. `database`
 
@@ -755,7 +755,9 @@ SecretRef 解析后的 URL scheme 必须为 `socks5://` 或 `socks5h://`：前�
 
 进程启动后的刷新只有在下载/读取、完整解析和内容校验都成功后才能原子替换当前快照；失败时保留上一份有效快照并记录带字段路径的错误。`auto_update` 只控制启动后的刷新，不降低首次快照要求；重试采用指数退避并封顶 5 分钟，连续三次计划刷新失败或超过 `3 × update_interval` 未成功时标记资源 `stale`，但仍可使用上一份有效快照。没有旧快照的资源引用必须 fail-closed。模板暂未提供远程版本锁定或 expected checksum 字段，当前仅记录内部 content hash/source fingerprint，生产部署的固定版本策略需后续定稿。
 
-`geosite:cn` 这类写法表示引用 V2Ray `GeoSiteList` protobuf `dat` 地理规则集中的命名子集。解析时先尝试完整资源名；完整名不存在时再按第一个 `:` 拆分。资源名大小写敏感；selector 必须非空、不超过 128 bytes，且只包含不含空白的可打印 ASCII，保留拒绝 `:` 分隔符和 `@` attribute 语法，并归一化为小写。因此 `geosite:geolocation-!cn` 可直接引用。格式不支持 selector 或 selector 不存在时在 prepare 阶段失败。`dat` 加载或刷新时一次性解析、校验并编译所有 selector，查询热路径只查当前 rule 引用的 canonical selector 和既有 matcher，不会重新解析 dat 或逐个校验全部 selector。`dat` 内容按二进制 protobuf 读取，不先转换为 UTF-8。
+`geosite:cn` 这类写法表示引用 V2Ray `GeoSiteList` protobuf `dat` 地理规则集中的命名子集。解析时先尝试完整资源名；完整名不存在时再按第一个 `:` 拆分。资源名大小写敏感；selector 必须非空、不超过 128 bytes，且只包含不含空白的可打印 ASCII，保留拒绝 `:` 分隔符和 `@` attribute 语法，并归一化为小写。因此 `geosite:geolocation-!cn` 可直接引用。格式不支持 selector 或 selector 不存在时在 prepare 阶段失败。
+
+2026-11-08 局部核对（`de39a28` 加工作树）：`dat` 按引用按需加载。[`resolve.rs`](../../backend/src/config/resolve.rs) 的 `collect_rule_set_selectors` 汇总全部 strategy 对每个 dat 资源的 canonical selector，写入 `ResolvedRuleSet.selectors`；[`RuleIndex::parse_dat_with_limits`](../../backend/src/resource/rules.rs) 以 `DatSelection::Only` 只为这些 selector 解码 domain 并建索引，其余 selector 只校验 site 外层 protobuf 框架、selector 合法性/唯一性和 selector 数量上限，domain 条目不解码，坏条目也不会导致资源失败。`work.rule_set_max_rules` 只统计实际建索引的规则。例如 Loyalsoldier `geosite.dat` 约 53 万条规则，只引用 `cn`、`gfw` 时约 11.5 万条入索引，低于默认上限。被引用 selector 在文件中缺失时报 `RULE_DAT_SELECTOR_NOT_FOUND` 并在诊断中给出 selector；自动刷新遇到该错误时保留旧 snapshot。增删 selector 引用会使该资源在 reload 时按新集合重新解析，remote 从已落盘 content 恢复，不额外下载。同日在 Windows 本机 release 上，用最小配置加载 11.4 MB 的 Loyalsoldier `geosite.dat`（file 资源）并引用 `cn`、`gfw`，默认 `rule_set_max_rules` 下可以正常启动。进程 Private 内存比无 dat 基线高约 10–11 MB；改造前只引用 `cn` 时，高出约 44 MB（且需调高规则上限）。启动峰值 Working Set 从约 67 MB 降到约 34 MB。该结果未在 Linux/glibc 部署环境复测。查询热路径只查当前 rule 引用的 canonical selector 和既有 matcher，不会重新解析 dat。`dat` 内容按二进制 protobuf 读取，不先转换为 UTF-8。
 
 ## 15. `clients[]`
 

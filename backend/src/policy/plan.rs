@@ -1407,6 +1407,7 @@ mod tests {
                 update_interval: None,
             }],
             &[crate::config::resolve::ResolvedRuleSet::Const {
+                selectors: Default::default(),
                 id: rules_id.clone(),
                 format: crate::config::model::RuleSetFormat::Json,
                 rule: r#"{"domain":"rule.example"}"#.to_owned(),

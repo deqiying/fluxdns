@@ -642,6 +642,7 @@ mod tests {
 
     fn remote_rule_set() -> ResolvedRuleSet {
         ResolvedRuleSet::Remote {
+            selectors: Default::default(),
             id: id("remote-rules"),
             format: RuleSetFormat::Clash,
             url: url::Url::parse("https://rules.example.test/list").unwrap(),
@@ -797,6 +798,7 @@ mod tests {
         ));
         std::fs::write(&path, "DOMAIN-SUFFIX,old.example\n").unwrap();
         let resource = ResolvedRuleSet::File {
+            selectors: Default::default(),
             id: id("file-rules"),
             format: RuleSetFormat::Clash,
             path: path.clone(),

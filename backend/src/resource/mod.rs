@@ -32,7 +32,7 @@ pub use remote::{
     LoadedRemoteRuleSet, RemoteResourceError, RemoteResourceManifest, RemoteResourceOptions,
     fetch_remote_rule_set, restore_remote_rule_set,
 };
-pub use rules::{RuleIndex, RuleLimits, RuleMatch, RuleParseError};
+pub use rules::{DatSelection, RuleIndex, RuleLimits, RuleMatch, RuleParseError};
 pub use scheduler::{
     ResourceSchedule, ResourceScheduleDecision, ResourceSchedulePolicy, ResourceScheduleStopReason,
 };

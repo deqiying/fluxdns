@@ -6,6 +6,8 @@
 >
 > 最后评审：2026-09-05（条件请求、manifest 身份/代际与安全 304；基线见[模块索引](README.md)，本地证据见[后台服务](../../../implementation/backend/background-services.md#本次验证)）
 >
+> 2026-11-08 局部评审：仅 dat selector 按需加载、规则数统计口径与缺失 selector 失败语义；其余范围沿原评审记录，验证证据见[后台服务](../../../implementation/backend/background-services.md#能力与证据)。
+>
 > 关联实现：[loader.rs](../../../../backend/src/resource/loader.rs)、[fetcher.rs](../../../../backend/src/resource/fetcher.rs)、[remote.rs](../../../../backend/src/resource/remote.rs)、[rules.rs](../../../../backend/src/resource/rules.rs)、[hosts.rs](../../../../backend/src/resource/hosts.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Policy](policy.md) · [Runtime](runtime.md) · [Upstream](upstream.md)
@@ -29,7 +31,7 @@ Resource 模块负责 hosts 和 rule_set 的读取、下载、解析、规范化
 
 查询热路径只读取编译后的不可变索引，不访问文件、网络或 parser。
 
-规则资源的读取、下载和解析共用 `work.rule_set_max_size_bytes` 与 `work.rule_set_max_rules` 上限；缺失时分别使用 16 MiB 和 131072 默认值，避免传输和 parser 使用不一致的限额。
+规则资源的读取、下载和解析共用 `work.rule_set_max_size_bytes` 与 `work.rule_set_max_rules` 上限；缺失时分别使用 16 MiB 和 131072 默认值，避免传输和 parser 使用不一致的限额。规则数上限只统计实际建索引的规则；dat 未被引用的 selector 不计入。
 
 ## 2. ResourceSnapshot
 
@@ -124,7 +126,11 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 
 ### dat（geosite.dat）
 
-目标契约为 selector → domain matcher map，采用 V2Ray `GeoSiteList` protobuf schema。selector 必须非空、不超过 128 bytes，且仅含除 `:`、`@` 外的不含空白可打印 ASCII；加载时统一转为小写，大小写归一化后重复的 selector 报错。该规则允许 `geolocation-!cn`。`geosite:cn` 先解析大小写敏感的资源名 `geosite`，再查 canonical selector `cn`。解析器只依赖现有代码，拒绝截断、非法 wire type、未知 domain type、超限 selector 和超限规则；所有 selector 在资源加载或刷新时一次性校验并编译到不可变 map，Policy 在 prepare 阶段校验引用存在，查询热路径只查当前引用的 matcher。
+目标契约为 selector → domain matcher map，采用 V2Ray `GeoSiteList` protobuf schema。selector 必须非空、不超过 128 bytes，且仅含除 `:`、`@` 外的不含空白可打印 ASCII；加载时统一转为小写，大小写归一化后重复的 selector 报错。该规则允许 `geolocation-!cn`。`geosite:cn` 先解析大小写敏感的资源名 `geosite`，再查 canonical selector `cn`。解析器只依赖现有代码，拒绝截断、非法 wire type、超限 selector 和超限规则。
+
+dat 按引用按需加载：Config resolve 汇总全部 strategy 对该资源引用的 canonical selector，写入 `ResolvedRuleSet.selectors`；首次加载、remote 恢复/抓取和自动刷新都只为该集合中的 selector 解码 domain 并编译到不可变 map。未被引用的 selector 只做结构校验——site 外层 protobuf 框架、selector 合法性、归一化后唯一性和 selector 数量上限——其 domain 条目不解码、不分配内存，因此其中的未知 domain type 或非法域名不会让资源失败。被引用 selector 在文件中缺失时解析失败（`RULE_DAT_SELECTOR_NOT_FOUND`），刷新时保留旧 snapshot，不发布缺少引用 selector 的索引。
+
+`selectors` 参与 `ResolvedRuleSet` 相等比较：引用集合变化即视为资源变化，reload 不迁移旧 snapshot/worker 状态，候选按新集合重新解析；remote 从已落盘原始 content 恢复，不因此重新下载，manifest 源身份也不包含 selector。资源没有任何 selector 引用时仍校验结构并保留 selector map 类型，但不建任何索引；Policy 在 prepare 阶段继续校验引用存在，查询热路径只查当前引用的 matcher。
 
 ## 7. Matcher
 
@@ -134,7 +140,7 @@ v1 接受 `DOMAIN`、`DOMAIN-SUFFIX` 和 `DOMAIN-REGEX` 行。空行和注释忽
 - `RuleIndex` 的 exact/suffix 使用 `BTreeSet`，suffix 逐级枚举查询，不是 reversed-label trie；
 - keyword 使用有序列表，按 first-match 返回；
 - regex 使用有界的自有 `CompiledRegex` token 列表，支持受限原子和量词，拒绝分组/分支等语法，不是外部 RegexSet；
-- dat selector 使用不可变 map，值为已编译 `Arc<RuleIndex>`。
+- dat selector 使用不可变 map，只含被引用的 selector，值为已编译 `Arc<RuleIndex>`；是否为 selector map 由格式决定，不由 map 是否为空推断。
 
 Hosts 为 exact → 最长 wildcard；rules 为 exact → 最长 suffix → keyword → regex。matcher 无内部 mutable cache，snapshot 可跨线程共享。
 

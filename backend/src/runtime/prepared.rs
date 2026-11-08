@@ -1508,6 +1508,7 @@ clients: []
         let resource_id = ConfigId::new("geosite").unwrap();
         let mut config = Arc::try_unwrap(config()).unwrap();
         config.rule_sets = vec![crate::config::resolve::ResolvedRuleSet::File {
+            selectors: std::collections::BTreeSet::from(["cn".to_owned()]),
             id: resource_id.clone(),
             format: crate::config::model::RuleSetFormat::Dat,
             path: path.clone(),
@@ -1879,6 +1880,7 @@ clients: []
         let mut config = Arc::try_unwrap(config()).unwrap();
         config.work.rule_set_max_rules = 1;
         config.rule_sets = vec![crate::config::resolve::ResolvedRuleSet::File {
+            selectors: Default::default(),
             id: ConfigId::new("limited-rules").unwrap(),
             format: crate::config::model::RuleSetFormat::Clash,
             path,
@@ -1902,6 +1904,87 @@ clients: []
         assert!(!encoded.contains("path-secret"));
         assert!(!encoded.contains("private.test"));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn async_prepare_rejects_dat_missing_referenced_selector() {
+        let path = std::env::temp_dir().join(format!(
+            "fluxdns-runtime-dat-missing-{}-{}.dat",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&path, dat_fixture()).unwrap();
+        let resource_id = ConfigId::new("geosite").unwrap();
+        let mut config = Arc::try_unwrap(config()).unwrap();
+        config.rule_sets = vec![crate::config::resolve::ResolvedRuleSet::File {
+            id: resource_id.clone(),
+            format: crate::config::model::RuleSetFormat::Dat,
+            path: path.clone(),
+            auto_update: false,
+            update_interval: None,
+            selectors: std::collections::BTreeSet::from(["gfw".to_owned()]),
+        }];
+        let strategy_ecs = config.strategies[0].edns_client_subnet.clone();
+        config.strategies[0].rules = vec![crate::config::resolve::ResolvedStrategyRule {
+            rule_set: Some(crate::config::resolve::ResolvedRuleSetRef {
+                resource: resource_id,
+                selector: Some("gfw".to_owned()),
+            }),
+            hosts: None,
+            upstream: Some(ConfigId::new("local").unwrap()),
+            edns_client_subnet: strategy_ecs,
+        }];
+
+        let error = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            Arc::new(config),
+            RuntimeRevision(7),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap_err();
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.code, "RULE_DAT_SELECTOR_NOT_FOUND");
+        assert_eq!(diagnostic.resource.as_deref(), Some("geosite"));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn dat_selector_reference_change_is_a_rule_set_change() {
+        let resource = |selectors: &[&str]| crate::config::resolve::ResolvedRuleSet::File {
+            id: ConfigId::new("geosite").unwrap(),
+            format: crate::config::model::RuleSetFormat::Dat,
+            path: std::path::PathBuf::from("geosite.dat"),
+            auto_update: true,
+            update_interval: Some(Duration::from_secs(60)),
+            selectors: selectors.iter().map(|value| (*value).to_owned()).collect(),
+        };
+        let with = |selectors: &[&str]| {
+            let mut config = Arc::try_unwrap(config()).unwrap();
+            config.rule_sets = vec![resource(selectors)];
+            config
+        };
+        let id = ConfigId::new("geosite").unwrap();
+
+        // 引用集合不同则不迁移旧 snapshot/worker，候选按新集合重新解析。
+        assert!(!super::same_rule_set(
+            &with(&["cn"]),
+            &with(&["cn", "gfw"]),
+            &id
+        ));
+        assert!(!super::same_resource(
+            &with(&["cn"]),
+            &with(&["cn", "gfw"]),
+            &id
+        ));
+        assert!(super::same_rule_set(
+            &with(&["cn", "gfw"]),
+            &with(&["cn", "gfw"]),
+            &id
+        ));
     }
 
     #[test]
@@ -1928,6 +2011,7 @@ clients: []
         let mut config = Arc::try_unwrap(config()).unwrap();
         config.work.rule_set_max_rules = 1;
         config.rule_sets = vec![crate::config::resolve::ResolvedRuleSet::Const {
+            selectors: Default::default(),
             id: ConfigId::new("inline-rules").unwrap(),
             format: crate::config::model::RuleSetFormat::Clash,
             rule: "DOMAIN,first-private.test\nDOMAIN,second-private.test\n".to_owned(),

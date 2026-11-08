@@ -8,6 +8,8 @@
 >
 > 2026-11-06 局部评审：单次保存、活动源内存模型和内部版本/文件确认边界；其余范围沿原评审记录。
 >
+> 2026-11-08 局部评审：仅同步 dat selector 引用集合归一化到 `ResolvedRuleSet`；其余范围沿原评审记录。
+>
 > 2026-11-08 局部评审：仅同步 DoH 裸路由隐式 ID 后缀、同形显式模板优先及重叠拒绝契约；其余范围沿原评审记录，实施与验证证据见[DNS 管线](../../../implementation/backend/dns-pipeline.md#能力与证据)。
 >
 > 关联实现：[load.rs](../../../../backend/src/config/load.rs)、[resolve.rs](../../../../backend/src/config/resolve.rs)、[validate.rs](../../../../backend/src/config/validate.rs)、[store.rs](../../../../backend/src/config/store.rs)
@@ -77,7 +79,7 @@ YAML 文件必须是 UTF-8。唯一 v2 loader 以 4 MiB 限制输入，避免在
 - 再以 `resolved_work_path` 为唯一基准，将其他相对项目路径规范化为绝对路径；
 - duration、URL、CIDR 和枚举转换为强类型；
 - group member 缺失的 `weight` 在 DTO 输入边界归一化为 `1`；
-- `resource:selector` 引用中的 selector 使用与 Resource dat parser 相同的规则规范化为 lowercase canonical key；
+- `resource:selector` 引用中的 selector 使用与 Resource dat parser 相同的规则规范化为 lowercase canonical key；全部 strategy 对同一 dat 资源的 selector 引用汇总为 `ResolvedRuleSet.selectors`，供 Resource 按需加载，非 dat 资源恒为空集合；
 - cache、TTL、ECS 的缺失/显式禁用/字段继承；
 - client、strategy、route、resource 和 upstream 名称转换为 typed ID；
 - SecretRef source 归一化为 env/file/inline `url` 引用；实际值不会在普通 YAML load 中读取，只能由后续 adapter 通过 `ResolvedSecretRef::resolve` 或 `resolve_proxy_url` 等显式 accessor 请求，并包装为 Debug/Display 脱敏、不可 Serialize 的 secret 类型；内联 `url` 在序列化、Debug 与日志中同样只输出脱敏密码位；

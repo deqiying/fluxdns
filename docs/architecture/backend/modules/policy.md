@@ -10,6 +10,8 @@
 >
 > 局部评审基线：`fcbb12831c66e81e02108ccd030ac3c2a1e08f56` 加本次工作树；仅用于上述范围
 >
+> 2026-11-08 局部评审：仅同步 dat selector 按需编译的 Resource 依赖描述；其余范围沿原评审记录
+>
 > 2026-11-08 局部评审：仅同步 DoH 裸路由可提取隐式 ID、显式模板必填和 canonical route ID 约束；客户端精确 ID 优先及 CIDR 回退不变，其余范围沿原评审记录。
 >
 > 关联实现：[client.rs](../../../../backend/src/policy/client.rs)、[plan.rs](../../../../backend/src/policy/plan.rs)、[dns/policy.rs](../../../../backend/src/dns/policy.rs)
@@ -109,7 +111,7 @@ base strategy from listener/route
 
 first-match 指 strategy rule 顺序。HostsIndex 内部为 exact → 最长 wildcard suffix；RuleIndex 内部为 exact → 最长 domain suffix（含 apex）→ keyword → regex。不能混成一个包含 wildcard 的通用规则 matcher，也不能省略 keyword 的优先级。
 
-`rule_set` 引用先尝试完整资源名；完整名不存在且包含 `:` 时，才按第一个 `:` 解释为 `resource:selector`。资源名大小写敏感；selector 使用 Config/Resource 共用规则归一化为小写，允许 `!` 等不产生分隔歧义的可打印 ASCII。selector 只对支持子集的格式有效，不存在或格式不支持时在 prepare 阶段失败。Resource 已在加载或刷新时编译并缓存所有 selector matcher；查询热路径只对当前 strategy rule 执行一次 map lookup，不逐个重新校验 selector。
+`rule_set` 引用先尝试完整资源名；完整名不存在且包含 `:` 时，才按第一个 `:` 解释为 `resource:selector`。资源名大小写敏感；selector 使用 Config/Resource 共用规则归一化为小写，允许 `!` 等不产生分隔歧义的可打印 ASCII。selector 只对支持子集的格式有效，不存在或格式不支持时在 prepare 阶段失败。Resource 在加载或刷新时只编译并缓存被 strategy 引用的 selector matcher（见 [Resource dat](resource.md#datgeositedat)）；查询热路径只对当前 strategy rule 执行一次 map lookup，不逐个重新校验 selector。
 
 ## 8. 覆盖与继承
 

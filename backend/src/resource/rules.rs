@@ -103,6 +103,8 @@ pub enum RuleParseError {
     DatSelectorTooLong,
     #[error("rule resource dat contains an unsupported domain type")]
     UnsupportedDatDomainType,
+    #[error("rule resource dat does not contain referenced selector {selector}")]
+    DatSelectorNotFound { selector: String },
 }
 
 impl RuleParseError {
@@ -151,15 +153,25 @@ impl RuleParseError {
                 "DAT 域名类型不受支持",
                 None,
             ),
+            Self::DatSelectorNotFound { .. } => (
+                "RULE_DAT_SELECTOR_NOT_FOUND",
+                "DAT 中不存在策略引用的选择器",
+                None,
+            ),
         };
         let position = line
             .map(|line| format!("；行号={line}"))
             .unwrap_or_default();
+        // selector 来自配置引用而非规则正文，回显它便于定位缺失的引用。
+        let subject = match self {
+            Self::DatSelectorNotFound { selector } => format!("；选择器={selector}"),
+            _ => String::new(),
+        };
         crate::diagnostics::Diagnostic::new(
             "resource_parse",
             code,
             format!(
-                "{message}{position}；当前限制：work.rule_set_max_size_bytes={}，work.rule_set_max_rules={}，单条规则字节={}，正则字节={}，正则指令={}，选择器数量={}，选择器字节={}",
+                "{message}{position}{subject}；当前限制：work.rule_set_max_size_bytes={}，work.rule_set_max_rules={}，单条规则字节={}，正则字节={}，正则指令={}，选择器数量={}，选择器字节={}",
                 limits.max_input_bytes,
                 limits.max_rules,
                 limits.max_rule_bytes,
@@ -172,6 +184,27 @@ impl RuleParseError {
     }
 }
 
+/// DAT selector 的索引范围。
+///
+/// 生产加载链路使用 `Only`，集合来自 strategy 的实际引用；`All` 保留给测试和
+/// 显式需要完整 selector map 的调用方。
+#[derive(Clone, Copy, Debug)]
+pub enum DatSelection<'a> {
+    /// 为全部 selector 建索引。
+    All,
+    /// 只为给定 canonical selector 建索引，其余 selector 只校验结构；集合中任一
+    /// selector 在文件中不存在时解析失败。
+    Only(&'a BTreeSet<String>),
+}
+
+impl DatSelection<'_> {
+    fn includes(self, selector: &str) -> bool {
+        match self {
+            Self::All => true,
+            Self::Only(selectors) => selectors.contains(selector),
+        }
+    }
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuleMatch {
     Exact,
@@ -187,6 +220,8 @@ pub struct RuleIndex {
     keywords: BTreeSet<String>,
     regex: Vec<CompiledRegex>,
     selectors: BTreeMap<String, Arc<RuleIndex>>,
+    /// 是否为 dat selector map；按需加载时 map 可能为空，不能用 map 是否为空推断格式。
+    selector_map: bool,
     rule_count: usize,
     skipped_unsupported_count: usize,
 }
@@ -221,25 +256,29 @@ impl RuleIndex {
         match format {
             RuleSetFormat::Json => Self::parse_json_with_limits(input, limits),
             RuleSetFormat::Clash => Self::parse_clash_with_limits(input, limits),
-            RuleSetFormat::Dat => Self::parse_dat_with_limits(input.as_bytes(), limits),
+            RuleSetFormat::Dat => {
+                Self::parse_dat_with_limits(input.as_bytes(), limits, DatSelection::All)
+            }
         }
     }
 
     /// 解析指定格式的原始字节。`dat` 是 protobuf 二进制，不能先转换为 UTF-8。
     pub fn parse_bytes(input: &[u8], format: RuleSetFormat) -> Result<Self, RuleParseError> {
-        Self::parse_bytes_with_limits(input, format, RuleLimits::default())
+        Self::parse_bytes_with_limits(input, format, RuleLimits::default(), DatSelection::All)
     }
 
+    /// 解析原始字节；`selection` 只作用于 `dat`，其他格式忽略。
     pub fn parse_bytes_with_limits(
         input: &[u8],
         format: RuleSetFormat,
         limits: RuleLimits,
+        selection: DatSelection<'_>,
     ) -> Result<Self, RuleParseError> {
         if input.len() > limits.max_input_bytes {
             return Err(RuleParseError::InputTooLarge);
         }
         match format {
-            RuleSetFormat::Dat => Self::parse_dat_with_limits(input, limits),
+            RuleSetFormat::Dat => Self::parse_dat_with_limits(input, limits, selection),
             RuleSetFormat::Json | RuleSetFormat::Clash => {
                 let text = std::str::from_utf8(input).map_err(|_| RuleParseError::InvalidJson)?;
                 Self::parse_with_limits(text, format, limits)
@@ -248,46 +287,66 @@ impl RuleIndex {
     }
 
     pub fn parse_dat(input: &[u8]) -> Result<Self, RuleParseError> {
-        Self::parse_dat_with_limits(input, RuleLimits::default())
+        Self::parse_dat_with_limits(input, RuleLimits::default(), DatSelection::All)
     }
 
-    pub fn parse_dat_with_limits(input: &[u8], limits: RuleLimits) -> Result<Self, RuleParseError> {
+    /// 解析 V2Ray `GeoSiteList`，只为 `selection` 选中的 selector 建索引。
+    ///
+    /// 每个 site 的外层 protobuf 框架、selector 合法性、唯一性和 selector 数量上限对
+    /// 全部 site 都会校验；未选中 site 的域名条目不解码、不分配内存，因此其中的坏条目
+    /// 不会让资源失败。`max_rules` 只统计实际建索引的规则。`Only` 中任一 selector 在
+    /// 文件中缺失即失败，避免刷新后发布缺少引用 selector 的索引。
+    pub fn parse_dat_with_limits(
+        input: &[u8],
+        limits: RuleLimits,
+        selection: DatSelection<'_>,
+    ) -> Result<Self, RuleParseError> {
         if input.len() > limits.max_input_bytes {
             return Err(RuleParseError::InputTooLarge);
         }
         let mut reader = DatReader::new(input);
-        let mut selectors: BTreeMap<String, RuleIndex> = BTreeMap::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut selectors: BTreeMap<String, Arc<RuleIndex>> = BTreeMap::new();
+        let mut rule_count = 0_usize;
         let mut skipped_unsupported_count = 0;
         while let Some((field, wire)) = reader.read_key()? {
             if field == 1 && wire == WIRE_LEN_DELIM {
                 let payload = reader.read_length_delimited()?;
-                let site = parse_dat_site(payload, limits)?;
-                let selector = normalize_dat_selector(&site.selector, limits)?;
-                if selectors.contains_key(&selector) {
+                let raw_selector = read_dat_site_selector(payload)?;
+                let selector = normalize_dat_selector(&raw_selector, limits)?;
+                if seen.contains(&selector) {
                     return Err(RuleParseError::InvalidDatSelector);
                 }
-                if selectors.len() >= limits.max_selectors {
+                if seen.len() >= limits.max_selectors {
                     return Err(RuleParseError::TooManySelectors);
                 }
-                let total_rules = selectors
-                    .values()
-                    .map(|index| index.rule_count)
-                    .sum::<usize>()
-                    .checked_add(site.index.rule_count)
-                    .ok_or(RuleParseError::TooManyRules)?;
-                if total_rules > limits.max_rules {
-                    return Err(RuleParseError::TooManyRules);
+                seen.insert(selector.clone());
+                if !selection.includes(&selector) {
+                    continue;
                 }
-                skipped_unsupported_count += site.index.skipped_unsupported_count;
-                selectors.insert(selector, site.index);
+                let index = compile_dat_site(payload, limits)?;
+                rule_count = rule_count
+                    .checked_add(index.rule_count)
+                    .filter(|total| *total <= limits.max_rules)
+                    .ok_or(RuleParseError::TooManyRules)?;
+                skipped_unsupported_count += index.skipped_unsupported_count;
+                selectors.insert(selector, Arc::new(index));
             } else {
                 reader.skip_field(wire)?;
             }
         }
-        if !reader.is_exhausted() || selectors.is_empty() {
+        if !reader.is_exhausted() || seen.is_empty() {
             return Err(RuleParseError::InvalidDat);
         }
-        let rule_count = selectors.values().map(|index| index.rule_count).sum();
+        if let DatSelection::Only(required) = selection
+            && let Some(missing) = required
+                .iter()
+                .find(|selector| !selectors.contains_key(selector.as_str()))
+        {
+            return Err(RuleParseError::DatSelectorNotFound {
+                selector: missing.clone(),
+            });
+        }
         if skipped_unsupported_count > 0 {
             tracing::warn!(
                 event = "rule_set_unsupported_entries_skipped",
@@ -301,10 +360,8 @@ impl RuleIndex {
             suffix: BTreeSet::new(),
             keywords: BTreeSet::new(),
             regex: Vec::new(),
-            selectors: selectors
-                .into_iter()
-                .map(|(name, index)| (name, Arc::new(index)))
-                .collect(),
+            selectors,
+            selector_map: true,
             rule_count,
             skipped_unsupported_count,
         })
@@ -405,12 +462,14 @@ impl RuleIndex {
         self.keywords.len()
     }
 
+    /// 已建索引的 selector 数量；按需加载时只包含被引用的 selector。
     pub fn selector_count(&self) -> usize {
         self.selectors.len()
     }
 
+    /// 是否为 dat selector map，与已加载 selector 数量无关。
     pub fn is_selector_map(&self) -> bool {
-        !self.selectors.is_empty()
+        self.selector_map
     }
 
     pub fn selector(&self, value: &str) -> Option<&RuleIndex> {
@@ -458,6 +517,7 @@ impl RuleIndex {
             keywords: BTreeSet::new(),
             regex: Vec::new(),
             selectors: BTreeMap::new(),
+            selector_map: false,
             rule_count: 0,
             skipped_unsupported_count: 0,
         }
@@ -980,20 +1040,18 @@ impl<'a> DatReader<'a> {
     }
 }
 
-struct DatSite {
-    selector: String,
-    index: RuleIndex,
-}
-
-struct DatDomain {
+struct DatDomain<'a> {
     kind: u64,
-    value: String,
+    value: &'a str,
 }
 
-fn parse_dat_site(payload: &[u8], limits: RuleLimits) -> Result<DatSite, RuleParseError> {
+/// 结构性遍历一个 `GeoSite` 消息，只取出 selector。
+///
+/// 校验 site 内字段的 protobuf 框架与 selector 唯一出现；`domain` 条目只按长度跳过、
+/// 不解码，未被引用的 selector 因此只承担结构校验成本。
+fn read_dat_site_selector(payload: &[u8]) -> Result<String, RuleParseError> {
     let mut reader = DatReader::new(payload);
     let mut selector = None;
-    let mut domains = Vec::new();
     while let Some((field, wire)) = reader.read_key()? {
         match (field, wire) {
             (1, WIRE_LEN_DELIM) => {
@@ -1001,38 +1059,48 @@ fn parse_dat_site(payload: &[u8], limits: RuleLimits) -> Result<DatSite, RulePar
                     return Err(RuleParseError::InvalidDat);
                 }
                 selector = Some(
-                    String::from_utf8(reader.read_length_delimited()?.to_vec())
-                        .map_err(|_| RuleParseError::InvalidDat)?,
+                    std::str::from_utf8(reader.read_length_delimited()?)
+                        .map_err(|_| RuleParseError::InvalidDat)?
+                        .to_owned(),
                 );
-            }
-            (2, WIRE_LEN_DELIM) => {
-                let domain = parse_dat_domain(reader.read_length_delimited()?)?;
-                domains.push(domain);
             }
             _ => reader.skip_field(wire)?,
         }
     }
-    let selector = selector.ok_or(RuleParseError::InvalidDat)?;
+    selector.ok_or(RuleParseError::InvalidDat)
+}
+
+/// 解码被引用 site 的全部 domain 条目并编译为独立索引。
+///
+/// 调用前 `read_dat_site_selector` 已完成框架校验；这里逐条解码后立即写入索引，
+/// 不额外缓存中间 domain 列表。
+fn compile_dat_site(payload: &[u8], limits: RuleLimits) -> Result<RuleIndex, RuleParseError> {
+    let mut reader = DatReader::new(payload);
     let mut index = RuleIndex::empty();
-    for domain in domains {
+    while let Some((field, wire)) = reader.read_key()? {
+        if (field, wire) != (2, WIRE_LEN_DELIM) {
+            reader.skip_field(wire)?;
+            continue;
+        }
+        let domain = parse_dat_domain(reader.read_length_delimited()?)?;
         match domain.kind {
-            0 => index.add_keyword(&domain.value, limits)?,
-            1 => match index.add_regex(&domain.value, 0, limits) {
+            0 => index.add_keyword(domain.value, limits)?,
+            1 => match index.add_regex(domain.value, 0, limits) {
                 Ok(()) => {}
                 Err(RuleParseError::UnsupportedRegex { .. }) => {
                     index.skipped_unsupported_count += 1;
                 }
                 Err(error) => return Err(error),
             },
-            2 => index.add_domain(RuleKind::Suffix, &domain.value, 0, limits)?,
-            3 => index.add_domain(RuleKind::Exact, &domain.value, 0, limits)?,
+            2 => index.add_domain(RuleKind::Suffix, domain.value, 0, limits)?,
+            3 => index.add_domain(RuleKind::Exact, domain.value, 0, limits)?,
             _ => return Err(RuleParseError::UnsupportedDatDomainType),
         }
     }
-    Ok(DatSite { selector, index })
+    Ok(index)
 }
 
-fn parse_dat_domain(payload: &[u8]) -> Result<DatDomain, RuleParseError> {
+fn parse_dat_domain(payload: &[u8]) -> Result<DatDomain<'_>, RuleParseError> {
     let mut reader = DatReader::new(payload);
     let mut kind = 0_u64;
     let mut value = None;
@@ -1044,7 +1112,7 @@ fn parse_dat_domain(payload: &[u8]) -> Result<DatDomain, RuleParseError> {
                     return Err(RuleParseError::InvalidDat);
                 }
                 value = Some(
-                    String::from_utf8(reader.read_length_delimited()?.to_vec())
+                    std::str::from_utf8(reader.read_length_delimited()?)
                         .map_err(|_| RuleParseError::InvalidDat)?,
                 );
             }
@@ -1334,7 +1402,8 @@ mod tests {
                 RuleLimits {
                     max_selectors: 0,
                     ..RuleLimits::default()
-                }
+                },
+                DatSelection::All,
             ),
             Err(RuleParseError::TooManySelectors)
         ));
@@ -1344,7 +1413,8 @@ mod tests {
                 RuleLimits {
                     max_selector_bytes: 1,
                     ..RuleLimits::default()
-                }
+                },
+                DatSelection::All,
             ),
             Err(RuleParseError::DatSelectorTooLong)
         ));
@@ -1360,6 +1430,138 @@ mod tests {
                 .unwrap()
                 .matches(&domain("example.test"))
                 .is_some()
+        );
+    }
+
+    fn selectors(values: &[&str]) -> BTreeSet<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    fn geosite_fixture() -> Vec<u8> {
+        let mut input = dat_site("CN", &[(2, "cn"), (3, "exact.cn.example")]);
+        input.extend(dat_site("gfw", &[(2, "blocked.example")]));
+        input.extend(dat_site(
+            "category-ads-all",
+            &[
+                (2, "ads1.example"),
+                (2, "ads2.example"),
+                (2, "ads3.example"),
+            ],
+        ));
+        input
+    }
+
+    #[test]
+    fn dat_selection_indexes_only_referenced_selectors_and_counts_loaded_rules() {
+        let input = geosite_fixture();
+        let wanted = selectors(&["cn", "gfw"]);
+        let limits = RuleLimits::default().with_max_rules(3);
+
+        let index =
+            RuleIndex::parse_dat_with_limits(&input, limits, DatSelection::Only(&wanted)).unwrap();
+        assert!(index.is_selector_map());
+        assert_eq!(index.selector_count(), 2);
+        assert_eq!(index.rule_count(), 3);
+        assert!(index.selector("category-ads-all").is_none());
+        assert_eq!(
+            index
+                .selector("gfw")
+                .unwrap()
+                .matches(&domain("www.blocked.example")),
+            Some(RuleMatch::Suffix { label_count: 2 })
+        );
+
+        // 全量加载会把未引用的 3 条广告规则计入上限。
+        assert_eq!(
+            RuleIndex::parse_dat_with_limits(&input, limits, DatSelection::All),
+            Err(RuleParseError::TooManyRules)
+        );
+    }
+
+    #[test]
+    fn dat_selection_only_checks_structure_of_unreferenced_selectors() {
+        let wanted = selectors(&["cn"]);
+        let mut input = dat_site("cn", &[(3, "example.test")]);
+        // 未引用 selector 中的未知 domain 类型和非法域名不解码，因此不影响加载。
+        input.extend(dat_site("bad-content", &[(9, "x"), (3, "*.invalid")]));
+        let index = RuleIndex::parse_dat_with_limits(
+            &input,
+            RuleLimits::default(),
+            DatSelection::Only(&wanted),
+        )
+        .unwrap();
+        assert_eq!(index.selector_count(), 1);
+        assert_eq!(
+            RuleIndex::parse_dat(&input),
+            Err(RuleParseError::UnsupportedDatDomainType)
+        );
+
+        // 未引用 selector 的 protobuf 框架截断、非法或重复 selector 仍然拒绝。
+        let mut truncated_site = field(1, u64::from(WIRE_LEN_DELIM), b"broken");
+        truncated_site.extend([0x12, 0x05, 0x0a]);
+        let mut truncated = dat_site("cn", &[(3, "example.test")]);
+        truncated.extend(field(1, u64::from(WIRE_LEN_DELIM), &truncated_site));
+        assert_eq!(
+            RuleIndex::parse_dat_with_limits(
+                &truncated,
+                RuleLimits::default(),
+                DatSelection::Only(&wanted)
+            ),
+            Err(RuleParseError::InvalidDat)
+        );
+        let mut duplicate = dat_site("cn", &[(3, "example.test")]);
+        duplicate.extend(dat_site("other", &[]));
+        duplicate.extend(dat_site("OTHER", &[]));
+        assert_eq!(
+            RuleIndex::parse_dat_with_limits(
+                &duplicate,
+                RuleLimits::default(),
+                DatSelection::Only(&wanted)
+            ),
+            Err(RuleParseError::InvalidDatSelector)
+        );
+    }
+
+    #[test]
+    fn dat_selection_rejects_missing_referenced_selector_with_diagnostic() {
+        let input = dat_site("cn", &[(3, "example.test")]);
+        let wanted = selectors(&["cn", "gfw"]);
+        let error = RuleIndex::parse_dat_with_limits(
+            &input,
+            RuleLimits::default(),
+            DatSelection::Only(&wanted),
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            RuleParseError::DatSelectorNotFound {
+                selector: "gfw".to_owned()
+            }
+        );
+        let diagnostic = error.diagnostic(RuleLimits::default());
+        assert_eq!(diagnostic.code, "RULE_DAT_SELECTOR_NOT_FOUND");
+        assert!(diagnostic.message.contains("选择器=gfw"));
+    }
+
+    #[test]
+    fn dat_selection_without_references_keeps_selector_map_kind() {
+        let empty = BTreeSet::new();
+        let index = RuleIndex::parse_dat_with_limits(
+            &geosite_fixture(),
+            RuleLimits::default(),
+            DatSelection::Only(&empty),
+        )
+        .unwrap();
+        assert!(index.is_selector_map());
+        assert_eq!(index.selector_count(), 0);
+        assert!(index.is_empty());
+        assert_eq!(
+            RuleIndex::parse_dat_with_limits(
+                &[],
+                RuleLimits::default(),
+                DatSelection::Only(&empty)
+            ),
+            Err(RuleParseError::InvalidDat)
         );
     }
 }

@@ -742,6 +742,33 @@ mod tests {
     }
 
     #[test]
+    fn dat_rule_set_carries_only_referenced_canonical_selectors() {
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
+        let (source, _) = crate::config::test_support::portable_example();
+        // 同一 selector 大小写不同的重复引用归一为一个；非 dat 资源不携带 selector。
+        let source = source.replace(
+            "      - rule_set: geosite:cn\n",
+            "      - rule_set: geosite:cn\n        upstream: inner-group\n      - rule_set: geosite:GFW\n        upstream: inner-group\n      - rule_set: geosite:CN\n",
+        );
+        let output = loader.load_str(&source).unwrap();
+        let selectors_of = |name: &str| {
+            output
+                .resolved
+                .rule_sets
+                .iter()
+                .find(|resource| resource.id().as_str() == name)
+                .unwrap()
+                .selectors()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(selectors_of("geosite"), ["cn", "gfw"]);
+        assert!(selectors_of("proxy-sites").is_empty());
+    }
+
+    #[test]
     fn doh_routes_allow_optional_ids_and_explicit_overrides() {
         let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let (source, _) = crate::config::test_support::portable_example();

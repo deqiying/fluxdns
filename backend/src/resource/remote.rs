@@ -27,7 +27,9 @@ use crate::ports::effects::{
     ResourceLocation, ResourceValidators,
 };
 
-use super::{ResourceSnapshot, ResourceSourceKind, ResourceStaleStatus, RuleIndex, RuleLimits};
+use super::{
+    DatSelection, ResourceSnapshot, ResourceSourceKind, ResourceStaleStatus, RuleIndex, RuleLimits,
+};
 
 const MANIFEST_VERSION: u32 = 2;
 const PARSER_VERSION: &str = "rule-index-v2";
@@ -350,9 +352,12 @@ pub async fn fetch_remote_rule_set(
     validate_result(&result, options.max_bytes)?;
 
     let index = match format {
-        RuleSetFormat::Dat => {
-            RuleIndex::parse_bytes_with_limits(&result.body, format, options.rule_limits)
-        }
+        RuleSetFormat::Dat => RuleIndex::parse_bytes_with_limits(
+            &result.body,
+            format,
+            options.rule_limits,
+            DatSelection::Only(resource.selectors()),
+        ),
         RuleSetFormat::Json | RuleSetFormat::Clash => {
             let text =
                 std::str::from_utf8(&result.body).map_err(|_| RemoteResourceError::InvalidUtf8)?;
@@ -460,9 +465,12 @@ pub fn restore_remote_rule_set(
         .transpose()?;
 
     let index = match format {
-        RuleSetFormat::Dat => {
-            RuleIndex::parse_bytes_with_limits(&content, format, options.rule_limits)
-        }
+        RuleSetFormat::Dat => RuleIndex::parse_bytes_with_limits(
+            &content,
+            format,
+            options.rule_limits,
+            DatSelection::Only(resource.selectors()),
+        ),
         RuleSetFormat::Json | RuleSetFormat::Clash => {
             let text =
                 std::str::from_utf8(&content).map_err(|_| RemoteResourceError::InvalidUtf8)?;
@@ -724,6 +732,12 @@ mod tests {
 
     fn remote(format: RuleSetFormat, url: &str) -> ResolvedRuleSet {
         ResolvedRuleSet::Remote {
+            // dat 夹具只含 `cn`；按需加载要求资源声明被引用的 selector。
+            selectors: if matches!(format, RuleSetFormat::Dat) {
+                std::collections::BTreeSet::from(["cn".to_owned()])
+            } else {
+                Default::default()
+            },
             id: ConfigId::new("remote-rules").unwrap(),
             format,
             url: Url::parse(url).unwrap(),

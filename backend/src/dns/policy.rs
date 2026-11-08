@@ -4148,6 +4148,7 @@ strategy:
         let mut config = Arc::try_unwrap(config()).expect("policy fixture must be unique");
         let resource = ConfigId::new("dynamic-rules").unwrap();
         config.rule_sets.push(ResolvedRuleSet::Const {
+            selectors: Default::default(),
             id: resource.clone(),
             format: RuleSetFormat::Clash,
             rule: "DOMAIN-SUFFIX,old.example\n".to_owned(),

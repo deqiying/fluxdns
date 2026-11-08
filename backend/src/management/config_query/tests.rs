@@ -322,7 +322,8 @@ async fn remote_dat_limit_failure_reaches_operation_query_without_source_secrets
     let fixture = Fixture::with_source(1, &source);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    // 两条 full 域名的 GeoSite protobuf；限制 1，确保经过真正下载和 DAT 解析后拒绝。
+    // 两条 full 域名的 GeoSite protobuf；限制 1，且 strategy 引用 `cn`，确保该 selector
+    // 经过真正下载和 DAT 解析后因实际加载的规则数超限而拒绝。
     let mut site = vec![0x0a, 2, b'C', b'N'];
     for name in ["a.test", "b.test"] {
         let mut domain = vec![0x08, 3, 0x12, name.len() as u8];
@@ -358,6 +359,10 @@ async fn remote_dat_limit_failure_reaches_operation_query_without_source_secrets
         "changes":[{"module":"rule_set","change":{"action":"create","value":{
             "name":"diagnostic-dat","type":"remote","format":"dat",
             "url":format!("http://{address}/geosite.dat?token=private-token-sentinel"),"auto_update":false
+        }}},{"module":"strategy","change":{"action":"create","value":{
+            "name":"diagnostic-dat-strategy",
+            "rules":[{"rule_set":"diagnostic-dat:cn","upstream":"local"}],
+            "default_upstream":"local"
         }}}], "confirmations":[]
     })).unwrap();
     let initial = owner

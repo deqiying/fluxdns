@@ -11,7 +11,9 @@ use crate::config::hash::deterministic_hash;
 use crate::config::model::HostsFormat;
 use crate::config::resolve::{ConfigId, ResolvedHostsResource, ResolvedRuleSet};
 
-use super::{HostsIndex, HostsLimits, HostsParseError, RuleIndex, RuleLimits, RuleParseError};
+use super::{
+    DatSelection, HostsIndex, HostsLimits, HostsParseError, RuleIndex, RuleLimits, RuleParseError,
+};
 
 const MAX_STABLE_READ_ATTEMPTS: usize = 2;
 const HOSTS_PARSER_VERSION: &str = "hosts-index-v1";
@@ -251,9 +253,9 @@ pub fn load_rule_set(
     limits: RuleLimits,
 ) -> Result<LoadedRuleSetResource, RuleResourceLoadError> {
     let (id, format, source, bytes) = match resource {
-        ResolvedRuleSet::Const { id, format, rule } => {
-            (id, *format, ResourceSource::Const, rule.as_bytes().to_vec())
-        }
+        ResolvedRuleSet::Const {
+            id, format, rule, ..
+        } => (id, *format, ResourceSource::Const, rule.as_bytes().to_vec()),
         ResolvedRuleSet::File {
             id, format, path, ..
         } => {
@@ -286,9 +288,12 @@ pub fn load_rule_set(
         });
     }
     let index = match format {
-        crate::config::model::RuleSetFormat::Dat => {
-            RuleIndex::parse_bytes_with_limits(&bytes, format, limits)
-        }
+        crate::config::model::RuleSetFormat::Dat => RuleIndex::parse_bytes_with_limits(
+            &bytes,
+            format,
+            limits,
+            DatSelection::Only(resource.selectors()),
+        ),
         crate::config::model::RuleSetFormat::Json | crate::config::model::RuleSetFormat::Clash => {
             let text =
                 std::str::from_utf8(&bytes).map_err(|_| RuleResourceLoadError::InvalidUtf8 {
@@ -519,6 +524,7 @@ mod tests {
     #[test]
     fn loads_const_and_file_rule_sets_with_shared_file_boundaries() {
         let inline = ResolvedRuleSet::Const {
+            selectors: Default::default(),
             id: id("inline-rules"),
             format: RuleSetFormat::Json,
             rule: r#"{"version":2,"rules":[{"domain":"example.test","invert":true}]}"#.to_owned(),
@@ -540,6 +546,7 @@ mod tests {
         ));
         fs::write(&path, "DOMAIN-SUFFIX,example.test\n").unwrap();
         let file = ResolvedRuleSet::File {
+            selectors: Default::default(),
             id: id("file-rules"),
             format: RuleSetFormat::Clash,
             path: path.clone(),
@@ -555,6 +562,7 @@ mod tests {
     #[test]
     fn loads_dat_rule_sets_and_rejects_remote_sources_at_local_boundary() {
         let dat = ResolvedRuleSet::Const {
+            selectors: std::collections::BTreeSet::from(["cn".to_owned()]),
             id: id("dat-rules"),
             format: RuleSetFormat::Dat,
             rule: String::from_utf8(dat_fixture()).unwrap(),
@@ -564,6 +572,7 @@ mod tests {
         assert!(loaded.index().selector("cn").is_some());
 
         let remote = ResolvedRuleSet::Remote {
+            selectors: Default::default(),
             id: id("remote-rules"),
             format: RuleSetFormat::Json,
             url: url::Url::parse("https://example.test/rules.json").unwrap(),
@@ -580,6 +589,7 @@ mod tests {
     #[test]
     fn rule_diagnostics_preserve_limits_without_echoing_input_or_paths() {
         let resource = ResolvedRuleSet::Const {
+            selectors: Default::default(),
             id: id("limited-rules"),
             format: RuleSetFormat::Clash,
             rule: "DOMAIN,first-private.test\nDOMAIN,second-private.test\n".to_owned(),
@@ -594,6 +604,7 @@ mod tests {
         assert!(!diagnostic.message.contains("private.test"));
 
         let resource = ResolvedRuleSet::Const {
+            selectors: Default::default(),
             id: id("invalid-dat"),
             format: RuleSetFormat::Dat,
             rule: "private-dat-body".to_owned(),
@@ -603,6 +614,7 @@ mod tests {
         assert!(!diagnostic.message.contains("private-dat-body"));
 
         let resource = ResolvedRuleSet::File {
+            selectors: Default::default(),
             id: id("missing-file"),
             format: RuleSetFormat::Clash,
             path: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
