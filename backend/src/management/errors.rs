@@ -11,7 +11,8 @@ use super::contract::{ErrorCode, FieldError};
 #[derive(Debug)]
 pub(super) struct ManagementError {
     pub code: ErrorCode,
-    pub diagnostic: Option<Diagnostic>,
+    // 诊断仅失败时分配，避免扩大每个 Result 的内联错误分支。
+    pub diagnostic: Option<Box<Diagnostic>>,
     pub field_errors: Vec<FieldError>,
 }
 
@@ -43,7 +44,7 @@ impl From<ActiveError> for ManagementError {
         };
         Self {
             code: super::config_query::error_code(error),
-            diagnostic: Some(diagnostic),
+            diagnostic: Some(Box::new(diagnostic)),
             field_errors,
         }
     }
@@ -324,6 +325,11 @@ pub(super) fn control_diagnostic(error: &ControlError) -> Diagnostic {
 mod tests {
     use super::*;
     use crate::config::validate::ConfigError;
+
+    #[test]
+    fn management_error_stays_below_large_result_threshold() {
+        assert!(std::mem::size_of::<ManagementError>() < 128);
+    }
 
     #[test]
     fn validation_does_not_echo_arbitrary_paths_or_messages() {

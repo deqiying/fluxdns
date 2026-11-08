@@ -681,7 +681,7 @@ pub(super) fn v2_error_response_detailed(
                 message: message.to_owned(),
                 retryable,
                 field_errors,
-                diagnostic,
+                diagnostic: diagnostic.map(|detail| *detail),
             }),
         )
             .into_response(),
@@ -1118,11 +1118,11 @@ mod tests {
         let response = super::v2_error_response_detailed(
             crate::management::errors::ManagementError {
                 code: crate::management::contract::ErrorCode::ValidationFailed,
-                diagnostic: Some(crate::diagnostics::Diagnostic::new(
+                diagnostic: Some(Box::new(crate::diagnostics::Diagnostic::new(
                     "configuration",
                     "CONFIG_REFERENCE_MISSING",
                     "引用的上游不存在。",
-                )),
+                ))),
                 field_errors: Vec::new(),
             },
             &super::RequestId("diagnostic-request".to_owned()),

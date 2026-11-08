@@ -55,6 +55,8 @@ HTTP 错误继续携带 request ID；异步失败日志携带 operation ID、阶
 
 2026-11-08 Windows / Rust 1.98.0 验证：完整后端测试 871 项通过、4 项忽略；新增 loopback HTTP 下载两条 GeoSite 规则、实际配置限额为 1 的用例，经过 `start_apply`、下载、解析、冻结结果到 operation 查询，确认返回规则数量超限及资源名，旧运行版本/源文件不变，URL token 不进入诊断。另覆盖安全字段路径、I/O 类别、HTTP 状态及关联 ID、同 ID 重查冻结与调用者隔离。前端类型检查、44 文件 273 项测试、6 项 schema 测试和生产构建通过；没有替换用户运行实例、验证其代理网络或执行真实浏览器联合验收。
 
+2026-11-08 CI 修复补充核对（`ac0e01d` 加工作树）：错误诊断增加后，`ManagementError` 和 [`StorageServiceError::All`](../../../backend/src/storage/service.rs) 的内联体积触发 `clippy::result_large_err`。管理错误仅对可选诊断使用 `Box`，存储三重失败仅间接保存 backend 错误；HTTP 输出形状、诊断内容及 timeout/fatal 分类保持不变，并增加错误体积回归。Windows / Rust 1.98.0 已通过与发布工作流相同的 `cargo clippy --manifest-path backend/Cargo.toml --locked --all-targets --all-features -- -D warnings`，以及 `cargo test --manifest-path backend/Cargo.toml --locked --all-features`（875 项通过、4 项忽略）；本轮未重新运行 GitHub Linux runner 或其他发布平台，不以本机验证代替远端发布成功。
+
 ## P1 配置状态内部投影（2026-09-07）
 
 [`config_query.rs`](../../../backend/src/management/config_query.rs) 将真实 ConfigStore 快照映射到既有 `ConfigState` 和 `OperationResult`，不读取外部文件、不从 Runtime 反推配置、不返回活动原文、路径、身份/hash 或底层错误。`runtime_revision` 以十进制字符串表示，测试覆盖 `u64::MAX`；其余 opaque token 由与入站反序列化共用的有界构造器检查，schema 和生成类型无 wire 变化。

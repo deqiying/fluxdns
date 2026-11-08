@@ -59,7 +59,8 @@ pub enum StorageServiceError {
     All {
         stats: StatsPersistenceError,
         detail: PortError,
-        backend: PortError,
+        // 三重失败只在冷路径分配，避免聚合诊断扩大所有 flush/shutdown 的 Result。
+        backend: Box<PortError>,
     },
 }
 
@@ -488,7 +489,7 @@ impl StorageRuntime {
                 Err(StorageServiceError::All {
                     stats,
                     detail,
-                    backend,
+                    backend: Box::new(backend),
                 })
             }
             (Err(_), Err(service)) => Err(service),
@@ -1053,6 +1054,24 @@ mod tests {
         assert!(reopened.retention_task.is_none());
         drop(reopened);
         std::fs::remove_dir_all(work_path).unwrap();
+    }
+
+    #[test]
+    fn aggregate_error_stays_compact_and_keeps_timeout_classification() {
+        use crate::ports::{PortError, PortErrorClass};
+        use crate::storage::StatsPersistenceError;
+
+        assert!(std::mem::size_of::<StorageServiceError>() < 128);
+        let error = StorageServiceError::All {
+            stats: StatsPersistenceError::Backend(PortError::new(
+                PortErrorClass::Unavailable,
+                "stats",
+            )),
+            detail: PortError::new(PortErrorClass::Unavailable, "detail"),
+            backend: Box::new(PortError::new(PortErrorClass::Timeout, "backend")),
+        };
+        assert!(error.is_timeout());
+        assert!(!error.is_fatal());
     }
 
     #[test]
