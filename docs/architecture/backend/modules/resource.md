@@ -6,7 +6,7 @@
 >
 > 最后评审：2026-09-05（条件请求、manifest 身份/代际与安全 304；基线见[模块索引](README.md)，本地证据见[后台服务](../../../implementation/backend/background-services.md#本次验证)）
 >
-> 2026-11-08 局部评审：仅 dat selector 按需加载、规则数统计口径与缺失 selector 失败语义；其余范围沿原评审记录，验证证据见[后台服务](../../../implementation/backend/background-services.md#能力与证据)。
+> 2026-11-08 局部评审：仅 dat selector 按需加载、规则数统计口径、缺失 selector 失败语义，以及 remote 刷新只解析一次的条件请求流程；其余范围沿原评审记录，验证证据见[后台服务](../../../implementation/backend/background-services.md#能力与证据)。
 >
 > 关联实现：[loader.rs](../../../../backend/src/resource/loader.rs)、[fetcher.rs](../../../../backend/src/resource/fetcher.rs)、[remote.rs](../../../../backend/src/resource/remote.rs)、[rules.rs](../../../../backend/src/resource/rules.rs)、[hosts.rs](../../../../backend/src/resource/hosts.rs)
 >
@@ -173,7 +173,7 @@ manifest v2 包含资源 ID、format、byte length、checksum/content hash、par
 
 失败退避指数增长并封顶 5 分钟。连续三次计划刷新失败或超过 `3 × update_interval` 无成功时标记 stale，但继续使用旧 snapshot。
 
-收到 304 后再次校验本地 pair 与请求前的 hash/身份/验证器；有效时只更新 manifest、刷新成功时间并沿用内容 hash，不重写 body，也不把 fallback 误标为新内容。条件基础缺失、损坏或在请求中变化时，在同一 deadline/cancellation 内最多补发一次无条件请求；再次 304 明确失败。坏 2xx body 不替换有效文件或 snapshot。当前仍会读取并解析本地内容以验证，不承诺消除 parser 成本。
+条件请求前只读取并核验本地 pair（身份、格式、parser 版本、长度和内容 hash）以取得验证器，不解析规则内容。收到 304 后再次校验本地 pair 与请求前的 hash/身份/验证器；有效时解析一次本地内容，只更新 manifest、刷新成功时间并沿用内容 hash，不重写 body，也不把 fallback 误标为新内容。304 已确认本地内容就是远端当前内容，因此这次解析失败（例如缺少被引用的 dat selector）直接作为刷新失败返回，不再补发无条件请求。条件基础缺失、损坏或在请求中变化时，在同一 deadline/cancellation 内最多补发一次无条件请求；再次 304 明确失败。2xx 时只解析新 body，坏 body 不替换有效文件或 snapshot。因此每次刷新恰好解析一次；本地 pair 的读取与 hash 校验仍不可省略。
 
 刷新协调器只组合 schedule、reservation、per-resource single-flight、epoch/CAS、backoff、cancel 与 shutdown，不自己执行 I/O。worker 在 reservation 内完成有界读取/抓取、hash、parse/persist，再发布候选。资源内容更新不创建完整 Runtime candidate；Policy 内部 matcher/version/hash 一起发布，再更新 Runtime metadata，不构成跨两个对象的原子事务。真实 fetcher、auto-update task 与 prepare 接线见[后台服务实现](../../../implementation/backend/background-services.md)。
 

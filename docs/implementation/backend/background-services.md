@@ -17,6 +17,8 @@
 > 2026-11-07 增量核对：`eedc312` 加本次工作树，仅核对 V4-S01 的触发器 DDL 连接生命周期及旧 schema 回归；生产连接池、事务和重试语义不变
 >
 > 2026-11-08 增量核对：`de39a28` 加本次工作树，仅核对 dat selector 按需加载在 prepare、remote 恢复/抓取与 file/remote 刷新链路的接线
+>
+> 2026-11-08 增量核对：`3d1a92e` 加本次工作树，仅核对 remote 刷新在 304/200 路径各解析一次及 304 后解析失败不补发请求
 
 ## 资源准备与刷新
 
@@ -28,7 +30,7 @@ dat 规则集的 [`load_rule_set`](../../../backend/src/resource/loader.rs)、`f
 
 Policy 的 matcher/version/hash 先一起发布，随后单独更新 Runtime metadata，不是跨对象原子事务。fetcher 支持有界 ETag/Last-Modified 条件请求，结果区分 `Modified`/`NotModified`；拒绝重定向和其余非成功状态。2xx body 有界读入内存，解析成功才保存 content/manifest。
 
-manifest v2 保存源身份 digest、fetcher 代际及不透明验证器，不保存原始 URL。只有本地 pair 完整、身份及代际匹配才发送条件头；304 返回后再次检查 pair，更新 manifest 与成功状态，不重写 body。失去条件基础时最多补发一次同 deadline 的无条件请求，再次 304 明确失败。URL/代理身份/格式变化不能复用旧验证器，新 fetcher scope 也隔离同 ID 的配置或凭据变化。兼容旧 manifest v1 内容恢复，但首次刷新无条件获取；详见 [Resource](../../architecture/backend/modules/resource.md)。本地内容仍需读取/解析校验，不宣称消除编译成本。
+manifest v2 保存源身份 digest、fetcher 代际及不透明验证器，不保存原始 URL。只有本地 pair 完整、身份及代际匹配才发送条件头；304 返回后再次检查 pair，更新 manifest 与成功状态，不重写 body。失去条件基础时最多补发一次同 deadline 的无条件请求，再次 304 明确失败。URL/代理身份/格式变化不能复用旧验证器，新 fetcher scope 也隔离同 ID 的配置或凭据变化。兼容旧 manifest v1 内容恢复，但首次刷新无条件获取；详见 [Resource](../../architecture/backend/modules/resource.md)。[`fetch_remote_rule_set`](../../../backend/src/resource/remote.rs) 在条件请求前只调用 `read_verified_pair` 核验本地 pair 并取验证器；304 后重新核验，再经 `parse_rule_content` 解析一次本地内容，解析失败直接返回、不补发无条件请求；200 只解析新 body。每次刷新恰好解析一次，同一时刻也不会同时持有旧内容的两份临时索引；本地文件读取与 hash 校验仍保留。
 
 ## 完成事件与后台分发
 
@@ -145,7 +147,8 @@ Windows 定向证据：Observability 24 项通过，包含全局 subscriber 独�
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | remote/file 刷新 | 条件 fetch、manifest v2、epoch/CAS、scheduler | async prepare + service resource task | loopback 200/304 与真实条件头；重复 304、坏 pair/响应、旧 manifest、换代及同预算重试 | 未执行真实远程/代理组合 |
-| dat selector 按需加载 | `collect_rule_set_selectors`、`DatSelection`、`RuleIndex::parse_dat_with_limits` | loader/remote 恢复与抓取、file/remote 刷新 worker | 2026-11-08 Windows `cargo test` 全量通过，含选择性索引、计数口径、未引用只校验结构、缺失 selector 诊断、引用变化判定为资源变化；本机 release 加载 Loyalsoldier `geosite.dat` 的内存对比见[配置参考](../configuration.md#14-rule_set) | 未在 Linux/glibc 部署环境复测内存；remote 304 路径仍会解析两次 |
+| dat selector 按需加载 | `collect_rule_set_selectors`、`DatSelection`、`RuleIndex::parse_dat_with_limits` | loader/remote 恢复与抓取、file/remote 刷新 worker | 2026-11-08 Windows `cargo test` 全量通过，含选择性索引、计数口径、未引用只校验结构、缺失 selector 诊断、引用变化判定为资源变化；本机 release 加载 Loyalsoldier `geosite.dat` 的内存对比见[配置参考](../configuration.md#14-rule_set) | 未在 Linux/glibc 部署环境复测内存 |
+| remote 刷新单次解析 | `read_verified_pair`、`parse_rule_content` | `fetch_remote_rule_set`（prepare 恢复失败后的抓取与 remote 刷新 worker） | 2026-11-08 Windows `cargo test` 全量通过；测试线程内计数确认 304 与 200 各解析 1 次，304 后缺少 selector 只发 1 次请求并返回解析错误 | 未对真实远端或代理复测 |
 | stats/detail | 统计 schema v9 + v2 layout marker、详情分片 layout v1、registry/lease、稳定 ID、跨日 cursor、commit stream、共同水位/manifest/run state、StorageRuntime、ResolutionRuntime | app 从 v2 配置打开独立统计库/records_path 并恢复水位；唯一 01:00 retention owner 消费配置 R/G/T | 真实布局初始化/重开/旧库拒绝、R/G/T、水位、调度与回收回归 | HTTP/WS 待 BC-13/25；未验证 Linux、真实权限/磁盘满 |
 | cache 二进制快照 owner | `FDCS` header/SHA-256、Moka 分批导出/恢复、周期 worker、generation | app 从 v2 enabled/path/interval 启动恢复 + coordinator reload + service shutdown | Windows 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际/超时定向测试 | 未验证真实权限/磁盘满或 Unix |
 | telemetry lifecycle / 聚合 | histogram、typed writer、registry、sampler | dispatcher + app/service 周期及最终 flush | 固定桶/标签、溢出原子性、拥塞下聚合、关闭详情、输出重试、reload 与最终快照 | 没有 exporter/逐 attempt 流；长期负载与全部输出故障未验收 |

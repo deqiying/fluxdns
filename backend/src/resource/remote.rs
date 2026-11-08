@@ -272,15 +272,16 @@ pub async fn fetch_remote_rule_set(
 
     let location = ResourceLocation::new(Arc::<str>::from(url.as_str()))
         .map_err(|error| RemoteResourceError::Fetch(error.with_safe_context("location")))?;
-    // 本地不存在、旧格式或损坏都转为无条件获取；取消/到期则不能被恢复分支吞掉。
-    let cached = match restore_remote_rule_set(resource, options.clone()) {
-        Ok(loaded)
-            if loaded.manifest.validator_scope.as_deref() == fetcher.validator_scope()
+    // 只核验本地 pair 以取得条件请求验证器，不解析内容：200 时旧内容会被丢弃，304 时
+    // 才需要解析且会重新核验。本地不存在、旧格式或损坏都转为无条件获取；取消/到期
+    // 则不能被恢复分支吞掉。
+    let cached = match read_verified_pair(resource, &options) {
+        Ok(pair)
+            if pair.manifest.validator_scope.as_deref() == fetcher.validator_scope()
                 && fetcher.validator_scope().is_some()
-                && loaded.manifest.source_identity.as_deref()
-                    == Some(&source_identity(resource)) =>
+                && pair.manifest.source_identity.as_deref() == Some(&source_identity(resource)) =>
         {
-            Some(loaded)
+            Some(pair.manifest)
         }
         Err(
             error @ (RemoteResourceError::Cancelled { .. } | RemoteResourceError::DeadlineExceeded),
@@ -297,7 +298,7 @@ pub async fn fetch_remote_rule_set(
         cancellation: options.cancellation.clone(),
         validators: cached
             .as_ref()
-            .map(|loaded| loaded.manifest.validators.clone())
+            .map(|manifest| manifest.validators.clone())
             .unwrap_or_default(),
     };
     let mut result = fetcher
@@ -310,33 +311,41 @@ pub async fn fetch_remote_rule_set(
         // fetch 期间本地 pair 可能被删除、损坏或被另一代替换，必须再次核验后才能发布。
         if let Some(cached) = cached
             && !request.validators.is_empty()
-            && let Ok(mut verified) = restore_remote_rule_set(resource, options.clone())
-            && verified.manifest.content_hash == cached.manifest.content_hash
-            && verified.manifest.validator_scope == cached.manifest.validator_scope
-            && verified.manifest.validators == cached.manifest.validators
+            && let Ok(verified) = read_verified_pair(resource, &options)
+            && verified.manifest.content_hash == cached.content_hash
+            && verified.manifest.validator_scope == cached.validator_scope
+            && verified.manifest.validators == cached.validators
         {
-            verified.manifest.validators.etag =
-                validators.etag.or(verified.manifest.validators.etag);
-            verified.manifest.validators.last_modified = validators
+            // 304 确认本地内容即远端当前内容，这是本次刷新唯一的一次解析；解析失败与
+            // 重新下载同一字节的结果一致，直接返回，不再补发无条件请求。
+            let index =
+                parse_rule_content(&verified.content, format, resource, options.rule_limits)?;
+            let mut manifest = verified.manifest;
+            manifest.validators.etag = validators.etag.or(manifest.validators.etag);
+            manifest.validators.last_modified = validators
                 .last_modified
-                .or(verified.manifest.validators.last_modified);
+                .or(manifest.validators.last_modified);
             check_boundary(&options)?;
-            persist_manifest(&options.manifest_path, &verified.manifest)?;
+            persist_manifest(&options.manifest_path, &manifest)?;
             check_boundary(&options)?;
-            verified.snapshot = ResourceSnapshot::new(
+            let snapshot = ResourceSnapshot::new(
                 id.clone(),
                 0,
                 0,
-                verified.manifest.content_hash.clone(),
-                verified.snapshot.source_fingerprint().to_owned(),
+                manifest.content_hash.clone(),
+                format!("remote:{}:{}", manifest.checksum, manifest.byte_len),
                 PARSER_VERSION,
                 SystemTime::now(),
                 ResourceSourceKind::Remote,
                 false,
                 ResourceStaleStatus::Fresh,
-                verified.index().clone(),
+                index,
             );
-            return Ok(verified);
+            return Ok(LoadedRemoteRuleSet {
+                id: id.clone(),
+                manifest,
+                snapshot,
+            });
         }
         check_boundary(&options)?;
         request.validators = ResourceValidators::default();
@@ -351,23 +360,7 @@ pub async fn fetch_remote_rule_set(
     };
     validate_result(&result, options.max_bytes)?;
 
-    let index = match format {
-        RuleSetFormat::Dat => RuleIndex::parse_bytes_with_limits(
-            &result.body,
-            format,
-            options.rule_limits,
-            DatSelection::Only(resource.selectors()),
-        ),
-        RuleSetFormat::Json | RuleSetFormat::Clash => {
-            let text =
-                std::str::from_utf8(&result.body).map_err(|_| RemoteResourceError::InvalidUtf8)?;
-            RuleIndex::parse_with_limits(text, format, options.rule_limits)
-        }
-    }
-    .map_err(|source| RemoteResourceError::Parse {
-        source,
-        limits: options.rule_limits,
-    })?;
+    let index = parse_rule_content(&result.body, format, resource, options.rule_limits)?;
     check_boundary(&options)?;
     let manifest = RemoteResourceManifest {
         manifest_version: MANIFEST_VERSION,
@@ -416,6 +409,48 @@ pub fn restore_remote_rule_set(
     resource: &ResolvedRuleSet,
     options: RemoteResourceOptions,
 ) -> Result<LoadedRemoteRuleSet, RemoteResourceError> {
+    let VerifiedPair {
+        manifest,
+        content,
+        modified_at,
+    } = read_verified_pair(resource, &options)?;
+    let index = parse_rule_content(&content, manifest.format, resource, options.rule_limits)?;
+    drop(content);
+    let snapshot = ResourceSnapshot::new(
+        manifest.resource_id.clone(),
+        0,
+        0,
+        Arc::clone(&manifest.content_hash),
+        format!("remote:{}:{}", manifest.checksum, manifest.byte_len),
+        PARSER_VERSION,
+        modified_at.unwrap_or_else(SystemTime::now),
+        ResourceSourceKind::Remote,
+        true,
+        ResourceStaleStatus::Fresh,
+        index,
+    );
+    Ok(LoadedRemoteRuleSet {
+        id: manifest.resource_id.clone(),
+        manifest,
+        snapshot,
+    })
+}
+
+/// 已通过身份、格式、parser 版本、长度与内容 hash 校验但尚未解析的本地 pair。
+struct VerifiedPair {
+    manifest: RemoteResourceManifest,
+    content: Vec<u8>,
+    modified_at: Option<SystemTime>,
+}
+
+/// 读取并核验本地 content/manifest pair，不解析规则内容。
+///
+/// 条件请求前只需要 manifest 中的验证器；把核验与解析拆开，避免每次刷新都为
+/// 取验证器而完整编译一次旧内容。
+fn read_verified_pair(
+    resource: &ResolvedRuleSet,
+    options: &RemoteResourceOptions,
+) -> Result<VerifiedPair, RemoteResourceError> {
     let (id, format) = match resource {
         ResolvedRuleSet::Remote {
             id, format, url, ..
@@ -430,15 +465,15 @@ pub fn restore_remote_rule_set(
             return Err(RemoteResourceError::UnsupportedSource { kind: "file" });
         }
     };
-    validate_options(&options)?;
-    check_boundary(&options)?;
+    validate_options(options)?;
+    check_boundary(options)?;
 
     let manifest_bytes =
         read_persisted_file(&options.manifest_path, MAX_MANIFEST_BYTES, "manifest_read")?;
     let persisted: PersistedManifest = yaml_serde::from_slice(&manifest_bytes)
         .map_err(|_| RemoteResourceError::ManifestInvalid)?;
     let content = read_persisted_file(&options.content_path, options.max_bytes, "content_read")?;
-    check_boundary(&options)?;
+    check_boundary(options)?;
 
     if !matches!(persisted.manifest_version, 1 | MANIFEST_VERSION)
         || persisted.resource_id != id.as_str()
@@ -463,32 +498,13 @@ pub fn restore_remote_rule_set(
                 .ok_or(RemoteResourceError::ManifestInvalid)
         })
         .transpose()?;
-
-    let index = match format {
-        RuleSetFormat::Dat => RuleIndex::parse_bytes_with_limits(
-            &content,
-            format,
-            options.rule_limits,
-            DatSelection::Only(resource.selectors()),
-        ),
-        RuleSetFormat::Json | RuleSetFormat::Clash => {
-            let text =
-                std::str::from_utf8(&content).map_err(|_| RemoteResourceError::InvalidUtf8)?;
-            RuleIndex::parse_with_limits(text, format, options.rule_limits)
-        }
-    }
-    .map_err(|source| RemoteResourceError::Parse {
-        source,
-        limits: options.rule_limits,
-    })?;
-    let content_hash: Arc<str> = Arc::from(persisted.content_hash);
     let manifest = RemoteResourceManifest {
         manifest_version: persisted.manifest_version,
         resource_id: id.clone(),
         format,
         byte_len: persisted.byte_len,
         checksum: persisted.checksum,
-        content_hash: Arc::clone(&content_hash),
+        content_hash: Arc::from(persisted.content_hash),
         modified_at_unix_nanos: persisted.modified_at_unix_nanos,
         parser_version: PARSER_VERSION,
         source_identity: persisted.source_identity,
@@ -502,24 +518,36 @@ pub fn restore_remote_rule_set(
         .validators
         .validate()
         .map_err(|_| RemoteResourceError::ManifestInvalid)?;
-    let snapshot = ResourceSnapshot::new(
-        id.clone(),
-        0,
-        0,
-        content_hash,
-        format!("remote:{}:{}", manifest.checksum, manifest.byte_len),
-        PARSER_VERSION,
-        modified_at.unwrap_or_else(SystemTime::now),
-        ResourceSourceKind::Remote,
-        true,
-        ResourceStaleStatus::Fresh,
-        index,
-    );
-    Ok(LoadedRemoteRuleSet {
-        id: id.clone(),
+    Ok(VerifiedPair {
         manifest,
-        snapshot,
+        content,
+        modified_at,
     })
+}
+
+/// remote 规则内容的唯一解析入口；dat 只编译资源声明引用的 selector。
+fn parse_rule_content(
+    content: &[u8],
+    format: RuleSetFormat,
+    resource: &ResolvedRuleSet,
+    limits: RuleLimits,
+) -> Result<RuleIndex, RemoteResourceError> {
+    #[cfg(test)]
+    tests::record_parse();
+    match format {
+        RuleSetFormat::Dat => RuleIndex::parse_bytes_with_limits(
+            content,
+            format,
+            limits,
+            DatSelection::Only(resource.selectors()),
+        ),
+        RuleSetFormat::Json | RuleSetFormat::Clash => {
+            let text =
+                std::str::from_utf8(content).map_err(|_| RemoteResourceError::InvalidUtf8)?;
+            RuleIndex::parse_with_limits(text, format, limits)
+        }
+    }
+    .map_err(|source| RemoteResourceError::Parse { source, limits })
 }
 
 /// 只保存定长身份摘要，不将 URL 或代理标识写入 manifest；adapter scope 隔离配置代际。
@@ -707,6 +735,15 @@ mod tests {
     use super::*;
     use crate::ports::{PortErrorClass, PortFuture};
 
+    thread_local! {
+        /// 当前测试线程内 `parse_rule_content` 的调用次数；tokio 测试默认单线程运行。
+        static PARSE_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    pub(super) fn record_parse() {
+        PARSE_COUNT.with(|count| count.set(count.get() + 1));
+    }
+
     struct FakeFetcher {
         body: Arc<[u8]>,
         calls: Arc<AtomicUsize>,
@@ -835,6 +872,100 @@ mod tests {
 
     fn unchanged() -> ResourceFetchResult {
         ResourceFetchResult::NotModified(ResourceValidators::default())
+    }
+
+    /// 只含 selector `cn`（full: example.test）的最小 GeoSiteList。
+    const CN_ONLY_DAT: &[u8] = b"\x0a\x16\x0a\x02CN\x12\x10\x08\x03\x12\x0cexample.test";
+
+    fn take_parse_count() -> usize {
+        PARSE_COUNT.with(|count| count.replace(0))
+    }
+
+    #[tokio::test]
+    async fn each_refresh_parses_rule_content_exactly_once() {
+        let root = conditional_root();
+        let resource = remote(RuleSetFormat::Clash, "https://rules.example.test/rules");
+        let fetcher = ConditionalFetcher::new(
+            "same",
+            vec![
+                modified(b"DOMAIN-SUFFIX,old.test\n"),
+                unchanged(),
+                modified(b"DOMAIN-SUFFIX,new.test\n"),
+            ],
+        );
+        fetch_remote_rule_set(&fetcher, &resource, options(&root))
+            .await
+            .unwrap();
+        take_parse_count();
+
+        // 304：条件请求前只核验本地 pair，304 后解析一次本地内容。
+        let unchanged = fetch_remote_rule_set(&fetcher, &resource, options(&root))
+            .await
+            .unwrap();
+        assert_eq!(take_parse_count(), 1);
+        assert_eq!(unchanged.index().suffix_count(), 1);
+
+        // 200：旧内容不再为取验证器而解析，只解析新 body。
+        let replaced = fetch_remote_rule_set(&fetcher, &resource, options(&root))
+            .await
+            .unwrap();
+        assert_eq!(take_parse_count(), 1);
+        assert_ne!(
+            unchanged.snapshot().content_hash(),
+            replaced.snapshot().content_hash()
+        );
+        let requests = fetcher.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert!(!requests[1].validators.is_empty());
+        assert!(!requests[2].validators.is_empty());
+    }
+
+    #[tokio::test]
+    async fn not_modified_parse_failure_returns_without_unconditional_retry() {
+        let root = conditional_root();
+        let initial = remote(RuleSetFormat::Dat, "https://rules.example.test/geosite.dat");
+        let first = ConditionalFetcher::new("same", vec![modified(CN_ONLY_DAT)]);
+        fetch_remote_rule_set(&first, &initial, options(&root))
+            .await
+            .unwrap();
+
+        // selector 引用不进入源身份，旧验证器仍有效；304 后本地内容缺少新引用的
+        // selector，重新下载同一字节也会失败，因此直接返回解析错误。
+        let ResolvedRuleSet::Remote {
+            id,
+            format,
+            url,
+            proxy,
+            auto_update,
+            update_interval,
+            ..
+        } = initial
+        else {
+            unreachable!()
+        };
+        let extended = ResolvedRuleSet::Remote {
+            id,
+            format,
+            url,
+            proxy,
+            auto_update,
+            update_interval,
+            selectors: ["cn".to_owned(), "gfw".to_owned()].into(),
+        };
+        let fetcher = ConditionalFetcher::new("same", vec![unchanged()]);
+        let error = fetch_remote_rule_set(&fetcher, &extended, options(&root))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            RemoteResourceError::Parse {
+                source: crate::resource::RuleParseError::DatSelectorNotFound { .. },
+                ..
+            }
+        ));
+        let requests = fetcher.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!requests[0].validators.is_empty());
     }
 
     #[tokio::test]
