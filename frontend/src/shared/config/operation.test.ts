@@ -3,10 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { server } from "@/mocks/server";
 import { setMockAuthenticated } from "@/mocks/handlers";
 import type { ApplyRequest, ConfigState } from "./api";
-import { applyAndSettle, createOperationId, settleOperation, resumeOperation, restoreFilesAndSettle, retryPersistenceAndSettle } from "./operation";
+import { applyAndSettle, createOperationId, getOperationMessage, operationError, PendingOperationError, settleOperation, resumeOperation, restoreFilesAndSettle, retryPersistenceAndSettle } from "./operation";
 import { QueryClient } from "@tanstack/react-query";
 import { assertNoPendingOperation, pendingOperationKey, trackConfigOperation } from "./pending-operation";
 import * as uuid from "@/shared/uuid";
+import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
 
 const state: ConfigState = {
   active_revision: "active-1",
@@ -161,5 +162,42 @@ describe("配置操作回读", () => {
     await expect(result).resolves.toMatchObject({ kind: "pending", operation: { operation_id: request.operation_id } });
     expect(reads).toBe(2);
     expect(writes).toBe(1);
+  });
+
+  it("拒绝与部分成功保留诊断，unknown 永不宣称拒绝或成功", () => {
+    const diagnostic = { stage: "persist", code: "FILE_WRITE_FAILED", message: "受管文件无法写入", resource: "config" };
+    const rejected = { operation_id: "rejected-id", status: { state: "rejected" as const, error: "APPLY_FAILED" as const }, diagnostic };
+    expect(getSafeErrorMessage(operationError(rejected))).toMatch(/运行状态保持不变.*persist.*FILE_WRITE_FAILED.*rejected-id/);
+    const partial = { operation_id: "partial-id", status: { state: "applied_unpersisted" as const, active_revision: "a2", persisted_revision: null, error: "PERSISTENCE_FAILED" as const }, diagnostic };
+    expect(getOperationMessage(partial)).toMatch(/运行配置已生效.*文件尚未同步.*FILE_WRITE_FAILED.*partial-id/);
+    expect(getOperationMessage({ operation_id: "unknown-id", status: { state: "unknown" } })).toMatch(/尚未确认.*unknown-id/);
+    expect(getOperationMessage({ operation_id: "unknown-id", status: { state: "unknown" } })).not.toMatch(/保持不变|已应用并同步/);
+  });
+
+  it("异步 apply 已受理后取消轮询仍保留未决 ID，而不是声称已拒绝", async () => {
+    const controller = new AbortController();
+    server.use(http.post("/api/v2/config/apply", () => { controller.abort(); return HttpResponse.json({ operation_id: "cancelled-id", status: { state: "applying" } }); }));
+    const client = new QueryClient();
+    const error = await trackConfigOperation(client, () => applyAndSettle(applyRequest("cancelled-id"), { signal: controller.signal, maxPolls: 1 })).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(PendingOperationError);
+    expect(getSafeErrorMessage(error)).toMatch(/尚未确认.*cancelled-id/);
+    expect(getSafeErrorMessage(error)).not.toContain("运行状态保持不变");
+    expect(client.getQueryData(pendingOperationKey)).toBe("cancelled-id");
+  });
+
+  it("未决查询保留安全请求诊断与两个 ID，不回显底层网络凭据", () => {
+    const error = new PendingOperationError("pending-safe", new ApiError({ code: "FORBIDDEN", message: "https://user:secret@example.com", kind: "http", requestId: "read-request", diagnostic: { stage: "read", code: "READ_DENIED", message: "无法读取操作记录" } }));
+    expect(getSafeErrorMessage(error)).toMatch(/尚未确认.*READ_DENIED.*read-request.*pending-safe/);
+    expect(getSafeErrorMessage(error)).not.toContain("secret");
+  });
+
+  it("恢复查询耗尽预算仍保留最后一次读取失败的诊断与请求 ID", async () => {
+    server.use(http.get("/api/v2/config/operations/budget-exhausted", () => HttpResponse.json({
+      code: "SERVICE_UNAVAILABLE", request_id: "last-read-request", message: "读取服务暂不可用", retryable: true, field_errors: [],
+      diagnostic: { stage: "configuration", code: "CONFIGURATION_UNAVAILABLE", message: "无法读取配置快照" },
+    }, { status: 503 })));
+    const error = await resumeOperation("budget-exhausted", { maxPolls: 1, pollIntervalMs: 0 }).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(PendingOperationError);
+    expect(getSafeErrorMessage(error)).toMatch(/尚未确认.*CONFIGURATION_UNAVAILABLE.*last-read-request.*budget-exhausted/);
   });
 });

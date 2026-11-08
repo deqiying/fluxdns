@@ -13,6 +13,8 @@
 > 2026-10-04 增量核对：`eb428f92cdc3acda836547107ef2f56f6d988249` 加本次工作树；范围限配置读取、搜索与 ECS 字段错误，不扩大历史验收结论
 >
 > 2026-11-06 增量核对：基线 `3d44dd4` 加本次工作树，范围限单次保存、无状态预览、文件操作和保留预览的新请求契约；旧批次结果不代表本次验证。
+>
+> 2026-11-08 错误传递增量核对：基线 `d208820` 加本次工作树，仅覆盖安全诊断、配置 operation 失败传递、资源限额与相关回归。
 
 ## 入口与生命周期
 
@@ -40,6 +42,18 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 所有预算在 OpenAPI `x-limits` 和字段 schema 中维护。已执行入站保护包括配置 4 MiB、变更 2 MiB/128 项、cursor 2048 bytes、历史查询 16 KiB/100 行/3650 天、WS 入站帧 128 KiB；BC-23 的在线身份表上限为 4096，超限窗口显式返回 `observation_gap`。WS 连接、订阅、队列、心跳、速率和 replay 预算均由运行时 owner 执行，具体值见 P4 小节。
 
 验证使用 [Rust 契约测试](../../../backend/src/management/contract/tests.rs)、[共享夹具](../../../backend/tests/fixtures/management-v2.json) 和 [Node schema 测试](../../../frontend/tests/contract-v2.node.mjs)：覆盖多态源值往返、只读注入、ID 修改、null、预算、精度、状态互斥及正式路由清单。真实 P3 HTTP/Runtime 与 P4 WS 证据见对应小节。
+
+## 安全错误诊断与操作关联
+
+[`Diagnostic`](../../../backend/src/diagnostics.rs) 是资源、配置和管理面共享的有界安全投影；[`errors.rs`](../../../backend/src/management/errors.rs) 按类型化错误生成固定中文说明，不使用任意底层 `Display` 或 `Debug` 正文。HTTP `ErrorEnvelope` 和异步 `OperationResult` 保留原错误码，并可附加诊断；字段权威及长度预算见 [OpenAPI](../../../frontend/openapi/management-api-v2.yaml)。旧响应缺少诊断仍合法。配置校验只公开已知字段路径、类别和错误数量，不回显提交值。
+
+[`ConfigMutationOwner`](../../../backend/src/management/config_mutation.rs) 在配置解析、凭据校验、资源准备、文件事务准备和服务应用失败时保留安全原因；[`ConfigStore`](../../../backend/src/config/store/active.rs) 将诊断与拒绝、已应用未持久化及补偿失败结果一起冻结，查询仍按原调用者隔离。持久化只公开 I/O 类别及事务阶段，清理失败优先说明需要核对事务，不把它伪装成普通拒绝。任务中断及回执未知仍保留 `unknown` 和 gate，不能推断运行态未改变或自动重放。
+
+[`PrepareError`](../../../backend/src/runtime/prepared.rs) 在错误产生处保留资源诊断：HTTP 状态、连接/TLS、超时、读取大小、DAT/JSON/Clash 解析、文件 I/O、持久化和 worker 构造分别可辨。规则解析错误带实际启用的限制值；不返回完整 URL、查询参数、代理凭据、规则正文、绝对路径或 SQL。后台资源刷新采用相同安全投影写结构化日志；健康指标保持静态有界标签，未新增手动资源刷新 API。
+
+HTTP 错误继续携带 request ID；异步失败日志携带 operation ID、阶段及原因码，前端用同一 operation ID 查询终态。两类标识不能互相代替，旧操作或非失败状态可以没有诊断。[前端统一错误处理](../frontend/application.md#统一安全错误与操作语义) 保留运行态语义、草稿和诊断文本，不执行 HTML 注入或自动重放。
+
+2026-11-08 Windows / Rust 1.98.0 验证：完整后端测试 871 项通过、4 项忽略；新增 loopback HTTP 下载两条 GeoSite 规则、实际配置限额为 1 的用例，经过 `start_apply`、下载、解析、冻结结果到 operation 查询，确认返回规则数量超限及资源名，旧运行版本/源文件不变，URL token 不进入诊断。另覆盖安全字段路径、I/O 类别、HTTP 状态及关联 ID、同 ID 重查冻结与调用者隔离。前端类型检查、44 文件 273 项测试、6 项 schema 测试和生产构建通过；没有替换用户运行实例、验证其代理网络或执行真实浏览器联合验收。
 
 ## P1 配置状态内部投影（2026-09-07）
 

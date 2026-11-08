@@ -68,6 +68,7 @@ pub struct PortError {
     class: PortErrorClass,
     operation: &'static str,
     safe_context: Option<&'static str>,
+    diagnostic: Option<Box<crate::diagnostics::Diagnostic>>,
 }
 
 impl PortError {
@@ -76,12 +77,23 @@ impl PortError {
             class,
             operation,
             safe_context: None,
+            diagnostic: None,
         }
     }
 
     pub const fn with_safe_context(mut self, context: &'static str) -> Self {
         self.safe_context = Some(context);
         self
+    }
+
+    /// adapter 仅可附加固定文案和安全枚举/数字组成的结构化诊断。
+    pub(crate) fn with_diagnostic(mut self, diagnostic: crate::diagnostics::Diagnostic) -> Self {
+        self.diagnostic = Some(Box::new(diagnostic));
+        self
+    }
+
+    pub(crate) fn diagnostic(&self) -> Option<&crate::diagnostics::Diagnostic> {
+        self.diagnostic.as_deref()
     }
 
     pub const fn class(&self) -> &PortErrorClass {

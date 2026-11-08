@@ -78,7 +78,7 @@ describe("apiV2Request", () => {
 
   it("未知后端 message 不会直接进入用户文案", () => {
     const error = new ApiError({ code: "UNKNOWN_INTERNAL", message: "sensitive backend detail", kind: "http", status: 500 });
-    expect(getSafeErrorMessage(error)).toBe("管理服务暂时不可用，请稍后重试。");
+    expect(getSafeErrorMessage(error)).toContain("管理服务暂时不可用，请稍后重试。");
     expect(getSafeErrorMessage(error)).not.toContain("sensitive backend detail");
   });
 
@@ -97,5 +97,21 @@ describe("apiV2Request", () => {
       requestId: "request-422",
       fieldErrors: [{ path: "/changes/0/change/path", code: "INVALID_ARGUMENT" }],
     });
+  });
+
+  it.each([403, 503])("非 JSON HTTP %s 保留状态与请求 ID，不回显响应体", async (status) => {
+    server.use(http.get("/api/v2/non-json", () => new HttpResponse("<html>https://user:secret@example.com</html>", { status, headers: { "Content-Type": "text/html", "X-Request-ID": "proxy-request" } })));
+    const error = await apiV2Request("/non-json").catch((value: unknown) => value);
+    expect(error).toMatchObject({ kind: "http", status, requestId: "proxy-request" });
+    expect(getSafeErrorMessage(error)).toContain(`HTTP ${status}`);
+    expect(getSafeErrorMessage(error)).toContain("proxy-request");
+    expect(getSafeErrorMessage(error)).not.toMatch(/html|secret|example/);
+  });
+
+  it("错误 envelope 的诊断与旧安全 message 均传递到统一展示", async () => {
+    server.use(http.get("/api/v2/diagnostic", () => HttpResponse.json({ code: "APPLY_FAILED", message: "request could not be completed", request_id: "diagnostic-request", retryable: false, field_errors: [], diagnostic: { stage: "prepare", code: "RESOURCE_PARSE_FAILED", message: "规则格式无效", resource: "guard" } }, { status: 422 })));
+    const error = await apiV2Request("/diagnostic").catch((value: unknown) => value);
+    expect(getSafeErrorMessage(error)).toMatch(/运行状态保持不变.*prepare.*guard.*规则格式无效.*RESOURCE_PARSE_FAILED.*diagnostic-request/);
+    expect(getSafeErrorMessage(error)).not.toContain("request could not");
   });
 });

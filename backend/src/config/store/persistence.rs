@@ -29,6 +29,43 @@ pub(crate) enum PersistenceError {
     Io(#[from] std::io::Error),
 }
 
+impl PersistenceError {
+    /// 文件错误只公开固定原因和 I/O 类别，不回显文件路径或 OS 错误正文。
+    pub(crate) fn diagnostic(&self) -> crate::diagnostics::Diagnostic {
+        use crate::diagnostics::Diagnostic;
+        let (code, message) = match self {
+            Self::Busy => (
+                "PERSISTENCE_BUSY",
+                "配置文件事务正被其他操作占用。".to_owned(),
+            ),
+            Self::Conflict => (
+                "PERSISTENCE_CONFLICT",
+                "配置文件内容或身份已改变，请检查外部修改后重新确认。".to_owned(),
+            ),
+            Self::InvalidJournal => (
+                "PERSISTENCE_JOURNAL_INVALID",
+                "配置事务日志无效，需检查并恢复文件事务。".to_owned(),
+            ),
+            Self::RecoveryRequired => (
+                "PERSISTENCE_RECOVERY_REQUIRED",
+                "存在未完成的配置事务，需核对文件并重启恢复；不要重复应用。".to_owned(),
+            ),
+            Self::CleanupRequired(_) => (
+                "PERSISTENCE_CLEANUP_FAILED",
+                "配置候选文件清理失败，需要人工核对事务状态，不能继续覆盖配置。".to_owned(),
+            ),
+            Self::Io(error) => (
+                "PERSISTENCE_IO_FAILED",
+                format!(
+                    "配置文件写入或同步失败（I/O 类别：{:?}），请检查目录、权限、磁盘及文件占用。",
+                    error.kind()
+                ),
+            ),
+        };
+        Diagnostic::new("persistence", code, message)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct Stamp {

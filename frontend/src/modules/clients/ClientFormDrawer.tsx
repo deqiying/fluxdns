@@ -3,7 +3,7 @@ import { Alert, App, Button, Drawer, Form, Input, Segmented, Select, Space, Typo
 import type { Rule } from "antd/es/form";
 import { Check, Lock, Pencil, RefreshCw, Save, Undo2 } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
-import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
+import { getSafeErrorMessage } from "@/shared/api/errors";
 import { DurationInput, durationOptionalRules } from "@/shared/components/DurationInput";
 import { clientEditValue } from "@/shared/config/contract";
 import { normalizeDuration } from "@/shared/config/form-values";
@@ -255,9 +255,6 @@ export function ClientFormDrawer({ target, items, strategyOptions, routeTemplate
           type="error"
           showIcon
           title={getSafeErrorMessage(mutation.error)}
-          description={mutation.error instanceof ApiError && mutation.error.requestId
-            ? <Typography.Text type="secondary">请求 ID：{mutation.error.requestId}</Typography.Text>
-            : undefined}
         />
       ) : null}
       <Form form={form} layout="vertical" requiredMark={requiredMark} onValuesChange={() => setDirty(true)} onFieldsChange={trackIdMeta}>

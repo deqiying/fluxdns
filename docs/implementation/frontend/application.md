@@ -13,6 +13,8 @@
 > 2026-11-07 增量核对：基线 `aa0fedf` 加本次工作树，范围限服务更新后的认证入口、页面模块加载失败分类与手动恢复；其余范围沿用原核对记录。
 >
 > 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，仅核对客户端 DoH 地址提示支持裸路由隐式 ID；验证见[页面与查询](pages.md#证据与限制)，认证等其余范围未重新核对。
+>
+> 2026-11-08 错误传递增量核对：基线 `d208820` 加本次工作树，仅核对 HTTP/operation 诊断解析与前端错误入口；其余范围沿用原记录。
 
 ## 入口
 
@@ -54,6 +56,16 @@
 [`apiV2Request`](../../../frontend/src/shared/api/client.ts) 固定 `/api/v2` 前缀，认证也使用该版本；默认 10 秒 timeout，支持调用者 AbortSignal、内存 Bearer 和统一错误处理。业务请求使用 Bearer 且 `credentials: omit`，认证专用请求才携带同源 Cookie，详见下节。client 校验 JSON Content-Type、解析错误 envelope，保留 request ID/retry-after 及受限字段错误；非鉴权请求 `401` 通知统一监听者。普通成功值最终是泛型断言，不是完整 OpenAPI 响应运行时 validator。
 
 认证、配置、保留、指标、历史与实时消息均来自 [v2 OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 生成的 [`generated-v2.ts`](../../../frontend/src/shared/api/generated-v2.ts)；[`types.ts`](../../../frontend/src/shared/api/types.ts) 只提供认证与错误的别名。schema 改动后使用 `generate:api`，命令见[前端 README](../../../frontend/README.md)。v1 schema、生成文件、client、fixture 与旧页面已删除。
+
+### 统一安全错误与操作语义
+
+[`errors.ts`](../../../frontend/src/shared/api/errors.ts) 的 `ApiError` 和 `getSafeErrorMessage` 保留原中文通用说明，再追加服务端安全 `diagnostic` 的阶段、资源、说明和原因码；没有诊断时仅使用 client 从已识别错误 envelope 提取的安全 message，固定英文通用失败句不取代中文回退。原始 `Error.message`、`cause`、HTML 或非 JSON 响应体不会进入 UI。诊断文本按 UTF-8 字节限长并清理控制/双向显示字符，关联 ID 仅接受受限标识；字段错误也有界并在统一文案中可见。完整字段与上限仍以 [OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
+
+[`client.ts`](../../../frontend/src/shared/api/client.ts) 将非 JSON 或 JSON 解析失败的 HTTP 错误按真实状态分类并保留响应头 request ID；HTTP 成功但内容不合法才归入 `invalid-response`。[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 把终态安全诊断与 operation ID 一起交给表单、组合采用和文件操作；`applied_unpersisted` 仍说明运行态已经生效，不能显示为拒绝。异步已受理后的轮询取消、非法响应或结果未知保留原操作 ID；只继续查询，不自动重放写入。会话刷新与原有 401 重放边界未改变。
+
+[`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx)、客户端抽屉、[`PageState`](../../../frontend/src/shared/components/PageState.tsx) 与全局配置状态均通过普通 React 文本展示统一文案，不使用 HTML 注入。保留预览错误单独存入 DNS 表单状态，避免被 mutation 外的 catch 吞掉；资源列表展示刷新失败及继续沿用旧内容的语义，辅助引用查询和系统指标刷新错误也不再静默隐藏。
+
+2026-11-08 Windows 验证：Node.js 26.8.1、pnpm 11.25.0，`pnpm run generate:api`、`pnpm run typecheck`、完整 Vitest 44 文件 273 项、`pnpm run test:contract:v2` 6 项及生产构建通过。新增覆盖细分诊断、旧响应回退、字段错误、非 JSON HTTP、关联 ID、部分成功/未知状态、取消后的未决操作、恢复查询预算耗尽仍保留最后一次诊断、UTF-8 长度与控制字符，以及表单普通文本渲染；MSW/jsdom 和 schema 验证不替代真实浏览器或故障文件系统联合验收，后端链路验证见[管理端诊断](../backend/management.md#安全错误诊断与操作关联)。
 
 ## P1 Bearer 接线（2026-09-08）
 

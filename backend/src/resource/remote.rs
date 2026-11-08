@@ -197,8 +197,12 @@ pub enum RemoteResourceError {
     InvalidUtf8,
     #[error("remote rule-set format is unsupported")]
     UnsupportedFormat,
-    #[error("remote rule-set could not be parsed: {0}")]
-    Parse(#[source] super::RuleParseError),
+    #[error("remote rule-set could not be parsed: {source}")]
+    Parse {
+        #[source]
+        source: super::RuleParseError,
+        limits: RuleLimits,
+    },
     #[error("remote resource persistence failed during {operation}")]
     Persistence {
         operation: &'static str,
@@ -355,7 +359,10 @@ pub async fn fetch_remote_rule_set(
             RuleIndex::parse_with_limits(text, format, options.rule_limits)
         }
     }
-    .map_err(RemoteResourceError::Parse)?;
+    .map_err(|source| RemoteResourceError::Parse {
+        source,
+        limits: options.rule_limits,
+    })?;
     check_boundary(&options)?;
     let manifest = RemoteResourceManifest {
         manifest_version: MANIFEST_VERSION,
@@ -462,7 +469,10 @@ pub fn restore_remote_rule_set(
             RuleIndex::parse_with_limits(text, format, options.rule_limits)
         }
     }
-    .map_err(RemoteResourceError::Parse)?;
+    .map_err(|source| RemoteResourceError::Parse {
+        source,
+        limits: options.rule_limits,
+    })?;
     let content_hash: Arc<str> = Arc::from(persisted.content_hash);
     let manifest = RemoteResourceManifest {
         manifest_version: persisted.manifest_version,
@@ -1026,6 +1036,58 @@ mod tests {
         ];
         bytes.extend_from_slice(b"example.test");
         Arc::from(bytes)
+    }
+
+    #[tokio::test]
+    async fn dat_parse_diagnostic_retains_effective_rule_limits() {
+        let root = conditional_root();
+        let fetcher = FakeFetcher {
+            body: dat_fixture(),
+            calls: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut options = options(&root);
+        options.rule_limits = RuleLimits::default().with_max_rules(0);
+        let resource = remote(
+            RuleSetFormat::Dat,
+            "https://rules.example.test/private?token=url-secret",
+        );
+        let diagnostic = fetch_remote_rule_set(&fetcher, &resource, options)
+            .await
+            .unwrap_err()
+            .diagnostic();
+        assert_eq!(diagnostic.stage, "resource_parse");
+        assert_eq!(diagnostic.code, "RULE_TOO_MANY_RULES");
+        assert!(diagnostic.message.contains("work.rule_set_max_rules=0"));
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("url-secret")
+        );
+        assert!(!root.join("rules.txt").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn persistence_diagnostics_keep_io_kind_but_not_source_text() {
+        for (operation, stage) in [
+            ("content_read", "resource_restore"),
+            ("rename", "resource_persist"),
+        ] {
+            let error = RemoteResourceError::Persistence {
+                operation,
+                source: io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "private-path/token=secret-value",
+                ),
+            };
+            let diagnostic = error.diagnostic();
+            assert_eq!(diagnostic.stage, stage);
+            assert_eq!(diagnostic.code, "RESOURCE_IO");
+            assert!(diagnostic.message.contains("PermissionDenied"));
+            let encoded = serde_json::to_string(&diagnostic).unwrap();
+            assert!(!encoded.contains("private-path"));
+            assert!(!encoded.contains("secret-value"));
+        }
     }
 
     #[tokio::test]

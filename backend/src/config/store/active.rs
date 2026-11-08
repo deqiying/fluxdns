@@ -22,6 +22,7 @@ use crate::config::edit::{
 use crate::config::hash::deterministic_hash;
 use crate::config::resolve::resolve_config_v2;
 use crate::config::source_edit::{InitialWebUiUser, create_initial_webui_user};
+use crate::diagnostics::Diagnostic;
 
 const MAX_RECORDS: usize = 1024;
 const OPERATION_TTL: Duration = Duration::from_secs(1800);
@@ -77,6 +78,7 @@ pub(crate) enum OperationSnapshot {
         active_revision: String,
         persisted_revision: Option<String>,
         error: OperationFailure,
+        diagnostic: Option<Diagnostic>,
     },
     AppliedSynced {
         active_revision: String,
@@ -84,15 +86,27 @@ pub(crate) enum OperationSnapshot {
     },
     Rejected {
         error: OperationFailure,
+        diagnostic: Option<Diagnostic>,
     },
     CompensationFailed {
         active_revision: Option<String>,
         error: OperationFailure,
+        diagnostic: Option<Diagnostic>,
     },
     Unknown,
 }
 
 impl OperationSnapshot {
+    /// 诊断与终态在同一锁内冻结，后续外改或其他操作不能覆盖失败证据。
+    pub(crate) fn diagnostic(&self) -> Option<&Diagnostic> {
+        match self {
+            Self::Rejected { diagnostic, .. }
+            | Self::AppliedUnpersisted { diagnostic, .. }
+            | Self::CompensationFailed { diagnostic, .. } => diagnostic.as_ref(),
+            _ => None,
+        }
+    }
+
     pub(crate) fn phase(&self) -> OperationPhase {
         match self {
             Self::Preparing => OperationPhase::Preparing,
@@ -118,12 +132,14 @@ impl OperationSnapshot {
             PersistenceError::CleanupRequired(_) => Self::CompensationFailed {
                 active_revision: Some(snapshot.revision.clone()),
                 error: OperationFailure::CompensationFailed,
+                diagnostic: Some(error.diagnostic()),
             },
             PersistenceError::RecoveryRequired => Self::Unknown,
             _ => Self::AppliedUnpersisted {
                 active_revision: snapshot.revision.clone(),
                 persisted_revision: snapshot.persisted_revision.clone(),
                 error: persistence_failure(error),
+                diagnostic: Some(error.diagnostic()),
             },
         }
     }
@@ -744,11 +760,13 @@ impl ConfigStore {
                     OperationSnapshot::CompensationFailed {
                         active_revision: Some(state.snapshot.revision.clone()),
                         error: OperationFailure::CompensationFailed,
+                        diagnostic: Some(error.diagnostic()),
                     }
                 } else {
                     state.snapshot.operation_id = None;
                     OperationSnapshot::Rejected {
                         error: persistence_failure(&error),
+                        diagnostic: Some(error.diagnostic()),
                     }
                 };
                 let record = state.operations.get_mut(operation_id).unwrap();
@@ -872,9 +890,19 @@ impl ApplyPermit {
 
     /// 由事务 owner 提供已知的拒绝类别；是否释放 gate 仍以真实补偿及旁文件清理为准。
     pub(crate) fn reject_with(
+        self,
+        error: OperationFailure,
+        compensated: bool,
+    ) -> Result<(), ActiveError> {
+        self.reject_with_diagnostic(error, compensated, None)
+    }
+
+    /// 原因只接收已脱敏诊断；补偿清理失败时优先报告真实清理失败，不能伪装成普通拒绝。
+    pub(crate) fn reject_with_diagnostic(
         mut self,
         error: OperationFailure,
         compensated: bool,
+        diagnostic: Option<Diagnostic>,
     ) -> Result<(), ActiveError> {
         let mut guard = self.store.active.lock().map_err(|_| ActiveError::Busy)?;
         let state = guard.as_mut().ok_or(ActiveError::Unavailable)?;
@@ -894,11 +922,16 @@ impl ApplyPermit {
             .get_mut(&self.operation_id)
             .ok_or(ActiveError::Unavailable)?;
         record.result = if compensated {
-            OperationSnapshot::Rejected { error }
+            OperationSnapshot::Rejected { error, diagnostic }
         } else {
             OperationSnapshot::CompensationFailed {
                 active_revision: None,
                 error: OperationFailure::CompensationFailed,
+                diagnostic: cleanup
+                    .as_ref()
+                    .err()
+                    .map(PersistenceError::diagnostic)
+                    .or(diagnostic),
             }
         };
         if compensated {

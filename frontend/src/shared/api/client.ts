@@ -218,9 +218,9 @@ async function sendOnce<T>(prefix: string, path: string, options: ApiRequestOpti
     const contentType = response.headers.get("content-type") ?? "";
     if (!contentType.toLowerCase().includes("application/json")) {
       throw new ApiError({
-        code: "INVALID_RESPONSE",
+        code: response.ok ? "INVALID_RESPONSE" : defaultHttpErrorCode(response.status),
         message: "expected application/json response",
-        kind: "invalid-response",
+        kind: response.ok ? "invalid-response" : "http",
         status: response.status,
         requestId: response.headers.get("x-request-id") ?? undefined,
       });
@@ -231,9 +231,9 @@ async function sendOnce<T>(prefix: string, path: string, options: ApiRequestOpti
       payload = await response.json();
     } catch (cause) {
       throw new ApiError({
-        code: "INVALID_RESPONSE",
+        code: response.ok ? "INVALID_RESPONSE" : defaultHttpErrorCode(response.status),
         message: "response body is not valid JSON",
-        kind: "invalid-response",
+        kind: response.ok ? "invalid-response" : "http",
         status: response.status,
         requestId: response.headers.get("x-request-id") ?? undefined,
         cause,
@@ -251,6 +251,8 @@ async function sendOnce<T>(prefix: string, path: string, options: ApiRequestOpti
         retryable: envelope?.retryable ?? (response.status === 429 || response.status >= 500),
         retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
         fieldErrors: extractFieldErrors(payload),
+        diagnostic: envelope?.diagnostic,
+        serverMessage: envelope?.message,
       });
 
       throw error;

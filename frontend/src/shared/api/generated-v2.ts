@@ -961,11 +961,23 @@ export interface components {
         };
         /** @enum {string} */
         ErrorCode: "HTTP_VERSION_NOT_SUPPORTED" | "URI_TOO_LONG" | "HEADERS_TOO_LARGE" | "REQUEST_TIMEOUT" | "INTERNAL_ERROR" | "SETUP_ALREADY_COMPLETED" | "AUTH_INVALID_CREDENTIALS" | "ORIGIN_REJECTED" | "CONFIG_CONFLICT" | "INVALID_ARGUMENT" | "VALIDATION_FAILED" | "PAYLOAD_TOO_LARGE" | "VERSION_UNSUPPORTED" | "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND" | "ACTIVE_REVISION_CONFLICT" | "FILE_REVISION_CONFLICT" | "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION" | "CONFIRMATION_REQUIRED" | "OPERATION_ID_REUSED" | "OPERATION_BUSY" | "PERSISTENCE_FAILED" | "APPLY_FAILED" | "COMPENSATION_FAILED" | "CURSOR_EXPIRED" | "RATE_LIMITED" | "SERVICE_UNAVAILABLE";
+        /** @description 服务端投影的安全诊断；不得含凭据、原始配置或底层错误链。长度上限按 UTF-8 字节计，旧响应及非失败状态可省略 diagnostic。 */
+        Diagnostic: {
+            /** @description 固定服务端安全阶段标识 */
+            stage: string;
+            /** @description 固定服务端安全原因码，不替代原错误码 */
+            code: string;
+            /** @description 安全诊断说明 */
+            message: string;
+            /** @description 安全资源标识，不含秘密 */
+            resource?: string;
+        };
         ErrorEnvelope: {
             code: components["schemas"]["ErrorCode"];
             request_id: string;
             message: string;
             retryable: boolean;
+            diagnostic?: components["schemas"]["Diagnostic"];
             field_errors: {
                 path: string;
                 code: components["schemas"]["ErrorCode"];
@@ -974,6 +986,7 @@ export interface components {
         OperationResult: {
             operation_id: components["schemas"]["OperationId"];
             status: components["schemas"]["OperationStatus"];
+            diagnostic?: components["schemas"]["Diagnostic"];
         };
         OperationStatus: {
             /** @enum {string} */

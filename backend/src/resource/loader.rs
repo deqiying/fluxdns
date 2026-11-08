@@ -119,20 +119,27 @@ pub enum ResourceLoadError {
     #[error("resource `{resource}` file path is a symlink")]
     Symlink { resource: String },
     #[error("resource `{resource}` file could not be inspected")]
-    Metadata { resource: String },
+    Metadata {
+        resource: String,
+        kind: std::io::ErrorKind,
+    },
     #[error("resource `{resource}` file could not be read")]
-    Read { resource: String },
+    Read {
+        resource: String,
+        kind: std::io::ErrorKind,
+    },
     #[error("resource `{resource}` file changed while it was being read")]
     UnstableFile { resource: String },
     #[error("resource `{resource}` is not valid UTF-8")]
     InvalidUtf8 { resource: String },
     #[error("resource `{resource}` exceeds the configured size limit")]
-    TooLarge { resource: String },
+    TooLarge { resource: String, max: usize },
     #[error("resource `{resource}` could not be parsed: {source}")]
     Parse {
         resource: String,
         #[source]
         source: HostsParseError,
+        limits: Box<HostsLimits>,
     },
 }
 
@@ -148,30 +155,37 @@ pub enum RuleResourceLoadError {
     #[error("rule resource `{resource}` file path is a symlink")]
     Symlink { resource: String },
     #[error("rule resource `{resource}` file could not be inspected")]
-    Metadata { resource: String },
+    Metadata {
+        resource: String,
+        kind: std::io::ErrorKind,
+    },
     #[error("rule resource `{resource}` file could not be read")]
-    Read { resource: String },
+    Read {
+        resource: String,
+        kind: std::io::ErrorKind,
+    },
     #[error("rule resource `{resource}` file changed while it was being read")]
     UnstableFile { resource: String },
     #[error("rule resource `{resource}` is not valid UTF-8")]
     InvalidUtf8 { resource: String },
     #[error("rule resource `{resource}` exceeds the configured size limit")]
-    TooLarge { resource: String },
+    TooLarge { resource: String, max: usize },
     #[error("rule resource `{resource}` could not be parsed: {source}")]
     Parse {
         resource: String,
         #[source]
         source: RuleParseError,
+        limits: Box<RuleLimits>,
     },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StableReadError {
     Symlink,
-    Metadata,
-    Read,
+    Metadata(std::io::ErrorKind),
+    Read(std::io::ErrorKind),
     UnstableFile,
-    TooLarge,
+    TooLarge { max: usize },
 }
 
 pub fn load_hosts(
@@ -207,6 +221,7 @@ pub fn load_hosts(
     if bytes.len() > limits.max_input_bytes {
         return Err(ResourceLoadError::TooLarge {
             resource: id.as_str().to_owned(),
+            max: limits.max_input_bytes,
         });
     }
     let text = String::from_utf8(bytes).map_err(|_| ResourceLoadError::InvalidUtf8 {
@@ -219,6 +234,7 @@ pub fn load_hosts(
     .map_err(|source| ResourceLoadError::Parse {
         resource: id.as_str().to_owned(),
         source,
+        limits: limits.into(),
     })?;
 
     Ok(LoadedHostsResource {
@@ -266,6 +282,7 @@ pub fn load_rule_set(
     if bytes.len() > limits.max_input_bytes {
         return Err(RuleResourceLoadError::TooLarge {
             resource: id.as_str().to_owned(),
+            max: limits.max_input_bytes,
         });
     }
     let index = match format {
@@ -283,6 +300,7 @@ pub fn load_rule_set(
     .map_err(|source| RuleResourceLoadError::Parse {
         resource: id.as_str().to_owned(),
         source,
+        limits: limits.into(),
     })?;
 
     Ok(LoadedRuleSetResource {
@@ -300,13 +318,13 @@ fn read_stable_file(
 ) -> Result<(Vec<u8>, FileFingerprint), StableReadError> {
     for _ in 0..MAX_STABLE_READ_ATTEMPTS {
         let before = inspect_file(path)?;
-        let file = File::open(path).map_err(|_| StableReadError::Read)?;
+        let file = File::open(path).map_err(|error| StableReadError::Read(error.kind()))?;
         let mut bytes = Vec::new();
         file.take((max_bytes as u64).saturating_add(1))
             .read_to_end(&mut bytes)
-            .map_err(|_| StableReadError::Read)?;
+            .map_err(|error| StableReadError::Read(error.kind()))?;
         if bytes.len() > max_bytes {
-            return Err(StableReadError::TooLarge);
+            return Err(StableReadError::TooLarge { max: max_bytes });
         }
         let after = inspect_file(path)?;
         if before == after && before.byte_len == bytes.len() as u64 {
@@ -317,12 +335,13 @@ fn read_stable_file(
 }
 
 fn inspect_file(path: &Path) -> Result<FileFingerprint, StableReadError> {
-    let metadata = fs::symlink_metadata(path).map_err(|_| StableReadError::Metadata)?;
+    let metadata =
+        fs::symlink_metadata(path).map_err(|error| StableReadError::Metadata(error.kind()))?;
     if metadata.file_type().is_symlink() {
         return Err(StableReadError::Symlink);
     }
     if !metadata.is_file() {
-        return Err(StableReadError::Metadata);
+        return Err(StableReadError::Metadata(std::io::ErrorKind::InvalidInput));
     }
     Ok(FileFingerprint {
         byte_len: metadata.len(),
@@ -334,10 +353,10 @@ fn map_hosts_file_error(error: StableReadError, id: &ConfigId) -> ResourceLoadEr
     let resource = id.as_str().to_owned();
     match error {
         StableReadError::Symlink => ResourceLoadError::Symlink { resource },
-        StableReadError::Metadata => ResourceLoadError::Metadata { resource },
-        StableReadError::Read => ResourceLoadError::Read { resource },
+        StableReadError::Metadata(kind) => ResourceLoadError::Metadata { resource, kind },
+        StableReadError::Read(kind) => ResourceLoadError::Read { resource, kind },
         StableReadError::UnstableFile => ResourceLoadError::UnstableFile { resource },
-        StableReadError::TooLarge => ResourceLoadError::TooLarge { resource },
+        StableReadError::TooLarge { max } => ResourceLoadError::TooLarge { resource, max },
     }
 }
 
@@ -345,10 +364,10 @@ fn map_rule_file_error(error: StableReadError, id: &ConfigId) -> RuleResourceLoa
     let resource = id.as_str().to_owned();
     match error {
         StableReadError::Symlink => RuleResourceLoadError::Symlink { resource },
-        StableReadError::Metadata => RuleResourceLoadError::Metadata { resource },
-        StableReadError::Read => RuleResourceLoadError::Read { resource },
+        StableReadError::Metadata(kind) => RuleResourceLoadError::Metadata { resource, kind },
+        StableReadError::Read(kind) => RuleResourceLoadError::Read { resource, kind },
         StableReadError::UnstableFile => RuleResourceLoadError::UnstableFile { resource },
-        StableReadError::TooLarge => RuleResourceLoadError::TooLarge { resource },
+        StableReadError::TooLarge { max } => RuleResourceLoadError::TooLarge { resource, max },
     }
 }
 
@@ -461,7 +480,7 @@ mod tests {
                     ..HostsLimits::default()
                 }
             ),
-            Err(ResourceLoadError::TooLarge { resource }) if resource == "bounded"
+            Err(ResourceLoadError::TooLarge { resource, .. }) if resource == "bounded"
         ));
 
         let path = std::env::temp_dir().join(format!(
@@ -557,5 +576,50 @@ mod tests {
             Err(RuleResourceLoadError::UnsupportedSource { resource, kind })
                 if resource == "remote-rules" && kind == "remote"
         ));
+    }
+    #[test]
+    fn rule_diagnostics_preserve_limits_without_echoing_input_or_paths() {
+        let resource = ResolvedRuleSet::Const {
+            id: id("limited-rules"),
+            format: RuleSetFormat::Clash,
+            rule: "DOMAIN,first-private.test\nDOMAIN,second-private.test\n".to_owned(),
+        };
+        let limits = super::RuleLimits::default().with_max_rules(1);
+        let error = load_rule_set(&resource, limits).unwrap_err();
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.stage, "resource_parse");
+        assert_eq!(diagnostic.code, "RULE_TOO_MANY_RULES");
+        assert_eq!(diagnostic.resource.as_deref(), Some("limited-rules"));
+        assert!(diagnostic.message.contains("work.rule_set_max_rules=1"));
+        assert!(!diagnostic.message.contains("private.test"));
+
+        let resource = ResolvedRuleSet::Const {
+            id: id("invalid-dat"),
+            format: RuleSetFormat::Dat,
+            rule: "private-dat-body".to_owned(),
+        };
+        let diagnostic = load_rule_set(&resource, limits).unwrap_err().diagnostic();
+        assert_eq!(diagnostic.code, "RULE_INVALID_DAT");
+        assert!(!diagnostic.message.contains("private-dat-body"));
+
+        let resource = ResolvedRuleSet::File {
+            id: id("missing-file"),
+            format: RuleSetFormat::Clash,
+            path: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("_fluxdns/nonexistent-path-secret/rules"),
+            auto_update: false,
+            update_interval: None,
+        };
+        let diagnostic = load_rule_set(&resource, limits).unwrap_err().diagnostic();
+        assert_eq!(diagnostic.stage, "resource_load");
+        assert_eq!(diagnostic.code, "RESOURCE_METADATA_IO");
+        assert!(diagnostic.message.contains("NotFound"));
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("path-secret")
+        );
     }
 }

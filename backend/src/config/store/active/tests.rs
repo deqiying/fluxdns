@@ -17,6 +17,10 @@ fn unresolved_persistence_results_are_not_classified_as_retryable_file_failure()
         OperationSnapshot::CompensationFailed {
             active_revision: Some(snapshot.revision.clone()),
             error: OperationFailure::CompensationFailed,
+            diagnostic: Some(
+                PersistenceError::CleanupRequired(Box::new(PersistenceError::Conflict))
+                    .diagnostic()
+            ),
         }
     );
     assert_eq!(
@@ -32,6 +36,9 @@ fn unresolved_persistence_results_are_not_classified_as_retryable_file_failure()
             active_revision: snapshot.revision.clone(),
             persisted_revision: snapshot.persisted_revision.clone(),
             error: OperationFailure::PersistenceFailed,
+            diagnostic: Some(
+                PersistenceError::Io(std::io::ErrorKind::PermissionDenied.into()).diagnostic()
+            ),
         }
     );
     assert_eq!(
@@ -40,6 +47,7 @@ fn unresolved_persistence_results_are_not_classified_as_retryable_file_failure()
             active_revision: snapshot.revision,
             persisted_revision: snapshot.persisted_revision,
             error: OperationFailure::FileRevisionConflict,
+            diagnostic: Some(PersistenceError::Conflict.diagnostic()),
         }
     );
 }
@@ -779,6 +787,7 @@ fn operation_capacity_is_bounded_but_optional_preview_has_no_ticket_capacity() {
                     actor: String::new(),
                     result: OperationSnapshot::Rejected {
                         error: OperationFailure::ApplyFailed,
+                        diagnostic: None,
                     },
                     expires: Instant::now() + OPERATION_TTL,
                 },
@@ -879,7 +888,8 @@ fn operation_retention_restarts_at_completion_and_pins_in_progress_results() {
     assert_eq!(
         record.result,
         OperationSnapshot::Rejected {
-            error: OperationFailure::ValidationFailed
+            error: OperationFailure::ValidationFailed,
+            diagnostic: None,
         }
     );
 }
@@ -1110,5 +1120,71 @@ fn file_change_after_acceptance_still_blocks_runtime_application() {
         fs::read_to_string(&fixture.source)
             .unwrap()
             .ends_with("# external\n")
+    );
+}
+
+#[test]
+fn rejected_operation_keeps_diagnostic_frozen_and_actor_scoped() {
+    let fixture = Fixture::new();
+    let changes = fixture.edit();
+    let BeginApply::Accepted(permit) = fixture
+        .store
+        .begin_apply(
+            "session",
+            "diagnostic-test",
+            &changes,
+            None,
+            &BTreeSet::new(),
+        )
+        .unwrap()
+    else {
+        panic!("expected accepted operation");
+    };
+    let diagnostic = Diagnostic::new(
+        "resource_parse",
+        "RULE_LIMIT_EXCEEDED",
+        "规则数量超过当前上限 131072。",
+    )
+    .with_resource("test-rules");
+    permit
+        .reject_with_diagnostic(
+            OperationFailure::ApplyFailed,
+            true,
+            Some(diagnostic.clone()),
+        )
+        .unwrap();
+    let result = fixture
+        .store
+        .operation_snapshot("session", "diagnostic-test")
+        .unwrap();
+    assert_eq!(result.diagnostic(), Some(&diagnostic));
+    assert_eq!(
+        fixture
+            .store
+            .operation_snapshot("other", "diagnostic-test")
+            .unwrap(),
+        OperationSnapshot::Unknown
+    );
+    let BeginApply::Existing(repeated) = fixture
+        .store
+        .begin_apply(
+            "session",
+            "diagnostic-test",
+            &changes,
+            None,
+            &BTreeSet::new(),
+        )
+        .unwrap()
+    else {
+        panic!("must not repeat a rejected operation");
+    };
+    assert_eq!(repeated, OperationPhase::Rejected);
+    assert_eq!(
+        fixture
+            .store
+            .operation_snapshot("session", "diagnostic-test")
+            .unwrap()
+            .diagnostic(),
+        Some(&diagnostic)
     );
 }

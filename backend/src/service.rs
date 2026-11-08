@@ -2293,20 +2293,23 @@ async fn run_resource_refresh_loop(
                     runtime.shutdown_resource_refresh();
                     return Err(TaskError::Cancelled);
                 }
-                Err(error) => {
+                Err(ResourceRefreshCoordinatorError::Resource(error)) => {
+                    let diagnostic = error.diagnostic();
                     if let Some(telemetry) = &telemetry {
                         publish_component_health(
                             telemetry,
                             TelemetryComponent::Resource,
                             ComponentHealthState::Degraded,
-                            Some("resource refresh failed"),
+                            Some("resource refresh failed; see structured diagnostics in logs"),
                         );
                     }
                     tracing::warn!(
                         event = "resource_refresh_failed",
                         component = "resource",
                         resource = %resource.as_str(),
-                        error = %error,
+                        stage = %diagnostic.stage,
+                        reason_code = %diagnostic.code,
+                        message = %diagnostic.message,
                         "resource_refresh_failed"
                     )
                 }

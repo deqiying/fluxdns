@@ -54,6 +54,14 @@ pub(crate) enum ControlError {
 }
 
 impl ServiceControl {
+    /// 仅用于拒绝发生在入队之前的配置测试，不启动服务或绑定 DNS 端口。
+    #[cfg(test)]
+    pub(crate) fn unavailable_for_test() -> Self {
+        let (sender, receiver) = mpsc::channel(1);
+        drop(receiver);
+        Self { sender }
+    }
+
     /// 只接纳已准备的运行时，队列满时不等待、不重试；入队失败不会改变运行状态。
     pub(crate) fn try_apply(
         &self,

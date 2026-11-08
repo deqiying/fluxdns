@@ -3,6 +3,7 @@ use std::process::ExitCode;
 pub mod app;
 pub mod cache;
 pub mod config;
+pub mod diagnostics;
 pub mod dns;
 pub mod management;
 pub mod observability;

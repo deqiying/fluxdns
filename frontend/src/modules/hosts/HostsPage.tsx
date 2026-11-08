@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button, Form, Input, Segmented, Select, Space, Switch, Table, Tag, Tooltip, Typography, type TableColumnsType } from "antd";
 import { Pencil, Plus, Search } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
+import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { DurationInput, durationRequiredRules } from "@/shared/components/DurationInput";
@@ -71,7 +72,7 @@ export function HostsPage() {
       width: 130,
       render: (_, item) => {
         const runtime = query.data?.runtime.find((value) => value.module === "hosts" && value.name === item.name);
-        return runtime && runtime.module === "hosts" ? <Tag color={runtime.condition === "ready" ? "success" : "warning"}>{runtime.condition}</Tag> : <Tag>未知</Tag>;
+        return runtime && runtime.module === "hosts" ? <Space orientation="vertical" size={0}><Tag color={runtime.condition === "ready" ? "success" : runtime.condition === "failed" ? "error" : "warning"}>{runtime.condition}</Tag>{runtime.error ? <Typography.Text type="danger">{getSafeErrorMessage(new ApiError({ code: runtime.error, message: "", kind: "http" }), runtime.condition === "stale" ? "资源刷新失败，继续使用上次可用内容。" : "资源加载失败。")}{`（${runtime.error}）`}</Typography.Text> : null}</Space> : <Tag>未知</Tag>;
       },
     },
     { title: "引用", width: 80, render: (_, item) => query.data?.references.filter((reference) => reference.to_name === item.name).length ?? 0 },

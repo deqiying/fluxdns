@@ -17,6 +17,7 @@ use crate::config::store::ConfigStore;
 use crate::config::store::active::{
     ActiveError, BeginApply, ExpectedRevisions, Impact, OperationFailure,
 };
+use crate::diagnostics::Diagnostic;
 use crate::dns::{Cancellation, Deadline, RuntimeRevision};
 use crate::runtime::PreparedRuntime;
 use crate::service::{ServiceControl, ServiceReloadError};
@@ -27,9 +28,10 @@ use super::contract::{
     OperationStatus, Revision, ValidationResult, decode_apply, decode_candidate, decode_file_sync,
     decode_module_candidate,
 };
+use super::errors::{ManagementError, active_diagnostic, control_diagnostic, secret_diagnostic};
 use super::router::{
-    AuthServices, RequestId, v2_error_response, v2_error_response_with_fields,
-    validate_v2_mutating_request,
+    AuthServices, RequestId, v2_error_response, v2_error_response_detailed,
+    v2_error_response_with_fields, validate_v2_mutating_request,
 };
 
 use super::session::SessionView;
@@ -50,12 +52,12 @@ impl ConfigMutationOwner {
     pub(super) async fn validate(
         &self,
         candidate: Candidate,
-    ) -> Result<ValidationResult, ErrorCode> {
+    ) -> Result<ValidationResult, ManagementError> {
         let store = Arc::clone(&self.store);
         tokio::task::spawn_blocking(move || {
             let validated = store
                 .validate_edit(&candidate.changes)
-                .map_err(error_code)?;
+                .map_err(ManagementError::from)?;
             Ok(ValidationResult {
                 observed_file_revision: revision(validated.observed_file_revision)?,
                 required_confirmations: validated.impacts.into_iter().map(impact_kind).collect(),
@@ -71,7 +73,7 @@ impl ConfigMutationOwner {
         &self,
         actor: String,
         request: ApplyRequest,
-    ) -> Result<OperationResult, ErrorCode> {
+    ) -> Result<OperationResult, ManagementError> {
         let store = Arc::clone(&self.store);
         let begin_actor = actor.clone();
         let operation_id = request.operation_id.as_str().to_owned();
@@ -95,20 +97,20 @@ impl ConfigMutationOwner {
         })
         .await
         .map_err(|_| ErrorCode::ServiceUnavailable)?
-        .map_err(error_code)?;
+        .map_err(ManagementError::from)?;
 
         match begin {
-            BeginApply::Existing(_) => {
-                super::config_query::read_async(&self.store, move |store| {
-                    operation_result(store, &actor, &query_operation_id)
-                })
-                .await
-            }
+            BeginApply::Existing(_) => super::config_query::read_async(&self.store, move |store| {
+                operation_result(store, &actor, &query_operation_id)
+            })
+            .await
+            .map_err(ManagementError::from),
             BeginApply::Accepted(permit) => {
                 // 已受理的工作必须启动，响应读取失败也不能丢弃 permit。
                 let initial = OperationResult {
                     operation_id: request.operation_id,
                     status: OperationStatus::Preparing {},
+                    diagnostic: None,
                 };
                 let owner = self.clone();
                 tokio::spawn(async move {
@@ -187,11 +189,16 @@ impl ConfigMutationOwner {
         let prepared = tokio::task::spawn_blocking(move || {
             let resolved = permit
                 .resolve_runtime_config()
-                .map_err(|_| OperationFailure::ValidationFailed)
+                .map_err(|error| {
+                    (
+                        OperationFailure::ValidationFailed,
+                        active_diagnostic(&error),
+                    )
+                })
                 .and_then(|resolved| {
-                    resolved
-                        .validate_secret_refs(64 * 1024)
-                        .map_err(|_| OperationFailure::ApplyFailed)?;
+                    resolved.validate_secret_refs(64 * 1024).map_err(|error| {
+                        (OperationFailure::ApplyFailed, secret_diagnostic(&error))
+                    })?;
                     Ok(resolved)
                 });
             (permit, resolved)
@@ -199,41 +206,67 @@ impl ConfigMutationOwner {
         .await;
         let (mut permit, resolved) = match prepared {
             Ok(value) => value,
-            Err(_) => return,
+            Err(_) => {
+                tracing::error!(event = "configuration_operation_interrupted", operation_id = %operation_id,
+                    stage = "configuration", "configuration_operation_interrupted");
+                return;
+            }
         };
         let resolved = match resolved {
             Ok(resolved) => resolved,
-            Err(failure) => {
-                let _ = permit.reject_with(failure, true);
+            Err((failure, diagnostic)) => {
+                reject_apply(permit, failure, true, diagnostic, &operation_id).await;
                 return;
             }
         };
         let runtime_revision = match self.store.active_snapshot_async().await {
             Ok(snapshot) => RuntimeRevision(snapshot.runtime_revision),
-            Err(_) => {
-                let _ = permit.reject_with(OperationFailure::ApplyFailed, true);
+            Err(error) => {
+                reject_apply(
+                    permit,
+                    OperationFailure::ApplyFailed,
+                    true,
+                    active_diagnostic(&error),
+                    &operation_id,
+                )
+                .await;
                 return;
             }
         };
-        let next_revision = match runtime_revision.0.checked_add(1) {
-            Some(revision) => RuntimeRevision(revision),
-            None => {
-                let _ = permit.reject_with(OperationFailure::ApplyFailed, true);
-                return;
-            }
+        let Some(revision) = runtime_revision.0.checked_add(1) else {
+            reject_apply(
+                permit,
+                OperationFailure::ApplyFailed,
+                true,
+                Diagnostic::new(
+                    "runtime_prepare",
+                    "REVISION_EXHAUSTED",
+                    "运行配置版本号已达到上限，无法继续应用。",
+                ),
+                &operation_id,
+            )
+            .await;
+            return;
         };
         let deadline = Deadline::new(Instant::now() + APPLY_TIMEOUT);
         let prepared = match PreparedRuntime::prepare_with_policy_core_and_remote_resources(
             resolved,
-            next_revision,
+            RuntimeRevision(revision),
             deadline,
             Cancellation::new(),
         )
         .await
         {
             Ok(prepared) => prepared,
-            Err(_) => {
-                let _ = permit.reject_with(OperationFailure::ApplyFailed, true);
+            Err(error) => {
+                reject_apply(
+                    permit,
+                    OperationFailure::ApplyFailed,
+                    true,
+                    error.diagnostic(),
+                    &operation_id,
+                )
+                .await;
                 return;
             }
         };
@@ -244,20 +277,34 @@ impl ConfigMutationOwner {
         .await;
         let (permit, stage_result) = match stage {
             Ok(value) => value,
-            Err(_) => return,
+            Err(_) => {
+                tracing::error!(event = "configuration_operation_interrupted", operation_id = %operation_id,
+                    stage = "persistence_prepare", "configuration_operation_interrupted");
+                return;
+            }
         };
         if let Err(error) = stage_result {
-            let failure = active_failure(&error);
-            let _ = tokio::task::spawn_blocking(move || permit.reject_with(failure, true)).await;
+            reject_apply(
+                permit,
+                active_failure(&error),
+                true,
+                active_diagnostic(&error),
+                &operation_id,
+            )
+            .await;
             return;
         }
-
         let receipt = match self.control.try_apply(runtime_revision, prepared, deadline) {
             Ok(receipt) => receipt,
             Err(error) => {
-                let failure = control_failure(&error);
-                let _ =
-                    tokio::task::spawn_blocking(move || permit.reject_with(failure, true)).await;
+                reject_apply(
+                    permit,
+                    control_failure(&error),
+                    true,
+                    control_diagnostic(&error),
+                    &operation_id,
+                )
+                .await;
                 return;
             }
         };
@@ -270,17 +317,24 @@ impl ConfigMutationOwner {
                     store.persist_applied(&actor, &persisted_operation_id)
                 })
                 .await;
-                if !matches!(persisted, Ok(Ok(_))) {
-                    tracing::warn!(
-                        event = "configuration_operation_incomplete",
-                        component = "management",
-                        operation_id = %operation_id,
-                        "configuration_operation_incomplete"
-                    );
+                match persisted {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        let diagnostic = active_diagnostic(&error);
+                        tracing::warn!(event = "configuration_operation_incomplete", operation_id = %operation_id,
+                            stage = %diagnostic.stage, reason_code = %diagnostic.code,
+                            message = %diagnostic.message, "configuration_operation_incomplete");
+                    }
+                    Err(_) => {
+                        tracing::error!(event = "configuration_operation_interrupted", operation_id = %operation_id,
+                            stage = "persistence", "configuration_operation_interrupted");
+                    }
                 }
             }
             Err(error) => {
                 if matches!(error, crate::service::ControlError::OutcomeUnknown) {
+                    tracing::warn!(event = "configuration_operation_outcome_unknown", operation_id = %operation_id,
+                        "configuration_operation_outcome_unknown");
                     drop(permit);
                     return;
                 }
@@ -288,12 +342,37 @@ impl ConfigMutationOwner {
                     error,
                     crate::service::ControlError::Apply(ServiceReloadError::LoggingCompensation(_))
                 );
-                let failure = control_failure(&error);
-                let _ =
-                    tokio::task::spawn_blocking(move || permit.reject_with(failure, compensated))
-                        .await;
+                reject_apply(
+                    permit,
+                    control_failure(&error),
+                    compensated,
+                    control_diagnostic(&error),
+                    &operation_id,
+                )
+                .await;
             }
         }
+    }
+}
+
+/// 在后台冻结失败与诊断；清理失败必须保留证据，不能用 let _ 吞掉。
+async fn reject_apply(
+    permit: crate::config::store::active::ApplyPermit,
+    failure: OperationFailure,
+    compensated: bool,
+    diagnostic: Diagnostic,
+    operation_id: &str,
+) {
+    tracing::warn!(event = "configuration_operation_failed", operation_id = %operation_id,
+        stage = %diagnostic.stage, reason_code = %diagnostic.code, resource = ?diagnostic.resource,
+        message = %diagnostic.message, "configuration_operation_failed");
+    let result = tokio::task::spawn_blocking(move || {
+        permit.reject_with_diagnostic(failure, compensated, Some(diagnostic))
+    })
+    .await;
+    if !matches!(result, Ok(Ok(()))) {
+        tracing::error!(event = "configuration_operation_rejection_incomplete", operation_id = %operation_id,
+            "configuration_operation_rejection_incomplete");
     }
 }
 
@@ -555,13 +634,13 @@ async fn post_retry(
     )
 }
 
-fn v2_result<T: serde::Serialize>(
-    result: Result<T, ErrorCode>,
+fn v2_result<T: serde::Serialize, E: Into<ManagementError>>(
+    result: Result<T, E>,
     request_id: &RequestId,
 ) -> Response {
     match result {
         Ok(value) => Json(value).into_response(),
-        Err(error) => v2_error_response(error, request_id),
+        Err(error) => v2_error_response_detailed(error.into(), request_id),
     }
 }
 
@@ -575,12 +654,14 @@ fn body_bytes(body: Result<Bytes, BytesRejection>) -> Result<Bytes, ErrorCode> {
     })
 }
 
-fn operation_response(
-    result: Result<OperationResult, ErrorCode>,
+fn operation_response<E: Into<ManagementError>>(
+    result: Result<OperationResult, E>,
     request_id: &RequestId,
 ) -> Response {
     match result {
         Ok(operation) => {
+            tracing::debug!(event = "configuration_operation_response", request_id = %request_id.0,
+                operation_id = %operation.operation_id.as_str(), "configuration_operation_response");
             let status = if matches!(
                 operation.status,
                 OperationStatus::Preparing {}
@@ -593,7 +674,7 @@ fn operation_response(
             };
             (status, Json(operation)).into_response()
         }
-        Err(error) => v2_error_response(error, request_id),
+        Err(error) => v2_error_response_detailed(error.into(), request_id),
     }
 }
 

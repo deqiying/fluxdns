@@ -316,6 +316,8 @@ ConfigV2
 
 启动时，应先得到绝对的 `resolved_work_path` 并确保目录存在；如果配置文件不在该目录中，再将其复制为 `<resolved_work_path>/config.yaml`。数据库、日志、缓存和证书等其他相对路径均以 `resolved_work_path` 为基准。
 
+2026-11-08 局部核对（`d208820` 加工作树）：远程规则的首次下载、缓存恢复和自动刷新通过 [`remote_resource_options`](../../backend/src/runtime/prepared.rs) 传递完整 `RuleLimits`，不再只传大小而让规则数退回默认值。DAT 的规则数量按整个文件各分类累计。该配置变更不会被文件 watcher 自动应用；当前管理面未提供 `work` 编辑入口，手动修改这两个上限后需重启进程读取实际启动源配置。解析失败会通过[安全错误诊断](backend/management.md#安全错误诊断与操作关联) 返回实际使用的上限，便于确认配置是否生效。
+
 ## 5. `database`
 
 | 字段 | 类型 | 条件 | 说明 |

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Alert, App, Button, Modal, Space, Typography } from "antd";
+import { Alert, App, Button, Modal, Space } from "antd";
 import { Save } from "lucide-react";
 import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
 
@@ -92,9 +92,6 @@ export function ConfigFormModal({
           type="error"
           showIcon
           message={getSafeErrorMessage(error)}
-          description={error instanceof ApiError && error.requestId
-            ? <Typography.Text type="secondary">请求 ID：{error.requestId}</Typography.Text>
-            : undefined}
         />
       ) : null}
       {children}

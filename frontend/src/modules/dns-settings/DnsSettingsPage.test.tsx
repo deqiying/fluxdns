@@ -130,7 +130,7 @@ describe("DNS 配置读取恢复与草稿", () => {
     expect(applies).toHaveLength(1);
     await user.click(screen.getByRole("button", { name: action === "cancel" ? "返回编辑" : "确认应用" }));
     if (action === "conflict") {
-      expect(await within(dialog).findByText("配置文件已再次变化，请重新读取差异。")).toBeInTheDocument();
+      expect(await within(dialog).findByText(/配置文件已再次变化，请重新读取差异。.*file-confirm/)).toBeInTheDocument();
       expect(applies).toEqual([applies[0], { ...applies[0], confirmations: ["discard_external_changes"], observed_file_revision: "files-new" }]);
     } else {
       await waitFor(() => expect(within(dialog).getByRole("button", { name: "保存" })).not.toBeDisabled());
@@ -140,5 +140,28 @@ describe("DNS 配置读取恢复与草稿", () => {
     expect(ttl).toHaveValue("23");
     expect(dialog).toBeInTheDocument();
     expect(screen.queryByText("配置操作结果尚未确认")).not.toBeInTheDocument();
+  });
+
+  it("保留预览失败显示安全诊断和字段错误，保留草稿且不提交 apply", async () => {
+    const user = userEvent.setup();
+    let applies = 0;
+    server.use(
+      http.post("/api/v2/retention/preview", () => HttpResponse.json({ code: "VALIDATION_FAILED", request_id: "preview-request", message: "request could not be completed", retryable: false, field_errors: [{ path: "/policy/retention/days", code: "INVALID_ARGUMENT" }], diagnostic: { stage: "preview", code: "RETENTION_INVALID", message: "保留策略无效", resource: "statistics" } }, { status: 422 })),
+      http.post("/api/v2/config/modules/statistics/apply", () => { applies += 1; return HttpResponse.error(); }),
+    );
+    mount();
+    await user.click(await screen.findByRole("button", { name: "编辑保留策略" }));
+    const dialog = await screen.findByRole("dialog", { name: "编辑数据保留" });
+    const days = within(dialog).getByLabelText("R：基础保留天数");
+    await user.clear(days);
+    await user.type(days, "2");
+    await user.click(within(dialog).getByRole("button", { name: "保存" }));
+    const alert = await within(dialog).findByRole("alert");
+    expect(alert).toHaveTextContent("RETENTION_INVALID");
+    expect(alert).toHaveTextContent("preview-request");
+    expect(alert).toHaveTextContent("/policy/retention/days");
+    expect(alert).not.toHaveTextContent("request could not be completed");
+    expect(days).toHaveValue("2");
+    expect(applies).toBe(0);
   });
 });

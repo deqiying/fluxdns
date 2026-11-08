@@ -89,6 +89,7 @@ export function ClientsPage() {
       )}
     >
       <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
+      <PageState error={strategies.error ?? listeners.error} hasData={!!query.data} onRetry={() => { void strategies.refetch(); void listeners.refetch(); }} />
       {query.data ? (
         <>
           <div className="client-summary">

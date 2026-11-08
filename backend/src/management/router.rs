@@ -644,17 +644,34 @@ pub(super) fn v2_error_response_with_fields(
     field_errors: Vec<super::contract::FieldError>,
     request_id: &RequestId,
 ) -> Response {
+    v2_error_response_detailed(
+        super::errors::ManagementError {
+            code,
+            field_errors,
+            diagnostic: None,
+        },
+        request_id,
+    )
+}
+
+/// HTTP 和 operation 采用同一安全诊断，不将底层 Error/Debug 内容发送给客户端。
+pub(super) fn v2_error_response_detailed(
+    error: super::errors::ManagementError,
+    request_id: &RequestId,
+) -> Response {
+    let super::errors::ManagementError {
+        code,
+        field_errors,
+        diagnostic,
+    } = error;
     let status =
         StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-    let (message, retryable) = match code {
-        super::contract::ErrorCode::InvalidArgument => ("request is invalid", false),
-        super::contract::ErrorCode::AuthRequired => ("session required", false),
-        super::contract::ErrorCode::NotFound => ("resource was not found", false),
-        super::contract::ErrorCode::ServiceUnavailable => {
-            ("management service is unavailable", true)
-        }
-        _ => ("request could not be completed", false),
-    };
+    let message = super::errors::default_message(&code);
+    let retryable = matches!(code, ErrorCode::ServiceUnavailable | ErrorCode::RateLimited);
+    if let Some(detail) = &diagnostic {
+        tracing::warn!(event = "management_request_failed", request_id = %request_id.0,
+            stage = %detail.stage, reason_code = %detail.code, "management_request_failed");
+    }
     with_request_id(
         (
             status,
@@ -664,6 +681,7 @@ pub(super) fn v2_error_response_with_fields(
                 message: message.to_owned(),
                 retryable,
                 field_errors,
+                diagnostic,
             }),
         )
             .into_response(),
@@ -701,6 +719,7 @@ fn error_response(
                 request_id: request_id.0.clone(),
                 retryable,
                 field_errors: Vec::new(),
+                diagnostic: None,
             }),
         )
             .into_response(),
@@ -1083,7 +1102,7 @@ mod tests {
         let body = to_bytes(response.into_body(), 4096).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["code"], "INVALID_ARGUMENT");
-        assert_eq!(body["message"], "request is invalid");
+        assert_eq!(body["message"], "请求参数或格式无效，请检查输入。");
         assert_eq!(
             body["field_errors"],
             serde_json::json!([{
@@ -1092,5 +1111,28 @@ mod tests {
             }])
         );
         assert!(!body.to_string().contains("192.0.2.0/99"));
+    }
+
+    #[tokio::test]
+    async fn detailed_http_error_preserves_request_id_and_safe_diagnostic() {
+        let response = super::v2_error_response_detailed(
+            crate::management::errors::ManagementError {
+                code: crate::management::contract::ErrorCode::ValidationFailed,
+                diagnostic: Some(crate::diagnostics::Diagnostic::new(
+                    "configuration",
+                    "CONFIG_REFERENCE_MISSING",
+                    "引用的上游不存在。",
+                )),
+                field_errors: Vec::new(),
+            },
+            &super::RequestId("diagnostic-request".to_owned()),
+        );
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(response.headers()["x-request-id"], "diagnostic-request");
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["request_id"], "diagnostic-request");
+        assert_eq!(value["diagnostic"]["code"], "CONFIG_REFERENCE_MISSING");
+        assert_eq!(value["diagnostic"]["message"], "引用的上游不存在。");
     }
 }

@@ -1054,6 +1054,16 @@ components:
     ErrorCode:
       type: string
       enum: [HTTP_VERSION_NOT_SUPPORTED, URI_TOO_LONG, HEADERS_TOO_LARGE, REQUEST_TIMEOUT, INTERNAL_ERROR, SETUP_ALREADY_COMPLETED, AUTH_INVALID_CREDENTIALS, ORIGIN_REJECTED, CONFIG_CONFLICT, INVALID_ARGUMENT, VALIDATION_FAILED, PAYLOAD_TOO_LARGE, VERSION_UNSUPPORTED, AUTH_REQUIRED, FORBIDDEN, NOT_FOUND, ACTIVE_REVISION_CONFLICT, FILE_REVISION_CONFLICT, EXTERNAL_CHANGES_REQUIRE_CONFIRMATION, CONFIRMATION_REQUIRED, OPERATION_ID_REUSED, OPERATION_BUSY, PERSISTENCE_FAILED, APPLY_FAILED, COMPENSATION_FAILED, CURSOR_EXPIRED, RATE_LIMITED, SERVICE_UNAVAILABLE]
+    Diagnostic:
+      type: object
+      additionalProperties: false
+      description: 服务端投影的安全诊断；不得含凭据、原始配置或底层错误链。长度上限按 UTF-8 字节计，旧响应及非失败状态可省略 diagnostic。
+      required: [stage, code, message]
+      properties:
+        stage: {type: string, maxLength: 64, x-max-utf8-bytes: 64, description: 固定服务端安全阶段标识}
+        code: {type: string, maxLength: 64, x-max-utf8-bytes: 64, description: 固定服务端安全原因码，不替代原错误码}
+        message: {type: string, maxLength: 1024, x-max-utf8-bytes: 1024, description: 安全诊断说明}
+        resource: {type: string, maxLength: 128, x-max-utf8-bytes: 128, description: 安全资源标识，不含秘密}
     ErrorEnvelope:
       type: object
       additionalProperties: false
@@ -1063,6 +1073,7 @@ components:
         request_id: {type: string, maxLength: 128}
         message: {type: string, maxLength: 512}
         retryable: {type: boolean}
+        diagnostic: {$ref: "#/components/schemas/Diagnostic"}
         field_errors:
           type: array
           maxItems: 128
@@ -1078,6 +1089,7 @@ components:
       properties:
         operation_id: {$ref: "#/components/schemas/OperationId"}
         status: {$ref: "#/components/schemas/OperationStatus"}
+        diagnostic: {$ref: "#/components/schemas/Diagnostic"}
     OperationStatus:
       oneOf:
         - type: object

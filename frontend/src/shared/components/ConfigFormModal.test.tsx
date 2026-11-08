@@ -35,6 +35,8 @@ it("错误展示安全文案和 request ID，并提供字段定位", () => {
     kind: "http",
     requestId: "request-safe",
     fieldErrors: [{ path: "/changes/0/change/path", code: "INVALID_ARGUMENT" }],
+    diagnostic: { stage: "validate", code: "INVALID_RESOURCE", message: "<img src=x onerror=alert(1)>", resource: "guard" },
+    operationId: "operation-safe",
   });
   render(
     <App>
@@ -43,8 +45,13 @@ it("错误展示安全文案和 request ID，并提供字段定位", () => {
       </ConfigFormModal>
     </App>,
   );
-  expect(screen.getByText("请求失败，请稍后重试。")).toBeInTheDocument();
-  expect(screen.getByText("请求 ID：request-safe")).toBeInTheDocument();
+  const alert = screen.getByRole("alert");
+  expect(alert).toHaveTextContent("配置校验失败");
+  expect(alert).toHaveTextContent("请求 ID：request-safe");
+  expect(alert).toHaveTextContent("操作 ID：operation-safe");
+  expect(alert).toHaveTextContent("字段 /changes/0/change/path：INVALID_ARGUMENT");
+  expect(alert).toHaveTextContent("<img src=x onerror=alert(1)>");
+  expect(alert.querySelector("img")).toBeNull();
   expect(screen.queryByText("unsafe detail")).not.toBeInTheDocument();
   expect(formFieldErrors(error)).toEqual([{ name: ["changes", "0", "change", "path"], errors: ["INVALID_ARGUMENT"] }]);
 });

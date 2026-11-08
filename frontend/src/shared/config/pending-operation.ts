@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { PendingOperationError, type OperationSettlement } from "./operation";
+import { operationError, PendingOperationError, type OperationSettlement } from "./operation";
 
 // 与服务端配置快照分开保存，后台刷新和页面切换都不能清除未确认的操作。
 export const pendingOperationKey = ["config-pending-operation"] as const;
@@ -16,7 +16,7 @@ export async function trackConfigOperation<T extends OperationSettlement | null>
 ): Promise<T> {
   try {
     const settlement = await run();
-    if (settlement && settlement.kind !== "settled") throw new PendingOperationError(settlement.operation.operation_id);
+    if (settlement && settlement.kind !== "settled") throw new PendingOperationError(settlement.operation.operation_id, operationError(settlement.operation));
     return settlement;
   } catch (error) {
     if (error instanceof PendingOperationError) client.setQueryData(pendingOperationKey, error.operationId);

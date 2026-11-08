@@ -5,7 +5,7 @@ import { ApiError } from "@/shared/api/errors";
 import type { components } from "@/shared/api/generated-v2";
 import { fetchConfigModule, fetchConfigState, type ConfigModule, type ConfigState } from "./api";
 import { invalidationKeysForChanges, configKeys } from "./query-keys";
-import { applyWithConfirmation, createOperationId } from "./operation";
+import { applyWithConfirmation, createOperationId, getOperationMessage, operationError } from "./operation";
 import { assertNoPendingOperation, trackConfigOperation } from "./pending-operation";
 
 type Schemas = components["schemas"];
@@ -41,7 +41,8 @@ export function useConfigChangeMutation(module: ConfigModule) {
       assertNoPendingOperation(queryClient);
       const readError = queryClient.getQueryState(configKeys.moduleRoot(module))?.error
         ?? queryClient.getQueryState(configKeys.state())?.error;
-      if (readError) throw new ApiError({ code: "CONFIG_READ_FAILED", message: "配置读取失败，请刷新后保存。", kind: "http" });
+      if (readError) throw new ApiError({ code: "CONFIG_READ_FAILED", message: "配置读取失败，请刷新后保存。", kind: "http", cause: readError,
+        ...(readError instanceof ApiError ? { requestId: readError.requestId, diagnostic: readError.diagnostic, serverMessage: readError.serverMessage, fieldErrors: readError.fieldErrors } : {}) });
       const settlement = await trackConfigOperation(queryClient, () => applyWithConfirmation({
         operation_id: createOperationId(),
         changes: [change],
@@ -49,7 +50,7 @@ export function useConfigChangeMutation(module: ConfigModule) {
       if (!settlement) return null;
       const operation = settlement.operation;
       if (operation.status.state === "rejected" || operation.status.state === "compensation_failed") {
-        throw new ApiError({ code: operation.status.error, message: operation.status.error, kind: "http" });
+        throw operationError(operation);
       }
       return operation;
     },
@@ -58,7 +59,7 @@ export function useConfigChangeMutation(module: ConfigModule) {
       await Promise.all(invalidationKeysForChanges([variables.change]).map((queryKey) =>
         queryClient.invalidateQueries({ queryKey })));
       if (operation.status.state === "applied_unpersisted") {
-        void message.warning("运行配置已生效，但文件尚未同步。请在全局配置提示中重试。");
+        void message.warning(getOperationMessage(operation));
       } else {
         void message.success("配置已应用并同步到文件");
       }

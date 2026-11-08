@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::config::resolve::{ConfigId, ResolvedHostsResource, ResolvedRuleSet};
 use crate::config::{BindPlan, ResolvedConfig};
+use crate::diagnostics::Diagnostic;
 use crate::dns::{Cancellation, DEFAULT_LOCAL_TTL, Deadline, PolicyDnsCore, RuntimeRevision};
 use crate::ports::effects::ResourceFetcher;
 use crate::resource::{
@@ -142,11 +143,13 @@ impl PreparedRuntime {
         let resource_fetcher = ReqwestResourceFetcher::from_resolved(&config.outbounds, 64 * 1024)
             .map_err(|error| PrepareError::ResourceFetcher {
                 reason: error.to_string(),
+                diagnostic: error.diagnostic().into(),
             })?;
         let policy_core =
             PolicyDnsCore::from_config(&config, DEFAULT_LOCAL_TTL).map_err(|error| {
                 PrepareError::PolicyCore {
                     reason: error.to_string(),
+                    diagnostic: policy_core_diagnostic(&error, &config).into(),
                 }
             })?;
         let snapshot = Arc::new(RuntimeSnapshot::with_policy_core(
@@ -181,6 +184,7 @@ impl PreparedRuntime {
             ReqwestResourceFetcher::from_resolved(&config.outbounds, 64 * 1024).map_err(
                 |error| PrepareError::ResourceFetcher {
                     reason: error.to_string(),
+                    diagnostic: error.diagnostic().into(),
                 },
             )?,
         );
@@ -202,6 +206,7 @@ impl PreparedRuntime {
                         .await
                         .map_err(|fetch_error| PrepareError::RemoteResource {
                             resource: id.as_str().to_owned(),
+                            diagnostic: fetch_error.diagnostic().with_resource(id.as_str()).into(),
                             reason: format!(
                                 "restore failed: {restore_error}; fetch failed: {fetch_error}"
                             ),
@@ -218,6 +223,7 @@ impl PreparedRuntime {
         )
         .map_err(|error| PrepareError::PolicyCore {
             reason: error.to_string(),
+            diagnostic: policy_core_diagnostic(&error, &config).into(),
         })?;
         let resource_workers = build_resource_workers(
             &config,
@@ -455,6 +461,7 @@ impl PreparedRuntime {
                     .await
                     .map_err(|error| ResourceRefreshError::Worker {
                         resource: resource.as_str().to_owned(),
+                        diagnostic: error.diagnostic().with_resource(resource.as_str()).into(),
                         reason: error.to_string(),
                     })?;
                 RefreshedResourceSnapshot::RuleSet(loaded.snapshot().clone())
@@ -464,6 +471,7 @@ impl PreparedRuntime {
                 .map(RefreshedResourceSnapshot::RuleSet)
                 .map_err(|error| ResourceRefreshError::Worker {
                     resource: resource.as_str().to_owned(),
+                    diagnostic: error.diagnostic().with_resource(resource.as_str()).into(),
                     reason: error.to_string(),
                 })?,
             PreparedResourceWorker::FileHosts(worker) => worker
@@ -471,6 +479,7 @@ impl PreparedRuntime {
                 .map(RefreshedResourceSnapshot::Hosts)
                 .map_err(|error| ResourceRefreshError::Worker {
                     resource: resource.as_str().to_owned(),
+                    diagnostic: error.diagnostic().with_resource(resource.as_str()).into(),
                     reason: error.to_string(),
                 })?,
         };
@@ -595,17 +604,78 @@ pub enum PrepareError {
     #[error("runtime bind entry {index} duplicates another endpoint")]
     DuplicateEndpoint { index: usize },
     #[error("runtime policy DNS core could not be built: {reason}")]
-    PolicyCore { reason: String },
+    PolicyCore {
+        reason: String,
+        diagnostic: Box<Diagnostic>,
+    },
     #[error("runtime resource fetcher could not be built: {reason}")]
-    ResourceFetcher { reason: String },
+    ResourceFetcher {
+        reason: String,
+        diagnostic: Box<Diagnostic>,
+    },
     #[error("remote resource `{resource}` could not be prepared: {reason}")]
-    RemoteResource { resource: String, reason: String },
+    RemoteResource {
+        resource: String,
+        reason: String,
+        diagnostic: Box<Diagnostic>,
+    },
     #[error("resource `{resource}` refresh worker could not be prepared: {reason}")]
-    ResourceRefresh { resource: String, reason: String },
+    ResourceRefresh {
+        resource: String,
+        reason: String,
+        diagnostic: Box<Diagnostic>,
+    },
     #[error("file hosts resource `{resource}` could not be prepared: {reason}")]
-    FileHostsResource { resource: String, reason: String },
+    FileHostsResource {
+        resource: String,
+        reason: String,
+        diagnostic: Box<Diagnostic>,
+    },
     #[error("file rule-set resource `{resource}` could not be prepared: {reason}")]
-    FileRuleSetResource { resource: String, reason: String },
+    FileRuleSetResource {
+        resource: String,
+        reason: String,
+        diagnostic: Box<Diagnostic>,
+    },
+}
+
+impl PrepareError {
+    /// 对外只传递源头的安全诊断，内部 reason 永不进入诊断正文。
+    pub(crate) fn diagnostic(&self) -> Diagnostic {
+        match self {
+            Self::ResourceFetcher { diagnostic, .. }
+            | Self::PolicyCore { diagnostic, .. }
+            | Self::RemoteResource { diagnostic, .. }
+            | Self::ResourceRefresh { diagnostic, .. }
+            | Self::FileHostsResource { diagnostic, .. }
+            | Self::FileRuleSetResource { diagnostic, .. } => diagnostic.as_ref().clone(),
+            Self::InvalidRevision => Diagnostic::new(
+                "runtime_bind_plan",
+                "RUNTIME_INVALID_REVISION",
+                "运行态版本必须大于零",
+            ),
+            Self::EmptyBindPlan => Diagnostic::new(
+                "runtime_bind_plan",
+                "RUNTIME_EMPTY_BIND_PLAN",
+                "运行态绑定计划不能为空",
+            ),
+            Self::InvalidPort { index } => Diagnostic::new(
+                "runtime_bind_plan",
+                "RUNTIME_INVALID_PORT",
+                format!("运行态绑定端口无效；条目序号={index}"),
+            ),
+            Self::EmptyOwner { index } => Diagnostic::new(
+                "runtime_bind_plan",
+                "RUNTIME_EMPTY_OWNER",
+                format!("运行态绑定缺少所有者；条目序号={index}"),
+            ),
+            Self::DuplicateEndpoint { index } => Diagnostic::new(
+                "runtime_bind_plan",
+                "RUNTIME_DUPLICATE_ENDPOINT",
+                format!("运行态绑定端点重复；条目序号={index}"),
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -613,13 +683,91 @@ pub enum ResourceRefreshError {
     #[error("runtime resource `{resource}` has no configured refresh worker")]
     NotConfigured { resource: String },
     #[error("runtime resource refresh worker for `{resource}` failed: {reason}")]
-    Worker { resource: String, reason: String },
+    Worker {
+        resource: String,
+        reason: String,
+        diagnostic: Box<Diagnostic>,
+    },
     #[error("runtime policy DNS core is unavailable for resource refresh")]
     MissingPolicyCore,
     #[error("runtime resource `{resource}` could not be published to policy: {reason}")]
     Policy { resource: String, reason: String },
     #[error("runtime resource `{resource}` metadata could not be published: {reason}")]
     Snapshot { resource: String, reason: String },
+}
+
+impl ResourceRefreshError {
+    /// 保留 worker 的源错误诊断；策略与元数据发布分别标注失败阶段。
+    pub(crate) fn diagnostic(&self) -> Diagnostic {
+        match self {
+            Self::Worker { diagnostic, .. } => diagnostic.as_ref().clone(),
+            Self::NotConfigured { resource } => Diagnostic::new(
+                "resource_refresh",
+                "RESOURCE_REFRESH_NOT_CONFIGURED",
+                "资源未配置刷新任务",
+            )
+            .with_resource(resource),
+            Self::MissingPolicyCore => Diagnostic::new(
+                "resource_policy_publish",
+                "RESOURCE_POLICY_MISSING",
+                "资源刷新缺少策略 DNS 核心",
+            ),
+            Self::Policy { resource, .. } => Diagnostic::new(
+                "resource_policy_publish",
+                "RESOURCE_POLICY_PUBLISH",
+                "刷新资源无法发布到策略 DNS 核心",
+            )
+            .with_resource(resource),
+            Self::Snapshot { resource, .. } => Diagnostic::new(
+                "resource_metadata_publish",
+                "RESOURCE_METADATA_PUBLISH",
+                "刷新资源元数据发布失败",
+            )
+            .with_resource(resource),
+        }
+    }
+}
+
+/// Policy 的资源解析错误仍投影原始枚举，其余构造失败保留明确阶段。
+fn policy_core_diagnostic(
+    error: &crate::dns::PolicyCoreBuildError,
+    config: &ResolvedConfig,
+) -> Diagnostic {
+    use crate::dns::PolicyCoreBuildError;
+    use crate::policy::PolicyBuildError;
+    match error {
+        PolicyCoreBuildError::HostsLoad { source, .. } => source.diagnostic(),
+        PolicyCoreBuildError::Policy(source) => match source {
+            PolicyBuildError::RuleSetParse { resource, source } => source
+                .diagnostic(
+                    RuleLimits::default()
+                        .with_max_input_bytes(config.work.rule_set_max_size_bytes)
+                        .with_max_rules(config.work.rule_set_max_rules),
+                )
+                .with_resource(resource.as_str()),
+            PolicyBuildError::HostsParse { resource, source } => {
+                crate::resource::ResourceLoadError::Parse {
+                    resource: resource.as_str().to_owned(),
+                    source: source.clone(),
+                    limits: HostsLimits::default().into(),
+                }
+                .diagnostic()
+            }
+            PolicyBuildError::HostsLoad { source, .. } => source.diagnostic(),
+            PolicyBuildError::RuleSetLoad { source, .. } => source.diagnostic(),
+            _ => Diagnostic::new(
+                "policy_index_build",
+                "POLICY_INDEX_BUILD",
+                "策略索引构造失败",
+            ),
+        },
+        PolicyCoreBuildError::Upstream { .. } => {
+            Diagnostic::new("upstream_build", "UPSTREAM_BUILD", "上游运行态构造失败")
+        }
+        PolicyCoreBuildError::Cache { .. } => {
+            Diagnostic::new("cache_build", "CACHE_BUILD", "运行态缓存构造失败")
+        }
+    }
 }
 
 fn same_resource(
@@ -703,6 +851,13 @@ fn build_resource_workers(
             return Err(PrepareError::ResourceRefresh {
                 resource: id.as_str().to_owned(),
                 reason: "auto_update requires a positive update interval".to_owned(),
+                diagnostic: Diagnostic::new(
+                    "resource_worker_build",
+                    "RESOURCE_REFRESH_INTERVAL",
+                    "资源自动刷新要求正数更新间隔",
+                )
+                .with_resource(id.as_str())
+                .into(),
             });
         }
         Ok((
@@ -736,12 +891,26 @@ fn build_resource_workers(
             .ok_or_else(|| PrepareError::FileHostsResource {
                 resource: id.as_str().to_owned(),
                 reason: "compiled file hosts snapshot is missing".to_owned(),
+                diagnostic: Diagnostic::new(
+                    "resource_worker_build",
+                    "RESOURCE_SNAPSHOT_MISSING",
+                    "构造本地 Hosts 刷新任务时缺少已编译快照",
+                )
+                .with_resource(id.as_str())
+                .into(),
             })?;
         let registry = ResourceRegistrySnapshot::new()
             .publish(snapshot.clone())
             .map_err(|error| PrepareError::FileHostsResource {
                 resource: id.as_str().to_owned(),
                 reason: format!("refresh registry could not be initialized: {error:?}"),
+                diagnostic: Diagnostic::new(
+                    "resource_worker_build",
+                    "RESOURCE_REGISTRY_BUILD",
+                    "本地 Hosts 刷新注册表初始化失败",
+                )
+                .with_resource(id.as_str())
+                .into(),
             })?;
         let runtime =
             ResourceRefreshRuntime::new(registry, policy, initial_due.saturating_add(interval));
@@ -779,12 +948,26 @@ fn build_resource_workers(
             .ok_or_else(|| PrepareError::FileRuleSetResource {
                 resource: id.as_str().to_owned(),
                 reason: "compiled file or remote rule-set snapshot is missing".to_owned(),
+                diagnostic: Diagnostic::new(
+                    "resource_worker_build",
+                    "RESOURCE_SNAPSHOT_MISSING",
+                    "构造规则刷新任务时缺少已编译快照",
+                )
+                .with_resource(id.as_str())
+                .into(),
             })?;
         let registry = ResourceRegistrySnapshot::new()
             .publish(snapshot.clone())
             .map_err(|error| PrepareError::FileRuleSetResource {
                 resource: id.as_str().to_owned(),
                 reason: format!("refresh registry could not be initialized: {error:?}"),
+                diagnostic: Diagnostic::new(
+                    "resource_worker_build",
+                    "RESOURCE_REGISTRY_BUILD",
+                    "规则刷新注册表初始化失败",
+                )
+                .with_resource(id.as_str())
+                .into(),
             })?;
         let runtime =
             ResourceRefreshRuntime::new(registry, policy, initial_due.saturating_add(interval));
@@ -815,6 +998,7 @@ fn load_initial_file_snapshots(
             PrepareError::FileHostsResource {
                 resource: id.as_str().to_owned(),
                 reason: error.to_string(),
+                diagnostic: error.diagnostic().into(),
             }
         })?;
         hosts.insert(id.clone(), local_hosts_snapshot(&loaded));
@@ -829,6 +1013,7 @@ fn load_initial_file_snapshots(
             PrepareError::FileRuleSetResource {
                 resource: id.as_str().to_owned(),
                 reason: error.to_string(),
+                diagnostic: error.diagnostic().into(),
             }
         })?;
         rule_sets.insert(id.clone(), local_rule_snapshot(&loaded));
@@ -915,13 +1100,16 @@ fn remote_resource_options(
         .work
         .rules_path
         .join(format!("{}.manifest", resource.as_str()));
-    RemoteResourceOptions::new(
+    let mut options = RemoteResourceOptions::new(
         rule_limits.max_input_bytes,
         content_path,
         manifest_path,
         deadline,
         cancellation,
-    )
+    );
+    // 首次下载、缓存恢复和后续刷新必须使用同一组运行配置限额，不能回退到解析器默认值。
+    options.rule_limits = rule_limits;
+    options
 }
 
 fn prepare_bind_plan(
@@ -1293,6 +1481,10 @@ clients: []
             .await
             .unwrap_err();
         assert!(matches!(error, super::ResourceRefreshError::Worker { .. }));
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.code, "RESOURCE_METADATA_IO");
+        assert_eq!(diagnostic.resource.as_deref(), Some("local-hosts"));
+        assert!(diagnostic.message.contains("NotFound"));
         assert_eq!(
             candidate
                 .resource_refresh_decision(&ConfigId::new("local-hosts").unwrap(), u64::MAX)
@@ -1626,7 +1818,9 @@ clients: []
 
         let error = PreparedRuntime::prepare_with_policy_core(Arc::new(config), RuntimeRevision(3))
             .unwrap_err();
-        let PrepareError::PolicyCore { reason } = error else {
+        assert_eq!(error.diagnostic().stage, "upstream_build");
+        assert!(!error.diagnostic().message.contains("missing-proxy"));
+        let PrepareError::PolicyCore { reason, .. } = error else {
             panic!("expected policy core preparation error");
         };
         assert!(reason.contains("missing outbound `missing-proxy`"));
@@ -1660,5 +1854,107 @@ clients: []
             PreparedRuntime::prepare(config, RuntimeRevision(1)).unwrap_err(),
             PrepareError::DuplicateEndpoint { index: 1 }
         );
+    }
+    #[tokio::test]
+    async fn prepare_diagnostic_retains_configured_rule_limit_and_redacts_source() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("_fluxdns/test-temp")
+            .join(format!(
+                "resource-diagnostic-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("private-path-secret.rules");
+        std::fs::write(
+            &path,
+            "DOMAIN,first-private.test\nDOMAIN,second-private.test\n",
+        )
+        .unwrap();
+        let mut config = Arc::try_unwrap(config()).unwrap();
+        config.work.rule_set_max_rules = 1;
+        config.rule_sets = vec![crate::config::resolve::ResolvedRuleSet::File {
+            id: ConfigId::new("limited-rules").unwrap(),
+            format: crate::config::model::RuleSetFormat::Clash,
+            path,
+            auto_update: false,
+            update_interval: None,
+        }];
+        let error = PreparedRuntime::prepare_with_policy_core_and_remote_resources(
+            Arc::new(config),
+            RuntimeRevision(7),
+            Deadline::new(Instant::now() + Duration::from_secs(5)),
+            Cancellation::new(),
+        )
+        .await
+        .unwrap_err();
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.stage, "resource_parse");
+        assert_eq!(diagnostic.code, "RULE_TOO_MANY_RULES");
+        assert_eq!(diagnostic.resource.as_deref(), Some("limited-rules"));
+        assert!(diagnostic.message.contains("work.rule_set_max_rules=1"));
+        let encoded = serde_json::to_string(&diagnostic).unwrap();
+        assert!(!encoded.contains("path-secret"));
+        assert!(!encoded.contains("private.test"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn policy_prepare_diagnostic_does_not_echo_internal_reason() {
+        let error = PrepareError::PolicyCore {
+            reason: "https://user:proxy-secret@private.test/path?token=url-secret".to_owned(),
+            diagnostic: crate::diagnostics::Diagnostic::new(
+                "policy_core_build",
+                "POLICY_CORE_BUILD",
+                "策略 DNS 核心构造失败",
+            )
+            .into(),
+        };
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.stage, "policy_core_build");
+        let encoded = serde_json::to_string(&diagnostic).unwrap();
+        for secret in ["proxy-secret", "private.test", "url-secret"] {
+            assert!(!encoded.contains(secret));
+        }
+    }
+
+    #[test]
+    fn inline_rule_parse_diagnostic_survives_policy_core_boundary() {
+        let mut config = Arc::try_unwrap(config()).unwrap();
+        config.work.rule_set_max_rules = 1;
+        config.rule_sets = vec![crate::config::resolve::ResolvedRuleSet::Const {
+            id: ConfigId::new("inline-rules").unwrap(),
+            format: crate::config::model::RuleSetFormat::Clash,
+            rule: "DOMAIN,first-private.test\nDOMAIN,second-private.test\n".to_owned(),
+        }];
+        let error = PreparedRuntime::prepare_with_policy_core(Arc::new(config), RuntimeRevision(7))
+            .unwrap_err();
+        let diagnostic = error.diagnostic();
+        assert_eq!(diagnostic.code, "RULE_TOO_MANY_RULES");
+        assert_eq!(diagnostic.resource.as_deref(), Some("inline-rules"));
+        assert!(diagnostic.message.contains("work.rule_set_max_rules=1"));
+        assert!(!diagnostic.message.contains("private.test"));
+    }
+
+    #[test]
+    fn remote_options_keep_all_configured_parser_limits() {
+        let config = config();
+        let limits = super::RuleLimits::default()
+            .with_max_input_bytes(32 * 1024 * 1024)
+            .with_max_rules(1_000_000);
+        let options = super::remote_resource_options(
+            &config,
+            &ConfigId::new("geosite").unwrap(),
+            limits,
+            Deadline::new(Instant::now() + Duration::from_secs(30)),
+            Cancellation::new(),
+        );
+        assert_eq!(options.rule_limits, limits);
+        assert_eq!(options.max_bytes, limits.max_input_bytes);
     }
 }

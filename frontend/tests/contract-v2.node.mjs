@@ -138,3 +138,21 @@ test("简化写接口只接受 changes 与显式风险确认，保留只读 revi
   assert.ok(definitions.ErrorCode.enum.includes("ACTIVE_REVISION_CONFLICT"));
   assert.ok(!definitions.ErrorCode.enum.includes("VALIDATION_EXPIRED"));
 });
+
+test("安全 diagnostic 可选且独立于原错误码和 operation 状态", () => {
+  const diagnostic = {stage: "prepare", code: "RESOURCE_PARSE_FAILED", message: "规则格式不合法", resource: "guard"};
+  const envelope = {code: "APPLY_FAILED", request_id: "request-safe", message: "request could not be completed", retryable: false, field_errors: []};
+  validate("ErrorEnvelope", envelope);
+  validate("ErrorEnvelope", {...envelope, diagnostic});
+  for (const operation of fixtures.operations) {
+    validate("OperationResult", operation);
+    validate("OperationResult", {...operation, diagnostic});
+  }
+  const validator = ajv.getSchema("fluxdns-v2#/$defs/Diagnostic");
+  for (const [field, limit] of Object.entries({stage: 64, code: 64, message: 1024, resource: 128})) {
+    assert.equal(definitions.Diagnostic.properties[field]["x-max-utf8-bytes"], limit);
+    assert.equal(validator({...diagnostic, [field]: "x".repeat(limit + 1)}), false, field);
+  }
+  assert.equal(validator({stage: "prepare", code: "CODE"}), false);
+  assert.equal(validator({...diagnostic, unsafe_detail: "not allowed"}), false);
+});

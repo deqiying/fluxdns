@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { Badge, Button, Flex, Typography } from "antd";
 import { RefreshCw } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
-import { ApiError } from "@/shared/api/errors";
+import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
 import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { InlineUnavailable, PageState } from "@/shared/components/PageState";
@@ -74,11 +74,11 @@ function measurementValue<T extends number | string>(
 }
 
 /**
- * 次级卡片读取失败时保留契约错误码；加载中返回 null，由调用方用占位符区分，
+ * 次级卡片读取失败时保留契约错误码、安全诊断和请求 ID；加载中返回 null，
  * 不把「还没返回」渲染成「不可用」。
  */
 function failureValue(isError: boolean, error: unknown): ReactNode {
-  return isError ? <InlineUnavailable reasonCode={error instanceof ApiError ? error.code : undefined} /> : null;
+  return isError ? <InlineUnavailable reasonCode={`${error instanceof ApiError ? `${error.code}；` : ""}${getSafeErrorMessage(error)}`} /> : null;
 }
 
 function hostText(value: string | null | undefined): ReactNode {
@@ -176,7 +176,8 @@ export function SystemPage() {
     >
       <PageState
         loading={metricsQuery.isLoading}
-        error={metrics ? undefined : metricsQuery.error}
+        error={metricsQuery.error}
+        hasData={!!metrics}
         onRetry={() => void refresh()}
       />
       {metrics ? (

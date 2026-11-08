@@ -308,6 +308,8 @@ pub struct ErrorEnvelope {
     pub message: String,
     pub retryable: bool,
     pub field_errors: Vec<FieldError>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<crate::diagnostics::Diagnostic>,
 }
 
 /// 候选封套的入站错误只公开固定错误码和经白名单校验的 DTO 路径。
@@ -369,6 +371,9 @@ pub enum OperationStatus {
 pub struct OperationResult {
     pub operation_id: OperationId,
     pub status: OperationStatus,
+    /// 随操作终态冻结的安全诊断；旧记录和非失败状态可缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<crate::diagnostics::Diagnostic>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

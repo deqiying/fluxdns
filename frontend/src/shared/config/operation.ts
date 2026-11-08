@@ -1,4 +1,4 @@
-import { ApiError } from "@/shared/api/errors";
+import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
 import { generateUuidV4 } from "@/shared/uuid";
 import {
   applyCandidate,
@@ -30,9 +30,32 @@ export interface ApplyAndSettleOptions {
 
 /** 保存结果未决时保留原 ID；页面只能继续查询，不能把它当成可重新提交的失败。 */
 export class PendingOperationError extends ApiError {
-  constructor(readonly operationId: string, cause?: unknown) {
-    super({ code: "CONFIG_OPERATION_PENDING", message: "配置操作结果尚未确认，请继续查询。", kind: "http", cause });
+  declare readonly operationId: string;
+  constructor(operationId: string, cause?: unknown) {
+    const detail = cause instanceof ApiError ? cause : undefined;
+    super({ code: "CONFIG_OPERATION_PENDING", message: "配置操作结果尚未确认，请继续查询。", kind: "http", cause,
+      operationId, requestId: detail?.requestId, diagnostic: detail?.diagnostic, serverMessage: detail?.serverMessage, fieldErrors: detail?.fieldErrors });
   }
+}
+
+/** 终态转换保留 operation ID 和安全诊断；不把 unknown 或部分成功当作 rejected。 */
+export function operationError(operation: OperationResult): ApiError {
+  const status = operation.status;
+  return new ApiError({
+    code: "error" in status ? status.error : "CONFIG_OPERATION_PENDING",
+    message: "配置操作结果",
+    kind: "http",
+    operationId: operation.operation_id,
+    diagnostic: operation.diagnostic,
+  });
+}
+
+export function getOperationMessage(operation: OperationResult): string {
+  const status = operation.status;
+  if (status.state === "applied_synced") return "配置已应用并同步到文件";
+  return getSafeErrorMessage(operationError(operation), status.state === "applied_unpersisted"
+    ? "运行配置已生效，但文件尚未同步。请在全局配置提示中重试。"
+    : undefined);
 }
 
 /** 每次保存仅生成一次，确认重试与结果回读继续沿用同一 ID。 */
@@ -40,7 +63,7 @@ export function createOperationId(): string {
   return generateUuidV4();
 }
 
-/** apply 只发送一次；timeout/network 后使用同一 operation_id 回读，不重放变更。 */
+/** apply 只发送一次；传输/响应丢失后使用同一 operation_id 回读，不重放变更。 */
 export async function applyAndSettle(
   request: ApplyRequest,
   options: ApplyAndSettleOptions = {},
@@ -49,11 +72,14 @@ export async function applyAndSettle(
   try {
     operation = await applyCandidate(request, { module: options.module, signal: options.signal });
   } catch (error) {
-    if (!(error instanceof ApiError) || (error.kind !== "timeout" && error.kind !== "network")) throw error;
+    if (!(error instanceof ApiError)) throw new PendingOperationError(request.operation_id, error);
+    if (error.kind === "http") throw new ApiError({ ...error, message: error.message, operationId: request.operation_id, cause: error });
     return resumeOperation(request.operation_id, options);
   }
-  assertOperationId(request.operation_id, operation);
-  return settleOperation(operation, options);
+  try {
+    assertOperationId(request.operation_id, operation);
+    return await settleOperation(operation, options);
+  } catch (error) { throw error instanceof PendingOperationError ? error : new PendingOperationError(request.operation_id, error); }
 }
 
 /** 仅首次受理前的确认拒绝可补充确认重试；不确定结果仍交给 applyAndSettle 只查询。
@@ -109,7 +135,8 @@ export async function settleOperation(
   let operation = initial;
 
   for (let poll = 0; isInProgress(operation) && poll < maxPolls; poll += 1) {
-    await waitForPoll(pollIntervalMs, options.signal);
+    try { await waitForPoll(pollIntervalMs, options.signal); }
+    catch (error) { throw new PendingOperationError(operation.operation_id, error); }
     try {
       const next = await fetchConfigOperation(operation.operation_id, options.signal);
       assertOperationId(operation.operation_id, next);
@@ -122,7 +149,7 @@ export async function settleOperation(
 
   if (operation.status.state === "unknown") {
     try { return { kind: "unknown", operation, state: await fetchConfigState(options.signal) }; }
-    catch { throw new PendingOperationError(operation.operation_id); }
+    catch (error) { throw new PendingOperationError(operation.operation_id, error); }
   }
   if (isInProgress(operation)) return { kind: "pending", operation };
   return { kind: "settled", operation };
@@ -143,28 +170,38 @@ async function runFileMutationAndSettle(
   try {
     operation = await mutation(request, options.signal);
   } catch (error) {
-    if (!(error instanceof ApiError) || (error.kind !== "timeout" && error.kind !== "network")) throw error;
+    if (!(error instanceof ApiError)) throw new PendingOperationError(request.operation_id, error);
+    if (error.kind === "http") throw new ApiError({ ...error, message: error.message, operationId: request.operation_id, cause: error });
     return resumeOperation(request.operation_id, options);
   }
-  assertOperationId(request.operation_id, operation);
-  return settleOperation(operation, options);
+  try {
+    assertOperationId(request.operation_id, operation);
+    return await settleOperation(operation, options);
+  } catch (error) { throw error instanceof PendingOperationError ? error : new PendingOperationError(request.operation_id, error); }
 }
 
 /** 恢复查询与随后轮询共用预算；没有成功快照时仍将原操作 ID 交回页面。 */
 export async function resumeOperation(operationId: string, options: ApplyAndSettleOptions = {}): Promise<OperationSettlement> {
   const attempts = Math.max(0, options.maxPolls ?? 20);
+  let lastReadError: unknown;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     let operation: OperationResult;
     try { operation = await fetchConfigOperation(operationId, options.signal); }
     catch (error) {
+      lastReadError = error;
       if (!isTransientConfigRead(error)) throw new PendingOperationError(operationId, error);
-      if (attempt + 1 < attempts) await waitForPoll(options.pollIntervalMs ?? 250, options.signal);
+      if (attempt + 1 < attempts) {
+        try { await waitForPoll(options.pollIntervalMs ?? 250, options.signal); }
+        catch (cause) { throw new PendingOperationError(operationId, cause); }
+      }
       continue;
     }
-    assertOperationId(operationId, operation);
-    return settleOperation(operation, { ...options, maxPolls: attempts - attempt - 1 });
+    try {
+      assertOperationId(operationId, operation);
+      return await settleOperation(operation, { ...options, maxPolls: attempts - attempt - 1 });
+    } catch (error) { throw error instanceof PendingOperationError ? error : new PendingOperationError(operationId, error); }
   }
-  throw new PendingOperationError(operationId);
+  throw new PendingOperationError(operationId, lastReadError);
 }
 
 function assertOperationId(expected: string, operation: OperationResult): void {

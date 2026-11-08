@@ -709,7 +709,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             error,
-            ResourceRefreshWorkerError::Fetch(RemoteResourceError::Parse(_))
+            ResourceRefreshWorkerError::Fetch(RemoteResourceError::Parse { .. })
         ));
         assert_eq!(
             worker.runtime().phase(&id("remote-rules")),

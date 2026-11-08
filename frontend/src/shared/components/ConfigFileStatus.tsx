@@ -15,7 +15,7 @@ import { configKeys, invalidationKeysForChanges } from "@/shared/config/query-ke
 import { confirmImpacts } from "@/shared/config/hooks";
 import { assertNoPendingOperation, pendingOperationKey, trackConfigOperation } from "@/shared/config/pending-operation";
 import {
-  applyWithConfirmation, createOperationId,
+  applyWithConfirmation, createOperationId, getOperationMessage, operationError,
   restoreFilesAndSettle,
   retryPersistenceAndSettle,
   resumeOperation,
@@ -43,7 +43,9 @@ export function ConfigFileStatus() {
       await queryClient.invalidateQueries({ queryKey: ["config-v2"] });
       const status = settlement.operation.status;
       if (status.state === "rejected" || status.state === "compensation_failed") {
-        void message.error(getSafeErrorMessage(new ApiError({ code: status.error, message: status.error, kind: "http" })));
+        void message.error(getOperationMessage(settlement.operation));
+      } else if (status.state === "applied_unpersisted") {
+        void message.warning(getOperationMessage(settlement.operation));
       } else {
         void message.success("已确认配置操作结果，请刷新并核对配置后继续编辑。");
       }
@@ -100,6 +102,7 @@ export function ConfigFileStatus() {
         ? restoreFilesAndSettle(request)
         : retryPersistenceAndSettle(request));
       acceptSettlement(settlement, dispatch);
+      if (settlement.operation.status.state === "applied_unpersisted") void message.warning(getOperationMessage(settlement.operation));
       await queryClient.invalidateQueries({ queryKey: configKeys.externalDiffs() });
       await stateQuery.refetch();
     } catch (error) {
@@ -142,7 +145,7 @@ export function ConfigFileStatus() {
       await queryClient.invalidateQueries({ queryKey: configKeys.externalDiffs() });
       await stateQuery.refetch();
       if (settlement.operation.status.state === "applied_unpersisted") {
-        void message.warning("组合配置已热应用，但文件尚未同步。");
+        void message.warning(getOperationMessage(settlement.operation));
       } else if (settlement.operation.status.state === "applied_synced") {
         void message.success("外部配置已组合采用并同步");
       }
@@ -156,7 +159,7 @@ export function ConfigFileStatus() {
     <>
       {pendingQuery.data ? <div className="global-config-status" aria-live="polite"><Alert type="warning" showIcon
         message="配置操作结果尚未确认"
-        description="已保留原操作，请继续查询。确认结果前不能提交新的配置变更。"
+        description={`已保留原操作，请继续查询。确认结果前不能提交新的配置变更。操作 ID：${pendingQuery.data}`}
         action={<Button size="small" loading={resuming} onClick={() => void continueOperation()}>继续查询</Button>}
       /></div> : null}
       {stateQuery.isError || showBanner ? (
@@ -208,7 +211,7 @@ function acceptSettlement(
   if (operation.status.state === "rejected" || operation.status.state === "compensation_failed") {
     dispatch({
       type: "failure",
-      error: new ApiError({ code: operation.status.error, message: operation.status.error, kind: "http" }),
+      error: operationError(operation),
     });
     return false;
   }

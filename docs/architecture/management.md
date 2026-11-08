@@ -71,6 +71,8 @@ HTTP 直连不提供传输加密，只适用于 loopback/可信隔离管理网�
 
 API 使用统一 request ID、错误 envelope 和有界安全错误；错误正文不返回 SQL、绝对配置路径、SecretRef、hash、token 或 backtrace。仅认证专用成功响应返回 access token，刷新凭据永不进入正文。查询使用只读连接、固定模板、参数绑定、分页和时间窗口上限。
 
+2026-11-08 局部评审：稳定错误码与可选安全诊断分离，HTTP 失败和异步操作共用诊断投影，字段以 [OpenAPI](../../frontend/openapi/management-api-v2.yaml) 为准。诊断只由类型化错误生成受审查文案和安全数字/枚举，可附管理面已有的资源标识；不得直接回显底层错误链。操作终态及诊断必须同时冻结并按调用者隔离，关联 operation ID 不替代 HTTP request ID；前端不能把 `applied_unpersisted`、`unknown` 或轮询失败解释为配置未生效，也不能据此自动重放写入。实现和证据见[安全错误诊断](../implementation/backend/management.md#安全错误诊断与操作关联)。
+
 所有 authenticated WebUI 用户可以读取 canonical qname、有效 client IP、真实配置 ID、upstream provenance 与有界 answer。该授权范围不等同普通日志/metrics允许这些内容。不读取旧版脱敏详情；新记录的缺失或截断状态必须据实展示。始终禁止 DNS wire、request digest、route 原文与秘密配置进入 API。
 
 静态响应提供 CSP、`nosniff`、正确 MIME、ETag/HEAD/条件缓存；HTML 与 API 使用保守缓存策略，带内容 hash 的资源可长期缓存。生产构建不包含 source map 或 mock worker。是否真的在无外部资源机器上可用由[交付证据](../implementation/delivery.md)证明，不能由 `webui-embed` 名称推断。

@@ -759,6 +759,7 @@ pub(crate) fn operation_result(
     let result = store
         .operation_snapshot(actor, operation_id)
         .map_err(error_code)?;
+    let diagnostic = result.diagnostic().cloned();
     let status = match result {
         OperationSnapshot::Preparing => OperationStatus::Preparing {},
         OperationSnapshot::Applying => OperationStatus::Applying {},
@@ -776,17 +777,19 @@ pub(crate) fn operation_result(
             active_revision,
             persisted_revision,
             error,
+            ..
         } => OperationStatus::AppliedUnpersisted {
             active_revision: revision(active_revision)?,
             persisted_revision: persisted_revision.map(revision).transpose()?,
             error: failure_code(error),
         },
-        OperationSnapshot::Rejected { error } => OperationStatus::Rejected {
+        OperationSnapshot::Rejected { error, .. } => OperationStatus::Rejected {
             error: failure_code(error),
         },
         OperationSnapshot::CompensationFailed {
             active_revision,
             error,
+            ..
         } => OperationStatus::CompensationFailed {
             active_revision: active_revision.map(revision).transpose()?,
             error: failure_code(error),
@@ -796,6 +799,7 @@ pub(crate) fn operation_result(
     Ok(OperationResult {
         operation_id: id,
         status,
+        diagnostic,
     })
 }
 

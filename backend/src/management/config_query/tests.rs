@@ -307,3 +307,93 @@ fn partial_self_write_is_known_but_external_same_content_identity_is_not() {
         &[failure, fixture.result("partial")],
     );
 }
+
+#[tokio::test]
+async fn remote_dat_limit_failure_reaches_operation_query_without_source_secrets() {
+    use crate::management::{
+        config_mutation::ConfigMutationOwner,
+        contract::{ApplyRequest, OperationStatus},
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let source = SOURCE.replace(
+        "  rules_path: ./rules",
+        "  rules_path: ./rules\n  rule_set_max_rules: 1",
+    );
+    let fixture = Fixture::with_source(1, &source);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    // 两条 full 域名的 GeoSite protobuf；限制 1，确保经过真正下载和 DAT 解析后拒绝。
+    let mut site = vec![0x0a, 2, b'C', b'N'];
+    for name in ["a.test", "b.test"] {
+        let mut domain = vec![0x08, 3, 0x12, name.len() as u8];
+        domain.extend_from_slice(name.as_bytes());
+        site.extend_from_slice(&[0x12, domain.len() as u8]);
+        site.extend(domain);
+    }
+    let mut body = vec![0x0a, site.len() as u8];
+    body.extend(site);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 8192];
+        let length = stream.read(&mut request).await.unwrap();
+        assert!(String::from_utf8_lossy(&request[..length]).contains("private-token-sentinel"));
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+        stream.write_all(&body).await.unwrap();
+    });
+    let owner = ConfigMutationOwner::new(
+        Arc::clone(fixture.store()),
+        crate::service::ServiceControl::unavailable_for_test(),
+    );
+    let request: ApplyRequest = serde_json::from_value(json!({
+        "operation_id":"diagnostic-dat-apply",
+        "changes":[{"module":"rule_set","change":{"action":"create","value":{
+            "name":"diagnostic-dat","type":"remote","format":"dat",
+            "url":format!("http://{address}/geosite.dat?token=private-token-sentinel"),"auto_update":false
+        }}}], "confirmations":[]
+    })).unwrap();
+    let initial = owner
+        .start_apply("actor".to_owned(), request)
+        .await
+        .unwrap();
+    assert!(matches!(initial.status, OperationStatus::Preparing {}));
+    let result = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let result =
+                operation_result(fixture.store(), "actor", "diagnostic-dat-apply").unwrap();
+            if matches!(result.status, OperationStatus::Rejected { .. }) {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    server.await.unwrap();
+    let diagnostic = result.diagnostic.as_ref().unwrap();
+    assert_eq!(diagnostic.code, "RULE_TOO_MANY_RULES");
+    assert_eq!(diagnostic.stage, "resource_parse");
+    assert_eq!(diagnostic.resource.as_deref(), Some("diagnostic-dat"));
+    assert!(diagnostic.message.contains("1"));
+    let encoded = serde_json::to_string(&result).unwrap();
+    assert!(!encoded.contains("private-token-sentinel"));
+    assert!(!encoded.contains(&address.to_string()));
+    assert_eq!(
+        fixture.store().active_snapshot().unwrap().runtime_revision,
+        1
+    );
+    assert_eq!(
+        fs::read_to_string(&fixture.source).unwrap(),
+        format!("{source}\n# private-configuration-sentinel\n")
+    );
+    let again = operation_result(fixture.store(), "actor", "diagnostic-dat-apply").unwrap();
+    assert_eq!(again.diagnostic, result.diagnostic);
+}

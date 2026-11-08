@@ -1,5 +1,6 @@
 //! 可热替换的资源解析与不可变索引。
 
+mod diagnostic;
 mod fetcher;
 mod hosts;
 mod loader;

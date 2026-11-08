@@ -92,6 +92,7 @@ export function StrategiesPage() {
       actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !!query.error || !!state.error || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加策略</Button></Space>}
     >
       <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
+      <PageState error={upstreams.error ?? hosts.error} hasData={!!query.data} onRetry={() => { void upstreams.refetch(); void hosts.refetch(); }} />
       {query.data ? <div className="config-module-content strategy-page"><div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索策略名称" onChange={(event) => setSearch(event.target.value)} /></div><Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1040 }} locale={{ emptyText: search ? "没有匹配的策略" : "尚未配置策略" }} /></div> : null}
       <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加策略" : "编辑策略"} dirty={dirty} busy={mutation.isPending} submitDisabled={!query.data || !!query.error || !!state.error} error={mutation.error} layout="wide" onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
         <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>

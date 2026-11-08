@@ -105,6 +105,73 @@ pub enum RuleParseError {
     UnsupportedDatDomainType,
 }
 
+impl RuleParseError {
+    /// 解析边界保存实际启用的限制，不回显规则正文或底层解析器错误。
+    pub(crate) fn diagnostic(&self, limits: RuleLimits) -> crate::diagnostics::Diagnostic {
+        let (code, message, line) = match self {
+            Self::UnsupportedFormat => ("RULE_UNSUPPORTED_FORMAT", "规则格式不受支持", None),
+            Self::InputTooLarge => ("RULE_INPUT_TOO_LARGE", "规则输入超过字节上限", None),
+            Self::TooManyRules => ("RULE_TOO_MANY_RULES", "规则数量超过上限", None),
+            Self::RuleTooLong { line } => ("RULE_TOO_LONG", "单条规则超过字节上限", Some(*line)),
+            Self::InvalidJson => ("RULE_INVALID_JSON", "规则 JSON 格式无效", None),
+            Self::MissingRuleField => ("RULE_MISSING_FIELD", "规则 JSON 缺少支持的规则字段", None),
+            Self::UnsupportedSingBoxVersion => {
+                ("RULE_UNSUPPORTED_VERSION", "规则集版本不受支持", None)
+            }
+            Self::EmptyRule { line } => ("RULE_EMPTY", "规则为空", Some(*line)),
+            Self::InvalidFieldCount { line } => {
+                ("RULE_INVALID_FIELD_COUNT", "规则字段数量无效", Some(*line))
+            }
+            Self::UnknownRuleType { line } => {
+                ("RULE_UNKNOWN_TYPE", "规则类型不受支持", Some(*line))
+            }
+            Self::InvalidDomain { line } => ("RULE_INVALID_DOMAIN", "规则域名无效", Some(*line)),
+            Self::InvalidKeyword => ("RULE_INVALID_KEYWORD", "规则域名关键字无效", None),
+            Self::InvalidRegex { line } => {
+                ("RULE_INVALID_REGEX", "规则正则表达式无效", Some(*line))
+            }
+            Self::UnsupportedRegex { line } => (
+                "RULE_UNSUPPORTED_REGEX",
+                "规则正则表达式包含不支持的结构",
+                Some(*line),
+            ),
+            Self::RegexProgramTooLarge { line } => (
+                "RULE_REGEX_PROGRAM_TOO_LARGE",
+                "规则正则表达式超过指令上限",
+                Some(*line),
+            ),
+            Self::InvalidDat => ("RULE_INVALID_DAT", "DAT 二进制规则格式无效", None),
+            Self::TooManySelectors => ("RULE_TOO_MANY_SELECTORS", "DAT 选择器数量超过上限", None),
+            Self::InvalidDatSelector => ("RULE_INVALID_DAT_SELECTOR", "DAT 选择器无效", None),
+            Self::DatSelectorTooLong => {
+                ("RULE_DAT_SELECTOR_TOO_LONG", "DAT 选择器超过字节上限", None)
+            }
+            Self::UnsupportedDatDomainType => (
+                "RULE_UNSUPPORTED_DAT_DOMAIN_TYPE",
+                "DAT 域名类型不受支持",
+                None,
+            ),
+        };
+        let position = line
+            .map(|line| format!("；行号={line}"))
+            .unwrap_or_default();
+        crate::diagnostics::Diagnostic::new(
+            "resource_parse",
+            code,
+            format!(
+                "{message}{position}；当前限制：work.rule_set_max_size_bytes={}，work.rule_set_max_rules={}，单条规则字节={}，正则字节={}，正则指令={}，选择器数量={}，选择器字节={}",
+                limits.max_input_bytes,
+                limits.max_rules,
+                limits.max_rule_bytes,
+                limits.max_regex_bytes,
+                limits.max_regex_program,
+                limits.max_selectors,
+                limits.max_selector_bytes,
+            ),
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuleMatch {
     Exact,

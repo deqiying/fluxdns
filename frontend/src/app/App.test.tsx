@@ -318,7 +318,7 @@ describe("application routes", () => {
       })),
       http.post("/api/v2/config/apply", () => {
         applyRequests += 1;
-        return HttpResponse.json({ code: "FILE_REVISION_CONFLICT", message: "configuration file changed again", request_id: "mock-file-conflict", retryable: false, field_errors: [] }, { status: 409 });
+        return HttpResponse.json({ code: "FILE_REVISION_CONFLICT", message: "configuration file changed again", request_id: "mock-file-conflict", retryable: false, field_errors: [], diagnostic: { stage: "file_guard", code: "SOURCE_CHANGED", message: "所见文件版本已变化", resource: "config" } }, { status: 409 });
       }),
     );
 
@@ -327,7 +327,9 @@ describe("application routes", () => {
     await user.click(screen.getByRole("button", { name: "查看" }));
     await user.click(await screen.findByRole("button", { name: "组合采用 1 项" }));
     await user.click(await screen.findByRole("button", { name: "确认采用" }));
-    expect(await screen.findByText("配置文件已再次变化，请重新读取差异。")).toBeInTheDocument();
+    const failure = await screen.findByText(/配置文件已再次变化，请重新读取差异。.*SOURCE_CHANGED/);
+    expect(failure).toHaveTextContent("mock-file-conflict");
+    expect(failure).toHaveTextContent("操作 ID：");
     expect(applyRequests).toBe(1);
   });
 

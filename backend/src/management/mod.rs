@@ -5,6 +5,7 @@ mod auth;
 mod config_mutation;
 mod config_query;
 pub(crate) mod contract;
+mod errors;
 mod events;
 mod metrics;
 mod query;

@@ -13,6 +13,7 @@ use url::Url;
 
 use crate::config::hash::deterministic_hash;
 use crate::config::resolve::ResolvedOutbound;
+use crate::diagnostics::Diagnostic;
 use crate::dns::{CancelReason, Cancellation, Deadline};
 use crate::ports::effects::{
     ProxyProfileId, ResourceContent, ResourceFetchRequest, ResourceFetchResult, ResourceFetcher,
@@ -226,17 +227,22 @@ async fn fetch_with_client(
     if !response.status().is_success() {
         return Err(
             PortError::new(PortErrorClass::ProtocolViolation, "resource_fetch.status")
-                .with_safe_context("resource response status is not successful"),
+                .with_safe_context("resource response status is not successful")
+                .with_diagnostic(Diagnostic::new(
+                    "resource_fetch",
+                    "RESOURCE_HTTP_STATUS",
+                    format!(
+                        "远程资源返回非成功 HTTP 状态码：{}",
+                        response.status().as_u16()
+                    ),
+                )),
         );
     }
     if response
         .content_length()
         .is_some_and(|length| length > request.max_bytes as u64)
     {
-        return Err(PortError::new(
-            PortErrorClass::ResourceExhausted,
-            "resource_fetch.read",
-        ));
+        return Err(resource_size_error(request.max_bytes));
     }
 
     let modified_at = None;
@@ -265,10 +271,7 @@ async fn fetch_with_client(
             break;
         };
         if body.len().saturating_add(chunk.len()) > request.max_bytes {
-            return Err(PortError::new(
-                PortErrorClass::ResourceExhausted,
-                "resource_fetch.read",
-            ));
+            return Err(resource_size_error(request.max_bytes));
         }
         body.extend_from_slice(&chunk);
     }
@@ -321,6 +324,16 @@ fn cancelled_error(cancellation: &Cancellation, operation: &'static str) -> Port
     )
 }
 
+fn resource_size_error(max: usize) -> PortError {
+    PortError::new(PortErrorClass::ResourceExhausted, "resource_fetch.read").with_diagnostic(
+        Diagnostic::new(
+            "resource_read",
+            "RESOURCE_TOO_LARGE",
+            format!("远程资源超过字节上限；上限字节={max}"),
+        ),
+    )
+}
+
 fn map_reqwest_error(error: reqwest::Error, operation: &'static str) -> PortError {
     if error.is_timeout() {
         return PortError::new(PortErrorClass::Timeout, operation)
@@ -328,11 +341,21 @@ fn map_reqwest_error(error: reqwest::Error, operation: &'static str) -> PortErro
     }
     if error.is_connect() {
         return PortError::new(PortErrorClass::Unavailable, operation)
-            .with_safe_context("resource HTTP connection failed");
+            .with_safe_context("resource HTTP connection failed")
+            .with_diagnostic(Diagnostic::new(
+                "resource_fetch",
+                "RESOURCE_CONNECT_TLS",
+                "远程资源连接或 TLS 握手失败",
+            ));
     }
     if error.is_body() {
         return PortError::new(PortErrorClass::Unavailable, operation)
-            .with_safe_context("resource HTTP body read failed");
+            .with_safe_context("resource HTTP body read failed")
+            .with_diagnostic(Diagnostic::new(
+                "resource_read",
+                "RESOURCE_BODY_READ",
+                "远程资源响应正文读取失败",
+            ));
     }
     PortError::new(PortErrorClass::Internal, operation)
         .with_safe_context("resource HTTP request failed")
@@ -606,17 +629,36 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_non_success_and_oversized_responses() {
-        let (address, task) = server(b"blocked", "503 Service Unavailable").await;
         let fetcher = ReqwestResourceFetcher::from_resolved(&[], 1024).unwrap();
-        let error = fetcher
-            .fetch(request(
-                &format!("http://127.0.0.1:{}/rules", address.port()),
-                1024,
-            ))
-            .await
-            .unwrap_err();
-        assert!(matches!(error.class(), PortErrorClass::ProtocolViolation));
-        task.await.unwrap();
+        for (status, number) in [
+            ("302 Found", 302),
+            ("403 Forbidden", 403),
+            ("404 Not Found", 404),
+            ("503 Service Unavailable", 503),
+        ] {
+            let (address, task) = server(b"external-body-secret", status).await;
+            let error = fetcher
+                .fetch(request(
+                    &format!("http://{address}/private-path?token=url-secret"),
+                    1024,
+                ))
+                .await
+                .unwrap_err();
+            assert!(matches!(error.class(), PortErrorClass::ProtocolViolation));
+            let diagnostic = crate::resource::RemoteResourceError::Fetch(error).diagnostic();
+            assert_eq!(diagnostic.code, "RESOURCE_HTTP_STATUS");
+            assert!(diagnostic.message.contains(&number.to_string()));
+            let encoded = serde_json::to_string(&diagnostic).unwrap();
+            for secret in [
+                "external-body-secret",
+                "private-path",
+                "url-secret",
+                "127.0.0.1",
+            ] {
+                assert!(!encoded.contains(secret));
+            }
+            task.await.unwrap();
+        }
 
         let (address, task) = server(b"too-large", "200 OK").await;
         let error = fetcher
@@ -627,6 +669,9 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(error.class(), PortErrorClass::ResourceExhausted));
+        let diagnostic = error.diagnostic().unwrap();
+        assert_eq!(diagnostic.code, "RESOURCE_TOO_LARGE");
+        assert!(diagnostic.message.contains("上限字节=1"));
         task.await.unwrap();
     }
 
@@ -670,5 +715,36 @@ mod tests {
             ReqwestResourceFetcher::from_resolved(&[outbound], 1024),
             Err(ResourceFetcherBuildError::InvalidOutbound { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn connection_and_timeout_diagnostics_do_not_echo_private_urls() {
+        let fetcher = ReqwestResourceFetcher::from_resolved(&[], 1024).unwrap();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut connection_request = request(
+            &format!("http://{address}/private?token=secret-value"),
+            1024,
+        );
+        // Windows 的 loopback 拒绝可能经过 TCP 重试，不能与单独验证的到期预算混为一类。
+        connection_request.deadline = Deadline::new(Instant::now() + Duration::from_secs(10));
+        let error = fetcher.fetch(connection_request).await.unwrap_err();
+        let diagnostic = crate::resource::RemoteResourceError::Fetch(error).diagnostic();
+        assert_eq!(diagnostic.code, "RESOURCE_CONNECT_TLS");
+        assert!(
+            !serde_json::to_string(&diagnostic)
+                .unwrap()
+                .contains("secret-value")
+        );
+
+        let mut expired = request("http://127.0.0.1/private?token=secret-value", 1024);
+        expired.deadline = Deadline::new(Instant::now());
+        let error = fetcher.fetch(expired).await.unwrap_err();
+        let diagnostic = crate::resource::RemoteResourceError::Fetch(error).diagnostic();
+        assert_eq!(diagnostic.code, "RESOURCE_TIMEOUT");
+        assert!(!diagnostic.message.contains("private"));
     }
 }

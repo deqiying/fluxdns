@@ -129,7 +129,7 @@ function ExternalChangeDrawerBody({
   if (state.phase === "loading") return <div className="external-change-loading"><Spin /></div>;
   if (state.phase === "error") return <Alert type="error" showIcon message={getSafeErrorMessage(state.error)} />;
   if (state.phase === "conflict") {
-    return <Alert type="warning" showIcon message="配置文件已再次变化，请重新读取差异。" />;
+    return <Alert type="warning" showIcon message={getSafeErrorMessage(state.error, "配置文件已再次变化，请重新读取差异。")} />;
   }
   if (!state.diff) return <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无可显示的差异" />;
 
