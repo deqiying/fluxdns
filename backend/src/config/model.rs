@@ -1378,7 +1378,7 @@ pub fn format_duration(value: Duration) -> String {
     let (unit, factor) = UNITS
         .iter()
         .copied()
-        .find(|(_, factor)| nanos % factor == 0)
+        .find(|(_, factor)| nanos.is_multiple_of(*factor))
         .unwrap_or(("ns", 1));
     format!("{}{unit}", nanos / factor)
 }
