@@ -14,7 +14,7 @@
 | --- | --- |
 | 文档目录结构、新增、迁移、重命名、状态维护和废弃 | [`docs/rules/documentation-maintenance.md`](docs/rules/documentation-maintenance.md)，并从 [`docs/README.md`](docs/README.md)确认权威文档与目录职责 |
 | 项目工具链、构建物、缓存、命令调用和工具安装边界 | [`docs/rules/environment-usage.md`](docs/rules/environment-usage.md) |
-| 本地测试配置、运行时文件、DoH smoke test 和测试结果记录 | [`docs/rules/local-testing.md`](docs/rules/local-testing.md) |
+| 本地测试配置、运行时文件、测试构建形态、DoH smoke test 和测试结果记录 | [`docs/rules/local-testing.md`](docs/rules/local-testing.md) |
 | 规范文档索引及新增规范的存放位置 | [`docs/rules/README.md`](docs/rules/README.md) |
 | 活动需求、实施步骤和剩余验收 | [`docs/plans/README.md`](docs/plans/README.md) 及对应计划 |
 | 系统、管理面和前端架构 | [`docs/architecture/README.md`](docs/architecture/README.md) 及对应设计 |
@@ -37,6 +37,7 @@
 ## 构建与验证
 
 - 后端命令从仓库根目录执行，并通过 `--manifest-path backend/Cargo.toml` 指定 Rust manifest；项目 Rust、Node、pnpm 工具链调用、构建物、缓存和安装边界遵循 [`docs/rules/environment-usage.md`](docs/rules/environment-usage.md)。
+- 本地开发测试默认构建二进制进行验证；未经用户明确授权，禁止在本地构建 Docker 镜像进行测试。
 - 本地测试配置、DoH 工具和测试结果记录遵循 [`docs/rules/local-testing.md`](docs/rules/local-testing.md)。构建物和依赖目录必须由 `.gitignore` 覆盖；提交前检查 `git status --short`，不要使用 `git add -f` 提交本地产物。
 - 文档或规则修改后执行 `pwsh -File .agents/skills/project-doc-maintenance/scripts/check-docs.ps1` 和 `git diff --check`；检查器由该技能维护，并按改动范围追加最小充分验证，不维护独立测试版本。不要把未执行的测试描述为已通过。
 
