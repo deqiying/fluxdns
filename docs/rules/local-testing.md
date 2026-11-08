@@ -2,7 +2,7 @@
 
 > 文档状态：有效
 >
-> 适用范围：FluxDNS 本地测试配置、运行时文件和 DoH smoke test 管理
+> 适用范围：FluxDNS 本地测试配置、运行时文件、测试构建形态和 DoH smoke test 管理
 
 本文档约定 FluxDNS 在本地开发和验证时的测试配置、运行时文件和 DoH smoke test 方式。项目工具链、命令调用、构建物和缓存目录遵循[项目环境使用规范](environment-usage.md)。除非另有说明，命令均从仓库根目录执行。
 
@@ -48,7 +48,15 @@ Copy-Item config-example.yaml _fluxdns/config.yaml
 
 构建物、依赖目录和工具链缓存的路径、`.gitignore` 约定及新增目录的同步要求见[项目环境使用规范](environment-usage.md)。本地测试配置和运行时数据统一放在 `_fluxdns/`，该目录已加入 `.gitignore`，不得通过 `git add -f` 强行提交本地产物。提交前检查 `git status --short`，确认没有配置、数据库、日志或构建目录进入暂存区。
 
-## 3. DoH 本地 smoke test
+## 3. 测试构建形态
+
+本地开发测试默认构建二进制进行验证：从仓库根目录用 Cargo 按 `--manifest-path backend/Cargo.toml` 构建当前平台二进制，产物留在 `backend/target/`，再显式传入 `_fluxdns/` 下的配置启动。是否需要内嵌 WebUI、release 或打包形态，按[交付实现](../implementation/delivery.md)选择对应入口。
+
+- 未获得用户明确授权时，禁止在本地构建 Docker 镜像进行测试，也不得用 `docker build`、`docker buildx build`、`docker compose up --build` 等容器构建方式替代二进制测试。
+- 授权只覆盖用户明确同意的那次构建与验证范围，不延伸为后续任务的默认做法；它也不等同于安装 Docker 或 Buildx 的批准，工具安装仍遵循[项目环境使用规范](environment-usage.md#4-工具安装边界)。
+- 正式镜像只在 GitHub Actions 的 container workflow 中构建，见[容器镜像交付](../implementation/delivery.md#容器镜像交付)。需要容器相关验证但未获授权时，在测试结果中记录未执行项和所需授权，不得把二进制测试结果描述为镜像验证通过。
+
+## 4. DoH 本地 smoke test
 
 DoH smoke test 只验证本地启动实例和本次改动涉及的行为，不以远程服务可用性代替本地验证。建议流程如下：
 
@@ -65,7 +73,7 @@ DoH 测试至少覆盖当前实现支持的 GET 和 POST 入口；HTTP 层错误
 - 如果现有的 `doggo`、`curl` 或其他已获准工具无法完成 `external` 模式验证，可以跳过该模式，不得为了补齐测试而自行安装反向代理。
 - 跳过 `external` 模式时，必须在测试结果中记录未执行的模式、实际尝试过的工具、具体限制和后续需要的环境条件；不得将跳过描述为通过。
 
-## 4. 结果记录
+## 5. 结果记录
 
 ### WebUI 真实 HTTP/WS 联合验收
 

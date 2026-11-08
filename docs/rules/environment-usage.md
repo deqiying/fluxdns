@@ -102,7 +102,7 @@ mise exec -- node --version
 - 项目当前确实需要且本机缺失的工具（例如检查 SQLite 数据库所需的 SQLite CLI）可以自行安装，但必须确认当前 `mise` 支持管理该工具，并通过 `mise` 安装或切换版本。
 - `mise` 不支持的工具、与当前项目任务无关的工具以及其他依赖工具，安装前必须获得明确批准。未经批准不得通过 `cargo install`、`npm install -g`、`pip install`、Scoop、WinGet、Chocolatey 或其他包管理器绕过该规则。
 - 如果工具版本需要成为项目共享基线，应同步更新 `mise.toml`；个人临时工具不写入仓库配置。
-- 容器镜像不作为本地构建目标：镜像只在 `.github/workflows/container.yml` 的 GitHub Actions 运行中构建并推送；本机不要求安装 Docker 或 Buildx，也不产生本地镜像产物。需要在本机用容器验证时，先按本节取得工具安装批准。
+- 容器镜像不作为本地构建目标：镜像只在 `.github/workflows/container.yml` 的 GitHub Actions 运行中构建并推送；本机不要求安装 Docker 或 Buildx，也不产生本地镜像产物。本地开发测试默认构建二进制；未经用户明确授权禁止在本地构建镜像进行测试，具体约束见[本地测试规范](local-testing.md#3-测试构建形态)。获授权后如需在本机安装容器工具，仍须先按本节取得工具安装批准。
 - DoH smoke test 所需的 `doggo`、`curl` 等工具是否存在及缺失时的处理，遵循[本地测试规范](local-testing.md)，不得为了补齐单次测试而自行安装替代工具。
 
 ## 5. 环境核验与记录

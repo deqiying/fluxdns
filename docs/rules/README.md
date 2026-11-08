@@ -10,6 +10,6 @@
 
 - [文档维护规则](documentation-maintenance.md)：四类文档权威、选址、命名、索引、分类状态、代码同步、方案退出和检查范围。
 - [项目环境使用规范](environment-usage.md)：项目工具链、Node.js 与 pnpm 命令调用、构建物、依赖目录、缓存和工具安装边界。
-- [本地测试规范](local-testing.md)：本地测试配置目录、运行时文件、DoH smoke test 和结果记录。
+- [本地测试规范](local-testing.md)：本地测试配置目录、运行时文件、测试构建形态（默认二进制、镜像需授权）、DoH smoke test 和结果记录。
 
 新增规范文档时，应使用清晰的英文文件名，补充本索引和根目录 `AGENTS.md` 的路由，并按[文档维护规范](documentation-maintenance.md)更新文档总索引或对应模块入口。
