@@ -141,6 +141,25 @@ describe("配置表单共享值转换", () => {
     expect(normalizeDuration("bogus")).toBe("bogus");
   });
 
+  it("后端回显的紧凑串与历史纳秒串得到相同的回填、摘要和提交值", () => {
+    // 后端现统一输出能整除的最大单位（3d、36h、90m、1500ms）；旧版本写入的纳秒串仍然合法。
+    const pairs: [string, string, { amount: string; unit: string }, string][] = [
+      ["3d", "259200000000000ns", { amount: "3", unit: "d" }, "3 天"],
+      ["36h", "129600000000000ns", { amount: "36", unit: "h" }, "36 小时"],
+      ["90m", "5400000000000ns", { amount: "90", unit: "m" }, "90 分钟"],
+      ["1500ms", "1500000000ns", { amount: "1500", unit: "ms" }, "1500 毫秒"],
+      ["0s", "0ns", { amount: "0", unit: "s" }, "0 秒"],
+    ];
+    for (const [compact, legacy, form, text] of pairs) {
+      expect(durationToForm(compact), compact).toEqual(form);
+      expect(durationToForm(legacy), legacy).toEqual(form);
+      expect(durationToNanoseconds(compact)).toBe(durationToNanoseconds(legacy));
+      // 未编辑字段归一化后提交值一致，不会因回显形态不同而产生无谓差异。
+      expect(normalizeDuration(compact)).toBe(normalizeDuration(legacy));
+      expect(formatDurationText(compact), compact).toBe(text);
+    }
+  });
+
   it("时长合法性判定区分必填正数与可为零的边界", () => {
     for (const valid of ["5s", "1500ms", "1h30m", "0.5s"]) {
       expect(isPositiveDuration(valid), valid).toBe(true);

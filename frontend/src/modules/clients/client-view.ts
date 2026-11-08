@@ -43,7 +43,7 @@ export function clientOverrides(client: Client): ClientOverride[] {
   return overrides;
 }
 
-/** 接口回显为纳秒串，列表按紧凑单位展示；非法值原样保留，不静默改写后端事实。 */
+/** 接口回显为紧凑 duration（兼容历史纳秒串），列表按紧凑单位展示；非法值原样保留，不静默改写后端事实。 */
 function ttlBound(value: string | undefined): string {
   if (value === undefined || value === "") return "—";
   try {

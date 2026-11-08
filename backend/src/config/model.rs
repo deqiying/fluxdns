@@ -1130,11 +1130,14 @@ where
 }
 
 /// 源 DTO 的 duration 使用字符串传输，不泄漏 Rust Duration 的内部字段布局。
+///
+/// 配置写回 YAML 与 Management API 回显共用这一出口，因此输出必须同时满足可读和无损：
+/// 统一经 [`format_duration`] 规范化，且能被 [`parse_duration`] 精确读回。
 pub(super) fn serialize_duration<S>(value: &Duration, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
-    serializer.serialize_str(&format!("{}ns", value.as_nanos()))
+    serializer.serialize_str(&format_duration(*value))
 }
 
 pub(super) fn serialize_optional_duration<S>(
@@ -1351,6 +1354,35 @@ pub fn parse_duration(value: &str) -> Result<Duration, String> {
     ))
 }
 
+/// 把 `Duration` 规范化为 [`parse_duration`] 可无损读回的紧凑字符串，是所有 duration 写出的唯一入口。
+///
+/// 取能整除的最大单位表示整数值（`259200s` → `3d`，`129600s` → `36h`，`1500ms` → `1500ms`），
+/// 不使用小数和复合写法，因此永远精确；零值固定写 `0s`，与模板中“0s 表示不设限”的写法一致。
+/// 刻意不输出 `w`：前端单位只提供到天，周只在读取时兼容，避免用户写 `7d` 却被改成 `1w`。
+pub fn format_duration(value: Duration) -> String {
+    // 从大到小排列，末项 `ns` 的因子为 1，必然整除，因此总能找到单位。
+    const UNITS: [(&str, u128); 7] = [
+        ("d", 24 * 60 * 60 * 1_000_000_000),
+        ("h", 60 * 60 * 1_000_000_000),
+        ("m", 60 * 1_000_000_000),
+        ("s", 1_000_000_000),
+        ("ms", 1_000_000),
+        ("us", 1_000),
+        ("ns", 1),
+    ];
+
+    let nanos = value.as_nanos();
+    if nanos == 0 {
+        return "0s".to_owned();
+    }
+    let (unit, factor) = UNITS
+        .iter()
+        .copied()
+        .find(|(_, factor)| nanos % factor == 0)
+        .unwrap_or(("ns", 1));
+    format!("{}{unit}", nanos / factor)
+}
+
 /// Validate a path-like value without reading the filesystem.
 pub fn is_non_empty_path(path: &Path) -> bool {
     !path.as_os_str().is_empty()
@@ -1363,8 +1395,61 @@ mod tests {
     use serde::Deserialize;
 
     use super::{
-        REDACTED_INLINE_PASSWORD, SecretRefDto, WebUiDto, parse_duration, redact_inline_url,
+        REDACTED_INLINE_PASSWORD, SecretRefDto, WebUiDto, format_duration, parse_duration,
+        redact_inline_url,
     };
+
+    #[test]
+    fn formats_durations_with_the_largest_exact_unit() {
+        for (duration, expected) in [
+            (Duration::ZERO, "0s"),
+            (Duration::from_secs(259_200), "3d"),
+            (Duration::from_secs(86_400), "1d"),
+            (Duration::from_secs(129_600), "36h"),
+            (Duration::from_secs(5_400), "90m"),
+            (Duration::from_secs(300), "5m"),
+            (Duration::from_secs(10), "10s"),
+            (Duration::from_millis(1_500), "1500ms"),
+            (Duration::from_micros(2_500), "2500us"),
+            (Duration::from_nanos(1_000_000_001), "1000000001ns"),
+            // 7 天不折算为 `1w`，与前端单位保持一致。
+            (Duration::from_secs(604_800), "7d"),
+        ] {
+            assert_eq!(format_duration(duration), expected);
+        }
+    }
+
+    #[test]
+    fn formatted_durations_round_trip_through_the_parser() {
+        for duration in [
+            Duration::ZERO,
+            Duration::from_nanos(1),
+            Duration::from_micros(7),
+            Duration::from_millis(1_500),
+            Duration::new(1, 1),
+            Duration::from_secs(59),
+            Duration::from_secs(3_601),
+            Duration::from_secs(259_200),
+            Duration::from_secs(u64::MAX / 1_000_000_000),
+        ] {
+            assert_eq!(parse_duration(&format_duration(duration)), Ok(duration));
+        }
+    }
+
+    #[test]
+    fn serialized_duration_fields_are_human_readable_yaml_and_json() {
+        let optimistic: crate::config::contract::GlobalCacheV2 = yaml_serde::from_str(
+            "enabled: true\nmemory: {max_size_bytes: 1048576}\nfailure_ttl: 5s\noptimistic:\n  enabled: true\n  answer_ttl: 10s\n  max_age: 72h\n",
+        )
+        .unwrap();
+        let yaml = yaml_serde::to_string(&optimistic).unwrap();
+        assert!(yaml.contains("failure_ttl: 5s"), "{yaml}");
+        assert!(yaml.contains("max_age: 3d"), "{yaml}");
+        // 不能直接搜 "ns"：字段名 answer_ttl 本身含有这两个字母，这里只拦“数字 + ns”的旧写法。
+        assert!(!yaml.contains("0ns"), "{yaml}");
+        let json = serde_json::to_value(&optimistic).unwrap();
+        assert_eq!(json["optimistic"]["max_age"], "3d");
+    }
 
     #[test]
     fn parses_compact_and_compound_durations() {

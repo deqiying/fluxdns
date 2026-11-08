@@ -148,7 +148,7 @@ export interface DurationFormValue {
 }
 
 /**
- * 接口返回的紧凑 duration（后端恒为纳秒串）换算成「数值 + 单位」：
+ * 接口返回的紧凑 duration（后端输出能整除的最大单位，历史配置可能仍是纳秒串）换算成「数值 + 单位」：
  * 优先用能整除的最大单位，不足一秒才按毫秒精确展开。语法非法时抛错，由调用方决定提示方式。
  */
 export function durationToForm(value: string | undefined): DurationFormValue {

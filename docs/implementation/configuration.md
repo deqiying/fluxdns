@@ -28,6 +28,8 @@
 >
 > 2026-11-08 短响应缓存增量核对：基线 `96daf34` 加本次工作树，仅更新 REFUSED/空 Answer 的固定 10s 缓存、客户端 TTL、禁止 stale 与 entry v3 恢复兼容；验证见 [DNS 管线](backend/dns-pipeline.md#短响应缓存验证)。
 >
+> 2026-11-08 duration 写回增量核对：基线 `5e8b4e1` 加本次工作树，仅核对 duration 字段的写回与 API 回显规范化；验证与未覆盖范围见下文活动源与候选内部底座。
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -84,6 +86,8 @@ BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml 
 2026-11-05 格式兼容回归：Windows Rust 1.98.0 使用脱敏夹具，修复前两个候选构建测试均复现 `UnsupportedSource`，修复后通过。[候选测试](../../backend/src/config/edit/tests.rs)与[格式边界测试](../../backend/src/config/source_edit/sections_tests.rs)覆盖顶格/缩进列表混排、仅 ID 客户端新增、跨模块组合编辑、重复编辑、引号键、多行字符串与块文本、LF/CRLF、无末尾换行、显式文档结束标记、新增顶层模块，以及语义不一致、重复键、多文档和锚点/别名拒绝。未改动 API 错误映射、依赖版本或部署配置；本地测试不等于线上容器验收。
 
 2026-11-08 写回风格回归（Windows Rust 1.98.0）：[风格测试](../../backend/src/config/source_edit/style_tests.rs)覆盖两格/四格缩进、顶格列表、嵌套字段、列表缩短、空集合填充/清空后重填、flow 保持、行尾及空容器内部注释、尾逗号与注释/字符串内逗号区分、特殊与多行字符串、CRLF、文档结束标记和重复编辑。首轮使用现有编译依赖以隔离入口直接编译实际 `source_edit` 模块，14 项测试通过；同一风格测试对 `96daf34` 的修复前源码有 6 项失败，复现新增对象被写为 flow 的问题。后续两项复核回归在修复前分别复现内部注释丢失和尾逗号追加被拒绝，修复后 9 项风格测试全部通过。[候选测试](../../backend/src/config/edit/tests.rs)另覆盖规则集缺省、空列表、非空列表三种来源的新增与再次编辑。最终正式 `cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 150 项、`management::` 64 项全部通过；生产目标 `cargo check`、本次 Rust 文件格式检查、文档检查及 `git diff --check` 通过。未执行真实浏览器保存或线上容器部署验收。
+
+2026-11-08 duration 写回规范化（Windows Rust 1.98.0，基线 `5e8b4e1` 加工作树）：此前 [`serialize_duration`](../../backend/src/config/model.rs) 与 Management 生效值投影各自把 duration 写成 `<纳秒数>ns`，配置 `update_interval: 3d` 经保存变成 `259200000000000ns`。现统一经 `format_duration` 输出能整除的最大单位（`d/h/m/s/ms/us/ns`，零值 `0s`，不输出 `w` 与小数），可被 `parse_duration` 无损读回；覆盖 DNS 缓存/快照、TTL 覆写、上游组超时、Hosts 与规则集更新周期共 13 个字段，Management API 回显使用同一形态。读取仍接受任意既有写法，历史 `ns` 配置继续有效；未被修改的字段沿用原文，不会被批量重写，只有被编辑的字段才改成新写法，已落成纳秒串的字段需重新编辑一次或手工改写。原地替换已有标量时 `source_edit` 统一写成带引号字符串（如 `update_interval: "36h"`），与本次改动无关，未调整。验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 154 项、`management::` 64 项通过；将 `serialize_duration` 临时还原为旧实现时新增或加强的 3 项测试失败，恢复后通过；前端 `pnpm run typecheck` 与 Vitest 44 文件 274 项通过。未执行真实浏览器保存和线上容器验收。
 
 ### P1 应用后持久化内部底座（2026-09-07）
 
@@ -230,7 +234,7 @@ listener
 
 | 数据类型 | 模板示例 | 说明 |
 | --- | --- | --- |
-| 时长 | `10s`、`24h`、`1d` | 用于缓存、超时和定时更新；解析为 duration，而不是整数天数或秒数。 |
+| 时长 | `10s`、`24h`、`1d` | 用于缓存、超时和定时更新；解析为 duration，而不是整数天数或秒数。读取接受 `ns/us/ms/s/m/h/d/w` 及复合写法；写回配置和 API 回显统一规范化为能整除的最大单位（`3d`、`36h`、`1500ms`，零值 `0s`），不输出纳秒数。 |
 | 字节数 | `8388608` | `max_size_bytes` 使用整数，单位为字节。 |
 | IP/CIDR | `192.168.1.0/24`、`fe80::/10` | 用于监听绑定、客户端匹配、ECS 和可信代理。 |
 | URL | `https://dns.google/dns-query` | 必须按字段要求使用合法 URL。 |

@@ -153,7 +153,7 @@ fn nested_listener_group_and_inline_variants_keep_typed_source_values() {
     assert_eq!(group["upstreams"][0]["name"], "local");
     assert_eq!(group["upstreams"][0]["weight"], 2);
     assert_eq!(group["upstreams"][1]["name"], "doh");
-    assert_eq!(group["timeout"], "1000000000ns");
+    assert_eq!(group["timeout"], "1s");
     assert_eq!(result["editable"][3]["external"]["value"].get("path"), None);
     report("variants", &[result]);
 }

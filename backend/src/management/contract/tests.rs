@@ -275,7 +275,7 @@ fn shared_source_serialization_preserves_omission_paths_and_duration_shape() {
         value["value"]["cache"]["persistence"]["path"],
         "./data/dns-cache.db"
     );
-    assert_eq!(value["value"]["cache"]["failure_ttl"], "5000000000ns");
+    assert_eq!(value["value"]["cache"]["failure_ttl"], "5s");
     assert!(value["value"].get("resolve_log").is_none());
     let _: ModuleSource = serde_json::from_value(value).unwrap();
 }

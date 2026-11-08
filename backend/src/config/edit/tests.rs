@@ -551,6 +551,9 @@ fn rule_set_creation_and_updates_keep_block_yaml() {
             rule_set.contains("\n    url: https://rules.example/geosite.dat"),
             "{rule_set}"
         );
+        // 回归：3d 曾被写成 259200000000000ns，写回的 duration 必须保持人类可读。
+        assert!(rule_set.contains("\n    update_interval: 3d"), "{rule_set}");
+        assert!(!rule_set.contains("0ns"), "{rule_set}");
         if initial.contains("保留原路径") {
             assert!(candidate.source.contains(initial));
         }
@@ -558,6 +561,53 @@ fn rule_set_creation_and_updates_keep_block_yaml() {
           {"module":"rule_set","change":{"action":"update","original_name":"geosite","value":{"name":"geosite","type":"remote","format":"dat","url":"https://rules.example/geosite.dat","auto_update":false,"update_interval":"3d"}}}
         ]"#)).unwrap();
         assert!(updated.source.contains("    auto_update: false"));
+        // 只改 auto_update 时，未变化的 duration 沿用原文，不被重写成其他写法。
+        assert!(
+            updated.source.contains("    update_interval: 3d"),
+            "{}",
+            updated.source
+        );
         assert!(updated.source.starts_with(FIXTURE));
+    }
+}
+
+#[test]
+fn changed_duration_is_written_in_the_largest_exact_unit() {
+    let create = changes(
+        r#"[
+      {"module":"rule_set","change":{"action":"create","value":{"name":"geosite","type":"remote","format":"dat","url":"https://rules.example/geosite.dat","auto_update":true,"update_interval":"72h"}}}
+    ]"#,
+    );
+    let created = build(&format!("{FIXTURE}\n"), &create).unwrap();
+    // 72h 与 3d 同值：规范输出为 3d，而不是纳秒数。
+    assert!(
+        created.source.contains("    update_interval: 3d"),
+        "{}",
+        created.source
+    );
+
+    // 原地替换已有标量时引号风格由 source_edit 统一决定（见 style_tests），这里只比较解析后的值。
+    for (input, expected) in [
+        ("36h", "36h"),
+        ("90m", "90m"),
+        ("1500ms", "1500ms"),
+        ("7d", "7d"),
+        // 不同写法的等价输入统一为同一规范形态。
+        ("24h", "1d"),
+        ("120s", "2m"),
+        ("1h30m", "90m"),
+        ("1.5s", "1500ms"),
+    ] {
+        let update = changes(&format!(
+            r#"[{{"module":"rule_set","change":{{"action":"update","original_name":"geosite","value":{{"name":"geosite","type":"remote","format":"dat","url":"https://rules.example/geosite.dat","auto_update":true,"update_interval":"{input}"}}}}}}]"#
+        ));
+        let updated = build(&created.source, &update).unwrap();
+        let tree: Value = yaml_serde::from_str(&updated.source).unwrap();
+        assert_eq!(
+            tree["rule_set"][0]["update_interval"], expected,
+            "输入 {input}：\n{}",
+            updated.source
+        );
+        assert!(!updated.source.contains("0ns"), "{}", updated.source);
     }
 }

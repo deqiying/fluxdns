@@ -43,7 +43,7 @@
 
 12 个目标入口都已进入 router；`/dashboard` 与 `/queries` 已接入 v2 HTTP/WS，`/system-runtime` 接入 BC-23 的 v2 进程查询并统一返回版本与启动时间，其余九个 P3 配置入口接入 v2 typed module API。原 `/runtime`、`/health`、`/statistics`、`/resources`、`/system` 不再注册且返回正常 404；旧页面源码、API/hooks、兼容 fixture 和 v1 类型已删除。
 
-所有配置 Duration 字段（DNS 缓存失败 TTL／乐观回答 TTL／最大陈旧时间／快照周期／TTL 覆盖上下限、Hosts 检查周期、规则集更新周期、客户端与策略 TTL 覆盖、上游组主要超时与回退超时）统一用共享 [`DurationInput`](../../../frontend/src/shared/components/DurationInput.tsx) 的「数值 + 单位」编辑，单位只提供毫秒/秒/分钟/小时/天且默认秒；规则集刷新列等摘要展示经 [`formatDurationText`](../../../frontend/src/shared/config/form-values.ts) 输出可感知单位，回填时把后端恒为纳秒的串归一化成紧凑 duration。
+所有配置 Duration 字段（DNS 缓存失败 TTL／乐观回答 TTL／最大陈旧时间／快照周期／TTL 覆盖上下限、Hosts 检查周期、规则集更新周期、客户端与策略 TTL 覆盖、上游组主要超时与回退超时）统一用共享 [`DurationInput`](../../../frontend/src/shared/components/DurationInput.tsx) 的「数值 + 单位」编辑，单位只提供毫秒/秒/分钟/小时/天且默认秒；规则集刷新列等摘要展示经 [`formatDurationText`](../../../frontend/src/shared/config/form-values.ts) 输出可感知单位，回填时把后端回显（紧凑串，或历史配置残留的纳秒串）归一化成紧凑 duration。
 
 上游 Hosts 编辑器选择 JSON 时，由 [`hostsJsonError`](../../../frontend/src/modules/upstreams/hosts-json.ts) 校验严格 JSON 语法和顶层映射对象；输入框下常驻双引号、逗号、禁止注释/末尾逗号的说明，空值显示带条目分隔的示例，并关闭浏览器拼写检查以免混淆语法错误。输入/失焦校验使用 300ms 防抖，切换格式重新校验；错误位置优先取浏览器返回的行列或字符位置，缺少位置时仅显示通用中文提示，不回显解析器中的原始映射片段。保存统一经 `Form.submit` / `onFinish`，校验失败保留草稿且不发送 apply；通过后提交原文，不自动格式化或改写内容。Hosts 行格式不应用 JSON 规则，IP/记录类型等业务约束仍由后端校验；本批不扩展其他 JSON 输入入口或新增编辑器依赖。
 

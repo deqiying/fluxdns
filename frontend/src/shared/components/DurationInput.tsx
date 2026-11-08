@@ -15,7 +15,7 @@ import {
 const unitOptions = DURATION_UNITS.map((unit) => ({ label: DURATION_UNIT_LABELS[unit], value: unit }));
 
 export interface DurationInputProps {
-  /** 紧凑 duration 字符串；接口回显恒为纳秒串，提交仍写回紧凑串。 */
+  /** 紧凑 duration 字符串；接口回显为能整除的最大单位（如 `3d`，兼容历史纳秒串），提交仍写回紧凑串。 */
   value?: string;
   onChange?: (value: string | undefined) => void;
   disabled?: boolean;

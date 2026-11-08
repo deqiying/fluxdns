@@ -37,7 +37,7 @@ P1 会话回归（2026-09-07）：`AuthState::replace` 按名称规范排序后�
 | 操作与失败 | preparing、applying、persisting、applied_synced、applied_unpersisted、rejected、compensation_failed、unknown；幂等 ID、危险影响确认，无验证票据 | ConfigMutationOwner 独立于 HTTP 请求推进 Runtime 与持久化；运行成功不等于文件同步，unknown 不能自动重放 |
 | 历史与实时 | 原始 ID/IP、当时匹配、当前名称、稳定记录 ID、历史 cursor 与提交 cursor 分离；指标不可用状态、WS 判别消息 | BC-13 Bearer HTTP 与 BC-24/25 指标/记录 WS 均已接线；记录 subscription 绑定 snapshot cursor 和 retention revision |
 
-大计数/序列使用十进制 `u64` 字符串，Rust 和 schema 均拒绝溢出与前导零；安全整数时间采用 UTC ms，耗时采用 us。请求中的安全时间上界由 REST/WS 共用验证器执行；输出时间仍为 Rust `u64`，生产投影接线时必须保持 schema 的安全整数边界。源 DTO 的相对路径、SecretRef 来源和缺失继承保留，duration 序列化为精确 ns 字符串；这不是可回写的完整 YAML 语法树，不能据此丢弃原注释或显式源表达。
+大计数/序列使用十进制 `u64` 字符串，Rust 和 schema 均拒绝溢出与前导零；安全整数时间采用 UTC ms，耗时采用 us。请求中的安全时间上界由 REST/WS 共用验证器执行；输出时间仍为 Rust `u64`，生产投影接线时必须保持 schema 的安全整数边界。源 DTO 的相对路径、SecretRef 来源和缺失继承保留，duration 经 `format_duration` 序列化为能整除的最大单位的紧凑串（如 `3d`、`1500ms`，零值为 `0s`），与配置写回同一出口，仍可读取历史纳秒串；这不是可回写的完整 YAML 语法树，不能据此丢弃原注释或显式源表达。
 
 所有预算在 OpenAPI `x-limits` 和字段 schema 中维护。已执行入站保护包括配置 4 MiB、变更 2 MiB/128 项、cursor 2048 bytes、历史查询 16 KiB/100 行/3650 天、WS 入站帧 128 KiB；BC-23 的在线身份表上限为 4096，超限窗口显式返回 `observation_gap`。WS 连接、订阅、队列、心跳、速率和 replay 预算均由运行时 owner 执行，具体值见 P4 小节。
 

@@ -10,7 +10,7 @@ use super::contract::{
 };
 use crate::cache::{CacheSnapshotCondition, CacheSnapshotFailure};
 use crate::config::contract::ConfigV2;
-use crate::config::model::{HostsResourceDto, RuleSetDto};
+use crate::config::model::{HostsResourceDto, RuleSetDto, format_duration};
 use crate::config::resolve::{ResolvedConfig, ResolvedUpstream, ValueSource};
 use crate::config::store::{
     ConfigStore,
@@ -733,8 +733,9 @@ impl From<u64> for ScalarValue {
     }
 }
 
+/// 生效值回显与源 DTO 共用 `format_duration`，避免同一个 duration 在两个出口写成不同形态。
 fn duration_value(value: Duration) -> String {
-    format!("{}ns", value.as_nanos())
+    format_duration(value)
 }
 
 fn display_path(path: &std::path::Path) -> String {
