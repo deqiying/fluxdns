@@ -8,6 +8,8 @@
 >
 > 2026-11-06 局部评审：单次保存、活动源内存模型和内部版本/文件确认边界；其余范围沿原评审记录。
 >
+> 2026-11-08 局部评审：仅同步 DoH 裸路由隐式 ID 后缀、同形显式模板优先及重叠拒绝契约；其余范围沿原评审记录，实施与验证证据见[DNS 管线](../../../implementation/backend/dns-pipeline.md#能力与证据)。
+>
 > 关联实现：[load.rs](../../../../backend/src/config/load.rs)、[resolve.rs](../../../../backend/src/config/resolve.rs)、[validate.rs](../../../../backend/src/config/validate.rs)、[store.rs](../../../../backend/src/config/store.rs)
 >
 > 关联文档：[配置字段参考](../../../implementation/configuration.md) · [后端架构](../overview.md)
@@ -161,7 +163,7 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - cache/TTL/ECS 全继承矩阵；
 - group member 缺省 `weight: 1` 及各 mode 的显式权重约束；
 - 包含 `!` 等可打印 ASCII 的 dat selector canonicalization；
-- DoH 显式裸路径与必填 `{client_id}`；允许固定段优先的重叠，拒绝重复模板及同优先级歧义（2026-11-07 局部评审）；
+- DoH 裸路由精确路径与单个非空隐式 ID 后缀、尾随斜杠/根路径，以及显式 `{client_id}` 必填且不接受额外多段；隐式后缀纳入逐段固定段优先比较，同样段结构下显式模板优先，不依赖配置顺序；允许有确定优先级的重叠，拒绝重复和同优先级重叠，包含 `/dns` 与 `/dns/` 的隐式后缀冲突；canonical route ID 保留配置原文且不改写配置（2026-11-08 局部评审，完整样例见[配置参考](../../../implementation/configuration.md)）；
 - IPv4/IPv6 bind 冲突；
 - SecretRef env/file/inline `url`、缺失、空值、非法 scheme 和脱敏；
 - migration golden test、空链幂等和有损 warning 边界；

@@ -22,6 +22,8 @@
 >
 > 2026-11-07 增量核对：基线 `aa0fedf` 加本次工作树，仅核对 DoH 显式裸路径、必填 `{client_id}`、固定段优先及旧配置迁移；验证范围见 [DNS 管线](backend/dns-pipeline.md#能力与证据)。
 >
+> 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，仅核对 DoH 裸路径兼容隐式 ID 后缀、必填显式模板及确定性优先级；本次测试证据见 [DNS 管线](backend/dns-pipeline.md#能力与证据)，其余历史范围未重新核对。
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -490,27 +492,45 @@ DoH 不使用普通 listener 的顶层 `address`、`port`、`strategy` 或单个
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
-| `path` | string | HTTP 路径，可使用一次完整路径段形式的 `{client_id}` 占位符；占位符必须提供非空值。 |
+| `path` | string | HTTP 路径；无占位符时接受精确裸路径或追加一个非空 ID 段；可使用一次完整路径段形式的 `{client_id}` 占位符，显式占位符必须提供非空值。 |
 | `strategy` | string | 路由命中的策略，引用 `strategy[].name`。 |
 
-裸路径与带 ID 的模板分别配置：`/doh-query` 仅匹配该路径，不产生 `client_id`，客户端根据 endpoint 提取的有效来源 IP/CIDR 匹配；`/doh-query/{client_id}` 必须提供一个非空路径段，例如 `/doh-query/client-a`。占位符无论位于末尾还是中间均不可省略；空段、模板之外的额外路径段不匹配该模板。带 ID 请求仍获取来源 IP，客户端精确 ID 优先、未命中时回退最长 CIDR 的规则不变，路径 ID 不是认证凭据。
+不带占位符的裸路由兼容两种请求，无需分别添加入口：`/doh-query` 精确匹配 `/doh-query` 时 `client_id = None`，也接受 `/doh-query/client-a` 并提取 `client_id = client-a`。隐式后缀只能是一个非空路径段，不接受空 ID 或额外多段。精确裸路径按 endpoint 提取的有效来源 IP/CIDR 匹配；带 ID 请求仍获取来源 IP，客户端精确 ID 优先、未命中时回退最长 CIDR 的规则不变，路径 ID 不是认证凭据。
 
-允许存在能够确定优先级的匹配重叠：从左到右逐段比较，固定段优先于 `{client_id}` 参数段，不依赖路由配置顺序。例如显式配置 `/doh-query/inner` 后，它优先于 `/doh-query/{client_id}`；`/doh-query/inner/{client_id}` 也优先于 `/doh-query/{client_id}/query`，二者同时命中 `/doh-query/inner/query` 时取前者。重复模板和同优先级的歧义仍在配置校验阶段拒绝。
+含显式 `{client_id}` 的模板只接受完整模板对应的路径，例如 `/doh-query/{client_id}` 必须提供 `/doh-query/client-a`。占位符无论位于末尾还是中间均不可省略；空 ID、模板之外的额外路径段不匹配该模板，也不在模板末尾再附加隐式 ID。
 
-同时配置下列六条路由时，典型匹配结果如下：
+尾随斜杠与根路径保留原文语义，不自动规范化配置：
 
-| 请求路径 | 命中模板 | 请求 client_id |
+| 单独配置的裸路由 | 精确请求（client_id 为 None） | 追加 ID 请求（client_id 为 client-a） |
 | --- | --- | --- |
-| `/doh-query` | `/doh-query` | 无，按 IP 匹配 |
-| `/doh-query/client-a` | `/doh-query/{client_id}` | `client-a` |
-| `/doh-query/inner` | `/doh-query/inner` | 无，按 IP 匹配 |
-| `/doh-query/inner/client-a` | `/doh-query/inner/{client_id}` | `client-a` |
-| `/doh-query/outside` | `/doh-query/outside` | 无，按 IP 匹配 |
-| `/doh-query/outside/client-a` | `/doh-query/outside/{client_id}` | `client-a` |
+| `/dns` | `/dns` | `/dns/client-a` |
+| `/dns/` | `/dns/` | `/dns/client-a`，沿用已有斜杠，不插入双斜杠 |
+| `/` | `/` | `/client-a` |
 
-**旧行为迁移：** 末尾 `/{client_id}` 不再隐式包含去掉该段的裸路径。若旧配置依赖 `/dns/inner/{client_id}` 同时接受 `/dns/inner`，应显式添加 `/dns/inner` 并绑定原策略；[配置示例](../../config-example.yaml) 已同时列出两种入口。不会自动生成裸路由或改写部署配置；如果没有显式裸路由，该路径可能被其他参数模板命中，不能把所有省略 ID 的请求一概理解为 404。来源 IP 的可信代理及 Header 缺失/非法处理仍按 endpoint 的 `client_ip` 配置执行，与路由是否含 ID 无关。
+`/dns` 与 `/dns/` 的精确路径不同，但隐式 ID 匹配集合重叠且优先级相同，因此配置校验拒绝二者在同一 listener 的 routes 中共存。
 
-Transport 只对实际 HTTP path 匹配一次，并把配置模板作为稳定 route ID 传给 Policy；route ID 不包含真实 client ID。`/dns-quer/inner*` 与 `/dns-quer/outside*` 是服务保留路径，不能作为自定义路由；它们与示例中的 `/dns/...` 前缀不是同一组路径。
+允许存在能够确定优先级的匹配重叠，优先级不依赖路由配置顺序：
+
+1. 将裸路由的隐式 ID 后缀纳入从左到右的逐段比较，固定段优先于参数段。
+2. 同样段结构下，显式 `{client_id}` 模板优先于裸路由的隐式 ID 后缀。
+3. 重复路由和同优先级的重叠歧义仍在配置校验阶段拒绝。
+
+例如固定路径 `/doh-query/inner` 对请求 `/doh-query/inner` 优先于 `/doh-query` 的隐式后缀和 `/doh-query/{client_id}`，不会把 `inner` 识别成 ID；该裸 inner 路由同时可以接受 `/doh-query/inner/client-a`。`/doh-query/inner/{client_id}` 也优先于 `/doh-query/{client_id}/query`，二者同时命中 `/doh-query/inner/query` 时取前者。
+
+同时配置 `/doh-query`、`/doh-query/{client_id}`、`/doh-query/inner` 三条路由时：
+
+| 请求路径 | 命中的 canonical route ID | 请求 client_id |
+| --- | --- | --- |
+| `/doh-query` | `/doh-query` | None，按 IP 匹配 |
+| `/doh-query/client-a` | `/doh-query/{client_id}` | `client-a`，同形显式模板优先 |
+| `/doh-query/inner` | `/doh-query/inner` | None，固定段优先 |
+| `/doh-query/inner/client-a` | `/doh-query/inner` | `client-a`，裸路由隐式后缀 |
+
+如果只配置 `/doh-query`，`/doh-query/client-a` 的 canonical route ID 仍为 `/doh-query`。如果再添加 `/doh-query/inner/{client_id}`，它会优先承接 `/doh-query/inner/client-a`，canonical route ID 为该显式模板原文。
+
+**既有配置边界：** 显式模板仍不隐式包含省略 ID 的短路径。只配置 `/dns/inner/{client_id}` 时，`/dns/inner` 返回 404；如果需要相同策略下兼容不带 ID 和带 ID 的请求，可以配置裸路由 `/dns/inner`。但如果还存在其他裸/通用路由，短路径可能被其他路由按 ID 捕获，例如 `/dns` 或 `/dns/{client_id}` 可把 `/dns/inner` 中的 `inner` 作为 ID，不能把所有省略模板 ID 的请求一概理解为 404。来源 IP 的可信代理及 Header 缺失/非法处理仍按 endpoint 的 `client_ip` 配置执行，与路由是否含 ID 无关。
+
+Transport 只对实际 HTTP path 匹配一次，并始终把配置 `path` 原文作为稳定 canonical route ID 传给 Policy；不会为隐式后缀改写成 `{client_id}` 模板，route ID 不包含实际请求中的 client ID，也不自动改写既有配置。`/dns-quer/inner*` 与 `/dns-quer/outside*` 是服务保留路径，不能作为自定义路由；它们与示例中的 `/dns/...` 前缀不是同一组路径。
 
 每条路由固定同时支持 DoH GET 和 POST，不增加方法开关：
 
@@ -770,7 +790,7 @@ v2 配置加载阶段至少执行以下校验：
 8. ECS 块未配置时继承，显式 `mode: disabled` 才停止继续传递。
 9. `webui.users[].password_hash` 必须是受支持算法生成的单向 hash，禁止明文 `password` 字段。
 10. `dns.cache.memory.max_size_bytes` 为正数，`failure_ttl` 在 `1s..=5m`，`negative_ttl_max` 在 `1s..=1d`，`persistence.snapshot_interval` 在 `1s..=1d`。
-11. DoH route 的 path 模板合法且彼此不存在语义重叠；endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段；GET/POST wire、Content-Type 和固定消息上限合法。
+11. DoH route 的 path 模板合法，允许固定段优先或同形显式模板优先的重叠，拒绝重复及同优先级歧义（包含隐式 ID 后缀）；endpoint 的 `tls.mode` 独立校验：`terminate` 必须有证书和私钥，`external` 不得有证书字段；GET/POST wire、Content-Type 和固定消息上限合法。
 12. `forwarded_header`/`proxy_protocol` 必须配置 `trusted_proxies`，且可信范围只覆盖反代对端；PROXY v1/v2 前导头缺失、未知或非法时拒绝。
 13. DoH 上游的 `bootstrap` 与 `connect_ip` 互斥；SecretRef 解析后的代理 scheme 合法，`socks5h://` 不得同时使用 `bootstrap`。
 14. `database.type`/`database.path`/`database.records_path` 始终存在；prepare 阶段布局标记、数据库打开、migration 或写探针失败必须阻止启动，分片目录与统计库、缓存快照物理隔离。

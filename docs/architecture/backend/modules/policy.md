@@ -10,6 +10,8 @@
 >
 > 局部评审基线：`fcbb12831c66e81e02108ccd030ac3c2a1e08f56` 加本次工作树；仅用于上述范围
 >
+> 2026-11-08 局部评审：仅同步 DoH 裸路由可提取隐式 ID、显式模板必填和 canonical route ID 约束；客户端精确 ID 优先及 CIDR 回退不变，其余范围沿原评审记录。
+>
 > 关联实现：[client.rs](../../../../backend/src/policy/client.rs)、[plan.rs](../../../../backend/src/policy/plan.rs)、[dns/policy.rs](../../../../backend/src/dns/policy.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [DNS Core](dns-core.md) · [Resource](resource.md) · [Upstream](upstream.md)
@@ -175,7 +177,7 @@ optimistic refresh 与 late-result 跨 runtime 切换时必须在 latest core �
 - name 与 client ID 独立索引、ID 优先于 CIDR、IPv4/IPv6 最长前缀、mapped IPv4 和 unknown；
 - 冲突在 prepare 阶段拒绝；
 - base strategy 与 client override；
-- DoH 使用 Transport 按固定段优先选出的 canonical route ID；显式裸路径不携带 ID，参数模板必须携带 ID，客户端仍按精确 ID 优先、IP/CIDR 回退匹配（2026-11-07 局部评审）；
+- DoH 使用 Transport 将裸路由隐式后缀纳入逐段固定段优先、同形显式模板优先后选出的 canonical route ID，该 ID 始终为配置 `path` 原文；裸路由精确命中时不携带 ID、追加单个非空段时携带 ID，显式模板必须携带非空 ID。Policy 不重新匹配路径，客户端仍按精确 ID 优先、来源 IP/CIDR 回退匹配，路径 ID 不作为认证（2026-11-08 局部评审，完整路由边界见[配置参考](../../../implementation/configuration.md)）；
 - listener hosts、strategy first-match、default upstream；
 - exact/suffix/wildcard/regex 优先级；
 - `resource:selector` 解析和不存在错误；

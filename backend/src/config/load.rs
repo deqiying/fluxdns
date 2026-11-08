@@ -742,11 +742,11 @@ mod tests {
     }
 
     #[test]
-    fn doh_routes_allow_explicit_bare_paths_and_specific_overrides() {
+    fn doh_routes_allow_optional_ids_and_explicit_overrides() {
         let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
         let (source, _) = crate::config::test_support::portable_example();
         assert!(loader.load_str(&source).is_ok());
-        // 通用 ID 路由与固定 inner/outside 裸路径可共存；优先级由固定段确定。
+        // 裸路由的隐式 ID 与显式模板可共存；同形时显式模板优先，固定段仍优先。
         let source = source.replace("path: /dns/inner/{client_id}", "path: /dns/{client_id}");
         assert!(loader.load_str(&source).is_ok());
     }
@@ -767,6 +767,22 @@ mod tests {
         assert!(report.errors.iter().any(|error| {
             error.kind == crate::config::ConfigErrorKind::Duplicate
                 && error.path == "listener[2].routes[1].path"
+        }));
+    }
+
+    #[test]
+    fn doh_routes_reject_ambiguous_implicit_id_suffixes() {
+        let loader = super::ConfigV2Loader::new(super::LoadOptions::default().without_snapshot());
+        let (source, _) = crate::config::test_support::portable_example();
+        // 两条不同裸路径的 ID 请求集合相同，不能依赖配置顺序选择策略。
+        let source = source.replace("path: /dns/outside\n", "path: /dns/inner/\n");
+        let super::ConfigLoadError::Validation(report) = loader.load_str(&source).unwrap_err()
+        else {
+            panic!("expected ambiguous route validation error");
+        };
+        assert!(report.errors.iter().any(|error| {
+            error.kind == crate::config::ConfigErrorKind::Constraint
+                && error.path == "listener[2].routes[3].path"
         }));
     }
 

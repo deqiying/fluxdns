@@ -19,6 +19,8 @@
 > 增量核对基线：`e50b948edb4699f58a1e57039fb56442ab228687`（v0.2.9）加本次缓存修复工作树；最终验收仅静态检查/编译，范围见[缓存修复验证](#缓存修复验证)
 >
 > 2026-11-07 增量核对：`aa0fedf` 加本次工作树，仅更新 DoH 显式裸路径、必填 client ID 和路由优先级；其余历史范围沿用原记录
+>
+> 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，仅核对 DoH 裸路由隐式 ID 后缀、必填显式模板与优先级；本次验证见[能力与证据](#能力与证据)，其余历史范围未重新核对。
 
 ## 入口与调用链
 
@@ -46,7 +48,7 @@ SystemSocketFactory / typed binding
 
 正式 async prepare 在 [`dns/policy.rs`](../../../backend/src/dns/policy.rs) 构造 `PolicyDnsCore::from_config_with_resource_snapshots`；不另设仅处理 hosts 的配置装配层。`PolicyContext` 先选 client/strategy/cache namespace，Core 再结合 PolicyState 计算 ECS、eligibility 和 fingerprint；fast miss 后再求 `RouteDecision`，调用 [`policy`](../../../backend/src/policy) 的 client/strategy/route 逻辑。
 
-配置 route 由 [`config/doh_route.rs`](../../../backend/src/config/doh_route.rs) 的 `DohPathPattern` 共享编译。裸路径只精确匹配，模板中的 client ID 段必须非空；`specificity_cmp` 从左到右比较固定段/参数段，供 Config 的同优先级歧义校验和 [`DohAdapter::new_with_tls`](../../../backend/src/transport/doh.rs) 的装配期排序共用。DoH adapter 按已排序模板匹配真实路径后传 typed route ID，Policy 不重新匹配 URL；请求热路径不重新排序。两类路由都保留 endpoint 的来源 IP 提取规则，裸路径进入现有 CIDR 匹配，已注册 ID 优先于 CIDR，未注册 ID 仍可按 IP 回退。完整匹配样例及旧配置迁移见[配置参考](../configuration.md)。资源-only publish 更新 core 内的资源 snapshot，后续请求使用新 hash；不依靠全局 cache clear。
+配置 route 由 [`config/doh_route.rs`](../../../backend/src/config/doh_route.rs) 的 `DohPathPattern` 共享编译。裸路由既精确匹配原文路径（`client_id = None`），也接受追加一个非空 ID 段；尾随斜杠追加时沿用已有斜杠，根路径 `/` 同时支持 `/` 与 `/client-a`。显式模板中的 client ID 段必须非空、不可省略，不接受额外多段。`specificity_cmp` 将裸路由隐式 ID 后缀纳入逐段固定段优先比较，同样段结构下显式模板优先，供 Config 同优先级歧义校验和 [`DohAdapter::new_with_tls`](../../../backend/src/transport/doh.rs) 装配期排序共用；`/dns` 与 `/dns/` 的隐式 ID 集合重叠且同优先级，不能共存。DoH adapter 按已排序路由匹配真实路径后，将配置 `path` 原文传为 typed canonical route ID，不合成模板、不改写配置；Policy 不重新匹配 URL，请求热路径不重新排序。所有入口保留 endpoint 的来源 IP 提取规则，无 ID 时进入现有 CIDR 匹配，有 ID 时精确 ID 优先、未注册 ID 按 IP 回退，路径 ID 不是认证。完整匹配样例、固定 inner 路由及短路径被其他路由捕获的边界见[配置参考](../configuration.md)。资源-only publish 更新 core 内的资源 snapshot，后续请求使用新 hash；不依靠全局 cache clear。
 
 `dns/policy.rs` 同时含具体 adapter 的构造代码，包括 `UpstreamRegistry` 和 Moka cache；解析方法通过 port 使用它们，并把具体 Moka source 交给进程级 snapshot owner。不能把设计中的“公共接口不泄漏 adapter 类型”扩大为“整个 dns 源目录不 import adapter”。旧 SQLite/File cache adapter 与增量持久化链已删除，只保留 FDCS 使用的记录编码和进程级快照 owner。
 
@@ -116,7 +118,7 @@ parallel 的上述择优不依赖 sink 是否存在。Positive 提前返回时�
 | --- | --- | --- | --- | --- |
 | UDP/TCP/DoH | `transport/udp.rs`、`tcp.rs`、`doh.rs` | service 的 typed binding 与 session loop | 本次完整测试包含跨 UDP/TCP/DoH GET/POST 用例 | 本地 loopback，不是远程矩阵；DoH 入站非 HTTP/2 |
 | TLS / 客户端地址 | system socket TLS、DoH forwarded/PROXY parser | DoH accept 后先可信 PROXY、再 TLS、再 HTTP | 本轮核对生产分支 | 真实代理、证书和故障组合仍需环境验收 |
-| DoH 显式 IP/ID 入口与固定段优先 | `DohPathPattern::matches/specificity_cmp`、Config 校验、`DohAdapter::new_with_tls` | 所有 DoH endpoint 装配期排序，HTTP 层选择 canonical route ID，Policy 保持原 ID/IP 索引 | 2026-11-07 Windows 完整后端 854 项通过、4 项既有手动测试忽略；新增 fake socket 会话矩阵覆盖正反顺序 × GET/POST × 9 条路径、ID/CIDR 选择，以及缺失 ID/空段/多段返回 404；严格 loader 验证显式裸路径与优先级重叠可接受、重复仍拒绝 | 新增矩阵使用真实 HTTP parser 和 ClientIndex，但不是远程代理或浏览器验收；未执行 Linux/OpenWrt、部署和忽略的性能/容量专项 |
+| DoH 裸路径/隐式 ID 与显式模板优先 | `DohPathPattern::matches/specificity_cmp`、Config 校验、`DohAdapter::new_with_tls` | 所有 DoH endpoint 装配期排序，HTTP 层以配置原文选择 canonical route ID，Policy 保持原 ID/IP 索引 | 2026-11-08 Windows，`bfece26` 加本次工作树，Rust 1.98.0：`cargo test --manifest-path backend/Cargo.toml -- --test-threads=1` 全部 857 项通过、4 项既有忽略。共享匹配器覆盖可选/必填 ID、空段/多段、根路径/尾随斜杠、固定段与显式模板优先；loader 覆盖合法重叠、重复及隐式后缀歧义。fake socket 矩阵覆盖有/无显式末尾模板 × 正反顺序 × GET/POST × 9 条路径，断言 canonical route ID 与 ID/CIDR 选择；两类入口的非法路径均验证 NotFound | 首次与前端并发执行全量测试时，SQLite 锁预算用例在 30ms 连接阶段返回 Connect，856 项通过、1 项失败、4 项忽略；串行复测通过，未修改其断言或预算。会话矩阵使用真实 HTTP parser 和 ClientIndex，但未做线上代理、真实浏览器、Linux/OpenWrt 或忽略专项验收 |
 | Moka / FDCS cache | `build_cache_facade`、`CacheSnapshotOwner`、二进制 codec | app 从 v2 enabled/path/interval 启动恢复、coordinator reload、service shutdown | 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际测试；旧 SQLite adapter 测试保留 | 未验证 Unix、真实磁盘满；late-window 组合见[Late-window 与 owner](#late-window-与-owner) |
 | Policy -> 出站 | core -> registry -> protocol-independent connector | 正式配置构造支持真实 HTTP/代理路径 | 本轮静态，无远程请求 | 不等同所有 SOCKS/Host/SNI 组合已实测 |
 | 单次完成事件 | service instrumented core、resolution publisher | core 返回后、编码前无等待移交 | 本轮核对调用位置 | ingress 满会出现可观测 gap，不能承诺零丢失 |

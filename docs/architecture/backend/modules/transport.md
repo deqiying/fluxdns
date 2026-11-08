@@ -131,11 +131,11 @@ DoH endpoint 只复用底层 TCP socket，不能被当作 raw DNS/TCP 服务。t
 
 TLS、forwarded header 与 PROXY 的约束见下节；HTTP/1.x 请求按读取顺序处理并支持有界 keep-alive。本设计不提供入站 HTTP/2 或证书热加载契约，实际支持和握手/故障验证边界见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)。
 
-> 2026-11-07 局部评审：路由改为显式裸路径、必填 ID 与固定段优先；TLS、客户端 IP 信任边界和单次匹配职责不变。
+> 2026-11-08 局部评审：仅同步裸路由兼容隐式 ID 后缀、必填显式模板与确定性优先级；TLS、客户端 IP 信任边界和单次匹配职责不变。
 
-route template 由 Config 提供的共享 compiler 校验和匹配。裸路径只精确匹配，不产生 `client_id`；模板中的 `{client_id}` 必须对应一个非空路径段，不再隐式接受省略该段的路径。空 ID 和额外路径段不匹配该模板。若同时命中多条路由，从左到右按固定段优先于参数段确定唯一优先项，不依赖配置顺序；重复模板和同优先级歧义在 Config 阶段拒绝。具体样例与旧配置迁移见[配置参考](../../../implementation/configuration.md)。
+route template 由 Config 提供的共享 compiler 校验和匹配。裸路由精确匹配配置原文路径时不产生 `client_id`，也接受追加一个非空 ID 段；尾随斜杠沿用已有斜杠，根路径 `/` 接受 `/` 与 `/client-a`。显式 `{client_id}` 必须对应一个非空路径段，不接受省略 ID 或模板之外的额外路径段。若同时命中多条路由，将隐式后缀纳入从左到右的逐段比较，固定段优先于参数段；同样段结构下显式模板优先于裸路由隐式 ID，不依赖配置顺序。固定 `/doh-query/inner` 优先于 `/doh-query` 的隐式后缀及 `/doh-query/{client_id}`，自身也能接受 `/doh-query/inner/client-a`。重复路由和同优先级重叠在 Config 阶段拒绝，包含 `/dns` 与 `/dns/` 的隐式 ID 集合冲突。完整样例与其他路由捕获短路径的边界见[配置参考](../../../implementation/configuration.md)。
 
-Transport 在 adapter 装配时预排序，真实 HTTP path 仍只匹配一次，将选中的配置模板写入稳定 `route_id` 并把提取的 ID 写入客户端身份；Policy 只按 route ID 查表，不重建或二次匹配路径。两类入口都按 endpoint 规则获取来源 IP，ID 缺失不代表忽略可信 Header 校验。日志不记录实际路径参数或 query string。
+Transport 在 adapter 装配时预排序，真实 HTTP path 仍只匹配一次，将选中路由的配置 `path` 原文写入稳定 canonical `route_id`，不为隐式后缀合成模板或改写配置，并把提取的 ID 写入客户端身份；Policy 只按 route ID 查表，不重建或二次匹配路径。所有入口都按 endpoint 规则获取来源 IP，无 ID 时按 CIDR 匹配，有 ID 时精确 ID 优先、未命中回退 CIDR；路径 ID 不是认证。ID 缺失不代表忽略可信 Header 校验。日志不记录实际路径参数或 query string。
 
 ## 8. TLS
 
@@ -210,7 +210,7 @@ encoder 由 request correlation 持有并只能调用一次：
 - UDP/TCP canonical equivalence、ID 恢复和 UDP TC；
 - TCP length 分片、半包、EOF、idle timeout 和顺序响应；
 - DoH GET/POST、request-line、Host authority/cardinality、媒体类型、严格十进制 `Content-Length`、`Expect` 拒绝、body framing、header 数量/字节、方法、65,535/87,380 边界、最大 request-target 独立计费和 HTTP/DNS 分层；
-- DoH 显式裸路径、必填 client ID、空段/多段边界、固定段优先与配置顺序无关，以及 canonical route ID 和 IP/ID 客户端匹配；
+- DoH 裸路由精确路径/单 ID 后缀、尾随斜杠/根路径、显式模板 ID 必填、空段/多段边界；隐式后缀参与固定段优先比较、同形显式模板优先及配置顺序无关；重复/同优先级重叠拒绝、canonical route ID 保持配置原文，以及 IP/ID 客户端匹配；
 - TLS PEM/DER 证书/key 组合、handshake timeout 与坏连接隔离；
 - forwarded header 信任链、伪造 header、missing/invalid policy；
 - PROXY v1/v2 分片、未知 TLV、非法长度、不可信 peer；

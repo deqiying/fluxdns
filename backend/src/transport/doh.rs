@@ -2354,9 +2354,14 @@ mod tests {
 
     #[test]
     fn route_pattern_matches_exact_and_client_id_segments() {
-        let exact = DohRoutePattern::new("/dns", "default").unwrap();
-        assert!(exact.matches("/dns").is_some());
-        assert!(exact.matches("/dns/extra").is_none());
+        let bare = DohRoutePattern::new("/dns", "default").unwrap();
+        assert!(bare.matches("/dns").unwrap().client_id.is_none());
+        let matched = bare.matches("/dns/abc-123").unwrap();
+        assert_eq!(matched.template, "/dns");
+        assert_eq!(matched.strategy, "default");
+        assert_eq!(matched.client_id.unwrap().as_str(), "abc-123");
+        assert!(bare.matches("/dns/").is_none());
+        assert!(bare.matches("/dns/a/b").is_none());
 
         let templated = DohRoutePattern::new("/dns/{client_id}", "inner").unwrap();
         let matched = templated.matches("/dns/abc-123").unwrap();
@@ -2713,76 +2718,164 @@ mod tests {
             },
         ])
         .unwrap();
-        let cases = [
-            ("/doh-query", "/doh-query", None),
-            (
-                "/doh-query/client-a",
-                "/doh-query/{client_id}",
-                Some("client-a"),
-            ),
-            (
-                "/doh-query/unknown-id",
-                "/doh-query/{client_id}",
-                Some("unknown-id"),
-            ),
-            ("/doh-query/inner", "/doh-query/inner", None),
-            (
-                "/doh-query/inner/client-a",
-                "/doh-query/inner/{client_id}",
-                Some("client-a"),
-            ),
-            ("/doh-query/outside", "/doh-query/outside", None),
-            (
-                "/doh-query/outside/client-a",
-                "/doh-query/outside/{client_id}",
-                Some("client-a"),
-            ),
-            (
-                "/doh-query/inner/query",
-                "/doh-query/inner/{client_id}",
-                Some("query"),
-            ),
-            (
-                "/doh-query/other/query",
-                "/doh-query/{client_id}/query",
-                Some("other"),
-            ),
-        ];
-        let peer = SocketAddr::from(([198, 51, 100, 10], 40000));
-        for reverse in [false, true] {
-            let mut routes: Vec<_> = [
-                ("/doh-query/{client_id}", "default"),
-                ("/doh-query", "default"),
-                ("/doh-query/{client_id}/query", "generic-query"),
-                ("/doh-query/inner/{client_id}", "inner"),
-                ("/doh-query/inner", "inner"),
-                ("/doh-query/outside/{client_id}", "outside"),
-                ("/doh-query/outside", "outside"),
-            ]
-            .into_iter()
-            .map(|(path, strategy)| DohRoutePattern::new(path, strategy).unwrap())
-            .collect();
-            if reverse {
-                routes.reverse();
+        // 同时覆盖只有裸路由，以及增加显式模板覆盖其隐式 ID 后缀的情况。
+        for explicit_templates in [false, true] {
+            let cases = [
+                ("/doh-query", "/doh-query", None),
+                (
+                    "/doh-query/client-a",
+                    "/doh-query/{client_id}",
+                    Some("client-a"),
+                ),
+                (
+                    "/doh-query/unknown-id",
+                    "/doh-query/{client_id}",
+                    Some("unknown-id"),
+                ),
+                ("/doh-query/inner", "/doh-query/inner", None),
+                (
+                    "/doh-query/inner/client-a",
+                    "/doh-query/inner/{client_id}",
+                    Some("client-a"),
+                ),
+                ("/doh-query/outside", "/doh-query/outside", None),
+                (
+                    "/doh-query/outside/client-a",
+                    "/doh-query/outside/{client_id}",
+                    Some("client-a"),
+                ),
+                (
+                    "/doh-query/inner/query",
+                    "/doh-query/inner/{client_id}",
+                    Some("query"),
+                ),
+                (
+                    "/doh-query/other/query",
+                    "/doh-query/{client_id}/query",
+                    Some("other"),
+                ),
+            ];
+            let peer = SocketAddr::from(([198, 51, 100, 10], 40000));
+            for reverse in [false, true] {
+                let mut routes: Vec<_> = [
+                    ("/doh-query/{client_id}", "default"),
+                    ("/doh-query", "default"),
+                    ("/doh-query/{client_id}/query", "generic-query"),
+                    ("/doh-query/inner/{client_id}", "inner"),
+                    ("/doh-query/inner", "inner"),
+                    ("/doh-query/outside/{client_id}", "outside"),
+                    ("/doh-query/outside", "outside"),
+                ]
+                .into_iter()
+                .filter(|(path, _)| explicit_templates || !path.ends_with("/{client_id}"))
+                .map(|(path, strategy)| DohRoutePattern::new(path, strategy).unwrap())
+                .collect();
+                if reverse {
+                    routes.reverse();
+                }
+                let listener = Arc::new(FakeDohListener::default());
+                let adapter = DohAdapter::new(
+                    listener.clone(),
+                    DohBindingRef {
+                        listener_id: "doh".to_owned(),
+                        endpoint_id: "plain".to_owned(),
+                    },
+                    routes,
+                    RuntimeRevision(1),
+                    doh_capabilities(),
+                    Duration::from_secs(1),
+                )
+                .unwrap();
+                for method in ["GET", "POST"] {
+                    for &(path, expected_route, expected_id) in &cases {
+                        let expected_route = if explicit_templates {
+                            expected_route
+                        } else {
+                            expected_route
+                                .strip_suffix("/{client_id}")
+                                .unwrap_or(expected_route)
+                        };
+                        let wire = wire();
+                        let bytes = if method == "GET" {
+                            request("GET", &format!("{path}?dns={}", base64url(&wire)), "", &[])
+                        } else {
+                            request(
+                                "POST",
+                                path,
+                                &format!(
+                                    "Content-Type: application/dns-message\r\nContent-Length: {}\r\n",
+                                    wire.len()
+                                ),
+                                &wire,
+                            )
+                        };
+                        listener.connections.lock().unwrap().push_back(Box::new(
+                            FakeDohConnection {
+                                peer,
+                                chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(
+                                    bytes,
+                                ))])),
+                                writes: Arc::new(Mutex::new(Vec::new())),
+                            },
+                        ));
+                        let cancellation = Cancellation::new();
+                        let mut session = adapter
+                            .accept_session(&cancellation)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        let DohSessionEvent::Request(inbound) =
+                            session.receive(&cancellation).await.unwrap()
+                        else {
+                            panic!("expected valid {method} request at {path}");
+                        };
+                        let context = &inbound.request().context;
+                        assert_eq!(
+                            context.meta.route_id.as_ref().unwrap().as_ref(),
+                            expected_route,
+                            "{method} {path}, reverse={reverse}, explicit_templates={explicit_templates}"
+                        );
+                        let client_id = context.client.client_id.as_ref().map(|id| id.as_str());
+                        assert_eq!(client_id, expected_id);
+                        assert_eq!(context.client.client_addr, Some(peer.ip()));
+                        let ClientMatch::Matched { client, kind } =
+                            clients.match_client(client_id, context.client.client_addr)
+                        else {
+                            panic!("expected client match at {path}");
+                        };
+                        if expected_id == Some("client-a") {
+                            assert_eq!(client.name.as_str(), "by-id");
+                            assert_eq!(kind, ClientMatchKind::ExactId);
+                        } else {
+                            // 裸路径和未注册 ID 仍使用已有的来源 IP/CIDR 回退，不把路径当作认证。
+                            assert_eq!(client.name.as_str(), "by-ip");
+                            assert_eq!(kind, ClientMatchKind::Cidr { prefix_len: 24 });
+                        }
+                    }
+                }
             }
-            let listener = Arc::new(FakeDohListener::default());
-            let adapter = DohAdapter::new(
-                listener.clone(),
-                DohBindingRef {
-                    listener_id: "doh".to_owned(),
-                    endpoint_id: "plain".to_owned(),
-                },
-                routes,
-                RuntimeRevision(1),
-                doh_capabilities(),
-                Duration::from_secs(1),
-            )
-            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reports_route_error_without_confusing_it_with_dns_failure() {
+        let wire = wire();
+        let encoded = base64url(&wire);
+        for template in ["/dns", "/dns/{client_id}"] {
             for method in ["GET", "POST"] {
-                for &(path, expected_route, expected_id) in &cases {
-                    let wire = wire();
-                    let bytes = if method == "GET" {
-                        request("GET", &format!("{path}?dns={}", base64url(&wire)), "", &[])
+                for path in [
+                    "/unknown",
+                    "/dns",
+                    "/dns/",
+                    "/dns/a/b",
+                    "/dns//a",
+                    "/dns-other/a",
+                ] {
+                    if template == "/dns" && path == "/dns" {
+                        continue;
+                    }
+                    let request = if method == "GET" {
+                        request("GET", &format!("{path}?dns={encoded}"), "", &[])
                     } else {
                         request(
                             "POST",
@@ -2794,99 +2887,49 @@ mod tests {
                             &wire,
                         )
                     };
+                    let listener = Arc::new(FakeDohListener::default());
                     listener
                         .connections
                         .lock()
                         .unwrap()
                         .push_back(Box::new(FakeDohConnection {
-                            peer,
+                            peer: SocketAddr::from(([127, 0, 0, 1], 40000)),
                             chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(
-                                bytes,
+                                request,
                             ))])),
                             writes: Arc::new(Mutex::new(Vec::new())),
                         }));
+                    let adapter = DohAdapter::new(
+                        listener,
+                        DohBindingRef {
+                            listener_id: "doh".to_owned(),
+                            endpoint_id: "plain".to_owned(),
+                        },
+                        vec![DohRoutePattern::new(template, "default").unwrap()],
+                        RuntimeRevision(1),
+                        doh_capabilities(),
+                        Duration::from_secs(1),
+                    )
+                    .unwrap();
                     let cancellation = Cancellation::new();
                     let mut session = adapter
                         .accept_session(&cancellation)
                         .await
                         .unwrap()
                         .unwrap();
-                    let DohSessionEvent::Request(inbound) =
-                        session.receive(&cancellation).await.unwrap()
-                    else {
-                        panic!("expected valid {method} request at {path}");
-                    };
-                    let context = &inbound.request().context;
-                    assert_eq!(
-                        context.meta.route_id.as_ref().unwrap().as_ref(),
-                        expected_route,
-                        "{method} {path}, reverse={reverse}"
+                    let event = session.receive(&cancellation).await.unwrap();
+                    assert!(
+                        matches!(
+                            event,
+                            DohSessionEvent::HttpError {
+                                error: DohHttpError::NotFound,
+                                close: false
+                            }
+                        ),
+                        "{method} {path}, template={template}"
                     );
-                    let client_id = context.client.client_id.as_ref().map(|id| id.as_str());
-                    assert_eq!(client_id, expected_id);
-                    assert_eq!(context.client.client_addr, Some(peer.ip()));
-                    let ClientMatch::Matched { client, kind } =
-                        clients.match_client(client_id, context.client.client_addr)
-                    else {
-                        panic!("expected client match at {path}");
-                    };
-                    if expected_id == Some("client-a") {
-                        assert_eq!(client.name.as_str(), "by-id");
-                        assert_eq!(kind, ClientMatchKind::ExactId);
-                    } else {
-                        // 裸路径和未注册 ID 仍使用已有的来源 IP/CIDR 回退，不把路径当作认证。
-                        assert_eq!(client.name.as_str(), "by-ip");
-                        assert_eq!(kind, ClientMatchKind::Cidr { prefix_len: 24 });
-                    }
                 }
             }
-        }
-    }
-
-    #[tokio::test]
-    async fn session_reports_route_error_without_confusing_it_with_dns_failure() {
-        let encoded = base64url(&wire());
-        for path in ["/unknown", "/dns", "/dns/", "/dns/a/b"] {
-            let request = request("GET", &format!("{path}?dns={encoded}"), "", &[]);
-            let listener = Arc::new(FakeDohListener::default());
-            listener
-                .connections
-                .lock()
-                .unwrap()
-                .push_back(Box::new(FakeDohConnection {
-                    peer: SocketAddr::from(([127, 0, 0, 1], 40000)),
-                    chunks: Mutex::new(VecDeque::from([Ok(TcpReadChunkResult::Data(request))])),
-                    writes: Arc::new(Mutex::new(Vec::new())),
-                }));
-            let adapter = DohAdapter::new(
-                listener,
-                DohBindingRef {
-                    listener_id: "doh".to_owned(),
-                    endpoint_id: "plain".to_owned(),
-                },
-                vec![DohRoutePattern::new("/dns/{client_id}", "default").unwrap()],
-                RuntimeRevision(1),
-                doh_capabilities(),
-                Duration::from_secs(1),
-            )
-            .unwrap();
-            let cancellation = Cancellation::new();
-            let mut session = adapter
-                .accept_session(&cancellation)
-                .await
-                .unwrap()
-                .unwrap();
-            let event = session.receive(&cancellation).await.unwrap();
-            assert!(
-                matches!(
-                    event,
-                    DohSessionEvent::HttpError {
-                        error: DohHttpError::NotFound,
-                        close: false
-                    }
-                ),
-                "{path}"
-            );
         }
     }
 }

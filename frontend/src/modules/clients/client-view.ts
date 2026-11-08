@@ -66,10 +66,13 @@ export function clientSummary(items: Client[]): ClientSummary {
   };
 }
 
-/** 收集所有 DoH 路由中带 `{client_id}` 占位符的模板，按配置顺序去重。 */
+/** 收集 DoH 的显式与隐式 ID 模板，按配置顺序去重，不改写监听配置。 */
 export function clientRouteTemplates(listeners: Listener[]): string[] {
-  const templates = listeners.flatMap((listener) => listener.type === "doh" ? listener.routes.map((route) => route.path) : []);
-  return [...new Set(templates.filter((path) => path.includes(CLIENT_ID_PLACEHOLDER)))];
+  const paths = listeners.flatMap((listener) => listener.type === "doh" ? listener.routes.map((route) => route.path) : []);
+  const templates = paths.map((path) => path.includes(CLIENT_ID_PLACEHOLDER)
+    ? path
+    : `${path}${path.endsWith("/") ? "" : "/"}${CLIENT_ID_PLACEHOLDER}`);
+  return [...new Set(templates)];
 }
 
 /** 把路由模板代入具体 ID，得到终端应配置的 DoH 路径；没有模板时返回空数组，由调用方隐藏该区块。 */

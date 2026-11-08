@@ -178,13 +178,14 @@ listener:
     # 解码后的 DNS wire 与 POST body 上限固定为 65535 字节。
     # DoH 路由列表；所有 endpoint 共用这些路径和策略。
     routes:
-      # {client_id} 必须是一个非空路径段；不带 ID 的入口需另行配置裸路径。
-      # 固定路径段优先于参数段，路由排列顺序不影响命中结果。
+      # 显式 {client_id} 必须是一个非空路径段，该模板不接受省略 ID 的短路径。
+      # 固定路径段优先；同形时显式模板优先于裸路由的隐式 ID 后缀，与排列顺序无关。
       - path: /dns/inner/{client_id}
         strategy: inner
       - path: /dns/outside/{client_id}
         strategy: outside
-      # 裸路径不携带 client_id，仍根据 endpoint 提取的来源 IP 匹配客户端。
+      # 裸路由支持自身及追加一个 ID 段；不带 ID 时根据来源 IP 匹配客户端。
+      # 仅需同一策略同时支持两种入口时，保留裸路由即可；此处展示与显式模板共存。
       - path: /dns/inner
         strategy: inner
       - path: /dns/outside

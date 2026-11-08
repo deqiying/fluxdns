@@ -27,16 +27,28 @@ describe("client view helpers", () => {
     expect(clientSummary([])).toMatchObject({ total: 0, ipEntries: 0 });
   });
 
-  it("仅从 DoH 路由中提取带 client_id 占位符的模板并代入新 ID", () => {
+  it("从 DoH 裸路由和显式模板生成 ID 地址并去重", () => {
     const listeners = [
       { name: "udp", type: "udp", addresses: ["0.0.0.0"], port: 53, strategy: "default" },
       { name: "doh-a", type: "doh", routes: [{ path: "/dns/inner/{client_id}", strategy: "a" }, { path: "/dns-query", strategy: "a" }], endpoints: [] },
-      { name: "doh-b", type: "doh", routes: [{ path: "/dns/inner/{client_id}", strategy: "a" }, { path: "/dns/outside/{client_id}", strategy: "b" }], endpoints: [] },
+      { name: "doh-b", type: "doh", routes: [{ path: "/dns/inner/{client_id}", strategy: "a" }, { path: "/dns/inner", strategy: "a" }, { path: "/dns/outside/{client_id}", strategy: "b" }], endpoints: [] },
     ] as unknown as components["schemas"]["Listener"][];
     const templates = clientRouteTemplates(listeners);
-    expect(templates).toEqual(["/dns/inner/{client_id}", "/dns/outside/{client_id}"]);
-    expect(clientDohPaths(templates, "singbox-home")).toEqual(["/dns/inner/singbox-home", "/dns/outside/singbox-home"]);
+    expect(templates).toEqual(["/dns/inner/{client_id}", "/dns-query/{client_id}", "/dns/outside/{client_id}"]);
+    expect(clientDohPaths(templates, "singbox-home")).toEqual(["/dns/inner/singbox-home", "/dns-query/singbox-home", "/dns/outside/singbox-home"]);
     expect(clientDohPaths([], "x")).toEqual([]);
+  });
+
+  it("裸根路径及尾随斜杠复用分隔符，中间占位符保持不变", () => {
+    const listeners = [{ name: "doh", type: "doh", routes: [
+      { path: "/", strategy: "default" },
+      { path: "/dns/", strategy: "default" },
+      { path: "/client/{client_id}/query", strategy: "default" },
+    ], endpoints: [] }] as unknown as components["schemas"]["Listener"][];
+    expect(clientDohPaths(clientRouteTemplates(listeners), "client-a")).toEqual([
+      "/client-a", "/dns/client-a", "/client/client-a/query",
+    ]);
+    expect(listeners[0]).toMatchObject({ routes: [{ path: "/" }, { path: "/dns/" }, { path: "/client/{client_id}/query" }] });
   });
 
   it("生成满足 client_id 字符集的 UUID v4", () => {
