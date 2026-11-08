@@ -529,3 +529,35 @@ fn first_client_can_be_created_when_module_is_omitted_after_indentless_sequence(
         }
     }
 }
+
+#[test]
+fn rule_set_creation_and_updates_keep_block_yaml() {
+    let create = changes(
+        r#"[
+      {"module":"rule_set","change":{"action":"create","value":{"name":"geosite","type":"remote","format":"dat","url":"https://rules.example/geosite.dat","auto_update":true,"update_interval":"3d"}}}
+    ]"#,
+    );
+    for initial in [
+        "",
+        "rule_set: [] # 首次新增\n",
+        "rule_set:\n  - name: local\n    type: file\n    format: dat\n    path: ./rules/local.dat # 保留原路径\n",
+    ] {
+        let source = format!("{FIXTURE}\n{initial}");
+        let candidate = build(&source, &create).unwrap();
+        assert!(candidate.source.starts_with(FIXTURE));
+        let rule_set = candidate.source.split("rule_set:").nth(1).unwrap();
+        assert!(!rule_set.contains('{'), "{rule_set}");
+        assert!(
+            rule_set.contains("\n    url: https://rules.example/geosite.dat"),
+            "{rule_set}"
+        );
+        if initial.contains("保留原路径") {
+            assert!(candidate.source.contains(initial));
+        }
+        let updated = build(&candidate.source, &changes(r#"[
+          {"module":"rule_set","change":{"action":"update","original_name":"geosite","value":{"name":"geosite","type":"remote","format":"dat","url":"https://rules.example/geosite.dat","auto_update":false,"update_interval":"3d"}}}
+        ]"#)).unwrap();
+        assert!(updated.source.contains("    auto_update: false"));
+        assert!(updated.source.starts_with(FIXTURE));
+    }
+}

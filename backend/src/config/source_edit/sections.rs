@@ -5,10 +5,8 @@ use std::collections::BTreeSet;
 use yaml_edit::SyntaxKind;
 use yaml_serde::Value;
 
-use super::{
-    Document, FromStr, SourceEditError, edit_with_cst, flow_value, preferred_newline,
-    quote_yaml_string,
-};
+use super::render::{Style, block_entry};
+use super::{Document, FromStr, SourceEditError, edit_with_cst, preferred_newline};
 
 /// 分段只提供定位边界：每段必须独立解析为原树中的一个顶层项，不能靠文本形状猜测语义。
 /// 不重排或重新序列化原文；顶层删除不属于管理变更契约，兼容路径仍拒绝它。
@@ -61,14 +59,15 @@ pub(super) fn edit_block_sections(
                 .iter()
                 .filter(|(key, _)| !old.contains_key(*key))
                 .map(|(key, value)| {
-                    let field = key.as_str().ok_or(SourceEditError::UnsupportedSyntax)?;
-                    Ok(format!(
-                        "{}{}: {}{}",
-                        " ".repeat(indent),
-                        quote_yaml_string(field),
-                        flow_value(value)?,
-                        preferred_newline(source)
-                    ))
+                    block_entry(
+                        key,
+                        value,
+                        Style {
+                            indent,
+                            ..Style::default()
+                        },
+                        preferred_newline(source),
+                    )
                 })
                 .collect::<Result<Vec<_>, SourceEditError>>()?;
             if !additions.is_empty() {

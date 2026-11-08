@@ -5,10 +5,16 @@ use std::str::FromStr;
 use thiserror::Error;
 use yaml_edit::Document;
 
+use render::{Style, block_entry, block_value, is_block_value};
+
+mod render;
 mod sections;
 
 #[cfg(test)]
 mod sections_tests;
+
+#[cfg(test)]
+mod style_tests;
 
 /// 根据已校验的源树差异修改 CST；输出必须与目标树完全等价，不能静默损坏不支持的语法。
 pub(crate) fn edit_document(
@@ -50,6 +56,7 @@ fn edit_with_cst(
         yaml_edit::YamlNode::Mapping(root),
         original,
         intended,
+        Style::default(),
         &mut edits,
     )?;
     edits.sort_by_key(|edit| edit.0);
@@ -74,6 +81,7 @@ fn collect_edits(
     node: yaml_edit::YamlNode,
     old: &yaml_serde::Value,
     new: &yaml_serde::Value,
+    parent_style: Style,
     edits: &mut Vec<(usize, usize, String)>,
 ) -> Result<(), SourceEditError> {
     use yaml_edit::YamlNode;
@@ -83,11 +91,16 @@ fn collect_edits(
     }
     let range = node_range(&node)?;
     let raw = &source[range.start as usize..range.end as usize];
-    let flow = raw.trim_start().starts_with(['{', '[']);
+    let style = parent_style.at(source, &node, old)?;
+    let flow = style.flow;
+    // 空的 flow 占位符在块式父节点下首次填充时展开，不能把 JSON 写法传播到新配置。
+    if raw.trim_start().starts_with(['{', '[']) && !flow && is_block_value(new) {
+        return replace_node(source, range, new, style, edits);
+    }
     match (node, old, new) {
         (YamlNode::Mapping(mapping), Value::Mapping(old), Value::Mapping(new)) => {
             if new.is_empty() || (flow && old.keys().any(|key| !new.contains_key(key))) {
-                replace_node(raw, range, new, edits)?;
+                replace_node(source, range, &Value::Mapping(new.clone()), style, edits)?;
                 return Ok(());
             }
             for key in old.keys().filter(|key| !new.contains_key(*key)) {
@@ -124,29 +137,34 @@ fn collect_edits(
                     let child = mapping
                         .get(field)
                         .ok_or(SourceEditError::UnsupportedSyntax)?;
-                    collect_edits(source, child, previous, value, edits)?;
-                } else {
+                    collect_edits(
+                        source,
+                        child,
+                        previous,
+                        value,
+                        style.child(style.step),
+                        edits,
+                    )?;
+                } else if flow {
                     additions.push(format!(
                         "{}: {}",
                         quote_yaml_string(field),
                         flow_value(value)?
                     ));
+                } else {
+                    additions.push(block_entry(key, value, style, preferred_newline(source))?);
                 }
             }
             if !additions.is_empty() {
                 if flow {
                     let end = range.start as usize
                         + raw.rfind('}').ok_or(SourceEditError::UnsupportedSyntax)?;
-                    let prefix = if old.is_empty() { "" } else { ", " };
+                    let prefix = flow_separator(&source[range.start as usize..end], old.is_empty());
                     edits.push((end, end, format!("{prefix}{}", additions.join(", "))));
                 } else {
-                    let indent = range.start as usize - line_start(source, range.start as usize);
                     let newline = preferred_newline(source);
                     let prefix = if raw.ends_with('\n') { "" } else { newline };
-                    let addition = additions
-                        .iter()
-                        .map(|value| format!("{}{value}{newline}", " ".repeat(indent)))
-                        .collect::<String>();
+                    let addition = additions.concat();
                     edits.push((
                         range.end as usize,
                         range.end as usize,
@@ -158,34 +176,31 @@ fn collect_edits(
         }
         (YamlNode::Sequence(sequence), Value::Sequence(old), Value::Sequence(new)) => {
             if new.len() < old.len() {
-                replace_node(raw, range, new, edits)?;
+                replace_node(source, range, &Value::Sequence(new.clone()), style, edits)?;
                 return Ok(());
             }
             for (index, (previous, value)) in old.iter().zip(new).enumerate() {
                 let child = sequence
                     .get(index)
                     .ok_or(SourceEditError::UnsupportedSyntax)?;
-                collect_edits(source, child, previous, value, edits)?;
+                collect_edits(source, child, previous, value, style.child(2), edits)?;
             }
             if new.len() > old.len() {
-                let additions = new
-                    .iter()
-                    .skip(old.len())
-                    .map(flow_value)
-                    .collect::<Result<Vec<_>, _>>()?;
                 if flow {
+                    let additions = new
+                        .iter()
+                        .skip(old.len())
+                        .map(flow_value)
+                        .collect::<Result<Vec<_>, _>>()?;
                     let end = range.start as usize
                         + raw.rfind(']').ok_or(SourceEditError::UnsupportedSyntax)?;
-                    let prefix = if old.is_empty() { "" } else { ", " };
+                    let prefix = flow_separator(&source[range.start as usize..end], old.is_empty());
                     edits.push((end, end, format!("{prefix}{}", additions.join(", "))));
                 } else {
-                    let indent = range.start as usize - line_start(source, range.start as usize);
                     let newline = preferred_newline(source);
                     let prefix = if raw.ends_with('\n') { "" } else { newline };
-                    let addition = additions
-                        .iter()
-                        .map(|value| format!("{}- {value}{newline}", " ".repeat(indent)))
-                        .collect::<String>();
+                    let addition =
+                        block_value(&Value::Sequence(new[old.len()..].to_vec()), style, newline)?;
                     edits.push((
                         range.end as usize,
                         range.end as usize,
@@ -195,7 +210,32 @@ fn collect_edits(
             }
             Ok(())
         }
-        (_, _, new) => replace_node(raw, range, new, edits),
+        (_, _, new) => replace_node(source, range, new, style, edits),
+    }
+}
+
+/// 忽略空白与注释后判断已有尾逗号；字符串内的逗号不能当作集合分隔符。
+fn flow_separator(before_close: &str, empty: bool) -> &'static str {
+    use yaml_edit::SyntaxKind;
+    if empty {
+        return "";
+    }
+    let last = yaml_edit::lex(before_close)
+        .into_iter()
+        .rev()
+        .find(|(kind, _)| {
+            !matches!(
+                kind,
+                SyntaxKind::WHITESPACE
+                    | SyntaxKind::NEWLINE
+                    | SyntaxKind::INDENT
+                    | SyntaxKind::COMMENT
+            )
+        });
+    if last.is_some_and(|(kind, _)| kind == SyntaxKind::COMMA) {
+        " "
+    } else {
+        ", "
     }
 }
 
@@ -215,23 +255,64 @@ fn line_start(source: &str, index: usize) -> usize {
 }
 
 fn replace_node(
-    raw: &str,
+    source: &str,
     range: yaml_edit::TextPosition,
-    value: &impl serde::Serialize,
+    value: &yaml_serde::Value,
+    style: Style,
     edits: &mut Vec<(usize, usize, String)>,
 ) -> Result<(), SourceEditError> {
-    let ending = if raw.ends_with("\r\n") {
-        "\r\n"
-    } else if raw.ends_with('\n') {
-        "\n"
+    let mut start = range.start as usize;
+    let mut end = range.end as usize;
+    let raw = &source[start..end];
+    let newline = preferred_newline(source);
+    let ending = if raw.ends_with('\n') { newline } else { "" };
+    let replacement = if style.flow || !is_block_value(value) {
+        format!("{}{ending}", flow_value(value)?)
     } else {
-        ""
+        let mut rendered = String::new();
+        if raw.trim_start().starts_with(['{', '[']) {
+            // 空 flow 容器的内部注释不在语义树中；展开前移到新子块之前，避免等价校验漏掉文本损失。
+            for (kind, text) in yaml_edit::lex(raw) {
+                if kind == yaml_edit::SyntaxKind::COMMENT {
+                    rendered.push_str(&" ".repeat(style.indent));
+                    rendered.push_str(text.trim_end_matches(['\r', '\n']));
+                    rendered.push_str(newline);
+                }
+            }
+        }
+        rendered.push_str(&block_value(value, style, newline)?);
+        let prefix = &source[line_start(source, start)..start];
+        if prefix.trim().is_empty() || prefix.trim() == "-" {
+            // 原本就是块节点（或紧跟列表短横线），第一行的缩进已在替换区间之外。
+            format!(
+                "{}{ending}",
+                rendered
+                    .trim_start_matches(' ')
+                    .strip_suffix(newline)
+                    .unwrap_or(&rendered)
+            )
+        } else {
+            // 将 `key: [] # 注释` 展开时把注释放回 key 行，不让它落到最后一个子字段。
+            start -= prefix.len() - prefix.trim_end_matches([' ', '\t']).len();
+            let line_end = if ending.is_empty() {
+                source[end..]
+                    .find(['\r', '\n'])
+                    .map_or(source.len(), |offset| end + offset)
+            } else {
+                end
+            };
+            let comment = &source[end..line_end];
+            if !comment.trim().is_empty() && !comment.trim_start().starts_with('#') {
+                return Err(SourceEditError::UnsupportedSyntax);
+            }
+            end = line_end;
+            format!(
+                "{comment}{newline}{}{ending}",
+                rendered.strip_suffix(newline).unwrap_or(&rendered)
+            )
+        }
     };
-    edits.push((
-        range.start as usize,
-        range.end as usize,
-        format!("{}{ending}", flow_value(value)?),
-    ));
+    edits.push((start, end, replacement));
     Ok(())
 }
 

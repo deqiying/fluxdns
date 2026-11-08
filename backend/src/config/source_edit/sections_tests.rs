@@ -50,7 +50,15 @@ fn simultaneous_edits_and_new_modules_stay_before_document_end() {
         if !ending.is_empty() {
             assert!(result.ends_with(ending));
         }
-        // 新增的行内模块和已有顶格列表仍可在下一次编辑中定位。
+        assert!(
+            result.contains("logs:\n  enable: false\n  level: info\n  path: ./logs/test.log\n"),
+            "{result}"
+        );
+        assert!(
+            result.contains("clients:\n  - name: phone\n    client_id: phone-01\n"),
+            "{result}"
+        );
+        // 新增的块式模块和已有顶格列表仍可在下一次编辑中定位。
         let mut next = intended.clone();
         next["logs"]["enable"] = Value::Bool(true);
         let repeated = edit_document(&result, &intended, &next).unwrap();

@@ -24,6 +24,8 @@
 >
 > 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，仅核对 DoH 裸路径兼容隐式 ID 后缀、必填显式模板及确定性优先级；本次测试证据见 [DNS 管线](backend/dns-pipeline.md#能力与证据)，其余历史范围未重新核对。
 >
+> 2026-11-08 写回风格增量核对：基线 `96daf34` 加本次工作树，仅核对管理候选的块式片段渲染、空集合展开与原文保留；验证与未覆盖范围见下文活动源与候选内部底座。
+>
 > 2026-11-08 短响应缓存增量核对：基线 `96daf34` 加本次工作树，仅更新 REFUSED/空 Answer 的固定 10s 缓存、客户端 TTL、禁止 stale 与 entry v3 恢复兼容；验证见 [DNS 管线](backend/dns-pipeline.md#短响应缓存验证)。
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
@@ -73,13 +75,15 @@ Windows Rust 1.98.0 执行 `cargo test --manifest-path backend/Cargo.toml -- --n
 
 - [`config/edit.rs`](../../backend/src/config/edit.rs) 承接原 Management 的严格变更类型，Management 重用同一类型，无新增 HTTP 契约。旧 name 相对同一活动快照定位，单候选不重复编辑同一目标；交换名称按一次映射处理，不递归串联改名。上游/组共享空间。客户端更新的 `ClientEdit.client_id` 可选：缺省保留原值，显式提供时替换请求身份，格式与唯一性由整份候选的契约校验统一拒绝，因此同一候选内互换两个客户端的 ID 也合法。
 - 候选依次执行变更预算、活动源定向修改、已知 variant 引用更新、完整 `ConfigV2::parse/validate`、两级路径检查、CST 定位编辑及整树等价复核。覆盖 listener/DoH route、bootstrap、组成员/fallback、策略、Hosts、rule-set selector、proxy 和客户端策略；不对正文、路径、SecretRef 做字符串替换。资源首载、物理 owner 路径、socket 和进程 prepare 仍属于后续运行接线，不能把这一步视为可应用运行态。
-- [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。新增片段经 serializer 转义；支持块/flow、CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验。整份 CST 无法安全编辑时，[顶层分段兼容路径](../../backend/src/config/source_edit/sections.rs) 按词法 token 定位块映射项，每段必须独立解析为原语义树中的唯一对应项，再局部编辑并复核整树等价；因此 `outbound` 等顶格列表不会阻断后续 `clients` 的新增和编辑。该路径保留原列表缩进及未修改片段，不是整份重序列化回退；分段边界有歧义、顶层删除，以及锚点/别名/merge 等无法安全维护的表达仍明确拒绝。
+- [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。[片段渲染器](../../backend/src/config/source_edit/render.rs) 对块式区域新增字段、追加列表项及必须重写的非空集合使用块式 YAML，嵌套映射与列表递归展开，不再统一写成 JSON 行内对象；缩进优先参考当前映射的子容器，再继承上层，无线索时使用两格。已有非空 flow 容器继续沿用 flow，追加时通过词法 token 识别已有尾逗号，跳过空白与注释，不把字符串内逗号当作分隔符；块式父节点下的空 `{}` / `[]` 首次填充时展开，闭括号后的行尾注释保留在原字段行，容器内部注释按原顺序移到新子块之前。仍为空的集合保留显式 `{}` / `[]`，不写成 null。标量由 serializer 转义，多行新值使用转义字符串保证换行语义；支持 LF/CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验。整份 CST 无法安全编辑时，[顶层分段兼容路径](../../backend/src/config/source_edit/sections.rs) 按词法 token 定位块映射项，每段必须独立解析为原语义树中的唯一对应项，再局部编辑并复核整树等价；因此 `outbound` 等顶格列表不会阻断后续 `clients` 的新增和编辑，新增顶层模块也使用块式片段。该路径保留原列表缩进及未修改片段，不是整份重序列化回退；分段边界有歧义、顶层删除，以及锚点/别名/merge 等无法安全维护的表达仍明确拒绝。
 - [`observation`](../../backend/src/config/store/observation.rs) 有界读取源与派生文件，各自区分可读/缺失/不可读/超限，组合 token 包含内容指纹和物理文件身份；同内容替换仍产生不同 token。拒绝 hard link、symlink/reparse 路径；读取前后核对身份和元数据。Windows 使用真实 FileId，Unix 代码未在本次执行。此观测不提供 filesystem CAS，正式替换前仍须重新核对；BC-29 的写入身份与旁文件保护见下节。
 - 普通保存直接调用 `begin_apply`，在 transaction gate 内以当前活动源构造候选，不接收客户端活动版本，不需要预校验票据；同条目后提交覆盖，其他条目保留。`validate_edit` 仅提供无状态影响预览。缩短保留策略需明确确认，覆盖外改还必须绑定所见组合文件版本。operation 摘要只绑定调用者和原始请求，在展开脱敏字段或解析旧键前先去重；相同 ID 不同命令拒绝，相同请求返回既有结果，不能重新执行已完成的新增/改名。操作上限 1024、完成后保留 30 分钟，进行中记录不淘汰；未同步、补偿失败或结果未知保持 gate。内部捕获版本仍复核运行切换和文件提交，但不再让页面承担全局版本前置条件。
 
 BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 71 项（含摘要加固后的 SHA-256 固定向量）、`management::` 18 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过。Node/Vite 子进程在沙盒内被 `spawn EPERM` 阻止后，经批准在沙盒外重跑通过。新测试覆盖候选/引用/源表达和真实双文件观测；文件只在 `_fluxdns/p1-config-tests/` 的随机用例目录创建并清理。该批未执行真实 v2 启动、HTTP、DNS 热更新、journal crash point、文件还原/同步重试、日志切换或浏览器验收；后续批次证据单列。当前 schema 和生成类型没有 wire 变化。
 
 2026-11-05 格式兼容回归：Windows Rust 1.98.0 使用脱敏夹具，修复前两个候选构建测试均复现 `UnsupportedSource`，修复后通过。[候选测试](../../backend/src/config/edit/tests.rs)与[格式边界测试](../../backend/src/config/source_edit/sections_tests.rs)覆盖顶格/缩进列表混排、仅 ID 客户端新增、跨模块组合编辑、重复编辑、引号键、多行字符串与块文本、LF/CRLF、无末尾换行、显式文档结束标记、新增顶层模块，以及语义不一致、重复键、多文档和锚点/别名拒绝。未改动 API 错误映射、依赖版本或部署配置；本地测试不等于线上容器验收。
+
+2026-11-08 写回风格回归（Windows Rust 1.98.0）：[风格测试](../../backend/src/config/source_edit/style_tests.rs)覆盖两格/四格缩进、顶格列表、嵌套字段、列表缩短、空集合填充/清空后重填、flow 保持、行尾及空容器内部注释、尾逗号与注释/字符串内逗号区分、特殊与多行字符串、CRLF、文档结束标记和重复编辑。首轮使用现有编译依赖以隔离入口直接编译实际 `source_edit` 模块，14 项测试通过；同一风格测试对 `96daf34` 的修复前源码有 6 项失败，复现新增对象被写为 flow 的问题。后续两项复核回归在修复前分别复现内部注释丢失和尾逗号追加被拒绝，修复后 9 项风格测试全部通过。[候选测试](../../backend/src/config/edit/tests.rs)另覆盖规则集缺省、空列表、非空列表三种来源的新增与再次编辑。最终正式 `cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 150 项、`management::` 64 项全部通过；生产目标 `cargo check`、本次 Rust 文件格式检查、文档检查及 `git diff --check` 通过。未执行真实浏览器保存或线上容器部署验收。
 
 ### P1 应用后持久化内部底座（2026-09-07）
 
