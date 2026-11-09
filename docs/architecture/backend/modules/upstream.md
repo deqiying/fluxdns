@@ -6,6 +6,8 @@
 >
 > 最后评审：2026-09-05（parallel 择优、正常响应阻止 fallback、保留 late-result 与 primary lease；基线见[模块索引](README.md)，证据见[DNS 管线](../../../implementation/backend/dns-pipeline.md)）
 >
+> 2026-11-10 局部评审：选中 ECS leaf 元数据随 attempt/outcome 传递，保持原顶层路由字段和响应选择不变。
+>
 > 关联实现：[registry.rs](../../../../backend/src/upstream/registry.rs)、[executor.rs](../../../../backend/src/upstream/executor.rs)、[group.rs](../../../../backend/src/upstream/group.rs)、[http.rs](../../../../backend/src/upstream/http.rs)、[reqwest_http.rs](../../../../backend/src/upstream/reqwest_http.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md)
@@ -42,6 +44,8 @@ prepare 为每个 upstream 生成 typed ID 和 connector handle，组合以下�
 - 安全的观测标签。
 
 Registry 在构造时拒绝缺失/重复 connector、非法 outbound、循环和不兼容组合，返回稳定 typed error；不能等到每次请求才解释配置。Group 可递归组合，但必须保留 cycle guard 和嵌套 late-result sink，不在 GroupExchange 边界丢弃晚到候选。具体生产与测试构造器的支持范围见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)。
+
+详情启用时，Direct 从实际成员 query 与自身 outcome 形成有界 ECS leaf 事实，Nested 继续传递内层选中 leaf，聚合选择 outcome 时必须一同选择元数据。来源由同次 prepared query 的逐 leaf 决策绑定；uniform ECS 不代表 uniform 来源。禁止共享请求级“最后完成结果”槽，late-result 不得改写已返回应答的事实；无可靠选中 leaf 的全失败明确未记录。该元数据不重定义顶层 connector/member/provenance，不参与择优、fallback、TTL 或缓存准入。
 
 connector 构建 key 至少包含 upstream、outbound、bootstrap/connect_ip 和 TLS/HTTP profile。相同 key 复用 client 和连接池。
 

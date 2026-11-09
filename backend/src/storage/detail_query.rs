@@ -256,6 +256,7 @@ pub struct DetailCommitCursor {
 pub struct DetailQueryRecord {
     pub listener_id: Option<String>,
     pub execution: Option<crate::dns::RequestTraceSnapshot>,
+    pub ecs: Option<crate::dns::ecs::QueryEcs>,
     pub id: DetailRecordId,
     pub occurred_at_millis: u64,
     pub duration_millis: u64,
@@ -362,6 +363,7 @@ impl DetailCommittedRecord {
         Ok(DetailQueryRecord {
             listener_id: Some(record.listener_id().to_owned()),
             execution: record.execution().cloned(),
+            ecs: record.ecs().cloned(),
             id: self.id.clone(),
             occurred_at_millis,
             duration_millis: record.duration_millis(),
@@ -409,6 +411,11 @@ impl DetailCommittedRecord {
         512_usize
             .saturating_add(json_string_budget(record.listener_id()))
             .saturating_add(record.execution().map_or(0, |_| 4096))
+            .saturating_add(
+                record
+                    .ecs()
+                    .map_or(0, |_| crate::dns::ecs::MAX_ECS_JSON_BYTES),
+            )
             .saturating_add(json_string_budget(self.id.as_str()))
             .saturating_add(json_string_budget(record.qname()))
             .saturating_add(optional)
@@ -944,6 +951,23 @@ fn map_row(row: &sqlx::sqlite::SqliteRow, day_utc: i32) -> Result<LocatedRecord,
         Ok(None) | Err(sqlx::Error::ColumnNotFound(_)) => None,
         _ => return Err(corrupt(operation)),
     };
+    let ecs = match row.try_get::<Option<String>, _>("ecs_json") {
+        Ok(Some(json)) => match crate::dns::ecs::QueryEcs::decode_json(&json) {
+            Ok(value) => Some(value),
+            Err(reason) => {
+                tracing::warn!(?reason, "ECS detail discarded while reading history");
+                None
+            }
+        },
+        Ok(None) | Err(sqlx::Error::ColumnNotFound(_)) => None,
+        Err(_) => {
+            tracing::warn!(
+                reason = "invalid_column",
+                "ECS detail discarded while reading history"
+            );
+            None
+        }
+    };
     let listener_id = optional_text(row, "listener_id", operation)?;
     let row_id = positive_i64(row, "id", operation)?;
     let occurred_at_millis = nonnegative_u64(row, "event_time_utc_millis", operation)?;
@@ -1035,6 +1059,7 @@ fn map_row(row: &sqlx::sqlite::SqliteRow, day_utc: i32) -> Result<LocatedRecord,
         record: DetailQueryRecord {
             listener_id,
             execution,
+            ecs,
             id: DetailRecordId::from_location(day_utc, row_id),
             occurred_at_millis,
             duration_millis,
@@ -1398,6 +1423,10 @@ fn unavailable(operation: &'static str) -> PortError {
 }
 
 #[cfg(test)]
+#[path = "ecs_baseline_reader.rs"]
+mod ecs_baseline_reader;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1415,9 +1444,10 @@ mod tests {
     use crate::storage::detail_shards::{DetailShardStore, DetailSqlTestStage};
 
     use super::{
-        DetailPageDirection, DetailQuery, DetailQueryCacheOutcome, DetailQueryFilter,
-        DetailQueryOutcome, DetailQueryRcode, DetailQuerySort, DetailQuerySource,
-        DetailQueryTransport, DetailRecordId, DetailSortOrder,
+        DetailCommittedRecord, DetailPageDirection, DetailQuery, DetailQueryCacheOutcome,
+        DetailQueryFilter, DetailQueryOutcome, DetailQueryRcode, DetailQuerySort,
+        DetailQuerySource, DetailQueryTransport, DetailRecordId, DetailSortOrder,
+        ecs_baseline_reader, map_row,
     };
 
     const DAY_MILLIS: u64 = 86_400_000;
@@ -1515,6 +1545,274 @@ mod tests {
         let error = DetailRecordId::try_from(String::from_utf8(modified).unwrap()).unwrap_err();
         assert!(matches!(error.class(), PortErrorClass::InvalidInput));
         assert!(DetailRecordId::try_from("../2026-09-08.sqlite3".to_owned()).is_err());
+    }
+
+    fn ecs_fixture() -> crate::dns::ecs::QueryEcs {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/management-v2.json")).unwrap();
+        crate::dns::ecs::QueryEcs::decode_json(&fixtures["ecs_cases"][2].to_string()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn ecs_round_trip_commit_baseline_and_corruption_are_isolated() {
+        let root = test_root("ecs-round-trip");
+        let store = DetailShardStore::new(root.clone(), Vec::new(), 2).unwrap();
+        let mut receiver = store.subscribe_commits();
+        let mut sample = record(FIRST_DAY, 100, 7, "ecs.example.", "client", "client");
+        let execution = crate::dns::RequestTraceSnapshot::default();
+        sample.set_execution(execution.clone());
+        sample.set_ecs(ecs_fixture());
+        let expected_ecs = sample.ecs().cloned();
+        store
+            .write_records(FIRST_DAY, &[sample], deadline())
+            .await
+            .unwrap();
+        let notification = receiver.recv().await.unwrap();
+        let committed = notification.records[0].to_query_record().unwrap();
+        let saved = store
+            .read_detail(&committed.id, deadline())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(saved, committed);
+        assert_eq!(saved.ecs, expected_ecs);
+        let page = store
+            .query_details(query(FIRST_DAY, FIRST_DAY, 10), deadline())
+            .await
+            .unwrap();
+        assert_eq!(page.items[0], saved);
+
+        let lease = store.acquire_write(FIRST_DAY, deadline()).await.unwrap();
+        let row = sqlx::query("SELECT * FROM resolve_log WHERE id = 1")
+            .fetch_one(lease.pool())
+            .await
+            .unwrap();
+        // 真正执行冻结基线的 SELECT * 行映射，而不是假定多一列无影响。
+        let baseline = ecs_baseline_reader::read(&row, FIRST_DAY).unwrap();
+        macro_rules! same { ($($field:ident),+) => { $(assert_eq!(baseline.$field, saved.$field);)+ }; }
+        same!(
+            listener_id,
+            execution,
+            id,
+            occurred_at_millis,
+            duration_millis,
+            dns_core_duration_micros,
+            client_id,
+            client_ip,
+            client_match_source,
+            matched_client_id,
+            qname,
+            qtype,
+            transport,
+            rcode,
+            source,
+            outcome,
+            cache,
+            strategy_id,
+            upstream_target_id,
+            upstream_used_id,
+            answers,
+            answer_count,
+            answers_truncated
+        );
+        for json in [
+            "{".to_owned(),
+            "x".repeat(crate::dns::ecs::MAX_ECS_JSON_BYTES + 1),
+            expected_ecs
+                .as_ref()
+                .unwrap()
+                .encode_json()
+                .unwrap()
+                .replace("203.0.113.0/24", "203.0.113.1/24"),
+        ] {
+            sqlx::query("UPDATE resolve_log SET ecs_json = ? WHERE id = 1")
+                .bind(json)
+                .execute(lease.pool())
+                .await
+                .unwrap();
+            let row = sqlx::query("SELECT * FROM resolve_log WHERE id = 1")
+                .fetch_one(lease.pool())
+                .await
+                .unwrap();
+            let recovered = map_row(&row, FIRST_DAY).unwrap().record;
+            assert!(recovered.ecs.is_none());
+            assert_eq!(recovered.execution, Some(execution.clone()));
+            assert_eq!(recovered.answers, saved.answers);
+            assert_eq!(recovered.id, saved.id);
+        }
+        // execution_json 的损坏规则不能随 ECS 安全降级而放宽。
+        sqlx::query("UPDATE resolve_log SET execution_json = '{' WHERE id = 1")
+            .execute(lease.pool())
+            .await
+            .unwrap();
+        let row = sqlx::query("SELECT * FROM resolve_log WHERE id = 1")
+            .fetch_one(lease.pool())
+            .await
+            .unwrap();
+        assert!(map_row(&row, FIRST_DAY).is_err());
+        lease.close(deadline()).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecs_old_shards_are_read_only_until_late_write_extends_them() {
+        let root = test_root("ecs-migration");
+        let store = DetailShardStore::new(root.clone(), Vec::new(), 2).unwrap();
+        store
+            .write_records(
+                FIRST_DAY,
+                &[record(FIRST_DAY, 1, 1, "old.example.", "client", "client")],
+                deadline(),
+            )
+            .await
+            .unwrap();
+        store
+            .write_records(
+                FIRST_DAY + 1,
+                &[record(
+                    FIRST_DAY + 1,
+                    1,
+                    1,
+                    "next.example.",
+                    "client",
+                    "client",
+                )],
+                deadline(),
+            )
+            .await
+            .unwrap();
+        let id = DetailRecordId::from_location(FIRST_DAY, 1);
+        let lease = store.acquire_write(FIRST_DAY, deadline()).await.unwrap();
+        sqlx::query("ALTER TABLE resolve_log DROP COLUMN ecs_json")
+            .execute(lease.pool())
+            .await
+            .unwrap();
+        lease.close(deadline()).await.unwrap();
+        assert!(
+            store
+                .read_detail(&id, deadline())
+                .await
+                .unwrap()
+                .unwrap()
+                .ecs
+                .is_none()
+        );
+        // 检查真实只读连接的 schema，确认 read_detail 没有触发迁移。
+        let lease = store
+            .acquire_read(FIRST_DAY, deadline())
+            .await
+            .unwrap()
+            .unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('resolve_log') WHERE name = 'ecs_json'",
+        )
+        .fetch_one(lease.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+        lease.close(deadline()).await.unwrap();
+        let mut late = record(FIRST_DAY, 2, 2, "late.example.", "client", "client");
+        late.set_ecs(ecs_fixture());
+        store
+            .write_records(FIRST_DAY, &[late.clone()], deadline())
+            .await
+            .unwrap();
+        // 再次取得写 lease 不重复扩列；旧记录保持 NULL、ID 和 Answer。
+        store
+            .write_records(FIRST_DAY, &[late], deadline())
+            .await
+            .unwrap();
+        let lease = store.acquire_write(FIRST_DAY, deadline()).await.unwrap();
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pragma_table_info('resolve_log') WHERE name = 'ecs_json'",
+        )
+        .fetch_one(lease.pool())
+        .await
+        .unwrap();
+        assert_eq!(count, 1);
+        let null: Option<String> =
+            sqlx::query_scalar("SELECT ecs_json FROM resolve_log WHERE id = 1")
+                .fetch_one(lease.pool())
+                .await
+                .unwrap();
+        assert!(null.is_none());
+        lease.close(deadline()).await.unwrap();
+        assert_eq!(
+            store
+                .read_detail(&id, deadline())
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            id
+        );
+        assert!(
+            store
+                .read_detail(&DetailRecordId::from_location(FIRST_DAY, 2), deadline())
+                .await
+                .unwrap()
+                .unwrap()
+                .ecs
+                .is_some()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn ecs_write_failure_rolls_back_base_row_and_does_not_publish_commit() {
+        let root = test_root("ecs-atomic");
+        let store = DetailShardStore::new(root.clone(), Vec::new(), 2).unwrap();
+        let lease = store.acquire_write(FIRST_DAY, deadline()).await.unwrap();
+        sqlx::query("CREATE TRIGGER reject_ecs BEFORE UPDATE OF ecs_json ON resolve_log BEGIN SELECT RAISE(ABORT, 'ecs rejected'); END").execute(lease.pool()).await.unwrap();
+        lease.close(deadline()).await.unwrap();
+        let mut receiver = store.subscribe_commits();
+        let mut sample = record(FIRST_DAY, 1, 1, "atomic.example.", "client", "client");
+        sample.set_ecs(ecs_fixture());
+        assert!(
+            store
+                .write_records(FIRST_DAY, &[sample], deadline())
+                .await
+                .is_err()
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(store.detail_commit_cursor().sequence, 0);
+        let lease = store.acquire_write(FIRST_DAY, deadline()).await.unwrap();
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM resolve_log")
+            .fetch_one(lease.pool())
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+        lease.close(deadline()).await.unwrap();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn ecs_replay_budget_and_invalid_projection_preserve_base_detail() {
+        let mut sample = record(FIRST_DAY, 1, 1, "budget.example.", "client", "client");
+        let id = DetailRecordId::from_location(FIRST_DAY, 1);
+        let base = DetailCommittedRecord {
+            id: id.clone(),
+            record: sample.clone(),
+        }
+        .estimated_replay_bytes();
+        sample.set_ecs(ecs_fixture());
+        let with_ecs = DetailCommittedRecord {
+            id,
+            record: sample.clone(),
+        }
+        .estimated_replay_bytes();
+        assert_eq!(with_ecs - base, crate::dns::ecs::MAX_ECS_JSON_BYTES);
+        let mut invalid = ecs_fixture();
+        invalid.request = crate::dns::ecs::EcsValue::Present {
+            cidr: "203.0.113.1/24".into(),
+            scope_prefix: 0,
+        };
+        sample.set_ecs(invalid);
+        assert!(sample.ecs().is_none());
+        assert_eq!(sample.qname(), "budget.example.");
     }
 
     #[tokio::test]
@@ -1989,6 +2287,7 @@ mod tests {
         let record = super::DetailQueryRecord {
             listener_id: None,
             execution: None,
+            ecs: None,
             id: DetailRecordId::from_location(FIRST_DAY, 1),
             occurred_at_millis: 1,
             duration_millis: 2,

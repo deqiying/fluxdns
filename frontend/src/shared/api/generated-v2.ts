@@ -1159,7 +1159,68 @@ export interface components {
             /** @constant */
             state: "unavailable";
         };
+        /** @description 清除 host bits 后的标准 IPv4 CIDR；生产边界另校验网络地址 */
+        EcsIpv4Cidr: string;
+        /** @description 清除 host bits 后的标准 IPv6 CIDR；生产边界另校验压缩表示和网络地址 */
+        EcsIpv6Cidr: string;
+        EcsValue: {
+            /** @constant */
+            state: "present";
+            cidr: components["schemas"]["EcsIpv4Cidr"];
+            scope_prefix: number;
+        } | {
+            /** @constant */
+            state: "present";
+            cidr: components["schemas"]["EcsIpv6Cidr"];
+            scope_prefix: number;
+        } | {
+            /** @enum {string} */
+            state: "absent" | "invalid" | "unrecorded";
+        };
+        EcsPolicy: {
+            /** @enum {string} */
+            source: "default" | "global" | "upstream" | "client" | "strategy" | "rule";
+            /** @enum {string} */
+            mode: "disabled" | "client" | "custom";
+            /** @enum {string} */
+            value_source: "client_ecs" | "client_ip" | "custom" | "none";
+        };
+        EcsExchange: {
+            /** @constant */
+            state: "observed";
+            query: components["schemas"]["EcsValue"];
+            response: components["schemas"]["EcsValue"];
+            policy: components["schemas"]["EcsPolicy"];
+            upstream_leaf_name: components["schemas"]["Name"];
+        } | {
+            /** @constant */
+            state: "not_sent";
+            /** @enum {string} */
+            reason: "cache_hit" | "local_answer" | "single_flight" | "not_started";
+        } | {
+            /** @constant */
+            state: "unrecorded";
+            /** @enum {string} */
+            reason: "not_observed" | "no_selected_response" | "deadline" | "budget";
+        };
+        EcsCacheMatch: {
+            /** @enum {string} */
+            kind: "covering" | "exact";
+            cidr: components["schemas"]["EcsIpv4Cidr"] | components["schemas"]["EcsIpv6Cidr"];
+        } | {
+            /** @enum {string} */
+            kind: "no_ecs" | "members";
+            cidr: null;
+        };
+        QueryEcs: {
+            request: components["schemas"]["EcsValue"];
+            upstream: components["schemas"]["EcsExchange"];
+            cache_match: components["schemas"]["EcsCacheMatch"] | null;
+            refresh: components["schemas"]["EcsExchange"] | null;
+        };
         QueryRecord: {
+            /** @description 请求执行时的 ECS 事实；旧后端可以省略，未记录时为 null */
+            ecs?: components["schemas"]["QueryEcs"] | null;
             /** @description 本次请求的监听入口；历史缺失时为 null */
             listener_name: components["schemas"]["Name"] | null;
             /** @description 完整请求接收至服务端响应写出成功的耗时，不包括后台刷新；不表示客户端收到确认 */

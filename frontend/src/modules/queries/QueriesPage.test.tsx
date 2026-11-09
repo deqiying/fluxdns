@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { ConfigProvider } from "antd";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -8,8 +9,8 @@ import { sessionFixture, v2QueryPageFixture, v2QueryRecordsFixture } from "@/moc
 import { setMockAuthenticated } from "@/mocks/handlers";
 import { acceptAuthSession } from "@/shared/api/client";
 import { managementEvents, type QueryBatch } from "@/shared/api/events";
-import type { QueryRequest } from "./api";
-import { formatCacheActivityResult, formatClientIdentity, formatDurationSummary, formatResponseSummary, formatRoute, QueriesPage, sourceLabel } from "./QueriesPage";
+import type { QueryRecord, QueryRequest } from "./api";
+import { formatCacheActivityResult, formatClientIdentity, formatDurationSummary, formatQueryTime, formatResponseSummary, formatRoute, QueriesPage, sourceLabel } from "./QueriesPage";
 
 function renderPage() {
   setMockAuthenticated(true);
@@ -20,7 +21,8 @@ function renderPage() {
     access_expires_at_ms: Date.now() + 300_000,
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(<QueryClientProvider client={queryClient}><QueriesPage /></QueryClientProvider>);
+  // jsdom 不执行 CSS 动画；视觉与动画由真实浏览器验收，行为测试使用确定的可见终态。
+  return { ...render(<ConfigProvider theme={{ token: { motion: false } }}><QueryClientProvider client={queryClient}><QueriesPage /></QueryClientProvider></ConfigProvider>), queryClient };
 }
 
 /**
@@ -33,7 +35,7 @@ function openAllBreakpoints(): () => void {
     configurable: true,
     writable: true,
     value: (query: string) => ({
-      matches: true,
+      matches: !query.includes("max-width: 760px"),
       media: query,
       onchange: null,
       addListener: () => {},
@@ -87,16 +89,32 @@ describe("QueriesPage 展示语义", () => {
     await user.unhover(first);
     const detail = await screen.findByRole("dialog", { name: "example.test. 解析详情" });
     expect(detail).toHaveTextContent("点击固定");
+    expect(detail.querySelector("details")).not.toHaveAttribute("open");
+    await user.click(within(detail).getByText("诊断信息"));
+    expect(detail.querySelector("details")).toHaveAttribute("open");
     expect(detail).toHaveTextContent("总耗时");
     expect(detail).toHaveTextContent("主链耗时");
     expect(detail).toHaveTextContent("响应耗时");
-    await user.click(within(detail).getByText("总耗时"));
+    await user.click(within(detail).getByText("总耗时", { selector: ".ant-descriptions-item-label" }));
     expect(detail).toBeInTheDocument();
     await user.click(second);
     expect(await screen.findByRole("dialog", { name: "cached.example.test. 解析详情" })).toHaveTextContent("后台刷新");
     expect(screen.getAllByRole("dialog")).toHaveLength(1);
     await user.click(screen.getByRole("heading", { name: "解析记录" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+  });
+
+  it("外部点击筛选输入框关闭详情后保留新焦点并可连续输入", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "查看 example.test. 的详情" }));
+    expect(await screen.findByRole("dialog")).toBeVisible();
+    const input = screen.getByRole("textbox", { name: "域名" });
+    await user.click(input);
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(input).toHaveFocus();
+    await user.keyboard("continuous-input");
+    expect(input).toHaveValue("continuous-input");
   });
 
   it("Hosts 在结果列与路由列标签行都显示来源标签，且不出现写入标签", async () => {
@@ -167,12 +185,14 @@ describe("QueriesPage 展示语义", () => {
 
     expect(await screen.findByText("example.test.")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "自动刷新" })).toBeChecked();
+    expect(requests[0].page_size).toBe(10);
     await user.click(screen.getByRole("button", { name: "下一页" }));
     await waitFor(() => expect(requests).toHaveLength(2));
     expect(requests[1]).toMatchObject({ cursor: v2QueryPageFixture.next_cursor, direction: "older" });
 
     await user.click(screen.getAllByRole("button", { name: /查看 .* 的详情/ })[0]);
     const detail = await screen.findByRole("dialog", { name: "example.test. 解析详情" });
+    await user.click(within(detail).getByText("诊断信息"));
     expect(detail).toHaveTextContent("2026-09-07.18");
     expect(detail).toHaveTextContent("clients-12");
   });
@@ -206,6 +226,7 @@ describe("QueriesPage 展示语义", () => {
     const trigger = await screen.findByRole("button", { name: `查看 ${record.qname} 的详情` });
     await user.pointer([{ keys: "[TouchA>]", target: trigger }, { keys: "[/TouchA]", target: trigger }]);
     const detail = await screen.findByRole("dialog", { name: `${record.qname} 解析详情` });
+    await user.click(within(detail).getByText("诊断信息"));
     expect(detail).toHaveTextContent(record.id);
     expect(detail).toHaveTextContent(malicious);
     expect(detail.querySelector("img,[onerror]")).toBeNull();
@@ -316,7 +337,7 @@ describe("QueriesPage 身份与来源标签", () => {
     try {
       renderPage();
       const identity = await screen.findByText("workstation");
-      expect(screen.getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["时间", "请求", "结果", "路由", "客户端"]);
+      expect(screen.getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual(["时间", "请求", "结果", "响应耗时", "路由", "客户端"]);
       const row = identity.closest("tr");
       expect(row).not.toBeNull();
       expect(row).toHaveTextContent("192.0.2.55");
@@ -324,9 +345,108 @@ describe("QueriesPage 身份与来源标签", () => {
       expect(row).not.toHaveTextContent("Desktop-01");
       expect(row).not.toHaveTextContent("总耗时");
       expect(row).not.toHaveTextContent("主链耗时");
-      expect(row).toHaveTextContent("响应耗时 0.18 ms");
+      expect(within(row as HTMLElement).getByLabelText("响应耗时 0.18 ms")).toHaveTextContent("0.18 ms");
     } finally {
       restoreMatchMedia();
     }
+  });
+
+  it("固定 ECS 与目录快照不受同 ID refetch 或 WS 新记录替换", async () => {
+    const user = userEvent.setup();
+    const initial: QueryRecord = { ...direct, ecs: {
+      request: { state: "absent" }, upstream: { state: "observed", query: { state: "present", cidr: "203.0.113.0/24", scope_prefix: 0 }, response: { state: "absent" }, policy: { source: "global", mode: "client", value_source: "client_ip" }, upstream_leaf_name: "original-leaf" }, cache_match: null, refresh: null,
+    } };
+    let current = initial;
+    let push: ((batch: QueryBatch) => void) | undefined;
+    vi.spyOn(managementEvents, "subscribeQueries").mockImplementation((_options, onData) => { push = onData; return vi.fn(); });
+    server.use(http.post("/api/v2/queries/search", () => HttpResponse.json({ ...v2QueryPageFixture, directory_revision: current === initial ? "frozen-directory" : "changed-directory", items: [current] })));
+    const { queryClient } = renderPage();
+    await user.click(await screen.findByRole("button", { name: "查看 example.test. 的详情" }));
+    let detail = await screen.findByRole("dialog");
+    expect(within(detail).getByLabelText("ECS 摘要")).toHaveTextContent("203.0.113.0/24");
+    current = { ...initial, ecs: null, current_client_name: "changed-client" };
+    await act(async () => { await queryClient.invalidateQueries({ queryKey: ["api", "v2", "queries"] }); });
+    detail = await screen.findByRole("dialog", { name: "example.test. 解析详情" });
+    server.use(http.post("/api/v2/queries/search", () => HttpResponse.json({ ...v2QueryPageFixture, items: [] })));
+    await act(async () => { await queryClient.invalidateQueries({ queryKey: ["api", "v2", "queries"] }); });
+    await waitFor(() => expect(screen.getByRole("dialog", { name: "example.test. 解析详情" })).toBeVisible());
+    detail = screen.getByRole("dialog", { name: "example.test. 解析详情" });
+    expect(screen.getByRole("button", { name: "查看 example.test. 的详情" })).toBeInTheDocument();
+    act(() => push?.({ cursor: { epoch: "stream-1", sequence: "44" }, directoryRevision: "ws-directory", items: [{ ...current, id: "different-record", qname: "new.example." }] }));
+    expect(within(detail).getByLabelText("ECS 摘要")).toHaveTextContent("203.0.113.0/24");
+    await user.click(within(detail).getByText("诊断信息"));
+    expect(detail).toHaveTextContent("frozen-directory");
+    expect(detail).not.toHaveTextContent("changed-directory");
+    expect(detail).toHaveTextContent("original-leaf");
+    await user.keyboard("{Escape}");
+  });
+
+  it("高级筛选全部保留，页大小变化清除历史 cursor 与详情", async () => {
+    const user = userEvent.setup();
+    const requests: QueryRequest[] = [];
+    server.use(http.post("/api/v2/queries/search", async ({ request }) => { requests.push(await request.json() as QueryRequest); return HttpResponse.json(v2QueryPageFixture); }));
+    renderPage();
+    await screen.findByText("example.test.");
+    await user.click(screen.getByRole("button", { name: "高级筛选" }));
+    for (const label of ["原始 ID", "历史匹配 ID", "QTYPE", "RCODE", "结果状态", "缓存状态", "排序字段", "排序方向"]) expect(screen.getByLabelText(label)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("原始 ID"), " original ");
+    await user.type(screen.getByLabelText("历史匹配 ID"), " historical ");
+    await user.type(screen.getByLabelText("QTYPE"), " AAAA ");
+    await user.click(screen.getByRole("button", { name: "查询" }));
+    await waitFor(() => expect(requests.at(-1)?.filter).toMatchObject({ client_id: "original", matched_client_id: "historical", qtype: "AAAA" }));
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(requests.at(-1)?.cursor).toBe(v2QueryPageFixture.next_cursor));
+    await user.click(screen.getByRole("button", { name: "查看 example.test. 的详情" }));
+    await user.keyboard("{Escape}");
+    fireEvent.mouseDown(screen.getByLabelText("每页条数"));
+    fireEvent.click(await screen.findByTitle("50 条/页"));
+    await waitFor(() => expect(requests.at(-1)).toMatchObject({ page_size: 50, cursor: null }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("UTC 格式不受本地偏移影响且无效时间不伪造", () => {
+    expect(formatQueryTime(Date.parse("2026-11-09T08:01:02+08:00"))).toEqual({ date: "2026-11-09", time: "00:01:02" });
+    expect(formatQueryTime(NaN)).toEqual({ date: "—", time: "—" });
+  });
+
+  it("显式固定、复制与关闭不会丢失焦点，复制失败可手工选择", async () => {
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole("button", { name: "查看 example.test. 的详情" }));
+    const detail = await screen.findByRole("dialog");
+    const clipboard = vi.spyOn(navigator.clipboard, "writeText").mockResolvedValue();
+    await user.click(within(detail).getByRole("button", { name: "复制域名" }));
+    expect(clipboard).toHaveBeenCalledWith("example.test.");
+    expect(await within(detail).findByRole("status")).toHaveTextContent("域名已复制");
+    clipboard.mockRejectedValueOnce(new Error("denied"));
+    await user.click(within(detail).getByRole("button", { name: "复制域名" }));
+    expect(await within(detail).findByRole("status")).toHaveTextContent("请选择域名手工复制");
+    await user.click(within(detail).getByRole("button", { name: "取消固定" }));
+    expect(within(detail).getByRole("button", { name: "固定详情" })).toHaveAttribute("aria-pressed", "false");
+    await user.click(within(detail).getByRole("button", { name: "固定详情" }));
+    await user.click(within(detail).getByRole("button", { name: "关闭详情" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "查看 example.test. 的详情" })).toHaveFocus());
+  });
+
+  it("窄屏卡片使用底部 Drawer，Esc 关闭并恢复同一记录焦点", async () => {
+    vi.spyOn(window, "matchMedia").mockImplementation((query) => ({
+      matches: query.includes("max-width: 760px"), media: query, onchange: null,
+      addListener: () => {}, removeListener: () => {}, addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
+    }));
+    const user = userEvent.setup();
+    renderPage();
+    const trigger = await screen.findByRole("button", { name: "查看 example.test. 的详情" });
+    expect(trigger.closest("article")).toHaveTextContent("响应耗时 0.18 ms");
+    expect(screen.queryByRole("table")).not.toBeInTheDocument();
+    await user.click(trigger);
+    const drawer = await screen.findByRole("dialog");
+    expect(drawer).toHaveAccessibleName("example.test. 解析详情");
+    expect(drawer.closest(".ant-drawer")).toHaveClass("ant-drawer-bottom");
+    await user.click(within(drawer).getByText("诊断信息"));
+    expect(within(drawer).getByText("目录快照")).toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole("button", { name: "查看 example.test. 的详情" })).toHaveFocus());
   });
 });

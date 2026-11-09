@@ -1241,11 +1241,7 @@ mod tests {
         detail_store
             .write_records(
                 i32::try_from(super::super::query::tests::HISTORY_DAY + 2).unwrap(),
-                &[super::super::query::tests::history_record(
-                    super::super::query::tests::HISTORY_DAY + 2,
-                    1,
-                    crate::ports::storage::StatsSource::Upstream,
-                )],
+                &[ecs_history_record(1)],
                 crate::dns::Deadline::new(Instant::now() + Duration::from_secs(5)),
             )
             .await
@@ -1255,6 +1251,10 @@ mod tests {
             ServerMessage::Queries { cursor, items, .. } => {
                 assert_eq!(items.len(), 1);
                 assert_eq!(items[0].qname, "direct.example.");
+                assert_eq!(
+                    serde_json::to_value(&items[0].ecs).unwrap(),
+                    ecs_fixture_value()
+                );
                 cursor
             }
             message => panic!("expected query update, got {message:?}"),
@@ -1264,11 +1264,7 @@ mod tests {
         detail_store
             .write_records(
                 i32::try_from(super::super::query::tests::HISTORY_DAY + 2).unwrap(),
-                &[super::super::query::tests::history_record(
-                    super::super::query::tests::HISTORY_DAY + 2,
-                    2,
-                    crate::ports::storage::StatsSource::Upstream,
-                )],
+                &[ecs_history_record(2)],
                 crate::dns::Deadline::new(Instant::now() + Duration::from_secs(5)),
             )
             .await
@@ -1299,6 +1295,10 @@ mod tests {
         match replay {
             ServerMessage::Queries { cursor, items, .. } => {
                 assert_eq!(items.len(), 1);
+                assert_eq!(
+                    serde_json::to_value(&items[0].ecs).unwrap(),
+                    ecs_fixture_value()
+                );
                 assert!(cursor.sequence.as_u64() > first_cursor.sequence.as_u64());
             }
             message => panic!("expected replayed query update, got {message:?}"),
@@ -1374,6 +1374,148 @@ mod tests {
         assert!(outbound.message(Message::Text("first".into())));
         assert!(!outbound.message(Message::Text("second".into())));
         assert_eq!(*close_receiver.borrow(), Some((1013, "slow consumer")));
+    }
+
+    fn ecs_fixture_value() -> serde_json::Value {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/management-v2.json")).unwrap();
+        fixtures["ecs_cases"][2].clone()
+    }
+
+    fn ecs_history_record(offset: u64) -> crate::storage::ResolveDetailRecord {
+        let mut record = super::super::query::tests::history_record(
+            super::super::query::tests::HISTORY_DAY + 2,
+            offset,
+            crate::ports::storage::StatsSource::Upstream,
+        );
+        record.set_ecs(
+            crate::dns::ecs::QueryEcs::decode_json(&ecs_fixture_value().to_string()).unwrap(),
+        );
+        record
+    }
+
+    #[tokio::test]
+    async fn ecs_payload_counts_toward_replay_and_actual_outbound_byte_limits() {
+        let (services, root) = super::super::query::tests::test_services().await;
+        let queries = services.queries.as_ref().unwrap();
+        let store = queries.detail_store();
+        let mut receiver = store.subscribe_commits();
+        let initial = store.detail_commit_cursor();
+        store
+            .write_records(
+                i32::try_from(super::super::query::tests::HISTORY_DAY + 2).unwrap(),
+                &[ecs_history_record(1)],
+                crate::dns::Deadline::new(Instant::now() + Duration::from_secs(5)),
+            )
+            .await
+            .unwrap();
+        let notification = receiver.recv().await.unwrap();
+        let estimated = notification.records[0].estimated_replay_bytes();
+        assert!(estimated >= crate::dns::ecs::MAX_ECS_JSON_BYTES);
+        let count = REPLAY_BYTES / estimated + 1;
+        assert!(count < REPLAY_RECORDS);
+        let mut replay = ReplayState::new(initial, store.detail_retention_revision());
+        replay.push(
+            Arc::new(DetailCommitNotification {
+                cursor: notification.cursor.clone(),
+                records: vec![notification.records[0].clone(); count].into(),
+            }),
+            Instant::now(),
+        );
+        assert!(replay.entries.is_empty());
+        assert!(matches!(replay.floor_reason, ResyncReason::BufferOverflow));
+        assert_eq!(replay.floor_sequence, notification.cursor.sequence);
+
+        let (revision, items) = queries
+            .project_committed_records(
+                &services.config_store,
+                query_filter(),
+                &notification.records,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&items[0].ecs).unwrap(),
+            ecs_fixture_value()
+        );
+        let frame = ServerMessage::Queries {
+            subscription_id: Revision::try_from("capacity-ecs".to_owned()).unwrap(),
+            cursor: commit_cursor(&notification.cursor).unwrap(),
+            directory_revision: revision,
+            items: vec![items[0].clone(); 100],
+        };
+        let encoded = serde_json::to_string(&frame).unwrap();
+        let (messages, mut receiver) = mpsc::channel(WS_QUEUE_MESSAGES);
+        let (close, close_receiver) = watch::channel(None);
+        let outbound = Outbound {
+            messages,
+            bytes: Arc::new(Semaphore::new(WS_QUEUE_BYTES)),
+            close,
+        };
+        let expected_frames = (WS_QUEUE_BYTES / encoded.len()).min(WS_QUEUE_MESSAGES);
+        for _ in 0..expected_frames {
+            assert!(outbound.json(&frame));
+        }
+        assert_eq!(
+            outbound.bytes.available_permits(),
+            WS_QUEUE_BYTES - expected_frames * encoded.len()
+        );
+        assert!(!outbound.json(&frame));
+        assert_eq!(*close_receiver.borrow(), Some((1013, "slow consumer")));
+        // 已排队的 payload 没有删除 ECS；释放消息后归还全部字节配额。
+        while let Ok(queued) = receiver.try_recv() {
+            if let Message::Text(text) = &queued.message {
+                assert_eq!(text.as_str(), encoded);
+            }
+        }
+        assert_eq!(outbound.bytes.available_permits(), WS_QUEUE_BYTES);
+
+        // 同时覆盖 schema 允许的最大 Answer 和转义后的最长 leaf 名，不把入站帧上限当出站保证。
+        let mut maximum = items[0].clone();
+        let mut maximum_ecs = ecs_history_record(1).ecs().unwrap().clone();
+        if let Some(crate::dns::ecs::EcsExchange::Observed {
+            upstream_leaf_name, ..
+        }) = &mut maximum_ecs.refresh
+        {
+            *upstream_leaf_name = "\\\"".repeat(64);
+        }
+        maximum.ecs = Some(maximum_ecs.try_into().unwrap());
+        maximum.answers = super::super::contract::AnswerSummary::Truncated {
+            records: vec![
+                super::super::contract::DnsAnswer {
+                    name: "a".repeat(253),
+                    r#type: "TXT".to_owned(),
+                    ttl_seconds: u32::MAX,
+                    data: "\\\"".repeat(256),
+                };
+                16
+            ],
+            total_count: 16,
+        };
+        let mut maximum_frame = frame.clone();
+        if let ServerMessage::Queries { items, .. } = &mut maximum_frame {
+            *items = vec![maximum; 100];
+        }
+        let maximum_bytes = serde_json::to_vec(&maximum_frame).unwrap().len();
+        assert!(maximum_bytes > WS_QUEUE_BYTES);
+        assert!(!outbound.json(&maximum_frame));
+        assert!(receiver.try_recv().is_err());
+        assert_eq!(outbound.bytes.available_permits(), WS_QUEUE_BYTES);
+        store
+            .shutdown(crate::dns::Deadline::new(
+                Instant::now() + Duration::from_secs(5),
+            ))
+            .await
+            .unwrap();
+        drop(store);
+        drop(services);
+        if std::fs::remove_dir_all(root).is_err() {
+            // 共享 fixture 的统计 owner 尚可能持有 SQLite；保留在已忽略的测试目录。
+            tracing::warn!(
+                reason = "fixture_in_use",
+                "ECS capacity test fixture retained"
+            );
+        }
     }
 
     #[test]

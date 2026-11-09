@@ -282,7 +282,7 @@ async fn longest_prefix_wins_and_refresh_migrates_scope_without_removing_new_ver
     let answer = answer_key(&core, &request).unwrap();
     let policy = plan_for(&core, &request).cache;
     assert_eq!(
-        core.probe_answer(&answer, &policy, request.context.meta.deadline)
+        core.probe_answer(&answer, &policy, request.context.meta.deadline, false)
             .await
             .fresh
             .unwrap()
@@ -291,7 +291,7 @@ async fn longest_prefix_wins_and_refresh_migrates_scope_without_removing_new_ver
     );
     let stale = force_stale(&core, &narrow).await;
     let probe = core
-        .probe_answer(&answer, &policy, request.context.meta.deadline)
+        .probe_answer(&answer, &policy, request.context.meta.deadline, false)
         .await;
     assert!(
         probe.fresh.is_none(),

@@ -987,6 +987,7 @@ async fn submit_late(old: &PolicyDnsCore, request: &DnsRequest, octet: u8) {
                 attempt_index: 1,
                 connector: ConnectorId::new("remote").unwrap(),
                 outcome: UpstreamOutcome::Response(positive_response(request, octet)),
+                selected_leaf: None,
             },
         );
 }
@@ -1385,3 +1386,6 @@ async fn short_responses_hit_age_and_expire_without_changing_rcode() {
 
 #[path = "policy_scope_tests.rs"]
 mod scope_tests;
+
+#[path = "policy_ecs_tests.rs"]
+mod ecs_tests;

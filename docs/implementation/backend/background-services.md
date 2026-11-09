@@ -19,6 +19,8 @@
 > 2026-11-08 增量核对：`de39a28` 加本次工作树，仅核对 dat selector 按需加载在 prepare、remote 恢复/抓取与 file/remote 刷新链路的接线
 >
 > 2026-11-08 增量核对：`3d1a92e` 加本次工作树，仅核对 remote 刷新在 304/200 路径各解析一次及 304 后解析失败不补发请求
+>
+> 2026-11-10 ECS 增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅核对独立 ECS trace/投影、日分片可空扩列和历史兼容；其余范围沿历史日期。
 
 ## 资源准备与刷新
 
@@ -46,7 +48,13 @@ manifest v2 保存源身份 digest、fetcher 代际及不透明验证器，不�
 
 详情 projector 用 owner 持有的 `JoinSet` 最多并发等待 128 个请求的响应与缓存终态，每项最多 6 秒；超时字段记为 unrecorded，慢刷新不串行阻塞后续详情。该等待不进入 DNS 主链，stats/telemetry 仍在 dispatcher 即时消费。记录包含完整执行事实后一次写入并通过既有 commit/replay 增量推送，因此后台刷新较慢时详情记录可晚于客户端响应出现；本次没有另建按请求更新的事件流。shutdown 中 JoinSet 随 owner 取消，保留现有 ingress/详情丢弃计数边界。
 
-诊断快照经 `ResolveDetailRecord.execution` 序列化为日分片的可空 `execution_json`。仅在写 lease 完成既有 layout/day/对象校验后幂等添加此列，不改变 layout 或 record ID；旧只读分片不迁移，缺列读取为未记录。监听入口直接投影原有 `listener_id`。replay 字节预算包含监听入口与诊断快照上界，HTTP search/detail 和 WS 使用同一记录投影。
+[`RequestTrace`](../../../backend/src/dns/trace.rs) 的内存聚合将 execution 与 ECS 分开，`settled_observation` 在原 6 秒预算内冻结同一 watch 快照；已知 request、前台和 cache_match 保留，未知刷新到期标 deadline，已取得交换不因后续写入等待而抹掉。`run_detail_projector` 保持 128 并发、一次详情提交，无同 ID 回写或第二类 WS 更新。持久化 `RequestTraceSnapshot` 字段集合与 `execution_json` 的 4096 字节和损坏语义不变。
+
+[`ResolveDetailRecord::set_ecs`](../../../backend/src/storage/resolve_log.rs) 在后台按 [`MAX_ECS_JSON_BYTES`](../../../backend/src/dns/ecs.rs)（4096 UTF-8 bytes）校验和编码观测；writer 同一事务写 `execution_json` 与独立可空 `ecs_json`，成功后才发布 commit。写 lease 先校验受管路径/layout/day/对象，再幂等增加缺失可空列；只读缺列/NULL 返回未记录，不创建、迁移或回填历史。ECS 非法、超限或损坏只降级该字段并记录固定安全原因，其他字段的原有严格损坏规则不放宽。旧版已知字段读取逻辑由基线夹具实际回读验证，新增列不要求回退删列；旧写入省略列保留 NULL。
+
+commit 内存投影和 SQLite 历史读取都携带同一 ECS；replay 的保守字节估算包含 ECS 上界，实际出站序列化仍受既有队列预算。子网只进入受保护详情；领域类型和 DTO 使用安全 Debug，普通日志、metrics 与错误正文不输出地址或 wire。字段权威及 HTTP/WS 转换见[Management 实现](management.md#请求级-ecs-统一投影)。
+
+2026-11-10 ECS 增量的工程结果与取消运行时验收边界见 [ECS 工程验证](management.md#ecs-工程验证与边界)。开发阶段曾显式运行 release 的 `benchmark_udp_resolution_observation_profile`：每类 1000 个、并发 1 的本机 UDP 样本，详情开启时 `detail_accepted=3002`、`detail_dropped=1040`、`detail_failed=0`。该辅助样本早于最后的观测开关与焦点修复，不是最终发布性能验收，也不能支持详情零丢失或生产 SLO 承诺；既有有界队列及丢弃计数语义不变，不以 DNS 低延迟掩盖详情丢弃。
 
 2026-09-22 验证：Windows 后端全量 807 项通过、4 项既有忽略；全 target/feature Clippy 无警告。新增覆盖响应耗时冻结、失败发送、guard 丢弃、等待上限、真实刷新更新和旧分片读取/扩列后稳定 ID。本机独立夹具验证 UDP/TCP/DoH、HTTP 详情、新建/命中缓存及真实 60 秒 TTL 过期后的乐观缓存更新；WS 推送、断线 replay 与会话撤销使用项目脚本验证。未重跑忽略的性能/长期压力专项，不外推到远程网络。
 

@@ -11,6 +11,7 @@ use crate::dns::{CancelReason, CanonicalQuery, RequestContext};
 use crate::ports::PortFuture;
 use crate::ports::exchange::{ConnectorId, DnsExchange, SelectionPolicy, UpstreamOutcome};
 
+use super::outcome::SelectedEcsLeaf;
 use super::outcome::aggregate_with_connector;
 use super::{FallbackDecision, GroupSelector, GroupSelectorError, UpstreamAttempt, assess};
 
@@ -96,6 +97,7 @@ pub trait LateResultSink: Send + Sync {
 pub(crate) struct GroupExecutionResult {
     pub(crate) connector: Option<ConnectorId>,
     pub(crate) outcome: UpstreamOutcome,
+    pub(crate) selected_leaf: Option<SelectedEcsLeaf>,
 }
 
 /// group 成员的已绑定执行句柄。
@@ -137,14 +139,29 @@ impl GroupMember {
         context: &'a RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
         member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
-    ) -> PortFuture<'a, UpstreamOutcome> {
+    ) -> PortFuture<'a, (UpstreamOutcome, Option<SelectedEcsLeaf>)> {
         match self {
             Self::Direct(exchange) => Box::pin(async move {
                 let query = member_queries
                     .as_ref()
                     .and_then(|queries| queries.get(exchange.connector_id()))
                     .unwrap_or(query);
-                exchange.exchange(query, context).await
+                let outcome = exchange.exchange(query, context).await;
+                let leaf = context
+                    .meta
+                    .completion
+                    .ecs_enabled()
+                    .then(|| SelectedEcsLeaf {
+                        name: exchange.connector_id().as_str().to_owned(),
+                        query: crate::dns::ecs_observation::query_value(query),
+                        response: match &outcome {
+                            UpstreamOutcome::Response(response) => {
+                                crate::dns::ecs_observation::response_value(response)
+                            }
+                            _ => crate::dns::ecs::EcsValue::Unrecorded,
+                        },
+                    });
+                (outcome, leaf)
             }),
             Self::Nested {
                 connector,
@@ -152,18 +169,23 @@ impl GroupMember {
             } => {
                 let connector = connector.clone();
                 Box::pin(async move {
-                    let result = executor
+                    match executor
                         .execute_inner(query, context, late_sink, member_queries)
                         .await
-                        .map(|result| result.outcome);
-                    result.unwrap_or(UpstreamOutcome::TransportFailure(
-                        crate::ports::exchange::TransportFailure {
-                            connector,
-                            class: crate::ports::exchange::TransportFailureClass::Internal,
-                            retryable: false,
-                            safe_context: Some("nested group execution failed"),
-                        },
-                    ))
+                    {
+                        Ok(result) => (result.outcome, result.selected_leaf),
+                        Err(_) => (
+                            UpstreamOutcome::TransportFailure(
+                                crate::ports::exchange::TransportFailure {
+                                    connector,
+                                    class: crate::ports::exchange::TransportFailureClass::Internal,
+                                    retryable: false,
+                                    safe_context: Some("nested group execution failed"),
+                                },
+                            ),
+                            None,
+                        ),
+                    }
                 })
             }
         }
@@ -372,6 +394,7 @@ impl UpstreamGroupExecutor {
             result: GroupExecutionResult {
                 connector: result.connector,
                 outcome: result.outcome,
+                selected_leaf: result.selected_leaf,
             },
         })
     }
@@ -424,8 +447,8 @@ impl UpstreamGroupExecutor {
         let mut attempts = Vec::with_capacity(indices.len());
         for (attempt_index, index) in indices.into_iter().enumerate() {
             let exchange = &phase.exchanges[index];
-            let outcome = match cancelled_outcome(context) {
-                Some(outcome) => outcome,
+            let (outcome, selected_leaf) = match cancelled_outcome(context) {
+                Some(outcome) => (outcome, None),
                 None => {
                     run_exchange(
                         exchange,
@@ -442,6 +465,7 @@ impl UpstreamGroupExecutor {
                 attempt_index,
                 connector: exchange.connector_id().clone(),
                 outcome,
+                selected_leaf,
             });
             if should_stop || context.meta.deadline.is_expired(Instant::now()) {
                 break;
@@ -466,6 +490,7 @@ impl UpstreamGroupExecutor {
                     attempt_index: index,
                     connector: phase.exchanges[index].connector_id().clone(),
                     outcome,
+                    selected_leaf: None,
                 }]);
             }
             let exchange = phase.exchanges[index].clone();
@@ -475,9 +500,9 @@ impl UpstreamGroupExecutor {
             let member_queries = member_queries.clone();
             tasks.spawn(async move {
                 let connector = exchange.connector_id().clone();
-                let outcome =
+                let (outcome, selected_leaf) =
                     run_exchange(&exchange, &query, &context, late_sink, member_queries).await;
-                (index, connector, outcome)
+                (index, connector, outcome, selected_leaf)
             });
         }
         let mut attempts = Vec::with_capacity(phase.exchanges.len());
@@ -490,6 +515,7 @@ impl UpstreamGroupExecutor {
                         attempt_index: phase.exchanges.len(),
                         connector: phase.exchanges[0].connector_id().clone(),
                         outcome: cancelled_outcome(context).expect("cancellation branch is cancelled"),
+                        selected_leaf: None,
                     }]);
                 }
                 joined = tasks.join_next() => joined,
@@ -497,7 +523,7 @@ impl UpstreamGroupExecutor {
             let Some(joined) = joined else {
                 break;
             };
-            let (index, connector, outcome) = match joined {
+            let (index, connector, outcome, selected_leaf) = match joined {
                 Ok(result) => result,
                 Err(_) => return Err(ExecutorError::TaskFailed),
             };
@@ -510,6 +536,7 @@ impl UpstreamGroupExecutor {
                 attempt_index: index,
                 connector,
                 outcome,
+                selected_leaf,
             });
             // 正常负响应只阻止进入下一阶段 fallback，不终止本组已启动的候选择优。
             // Positive 可立即返回，其余尝试仍交给既有 late owner 有界收集。
@@ -533,14 +560,14 @@ impl UpstreamGroupExecutor {
 }
 
 fn late_attempt_drain(
-    mut tasks: tokio::task::JoinSet<(usize, ConnectorId, UpstreamOutcome)>,
+    mut tasks: tokio::task::JoinSet<(usize, ConnectorId, UpstreamOutcome, Option<SelectedEcsLeaf>)>,
     query: CanonicalQuery,
     context: RequestContext,
     sink: Arc<dyn LateResultSink>,
 ) -> Pin<Box<dyn Future<Output = ()> + Send + 'static>> {
     Box::pin(async move {
         while let Some(joined) = tasks.join_next().await {
-            let Ok((attempt_index, connector, outcome)) = joined else {
+            let Ok((attempt_index, connector, outcome, selected_leaf)) = joined else {
                 break;
             };
             if !matches!(outcome, UpstreamOutcome::Response(_)) {
@@ -553,6 +580,7 @@ fn late_attempt_drain(
                     attempt_index,
                     connector,
                     outcome,
+                    selected_leaf,
                 },
             );
         }
@@ -653,20 +681,20 @@ async fn run_exchange(
     context: &RequestContext,
     late_sink: Option<Arc<dyn LateResultSink>>,
     member_queries: Option<Arc<HashMap<ConnectorId, CanonicalQuery>>>,
-) -> UpstreamOutcome {
+) -> (UpstreamOutcome, Option<SelectedEcsLeaf>) {
     if let Some(outcome) = cancelled_outcome(context) {
-        return outcome;
+        return (outcome, None);
     }
     let remaining = context.meta.deadline.remaining(Instant::now());
     if remaining.is_zero() {
-        return timeout_failure(exchange);
+        return (timeout_failure(exchange), None);
     }
     tokio::select! {
         biased;
-        _ = context.meta.cancellation.cancelled() => UpstreamOutcome::Cancelled(
+        _ = context.meta.cancellation.cancelled() => (UpstreamOutcome::Cancelled(
             context.meta.cancellation.reason().unwrap_or(CancelReason::UpstreamCancelled),
-        ),
-        _ = tokio::time::sleep(remaining) => timeout_failure(exchange),
+        ), None),
+        _ = tokio::time::sleep(remaining) => (timeout_failure(exchange), None),
         outcome = exchange.exchange(query, context, late_sink, member_queries) => outcome,
     }
 }

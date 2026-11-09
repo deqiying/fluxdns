@@ -1378,6 +1378,21 @@ pub(super) async fn apply_resolve_records(
                     PortError::new(PortErrorClass::Unavailable, "sqlite_storage.execution")
                 })?;
         }
+        if let Some(ecs) = record.ecs() {
+            match ecs.encode_json() {
+                Ok(json) => {
+                    sqlx::query("UPDATE resolve_log SET ecs_json = ? WHERE id = ?")
+                        .bind(json)
+                        .bind(result.last_insert_rowid())
+                        .execute(&mut **transaction)
+                        .await
+                        .map_err(|_| {
+                            PortError::new(PortErrorClass::Unavailable, "sqlite_storage.ecs")
+                        })?;
+                }
+                Err(reason) => tracing::warn!(?reason, "ECS detail discarded at writer boundary"),
+            }
+        }
         row_ids.push(result.last_insert_rowid());
     }
     Ok(row_ids)

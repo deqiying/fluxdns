@@ -13,11 +13,11 @@ pub use admission::{
     CacheAdmissionError, CacheAdmissionOutcome, CacheAdmissionPolicy, CacheAdmissionRejection,
     admit_response, canonical_checksum,
 };
-pub(crate) use key::ecs_privacy_prefix;
 pub use key::{
     AnswerEcs, AnswerKey, CACHE_KEY_FORMAT_VERSION, CacheFingerprint, CacheKeyError,
     build_answer_key,
 };
+pub(crate) use key::{AnswerProbeMatch, ecs_privacy_prefix};
 pub use memory::{MemoryCacheStore, MemoryCacheStoreBuildError};
 pub use moka::{MokaCacheStore, MokaCacheStoreBuildError};
 pub use service::{

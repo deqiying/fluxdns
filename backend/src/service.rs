@@ -1264,6 +1264,13 @@ impl DnsCore for EventPublishingDnsCore {
         request: &'a DnsRequest,
     ) -> crate::ports::PortFuture<'a, Result<CoreOutcome, CoreError>> {
         Box::pin(async move {
+            if self.resolution_event_sink.detail_enabled() {
+                request
+                    .context
+                    .meta
+                    .completion
+                    .observe_request(&request.query);
+            }
             let dns_core_started_at = Instant::now();
             let completion = self.inner.resolve_with_completion(request).await;
             let completed_at = Instant::now();

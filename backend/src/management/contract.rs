@@ -3,6 +3,7 @@
 
 use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 use crate::config::contract::{ClientV2, DnsV2, StatisticsV2};
 pub use crate::config::edit::{ConfigChange, ConfigModule};
@@ -684,9 +685,203 @@ pub enum AnswerSummary {
     Unavailable {},
 }
 
+/// 管理协议独立于 DNS 执行类型；解码沿用严格的领域值校验。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(try_from = "crate::dns::ecs::QueryEcs", deny_unknown_fields)]
+pub struct QueryEcs {
+    pub request: EcsValue,
+    pub upstream: EcsExchange,
+    pub cache_match: Option<EcsCacheMatch>,
+    pub refresh: Option<EcsExchange>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    deny_unknown_fields,
+    try_from = "crate::dns::ecs::EcsValue"
+)]
+pub enum EcsValue {
+    Present { cidr: String, scope_prefix: u8 },
+    Absent,
+    Invalid,
+    Unrecorded,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "state",
+    rename_all = "snake_case",
+    deny_unknown_fields,
+    try_from = "crate::dns::ecs::EcsExchange"
+)]
+pub enum EcsExchange {
+    Observed {
+        query: EcsValue,
+        response: EcsValue,
+        policy: EcsPolicy,
+        upstream_leaf_name: String,
+    },
+    NotSent {
+        reason: EcsNotSentReason,
+    },
+    Unrecorded {
+        reason: EcsUnrecordedReason,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EcsPolicy {
+    pub source: EcsPolicySource,
+    pub mode: EcsPolicyMode,
+    pub value_source: EcsValueSource,
+}
+
+macro_rules! ecs_dto_enum {
+    ($name:ident { $($variant:ident),+ $(,)? }) => {
+        #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+        impl From<crate::dns::ecs::$name> for $name {
+            fn from(value: crate::dns::ecs::$name) -> Self {
+                match value { $(crate::dns::ecs::$name::$variant => Self::$variant),+ }
+            }
+        }
+    };
+}
+ecs_dto_enum!(EcsPolicySource {
+    Default,
+    Global,
+    Upstream,
+    Client,
+    Strategy,
+    Rule
+});
+ecs_dto_enum!(EcsPolicyMode {
+    Disabled,
+    Client,
+    Custom
+});
+ecs_dto_enum!(EcsValueSource {
+    ClientEcs,
+    ClientIp,
+    Custom,
+    None
+});
+ecs_dto_enum!(EcsNotSentReason {
+    CacheHit,
+    LocalAnswer,
+    SingleFlight,
+    NotStarted
+});
+ecs_dto_enum!(EcsUnrecordedReason {
+    NotObserved,
+    NoSelectedResponse,
+    Deadline,
+    Budget
+});
+ecs_dto_enum!(EcsCacheMatchKind {
+    Covering,
+    Exact,
+    NoEcs,
+    Members
+});
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, try_from = "crate::dns::ecs::EcsCacheMatch")]
+pub struct EcsCacheMatch {
+    pub kind: EcsCacheMatchKind,
+    pub cidr: Option<String>,
+}
+
+impl TryFrom<crate::dns::ecs::EcsValue> for EcsValue {
+    type Error = &'static str;
+    fn try_from(value: crate::dns::ecs::EcsValue) -> Result<Self, Self::Error> {
+        if !value.validate() {
+            return Err("invalid ECS value");
+        }
+        Ok(match value {
+            crate::dns::ecs::EcsValue::Present { cidr, scope_prefix } => {
+                Self::Present { cidr, scope_prefix }
+            }
+            crate::dns::ecs::EcsValue::Absent => Self::Absent,
+            crate::dns::ecs::EcsValue::Invalid => Self::Invalid,
+            crate::dns::ecs::EcsValue::Unrecorded => Self::Unrecorded,
+        })
+    }
+}
+impl TryFrom<crate::dns::ecs::EcsExchange> for EcsExchange {
+    type Error = &'static str;
+    fn try_from(value: crate::dns::ecs::EcsExchange) -> Result<Self, Self::Error> {
+        if !value.validate() {
+            return Err("invalid ECS exchange");
+        }
+        Ok(match value {
+            crate::dns::ecs::EcsExchange::Observed {
+                query,
+                response,
+                policy,
+                upstream_leaf_name,
+            } => Self::Observed {
+                query: query.try_into()?,
+                response: response.try_into()?,
+                policy: EcsPolicy {
+                    source: policy.source.into(),
+                    mode: policy.mode.into(),
+                    value_source: policy.value_source.into(),
+                },
+                upstream_leaf_name,
+            },
+            crate::dns::ecs::EcsExchange::NotSent { reason } => Self::NotSent {
+                reason: reason.into(),
+            },
+            crate::dns::ecs::EcsExchange::Unrecorded { reason } => Self::Unrecorded {
+                reason: reason.into(),
+            },
+        })
+    }
+}
+impl TryFrom<crate::dns::ecs::EcsCacheMatch> for EcsCacheMatch {
+    type Error = &'static str;
+    fn try_from(value: crate::dns::ecs::EcsCacheMatch) -> Result<Self, Self::Error> {
+        if !value.validate() {
+            return Err("invalid ECS cache match");
+        }
+        Ok(Self {
+            kind: value.kind.into(),
+            cidr: value.cidr,
+        })
+    }
+}
+impl TryFrom<crate::dns::ecs::QueryEcs> for QueryEcs {
+    type Error = &'static str;
+    fn try_from(value: crate::dns::ecs::QueryEcs) -> Result<Self, Self::Error> {
+        value.encode_json().map_err(|_| "invalid ECS detail")?;
+        Ok(Self {
+            request: value.request.try_into()?,
+            upstream: value.upstream.try_into()?,
+            cache_match: value.cache_match.map(TryInto::try_into).transpose()?,
+            refresh: value.refresh.map(TryInto::try_into).transpose()?,
+        })
+    }
+}
+
+macro_rules! ecs_dto_safe_debug {
+    ($($ty:ty),+) => { $(impl fmt::Debug for $ty {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(concat!(stringify!($ty), "(<redacted>)"))
+        }
+    })+ };
+}
+ecs_dto_safe_debug!(EcsValue, EcsExchange, EcsCacheMatch);
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct QueryRecord {
+    #[serde(default)]
+    pub ecs: Option<QueryEcs>,
     pub listener_name: Option<String>,
     pub response_duration_us: Option<u64>,
     pub response_status: crate::dns::ResponseDelivery,

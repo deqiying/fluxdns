@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
   Descriptions,
+  Drawer,
   Input,
   Popover,
   Segmented,
@@ -14,13 +15,15 @@ import {
   Typography,
   type TableColumnsType,
 } from "antd";
-import { ChevronLeft, ChevronRight, Clock3, Eye, RotateCw, Search, SlidersHorizontal } from "lucide-react";
+import { ChevronLeft, ChevronRight, Copy, Eye, Pin, RotateCw, Search, SlidersHorizontal, X } from "lucide-react";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { formatDuration, formatEpochMillis } from "@/shared/formatters";
+import { formatDuration } from "@/shared/formatters";
 import type { EventConnectionState } from "@/shared/api/events";
 import type { QueryFilter, QueryRecord, QueryRequest } from "./api";
 import { useQueries } from "./hooks";
+import { QueryEcsDiagnostics, QueryEcsSummary } from "./QueryEcsSummary";
+import "./queries.css";
 
 const DAY_MS = 86_400_000;
 const transports = ["udp", "tcp", "doh"] as const;
@@ -43,20 +46,24 @@ type Navigation = Pick<QueryRequest, "cursor" | "direction">;
 interface DetailSnapshot {
   record: QueryRecord;
   directoryRevision: string;
+  items: QueryRecord[];
+  directoryRevisions: ReadonlyMap<string, string>;
 }
 
 export function QueriesPage() {
+  const drawerTitleId = useId();
   const [draft, setDraft] = useState<QueryFilter>(() => defaultFilter());
   const [filter, setFilter] = useState<QueryFilter>(draft);
   const [datePreset, setDatePreset] = useState<DatePreset>("7d");
   const [advanced, setAdvanced] = useState(false);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize, setPageSize] = useState(10);
   const [sort, setSort] = useState<QueryRequest["sort"]>("occurred_at");
   const [order, setOrder] = useState<QueryRequest["order"]>("desc");
   const [navigation, setNavigation] = useState<Navigation>({ cursor: null, direction: "older" });
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [detail, setDetail] = useState<DetailSnapshot>();
   const [detailPinned, setDetailPinned] = useState(false);
+  const narrow = useNarrowQueries();
   const detailTriggers = useRef(new Map<string, HTMLButtonElement>());
   const suppressedDetailOpen = useRef<string | undefined>(undefined);
   const detailContent = useRef<HTMLDivElement>(null);
@@ -86,35 +93,43 @@ export function QueriesPage() {
   const latestPage = navigation.cursor === null && sort === "occurred_at" && order === "desc" && datePreset !== "custom";
   const query = useQueries(request, { autoRefresh, holdUpdates: detail !== undefined, applyImmediately: latestPage });
   const page = query.data;
+  // HTTP refetch 也可能移走触发行；详情期间冻结列表，确保浮层及焦点锚点仍在。
+  const visibleItems = detail?.items ?? query.items;
+
+  const closeDetail = (restoreFocus = true) => {
+    clearTimeout(hoverOpenTimer.current);
+    cancelHoverClose();
+    const recordId = detail?.record.id;
+    suppressedDetailOpen.current = recordId;
+    setDetail(undefined);
+    setDetailPinned(false);
+    // 显式或键盘关闭后按 ID 恢复节点；外部指针关闭应保留用户新选中的输入焦点。
+    if (restoreFocus && recordId) window.setTimeout(() => detailTriggers.current.get(recordId)?.focus(), 0);
+  };
 
   useEffect(() => {
-    if (!detail) return;
+    if (!detail || narrow) return;
     const close = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
-      const recordId = detail.record.id;
-      suppressedDetailOpen.current = detail.record.id;
-      setDetail(undefined);
-      setDetailPinned(false);
-      // 关闭后按稳定 ID 重新取得触发节点，避免列表合并时恢复到失效 DOM。
-      window.setTimeout(() => detailTriggers.current.get(recordId)?.focus(), 0);
+      closeDetail();
     };
     document.addEventListener("keydown", close);
     const outside = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node) || detailContent.current?.contains(target)
         || (target instanceof Element && target.closest(".query-result-trigger"))) return;
-      suppressedDetailOpen.current = detail.record.id;
-      setDetail(undefined);
-      setDetailPinned(false);
+      closeDetail(false);
     };
     document.addEventListener("pointerdown", outside, true);
     return () => {
       document.removeEventListener("keydown", close);
       document.removeEventListener("pointerdown", outside, true);
     };
-  }, [detail]);
+  }, [detail, narrow]);
 
   const resetContext = () => {
+    clearTimeout(hoverOpenTimer.current);
+    cancelHoverClose();
     if (detail) suppressedDetailOpen.current = detail.record.id;
     setDetail(undefined);
     setDetailPinned(false);
@@ -153,7 +168,9 @@ export function QueriesPage() {
     if (detailPinned) return;
     setDetail((current) => current?.record.id === record.id ? current : {
       record,
-      directoryRevision: query.directoryRevisions.get(record.id) ?? page?.directory_revision ?? "unknown",
+      directoryRevision: (current?.directoryRevisions ?? query.directoryRevisions).get(record.id) ?? page?.directory_revision ?? "unknown",
+      items: current?.items ?? query.items,
+      directoryRevisions: current?.directoryRevisions ?? new Map(query.directoryRevisions),
     });
   };
 
@@ -165,7 +182,9 @@ export function QueriesPage() {
     // 点击必须能够切换已固定记录，不能走仅处理 hover 的 pinned 防护。
     setDetail((current) => current?.record.id === record.id ? current : {
       record,
-      directoryRevision: query.directoryRevisions.get(record.id) ?? page?.directory_revision ?? "unknown",
+      directoryRevision: (current?.directoryRevisions ?? query.directoryRevisions).get(record.id) ?? page?.directory_revision ?? "unknown",
+      items: current?.items ?? query.items,
+      directoryRevisions: current?.directoryRevisions ?? new Map(query.directoryRevisions),
     });
   };
 
@@ -173,13 +192,13 @@ export function QueriesPage() {
     {
       title: "时间",
       dataIndex: "occurred_at_ms",
-      width: 145,
+      width: 112,
       render: (value: number) => <TimeCell value={value} />,
     },
     {
       title: "请求",
       key: "request",
-      width: 260,
+      width: 220,
       render: (_, record) => (
         <CellStack
           primary={record.qname}
@@ -191,16 +210,18 @@ export function QueriesPage() {
       title: "结果",
       key: "result",
       className: "query-result-cell",
-      width: 340,
+      width: 260,
       render: (_, record) => (
         <Popover
           key={record.id}
-          placement="bottom"
+          placement="rightTop"
+          autoAdjustOverflow
+          classNames={{ root: "query-detail-overlay" }}
           trigger={[]}
           fresh
-          open={detail?.record.id === record.id}
+          open={!narrow && detail?.record.id === record.id}
           destroyOnHidden
-          content={detail?.record.id === record.id ? <div ref={detailContent} onPointerEnter={cancelHoverClose} onPointerLeave={() => scheduleHoverClose(record)}><QueryDetails snapshot={detail} pinned={detailPinned} /></div> : null}
+          content={detail?.record.id === record.id ? <div ref={detailContent} onPointerEnter={cancelHoverClose} onPointerLeave={() => scheduleHoverClose(record)}><QueryDetails key={detail.record.id} snapshot={detail} pinned={detailPinned} onPin={() => setDetailPinned((value) => !value)} onClose={() => closeDetail()} /></div> : null}
         >
           <button
             ref={(node) => {
@@ -213,7 +234,7 @@ export function QueriesPage() {
             aria-expanded={detail?.record.id === record.id}
             aria-haspopup="dialog"
             onPointerEnter={(event) => {
-              if (event.pointerType !== "mouse") return;
+              if (narrow || event.pointerType !== "mouse") return;
               if (suppressedDetailOpen.current === record.id) suppressedDetailOpen.current = undefined;
               cancelHoverClose();
               clearTimeout(hoverOpenTimer.current);
@@ -226,9 +247,12 @@ export function QueriesPage() {
             onClick={() => pinDetail(record)}
             onFocus={(event) => {
               // 鼠标/触摸按下的 focus 不能提前弹出并挡住随后的 pointerup/click。
-              if (event.currentTarget.matches(":focus-visible")) openDetail(record, true);
+              if (!narrow && event.currentTarget.matches(":focus-visible")) openDetail(record, true);
             }}
-            onBlur={() => openDetail(record, false)}
+            onBlur={(event) => {
+              if (event.relatedTarget instanceof Node && detailContent.current?.contains(event.relatedTarget)) return;
+              openDetail(record, false);
+            }}
           >
             <ResponseCell record={record} />
             <Eye size={16} aria-hidden />
@@ -237,15 +261,22 @@ export function QueriesPage() {
       ),
     },
     {
+      title: "响应耗时",
+      key: "response-duration",
+      width: 120,
+      align: "right",
+      render: (_, record) => <span className="query-mono" aria-label={formatDurationSummary(record).response}>{responseDuration(record)}</span>,
+    },
+    {
       title: "路由",
       key: "route",
-      width: 300,
+      width: 250,
       render: (_, record) => <CellStack primary={<RouteChain record={record} />} secondary={<><CacheActivityTags record={record} /><RouteSourceTag record={record} /></>} />,
     },
     {
       title: "客户端",
       key: "identity",
-      width: 200,
+      width: 170,
       render: (_, record) => <IdentityCell record={record} />,
     },
   ];
@@ -312,34 +343,39 @@ export function QueriesPage() {
         ) : null}
       </section>
 
-      {autoRefresh && (query.requiresResync || (query.pendingCount ?? 0) > 0) ? (
-        <Alert
-          className="query-update-alert"
-          type={query.requiresResync ? "warning" : "info"}
-          showIcon
-          title={query.requiresResync ? "有新记录，需重新同步" : `有 ${query.pendingCount} 条新记录`}
-          action={<Button size="small" icon={<RotateCw size={15} />} onClick={showLatest}>查看新记录</Button>}
-        />
-      ) : null}
 
       <PageState loading={query.isLoading} error={query.error} onRetry={() => void query.refetch()} />
       {page ? (
         <section className="query-records" aria-label="解析记录列表">
-          <PageState empty={query.items.length === 0} emptyDescription="当前筛选条件下没有解析记录" />
-          {query.items.length > 0 ? (
+          <div className="query-records-toolbar">
+            <Typography.Text type="secondary">{sort === "occurred_at" ? "发生时间" : "总耗时"}{order === "desc" ? "降序" : "升序"} · UTC</Typography.Text>
+            {autoRefresh && (query.requiresResync || (query.pendingCount ?? 0) > 0) ? <Space wrap>
+              <span role="status">{query.requiresResync ? "有新记录，需重新同步" : `有 ${query.pendingCount} 条新记录`}</span>
+              <Button size="small" icon={<RotateCw size={15} />} onClick={showLatest}>查看新记录</Button>
+            </Space> : null}
+          </div>
+          <PageState empty={visibleItems.length === 0} emptyDescription="当前筛选条件下没有解析记录" />
+          {visibleItems.length > 0 && !narrow ? (
             <Table
               rowKey="id"
               columns={columns}
-              dataSource={query.items}
+              dataSource={visibleItems}
               tableLayout="fixed"
               rowClassName={(record) => record.id === detail?.record.id ? "query-row-active" : ""}
-              scroll={{ x: 1_245 }}
+              scroll={{ x: 1_132 }}
               pagination={false}
               loading={query.isFetching && !query.isLoading}
             />
           ) : null}
+          {narrow ? <div className="query-mobile-records">{visibleItems.map((record) => <article key={record.id} className={`query-record-card${detail?.record.id === record.id ? " query-row-active" : ""}`}>
+            <div className="query-card-meta"><span>{formatQueryTime(record.occurred_at_ms).date} {formatQueryTime(record.occurred_at_ms).time}</span><span className="query-mono">{formatDurationSummary(record).response}</span></div>
+            <strong className="query-card-qname">{record.qname}</strong>
+            <small>{record.qtype} · {record.transport.toUpperCase()}</small>
+            <button type="button" className="query-result-trigger" ref={(node) => { if (node) detailTriggers.current.set(record.id, node); else detailTriggers.current.delete(record.id); }} aria-label={`查看 ${record.qname} 的详情`} aria-haspopup="dialog" aria-expanded={detail?.record.id === record.id} onClick={() => pinDetail(record)}><ResponseCell record={record} /><Eye size={16} aria-hidden /></button>
+            <div className="query-card-meta"><span>{formatClientIdentity(record).primary}</span><span>{record.identity.client_ip}</span></div>
+          </article>)}</div> : null}
           <div className="query-pagination">
-            <Typography.Text type="secondary">当前显示 {query.items.length} 条</Typography.Text>
+            <Typography.Text type="secondary">当前显示 {visibleItems.length} 条</Typography.Text>
             <Space>
               <Select
                 aria-label="每页条数"
@@ -349,12 +385,14 @@ export function QueriesPage() {
               />
               <Button
                 aria-label="上一页"
+                title="更新记录"
                 icon={<ChevronLeft size={16} />}
                 disabled={!page.previous_cursor || query.isFetching}
                 onClick={() => { if (detail) suppressedDetailOpen.current = detail.record.id; setDetail(undefined); setDetailPinned(false); setNavigation({ cursor: page.previous_cursor, direction: "newer" }); }}
               />
               <Button
                 aria-label="下一页"
+                title="更早记录"
                 icon={<ChevronRight size={16} />}
                 disabled={!page.next_cursor || query.isFetching}
                 onClick={() => { if (detail) suppressedDetailOpen.current = detail.record.id; setDetail(undefined); setDetailPinned(false); setNavigation({ cursor: page.next_cursor, direction: "older" }); }}
@@ -363,15 +401,17 @@ export function QueriesPage() {
           </div>
         </section>
       ) : null}
+      <Drawer placement="bottom" size="85dvh" open={narrow && !!detail} onClose={() => closeDetail()} aria-labelledby={drawerTitleId} title={<span id={drawerTitleId}>{detail ? `${detail.record.qname} 解析详情` : "解析详情"}</span>} destroyOnHidden className="query-mobile-drawer">
+        {narrow && detail ? <QueryDetails key={detail.record.id} snapshot={detail} pinned={detailPinned} onPin={() => setDetailPinned((value) => !value)} onClose={() => closeDetail()} mobile /> : null}
+      </Drawer>
     </PageFrame>
     </div>
   );
 }
 
 function TimeCell({ value }: { value: number }) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return <Typography.Text type="secondary">—</Typography.Text>;
-  return <CellStack primary={date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })} secondary={date.toLocaleDateString()} />;
+  const time = formatQueryTime(value);
+  return <CellStack primary={time.time} secondary={time.date} />;
 }
 
 function IdentityCell({ record }: { record: QueryRecord }) {
@@ -386,63 +426,105 @@ function IdentityCell({ record }: { record: QueryRecord }) {
 
 function ResponseCell({ record }: { record: QueryRecord }) {
   const summary = formatResponseSummary(record);
-  const durations = formatDurationSummary(record);
+  const exceptional = record.answers.state !== "available";
   const source = sourceLabel(record);
   return (
     <CellStack
       primary={summary.primary}
-      secondary={<><Clock3 size={13} aria-hidden /><span>{durations.response}</span><Tag color={source.color}>{source.label}</Tag></>}
+      secondary={<><Tag color={source.color}>{source.label}</Tag>{exceptional ? <span>{summary.meta}</span> : null}</>}
     />
   );
 }
 
-function QueryDetails({ snapshot, pinned }: { snapshot: DetailSnapshot; pinned: boolean }) {
+function QueryDetails({ snapshot, pinned, onPin, onClose, mobile = false }: { snapshot: DetailSnapshot; pinned: boolean; onPin: () => void; onClose: () => void; mobile?: boolean }) {
   const { record } = snapshot;
+  const [copyStatus, setCopyStatus] = useState("");
   const answers = record.answers.state === "unavailable" ? [] : record.answers.records;
   const durations = formatDurationSummary(record);
+  const copyDomain = async () => {
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable");
+      await navigator.clipboard.writeText(record.qname);
+      setCopyStatus("域名已复制");
+    } catch {
+      setCopyStatus("复制不可用，请选择域名手工复制");
+    }
+  };
   return (
-    <div className="query-details-popover" role="dialog" aria-label={`${record.qname} 解析详情`}>
+    <div className="query-details-popover" role={mobile ? "region" : "dialog"} aria-label={`${record.qname} 解析详情`}>
       <div className="query-detail-heading">
         <Typography.Title level={5}>{record.qname}</Typography.Title>
-        <Tag color={pinned ? "blue" : undefined}>{pinned ? "点击固定" : "悬停预览"}</Tag>
+        <Space size={2}>
+          <Button type="text" size="small" aria-label="复制域名" icon={<Copy size={15} />} onClick={() => void copyDomain()} />
+          {!mobile ? <Button type="text" size="small" aria-label={pinned ? "取消固定" : "固定详情"} aria-pressed={pinned} icon={<Pin size={15} />} onClick={onPin} /> : null}
+          <Button type="text" size="small" aria-label="关闭详情" icon={<X size={15} />} onClick={onClose} />
+        </Space>
       </div>
-      <Typography.Text type="secondary" className="query-detail-id" code>{record.id}</Typography.Text>
-      <div className="query-detail-durations">
-        {[durations.total, durations.dnsCore, durations.response].map((duration) => {
-          const [label, ...value] = duration.split(" ");
-          const hint = label === "响应耗时" ? "收到完整请求至服务端成功写出响应，不含后台刷新，也不是客户端接收确认" : label === "总耗时" ? "Transport 接入计时点至 DNS core 完成" : "仅 DNS core 主链解析耗时";
-          return <div key={label} title={hint}><span>{label}</span><strong>{value.join(" ")}</strong></div>;
-        })}
-      </div>
-      <Descriptions size="small" column={1} colon={false}>
-        <Descriptions.Item label="发生时间">{formatEpochMillis(record.occurred_at_ms)}</Descriptions.Item>
-        <Descriptions.Item label="请求">{record.qtype} / {record.transport.toUpperCase()}</Descriptions.Item>
-        <Descriptions.Item label="原始身份">{record.identity.client_id ?? "未传入 ID"} · {record.identity.client_ip}</Descriptions.Item>
-        <Descriptions.Item label="当时匹配">{formatHistoricalMatch(record)}</Descriptions.Item>
-        <Descriptions.Item label="当前名称">{record.current_client_name ?? "配置中已无对应名称"}</Descriptions.Item>
-        <Descriptions.Item label="响应">{record.rcode} / {record.outcome} / {sourceLabel(record).label}</Descriptions.Item>
-        <Descriptions.Item label="发送状态">{responseStatusLabel(record)}</Descriptions.Item>
-        <Descriptions.Item label="路由链路"><span className="query-detail-route">{formatRoute(record)}</span></Descriptions.Item>
-        <Descriptions.Item label="缓存变化"><CacheActivityTags record={record} />{!record.cache_activity ? "无记录" : null}</Descriptions.Item>
-        {record.cache_activity?.upstream_target_name ? <Descriptions.Item label="刷新链路">{[record.listener_name, record.cache_activity.upstream_target_name, record.cache_activity.upstream_used_name].filter(Boolean).join(" → ")}</Descriptions.Item> : null}
-        <Descriptions.Item label="目录快照">{snapshot.directoryRevision}</Descriptions.Item>
-      </Descriptions>
-      {record.source === "cache" ? <Alert type="info" showIcon title={record.cache === "stale"
-        ? "本次先返回过期缓存，后台尝试刷新；响应耗时不包含后台刷新。链路出口来自旧缓存生产请求，刷新链路单独展示。"
-        : "链路出口来自缓存生产请求，本次直接命中缓存。"} /> : null}
+      {copyStatus ? <div role="status">{copyStatus}</div> : null}
+      <div className="query-detail-meta">{record.qtype} · {record.transport.toUpperCase()} · {formatQueryTimestamp(record.occurred_at_ms)} · {pinned ? "点击固定" : "悬停预览"}</div>
+      <div className="query-detail-result"><span>{record.rcode} · {sourceLabel(record).label} · {responseStatusLabel(record)}</span><strong className="query-mono">{durations.response}</strong></div>
+      {["failed", "cancelled"].includes(record.response_status) ? <Alert type="warning" showIcon title={responseStatusLabel(record)} /> : null}
       <div className="query-answer-list">
         <Typography.Text strong>Answer</Typography.Text>
         {record.answers.state === "unavailable" ? <Typography.Text type="secondary">结果未保留</Typography.Text> : null}
         {record.answers.state === "truncated" ? <Alert type="warning" showIcon title={`保留 ${answers.length} 条，共 ${record.answers.total_count} 条`} /> : null}
-        {record.answers.state !== "unavailable" && answers.length === 0 ? <Typography.Text type="secondary">响应没有 Answer 记录</Typography.Text> : null}
-        {answers.map((answer, index) => (
-          <div className="query-answer-row" key={`${answer.name}:${answer.type}:${index}`}>
-            <span>{answer.type}</span><code>{answer.name}</code><code>{answer.data}</code><span>{answer.ttl_seconds}s</span>
-          </div>
-        ))}
+        {record.answers.state === "available" && answers.length === 0 ? <Typography.Text type="secondary">{record.rcode === "NOERROR" && record.answers.total_count === 0 ? "NOERROR · NODATA" : "响应没有 Answer 记录"}</Typography.Text> : null}
+        {answers.map((answer, index) => <div className="query-answer-row" key={`${answer.name}:${answer.type}:${index}`}>
+          <span>{answer.type}</span><div>{answer.name !== record.qname ? <code className="query-answer-owner">{answer.name}</code> : null}<code>{answer.data}</code></div><span>{answer.ttl_seconds}s</span>
+        </div>)}
       </div>
+      <Descriptions size="small" column={1} colon={false}>
+        <Descriptions.Item label={record.source === "cache" ? "缓存来源链路" : "本次应答"}><span className="query-detail-route">{formatRoute(record)}</span></Descriptions.Item>
+        {record.cache_activity ? <Descriptions.Item label="后台活动"><CacheActivityTags record={record} />{record.cache_activity.upstream_target_name ? <div className="query-detail-route">刷新链路：{[record.listener_name, record.cache_activity.upstream_target_name, record.cache_activity.upstream_used_name].filter(Boolean).join(" → ")}</div> : null}</Descriptions.Item> : null}
+        <Descriptions.Item label="客户端">{formatClientIdentity(record).primary} / {record.identity.client_ip}</Descriptions.Item>
+      </Descriptions>
+      <QueryEcsSummary ecs={record.ecs} />
+      <details className="query-diagnostics">
+        <summary>诊断信息</summary>
+        <Descriptions size="small" column={1} colon={false}>
+          <Descriptions.Item label="原始身份">{record.identity.client_id ?? "未传入 ID"} · {record.identity.client_ip}</Descriptions.Item>
+          <Descriptions.Item label="当时匹配">{formatHistoricalMatch(record)}</Descriptions.Item>
+          <Descriptions.Item label="当前名称">{record.current_client_name ?? "配置中已无对应名称"}</Descriptions.Item>
+          <Descriptions.Item label="总耗时">{durations.total}</Descriptions.Item>
+          <Descriptions.Item label="主链耗时">{durations.dnsCore}</Descriptions.Item>
+          <Descriptions.Item label="响应耗时"><span tabIndex={0} title="收到完整请求至服务端成功写出响应，不含后台刷新，也不是客户端接收确认">{durations.response}</span></Descriptions.Item>
+          <Descriptions.Item label="发生时间">{formatQueryTimestamp(record.occurred_at_ms)}</Descriptions.Item>
+          <Descriptions.Item label="记录 ID"><code>{record.id}</code></Descriptions.Item>
+          <Descriptions.Item label="目录快照">{snapshot.directoryRevision}</Descriptions.Item>
+        </Descriptions>
+        <QueryEcsDiagnostics ecs={record.ecs} />
+      </details>
     </div>
   );
+}
+
+/** 本页所有时钟与日期统一为 UTC，不受浏览器本地时区影响。 */
+export function formatQueryTime(value: number): { date: string; time: string } {
+  if (!Number.isFinite(value) || Number.isNaN(new Date(value).getTime())) return { date: "—", time: "—" };
+  const iso = new Date(value).toISOString();
+  return { date: iso.slice(0, 10), time: iso.slice(11, 19) };
+}
+
+function formatQueryTimestamp(value: number): string {
+  if (formatQueryTime(value).date === "—") return "未记录";
+  return `${new Date(value).toISOString().replace("T", " ").replace("Z", "")} UTC`;
+}
+
+function responseDuration(record: QueryRecord): string {
+  return record.response_duration_us == null ? "未记录" : formatDuration(record.response_duration_us / 1_000);
+}
+
+/** 使用真实媒体查询切换呈现；Drawer 与浮层继续读取同一份固定快照。 */
+function useNarrowQueries(): boolean {
+  const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 760px)").matches);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 760px)");
+    const update = () => setNarrow(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return narrow;
 }
 
 export function formatDurationSummary(record: QueryRecord): { total: string; dnsCore: string; response: string } {
@@ -604,7 +686,7 @@ function ConnectionState({ enabled, state, lastUpdatedAt }: { enabled: boolean; 
   const label = state === "open" ? "实时连接正常" : state === "connecting" ? "连接中" : state === "reconnecting" ? "正在重连" : "实时连接异常";
   return (
     <Typography.Text type={state === "error" ? "danger" : "secondary"} className={`query-connection query-connection-${state}`} role="status">
-      {label}{lastUpdatedAt ? ` · ${new Date(lastUpdatedAt).toLocaleTimeString()}` : ""}
+      {label}{lastUpdatedAt ? ` · ${formatQueryTime(lastUpdatedAt).time} UTC` : ""}
     </Typography.Text>
   );
 }

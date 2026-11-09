@@ -1,0 +1,57 @@
+/* 本页覆盖共享旧详情样式，避免影响其他页面与全局壳层。 */
+.query-records-toolbar {
+  display: flex;
+  min-height: 48px;
+  padding: 10px 16px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  border-bottom: 1px solid #e8e9ec;
+  font-size: 12px;
+}
+.query-detail-overlay .query-details-popover {
+  box-sizing: border-box;
+  width: min(452px, calc(100vw - 56px));
+  max-height: min(680px, calc(100dvh - 56px));
+  overflow: auto;
+  overscroll-behavior: contain;
+  overflow-wrap: anywhere;
+}
+.query-detail-overlay { max-width: 480px; }
+.query-details-popover .query-detail-heading { position: sticky; top: 0; z-index: 1; background: #fff; padding-bottom: 8px; margin-bottom: 0; }
+.query-details-popover .query-detail-heading > .ant-space { flex-shrink: 0; }
+.query-detail-meta { color: #73737d; font-size: 12px; margin-bottom: 12px; overflow-wrap: anywhere; }
+.query-detail-result { display: flex; align-items: start; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 10px 0; }
+.query-detail-result strong { font-variant-numeric: tabular-nums; font-size: 13px; }
+.query-details-popover .query-answer-list { margin: 0 0 14px; padding-top: 10px; }
+.query-details-popover .query-answer-row { grid-template-columns: 48px minmax(0, 1fr) 48px; gap: 8px; padding: 6px 0; }
+.query-details-popover .query-answer-row > span:last-child { grid-column: auto; text-align: right; }
+.query-answer-row > div { min-width: 0; }
+.query-answer-owner { display: block; color: #73737d; }
+.query-ecs-summary, .query-diagnostics { border-top: 1px solid #eceef1; padding: 12px 0; overflow-wrap: anywhere; }
+.query-ecs-summary { display: grid; gap: 4px; }
+.query-ecs-summary small { color: #73737d; }
+.query-diagnostics summary { cursor: pointer; font-weight: 500; padding: 4px 0; }
+.query-diagnostics summary:focus-visible { outline: 2px solid #1769aa; }
+.query-diagnostics .ant-descriptions { margin-top: 12px; }
+.query-diagnostics .ant-descriptions-item-content { min-width: 0; overflow-wrap: anywhere; }
+.query-ecs-diagnostics { display: grid; gap: 8px; font-size: 12px; }
+.query-ecs-exchange { display: grid; gap: 4px; }
+.query-mono { font-variant-numeric: tabular-nums; }
+.query-mobile-records { display: grid; }
+.query-record-card { min-width: 0; padding: 12px; border-bottom: 1px solid #e8e9ec; }
+.query-record-card.query-row-active { background: #f5f9ff; }
+.query-card-meta { display: flex; align-items: start; justify-content: space-between; flex-wrap: wrap; gap: 6px; color: #73737d; font-size: 12px; overflow-wrap: anywhere; }
+.query-card-qname { display: block; overflow-wrap: anywhere; margin-top: 8px; }
+.query-record-card .query-result-trigger { padding: 8px 0; height: auto; min-height: 64px; }
+.query-mobile-drawer .query-details-popover { box-sizing: border-box; width: 100%; max-height: none; overflow: visible; overflow-wrap: anywhere; }
+.query-mobile-drawer .ant-drawer-body { padding: 16px 16px max(20px, env(safe-area-inset-bottom)); overscroll-behavior: contain; }
+.query-mobile-drawer .ant-drawer-title { overflow-wrap: anywhere; }
+@media (max-width: 760px) {
+  .query-page, .query-page .page-content, .query-page .query-records, .query-page .filter-field { min-width: 0; max-width: 100%; }
+  .query-page .query-filter-primary, .query-page .query-filter-advanced { grid-template-columns: minmax(0, 1fr); }
+  .query-page .query-pagination { align-items: start; flex-wrap: wrap; gap: 8px; }
+  .query-page .query-pagination > .ant-space { flex-wrap: wrap; }
+  .query-page .query-date-row > .ant-space { min-width: 0; max-width: 100%; }
+}

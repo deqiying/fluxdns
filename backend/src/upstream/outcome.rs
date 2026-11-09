@@ -35,16 +35,32 @@ pub struct AttemptAssessment {
     pub fallback: FallbackDecision,
 }
 
+/// 只随自身 attempt 传递的叶子事实；安全 Debug 由 EcsValue 提供，不保存 wire。
+#[derive(Clone)]
+pub struct SelectedEcsLeaf {
+    pub name: String,
+    pub query: crate::dns::ecs::EcsValue,
+    pub response: crate::dns::ecs::EcsValue,
+}
+
+impl std::fmt::Debug for SelectedEcsLeaf {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("SelectedEcsLeaf(<redacted>)")
+    }
+}
+
 pub struct UpstreamAttempt {
     pub attempt_index: usize,
     pub connector: ConnectorId,
     pub outcome: UpstreamOutcome,
+    pub selected_leaf: Option<SelectedEcsLeaf>,
 }
 
 /// 聚合后的上游结果及产生该结果的成员。
 pub(super) struct AggregatedOutcome {
     pub connector: Option<ConnectorId>,
     pub outcome: UpstreamOutcome,
+    pub selected_leaf: Option<SelectedEcsLeaf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -153,7 +169,8 @@ pub(super) fn aggregate_with_connector(
     }
 
     let mut cancellation: Option<(ConnectorId, CancelReason)> = None;
-    let mut selected_response: Option<(ConnectorId, CanonicalResponse)> = None;
+    let mut selected_response: Option<(ConnectorId, CanonicalResponse, Option<SelectedEcsLeaf>)> =
+        None;
     let mut fallback_blocked = false;
     for attempt in attempts {
         if fallback_blocked {
@@ -170,13 +187,14 @@ pub(super) fn aggregate_with_connector(
             }
             FallbackDecision::Stop => match attempt.outcome {
                 UpstreamOutcome::Response(candidate) => {
-                    let replace = selected_response.as_ref().is_none_or(|(_, current)| {
+                    let replace = selected_response.as_ref().is_none_or(|(_, current, _)| {
                         mode == SelectionPolicy::Parallel
                             && response_preference(candidate.class())
                                 > response_preference(current.class())
                     });
                     if replace {
-                        selected_response = Some((attempt.connector, candidate));
+                        selected_response =
+                            Some((attempt.connector, candidate, attempt.selected_leaf));
                     }
                 }
                 UpstreamOutcome::Cancelled(reason) => {
@@ -197,22 +215,26 @@ pub(super) fn aggregate_with_connector(
         return Ok(AggregatedOutcome {
             connector: Some(connector.clone()),
             outcome: UpstreamOutcome::Cancelled(*reason),
+            selected_leaf: None,
         });
     }
-    if let Some((connector, response)) = selected_response {
+    if let Some((connector, response, selected_leaf)) = selected_response {
         return Ok(AggregatedOutcome {
             connector: Some(connector),
             outcome: UpstreamOutcome::Response(response),
+            selected_leaf,
         });
     }
     if let Some((connector, reason)) = cancellation {
         return Ok(AggregatedOutcome {
             connector: Some(connector),
             outcome: UpstreamOutcome::Cancelled(reason),
+            selected_leaf: None,
         });
     }
     Ok(AggregatedOutcome {
         connector: None,
+        selected_leaf: None,
         outcome: UpstreamOutcome::Response(
             CanonicalResponse::empty_response(query, ResponseCode::ServFail)
                 .expect("canonical SERVFAIL response construction is infallible"),
@@ -303,6 +325,7 @@ mod tests {
             attempt_index: index,
             connector: connector(name),
             outcome,
+            selected_leaf: None,
         }
     }
 

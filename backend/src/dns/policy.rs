@@ -43,10 +43,11 @@ use crate::resource::{
     CanonicalDomain, HostsIndex, ResourceLoadError, ResourceSnapshot, ResourceVersion, RuleIndex,
 };
 use crate::upstream::{
-    GroupExecutionResult, GroupMember, GroupSelector, LateResultSink, RegistryError,
-    UpstreamAttempt, UpstreamGroupExecutor, UpstreamRegistry,
+    GroupMember, GroupSelector, LateResultSink, RegistryError, UpstreamAttempt,
+    UpstreamGroupExecutor, UpstreamRegistry,
 };
 
+use super::ecs::{EcsExchange, EcsNotSentReason, EcsPolicy, EcsUnrecordedReason, EcsValueSource};
 use super::handler::resource_answers;
 use super::{
     CanonicalResponse, CoreError, CoreOutcome, DnsCore, DnsCoreCompletion, DnsRequest,
@@ -437,6 +438,7 @@ struct PreparedCacheQuery {
     answer: AnswerKey,
     query: super::CanonicalQuery,
     member_queries: Option<Arc<HashMap<ConnectorId, super::CanonicalQuery>>>,
+    member_policies: Option<Arc<PreparedEcsPolicies>>,
     upstream: ConfigId,
     cache: crate::policy::CacheDecision,
 }
@@ -605,6 +607,7 @@ struct AnswerProbe {
     fresh: Option<CacheRecord>,
     stale: Vec<(CacheRecord, CacheRefreshPermit)>,
     seen: Vec<(CacheKey, CacheVersion)>,
+    matched: Option<crate::cache::AnswerProbeMatch>,
 }
 
 impl AnswerProbe {
@@ -779,6 +782,7 @@ impl PolicyDnsCore {
         let matched_rule = matched_rule_observation(&policy, plan.matched_rule.as_ref());
 
         if let Some(resource_id) = plan.hosts {
+            meta.completion.not_sent(EcsNotSentReason::LocalAnswer);
             let Some(index) = policy.index.hosts_index(&resource_id) else {
                 return (servfail(request), None, None, None);
             };
@@ -901,6 +905,7 @@ impl PolicyDnsCore {
         let PreparedUpstreamQuery {
             query,
             member_queries,
+            member_policies,
             ..
         } = prepared;
         let Some(answer) = answer else {
@@ -923,13 +928,35 @@ impl PolicyDnsCore {
                     &request.context,
                     None,
                     member_queries,
+                    member_policies,
                 )
                 .await
                 .map(|outcome| PolicyUpstreamResult::upstream(outcome, CacheStatus::Disabled));
         };
         let deadline = request.context.meta.deadline;
-        let probe = self.probe_answer(&answer, &plan.cache, deadline).await;
+        let probe = self
+            .probe_answer(
+                &answer,
+                &plan.cache,
+                deadline,
+                request.context.meta.completion.ecs_enabled(),
+            )
+            .await;
         if let Some(record) = &probe.fresh {
+            request
+                .context
+                .meta
+                .completion
+                .not_sent(EcsNotSentReason::CacheHit);
+            if request.context.meta.completion.ecs_enabled()
+                && let Some(matched) = &probe.matched
+            {
+                request
+                    .context
+                    .meta
+                    .completion
+                    .cache_match(matched.observation());
+            }
             return Some(PolicyUpstreamResult::cache(
                 UpstreamOutcome::Response(self.fresh_cache_response(record)),
                 record,
@@ -943,6 +970,20 @@ impl PolicyDnsCore {
                     .map(|answer_ttl| (record, refresh, answer_ttl))
             })
         {
+            request
+                .context
+                .meta
+                .completion
+                .not_sent(EcsNotSentReason::CacheHit);
+            if request.context.meta.completion.ecs_enabled()
+                && let Some(matched) = &probe.matched
+            {
+                request
+                    .context
+                    .meta
+                    .completion
+                    .cache_match(matched.observation());
+            }
             let mut stale_response = (*record.entry.response).clone();
             stale_response.set_ttl(answer_ttl);
             if refresh.try_consume() {
@@ -976,6 +1017,7 @@ impl PolicyDnsCore {
                         &request.context,
                         Some(Arc::clone(&late_sink)),
                         member_queries.clone(),
+                        member_policies.clone(),
                     )
                     .await
                     .map(|outcome| {
@@ -985,6 +1027,11 @@ impl PolicyDnsCore {
         };
         match reservation {
             CacheLoadReservation::Follower(waiter) => {
+                request
+                    .context
+                    .meta
+                    .completion
+                    .not_sent(EcsNotSentReason::SingleFlight);
                 match self
                     .cache
                     .wait_load(waiter, deadline, &request.context.meta.cancellation)
@@ -1011,6 +1058,7 @@ impl PolicyDnsCore {
                                 &request.context,
                                 Some(Arc::clone(&late_sink)),
                                 member_queries.clone(),
+                                member_policies.clone(),
                             )
                             .await
                             .map(|outcome| PolicyUpstreamResult::upstream(outcome, miss_status))
@@ -1026,6 +1074,7 @@ impl PolicyDnsCore {
                         &request.context,
                         Some(Arc::clone(&late_sink)),
                         member_queries,
+                        member_policies,
                     )
                     .await
                 else {
@@ -1111,6 +1160,7 @@ impl PolicyDnsCore {
             &request.query,
             &plan.edns_client_subnet,
             request.context.client.client_addr,
+            request.context.meta.completion.ecs_enabled(),
         );
         let answer = plan
             .cache
@@ -1135,14 +1185,16 @@ impl PolicyDnsCore {
         answer: &AnswerKey,
         cache: &crate::policy::CacheDecision,
         deadline: Deadline,
+        observe: bool,
     ) -> AnswerProbe {
         let mut probe = AnswerProbe::default();
         let covering = self.cache_snapshot_source.covering_prefixes(answer);
-        for key in answer.probe_keys(&covering) {
+        for (key, matched) in answer.probe_candidates(&covering, observe) {
             match self.cache.lookup(&key, deadline).await {
                 Ok(CacheLookup::Fresh(record)) => {
                     if probe.stale.is_empty() {
                         probe.fresh = Some(record);
+                        probe.matched = matched;
                     }
                     break;
                 }
@@ -1152,6 +1204,7 @@ impl PolicyDnsCore {
                         && stale_answer_ttl(cache, &record.entry, Instant::now()).is_some()
                     {
                         probe.stale.push((record, refresh));
+                        probe.matched = matched;
                     }
                 }
                 Ok(CacheLookup::Expired(record)) => probe.seen.push((key, record.version)),
@@ -1194,6 +1247,7 @@ impl PolicyDnsCore {
             answer: answer?,
             query: prepared.query,
             member_queries: prepared.member_queries,
+            member_policies: prepared.member_policies,
             cache: plan.cache,
             upstream: plan.upstream,
         })
@@ -1225,6 +1279,7 @@ impl PolicyDnsCore {
         let finalizer = Arc::clone(&core.late_cache_finalizer);
         let mut request = request.clone();
         request.context = optimistic_refresh_context(&request.context);
+        request.context.meta.completion = request.context.meta.completion.for_refresh();
         request.context.runtime_revision = producer_revision;
         let refresh_observation = request
             .context
@@ -1243,7 +1298,7 @@ impl PolicyDnsCore {
             };
             let deadline = request.context.meta.deadline;
             let probe = core
-                .probe_answer(&prepared.answer, &prepared.cache, deadline)
+                .probe_answer(&prepared.answer, &prepared.cache, deadline, false)
                 .await;
             if probe.fresh.is_some() {
                 tracing::debug!(
@@ -1267,6 +1322,7 @@ impl PolicyDnsCore {
                     &request.context,
                     None,
                     prepared.member_queries,
+                    prepared.member_policies,
                 )
                 .await
             else {
@@ -1461,23 +1517,46 @@ fn stale_answer_ttl(
         .then_some(answer_ttl)
 }
 
-/// 根据请求级 ECS 配置生成真正发往上游的 canonical query。
+/// 测试入口复用生产 ECS 分支，不额外构造诊断数据。
+#[cfg(test)]
 fn effective_upstream_query(
     query: &crate::dns::CanonicalQuery,
     ecs: &ResolvedEcs,
     client_addr: Option<IpAddr>,
 ) -> crate::dns::CanonicalQuery {
-    let subnet = match ecs.mode {
-        EcsMode::Disabled => None,
-        EcsMode::Custom => ecs
-            .custom_ip
-            .map(|network| ClientSubnet::new(network.network(), network.prefix_len(), 0)),
-        EcsMode::Client => query
-            .edns_client_subnet()
-            .and_then(normalize_client_subnet)
-            .or_else(|| client_addr.map(client_address_subnet)),
+    effective_upstream_query_and_source(query, ecs, client_addr).0
+}
+
+/// query 与取值来源在同一分支产生；只增加旁路枚举，不改变 ECS 选择策略。
+fn effective_upstream_query_and_source(
+    query: &crate::dns::CanonicalQuery,
+    ecs: &ResolvedEcs,
+    client_addr: Option<IpAddr>,
+) -> (crate::dns::CanonicalQuery, EcsValueSource) {
+    let (subnet, source) = match ecs.mode {
+        EcsMode::Disabled => (None, EcsValueSource::None),
+        EcsMode::Custom => (
+            ecs.custom_ip
+                .map(|network| ClientSubnet::new(network.network(), network.prefix_len(), 0)),
+            if ecs.custom_ip.is_some() {
+                EcsValueSource::Custom
+            } else {
+                EcsValueSource::None
+            },
+        ),
+        EcsMode::Client => match query.edns_client_subnet().and_then(normalize_client_subnet) {
+            Some(subnet) => (Some(subnet), EcsValueSource::ClientEcs),
+            None => (
+                client_addr.map(client_address_subnet),
+                if client_addr.is_some() {
+                    EcsValueSource::ClientIp
+                } else {
+                    EcsValueSource::None
+                },
+            ),
+        },
     };
-    query.with_edns_client_subnet(subnet)
+    (query.with_edns_client_subnet(subnet), source)
 }
 
 /// 校验并规范化客户端自带的 ECS：source 截断到隐私上限（IPv4 `/24`、IPv6 `/56`），
@@ -1633,6 +1712,13 @@ struct PreparedUpstreamQuery {
     query: super::CanonicalQuery,
     member_queries: Option<Arc<HashMap<ConnectorId, super::CanonicalQuery>>>,
     ecs: AnswerEcs,
+    member_policies: Option<Arc<PreparedEcsPolicies>>,
+}
+
+/// ECS 值相同不代表来源相同；按实际 leaf 保留同次准备的来源。
+struct PreparedEcsPolicies {
+    default: EcsPolicy,
+    members: BTreeMap<String, EcsPolicy>,
 }
 
 /// 一次上游执行的终态和实际选中的配置成员 ID。
@@ -1753,42 +1839,55 @@ impl UpstreamRuntime {
         original_query: &super::CanonicalQuery,
         selected_ecs: &ResolvedEcs,
         client_addr: Option<IpAddr>,
+        observe: bool,
     ) -> PreparedUpstreamQuery {
-        let query = effective_upstream_query(original_query, selected_ecs, client_addr);
-        let uniform = |query: super::CanonicalQuery| PreparedUpstreamQuery {
-            ecs: AnswerEcs::from_query(query.edns_client_subnet()),
-            query,
-            member_queries: None,
+        let (query, value_source) =
+            effective_upstream_query_and_source(original_query, selected_ecs, client_addr);
+        let mut policies = observe.then(|| PreparedEcsPolicies {
+            default: super::ecs_observation::policy(selected_ecs, value_source),
+            members: BTreeMap::new(),
+        });
+        let uniform = |query: super::CanonicalQuery, policies: Option<PreparedEcsPolicies>| {
+            PreparedUpstreamQuery {
+                ecs: AnswerEcs::from_query(query.edns_client_subnet()),
+                query,
+                member_queries: None,
+                member_policies: policies.map(Arc::new),
+            }
         };
         if !matches!(
             selected_ecs.source,
             ValueSource::Default | ValueSource::Global
         ) {
-            return uniform(query);
+            return uniform(query, policies);
         }
         let Some(members) = self.group_member_ecs.get(upstream) else {
-            return uniform(query);
+            return uniform(query, policies);
         };
         if !members.values().any(Option::is_some) {
-            return uniform(query);
+            return uniform(query, policies);
         }
         let queries: BTreeMap<_, _> = members
             .iter()
             .map(|(member, ecs)| {
-                let member_query = ecs.as_ref().map_or_else(
-                    || query.clone(),
-                    |ecs| effective_upstream_query(original_query, ecs, client_addr),
-                );
+                let ecs = ecs.as_ref().unwrap_or(selected_ecs);
+                let (member_query, source) =
+                    effective_upstream_query_and_source(original_query, ecs, client_addr);
+                if let Some(policies) = &mut policies {
+                    policies.members.insert(
+                        member.as_str().to_owned(),
+                        super::ecs_observation::policy(ecs, source),
+                    );
+                }
                 (member, member_query)
             })
             .collect();
-        // 所有 query 均由同一原始请求只改 ECS 生成，比较规范化后的 ECS 即足够。
         if let Some(first) = queries.values().next()
             && queries
                 .values()
                 .all(|member| member.edns_client_subnet() == first.edns_client_subnet())
         {
-            return uniform(first.clone());
+            return uniform(first.clone(), policies);
         }
         let ecs = AnswerEcs::members(
             queries
@@ -1806,6 +1905,7 @@ impl UpstreamRuntime {
         PreparedUpstreamQuery {
             query,
             member_queries: Some(Arc::new(member_queries)),
+            member_policies: policies.map(Arc::new),
             ecs,
         }
     }
@@ -1818,15 +1918,15 @@ impl UpstreamRuntime {
         context: &super::RequestContext,
         late_sink: Option<Arc<dyn LateResultSink>>,
         member_queries: Option<Arc<HashMap<ConnectorId, super::CanonicalQuery>>>,
+        member_policies: Option<Arc<PreparedEcsPolicies>>,
     ) -> Option<UpstreamExecutionResult> {
-        if let Some(exchange) = self.direct.get(upstream) {
-            return Some(UpstreamExecutionResult {
-                outcome: exchange.exchange(query, context).await,
-                target_id: Arc::from(upstream.as_str()),
-                used_id: Some(Arc::from(exchange.connector_id().as_str())),
+        let trace = &context.meta.completion;
+        if trace.ecs_enabled() {
+            trace.exchange(EcsExchange::Unrecorded {
+                reason: EcsUnrecordedReason::NoSelectedResponse,
             });
         }
-        if let Some(executor) = self.groups.get(upstream) {
+        let (outcome, used_id, selected_leaf) = if let Some(executor) = self.groups.get(upstream) {
             let result = match late_sink {
                 Some(sink) => executor
                     .execute_with_selection_and_late_sink(query, context, sink, member_queries)
@@ -1837,21 +1937,53 @@ impl UpstreamRuntime {
                     .await
                     .ok(),
             }?;
-            let GroupExecutionResult { connector, outcome } = result;
-            return Some(UpstreamExecutionResult {
-                target_id: Arc::from(upstream.as_str()),
-                used_id: connector.map(|id| Arc::from(id.as_str())),
+            (
+                result.outcome,
+                result.connector.map(|id| Arc::from(id.as_str())),
+                result.selected_leaf,
+            )
+        } else {
+            let exchange = self
+                .direct
+                .get(upstream)
+                .or_else(|| self.all.get(upstream))?;
+            let outcome = exchange.exchange(query, context).await;
+            let selected_leaf = trace
+                .ecs_enabled()
+                .then(|| crate::upstream::SelectedEcsLeaf {
+                    name: exchange.connector_id().as_str().to_owned(),
+                    query: super::ecs_observation::query_value(query),
+                    response: match &outcome {
+                        UpstreamOutcome::Response(response) => {
+                            super::ecs_observation::response_value(response)
+                        }
+                        _ => super::ecs::EcsValue::Unrecorded,
+                    },
+                });
+            (
                 outcome,
+                Some(Arc::from(exchange.connector_id().as_str())),
+                selected_leaf,
+            )
+        };
+        if let (Some(leaf), Some(policies)) = (selected_leaf, member_policies) {
+            let policy = policies
+                .members
+                .get(&leaf.name)
+                .unwrap_or(&policies.default)
+                .clone();
+            trace.exchange(EcsExchange::Observed {
+                query: leaf.query,
+                response: leaf.response,
+                policy,
+                upstream_leaf_name: leaf.name,
             });
         }
-        if let Some(exchange) = self.all.get(upstream) {
-            return Some(UpstreamExecutionResult {
-                outcome: exchange.exchange(query, context).await,
-                target_id: Arc::from(upstream.as_str()),
-                used_id: Some(Arc::from(exchange.connector_id().as_str())),
-            });
-        }
-        None
+        Some(UpstreamExecutionResult {
+            outcome,
+            target_id: Arc::from(upstream.as_str()),
+            used_id,
+        })
     }
 }
 
@@ -3401,6 +3533,7 @@ mod tests {
                 attempt_index: 1,
                 connector: ConnectorId::new("late").unwrap(),
                 outcome: UpstreamOutcome::Response(response),
+                selected_leaf: None,
             },
         );
 
@@ -3481,6 +3614,7 @@ mod tests {
                 attempt_index: 1,
                 connector: ConnectorId::new("late-positive").unwrap(),
                 outcome: UpstreamOutcome::Response(positive),
+                selected_leaf: None,
             },
         );
 
@@ -3516,6 +3650,7 @@ mod tests {
                 attempt_index: 2,
                 connector: ConnectorId::new("late-positive-replacement").unwrap(),
                 outcome: UpstreamOutcome::Response(replacement),
+                selected_leaf: None,
             },
         );
         for _ in 0..100 {
@@ -3586,6 +3721,7 @@ mod tests {
                     attempt_index,
                     connector: ConnectorId::new(format!("late-negative-{attempt_index}")).unwrap(),
                     outcome: UpstreamOutcome::Response(response),
+                    selected_leaf: None,
                 },
             );
         }
@@ -3671,6 +3807,7 @@ mod tests {
                     attempt_index: 1,
                     connector: ConnectorId::new("late-latest").unwrap(),
                     outcome: UpstreamOutcome::Response(response),
+                    selected_leaf: None,
                 },
             );
 
@@ -4644,6 +4781,7 @@ strategy:
                 &ConfigId::new("outer").unwrap(),
                 &request.query,
                 &request.context,
+                None,
                 None,
                 None,
             )

@@ -25,8 +25,8 @@ pub use doh::{
     DOH_MEDIA_TYPE, DohEndpointError, DohExchange, DohHttpRequest, DohHttpResponse,
     DohHttpResponseOwned, DohHttpTransport, MAX_DOH_RESPONSE_BODY_BYTES, validate_response,
 };
+pub(crate) use executor::GroupMember;
 pub use executor::{ExecutorBuildError, ExecutorError, LateResultSink, UpstreamGroupExecutor};
-pub(crate) use executor::{GroupExecutionResult, GroupMember};
 pub use group::{GroupSelector, GroupSelectorError, SelectionLease};
 pub use hosts::{HostsExchange, HostsExchangeBuildError};
 pub use http::{
@@ -37,6 +37,7 @@ pub use outbound::{
     NameResolution, OutboundCredentials, OutboundProfile, OutboundProfileError, OutboundTarget,
     OutboundTargetError, Socks5ConnectError, Socks5Connector,
 };
+pub(crate) use outcome::SelectedEcsLeaf;
 pub use outcome::{
     AttemptAssessment, AttemptClass, FallbackDecision, OutcomeError, UpstreamAttempt, aggregate,
     assess, deduplicate_connector_order, should_enter_fallback,

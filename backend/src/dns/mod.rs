@@ -1,6 +1,8 @@
 //! Transport 无关的 DNS 核心契约。
 
 mod context;
+pub mod ecs;
+pub(crate) mod ecs_observation;
 mod handler;
 mod hosts;
 mod message;

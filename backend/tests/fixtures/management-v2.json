@@ -33,6 +33,7 @@
     "order": "desc"
   },
   "record": {
+    "ecs": null,
     "id": "2026-09-07.17",
     "occurred_at_ms": 1788739201000,
     "identity": {"client_id": "unknown-id", "client_ip": "192.0.2.10"},
@@ -57,6 +58,26 @@
     "cache_activity": null,
     "answers": {"state": "available", "total_count": 1, "records": [{"name": "example.test.", "type": "A", "ttl_seconds": 30, "data": "192.0.2.1"}]}
   },
+  "ecs_cases": [
+    {"request":{"state":"present","cidr":"2001:db8::/32","scope_prefix":0},"upstream":{"state":"observed","query":{"state":"present","cidr":"2001:db8::/48","scope_prefix":0},"response":{"state":"present","cidr":"2001:db8::/48","scope_prefix":48},"policy":{"source":"rule","mode":"custom","value_source":"custom"},"upstream_leaf_name":"inner"},"cache_match":null,"refresh":null},
+    {"request":{"state":"absent"},"upstream":{"state":"observed","query":{"state":"absent"},"response":{"state":"absent"},"policy":{"source":"default","mode":"disabled","value_source":"none"},"upstream_leaf_name":"direct"},"cache_match":null,"refresh":null},
+    {"request":{"state":"invalid"},"upstream":{"state":"not_sent","reason":"cache_hit"},"cache_match":{"kind":"covering","cidr":"203.0.113.0/24"},"refresh":{"state":"observed","query":{"state":"present","cidr":"203.0.113.0/24","scope_prefix":0},"response":{"state":"unrecorded"},"policy":{"source":"global","mode":"client","value_source":"client_ip"},"upstream_leaf_name":"refresh-leaf"}},
+    {"request":{"state":"unrecorded"},"upstream":{"state":"unrecorded","reason":"no_selected_response"},"cache_match":null,"refresh":{"state":"unrecorded","reason":"deadline"}},
+    {"request":{"state":"absent"},"upstream":{"state":"not_sent","reason":"local_answer"},"cache_match":null,"refresh":null},
+    {"request":{"state":"absent"},"upstream":{"state":"not_sent","reason":"single_flight"},"cache_match":null,"refresh":null},
+    {"request":{"state":"absent"},"upstream":{"state":"not_sent","reason":"cache_hit"},"cache_match":{"kind":"exact","cidr":"0.0.0.0/0"},"refresh":{"state":"not_sent","reason":"not_started"}},
+    {"request":{"state":"absent"},"upstream":{"state":"not_sent","reason":"cache_hit"},"cache_match":{"kind":"no_ecs","cidr":null},"refresh":null},
+    {"request":{"state":"absent"},"upstream":{"state":"not_sent","reason":"cache_hit"},"cache_match":{"kind":"members","cidr":null},"refresh":{"state":"unrecorded","reason":"budget"}},
+    {"request":{"state":"absent"},"upstream":{"state":"unrecorded","reason":"not_observed"},"cache_match":null,"refresh":null}
+  ],
+  "ecs_invalid_cases": [
+    {"request":{"state":"present","cidr":"192.0.2.0/33","scope_prefix":0},"upstream":{"state":"not_sent","reason":"local_answer"},"cache_match":null,"refresh":null},
+    {"request":{"state":"present","cidr":"2001:db8::/129","scope_prefix":0},"upstream":{"state":"not_sent","reason":"local_answer"},"cache_match":null,"refresh":null},
+    {"request":{"state":"present","cidr":"203.0.113.0/24","scope_prefix":33},"upstream":{"state":"not_sent","reason":"local_answer"},"cache_match":null,"refresh":null},
+    {"request":{"state":"absent","cidr":"203.0.113.0/24"},"upstream":{"state":"not_sent","reason":"local_answer"},"cache_match":null,"refresh":null},
+    {"request":{"state":"absent"},"upstream":{"state":"not_sent","reason":"local_answer","query":{"state":"absent"}},"cache_match":null,"refresh":null},
+    {"request":{"state":"absent"},"upstream":{"state":"not_sent","reason":"cache_hit"},"cache_match":{"kind":"members","cidr":"203.0.113.0/24"},"refresh":null}
+  ],
   "metrics": {
     "sampled_at_ms": 1788739201000,
     "qps": {"state": "unavailable", "reason": "warmup", "observed_seconds": 23},

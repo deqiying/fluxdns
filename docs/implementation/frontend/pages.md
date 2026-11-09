@@ -19,6 +19,8 @@
 > 2026-11-07 增量核对：`1a226a8` 加本次工作树；仅核对 DoH 文案回归用例的按钮定位优化与测试证据，页面行为和其余历史范围不变
 >
 > 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，范围限 DoH 编辑器的新路由提示及客户端页面的显式/隐式 ID 地址生成；本次验证见[证据与限制](#证据与限制)，其余历史范围未重新核对。
+>
+> 2026-11-10 增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅核对解析记录六列布局、UTC、分层详情与请求级 ECS；其余页面仍按原核对范围解释。
 
 ## 路由与数据源
 
@@ -69,21 +71,25 @@ DashboardPage 的“深色样例/浅色显示”只切换本页 CSS 外观，指
 
 [`MetricsTrendChart`](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx) 在同一绘图区显示 QPS 蓝线和 RPM 青绿色线，分别标注左轴请求/秒、右轴请求/分钟；两条线都逐秒一个点，RPM 由 [`rateTrend`](../../../frontend/src/modules/dashboard/rateTrend.ts) 把快照逐秒 `qps_trend`（订阅基线加每秒增量拼装出的序列）与页面本地保留的最近 120 秒缓存合并后按过去 60 秒滚动求和得出，同一秒以最新快照为准，因此不依赖后端分钟级 `rpm_trend`：后端快照自带窗口起点前 60 秒前瞻秒桶，窗口最左一分钟也有完整求和窗口，只有服务启动不足 660 秒时才按 warmup 给出已覆盖秒数；缺口秒会让其后 60 秒断线，相邻可用样本间隔过大也断开连线，都不用部分窗口凑数。两个轴独立线性缩放，`axisMaximum` 把单格刻度取为不小于峰值四分之一的最小易读整数值：倍数取 1/1.2/1.25/1.5/2/2.5/3/4/5/6/8/10，小量级下非整数倍数被过滤成 1/2/3/4/5/6/8/10，10 倍量级起为 120/125/150/200/250/300/400/500/600/800/1000；轴上限恒为单格的四倍且不额外留余量，因此两轴刻度始终是整数并与同一组五条网格线对齐；横轴标签按分钟给出并在窄屏放宽到 2/5 分钟。采样时间、时间范围、横轴和提示框统一为 UTC。窗口外样本不参与刻度或选点，不可用区间不连接，孤立有效样本保留为圆端点；空趋势和全不可用趋势有明确提示。提示框由悬停、点按或键盘聚焦显示，离开交互后收起，避免常驻遮挡窄屏曲线；方向键、Home/End 沿共享时间轴按秒选择各序列最近样本，圆点位于该样本实际时间。ResizeObserver 让 SVG 使用容器像素宽度，保持轴文字大小，并在窄屏减少时间刻度。
 
-[`QueriesPage`](../../../frontend/src/modules/queries/QueriesPage.tsx) 使用 `POST /api/v2/queries/search` 的 opaque previous/next cursor，默认最近 7 天、20 条、发生时间降序；域名、当前匹配客户端、原始 ID/IP、协议、来源、rcode 与结果状态均在服务端分页前过滤，不伪造页码或总数。query key 包含规范化请求，过滤或页大小变化清除 cursor、实时缓冲和详情；旧请求取消，翻页不复用不匹配的数据。
+[`QueriesPage`](../../../frontend/src/modules/queries/QueriesPage.tsx) 使用 `POST /api/v2/queries/search` 的 opaque previous/next cursor，默认最近 7 天、10 条、发生时间降序，保留 10/20/50/100 条选项；页面显式提交页大小，不改变后端默认值。域名、当前客户端名称、原始/历史匹配 ID、请求 IP、协议、来源、QTYPE、RCODE、结果与缓存状态均在服务端分页前过滤，不伪造页码或总数。query key 包含规范化请求，过滤、排序或页大小变化清除 cursor、实时缓冲和详情。
 
 域名、客户端名称和请求 IP 输入均表示字面包含搜索，输入提示分别为关键词/地址片段；HTTP 与 WS 发送同一过滤条件。匹配和完整 IP 规范化由后端完成，CIDR 不是网段查询，`%/_/*` 不是通配符；前端不按当前页结果做本地过滤。
 
-解析记录自动刷新默认开启。初次 HTTP 快照后共享 events client 携带快照 cursor、retention revision 和同一过滤器订阅后端 WebSocket 增量，不轮询整个列表；收到记录按稳定 ID 去重。首页默认倒序且无详情时直接合并，详情打开或浏览历史 cursor 时只进入 500 条/2 MiB 缓冲并显示待更新；超限或服务端 resync 重新取 HTTP 首屏。用户关闭自动刷新或页面不可见时释放订阅，恢复可见先重新同步快照。
+解析记录自动刷新默认开启。HTTP 快照后共享 events client 携带快照 cursor、retention revision 和同一过滤器订阅 WS 增量，不轮询整个列表，按稳定 ID 去重。默认倒序首页无详情时直接合并；详情打开或浏览历史页时进入 500 条/2 MiB 缓冲，新记录提示并入列表工具栏。完整记录（含 ECS）的实际 UTF-8 JSON 字节参与预算，超限或服务端 resync 重新读取 HTTP 权威快照。关闭自动刷新或页面隐藏时释放订阅，恢复可见先重新同步。
 
-非模态 Popover 冻结 record ID 与目录快照。鼠标进入结果单元格 120ms 后打开预览，移到浮窗内仍可查看，离开两者 180ms 后关闭；点击结果固定，点击另一结果切换，浮窗内点击和选择文本不关闭，外部点击关闭。键盘聚焦也可打开，Escape 关闭并恢复原触发按钮焦点。后台新记录、refetch 和旧行的延迟关闭回调不能替换当前详情。
+桌面非模态 Popover 冻结 record、ECS、目录 revision 和当前列表；120ms 悬停打开、移出触发器和浮层 180ms 后关闭，点击固定/切换，内部点击和选择文本不关闭，提供复制、固定/取消固定与关闭操作。优先 `rightTop`、自动翻转/调整，外宽约 480px，正文受视口高度限制并内部滚动。Esc 或显式关闭后按稳定 ID 寻找仍可用触发节点恢复焦点，并抑制焦点导致的立即重开；外部指针关闭保留用户新选择的焦点，不抢走筛选输入。`≤760px` 改为记录卡片和 Ant Design 底部 Drawer，保留焦点管理、背景滚动约束及安全区留白；窄屏完整路由只放详情。
 
-详情显示 canonical qname、Answer 截断计数、strategy/upstream/cache producer 与原始/历史/当前三层客户端事实。qname/Answer 只按文本渲染，缺失耗时不伪造为零；共同保留水位使记录过期时显示明确状态，不按行号寻找替代记录。
+默认详情依次展示域名/UTC 时间、响应码/来源/发送状态/响应耗时、Answer、应答链路、后台缓存活动、客户端与 ECS。原始/历史/当前身份、三种完整耗时、完整时间、记录 ID、目录快照及 ECS 原始值/交换/匹配进入默认折叠的诊断区。Answer owner 与请求名相同不重复显示，不同时保留；发送失败、截断/未保留和历史缺失提示保留，复制不可用时明确提示手工选择。
 
-解析记录页沿用服务状态的大标题、单句说明和浅色圆角卡片。列表按时间、请求、结果、路由、客户端排列，行高固定为 76px，每个单元格保留两行，超出宽度以省略号显示；窄屏保持表格内部横向滚动。客户端仅显示名称和请求 IP，名称丢失显示未命名/未匹配占位，历史匹配 ID 保留在详情。主筛选为域名、客户端、请求 IP、协议和来源，原始 ID 移到高级筛选。
+页面沿用 PageFrame、Ant Design、Lucide 和现有壳层，模块样式位于 [`queries.css`](../../../frontend/src/modules/queries/queries.css)。桌面固定 76px 两行六列：时间、请求、结果、响应耗时、路由、客户端；长值省略，完整事实在详情。列表、详情与日期范围统一 UTC。主筛选保留域名、客户端名称、IP、协议和来源；原始 ID、历史匹配 ID、QTYPE、RCODE、结果/缓存状态和排序均保留在高级筛选。
 
-列表结果第二行仅显示响应耗时与来源标签；详情保留总耗时、主链耗时、响应耗时、发送状态及原始/历史/当前身份。三种耗时来自各自后端测点，不能互相相减或以 HTTP 拉取时间代替；历史未记录的响应耗时显示“未记录”，失败发送不显示成功响应耗时。来源标签保留命中缓存、乐观缓存、缓存过期、请求上游及 Hosts；高级缓存筛选保留相同分类名称，提交值仍为原枚举。结果第一行无 Answer 时，`formatResponseSummary` 仅在 `NOERROR`、Answer 状态为 `available` 且 `total_count = 0` 时显示 “NOERROR · NODATA”；截断或未保留时无法判断是否为空，仍显示 “RCODE · outcome”（`outcome` 只由 RCODE 推导，空应答同样是 `answered`）。
+结果第二行只保留来源标签；响应耗时独立右对齐，直接消费 `response_duration_us`，缺失为“未记录”，不补零或由其他耗时相减。总/主链耗时只在诊断区呈现，发送失败不声称成功响应。`formatResponseSummary` 仅在 NOERROR、Answer 状态 available 且 total_count=0 时显示 NODATA；仅 CNAME 仍是实际 Answer，截断和未保留不能伪装为空应答。
 
 路由第一行从 `listener_name` 经策略和上游目标到实际出口；缓存命中沿用缓存生产出口，详情明确它不是当前后台刷新路由。`RouteChain` 根据实际列宽选择完整链路或“入口 → … → 出口”，首尾名称各自可省略，完整内容仍在 title、无障碍名称及详情中保留。第二行显示 `cache_activity`：后台刷新和实际新建/更新/冲突/失败等结果，不能由 miss/expired 推断写入成功；结果标签按 `formatCacheActivityResult` 追加写入结果的响应类与写入 TTL（如“更新缓存 · NODATA 300s”，正应答为“TTL 30s”），用于识别“刷新成功但上游仍返回空应答”，旧记录两字段为 null 时不追加。Hosts 命中不产生写入结果，改为在同一标签行以同级的 `Hosts` 来源标签（`RouteSourceTag`）标注，既不显示无意义的未写入标签，也不留空这一行。后台刷新实际目标和出口在详情中单独展示。
+
+[`QueryEcsSummary`](../../../frontend/src/modules/queries/QueryEcsSummary.tsx) 仅消费生成 DTO：默认主值优先已观察到的后台刷新，其次为本次上游；明确“后台刷新使用”或“用于上游请求”。fresh、Hosts 和 single-flight 分别显示本次未发送、不适用、未独立请求上游；disabled 的真实上游交换显示“未携带 ECS”及配置来源。Scope 只来自真实 response，缓存匹配独立保留 covering/exact（含各自 `/0`）、无 ECS 桶和 members。旧后端省略或旧记录 null 显示未记录，不读取当前配置补算。原始请求与最终 query/response、来源和 leaf 都可在诊断区查看。
+
+2026-11-10 本轮工程结果及用户取消运行时验收的边界统一见 [ECS 工程验证](../backend/management.md#ecs-工程验证与边界)。固定详情不随同 ID refetch/WS 漂移、外部指针关闭后可连续输入、显式关闭/Esc 恢复焦点均有页面回归；jsdom 行为测试关闭 CSS motion，不作为真实动画或多视口布局通过证据。
 
 P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关闭后必须在渲染完成时按稳定 record ID 重新取得当前 DOM 节点再恢复焦点，不能缓存即将移除的按钮。新增 TouchA 点击、恶意 Answer 文本、Escape 与焦点恢复联合测试，该轮前端 97 项通过；加入认证缓存回归后的最终套件为 98 项。
 
@@ -108,6 +114,7 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 | 服务状态视觉与品牌更新 | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx)、[MetricsTrendChart](../../../frontend/src/modules/dashboard/MetricsTrendChart.tsx)、[AppLayout](../../../frontend/src/shared/components/AppLayout.tsx) | 原 `/dashboard` 数据链路及 Vite 图标资源 | 2026-09-22：完整前端 26 文件 110 项测试、typecheck 和生产构建通过；Windows Chromium 生产预览在 1600/1024/768/390/320px 验证布局、键盘/指针选点、浅深色、图标资源及模拟 WS 停止后的过期提示 | 浏览器数据为模拟 HTTP/WS；本轮未重新验证真实 DNS 后端和内嵌 release |
 | 进程状态 | system Page/hooks/api、formatters | `/system-runtime` 已注册 | FC-14 测试；Windows 真实浏览器/后端可用样本与刷新；P3 窄屏无溢出 | 真实不可用 OS 样本未做浏览器验收 |
 | v2 查询与实时记录 | QueriesPage、cursor hooks、realtime buffer | v2 search/detail HTTP + queries WS | Vitest；真实 UDP/SQLite/HTTP/WS、断线 replay/resync | 真实网络慢读饱和和性能未验证 |
+| 解析记录重设计与 ECS | [QueriesPage](../../../frontend/src/modules/queries/QueriesPage.tsx)、[QueryEcsSummary](../../../frontend/src/modules/queries/QueryEcsSummary.tsx)、[queries.css](../../../frontend/src/modules/queries/queries.css) | `/queries` 六列/10 条/UTC、分层详情、Popover/Drawer；复用服务端过滤、cursor 与共享 WS | 2026-11-10：完整前端 45 文件 287 项、v2 契约 7 项、生成幂等、typecheck 与 build 通过；后端结果见 [ECS 工程验证](../backend/management.md#ecs-工程验证与边界) | 用户取消独立运行时验收；没有本轮真实浏览器尺寸/动画或完整 HTTP/WS/wire 联合通过结论 |
 | 解析记录设计与执行事实 | QueriesPage、RequestTrace、详情投影 | 默认 WS、三项耗时、监听入口和缓存操作结果 | 2026-09-22～23：前端 114 项、schema 4 项、生产构建；Chromium 在 1600/1024/768/390/320px 验证固定行高、首尾省略、浮窗与模拟 WS；本机真实 UDP/TCP/DoH、HTTP/WS 及 TTL 过期刷新验证 | 浏览器使用模拟 API；真实后端使用独立 loopback 夹具，未覆盖远程客户端或生产负载 |
 | 稳定详情 | record-keyed Popover、detail formatter | 列表结果与按 ID detail | 持续写入下固定 ID、显式查看新记录、桌面/移动浏览器 | 不重建已过期或历史丢失值 |
 | P3 配置管理 | 九个 Page、v2 module hooks、ConfigFileStatus | 十模块读写、保留 preview、文件差异/组合采用 | 91 项 P3 Vitest；真实文件/SQLite/UDP/Bearer HTTP/两档浏览器 | Linux/macOS 未验证；Windows 主链路结果见联合验收 |

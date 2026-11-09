@@ -5,6 +5,7 @@ import {
   emptyRealtimeBuffer,
   mergeLatestRecords,
   QUERY_BUFFER_RECORDS,
+  QUERY_BUFFER_BYTES,
 } from "./realtime";
 
 describe("解析记录实时缓冲", () => {
@@ -33,5 +34,19 @@ describe("解析记录实时缓冲", () => {
       answers: { state: "available" as const, total_count: 16, records: Array.from({ length: 16 }, () => answer) },
     }));
     expect(appendRealtimeBuffer(emptyRealtimeBuffer(), records).overflow).toBe(true);
+  });
+  it("ECS 完整 UTF-8 载荷参与 2 MiB 预算，不能只计算基础记录", () => {
+    const base = { ...v2QueryRecordsFixture[0], answers: { state: "available" as const, total_count: 16, records: Array.from({ length: 16 }, () => ({ name: "example.test.", type: "TXT", ttl_seconds: 30, data: "d".repeat(300) })) } };
+    const exchange = { state: "observed" as const, query: { state: "present" as const, cidr: "2001:db8::/56", scope_prefix: 0 }, response: { state: "present" as const, cidr: "2001:db8::/56", scope_prefix: 48 }, policy: { source: "rule" as const, mode: "custom" as const, value_source: "custom" as const }, upstream_leaf_name: "成员".repeat(40) };
+    const enriched = { ...base, ecs: { request: { state: "absent" as const }, upstream: exchange, cache_match: null, refresh: exchange } };
+    const baseBytes = appendRealtimeBuffer(emptyRealtimeBuffer(), [base]).bytes;
+    const enrichedBytes = appendRealtimeBuffer(emptyRealtimeBuffer(), [enriched]).bytes;
+    expect(enrichedBytes).toBeGreaterThan(baseBytes);
+    expect(enrichedBytes).toBe(new TextEncoder().encode(JSON.stringify(enriched)).byteLength + 1);
+    const count = Math.floor(QUERY_BUFFER_BYTES / enrichedBytes) + 1;
+    expect(count).toBeLessThan(QUERY_BUFFER_RECORDS);
+    const records = Array.from({ length: count }, (_, index) => ({ ...enriched, id: `${enriched.id}-${index}` }));
+    expect(appendRealtimeBuffer(emptyRealtimeBuffer(), records).overflow).toBe(true);
+    expect(appendRealtimeBuffer(emptyRealtimeBuffer(), records.map(({ ecs: _ecs, ...record }) => record)).overflow).toBe(false);
   });
 });

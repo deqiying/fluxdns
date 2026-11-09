@@ -25,6 +25,8 @@
 > 2026-11-08 短响应缓存增量核对：基线 `96daf34376bcc108efacffdf620144ba5fd0bb54` 加本次工作树，仅核对 REFUSED/空 Answer 的 10s 生命周期、客户端 TTL、无 stale 与 entry v3 恢复；证据见[短响应缓存验证](#短响应缓存验证)。
 >
 > 2026-11-09 答案缓存增量核对：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，核对 v3 AnswerKey、target 子树摘要、成员 ECS、scope 索引与 refresh/late-result；本轮全量后端测试和 loopback 二进制验收见 [v3 答案缓存核对边界](#v3-答案缓存核对边界)，其余历史结论不自动刷新。
+>
+> 2026-11-10 ECS 观测增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅补充请求级 ECS 采集、选中 leaf 与缓存匹配事实；不改变以下 DNS/缓存策略。
 
 ## 入口与调用链
 
@@ -59,6 +61,18 @@ SystemSocketFactory / typed binding
 `MemoryCacheStore`、`InMemoryStorageBackend` 和 `HostsCore`/`ServFailCore` 不在正式请求装配中。前两者用于与 Moka/SQLite 共用的 adapter 契约测试；后两者用于简化解析、dispatch/Transport 测试。它们不是查询性能优化，也不应为了清理名称相似的代码而删除生产 `MokaCacheStore`、`SqliteStorageBackend`、`PolicyDnsCore` 或 hosts upstream 使用的 `HostsTable`。
 
 `ResolvedClient` 与 `ClientRule` 显式区分配置管理 `name` 和请求 `client_ids`。`ClientIndex` 分别构建 name/exact ID 索引，ID 保持大小写敏感且优先于 IP；client CIDR 按前缀长度降序扫描，IPv4-mapped IPv6 在匹配与 cache digest 前归一化为 IPv4。生产 v2 loader 把单个 `client_id` 直接编译到运行时索引；复数容器只是内部统一形态，不表示配置仍接受 `match.ids`。hosts 使用 BTreeMap，rule exact/suffix 使用 BTreeSet，随后依次匹配 keyword/受限 regex。当前没有 CIDR/suffix trie。PolicyState 的 matcher/version/hash 一起发布，Runtime metadata 随后更新，不是跨两个 ArcSwap 的事务。
+
+## 请求级 ECS 执行事实
+
+[`EventPublishingDnsCore`](../../../backend/src/service.rs) 在统一 Core 入口、策略执行前，仅当详情 sink 启用时从原始 canonical query 开启 trace ECS；UDP/TCP/DoH 共用，不用当前配置或客户端地址补算 request。[`ecs_observation.rs`](../../../backend/src/dns/ecs_observation.rs) 区分 present/absent/invalid/unrecorded，保留本阶段 source/scope，仅清除 host bits。
+
+`effective_upstream_query_and_source` 在原有 disabled/client/custom 取值分支同时返回 value_source，`prepare_query` 保存同次 ResolvedEcs 来源。uniform 只表示最终值一致，逐 leaf 来源仍独立。Direct attempt 读取实际进入 connector 的 query 和自身 response；[`executor.rs`](../../../backend/src/upstream/executor.rs) 的 nested、fallback 与 parallel 将 `SelectedEcsLeaf` 随 outcome 返回，[`outcome.rs`](../../../backend/src/upstream/outcome.rs) 择优时一起选择，不使用请求级 last-writer 槽。既有顶层成员/缓存 provenance 原义不变；组全失败没有可靠 leaf 时为 no_selected_response，late-result 不改已返回 ECS。
+
+[`AnswerKey::probe_candidates`](../../../backend/src/cache/key.rs) 从原候选生成 key，仅在观测开启时附带类型化匹配描述；详情关闭、独立 `probe_keys` 以及刷新前的缓存重探测不构造附加地址描述。`AnswerProbe` 只保留实际 fresh/可返回 stale 的匹配。covering、exact、无 ECS 桶和 members 独立，exact `/0` 不等同 covering `/0`。候选顺序、最长前缀、版本/CAS、key/entry/FDCS 格式不变；不把生产请求完整 ECS 来源塞进缓存。
+
+前台只写 `upstream`；fresh/stale 为 cache_hit，Hosts 为 local_answer，single-flight follower 为 single_flight 且不伪造 probe match，真正 fallback 回源时才记录自身交换。刷新 context 的 trace clone 只拥有 `refresh`，使用重决策后的 query/选中 leaf，事实先于缓存终态发布；已确认未回源为 not_started，未知不是禁用或成功。关闭详情时不构造含子网和 leaf 名的附加观测，不在主链格式化 JSON、写 SQLite、等待详情或新增网络调用。持久化和统一投影见[后台分发](background-services.md#完成事件与后台分发)。
+
+2026-11-10 本轮来源、并发、缓存、刷新和详情关闭的回归随全量 Rust suite 通过；工程结果及用户取消独立运行时验收的边界见 [ECS 工程验证](management.md#ecs-工程验证与边界)，不沿用下一节旧基线的受控二进制结果作为新增观测的通过证据。
 
 ## Cache 与 TTL
 

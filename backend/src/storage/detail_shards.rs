@@ -1058,6 +1058,14 @@ async fn initialize_or_validate_shard(
                 .execute(&mut *transaction).await
                 .map_err(|_| PortError::new(PortErrorClass::Unavailable, "detail_shard.execution_column"))?;
         }
+        let has_ecs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM pragma_table_info('resolve_log') WHERE name = 'ecs_json'")
+            .fetch_one(&mut *transaction).await
+            .map_err(|_| PortError::new(PortErrorClass::Unavailable, "detail_shard.ecs_column"))?;
+        if has_ecs == 0 {
+            sqlx::query("ALTER TABLE resolve_log ADD COLUMN ecs_json TEXT")
+                .execute(&mut *transaction).await
+                .map_err(|_| PortError::new(PortErrorClass::Unavailable, "detail_shard.ecs_column"))?;
+        }
         transaction.commit().await.map_err(|_| {
             PortError::new(PortErrorClass::Unavailable, "detail_shard.initialize")
         })?;

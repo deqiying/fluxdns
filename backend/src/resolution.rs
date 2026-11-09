@@ -352,13 +352,14 @@ async fn run_detail_projector(
                 if let Some(event) = event {
                     pending.spawn(async move {
                         let execution = if let Some(detail) = &event.detail {
-                            Some(detail.completion.settled().await)
+                            Some(detail.completion.settled_observation().await)
                         } else {
                             None
                         };
                         let mut record = ResolveDetailRecord::from_resolution_event(&event)?;
                         if let Some(execution) = execution {
-                            record.set_execution(execution);
+                            record.set_execution(execution.execution);
+                            if let Some(ecs) = execution.ecs { record.set_ecs(ecs); }
                         }
                         Ok::<_, PortError>(record)
                     });

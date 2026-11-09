@@ -13,6 +13,8 @@
 ## 1. 职责与边界
 
 > 2026-09-23 局部评审：仅补充请求诊断快照、已验证分片可空扩列及旧记录兼容。
+>
+> 2026-11-10 局部评审：请求级 ECS 独立可空诊断列、4096 字节预算、原子 commit 和旧/回退读取；其余设计沿历史范围。
 
 Storage 模块实现两个相互隔离的持久化 owner：
 
@@ -105,13 +107,15 @@ prepare 阶段先初始化统计库：
 
 响应发送及异步缓存结果使用可空诊断快照，历史缺失不补造事实。扩展已有分片必须先通过 layout、日期和对象校验，仅在写 lease 内幂等增加可空列，保留现有 record ID；只读历史查询必须兼容缺列。详情等待这些终态采用独立有界并发和时间预算，不阻塞请求或统计。当前接线和精确边界见[完成事件与后台分发](../../../implementation/backend/background-services.md#完成事件与后台分发)。
 
+ECS 诊断使用同一 resolve_log 表中的独立可空 `ecs_json`，不向严格反序列化的 `execution_json` 添加字段，也不改变 layout、ID、lease、retention 或缓存快照格式。后台投影与读写边界共用 4096 UTF-8 字节上限，非法/超限/损坏只降级 ECS 并给出固定安全原因，基础记录与 execution 仍遵守原严格规则。两列与基础行在同一事务提交，commit/replay 只发布已成功持久化的事实。合法写 lease 校验后幂等扩列，只读缺列或 NULL 为未记录；不扫描回填历史，旧读者按已知字段忽略新增列，回退必须有基线读取夹具证据。
+
 - event time、从 transport 接入到 core 完成的 request duration，以及微秒精度的 DNS core 主链耗时；
 - request ID digest；
 - listener、route 存在性、配置 client bucket、有效 client IP 和 strategy；
 - canonical qname、qtype、qclass；
 - 策略目标 upstream/group、实际产生响应的 direct/顶层 group member；cache hit 保存缓存生产来源；
 - matched rule 来源、资源存在性标记和可选 ordinal；
-- 当前 schema 没有 ECS mode/prefix 列，不能宣称已持久化 ECS 诊断；
+- ECS 原始输入、实际选中上游交换、缓存匹配与关联后台刷新使用独立 ecs_json，不以配置或旧缓存内容补算；
 - source、RCODE、cache status 和有界 answer JSON（最多 16 条、4096 bytes）；
 - failure/cancellation 分类；
 - runtime/resource revision 摘要。

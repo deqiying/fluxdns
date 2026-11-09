@@ -354,6 +354,18 @@ fn query_record(
     };
     let execution = record.execution.unwrap_or_default();
     Ok(QueryRecord {
+        ecs: record
+            .ecs
+            .and_then(|value| match contract::QueryEcs::try_from(value) {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    tracing::warn!(
+                        reason = "invalid",
+                        "ECS detail discarded at management boundary"
+                    );
+                    None
+                }
+            }),
         listener_name: record.listener_id,
         response_duration_us: execution.response_duration_us,
         response_status: execution.response_status,
@@ -464,5 +476,79 @@ fn storage_error(error: PortError) -> ErrorCode {
         ErrorCode::InvalidArgument
     } else {
         ErrorCode::ServiceUnavailable
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn ecs_search_detail_and_commit_projection_are_identical() {
+        let (services, root) = crate::management::query::tests::test_services().await;
+        let service = services.queries.as_ref().unwrap();
+        let day = crate::management::query::tests::HISTORY_DAY + 2;
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/management-v2.json"))
+                .unwrap();
+        let mut record = crate::management::query::tests::history_record(
+            day,
+            10,
+            crate::ports::storage::StatsSource::Upstream,
+        );
+        record.set_ecs(
+            crate::dns::ecs::QueryEcs::decode_json(&fixtures["ecs_cases"][0].to_string()).unwrap(),
+        );
+        let mut commits = service.detail_store.subscribe_commits();
+        service
+            .detail_store
+            .write_records(
+                i32::try_from(day).unwrap(),
+                &[record],
+                super::super::query_deadline(),
+            )
+            .await
+            .unwrap();
+        let commit = commits.recv().await.unwrap();
+        let request: QueryRequest = serde_json::from_value(serde_json::json!({
+            "filter": {"from_ms": day * 86_400_000, "to_ms": (day + 1) * 86_400_000},
+            "cursor": null, "direction": "older", "page_size": 10, "sort": "occurred_at", "order": "asc"
+        })).unwrap();
+        let page = search(service, &services.config_store, request.clone())
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 1);
+        let detail = detail(
+            service,
+            &services.config_store,
+            page.items[0].id.as_str().to_owned(),
+        )
+        .await
+        .unwrap();
+        let (_, projected) = project_committed_records(
+            service,
+            &services.config_store,
+            request.filter,
+            &commit.records,
+        )
+        .await
+        .unwrap();
+        let expected = fixtures["ecs_cases"][0].clone();
+        for value in [&page.items[0], &detail.record, &projected[0]] {
+            assert_eq!(serde_json::to_value(&value.ecs).unwrap(), expected);
+        }
+        service
+            .detail_store
+            .shutdown(super::super::query_deadline())
+            .await
+            .unwrap();
+        drop(services);
+        if std::fs::remove_dir_all(root).is_err() {
+            // 共享 fixture 的统计 owner 尚可能持有 SQLite；保留在已忽略的测试目录。
+            tracing::warn!(
+                reason = "fixture_in_use",
+                "ECS projection test fixture retained"
+            );
+        }
     }
 }

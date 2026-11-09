@@ -7,6 +7,8 @@
 > 最后评审：2026-10-04（局部：文本包含搜索与配置快照等待；其他范围沿用 2026-09-09）
 >
 > 2026-11-06 局部评审：配置单次保存、无状态影响预览和文件确认；其余范围沿原评审记录。
+>
+> 2026-11-10 局部评审：QueryRecord 可空 ECS、HTTP/WS 统一投影、载荷预算与详情授权边界；其余设计沿历史范围。
 
 ## 设计结论
 
@@ -23,6 +25,8 @@ v2 外部差异只投影白名单模块源值；只读字段和认证 hash 仅�
 实时事件使用独立的有界 WS owner。浏览器先以业务 Bearer 向同源 ticket 端点换取 30 秒单次凭据，再通过 `Sec-WebSocket-Protocol` 传递；服务端协商响应只保留固定协议名，不能回显 ticket。upgrade 必须精确校验 `public_origin`，不接受 URL query token、业务 Cookie 或 Authorization 后备。握手后持续复核同一 SessionStore，登出、到期、用户认证变化和 shutdown 都回收连接；长连接不受普通 HTTP 15 秒 timeout 误杀，但仍受连接、订阅、帧、队列、心跳和写入预算约束。
 
 解析记录只在详情事务 commit 后按 `stream_epoch + sequence` 发布。HTTP 快照返回 commit cursor 与共同保留 revision，订阅携带二者，服务端只在 epoch、水位和 replay 范围连续时补发；任何进程重启、cursor 缺口、缓冲溢出或保留 revision 变化都返回 `resync_required`。客户端必须按稳定记录 ID 去重并重新读取 HTTP 权威快照，不能把 event time 当游标或宣称无限回放。
+
+请求级 ECS 是受保护解析详情的一部分，request、upstream、cache_match、refresh 四组事实来自执行时的原始 query、实际选中 leaf/response、实际命中候选与关联任务，不按当前配置恢复旧事实。独立可空 ecs_json 与基础行同事务持久化，execution_json 的严格字段集合保持不变；一次 commit 后冻结，不增加按 ID 回写事件。search、detail、WS push/replay 使用相同 QueryRecord 投影，字段缺省/null 兼容旧记录。新增载荷参与既有 replay 估算与真实出站字节限额，超限明确关闭或 resync，不静默裁掉 ECS；原有鉴权、Origin、会话和 retention 边界不扩大。精确 schema 由 OpenAPI 维护，接线与兼容证据见[请求级 ECS 统一投影](../implementation/backend/management.md#请求级-ecs-统一投影)。
 
 域名、当前客户端名称、请求 IP 采用 ASCII 忽略大小写的字面文本包含搜索，HTTP 历史、WS 在线和 replay 共用规范化及过滤语义。完整 IP 仍先规范化，地址片段不是 CIDR 查询；`%`、`_`、`*` 不解释为通配符。全部过滤在服务端分页前完成，客户端名称先解析为完整当前目录 ID 集合。包含搜索以时间窗口、页大小和 deadline 限制成本，不引入额外全文索引。
 

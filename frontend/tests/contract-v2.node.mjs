@@ -156,3 +156,32 @@ test("安全 diagnostic 可选且独立于原错误码和 operation 状态", () 
   assert.equal(validator({stage: "prepare", code: "CODE"}), false);
   assert.equal(validator({...diagnostic, unsafe_detail: "not allowed"}), false);
 });
+
+test("ECS 状态、IPv6、缓存刷新和旧缺省使用同一记录契约", () => {
+  for (const ecs of fixtures.ecs_cases) {
+    validate("QueryEcs", ecs);
+    validate("QueryRecord", {...fixtures.record, ecs});
+    validate("QueryDetail", {record: {...fixtures.record, ecs}, directory_revision: "directory-1"});
+    validate("ServerMessage", {type: "queries", subscription_id: "queries-ecs", cursor: {epoch: "stream-ecs", sequence: "1"}, directory_revision: "directory-1", items: [{...fixtures.record, ecs}]});
+  }
+  for (const ecs of fixtures.ecs_invalid_cases) {
+    assert.equal(ajv.getSchema("fluxdns-v2#/$defs/QueryEcs")(ecs), false);
+  }
+  const legacy = {...fixtures.record};
+  delete legacy.ecs;
+  validate("QueryRecord", legacy);
+  validate("QueryRecord", {...legacy, ecs: null});
+  assert.equal(definitions.QueryRecord.required.includes("ecs"), false);
+  assert.equal(definitions.QueryEcs["x-max-json-bytes"], 4096);
+  for (const cidr of ["::/0", "::1/128", "2001:db8::/32", "::ffff:192.0.2.0/120"]) {
+    validate("EcsValue", {state: "present", cidr, scope_prefix: 128});
+  }
+  for (const cidr of [":::/0", "1::2::/64", "2001:db8::/129", "999.0.0.0/24", "192.0.2.0/33"]) {
+    assert.equal(ajv.getSchema("fluxdns-v2#/$defs/EcsValue")({state: "present", cidr, scope_prefix: 0}), false, cidr);
+  }
+  for (const field of ["request", "upstream", "cache_match", "refresh"]) {
+    const invalid = {...fixtures.ecs_cases[0]};
+    delete invalid[field];
+    assert.equal(ajv.getSchema("fluxdns-v2#/$defs/QueryEcs")(invalid), false, field);
+  }
+});

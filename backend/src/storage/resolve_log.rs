@@ -25,6 +25,7 @@ const MAX_ANSWER_JSON_BYTES: usize = 4_096;
 #[derive(Clone)]
 pub struct ResolveDetailRecord {
     execution: Option<crate::dns::RequestTraceSnapshot>,
+    ecs: Option<crate::dns::ecs::QueryEcs>,
     occurred_at: SystemTime,
     duration_millis: u64,
     dns_core_duration_micros: u64,
@@ -159,6 +160,7 @@ impl ResolveDetailRecord {
 
         Ok(Self {
             execution: None,
+            ecs: None,
             occurred_at: event.occurred_at,
             duration_millis: event.duration_millis,
             dns_core_duration_micros: event.dns_core_duration_micros,
@@ -204,6 +206,21 @@ impl ResolveDetailRecord {
 
     pub fn execution(&self) -> Option<&crate::dns::RequestTraceSnapshot> {
         self.execution.as_ref()
+    }
+
+    /// 在后台投影时校验 ECS；诊断失败只丢弃 ECS，不影响基础详情。
+    pub(crate) fn set_ecs(&mut self, ecs: crate::dns::ecs::QueryEcs) {
+        self.ecs = match ecs.encode_json() {
+            Ok(_) => Some(ecs),
+            Err(reason) => {
+                tracing::warn!(?reason, "ECS detail discarded at projection boundary");
+                None
+            }
+        };
+    }
+
+    pub fn ecs(&self) -> Option<&crate::dns::ecs::QueryEcs> {
+        self.ecs.as_ref()
     }
 
     pub const fn duration_millis(&self) -> u64 {

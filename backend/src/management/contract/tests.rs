@@ -435,3 +435,39 @@ fn file_actions_and_retention_preview_do_not_accept_active_revision() {
         json!({"active_revision": "active-1", "observed_file_revision": "files-1"});
     assert!(serde_json::from_value::<RetentionPreviewRequest>(legacy).is_err());
 }
+
+#[test]
+fn ecs_contract_states_are_strict_and_legacy_defaults_to_null() {
+    let fixture = fixtures();
+    for ecs in fixture["ecs_cases"].as_array().unwrap() {
+        round_trip::<QueryEcs>(ecs);
+        let mut record = fixture["record"].clone();
+        record["ecs"] = ecs.clone();
+        round_trip::<QueryRecord>(&record);
+        round_trip::<QueryDetail>(&json!({"record": record, "directory_revision": "directory-1"}));
+        let value: QueryEcs = serde_json::from_value(ecs.clone()).unwrap();
+        let debug = format!("{value:?}");
+        assert!(!debug.contains("2001:db8"));
+        assert!(!debug.contains("203.0.113"));
+        assert!(!debug.contains("refresh-leaf"));
+    }
+    for ecs in fixture["ecs_invalid_cases"].as_array().unwrap() {
+        assert!(serde_json::from_value::<QueryEcs>(ecs.clone()).is_err());
+    }
+    let mut legacy = fixture["record"].clone();
+    legacy.as_object_mut().unwrap().remove("ecs");
+    let typed: QueryRecord = serde_json::from_value(legacy).unwrap();
+    assert!(typed.ecs.is_none());
+    assert_eq!(serde_json::to_value(typed).unwrap()["ecs"], Value::Null);
+    let mut invalid = fixture["ecs_cases"][0].clone();
+    invalid["request"]["cidr"] = json!("2001:db8::1/32");
+    assert!(serde_json::from_value::<QueryEcs>(invalid).is_err());
+    for field in ["request", "upstream", "cache_match", "refresh"] {
+        let mut invalid = fixture["ecs_cases"][0].clone();
+        invalid.as_object_mut().unwrap().remove(field);
+        assert!(
+            serde_json::from_value::<QueryEcs>(invalid).is_err(),
+            "{field}"
+        );
+    }
+}

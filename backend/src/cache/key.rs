@@ -150,6 +150,24 @@ pub fn build_answer_key(
     })
 }
 
+/// 探测候选的匹配语义与 key 同源生成；地址仅在受保护详情投影时格式化。
+#[derive(Clone)]
+pub(crate) struct AnswerProbeMatch {
+    kind: crate::dns::ecs::EcsCacheMatchKind,
+    network: Option<(IpAddr, u8)>,
+}
+
+impl AnswerProbeMatch {
+    pub(crate) fn observation(&self) -> crate::dns::ecs::EcsCacheMatch {
+        crate::dns::ecs::EcsCacheMatch {
+            kind: self.kind,
+            cidr: self
+                .network
+                .map(|(address, prefix)| format!("{address}/{prefix}")),
+        }
+    }
+}
+
 impl AnswerKey {
     /// single-flight key：回源前尚不知道 scope，按 base 与查询 ECS 精确值合并。
     pub fn load_key(&self) -> CacheKey {
@@ -168,19 +186,56 @@ impl AnswerKey {
     /// `covering_prefixes` 为该 base 下已存在 covering 条目的前缀长度（升序）；只探测不超过
     /// 查询 source 的长度，从长到短，最后探测 source 本身的 exact 条目。
     pub fn probe_keys(&self, covering_prefixes: &[u8]) -> Vec<CacheKey> {
+        self.probe_candidates(covering_prefixes, false)
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
+    }
+
+    /// 不改变原有候选顺序；仅在详情采集开启时构造绑定的地址匹配描述。
+    pub(crate) fn probe_candidates(
+        &self,
+        covering_prefixes: &[u8],
+        observe: bool,
+    ) -> Vec<(CacheKey, Option<AnswerProbeMatch>)> {
+        use crate::dns::ecs::EcsCacheMatchKind;
         let AnswerEcs::Uniform(subnet) = self.ecs else {
-            return vec![self.whole_key()];
+            return vec![(
+                self.whole_key(),
+                if observe {
+                    Some(AnswerProbeMatch {
+                        kind: if matches!(self.ecs, AnswerEcs::Members(_)) {
+                            EcsCacheMatchKind::Members
+                        } else {
+                            EcsCacheMatchKind::NoEcs
+                        },
+                        network: None,
+                    })
+                } else {
+                    None
+                },
+            )];
         };
         let source = subnet.source_prefix();
         covering_prefixes
             .iter()
             .rev()
             .filter(|prefix| **prefix <= source)
-            .map(|prefix| self.subnet_key(covering_tag(subnet.addr()), subnet.addr(), *prefix))
-            .chain(std::iter::once(self.subnet_key(
-                exact_tag(subnet.addr()),
-                subnet.addr(),
-                source,
+            .map(|prefix| {
+                (
+                    self.subnet_key(covering_tag(subnet.addr()), subnet.addr(), *prefix),
+                    observe.then(|| AnswerProbeMatch {
+                        kind: EcsCacheMatchKind::Covering,
+                        network: Some((masked(subnet.addr(), *prefix), *prefix)),
+                    }),
+                )
+            })
+            .chain(std::iter::once((
+                self.subnet_key(exact_tag(subnet.addr()), subnet.addr(), source),
+                observe.then(|| AnswerProbeMatch {
+                    kind: EcsCacheMatchKind::Exact,
+                    network: Some((masked(subnet.addr(), source), source)),
+                }),
             )))
             .collect()
     }
@@ -718,6 +773,26 @@ mod tests {
             answer(&query(message(1)), AnswerEcs::Absent).probe_keys(&[0, 24]),
             vec![answer(&query(message(1)), AnswerEcs::Absent).whole_key()]
         );
+    }
+
+    #[test]
+    fn probe_observations_are_opt_in_and_preserve_keys() {
+        for key in [
+            uniform("192.0.2.0/24"),
+            uniform("2001:db8:1200::/56"),
+            uniform_source_zero(),
+            answer(&query(message(1)), AnswerEcs::Absent),
+            answer(&query(message(1)), AnswerEcs::members([("leaf", None)])),
+        ] {
+            let off = key.probe_candidates(&[0, 16, 24, 48, 56], false);
+            let on = key.probe_candidates(&[0, 16, 24, 48, 56], true);
+            assert!(off.iter().all(|(_, matched)| matched.is_none()));
+            assert!(on.iter().all(|(_, matched)| matched.is_some()));
+            assert_eq!(
+                off.into_iter().map(|(key, _)| key).collect::<Vec<_>>(),
+                on.into_iter().map(|(key, _)| key).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

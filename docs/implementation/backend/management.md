@@ -15,6 +15,8 @@
 > 2026-11-06 增量核对：基线 `3d44dd4` 加本次工作树，范围限单次保存、无状态预览、文件操作和保留预览的新请求契约；旧批次结果不代表本次验证。
 >
 > 2026-11-08 错误传递增量核对：基线 `d208820` 加本次工作树，仅覆盖安全诊断、配置 operation 失败传递、资源限额与相关回归。
+>
+> 2026-11-10 ECS 增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅覆盖解析记录 ECS 契约、统一投影、replay 与安全边界；其余内容沿历史日期。
 
 ## 入口与生命周期
 
@@ -84,6 +86,30 @@ Windows 使用本批 debug binary 与独立 `_fluxdns/bc12-http/` v2 配置完�
 qname 关键词去首尾空白并 ASCII 小写，不再强制解析完整 DNS 名或补尾点；完整 IP 规范化，片段保留为小写文本。SQL 对 qname/IP 使用绑定参数的 `instr(column, ?) > 0`，WS/replay 使用同样的字面 `contains`，`%/_/*` 没有通配含义；客户端名称按当前目录包含匹配。原始输入先检查长度和控制字符，再处理空白，REST/WS 使用同一 decoder。qtype 接受标准名或 `TYPE<n>`；原总耗时从存储毫秒投影为微秒。2026-09-22 增量核对（`2b3b160` 加工作树）：HTTP search/detail 和 WS 共用 `query_record`，新增真实 `listener_name`、`response_duration_us`、`response_status` 与 `cache_activity`，响应微秒值校验 JavaScript 安全整数上限；旧诊断缺失时为 null/unrecorded，不从 core 耗时推算。缓存命中的顶层 upstream 字段保持空值，旧 producer 的 strategy/目标/实际 upstream 单独放入 `cache_producer`，刷新实际出口保存在 `cache_activity`，不混同历史生产链路。字段与枚举以 OpenAPI 为准，采集和持久化边界见[后台分发](background-services.md#完成事件与后台分发)。记录 ID、前后 cursor、commit cursor 和 retention revision 沿用 BC-09 的 opaque/十进制契约；cursor 篡改或水位失效返回 410 `CURSOR_EXPIRED`，非法 filter/record ID 返回 400，已过期或不存在记录返回 404，storage/目录代次异常返回 503。
 
 Windows 定向测试用两个真实 UTC 日 SQLite 分片覆盖跨日稳定分页、分页前名称过滤、无尾点 qname、缓存 provenance、详情定位、非法 qtype/cursor 与 Bearer 拒绝。生产 debug binary 又在独立 `_fluxdns/bc13-http/` 目录完成真实 login、`doggo` UDP 请求、详情分片提交及 Bearer HTTP：列表和详情均为 200，返回同一稳定 ID；无 Bearer 列表为 401。实际两类响应另经当前 OpenAPI AJV 校验。最终完整 Cargo 为 836 passed、3 ignored，全部测试目标编译、build 和 fmt 通过；前端 typecheck、20 文件 84 项 Vitest、build 与 4 项 v2 schema contract 通过。Clippy `-D warnings` 仍被本次改动前已有的 6 项 lint 阻断，本项没有新增 lint；一次此前成功运行后的默认并发 Cargo 重跑发生无具体失败用例的 Windows `STATUS_STACK_BUFFER_OVERRUN`，立即同命令重跑通过。测试进程已停止；这不覆盖浏览器、WS/replay、HTTPS 反向代理、Linux、约 10 客户端或 core 2ms 性能。
+
+## 请求级 ECS 统一投影
+
+`QueryRecord.ecs` 是独立可空扩展，新后端始终输出该字段、未记录为 null；Rust DTO 缺省和 OpenAPI optional 允许新客户端读取旧后端省略字段。结构由 [OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 的严格判别联合声明，领域 [`QueryEcs`](../../../backend/src/dns/ecs.rs) 与 Management DTO 分离，TypeScript 通过 `pnpm run generate:api` 生成，不公开 Hickory/ResolvedEcs 或无约束 JSON。
+
+[`history::query_record`](../../../backend/src/management/query/history.rs) 统一转换历史行与 commit 内存 read model：search、按 ID detail、WS push 和 replay 的同一记录 ECS 一致，当前客户端名称仍按各次目录快照投影。request、前台选中交换、实际 cache_match 与关联 refresh 不相互替代；旧数据不回填、不按当前配置推算。原始顶层 group/member 字段不改义，实际 leaf 独立在 ECS 交换中。
+
+ECS 纳入原 replay 保守估算及实际出站 JSON 字节计费；5000 条/8 MiB/60 秒 replay、64 条/1 MiB 单连接队列、最多 100 条消息分组和既有 resync/关闭机制不变。128 KiB 限制仍是入站帧边界，不宣称为出站分组保证；中途断线沿稳定 record ID 去重和 HTTP 权威快照恢复。ECS 与 qname/client IP 使用同一 Bearer、Origin、会话与 retention 保护，安全 Debug/错误/日志不输出地址、wire、cache key 或秘密。自动化覆盖 schema 缺省/非法前缀、统一投影、真实 socket replay/保留变化与载荷容量，实际本轮结果见下方验收记录。
+
+### ECS 工程验证与边界
+
+2026-11-10，Windows，基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加本次工作树；工具由 mise 解析为 Rust 1.98.0、Node 26.8.1、pnpm 11.25.0。最终工程检查如下，不能与历史批次的运行验收混用：
+
+| 检查 | 实际结果 |
+| --- | --- |
+| `cargo test --offline --locked --manifest-path backend/Cargo.toml -- --test-threads=1` | 938 项通过，5 项显式忽略；最后一次 Clippy 修正后已完整复跑 |
+| `cargo clippy --offline --locked --manifest-path backend/Cargo.toml --all-targets --all-features -- -D warnings` 与 `cargo fmt --manifest-path backend/Cargo.toml -- --check` | 通过 |
+| `pnpm run generate:api` 与生成前后 SHA-256 比对 | 通过，生成幂等，无人工修改生成类型 |
+| `pnpm run typecheck`、`pnpm run test:contract:v2`、`pnpm run test --maxWorkers=1` | 通过；契约 7 项，Vitest 45 文件 287 项 |
+| `pnpm run build` 与 `cargo build --offline --locked --manifest-path backend/Cargo.toml --release --features webui-embed` | 通过；生成正式前端和内嵌 release |
+
+自动化覆盖原始与发送 ECS 分离、来源优先级、IPv6、嵌套/fallback/parallel 与迟到结果、single-flight、缓存匹配与跨 runtime 刷新、严格 JSON 预算、旧分片/回退读取、同 ID search/detail/commit 投影、真实 socket replay/保留变化及载荷背压；前端覆盖固定快照、全部高级筛选、窄屏 Drawer 与 Esc、外部点击后连续输入。jsdom 用例关闭 CSS motion 以检查确定的可见终态，不将其当作动画或像素布局验收。前端完整套件仍输出既有 Node localStorage、Ant Design 弃用和 React key 警告，不宣称无警告。
+
+本轮独立进程 HTTP/WS/wire 联合比对和真实浏览器多视口验收未形成通过结论，随后由用户明确取消，不再作为本次交付退出条件；准备阶段失败记录保留于忽略的 `_fluxdns/query-ecs-acceptance/`，临时进程已退出。不将服务成功启动、自动化真实 socket 测试或历史浏览器结果替代端到端验收；Linux/macOS/OpenWrt、线上 TLS/代理、长期负载和生产性能仍未验证。相关实现及接受的设计已沉淀，本方案按更新后的交付范围收口。
 
 ## P1 外部配置差异内部投影（2026-09-08）
 
