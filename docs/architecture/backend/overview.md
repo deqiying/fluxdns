@@ -5,6 +5,8 @@
 > 适用范围：后端跨模块依赖、运行时所有权、请求与副作用边界
 >
 > 最后评审：2026-09-05（以当前源码静态校正跨模块边界；范围与基线见[模块索引](modules/README.md)，不含运行验收）
+>
+> 2026-11-09 局部评审：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅同步完整决策后 v3 答案缓存与 ECS scope 边界；不代表整篇重审或运行验收。
 
 ## 职责与依赖
 
@@ -45,15 +47,15 @@ RawConfigVn -> migration / strict parse -> ResolvedConfig
 
 ```text
 InboundAdapter -> canonical query + RequestContext
- -> PolicyContext -> fast cache lookup
- -> on miss: RouteDecision -> hosts / resolved cache / upstream
+ -> PolicyContext -> RouteDecision -> hosts local answer
+ -> otherwise: prepare final member ECS -> v3 AnswerKey lookup / single-flight / upstream
  -> canonical response + completion
  -> one nonblocking ResolutionEnvelope -> ResponseEncoder
 ```
 
-DoH route 在 adapter 用共享模板匹配一次，Policy 按 typed route ID 查表。请求一次捕获 runtime；client/strategy/namespace/ECS 等上下文在 fast lookup 前确定，逐规则 matcher 只在 miss 后运行。
+DoH route 在 adapter 用共享模板匹配一次，Policy 按 typed route ID 查表。请求一次捕获 runtime；每次均完成 client/strategy/namespace、逐规则 matcher、target 与最终成员 ECS 决策后才查缓存，Fast 路径已删除。
 
-缓存 key 的 `Fast`/`Resolved` mode 隔离；fingerprint 包含会改变答案的策略/资源语义，不包含整个 runtime revision 或纯观测变化。资源更新切换 key 而不扫描全库，旧项按 TTL/容量淘汰。不能预先确定的 group member ECS 必须绕过不安全的缓存复用。listener/strategy hosts 本地回答绕过 response cache，上游 hosts connector 则遵循上游响应准入。
+v3 AnswerKey 只纳入 namespace、question、RD/CD/DO、规范化保留 EDNS options、transport compatibility、target 子树 fingerprint 和最终成员 ECS；入口、身份、policy/资源 hash 不直接进入答案维度，EDNS 存在本身不入 key。同 namespace 内 target/最终查询相同即可复用，隔离需求通过显式 client/strategy 池表达。uniform ECS 按应答 scope 匹配，异构成员组合精确缓存，无 ECS 桶独立；刷新重新决策并按回源前 store 水位清理覆盖的旧版本，late-result 只核对 AnswerKey。listener/strategy hosts 本地回答绕过 response cache，上游 hosts connector 按普通响应准入；具体矩阵与并发保护见 [Cache](modules/cache.md)。
 
 缓存保存 canonical response 和 producer provenance，不保存客户端 ID 或 transport envelope。首响应与 late-window 缓存候选分离：late result 不能改写已返回响应。single-flight lease 必须在成功、队列丢弃、取消和 drop 上都有终态，不能永久挂起 waiter。细节分别见 [DNS Core](modules/dns-core.md)、[Cache](modules/cache.md) 和 [Upstream](modules/upstream.md)。
 

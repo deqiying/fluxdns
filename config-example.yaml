@@ -106,7 +106,8 @@ dns:
   # ECS（EDNS Client Subnet）全局默认配置。
   # mode: disabled | client | custom
   # 未配置更高层级时，按 global → upstream → client → strategy → rule 的顺序继承。
-  # mode: client 使用请求携带的 ECS；请求没有 ECS 时按客户端地址推导前缀。
+  # mode: client 使用请求 ECS，source 最长 IPv4 /24、IPv6 /56，较短前缀保留、scope 置 0；
+  # 请求没有合法 ECS 时按客户端地址推导 /24 或 /56。custom_ip 不受 client 前缀上限影响。
   # mode: disabled 会停止继续向上游传递 ECS；mode: custom 时 custom_ip 必填。
   edns_client_subnet:
     # ECS 处理模式。

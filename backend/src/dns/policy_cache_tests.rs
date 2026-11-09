@@ -585,7 +585,7 @@ async fn uniform_member_ecs_different_from_global_drives_wire_and_cache_key() {
 }
 
 #[tokio::test]
-async fn heterogeneous_fallback_ecs_bypasses_while_normalized_client_equivalence_can_cache() {
+async fn heterogeneous_fallback_and_normalized_client_ecs_are_cached() {
     for (label, fallback) in [
         ("custom", EcsSpec::Custom("192.0.2.0/24")),
         ("disabled", EcsSpec::Disabled),
@@ -617,19 +617,33 @@ async fn heterogeneous_fallback_ecs_bypasses_while_normalized_client_equivalence
         let transport = Arc::new(RecordingDohTransport::new(13));
         let core = core_with_transport(&config, Arc::clone(&transport));
         let request = request("heterogeneous.example.", RecordType::A);
-        for _ in 0..2 {
-            assert_upstream(
-                &resolve_and_commit(&core, &request).await,
-                CacheStatus::Disabled,
-            );
-        }
-        assert_eq!(transport.calls(), 2, "fallback mode {label}");
+        let mut first = core.resolve_with_completion(&request).await;
+        assert_upstream(first.observation.as_ref().unwrap(), CacheStatus::Miss);
+        let follower = core.resolve_with_completion(&request);
+        tokio::pin!(follower);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut follower)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            first
+                .cache_commit
+                .take()
+                .unwrap()
+                .commit(Duration::from_secs(1))
+                .await,
+            CacheCommitOutcome::Stored
+        );
+        assert_fresh(follower.await.observation.as_ref().unwrap());
+        assert_fresh(&resolve_and_commit(&core, &request).await);
+        assert_eq!(transport.calls(), 1, "fallback mode {label}");
     }
 
-    for (label, request_ecs, cached) in [
-        ("same", Some("198.51.100.42/24"), true),
-        ("different", Some("203.0.113.42/24"), false),
-        ("absent", None, false),
+    for (label, request_ecs) in [
+        ("same", Some("198.51.100.42/24")),
+        ("different", Some("203.0.113.42/24")),
+        ("absent", None),
     ] {
         let upstreams = [
             doh(
@@ -663,15 +677,9 @@ async fn heterogeneous_fallback_ecs_bypasses_while_normalized_client_equivalence
         );
         let first = resolve_and_commit(&core, &request).await;
         let second = resolve_and_commit(&core, &request).await;
-        if cached {
-            assert_upstream(&first, CacheStatus::Miss);
-            assert_fresh(&second);
-            assert_eq!(transport.calls(), 1, "client case {label}");
-        } else {
-            assert_upstream(&first, CacheStatus::Disabled);
-            assert_upstream(&second, CacheStatus::Disabled);
-            assert_eq!(transport.calls(), 2, "client case {label}");
-        }
+        assert_upstream(&first, CacheStatus::Miss);
+        assert_fresh(&second);
+        assert_eq!(transport.calls(), 1, "client case {label}");
     }
 }
 
@@ -825,7 +833,7 @@ async fn steady_state_refresh_case(resolved: bool) {
 }
 
 #[tokio::test]
-async fn published_current_core_refreshes_fast_and_resolved_stale_entries() {
+async fn published_current_core_refreshes_direct_and_group_stale_entries() {
     steady_state_refresh_case(false).await;
     steady_state_refresh_case(true).await;
 }
@@ -967,22 +975,20 @@ async fn cross_runtime_refresh_safely_replaces_target_stale_with_latest_query() 
     );
 }
 
-async fn submit_late(
-    old: &PolicyDnsCore,
-    request: &DnsRequest,
-    key: &crate::ports::cache::CacheKey,
-    octet: u8,
-) {
+/// 以旧 runtime 当时的答案 key 提交一条 late 正向应答。
+async fn submit_late(old: &PolicyDnsCore, request: &DnsRequest, octet: u8) {
     let plan = plan_for(old, request);
-    old.late_result_sink(key, request, &plan.upstream).submit(
-        request.query.clone(),
-        request.context.clone(),
-        UpstreamAttempt {
-            attempt_index: 1,
-            connector: ConnectorId::new("remote").unwrap(),
-            outcome: UpstreamOutcome::Response(positive_response(request, octet)),
-        },
-    );
+    let answer = answer_key(old, request).unwrap();
+    old.late_result_sink(&answer, request, &plan.upstream)
+        .submit(
+            request.query.clone(),
+            request.context.clone(),
+            UpstreamAttempt {
+                attempt_index: 1,
+                connector: ConnectorId::new("remote").unwrap(),
+                outcome: UpstreamOutcome::Response(positive_response(request, octet)),
+            },
+        );
 }
 
 #[tokio::test]
@@ -1010,7 +1016,7 @@ async fn late_result_cross_store_accepts_same_semantics_and_rejects_changed_upst
         core: Arc::clone(&same_latest),
         revision: RuntimeRevision(2),
     })));
-    submit_late(&old, &request, &old_key, 24).await;
+    submit_late(&old, &request, 24).await;
     drain(&same_latest).await;
     assert!(matches!(
         same_latest
@@ -1056,7 +1062,7 @@ async fn late_result_cross_store_accepts_same_semantics_and_rejects_changed_upst
             core: Arc::clone(&changed_latest),
             revision: RuntimeRevision(3 + index as u64),
         })));
-        submit_late(&old, &request, &old_key, 26).await;
+        submit_late(&old, &request, 26).await;
         drain(&changed_latest).await;
         for key in [&old_key, &changed_key] {
             assert!(matches!(
@@ -1279,7 +1285,7 @@ async fn nodata_soa_and_client_ttl_use_ten_seconds_without_stale() {
     assert_eq!(transport.calls(), 1);
 }
 
-/// Fast/Resolved、A/AAAA、无 SOA/零 TTL/长 TTL；10s 边界后同步回源而非乐观返回。
+/// direct/group、A/AAAA、无 SOA/零 TTL/长 TTL；10s 边界后同步回源而非乐观返回。
 #[tokio::test]
 async fn short_responses_hit_age_and_expire_without_changing_rcode() {
     use hickory_proto::op::ResponseCode;
@@ -1376,3 +1382,6 @@ async fn short_responses_hit_age_and_expire_without_changing_rcode() {
         }
     }
 }
+
+#[path = "policy_scope_tests.rs"]
+mod scope_tests;

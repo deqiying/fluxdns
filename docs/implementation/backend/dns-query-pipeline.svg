@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1080" viewBox="0 0 1600 1080" role="img" aria-labelledby="title desc">
   <title id="title">FluxDNS DNS 查询主链与异步观测流程</title>
-  <desc id="desc">展示请求经 PolicyContext、fast cache key v2、RouteDecision 和上游解析形成共享响应，并在 transport 编码前一次性非阻塞发布 ResolutionEnvelope，由后台分别处理统计、缓存提交和解析详情。</desc>
+  <desc id="desc">每次请求先经 PolicyContext、RouteDecision 与最终成员 ECS 决策，本地 hosts 直接回答，其余经 v3 AnswerKey 的 scope 或精确缓存查找、single-flight 和上游交换；响应在 transport 编码前一次非阻塞发布 ResolutionEnvelope，后台处理统计、缓存提交和详情。</desc>
   <defs>
     <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto" markerUnits="strokeWidth">
       <path d="M 0 0 L 10 5 L 0 10 z" fill="#334155"/>
@@ -38,7 +38,7 @@
 
   <rect width="1600" height="1080" fill="#ffffff"/>
   <text class="title" x="48" y="52">FluxDNS DNS 查询主链与异步观测流程</text>
-  <text class="subtitle" x="48" y="82">当前实现：fast cache key v2 + 共享响应 + 单次有界发布；stats、cache commit 与 resolve_log 均不阻塞客户端响应</text>
+  <text class="subtitle" x="48" y="82">当前实现：完整决策后 v3 AnswerKey / ECS scope 缓存 + 共享响应 + 单次有界发布；Fast 路径已删除</text>
 
   <rect class="panel" x="32" y="112" width="1536" height="470"/>
   <text class="section" x="56" y="150">请求任务：同步主链</text>
@@ -57,12 +57,12 @@
   <rect class="box" x="436" y="202" width="180" height="82"/>
   <text class="box-title" x="526" y="226">PolicyContext</text>
   <text class="box-text" x="526" y="250">client · strategy · namespace</text>
-  <text class="box-text" x="526" y="270">policy / request / ECS hash</text>
+  <text class="box-text" x="526" y="270">TTL / request ECS</text>
 
-  <rect class="box-green" x="656" y="202" width="170" height="82"/>
-  <text class="box-title" x="741" y="232">Fast cache lookup</text>
-  <text class="box-text" x="741" y="256">key format v2 · Fast</text>
-  <text class="box-text" x="741" y="274">fresh / stale / miss</text>
+  <rect class="box" x="656" y="202" width="170" height="82"/>
+  <text class="box-title" x="741" y="232">RouteDecision</text>
+  <text class="box-text" x="741" y="256">rules · listener hosts</text>
+  <text class="box-text" x="741" y="274">target / final member ECS</text>
 
   <rect class="box-green" x="1056" y="202" width="175" height="82"/>
   <text class="box-title" x="1143" y="232">共享解析结果</text>
@@ -83,23 +83,26 @@
   <path class="flow" d="M 396 243 H 428"/>
   <path class="flow" d="M 616 243 H 648"/>
   <path class="hit" d="M 826 243 H 1048"/>
-  <text class="label-green" x="909" y="230">fresh / stale hit</text>
+  <text class="label-green" x="909" y="230">local hosts answer</text>
   <path class="flow" d="M 1231 243 H 1263"/>
   <path class="flow" d="M 1446 243 H 1478"/>
 
-  <rect class="box" x="656" y="380" width="170" height="92"/>
-  <text class="box-title" x="741" y="407">RouteDecision</text>
-  <text class="box-text" x="741" y="431">rules · listener hosts</text>
-  <text class="box-text" x="741" y="451">target · member ECS</text>
+  <rect class="box-green" x="656" y="380" width="170" height="92"/>
+  <text class="box-title" x="741" y="407">AnswerKey v3 lookup</text>
+  <text class="box-text" x="741" y="431">uniform: scope / exact</text>
+  <text class="box-text" x="741" y="451">members / no ECS: exact</text>
 
   <rect class="box-purple" x="866" y="380" width="170" height="92"/>
-  <text class="box-title" x="951" y="407">Resolved path</text>
-  <text class="box-text" x="951" y="431">resolved key lookup</text>
-  <text class="box-text" x="951" y="451">hosts / upstream exchange</text>
+  <text class="box-title" x="951" y="407">Upstream exchange</text>
+  <text class="box-text" x="951" y="431">single-flight: query ECS</text>
+  <text class="box-text" x="951" y="451">commit key: response scope</text>
 
   <path class="flow" d="M 741 284 V 372"/>
-  <text class="label" x="754" y="334">miss / fast ineligible</text>
-  <path class="flow" d="M 826 426 H 858"/>
+  <text class="label" x="754" y="308">非本地回答</text>
+  <path class="hit" d="M 826 400 H 842 V 328 H 1143 V 292"/>
+  <text class="label-green" x="866" y="320">fresh / stale hit（stale 后台重新决策刷新）</text>
+  <path class="flow" d="M 826 446 H 858"/>
+  <text class="label" x="831" y="466">miss</text>
   <path class="flow" d="M 1036 426 H 1143 V 292"/>
   <text class="label" x="1054" y="410">response + optional commit candidate</text>
 
@@ -124,7 +127,7 @@
   <rect class="box-green" x="650" y="838" width="300" height="86"/>
   <text class="box-title" x="800" y="868">CacheCommitWorker</text>
   <text class="box-text" x="800" y="892">独立 100ms deadline · admission / CAS</text>
-  <text class="box-text" x="800" y="912">RAII lease 完成并唤醒 follower</text>
+  <text class="box-text" x="800" y="912">scope key 写入 · RAII lease 唤醒 follower</text>
 
   <rect class="box-purple" x="1204" y="838" width="300" height="86"/>
   <text class="box-title" x="1354" y="868">Detail projector + SQLite writer</text>

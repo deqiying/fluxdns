@@ -319,6 +319,14 @@ impl CanonicalResponse {
         self.ttl
     }
 
+    /// 返回上游应答携带的首个 ECS；缓存按它的 scope 决定答案可共享的网段。
+    pub(crate) fn edns_client_subnet(&self) -> Option<ClientSubnet> {
+        match self.message.edns.as_ref()?.option(EdnsCode::Subnet)? {
+            EdnsOption::Subnet(subnet) => Some(*subnet),
+            _ => None,
+        }
+    }
+
     /// REFUSED 或 Answer 为空的有效响应只短暂缓存，避免拒绝/空结果长期遮蔽新记录。
     /// 只包含 CNAME 的成功答案并非空响应；TC 等标志不改变空 Answer 的判定。
     pub(crate) fn short_cache_ttl(&self) -> Option<Duration> {

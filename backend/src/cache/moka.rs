@@ -1,9 +1,10 @@
 //! 基于 Moka 的并发内存 `CacheStore` adapter。
 
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use moka::notification::RemovalCause;
@@ -11,6 +12,7 @@ use moka::policy::Expiry;
 use moka::sync::Cache;
 use thiserror::Error;
 
+use super::key::{AnswerKey, covering_prefix};
 use super::memory::MemoryCacheStore;
 use crate::dns::{Cancellation, Deadline};
 use crate::ports::cache::{
@@ -29,6 +31,42 @@ pub struct MokaCacheStore {
     snapshot_reset_generation: Arc<AtomicU64>,
     max_weight: Option<u64>,
     eviction_count: Arc<AtomicU64>,
+    covering: Arc<Mutex<CoveringIndex>>,
+}
+
+/// ECS covering 条目的前缀长度索引：base → 前缀长度 → 条目数。
+///
+/// 每次写入一个新版本都增加计数，任何移除通知（含替换）都减少旧版本计数；不能依据 CAS 前
+/// 的存在状态计数，因为 Moka 可能在读写之间淘汰旧版本。快照恢复通过同一路径重建索引。
+/// 命中与否仍以 store 中的实际条目为准。
+#[derive(Default)]
+struct CoveringIndex(HashMap<Arc<[u8]>, BTreeMap<u8, usize>>);
+
+impl CoveringIndex {
+    fn insert(&mut self, base: &[u8], prefix: u8) {
+        match self.0.get_mut(base) {
+            Some(prefixes) => *prefixes.entry(prefix).or_default() += 1,
+            None => {
+                self.0
+                    .insert(Arc::from(base), BTreeMap::from([(prefix, 1)]));
+            }
+        }
+    }
+
+    fn remove(&mut self, base: &[u8], prefix: u8) {
+        let Some(prefixes) = self.0.get_mut(base) else {
+            return;
+        };
+        if let Some(count) = prefixes.get_mut(&prefix) {
+            *count -= 1;
+            if *count == 0 {
+                prefixes.remove(&prefix);
+            }
+        }
+        if prefixes.is_empty() {
+            self.0.remove(base);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -139,12 +177,20 @@ impl MokaCacheStore {
     fn with_limit(max_weight: Option<u64>) -> Self {
         let eviction_count = Arc::new(AtomicU64::new(0));
         let eviction_count_for_listener = Arc::clone(&eviction_count);
+        let covering = Arc::new(Mutex::new(CoveringIndex::default()));
+        let covering_for_listener = Arc::clone(&covering);
         let mut builder = Cache::builder()
             .weigher(moka_weight)
             .expire_after(MokaExpiry)
-            .eviction_listener(move |_key, _value, cause| {
+            .eviction_listener(move |key: Arc<CacheKey>, _value, cause| {
                 if cause == RemovalCause::Size {
                     eviction_count_for_listener.fetch_add(1, Ordering::Relaxed);
+                }
+                if let Some((base, prefix)) = covering_prefix(&key) {
+                    covering_for_listener
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .remove(base, prefix);
                 }
             });
         if let Some(max_weight) = max_weight {
@@ -158,7 +204,56 @@ impl MokaCacheStore {
             snapshot_reset_generation: Arc::new(AtomicU64::new(0)),
             max_weight,
             eviction_count,
+            covering,
         }
+    }
+
+    /// 返回答案 key 下已存在 covering 条目的前缀长度（升序），供 lookup 只探测这些长度。
+    pub(crate) fn covering_prefixes(&self, key: &AnswerKey) -> Vec<u8> {
+        self.covering
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0
+            .get(key.base())
+            .map(|prefixes| prefixes.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// 刷新成功后清除被新 scope 覆盖的旧版本；与写入共用锁，不删除刷新期间的新结果。
+    /// 新条目被淘汰或再次替换时不清理，避免失去唯一仍可用的答案。
+    pub(crate) fn invalidate_covered(
+        &self,
+        key: &CacheKey,
+        version: CacheVersion,
+        before_refresh: u64,
+    ) -> Result<(), PortError> {
+        let state = lock(&self.state, "moka_cache.invalidate_covered")?;
+        if state.shutting_down {
+            return Err(unavailable("moka_cache.invalidate_covered"));
+        }
+        if !self
+            .get_record(key)
+            .is_some_and(|record| record.version == version)
+        {
+            return Ok(());
+        }
+        let keys: Vec<_> = self
+            .cache
+            .iter()
+            .filter_map(|(old, record)| {
+                (record.version.0 <= before_refresh && super::key::covers(key, &old)).then_some(old)
+            })
+            .collect();
+        for old in &keys {
+            self.cache.invalidate(old.as_ref());
+        }
+        if !keys.is_empty() {
+            self.next_version.fetch_add(1, Ordering::AcqRel);
+            self.snapshot_reset_generation
+                .fetch_add(1, Ordering::AcqRel);
+        }
+        self.cache.run_pending_tasks();
+        Ok(())
     }
 
     fn get_record(&self, key: &CacheKey) -> Option<CacheRecord> {
@@ -342,6 +437,13 @@ impl CacheStore for MokaCacheStore {
             } else {
                 CacheWriteOutcome::Inserted(version)
             };
+            // 先为新版本计数，再交给 Moka；替换/淘汰回调只扣除各自旧版本的计数。
+            if let Some((base, prefix)) = covering_prefix(&key) {
+                self.covering
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(base, prefix);
+            }
             self.cache.insert(key, CacheRecord { version, entry });
             self.cache.run_pending_tasks();
             Ok(outcome)

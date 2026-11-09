@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::config::resolve::{ProxyScheme, ResolvedOutbound, ResolvedUpstream};
@@ -21,6 +22,7 @@ use super::{
 
 pub struct UpstreamRegistry {
     connectors: HashMap<ConnectorId, Arc<dyn DnsExchange>>,
+    outbound_fingerprints: HashMap<crate::config::resolve::ConfigId, [u8; 32]>,
 }
 
 enum ConfiguredDohTransport {
@@ -217,11 +219,22 @@ impl UpstreamRegistry {
                 )))
             };
 
-        Self::build_connectors(
+        let mut registry = Self::build_connectors(
             upstreams,
             Some(bootstrap_registry.clone()),
             transport_factory,
-        )
+        )?;
+        // 复用 connector 使用的已解析值，不二次读取 SecretRef；明文不进入缓存或日志。
+        registry.outbound_fingerprints = profiles
+            .iter()
+            .map(|(id, profile)| {
+                let mut digest = Sha256::new();
+                digest.update(b"fluxdns/outbound/v3\0");
+                digest.update(profile.proxy_url().expose());
+                (id.clone(), digest.finalize().into())
+            })
+            .collect();
+        Ok(registry)
     }
 
     pub fn from_resolved_with_doh_transport<T>(
@@ -343,7 +356,18 @@ impl UpstreamRegistry {
             }
             connectors.insert(connector, exchange);
         }
-        Ok(Self { connectors })
+        Ok(Self {
+            connectors,
+            outbound_fingerprints: HashMap::new(),
+        })
+    }
+
+    /// 与已构造 connector 绑定的 outbound 内容摘要；无代理的 registry 不持有此维度。
+    pub(crate) fn outbound_fingerprint(
+        &self,
+        id: &crate::config::resolve::ConfigId,
+    ) -> Option<&[u8; 32]> {
+        self.outbound_fingerprints.get(id)
     }
 
     pub fn get(&self, connector: &ConnectorId) -> Result<Arc<dyn DnsExchange>, RegistryError> {

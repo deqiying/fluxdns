@@ -23,6 +23,8 @@
 > 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，仅核对 DoH 裸路由隐式 ID 后缀、必填显式模板与优先级；本次验证见[能力与证据](#能力与证据)，其余历史范围未重新核对。
 >
 > 2026-11-08 短响应缓存增量核对：基线 `96daf34376bcc108efacffdf620144ba5fd0bb54` 加本次工作树，仅核对 REFUSED/空 Answer 的 10s 生命周期、客户端 TTL、无 stale 与 entry v3 恢复；证据见[短响应缓存验证](#短响应缓存验证)。
+>
+> 2026-11-09 答案缓存增量核对：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，核对 v3 AnswerKey、target 子树摘要、成员 ECS、scope 索引与 refresh/late-result；本轮全量后端测试和 loopback 二进制验收见 [v3 答案缓存核对边界](#v3-答案缓存核对边界)，其余历史结论不自动刷新。
 
 ## 入口与调用链
 
@@ -34,8 +36,8 @@
 SystemSocketFactory / typed binding
  -> transport adapter -> DnsRequest + RequestContext
  -> instrumented DnsCore::resolve_with_completion
- -> PolicyDnsCore -> PolicyContext -> fast cache
- -> miss: RouteDecision -> hosts / resolved cache / UpstreamRegistry
+ -> PolicyDnsCore -> PolicyContext -> RouteDecision -> local hosts answer
+ -> otherwise: prepare_query -> v3 AnswerKey lookup / single-flight / UpstreamRegistry
  -> canonical response + completion
  -> ResolutionEventSink::try_publish -> transport response encoding
 ```
@@ -48,7 +50,7 @@ SystemSocketFactory / typed binding
 
 ## Policy 与实际 core
 
-正式 async prepare 在 [`dns/policy.rs`](../../../backend/src/dns/policy.rs) 构造 `PolicyDnsCore::from_config_with_resource_snapshots`；不另设仅处理 hosts 的配置装配层。`PolicyContext` 先选 client/strategy/cache namespace，Core 再结合 PolicyState 计算 ECS、eligibility 和 fingerprint；fast miss 后再求 `RouteDecision`，调用 [`policy`](../../../backend/src/policy) 的 client/strategy/route 逻辑。
+正式 async prepare 在 [`dns/policy.rs`](../../../backend/src/dns/policy.rs) 构造 `PolicyDnsCore::from_config_with_resource_snapshots`；不另设仅处理 hosts 的配置装配层。每个请求先由 `prepare_context` 选 client/strategy/cache namespace，随后 `evaluate_route` 完成 listener hosts 与有序规则，再组合 `ResolutionPlan` 和最终成员 ECS。Fast 分支及 eligibility/memo 已删除；cache lookup 不再跳过规则决策。
 
 配置 route 由 [`config/doh_route.rs`](../../../backend/src/config/doh_route.rs) 的 `DohPathPattern` 共享编译。裸路由既精确匹配原文路径（`client_id = None`），也接受追加一个非空 ID 段；尾随斜杠追加时沿用已有斜杠，根路径 `/` 同时支持 `/` 与 `/client-a`。显式模板中的 client ID 段必须非空、不可省略，不接受额外多段。`specificity_cmp` 将裸路由隐式 ID 后缀纳入逐段固定段优先比较，同样段结构下显式模板优先，供 Config 同优先级歧义校验和 [`DohAdapter::new_with_tls`](../../../backend/src/transport/doh.rs) 装配期排序共用；`/dns` 与 `/dns/` 的隐式 ID 集合重叠且同优先级，不能共存。DoH adapter 按已排序路由匹配真实路径后，将配置 `path` 原文传为 typed canonical route ID，不合成模板、不改写配置；Policy 不重新匹配 URL，请求热路径不重新排序。所有入口保留 endpoint 的来源 IP 提取规则，无 ID 时进入现有 CIDR 匹配，有 ID 时精确 ID 优先、未注册 ID 按 IP 回退，路径 ID 不是认证。完整匹配样例、固定 inner 路由及短路径被其他路由捕获的边界见[配置参考](../configuration.md)。资源-only publish 更新 core 内的资源 snapshot，后续请求使用新 hash；不依靠全局 cache clear。
 
@@ -60,21 +62,45 @@ SystemSocketFactory / typed binding
 
 ## Cache 与 TTL
 
-`build_cache_facade` 的生产默认是 [`MokaCacheStore::with_max_weight`](../../../backend/src/cache/moka.rs)，不是测试用 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs)。共享 store 通过 namespace 形成逻辑池；`cache/key.rs` 的 v2 编码隔离 Fast/Resolved。两种 mode 的 policy 维度都来自 `PolicyState::cache_semantics_fingerprint`：它组合会改变答案的已解析配置语义、listener/route/strategy/client 上下文与 PolicyState 中全部 hosts/rule-set content hash；纯观测配置和整个 runtime revision 不直接作为失效维度。Resolved 不再只放 strategy ID 摘要，而是在同一语义 fingerprint 上增加 target 与最终 ECS。
+`build_cache_facade` 的生产默认是 [`MokaCacheStore::with_max_weight`](../../../backend/src/cache/moka.rs)，不是测试用 [`MemoryCacheStore`](../../../backend/src/cache/memory.rs)。共享 store 通过 namespace 形成逻辑池；所有 subnet/namespace 记录共享全局 weight，没有每 base 条目上限。v3 [`AnswerKey`](../../../backend/src/cache/key.rs) 由 namespace、transport compatibility、target 子树 fingerprint、规范化 question、RD/CD/DO、排序保留 EDNS options 与最终成员 ECS 构成；EDNS 存在本身不入 key。ECS 单独编码，DNS ID、COOKIE、PADDING、TCP keepalive 和 UDP payload size 不入 key，未知 option 保守保留。入口/客户端/policy/request/资源 hash 不再进入答案身份。
 
-`cache_semantics_base` 显式将完整 DoH endpoint（含 path/query）输入 SHA-256，避免 `SafeUrl` 的脱敏 Debug 隐去分流差异。端点明文不进入日志或缓存键；升级时相关旧 key 自然失效，格式和兼容性见[配置参考](../configuration.md)。
+[`target_fingerprint`](../../../backend/src/dns/policy.rs) 预计算每个 target 的 group 成员/权重/fallback/模式/超时/嵌套结构，以及 direct 的完整 DoH URL（含 path/query）、connect_ip、bootstrap 链、所用 outbound 与上游 hosts 内容。outbound 摘要由 [`UpstreamRegistry`](../../../backend/src/upstream/registry.rs) 复用 connector 已解析的 profile 产生，不二次读取 SecretRef，不持久化凭据明文。无关 target 配置、规则或本地 hosts 更新不改变摘要；同 namespace 内不同入口/身份/策略在 target 与最终查询相同时共享答案，需要隔离则显式选择 client/strategy 池。
 
 - listener/strategy hosts 本地回答绕过 response cache；upstream hosts 按普通上游响应处理。
-- `UpstreamRuntime` 构造时记录 group 全部可达 direct leaves，覆盖 primary、fallback、nested group 与隐式继承请求级 ECS 的成员；请求级 ECS 来自 global/default 时，`prepare_query` 用该集合计算并比较规范化后的最终 ECS。所有成员 query 相同时使用统一 query 和 Resolved cache；只有真正异构时才携带 per-member query，并绕过 lookup、single-flight 与 commit。显式成员 ECS 即使不同于 global，只要各成员最终 query 相同也属于可缓存路径；rule/strategy/client 显式 ECS 则直接统一覆盖成员。
-- Fast eligibility 仍按策略可达 target 保守计算：存在任一显式成员 ECS 就禁用 Fast；这不妨碍 fast miss 后的完整决策证明 query 一致并使用 Resolved。
-- 缓存候选保留 canonical upstream origin response。`CanonicalResponse::short_cache_ttl` 统一识别 REFUSED（包含非空 Answer）和所有空 Answer 响应，[`admit_response`](../../../backend/src/cache/admission.rs) 固定写入 10s 且不设 stale 窗口。上游输出与 Fast/Resolved fresh 命中分别由 `rewrite_short_cache_ttl` 改写 RR TTL/SOA.MINIMUM 为 10s/剩余寿命，无记录时不合成记录；短响应跳过 TTL override。`stale_answer_ttl` 对这类响应直接拒绝，即使旧条目带长 stale 窗口也必须回源。非短响应的 origin TTL、负 TTL 上限、输出 override 与乐观窗口保持原策略。越过应答窗口的可见条目仍返回 `Expired`，不混同 `Miss`。
-- Fast/Resolved stale 共用 `schedule_optimistic_refresh`，切到最新可用 core 后重新执行 `prepare_cache_query`，不复用 entry 保存的旧 connector/rule pointer。同一 `Arc` store 且 key 相同时以 `Version(stale_version)` CAS；store 或 key 不同时先读目标，Miss 使用 `Absent`、Stale/Expired 使用目标 `Version`、Fresh 直接跳过。exchange 后写回前再次核对 semantics/key，任一步失败都不延长旧 stale。
-- `PolicyLateResultSink` 保存生产请求的 semantics，并在切换 latest core 后仅当重新准备的 semantics、key 和最终 ECS 与原请求一致时接纳旧响应；配置、资源、目标或 ECS 改变时丢弃。写回前再次检查 semantics/key，目标已有同等或更高质量结果时不覆盖；目标条目已过期时不适用该质量比较，直接按其版本替换，否则刷新结果会因 CAS 冲突无法写回。
-- `reason = "group_ecs_differs"`、`operation = "cache_refresh"` 与 `operation = "cache_late"` 的 debug 事件只记录低基数 reason/outcome 及配置 ID，不输出明文 ECS 或客户端 IP；`cache_refresh` 额外带写回结果的 `class` 与 `ttl_secs`。
+- `UpstreamRuntime::prepare_query` 遍历 primary/fallback/nested 的全部 direct leaves。rule/strategy/client 显式 ECS 统一覆盖成员，否则成员 upstream 覆盖 global、未显式成员继承请求级 ECS。最终 ECS 相同则 uniform；异构时按成员 ID 排序编码最终 ECS/None 的摘要，并把 per-member query 交给 executor，正常参与精确 lookup、single-flight 和 commit。
+- `normalize_client_subnet` 将合法请求 ECS 的 source 截断到 IPv4 /24、IPv6 /56，较短前缀保留，清除 host bits，scope 置 0；缺失合法 ECS 时由客户端地址推导。custom CIDR 保持配置前缀、scope 置 0。
+- 缓存候选保留 canonical upstream origin response。`CanonicalResponse::short_cache_ttl` 统一识别 REFUSED（包含非空 Answer）和所有空 Answer 响应，[`admit_response`](../../../backend/src/cache/admission.rs) 固定写入 10s 且不设 stale 窗口。上游输出与 fresh 命中由 `rewrite_short_cache_ttl` 改写 RR TTL/SOA.MINIMUM 为 10s/剩余寿命，无记录时不合成记录；短响应跳过 TTL override。`stale_answer_ttl` 直接拒绝短响应；越过应答窗口的可见条目返回 `Expired`，不混同 `Miss`。
+- `probe_answer` 使用 Moka covering 前缀计数索引，经 `AnswerKey::probe_keys` 从长到短探测不超过查询 source 的 covering key，最后 exact；选择当前池允许返回的最长前缀答案，较宽 fresh 不越过可返回的更具体 stale。`load_key` 按查询 ECS 精确合并 single-flight；`storage_key(response.edns_client_subnet())` 在应答后确定实际存储网段。scope/exact、source 0 与无 ECS 桶的完整矩阵见 [Cache 设计](../../architecture/backend/modules/cache.md#4-lookup-与-single-flight)。应答不带 ECS 或应答 ECS 不一致时按查询 source 存储（source 0 仍为 exact /0），不一致应答仍正常返回与缓存；异构摘要不参与 scope 匹配。
+- [`MokaCacheStore`](../../../backend/src/cache/moka.rs) 的 `CoveringIndex` 按 base/前缀计数，每次写入新版本增加，所有移除通知（含替换）减少旧版本计数，覆盖读写之间淘汰的交错；恢复使用插入路径重建，不单独持久化。索引只引导探测，不能替代真实 key/生命周期检查。
+- `schedule_optimistic_refresh` 切到最新 core 重新执行 `prepare_cache_query`，目标 fresh 则跳过。回源前记录 `snapshot_generation()` 水位，响应后写前再次核对 AnswerKey。新 scope key 按 probe 的 Version/Absent CAS；成功 Inserted/Replaced 后调用 `invalidate_covered(key, version, before_refresh)`，在 store 锁内核对新版本仍有效，仅清除被完整覆盖且版本不晚于水位的旧条目，保护刷新期间更新。新条目已失效/替换不清理，失败不延长旧 stale。
+- `PolicyLateResultSink` 保存 AnswerKey、不保存 policy semantics。latest core 重新准备及写前均要求答案身份相等；policy/资源改变但 target/最终查询不变仍可接纳。按应答 scope 计算目标 key，fresh/stale 已有同等或更高质量则跳过；expired 按版本替换，不当作 Absent。
+- `cache_scope/ecs_mismatch`、`cache_refresh` 与 `cache_late` debug 事件只记录低基数 reason/outcome/配置 ID，不输出明文 ECS 或客户端 IP；异构绕过的 `group_ecs_differs` 事件已删除。`cache_refresh` 仍带实际写回 `class` 与 `ttl_secs`。
 - `CacheActivity` 的 `response_class`（positive/nodata/nxdomain/servfail/truncated/refused/other）与 `ttl_secs` 由 `CacheCommitCandidate::commit` 和后台刷新在实际得到写回候选时通过 `CacheActivityGuard::result` 记录，TTL 取 `cache_written_ttl_secs`（写入条目的剩余寿命）。两字段在 serde 中带默认值，旧详情 `execution_json` 仍可读取，缺失时为 null。
 - Core 将持有 single-flight lease 的 `CacheCommitCandidate` 随完成事件交出；[`resolution.rs`](../../../backend/src/resolution.rs) 的 cache worker 在独立 deadline 内 CAS。candidate drop 必须唤醒 waiter，响应不等待写回。
 
 进程快照的恢复、周期、generation 和失败见[后台服务](background-services.md)；准入与终态约束见 [Cache 设计](../../architecture/backend/modules/cache.md)。
+
+### v3 答案缓存核对边界
+
+2026-11-09，Windows x86_64，mise 声明的 Rust/Cargo 1.98.0，基线 `08a7747` 加本次工作树，实际执行：
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo test --offline --locked --manifest-path backend/Cargo.toml -- --test-threads=1` | 913 passed、0 failed、5 ignored；含 4 项既有显式专项和 1 项新增微基准 |
+| `cargo clippy --offline --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings` | 通过 |
+| `cargo build --offline --locked --manifest-path backend/Cargo.toml` | 通过；使用该 debug 二进制运行验收 |
+| `cargo fmt --manifest-path backend/Cargo.toml -- --check`、文档检查器、`git diff --check` | 通过 |
+| `cargo test --offline --locked --release --manifest-path backend/Cargo.toml scope_probe_benchmark -- --ignored --nocapture` | 1 项通过；单独执行，不作为时延门禁 |
+
+[`policy_scope_tests.rs`](../../../backend/src/dns/policy_scope_tests.rs) 覆盖 IPv4/IPv6 scope 矩阵、source 0 与无 ECS 隔离、不一致应答原样返回、最长前缀（含 stale）、刷新扩域和并发版本保护、索引替换/清理/快照重建、客户端前缀上限，以及跨 listener/route/client/strategy 与资源更新后的实际命中。target 摘要测试覆盖无关上游不失效、完整 DoH URL 改变和同 SecretRef 文件内容改变后的 connector 重建。异构 group single-flight、TTL/短响应、晚到结果与跨 runtime 刷新继续由 [`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 和既有 suite 回归。
+
+本地运行使用 `_fluxdns/cache-scope-1794234306582/config.yaml`，`work.path: ./` 解析到同目录；报告、驱动、数据库与日志均留在该忽略目录。Node 26.8.1 可控 HTTP 上游（loopback 64345）、UDP/TCP 64346、plain DoH 64347，curl 8.21.0 发送 GET/POST，SQLite 3.53.4 核对详情。四类响应各发送 UDP、TCP、DoH POST、GET 共 16 次：scope /0 跨网段只回源 1 次，scope /24、缺失 ECS、不一致 ECS 各回源 2 次；同网段均命中。DNS ID/RCODE/Answer、HTTP 200/Content-Type、客户端 /32 截断为 /24 且查询 scope 0、不一致应答仍保留原 ECS 均符合预期；16 条详情的 `miss/fresh` 序列与回源计数一致。驱动准备阶段修正了缺失 `failure_ttl` 和过早读取异步详情的问题，未改变产品配置校验或落盘时序。测试子进程已终止，全部端口已重新绑定确认释放；这不是优雅停机验收。
+
+微基准仅测 `probe_keys` 编码/分配：每种 100,000 次，IPv4 2/25 个索引前缀分别 33.15/258.67ms，IPv6 2/57 个前缀分别 28.06/576.82ms；不包含 store lookup、网络、规则匹配或并发负载，不代表整体 DNS 延迟。没有新增依赖、配置项或每 base 配额，容量仍受 Moka 全局 weight 约束。
+
+key v3 使旧 key v2 快照记录按 `Incompatible` 冷启动，FDCS 外层与 entry v3 不改版；恢复会重建前缀索引，不能以 entry payload 的旧布局转换能力宣称 key v2 可恢复。未执行生产上游、真实 TLS 反代、Linux/OpenWrt、长期负载或 Docker 验收；本轮 loopback 不覆盖这些边界。
+
+下列短响应、负缓存和缓存修复章节保留各自日期/基线的历史报告；本轮通过证据以上表为准。历史 Fast/Resolved、异构绕过与 key v2 描述只解释当时证据，当前行为以上文为准。
 
 ### 短响应缓存验证
 
@@ -82,9 +108,9 @@ SystemSocketFactory / typed binding
 
 同一工作树随后执行全量 `cargo test --offline --locked --manifest-path backend/Cargo.toml -- --test-threads=1`：894 passed、0 failed、4 ignored；`cargo fmt --manifest-path backend/Cargo.toml -- --check`、`cargo clippy --offline --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings`、文档检查器与 `git diff --check` 均通过。工作树同时包含独立的配置写回改动，全量结果属于当时组合工作树；缓存定向证据以上面的两组测试为准。
 
-- [`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 的 `short_responses_hit_age_and_expire_without_changing_rcode` 覆盖 Fast/Resolved × A/AAAA × NOERROR/NXDOMAIN/REFUSED/SERVFAIL/FORMERR/NOTIMP × 无 SOA/零 TTL/1800s SOA：首答与命中返回码不变、短 TTL 不受 300s override 放大、命中时按剩余寿命递减、到期后首查同步取得新记录，正常答案保持 origin TTL 与乐观缓存。`nodata_soa_and_client_ttl_use_ten_seconds_without_stale` 核对 SOA.MINIMUM 与 origin response 隔离。
+- 原文报告（2026-11-08，本轮未复核）：[`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 当时的 `short_responses_hit_age_and_expire_without_changing_rcode` 覆盖 Fast/Resolved × A/AAAA × NOERROR/NXDOMAIN/REFUSED/SERVFAIL/FORMERR/NOTIMP × 无 SOA/零 TTL/1800s SOA：首答与命中返回码不变、短 TTL 不受 300s override 放大、命中时按剩余寿命递减、到期后首查同步取得新记录，正常答案保持 origin TTL 与乐观缓存。`nodata_soa_and_client_ttl_use_ten_seconds_without_stale` 核对 SOA.MINIMUM 与 origin response 隔离。当前已无 Fast 分支，不能将此矩阵当作本轮结果。
 - [`admission.rs`](../../../backend/src/cache/admission.rs) 覆盖 REFUSED 非空 Answer、TC 空响应、零/缺失 TTL 短响应准入和非空负/失败响应原策略；[`service.rs`](../../../backend/src/cache/service.rs) 的 finalizer 矩阵覆盖 REFUSED 写入及 single-flight follower 收到 Ready，准入拒绝改用零 TTL 正答案。
-- [`codec.rs`](../../../backend/src/cache/codec.rs) 覆盖短响应 RCODE/class/checksum 往返、保存剩余期限、过期不复活、entry v2 空响应冷启及普通答案兼容恢复。key v2 与 FDCS 外层格式不变，entry v3 新增 Refused/Other 分类。
+- 原文报告（2026-11-08，本轮未复核）：[`codec.rs`](../../../backend/src/cache/codec.rs) 当时覆盖短响应 RCODE/class/checksum 往返、保存剩余期限、过期不复活、entry v2 空响应冷启及普通答案兼容恢复；当时 key v2 与 FDCS 外层格式不变，entry v3 新增 Refused/Other。当前 key v3 的冷启边界以上文为准。
 
 ### 负缓存新鲜度验证
 
@@ -96,7 +122,7 @@ SystemSocketFactory / typed binding
 
 本机 Windows、Rust/Cargo 1.98.0，最终编译基线为 `e50b948edb4699f58a1e57039fb56442ab228687` 加本次工作树。分析起点为 `fcbb128`；期间已发布的版本/交付变更未触及 DNS 缓存链路，验证使用实际当前 manifest（v0.2.9）。
 
-[`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 通过正式 `ConfigV2Loader` 加载脱敏 YAML，并使用带 origin TTL 的模拟 DoH 回答、真实缓存 facade 与有界 finalizer 等待。八组回归覆盖：等价 ECS 的 A/HTTPS 缓存、嵌套/重复成员与隐式 fallback、统一成员 ECS 不同于全局、真正异构 ECS 绕过和 client 子网规范化、覆盖优先级、当前 core 已发布时 Fast/Resolved stale 刷新、新 runtime 已有 fresh/stale 的更新，以及同语义/不同主机、路径、查询参数的 late-result 隔离。
+原文报告（2026-09-21，本轮未复核）：[`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 当时通过正式 `ConfigV2Loader` 加载脱敏 YAML，并使用带 origin TTL 的模拟 DoH 回答、真实缓存 facade 与有界 finalizer 等待。八组历史回归覆盖：等价 ECS 的 A/HTTPS 缓存、嵌套/重复成员与隐式 fallback、统一成员 ECS 不同于全局、真正异构 ECS 绕过和 client 子网规范化、覆盖优先级、当前 core 已发布时 Fast/Resolved stale 刷新、新 runtime 已有 fresh/stale 的更新，以及同语义/不同主机、路径、查询参数的 late-result 隔离。异构绕过和 Fast 已被当前实现删除，历史结果不构成 v3 验证。
 
 前期开发阶段已实际执行 `cargo test --offline --locked --manifest-path backend/Cargo.toml --bin fluxdns <filter>`：`dns::policy::` 46 项、`cache::` 52 项、`runtime::` 61 项、`resolution::` 6 项，均为 0 failed、0 ignored。Policy 包含上述八组新增回归和既有快照、资源发布、并发及停机相关用例。这些是当时工作树的定向结果，不代表全量或目标平台验收。
 
@@ -132,6 +158,7 @@ parallel 的上述择优不依赖 sink 是否存在。Positive 提前返回时�
 | TLS / 客户端地址 | system socket TLS、DoH forwarded/PROXY parser | DoH accept 后先可信 PROXY、再 TLS、再 HTTP | 本轮核对生产分支 | 真实代理、证书和故障组合仍需环境验收 |
 | DoH 裸路径/隐式 ID 与显式模板优先 | `DohPathPattern::matches/specificity_cmp`、Config 校验、`DohAdapter::new_with_tls` | 所有 DoH endpoint 装配期排序，HTTP 层以配置原文选择 canonical route ID，Policy 保持原 ID/IP 索引 | 2026-11-08 Windows，`bfece26` 加本次工作树，Rust 1.98.0：`cargo test --manifest-path backend/Cargo.toml -- --test-threads=1` 全部 857 项通过、4 项既有忽略。共享匹配器覆盖可选/必填 ID、空段/多段、根路径/尾随斜杠、固定段与显式模板优先；loader 覆盖合法重叠、重复及隐式后缀歧义。fake socket 矩阵覆盖有/无显式末尾模板 × 正反顺序 × GET/POST × 9 条路径，断言 canonical route ID 与 ID/CIDR 选择；两类入口的非法路径均验证 NotFound | 首次与前端并发执行全量测试时，SQLite 锁预算用例在 30ms 连接阶段返回 Connect，856 项通过、1 项失败、4 项忽略；串行复测通过，未修改其断言或预算。会话矩阵使用真实 HTTP parser 和 ClientIndex，但未做线上代理、真实浏览器、Linux/OpenWrt 或忽略专项验收 |
 | Moka / FDCS cache | `build_cache_facade`、`CacheSnapshotOwner`、二进制 codec | app 从 v2 enabled/path/interval 启动恢复、coordinator reload、service shutdown | 真实文件、跨 Policy core 重启、周期/预算/损坏/alias/代际测试；旧 SQLite adapter 测试保留 | 未验证 Unix、真实磁盘满；late-window 组合见[Late-window 与 owner](#late-window-与-owner) |
+| v3 AnswerKey / ECS scope | [`key.rs`](../../../backend/src/cache/key.rs) 的 AnswerKey、[`moka.rs`](../../../backend/src/cache/moka.rs) 的 CoveringIndex/invalidate_covered | PolicyDnsCore 完整决策后的 lookup、single-flight、commit、refresh、late-result；恢复经 Moka 插入 | 2026-11-09，`08a7747` 加工作树，全量测试、Clippy、loopback 二进制及 16 条详情验收通过，见 [v3 答案缓存核对边界](#v3-答案缓存核对边界) | 未验证生产上游、跨平台、TLS 反代与长期负载；微基准不等于完整查询延迟 |
 | Policy -> 出站 | core -> registry -> protocol-independent connector | 正式配置构造支持真实 HTTP/代理路径 | 本轮静态，无远程请求 | 不等同所有 SOCKS/Host/SNI 组合已实测 |
 | 单次完成事件 | service instrumented core、resolution publisher | core 返回后、编码前无等待移交 | 本轮核对调用位置 | ingress 满会出现可观测 gap，不能承诺零丢失 |
 | bootstrap 地址缓存 | 配置绑定 resolver、绝对到期点、查填许可 | 两个配置工厂均装配，direct/HTTPS/SOCKS5 共用 | [address_cache_tests.rs](../../../backend/src/upstream/address_cache_tests.rs)；registry 的正式 hosts bootstrap/代理测试 | 单 connector 单项；不缓存 system lookup、负答案或过期地址 |

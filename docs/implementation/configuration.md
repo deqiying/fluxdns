@@ -30,6 +30,8 @@
 >
 > 2026-11-08 duration 写回增量核对：基线 `5e8b4e1` 加本次工作树，仅核对 duration 字段的写回与 API 回显规范化；验证与未覆盖范围见下文活动源与候选内部底座。
 >
+> 2026-11-09 缓存 key/ECS 增量核对：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅静态核对 v3 AnswerKey、成员 ECS、scope、刷新和兼容性；本轮未执行产品测试或构建，运行证据待主代理补充，其余历史结果不变。
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -261,10 +263,10 @@ strategy.rules[].edns_client_subnet
 `mode` 的取值为 `disabled`、`client`、`custom`：
 
 - `disabled` 显式停止当前请求继续向上游传递 ECS；
-- `client` 优先使用并规范化请求携带的合法 ECS；没有时按客户端地址推导 IPv4 `/24` 或 IPv6 `/56` 前缀，避免向上游传递完整客户端地址；
-- `custom` 使用 `custom_ip`，因此 `custom_ip` 必填。
+- `client` 优先使用合法请求 ECS，清除 host bits，source 取 `min(原值, 24)`（IPv4）或 `min(原值, 56)`（IPv6），较短前缀保留；无合法请求 ECS 时按客户端地址推导 `/24` 或 `/56`；所有查询 scope 置 0；
+- `custom` 使用必填的 `custom_ip` CIDR，清除 host bits、scope 置 0，不按 client 隐私上限截断。
 
-当策略目标是 group 时，rule/strategy/client 的显式 ECS 继续覆盖所有成员。只有请求级结果来自 global/default 时，运行时才遍历 group 的全部可达 direct leaves（含 nested group、fallback，以及未显式配置而继承请求级 ECS 的成员），为每个 leaf 计算并规范化最终 ECS query。所有成员 query 相同时，group 使用这一统一 query 并允许 `Resolved` response cache；即使成员显式 ECS 不同于 global，只要所有成员最终一致也可缓存。只有最终 query 真正异构时才为成员保留独立 query，并绕过 cache lookup、single-flight 和 commit。Fast eligibility 仍保守：策略可达 target 只要存在显式成员 ECS 就不使用 Fast，后续完整决策仍可进入 Resolved。
+当策略目标是 group 时，rule/strategy/client 的显式 ECS 覆盖所有成员；来自 global/default 时遍历全部可达 direct leaves（nested group、fallback、隐式继承成员），逐成员计算最终 ECS。最终 ECS 一致时使用 uniform scope 缓存；真正异构时保留 per-member query，以按成员 ID 排序的 `(member, 最终 ECS 或 None)` 摘要精确缓存，正常参与 lookup、single-flight 和 commit，不再绕过。Fast 路径已删除，每次请求均先完成规则与 target 决策再查缓存。
 
 #### 缓存和 TTL
 
@@ -388,7 +390,7 @@ ConfigV2
 | `dns.cache.persistence.path` | string | 当前进程级 `FDCS` 快照文件路径；相对路径以 `work.path` 为基准。 |
 | `dns.cache.persistence.snapshot_interval` | duration | 完整快照周期，范围 `1s..=1d`。 |
 
-`memory.max_size_bytes` 是缓存条目按 key、DNS wire 和元数据计算后的容量预算，不承诺等于进程 RSS。`FDCS` 文件没有用户可配的磁盘配额，也不承诺文件大小等于 Moka weight；reader/writer 使用内部 1 GiB 文件上限和记录预算。旧 `persistence.max_size_bytes` 在 v2 中是未知字段。
+`memory.max_size_bytes` 是所有 namespace/subnet 条目共享的全局 weight 预算，计入 key、DNS wire 和元数据，不承诺等于进程 RSS；没有每 base key 条目上限。`FDCS` 文件没有用户可配的磁盘配额，也不承诺文件大小等于 Moka weight；reader/writer 使用内部 1 GiB 文件上限和记录预算。旧 `persistence.max_size_bytes` 在 v2 配置中是未知字段。
 
 `persistence.enabled` 开启时，正式 app 在 bind 前由唯一进程 owner 从 `FDCS` 分批预热活动 Moka，随后按 `snapshot_interval` 覆盖完整可见集合；缺失、损坏、不兼容、超时和内存预算不足只形成冷启/部分恢复状态。内存 CAS 不等待磁盘，也不再排入逐条 SQLite persistence。reload 只切换 owner generation/source，不恢复候选；shutdown 在 finalizer 排空后 best-effort 写最终快照。详见[Cache 设计](../architecture/backend/modules/cache.md)与[后台服务](backend/background-services.md#cache-persistence)。
 
@@ -414,13 +416,15 @@ strategy[].cache.enabled == true  → 策略池
 strategy[].cache 整块缺失          → dns.cache.enabled 为 true 时使用全局池，否则不缓存
 ```
 
-cache key format v2 显式区分逐规则匹配前的 `Fast` 模式和完整决策后的 `Resolved` 模式，二者不能 alias。除 pool namespace 与 canonical query 外，key 包含 transport compatibility，以及 opaque 的 policy/request/target/ECS fingerprint；不包含 DNS ID、原始 client 地址、整个配置 revision 或资源 generation。Fast 与 Resolved 的 policy 维度都使用 `cache_semantics_fingerprint`，覆盖会改变答案的已解析配置、当前 PolicyState 中全部 hosts/rule-set content hash 和请求上下文；Resolved 另加入最终 target/ECS，不再只用 strategy ID 摘要。请求 fingerprint 对有效请求 ECS 使用规范化网段；没有 ECS 时只使用脱敏的客户端 `/24`（IPv4）或 `/56`（IPv6）网段。
+cache key format v3 的 `AnswerKey` 由 pool namespace、规范化 qname/qtype/qclass、RD/CD/DO、排序后的保留 EDNS options、transport compatibility、target 子树 fingerprint 与最终成员 ECS 组成。EDNS 存在本身、DNS ID、COOKIE、PADDING、TCP keepalive、UDP payload size 不入 key；ECS 单独编码，未知 option 保守保留。没有 Fast/Resolved mode、policy/request fingerprint、listener/route/client/规则/hosts hash 或整体 revision 维度。
 
-规则或 hosts 的变化不会扫描或清空缓存，但会改变 policy fingerprint，使后续请求不再命中旧语义 entry；旧 entry 继续占用容量并按自身 TTL/optimistic 生命周期淘汰。请求先按最新 runtime snapshot 计算客户端、生效策略、ECS、namespace 和 policy/request fingerprint，fast miss 后才执行 rules、hosts 和 upstream target 决策。策略可达 target 存在显式成员 ECS 时 Fast eligibility 保守禁用；完整决策后若全部 direct leaf 的最终 query 相同，仍可使用 Resolved key，只有真正异构时才绕过 response cache。`hosts[]` 的 listener/strategy 本地回答直接使用当前资源 snapshot 并绕过 response cache；`upstreams[type=hosts]` 属于 upstream connector，其结果按普通上游响应处理。启用 optimistic cache 时，Fast/Resolved stale 都按最新 Policy/资源重新执行 route、ECS 与上游选择，不能沿用旧 entry 的目标；失败不会延长旧 stale。后续 WebUI 的清除缓存功能属于显式 `namespace/key/predicate` 操作，不由普通资源刷新隐式触发。
+target fingerprint 仅覆盖所选 target 子树：group 模式、成员/权重/fallback/超时与嵌套结构，以及 direct 定义、完整 DoH URL（含 path/query）、connect_ip、bootstrap 链、所用 outbound 与上游 hosts 内容；URL 只输入摘要，不进 key 明文/日志。同一 namespace 内，不同入口、客户端和策略只要最终 target/查询相同就共享答案；要求隔离时显式选择 client/strategy 池。规则/hosts 更新先改变决策，不再让不相关答案失效；listener/strategy hosts 本地回答仍绕过 response cache，upstream hosts 按普通上游响应处理。
 
-cache key format v2 和外层 `FDCS` snapshot format 保持不变；entry payload 升为 v3，以区分固定 10s 短响应语义并新增 REFUSED/Other 分类。恢复时，v2 的 REFUSED/空 Answer 条目视为不兼容，不继续使用旧的长 fresh/stale 窗口；v2 的普通非空答案可按同布局恢复并转换为 v3。v3 条目按保存的绝对到期时间恢复，不重新补满 10s。此前的 policy fingerprint 已纳入完整 DoH endpoint（含 path/query），端点明文不进入缓存键或日志。
+uniform ECS 按应答 scope 存储并最长前缀探测：一致应答 `C ≤ S` 存 covering `/C`；`C > S` 时，source 已达 `/24`、`/56` 上限则 covering `/S`，未达上限则 exact `/S`（仅相同 source/网段）。无应答 ECS 或 FAMILY/SOURCE/ADDRESS 不一致时忽略应答 ECS，按查询 source 存 covering `/S`；不一致应答仍返回与缓存，这是对 RFC 7871 MUST drop 的有意偏离，不扩大共享范围。查询 source 0 始终存 exact `/0`，区别于应答 scope 0 的 covering `/0`。查询无 ECS 使用独立桶，不服务带 ECS 请求；异构组合只精确匹配。
 
-policy fingerprint 只保证实现纳入语义摘要的相关变化切换 key；它不是通用配置 revision，也不替代显式清理接口。真正旧格式的 key 仍不能与 v2 恢复记录混用，持久化 adapter 将其按不兼容记录隔离。
+covering lookup 从长到短探测不超过查询 source 的已有前缀，最后探测 exact；single-flight 按查询 ECS 精确值合并，存储 key 等应答 scope 确定。Moka 前缀计数索引随插入和删除/淘汰维护，快照恢复经插入重建，不单独持久化。optimistic refresh 在最新 core 完整重新决策，记录回源前 store 版本水位；新 scope 写入成功后锁内确认新版本仍有效，再清除其覆盖且不晚于水位的旧条目，不删除刷新期间更新的条目，新条目失效则不清理。late-result 只复核重新决策的 AnswerKey，不比较 policy；失败不延长旧 stale。详细契约见 [Cache](../architecture/backend/modules/cache.md)。
+
+cache key 由 v2 升为 v3，旧 v2 key 的快照记录恢复为 `Incompatible`，升级需冷启动一次；外层 `FDCS` 和 entry v3 不因此改版。entry codec 保留普通非空 v2 payload 按同布局转换的能力，但不能绕过 key 版本检查；旧 REFUSED/空 Answer payload 仍不兼容。恢复按绝对到期时间，不补满 TTL。配置 schema v2 与 cache key/entry 版本独立。
 
 #### 响应缓存语义
 
@@ -726,7 +730,7 @@ WebUI 有序规则卡片支持本级 ECS 的继承、禁用、客户端地址和
 
 文件型 hosts 的 `auto_update` 只表示本地文件重载，不表示远程同步。
 
-hosts 与 rule_set 使用相同的 per-resource snapshot 机制：本地文件变更只发布该 hosts 资源的新版本，保留其他资源版本；发布时同步更新 Policy 使用的资源内容 hash，使后续 fast cache key 切换 fingerprint。请求和 optimistic refresh 按最新资源重新进行 hosts/rule 匹配，但不因单资源变化扫描或全局清除缓存。
+hosts 与 rule_set 使用相同的 per-resource snapshot 机制：本地文件变更只发布该 hosts 资源的新版本，保留其他资源版本；Policy matcher/version/hash 同步更新，hash 不再进入答案 key。请求和 optimistic refresh 按最新资源重新进行 hosts/rule 匹配，最终 target/查询不变时复用原答案，不因单资源变化扫描或全局清除缓存。
 
 ## 13. `outbound[]`
 

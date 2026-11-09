@@ -10,6 +10,8 @@
 >
 > 局部评审基线：`fcbb12831c66e81e02108ccd030ac3c2a1e08f56` 加本次工作树；仅用于上述范围
 >
+> 2026-11-09 局部评审：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅核对完整决策、v3 AnswerKey 与 ECS scope 编排；未新增测试或运行验收。
+>
 > 关联实现：[policy.rs](../../../../backend/src/dns/policy.rs)、[handler.rs](../../../../backend/src/dns/handler.rs)、[service.rs](../../../../backend/src/service.rs)、[resolution.rs](../../../../backend/src/resolution.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
@@ -29,7 +31,7 @@ DNS Core 是 transport 无关的请求编排器。输入是 canonical query 和 
 | `message.rs` | canonical query/response、DNS validation 和 response class |
 | `context.rs` | request meta、client identity、deadline/cancellation |
 | `handler.rs` | `DnsCore`、completion/observation、简化 Core 与 `dispatch_inbound` |
-| `policy.rs` | 正式策略、资源状态、Fast/Resolved 缓存、上游、刷新与 adapter 装配 |
+| `policy.rs` | 正式策略、资源状态、v3 答案缓存、上游、刷新与 adapter 装配 |
 | `configured.rs` / `hosts.rs` | 简化配置 Core 与兼容 hosts 数据结构 |
 | `service.rs` / `resolution.rs`（模块外） | completion 计时/发布和后台 stats/cache/detail 分发 |
 
@@ -60,10 +62,10 @@ DNS Core 是 transport 无关的请求编排器。输入是 canonical query 和 
 ```text
 capture one RuntimeSnapshot
   → validate canonical query
-  → prepare PolicyContext（client / strategy / namespace / fingerprints）
-  → fast cache key v2 lookup
-  → on miss: evaluate RouteDecision（rules / hosts / target / member ECS）
-  → local hosts answer OR resolved key lookup / exchange
+  → prepare PolicyContext（client / strategy / namespace / TTL）
+  → evaluate RouteDecision（rules / hosts / target）
+  → local hosts answer OR prepare_query（最终 member ECS）
+  → v3 AnswerKey scope/exact lookup → miss: single-flight / exchange
   → validate and classify response
   → create optional CacheCommitCandidate
   → apply client-visible TTL
@@ -79,27 +81,27 @@ Core 入口、cache/exchange 与 response correlation 按各自边界检查 canc
 
 Policy 将原有完整决策拆为两个稳定阶段：
 
-- `PolicyContext`：client bucket/identity、生效 strategy、cache decision/namespace、TTL override、可提前确定的 ECS，以及 policy/request fingerprint；
-- `RouteDecision`：matched rule/hosts/resource、local answer 或 upstream target、最终 target/member ECS 和安全 decision trace IDs。
+- `PolicyContext`：client bucket/identity、生效 strategy、cache decision/namespace、TTL override；Core 组合请求级 ECS；
+- `RouteDecision`：matched rule/hosts/resource、upstream target、生效 ECS；Core 再准备最终 member ECS 和安全 observation。
 
 Core 不再次计算继承，也不把 rule 文本写入日志。
 
-当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 对 eligible 请求先执行 `prepare_context → fast lookup`，miss 后再执行 `evaluate_route → resolved lookup/upstream`；stale 命中先返回并在后台按最新 Policy/资源重新刷新，`hosts[]` 本地命中绕过 response cache。`DnsCore::resolve_with_completion` 返回响应、当前 strategy/target/actual/matched resource/cache lookup observation、取消原因和可选 commit candidate；fresh/stale/single-flight cache hit 从 entry provenance 恢复缓存生产 target/actual，不使用当前 route 猜测来源。
+当前 `HostsCore` 同时保留旧 `HostsTable` 兼容路径，并支持不可变 `Resource::HostsIndex`；命中后直接生成 A/AAAA/CNAME 本地响应，支持 exact/wildcard 优先级，未命中时按 NXDOMAIN/NODATA 语义返回。`PolicyDnsCore` 每次执行 `prepare_context → evaluate_route`，本地 hosts 命中绕过 response cache；其余完成 `prepare_query` 后才查答案缓存，不存在 Fast 分支或决策 memo。`DnsCore::resolve_with_completion` 返回响应、当前决策 observation 和可选 commit candidate；fresh/stale/single-flight hit 从 entry provenance 恢复缓存生产 target/actual，不用当前 route 猜测来源。
 
-Upstream runtime 预记录 group 全部可达 direct leaves（含 primary、fallback、nested 与隐式继承请求级 ECS 的成员）。RouteDecision 确定上游后，若请求级 ECS 来自 global/default，Core 的 `prepare_query` 使用该集合计算并比较规范化最终 ECS；rule/strategy/client 显式 ECS 则直接统一覆盖成员。成员 query 全部相同时使用统一 query 和 Resolved cache；真正异构时才把 per-member query 交给 executor，并绕过 lookup、single-flight 与 commit。策略存在显式成员 ECS 时 Fast eligibility 仍保守禁用，但不阻止后续 Resolved 命中。
+Upstream runtime 预记录 group 全部 direct leaves（primary/fallback/nested/隐式继承成员）。rule/strategy/client 显式 ECS 统一覆盖成员，否则逐 leaf 计算最终 ECS。uniform ECS 可按应答 scope 共享；异构成员保留 per-member query 并以排序组合摘要精确缓存，正常参与 single-flight 与 commit，不再绕过。
 
 ## 6. Cache 交互
 
 只有需要上游交换的路径进入 CacheFacade：
 
-- lookup key 由 Cache 模块根据 `PolicyContext`、可选 `RouteDecision` 和 query 构造；`Fast`/`Resolved` 模式显式隔离，并共用完整 `cache_semantics_fingerprint` 作为 policy 维度，Resolved 另加入 target/final ECS；
+- 完整决策后用 namespace、规范化 question、RD/CD/DO、保留 EDNS options、transport compatibility、target 子树 fingerprint 与最终 ECS 构造 `AnswerKey`；入口、policy/资源 hash 不入 key，EDNS 存在本身不入 key；
 - fresh hit 直接使用 canonical response；
-- stale hit 可以先返回，并进入 Fast/Resolved 共用的 `schedule_optimistic_refresh`；
-- miss 进入 single-flight；
+- stale hit 可以先返回，并调度 `schedule_optimistic_refresh`；
+- uniform lookup 按 covering 前缀从长到短、最后 exact 探测；miss 按查询 ECS 精确值 single-flight，存储 key 待应答 scope 确定；无 ECS 桶和异构组合只精确匹配；
 - waiter 取消只释放自身，不取消仍有其他 waiter 的 exchange；
 - Core 把上游结果与 single-flight lease 封装为 `CacheCommitCandidate`，由统一解析事件移交后台 worker；worker 用独立 100ms deadline 完成准入、质量 CAS 和 follower completion。进程快照不在请求完成链逐条 enqueue。
-- optimistic refresh 切到 latest core 后重新执行 `prepare_cache_query`。同一 `Arc` store 且 key 相同使用 stale version CAS；跨 store/key 先读取目标，Miss/Stale 分别使用 `Absent`/目标 `Version`，Fresh 跳过。写回前再次核对 semantics/key，失败不延长旧 stale。
-- late-result 保存生产请求 semantics；切换 latest core 后只有 semantics、key、最终 ECS 一致才接纳旧响应，changed 时丢弃。相同语义允许跨 runtime 继续写入，不能仅凭相同 group ID 接纳。
+- optimistic refresh 切到 latest core 重新准备；目标 fresh 则跳过，回源前记录目标 store 版本水位，写前复核 AnswerKey。新 scope key 写入成功后在 store 锁内确认新版本有效，再清理被覆盖且不晚于水位的旧条目，不删除刷新期间更新的条目；新条目失效则不清理，失败不延长旧 stale；
+- late-result 保存 AnswerKey 而非 policy semantics，跨 runtime 重新决策与写前均要求答案身份相等；policy 变更但最终答案身份不变仍可接纳，不能仅凭 group ID 接纳。
 
 Core 不直接调用 Moka 或持久化 store。
 
@@ -109,11 +111,10 @@ ECS 处理顺序：
 
 1. Policy 计算 effective mode；
 2. `disabled` 删除已有 ECS；
-3. `client` 优先使用合法请求 ECS，否则从 client address 计算；
-4. `custom` 使用已验证 CIDR；
-5. 对前缀长度进行 family 合法性检查；
-6. canonical query 中只保留最终 ECS；
-7. 策略可达 target 存在显式成员 ECS 时 Fast key 保守禁用；完整决策后收集全部 direct leaves，规范化最终 ECS 并比较 query，统一时进入 Resolved cache，异构时绕过 response cache；
+3. `client` 优先使用合法请求 ECS，source 截断到 IPv4 /24、IPv6 /56（较短值保留）、清除 host bits；无合法请求 ECS 时从 client address 推导同样前缀；
+4. `custom` 使用已验证 CIDR，不按 client 上限截断；
+5. 所有查询 ECS scope 置 0，并校验 family/prefix；
+6. uniform 最终 ECS 进入 scope 缓存，异构组合进入精确缓存；无 ECS 使用独立桶，source 0 产生 exact /0，不能与应答 scope 0 covering /0 混用；应答缺失或不一致 ECS 按查询 source 存储，不一致应答仍返回。完整矩阵见 [Cache](cache.md#4-lookup-与-single-flight)。
 
 客户端地址不可用且 mode=client 时，不伪造 `0.0.0.0/0`；按“无 ECS”继续并记录低基数原因。
 
@@ -176,9 +177,9 @@ resolution ingress 满时 DNS 响应照常编码，但整个 envelope 被丢弃�
 - 同一 query 经 UDP/TCP/DoH 得到同一 Core 决策；
 - client/strategy/rule/hosts/upstream 管线顺序；
 - ECS 各层覆盖、全部 direct leaf 的最终 query 一致性与 cache key；
-- Fast/Resolved key v2 隔离、共用 policy semantics fingerprint、target/ECS 维度变化与纯观测配置排除；
+- v3 AnswerKey 跨入口共享、target 子树定向失效、RD/CD/DO/EDNS 规范化、scope/exact 及无 ECS 桶隔离；
 - local hosts 绕过 cache 且资源更新立即生效；
-- fresh/stale/miss/single-flight/cancellation，以及 Fast/Resolved 共用刷新流程；
+- fresh/stale/miss/single-flight/cancellation，以及最新 core 下重新决策的统一刷新流程；
 - 异步 commit 成功唤醒 follower，candidate drop 释放 lease；
 - NXDOMAIN/NODATA/SERVFAIL/REFUSED/TC 分类；
 - TTL override 不延长 cache expiry；
@@ -186,4 +187,4 @@ resolution ingress 满时 DNS 响应照常编码，但整个 envelope 被丢弃�
 - 一请求只记录一次 total stats。
 - 一请求只发布一次 typed completion，响应对象与详情 source 共享同一 `Arc`；
 - resolution ingress/detail/cache commit 有界队列的丢弃与独立计数。
-- refresh/late-result 在 latest core 重新准备并按 semantics/key/ECS 一致性接纳，失败不延长 stale。
+- refresh/late-result 在 latest core 重新准备并按 AnswerKey 接纳；刷新水位清理保护并发更新，新条目失效则不清理，失败不延长 stale。

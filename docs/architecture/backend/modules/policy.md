@@ -14,6 +14,8 @@
 >
 > 2026-11-08 局部评审：仅同步 DoH 裸路由可提取隐式 ID、显式模板必填和 canonical route ID 约束；客户端精确 ID 优先及 CIDR 回退不变，其余范围沿原评审记录。
 >
+> 2026-11-09 局部评审：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅核对完整决策后 v3 AnswerKey、成员 ECS 与 refresh/late-result；未新增运行验收。
+>
 > 关联实现：[client.rs](../../../../backend/src/policy/client.rs)、[plan.rs](../../../../backend/src/policy/plan.rs)、[dns/policy.rs](../../../../backend/src/dns/policy.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [DNS Core](dns-core.md) · [Resource](resource.md) · [Upstream](upstream.md)
@@ -55,14 +57,14 @@ Policy 模块把已解析配置和资源 snapshot 编译成纯内存决策索引
 - hosts/rule resource handle；
 - typed upstream handle；
 - 每层 cache/TTL/ECS override；
-- 会改变答案的 typed 决策输入；cache 摘要与 fast-path safety 由外层 `PolicyState` 保存；
+- 会改变路由或最终查询的 typed 决策输入；target 子树摘要由外层 `UpstreamRuntime` 预计算；
 - 用于观测的稳定、低基数 ID。
 
 编译发生在 prepare/resource update，不在请求时解析字符串引用。
 
 索引只持有已解析 typed 值。`ResolvedClient`/`ClientRule` 以 `name` 表示配置管理键，生产 v2 的单个 `client_id` 直接进入内部 `client_ids` 统一容器。client、strategy、route 分别编译，重复 name、重复 client ID、空 matcher 和引用错误在构造时拒绝。resource prepare 交付已编译 snapshot；同步测试构造器不等同完整资源准备入口。
 
-PolicyContext 在逐规则 matcher 前产生 cache/TTL/ECS/namespace；fast miss 后 RouteDecision 才执行 listener hosts 与有序 strategy rule。规则结果只输出 typed target、resource/version 和安全摘要。PolicyState 预计算不含观测/管理配置的语义基底，资源 CAS 同步更新 matcher 与 content hash，请求 fingerprint 只编码稳定字段。具体 core/registry 构造器见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)。
+PolicyContext 在逐规则 matcher 前产生 cache/TTL/namespace 等上下文；每个请求随后执行 RouteDecision 的 listener hosts 与有序 strategy rule，再准备最终成员 ECS 和答案 key。Fast 路径已删除。资源 CAS 仍同步发布 matcher/version/hash，但资源 hash 不进入答案 key。具体 core/registry 构造器见[DNS 管线实现](../../../implementation/backend/dns-pipeline.md)。
 
 ## 4. 域名规范化
 
@@ -140,23 +142,23 @@ ECS：
 rule → strategy → client → upstream → global
 ```
 
-`disabled` 是明确结果，不继续继承。`custom` 必须已有合法 CIDR。ECS 优先级保持 `rule > strategy > client > upstream > global`：group 有 rule/strategy/client 显式结果时统一覆盖成员；否则遍历 primary、fallback 与 nested group 的全部可达 direct leaves，让显式 upstream ECS 覆盖 global，未显式成员继承请求级 ECS。运行时比较各 leaf 规范化后的最终 query；全部相同时使用统一 query 并允许 Resolved cache，只有真正异构时才绕过 lookup、single-flight 和 commit。Fast eligibility 仍保守，只要策略可达 target 存在显式成员 ECS 就禁用 Fast，但完整决策后仍可证明统一并使用 Resolved。
+`disabled` 是明确结果，不继续继承。`custom` 必须已有合法 CIDR。ECS 优先级保持 `rule > strategy > client > upstream > global`：group 有 rule/strategy/client 显式结果时统一覆盖成员；否则遍历 primary、fallback 与 nested group 的全部可达 direct leaves，让显式 upstream ECS 覆盖 global，未显式成员继承请求级 ECS。最终 ECS 一致时使用 uniform scope 缓存；真正异构时保留 per-member query，按排序成员 ECS 组合摘要精确缓存，lookup、single-flight 和 commit 均不绕过。client ECS 清除 host bits、source 上限 IPv4 /24、IPv6 /56，较短前缀保留，查询 scope 置 0；custom CIDR 不按 client 上限截断。
 
 ## 9. `PolicyContext` 与 `RouteDecision`
 
-`PolicyContext` 的实际字段是 listener_id、可选 route、ClientMatch、`Arc<ResolvedStrategy>`、CacheDecision 和 TTL override。Core 结合这份上下文与 PolicyState 计算提前可确定的 ECS、fast eligibility 和 fingerprint，不把这些衍生值误列为 context 的直接字段。
+`PolicyContext` 的实际字段是 listener_id、可选 route、ClientMatch、`Arc<ResolvedStrategy>`、CacheDecision 和 TTL override。Core 结合上下文计算请求级 ECS，不将衍生值误列为 context 字段。
 
-`RouteDecision` 仅在 fast miss 或不安全时计算，包含 upstream `ConfigId`、生效 ECS、可选 hosts `ConfigId` 和 MatchedRule；并没有独立 `LocalAnswer` / `UpstreamTarget` 返回类型。资源版本与缓存 provenance 由 Core 组合为 completion observation。`ResolutionPlan` 是两阶段结果的组合视图，不是热路径必须先完整构造的单体。
+`RouteDecision` 在每次请求查缓存前计算，包含 upstream `ConfigId`、生效 ECS、可选 hosts `ConfigId` 和 MatchedRule；并没有独立 `LocalAnswer` / `UpstreamTarget` 返回类型。资源版本与缓存 provenance 由 Core 组合为 completion observation。`ResolutionPlan` 是两阶段结果的组合视图。
 
 两类结果不持有 SecretRef、HTTP client 或具体 connector；其中的配置 handle 和 matcher 引用来自 prepare，不能把“typed”解释为所有字段都不含字符串。
 
-### 9.1 cache 语义 fingerprint 与 Fast eligibility
+### 9.1 target fingerprint 与答案身份
 
-`dns/policy.rs` 的 `PolicyState` 负责 cache fingerprint 与 fast-path eligibility，不是 `PolicyIndex` 自身的字段。`cache_semantics_fingerprint` 覆盖已解析 typed 配置、listener/route/strategy/client 上下文、strategy/upstream/hosts/rule 语义和资源 content hash；`logs`、`webui`、`database` 等纯观测/管理字段明确排除。当前会遍历状态中全部 hosts/rule-set content hash，不仅限于本请求引用的资源，因此不相关资源更新也可能切换 key；这仍不是全库 clear。
+`dns/policy.rs` 的 `UpstreamRuntime` 为各 target 预计算子树 fingerprint：包括 group 成员/fallback、模式、权重、超时与嵌套结构，以及 direct 的完整 DoH URL、connect_ip、bootstrap、所用 outbound 和上游 hosts 内容。无关 target 或 policy 资源更新不改变该摘要。
 
-Fast 与 Resolved 的 policy 维度都使用这份完整语义 fingerprint；Resolved 不再使用 strategy ID 摘要，而是在相同 fingerprint 上增加最终 target/ECS。Fast request fingerprint 使用规范化请求 ECS；无请求 ECS 时只编码 client address 的 `/24`（IPv4）或 `/56`（IPv6）网段，不把原始地址写入 key 或 `Debug`。
+完整决策后，Core 用 namespace、question、RD/CD/DO、保留 EDNS options、transport compatibility、target fingerprint 和最终 ECS 构造 v3 `AnswerKey`。listener、route、客户端、strategy、规则/hosts hash 不再是答案维度；需要身份隔离时使用显式 client/strategy namespace。EDNS 存在本身不入 key，规范化细节与 scope/exact 边界见 [Cache](cache.md)。
 
-资源成功刷新时，matcher/index 与对应 content hash 在同一次 Policy 状态发布中生效；因此新请求会切换 Fast/Resolved key，旧 entry 不必全局清理。成员特有 ECS 或其他不能在 matcher 前证明安全的路径必须标记 Fast ineligible；这只是提前 lookup 的保守门槛，不代表完整决策后的 Resolved cache 也必须禁用。
+资源刷新继续原子发布 Policy matcher/index 与 content hash，新请求按新规则决策；相同 target/最终查询仍复用答案，不清库。listener/strategy hosts 本地命中始终绕过 response cache。
 
 ## 10. 一致性
 
@@ -164,7 +166,7 @@ Fast 与 Resolved 的 policy 维度都使用这份完整语义 fingerprint；Res
 
 请求决策使用同一次加载的 `Arc<PolicyState>`，其中 matcher、版本和 content hash 一起 CAS 发布。Runtime 的 `ResourceRegistrySnapshot<()>` 是另一份观测 metadata：`PreparedRuntime::refresh_resource` 先发布 Policy，再更新 metadata，并非两个 `ArcSwap` 的跨对象原子事务。请求决策不通过这份 metadata 重建 matcher；两者一致性不能被描述为“所有读者同时看到同一份原子组合”。
 
-optimistic refresh 与 late-result 跨 runtime 切换时必须在 latest core 重新执行 `prepare_cache_query`，按最新 Policy/资源重新计算 route、semantics、key 和最终 ECS。旧响应只有在生产请求 semantics 与最新准备的 semantics/key/ECS 一致时才可继续接纳；变化时丢弃，不能用相同 group ID 或偶然相同 key 代替语义证明。
+optimistic refresh 与 late-result 切换 latest core 时重新执行 `prepare_cache_query`，按最新 Policy/资源得到完整决策。写回核对 `AnswerKey` 相等，不再保存或比较 policy semantics；policy 变更但答案身份不变可以继续接纳。刷新 scope 迁移的版本水位与锁内覆盖清理契约见 [Cache](cache.md#5-optimistic-与-late-result)。
 
 ## 11. 错误语义
 
@@ -184,8 +186,8 @@ optimistic refresh 与 late-result 跨 runtime 切换时必须在 latest core �
 - exact/suffix/wildcard/regex 优先级；
 - `resource:selector` 解析和不存在错误；
 - cache tri-state、TTL、ECS 全覆盖矩阵，以及 primary/fallback/nested direct leaves 的统一/异构最终 query；
-- `prepare_context` 不执行逐规则 matcher，Fast eligibility 保守禁用时仍允许完整决策进入安全的 Resolved cache；
-- Fast/Resolved 共用 policy semantics fingerprint、request/target/ECS 维度稳定性、模式隔离和敏感字段排除；
+- `prepare_context` 不执行逐规则 matcher，但所有请求都在 cache lookup 前完成 `evaluate_route` 与成员 ECS 准备；
+- v3 AnswerKey 的 target/最终查询稳定性、uniform/异构编码隔离、跨入口共享与 namespace 身份隔离；
 - 同一 snapshot 下决策确定性；
 - 资源 swap 后 matcher 与 hash 同步切换，新旧请求各自保持一致。
-- refresh/late-result 切换 latest core 后重新准备，并按 semantics/key/ECS 一致性决定接纳。
+- refresh/late-result 切换 latest core 后重新准备，按 AnswerKey 一致性接纳；scope 变化清理不得删除刷新期间更新的条目。

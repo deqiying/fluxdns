@@ -16,6 +16,8 @@
 >
 > 2026-11-08 局部评审：REFUSED/空 Answer 固定 10s、禁止 stale、客户端 TTL 同步及 entry v3 恢复边界；本次不改变上游响应选择与 fallback。
 >
+> 2026-11-09 局部评审：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅核对 v3 AnswerKey、ECS scope、前缀索引及刷新/late-result 契约；未新增测试或运行验收。
+>
 > 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[snapshot.rs](../../../../backend/src/cache/snapshot.rs)、[snapshot_owner.rs](../../../../backend/src/cache/snapshot_owner.rs)
 >
 > 关联文档：[后端设计](../overview.md) · [配置参考](../../../implementation/configuration.md) · [DNS 管线](../../../implementation/backend/dns-pipeline.md) · [后台服务](../../../implementation/backend/background-services.md)
@@ -38,17 +40,17 @@ Cache 管理逻辑池、entry 生命周期、single-flight、optimistic refresh 
 
 namespace 使用稳定 typed components，不拼接可伪造原始 client ID。client identity 使用域分隔 digest，持久化格式包含版本。
 
-key format v2 包含 namespace、canonical query wire、opaque transport compatibility、Fast/Resolved mode byte、可选的 policy/request/target/ECS 32-byte fingerprint 与版本。不得包含客户端 DNS ID、整个 runtime revision、全局 resource generation、HTTP header/URL 或原始 client address。
+key format v3 的 `AnswerKey` 包含 namespace、transport compatibility、target 子树 fingerprint、规范化 question（qname/qtype/qclass）、RD/CD/DO、排序后的保留 EDNS options，以及最终成员 ECS 维度。EDNS 是否存在本身不入 key；ECS 单独编码，COOKIE、PADDING、TCP keepalive、UDP payload size 不入 key，未知 option 保守保留。DNS ID、入口、客户端、policy/request fingerprint、全局资源 hash 和 runtime revision 不入答案身份；namespace 仍是用户显式隔离边界。
 
-Fast 在逐规则 matcher 前构造；Fast 与 Resolved 的 policy 维度都必须使用同一 `cache_semantics_fingerprint`，覆盖会改变答案的已解析配置语义、请求上下文与当前 PolicyState 中全部 hosts/rule-set content hash。Resolved 不得退化为 strategy ID 摘要，而是在相同语义 fingerprint 上增加 target/final ECS。两种编码不能 alias。资源变化切换 key 而不主动扫描清空全库；旧项继续占容量到自然过期/淘汰。当前失效粒度可能大于实际依赖资源集合，见 [Policy](policy.md)。
+每个请求先完成 `prepare_context → evaluate_route → prepare_query` 再查缓存，Fast 路径已删除且不保留决策 memo。listener/strategy hosts 本地回答绕过 response cache。规则、hosts、策略或入口变化只改变决策；同 namespace 内最终 target 与查询不变时复用答案，不扫描清库。
 
-DoH endpoint 的 path/query 可能改变答案语义，必须将完整 URL 直接输入摘要，不能依赖会隐藏路径和查询参数的 `SafeUrl` Debug。完整 URL 不进入缓存键明文或日志。
+target fingerprint 只覆盖所选子树：group 的模式、权重、成员/fallback 顺序、超时与嵌套结构；direct 定义、完整 DoH URL（含 path/query）、connect_ip、bootstrap 链、所用 outbound 的已解析内容与上游 hosts 内容。outbound 摘要复用 connector 构造时的 profile，不二次读取 SecretRef；完整 URL 和凭据只输入摘要，不进入 key 明文或日志。
 
-Fast eligibility 对策略可达 target 保持保守：只要任一可达 group direct leaf 有显式成员 ECS，就不在规则匹配前使用 Fast。Upstream runtime 必须预记录 primary、fallback、nested group 与隐式继承请求级 ECS 的全部 direct leaves；请求级 ECS 来自 global/default 时，完整决策比较各 leaf 规范化后的最终 query。所有 query 相同时使用统一 query 和 Resolved cache，只有真正异构时才绕过 lookup、single-flight 和写入。显式成员 ECS 不同于 global 但所有成员最终一致，也属于可缓存路径；rule/strategy/client 显式 ECS 直接统一覆盖成员。
+`prepare_query` 遍历 primary、fallback、nested group 的全部 direct leaves。rule/strategy/client 显式 ECS 统一覆盖成员，否则按成员 upstream/global 继承。最终 ECS 一致时使用 uniform 维度；真正异构时将按成员 ID 排序的 `(member, 最终 ECS 或 None)` 编成独立摘要，精确匹配并正常参与 lookup、single-flight、commit，不参与 scope 扩展。
 
 ## 3. Entry、TTL 与质量
 
-entry 保存 canonical response、inserted/expiry/stale-until、原始 RR TTL、response class、producer revision、quality、checksum/format，以及缓存生产请求的 target/actual upstream provenance。上游 TC 额外受 transport compatibility 限制。policy/resource fingerprint 已在 key 内；producer revision 只用于诊断/CAS，不作为全局失效开关。
+entry 保存 canonical response、inserted/expiry/stale-until、原始 RR TTL、response class、producer revision、quality、checksum/format，以及缓存生产请求的 target/actual upstream provenance。上游 TC 额外受 transport compatibility 限制；producer revision 只用于诊断/CAS，不作为全局失效开关。
 
 - 正常 NOERROR 按可用 RR TTL 决定生命周期，返回时逐 RR 扣减。
 - REFUSED 与所有通过协议校验、Answer 为空的上游响应固定缓存 10s，不依赖 SOA/原 TTL，也不受 failure TTL、negative TTL 上限或 TTL override 改变。客户端首答的 RR TTL 与 SOA.MINIMUM 同步改为 10s，命中时使用剩余寿命；无 RR 时不伪造记录。origin response 与 checksum 保留原文。
@@ -60,7 +62,18 @@ entry 保存 canonical response、inserted/expiry/stale-until、原始 RR TTL、
 
 Facade 区分 Disabled、Miss、Fresh、Stale+一次性 refresh permit、Expired、StoreUnavailable。store unavailable 时继续解析，不能把存储错误伪装成正常命中。Expired 表示条目存在但已过期且当前不可乐观返回：本次必须回源，观测值也必须据此记录为「条目过期」，不能与「从未缓存」合并成同一个状态。
 
-single-flight key 与 cache key 一致：
+统一 ECS 的 lookup 使用 base（含地址族）下的 covering 前缀计数索引，从长到短探测不超过查询 source 的前缀，最后探测相同 source/网段的 exact key。按顺序选择 fresh 或当前池允许返回的 stale；较宽 fresh 不越过可返回的更具体 stale。不可返回的旧条目继续保留版本供 CAS。single-flight 使用 `AnswerKey::load_key`，按查询 ECS 精确值合并；存储 key 则在应答返回后由 `storage_key` 决定：
+
+| 最终查询 / 应答 ECS | 存储与适用范围 |
+| --- | --- |
+| 带 ECS，source S > 0，合法一致应答 scope C ≤ S | covering `/C`；只服务该网段内 source ≥ C 的查询 |
+| C > S，S 已达 IPv4 /24 或 IPv6 /56 上限 | covering `/S` |
+| C > S，S 未达上限 | exact `/S`，只服务 source/网段相同的查询 |
+| 应答不带 ECS，或 FAMILY/SOURCE/ADDRESS 与查询不一致 | 忽略应答 ECS，按查询 source 存 covering `/S`；不一致应答仍返回与缓存，这是对 RFC 7871 MUST drop 的有意偏离，不扩大共享范围 |
+| 查询 source = 0 | 始终 exact `/0`，区别于应答 scope 0 的 covering `/0`；exact 本身不扩大共享范围 |
+| 查询无 ECS | 独立无 ECS 桶，精确匹配，不服务带 ECS 的请求 |
+
+异构成员组合与无 ECS 桶均使用独立编码，不与 uniform scope 条目 alias。single-flight 生命周期如下：
 
 1. 首个 miss 创建 producer，后续 waiter 订阅同一结果；单 waiter 取消不影响其他人。
 2. 无 waiter 且无 late cache value 时可取消 producer；optimistic refresh 在独立窗口内可以继续。
@@ -78,11 +91,11 @@ single-flight key 与 cache key 一致：
 
 乐观缓存未启用或乐观窗口已经结束时，lookup 返回 Expired 而不是 Miss；两者都要回源，但必须保留这一区分，否则无法判断某次解析是因为条目过期还是因为从未缓存。过期条目仍占用 key，写回必须按版本 CAS 替换，不能当作不存在写入。
 
-Fast/Resolved stale 必须共用刷新流程：切到最新可用 core 后重新执行完整 `prepare_cache_query`，不得复用 entry 中的旧 connector/rule pointer。同一 `Arc` store 且 key 相同时以 stale version 做 `Version` CAS；store 或 key 不同时先读取目标，Miss 使用 `Absent`、Stale 使用目标 version、Fresh 跳过。上游返回后、写入前再次核对 semantics/key；任一准备、交换、匹配或写入失败都只放弃刷新，不延长旧 entry 的 stale 窗口。
+stale 刷新切到最新可用 core，重新执行完整 `prepare_cache_query`，不复用旧 connector/rule pointer；目标已有 fresh 则跳过。刷新回源前记录目标 store 的版本水位，写回前再次核对 `AnswerKey`。新 scope key 按探测到的旧版本 CAS，未见条目使用 `Absent`；写入成功后，在 store 锁内确认新条目版本仍有效，再删除同 base 下被它完整覆盖且版本不晚于水位的旧条目，不删除刷新期间更新的条目。新条目已失效/替换则不清理；准备、回源、匹配、写入或清理失败都不延长旧 stale。
 
-`PolicyLateResultSink` 必须保存生产请求的 semantics。切换 latest core 后，只有重新准备的 semantics、key 和最终 ECS 全部一致，才允许旧响应跨 runtime 继续写入；任何配置、资源、目标或 ECS 变化都丢弃。目标缓存已有同等或更高质量结果时不覆盖，写前再次核对 semantics/key。finalizer 以有界 semaphore 接收 typed write/refresh task，容量不足明确拒绝；shutdown 取消并等待已接收任务，晚到结果不改变已返回客户端的 response。
+`PolicyLateResultSink` 保存生产请求的 `AnswerKey`，不保存 policy semantics。切换 latest core 后完整重新决策，只有答案身份相等才允许旧响应跨 runtime 写入，写前再次核对；policy/资源变化本身不再触发丢弃，target 或最终查询变化则拒绝。fresh/stale 目标已有同等或更高质量时不覆盖；已过期目标按版本替换。finalizer 有界接收，shutdown 取消并等待已接收任务；晚到结果不改变已返回响应。
 
-缓存调试日志使用 `reason = "group_ecs_differs"`、`operation = "cache_refresh"`、`operation = "cache_late"` 等低基数 reason/outcome，不得输出明文 ECS 或客户端 IP。资源更新与跨 revision finalizer 的实际接线见[DNS 管线](../../../implementation/backend/dns-pipeline.md)；组合证据见[Late-window 与 owner](../../../implementation/backend/dns-pipeline.md#late-window-与-owner)，设计约束本身不表示全部组合已经验收。
+调试日志使用 `operation = "cache_scope"`、`reason = "ecs_mismatch"`、`operation = "cache_refresh"`、`operation = "cache_late"` 等低基数字段，不输出明文 ECS 或客户端 IP；旧 `group_ecs_differs` 绕过事件已删除。实际接线与证据边界见[DNS 管线](../../../implementation/backend/dns-pipeline.md)。
 
 ## 6. Memory store
 
@@ -93,6 +106,8 @@ Fast/Resolved stale 必须共用刷新流程：切到最新可用 core 后重新
 - 条目可见截止为应答窗口（`expires_at` 与 `stale_until` 中较晚者）再加固定过期保留期：窗口内可观察合法 stale，窗口结束后仍可短暂观察已过期条目，用于区分回源原因。保留期内的过期条目不计入命中，也不改变任何可返回给客户端的答案。
 - size eviction 单独计数，不混入显式失效、替换和 TTL 过期。
 - single-flight reservation/wait/publish/abandon 与 record 存储解耦，不向 Core 暴露 Moka guard/future。
+- covering 前缀索引按 base/前缀长度计数，每次写入新版本增加，所有移除通知（含替换）减少旧版本计数，避免读写之间淘汰导致漏记；恢复通过正常插入路径重建，不单独持久化。异步通知可留下空探测，但不能漏掉有效条目或返回错误答案。
+- subnet 条目共享全局 weight，没有每 base 条目上限；不能将前缀索引描述成独立容量配额。
 - shutdown 清理记录、唤醒 waiter，后续操作返回关闭状态。
 
 确定性 HashMap/Mutex adapter 用于替代实现和契约测试，不是生产默认的证据。
@@ -105,7 +120,7 @@ Fast/Resolved stale 必须共用刷新流程：切到最新可用 core 后重新
 
 快照没有用户可配置的磁盘大小配额，也不承诺文件大小等于 Moka weight 或 RSS。读取仍受文件字节数、单条大小、记录数、批次和 deadline 保护；先验证整个文件的长度与摘要，再分批解码。恢复逐条检查 key/entry version、checksum、绝对 expiry/stale-until 和当前内存预算，只装载仍可用于应答的条目（写入侧可见的过期条目计入 `expired`，不补回内存），停机时间不会重新补满 TTL。损坏、未知版本、超时或预算不足只形成冷启/部分恢复状态，不阻止 DNS 服务。
 
-cache key format v2 与外层 `FDCS` 格式不变，entry payload 升为 v3：新增 Refused/Other 分类，v3 短响应无 stale 窗口。v2 普通非空条目可按同布局恢复并转换成 v3；v2 REFUSED/空 Answer 条目不兼容并冷启动，不能沿用旧的长 fresh/stale 生命周期。绝对到期时间仍是恢复依据，不因重启补满短 TTL。详细兼容性见[配置参考](../../../implementation/configuration.md)。
+cache key 升为 v3，旧 v2 key 记录恢复时为 `Incompatible`，升级需冷启动一次；外层 `FDCS` 与 entry v3 格式不因此改变。entry codec 仍保留同布局普通非空 v2 payload 转换能力、拒绝旧短响应 payload，但不能绕过 key 版本检查。绝对到期时间仍是恢复依据，不因重启补满 TTL。详细兼容性见[配置参考](../../../implementation/configuration.md)。
 
 内存 commit 不再产生逐条 persistence 队列。周期任务覆盖当时的完整可见集合，被内存预算淘汰或显式清理的记录会从下一份快照消失。owner/path 切换和未来 clear 必须递增 generation，使旧任务失去发布权；正常 shutdown 只在统一剩余预算内尽力补写，不无限延长退出。
 
@@ -117,11 +132,11 @@ Facade 提供 exact key、namespace、typed predicate 和 all 失效。普通资
 
 ## 9. 契约验证要求
 
-- namespace、Fast/Resolved 不 alias、两种 mode 共用完整 policy semantics fingerprint、target/ECS 维度和资源更新不全局 clear。
+- namespace 隔离、v3 question/RD/CD/DO 与 EDNS 规范化、target 子树定向变化，以及入口/身份/规则变化不直接切换答案 key。
 - 正/负/failure TTL、REFUSED/空 Answer 的 10s 准入与到期回源、RR/SOA TTL 同步及 override 隔离、质量 CAS、并发乱序与 entry v2/v3 恢复。
 - 多 waiter 取消、candidate drop、commit 终态、占位上限和关闭后拒绝。
-- uniform/heterogeneous group ECS、Fast 保守禁用但 Resolved 可用、Fast/Resolved optimistic 的同 store/key 与跨 store/key CAS、跨 runtime late-result 语义接纳、独立 deadline 和失败不延长 stale。
-- Moka weight/expiry、分批导出、format/header/checksum/recovery、内存预算与实际文件大小的区别。
+- uniform/heterogeneous 成员 ECS、scope 矩阵、最长前缀、source 0 exact 与 scope 0 covering、无 ECS 桶隔离、single-flight 精确合并；刷新水位清理、并发更新保护、新条目失效不清理及 late-result AnswerKey 接纳。
+- Moka 全局 weight、前缀计数索引增删/恢复重建、expiry、分批导出、key v2 冷启动及 format/header/checksum/recovery；预算不等于实际文件大小。
 - 真实替换/权限/空间失败与恢复不破坏上一份快照、不阻塞 DNS；测试 hook 不替代真实介质。
 - 显式失效范围、历史 owner drain、失败摘要，以及 ECS/IP/Secret 不进入普通缓存日志。
 

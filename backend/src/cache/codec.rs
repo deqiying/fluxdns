@@ -479,4 +479,15 @@ mod tests {
         assert!(restored.entry.expires_at <= now);
         assert_eq!(restored.entry.stale_until, None);
     }
+
+    #[test]
+    fn v2_keys_are_incompatible_even_when_the_entry_is_current() {
+        let (mut key, record) = record(ResponseCode::NoError, true);
+        key.format_version = 2;
+        let payload = encode_record(&key, &record, Instant::now()).unwrap();
+        assert!(matches!(
+            decode_record(&payload, Instant::now()),
+            Err(CodecError::Incompatible)
+        ));
+    }
 }

@@ -13,9 +13,10 @@ pub use admission::{
     CacheAdmissionError, CacheAdmissionOutcome, CacheAdmissionPolicy, CacheAdmissionRejection,
     admit_response, canonical_checksum,
 };
+pub(crate) use key::ecs_privacy_prefix;
 pub use key::{
-    CACHE_KEY_FORMAT_VERSION, CacheFingerprint, CacheKeyDimensions, CacheKeyError, CacheKeyMode,
-    build_cache_key,
+    AnswerEcs, AnswerKey, CACHE_KEY_FORMAT_VERSION, CacheFingerprint, CacheKeyError,
+    build_answer_key,
 };
 pub use memory::{MemoryCacheStore, MemoryCacheStoreBuildError};
 pub use moka::{MokaCacheStore, MokaCacheStoreBuildError};
