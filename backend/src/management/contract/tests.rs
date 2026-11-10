@@ -101,48 +101,50 @@ fn request_budgets_and_tokens_fail_before_handler_work() {
 
 #[test]
 fn invalid_rule_ecs_custom_ip_returns_only_its_dto_path() {
-    let candidate = json!({
-        "changes": [{
-            "module": "strategy",
-            "change": {
-                "action": "update",
-                "original_name": "default",
-                "value": {
-                    "name": "default",
-                    "rules": [
-                        {"hosts": "local"},
-                        {"hosts": "local", "edns_client_subnet": {"mode": "custom", "custom_ip": "192.0.2.0/99"}}
-                    ],
-                    "default_upstream": "public"
+    for mode in ["custom", "client_or_custom"] {
+        let candidate = json!({
+            "changes": [{
+                "module": "strategy",
+                "change": {
+                    "action": "update",
+                    "original_name": "default",
+                    "value": {
+                        "name": "default",
+                        "rules": [
+                            {"hosts": "local"},
+                            {"hosts": "local", "edns_client_subnet": {"mode": mode, "custom_ip": "192.0.2.0/99"}}
+                        ],
+                        "default_upstream": "public"
+                    }
                 }
-            }
-        }]
-    });
-    let bytes = serde_json::to_vec(&candidate).unwrap();
-    let error = decode_candidate(&bytes).unwrap_err();
-    assert!(matches!(error.code, ErrorCode::InvalidArgument));
-    assert_eq!(error.field_errors.len(), 1);
-    assert_eq!(
-        error.field_errors[0].path,
-        "changes[0].change.value.rules[1].edns_client_subnet.custom_ip"
-    );
-    assert!(matches!(
-        error.field_errors[0].code,
-        ErrorCode::InvalidArgument
-    ));
-    assert!(!format!("{error:?}").contains("192.0.2.0/99"));
+            }]
+        });
+        let bytes = serde_json::to_vec(&candidate).unwrap();
+        let error = decode_candidate(&bytes).unwrap_err();
+        assert!(matches!(error.code, ErrorCode::InvalidArgument));
+        assert_eq!(error.field_errors.len(), 1);
+        assert_eq!(
+            error.field_errors[0].path,
+            "changes[0].change.value.rules[1].edns_client_subnet.custom_ip"
+        );
+        assert!(matches!(
+            error.field_errors[0].code,
+            ErrorCode::InvalidArgument
+        ));
+        assert!(!format!("{error:?}").contains("192.0.2.0/99"));
 
-    let apply = json!({
-        "operation_id": "operation-1",
-        "changes": candidate["changes"],
-        "confirmations": []
-    });
-    let error = decode_apply(&serde_json::to_vec(&apply).unwrap(), None).unwrap_err();
-    assert!(matches!(error.code, ErrorCode::InvalidArgument));
-    assert_eq!(
-        error.field_errors[0].path,
-        "changes[0].change.value.rules[1].edns_client_subnet.custom_ip"
-    );
+        let apply = json!({
+            "operation_id": "operation-1",
+            "changes": candidate["changes"],
+            "confirmations": []
+        });
+        let error = decode_apply(&serde_json::to_vec(&apply).unwrap(), None).unwrap_err();
+        assert!(matches!(error.code, ErrorCode::InvalidArgument));
+        assert_eq!(
+            error.field_errors[0].path,
+            "changes[0].change.value.rules[1].edns_client_subnet.custom_ip"
+        );
+    }
 }
 
 #[test]

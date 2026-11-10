@@ -108,6 +108,7 @@ enum EcsSpec<'a> {
     Disabled,
     Client,
     Custom(&'a str),
+    ClientOrCustom(&'a str),
 }
 
 impl EcsSpec<'_> {
@@ -118,6 +119,9 @@ impl EcsSpec<'_> {
             Self::Client => format!("{indent}edns_client_subnet:\n{indent}  mode: client\n"),
             Self::Custom(cidr) => format!(
                 "{indent}edns_client_subnet:\n{indent}  mode: custom\n{indent}  custom_ip: {cidr}\n"
+            ),
+            Self::ClientOrCustom(cidr) => format!(
+                "{indent}edns_client_subnet:\n{indent}  mode: client_or_custom\n{indent}  custom_ip: {cidr}\n"
             ),
         }
     }

@@ -185,3 +185,20 @@ test("ECS 状态、IPv6、缓存刷新和旧缺省使用同一记录契约", () 
     assert.equal(ajv.getSchema("fluxdns-v2#/$defs/QueryEcs")(invalid), false, field);
   }
 });
+
+test("ECS 请求优先回退配置约束与诊断 mode 同步", () => {
+  const validator = ajv.getSchema("fluxdns-v2#/$defs/Ecs");
+  for (const mode of ["custom", "client_or_custom"]) {
+    for (const custom_ip of ["192.0.2.0/24", "2001:db8::/48"]) validate("Ecs", {mode, custom_ip});
+    assert.equal(validator({mode}), false, mode);
+    assert.equal(validator({mode, custom_ip: ""}), false, mode);
+  }
+  for (const mode of ["client", "disabled"]) {
+    validate("Ecs", {mode});
+    assert.equal(validator({mode, custom_ip: "192.0.2.0/24"}), false, mode);
+  }
+  for (const value_source of ["client_ecs", "custom"]) {
+    validate("EcsPolicy", {source: "rule", mode: "client_or_custom", value_source});
+  }
+  assert.equal(validator({mode: "unknown"}), false);
+});

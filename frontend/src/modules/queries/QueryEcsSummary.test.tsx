@@ -73,6 +73,16 @@ describe("ECS 四组执行事实", () => {
     expect(formatEcsSummary({ ...ecs, refresh: { state: "unrecorded", reason: "deadline" } }).primary).toContain("203.0.113.0/24");
   });
 
+  it.each(["client_ecs", "custom"] as const)("请求 ECS 优先模式按真实 value_source=%s 展示，不推导客户端 IP", (valueSource) => {
+    const value: Ecs = { ...ecs, request: valueSource === "custom" ? { state: "invalid" } : ecs.request, upstream: { ...observed, policy: { source: "strategy", mode: "client_or_custom", value_source: valueSource } } };
+    expect(formatEcsSummary(value).primary).toBe(`203.0.113.0/24 · ${valueSource === "client_ecs" ? "请求携带" : "自定义"} · 策略`);
+    render(<QueryEcsDiagnostics ecs={value} />);
+    const diagnostic = screen.getByLabelText("ECS 诊断");
+    expect(diagnostic).toHaveTextContent(`策略 · client_or_custom · ${valueSource}`);
+    expect(diagnostic).toHaveTextContent(valueSource === "client_ecs" ? "使用合法请求 ECS" : "使用自定义回退地址");
+    expect(diagnostic).not.toHaveTextContent("客户端地址");
+  });
+
   it("本地应答、共享请求与尚未启动保留独立原因", () => {
     expect(formatEcsSummary({ ...ecs, upstream: { state: "not_sent", reason: "local_answer" } })).toEqual({ primary: "不适用", secondary: "本地应答" });
     expect(formatEcsSummary({ ...ecs, upstream: { state: "not_sent", reason: "single_flight" } }).primary).toBe("本次未独立请求上游");

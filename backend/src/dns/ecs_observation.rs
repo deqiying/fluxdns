@@ -65,6 +65,7 @@ pub(super) fn policy(ecs: &ResolvedEcs, value_source: EcsValueSource) -> EcsPoli
             EcsMode::Disabled => EcsPolicyMode::Disabled,
             EcsMode::Client => EcsPolicyMode::Client,
             EcsMode::Custom => EcsPolicyMode::Custom,
+            EcsMode::ClientOrCustom => EcsPolicyMode::ClientOrCustom,
         },
         value_source,
     }

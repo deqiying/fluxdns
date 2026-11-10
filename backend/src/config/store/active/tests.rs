@@ -1188,3 +1188,28 @@ fn rejected_operation_keeps_diagnostic_frozen_and_actor_scoped() {
         Some(&diagnostic)
     );
 }
+
+/// 使用正式候选编辑与持久化路径；Runtime 成功回执沿用 commit_changes 的模拟边界。
+#[test]
+fn client_or_custom_ecs_is_preserved_by_apply_persist_and_reload() {
+    let fixture = Fixture::new();
+    let changes = changes_from_json(
+        r#"[{"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"desktop","match":{"ips":["192.0.2.10/32"]},"edns_client_subnet":{"mode":"client_or_custom","custom_ip":"203.0.113.96/28"}}}}]"#,
+    );
+    commit_changes(&fixture, "client-or-custom", &changes);
+    let snapshot = fixture.store.active_snapshot().unwrap();
+    let ecs = snapshot.config.clients[0]
+        .edns_client_subnet
+        .as_ref()
+        .unwrap();
+    assert_eq!(ecs.mode, crate::config::model::EcsMode::ClientOrCustom);
+    assert_eq!(ecs.custom_ip.unwrap().to_string(), "203.0.113.96/28");
+    let saved = fs::read_to_string(&fixture.source).unwrap();
+    assert_eq!(saved, snapshot.source.as_ref());
+    assert_eq!(saved, fs::read_to_string(&fixture.derived).unwrap());
+    let reloaded = crate::config::contract::ConfigV2::parse(saved.as_bytes()).unwrap();
+    reloaded.validate().unwrap();
+    let restored = reloaded.clients[0].edns_client_subnet.as_ref().unwrap();
+    assert_eq!(restored.mode, ecs.mode);
+    assert_eq!(restored.custom_ip, ecs.custom_ip);
+}

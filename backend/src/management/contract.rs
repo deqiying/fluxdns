@@ -762,7 +762,8 @@ ecs_dto_enum!(EcsPolicySource {
 ecs_dto_enum!(EcsPolicyMode {
     Disabled,
     Client,
-    Custom
+    Custom,
+    ClientOrCustom
 });
 ecs_dto_enum!(EcsValueSource {
     ClientEcs,

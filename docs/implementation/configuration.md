@@ -32,6 +32,8 @@
 >
 > 2026-11-09 缓存 key/ECS 增量核对：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅静态核对 v3 AnswerKey、成员 ECS、scope、刷新和兼容性；本轮未执行产品测试或构建，运行证据待主代理补充，其余历史结果不变。
 >
+> 2026-11-10 ECS 自定义兜底增量核对：基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树，仅扩展 `client_or_custom`、本级回退值校验与五层 WebUI 配置；验证边界见 [DNS 管线](backend/dns-pipeline.md#请求级-ecs-执行事实)。
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -260,11 +262,14 @@ strategy.rules[].edns_client_subnet
   > dns.edns_client_subnet
 ```
 
-`mode` 的取值为 `disabled`、`client`、`custom`：
+`mode` 的取值为 `disabled`、`client`、`custom`、`client_or_custom`：
 
 - `disabled` 显式停止当前请求继续向上游传递 ECS；
 - `client` 优先使用合法请求 ECS，清除 host bits，source 取 `min(原值, 24)`（IPv4）或 `min(原值, 56)`（IPv6），较短前缀保留；无合法请求 ECS 时按客户端地址推导 `/24` 或 `/56`；所有查询 scope 置 0；
-- `custom` 使用必填的 `custom_ip` CIDR，清除 host bits、scope 置 0，不按 client 隐私上限截断。
+- `custom` 使用必填的 `custom_ip` CIDR，清除 host bits、scope 置 0，不按 client 隐私上限截断；
+- `client_or_custom` 优先使用合法请求 ECS，复用 `client` 的规范化规则；缺失或非法时使用本级必填 `custom_ip`，复用 `custom` 的处理规则，不按客户端 IP 推导。合法 `/0` 保留而不触发回退；整个 DNS 报文解析失败仍由协议入口拒绝，不进入此回退分支。
+
+`custom` 和 `client_or_custom` 的 `custom_ip` 必须在当前配置块内提供，不跨层级拼接；`client` 和 `disabled` 禁止携带该字段。缺失整个 ECS 块表示继承，所有层级均缺失时默认 `disabled`。旧配置行为不变；旧版本不识别 `client_or_custom`，回退版本前应先改回旧模式。
 
 当策略目标是 group 时，rule/strategy/client 的显式 ECS 覆盖所有成员；来自 global/default 时遍历全部可达 direct leaves（nested group、fallback、隐式继承成员），逐成员计算最终 ECS。最终 ECS 一致时使用 uniform scope 缓存；真正异构时保留 per-member query，以按成员 ID 排序的 `(member, 最终 ECS 或 None)` 摘要精确缓存，正常参与 lookup、single-flight 和 commit，不再绕过。Fast 路径已删除，每次请求均先完成规则与 target 决策再查缓存。
 
@@ -456,8 +461,8 @@ cache key 由 v2 升为 v3，旧 v2 key 的快照记录恢复为 `Incompatible`�
 
 | 字段 | 类型 | 条件 | 说明 |
 | --- | --- | --- | --- |
-| `mode` | enum | 必填 | `disabled`、`client` 或 `custom`。 |
-| `custom_ip` | CIDR | `mode: custom` 时必填 | 要发送给上游的 ECS 网段。 |
+| `mode` | enum | 必填 | `disabled`、`client`、`custom` 或 `client_or_custom`。 |
+| `custom_ip` | CIDR | `custom`、`client_or_custom` 时本级必填，其余模式禁止 | 固定发送或作为合法请求 ECS 缺失时回退的 ECS 网段。 |
 
 全局 ECS 设置可由上游、客户端、策略和规则覆盖，详见[覆盖和继承](#25-覆盖和继承)。
 
@@ -696,7 +701,7 @@ Transport 只对实际 HTTP path 匹配一次，并始终把配置 `path` 原文
 - `hosts` 规则是本地回答，不应依赖 `upstream`；
 - 所有资源引用必须存在且类型正确。
 
-WebUI 有序规则卡片支持本级 ECS 的继承、禁用、客户端地址和自定义 IP/CIDR；继承提交时省略对象，非 custom 模式省略 `custom_ip`。Hosts 规则可保留 ECS 配置，但本地回答不向上游发送 ECS，提交时清除 `upstream`。规则 DTO 不支持逐规则 cache/TTL；这两项继续在策略或其他既有层级配置。非法规则 CIDR 的管理接口错误包含对应 `rules[index].edns_client_subnet.custom_ip` 字段路径，不返回提交值或底层解析错误。
+WebUI 有序规则卡片支持本级 ECS 的继承、禁用、客户端地址、自定义 IP/CIDR 和请求 ECS 优先/自定义兜底；继承提交时省略对象，只有 `custom` 与 `client_or_custom` 提交并要求 `custom_ip`。Hosts 规则可保留 ECS 配置，但本地回答不向上游发送 ECS，提交时清除 `upstream`。规则 DTO 不支持逐规则 cache/TTL；这两项继续在策略或其他既有层级配置。非法规则 CIDR 的管理接口错误包含对应 `rules[index].edns_client_subnet.custom_ip` 字段路径，不返回提交值或底层解析错误。
 
 ### 11.2 策略级 `cache`
 

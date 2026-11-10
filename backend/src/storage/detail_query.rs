@@ -1553,6 +1553,47 @@ mod tests {
         crate::dns::ecs::QueryEcs::decode_json(&fixtures["ecs_cases"][2].to_string()).unwrap()
     }
 
+    /// 同时验证 commit 推送和历史读取能保留新模式的两个实际取值来源。
+    #[tokio::test]
+    async fn client_or_custom_ecs_survives_commit_and_history_round_trip() {
+        let root = test_root("client-or-custom-ecs");
+        let store = DetailShardStore::new(root, Vec::new(), 2).unwrap();
+        let mut receiver = store.subscribe_commits();
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/management-v2.json")).unwrap();
+        let cases: Vec<_> = fixtures["ecs_cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|value| value["upstream"]["policy"]["mode"] == "client_or_custom")
+            .collect();
+        assert_eq!(cases.len(), 2);
+        for value in cases {
+            let ecs = crate::dns::ecs::QueryEcs::decode_json(&value.to_string()).unwrap();
+            let mut sample = record(FIRST_DAY, 100, 7, "ecs.example.", "client", "client");
+            sample.set_execution(crate::dns::RequestTraceSnapshot::default());
+            sample.set_ecs(ecs.clone());
+            store
+                .write_records(FIRST_DAY, &[sample], deadline())
+                .await
+                .unwrap();
+            let notification = receiver.recv().await.unwrap();
+            let committed = notification.records[0].to_query_record().unwrap();
+            assert_eq!(committed.ecs, Some(ecs.clone()));
+            let saved = store
+                .read_detail(&committed.id, deadline())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(saved.ecs, Some(ecs));
+        }
+        let page = store
+            .query_details(query(FIRST_DAY, FIRST_DAY, 10), deadline())
+            .await
+            .unwrap();
+        assert_eq!(page.items.len(), 2);
+    }
+
     #[tokio::test]
     async fn ecs_round_trip_commit_baseline_and_corruption_are_isolated() {
         let root = test_root("ecs-round-trip");

@@ -1527,7 +1527,7 @@ fn effective_upstream_query(
     effective_upstream_query_and_source(query, ecs, client_addr).0
 }
 
-/// query 与取值来源在同一分支产生；只增加旁路枚举，不改变 ECS 选择策略。
+/// query 与取值来源在同一分支产生，确保缓存准备和诊断记录使用相同 ECS。
 fn effective_upstream_query_and_source(
     query: &crate::dns::CanonicalQuery,
     ecs: &ResolvedEcs,
@@ -1544,17 +1544,30 @@ fn effective_upstream_query_and_source(
                 EcsValueSource::None
             },
         ),
-        EcsMode::Client => match query.edns_client_subnet().and_then(normalize_client_subnet) {
-            Some(subnet) => (Some(subnet), EcsValueSource::ClientEcs),
-            None => (
-                client_addr.map(client_address_subnet),
-                if client_addr.is_some() {
-                    EcsValueSource::ClientIp
-                } else {
-                    EcsValueSource::None
-                },
-            ),
-        },
+        EcsMode::Client | EcsMode::ClientOrCustom => {
+            match query.edns_client_subnet().and_then(normalize_client_subnet) {
+                Some(subnet) => (Some(subnet), EcsValueSource::ClientEcs),
+                // 自定义兜底模式不按客户端 IP 推导，避免绕过配置的回退网段。
+                None if ecs.mode == EcsMode::ClientOrCustom => (
+                    ecs.custom_ip.map(|network| {
+                        ClientSubnet::new(network.network(), network.prefix_len(), 0)
+                    }),
+                    if ecs.custom_ip.is_some() {
+                        EcsValueSource::Custom
+                    } else {
+                        EcsValueSource::None
+                    },
+                ),
+                None => (
+                    client_addr.map(client_address_subnet),
+                    if client_addr.is_some() {
+                        EcsValueSource::ClientIp
+                    } else {
+                        EcsValueSource::None
+                    },
+                ),
+            }
+        }
     };
     (query.with_edns_client_subnet(subnet), source)
 }

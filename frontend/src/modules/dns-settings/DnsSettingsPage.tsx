@@ -34,7 +34,7 @@ interface DnsFormValues {
   ttl_mode: "inherit" | "enabled" | "disabled";
   ttl_min?: string;
   ttl_max?: string;
-  ecs_mode: "disabled" | "client" | "custom";
+  ecs_mode: Schemas["Ecs"]["mode"];
   ecs_custom_ip?: string;
   resolve_log_enable: boolean;
 }
@@ -106,7 +106,12 @@ export function DnsSettingsPage() {
 
   const saveDns = async () => {
     if (!editorState.current || dnsQuery.error || state.error) return;
-    const values = await dnsForm.validateFields();
+    let values: DnsFormValues;
+    try { values = await dnsForm.validateFields(); }
+    catch {
+      // 必填字段错误由表单内联展示；保留草稿且不提交请求。
+      return;
+    }
     const cacheSizeBytes = values.cache_size_bytes;
     // 空值或超出 Bytes 上限的输入已由 required 规则在 validateFields 拦下，此处仅做类型收窄，不掩盖校验失败。
     if (cacheSizeBytes === undefined) return;
@@ -120,7 +125,7 @@ export function DnsSettingsPage() {
         persistence: { enabled: values.snapshot_enabled, path: values.snapshot_path, snapshot_interval: values.snapshot_interval },
       },
       ...(values.ttl_mode === "inherit" ? {} : { ttl_override: values.ttl_mode === "disabled" ? { enabled: false } : { enabled: true, ...(values.ttl_min ? { min: values.ttl_min } : {}), ...(values.ttl_max ? { max: values.ttl_max } : {}) } }),
-      edns_client_subnet: { mode: values.ecs_mode, ...(values.ecs_mode === "custom" && values.ecs_custom_ip ? { custom_ip: values.ecs_custom_ip } : {}) },
+      edns_client_subnet: { mode: values.ecs_mode, ...((values.ecs_mode === "custom" || values.ecs_mode === "client_or_custom") && values.ecs_custom_ip ? { custom_ip: values.ecs_custom_ip } : {}) },
       resolve_log: { enable: values.resolve_log_enable },
     };
     try {
@@ -177,7 +182,7 @@ export function DnsSettingsPage() {
           <Form.Item name="optimistic_enabled" label="乐观缓存" valuePropName="checked"><Switch /></Form.Item><Space className="paired-fields" align="start"><Form.Item name="optimistic_answer_ttl" label="回答 TTL" rules={durationRequiredRules}><DurationInput label="回答 TTL" /></Form.Item><Form.Item name="optimistic_max_age" label="最大陈旧时间" rules={durationRequiredRules}><DurationInput label="最大陈旧时间" /></Form.Item></Space><Form.Item name="optimistic_negative_max_age" label="空应答最大陈旧时间" tooltip="NODATA/NXDOMAIN 过期后仍可乐观返回的最长时间；0 表示空应答过期即回源，超过最大陈旧时间时按其截断" rules={durationNonNegativeRequiredRules}><DurationInput label="空应答最大陈旧时间" /></Form.Item>
           <Form.Item name="snapshot_enabled" label="缓存快照" valuePropName="checked"><Switch /></Form.Item><Form.Item name="snapshot_path" label="快照路径" rules={[{ required: true }]}><Input /></Form.Item><Form.Item name="snapshot_interval" label="快照周期" rules={durationRequiredRules}><DurationInput label="快照周期" /></Form.Item>
           <Form.Item name="ttl_mode" label="TTL 覆盖"><Select options={[{ label: "使用默认", value: "inherit" }, { label: "启用", value: "enabled" }, { label: "禁用", value: "disabled" }]} /></Form.Item>{ttlMode === "enabled" ? <Space className="paired-fields" align="start"><Form.Item name="ttl_min" label="最小 TTL" rules={durationOptionalRules}><DurationInput label="最小 TTL" /></Form.Item><Form.Item name="ttl_max" label="最大 TTL" rules={durationOptionalRules}><DurationInput label="最大 TTL" /></Form.Item></Space> : null}
-          <Form.Item name="ecs_mode" label="ECS"><Select options={[{ label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }]} /></Form.Item>{ecsMode === "custom" ? <Form.Item name="ecs_custom_ip" label="自定义 ECS" rules={[{ required: true }]}><Input /></Form.Item> : null}<Form.Item name="resolve_log_enable" label="记录解析详情" valuePropName="checked"><Switch /></Form.Item>
+          <Form.Item name="ecs_mode" label="ECS"><Select options={[{ label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }, { label: "请求 ECS 优先，自定义兜底", value: "client_or_custom" }]} /></Form.Item>{ecsMode === "custom" || ecsMode === "client_or_custom" ? <Form.Item name="ecs_custom_ip" label="自定义 ECS" rules={[{ required: true }]}><Input /></Form.Item> : null}<Form.Item name="resolve_log_enable" label="记录解析详情" valuePropName="checked"><Switch /></Form.Item>
         </Form>
       </ConfigFormModal>
       <ConfigFormModal open={editor === "retention"} title="编辑数据保留" dirty={dirty} busy={statisticsMutation.isPending} submitDisabled={!!statisticsQuery.error || !!state.error} error={retentionError ?? statisticsMutation.error} onCancel={() => setEditor(null)} onSubmit={() => void saveRetention()}>

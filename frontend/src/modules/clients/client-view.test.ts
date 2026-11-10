@@ -22,6 +22,12 @@ describe("client view helpers", () => {
     expect(clientOverrides(clients[2])).toEqual([]);
   });
 
+  it("请求 ECS 优先模式摘要明确回退地址，不混同自定义或客户端地址", () => {
+    expect(clientOverrides({ name: "x", client_id: "x", edns_client_subnet: { mode: "client_or_custom", custom_ip: "2001:db8::/48" } })).toEqual([
+      { key: "ecs", label: "ECS", value: "请求 ECS 优先，自定义兜底 2001:db8::/48" },
+    ]);
+  });
+
   it("汇总概览卡片数据", () => {
     expect(clientSummary(clients)).toEqual({ total: 3, idOnly: 1, customStrategy: 1, withOverrides: 2, ipEntries: 3, clientsWithIps: 2 });
     expect(clientSummary([])).toMatchObject({ total: 0, ipEntries: 0 });

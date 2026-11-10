@@ -696,9 +696,16 @@ components:
       additionalProperties: false
       required: [mode]
       properties:
-        mode: {type: string, enum: [disabled, client, custom]}
-        custom_ip: {type: string, maxLength: 64}
-      description: custom 必须有 custom_ip，其余模式禁止；IP/CIDR 语义由公共 validator 检查
+        mode: {type: string, enum: [disabled, client, custom, client_or_custom]}
+        custom_ip: {type: string, minLength: 1, maxLength: 64}
+      description: custom 和 client_or_custom 必须有 custom_ip，client/disabled 禁止；client_or_custom 优先使用合法请求 ECS，缺失或非法时回退 custom_ip，不从客户端 IP 推导；IP/CIDR 语义由公共 validator 检查
+      allOf:
+        - if:
+            properties: {mode: {enum: [custom, client_or_custom]}}
+          then:
+            required: [custom_ip]
+          else:
+            not: {required: [custom_ip]}
     Snapshot:
       type: object
       additionalProperties: false
@@ -1345,7 +1352,7 @@ components:
       required: [source, mode, value_source]
       properties:
         source: {type: string, enum: [default, global, upstream, client, strategy, rule]}
-        mode: {type: string, enum: [disabled, client, custom]}
+        mode: {type: string, enum: [disabled, client, custom, client_or_custom]}
         value_source: {type: string, enum: [client_ecs, client_ip, custom, none]}
     EcsExchange:
       oneOf:

@@ -68,6 +68,7 @@ function ExchangeDiagnostic({ label, exchange }: { label: string; exchange: EcsE
     <div>上游请求 ECS：{formatEcsValue(exchange.query)}</div>
     <div>上游应答 ECS：{formatEcsValue(exchange.response)}</div>
     <div>配置来源：{sourceLabels[exchange.policy.source]} · {exchange.policy.mode} · {exchange.policy.value_source}</div>
+    {exchange.policy.mode === "client_or_custom" ? <div>请求 ECS 优先，自定义兜底 · {exchange.policy.value_source === "client_ecs" ? "使用合法请求 ECS" : "使用自定义回退地址"}</div> : null}
     <div>实际 leaf：{exchange.upstream_leaf_name}</div>
   </div>;
 }

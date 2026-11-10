@@ -1161,18 +1161,19 @@ pub(super) fn validate_ecs(
 ) {
     let path = path.into();
     if let Some(ecs) = ecs {
-        if matches!(ecs.mode, EcsMode::Custom) && ecs.custom_ip.is_none() {
+        let requires_custom = matches!(ecs.mode, EcsMode::Custom | EcsMode::ClientOrCustom);
+        if requires_custom && ecs.custom_ip.is_none() {
             report.push(ConfigError::new(
                 ConfigErrorKind::MissingField,
                 format!("{path}.custom_ip"),
-                "custom_ip is required for custom mode",
+                "custom_ip is required for custom or client_or_custom mode",
             ));
         }
-        if !matches!(ecs.mode, EcsMode::Custom) && ecs.custom_ip.is_some() {
+        if !requires_custom && ecs.custom_ip.is_some() {
             report.push(ConfigError::new(
                 ConfigErrorKind::Constraint,
                 format!("{path}.custom_ip"),
-                "custom_ip is only allowed for custom mode",
+                "custom_ip is only allowed for custom or client_or_custom mode",
             ));
         }
     }

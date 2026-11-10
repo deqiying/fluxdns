@@ -575,3 +575,386 @@ async fn heterogeneous_members_cache_match_never_fabricates_a_single_cidr() {
         })
     );
 }
+
+/// 断言真正发出的 DNS wire，而不是只检查预备 query 或成功应答。
+#[tokio::test]
+async fn client_or_custom_request_priority_and_fallback_match_wire_and_facts() {
+    for (supplied, fallback, expected, source) in [
+        (
+            Some(("198.51.100.99", 32, 7)),
+            "203.0.113.99/28",
+            "198.51.100.0/24",
+            EcsValueSource::ClientEcs,
+        ),
+        (
+            Some(("2001:db8:1234:5678::1", 128, 64)),
+            "203.0.113.99/28",
+            "2001:db8:1234:5600::/56",
+            EcsValueSource::ClientEcs,
+        ),
+        (
+            Some(("198.51.100.99", 16, 0)),
+            "203.0.113.99/28",
+            "198.51.0.0/16",
+            EcsValueSource::ClientEcs,
+        ),
+        (
+            Some(("2001:db8:1234::1", 32, 0)),
+            "203.0.113.99/28",
+            "2001:db8::/32",
+            EcsValueSource::ClientEcs,
+        ),
+        (
+            Some(("198.51.100.99", 0, 0)),
+            "203.0.113.99/28",
+            "0.0.0.0/0",
+            EcsValueSource::ClientEcs,
+        ),
+        (
+            Some(("2001:db8::1", 0, 0)),
+            "203.0.113.99/28",
+            "::/0",
+            EcsValueSource::ClientEcs,
+        ),
+        (
+            None,
+            "203.0.113.99/28",
+            "203.0.113.96/28",
+            EcsValueSource::Custom,
+        ),
+        (
+            None,
+            "2001:db8:1234:5678::99/64",
+            "2001:db8:1234:5678::/64",
+            EcsValueSource::Custom,
+        ),
+        (
+            Some(("198.51.100.99", 33, 0)),
+            "203.0.113.99/28",
+            "203.0.113.96/28",
+            EcsValueSource::Custom,
+        ),
+        (
+            Some(("198.51.100.99", 24, 33)),
+            "203.0.113.99/28",
+            "203.0.113.96/28",
+            EcsValueSource::Custom,
+        ),
+        (
+            Some(("2001:db8::1", 129, 0)),
+            "2001:db8::99/64",
+            "2001:db8::/64",
+            EcsValueSource::Custom,
+        ),
+        (
+            Some(("2001:db8::1", 56, 129)),
+            "2001:db8::99/64",
+            "2001:db8::/64",
+            EcsValueSource::Custom,
+        ),
+    ] {
+        for client_addr in [Some("192.0.2.10".parse().unwrap()), None] {
+            let config = fixture(
+                EcsSpec::ClientOrCustom(fallback),
+                doh("remote", "ok.example.test", EcsSpec::Inherit),
+                "remote",
+            );
+            let transport = Arc::new(RecordingDohTransport::new(46));
+            let core = core_with_transport(&config, Arc::clone(&transport));
+            let mut input = request("client-or-custom.example.", RecordType::A);
+            input.context.client.client_addr = client_addr;
+            input.query =
+                input
+                    .query
+                    .with_edns_client_subnet(supplied.map(|(addr, prefix, scope)| {
+                        ClientSubnet::new(addr.parse().unwrap(), prefix, scope)
+                    }));
+            let input = observed_request(input);
+            assert_upstream(&resolve_and_commit(&core, &input).await, CacheStatus::Miss);
+            let ecs = facts(&input).await;
+            exchange(
+                &ecs.upstream,
+                "remote",
+                present(expected, 0),
+                EcsPolicySource::Global,
+                source,
+            );
+            let EcsExchange::Observed { policy, .. } = &ecs.upstream else {
+                unreachable!()
+            };
+            assert_eq!(policy.mode, EcsPolicyMode::ClientOrCustom);
+            assert_eq!(
+                QueryEcs::decode_json(&ecs.encode_json().unwrap()).unwrap(),
+                ecs
+            );
+            let wires = transport.wires();
+            assert_eq!(wires.len(), 1);
+            let net: ipnet::IpNet = expected.parse().unwrap();
+            assert_eq!(
+                wire_ecs(&wires[0].query),
+                Some((net.network(), net.prefix_len()))
+            );
+            let EdnsOption::Subnet(sent) = wires[0]
+                .query
+                .edns
+                .as_ref()
+                .unwrap()
+                .option(EdnsCode::Subnet)
+                .unwrap()
+            else {
+                unreachable!()
+            };
+            assert_eq!(sent.scope_prefix(), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn client_or_custom_is_available_at_every_policy_source() {
+    for expected in [
+        EcsPolicySource::Global,
+        EcsPolicySource::Upstream,
+        EcsPolicySource::Client,
+        EcsPolicySource::Strategy,
+        EcsPolicySource::Rule,
+    ] {
+        let mode = EcsSpec::ClientOrCustom(MEMBER_ECS);
+        let config = load_fixture(Fixture {
+            name: "client-or-custom-sources",
+            global_ecs: if expected == EcsPolicySource::Global {
+                mode
+            } else {
+                EcsSpec::Custom(GLOBAL_ECS)
+            },
+            upstreams: doh(
+                "remote",
+                "ok.example.test",
+                if expected == EcsPolicySource::Upstream {
+                    mode
+                } else {
+                    EcsSpec::Inherit
+                },
+            ),
+            default_upstream: "remote",
+            strategy_ecs: if expected == EcsPolicySource::Strategy {
+                mode
+            } else {
+                EcsSpec::Inherit
+            },
+            rules: if expected == EcsPolicySource::Rule {
+                format!(
+                    "      - rule_set: routed\n        upstream: remote\n{}",
+                    mode.yaml("        ")
+                )
+            } else {
+                String::new()
+            },
+            rule_sets: if expected == EcsPolicySource::Rule {
+                "  - {type: const, name: routed, format: clash, rule: 'DOMAIN-SUFFIX,source.example'}\n".into()
+            } else {
+                String::new()
+            },
+            clients: if expected == EcsPolicySource::Client {
+                format!(
+                    "  - name: client\n    client_id: client-id\n    match: {{ips: [192.0.2.0/24]}}\n{}",
+                    mode.yaml("    ")
+                )
+            } else {
+                String::new()
+            },
+        });
+        for supplied in [None, Some("192.0.2.99/32")] {
+            let core = controlled_core(&config, false);
+            let input = supplied.map_or_else(
+                || request("source.example.", RecordType::A),
+                |ecs| request_with_ecs("source.example.", ecs),
+            );
+            let input = observed_request(input);
+            resolve_and_commit(&core, &input).await;
+            let ecs = facts(&input).await;
+            exchange(
+                &ecs.upstream,
+                "remote",
+                present(
+                    if supplied.is_some() {
+                        "192.0.2.0/24"
+                    } else {
+                        MEMBER_ECS
+                    },
+                    0,
+                ),
+                expected,
+                if supplied.is_some() {
+                    EcsValueSource::ClientEcs
+                } else {
+                    EcsValueSource::Custom
+                },
+            );
+            let EcsExchange::Observed { policy, .. } = ecs.upstream else {
+                unreachable!()
+            };
+            assert_eq!(policy.mode, EcsPolicyMode::ClientOrCustom);
+        }
+    }
+}
+
+#[tokio::test]
+async fn client_or_custom_cache_uses_final_ecs_for_both_branches() {
+    let config = fixture(
+        EcsSpec::ClientOrCustom("203.0.113.96/28"),
+        doh("remote", "ok.example.test", EcsSpec::Inherit),
+        "remote",
+    );
+    let transport = Arc::new(RecordingDohTransport::new(47));
+    let core = core_with_transport(&config, Arc::clone(&transport));
+    for supplied in [Some("198.51.100.99/32"), Some("192.0.2.99/32"), None] {
+        let input = supplied.map_or_else(
+            || request("cached-client-or-custom.example.", RecordType::A),
+            |ecs| request_with_ecs("cached-client-or-custom.example.", ecs),
+        );
+        assert_upstream(&resolve_and_commit(&core, &input).await, CacheStatus::Miss);
+        assert_fresh(&resolve_and_commit(&core, &input).await);
+    }
+    assert_eq!(transport.calls(), 3);
+    let mut invalid = request("cached-client-or-custom.example.", RecordType::A);
+    invalid.query = invalid
+        .query
+        .with_edns_client_subnet(Some(ClientSubnet::new(
+            "198.51.100.99".parse().unwrap(),
+            33,
+            0,
+        )));
+    assert_fresh(&resolve_and_commit(&core, &invalid).await);
+    assert_eq!(transport.calls(), 3);
+    for (wire, expected) in
+        transport
+            .wires()
+            .iter()
+            .zip(["198.51.100.0/24", "192.0.2.0/24", "203.0.113.96/28"])
+    {
+        let net: ipnet::IpNet = expected.parse().unwrap();
+        assert_eq!(
+            wire_ecs(&wire.query),
+            Some((net.network(), net.prefix_len()))
+        );
+    }
+}
+
+/// 相同请求 ECS 令成员变成 uniform；缺失时不同成员自定义值仍采用 members key。
+#[tokio::test]
+async fn client_or_custom_group_members_keep_uniform_and_heterogeneous_keys() {
+    let config = fixture(
+        EcsSpec::Disabled,
+        [
+            doh(
+                "one",
+                "ok.example.test",
+                EcsSpec::ClientOrCustom(GLOBAL_ECS),
+            ),
+            doh(
+                "two",
+                "ok.example.test",
+                EcsSpec::ClientOrCustom(MEMBER_ECS),
+            ),
+            group("group", &["one", "two"], &[], "failover"),
+        ]
+        .concat(),
+        "group",
+    );
+    let transport = Arc::new(RecordingDohTransport::new(48));
+    let core = core_with_transport(&config, Arc::clone(&transport));
+    for supplied in [None, Some("192.0.2.99/32")] {
+        let input = supplied.map_or_else(
+            || request("group-client-or-custom.example.", RecordType::A),
+            |ecs| request_with_ecs("group-client-or-custom.example.", ecs),
+        );
+        let first = observed_request(input.clone());
+        assert_upstream(&resolve_and_commit(&core, &first).await, CacheStatus::Miss);
+        exchange(
+            &facts(&first).await.upstream,
+            "one",
+            present(
+                if supplied.is_some() {
+                    "192.0.2.0/24"
+                } else {
+                    GLOBAL_ECS
+                },
+                0,
+            ),
+            EcsPolicySource::Upstream,
+            if supplied.is_some() {
+                EcsValueSource::ClientEcs
+            } else {
+                EcsValueSource::Custom
+            },
+        );
+        let second = observed_request(input);
+        assert_fresh(&resolve_and_commit(&core, &second).await);
+        assert_eq!(
+            facts(&second).await.cache_match.unwrap().kind,
+            if supplied.is_some() {
+                EcsCacheMatchKind::Covering
+            } else {
+                EcsCacheMatchKind::Members
+            }
+        );
+    }
+    assert_eq!(transport.calls(), 2);
+}
+
+#[tokio::test]
+async fn client_or_custom_refresh_reuses_the_selected_branch() {
+    for supplied in [None, Some("198.51.100.99/32")] {
+        let config = fixture(
+            EcsSpec::ClientOrCustom(GLOBAL_ECS),
+            doh("remote", "ok.example.test", EcsSpec::Inherit),
+            "remote",
+        );
+        let transport = Arc::new(RecordingDohTransport::new(49));
+        let core = core_with_transport(&config, Arc::clone(&transport));
+        let input = supplied.map_or_else(
+            || request("refresh-client-or-custom.example.", RecordType::A),
+            |ecs| request_with_ecs("refresh-client-or-custom.example.", ecs),
+        );
+        resolve_and_commit(&core, &input).await;
+        let key = cache_key(&core, &plan_for(&core, &input), &input).unwrap();
+        force_stale(&core, &key).await;
+        let _cell = publish_current(&core, 1);
+        let input = observed_request(input);
+        assert_eq!(
+            resolve_and_commit(&core, &input).await.cache_status,
+            CacheStatus::Stale
+        );
+        drain(&core).await;
+        let ecs = facts(&input).await;
+        assert_eq!(
+            ecs.upstream,
+            EcsExchange::NotSent {
+                reason: EcsNotSentReason::CacheHit
+            }
+        );
+        exchange(
+            ecs.refresh.as_ref().unwrap(),
+            "remote",
+            present(
+                if supplied.is_some() {
+                    "198.51.100.0/24"
+                } else {
+                    GLOBAL_ECS
+                },
+                0,
+            ),
+            EcsPolicySource::Global,
+            if supplied.is_some() {
+                EcsValueSource::ClientEcs
+            } else {
+                EcsValueSource::Custom
+            },
+        );
+        let EcsExchange::Observed { policy, .. } = ecs.refresh.unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(policy.mode, EcsPolicyMode::ClientOrCustom);
+        assert_eq!(transport.calls(), 2);
+    }
+}

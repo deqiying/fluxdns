@@ -27,6 +27,8 @@
 > 2026-11-09 答案缓存增量核对：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，核对 v3 AnswerKey、target 子树摘要、成员 ECS、scope 索引与 refresh/late-result；本轮全量后端测试和 loopback 二进制验收见 [v3 答案缓存核对边界](#v3-答案缓存核对边界)，其余历史结论不自动刷新。
 >
 > 2026-11-10 ECS 观测增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅补充请求级 ECS 采集、选中 leaf 与缓存匹配事实；不改变以下 DNS/缓存策略。
+>
+> 2026-11-10 ECS 自定义兜底增量核对：基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树，新增 `client_or_custom` 并复用原有查询准备、缓存与观测链路；其余历史范围不重新核对。
 
 ## 入口与调用链
 
@@ -66,13 +68,23 @@ SystemSocketFactory / typed binding
 
 [`EventPublishingDnsCore`](../../../backend/src/service.rs) 在统一 Core 入口、策略执行前，仅当详情 sink 启用时从原始 canonical query 开启 trace ECS；UDP/TCP/DoH 共用，不用当前配置或客户端地址补算 request。[`ecs_observation.rs`](../../../backend/src/dns/ecs_observation.rs) 区分 present/absent/invalid/unrecorded，保留本阶段 source/scope，仅清除 host bits。
 
-`effective_upstream_query_and_source` 在原有 disabled/client/custom 取值分支同时返回 value_source，`prepare_query` 保存同次 ResolvedEcs 来源。uniform 只表示最终值一致，逐 leaf 来源仍独立。Direct attempt 读取实际进入 connector 的 query 和自身 response；[`executor.rs`](../../../backend/src/upstream/executor.rs) 的 nested、fallback 与 parallel 将 `SelectedEcsLeaf` 随 outcome 返回，[`outcome.rs`](../../../backend/src/upstream/outcome.rs) 择优时一起选择，不使用请求级 last-writer 槽。既有顶层成员/缓存 provenance 原义不变；组全失败没有可靠 leaf 时为 no_selected_response，late-result 不改已返回 ECS。
+`effective_upstream_query_and_source` 在 disabled/client/custom/client_or_custom 取值分支同时返回 value_source，`prepare_query` 保存同次 ResolvedEcs 来源。`client_or_custom` 使用合法请求 ECS 时为 `client_ecs`，自定义兜底时为 `custom`，policy mode 始终保留 `client_or_custom`；不新建取值来源或数据库字段。uniform 只表示最终值一致，逐 leaf 来源仍独立。Direct attempt 读取实际进入 connector 的 query 和自身 response；[`executor.rs`](../../../backend/src/upstream/executor.rs) 的 nested、fallback 与 parallel 将 `SelectedEcsLeaf` 随 outcome 返回，[`outcome.rs`](../../../backend/src/upstream/outcome.rs) 择优时一起选择，不使用请求级 last-writer 槽。既有顶层成员/缓存 provenance 原义不变；组全失败没有可靠 leaf 时为 no_selected_response，late-result 不改已返回 ECS。
 
 [`AnswerKey::probe_candidates`](../../../backend/src/cache/key.rs) 从原候选生成 key，仅在观测开启时附带类型化匹配描述；详情关闭、独立 `probe_keys` 以及刷新前的缓存重探测不构造附加地址描述。`AnswerProbe` 只保留实际 fresh/可返回 stale 的匹配。covering、exact、无 ECS 桶和 members 独立，exact `/0` 不等同 covering `/0`。候选顺序、最长前缀、版本/CAS、key/entry/FDCS 格式不变；不把生产请求完整 ECS 来源塞进缓存。
 
 前台只写 `upstream`；fresh/stale 为 cache_hit，Hosts 为 local_answer，single-flight follower 为 single_flight 且不伪造 probe match，真正 fallback 回源时才记录自身交换。刷新 context 的 trace clone 只拥有 `refresh`，使用重决策后的 query/选中 leaf，事实先于缓存终态发布；已确认未回源为 not_started，未知不是禁用或成功。关闭详情时不构造含子网和 leaf 名的附加观测，不在主链格式化 JSON、写 SQLite、等待详情或新增网络调用。持久化和统一投影见[后台分发](background-services.md#完成事件与后台分发)。
 
 2026-11-10 本轮来源、并发、缓存、刷新和详情关闭的回归随全量 Rust suite 通过；工程结果及用户取消独立运行时验收的边界见 [ECS 工程验证](management.md#ecs-工程验证与边界)，不沿用下一节旧基线的受控二进制结果作为新增观测的通过证据。
+
+### ECS 自定义兜底验证
+
+2026-11-10，Windows x86_64、mise Rust/Cargo 1.98.0，基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树：`cargo test --offline --locked --manifest-path backend/Cargo.toml -- --test-threads=1` 为 946 passed、0 failed、5 ignored；`cargo fmt --manifest-path backend/Cargo.toml -- --check` 与默认 feature 的 `cargo build --offline --locked --manifest-path backend/Cargo.toml` 通过。
+
+新增回归由 [`policy_ecs_tests.rs`](../../../backend/src/dns/policy_ecs_tests.rs) 覆盖：合法 IPv4/IPv6 请求 ECS、短前缀与 `/0`、隐私上限/host bits/scope 规范化、缺失及非法 source/scope 的自定义兜底、客户端地址有无不影响兜底、五层配置来源、最终 ECS 缓存隔离与复用、group uniform/members 切换及后台刷新。受控 DoH port 直接断言发出的 DNS wire，并核对实际策略 mode/value_source 与诊断编码往返。
+
+[`config/contract/tests.rs`](../../../backend/src/config/contract/tests.rs) 验证五层本级 `custom_ip` 必填、非法 CIDR 与旧模式禁止残留字段；[`store/active/tests.rs`](../../../backend/src/config/store/active/tests.rs) 验证候选应用、原文件/派生文件持久化和重新解析，Runtime 成功回执沿用测试模拟边界；[`storage/detail_query.rs`](../../../backend/src/storage/detail_query.rs) 验证两种实际来源的 commit 通知和 SQLite 历史读取；Management 的字段错误测试及跨端共享夹具同步覆盖新枚举。
+
+上述是工程与受控 port 测试，不等同于独立进程的 UDP/TCP/DoH、Management HTTP/WS 联合验收；本轮未做真实浏览器布局、跨平台或生产负载验证。前端工程证据见[页面实现](../frontend/pages.md#策略覆盖编辑)。
 
 ## Cache 与 TTL
 
@@ -82,7 +94,7 @@ SystemSocketFactory / typed binding
 
 - listener/strategy hosts 本地回答绕过 response cache；upstream hosts 按普通上游响应处理。
 - `UpstreamRuntime::prepare_query` 遍历 primary/fallback/nested 的全部 direct leaves。rule/strategy/client 显式 ECS 统一覆盖成员，否则成员 upstream 覆盖 global、未显式成员继承请求级 ECS。最终 ECS 相同则 uniform；异构时按成员 ID 排序编码最终 ECS/None 的摘要，并把 per-member query 交给 executor，正常参与精确 lookup、single-flight 和 commit。
-- `normalize_client_subnet` 将合法请求 ECS 的 source 截断到 IPv4 /24、IPv6 /56，较短前缀保留，清除 host bits，scope 置 0；缺失合法 ECS 时由客户端地址推导。custom CIDR 保持配置前缀、scope 置 0。
+- `normalize_client_subnet` 将合法请求 ECS 的 source 截断到 IPv4 /24、IPv6 /56，较短前缀保留，清除 host bits，scope 置 0；`client` 缺失合法 ECS 时由客户端地址推导，`client_or_custom` 则使用本级自定义网段。自定义值保持配置前缀、scope 置 0，完整配置契约见[配置参考](../configuration.md#ecs-优先级)。
 - 缓存候选保留 canonical upstream origin response。`CanonicalResponse::short_cache_ttl` 统一识别 REFUSED（包含非空 Answer）和所有空 Answer 响应，[`admit_response`](../../../backend/src/cache/admission.rs) 固定写入 10s 且不设 stale 窗口。上游输出与 fresh 命中由 `rewrite_short_cache_ttl` 改写 RR TTL/SOA.MINIMUM 为 10s/剩余寿命，无记录时不合成记录；短响应跳过 TTL override。`stale_answer_ttl` 直接拒绝短响应；越过应答窗口的可见条目返回 `Expired`，不混同 `Miss`。
 - `probe_answer` 使用 Moka covering 前缀计数索引，经 `AnswerKey::probe_keys` 从长到短探测不超过查询 source 的 covering key，最后 exact；选择当前池允许返回的最长前缀答案，较宽 fresh 不越过可返回的更具体 stale。`load_key` 按查询 ECS 精确合并 single-flight；`storage_key(response.edns_client_subnet())` 在应答后确定实际存储网段。scope/exact、source 0 与无 ECS 桶的完整矩阵见 [Cache 设计](../../architecture/backend/modules/cache.md#4-lookup-与-single-flight)。应答不带 ECS 或应答 ECS 不一致时按查询 source 存储（source 0 仍为 exact /0），不一致应答仍正常返回与缓存；异构摘要不参与 scope 匹配。
 - [`MokaCacheStore`](../../../backend/src/cache/moka.rs) 的 `CoveringIndex` 按 base/前缀计数，每次写入新版本增加，所有移除通知（含替换）减少旧版本计数，覆盖读写之间淘汰的交错；恢复使用插入路径重建，不单独持久化。索引只引导探测，不能替代真实 key/生命周期检查。

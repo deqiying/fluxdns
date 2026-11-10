@@ -37,7 +37,7 @@ export function clientOverrides(client: Client): ClientOverride[] {
   }
   const ecs = client.edns_client_subnet;
   if (ecs) {
-    const value = ecs.mode === "disabled" ? "禁用" : ecs.mode === "client" ? "客户端地址" : `自定义 ${ecs.custom_ip ?? ""}`.trim();
+    const value = ecs.mode === "disabled" ? "禁用" : ecs.mode === "client" ? "客户端地址" : `${ecs.mode === "client_or_custom" ? "请求 ECS 优先，自定义兜底" : "自定义"} ${ecs.custom_ip ?? ""}`.trim();
     overrides.push({ key: "ecs", label: "ECS", value });
   }
   return overrides;

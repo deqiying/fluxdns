@@ -261,6 +261,8 @@ pub enum EcsMode {
     Disabled,
     Client,
     Custom,
+    /// 优先使用合法请求 ECS，否则使用本级必填的自定义网段。
+    ClientOrCustom,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

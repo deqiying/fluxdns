@@ -12,6 +12,8 @@
 >
 > 2026-11-09 局部评审：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅核对完整决策、v3 AnswerKey 与 ECS scope 编排；未新增测试或运行验收。
 >
+> 2026-11-10 局部评审：基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树，仅扩展请求 ECS 优先、自定义兜底模式；不改变协议解析、缓存 key 或 scope 规则。
+>
 > 关联实现：[policy.rs](../../../../backend/src/dns/policy.rs)、[handler.rs](../../../../backend/src/dns/handler.rs)、[service.rs](../../../../backend/src/service.rs)、[resolution.rs](../../../../backend/src/resolution.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [Ports](ports.md) · [Policy](policy.md) · [Cache](cache.md) · [Upstream](upstream.md)
@@ -113,8 +115,9 @@ ECS 处理顺序：
 2. `disabled` 删除已有 ECS；
 3. `client` 优先使用合法请求 ECS，source 截断到 IPv4 /24、IPv6 /56（较短值保留）、清除 host bits；无合法请求 ECS 时从 client address 推导同样前缀；
 4. `custom` 使用已验证 CIDR，不按 client 上限截断；
-5. 所有查询 ECS scope 置 0，并校验 family/prefix；
-6. uniform 最终 ECS 进入 scope 缓存，异构组合进入精确缓存；无 ECS 使用独立桶，source 0 产生 exact /0，不能与应答 scope 0 covering /0 混用；应答缺失或不一致 ECS 按查询 source 存储，不一致应答仍返回。完整矩阵见 [Cache](cache.md#4-lookup-与-single-flight)。
+5. `client_or_custom` 复用 `client` 的合法请求 ECS 分支，缺失或非法时改用本级已验证的 `custom_ip`，不按 client address 推导；合法 source 0 仍保留，整个报文无法解析时不进入此回退；
+6. 所有查询 ECS scope 置 0，并校验 family/prefix；
+7. uniform 最终 ECS 进入 scope 缓存，异构组合进入精确缓存；无 ECS 使用独立桶，source 0 产生 exact /0，不能与应答 scope 0 covering /0 混用；应答缺失或不一致 ECS 按查询 source 存储，不一致应答仍返回。完整矩阵见 [Cache](cache.md#4-lookup-与-single-flight)。
 
 客户端地址不可用且 mode=client 时，不伪造 `0.0.0.0/0`；按“无 ECS”继续并记录低基数原因。
 

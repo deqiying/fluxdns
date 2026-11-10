@@ -299,3 +299,82 @@ fn outbound_proxy_url_accepts_inline_urls_and_rejects_invalid_sources() {
         assert!(error.contains("proxy_url"), "{source}: {error}");
     }
 }
+
+/// 必填回退值按配置块校验，不能从其他层级拼接；所有正式入口共用该约束。
+#[test]
+fn client_or_custom_ecs_requires_a_local_fallback_at_every_layer() {
+    let layers = [
+        (
+            "dns: {}",
+            "dns: {edns_client_subnet: ECS}",
+            "dns.edns_client_subnet",
+        ),
+        (
+            "upstreams:\n  - name: local\n    type: hosts\n    format: hosts\n    hosts: \"127.0.0.1 localhost\"",
+            "upstreams:\n  - name: local\n    type: doh\n    address: https://dns.example.test/dns-query\n    edns_client_subnet: ECS",
+            "upstreams[0].edns_client_subnet",
+        ),
+        (
+            "    default_upstream: local",
+            "    default_upstream: local\n    edns_client_subnet: ECS",
+            "strategy[0].edns_client_subnet",
+        ),
+        (
+            "      - hosts: local",
+            "      - hosts: local\n        edns_client_subnet: ECS",
+            "strategy[0].rules[0].edns_client_subnet",
+        ),
+        (
+            "    client_id: Desktop-01",
+            "    client_id: Desktop-01\n    edns_client_subnet: ECS",
+            "clients[0].edns_client_subnet",
+        ),
+    ];
+    for (from, template, path) in layers {
+        for mode in ["custom", "client_or_custom"] {
+            let source = FIXTURE.replace(
+                from,
+                &template.replace(
+                    "ECS",
+                    &format!("{{mode: {mode}, custom_ip: 203.0.113.99/32}}"),
+                ),
+            );
+            let config = ConfigV2::parse(source.as_bytes()).unwrap();
+            config.validate().unwrap();
+            let ecs: EcsDto =
+                yaml_serde::from_str(&format!("mode: {mode}\ncustom_ip: 203.0.113.99/32\n"))
+                    .unwrap();
+            let saved = yaml_serde::to_string(&ecs).unwrap();
+            assert!(saved.contains(&format!("mode: {mode}")));
+            assert!(saved.contains("custom_ip: 203.0.113.99/32"));
+            let restored: EcsDto = yaml_serde::from_str(&saved).unwrap();
+            assert_eq!(restored.mode, ecs.mode);
+            assert_eq!(restored.custom_ip, ecs.custom_ip);
+
+            let missing =
+                FIXTURE.replace(from, &template.replace("ECS", &format!("{{mode: {mode}}}")));
+            let error = ConfigV2::parse(missing.as_bytes()).unwrap_err();
+            assert!(
+                error.to_string().contains(&format!("{path}.custom_ip")),
+                "{error}"
+            );
+        }
+        let invalid = FIXTURE.replace(
+            from,
+            &template.replace("ECS", "{mode: client_or_custom, custom_ip: 203.0.113.0/99}"),
+        );
+        assert!(ConfigV2::parse(invalid.as_bytes()).is_err(), "{path}");
+    }
+    for mode in ["client", "disabled"] {
+        let source = FIXTURE.replace(
+            "dns: {}",
+            &format!("dns: {{edns_client_subnet: {{mode: {mode}, custom_ip: 203.0.113.0/24}}}}"),
+        );
+        let error = ConfigV2::parse(source.as_bytes()).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("dns.edns_client_subnet.custom_ip")
+        );
+    }
+}

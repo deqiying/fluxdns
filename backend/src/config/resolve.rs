@@ -1096,8 +1096,8 @@ fn resolve_ecs(
             custom_ip: None,
             source,
         },
-        EcsMode::Custom => ResolvedEcs {
-            mode: EcsMode::Custom,
+        EcsMode::Custom | EcsMode::ClientOrCustom => ResolvedEcs {
+            mode: value.mode,
             custom_ip: value.custom_ip,
             source,
         },

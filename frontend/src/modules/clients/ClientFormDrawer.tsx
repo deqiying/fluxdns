@@ -25,7 +25,7 @@ interface ClientFormValues {
   ttl_mode: "inherit" | "enabled" | "disabled";
   ttl_min?: string;
   ttl_max?: string;
-  ecs_mode: "inherit" | "disabled" | "client" | "custom";
+  ecs_mode: "inherit" | Schemas["Ecs"]["mode"];
   ecs_custom_ip?: string;
 }
 
@@ -46,7 +46,7 @@ interface ClientFormDrawerProps {
 const CLIENT_ID_PATTERN = /^[A-Za-z0-9._~-]{1,128}$/;
 const CACHE_OPTIONS = [{ label: "继承", value: "inherit" }, { label: "启用", value: "enabled" }, { label: "禁用", value: "disabled" }];
 const TTL_OPTIONS = [{ label: "继承", value: "inherit" }, { label: "启用覆盖", value: "enabled" }, { label: "禁用覆盖", value: "disabled" }];
-const ECS_OPTIONS = [{ label: "继承", value: "inherit" }, { label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }];
+const ECS_OPTIONS = [{ label: "继承", value: "inherit" }, { label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }, { label: "请求 ECS 优先，自定义兜底", value: "client_or_custom" }];
 
 interface IdMeta {
   errors: number;
@@ -188,7 +188,7 @@ export function ClientFormDrawer({ target, items, strategyOptions, routeTemplate
       ...(values.strategy ? { strategy: values.strategy } : {}),
       ...(values.cache_mode === "inherit" ? {} : { cache: { enabled: values.cache_mode === "enabled" } }),
       ...(values.ttl_mode === "inherit" ? {} : { ttl_override: values.ttl_mode === "disabled" ? { enabled: false } : { enabled: true, ...(values.ttl_min ? { min: values.ttl_min } : {}), ...(values.ttl_max ? { max: values.ttl_max } : {}) } }),
-      ...(values.ecs_mode === "inherit" ? {} : { edns_client_subnet: { mode: values.ecs_mode, ...(values.ecs_mode === "custom" && values.ecs_custom_ip ? { custom_ip: values.ecs_custom_ip } : {}) } }),
+      ...(values.ecs_mode === "inherit" ? {} : { edns_client_subnet: { mode: values.ecs_mode, ...((values.ecs_mode === "custom" || values.ecs_mode === "client_or_custom") && values.ecs_custom_ip ? { custom_ip: values.ecs_custom_ip } : {}) } }),
     };
     let change: Schemas["ConfigChange"];
     let nextId: string | undefined;
@@ -332,7 +332,7 @@ export function ClientFormDrawer({ target, items, strategyOptions, routeTemplate
             ) : null}
           </OverrideRow>
           <OverrideRow label="ECS" name="ecs_mode" options={ECS_OPTIONS}>
-            {ecsMode === "custom" ? (
+            {ecsMode === "custom" || ecsMode === "client_or_custom" ? (
               <Form.Item name="ecs_custom_ip" label="自定义 ECS 地址" rules={[{ required: true, message: "请填写 IP 或 CIDR" }]}>
                 <Input placeholder="例如 192.0.2.0/24" />
               </Form.Item>
@@ -362,7 +362,7 @@ interface OverrideRowProps {
   children?: ReactNode;
 }
 
-/** 覆盖项一行一个分段控件，一眼看到当前值与可选项；启用后的补充字段在行内展开。 */
+/** 常用覆盖项使用分段控件；ECS 选项较长，使用下拉框避免窄屏横向溢出。 */
 function OverrideRow({ label, name, options, children }: OverrideRowProps) {
   const labelId = `client-${name}-label`;
   return (
@@ -370,7 +370,7 @@ function OverrideRow({ label, name, options, children }: OverrideRowProps) {
       <div className="client-override-head">
         <span id={labelId}>{label}</span>
         <Form.Item name={name} noStyle>
-          <Segmented size="small" options={options} aria-labelledby={labelId} />
+          {name === "ecs_mode" ? <Select size="small" options={options} aria-labelledby={labelId} style={{ flex: 1, minWidth: 0, maxWidth: 260 }} /> : <Segmented size="small" options={options} aria-labelledby={labelId} />}
         </Form.Item>
       </div>
       {children ? <div className="client-override-body">{children}</div> : null}

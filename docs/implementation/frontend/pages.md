@@ -23,6 +23,8 @@
 > 2026-11-10 增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅核对解析记录六列布局、UTC、分层详情与请求级 ECS；其余页面仍按原核对范围解释。
 >
 > 2026-11-10 增量核对：基线 `6fde43c7a88e4e4dedd678a6197b7c2bec0cc28d` 加工作树，范围仅限解析详情可见性等待的测试修复，页面行为不变。Windows / Node.js 26.8.1 / pnpm 11.25.0：定向 21 项、默认 worker 配置下完整 45 文件 287 项测试、typecheck 与生产构建通过；未重新验证 Ubuntu Actions 与真实浏览器动画。
+>
+> 2026-11-10 ECS 自定义兜底增量核对：基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树，范围限五层 ECS 编辑、摘要和诊断契约；验证边界见下文策略覆盖编辑，不刷新既有真实浏览器验收结论。
 
 ## 路由与数据源
 
@@ -101,9 +103,13 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 
 ## 策略覆盖编辑
 
-[`StrategiesPage`](../../../frontend/src/modules/strategies/StrategiesPage.tsx) 使用宽版 `ConfigFormModal` 和有序可折叠规则卡片；Form.List 稳定 key 保持重排后的字段与状态归属，折叠内容仍挂载参与校验。规则层提供 ECS 继承/禁用/客户端地址/自定义四态，Hosts 分支说明本地回答不发送 ECS，并清除 upstream 残留。后端字段错误通过 [`strategyFieldErrors`](../../../frontend/src/modules/strategies/strategy-form.ts) 映射到规则输入，失败后展开以便修正。
+[`StrategiesPage`](../../../frontend/src/modules/strategies/StrategiesPage.tsx) 使用宽版 `ConfigFormModal` 和有序可折叠规则卡片；Form.List 稳定 key 保持重排后的字段与状态归属，折叠内容仍挂载参与校验。规则层提供 ECS 继承/禁用/客户端地址/自定义/请求 ECS 优先自定义兜底五态，Hosts 分支说明本地回答不发送 ECS，并清除 upstream 残留。后端字段错误通过 [`strategyFieldErrors`](../../../frontend/src/modules/strategies/strategy-form.ts) 映射到规则输入，失败后展开以便修正。
 
 [`strategyToForm/strategyFromForm`](../../../frontend/src/modules/strategies/strategy-form.ts) 保留策略 cache.optimistic、TTL 缺失 enabled、显式禁用和 `0s` 的区别。保存先 `validateFields`，再 `getFieldsValue(true)` 取得隐藏字段；未修改覆盖块保留原 DTO，明确清空 TTL 边界会移除该字段。规则层不增加 cache/TTL，ECS 生效优先级由后端决定。`optimistic.negative_max_age` 映射为可留空的 `cache_negative_max_age`：`0s` 原样往返，原 DTO 缺失且未填写时提交省略该字段，由后端取默认值。
+
+DNS 全局、上游、客户端、策略和规则各 ECS 编辑入口均支持 `client_or_custom`（请求 ECS 优先，自定义兜底）。该模式与 `custom` 都显示并要求 `custom_ip`；提交、回显保留回退值，切换 `client`/`disabled` 后提交省略残留地址，继承仍省略整个对象。客户端和策略摘要明确区分新模式；解析记录保持实际来源 `client_ecs`/`custom`，不把回退描述成客户端地址推导。模式的转发和继承语义以[配置参考](../configuration.md#ecs-优先级)为准。
+
+2026-11-10，Windows / Node.js 26.8.1 / pnpm 11.25.0，基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树：`pnpm run generate:api` 及重复生成幂等检查、`typecheck`、`test:contract:v2`（8 项）、`test`（默认 worker，46 文件 296 项）与 `build` 通过。[五层 ECS 编辑测试](../../../frontend/src/shared/config/ecs-editors.test.tsx) 使用真实页面和 MSW，断言回显、必填拦截、IPv4/IPv6 回退值提交及切换模式清理；策略转换、客户端摘要、解析诊断和跨端 schema 另有定向用例。客户端 ECS 改用受宽度约束的 Select 容纳较长选项，cache/TTL 控件不变。未执行本轮真实浏览器布局或独立后端 HTTP/WS 联合验收；后端证据见[DNS 管线](../backend/dns-pipeline.md#ecs-自定义兜底验证)。
 
 2026-10-04 Windows 验证：完整前端 35 文件 195 项测试、v2 schema 4 项、typecheck 和生产构建通过。最终 debug embed 独立服务完成真实 HTTP/WS/ECS 联合验收，见[Management 实现](../backend/management.md)。本机 Chromium 连接真实服务，在 1440×900、390×844、320×740 验证弹窗无页面横向溢出、正文可滚动和保存按钮处于视口内；另通过已保存 ECS 重新打开、非法 CIDR 从折叠规则自动展开定位、键盘 Enter 切换、规则重排保存后回显，未捕获浏览器运行时异常。截图和测量报告留在本次 `_fluxdns/query-config-1791103465267/`。内置面板截图工具超时，采用独立 Chromium 的 CDP 截图与 DOM 测量；未将截图工具失败记为通过。未验证跨平台、远程代理或生产负载。
 

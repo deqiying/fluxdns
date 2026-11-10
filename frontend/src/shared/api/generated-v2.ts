@@ -659,12 +659,12 @@ export interface components {
             min?: components["schemas"]["Duration"];
             max?: components["schemas"]["Duration"];
         };
-        /** @description custom 必须有 custom_ip，其余模式禁止；IP/CIDR 语义由公共 validator 检查 */
+        /** @description custom 和 client_or_custom 必须有 custom_ip，client/disabled 禁止；client_or_custom 优先使用合法请求 ECS，缺失或非法时回退 custom_ip，不从客户端 IP 推导；IP/CIDR 语义由公共 validator 检查 */
         Ecs: {
             /** @enum {string} */
-            mode: "disabled" | "client" | "custom";
+            mode: "disabled" | "client" | "custom" | "client_or_custom";
             custom_ip?: string;
-        };
+        } & unknown;
         Snapshot: {
             /** @default false */
             enabled: boolean;
@@ -1181,7 +1181,7 @@ export interface components {
             /** @enum {string} */
             source: "default" | "global" | "upstream" | "client" | "strategy" | "rule";
             /** @enum {string} */
-            mode: "disabled" | "client" | "custom";
+            mode: "disabled" | "client" | "custom" | "client_or_custom";
             /** @enum {string} */
             value_source: "client_ecs" | "client_ip" | "custom" | "none";
         };

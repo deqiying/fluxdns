@@ -94,7 +94,8 @@ ecs_enum!(EcsPolicySource {
 ecs_enum!(EcsPolicyMode {
     Disabled,
     Client,
-    Custom
+    Custom,
+    ClientOrCustom
 });
 ecs_enum!(EcsValueSource {
     ClientEcs,

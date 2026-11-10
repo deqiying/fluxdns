@@ -26,7 +26,7 @@ interface UpstreamFormValues {
   bootstrap?: string;
   connect_ip?: string;
   proxy?: string;
-  ecs_mode?: "disabled" | "client" | "custom";
+  ecs_mode?: Schemas["Ecs"]["mode"];
   ecs_custom_ip?: string;
   upstreams?: Member[];
   upstream_mode?: Schemas["UpstreamMode"];
@@ -126,7 +126,7 @@ export function UpstreamsPage() {
             ...(values.bootstrap ? { bootstrap: values.bootstrap } : {}),
             ...(values.connect_ip ? { connect_ip: values.connect_ip } : {}),
             ...(values.proxy ? { proxy: values.proxy } : {}),
-            ...(values.ecs_mode ? { edns_client_subnet: { mode: values.ecs_mode, ...(values.ecs_mode === "custom" && values.ecs_custom_ip ? { custom_ip: values.ecs_custom_ip } : {}) } } : {}),
+            ...(values.ecs_mode ? { edns_client_subnet: { mode: values.ecs_mode, ...((values.ecs_mode === "custom" || values.ecs_mode === "client_or_custom") && values.ecs_custom_ip ? { custom_ip: values.ecs_custom_ip } : {}) } } : {}),
           }
         : {
             name: values.name,
@@ -177,8 +177,8 @@ export function UpstreamsPage() {
               <Form.Item name="bootstrap" label="Bootstrap 上游"><Select allowClear showSearch options={upstreamOptions} /></Form.Item>
               <Form.Item name="connect_ip" label="连接 IP"><Input /></Form.Item>
               <Form.Item name="proxy" label="代理"><Select allowClear options={proxyOptions} placeholder="直连" /></Form.Item>
-              <Form.Item name="ecs_mode" label="ECS"><Select options={[{ label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }]} /></Form.Item>
-              {ecsMode === "custom" ? <Form.Item name="ecs_custom_ip" label="自定义 ECS" rules={[{ required: true }]}><Input /></Form.Item> : null}
+              <Form.Item name="ecs_mode" label="ECS"><Select options={[{ label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }, { label: "请求 ECS 优先，自定义兜底", value: "client_or_custom" }]} /></Form.Item>
+              {ecsMode === "custom" || ecsMode === "client_or_custom" ? <Form.Item name="ecs_custom_ip" label="自定义 ECS" rules={[{ required: true }]}><Input /></Form.Item> : null}
             </>
           ) : null}
           {formType === "group" ? (

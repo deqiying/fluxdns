@@ -43,7 +43,7 @@ function ecsFromForm(mode: StrategyFormValues["ecs_mode"], customIp?: string): E
   if (mode === "inherit") return undefined;
   return {
     mode,
-    ...(mode === "custom" && customIp ? { custom_ip: customIp } : {}),
+    ...((mode === "custom" || mode === "client_or_custom") && customIp ? { custom_ip: customIp } : {}),
   };
 }
 
@@ -136,6 +136,7 @@ export function strategyFromForm(values: StrategyFormValues, original?: Strategy
 
 export function ecsSummary(ecs: Ecs | undefined) {
   if (!ecs) return "ECS：继承";
+  if (ecs.mode === "client_or_custom") return `ECS：请求 ECS 优先，自定义兜底 ${ecs.custom_ip ?? ""}`;
   if (ecs.mode === "custom") return `ECS：自定义 ${ecs.custom_ip ?? ""}`;
   return `ECS：${ecs.mode === "client" ? "客户端地址" : "禁用"}`;
 }

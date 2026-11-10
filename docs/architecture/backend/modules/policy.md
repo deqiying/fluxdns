@@ -16,6 +16,8 @@
 >
 > 2026-11-09 局部评审：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅核对完整决策后 v3 AnswerKey、成员 ECS 与 refresh/late-result；未新增运行验收。
 >
+> 2026-11-10 局部评审：基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树，仅补充 ECS 请求优先/自定义兜底模式，既有层级与成员覆盖规则不变。
+>
 > 关联实现：[client.rs](../../../../backend/src/policy/client.rs)、[plan.rs](../../../../backend/src/policy/plan.rs)、[dns/policy.rs](../../../../backend/src/dns/policy.rs)
 >
 > 关联文档：[后端架构](../overview.md) · [配置字段参考](../../../implementation/configuration.md) · [DNS Core](dns-core.md) · [Resource](resource.md) · [Upstream](upstream.md)
@@ -142,7 +144,7 @@ ECS：
 rule → strategy → client → upstream → global
 ```
 
-`disabled` 是明确结果，不继续继承。`custom` 必须已有合法 CIDR。ECS 优先级保持 `rule > strategy > client > upstream > global`：group 有 rule/strategy/client 显式结果时统一覆盖成员；否则遍历 primary、fallback 与 nested group 的全部可达 direct leaves，让显式 upstream ECS 覆盖 global，未显式成员继承请求级 ECS。最终 ECS 一致时使用 uniform scope 缓存；真正异构时保留 per-member query，按排序成员 ECS 组合摘要精确缓存，lookup、single-flight 和 commit 均不绕过。client ECS 清除 host bits、source 上限 IPv4 /24、IPv6 /56，较短前缀保留，查询 scope 置 0；custom CIDR 不按 client 上限截断。
+`disabled` 是明确结果，不继续继承。`custom` 与 `client_or_custom` 必须已有本级合法 CIDR；后者优先合法请求 ECS，仅缺失或非法时使用自定义值，不按客户端地址推导。ECS 优先级保持 `rule > strategy > client > upstream > global`：group 有 rule/strategy/client 显式结果时统一覆盖成员；否则遍历 primary、fallback 与 nested group 的全部可达 direct leaves，让显式 upstream ECS 覆盖 global，未显式成员继承请求级 ECS。最终 ECS 一致时使用 uniform scope 缓存；真正异构时保留 per-member query，按排序成员 ECS 组合摘要精确缓存，lookup、single-flight 和 commit 均不绕过。请求 ECS 清除 host bits、source 上限 IPv4 /24、IPv6 /56，较短前缀保留，查询 scope 置 0；自定义 CIDR 不按 client 上限截断。完整字段契约见[配置参考](../../../implementation/configuration.md#ecs-优先级)。
 
 ## 9. `PolicyContext` 与 `RouteDecision`
 

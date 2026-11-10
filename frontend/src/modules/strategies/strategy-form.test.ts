@@ -26,7 +26,7 @@ describe("strategy form conversion", () => {
     });
   });
 
-  it("继承不发送 ECS，非 custom 不保留 custom_ip，分支字段随类型清理", () => {
+  it("继承不发送 ECS，无自定义地址的模式不保留 custom_ip，分支字段随类型清理", () => {
     const values: StrategyFormValues = {
       ...strategyToForm(strategy),
       rules: [
@@ -44,6 +44,22 @@ describe("strategy form conversion", () => {
     });
     expect(strategyFromForm(values, strategy).edns_client_subnet).toBeUndefined();
     expect(ecsSummary({ mode: "client" })).toBe("ECS：客户端地址");
+  });
+
+  it("策略和规则的请求 ECS 优先模式无损往返，切换模式后清除地址", () => {
+    const ecs = { mode: "client_or_custom" as const, custom_ip: "2001:db8::/48" };
+    const original = { ...strategy, edns_client_subnet: ecs, rules: [{ rule_set: "domains", upstream: "secure", edns_client_subnet: ecs }] };
+    const form = strategyToForm(original);
+    expect(form).toMatchObject({ ecs_mode: "client_or_custom", ecs_custom_ip: ecs.custom_ip, rules: [{ ecs_mode: "client_or_custom", ecs_custom_ip: ecs.custom_ip }] });
+    expect(strategyFromForm(form, original)).toEqual(original);
+    expect(ecsSummary(ecs)).toBe("ECS：请求 ECS 优先，自定义兜底 2001:db8::/48");
+    for (const mode of ["inherit", "client", "disabled"] as const) {
+      const saved = strategyFromForm({ ...form, ecs_mode: mode, rules: form.rules.map((rule) => ({ ...rule, ecs_mode: mode })) }, original);
+      expect(saved.edns_client_subnet).toEqual(mode === "inherit" ? undefined : { mode });
+      expect(saved.rules[0].edns_client_subnet).toEqual(mode === "inherit" ? undefined : { mode });
+    }
+    const custom = strategyFromForm({ ...form, ecs_mode: "custom" }, original);
+    expect(custom.edns_client_subnet).toEqual({ mode: "custom", custom_ip: ecs.custom_ip });
   });
 
   it("清空 TTL 边界移除旧值，仍保留 enabled 缺失", () => {
