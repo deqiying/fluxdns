@@ -21,6 +21,8 @@
 > 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，范围限 DoH 编辑器的新路由提示及客户端页面的显式/隐式 ID 地址生成；本次验证见[证据与限制](#证据与限制)，其余历史范围未重新核对。
 >
 > 2026-11-10 增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅核对解析记录六列布局、UTC、分层详情与请求级 ECS；其余页面仍按原核对范围解释。
+>
+> 2026-11-10 增量核对：基线 `6fde43c7a88e4e4dedd678a6197b7c2bec0cc28d` 加工作树，范围仅限解析详情可见性等待的测试修复，页面行为不变。Windows / Node.js 26.8.1 / pnpm 11.25.0：定向 21 项、默认 worker 配置下完整 45 文件 287 项测试、typecheck 与生产构建通过；未重新验证 Ubuntu Actions 与真实浏览器动画。
 
 ## 路由与数据源
 
@@ -89,7 +91,7 @@ DashboardPage 的“深色样例/浅色显示”只切换本页 CSS 外观，指
 
 [`QueryEcsSummary`](../../../frontend/src/modules/queries/QueryEcsSummary.tsx) 仅消费生成 DTO：默认主值优先已观察到的后台刷新，其次为本次上游；明确“后台刷新使用”或“用于上游请求”。fresh、Hosts 和 single-flight 分别显示本次未发送、不适用、未独立请求上游；disabled 的真实上游交换显示“未携带 ECS”及配置来源。Scope 只来自真实 response，缓存匹配独立保留 covering/exact（含各自 `/0`）、无 ECS 桶和 members。旧后端省略或旧记录 null 显示未记录，不读取当前配置补算。原始请求与最终 query/response、来源和 leaf 都可在诊断区查看。
 
-2026-11-10 本轮工程结果及用户取消运行时验收的边界统一见 [ECS 工程验证](../backend/management.md#ecs-工程验证与边界)。固定详情不随同 ID refetch/WS 漂移、外部指针关闭后可连续输入、显式关闭/Esc 恢复焦点均有页面回归；jsdom 行为测试关闭 CSS motion，不作为真实动画或多视口布局通过证据。
+2026-11-10 本轮工程结果及用户取消运行时验收的边界统一见 [ECS 工程验证](../backend/management.md#ecs-工程验证与边界)。固定详情不随同 ID refetch/WS 漂移、外部指针关闭后可连续输入、显式关闭/Esc 恢复焦点均有页面回归；jsdom 行为测试关闭 CSS motion，但 Popover 仍可能短暂处于 `appear-prepare` 且 `opacity: 0` 的准备阶段。[外部点击回归](../../../frontend/src/modules/queries/QueriesPage.test.tsx) 使用 `waitFor` 等待指定详情真正可见后再点击筛选输入框，不将节点存在等同于视觉可见，也不使用固定延时。此类测试不作为真实动画或多视口布局通过证据。
 
 P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关闭后必须在渲染完成时按稳定 record ID 重新取得当前 DOM 节点再恢复焦点，不能缓存即将移除的按钮。新增 TouchA 点击、恶意 Answer 文本、Escape 与焦点恢复联合测试，该轮前端 97 项通过；加入认证缓存回归后的最终套件为 98 项。
 

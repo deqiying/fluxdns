@@ -21,7 +21,7 @@ function renderPage() {
     access_expires_at_ms: Date.now() + 300_000,
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  // jsdom 不执行 CSS 动画；视觉与动画由真实浏览器验收，行为测试使用确定的可见终态。
+  // jsdom 行为测试关闭 CSS motion；浮层准备阶段仍异步，涉及可见性的断言必须等待终态。
   return { ...render(<ConfigProvider theme={{ token: { motion: false } }}><QueryClientProvider client={queryClient}><QueriesPage /></QueryClientProvider></ConfigProvider>), queryClient };
 }
 
@@ -108,7 +108,10 @@ describe("QueriesPage 展示语义", () => {
     const user = userEvent.setup();
     renderPage();
     await user.click(await screen.findByRole("button", { name: "查看 example.test. 的详情" }));
-    expect(await screen.findByRole("dialog")).toBeVisible();
+    // 节点挂载后仍可能处于透明的浮层准备阶段，等待可见后再验证外部点击。
+    await waitFor(() => {
+      expect(screen.getByRole("dialog", { name: "example.test. 解析详情" })).toBeVisible();
+    });
     const input = screen.getByRole("textbox", { name: "域名" });
     await user.click(input);
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
