@@ -12,6 +12,17 @@ describe("服务端时区", () => {
     expect(timeZoneLabel("Asia/Shanghai", at)).toBe("Asia/Shanghai (UTC+08:00)");
   });
 
+  it.each([
+    ["UTC", "2026-01-01T12:00:00Z", "UTC"],
+    ["Asia/Shanghai", "2026-01-01T12:00:00Z", "UTC+08:00"],
+    ["Asia/Kathmandu", "2026-01-01T12:00:00Z", "UTC+05:45"],
+    ["America/St_Johns", "2026-01-01T12:00:00Z", "UTC-03:30"],
+    ["America/New_York", "2026-01-01T12:00:00Z", "UTC-05:00"],
+    ["America/New_York", "2026-07-01T12:00:00Z", "UTC-04:00"],
+  ])("%s 在 %s 的简要标识为 %s", (timeZone, at, expected) => {
+    expect(timeZoneLabel(timeZone, Date.parse(at), "offset")).toBe(expected);
+  });
+
   it("缺失或无效时区明确回退 UTC，不读取浏览器默认时区", () => {
     expect(resolveTimeZone("Asia/Shanghai")).toEqual({ timeZone: "Asia/Shanghai", fallbackReason: null });
     expect(resolveTimeZone("UTC")).toEqual({ timeZone: "UTC", fallbackReason: null });

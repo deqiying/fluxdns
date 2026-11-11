@@ -361,7 +361,7 @@ function QueriesContent({ timeZone, preferences, updatePreferences }: { timeZone
       {page ? (
         <section className="query-records" aria-label="解析记录列表">
           <div className="query-records-toolbar">
-            <Typography.Text type="secondary">{sort === "occurred_at" ? "发生时间" : "总耗时"}{order === "desc" ? "降序" : "升序"} · {timeZone}</Typography.Text>
+            <Typography.Text type="secondary" title={timeZone}>{sort === "occurred_at" ? "发生时间" : "总耗时"}{order === "desc" ? "降序" : "升序"} · {timeZoneLabel(timeZone, Date.now(), "offset")}</Typography.Text>
             {autoRefresh && (query.requiresResync || (query.pendingCount ?? 0) > 0) ? <Space wrap>
               <span role="status">{query.requiresResync ? "有新记录，需重新同步" : `有 ${query.pendingCount} 条新记录`}</span>
               <Button size="small" icon={<RotateCw size={15} />} onClick={showLatest}>查看新记录</Button>
@@ -700,8 +700,8 @@ function ConnectionState({ enabled, state, lastUpdatedAt }: { enabled: boolean; 
   if (!enabled) return <Typography.Text type="secondary">已关闭</Typography.Text>;
   const label = state === "open" ? "实时连接正常" : state === "connecting" ? "连接中" : state === "reconnecting" ? "正在重连" : "实时连接异常";
   return (
-    <Typography.Text type={state === "error" ? "danger" : "secondary"} className={`query-connection query-connection-${state}`} role="status">
-      {label}{lastUpdatedAt ? ` · ${formatQueryTime(lastUpdatedAt, timeZone).time} ${timeZone}` : ""}
+    <Typography.Text type={state === "error" ? "danger" : "secondary"} className={`query-connection query-connection-${state}`} role="status" title={timeZone}>
+      {label}{lastUpdatedAt ? ` · ${formatQueryTime(lastUpdatedAt, timeZone).time} ${timeZoneLabel(timeZone, lastUpdatedAt, "offset")}` : ""}
     </Typography.Text>
   );
 }

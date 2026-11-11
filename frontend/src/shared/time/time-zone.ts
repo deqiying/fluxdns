@@ -36,10 +36,11 @@ export function formatTimeParts(value: number, timeZone = "UTC"): { date: string
   return { date: `${part("year")}-${part("month")}-${part("day")}`, time: formatter(timeZone, "clock").format(value) };
 }
 
-/** 偏移以事件发生时刻为准，不能把当前偏移套用到跨夏令时的历史记录。 */
-export function timeZoneLabel(timeZone: string, at: number): string {
+/** 偏移以对应时间点为准；简要模式只显示 UTC 偏移，完整模式保留 IANA 名称。 */
+export function timeZoneLabel(timeZone: string, at: number, style: "full" | "offset" = "full"): string {
   if (timeZone === "UTC") return "UTC";
   const offset = formatter(timeZone, "offset").formatToParts(at).find((part) => part.type === "timeZoneName")?.value.replace("GMT", "UTC");
+  if (style === "offset") return offset ?? timeZone;
   return `${timeZone}${offset ? ` (${offset})` : ""}`;
 }
 

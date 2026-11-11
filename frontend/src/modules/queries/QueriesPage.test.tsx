@@ -88,6 +88,27 @@ describe("QueriesPage 展示语义", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it.each([
+    ["Asia/Shanghai", "UTC+08:00", "20:00:00"],
+    ["America/New_York", "UTC-04:00", "08:00:00"],
+    ["UTC", "UTC", "12:00:00"],
+  ])("%s 的列表和实时状态使用易读偏移，悬停保留时区名称", async (timeZone, offset, clock) => {
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-07-01T12:00:00Z"));
+    let push: ((batch: QueryBatch) => void) | undefined;
+    const subscribe = vi.spyOn(managementEvents, "subscribeQueries").mockImplementation((_options, onData, _resync, onState) => {
+      push = onData;
+      onState("open");
+      return vi.fn();
+    });
+    renderPage(timeZone);
+    await waitFor(() => expect(subscribe).toHaveBeenCalled());
+    expect(screen.getByText(`发生时间降序 · ${offset}`)).toHaveAttribute("title", timeZone);
+    act(() => push?.({ cursor: { epoch: "stream-1", sequence: "43" }, directoryRevision: "clients-13", items: [] }));
+    const connection = screen.getByRole("status");
+    expect(connection.textContent).toBe(`实时连接正常 · ${clock} ${offset}`);
+    expect(connection).toHaveAttribute("title", timeZone);
+  });
+
   it("上海时区统一用于列表、详情、默认七天和自定义日期的请求边界", async () => {
     const user = userEvent.setup();
     vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-10T16:30:00Z"));
