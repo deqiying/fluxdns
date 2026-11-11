@@ -1,3 +1,4 @@
+import { queryOptions } from "@tanstack/react-query";
 import { apiV2Request } from "@/shared/api/client";
 import type { components } from "@/shared/api/generated-v2";
 
@@ -19,6 +20,15 @@ export type SystemConfigRead = Schemas["SystemConfigRead"];
 export function getProcessMetrics(signal?: AbortSignal): Promise<ProcessMetrics> {
   return apiV2Request<ProcessMetrics>("/system/runtime", { signal });
 }
+
+/** 时区入口和系统页共用有效期，避免入口读取后页面挂载立即重复请求。 */
+export const processMetricsOptions = queryOptions({
+  queryKey: processMetricsKey,
+  queryFn: ({ signal }) => getProcessMetrics(signal),
+  staleTime: 10_000,
+  // 时区入口已尝试读取；系统页挂载不应使失败查询在两个入口之间循环重试。
+  retryOnMount: false,
+});
 
 export function getServiceMetrics(signal?: AbortSignal): Promise<ServiceMetrics> {
   return apiV2Request<ServiceMetrics>("/service/metrics", { signal });

@@ -19,13 +19,14 @@ import { ChevronLeft, ChevronRight, Copy, Eye, Pin, RotateCw, Search, SlidersHor
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { formatDuration } from "@/shared/formatters";
+import { useServerTimeZone } from "@/shared/time/TimeZoneContext";
+import { calendarDayRange, calendarDayStart, formatTimeParts, shiftCalendarDate, timeZoneLabel } from "@/shared/time/time-zone";
 import type { EventConnectionState } from "@/shared/api/events";
 import type { QueryFilter, QueryRecord, QueryRequest } from "./api";
 import { useQueries } from "./hooks";
 import { QueryEcsDiagnostics, QueryEcsSummary } from "./QueryEcsSummary";
 import "./queries.css";
 
-const DAY_MS = 86_400_000;
 const transports = ["udp", "tcp", "doh"] as const;
 const sources = ["cache", "hosts", "rule", "upstream", "synthetic"] as const;
 const outcomes = ["answered", "negative", "timeout", "rejected", "failed"] as const;
@@ -43,6 +44,14 @@ const rcodes = ["NOERROR", "FORMERR", "SERVFAIL", "NXDOMAIN", "NOTIMP", "REFUSED
 type DatePreset = "24h" | "7d" | "custom";
 type Navigation = Pick<QueryRequest, "cursor" | "direction">;
 
+interface QueryPreferences {
+  advanced: boolean;
+  pageSize: number;
+  sort: QueryRequest["sort"];
+  order: QueryRequest["order"];
+  autoRefresh: boolean;
+}
+
 interface DetailSnapshot {
   record: QueryRecord;
   directoryRevision: string;
@@ -51,16 +60,20 @@ interface DetailSnapshot {
 }
 
 export function QueriesPage() {
+  const { timeZone } = useServerTimeZone();
+  const [preferences, setPreferences] = useState<QueryPreferences>({ advanced: false, pageSize: 10, sort: "occurred_at", order: "desc", autoRefresh: true });
+  const updatePreferences = (changes: Partial<QueryPreferences>) => setPreferences((current) => ({ ...current, ...changes }));
+  // 时区变化后重新建立日期/cursor/实时订阅上下文，不沿用旧时区解释的筛选或详情。
+  return <QueriesContent key={timeZone} timeZone={timeZone} preferences={preferences} updatePreferences={updatePreferences} />;
+}
+
+function QueriesContent({ timeZone, preferences, updatePreferences }: { timeZone: string; preferences: QueryPreferences; updatePreferences: (changes: Partial<QueryPreferences>) => void }) {
+  const { advanced, pageSize, sort, order, autoRefresh } = preferences;
   const drawerTitleId = useId();
-  const [draft, setDraft] = useState<QueryFilter>(() => defaultFilter());
+  const [draft, setDraft] = useState<QueryFilter>(() => defaultFilter(timeZone));
   const [filter, setFilter] = useState<QueryFilter>(draft);
   const [datePreset, setDatePreset] = useState<DatePreset>("7d");
-  const [advanced, setAdvanced] = useState(false);
-  const [pageSize, setPageSize] = useState(10);
-  const [sort, setSort] = useState<QueryRequest["sort"]>("occurred_at");
-  const [order, setOrder] = useState<QueryRequest["order"]>("desc");
   const [navigation, setNavigation] = useState<Navigation>({ cursor: null, direction: "older" });
-  const [autoRefresh, setAutoRefresh] = useState(true);
   const [detail, setDetail] = useState<DetailSnapshot>();
   const [detailPinned, setDetailPinned] = useState(false);
   const narrow = useNarrowQueries();
@@ -135,28 +148,27 @@ export function QueriesPage() {
     setDetailPinned(false);
     setNavigation({ cursor: null, direction: "older" });
   };
+  const validDateRange = Number.isFinite(draft.from_ms) && Number.isFinite(draft.to_ms) && draft.from_ms < draft.to_ms;
 
   const applyFilters = () => {
+    if (!validDateRange) return;
     setFilter(normalizeFilter(draft));
     resetContext();
   };
 
   const resetFilters = () => {
-    const next = defaultFilter();
+    const next = defaultFilter(timeZone);
     setDraft(next);
     setFilter(next);
     setDatePreset("7d");
-    setAdvanced(false);
-    setSort("occurred_at");
-    setOrder("desc");
+    updatePreferences({ advanced: false, sort: "occurred_at", order: "desc" });
     resetContext();
   };
 
   const choosePreset = (preset: DatePreset) => {
     setDatePreset(preset);
     if (preset === "custom") return;
-    const to = utcDayEnd(Date.now());
-    setDraft((current) => ({ ...current, from_ms: to - (preset === "24h" ? DAY_MS : 7 * DAY_MS), to_ms: to }));
+    setDraft((current) => ({ ...current, ...calendarDayRange(Date.now(), preset === "24h" ? 1 : 7, timeZone) }));
   };
 
   const openDetail = (record: QueryRecord, open: boolean) => {
@@ -296,7 +308,7 @@ export function QueriesPage() {
       description="每一次请求，清晰可循。"
       actions={(
         <Space className="query-live-control" size={10} wrap>
-          <Switch aria-label="自动刷新" checked={autoRefresh} onChange={setAutoRefresh} />
+          <Switch aria-label="自动刷新" checked={autoRefresh} onChange={(autoRefresh) => updatePreferences({ autoRefresh })} />
           <Typography.Text>自动刷新</Typography.Text>
           <ConnectionState enabled={autoRefresh} state={query.connectionState} lastUpdatedAt={query.lastUpdatedAt} />
         </Space>
@@ -314,19 +326,19 @@ export function QueriesPage() {
           <Segmented<DatePreset>
             aria-label="日期范围"
             value={datePreset}
-            options={[{ label: "24 小时", value: "24h" }, { label: "7 天", value: "7d" }, { label: "自定义", value: "custom" }]}
+            options={[{ label: "今天", value: "24h" }, { label: "7 天", value: "7d" }, { label: "自定义", value: "custom" }]}
             onChange={choosePreset}
           />
           {datePreset === "custom" ? (
             <Space wrap>
-              <label className="query-date-field">开始<input type="date" value={dateInput(draft.from_ms)} onChange={(event) => setDraft((value) => ({ ...value, from_ms: dateStart(event.target.value) }))} /></label>
-              <label className="query-date-field">结束<input type="date" value={dateInput(draft.to_ms - 1)} onChange={(event) => setDraft((value) => ({ ...value, to_ms: dateStart(event.target.value) + DAY_MS }))} /></label>
+              <label className="query-date-field">开始<input type="date" value={formatQueryTime(draft.from_ms, timeZone).date} onChange={(event) => { const from_ms = calendarDayStart(event.target.value, timeZone); if (Number.isFinite(from_ms)) setDraft((value) => ({ ...value, from_ms })); }} /></label>
+              <label className="query-date-field">结束<input type="date" value={formatQueryTime(draft.to_ms - 1, timeZone).date} onChange={(event) => { const to_ms = calendarDayStart(shiftCalendarDate(event.target.value, 1), timeZone); if (Number.isFinite(to_ms)) setDraft((value) => ({ ...value, to_ms })); }} /></label>
             </Space>
           ) : null}
-          <Button type="text" icon={<SlidersHorizontal size={16} />} onClick={() => setAdvanced((value) => !value)}>高级筛选</Button>
+          <Button type="text" icon={<SlidersHorizontal size={16} />} onClick={() => updatePreferences({ advanced: !advanced })}>高级筛选</Button>
           <Space className="query-filter-actions">
             <Button onClick={resetFilters}>重置</Button>
-            <Button type="primary" icon={<Search size={16} />} onClick={applyFilters}>查询</Button>
+            <Button type="primary" icon={<Search size={16} />} onClick={applyFilters} disabled={!validDateRange}>查询</Button>
           </Space>
         </div>
         {advanced ? (
@@ -337,10 +349,11 @@ export function QueriesPage() {
             <FilterSelect label="RCODE" value={draft.rcode} values={rcodes} onChange={(rcode) => setDraft((value) => ({ ...value, rcode }))} />
             <FilterSelect label="结果状态" value={draft.outcome} values={outcomes} onChange={(outcome) => setDraft((value) => ({ ...value, outcome }))} />
             <FilterSelect label="缓存状态" value={draft.cache} values={caches} labels={cacheLabels} onChange={(cache) => setDraft((value) => ({ ...value, cache }))} />
-            <FilterSelect label="排序字段" value={sort} values={["occurred_at", "duration"] as const} onChange={(value) => { setSort(value ?? "occurred_at"); resetContext(); }} />
-            <FilterSelect label="排序方向" value={order} values={["desc", "asc"] as const} onChange={(value) => { setOrder(value ?? "desc"); resetContext(); }} />
+            <FilterSelect label="排序字段" value={sort} values={["occurred_at", "duration"] as const} onChange={(value) => { updatePreferences({ sort: value ?? "occurred_at" }); resetContext(); }} />
+            <FilterSelect label="排序方向" value={order} values={["desc", "asc"] as const} onChange={(value) => { updatePreferences({ order: value ?? "desc" }); resetContext(); }} />
           </div>
         ) : null}
+        {!validDateRange ? <Alert type="warning" title="开始日期不能晚于结束日期" /> : null}
       </section>
 
 
@@ -348,7 +361,7 @@ export function QueriesPage() {
       {page ? (
         <section className="query-records" aria-label="解析记录列表">
           <div className="query-records-toolbar">
-            <Typography.Text type="secondary">{sort === "occurred_at" ? "发生时间" : "总耗时"}{order === "desc" ? "降序" : "升序"} · UTC</Typography.Text>
+            <Typography.Text type="secondary">{sort === "occurred_at" ? "发生时间" : "总耗时"}{order === "desc" ? "降序" : "升序"} · {timeZone}</Typography.Text>
             {autoRefresh && (query.requiresResync || (query.pendingCount ?? 0) > 0) ? <Space wrap>
               <span role="status">{query.requiresResync ? "有新记录，需重新同步" : `有 ${query.pendingCount} 条新记录`}</span>
               <Button size="small" icon={<RotateCw size={15} />} onClick={showLatest}>查看新记录</Button>
@@ -368,7 +381,7 @@ export function QueriesPage() {
             />
           ) : null}
           {narrow ? <div className="query-mobile-records">{visibleItems.map((record) => <article key={record.id} className={`query-record-card${detail?.record.id === record.id ? " query-row-active" : ""}`}>
-            <div className="query-card-meta"><span>{formatQueryTime(record.occurred_at_ms).date} {formatQueryTime(record.occurred_at_ms).time}</span><span className="query-mono">{formatDurationSummary(record).response}</span></div>
+            <div className="query-card-meta"><span>{formatQueryTime(record.occurred_at_ms, timeZone).date} {formatQueryTime(record.occurred_at_ms, timeZone).time}</span><span className="query-mono">{formatDurationSummary(record).response}</span></div>
             <strong className="query-card-qname">{record.qname}</strong>
             <small>{record.qtype} · {record.transport.toUpperCase()}</small>
             <button type="button" className="query-result-trigger" ref={(node) => { if (node) detailTriggers.current.set(record.id, node); else detailTriggers.current.delete(record.id); }} aria-label={`查看 ${record.qname} 的详情`} aria-haspopup="dialog" aria-expanded={detail?.record.id === record.id} onClick={() => pinDetail(record)}><ResponseCell record={record} /><Eye size={16} aria-hidden /></button>
@@ -381,7 +394,7 @@ export function QueriesPage() {
                 aria-label="每页条数"
                 value={pageSize}
                 options={[10, 20, 50, 100].map((value) => ({ value, label: `${value} 条/页` }))}
-                onChange={(value) => { setPageSize(value); resetContext(); }}
+                onChange={(pageSize) => { updatePreferences({ pageSize }); resetContext(); }}
               />
               <Button
                 aria-label="上一页"
@@ -410,7 +423,8 @@ export function QueriesPage() {
 }
 
 function TimeCell({ value }: { value: number }) {
-  const time = formatQueryTime(value);
+  const { timeZone } = useServerTimeZone();
+  const time = formatQueryTime(value, timeZone);
   return <CellStack primary={time.time} secondary={time.date} />;
 }
 
@@ -438,6 +452,7 @@ function ResponseCell({ record }: { record: QueryRecord }) {
 
 function QueryDetails({ snapshot, pinned, onPin, onClose, mobile = false }: { snapshot: DetailSnapshot; pinned: boolean; onPin: () => void; onClose: () => void; mobile?: boolean }) {
   const { record } = snapshot;
+  const { timeZone } = useServerTimeZone();
   const [copyStatus, setCopyStatus] = useState("");
   const answers = record.answers.state === "unavailable" ? [] : record.answers.records;
   const durations = formatDurationSummary(record);
@@ -461,7 +476,7 @@ function QueryDetails({ snapshot, pinned, onPin, onClose, mobile = false }: { sn
         </Space>
       </div>
       {copyStatus ? <div role="status">{copyStatus}</div> : null}
-      <div className="query-detail-meta">{record.qtype} · {record.transport.toUpperCase()} · {formatQueryTimestamp(record.occurred_at_ms)} · {pinned ? "点击固定" : "悬停预览"}</div>
+      <div className="query-detail-meta">{record.qtype} · {record.transport.toUpperCase()} · {formatQueryTimestamp(record.occurred_at_ms, timeZone)} · {pinned ? "点击固定" : "悬停预览"}</div>
       <div className="query-detail-result"><span>{record.rcode} · {sourceLabel(record).label} · {responseStatusLabel(record)}</span><strong className="query-mono">{durations.response}</strong></div>
       {["failed", "cancelled"].includes(record.response_status) ? <Alert type="warning" showIcon title={responseStatusLabel(record)} /> : null}
       <div className="query-answer-list">
@@ -488,7 +503,7 @@ function QueryDetails({ snapshot, pinned, onPin, onClose, mobile = false }: { sn
           <Descriptions.Item label="总耗时">{durations.total}</Descriptions.Item>
           <Descriptions.Item label="主链耗时">{durations.dnsCore}</Descriptions.Item>
           <Descriptions.Item label="响应耗时"><span tabIndex={0} title="收到完整请求至服务端成功写出响应，不含后台刷新，也不是客户端接收确认">{durations.response}</span></Descriptions.Item>
-          <Descriptions.Item label="发生时间">{formatQueryTimestamp(record.occurred_at_ms)}</Descriptions.Item>
+          <Descriptions.Item label="发生时间">{formatQueryTimestamp(record.occurred_at_ms, timeZone)}</Descriptions.Item>
           <Descriptions.Item label="记录 ID"><code>{record.id}</code></Descriptions.Item>
           <Descriptions.Item label="目录快照">{snapshot.directoryRevision}</Descriptions.Item>
         </Descriptions>
@@ -498,16 +513,15 @@ function QueryDetails({ snapshot, pinned, onPin, onClose, mobile = false }: { sn
   );
 }
 
-/** 本页所有时钟与日期统一为 UTC，不受浏览器本地时区影响。 */
-export function formatQueryTime(value: number): { date: string; time: string } {
-  if (!Number.isFinite(value) || Number.isNaN(new Date(value).getTime())) return { date: "—", time: "—" };
-  const iso = new Date(value).toISOString();
-  return { date: iso.slice(0, 10), time: iso.slice(11, 19) };
+/** 列表与详情共用服务端时区；UTC 默认值仅供独立格式化调用。 */
+export function formatQueryTime(value: number, timeZone = "UTC"): { date: string; time: string } {
+  return formatTimeParts(value, timeZone);
 }
 
-function formatQueryTimestamp(value: number): string {
-  if (formatQueryTime(value).date === "—") return "未记录";
-  return `${new Date(value).toISOString().replace("T", " ").replace("Z", "")} UTC`;
+function formatQueryTimestamp(value: number, timeZone: string): string {
+  const parts = formatQueryTime(value, timeZone);
+  if (parts.date === "—") return "未记录";
+  return `${parts.date} ${parts.time}.${String(new Date(value).getUTCMilliseconds()).padStart(3, "0")} ${timeZoneLabel(timeZone, value)}`;
 }
 
 function responseDuration(record: QueryRecord): string {
@@ -682,23 +696,18 @@ function FilterSelect<T extends string>({ label, value, values, labels, onChange
 }
 
 function ConnectionState({ enabled, state, lastUpdatedAt }: { enabled: boolean; state: EventConnectionState; lastUpdatedAt?: number }) {
+  const { timeZone } = useServerTimeZone();
   if (!enabled) return <Typography.Text type="secondary">已关闭</Typography.Text>;
   const label = state === "open" ? "实时连接正常" : state === "connecting" ? "连接中" : state === "reconnecting" ? "正在重连" : "实时连接异常";
   return (
     <Typography.Text type={state === "error" ? "danger" : "secondary"} className={`query-connection query-connection-${state}`} role="status">
-      {label}{lastUpdatedAt ? ` · ${formatQueryTime(lastUpdatedAt).time} UTC` : ""}
+      {label}{lastUpdatedAt ? ` · ${formatQueryTime(lastUpdatedAt, timeZone).time} ${timeZone}` : ""}
     </Typography.Text>
   );
 }
 
-function defaultFilter(now = Date.now()): QueryFilter {
-  const to = utcDayEnd(now);
-  return { from_ms: to - 7 * DAY_MS, to_ms: to };
-}
-
-function utcDayEnd(value: number): number {
-  const date = new Date(value);
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate() + 1);
+function defaultFilter(timeZone: string, now = Date.now()): QueryFilter {
+  return calendarDayRange(now, 7, timeZone);
 }
 
 function normalizeFilter(filter: QueryFilter): QueryFilter {
@@ -709,13 +718,4 @@ function normalizeFilter(filter: QueryFilter): QueryFilter {
     else delete normalized[key];
   }
   return normalized;
-}
-
-function dateInput(value: number): string {
-  return new Date(value).toISOString().slice(0, 10);
-}
-
-function dateStart(value: string): number {
-  const parsed = Date.parse(`${value}T00:00:00Z`);
-  return Number.isFinite(parsed) ? parsed : 0;
 }

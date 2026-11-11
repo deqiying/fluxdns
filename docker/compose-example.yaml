@@ -13,6 +13,8 @@ services:
     # SecretRef 的实际值通过 env_file 注入容器环境，不写进镜像与仓库。
     env_file:
       - .env
+    # 日志和 WebUI 跟随服务器 TZ；默认 UTC，也可在 .env 中设为 Asia/Shanghai。
+    # 不在 environment 中重复赋值，避免覆盖 env_file 中用户自定义的 TZ。
     ports:
       # DNS 同时需要 UDP 与 TCP。
       - "${FLUXDNS_DNS_PORT:-53}:53/udp"

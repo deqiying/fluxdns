@@ -19,6 +19,7 @@ fn shared_http_and_ws_fixtures_round_trip_without_precision_loss() {
     round_trip::<QueryRequest>(&fixtures["query"]);
     round_trip::<QueryRecord>(&fixtures["record"]);
     round_trip::<ServiceMetrics>(&fixtures["metrics"]);
+    round_trip::<ProcessMetrics>(&fixtures["runtime"]);
     round_trip::<WebSocketTicket>(&fixtures["websocket_ticket"]);
     round_trip::<ConfigRead>(&fixtures["config_read"]);
     round_trip::<ExternalDiff>(&fixtures["external_diff"]);
@@ -36,6 +37,20 @@ fn shared_http_and_ws_fixtures_round_trip_without_precision_loss() {
     for value in fixtures["server_messages"].as_array().unwrap() {
         round_trip::<ServerMessage>(value);
     }
+}
+
+#[test]
+fn runtime_timezone_fields_are_required_and_fallback_is_explicit() {
+    let runtime = fixtures()["runtime"].clone();
+    for field in ["timezone", "timezone_fallback_reason"] {
+        let mut missing = runtime.clone();
+        missing.as_object_mut().unwrap().remove(field);
+        assert!(serde_json::from_value::<ProcessMetrics>(missing).is_err());
+    }
+    let mut fallback = runtime;
+    fallback["timezone"] = json!("UTC");
+    fallback["timezone_fallback_reason"] = json!("invalid_tz");
+    round_trip::<ProcessMetrics>(&fallback);
 }
 
 #[test]

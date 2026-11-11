@@ -4,6 +4,7 @@ import { Activity, Cpu, Gauge, Moon, Sun, Users, type LucideIcon } from "lucide-
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState, InlineUnavailable } from "@/shared/components/PageState";
 import { formatBytes, formatCount, formatEpochMillis } from "@/shared/formatters";
+import { useServerTimeZone } from "@/shared/time/TimeZoneContext";
 import type { ServiceMetrics } from "./api";
 import { MetricsTrendChart } from "./MetricsTrendChart";
 import { useServiceMetrics } from "./hooks";
@@ -19,6 +20,7 @@ interface AverageMetric {
 
 /** 状态标识只描述指标连接，不将快照存在等同于服务健康。 */
 export function DashboardPage() {
+  const { timeZone } = useServerTimeZone();
   // 深色样例只属于当前服务状态页，不持久化偏好或改变其他路由的主题。
   const [darkPreview, setDarkPreview] = useState(false);
   const query = useServiceMetrics();
@@ -50,7 +52,7 @@ export function DashboardPage() {
                   onClick={() => setDarkPreview((value) => !value)} />
               </Tooltip>
             </div>
-            <span className="service-status-sampled-at">{metrics ? `最后采样 ${formatEpochMillis(metrics.sampled_at_ms)}` : "等待首次采样"}</span>
+            <span className="service-status-sampled-at">{metrics ? `最后采样 ${formatEpochMillis(metrics.sampled_at_ms, timeZone)}` : "等待首次采样"}</span>
           </div>
         }
       >
@@ -68,7 +70,7 @@ export function DashboardPage() {
               <Metric label="在线客户端" measurement={metrics.online_clients} formatter={(value) => formatCount(Number(value))} unit="个" hint="当前活跃身份" icon={Users} />
             </div>
             <MetricsTrendChart metrics={metrics} rateTrend={rateTrend} />
-            <div className="service-status-footer"><span>主实例</span><span>最近 10 分钟 · UTC</span></div>
+            <div className="service-status-footer"><span>主实例</span><span>最近 10 分钟 · {timeZone}</span></div>
           </div>
         ) : null}
       </PageFrame>

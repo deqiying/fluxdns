@@ -13,6 +13,8 @@ export const sessionFixture = {
 
 export const processMetricsFixture = {
   version: "0.1.1",
+  timezone: "UTC",
+  timezone_fallback_reason: null,
   started_at_ms: 1_788_900_000_000,
   sampled_at_ms: Date.parse("2026-09-03T08:00:00Z"),
   uptime_seconds: 7_200,

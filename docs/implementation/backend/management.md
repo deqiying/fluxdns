@@ -17,6 +17,8 @@
 > 2026-11-08 错误传递增量核对：基线 `d208820` 加本次工作树，仅覆盖安全诊断、配置 operation 失败传递、资源限额与相关回归。
 >
 > 2026-11-10 ECS 增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅覆盖解析记录 ECS 契约、统一投影、replay 与安全边界；其余内容沿历史日期。
+>
+> 2026-11-11 展示时区增量核对：基线 `2f41904` 加工作树，范围限日志与运行时共享时区及页面元数据；未重新验证既有 DNS/保留/发布验收。
 
 ## 入口与生命周期
 
@@ -234,6 +236,14 @@ try_lock -> ConfigFileLock -> reread source / fingerprint check
 `ProcessMetrics` 从同一 MetricsOwner 返回程序 version、started_at_ms、uptime、RSS、CPU、线程、采样时间和进程主机环境 `host`，系统运行页面只需这一响应，不展示旧兼容 API 能力清单。`host` 在 owner 构造时采集一次：架构、逻辑核心与进程 ID 直接取 `std`；Windows 从 `HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion` 读产品名、显示版本、主次版本号与构建号 UBR，Linux 从 `/etc/os-release` 与 `/proc/sys/kernel/osrelease` 读发行版名和内核 release，macOS 等非 Windows/Linux 平台从 `/System/Library/CoreServices/SystemVersion.plist` 读产品名、产品版本与构建号；主机名在 unix 上调用 POSIX `gethostname`（只声明系统 C 库符号，不新增依赖），Windows 用 `COMPUTERNAME`。读不到或读空的字段返回 `null`，不用空字符串或推测值代替，文本按 OpenAPI 上限截断。回归新增 os-release/plist 解析、空值与截断断言：`cargo clippy --all-targets --all-features -- -D warnings`（Windows msvc）与 `cargo fmt --check` 通过；Linux/macOS 分支未在本机编译（本机只有 windows-msvc target）。回归新增旧版本 GET/POST、HTML Accept 仍返回 JSON 404，以及认证错误反序列化检查。内嵌 binary 的完整验收由 P5 联合验证记录。
 
 Windows / `1c58a82` 加本次工作树：`cargo test --manifest-path backend/Cargo.toml management:: -- --test-threads=1` 49 项通过（含真实 HTTP/WS adapter）；前端 99 项 Vitest、4 项 OpenAPI 契约、typecheck/build、文档与 diff 检查通过。一次默认并行 Management 测试在已输出多项成功后异常退出 `0xc0000409 STATUS_STACK_BUFFER_OVERRUN`，未产生失败断言；串行复核成功，不据此认定该 Windows 并行异常已修复。
+
+## 服务端展示时区
+
+[`observability::timezone::display_timezone`](../../../backend/src/observability/timezone.rs) 用进程级 `OnceLock` 冻结时区；bootstrap 与 `MetricsOwner` 共用同一结果，日志输出和运行时读取不再重复解析。`TZ` 显式存在时优先按 Jiff 数据库解析；空值视为 UTC，支持 IANA 名称/别名、前导冒号及 `zoneinfo/` 路径中的名称，但不读取任意环境指定文件。未设置时尝试系统时区。非法编码、无效 TZ、系统不可用或缺少 IANA 名称均明确回退 UTC；安全原因码只描述类别，不回显环境值/系统路径。修改需重启，无名称 TZif、纯固定偏移和非 IANA POSIX 规则不作为页面时区。
+
+受 Bearer 保护的 `/api/v2/system/runtime` 由同一 owner 返回展示时区及可空降级原因，精确字段以 [OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准；Rust/JSON 夹具与生成类型同步维护。前端入口接线见[页面时区](../frontend/pages.md#服务端展示时区)。所有整数时间戳、历史数据、统计 UTC 日及 retention 调度代码不变；非法 TZ 时既有 retention 的下一调度时间可能为 null，本次展示回退不声称修复该独立边界。
+
+定向回归覆盖 UTC、上海、IANA 别名、非法 TZ、系统路径与不可用/无名称系统时区，验证日志与 ProcessMetrics 共用冻结结果及 HTTP 字段接线；独立进程环境测试避免在并发单测中改全局 TZ。2026-11-11，Windows / Rust 1.98.0，基线 `2f41904` 加工作树：默认 feature 串行全量 950 项通过、5 项忽略，全 feature 串行复测 952 项通过、5 项忽略；fmt 与全部 target/feature 的 Clippy `-D warnings` 通过。首轮全 feature 在既有日志热切换用例中以 `0xc0000409 STATUS_STACK_BUFFER_OVERRUN` 异常退出、没有断言失败；该用例定向及同命令全量复测通过，不据此认定既有 Windows 异常已修复。未运行 Linux/macOS 实机或 Docker；页面验证见[服务端展示时区](../frontend/pages.md#服务端展示时区)。
 
 ## 静态资源与证据
 

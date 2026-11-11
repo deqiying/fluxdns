@@ -11,8 +11,9 @@ import { acceptAuthSession } from "@/shared/api/client";
 import { managementEvents, type QueryBatch } from "@/shared/api/events";
 import type { QueryRecord, QueryRequest } from "./api";
 import { formatCacheActivityResult, formatClientIdentity, formatDurationSummary, formatQueryTime, formatResponseSummary, formatRoute, QueriesPage, sourceLabel } from "./QueriesPage";
+import { TimeZoneContext } from "@/shared/time/TimeZoneContext";
 
-function renderPage() {
+function renderPage(timeZone = "UTC") {
   setMockAuthenticated(true);
   acceptAuthSession({
     session: sessionFixture,
@@ -22,7 +23,9 @@ function renderPage() {
   });
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   // jsdom 行为测试关闭 CSS motion；浮层准备阶段仍异步，涉及可见性的断言必须等待终态。
-  return { ...render(<ConfigProvider theme={{ token: { motion: false } }}><QueryClientProvider client={queryClient}><QueriesPage /></QueryClientProvider></ConfigProvider>), queryClient };
+  const page = (zone: string) => <ConfigProvider theme={{ token: { motion: false } }}><QueryClientProvider client={queryClient}><TimeZoneContext.Provider value={{ timeZone: zone, fallbackReason: null }}><QueriesPage /></TimeZoneContext.Provider></QueryClientProvider></ConfigProvider>;
+  const view = render(page(timeZone));
+  return { ...view, queryClient, changeTimeZone: (zone: string) => view.rerender(page(zone)) };
 }
 
 /**
@@ -52,6 +55,84 @@ describe("QueriesPage 展示语义", () => {
   const [direct, cache] = v2QueryRecordsFixture;
 
   afterEach(() => vi.restoreAllMocks());
+
+  it("时区变化仅重建日期/游标/详情，保留自动刷新、页大小、排序和高级面板偏好", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-11T00:30:00Z"));
+    const requests: QueryRequest[] = [];
+    server.use(http.post("/api/v2/queries/search", async ({ request }) => { requests.push(await request.json() as QueryRequest); return HttpResponse.json(v2QueryPageFixture); }));
+    const view = renderPage();
+    await screen.findByRole("button", { name: "查看 example.test. 的详情" });
+    await user.click(screen.getByRole("switch", { name: "自动刷新" }));
+    fireEvent.mouseDown(screen.getByLabelText("每页条数"));
+    fireEvent.click(await screen.findByTitle("50 条/页"));
+    await user.click(screen.getByRole("button", { name: "高级筛选" }));
+    fireEvent.mouseDown(screen.getByLabelText("排序字段"));
+    fireEvent.click(await screen.findByTitle("DURATION"));
+    fireEvent.mouseDown(screen.getByLabelText("排序方向"));
+    fireEvent.click(await screen.findByTitle("ASC"));
+    await user.type(screen.getByLabelText("域名"), "example");
+    await user.click(screen.getByRole("button", { name: "查询" }));
+    await waitFor(() => expect(requests.at(-1)?.filter.qname).toBe("example"));
+    await user.click(screen.getByRole("button", { name: "下一页" }));
+    await waitFor(() => expect(requests.at(-1)?.cursor).toBe(v2QueryPageFixture.next_cursor));
+    await user.click(screen.getByRole("button", { name: "查看 example.test. 的详情" }));
+    await screen.findByRole("dialog");
+    view.changeTimeZone("Asia/Shanghai");
+    await waitFor(() => expect(requests.at(-1)).toMatchObject({ cursor: null, page_size: 50, sort: "duration", order: "asc", filter: { from_ms: Date.parse("2026-11-04T16:00:00Z"), to_ms: Date.parse("2026-11-11T16:00:00Z") } }));
+    expect(requests.at(-1)?.filter.qname).toBeUndefined();
+    expect(screen.getByRole("switch", { name: "自动刷新" })).not.toBeChecked();
+    expect(screen.getByLabelText("域名")).toHaveValue("");
+    expect(screen.getByLabelText("每页条数").closest(".ant-select")).toHaveTextContent("50 条/页");
+    expect(screen.getByLabelText("排序字段").closest(".ant-select")).toHaveTextContent("DURATION");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("上海时区统一用于列表、详情、默认七天和自定义日期的请求边界", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-11-10T16:30:00Z"));
+    const requests: QueryRequest[] = [];
+    const record = { ...direct, occurred_at_ms: Date.parse("2026-11-10T16:30:00.123Z") };
+    server.use(http.post("/api/v2/queries/search", async ({ request }) => {
+      requests.push(await request.json() as QueryRequest);
+      return HttpResponse.json({ ...v2QueryPageFixture, items: [record] });
+    }));
+    const restore = openAllBreakpoints();
+    try {
+      renderPage("Asia/Shanghai");
+      const trigger = await screen.findByRole("button", { name: "查看 example.test. 的详情" });
+      expect(screen.getByRole("table")).toHaveTextContent("00:30:00");
+      expect(screen.getByRole("table")).toHaveTextContent("2026-11-11");
+      expect(requests[0].filter).toMatchObject({ from_ms: Date.parse("2026-11-04T16:00:00Z"), to_ms: Date.parse("2026-11-11T16:00:00Z") });
+      await user.click(trigger);
+      expect(await screen.findByRole("dialog")).toHaveTextContent("2026-11-11 00:30:00.123 Asia/Shanghai (UTC+08:00)");
+      await user.click(screen.getByRole("button", { name: "关闭详情" }));
+      await user.click(screen.getByText("自定义", { selector: ".ant-segmented-item-label" }));
+      expect(screen.getByLabelText("开始")).toHaveValue("2026-11-05");
+      expect(screen.getByLabelText("结束")).toHaveValue("2026-11-11");
+      fireEvent.change(screen.getByLabelText("开始"), { target: { value: "2026-11-11" } });
+      await user.click(screen.getByRole("button", { name: "查询" }));
+      await waitFor(() => expect(requests.at(-1)?.filter).toMatchObject({ from_ms: Date.parse("2026-11-10T16:00:00Z"), to_ms: Date.parse("2026-11-11T16:00:00Z") }));
+      fireEvent.change(screen.getByLabelText("开始"), { target: { value: "2026-11-12" } });
+      expect(screen.getByRole("button", { name: "查询" })).toBeDisabled();
+    } finally { restore(); }
+  });
+
+  it("纽约夏令时结束日提交 25 小时区间，结束日期不加固定 24 小时", async () => {
+    const user = userEvent.setup();
+    const requests: QueryRequest[] = [];
+    server.use(http.post("/api/v2/queries/search", async ({ request }) => {
+      requests.push(await request.json() as QueryRequest);
+      return HttpResponse.json(v2QueryPageFixture);
+    }));
+    renderPage("America/New_York");
+    await screen.findByRole("button", { name: "查看 example.test. 的详情" });
+    await user.click(screen.getByText("自定义", { selector: ".ant-segmented-item-label" }));
+    fireEvent.change(screen.getByLabelText("开始"), { target: { value: "2026-11-01" } });
+    fireEvent.change(screen.getByLabelText("结束"), { target: { value: "2026-11-01" } });
+    await user.click(screen.getByRole("button", { name: "查询" }));
+    await waitFor(() => expect(requests.at(-1)?.filter).toMatchObject({ from_ms: Date.parse("2026-11-01T04:00:00Z"), to_ms: Date.parse("2026-11-02T05:00:00Z") }));
+  });
 
   it("区分缓存生产出口、直接上游与三种耗时", () => {
     expect(formatRoute(cache)).toBe("udp-in → default → public → public-2");

@@ -1343,6 +1343,13 @@ export interface components {
         };
         ProcessMetrics: {
             version: string;
+            /** @description 启动时冻结的服务器 IANA 展示时区或 UTC；TZ 优先，其次系统时区。无法提供浏览器可用名称时回退 UTC；日志共用此时区，修改需重启。所有整数时间戳仍为 UTC 毫秒，统计日不变。 */
+            timezone: string;
+            /**
+             * @description 成功识别时为 null；回退 UTC 时返回固定安全原因码，不包含环境变量原文或系统路径。invalid_tz 也包括无法转为 IANA 名称的显式 TZ 规则。
+             * @enum {string|null}
+             */
+            timezone_fallback_reason: "invalid_tz_encoding" | "invalid_tz" | "system_timezone_unavailable" | "unsupported_timezone" | null;
             started_at_ms: components["schemas"]["SafeInteger"];
             sampled_at_ms: components["schemas"]["SafeInteger"];
             uptime_seconds: components["schemas"]["SafeInteger"];

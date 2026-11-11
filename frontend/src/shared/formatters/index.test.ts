@@ -16,6 +16,13 @@ describe("formatters", () => {
     expect(formatDateTime("invalid")).toBe("—");
   });
 
+  it("显式服务端时区用于日期与毫秒时间戳，跨日保留正确日期与偏移", () => {
+    const value = "2026-11-10T16:30:00Z";
+    expect(formatDateTime(value, "Asia/Shanghai")).toBe("2026/11/11 00:30:00 Asia/Shanghai (UTC+08:00)");
+    expect(formatEpochMillis(Date.parse(value), "Asia/Shanghai")).toBe(formatDateTime(value, "Asia/Shanghai"));
+    expect(formatDateTime(value, "UTC")).toBe("2026/11/10 16:30:00 UTC");
+  });
+
   it("格式化数值与运行时长", () => {
     expect(formatCount(1234)).toMatch(/1[,，]?234/);
     expect(formatPercent(86.47)).toBe("86.47%");

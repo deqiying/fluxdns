@@ -4,9 +4,9 @@
 # （见 .github/workflows/container.yml），镜像内不做任何编译。
 FROM debian:trixie-slim
 
-# 远程规则集与 DoH 上游需要可信 CA。
+# 远程规则集与 DoH 上游需要可信 CA；tzdata 提供 TZ 和系统时区的 IANA 数据。
 RUN apt-get update \
- && apt-get install --yes --no-install-recommends ca-certificates \
+ && DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends ca-certificates tzdata \
  && rm -rf /var/lib/apt/lists/*
 
 ARG FLUXDNS_VERSION=0.0.0

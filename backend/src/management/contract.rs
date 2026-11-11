@@ -1027,6 +1027,11 @@ pub struct HostEnvironment {
 #[serde(deny_unknown_fields)]
 pub struct ProcessMetrics {
     pub version: String,
+    /// 启动时冻结的服务器 IANA 展示时区；时间戳仍为 UTC 毫秒。
+    pub timezone: String,
+    /// 回退 UTC 的安全原因码；成功识别时必须显式输出 null。
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub timezone_fallback_reason: Option<String>,
     pub started_at_ms: u64,
     pub sampled_at_ms: u64,
     pub uptime_seconds: u64,

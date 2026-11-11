@@ -16,6 +16,7 @@ import {
   formatUptimeClock,
 } from "@/shared/formatters";
 import { useDisplayedUptime, useProcessMetrics, useServiceMetrics, useSystemConfig } from "./hooks";
+import { useServerTimeZone } from "@/shared/time/TimeZoneContext";
 
 type Schemas = components["schemas"];
 type Unavailable = Schemas["Unavailable"];
@@ -100,6 +101,7 @@ function readySummary(runtime: ModuleRuntime[] | undefined): string | null {
 }
 
 export function SystemPage() {
+  const { timeZone } = useServerTimeZone();
   const metricsQuery = useProcessMetrics();
   const metrics = metricsQuery.data;
   const displayedUptime = useDisplayedUptime(metrics?.uptime_seconds, metricsQuery.dataUpdatedAt);
@@ -215,8 +217,8 @@ export function SystemPage() {
             </div>
             <div className="system-info-row">
               <InfoCell label="版本" value={metrics.version} />
-              <InfoCell label="启动时间" value={formatEpochMillis(metrics.started_at_ms)} />
-              <InfoCell label="采样时间" value={formatEpochMillis(metrics.sampled_at_ms)} />
+              <InfoCell label="启动时间" value={formatEpochMillis(metrics.started_at_ms, timeZone)} />
+              <InfoCell label="采样时间" value={formatEpochMillis(metrics.sampled_at_ms, timeZone)} />
               <InfoCell label="采样来源" value="主实例进程" />
             </div>
           </section>

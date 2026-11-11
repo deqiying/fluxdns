@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerE
 import { Clock3 } from "lucide-react";
 import type { ServiceMetrics } from "./api";
 import { TREND_WINDOW_MS, type RateSample, type RateTrend } from "./rateTrend";
+import { useServerTimeZone } from "@/shared/time/TimeZoneContext";
+import { formatTimeParts, timeZoneLabel } from "@/shared/time/time-zone";
 
 const HEIGHT = 252;
 const LEFT = 42;
@@ -9,12 +11,13 @@ const RIGHT = 48;
 const TOP = 18;
 const BOTTOM = 34;
 const PLOT_HEIGHT = HEIGHT - TOP - BOTTOM;
-const timeFormatter = new Intl.DateTimeFormat("zh-CN", { timeZone: "UTC", hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
 /** 逐秒序列允许的最大相邻采样间隔，更宽的间隔按缺口处理。 */
 const SAMPLE_GAP_MS = 1_500;
 
 /** 双折线共享逐秒时间轴、各用独立的整数计数线性刻度；RPM 由页面推导的过去 60 秒请求数给出，缺口不插值，键盘和指针共用选点状态。 */
 export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetrics; rateTrend: RateTrend }) {
+  const { timeZone } = useServerTimeZone();
+  const formatTime = (at: number) => formatTimeParts(at, timeZone).time;
   const plotRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(1000);
   const plotWidth = width - LEFT - RIGHT;
@@ -86,11 +89,11 @@ export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetr
       onPointerLeave={(event) => {
         if (document.activeElement !== event.currentTarget) { setFollowLatest(true); setShowTooltip(false); }
       }}
-      aria-label={selected === undefined ? "最近十分钟没有趋势样本" : selectedLabel(selected, qpsSelected, rpmSelected)}
+      aria-label={selected === undefined ? "最近十分钟没有趋势样本" : selectedLabel(selected, qpsSelected, rpmSelected, timeZone)}
     >
       <div className="metrics-chart-heading">
         <div className="metrics-chart-title"><h3>请求趋势</h3><span>最近 10 分钟</span></div>
-        <span className="metrics-chart-range"><Clock3 size={14} aria-hidden="true" />{formatTime(startAt)} – {formatTime(endAt)} UTC</span>
+        <span className="metrics-chart-range"><Clock3 size={14} aria-hidden="true" />{formatTime(startAt)} – {formatTime(endAt)} {timeZoneLabel(timeZone, endAt)}</span>
       </div>
       <div className="metrics-chart-legends">
         <div className="metrics-chart-legend"><i className="qps" /><strong>QPS</strong><span>请求/秒 · 左轴</span></div>
@@ -99,7 +102,7 @@ export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetr
       <div className="metrics-chart-plot" ref={plotRef}>
         <svg viewBox={`0 0 ${width} ${HEIGHT}`} role="img" aria-labelledby="metrics-chart-title metrics-chart-description" onPointerMove={selectFromPointer} onPointerDown={selectFromPointer}>
           <title id="metrics-chart-title">QPS 与 RPM 请求趋势</title>
-          <desc id="metrics-chart-description">最近十分钟 UTC 时间轴，逐秒一个采样点；左轴 QPS 为每秒请求量，右轴 RPM 为过去 60 秒的请求数，均为线性刻度，刻度值取整数（两轴都是请求计数）；缺口处不连接，快照自带窗口起点前的 60 秒前瞻样本，因此最左一分钟同样绘制 RPM，只有服务启动不足 660 秒时才按不可用处理。方向键按秒选择采样点，Home 和 End 跳转首尾。</desc>
+          <desc id="metrics-chart-description">最近十分钟 {timeZone} 时间轴，逐秒一个采样点；左轴 QPS 为每秒请求量，右轴 RPM 为过去 60 秒的请求数，均为线性刻度，刻度值取整数（两轴都是请求计数）；缺口处不连接，快照自带窗口起点前的 60 秒前瞻样本，因此最左一分钟同样绘制 RPM，只有服务启动不足 660 秒时才按不可用处理。方向键按秒选择采样点，Home 和 End 跳转首尾。</desc>
           {[0, 1, 2, 3, 4].map((step) => {
             const y = TOP + PLOT_HEIGHT * step / 4;
             return <line key={step} className="metrics-chart-grid" x1={LEFT} x2={width - RIGHT} y1={y} y2={y} />;
@@ -129,7 +132,7 @@ export function MetricsTrendChart({ metrics, rateTrend }: { metrics: ServiceMetr
         </svg>
         {showTooltip && selected !== undefined ? (
           <div className="metrics-chart-tooltip" style={{ left: Math.max(100, Math.min(width - 100, selectedX)) }}>
-            <strong>{formatTime(selected)} UTC</strong>
+            <strong>{formatTime(selected)} {timeZoneLabel(timeZone, selected)}</strong>
             <span><i className="qps" /><span>QPS</span><b>{formatSample(qpsSelected)}</b></span>
             <span><i className="rpm" /><span>RPM</span><b>{formatSample(rpmSelected)}</b></span>
           </div>
@@ -226,10 +229,6 @@ function formatAxis(value: number): string {
   return new Intl.NumberFormat("zh-CN", { maximumSignificantDigits: 3, notation: value >= 10_000 ? "compact" : "standard" }).format(value);
 }
 
-function formatTime(at: number): string {
-  return timeFormatter.format(at);
-}
-
-function selectedLabel(at: number, qps: RateSample | undefined, rpm: RateSample | undefined): string {
-  return `${formatTime(at)} UTC，QPS ${formatSample(qps)}，RPM ${formatSample(rpm)}`;
+function selectedLabel(at: number, qps: RateSample | undefined, rpm: RateSample | undefined, timeZone: string): string {
+  return `${formatTimeParts(at, timeZone).time} ${timeZoneLabel(timeZone, at)}，QPS ${formatSample(qps)}，RPM ${formatSample(rpm)}`;
 }

@@ -684,6 +684,29 @@ describe("application routes", () => {
     await waitFor(() => expect(processRequests).toBe(2));
   });
 
+  it("首次进入系统运行页即采用服务器时区，无需先打开其他页面", async () => {
+    setMockAuthenticated(true);
+    server.use(http.get("/api/v2/system/runtime", () => HttpResponse.json({ ...processMetricsFixture, timezone: "Asia/Shanghai" })));
+    renderApp("/system-runtime");
+    await screen.findByRole("heading", { name: "系统运行状态", level: 2 });
+    expect(screen.getByRole("group", { name: "启动时间" })).toHaveTextContent("2026/09/09 04:40:00 Asia/Shanghai (UTC+08:00)");
+    expect(screen.getByRole("group", { name: "采样时间" })).toHaveTextContent("2026/09/03 16:00:00 Asia/Shanghai (UTC+08:00)");
+  });
+
+  it("运行时首次失败后放行系统页，挂载不循环重试且重试不卸载页面", async () => {
+    const user = userEvent.setup();
+    let reads = 0;
+    setMockAuthenticated(true);
+    server.use(http.get("/api/v2/system/runtime", () => { reads += 1; return new HttpResponse(null, { status: 503 }); }));
+    renderApp("/system-runtime");
+    const heading = await screen.findByRole("heading", { name: "系统运行状态", level: 2 });
+    expect(reads).toBe(1);
+    expect(screen.getByRole("button", { name: "重试时区读取" })).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重试时区读取" }));
+    await waitFor(() => expect(reads).toBe(2));
+    expect(screen.getByRole("heading", { name: "系统运行状态", level: 2 })).toBe(heading);
+  });
+
   it("系统运行状态把指标与运行信息放进同一条四列栅格", async () => {
     setMockAuthenticated(true);
     renderApp("/system-runtime");

@@ -6,6 +6,7 @@ import { ProtectedRoute } from "@/modules/auth/ProtectedRoute";
 import { LoginPage } from "@/modules/auth/LoginPage";
 import { InitializePage } from "@/modules/auth/InitializePage";
 import { lazyPage } from "./lazy-page";
+import { ServerTimeZoneProvider } from "./ServerTimeZoneProvider";
 
 const AppLayout = lazyPage(() => import("@/shared/components/AppLayout").then((module) => ({ default: module.AppLayout })));
 const DashboardPage = lazyPage(() => import("@/modules/dashboard/DashboardPage").then((module) => ({ default: module.DashboardPage })));
@@ -29,7 +30,7 @@ export function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/initialize" element={<InitializePage />} />
         <Route element={<ProtectedRoute />}>
-          <Route element={<AppLayout />}>
+          <Route element={<ServerTimeZoneProvider><AppLayout /></ServerTimeZoneProvider>}>
             <Route index element={<Navigate to="/dashboard" replace />} />
             <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/queries" element={<QueriesPage />} />

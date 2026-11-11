@@ -1,27 +1,22 @@
+import { formatTimeParts, timeZoneLabel } from "@/shared/time/time-zone";
+
 const integerFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 0 });
 const decimalFormatter = new Intl.NumberFormat("zh-CN", { maximumFractionDigits: 2 });
 const U64_MAX = 18_446_744_073_709_551_615n;
-const dateTimeFormatter = new Intl.DateTimeFormat("zh-CN", {
-  timeZone: "UTC",
-  year: "numeric",
-  month: "2-digit",
-  day: "2-digit",
-  hour: "2-digit",
-  minute: "2-digit",
-  second: "2-digit",
-  hour12: false,
-});
 
-export function formatDateTime(value: string | null | undefined): string {
+/** 只在展示层使用服务端时区，缺失或非法时间保持占位符。 */
+export function formatDateTime(value: string | null | undefined, timeZone = "UTC"): string {
   if (!value) return "—";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : `${dateTimeFormatter.format(date)} UTC`;
+  if (Number.isNaN(date.getTime())) return "—";
+  const parts = formatTimeParts(date.getTime(), timeZone);
+  return `${parts.date.replaceAll("-", "/")} ${parts.time} ${timeZoneLabel(timeZone, date.getTime())}`;
 }
 
-export function formatEpochMillis(value: number | null | undefined): string {
+export function formatEpochMillis(value: number | null | undefined, timeZone = "UTC"): string {
   if (value === null || value === undefined || !Number.isSafeInteger(value) || value < 0) return "—";
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? "—" : formatDateTime(date.toISOString());
+  return Number.isNaN(date.getTime()) ? "—" : formatDateTime(date.toISOString(), timeZone);
 }
 
 export function formatCount(value: number | null | undefined): string {

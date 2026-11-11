@@ -126,6 +126,8 @@ impl MetricsOwner {
     }
 
     fn new_at(started_at: SystemTime, started_instant: Instant) -> Self {
+        // 与 bootstrap 日志共享同一进程级快照，采样与 HTTP 不重新解析时区。
+        let _ = crate::observability::timezone::display_timezone();
         Self {
             started_at,
             started_instant,
@@ -298,8 +300,11 @@ impl MetricsOwner {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let uptime_seconds = self.elapsed_seconds(now);
+        let timezone = crate::observability::timezone::display_timezone();
         ProcessMetrics {
             version: env!("CARGO_PKG_VERSION").to_owned(),
+            timezone: timezone.name.clone(),
+            timezone_fallback_reason: timezone.fallback_reason.map(str::to_owned),
             started_at_ms: unix_millis(self.started_at),
             sampled_at_ms: snapshot.sampled_at_ms,
             uptime_seconds,

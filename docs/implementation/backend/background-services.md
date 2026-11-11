@@ -121,6 +121,8 @@ BC-07 交付验证在 Windows、Rust/Cargo 1.98.0 执行：全量 `cargo test --
 
 本轮 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --locked observability:: -- --test-threads=4` 的 30 项通过，覆盖三类 JSON 及聚合快照时间在首字段、JSON 转义、毫秒截断、UTC/东八区、epoch 前时间、DST 重复小时、超范围错误、真实文件追加和 stderr fallback；`cargo fmt --check` 与 `cargo clippy --all-targets -- -D warnings` 通过。测试临时文件限定在 `_fluxdns/test-temp/`；本轮未执行后端全量、Linux/OpenWrt 实机或线上部署验收。
 
+2026-11-11 展示时区补充核对（基线 `2f41904` 加工作树）：日志格式化改为读取启动时冻结的 [`display_timezone`](../../../backend/src/observability/timezone.rs)，与 Management 元数据共用 IANA 名称和 UTC 降级结果，不再逐条调用系统时区探测；修改环境或系统时区需重启。输入优先级、固定偏移/POSIX 限制及验证边界见[服务端展示时区](management.md#服务端展示时区)。这不改变上文独立 retention scheduler 的系统时区读取与调度行为。
+
 P5 新目录 release 冷启回归发现日志文件早于其父目录创建，已统一通过 `open_log_file` 创建所需父目录并以追加模式打开。bootstrap 与热切换预开共用此入口；既有文件不截断，父路径为文件、权限或其他 I/O 失败继续返回错误。Windows 定向 Observability 25 项通过，包含缺失父目录、重开追加和非法父路径；修复后的内嵌 release 已从新目录完成启动及首次管理员初始化。
 
 [`service.rs`](../../../backend/src/service.rs) 为启用的 writer 创建 `TelemetrySampler`，在既有 5 秒周期 flush 前采样：

@@ -2,18 +2,16 @@ import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { getSummaryPollInterval } from "@/app/query-client";
 import {
-  getProcessMetrics,
   getServiceMetrics,
   getSystemConfig,
-  processMetricsKey,
+  processMetricsOptions,
   serviceMetricsKey,
   systemConfigKey,
 } from "./api";
 
 export function useProcessMetrics() {
   return useQuery({
-    queryKey: processMetricsKey,
-    queryFn: ({ signal }) => getProcessMetrics(signal),
+    ...processMetricsOptions,
     refetchInterval: () => getSummaryPollInterval(),
     refetchIntervalInBackground: false,
   });

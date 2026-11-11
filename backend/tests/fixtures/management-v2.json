@@ -90,6 +90,18 @@
     "qps_trend": [],
     "rpm_trend": []
   },
+  "runtime": {
+    "version": "0.4.20",
+    "timezone": "Asia/Shanghai",
+    "timezone_fallback_reason": null,
+    "started_at_ms": 1788739200000,
+    "sampled_at_ms": 1788739201000,
+    "uptime_seconds": 1,
+    "rss_bytes": {"state": "available", "value": "1024"},
+    "cpu_percent": {"state": "available", "value": 1.25},
+    "threads": {"state": "available", "value": 2},
+    "host": {"os": "Linux", "kernel": null, "arch": "x86_64", "logical_cores": 2, "hostname": null, "process_id": 1}
+  },
   "websocket_ticket": {
     "ticket": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     "expires_at_ms": 1788739231000

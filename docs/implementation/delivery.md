@@ -7,6 +7,8 @@
 > 最后核对：2026-09-30（新增容器镜像交付：独立 container workflow、Dockerfile 与部署示例；同批次拆分镜像流水线 job 并修正镜像启动探针）
 >
 > 核对基线：`bfac363`；本轮核对镜像 workflow、Dockerfile 与本地可执行的配置/文档检查，未执行 Actions、镜像构建或容器内运行，历史运行结果按原日期和基线解释
+>
+> 2026-11-11 时区增量核对：基线 `2f41904` 加工作树，仅容器 tzdata、TZ 注入及展示时区契约；本轮未构建或运行 Docker 镜像。
 
 ## 工具与命令边界
 
@@ -119,7 +121,7 @@ workflow 由 `v*` tag 推送或 `workflow_dispatch`（输入已存在的 tag）�
 
 | 镜像契约 | 行为 |
 | --- | --- |
-| 基础镜像 | `debian:trixie-slim` 加 `ca-certificates`；不含编译工具链、init 进程或 shell 诊断工具 |
+| 基础镜像 | `debian:trixie-slim` 加 `ca-certificates` 与 `tzdata`；不含编译工具链、init 进程或 shell 诊断工具 |
 | 内容 | 只有 `/usr/local/bin/fluxdns` 与运行期依赖；迁移 SQL 与 SPA 已在编译期内嵌，镜像不携带 `backend/migrations` 或 `frontend/dist` |
 | 用户 | 默认 root（uid 0），以便绑定配置中的 53/443；能力与 `no-new-privileges` 由部署层收紧 |
 | 工作目录 | `/etc/fluxdns`，入口为 `fluxdns run --config /etc/fluxdns/config.yaml`；配置里的 `work.path` 必须同为 `/etc/fluxdns`，否则启动会生成第二份配置快照 |
@@ -127,6 +129,8 @@ workflow 由 `v*` tag 推送或 `workflow_dispatch`（输入已存在的 tag）�
 | 许可标签 | 不声明 `org.opencontainers.image.licenses`，因为仓库没有 `LICENSE` |
 
 部署示例是 [`docker/compose-example.yaml`](../../docker/compose-example.yaml) 与 [`docker/.env.example`](../../docker/.env.example)：bridge 网络与端口映射（53 UDP/TCP、443、仅回环的 8080）、整目录卷、`env_file` 注入 SecretRef、`cap_drop: ALL` 加 `NET_BIND_SERVICE`、`no-new-privileges`、`stop_grace_period: 20s`，并以二进制自身的 `validate` 作为配置级健康检查。`docker/.env` 已在 `.gitignore` 中忽略；首次启动前宿主工作目录必须存在且包含 `config.yaml`。镜像构建使用的冒烟夹具是 [`docker/container-smoke-config.yaml`](../../docker/container-smoke-config.yaml)，只用于验证，不代表生产配置。
+
+镜像显式非交互安装 `tzdata`，不内置地区默认值；`.env.example` 的 `TZ=UTC` 可改为 `TZ=Asia/Shanghai`，沿用 `env_file` 注入，Compose 不重复设置 `environment.TZ` 覆盖用户值。变更环境后须重建容器进程；日志和 WebUI 共用启动时确定的展示时区，字段、回退和限制见[Management 实现](backend/management.md#服务端展示时区)。浏览器时区不同不会覆盖服务器选择，数据库/API 时间戳和统计 UTC 日不变。
 
 已知边界：
 

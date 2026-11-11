@@ -683,6 +683,12 @@ pub(crate) mod tests {
                 service_cpu = Some(body["cpu_percent"].clone());
             }
             if path == "/api/v2/system/runtime" {
+                let timezone = crate::observability::timezone::display_timezone();
+                assert_eq!(body["timezone"], timezone.name);
+                assert_eq!(
+                    body.get("timezone_fallback_reason"),
+                    Some(&serde_json::json!(timezone.fallback_reason))
+                );
                 assert_eq!(body["cpu_percent"]["value"], 1.25);
                 assert_eq!(body["threads"]["value"], 8);
                 assert_eq!(Some(body["rss_bytes"].clone()), service_rss);

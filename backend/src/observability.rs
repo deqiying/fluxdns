@@ -22,6 +22,7 @@ use tracing_subscriber::layer::{Context, Layer};
 
 mod logging;
 mod registry;
+pub(crate) mod timezone;
 pub use logging::LoggingError;
 pub(crate) use logging::{LoggingOwner, LoggingPublishError};
 pub use registry::{LatencyHistogram, MetricSnapshot, REQUEST_LATENCY_BUCKETS_MICROS};
@@ -60,6 +61,7 @@ pub fn bootstrap_subscriber() -> impl Subscriber + Send + Sync {
 
 /// 安装进程级 bootstrap subscriber。
 pub fn init_bootstrap() -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
+    let _ = timezone::display_timezone();
     let output = BOOTSTRAP_OUTPUT
         .get_or_init(|| Arc::new(Mutex::new(OutputTarget::Stderr)))
         .clone();
@@ -490,10 +492,9 @@ fn json_escape(value: &str) -> String {
     escaped
 }
 
-/// 输出服务器本地时间和明确偏移；系统时区不可用时退回 UTC，不能因此丢失日志。
+/// 与管理面共用启动时冻结的展示时区；无法提供 IANA 名称时统一使用 UTC。
 fn format_log_time(time: SystemTime) -> Result<String, PortError> {
-    let timezone = jiff::tz::TimeZone::try_system().unwrap_or(jiff::tz::TimeZone::UTC);
-    format_log_time_in_zone(time, timezone)
+    format_log_time_in_zone(time, timezone::display_timezone().zone.clone())
 }
 
 /// 只在输出层截断到毫秒，保留事件发生时间；不改动存储和 API 的整数时间契约。

@@ -26,6 +26,20 @@ test("共享 JSON 夹具符合正式 v2 schema", () => {
   validate("Configuration", yaml.load(readFileSync(new URL("../../backend/tests/fixtures/config-v2.yaml", import.meta.url), "utf8")));
 });
 
+test("运行时展示时区必填，UTC 降级原因使用安全枚举且不改时间戳", () => {
+  validate("ProcessMetrics", fixtures.runtime);
+  validate("ProcessMetrics", {...fixtures.runtime, timezone: "UTC", timezone_fallback_reason: "invalid_tz"});
+  const validator = ajv.getSchema("fluxdns-v2#/$defs/ProcessMetrics");
+  for (const key of ["timezone", "timezone_fallback_reason"]) {
+    const missing = {...fixtures.runtime};
+    delete missing[key];
+    assert.equal(validator(missing), false, key);
+  }
+  assert.equal(validator({...fixtures.runtime, timezone: ""}), false);
+  assert.equal(validator({...fixtures.runtime, timezone_fallback_reason: "raw-system-error"}), false);
+  assert.equal(validator({...fixtures.runtime, started_at_ms: "2026-11-11T00:00:00+08:00"}), false);
+});
+
 test("schema 拒绝只读字段、非法身份、旧字段和类型残留", () => {
   const candidateValidator = ajv.getSchema("fluxdns-v2#/$defs/Candidate");
   const invalidChanges = [

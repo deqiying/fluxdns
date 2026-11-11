@@ -4,6 +4,7 @@ import { serviceMetricsFixture } from "@/mocks/fixtures";
 import type { ServiceMetrics } from "./api";
 import { MetricsTrendChart } from "./MetricsTrendChart";
 import { RPM_WINDOW_SECONDS, TREND_WINDOW_MS, rollingRpm, type RateSample, type RateTrend } from "./rateTrend";
+import { TimeZoneContext } from "@/shared/time/TimeZoneContext";
 
 const sampledAt = Date.parse("2026-09-22T13:16:15Z");
 const startAt = sampledAt - TREND_WINDOW_MS;
@@ -40,6 +41,18 @@ function tickLabels(container: HTMLElement): (string | null)[] {
 }
 
 describe("MetricsTrendChart", () => {
+  it("服务端时区统一作用于轴、范围、提示框与无障碍标签", () => {
+    const { container } = render(<TimeZoneContext.Provider value={{ timeZone: "Asia/Shanghai", fallbackReason: null }}><MetricsTrendChart metrics={metrics} rateTrend={rateTrend()} /></TimeZoneContext.Provider>);
+    expect(tickLabels(container)[0]).toBe("21:06");
+    expect(tickLabels(container).at(-1)).toBe("21:16");
+    const chart = screen.getByRole("group");
+    expect(chart).toHaveAttribute("aria-label", "21:16:14 Asia/Shanghai (UTC+08:00)，QPS 2，RPM 120");
+    expect(container.querySelector(".metrics-chart-range")).toHaveTextContent("21:06:15 – 21:16:15 Asia/Shanghai (UTC+08:00)");
+    fireEvent.focus(chart);
+    expect(container.querySelector(".metrics-chart-tooltip")).toHaveTextContent("21:16:14 Asia/Shanghai (UTC+08:00)");
+    expect(container.querySelector("desc")).toHaveTextContent("Asia/Shanghai 时间轴");
+  });
+
   it("QPS 每秒一个点，RPM 为过去 60 秒请求数并在缺口处断开", () => {
     const { container } = render(<MetricsTrendChart metrics={metrics} rateTrend={rateTrend()} />);
     expect(screen.getByRole("img", { name: /QPS 与 RPM 请求趋势/ })).toBeInTheDocument();
