@@ -19,6 +19,8 @@
 > 2026-11-10 ECS 增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅覆盖解析记录 ECS 契约、统一投影、replay 与安全边界；其余内容沿历史日期。
 >
 > 2026-11-11 展示时区增量核对：基线 `2f41904` 加工作树，范围限日志与运行时共享时区及页面元数据；未重新验证既有 DNS/保留/发布验收。
+>
+> 2026-11-11 时区别名回归增量核对：基线 `27b2290` 加工作树，范围限时区数据库名称可用性与显式 TZ 的成功/降级测试；不扩大历史平台或发布验收结论。
 
 ## 入口与生命周期
 
@@ -239,11 +241,15 @@ Windows / `1c58a82` 加本次工作树：`cargo test --manifest-path backend/Car
 
 ## 服务端展示时区
 
-[`observability::timezone::display_timezone`](../../../backend/src/observability/timezone.rs) 用进程级 `OnceLock` 冻结时区；bootstrap 与 `MetricsOwner` 共用同一结果，日志输出和运行时读取不再重复解析。`TZ` 显式存在时优先按 Jiff 数据库解析；空值视为 UTC，支持 IANA 名称/别名、前导冒号及 `zoneinfo/` 路径中的名称，但不读取任意环境指定文件。未设置时尝试系统时区。非法编码、无效 TZ、系统不可用或缺少 IANA 名称均明确回退 UTC；安全原因码只描述类别，不回显环境值/系统路径。修改需重启，无名称 TZif、纯固定偏移和非 IANA POSIX 规则不作为页面时区。
+[`observability::timezone::display_timezone`](../../../backend/src/observability/timezone.rs) 用进程级 `OnceLock` 冻结时区；bootstrap 与 `MetricsOwner` 共用同一结果，日志输出和运行时读取不再重复解析。`TZ` 显式存在时优先按 Jiff 数据库解析；空值视为 UTC，支持当前数据库提供的 IANA 名称/别名、前导冒号及 `zoneinfo/` 路径中的名称，但不读取任意环境指定文件。历史别名（如 `US/Eastern`）的可用性取决于运行环境的时区数据库，不保证跨平台一致；对外名称取数据库解析结果的 IANA 名称，不要求保留输入别名。显式名称查询失败时返回 UTC 与 `invalid_tz`，不再尝试系统时区。未设置 TZ 时才尝试系统时区。非法编码、无效 TZ、系统不可用或缺少 IANA 名称均明确回退 UTC；安全原因码只描述类别，不回显环境值/系统路径。修改需重启，无名称 TZif、纯固定偏移和非 IANA POSIX 规则不作为页面时区。
 
 受 Bearer 保护的 `/api/v2/system/runtime` 由同一 owner 返回展示时区及可空降级原因，精确字段以 [OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准；Rust/JSON 夹具与生成类型同步维护。前端入口接线见[页面时区](../frontend/pages.md#服务端展示时区)。所有整数时间戳、历史数据、统计 UTC 日及 retention 调度代码不变；非法 TZ 时既有 retention 的下一调度时间可能为 null，本次展示回退不声称修复该独立边界。
 
 定向回归覆盖 UTC、上海、IANA 别名、非法 TZ、系统路径与不可用/无名称系统时区，验证日志与 ProcessMetrics 共用冻结结果及 HTTP 字段接线；独立进程环境测试避免在并发单测中改全局 TZ。2026-11-11，Windows / Rust 1.98.0，基线 `2f41904` 加工作树：默认 feature 串行全量 950 项通过、5 项忽略，全 feature 串行复测 952 项通过、5 项忽略；fmt 与全部 target/feature 的 Clippy `-D warnings` 通过。首轮全 feature 在既有日志热切换用例中以 `0xc0000409 STATUS_STACK_BUFFER_OVERRUN` 异常退出、没有断言失败；该用例定向及同命令全量复测通过，不据此认定既有 Windows 异常已修复。未运行 Linux/macOS 实机或 Docker；页面验证见[服务端展示时区](../frontend/pages.md#服务端展示时区)。
+
+2026-11-11 时区别名 CI 回归：用户提供的失败日志显示 `US/Eastern` 被解析为 UTC，而旧用例固定期望原别名，结果为 940 项通过、1 项失败、5 项忽略。核对锁定的 Jiff 0.2.35：默认内嵌库用于 Windows/wasm，Linux 默认依赖系统时区数据库；未核实失败 runner 的 tzdata 包组成，不能将此次结果推广为 Linux 均不支持该别名。`resolve` 现通过可注入名称查询分别严格覆盖“数据库返回规范名”和“别名缺失”两条路径，验证展示名称、时区对象、降级原因与禁止系统回退；生产仍调用 `TimeZone::get`，不硬编码别名映射、不安装额外数据或放宽断言。
+
+本轮本机证据：Windows / mise Rust 1.98.0，基线 `27b2290` 加工作树；`cargo test --offline --locked --manifest-path backend/Cargo.toml observability::timezone:: -- --test-threads=1` 5 项通过；`cargo test --offline --locked --manifest-path backend/Cargo.toml --all-features -- --test-threads=1` 复测 954 项通过、5 项忽略；`cargo fmt --manifest-path backend/Cargo.toml -- --check` 与全部 target/feature 的 Clippy `-D warnings` 通过。首轮全 feature 再次在既有日志热切换用例处以 `0xc0000409 STATUS_STACK_BUFFER_OVERRUN` 异常退出，无断言失败；该用例定向与全量复测通过，但异常原因未解决。本机串行结果不等于 Actions 默认并行验证；未重跑远端 Actions，也未执行 Linux/macOS 或容器验收。
 
 ## 静态资源与证据
 
