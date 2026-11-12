@@ -21,6 +21,8 @@
 > 2026-11-11 展示时区增量核对：基线 `2f41904` 加工作树，范围限日志与运行时共享时区及页面元数据；未重新验证既有 DNS/保留/发布验收。
 >
 > 2026-11-11 时区别名回归增量核对：基线 `27b2290` 加工作树，范围限时区数据库名称可用性与显式 TZ 的成功/降级测试；不扩大历史平台或发布验收结论。
+>
+> 2026-11-12 OpenWrt 时区增量核对：基线 `df5ea79` 加工作树，仅 UCI 展示时区读取、内嵌规则兜底和启动降级告警；不扩大 retention 或 OpenWrt 实机验收结论。
 
 ## 入口与生命周期
 
@@ -241,15 +243,29 @@ Windows / `1c58a82` 加本次工作树：`cargo test --manifest-path backend/Car
 
 ## 服务端展示时区
 
-[`observability::timezone::display_timezone`](../../../backend/src/observability/timezone.rs) 用进程级 `OnceLock` 冻结时区；bootstrap 与 `MetricsOwner` 共用同一结果，日志输出和运行时读取不再重复解析。`TZ` 显式存在时优先按 Jiff 数据库解析；空值视为 UTC，支持当前数据库提供的 IANA 名称/别名、前导冒号及 `zoneinfo/` 路径中的名称，但不读取任意环境指定文件。历史别名（如 `US/Eastern`）的可用性取决于运行环境的时区数据库，不保证跨平台一致；对外名称取数据库解析结果的 IANA 名称，不要求保留输入别名。显式名称查询失败时返回 UTC 与 `invalid_tz`，不再尝试系统时区。未设置 TZ 时才尝试系统时区。非法编码、无效 TZ、系统不可用或缺少 IANA 名称均明确回退 UTC；安全原因码只描述类别，不回显环境值/系统路径。修改需重启，无名称 TZif、纯固定偏移和非 IANA POSIX 规则不作为页面时区。
+[`observability::timezone::display_timezone`](../../../backend/src/observability/timezone.rs) 用进程级 `OnceLock` 冻结时区；bootstrap 与 `MetricsOwner` 共用同一结果，日志输出和运行时读取不再重复解析。展示时区来源按以下顺序选择：
+
+1. **显式 `TZ`**：始终最高优先级，即使值无效也不读取 UCI 或系统时区。空值视为 UTC；支持数据库提供的 IANA 名称/别名、前导冒号及 `zoneinfo/` 路径中的名称，但不读取任意环境指定文件。
+2. **OpenWrt UCI**：仅在未设置 `TZ`、目标为 Linux 且存在 `/etc/openwrt_release` 时，启动阶段执行一次固定命令 `/sbin/uci -q get system.@system[0].zonename`。不经过 shell，不读取 `timezone` 中的 POSIX 规则，也不依赖 `/etc/localtime` 或 `/tmp/localtime`。输出按 UTF-8 解码并去掉两端空白；读取失败、名称为空或无效时直接回退 UTC，不用通用探测掩盖配置错误。
+3. **其他平台的系统时区**：没有显式 `TZ` 且未识别为 OpenWrt 时，沿用 `TimeZone::try_system()`。
+
+名称查询先使用 Jiff 当前数据库；查询失败时通过 `TimeZoneDatabase::bundled()` 补查内嵌规则。后端 [Cargo manifest](../../../backend/Cargo.toml) 始终启用 `tzdb-bundle-always`，因此缺少系统 zoneinfo 或系统库仅缺少某个条目时，显式 `TZ` 和 UCI 名称仍可解析，不要求精简固件另装时区数据。系统库可用的规则保持优先；内嵌数据随二进制依赖更新，不跟随设备 tzdata 自动升级。对外名称取数据库解析结果的 IANA 名称，不要求保留输入别名。
+
+降级沿用现有 API 原因码：非法编码为 `invalid_tz_encoding`；UCI 名称为空，或显式/UCI 名称无效、所有规则来源均无法解析时为 `invalid_tz`（显式空 `TZ` 仍按原约定使用 UTC，不告警）；UCI 命令启动/退出失败或通用系统探测失败为 `system_timezone_unavailable`；系统结果缺少 IANA 名称为 `unsupported_timezone`。无名称 TZif、纯固定偏移和非 IANA POSIX 规则不作为页面时区。所有降级统一使用 UTC；[`init_bootstrap`](../../../backend/src/observability.rs) 在 subscriber 安装成功后输出一次 `timezone_fallback` WARN，仅包含固定原因码，不回显环境值、UCI 原值、命令错误或系统路径，WebUI 沿用同一原因告警。
+
+修改 `TZ`、UCI 或系统时区后必须重启 FluxDNS；页面重试只重新读取当前进程快照，不触发系统重新探测。
 
 受 Bearer 保护的 `/api/v2/system/runtime` 由同一 owner 返回展示时区及可空降级原因，精确字段以 [OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准；Rust/JSON 夹具与生成类型同步维护。前端入口接线见[页面时区](../frontend/pages.md#服务端展示时区)。所有整数时间戳、历史数据、统计 UTC 日及 retention 调度代码不变；非法 TZ 时既有 retention 的下一调度时间可能为 null，本次展示回退不声称修复该独立边界。
 
 定向回归覆盖 UTC、上海、IANA 别名、非法 TZ、系统路径与不可用/无名称系统时区，验证日志与 ProcessMetrics 共用冻结结果及 HTTP 字段接线；独立进程环境测试避免在并发单测中改全局 TZ。2026-11-11，Windows / Rust 1.98.0，基线 `2f41904` 加工作树：默认 feature 串行全量 950 项通过、5 项忽略，全 feature 串行复测 952 项通过、5 项忽略；fmt 与全部 target/feature 的 Clippy `-D warnings` 通过。首轮全 feature 在既有日志热切换用例中以 `0xc0000409 STATUS_STACK_BUFFER_OVERRUN` 异常退出、没有断言失败；该用例定向及同命令全量复测通过，不据此认定既有 Windows 异常已修复。未运行 Linux/macOS 实机或 Docker；页面验证见[服务端展示时区](../frontend/pages.md#服务端展示时区)。
 
-2026-11-11 时区别名 CI 回归：用户提供的失败日志显示 `US/Eastern` 被解析为 UTC，而旧用例固定期望原别名，结果为 940 项通过、1 项失败、5 项忽略。核对锁定的 Jiff 0.2.35：默认内嵌库用于 Windows/wasm，Linux 默认依赖系统时区数据库；未核实失败 runner 的 tzdata 包组成，不能将此次结果推广为 Linux 均不支持该别名。`resolve` 现通过可注入名称查询分别严格覆盖“数据库返回规范名”和“别名缺失”两条路径，验证展示名称、时区对象、降级原因与禁止系统回退；生产仍调用 `TimeZone::get`，不硬编码别名映射、不安装额外数据或放宽断言。
+2026-11-11 时区别名 CI 回归（历史配置，内嵌兜底新增前）：用户提供的失败日志显示 `US/Eastern` 被解析为 UTC，而旧用例固定期望原别名，结果为 940 项通过、1 项失败、5 项忽略。核对锁定的 Jiff 0.2.35：当时 manifest 只启用默认 feature，内嵌库用于 Windows/wasm，Linux 默认依赖系统时区数据库；未核实失败 runner 的 tzdata 包组成，不能将此次结果推广为 Linux 均不支持该别名。`resolve` 通过可注入名称查询分别严格覆盖“数据库返回规范名”和“名称不可用”两条路径，验证展示名称、时区对象、降级原因与禁止系统回退；不硬编码别名映射或放宽断言。当前生产名称查询已增加上文的内嵌规则兜底。
 
 本轮本机证据：Windows / mise Rust 1.98.0，基线 `27b2290` 加工作树；`cargo test --offline --locked --manifest-path backend/Cargo.toml observability::timezone:: -- --test-threads=1` 5 项通过；`cargo test --offline --locked --manifest-path backend/Cargo.toml --all-features -- --test-threads=1` 复测 954 项通过、5 项忽略；`cargo fmt --manifest-path backend/Cargo.toml -- --check` 与全部 target/feature 的 Clippy `-D warnings` 通过。首轮全 feature 再次在既有日志热切换用例处以 `0xc0000409 STATUS_STACK_BUFFER_OVERRUN` 异常退出，无断言失败；该用例定向与全量复测通过，但异常原因未解决。本机串行结果不等于 Actions 默认并行验证；未重跑远端 Actions，也未执行 Linux/macOS 或容器验收。
+
+2026-11-12 OpenWrt 时区回归：Windows / mise Rust 1.98.0，基线 `df5ea79` 加工作树；`cargo test --offline --manifest-path backend/Cargo.toml observability::timezone:: -- --test-threads=1` 12 项通过，包含无系统数据库的 UCI/显式 TZ、来源优先级、空/无效名称、命令失败、编码失败和独立进程启动告警脱敏；`cargo tree --offline --locked --manifest-path backend/Cargo.toml --target x86_64-unknown-linux-musl -e features -i jiff-tzdb` 确认 musl target 启用内嵌库。UCI 输出与读取失败通过注入覆盖，没有修改本机系统配置；本机未安装 Linux/musl target，未交叉编译、连接 OpenWrt 或部署二进制，不把依赖树与 mock 结果视为设备验收。
+
+同轮 `cargo test --offline --locked --manifest-path backend/Cargo.toml --all-features -- --test-threads=1` 961 项通过、5 项忽略、0 项失败；`cargo clippy --offline --locked --manifest-path backend/Cargo.toml --all-targets --all-features -- -D warnings`、`cargo fmt --manifest-path backend/Cargo.toml -- --check`、项目文档检查和 `git diff --check` 均通过。未运行前端套件、Docker 或远端 Actions；API 字段及前端行为未修改。
 
 ## 静态资源与证据
 

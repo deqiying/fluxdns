@@ -59,9 +59,9 @@ pub fn bootstrap_subscriber() -> impl Subscriber + Send + Sync {
         .finish()
 }
 
-/// 安装进程级 bootstrap subscriber。
+/// 安装进程级 bootstrap subscriber；展示时区降级时在安装成功后输出一次安全告警。
 pub fn init_bootstrap() -> Result<(), tracing::subscriber::SetGlobalDefaultError> {
-    let _ = timezone::display_timezone();
+    let timezone = timezone::display_timezone();
     let output = BOOTSTRAP_OUTPUT
         .get_or_init(|| Arc::new(Mutex::new(OutputTarget::Stderr)))
         .clone();
@@ -78,7 +78,15 @@ pub fn init_bootstrap() -> Result<(), tracing::subscriber::SetGlobalDefaultError
     let _ = BOOTSTRAP_LAYER.set(layer_handle);
     use tracing_subscriber::layer::SubscriberExt as _;
     let subscriber = tracing_subscriber::registry().with(filter).with(layer);
-    tracing::subscriber::set_global_default(subscriber)
+    tracing::subscriber::set_global_default(subscriber)?;
+    if let Some(reason) = timezone.fallback_reason {
+        tracing::warn!(
+            event = "timezone_fallback",
+            reason,
+            "服务端时区不可用，当前使用 UTC"
+        );
+    }
+    Ok(())
 }
 
 /// 在 bootstrap subscriber 已安装后切换到配置指定的真实输出。
