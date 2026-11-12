@@ -279,16 +279,70 @@ jobs:
           sudo rm -f \
             /etc/apt/sources.list.d/*google* \
             /etc/apt/sources.list.d/*chrome*
+
+          # runner 的源指向 /etc/apt/apt-mirrors.txt，其中全是 *.ubuntu.com。该域名解析
+          # 不可用时，apt 会在每个镜像上反复超时数分钟再退出 100（actions/runner-images#15296）。
+          # 索引仍由 Ubuntu 归档密钥校验，换用非 ubuntu.com 镜像不改变包内容。
+          mirror_list=/etc/apt/apt-mirrors.txt
+          probe_host=azure.archive.ubuntu.com
+          fallback_mirror=https://mirrors.edge.kernel.org/ubuntu/
+          # 显式收紧传输超时与重试次数，把单次尝试的最坏耗时限制在数分钟内，
+          # 避免记录不可达时按默认 30 秒超时反复挂起。
+          apt_options=(
+            -o Acquire::Retries=2
+            -o Acquire::http::Timeout=15
+            -o Acquire::https::Timeout=15
+          )
+          switched=0
+
+          use_fallback_mirror() {
+            if [[ "${switched}" -eq 1 ]]; then
+              return 0
+            fi
+            switched=1
+            echo "::warning::apt mirror ${probe_host} is unavailable; using ${fallback_mirror}"
+            printf '%s\tpriority:1\n' "${fallback_mirror}" | sudo tee "${mirror_list}" >/dev/null
+            # 镜像列表只在采用 mirror+file 的源上生效，因此同时改写直接写死 ubuntu.com 的源。
+            for source in \
+              /etc/apt/sources.list \
+              /etc/apt/sources.list.d/*.sources \
+              /etc/apt/sources.list.d/*.list; do
+              [[ -f "${source}" ]] || continue
+              sudo sed -i -E \
+                "s#https?://(azure\.archive|archive|security)\.ubuntu\.com/ubuntu/?#${fallback_mirror}#g" \
+                "${source}"
+            done
+          }
+
+          if ! timeout 15 getent hosts "${probe_host}" >/dev/null 2>&1; then
+            use_fallback_mirror
+          fi
+
+          # update 与 install 放在同一次尝试内：索引过期的失败需要连同安装一起重试。
+          installed=0
           for attempt in 1 2 3; do
-            if sudo apt-get update; then
+            if sudo apt-get "${apt_options[@]}" update \
+              && sudo apt-get "${apt_options[@]}" install --yes --no-install-recommends musl-tools binutils; then
+              installed=1
               break
             fi
-            if [[ "${attempt}" -eq 3 ]]; then
-              exit 1
+            if [[ "${attempt}" -lt 3 ]]; then
+              sleep $((attempt * 5))
             fi
-            sleep $((attempt * 5))
           done
-          sudo apt-get install --yes --no-install-recommends musl-tools binutils
+
+          if [[ "${installed}" -eq 0 ]]; then
+            # 域名可解析但归档本身不可用时同样会走到这里，换镜像再试一次。
+            use_fallback_mirror
+            sudo apt-get "${apt_options[@]}" update
+            sudo apt-get "${apt_options[@]}" install --yes --no-install-recommends musl-tools binutils
+          fi
+
+          if ! command -v musl-gcc >/dev/null; then
+            echo "musl-gcc is missing after installing musl-tools." >&2
+            exit 1
+          fi
+
           # SQLite 和 ring 的 C 代码及最终链接均使用 musl 工具链。
           echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "${GITHUB_ENV}"
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc" >> "${GITHUB_ENV}"

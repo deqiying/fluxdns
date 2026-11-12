@@ -9,6 +9,8 @@
 > 核对基线：`bfac363`；本轮核对镜像 workflow、Dockerfile 与本地可执行的配置/文档检查，未执行 Actions、镜像构建或容器内运行，历史运行结果按原日期和基线解释
 >
 > 2026-11-11 时区增量核对：基线 `2f41904` 加工作树，仅容器 tzdata、TZ 注入及展示时区契约；本轮未构建或运行 Docker 镜像。
+>
+> 2026-11-12 Release 增量核对：基线 `163961a` 加工作树，仅 OpenWrt apt 步骤的镜像回退与重试；本轮未执行 Actions，用桩命令模拟运行该步骤脚本。
 
 ## 工具与命令边界
 
@@ -96,6 +98,8 @@ pwsh -File script/dev.ps1 stop
 | macOS ARM64 | `aarch64-apple-darwin` | `fluxdns_<version>_macos_arm64.tar.gz` |
 
 OpenWrt 构建项在临时 Ubuntu runner 安装 `musl-tools` 与 `binutils`，为 `cc` 指定 `CC_x86_64_unknown_linux_musl=musl-gcc`，并为 Cargo 指定对应 target 的 linker；现有 SQLite bundled 与 ring C 代码随该工具链构建，不增加 Rust 依赖。该项显式启用 `-C target-feature=+crt-static`，打包前通过 `readelf` 拒绝 ELF `INTERP` 和动态 `NEEDED` 依赖，再复用公共的 `--version` 检查与打包流程。OpenWrt 安装端应选择 `_openwrt_x86_64.tar.gz`，不能回退使用 GNU/Linux 包；归档中的程序仍命名为 `fluxdns`。
+
+该步骤的 apt 调用不依赖 runner 默认镜像，分三层收敛失败：[`build` 步骤 `Setup OpenWrt musl build tools`](../../.github/workflows/release.yml) 先删除预装 Chrome 源，再用 `getent hosts azure.archive.ubuntu.com`（15 秒上限）探测镜像域名；不可解析时把 `/etc/apt/apt-mirrors.txt` 改写为单一 `https://mirrors.edge.kernel.org/ubuntu/` 条目，并同步改写 `sources.list` 与 `sources.list.d/*.sources|*.list` 中写死 `*.ubuntu.com` 的 URI，第三方源保持不动。`update` 与 `install` 合并为同一次尝试并在三次内重试，每次尝试附加 `Acquire::Retries=2` 与 15 秒 http/https 传输超时；三次均失败后再切换镜像补试一次。安装后校验 `musl-gcc` 存在才写入 `CC_x86_64_unknown_linux_musl`。这条路径针对 2026-11-11 起 `*.ubuntu.com` 在托管 runner 上解析失败的[上游事故](https://github.com/actions/runner-images/issues/15296)：当时 apt 在每个镜像上超时约 5 分钟后以 100 退出，导致 OpenWrt 构建项及其后续 `finalize-release` 全被跳过。镜像索引仍由 Ubuntu 归档密钥校验，换镜像不改变包内容。
 
 上述工具安装属于该 CI 构建项；本地工具安装仍遵循[环境规则](../rules/environment-usage.md)，本地 `package-embedded.ps1` 仍只支持原有 Windows/Linux x86_64。workflow 配置、静态链接检查与版本检查不等同 OpenWrt 上的真实 DNS/DoH 验收；新增平台尚待 GitHub Actions 构建和目标设备运行验证。
 
