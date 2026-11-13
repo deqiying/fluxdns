@@ -15,6 +15,8 @@
 > 2026-09-23 局部评审：仅补充请求诊断快照、已验证分片可空扩列及旧记录兼容。
 >
 > 2026-11-10 局部评审：请求级 ECS 独立可空诊断列、4096 字节预算、原子 commit 和旧/回退读取；其余设计沿历史范围。
+>
+> 2026-11-13 局部评审：仅收紧详情 writer 内部 pending 的有界接收、满批失败重试与关闭交还约束；其他设计沿历史范围。
 
 Storage 模块实现两个相互隔离的持久化 owner：
 
@@ -162,6 +164,7 @@ writer 周期性执行：
 - projector 在后台生成 request digest、canonical qname 和有界 answer JSON，再调用分片 writer 的 non-blocking `try_write`；
 - projection 或 SQLite queue 满时只丢弃当前详情，并分别累计 `detail_dropped`；写入拒绝累计 `detail_failed`；
 - 分片 worker 达到 batch 上限时立即提交，低流量尾批最多等待 5 秒；单个事务只取队首同一 UTC 日的连续记录，跨文件不做部分提交；
+- worker 内部 pending 不得超过单批上限；满批写入失败时暂停接收、按原周期重试，将背压保留在有界 channel；恢复后按队首顺序补写，不丢弃已接纳记录以腾挪内部容量；取消或输入关闭后将余量交回统一 shutdown，关闭预算耗尽或写入仍失败必须显式报告；
 - `enable=false` 时 producer 不附带详情 source，但同一低基数事件仍进入 stats/cache 消费者。
 
 请求级字符串化和字段长度限制只在 projector/SQLite 边界执行；总耗时与主链耗时在 DNS core 完成时已冻结为数值，projector 不再根据当前时刻计算。`ResolutionEvent` 的 `Debug` 只显示存在性和 typed 安全字段。

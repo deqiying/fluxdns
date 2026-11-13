@@ -678,11 +678,14 @@ pub struct ShardedResolveDetailWriter {
     sender: mpsc::Sender<ResolveDetailRecord>,
 }
 
+/// 仅在 pending 未满一批时接收，持续写库失败也不会搬空 channel 扩大内存积压。
 pub struct ShardedResolveDetailWorker {
     store: Arc<DetailShardStore>,
     receiver: mpsc::Receiver<ResolveDetailRecord>,
     pending: VecDeque<ResolveDetailRecord>,
     max_batch: usize,
+    #[cfg(test)]
+    failed_flush_observer: Arc<tokio::sync::Notify>,
 }
 
 impl ShardedResolveDetailWriter {
@@ -705,6 +708,8 @@ impl ShardedResolveDetailWriter {
                 receiver,
                 pending: VecDeque::new(),
                 max_batch,
+                #[cfg(test)]
+                failed_flush_observer: Arc::new(tokio::sync::Notify::new()),
             },
         ))
     }
@@ -752,7 +757,12 @@ impl ShardedResolveDetailWorker {
             .take_while(|record| record_day(record).is_ok_and(|value| value == day))
             .count();
         let records = self.pending.iter().take(count).cloned().collect::<Vec<_>>();
-        let summary = self.store.write_records(day, &records, deadline).await?;
+        let result = self.store.write_records(day, &records, deadline).await;
+        #[cfg(test)]
+        if result.is_err() {
+            self.failed_flush_observer.notify_one();
+        }
+        let summary = result?;
         for _ in 0..count {
             let _ = self.pending.pop_front();
         }
@@ -771,6 +781,7 @@ impl ShardedResolveDetailWorker {
         Ok(total)
     }
 
+    /// 满批写入失败后暂停接收，仅按周期重试；取消或输入关闭时交回有界积压。
     pub(crate) async fn run_until_stopped(
         mut self,
         cancellation: crate::dns::Cancellation,
@@ -788,10 +799,14 @@ impl ShardedResolveDetailWorker {
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         interval.tick().await;
         loop {
+            // 接收分支可能因满批而禁用；输入关闭后仍须把余量交还 shutdown，避免永久重试。
+            if self.pending.len() >= self.max_batch && self.receiver.is_closed() {
+                break;
+            }
             tokio::select! {
                 biased;
                 _ = cancellation.cancelled() => break,
-                record = self.receiver.recv() => {
+                record = self.receiver.recv(), if self.pending.len() < self.max_batch => {
                     let Some(record) = record else { break };
                     self.pending.push_back(record);
                     while self.pending.len() < self.max_batch {
@@ -1415,7 +1430,7 @@ mod tests {
 
     use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 
-    use crate::dns::{Deadline, RuntimeRevision, TransportClass};
+    use crate::dns::{CancelReason, Cancellation, Deadline, RuntimeRevision, TransportClass};
     use crate::ports::storage::{ResolveEvent, StatsSource};
     use crate::ports::telemetry::{CacheStatus, OutcomeClass};
 
@@ -1488,6 +1503,186 @@ mod tests {
             .connect_with(SqliteConnectOptions::new().filename(path).read_only(true))
             .await
             .unwrap()
+    }
+
+    /// 等到 worker 取走首批记录，不依赖固定 sleep 猜测任务调度。
+    async fn wait_for_empty_writer_queue(writer: &ShardedResolveDetailWriter) {
+        drop(
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                writer.sender.reserve_many(writer.sender.max_capacity()),
+            )
+            .await
+            .expect("detail worker did not receive the first batch")
+            .unwrap(),
+        );
+    }
+
+    /// 等待真实写入失败通知，不用固定时长推断重试次数。
+    async fn wait_for_failed_detail_flushes(observer: &tokio::sync::Notify, count: usize) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            for _ in 0..count {
+                observer.notified().await;
+            }
+        })
+        .await
+        .expect("detail worker did not report the expected failed writes");
+    }
+
+    #[tokio::test]
+    async fn failed_detail_writer_bounds_pending_and_cancels_when_saturated() {
+        let root = test_root("bounded-failure-cancel");
+        let day = 20_704;
+        let store = Arc::new(DetailShardStore::new(root.clone(), Vec::new(), 1).unwrap());
+        // 用目录占住分片文件路径，稳定模拟每次写库失败，不依赖权限或真实磁盘满。
+        std::fs::create_dir_all(root.join(format_shard_file_name(day).unwrap())).unwrap();
+        let (writer, worker) = ShardedResolveDetailWriter::channel(store, 4, 2).unwrap();
+        let failed_flushes = Arc::clone(&worker.failed_flush_observer);
+        writer.try_write(record(day, 0)).unwrap();
+        writer.try_write(record(day, 1)).unwrap();
+        let cancellation = Cancellation::new();
+        let task = tokio::spawn(worker.run_until_stopped(
+            cancellation.clone(),
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        ));
+        wait_for_empty_writer_queue(&writer).await;
+        for second in 2..6 {
+            writer.try_write(record(day, second)).unwrap();
+        }
+        assert!(matches!(
+            writer.try_write(record(day, 6)).unwrap_err().class(),
+            crate::ports::PortErrorClass::ResourceExhausted,
+        ));
+        wait_for_failed_detail_flushes(&failed_flushes, 2).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), writer.sender.reserve())
+                .await
+                .is_err(),
+            "持续失败时不得把有界 channel 搬进无界 pending",
+        );
+        cancellation.cancel(CancelReason::Shutdown);
+        let (worker, summary) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("saturated detail worker did not cancel")
+            .unwrap()
+            .unwrap();
+        assert_eq!(worker.pending.len(), 2);
+        assert_eq!(worker.receiver.len(), 4);
+        assert_eq!(worker.pending_len(), 6);
+        assert!(summary.failed_flushes >= 2);
+        assert_eq!(summary.flush.committed, 0);
+        assert!(matches!(
+            writer.try_write(record(day, 6)).unwrap_err().class(),
+            crate::ports::PortErrorClass::Unavailable,
+        ));
+        assert!(worker.shutdown(deadline()).await.is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_detail_writer_resumes_and_commits_accepted_records_in_order() {
+        let root = test_root("bounded-failure-recover");
+        let day = 20_704;
+        let shard_path = root.join(format_shard_file_name(day).unwrap());
+        let store = Arc::new(DetailShardStore::new(root.clone(), Vec::new(), 1).unwrap());
+        std::fs::create_dir_all(&shard_path).unwrap();
+        let mut commits = store.subscribe_commits();
+        let (writer, worker) =
+            ShardedResolveDetailWriter::channel(Arc::clone(&store), 4, 2).unwrap();
+        let failed_flushes = Arc::clone(&worker.failed_flush_observer);
+        writer.try_write(record(day, 0)).unwrap();
+        writer.try_write(record(day, 1)).unwrap();
+        let cancellation = Cancellation::new();
+        let task = tokio::spawn(worker.run_until_stopped(
+            cancellation.clone(),
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        ));
+        wait_for_empty_writer_queue(&writer).await;
+        for second in 2..6 {
+            writer.try_write(record(day, second)).unwrap();
+        }
+        wait_for_failed_detail_flushes(&failed_flushes, 2).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), writer.sender.reserve())
+                .await
+                .is_err(),
+        );
+        assert!(matches!(
+            commits.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty),
+        ));
+        std::fs::remove_dir(&shard_path).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut committed = 0;
+            while committed < 6 {
+                committed += commits.recv().await.unwrap().records.len();
+            }
+            assert_eq!(committed, 6);
+        })
+        .await
+        .expect("detail worker did not recover after storage became writable");
+        cancellation.cancel(CancelReason::Shutdown);
+        let (worker, summary) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(summary.failed_flushes >= 2);
+        assert_eq!(summary.flush.committed, 6);
+        assert_eq!(summary.flush.dropped, 0);
+        assert_eq!(worker.pending_len(), 0);
+        assert_eq!(worker.shutdown(deadline()).await.unwrap().committed, 0);
+        let pool = open_verification(&shard_path).await;
+        let times: Vec<i64> =
+            sqlx::query_scalar("SELECT event_time_utc_millis FROM resolve_log ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        let expected = (0..6)
+            .map(|second| (i64::from(day) * 86_400 + second) * 1_000)
+            .collect::<Vec<_>>();
+        assert_eq!(times, expected);
+        pool.close().await;
+        assert_eq!(store.active_connections(), 0);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_detail_writer_returns_full_batch_when_all_senders_close() {
+        let root = test_root("bounded-failure-input-close");
+        let day = 20_704;
+        let shard_path = root.join(format_shard_file_name(day).unwrap());
+        let store = Arc::new(DetailShardStore::new(root.clone(), Vec::new(), 1).unwrap());
+        std::fs::create_dir_all(&shard_path).unwrap();
+        let (writer, worker) =
+            ShardedResolveDetailWriter::channel(Arc::clone(&store), 2, 2).unwrap();
+        let failed_flushes = Arc::clone(&worker.failed_flush_observer);
+        writer.try_write(record(day, 0)).unwrap();
+        writer.try_write(record(day, 1)).unwrap();
+        let task = tokio::spawn(worker.run_until_stopped(
+            Cancellation::new(),
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        ));
+        wait_for_empty_writer_queue(&writer).await;
+        writer.try_write(record(day, 2)).unwrap();
+        writer.try_write(record(day, 3)).unwrap();
+        wait_for_failed_detail_flushes(&failed_flushes, 1).await;
+        drop(writer);
+        let (worker, summary) = tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("closed input left the full detail worker waiting forever")
+            .unwrap()
+            .unwrap();
+        assert!(summary.failed_flushes >= 1);
+        assert_eq!(worker.pending.len(), 2);
+        assert_eq!(worker.receiver.len(), 2);
+        assert_eq!(worker.pending_len(), 4);
+        std::fs::remove_dir(&shard_path).unwrap();
+        assert_eq!(worker.shutdown(deadline()).await.unwrap().committed, 4);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

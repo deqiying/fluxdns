@@ -21,6 +21,8 @@
 > 2026-11-08 增量核对：`3d1a92e` 加本次工作树，仅核对 remote 刷新在 304/200 路径各解析一次及 304 后解析失败不补发请求
 >
 > 2026-11-10 ECS 增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅核对独立 ECS trace/投影、日分片可空扩列和历史兼容；其余范围沿历史日期。
+>
+> 2026-11-13 详情积压增量核对：基线 `0736080` 加工作树，仅核对详情写库失败后的 pending 上限、周期重试与取消/输入关闭；验证范围见下文 Storage。
 
 ## 资源准备与刷新
 
@@ -70,11 +72,15 @@ transport 捕获的可选原始 `client_id`/有效 client IP 随 `ResolutionDeta
 
 详情由 [`resolve_log.rs`](../../../backend/src/storage/resolve_log.rs) 投影，再交 [`detail_shards.rs`](../../../backend/src/storage/detail_shards.rs) 的唯一有界 detail worker 批写。worker 按事件 UTC 日选择 `<records_path>/YYYY-MM-DD.sqlite3`，满批立即提交，低流量尾批由周期 flush 处理；一次事务只处理队首同日记录。registry 以日锁串行同一分片、全局最多 4 个活动单连接 pool，读 lease 缺文件时不建库，retirement 先阻止新 lease 再等待已有 lease。`writer.rs` 是内存 contract 实现，不是正式 SQLite writer。[`detail_query.rs`](../../../backend/src/storage/detail_query.rs) 提供跨分片 storage 读口并已由 BC-13 的正式 v2 历史 API 消费；旧单库 Management 读模型已删除。
 
+详情 worker 的 `pending` 最多保留 `max_batch` 条；满批写库失败后禁用接收分支，仅沿原 flush 周期重试，不能继续把 channel 搬入内部积压。默认 channel 为 1024 条、批次为 128 条，因此该 writer 的稳定积压最多 1152 条；事务中的临时批次副本及上游 projection 队列另有各自边界，这不是进程 RSS/堆字节上限。channel 满时 `try_write` 继续无等待返回 `ResourceExhausted`，由现有 resolution 失败计数记录；保留已接纳记录供恢复后顺序补写，不阻塞 DNS 或统计。取消或满批状态下输入已关闭时，worker 将有界余量交回原 shutdown，剩余 deadline 内排空或显式返回写入错误，不新增配置或持久化格式。
+
 [统计主库初始化 SQL](../../../backend/migrations/0001_statistics.sql) 直接创建 v2 layout、当前 schema 9、统计/ledger 和共同保留状态，不创建旧单库详情表，也不执行旧版升级。已有 v2 标记和 schema 9 的库直接校验并重开；未标记或其他 schema 拒绝，不转换或清库。新详情文件使用 [`migrations/detail`](../../../backend/migrations/detail) 的 layout v1：`detail_meta` 固定版本和唯一 UTC 日，`resolve_log` 保持当前有效字段，日归属 trigger 约束记录只能属于该文件日期；时间、耗时及 client ID/IP、历史匹配 ID、qname 使用查询索引。两类 SQLite 均使用 WAL、NORMAL synchronous 和 busy timeout；统计库保留串行 operation lock，详情连接由 registry lease 管理。
 
 主库首次初始化在一个事务执行完整 SQL、layout 和 metadata；版本不符直接失败。`connect_with_deadline` 将建目录、连接和初始化纳入 open 的同一预算；随后 `startup_write_probe` 在独立事务中实际更新 metadata 并回滚，不提交统计或详情。详情目录只在首个写 lease 时创建；已有日期文件必须声明匹配的 layout/day 和完整表、索引、trigger，普通外部 SQLite 或路径/文件身份异常会被拒绝。失败/超时不产生可服务 lease。
 
 停机时 `run_until_stopped` 关闭详情输入并将剩余 worker/队列交回 owner；正在执行的批次先结束，其余详情不抢先排空。`StorageService::shutdown` 提交统计并关闭主 pool，随后 `StorageRuntime` 用剩余时间排空分片详情、拒绝新 lease 并等待活动连接归还。启动/停机 deadline 不重置，但不能强制中断已进入 OS/SQLite worker 的操作；超时不伪装为成功或零丢失。
+
+2026-11-13 Windows、Rust/Cargo 1.98.0，基线 `0736080` 加工作树：新增 `failed_detail_writer_*` 三项在修复前均复现越界接收/积压，修复后全部通过，覆盖持续失败与 channel 拒绝、满载取消、存储恢复后全部记录有序且不重复提交、输入关闭后交回队列和 shutdown 补写；失败次数通过测试专用通知同步，不用固定等待时长推断。真实 SQLite 回读使用独立 `_fluxdns/p2-detail-shard-tests/` 夹具，故障由目录占住分片文件路径构造，不代表真实磁盘满或权限故障验收。`cargo test --manifest-path backend/Cargo.toml --locked --offline --bin fluxdns` 的 `storage::`、`resolution::`、`service::tests::` 筛选分别通过 85、7、68 项，最后一组保留 4 项手动忽略，筛选范围有交集；最终完整默认 binary 测试（`-- --test-threads=4`）为 978 passed、0 failed、5 ignored，all-targets Clippy（`-D warnings`）、格式、文档及 diff 检查通过。未修改个人配置、schema 或 API，未部署或运行线上磁盘故障验收。
 
 ### 业务时间存储
 
