@@ -348,7 +348,7 @@ impl PolicyIndex {
         self.rule_sets
             .iter()
             .map(|(resource, index)| crate::resource::RuleMemoryRoot {
-                resource: resource.to_string(),
+                resource: resource.as_str().to_owned(),
                 holder: crate::resource::RuleMemoryHolder::Policy,
                 index: Arc::clone(index),
             })

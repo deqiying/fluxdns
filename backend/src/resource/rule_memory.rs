@@ -312,10 +312,12 @@ mod tests {
             deadline: deadline(),
             remaining: 1,
         };
+        let mut total = u64::MAX;
         assert_eq!(
-            budget.add_array::<u8>(&mut u64::MAX, 1),
+            budget.add_array::<u8>(&mut total, 1),
             Err(RuleMemoryError::Overflow)
         );
+        assert_eq!(total, u64::MAX);
         let empty = analyze_rule_memory(Vec::new(), deadline()).unwrap();
         assert_eq!(
             (

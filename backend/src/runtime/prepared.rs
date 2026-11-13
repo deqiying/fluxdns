@@ -274,7 +274,7 @@ impl PreparedRuntime {
         let mut roots = Vec::new();
         for (resource, snapshot) in &self.resource_snapshots {
             roots.push(RuleMemoryRoot {
-                resource: resource.to_string(),
+                resource: resource.as_str().to_owned(),
                 holder: RuleMemoryHolder::Initial,
                 index: snapshot.compiled_arc(),
             });
@@ -282,7 +282,7 @@ impl PreparedRuntime {
         for (resource, worker) in &self.resource_workers {
             if let Some(snapshot) = worker.current_rule_snapshot() {
                 roots.push(RuleMemoryRoot {
-                    resource: resource.to_string(),
+                    resource: resource.as_str().to_owned(),
                     holder: RuleMemoryHolder::Worker,
                     index: snapshot.compiled_arc(),
                 });
