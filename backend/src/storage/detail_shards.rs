@@ -157,6 +157,14 @@ impl DetailShardStore {
         })
     }
 
+    /// 活跃 pool/lease 与连接预算的原子读数，不代表 SQLite 占用字节。
+    pub(crate) fn memory_lease_counts(&self) -> (u64, u64) {
+        (
+            self.active.load(Ordering::Acquire) as u64,
+            self.max_active as u64,
+        )
+    }
+
     pub fn root(&self) -> &Path {
         self.root.as_path()
     }
@@ -1582,10 +1590,12 @@ mod tests {
     async fn leases_bound_connections_and_shutdown_waits_for_release() {
         let root = test_root("leases");
         let store = Arc::new(DetailShardStore::new(root.clone(), Vec::new(), 1).unwrap());
+        assert_eq!(store.memory_lease_counts(), (0, 1));
         let first = store.acquire_write(20_704, deadline()).await.unwrap();
         assert_eq!(first.day_utc(), 20_704);
         assert!(first.path().ends_with("2026-09-08.sqlite3"));
         assert_eq!(store.active_connections(), 1);
+        assert_eq!(store.memory_lease_counts(), (1, 1));
 
         let next_store = Arc::clone(&store);
         let next = tokio::spawn(async move { next_store.acquire_write(20_705, deadline()).await });
@@ -1603,6 +1613,7 @@ mod tests {
         second.close(deadline()).await.unwrap();
         shutdown.await.unwrap().unwrap();
         assert_eq!(store.active_connections(), 0);
+        assert_eq!(store.memory_lease_counts(), (0, 1));
         assert!(store.acquire_write(20_706, deadline()).await.is_err());
         std::fs::remove_dir_all(root).unwrap();
     }

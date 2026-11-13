@@ -275,6 +275,11 @@ impl PolicyDnsCore {
         Arc::new(self.policy.load().index.clone())
     }
 
+    /// 在同一份当前 policy 状态上捕获只读句柄，释放 guard 后再由管理面分析。
+    pub(crate) fn rule_memory_roots(&self) -> Vec<crate::resource::RuleMemoryRoot> {
+        self.policy.load().index.rule_memory_roots()
+    }
+
     pub fn host_resource_count(&self) -> usize {
         self.policy.load().index.host_resource_count()
     }

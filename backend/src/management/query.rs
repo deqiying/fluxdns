@@ -35,6 +35,7 @@ pub(crate) struct ManagementQueryService {
     metrics: Arc<MetricsOwner>,
     retention: Arc<RetentionCoordinator>,
     detail_store: Arc<crate::storage::DetailShardStore>,
+    memory: super::memory::MemoryCollector,
 }
 
 /// 历史查询共享同一保留水位 owner 与日分片读口，避免两者被独立接线。
@@ -66,6 +67,7 @@ impl ManagementQueryService {
             metrics,
             retention: history.retention,
             detail_store: history.detail_store,
+            memory: super::memory::MemoryCollector::default(),
         }
     }
 
@@ -208,6 +210,8 @@ pub(crate) fn routes() -> Router<Arc<AuthServices>> {
     Router::new()
         .route("/api/v2/service/metrics", get(get_service_metrics))
         .route("/api/v2/system/runtime", get(get_process_metrics))
+        .route("/api/v2/system/memory", get(get_memory_analysis))
+        .route("/api/v2/system/memory/snapshot", post(post_memory_snapshot))
         .route("/api/v2/config/state", get(get_config_state))
         .route("/api/v2/config/system", get(get_system_config))
         .route("/api/v2/config/modules/{module}", get(get_config_module))
@@ -238,6 +242,42 @@ async fn get_process_metrics(
         return internal_error(&request_id);
     };
     Json(queries.process_metrics()).into_response()
+}
+
+async fn get_memory_analysis(
+    State(services): State<Arc<AuthServices>>,
+    Extension(request_id): Extension<RequestId>,
+) -> Response {
+    let Some(queries) = &services.queries else {
+        return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
+    };
+    Json(queries.memory.read(&queries.metrics)).into_response()
+}
+
+async fn post_memory_snapshot(
+    State(services): State<Arc<AuthServices>>,
+    Extension(request_id): Extension<RequestId>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if let Some(response) =
+        super::router::validate_v2_mutating_request(&headers, &services.public_origin, &request_id)
+    {
+        return response;
+    }
+    let Some(queries) = &services.queries else {
+        return v2_error_response(ErrorCode::ServiceUnavailable, &request_id);
+    };
+    v2_result(
+        queries
+            .memory
+            .collect(
+                Arc::clone(&queries.coordinator),
+                Arc::clone(&queries.metrics),
+                services.events.clone(),
+            )
+            .await,
+        &request_id,
+    )
 }
 
 async fn get_config_state(
@@ -635,6 +675,76 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn memory_analysis_is_authenticated_read_only_and_retains_previous_snapshot() {
+        let (services, root) = test_services().await;
+        let issued = services.sessions.issue("admin".to_owned()).unwrap();
+        let auth = format!("Bearer {}", issued.view.access_token);
+        let app = build_router(Arc::clone(&services));
+        let response = app
+            .clone()
+            .oneshot(get("/api/v2/system/memory", None))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(get("/api/v2/system/memory", Some(&auth)))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let initial: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                .unwrap();
+        let forbidden = Request::builder()
+            .method("POST")
+            .uri("/api/v2/system/memory/snapshot")
+            .header(AUTHORIZATION, &auth)
+            .header("origin", "https://cross-origin.test")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(forbidden).await.unwrap().status(),
+            StatusCode::FORBIDDEN
+        );
+        assert!(initial["snapshot"].is_null());
+        for id in ["1", "2"] {
+            let request = Request::builder()
+                .method("POST")
+                .uri("/api/v2/system/memory/snapshot")
+                .header(AUTHORIZATION, &auth)
+                .header("origin", "http://127.0.0.1:8080")
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            let body: serde_json::Value =
+                serde_json::from_slice(&to_bytes(response.into_body(), 1024 * 1024).await.unwrap())
+                    .unwrap();
+            assert_eq!(body["snapshot"]["snapshot_id"], id);
+            assert_eq!(body["snapshot"]["runtime_revision"], "7");
+            assert_eq!(body["snapshot"]["modules"].as_array().unwrap().len(), 6);
+            assert!(body["snapshot"]["modules"][5]["estimated_bytes"].is_null());
+            if id == "2" {
+                assert_eq!(body["previous_snapshot"]["snapshot_id"], "1");
+            }
+        }
+        assert_eq!(
+            services
+                .queries
+                .as_ref()
+                .unwrap()
+                .coordinator
+                .load()
+                .revision()
+                .0,
+            7
+        );
+        services.sessions.revoke_all();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
     async fn authenticated_router_serves_all_read_only_contracts() {
         let (services, root) = test_services().await;
         let issued = services.sessions.issue("admin".to_owned()).unwrap();
@@ -643,6 +753,7 @@ pub(crate) mod tests {
         let paths = [
             "/api/v2/service/metrics",
             "/api/v2/system/runtime",
+            "/api/v2/system/memory",
             "/api/v2/config/state",
             "/api/v2/config/system",
             "/api/v2/config/modules/listener",

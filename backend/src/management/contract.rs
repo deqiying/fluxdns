@@ -11,6 +11,9 @@ use crate::config::model::{
     HostsResourceDto, ListenerDto, LogsDto, OutboundDto, RuleSetDto, StrategyDto, UpstreamDto,
 };
 
+mod memory;
+pub use memory::*;
+
 pub const API_PREFIX: &str = "/api/v2";
 pub const MAX_MUTATION_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_EXTERNAL_DIFF_BYTES: usize = 2 * 1024 * 1024;

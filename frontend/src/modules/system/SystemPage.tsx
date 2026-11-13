@@ -17,6 +17,7 @@ import {
 } from "@/shared/formatters";
 import { useDisplayedUptime, useProcessMetrics, useServiceMetrics, useSystemConfig } from "./hooks";
 import { useServerTimeZone } from "@/shared/time/TimeZoneContext";
+import { MemoryAnalysisCard } from "./MemoryAnalysisCard";
 
 type Schemas = components["schemas"];
 type Unavailable = Schemas["Unavailable"];
@@ -222,6 +223,8 @@ export function SystemPage() {
               <InfoCell label="采样来源" value="主实例进程" />
             </div>
           </section>
+
+          <MemoryAnalysisCard processId={metrics.host.process_id} startedAtMs={metrics.started_at_ms} />
 
           <div className="system-detail-grid">
             <section className="system-detail-card" aria-labelledby="system-runtime-host-title">

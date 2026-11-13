@@ -179,6 +179,18 @@ pub(super) struct EventHub {
 }
 
 impl EventHub {
+    /// 只读当前持有账目，不 prune；字节数是 replay 计费而非分配器实测。
+    pub(super) fn memory_counts(&self) -> Option<(u64, u64, u64, u64)> {
+        let replay = self.replay.try_lock().ok()?;
+        let counts = (
+            replay.records as u64,
+            replay.entries.len() as u64,
+            replay.bytes as u64,
+        );
+        drop(replay);
+        let connections = self.connections.try_lock().ok()?;
+        Some((counts.0, counts.1, counts.2, connections.total as u64))
+    }
     pub(super) fn new(
         sessions: Arc<SessionStore>,
         metrics: Arc<MetricsOwner>,

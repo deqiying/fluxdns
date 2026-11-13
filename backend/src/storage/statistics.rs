@@ -301,6 +301,16 @@ impl StatsAccumulator {
         }
     }
 
+    /// 只尝试读取当前 epoch 的事件条数；竞争或锁中毒时不等待、不交换 epoch。
+    pub(crate) fn try_active_event_count(&self) -> Option<u64> {
+        let active = self.active.try_read().ok()?;
+        let mut count = 0u64;
+        for shard in &active.shards {
+            count = count.saturating_add(shard.try_lock().ok()?.events.len() as u64);
+        }
+        Some(count)
+    }
+
     pub fn active_event_count(&self) -> u64 {
         let active = self.active.read().expect("stats active lock poisoned");
         epoch_event_count(&active)
@@ -370,6 +380,21 @@ mod tests {
     use crate::ports::storage::StatsSource;
 
     use super::*;
+
+    #[test]
+    fn memory_active_count_never_waits_for_epoch_or_shard() {
+        let accumulator = StatsAccumulator::new(1).unwrap();
+        assert_eq!(accumulator.try_active_event_count(), Some(0));
+        let epoch = accumulator.active.write().unwrap();
+        assert!(accumulator.try_active_event_count().is_none());
+        drop(epoch);
+        let epoch = accumulator.active.read().unwrap();
+        let shard = epoch.shards[0].lock().unwrap();
+        assert!(accumulator.try_active_event_count().is_none());
+        drop(shard);
+        drop(epoch);
+        assert_eq!(accumulator.try_active_event_count(), Some(0));
+    }
 
     #[test]
     fn day_utc_handles_epoch_and_cross_midnight() {

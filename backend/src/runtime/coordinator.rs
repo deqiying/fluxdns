@@ -78,6 +78,15 @@ impl ActiveRuntime {
         self.snapshot().policy_core_arc()
     }
 
+    /// 捕获各持有方的真实规则 Arc；不保证跨 worker/policy 的原子视图，不执行分析。
+    pub(crate) fn rule_memory_roots(&self) -> Vec<crate::resource::RuleMemoryRoot> {
+        let mut roots = self.prepared.rule_memory_roots();
+        if let Some(core) = self.snapshot().policy_core() {
+            roots.extend(core.rule_memory_roots());
+        }
+        roots
+    }
+
     pub fn resource_worker_ids(&self) -> Vec<ConfigId> {
         self.prepared.resource_worker_ids()
     }

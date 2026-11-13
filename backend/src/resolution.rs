@@ -1,7 +1,7 @@
 //! 进程级 DNS 解析完成事件 dispatcher 与异步消费者。
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::mpsc;
@@ -56,9 +56,61 @@ pub struct ResolutionPipelineMetrics {
     detail_accepted: AtomicU64,
     detail_dropped: AtomicU64,
     detail_failed: AtomicU64,
+    queue_probes: RwLock<Option<ResolutionQueueProbes>>,
+}
+
+/// WeakSender 不延长生产队列生命周期；只在 runtime 初始化时注册。
+#[derive(Debug)]
+struct ResolutionQueueProbes {
+    ingress: mpsc::WeakSender<ResolutionEnvelope>,
+    cache: mpsc::WeakSender<crate::cache::CacheCommitCandidate>,
+    detail: Option<mpsc::WeakSender<Arc<ResolutionEvent>>>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(crate) struct ResolutionQueueMemoryCounts {
+    pub ingress: Option<u64>,
+    pub cache: Option<u64>,
+    pub detail: Option<u64>,
+}
+
+/// capacity 差值包含已 reserve 的 permit；已关闭或失效的队列不补零。
+fn queue_memory_count<T>(probe: &mpsc::WeakSender<T>) -> Option<u64> {
+    let sender = probe.upgrade()?;
+    (!sender.is_closed()).then(|| (sender.max_capacity() - sender.capacity()) as u64)
 }
 
 impl ResolutionPipelineMetrics {
+    /// 非阻塞采集当前队列占用；未启动返回空值，锁忙返回 None。
+    pub(crate) fn try_memory_counts(&self) -> Option<ResolutionQueueMemoryCounts> {
+        let probes = self.queue_probes.try_read().ok()?;
+        let Some(probes) = probes.as_ref() else {
+            return Some(ResolutionQueueMemoryCounts::default());
+        };
+        Some(ResolutionQueueMemoryCounts {
+            ingress: queue_memory_count(&probes.ingress),
+            cache: queue_memory_count(&probes.cache),
+            detail: probes.detail.as_ref().and_then(queue_memory_count),
+        })
+    }
+
+    /// 只在 owner 初始化时登记真实 sender，采集路径不注册、不创建新队列。
+    fn register_queue_probes(
+        &self,
+        ingress: &mpsc::Sender<ResolutionEnvelope>,
+        cache: &mpsc::Sender<crate::cache::CacheCommitCandidate>,
+        detail: Option<&mpsc::Sender<Arc<ResolutionEvent>>>,
+    ) {
+        *self
+            .queue_probes
+            .write()
+            .expect("resolution queue probes lock poisoned") = Some(ResolutionQueueProbes {
+            ingress: ingress.downgrade(),
+            cache: cache.downgrade(),
+            detail: detail.map(mpsc::Sender::downgrade),
+        });
+    }
+
     pub fn snapshot(&self) -> ResolutionPipelineSnapshot {
         let gap = self.gap_started_at_utc_millis.load(Ordering::Relaxed);
         ResolutionPipelineSnapshot {
@@ -187,6 +239,7 @@ impl ResolutionRuntime {
         let (cache_tx, cache_rx) = mpsc::channel(DEFAULT_CACHE_COMMIT_QUEUE_CAPACITY);
         let detail_enabled = detail_writer.is_some();
         let (detail_tx, detail_rx) = mpsc::channel(DEFAULT_DETAIL_PROJECTION_QUEUE_CAPACITY);
+        metrics.register_queue_probes(&ingress_tx, &cache_tx, detail_enabled.then_some(&detail_tx));
         let cancellation = Cancellation::new();
         let publisher = Arc::new(ResolutionPublisher {
             sender: ingress_tx,
@@ -485,6 +538,38 @@ mod tests {
     };
 
     use super::{ResolutionPipelineMetrics, ResolutionPublisher};
+
+    #[tokio::test]
+    async fn memory_queue_probes_track_occupancy_without_owning_senders() {
+        let metrics = ResolutionPipelineMetrics::default();
+        assert_eq!(
+            metrics.try_memory_counts().unwrap(),
+            super::ResolutionQueueMemoryCounts::default()
+        );
+        let (ingress, mut ingress_rx) = mpsc::channel(4);
+        let (cache, _cache_rx) = mpsc::channel(4);
+        let (detail, mut detail_rx) = mpsc::channel(4);
+        metrics.register_queue_probes(&ingress, &cache, Some(&detail));
+        let permit = ingress.reserve().await.unwrap();
+        detail.try_send(event()).unwrap();
+        let counts = metrics.try_memory_counts().unwrap();
+        assert_eq!(counts.ingress, Some(1));
+        assert_eq!(counts.cache, Some(0));
+        assert_eq!(counts.detail, Some(1));
+        detail_rx.recv().await.unwrap();
+        drop(permit);
+        assert_eq!(metrics.try_memory_counts().unwrap().ingress, Some(0));
+        assert_eq!(metrics.try_memory_counts().unwrap().detail, Some(0));
+        ingress_rx.close();
+        assert_eq!(metrics.try_memory_counts().unwrap().ingress, None);
+        metrics.register_queue_probes(&ingress, &cache, None);
+        assert_eq!(metrics.try_memory_counts().unwrap().detail, None);
+        drop(cache);
+        assert_eq!(metrics.try_memory_counts().unwrap().cache, None);
+        let held = metrics.queue_probes.write().unwrap();
+        assert!(metrics.try_memory_counts().is_none());
+        drop(held);
+    }
 
     fn event() -> Arc<ResolutionEvent> {
         Arc::new(ResolutionEvent {

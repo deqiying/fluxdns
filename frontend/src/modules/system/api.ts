@@ -37,3 +37,16 @@ export function getServiceMetrics(signal?: AbortSignal): Promise<ServiceMetrics>
 export function getSystemConfig(signal?: AbortSignal): Promise<SystemConfigRead> {
   return apiV2Request<SystemConfigRead>("/config/system", { signal });
 }
+
+export type MemoryAnalysis = Schemas["MemoryAnalysis"];
+export const memoryAnalysisKey = ["api", "v2", "system", "memory"] as const;
+
+/** GET 只读取 OS 样本与已存在的模块快照，不触发模块扫描。 */
+export function getMemoryAnalysis(signal?: AbortSignal): Promise<MemoryAnalysis> {
+  return apiV2Request<MemoryAnalysis>("/system/memory", { signal });
+}
+
+/** 手动采集只提交一次；超时或取消只结束前端等待，不保证服务端停止采集。 */
+export function collectMemorySnapshot(signal: AbortSignal): Promise<MemoryAnalysis> {
+  return apiV2Request<MemoryAnalysis>("/system/memory/snapshot", { method: "POST", signal });
+}

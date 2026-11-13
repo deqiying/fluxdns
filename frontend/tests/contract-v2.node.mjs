@@ -40,6 +40,20 @@ test("运行时展示时区必填，UTC 降级原因使用安全枚举且不改�
   assert.equal(validator({...fixtures.runtime, started_at_ms: "2026-11-11T00:00:00+08:00"}), false);
 });
 
+test("内存分析区分 OS 实测、已知载荷和计费权重，未采集不填零", () => {
+  const memory = JSON.parse(readFileSync(new URL("../../backend/tests/fixtures/memory-analysis-v2.json", import.meta.url), "utf8"));
+  validate("MemoryAnalysis", memory);
+  validate("MemoryAnalysis", {...memory, snapshot: null, previous_snapshot: null, collection_state: "collecting"});
+  validate("MemoryAnalysis", {...memory, collection_state: "failed", last_failure: "timeout"});
+  const check = ajv.getSchema("fluxdns-v2#/$defs/MemoryAnalysis");
+  assert.equal(check({...memory, trend: Array(122).fill(memory.os)}), false);
+  assert.equal(check({...memory, os: {...memory.os, rss_bytes: {state: "available", value: 1024}}}), false);
+  assert.equal(check({...memory, last_failure: "raw-private-error"}), false);
+  assert.equal(memory.snapshot.modules.find(module => module.id === "allocator").estimated_bytes, null);
+  assert.equal(memory.snapshot.modules.find(module => module.id === "dns_cache").estimated_bytes, null);
+  assert.equal(memory.snapshot.modules.find(module => module.id === "dns_cache").counters[1].kind, "billing_bytes");
+});
+
 test("schema 拒绝只读字段、非法身份、旧字段和类型残留", () => {
   const candidateValidator = ajv.getSchema("fluxdns-v2#/$defs/Candidate");
   const invalidChanges = [
@@ -85,6 +99,8 @@ test("全部 schema 可编译，v2 不声明角色/通用 YAML/顶层删除接�
     "previewRetention",
     "getServiceMetrics",
     "getProcessMetrics",
+    "getMemoryAnalysis",
+    "collectMemorySnapshot",
     "searchQueries",
     "getQueryDetail",
     "issueWebSocketTicket",

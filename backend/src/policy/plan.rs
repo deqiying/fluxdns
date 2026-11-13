@@ -343,6 +343,18 @@ impl PolicyIndex {
         )
     }
 
+    /// 只复制当前索引 Arc 句柄，不深拷贝规则，不改变刷新时的 clone 语义。
+    pub(crate) fn rule_memory_roots(&self) -> Vec<crate::resource::RuleMemoryRoot> {
+        self.rule_sets
+            .iter()
+            .map(|(resource, index)| crate::resource::RuleMemoryRoot {
+                resource: resource.to_string(),
+                holder: crate::resource::RuleMemoryHolder::Policy,
+                index: Arc::clone(index),
+            })
+            .collect()
+    }
+
     pub(crate) fn host_resource_count(&self) -> usize {
         self.hosts.len()
     }

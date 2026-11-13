@@ -29,6 +29,8 @@ x-implemented-operations:
   - previewRetention
   - getServiceMetrics
   - getProcessMetrics
+  - getMemoryAnalysis
+  - collectMemorySnapshot
   - searchQueries
   - getQueryDetail
   - issueWebSocketTicket
@@ -360,6 +362,24 @@ paths:
         "200":
           description: 与服务指标共享采样口径的进程状态
           content: {application/json: {schema: {$ref: "#/components/schemas/ProcessMetrics"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /system/memory:
+    get:
+      operationId: getMemoryAnalysis
+      description: 只读最近 OS 样本、最近完整分析和最多一小时的有界真实样本，不遍历规则。
+      responses:
+        "200":
+          description: 未采集的模块为 null；估算、计费权重与 RSS 不可加和
+          content: {application/json: {schema: {$ref: "#/components/schemas/MemoryAnalysis"}}}
+        default: {$ref: "#/components/responses/Error"}
+  /system/memory/snapshot:
+    post:
+      operationId: collectMemorySnapshot
+      description: 只读完整分析，单槽位、2 秒预算；忙返回 429，超时返回 408。超时或取消后不发布结果；不触发配置变更、缓存维护或回收。
+      responses:
+        "200":
+          description: 完成的分析及同进程上一份快照；各 owner 读取不是跨模块原子事务
+          content: {application/json: {schema: {$ref: "#/components/schemas/MemoryAnalysis"}}}
         default: {$ref: "#/components/responses/Error"}
   /events/ticket:
     post:
@@ -1570,6 +1590,76 @@ components:
         cpu_percent: {$ref: "#/components/schemas/NumberMeasurement"}
         threads: {$ref: "#/components/schemas/CountMeasurement"}
         host: {$ref: "#/components/schemas/HostEnvironment"}
+    MemoryOsSample:
+      type: object
+      additionalProperties: false
+      description: 同一采样轮次而非原子快照。Linux status 与 smaps_rollup 分别读取；不修正不一致分项。
+      required: [sampled_at_ms, rss_bytes, peak_rss_bytes, anonymous_bytes, file_bytes, shared_bytes, pss_bytes, private_dirty_bytes, swap_bytes]
+      properties:
+        sampled_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+        rss_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        peak_rss_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        anonymous_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        file_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        shared_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        pss_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        private_dirty_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+        swap_bytes: {$ref: "#/components/schemas/BytesMeasurement"}
+    MemoryCounter:
+      type: object
+      additionalProperties: false
+      required: [key, value, kind]
+      properties:
+        key: {type: string, maxLength: 64}
+        value: {$ref: "#/components/schemas/DecimalU64"}
+        kind: {type: string, enum: [count, billing_bytes, budget_bytes]}
+    MemoryRuleRow:
+      type: object
+      additionalProperties: false
+      description: 实际持有的唯一索引；共享对象去重，地址仅内部使用。行估算只覆盖已知载荷，非完整堆占用。
+      required: [resource, selector, rule_count, estimated_bytes, holders, retained]
+      properties:
+        resource: {$ref: "#/components/schemas/Name"}
+        selector: {type: [string, "null"], maxLength: 128}
+        rule_count: {$ref: "#/components/schemas/DecimalU64"}
+        estimated_bytes: {$ref: "#/components/schemas/DecimalU64"}
+        holders: {type: array, maxItems: 3, uniqueItems: true, items: {type: string, enum: [initial, worker, policy]}}
+        retained: {type: boolean, description: 仅初始快照持有且不在 worker/Policy 当前索引中的对象，不凭 revision 猜测}
+    MemoryModule:
+      type: object
+      additionalProperties: false
+      required: [id, state, estimated_bytes, estimate_version, counters, rules]
+      properties:
+        id: {type: string, enum: [rules, dns_cache, details_ws, statistics_queues, sqlite, allocator]}
+        state: {type: string, enum: [available, not_collected, busy]}
+        estimated_bytes: {oneOf: [{$ref: "#/components/schemas/DecimalU64"}, {type: "null"}], description: 不具备可靠字节估算时为 null；运行时计数仍可用}
+        estimate_version: {type: [string, "null"], maxLength: 64}
+        counters: {type: array, maxItems: 32, items: {$ref: "#/components/schemas/MemoryCounter"}}
+        rules: {type: array, maxItems: 4096, items: {$ref: "#/components/schemas/MemoryRuleRow"}}
+    MemorySnapshot:
+      type: object
+      additionalProperties: false
+      required: [snapshot_id, sampled_at_ms, runtime_revision, modules]
+      properties:
+        snapshot_id: {$ref: "#/components/schemas/DecimalU64"}
+        sampled_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+        runtime_revision: {$ref: "#/components/schemas/DecimalU64"}
+        modules: {type: array, maxItems: 6, items: {$ref: "#/components/schemas/MemoryModule"}}
+    MemoryAnalysis:
+      type: object
+      additionalProperties: false
+      required: [process_id, started_at_ms, sample_interval_seconds, gap_after_seconds, os, trend, snapshot, previous_snapshot, collection_state, last_failure]
+      properties:
+        process_id: {type: integer, minimum: 1, maximum: 4294967295}
+        started_at_ms: {$ref: "#/components/schemas/SafeInteger"}
+        sample_interval_seconds: {type: integer, const: 30}
+        gap_after_seconds: {type: integer, const: 75}
+        os: {$ref: "#/components/schemas/MemoryOsSample"}
+        trend: {type: array, maxItems: 121, items: {$ref: "#/components/schemas/MemoryOsSample"}}
+        snapshot: {oneOf: [{$ref: "#/components/schemas/MemorySnapshot"}, {type: "null"}]}
+        previous_snapshot: {oneOf: [{$ref: "#/components/schemas/MemorySnapshot"}, {type: "null"}]}
+        collection_state: {type: string, enum: [idle, collecting, failed]}
+        last_failure: {type: [string, "null"], enum: [timeout, sampling_failed, runtime_changed, null]}
     WebSocketTicket:
       type: object
       additionalProperties: false

@@ -174,6 +174,15 @@ impl MokaCacheStore {
         self.max_weight
     }
 
+    /// 诊断只读近似计数，不运行维护任务或改变缓存可见性。
+    pub(crate) fn memory_counts(&self) -> (u64, u64, Option<u64>) {
+        (
+            self.cache.entry_count(),
+            self.cache.weighted_size(),
+            self.max_weight,
+        )
+    }
+
     fn with_limit(max_weight: Option<u64>) -> Self {
         let eviction_count = Arc::new(AtomicU64::new(0));
         let eviction_count_for_listener = Arc::clone(&eviction_count);

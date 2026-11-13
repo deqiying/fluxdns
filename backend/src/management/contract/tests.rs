@@ -20,6 +20,11 @@ fn shared_http_and_ws_fixtures_round_trip_without_precision_loss() {
     round_trip::<QueryRecord>(&fixtures["record"]);
     round_trip::<ServiceMetrics>(&fixtures["metrics"]);
     round_trip::<ProcessMetrics>(&fixtures["runtime"]);
+    let memory: Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/memory-analysis-v2.json"
+    ))
+    .unwrap();
+    round_trip::<MemoryAnalysis>(&memory);
     round_trip::<WebSocketTicket>(&fixtures["websocket_ticket"]);
     round_trip::<ConfigRead>(&fixtures["config_read"]);
     round_trip::<ExternalDiff>(&fixtures["external_diff"]);

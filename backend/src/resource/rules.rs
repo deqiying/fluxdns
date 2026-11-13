@@ -241,6 +241,56 @@ impl fmt::Debug for RuleIndex {
 }
 
 impl RuleIndex {
+    /// rule-payload-v1 只计可证明的载荷；子索引由调用方按 Arc identity 单独计数。
+    /// 不估计 BTree 节点布局、空槽、Arc 控制块或 allocator 元数据，也不代表 RSS。
+    pub(crate) fn memory_payload(
+        &self,
+        budget: &mut super::rule_memory::MemoryBudget,
+    ) -> Result<u64, super::rule_memory::RuleMemoryError> {
+        let mut bytes = 0;
+        budget.add_array::<Self>(&mut bytes, 1)?;
+        for domain in self.exact.iter().chain(&self.suffix) {
+            budget.step()?;
+            budget.add_array::<CanonicalDomain>(&mut bytes, 1)?;
+            budget.add_array::<u8>(&mut bytes, domain.string_capacity())?;
+        }
+        for keyword in &self.keywords {
+            budget.step()?;
+            budget.add_array::<String>(&mut bytes, 1)?;
+            budget.add_array::<u8>(&mut bytes, keyword.capacity())?;
+        }
+        budget.add_array::<CompiledRegex>(&mut bytes, self.regex.capacity())?;
+        for regex in &self.regex {
+            budget.step()?;
+            budget.add_array::<RegexToken>(&mut bytes, regex.tokens.capacity())?;
+            for token in &regex.tokens {
+                budget.step()?;
+                if let RegexAtom::Class { ranges, .. } = &token.atom {
+                    budget.add_array::<(char, char)>(&mut bytes, ranges.capacity())?;
+                }
+            }
+        }
+        for selector in self.selectors.keys() {
+            budget.step()?;
+            budget.add_array::<(String, Arc<RuleIndex>)>(&mut bytes, 1)?;
+            budget.add_array::<u8>(&mut bytes, selector.capacity())?;
+        }
+        Ok(bytes)
+    }
+
+    pub(crate) fn memory_children(&self) -> impl Iterator<Item = (&String, &Arc<RuleIndex>)> {
+        self.selectors.iter()
+    }
+
+    /// DAT 顶层只持有 selector map，聚合 rule_count 不应在报告中重复计入子索引规则。
+    pub(crate) fn memory_rule_count(&self) -> usize {
+        if self.selector_map {
+            0
+        } else {
+            self.rule_count
+        }
+    }
+
     pub fn parse(input: &str, format: RuleSetFormat) -> Result<Self, RuleParseError> {
         Self::parse_with_limits(input, format, RuleLimits::default())
     }

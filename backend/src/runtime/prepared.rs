@@ -267,6 +267,30 @@ impl PreparedRuntime {
         &self.resource_snapshots
     }
 
+    /// 仅捕获 initial 与 worker 当前 Arc；worker 内部短锁只用于获取快照。
+    /// 深度遍历交给管理面在所有句柄获取完成后执行，不读取资源文件。
+    pub(crate) fn rule_memory_roots(&self) -> Vec<crate::resource::RuleMemoryRoot> {
+        use crate::resource::{RuleMemoryHolder, RuleMemoryRoot};
+        let mut roots = Vec::new();
+        for (resource, snapshot) in &self.resource_snapshots {
+            roots.push(RuleMemoryRoot {
+                resource: resource.to_string(),
+                holder: RuleMemoryHolder::Initial,
+                index: snapshot.compiled_arc(),
+            });
+        }
+        for (resource, worker) in &self.resource_workers {
+            if let Some(snapshot) = worker.current_rule_snapshot() {
+                roots.push(RuleMemoryRoot {
+                    resource: resource.to_string(),
+                    holder: RuleMemoryHolder::Worker,
+                    index: snapshot.compiled_arc(),
+                });
+            }
+        }
+        roots
+    }
+
     pub fn host_resource_snapshots(&self) -> &BTreeMap<ConfigId, ResourceSnapshot<HostsIndex>> {
         &self.host_resource_snapshots
     }

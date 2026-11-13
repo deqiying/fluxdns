@@ -45,6 +45,11 @@ impl CanonicalDomain {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// 返回已分配的字符串容量，供只读载荷估算使用，不包含 allocator 元数据。
+    pub(crate) fn string_capacity(&self) -> usize {
+        self.0.capacity()
+    }
 }
 
 impl AsRef<str> for CanonicalDomain {

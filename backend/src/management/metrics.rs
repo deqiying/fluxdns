@@ -2,15 +2,18 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
 
+use super::contract::MemoryOsSample;
 use super::contract::{
     DecimalU64, HostEnvironment, MAX_ONLINE_IDENTITIES, Measurement, ProcessMetrics, RateSample,
     ServiceMetrics, ServiceMetricsDelta, UnavailableReason,
 };
+use super::memory_os::MemoryHistory;
+use super::memory_sources::MemoryRuntimeSources;
 use crate::dns::{Cancellation, ClientIdentity};
 use crate::runtime::TaskError;
 
@@ -117,6 +120,8 @@ pub(crate) struct MetricsOwner {
     host: HostEnvironment,
     requests: Mutex<RequestState>,
     process: RwLock<ProcessSnapshot>,
+    memory_history: Mutex<MemoryHistory>,
+    memory_sources: OnceLock<Arc<MemoryRuntimeSources>>,
 }
 
 impl MetricsOwner {
@@ -138,7 +143,32 @@ impl MetricsOwner {
                 unix_millis(started_at),
                 started_instant,
             )),
+            memory_history: Mutex::new(MemoryHistory::new(unix_millis(started_at))),
+            memory_sources: OnceLock::new(),
         }
+    }
+
+    /// 只连接正式进程级 owner；不会因页面查询创建新的统计/队列实例。
+    pub(crate) fn attach_memory_sources(&self, sources: Arc<MemoryRuntimeSources>) {
+        assert!(
+            self.memory_sources.set(sources).is_ok(),
+            "memory sources already attached"
+        );
+    }
+
+    pub(super) fn memory_sources(&self) -> Option<Arc<MemoryRuntimeSources>> {
+        self.memory_sources.get().cloned()
+    }
+
+    pub(super) fn memory_samples(&self) -> (MemoryOsSample, Vec<MemoryOsSample>) {
+        self.memory_history
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .read(Instant::now())
+    }
+
+    pub(super) fn process_identity(&self) -> (u32, u64) {
+        (self.host.process_id, unix_millis(self.started_at))
     }
 
     /// 在 transport 已完成基础校验且 Runtime 接纳请求后计数；不保存原始身份。
@@ -332,7 +362,22 @@ impl MetricsOwner {
     ) -> Result<(), TaskError> {
         let mut sampler = platform::ProcessSampler::default();
         loop {
-            self.publish_process_sample(SystemTime::now(), Instant::now(), sampler.sample());
+            let at = SystemTime::now();
+            let now = Instant::now();
+            let sample = sampler.sample();
+            self.publish_process_sample(at, now, sample);
+            let memory_due = self
+                .memory_history
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .due(now);
+            if memory_due {
+                let memory = sampler.memory_sample(unix_millis(at), sample.rss_bytes);
+                self.memory_history
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(now, memory);
+            }
             tokio::select! {
                 _ = cancellation.cancelled() => return Err(TaskError::Cancelled),
                 _ = tokio::time::sleep(PROCESS_SAMPLE_INTERVAL) => {}
@@ -398,6 +443,13 @@ struct ProcessSample {
     rss_bytes: SampleValue<u64>,
     cpu_percent: SampleValue<f64>,
     threads: SampleValue<u32>,
+}
+
+#[cfg(not(target_os = "linux"))]
+fn portable_memory_sample(at_ms: u64, rss: SampleValue<u64>) -> MemoryOsSample {
+    let mut sample = MemoryOsSample::unavailable(at_ms, UnavailableReason::Unsupported);
+    sample.rss_bytes = map_measurement(rss, 0).map(DecimalU64::from);
+    sample
 }
 
 fn count_window(state: &RequestState, now: u64, window_seconds: u64) -> u64 {
@@ -736,6 +788,14 @@ mod platform {
             }
         }
 
+        pub(super) fn memory_sample(
+            &self,
+            at_ms: u64,
+            rss: SampleValue<u64>,
+        ) -> crate::management::contract::MemoryOsSample {
+            super::portable_memory_sample(at_ms, rss)
+        }
+
         fn sample_cpu(&mut self, process: *mut core::ffi::c_void) -> SampleValue<f64> {
             let mut creation = FILETIME::default();
             let mut exit = FILETIME::default();
@@ -903,6 +963,7 @@ mod platform {
     #[derive(Default)]
     pub(super) struct ProcessSampler {
         previous_cpu: Option<(Instant, u64, u64)>,
+        last_status: Option<String>,
     }
 
     impl ProcessSampler {
@@ -918,12 +979,26 @@ mod platform {
                 .and_then(|value| status_value(value, "Threads:"))
                 .and_then(|value| u32::try_from(value).ok())
                 .map_or(SampleValue::Failed, SampleValue::Available);
+            self.last_status = status;
             let cpu_percent = self.sample_cpu();
             ProcessSample {
                 rss_bytes,
                 cpu_percent,
                 threads,
             }
+        }
+
+        pub(super) fn memory_sample(
+            &self,
+            at_ms: u64,
+            _rss: SampleValue<u64>,
+        ) -> crate::management::contract::MemoryOsSample {
+            let rollup = crate::management::memory_os::read_rollup();
+            crate::management::memory_os::parse_linux(
+                at_ms,
+                self.last_status.as_deref(),
+                rollup.as_deref(),
+            )
         }
 
         fn sample_cpu(&mut self) -> SampleValue<f64> {
@@ -1019,6 +1094,14 @@ mod platform {
                 cpu_percent: SampleValue::Unsupported,
                 threads: SampleValue::Unsupported,
             }
+        }
+
+        pub(super) fn memory_sample(
+            &self,
+            at_ms: u64,
+            rss: SampleValue<u64>,
+        ) -> crate::management::contract::MemoryOsSample {
+            super::portable_memory_sample(at_ms, rss)
         }
     }
     /// macOS 等平台的产品名与构建号取自系统版本文件；文件缺失时对应字段保持 null。

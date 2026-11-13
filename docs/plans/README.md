@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | [Docker 镜像交付](docker-image.md) | 待验收 | 独立 workflow 响应 tag 推送，自行编译并推送 `linux/amd64` 镜像到 GHCR，不依赖 Release 流程；工作目录固定 `/etc/fluxdns`，附 `docker/` 部署示例、env 模板与镜像冒烟夹具 |
 | [负缓存新鲜度收敛](negative-cache-freshness.md) | 待验收 | REFUSED/空 Answer 已调整为固定 10s 且不乐观续用，客户端 TTL 同步；非空 NXDOMAIN 保留原策略。代码与受控测试已更新，剩余按新口径执行本地可控上游运行验收及写入/刷新观测 |
+| [系统运行状态页内存分析](runtime-memory-analysis.md) | 待验收 | 正式接线与前端检查已完成；Cargo 依赖阻塞，Rust 工程验证及 Linux proc/API/DNS 连续性仍待验收 |
 
 解析记录页面重设计与请求级 ECS 观测已按本轮工程交付范围完成，行为见[前端页面实现](../implementation/frontend/pages.md)，工程验证及用户取消运行时验收的边界见 [Management 实现](../implementation/backend/management.md#ecs-工程验证与边界)。
 

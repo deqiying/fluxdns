@@ -7,6 +7,7 @@ mod loader;
 mod orchestrator;
 mod refresh;
 mod remote;
+mod rule_memory;
 mod rules;
 mod scheduler;
 mod snapshot;
@@ -32,6 +33,7 @@ pub use remote::{
     LoadedRemoteRuleSet, RemoteResourceError, RemoteResourceManifest, RemoteResourceOptions,
     fetch_remote_rule_set, restore_remote_rule_set,
 };
+pub(crate) use rule_memory::{RuleMemoryHolder, RuleMemoryRoot, analyze_rule_memory};
 pub use rules::{DatSelection, RuleIndex, RuleLimits, RuleMatch, RuleParseError};
 pub use scheduler::{
     ResourceSchedule, ResourceScheduleDecision, ResourceSchedulePolicy, ResourceScheduleStopReason,

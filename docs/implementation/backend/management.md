@@ -23,6 +23,8 @@
 > 2026-11-11 时区别名回归增量核对：基线 `27b2290` 加工作树，范围限时区数据库名称可用性与显式 TZ 的成功/降级测试；不扩大历史平台或发布验收结论。
 >
 > 2026-11-12 OpenWrt 时区增量核对：基线 `df5ea79` 加工作树，仅 UCI 展示时区读取、内嵌规则兜底和启动降级告警；不扩大 retention 或 OpenWrt 实机验收结论。
+>
+> 2026-11-13 内存分析增量核对：基线 `ddbc49b` 加工作树，范围限 OS 内存历史、规则载荷分析、生产模块计数与新 API；工程和平台证据见下方内存分析小节，不扩大历史验收结论。
 
 ## 入口与生命周期
 
@@ -178,6 +180,27 @@ SessionStore 使用 30 天绝对/24 小时空闲期限、4096 全局/16 单用�
 Windows 使用 Bearer 子项当时的内嵌 binary、独立 `_fluxdns/p1-bearer-ui-20260908-0055/` 配置/SQLite 和 loopback 端口完成真实 HTTP 12 项检查：登录、Bearer session/overview、Cookie-only/凭据互换/非法 Bearer 拒绝、跨源刷新拒绝、刷新、当时尚未注册的 v2 返回 404、登出及两类凭据失效。浏览器 Network 已确认业务请求有 Authorization 且无 Cookie，刷新请求相反；还验证初始化、页面刷新恢复、重新登录和 Cookie 清除。该历史检查不覆盖随后新增的两个指标端点；HTTP 直连也不证明外部 HTTPS 代理，浏览器 WS 凭据传递留 BC-24 核定。
 
 本批最终回归：Management 39 项、Config 110 项、Cargo check、全部目标 no-run、fmt、前端 typecheck/schema 4 项/Vitest 9 文件 47 项/build 通过，当前及目标类型连续两次生成一致，文档检查与 diff 检查通过。Node/Vite 测试按已核实的沙盒 spawn 限制获准在沙盒外运行；未运行完整 Cargo suite、跨平台或性能验收，所有临时服务与运行数据均限定本次 `_fluxdns` 测试目录。
+
+## 系统运行状态内存分析
+
+[`query.rs`](../../../backend/src/management/query.rs) 注册 `GET /api/v2/system/memory` 与 `POST /api/v2/system/memory/snapshot`。GET 只投影现有 OS 历史和成功模块快照，不遍历规则；POST 通过 [`MemoryCollector`](../../../backend/src/management/memory.rs) 触发显式只读分析。两者使用既有 Bearer/no-store，POST 另校验 Origin/Fetch Metadata；不会进入 ConfigStore mutation，也不改变 runtime revision。字段权威仍为 [OpenAPI](../../../frontend/openapi/management-api-v2.yaml)。
+
+[`MetricsOwner`](../../../backend/src/management/metrics.rs) 保留原每秒 RSS/CPU/线程采样；Linux 复用该轮 `/proc/self/status`，每 30 秒再读取有 64 KiB 上限的 `smaps_rollup`。两份文件非原子，同轮不等于同一时刻。RSS/峰值、匿名/文件/共享、PSS/Private Dirty/Swap 各自独立降级；[`memory_os.rs`](../../../backend/src/management/memory_os.rs) 严格校验 `kB`、重复/缺失字段和溢出，不修正不一致分项。非 Linux 复用既有 RSS，其余分项明确 `unsupported`。历史最多一小时/121 份，超过 75 秒未刷新显示观测缺口，不补造样本。
+
+完整分析使用 `spawn_blocking`，单槽拒绝并发排队，遍历与可取消发布锁等待共用 2 秒 deadline。超时后 worker 仍持槽至真正结束，但无发布权限；只有存活的请求在 deadline 内、复核 runtime revision 后才能一次提交。失败保留最近成功结果及安全失败原因，不用部分结果替代成功；仅保留最近两份成功快照。响应在释放槽前固定，避免下一客户端的采集状态污染本次成功回执。
+
+| 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
+| --- | --- | --- | --- | --- |
+| OS 实测与历史 | `memory_os::parse_linux` / `MemoryHistory`、`MetricsOwner` | 原受监督进程采样任务；GET 读取历史 | parser/窗口/过期/重启隔离用例已编写；实际执行结果见本节验证记录 | Linux 实机 proc/API 对照尚待验收，不能以 Windows 或 fixture 代替 |
+| 规则已知载荷 | [`resource::analyze_rule_memory`](../../../backend/src/resource/rule_memory.rs)，经 prepared/coordinator 的只读 roots 取得 initial/worker/policy 索引 | POST blocking worker；真实 Arc identity 含 DAT 子索引去重 | 共享 Arc、真实 clone、已加载 selector、initial 独占保留、预算与溢出用例已编写 | 最多 4096 行/100 万访问；不重新解析文件，不证明完整进程引用关系 |
+| 模块计数 | [`memory_sources.rs`](../../../backend/src/management/memory_sources.rs)、Moka/EventHub/Stats/Resolution/DetailShard 只读 accessor | `app::run_command` 挂接生产 owner；EventHub 经 handler 传入，避免强引用环 | owner/锁竞争/弱队列探针用例已编写 | 竞争为 busy；禁用或已关闭队列省略，不用容量上限当占用 |
+| 采集安全与契约 | `MemoryCollector`、[`contract/memory.rs`](../../../backend/src/management/contract/memory.rs) | Bearer GET/同源 POST，不走配置操作 | 单槽/取消/超时/发布锁/成功回执、HTTP 与跨端 fixture 用例已编写 | 未完成执行的 Rust 检查不能视为通过；Linux DNS 并行负载验收待做 |
+
+`rule-payload-v1` 只累计已知对象、键、字符串和正则载荷容量；不包含 BTree 内部节点/空槽、allocator 元数据、Arc 控制块或解析工作区。行以稳定 resource/selector 归属并合并持有者；retained 只表示 initial 独占可达，不按 revision 推断副本。DNS 缓存提供真实条目/weight/预算，replay 提供记录/批次/计费字节/连接，统计提供活动/待提交和队列计数，SQLite 仅提供 active leases/lease budget。所有计费/预算均非堆内存；SQLite 和 allocator 字节仍未采集。
+
+本批不修复既有规则刷新深拷贝、初始快照持有或缓存权重算法，不触发 `run_pending_tasks`、清空、GC、规则重载或内存回收。采集不返回域名正文、凭据或对象地址。
+
+2026-11-13 工程验证（Windows，Rust 1.98.0，`ddbc49b` 加工作树）：`cargo fmt --check` 与 `git diff --check` 通过；在线 `cargo check --locked` 多次停在 crates.io 索引更新，离线 check、定向 `cargo test ... memory` 和严格 Clippy 均因缺少 `web-sys` 在依赖解析阶段失败，未进入编译。网络排查发现 Windows 吊销查询离线，单次进程选项调整未解除 Cargo 索引阻塞；未修改锁文件、依赖版本或全局配置。上表 Rust 用例只有源码证据，不是运行通过记录。Linux 实机 proc/API 数值及采集期间 DNS 连续性仍由[活动计划](../../plans/runtime-memory-analysis.md)跟踪；本轮前端证据见[系统页内存分析](../frontend/pages.md#系统页内存分析)。
 
 ## P1 服务与进程指标（2026-09-08）
 

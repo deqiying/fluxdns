@@ -112,6 +112,16 @@ impl StatsPersistenceWorker {
         self.accumulator.record(day_utc, dimensions)
     }
 
+    /// 内存探针只读 active/pending 计数，不触发 flush；锁忙时整组不可用。
+    pub(crate) fn try_memory_counts(&self) -> Option<(u64, u64, u64)> {
+        let ledger = self.ledger.try_lock().ok()?;
+        Some((
+            self.accumulator.try_active_event_count()?,
+            ledger.pending_count() as u64,
+            ledger.pending_event_count(),
+        ))
+    }
+
     pub fn pending_batch_count(&self) -> usize {
         self.ledger
             .lock()
@@ -295,6 +305,23 @@ mod tests {
 
     fn deadline() -> Deadline {
         Deadline::new(std::time::Instant::now() + Duration::from_secs(30))
+    }
+
+    #[test]
+    fn memory_counts_read_active_pending_and_report_contention() {
+        let worker =
+            StatsPersistenceWorker::new(std::sync::Arc::new(InMemoryStorageBackend::new()));
+        assert_eq!(worker.try_memory_counts(), Some((0, 0, 0)));
+        worker.record_request(20_260_905, Vec::new()).unwrap();
+        assert_eq!(worker.try_memory_counts(), Some((1, 0, 0)));
+        let snapshot = worker.accumulator.swap_epoch();
+        worker.ledger.lock().unwrap().enqueue(snapshot).unwrap();
+        worker.record_request(20_260_905, Vec::new()).unwrap();
+        assert_eq!(worker.try_memory_counts(), Some((1, 1, 1)));
+        let held = worker.ledger.lock().unwrap();
+        assert!(worker.try_memory_counts().is_none());
+        drop(held);
+        assert_eq!(worker.try_memory_counts(), Some((1, 1, 1)));
     }
 
     /// V4-S04：上一轮 flush 持锁时，新调用只能消耗自己的预算，不能提前交换 active epoch。

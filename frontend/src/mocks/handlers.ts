@@ -22,6 +22,9 @@ import {
   v2QueryPageFixture,
   v2QueryRecordsFixture,
 } from "./fixtures";
+import { memoryAnalysisFixture, memorySnapshotFixture } from "./memory-fixtures";
+
+let memoryAnalysis = structuredClone(memoryAnalysisFixture);
 
 let authenticated = false;
 let setupRequired = false;
@@ -65,6 +68,7 @@ export function resetMockState() {
   authenticated = false;
   setupRequired = false;
   authenticatedName = sessionFixture.user.name;
+  memoryAnalysis = structuredClone(memoryAnalysisFixture);
 }
 
 function unauthorized() {
@@ -134,6 +138,17 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 });
   }),
   http.get("/api/v2/system/runtime", readOnlyV2(processMetricsFixture)),
+  http.get("/api/v2/system/memory", ({ request }) => authorized(request) ? HttpResponse.json(memoryAnalysis) : unauthorized()),
+  http.post("/api/v2/system/memory/snapshot", ({ request }) => {
+    if (!authorized(request)) return unauthorized();
+    const previous = memoryAnalysis.snapshot;
+    memoryAnalysis = {
+      ...memoryAnalysis,
+      previous_snapshot: previous,
+      snapshot: { ...structuredClone(memorySnapshotFixture), snapshot_id: (BigInt(previous?.snapshot_id ?? "0") + 1n).toString() },
+    };
+    return HttpResponse.json(memoryAnalysis);
+  }),
   http.get("/api/v2/service/metrics", readOnlyV2(serviceMetricsFixture)),
   http.post("/api/v2/events/ticket", ({ request }) => authorized(request)
     ? HttpResponse.json({ ticket: "T".repeat(43), expires_at_ms: Date.now() + 30_000 }, { status: 201 })

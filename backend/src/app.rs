@@ -506,6 +506,13 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 .attach_cache_snapshot_owner(cache_snapshot_owner)
                 .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
             let metrics = Arc::new(crate::management::MetricsOwner::new());
+            metrics.attach_memory_sources(Arc::new(
+                crate::management::memory_sources::MemoryRuntimeSources::new(
+                    storage.stats_worker(),
+                    storage.resolution_metrics(),
+                    storage.detail_store(),
+                ),
+            ));
             let configuration_store = management_bootstrap
                 .as_ref()
                 .map(|(_, store)| Arc::clone(store));

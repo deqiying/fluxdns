@@ -1,0 +1,34 @@
+{
+  "process_id": 1,
+  "started_at_ms": 1805068800000,
+  "sample_interval_seconds": 30,
+  "gap_after_seconds": 75,
+  "os": {
+    "sampled_at_ms": 1805068830000,
+    "rss_bytes": {"state": "available", "value": "16777216"},
+    "peak_rss_bytes": {"state": "available", "value": "16777216"},
+    "anonymous_bytes": {"state": "available", "value": "12582912"},
+    "file_bytes": {"state": "available", "value": "4194304"},
+    "shared_bytes": {"state": "available", "value": "0"},
+    "pss_bytes": {"state": "available", "value": "15728640"},
+    "private_dirty_bytes": {"state": "available", "value": "12582912"},
+    "swap_bytes": {"state": "unavailable", "reason": "sampling_failed", "observed_seconds": null}
+  },
+  "trend": [],
+  "snapshot": {
+    "snapshot_id": "1",
+    "sampled_at_ms": 1805068831000,
+    "runtime_revision": "7",
+    "modules": [
+      {"id": "rules", "state": "available", "estimated_bytes": "512", "estimate_version": "rule-payload-v1", "counters": [{"key": "unique_indexes", "value": "1", "kind": "count"}, {"key": "retained_indexes", "value": "0", "kind": "count"}], "rules": [{"resource": "local", "selector": null, "rule_count": "2", "estimated_bytes": "512", "holders": ["initial", "policy"], "retained": false}]},
+      {"id": "dns_cache", "state": "available", "estimated_bytes": null, "estimate_version": null, "counters": [{"key": "entries", "value": "3", "kind": "count"}, {"key": "weighted_size", "value": "900", "kind": "billing_bytes"}, {"key": "max_weight", "value": "67108864", "kind": "budget_bytes"}], "rules": []},
+      {"id": "details_ws", "state": "busy", "estimated_bytes": null, "estimate_version": null, "counters": [], "rules": []},
+      {"id": "statistics_queues", "state": "available", "estimated_bytes": null, "estimate_version": null, "counters": [{"key": "active_events", "value": "2", "kind": "count"}], "rules": []},
+      {"id": "sqlite", "state": "available", "estimated_bytes": null, "estimate_version": null, "counters": [{"key": "active_leases", "value": "0", "kind": "count"}], "rules": []},
+      {"id": "allocator", "state": "not_collected", "estimated_bytes": null, "estimate_version": null, "counters": [], "rules": []}
+    ]
+  },
+  "previous_snapshot": null,
+  "collection_state": "idle",
+  "last_failure": null
+}

@@ -29,6 +29,8 @@
 > 2026-11-11 展示时区增量核对：基线 `2f41904` 加工作树，限应用时区入口、三个时间页面及自然日筛选；数据库/API 的 UTC 毫秒契约不变。
 >
 > 2026-11-12 时区标识增量核对：基线 `ca55de1` 加工作树，仅调整解析记录的列表标题与实时状态时区标识，不改变服务端时区选择、日期筛选或 UTC 毫秒契约。
+>
+> 2026-11-13 内存分析增量核对：基线 `ddbc49b` 加工作树，范围限系统页新增内存卡片、查询/采集状态、真实样本趋势与口径；本批证据和平台限制见下方内存分析小节，其余页面沿历史范围。
 
 ## 路由与数据源
 
@@ -40,7 +42,7 @@
 | `/login` | [LoginPage](../../../frontend/src/modules/auth/LoginPage.tsx) | 登录签发内存 Bearer，HttpOnly Cookie 仅用于认证刷新 |
 | `/dashboard` | [DashboardPage](../../../frontend/src/modules/dashboard/DashboardPage.tsx) | v2 HTTP/WS 的 RSS、CPU 占用、实时 QPS/RPM（卡底附近 600 秒平均值）、在线身份和双单位趋势图 |
 | `/queries` | [QueriesPage](../../../frontend/src/modules/queries/QueriesPage.tsx) | v2 cursor 查询、身份/来源/Answer、实时缓冲和稳定详情 |
-| `/system-runtime` | [SystemPage](../../../frontend/src/modules/system/SystemPage.tsx) | v2 进程采样、版本和启动时间 |
+| `/system-runtime` | [SystemPage](../../../frontend/src/modules/system/SystemPage.tsx) | v2 进程采样、版本/启动时间及分层内存分析 |
 | `/listeners` | [ListenersPage](../../../frontend/src/modules/listeners/ListenersPage.tsx) | UDP/TCP/DoH 类型化列表、运行状态列与编辑；标题区与 服务状态／解析记录 同构，只显示同步胶囊，不显示 revision |
 | `/upstreams` | [UpstreamsPage](../../../frontend/src/modules/upstreams/UpstreamsPage.tsx) | Hosts/DoH/Group 类型化读写及“上游 / 上游组”URL tab；上游组超时用“数字 + 单位”编辑，默认秒 |
 | `/dns-settings` | [DnsSettingsPage](../../../frontend/src/modules/dns-settings/DnsSettingsPage.tsx) | DNS/cache/TTL/ECS/详情与 R/G/T 预览保存；存储大小按 KB／MB／GB 可读单位展示 |
@@ -104,6 +106,20 @@ P5 触摸回归发现 Popover 的开闭 key 会替换触发按钮；Escape 关�
 [`SystemPage`](../../../frontend/src/modules/system/SystemPage.tsx) 以 `/api/v2/system/runtime` 为进程读数权威：指标区固定为「运行时长／常驻内存／CPU／线程数」四个同构格子（13px 标签、30px 等宽数值、12.5px 口径说明），版本、启动时间、采样时间与采样来源合并为同一卡片内的「运行信息」行，与上方格子共用同一条四列栅格，不再出现 16px 双行日期混进 28px 数值格、或标签列固定 132px 右侧留白的断口。RSS 从十进制 u64 字符串按 BigInt 换算；measurement 不可用时保留后端 reason，不能以零代替。运行时长只从成功响应的 `uptime_seconds` 与前端接收时刻递增，页面隐藏时停止逐秒渲染，重新可见后校正；30 秒轮询或手动刷新会按后端基准重置。同一页再读 `/config/system`（`work_path`）、`/config/state`（活动版本与同步胶囊）、`/config/modules/{listener,dns,hosts,rule_set}`（监听绑定、缓存快照、资源条件）与 `/service/metrics`（在线身份计数），组成「运行环境」与「数据面摘要」两张卡片；进程主机信息随 `/system/runtime` 的 `host` 对象返回，不再单独请求。次级读取失败显示「暂不可用 + 契约错误码」，尚未返回显示占位符，不把加载中渲染成不可用。
 
 [`PageState`](../../../frontend/src/shared/components/PageState.tsx) 与 [formatters](../../../frontend/src/shared/formatters/index.ts) 处理错误/加载和时间/耗时格式；各页面直接展示对应 v2 响应的采样信息，不复制整份后端配置到全局 store。
+
+## 系统页内存分析
+
+[`MemoryAnalysisCard`](../../../frontend/src/modules/system/MemoryAnalysisCard.tsx) 位于现有进程指标与摘要卡片之间；保留原页面结构。顶部独立展示 OS RSS/峰值/PSS，只有原始字节分项完整、非负且精确等于 RSS 时绘制构成，读取时差或缺测有原因说明，不归一化凑齐。模块表分开显示已知载荷、运行时计数、weight 计费和预算；规则可展开实际 resource/selector/holders。SQLite/allocator 及未接入可信字节的模块明确未采集，不显示假 0，不与 RSS 合计或计算差额。
+
+[`memory-hooks`](../../../frontend/src/modules/system/memory-hooks.ts) 以独立 query key 可见页 30 秒读取 GET，手动 POST 不自动重试；发起前取消旧 GET，成功直接更新缓存，避免晚到读取覆盖新快照。采集中防重复点击，退出页面 abort 等待，取消提示不保证服务端停止；失败保留历史成功快照并明确不是本次结果。进程身份与父页面不符时隐藏旧样本，delta 仅在同进程、同 runtime revision、相同估算版本且两次模块均可用时显示。
+
+[`memory-model`](../../../frontend/src/modules/system/memory-model.ts) 全程用 BigInt 处理 u64 字节、分项和差值，只把有界绘图比例转 Number。[`MemoryTrend`](../../../frontend/src/modules/system/MemoryTrend.tsx) 仅消费服务端有界真实样本，支持 10 分钟/1 小时和曲线显隐；缺数、倒序或间隔超过服务端 75 秒阈值时断线，不补启动前数据或原型事件。时间范围与页面统一使用服务端展示时区。标签页提供左右键/Home/End 和 roving tabindex；窄屏将模块表转为带标签的卡片，不丢口径与不可用说明。
+
+生产页没有原型的演示状态切换器，也不内置模拟趋势；DEV fixture 单独位于 [`memory-fixtures.ts`](../../../frontend/src/mocks/memory-fixtures.ts)，由明确开启的 MSW 提供，不能替代真实后端/Linux 验收。后端采样与估算排除项见 [Management 内存分析](../backend/management.md#系统运行状态内存分析)。
+
+2026-11-13，Windows / Node.js 26.8.1 / pnpm 11.25.0，`ddbc49b` 加工作树：最终完整 Vitest 51 文件/350 项、v2 schema 10 项、typecheck、生产 build 与生成类型 SHA-256 幂等检查通过。补口径说明后首次回归出现“保留旧索引”全页文本查询二义性，已限定至实际展开详情并完整复跑通过；SQLite DEV 夹具租约预算修正为 count 并保留断言。既有 Node localStorage、Ant Design 弃用与 React key 警告仍存在，不宣称无警告。
+
+本机浏览器加载正式 Vite React 应用、显式 DEV mock：在同源 iframe 的 320/390/768/1280/1600px 真实视口测量均无横向溢出，采集按钮未越过卡片；核对规则展开、方向键 tab、1 小时范围、曲线显隐及单次 POST。当前应用请求入口注入一次 503，确认保留快照且提示历史结果和安全 request ID；延迟响应下连续触发仅发送一次 POST、采集中禁用按钮，取消等待后恢复操作且保留历史快照，测试注入已撤销。报告保存在忽略的 `_fluxdns/memory-analysis-acceptance/`。浏览器面板禁止 CDP viewport override，使用 iframe 断点测量，不冒充独立移动设备验收；补充截图超时，未形成最终截图通过结论。mock 不代表真实后端/Linux 验收；后端依赖阻塞与平台差距见 [Management 实现](../backend/management.md#系统运行状态内存分析)。
 
 ## 服务端展示时区
 

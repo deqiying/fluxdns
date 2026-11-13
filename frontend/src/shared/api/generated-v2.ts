@@ -368,6 +368,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/system/memory": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description 只读最近 OS 样本、最近完整分析和最多一小时的有界真实样本，不遍历规则。 */
+        get: operations["getMemoryAnalysis"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/system/memory/snapshot": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** @description 只读完整分析，单槽位、2 秒预算；忙返回 429，超时返回 408。超时或取消后不发布结果；不触发配置变更、缓存维护或回收。 */
+        post: operations["collectMemorySnapshot"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/events/ticket": {
         parameters: {
             query?: never;
@@ -1358,6 +1392,67 @@ export interface components {
             threads: components["schemas"]["CountMeasurement"];
             host: components["schemas"]["HostEnvironment"];
         };
+        /** @description 同一采样轮次而非原子快照。Linux status 与 smaps_rollup 分别读取；不修正不一致分项。 */
+        MemoryOsSample: {
+            sampled_at_ms: components["schemas"]["SafeInteger"];
+            rss_bytes: components["schemas"]["BytesMeasurement"];
+            peak_rss_bytes: components["schemas"]["BytesMeasurement"];
+            anonymous_bytes: components["schemas"]["BytesMeasurement"];
+            file_bytes: components["schemas"]["BytesMeasurement"];
+            shared_bytes: components["schemas"]["BytesMeasurement"];
+            pss_bytes: components["schemas"]["BytesMeasurement"];
+            private_dirty_bytes: components["schemas"]["BytesMeasurement"];
+            swap_bytes: components["schemas"]["BytesMeasurement"];
+        };
+        MemoryCounter: {
+            key: string;
+            value: components["schemas"]["DecimalU64"];
+            /** @enum {string} */
+            kind: "count" | "billing_bytes" | "budget_bytes";
+        };
+        /** @description 实际持有的唯一索引；共享对象去重，地址仅内部使用。行估算只覆盖已知载荷，非完整堆占用。 */
+        MemoryRuleRow: {
+            resource: components["schemas"]["Name"];
+            selector: string | null;
+            rule_count: components["schemas"]["DecimalU64"];
+            estimated_bytes: components["schemas"]["DecimalU64"];
+            holders: ("initial" | "worker" | "policy")[];
+            /** @description 仅初始快照持有且不在 worker/Policy 当前索引中的对象，不凭 revision 猜测 */
+            retained: boolean;
+        };
+        MemoryModule: {
+            /** @enum {string} */
+            id: "rules" | "dns_cache" | "details_ws" | "statistics_queues" | "sqlite" | "allocator";
+            /** @enum {string} */
+            state: "available" | "not_collected" | "busy";
+            /** @description 不具备可靠字节估算时为 null；运行时计数仍可用 */
+            estimated_bytes: components["schemas"]["DecimalU64"] | null;
+            estimate_version: string | null;
+            counters: components["schemas"]["MemoryCounter"][];
+            rules: components["schemas"]["MemoryRuleRow"][];
+        };
+        MemorySnapshot: {
+            snapshot_id: components["schemas"]["DecimalU64"];
+            sampled_at_ms: components["schemas"]["SafeInteger"];
+            runtime_revision: components["schemas"]["DecimalU64"];
+            modules: components["schemas"]["MemoryModule"][];
+        };
+        MemoryAnalysis: {
+            process_id: number;
+            started_at_ms: components["schemas"]["SafeInteger"];
+            /** @constant */
+            sample_interval_seconds: 30;
+            /** @constant */
+            gap_after_seconds: 75;
+            os: components["schemas"]["MemoryOsSample"];
+            trend: components["schemas"]["MemoryOsSample"][];
+            snapshot: components["schemas"]["MemorySnapshot"] | null;
+            previous_snapshot: components["schemas"]["MemorySnapshot"] | null;
+            /** @enum {string} */
+            collection_state: "idle" | "collecting" | "failed";
+            /** @enum {string|null} */
+            last_failure: "timeout" | "sampling_failed" | "runtime_changed" | null;
+        };
         WebSocketTicket: {
             ticket: string;
             expires_at_ms: components["schemas"]["SafeInteger"];
@@ -2023,6 +2118,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProcessMetrics"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    getMemoryAnalysis: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 未采集的模块为 null；估算、计费权重与 RSS 不可加和 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryAnalysis"];
+                };
+            };
+            default: components["responses"]["Error"];
+        };
+    };
+    collectMemorySnapshot: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description 完成的分析及同进程上一份快照；各 owner 读取不是跨模块原子事务 */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MemoryAnalysis"];
                 };
             };
             default: components["responses"]["Error"];
