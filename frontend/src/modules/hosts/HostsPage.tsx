@@ -9,7 +9,7 @@ import { DurationInput, durationRequiredRules } from "@/shared/components/Durati
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { normalizeDuration } from "@/shared/config/form-values";
-import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { useConfigSave, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type Hosts = Schemas["Hosts"];
@@ -24,9 +24,11 @@ interface HostsFormValues {
   update_interval?: string;
 }
 
+const hostsFieldAliases = { hosts: "content" };
+
 export function HostsPage() {
   const query = useConfigModule("hosts");
-  const mutation = useConfigChangeMutation("hosts");
+  const mutation = useConfigSave();
   const state = useConfigState();
   const [form] = Form.useForm<HostsFormValues>();
   const sourceType = Form.useWatch("type", form);
@@ -40,6 +42,7 @@ export function HostsPage() {
     if (!editing) return;
     mutation.reset();
     setDirty(false);
+    form.resetFields();
     if (editing === "create") {
       form.setFieldsValue({ name: "", type: "const", format: "hosts", content: "", auto_update: false });
     } else if (editing.type === "const") {
@@ -85,9 +88,8 @@ export function HostsPage() {
     },
   ];
 
-  const submit = async () => {
-    if (!query.data || !editing) return;
-    const values = await form.validateFields();
+  const submit = (values: HostsFormValues) => {
+    if (!editing) return;
     const value: Hosts = values.type === "const"
       ? { name: values.name, type: "const", format: values.format, hosts: values.content ?? "" }
       : {
@@ -101,12 +103,7 @@ export function HostsPage() {
     const change: Schemas["ConfigChange"] = editing === "create"
       ? { module: "hosts", change: { action: "create", value } }
       : { module: "hosts", change: { action: "update", original_name: editing.name, value } };
-    try {
-      const operation = await mutation.mutateAsync({ change });
-      if (operation) setEditing(null);
-    } catch {
-      // 失败由表单容器呈现并保留草稿。
-    }
+    mutation.save(change, () => setEditing(null));
   };
 
   return (
@@ -116,7 +113,7 @@ export function HostsPage() {
       actions={(
         <Space size={12}>
           {state.data ? <ConfigSyncBadge state={state.data} /> : null}
-          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加 Hosts</Button>
+          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data} onClick={() => setEditing("create")}>添加 Hosts</Button>
         </Space>
       )}
     >
@@ -129,8 +126,8 @@ export function HostsPage() {
           <Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 900 }} locale={{ emptyText: search ? "没有匹配的 Hosts" : "尚未配置 Hosts" }} />
         </div>
       ) : null}
-      <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加 Hosts" : "编辑 Hosts"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
-        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
+      <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加 Hosts" : "编辑 Hosts"} dirty={dirty} busy={mutation.isPending} error={mutation.error} form={form} module="hosts" fieldAliases={hostsFieldAliases} configDigest={state.data?.config_digest} moduleDigest={query.data?.state.config_digest} onCancel={() => setEditing(null)} onSubmit={() => form.submit()}>
+        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)} onFinish={submit}>
           <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128 }]}><Input autoComplete="off" /></Form.Item>
           <Form.Item name="type" label="来源" rules={[{ required: true }]}><Segmented block options={[{ label: "内联", value: "const" }, { label: "本地文件", value: "file" }]} /></Form.Item>
           <Form.Item name="format" label="格式" rules={[{ required: true }]}><Select options={[{ label: "Hosts 行格式", value: "hosts" }, { label: "JSON", value: "json" }]} /></Form.Item>

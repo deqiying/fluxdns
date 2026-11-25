@@ -7,42 +7,33 @@ import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { useConfigSave, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { configKeys } from "@/shared/config/query-keys";
 import { getSystemConfig } from "./api";
 
 type Schemas = components["schemas"];
 type Logs = Schemas["Logs"];
 
-const systemConfigKey = ["api", "v2", "config", "system"] as const;
-
 export function SystemSettingsPage() {
-  const systemQuery = useQuery({ queryKey: systemConfigKey, queryFn: ({ signal }) => getSystemConfig(signal) });
+  const systemQuery = useQuery({ queryKey: configKeys.system, queryFn: ({ signal }) => getSystemConfig(signal) });
   const logsQuery = useConfigModule("logs");
-  const mutation = useConfigChangeMutation("logs");
+  const mutation = useConfigSave();
   const state = useConfigState();
   const [form] = Form.useForm<Logs>();
-  const [editing, setEditing] = useState(false);
+  const [editing, setEditing] = useState<Logs | null>(null);
   const [dirty, setDirty] = useState(false);
   const logs = logsQuery.data?.values.find((item) => item.module === "logs")?.value;
 
   useEffect(() => {
-    if (!editing || !logs) return;
+    if (!editing) return;
     mutation.reset();
     setDirty(false);
-    form.setFieldsValue(logs);
-  }, [editing, form, logs]);
+    form.resetFields();
+    form.setFieldsValue(editing);
+  }, [editing, form]);
 
-  const submit = async () => {
-    if (!logsQuery.data) return;
-    const value = await form.validateFields();
-    try {
-      const operation = await mutation.mutateAsync({
-        change: { module: "logs", change: value },
-      });
-      if (operation) setEditing(false);
-    } catch {
-      // 冲突与热应用失败时保留草稿。
-    }
+  const submit = (value: Logs) => {
+    mutation.save({ module: "logs", change: value }, () => setEditing(null));
   };
 
   const error = systemQuery.error ?? logsQuery.error;
@@ -94,12 +85,12 @@ export function SystemSettingsPage() {
               <Descriptions.Item label="级别">{logs.level}</Descriptions.Item>
               <Descriptions.Item label="文件"><Typography.Text code>{logs.path}</Typography.Text></Descriptions.Item>
             </Descriptions>
-            <Button icon={<Pencil size={16} />} disabled={!configStateEditable(logsQuery.data.state)} onClick={() => setEditing(true)}>编辑日志</Button>
+            <Button icon={<Pencil size={16} />} onClick={() => setEditing(logs)}>编辑日志</Button>
           </section>
         </div>
       ) : null}
-      <ConfigFormModal open={editing} title="编辑日志" dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(false)} onSubmit={() => void submit()}>
-        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
+      <ConfigFormModal open={editing !== null} title="编辑日志" dirty={dirty} busy={mutation.isPending} error={mutation.error} form={form} module="logs" configDigest={state.data?.config_digest} moduleDigest={logsQuery.data?.state.config_digest} onCancel={() => setEditing(null)} onSubmit={() => form.submit()}>
+        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)} onFinish={submit}>
           <Form.Item name="enable" label="启用日志" valuePropName="checked"><Switch /></Form.Item>
           <Form.Item name="level" label="日志级别" rules={[{ required: true }]}><Select options={["trace", "debug", "info", "warn", "error"].map((value) => ({ label: value, value }))} /></Form.Item>
           <Form.Item name="path" label="日志文件" rules={[{ required: true }, { max: 4096 }]}><Input /></Form.Item>

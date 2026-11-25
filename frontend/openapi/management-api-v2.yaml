@@ -4,9 +4,9 @@ info:
   version: 2.0.0
   description: >-
     P0 冻结的目标契约，按检查点分阶段注册 handler。当前已实现服务/进程指标、配置状态、
-    系统白名单、十个模块读投影、P1 组合配置事务与文件操作、P3 单模块写入、保留状态及历史查询；
+    系统白名单、十个模块读投影、同步保存/重新加载/写入磁盘、保留状态及历史查询；
     P3 业务页面按模块接入；P4 已接入指标与记录 replay WS。
-    配置以活动源表达为准，先应用后持久化；外部变化只提示。
+    内存配置是唯一权威，先应用 Runtime 后写盘；磁盘外改只提示，需显式重新加载才生效。
     所有认证用户均为管理员，不增加角色管理。路径和 SecretRef 来源可见，实际秘密不可见。
 servers:
   - url: /api/v2
@@ -17,14 +17,9 @@ x-implemented-operations:
   - getConfigState
   - getSystemConfig
   - getConfigModule
-  - validateModuleCandidate
-  - applyModuleCandidate
-  - validateCandidate
-  - applyCandidate
-  - getConfigOperation
-  - getExternalDiff
-  - restoreConfigFiles
-  - retryConfigPersistence
+  - saveConfig
+  - reloadConfig
+  - persistConfig
   - getRetentionStatus
   - previewRetention
   - getServiceMetrics
@@ -40,15 +35,11 @@ x-limits:
   access_renew_window_seconds: 600
   configuration_bytes: 4194304
   mutation_bytes: 2097152
-  external_diff_bytes: 2097152
   inline_text_bytes: 262144
   namespace_items: 1024
   candidate_changes: 128
   cursor_bytes: 2048
   query_body_bytes: 16384
-  operation_entries: 1024
-  operation_ttl_seconds: 1800
-  validation_ttl_seconds: 60
   query_timeout_seconds: 15
   websocket_protocol_version: 1
   websocket_frame_bytes: 131072
@@ -70,7 +61,7 @@ x-limits:
   replay_bytes: 8388608
   frontend_buffer_records: 500
   frontend_buffer_bytes: 2097152
-# 仅为 ErrorEnvelope 映射；已受理操作的终态使用 OperationResult，不以 200 推断成功。
+# ErrorEnvelope 的 HTTP 状态映射。
 x-error-statuses:
   HTTP_VERSION_NOT_SUPPORTED: 505
   URI_TOO_LONG: 414
@@ -88,15 +79,12 @@ x-error-statuses:
   AUTH_REQUIRED: 401
   FORBIDDEN: 403
   NOT_FOUND: 404
-  ACTIVE_REVISION_CONFLICT: 409
-  FILE_REVISION_CONFLICT: 409
-  EXTERNAL_CHANGES_REQUIRE_CONFIRMATION: 409
-  OPERATION_ID_REUSED: 409
+  CONFIG_FILE_CHANGED: 409
+  CONFIG_FILE_UNREADABLE: 422
   OPERATION_BUSY: 409
   CONFIRMATION_REQUIRED: 409
   PERSISTENCE_FAILED: 500
-  APPLY_FAILED: 500
-  COMPENSATION_FAILED: 500
+  APPLY_FAILED: 422
   CURSOR_EXPIRED: 410
   RATE_LIMITED: 429
   SERVICE_UNAVAILABLE: 503
@@ -165,7 +153,7 @@ paths:
       operationId: getConfigState
       responses:
         "200":
-          description: 当前运行和受管双文件状态，不读取外部文件作为活动配置
+          description: 内存配置摘要、Runtime 代次和磁盘状态；只读取最近一次磁盘观测，不读文件
           content: {application/json: {schema: {$ref: "#/components/schemas/ConfigState"}}}
         default: {$ref: "#/components/responses/Error"}
   /config/system:
@@ -186,118 +174,47 @@ paths:
           description: 有界完整模块集合；values 仅包含请求的模块，不是任意页的局部搜索
           content: {application/json: {schema: {$ref: "#/components/schemas/ConfigRead"}}}
         default: {$ref: "#/components/responses/Error"}
-  /config/validate:
+  /config/save:
     post:
-      operationId: validateCandidate
-      description: 可选无状态预览，无应用/写文件/操作注册副作用；基于当前活动源一次校验引用图，不返回票据。
-      requestBody:
-        required: true
-        content: {application/json: {schema: {$ref: "#/components/schemas/Candidate"}}}
-      responses:
-        "200":
-          description: 当前影响和最新文件观测版本，不绑定后续提交
-          content: {application/json: {schema: {$ref: "#/components/schemas/ValidationResult"}}}
-        "422": {$ref: "#/components/responses/Error"}
-        default: {$ref: "#/components/responses/Error"}
-  /config/modules/{module}/validate:
-    post:
-      operationId: validateModuleCandidate
-      description: 可选单模块无状态校验；候选只能包含一项且 module 必须与 URL 一致，普通表单保存直接 apply。
-      parameters:
-        - {name: module, in: path, required: true, schema: {$ref: "#/components/schemas/ConfigModule"}}
-      requestBody:
-        required: true
-        content: {application/json: {schema: {$ref: "#/components/schemas/Candidate"}}}
-      responses:
-        "200":
-          description: 单模块预校验及影响
-          content: {application/json: {schema: {$ref: "#/components/schemas/ValidationResult"}}}
-        default: {$ref: "#/components/responses/Error"}
-  /config/modules/{module}/apply:
-    post:
-      operationId: applyModuleCandidate
-      description: 普通模块单次保存入口，无需 validate；与组合采用共用应用编排，但只接收一个同模块 change。
-      parameters:
-        - {name: module, in: path, required: true, schema: {$ref: "#/components/schemas/ConfigModule"}}
-      requestBody:
-        required: true
-        content: {application/json: {schema: {$ref: "#/components/schemas/ApplyRequest"}}}
-      responses:
-        "200":
-          description: 操作终态
-          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
-        "202":
-          description: 操作进行中
-          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
-        default: {$ref: "#/components/responses/Error"}
-  /config/apply:
-    post:
-      operationId: applyCandidate
+      operationId: saveConfig
       description: >-
-        operation_id 首次发送前固定；受理后同 ID 不同命令摘要拒绝。非终态返回 202。
-        缺少危险影响确认返回 409 CONFIRMATION_REQUIRED，未确认外改返回 409 EXTERNAL_CHANGES_REQUIRE_CONFIRMATION；二者均为受理前标准错误，不注册 operation，可确认后用同 ID 再提交一次。
-        同条目后一次成功提交覆盖，不同条目保留，不传 active_revision。已应用但文件未同步也是明确结果；未知网络结果只查询 operation，不重放。
+        同步保存：在当前内存配置上应用 changes，严格校验后切换 Runtime，再只替换源文件中变化的条目。
+        磁盘与内存不一致且未设 overwrite_disk 返回 409 CONFIG_FILE_CHANGED；保留期缩短未确认返回 409
+        CONFIRMATION_REQUIRED；另一写操作进行中返回 409 OPERATION_BUSY；校验或布局不支持返回 422
+        VALIDATION_FAILED；prepare 或 Runtime 切换失败返回 422 APPLY_FAILED，旧 Runtime 不变。
+        HTTP 断开不会中断已开始的切换与写盘，结果以重新读取 config/state 为准，不自动重发。
       requestBody:
         required: true
-        content: {application/json: {schema: {$ref: "#/components/schemas/ApplyRequest"}}}
+        content: {application/json: {schema: {$ref: "#/components/schemas/SaveRequest"}}}
       responses:
         "200":
-          description: 已确认操作结果，须检查 status 而不是只检查 HTTP 200
-          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
-        "202":
-          description: 操作仍在执行
-          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+          description: 已生效；persisted 为 false 表示未写入磁盘（复核发现外改或写盘失败）
+          content: {application/json: {schema: {$ref: "#/components/schemas/SaveResult"}}}
         "409": {$ref: "#/components/responses/Error"}
         "422": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
-  /config/operations/{operation_id}:
-    get:
-      operationId: getConfigOperation
-      parameters:
-        - {name: operation_id, in: path, required: true, schema: {$ref: "#/components/schemas/OperationId"}}
-      responses:
-        "200":
-          description: 记录过期、重启或未命中返回 unknown，不能据此推断未执行
-          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
-        default: {$ref: "#/components/responses/Error"}
-  /config/files/diff:
-    get:
-      operationId: getExternalDiff
-      description: 无效外部 YAML 不返回正文；只读/敏感变化仅返回受保护分类。采用提交 ApplyRequest，首次即绑定 expected.observed_file_revision，不回传 active_revision。
-      responses:
-        "200":
-          description: 与组合文件观测版本绑定的类型化差异
-          content: {application/json: {schema: {$ref: "#/components/schemas/ExternalDiff"}}}
-        default: {$ref: "#/components/responses/Error"}
-  /config/files/restore:
+  /config/reload:
     post:
-      operationId: restoreConfigFiles
-      description: 以活动源还原受管文件，不重载 DNS；必须显式确认覆盖所见差异。
-      requestBody:
-        required: true
-        content: {application/json: {schema: {$ref: "#/components/schemas/FileSyncRequest"}}}
+      operationId: reloadConfig
+      description: >-
+        从磁盘重新加载源文件并应用；摘要未变化时直接返回。源文件缺失或不可读返回 422 CONFIG_FILE_UNREADABLE；
+        内容不合法返回 422 VALIDATION_FAILED，运行配置不变。webui.users 变化时撤销全部会话。
       responses:
         "200":
-          description: 还原结果
-          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
-        "202":
-          description: 还原进行中
-          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+          description: 重新加载后的状态
+          content: {application/json: {schema: {$ref: "#/components/schemas/ReloadResult"}}}
+        "409": {$ref: "#/components/responses/Error"}
+        "422": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
-  /config/files/retry:
+  /config/persist:
     post:
-      operationId: retryConfigPersistence
-      description: 只同步当前已应用源，不重新 prepare 或重放创建/改名；复用原 operation_id，显式重试确认覆盖 observed_file_revision 对应文件。
-      requestBody:
-        required: true
-        content: {application/json: {schema: {$ref: "#/components/schemas/FileSyncRequest"}}}
+      operationId: persistConfig
+      description: 以当前内存配置原子覆盖源文件和派生镜像，不触碰 Runtime；写盘失败返回 500 PERSISTENCE_FAILED。
       responses:
         "200":
-          description: 同步结果
-          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
-        "202":
-          description: 同步进行中
-          content: {application/json: {schema: {$ref: "#/components/schemas/OperationResult"}}}
+          description: 写入后的状态
+          content: {application/json: {schema: {$ref: "#/components/schemas/PersistResult"}}}
+        "409": {$ref: "#/components/responses/Error"}
         default: {$ref: "#/components/responses/Error"}
   /queries/search:
     post:
@@ -416,7 +333,7 @@ components:
     Error:
       description: >-
         400 形状/参数错误；401 未认证；403 来源/只读字段；404 不存在；
-        409 revision、operation 或 cursor 冲突；413 超限；422 候选语义不合法；
+        409 磁盘已修改、写操作忙、需确认或 cursor 冲突；413 超限；422 配置不合法、应用失败或源文件不可读；
         429 限流；503 owner 不可用。写请求不因 retryable 自动重放。
       headers:
         X-Request-Id: {schema: {type: string, maxLength: 128}}
@@ -622,7 +539,6 @@ components:
     Name: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9_.!-]+$'}
     ClientId: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._~-]+$'}
     Revision: {type: string, minLength: 1, maxLength: 128, pattern: '^[A-Za-z0-9._:-]+$'}
-    OperationId: {$ref: "#/components/schemas/Revision"}
     RecordId: {$ref: "#/components/schemas/Revision"}
     Cursor: {type: string, minLength: 1, maxLength: 2048, pattern: '^[A-Za-z0-9._:-]+$'}
     DecimalU64:
@@ -1017,70 +933,57 @@ components:
             proxy: {$ref: "#/components/schemas/Name"}
             auto_update: {type: boolean, default: false}
             update_interval: {$ref: "#/components/schemas/Duration"}
-    Preconditions:
+    DiskState:
       type: object
       additionalProperties: false
-      description: 仅作 ExternalDiff 的只读双版本上下文；写接口不再接收此封套。
-      required: [active_revision, observed_file_revision]
+      required: [status]
       properties:
-        active_revision: {$ref: "#/components/schemas/Revision"}
-        observed_file_revision: {$ref: "#/components/schemas/Revision"}
+        status:
+          type: string
+          enum: [in_sync, modified, missing, unreadable]
+          description: >-
+            只比较磁盘正文摘要与 config_digest。modified 表示外部编辑或上次写盘失败；
+            unreadable 包括无法读取、超过 4 MiB 或不是 UTF-8。
     ConfigState:
       type: object
       additionalProperties: false
-      required: [active_revision, runtime_revision, persisted_revision, observed_file_revision, files, synchronization, operation_id]
+      required: [config_digest, runtime_revision, disk]
       properties:
-        active_revision: {$ref: "#/components/schemas/Revision"}
-        runtime_revision: {$ref: "#/components/schemas/Revision"}
-        persisted_revision: {oneOf: [{$ref: "#/components/schemas/Revision"}, {type: "null"}]}
-        observed_file_revision: {$ref: "#/components/schemas/Revision"}
-        files:
-          type: object
-          additionalProperties: false
-          required: [source, derived]
-          properties:
-            source: {$ref: "#/components/schemas/FileCondition"}
-            derived: {oneOf: [{$ref: "#/components/schemas/FileCondition"}, {type: "null"}]}
-        synchronization: {type: string, enum: [synced, applying, persisting, applied_unpersisted, blocked]}
-        operation_id: {oneOf: [{$ref: "#/components/schemas/OperationId"}, {type: "null"}]}
-    FileCondition: {type: string, enum: [unchanged, changed, missing, unreadable, oversized]}
-    Candidate:
+        config_digest: {type: string, pattern: '^[0-9a-f]{64}$', description: 内存配置正文 SHA-256，唯一的配置版本}
+        runtime_revision: {$ref: "#/components/schemas/DecimalU64"}
+        disk: {$ref: "#/components/schemas/DiskState"}
+    SaveRequest:
       type: object
       additionalProperties: false
-      description: 可选的无状态校验输入；普通保存直接 apply，无需预校验或票据。
+      description: 同一目标在一次请求中只能出现一次；update 的 original_name 必须存在于当前内存配置。
       required: [changes]
       properties:
         changes: {type: array, minItems: 1, maxItems: 128, items: {$ref: "#/components/schemas/ConfigChange"}}
-    ApplyRequest:
+        overwrite_disk: {type: boolean, default: false, description: 磁盘已被外部修改时，以当前内存配置加本次修改覆盖磁盘}
+        confirm_retention_shortening: {type: boolean, default: false, description: 确认统计保留期缩短}
+    SaveResult:
       type: object
       additionalProperties: false
-      description: 单次提交变更；同条目后一次成功提交覆盖，不同条目保留。仅确认覆盖外部文件时携带 observed_file_revision；外部采用从首次提交绑定已查看的文件版本。确认拒绝发生在受理前，可用同一 operation_id 确认后再提交一次；网络结果不确定时只能查询，不能重放。
-      required: [operation_id, changes]
+      required: [state, persisted]
       properties:
-        operation_id: {$ref: "#/components/schemas/OperationId"}
-        changes: {type: array, minItems: 1, maxItems: 128, items: {$ref: "#/components/schemas/ConfigChange"}}
-        confirmations: {type: array, description: 省略时默认为空数组, maxItems: 2, uniqueItems: true, items: {$ref: "#/components/schemas/ImpactKind"}}
-        observed_file_revision: {$ref: "#/components/schemas/Revision"}
-    ImpactKind: {type: string, enum: [retention_shortening, discard_external_changes]}
-    ValidationResult:
+        state: {$ref: "#/components/schemas/ConfigState"}
+        persisted: {type: boolean, description: false 表示配置已生效但未写入磁盘，重启后会丢失}
+        diagnostic: {$ref: "#/components/schemas/Diagnostic"}
+    ReloadResult:
       type: object
       additionalProperties: false
-      required: [observed_file_revision, required_confirmations, affected_names]
+      required: [state]
       properties:
-        observed_file_revision: {$ref: "#/components/schemas/Revision"}
-        required_confirmations: {type: array, items: {$ref: "#/components/schemas/ImpactKind"}}
-        affected_names: {type: array, maxItems: 8192, items: {$ref: "#/components/schemas/Name"}}
-    FileSyncRequest:
+        state: {$ref: "#/components/schemas/ConfigState"}
+    PersistResult:
       type: object
       additionalProperties: false
-      description: 明确还原或重试即确认覆盖已查看的文件版本；retry 复用原 operation_id。
-      required: [operation_id, observed_file_revision]
+      required: [state]
       properties:
-        operation_id: {$ref: "#/components/schemas/OperationId"}
-        observed_file_revision: {$ref: "#/components/schemas/Revision"}
+        state: {$ref: "#/components/schemas/ConfigState"}
     ErrorCode:
       type: string
-      enum: [HTTP_VERSION_NOT_SUPPORTED, URI_TOO_LONG, HEADERS_TOO_LARGE, REQUEST_TIMEOUT, INTERNAL_ERROR, SETUP_ALREADY_COMPLETED, AUTH_INVALID_CREDENTIALS, ORIGIN_REJECTED, CONFIG_CONFLICT, INVALID_ARGUMENT, VALIDATION_FAILED, PAYLOAD_TOO_LARGE, VERSION_UNSUPPORTED, AUTH_REQUIRED, FORBIDDEN, NOT_FOUND, ACTIVE_REVISION_CONFLICT, FILE_REVISION_CONFLICT, EXTERNAL_CHANGES_REQUIRE_CONFIRMATION, CONFIRMATION_REQUIRED, OPERATION_ID_REUSED, OPERATION_BUSY, PERSISTENCE_FAILED, APPLY_FAILED, COMPENSATION_FAILED, CURSOR_EXPIRED, RATE_LIMITED, SERVICE_UNAVAILABLE]
+      enum: [HTTP_VERSION_NOT_SUPPORTED, URI_TOO_LONG, HEADERS_TOO_LARGE, REQUEST_TIMEOUT, INTERNAL_ERROR, SETUP_ALREADY_COMPLETED, AUTH_INVALID_CREDENTIALS, ORIGIN_REJECTED, CONFIG_CONFLICT, INVALID_ARGUMENT, VALIDATION_FAILED, PAYLOAD_TOO_LARGE, VERSION_UNSUPPORTED, AUTH_REQUIRED, FORBIDDEN, NOT_FOUND, CONFIG_FILE_CHANGED, CONFIG_FILE_UNREADABLE, CONFIRMATION_REQUIRED, OPERATION_BUSY, PERSISTENCE_FAILED, APPLY_FAILED, CURSOR_EXPIRED, RATE_LIMITED, SERVICE_UNAVAILABLE]
     Diagnostic:
       type: object
       additionalProperties: false
@@ -1101,6 +1004,9 @@ components:
         message: {type: string, maxLength: 512}
         retryable: {type: boolean}
         diagnostic: {$ref: "#/components/schemas/Diagnostic"}
+        disk:
+          description: 仅 CONFIG_FILE_CHANGED 携带保存时观测到的磁盘状态
+          $ref: "#/components/schemas/DiskState"
         field_errors:
           type: array
           maxItems: 128
@@ -1109,50 +1015,6 @@ components:
             additionalProperties: false
             required: [path, code]
             properties: {path: {type: string, maxLength: 512}, code: {$ref: "#/components/schemas/ErrorCode"}}
-    OperationResult:
-      type: object
-      additionalProperties: false
-      required: [operation_id, status]
-      properties:
-        operation_id: {$ref: "#/components/schemas/OperationId"}
-        status: {$ref: "#/components/schemas/OperationStatus"}
-        diagnostic: {$ref: "#/components/schemas/Diagnostic"}
-    OperationStatus:
-      oneOf:
-        - type: object
-          additionalProperties: false
-          required: [state]
-          properties: {state: {type: string, enum: [preparing, applying, unknown]}}
-        - type: object
-          additionalProperties: false
-          required: [state, active_revision]
-          properties: {state: {const: persisting}, active_revision: {$ref: "#/components/schemas/Revision"}}
-        - type: object
-          additionalProperties: false
-          required: [state, active_revision, persisted_revision]
-          properties:
-            state: {const: applied_synced}
-            active_revision: {$ref: "#/components/schemas/Revision"}
-            persisted_revision: {$ref: "#/components/schemas/Revision"}
-        - type: object
-          additionalProperties: false
-          required: [state, active_revision, persisted_revision, error]
-          properties:
-            state: {const: applied_unpersisted}
-            active_revision: {$ref: "#/components/schemas/Revision"}
-            persisted_revision: {oneOf: [{$ref: "#/components/schemas/Revision"}, {type: "null"}]}
-            error: {$ref: "#/components/schemas/ErrorCode"}
-        - type: object
-          additionalProperties: false
-          required: [state, error]
-          properties: {state: {const: rejected}, error: {$ref: "#/components/schemas/ErrorCode"}}
-        - type: object
-          additionalProperties: false
-          required: [state, active_revision, error]
-          properties:
-            state: {const: compensation_failed}
-            active_revision: {oneOf: [{$ref: "#/components/schemas/Revision"}, {type: "null"}]}
-            error: {$ref: "#/components/schemas/ErrorCode"}
     ConfigRead:
       type: object
       additionalProperties: false
@@ -1231,32 +1093,10 @@ components:
         file_bytes: {oneOf: [{$ref: "#/components/schemas/DecimalU64"}, {type: "null"}]}
         last_success_at_ms: {oneOf: [{$ref: "#/components/schemas/SafeInteger"}, {type: "null"}]}
         last_error: {oneOf: [{$ref: "#/components/schemas/ErrorCode"}, {type: "null"}]}
-    ExternalDiff:
-      type: object
-      description: >-
-        最多 128 项且完整 JSON 不超过 2 MiB，超限返回 PAYLOAD_TOO_LARGE，不截断。
-        按同命名空间 name 配对，不猜测改名；只有 active 的条目不授权删除。
-        普通资源 URL 的 query 按源配置保留，不伪造替代 URL；管理认证 token 不进入配置差异或 URL。
-      additionalProperties: false
-      required: [expected, editable, protected_changes, parse_error]
-      properties:
-        expected: {$ref: "#/components/schemas/Preconditions"}
-        editable:
-          type: array
-          maxItems: 128
-          items:
-            type: object
-            additionalProperties: false
-            required: [active, external]
-            properties:
-              active: {oneOf: [{$ref: "#/components/schemas/ModuleSource"}, {type: "null"}]}
-              external: {oneOf: [{$ref: "#/components/schemas/ModuleSource"}, {type: "null"}]}
-        protected_changes: {type: array, uniqueItems: true, items: {type: string, enum: [work, database, webui, protected_credentials]}}
-        parse_error: {oneOf: [{$ref: "#/components/schemas/ErrorCode"}, {type: "null"}]}
     SystemConfigRead:
       type: object
       additionalProperties: false
-      required: [state, work_path, rules_path, database_path, records_path, webui_enabled, webui_address, webui_port, public_origin]
+      required: [state, work_path, rules_path, database_path, records_path, webui_enabled, webui_address, webui_port, public_origin, restart_required]
       properties:
         state: {$ref: "#/components/schemas/ConfigState"}
         work_path: {$ref: "#/components/schemas/Path"}
@@ -1267,6 +1107,12 @@ components:
         webui_address: {type: string, maxLength: 64}
         webui_port: {type: integer, minimum: 1, maximum: 65535}
         public_origin: {type: [string, "null"], maxLength: 4096}
+        restart_required:
+          type: array
+          description: 已写入配置但需重启 FluxDNS 才生效的启动级组件；只在系统运行状态页提示，改回原值后清空
+          uniqueItems: true
+          maxItems: 3
+          items: {type: string, enum: [database, webui, dns.resolve_log]}
     QueryFilter:
       type: object
       additionalProperties: false
@@ -1744,11 +1590,10 @@ components:
             reason: {type: string, enum: [epoch_changed, cursor_expired, buffer_overflow, observation_gap, retention_changed]}
         - type: object
           additionalProperties: false
-          required: [type, active_revision, observed_file_revision]
+          required: [type, config_digest]
           properties:
             type: {const: config_changed}
-            active_revision: {$ref: "#/components/schemas/Revision"}
-            observed_file_revision: {$ref: "#/components/schemas/Revision"}
+            config_digest: {$ref: "#/components/schemas/Revision"}
         - type: object
           additionalProperties: false
           required: [type, nonce]

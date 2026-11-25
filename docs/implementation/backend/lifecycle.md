@@ -7,6 +7,8 @@
 > 最后核对：2026-09-08（P1 配置 operation、文件观测与 service 应用接线）
 >
 > 核对基线：`4a5a5a7b13896f3b4c1d86fe4469a3afae38ac10` 加本次 P1 工作树
+>
+> 2026-11-26 配置读写增量核对：基线 `be19359` 加工作树，仅更新启动顺序中的配置恢复与 ConfigStore 建立、源文件观测、配置切换生产者及能力表行；事务恢复、ConfigMutationOwner 与 operation 随实现删除，带日期的历史小节保留原记录。
 
 ## 正式入口
 
@@ -14,8 +16,8 @@
 
 `run_command` 的顺序是：
 
-1. 仅 `run` 先执行 `recover_pending_transaction`；`validate` 关闭 snapshot 写入，不恢复写事务。
-2. `ConfigV2Loader::load_from_path` 只加载 `version: 2`，`run` 先恢复已知配置文件事务并建立 active `ConfigStore`，再检查 SecretRef、配置正式日志输出并始终创建 telemetry writer 和日志 owner。
+1. `ConfigV2Loader::load_from_path` 只加载 `version: 2`；`validate` 关闭 snapshot 写入。启动不恢复任何写事务，源文件是唯一权威。
+2. `run` 检查 SecretRef、配置正式日志输出；随后无论 WebUI 是否启用，都对旧版本遗留的 journal/stage/lock 旁文件只记录 `configuration_legacy_sidecars_found` 警告，既不恢复也不删除。WebUI 启用时用 loader 实际读取并校验的正文建立 active `ConfigStore`，未启用时不建立 store；之后始终创建 telemetry writer 和日志 owner。
 3. 调用 `PreparedRuntime::prepare_with_policy_core_and_remote_resources`，准备资源、Policy core 和 upstream；候选 prepare 不读写 cache snapshot。
 4. `StorageRuntime::open` 在共享 deadline 内建目录、初始化/校验 v2 统计与日分片布局并执行独立事务写入/回滚探针；失败映射为 prepare 错误，不创建服务 owner。
 5. app 创建唯一 `CacheSnapshotOwner`，在独立的有界 prepare deadline 内把快照分批恢复到活动 Moka；恢复故障降级冷启。owner 就绪后才继续 bind。
@@ -33,7 +35,7 @@
 
 ## Reload
 
-[`app.rs`](../../../backend/src/app.rs) 的 `prepare_reload_candidate`、`reload_runtime_from_path` 与 `reload_service_from_path` 是保留的显式内部入口：重读配置时关闭 snapshot 写入，先拒绝进程持有配置的变化，再 prepare。正式 app watcher 不再调用它们，只生成双文件观测提示。
+[`app.rs`](../../../backend/src/app.rs) 的 `prepare_reload_candidate`、`reload_runtime_from_path` 与 `reload_service_from_path` 是保留的显式内部入口：重读配置时关闭 snapshot 写入，先拒绝进程持有配置的变化，再 prepare。正式 app watcher 不再调用它们，只观测源文件并把稳定观测交给 ConfigStore。
 
 [`DnsService::reload_prepared`](../../../backend/src/service.rs) 统一调用 `bind_prepared_reusing`，按物理 `SocketSpec` 复用未变句柄，只为新增或改变的 endpoint 创建 socket。transport/resource task 先注册并等待启动闸门，全部准备成功后执行 revision CAS，再同步更新服务集合并放行任务；旧 transport 由 Runtime retirement 通知停止接纳，已接纳请求继续完成，被移除的资源任务单独取消。该显式应用入口不由文件 watcher 触发。
 
@@ -43,9 +45,11 @@ Storage/Telemetry 和解析统计 sink 由进程持有，reload 为候选 core �
 
 TelemetrySampler 的 Resolution metrics Source Arc 和采样游标同样属于进程 owner，reload 不重置累计量。与之不同，重新 prepare 的 DoH connector 创建独立 bootstrap 地址缓存；旧请求只能填旧 resolver，候选失败不影响活动缓存。资源-only publish 未替换 connector 时继续使用其原缓存。
 
-P1 的 logs enable/level/path 已通过 ConfigMutationOwner 进入 service-aware 热应用边界，先预开输出，再协调 filter/Runtime 发布，保留旧输出和真实失败分类，见[日志热切换](background-services.md#p1-日志热切换2026-09-07)。仅 coordinator 的旧入口没有日志 owner，继续拒绝日志变化。
+logs enable/level/path 经 ConfigStore 的 save/reload（Management `ServiceHost`）进入 service-aware 热应用边界，先预开输出，再协调 filter/Runtime 发布，保留旧输出和真实失败分类，见[日志热切换](background-services.md#p1-日志热切换2026-09-07)。仅 coordinator 的旧入口没有日志 owner，继续拒绝日志变化。
 
 ### P1 仅提示文件观测（2026-09-07）
+
+> 2026-11-26 起本节的双文件观测与 `ManagedObservation` 已由单源文件观测取代：[`ConfigFileWatcher`](../../../backend/src/app/config_watcher.rs) 在最多一个在途 `spawn_blocking` 中执行 `disk::observe`，连续两次相同（同代次、同内容）才算稳定；有 store 时交给 `ConfigStore::observe_disk` 并丢弃过期代次，无 store 时只在变化时记录 `configuration_file_observed`。工作目录镜像不再被观测。现行磁盘状态与操作见[配置读写与磁盘同步](../configuration.md#配置读写与磁盘同步2026-11-26)。以下为原记录。
 
 正式 `run_command` 使用加载结果中的绝对源路径与 `work.snapshot_path`，相同路径只观测一次。[`ConfigFileWatcher`](../../../backend/src/app/config_watcher.rs) 复用 ConfigStore 的 `ManagedObservation`，源/派生文件分别受 4 MiB、SHA-256、文件身份和路径链接检查约束；服务轮询只收取已结束的结果，文件读取移到最多一个在途 `spawn_blocking` 任务，不积压读取队列。
 
@@ -53,7 +57,7 @@ P1 的 logs enable/level/path 已通过 ConfigMutationOwner 进入 service-aware
 
 Windows 定向测试覆盖双文件、防抖、同长度内容变化、同内容文件身份替换、无效 YAML、缺失、非文件、超限和慢读取单在途。真实 UDP 服务在与生产相同的控制循环中，源/派生文件连续变化后保持同一个 Runtime、revision 和 DNS 策略；随后仅改 Hosts 资源文件，由正式 resource worker 到期刷新 DNS 结果，未手动调用 refresh。该 watcher 证据早于 BC-26，仍只证明外改不触发 reload；v2 冷启/重启证据单独记录。
 
-BC-30 的 ConfigStore [还原](../configuration.md#p1-受管文件还原内部能力2026-09-07)、[外改确认重试](../configuration.md#p1-外改确认重试内部能力2026-09-07)、脱敏差异和状态/文件端点已正式接线；WebUI 全局提示见前端实现。文件系统停滞的强制中断和完整应用级 shutdown 总预算仍未验证。
+BC-30 当时接线的 ConfigStore 还原、外改确认重试、脱敏差异和状态/文件端点已于 2026-11-26 删除，现由 reload/persist 与磁盘状态提示取代，见[配置读写与磁盘同步](../configuration.md#配置读写与磁盘同步2026-11-26)。文件系统停滞的强制中断和完整应用级 shutdown 总预算仍未验证。
 
 ### P1 差量 socket 子项（2026-09-07）
 
@@ -85,9 +89,9 @@ Windows Rust 1.98.0 验证：新增 2 项真实 loopback 测试覆盖复用/差�
 
 [`service/control.rs`](../../../backend/src/service/control.rs) 提供单候选排队的 `ServiceControl`，另有一个由现有 `DnsService` 执行的应用槽。`try_apply` 只接受已准备且为 expected + 1 的 Runtime，队列满、已过期或 owner 已关闭时明确拒绝；服务循环消费时再次核对 revision/deadline，再走同一个 `reload_prepared`，不复制 Supervisor，也不增加重启/停止命令。
 
-回执超时或通道断开是 `OutcomeUnknown`，不会自动重发；调用者丢弃回执也不撤销已接纳命令。关闭 owner 会停止接纳并拒绝尚在排队的命令；应用等待 mutation gate 时仍可响应退出信号，中断的命令回执只能报告未知。生产 ConfigMutationOwner 现在等待 service 最终回执并更新 ConfigStore 的可查询 operation；单个 HTTP 请求只负责受理，不持有该生命周期。
+回执超时或通道断开是 `OutcomeUnknown`，不会自动重发；调用者丢弃回执也不撤销已接纳命令。关闭 owner 会停止接纳并拒绝尚在排队的命令；应用等待 mutation gate 时仍可响应退出信号，中断的命令回执只能报告未知。生产者是 ConfigStore 的 save/reload：在写锁内经 Management `ServiceHost` 同步等待最终回执，回执未知时按 coordinator 当前 revision 是否等于期望新 revision 判定是否已应用，不维护 operation。
 
-既有 6 项测试覆盖容量、入队/出队过期、关闭、真实服务循环换代、丢弃回执后继续应用、旧 revision 拒绝、真实绑定失败后旧 DNS 可查询、回执丢失/超时，以及提交锁等待期间退出。2026-09-08 的 v2 真实进程进一步通过组合 apply 将日志配置应用、持久化并重启复读，前后 UDP 查询持续成功；文件、SQLite 与 HTTP 证据见[配置事务生产接线](../configuration.md#p1-配置事务生产接线2026-09-08)。
+既有 6 项测试覆盖容量、入队/出队过期、关闭、真实服务循环换代、丢弃回执后继续应用、旧 revision 拒绝、真实绑定失败后旧 DNS 可查询、回执丢失/超时，以及提交锁等待期间退出。2026-09-08 的 v2 真实进程曾通过当时的组合 apply 将日志配置应用、持久化并重启复读，前后 UDP 查询持续成功；该配置事务链路已于 2026-11-26 由同步保存取代，现行验证见[配置读写与磁盘同步](../configuration.md#配置读写与磁盘同步2026-11-26)。
 
 ## Shutdown 与错误
 
@@ -106,7 +110,7 @@ Storage 停机先关闭 detail 输入并回收当前正在提交的 batch，不�
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | 完整启动 | `run_command`、async prepare、StorageRuntime deadline/probe | `main -> app -> DnsService` | 过期预算不建库、真实 SQLite 写锁与写入拒绝/回滚测试 | 不证明真实磁盘满或权限故障全部可恢复 |
-| 配置切换 | `ConfigMutationOwner`、`ServiceControl`、`reload_prepared` | 组合及 P3 十模块 apply，复用进程服务；watcher 只观测 | reload/rebind/failure、真实 v2 Bearer HTTP/UDP/日志/文件/组合采用 | 不宣称所有平台、磁盘故障或长连接组合已验收 |
+| 配置切换 | `ConfigStore` save/reload、`ServiceControl`、`reload_prepared` | Management 同步保存与重新加载，复用进程服务；watcher 只观测 | reload/rebind/failure、2026-11-26 真实进程条目级保存、外改重新加载/冲突、日志热切换与启动级字段重启 | 不宣称所有平台、磁盘满或长连接组合已验收 |
 | 有界停机 | `shutdown`、finalizer owner、stats-first | 正常信号及 fatal task 路径 | SQLite trigger 验证 stats 提交先于 300 条多批详情排空 | 已执行 SQL 无强制抢占保证；Unix 双信号 smoke 未执行 |
 | 安全 panic hook | 固定分类、受限源码位置、backtrace 状态 | 异步 `main` 第一项安装 `std::panic::set_hook` | 独立子进程验证主线程/worker panic 不泄漏 payload、线程名或完整栈 | 不改变内部 task owner 的失败升级策略；安装前异常不覆盖 |
 

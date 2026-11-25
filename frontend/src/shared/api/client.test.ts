@@ -83,19 +83,19 @@ describe("apiV2Request", () => {
   });
 
   it("保留 v2 字段错误和安全 request ID", async () => {
-    server.use(http.post("/api/v2/config/validate", () => HttpResponse.json({
+    server.use(http.post("/api/v2/config/save", () => HttpResponse.json({
       code: "VALIDATION_FAILED",
       message: "field failed",
       request_id: "request-422",
       retryable: false,
-      field_errors: [{ path: "/changes/0/change/path", code: "INVALID_ARGUMENT" }],
+      field_errors: [{ path: "logs.path", code: "INVALID_ARGUMENT" }],
     }, { status: 422 })));
 
-    const error = await apiV2Request("/config/validate", { method: "POST", body: {} }).catch((value) => value);
+    const error = await apiV2Request("/config/save", { method: "POST", body: {} }).catch((value) => value);
     expect(error).toMatchObject({
       code: "VALIDATION_FAILED",
       requestId: "request-422",
-      fieldErrors: [{ path: "/changes/0/change/path", code: "INVALID_ARGUMENT" }],
+      fieldErrors: [{ path: "logs.path", code: "INVALID_ARGUMENT" }],
     });
   });
 

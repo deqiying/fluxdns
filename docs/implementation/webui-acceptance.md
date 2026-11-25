@@ -7,6 +7,8 @@
 > 最后核对：2026-09-09（P5 旧路径退出、release、浏览器与联合回归）
 >
 > 核对基线：`f052545` 加本次联合验收脚本/夹具工作树；P0-P4 和 BC-26 为已完成基线
+>
+> 2026-11-26 配置读写增量核对：仅为 HTTP 脚本行与 E2E-03 补注当时链路已被同步保存取代；表内结果仍为 2026-09-09 记录，新证据见[配置读写与磁盘同步](configuration.md#配置读写与磁盘同步2026-11-26)。
 
 ## 运行与复现入口
 
@@ -23,7 +25,7 @@ Windows 本机使用项目声明的 Rust 1.98.0、Node.js 26.8.1、pnpm 11.25.0�
 | `pnpm run generate:api`、`typecheck`、`test`、`test:contract:v2`、`build` | 唯一 v2 生成类型；98 项 Vitest、4 项 schema contract、类型与构建通过 |
 | `pwsh -File script/package-embedded.ps1` | 前端、默认 release、Windows target 内嵌 release 三阶段通过，deploy 文件与 target 文件 SHA-256 相同 |
 | `pwsh -File script/test-backend-contracts.ps1 -Suite WebUI` | 真实 10 客户端、主链路计时、快照/回收/热更新并行通过，详见下节 |
-| `node script/test-webui-http.mjs _fluxdns/<run>` | v2 Bearer/Origin/预算/只读边界、四种 DNS 请求、改名/冲突/历史、外改还原、指标和登出通过 |
+| `node script/test-webui-http.mjs _fluxdns/<run>` | v2 Bearer/Origin/预算/只读边界、四种 DNS 请求、改名/冲突/历史、外改还原、指标和登出通过（2026-11-26 起脚本改用 `/config/save` 与 `/config/persist`，外改检查不再调用还原端点） |
 | `pwsh -File script/test-webui-events.ps1 -WorkDirectory _fluxdns/<run>` | 真 HTTP ticket、UDP/SQLite/WS、断线 replay 与登出撤销通过 |
 | 文档检查器与 `git diff --check` | 在文档收口后执行，检查 Markdown 结构、链接、编码及 diff 空白 |
 
@@ -45,7 +47,7 @@ Windows 本机使用项目声明的 Rust 1.98.0、Node.js 26.8.1、pnpm 11.25.0�
 | --- | --- | --- |
 | E2E-01 初始化/登录/导航/退出 | 新目录 release 初始化；12 个受保护入口；重启后旧会话进入登录；HTTP logout 同时拒绝旧 access 与 refresh；前端认证代次/迟到结果测试 | 浏览器会话清理与认证测试分别覆盖，不把本地状态清理当成服务端撤销 |
 | E2E-02 依赖创建/改名 | 本轮重跑组合创建、前向引用、同时改名与真实 Runtime 应用用例；本轮 HTTP 将 local 改名后策略引用同步，实际 DoH 正常，再恢复原名 | 完整领域表单依赖链沿用已完成 P3 基线；不重新引入删除或任意 YAML 编辑 |
-| E2E-03 并发/外改/持久化 | 双 revision 冲突、外改不自动 reload、差异读取、明确还原且 Runtime 不变；Windows journal crash、文件锁、缺失文件、覆盖确认/重试用例重跑 | 真实磁盘满和不可中断 OS I/O 未制造；注入失败不等于物理介质故障 |
+| E2E-03 并发/外改/持久化 | 双 revision 冲突、外改不自动 reload、差异读取、明确还原且 Runtime 不变；Windows journal crash、文件锁、缺失文件、覆盖确认/重试用例重跑（上述 revision/差异/还原/journal 链路已于 2026-11-26 删除，现行冲突、重新加载与写入磁盘证据见[配置读写与磁盘同步](configuration.md#配置读写与磁盘同步2026-11-26)） | 真实磁盘满和不可中断 OS I/O 未制造；注入失败不等于物理介质故障 |
 | E2E-04 保存后 DNS 生效 | Hosts 保存后 UDP、TCP、DoH GET/POST 均返回新地址；非法候选被拒且旧地址继续有效 | DoH HTTP 入口为 loopback；外部 TLS 代理未测试 |
 | E2E-05 身份/历史 | 10 个 DoH ID 优先匹配；未知 ID 回退 IP；UDP 无 ID；改客户端 name 后原记录匹配不变、当前名称更新；CIDR/只读 ID/唯一 name 的现有测试通过 | 不从旧记录推造新身份，不保留 legacy 分支 |
 | E2E-06 缓存快照 | 最终 release 预热/落盘/受控重启后首次请求为 cache hit，原分片记录仍可读；损坏、预算缩小、TTL、失败保留旧快照、reload/关闭交错用例通过 | 热更新的冷 miss 与恢复命中分开记录 |

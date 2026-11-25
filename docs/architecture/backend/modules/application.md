@@ -6,6 +6,8 @@
 >
 > 最后评审：2026-09-05（安全 panic hook 与已接受的快速取消停机契约；基线见[模块索引](README.md)，证据见[生命周期](../../../implementation/backend/lifecycle.md)）
 >
+> 2026-11-26 局部评审：配置读写重构——watcher 只观测源文件、启动不恢复写事务；其余结论不变。
+>
 > 关联实现：[main.rs](../../../../backend/src/main.rs)、[app.rs](../../../../backend/src/app.rs)、[service.rs](../../../../backend/src/service.rs)
 >
 > 关联文档：[后端架构](../overview.md)
@@ -20,7 +22,7 @@ Application 模块是进程边界和依赖装配入口，负责把 Config、Runt
 - 建立最小 bootstrap 日志，再初始化正式观测组件；
 - 调用配置加载和 runtime prepare；
 - 把进程信号转换为统一 shutdown 请求；
-- 在运行期间轮询配置文件 fingerprint，并把稳定变更交给统一 reload 入口；
+- 在运行期间只读观测源配置文件，把稳定观测交给 ConfigStore 计算磁盘状态，不自动 reload；
 - 将结构化错误映射为面向操作者的消息和稳定退出码；
 - 通过 `DnsService` 装配 Supervisor 与进程级服务 owner，保证运行任务有明确的关闭边界。
 
@@ -52,7 +54,7 @@ Application 提供“启动服务”和“只读校验配置”两类用例，�
 
 - 配置路径可以显式指定；
 - 未指定时只使用文档约定的默认 `config.yaml`，不遍历目录猜测；
-- `validate` 只走严格配置加载，关闭 snapshot 写入，不恢复 ConfigStore journal，也不解析 SecretRef 实际值、不准备资源、不打开数据库或绑定 listener；
+- `validate` 只走严格配置加载，关闭 snapshot 写入，也不解析 SecretRef 实际值、不准备资源、不打开数据库或绑定 listener；`run` 也不恢复任何配置写事务，旧版本旁文件只告警；
 - 任何会覆盖、迁移或回滚配置文件的命令在拥有独立交互契约前不启用；
 - stdout 用于机器可读或明确请求的结果，诊断默认写 stderr。
 
@@ -75,7 +77,7 @@ bootstrap telemetry
 
 依赖装配使用显式 constructor/build step，不使用全局 mutable singleton。资源 task 通过 coordinator 查询当前活动 runtime，以 scoped token 管理 reload；transport task 固定持有对应 runtime，显式 reload 才切换。Storage/Telemetry 按进程持有，候选 core 复用其 sink，不因 revision 重建。
 
-文件 reload 关闭 snapshot 写入，完成严格加载、SecretRef 检查和 prepare 后再 bind/CAS；失败保留旧 ActiveRuntime。按 BindPlan 复用或重绑 listener，成功后才更新 watcher fingerprint、注册新 task 并取消旧 token。进程配置的 restart-required 边界由[配置参考](../../../implementation/configuration.md)定义；用户变更与内部写入识别遵循[Management 设计](../../management.md)。
+显式 reload 完成严格加载、SecretRef 检查和 prepare 后再 bind/CAS；失败保留旧 ActiveRuntime。按 BindPlan 复用或重绑 listener，成功后才注册新 task 并取消旧 token。进程配置的 restart-required 边界由[配置参考](../../../implementation/configuration.md)定义；用户变更与内部写入识别遵循[Management 设计](../../management.md)。
 
 ## 5. 信号与退出
 

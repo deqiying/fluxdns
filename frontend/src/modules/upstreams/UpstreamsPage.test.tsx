@@ -8,7 +8,7 @@ import { AppProviders } from "@/app/providers";
 import { setMockAuthenticated } from "@/mocks/handlers";
 import { upstreamsConfigReadFixture } from "@/mocks/fixtures";
 import { server } from "@/mocks/server";
-import type { ApplyRequest, ConfigRead } from "@/shared/config/api";
+import type { ConfigRead, SaveRequest } from "@/shared/config/api";
 
 const validJson = '{\n  "first.example": {"A": ["192.0.2.1"]},\n  "second.example": {"A": ["192.0.2.2"]}\n}';
 const missingComma = validJson.replace(']},\n', ']}\n');
@@ -16,13 +16,12 @@ const missingComma = validJson.replace(']},\n', ']}\n');
 function mount(hosts = validJson) {
   const fixture: ConfigRead = structuredClone(upstreamsConfigReadFixture);
   fixture.values[0] = { module: "upstreams", value: { name: "local", type: "hosts", format: "json", hosts } };
-  const requests: ApplyRequest[] = [];
+  const requests: SaveRequest[] = [];
   server.use(
     http.get("/api/v2/config/modules/upstreams", () => HttpResponse.json(fixture)),
-    http.post("/api/v2/config/modules/upstreams/apply", async ({ request }) => {
-      const body = await request.json() as ApplyRequest;
-      requests.push(body);
-      return HttpResponse.json({ operation_id: body.operation_id, status: { state: "applied_synced", active_revision: "a2", persisted_revision: "a2" } });
+    http.post("/api/v2/config/save", async ({ request }) => {
+      requests.push(await request.json() as SaveRequest);
+      return HttpResponse.json({ state: fixture.state, persisted: true });
     }),
   );
   setMockAuthenticated(true);

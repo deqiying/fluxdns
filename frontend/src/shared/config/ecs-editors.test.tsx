@@ -8,7 +8,7 @@ import { AppProviders } from "@/app/providers";
 import { setMockAuthenticated } from "@/mocks/handlers";
 import { clientsConfigReadFixture, dnsConfigReadFixture, strategiesConfigReadFixture, upstreamsConfigReadFixture } from "@/mocks/fixtures";
 import { server } from "@/mocks/server";
-import type { ApplyRequest, ConfigRead } from "./api";
+import type { SaveRequest, ConfigRead } from "./api";
 
 const fallback = { mode: "client_or_custom", custom_ip: "2001:db8::/48" } as const;
 const label = "请求 ECS 优先，自定义兜底";
@@ -33,11 +33,11 @@ describe("五层 ECS 编辑器", () => {
         if (!isRule) item.value.edns_client_subnet = fallback;
       }
     }
-    const requests: ApplyRequest[] = [];
+    const requests: SaveRequest[] = [];
     server.use(
       http.get(`/api/v2/config/modules/${scenario.module}`, () => HttpResponse.json(fixture)),
-      http.post(`/api/v2/config/modules/${scenario.module}/apply`, async ({ request }) => {
-        requests.push(await request.json() as ApplyRequest);
+      http.post("/api/v2/config/save", async ({ request }) => {
+        requests.push(await request.json() as SaveRequest);
         // 保留编辑器，以同一草稿连续验证字段清理；不依赖模拟后端持久化行为。
         return HttpResponse.json({ code: "VALIDATION_FAILED", request_id: "ecs-editor", message: "test rejection", retryable: false, field_errors: [] }, { status: 422 });
       }),

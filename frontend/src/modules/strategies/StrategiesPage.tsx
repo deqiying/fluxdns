@@ -1,14 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button, Form, Input, Select, Space, Table, Tag, Tooltip, Typography, type TableColumnsType } from "antd";
 import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, Pencil, Plus, Search, Trash2 } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
-import { ApiError } from "@/shared/api/errors";
+import { ApiError, type ApiFieldError } from "@/shared/api/errors";
 import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { DurationInput, durationOptionalRules, durationRequiredRules } from "@/shared/components/DurationInput";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { useConfigSave, useConfigModule, useConfigState } from "@/shared/config/hooks";
 import { ecsSummary, strategyFieldErrors, strategyFromForm, strategyToForm, type RuleFormValue, type Strategy, type StrategyFormValues } from "./strategy-form";
 import "./strategies.css";
 
@@ -22,17 +22,21 @@ const ecsOptions = [
   { label: "请求 ECS 优先，自定义兜底", value: "client_or_custom" },
 ];
 
+const strategyFieldPath = (field: ApiFieldError) => {
+  const name = strategyFieldErrors([field])[0]?.name;
+  return Array.isArray(name) ? name : undefined;
+};
+
 export function StrategiesPage() {
   const query = useConfigModule("strategy");
   const upstreams = useConfigModule("upstreams");
   const hosts = useConfigModule("hosts");
-  const mutation = useConfigChangeMutation("strategy");
+  const mutation = useConfigSave();
   const state = useConfigState();
   const [form] = Form.useForm<StrategyFormValues>();
   const [editing, setEditing] = useState<Strategy | "create" | null>(null);
   const [dirty, setDirty] = useState(false);
   const [search, setSearch] = useState("");
-  const openedState = useRef<Schemas["ConfigState"] | null>(null);
   const [revealErrors, setRevealErrors] = useState(0);
   const ttlMode = Form.useWatch("ttl_mode", form);
   const cacheMode = Form.useWatch("cache_mode", form);
@@ -45,7 +49,6 @@ export function StrategiesPage() {
 
   useEffect(() => {
     if (!editing) return;
-    openedState.current = query.data?.state ?? null;
     setRevealErrors(0);
     mutation.reset();
     setDirty(false);
@@ -54,9 +57,10 @@ export function StrategiesPage() {
   }, [editing, form]);
 
   useEffect(() => {
-    const errors = mutation.error instanceof ApiError ? strategyFieldErrors(mutation.error.fieldErrors) : [];
-    if (errors.length) { form.setFields(errors); setRevealErrors((value) => value + 1); }
-  }, [form, mutation.error]);
+    if (mutation.error instanceof ApiError && mutation.error.fieldErrors.some(strategyFieldPath)) {
+      setRevealErrors((value) => value + 1);
+    }
+  }, [mutation.error]);
 
   const columns: TableColumnsType<Strategy> = [
     { title: "名称", dataIndex: "name", width: 200, render: (value: string) => <Typography.Text strong>{value}</Typography.Text> },
@@ -66,11 +70,11 @@ export function StrategiesPage() {
     { title: "缓存", width: 100, render: (_, item) => <Tag>{item.cache ? (item.cache.enabled ? "启用" : "禁用") : "继承"}</Tag> },
     { title: "TTL", width: 100, render: (_, item) => <Tag>{item.ttl_override ? (item.ttl_override.enabled === false ? "禁用" : "覆盖") : "继承"}</Tag> },
     { title: "引用", width: 70, render: (_, item) => query.data?.references.filter((reference) => reference.to_name === item.name).length ?? 0 },
-    { title: "操作", width: 72, align: "center", render: (_, item) => <Tooltip title="编辑策略"><Button type="text" aria-label={`编辑策略 ${item.name}`} icon={<Pencil size={17} />} disabled={!!query.error || !!state.error || !query.data || !configStateEditable(query.data.state)} onClick={() => setEditing(item)} /></Tooltip> },
+    { title: "操作", width: 72, align: "center", render: (_, item) => <Tooltip title="编辑策略"><Button type="text" aria-label={`编辑策略 ${item.name}`} icon={<Pencil size={17} />} onClick={() => setEditing(item)} /></Tooltip> },
   ];
 
   const submit = async () => {
-    if (!openedState.current || !editing || query.error || state.error) return;
+    if (!editing) return;
     let values: StrategyFormValues;
     try { await form.validateFields(); values = form.getFieldsValue(true); }
     catch { setRevealErrors((value) => value + 1); return; }
@@ -78,24 +82,19 @@ export function StrategiesPage() {
     const change: Schemas["ConfigChange"] = editing === "create"
       ? { module: "strategy", change: { action: "create", value } }
       : { module: "strategy", change: { action: "update", original_name: editing.name, value } };
-    try {
-      const operation = await mutation.mutateAsync({ change });
-      if (operation) setEditing(null);
-    } catch {
-      // 保留草稿与定位后的字段错误。
-    }
+    mutation.save(change, () => setEditing(null));
   };
 
   return (
     <PageFrame
       title="DNS 分流策略"
       description="每一条规则，各归其位。"
-      actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !!query.error || !!state.error || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加策略</Button></Space>}
+      actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}<Button type="primary" icon={<Plus size={17} />} disabled={!query.data} onClick={() => setEditing("create")}>添加策略</Button></Space>}
     >
       <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
       <PageState error={upstreams.error ?? hosts.error} hasData={!!query.data} onRetry={() => { void upstreams.refetch(); void hosts.refetch(); }} />
       {query.data ? <div className="config-module-content strategy-page"><div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索策略名称" onChange={(event) => setSearch(event.target.value)} /></div><Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1040 }} locale={{ emptyText: search ? "没有匹配的策略" : "尚未配置策略" }} /></div> : null}
-      <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加策略" : "编辑策略"} dirty={dirty} busy={mutation.isPending} submitDisabled={!query.data || !!query.error || !!state.error} error={mutation.error} layout="wide" onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
+      <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加策略" : "编辑策略"} dirty={dirty} busy={mutation.isPending} error={mutation.error} form={form} module="strategy" mapField={strategyFieldPath} configDigest={state.data?.config_digest} moduleDigest={query.data?.state.config_digest} layout="wide" onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
         <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
           <section className="strategy-form-section"><Typography.Title level={5}>基础配置</Typography.Title><Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128 }]}><Input /></Form.Item><Form.Item name="default_upstream" label="默认上游" rules={[{ required: true }]}><Select showSearch options={upstreamOptions} /></Form.Item></section>
           <section className="strategy-form-section"><Form.List name="rules" rules={[{ validator: async (_, rules) => { if (!rules?.length) throw new Error("至少需要一条规则"); } }]}>{(fields, { add, remove, move }, { errors }) => <div className="strategy-rules"><div className="strategy-section-heading"><Typography.Title level={5}>有序规则</Typography.Title><Button icon={<Plus size={16} />} onClick={() => add({ source_type: "hosts", source: "", ecs_mode: "inherit" })}>添加规则</Button></div>{fields.map((field, index) => <StrategyRuleCard key={field.key} field={field} index={index} count={fields.length} form={form} revealErrors={revealErrors} hostsOptions={hostsOptions} upstreamOptions={upstreamOptions} remove={remove} move={move} />)}<Form.ErrorList errors={errors} /></div>}</Form.List></section>

@@ -15,6 +15,8 @@
 > 2026-11-08 增量核对：基线 `bfece26` 加本次工作树，仅核对客户端 DoH 地址提示支持裸路由隐式 ID；验证见[页面与查询](pages.md#证据与限制)，认证等其余范围未重新核对。
 >
 > 2026-11-08 错误传递增量核对：基线 `d208820` 加本次工作树，仅核对 HTTP/operation 诊断解析与前端错误入口；其余范围沿用原记录。
+>
+> 2026-11-26 配置读写增量核对：基线 `be19359` 加工作树，重写配置交互基础、配置保存与磁盘状态、系统页需重启提示及相关能力表行；外部差异与组合采用说明随实现删除。
 
 ## 入口
 
@@ -61,7 +63,7 @@
 
 [`errors.ts`](../../../frontend/src/shared/api/errors.ts) 的 `ApiError` 和 `getSafeErrorMessage` 保留原中文通用说明，再追加服务端安全 `diagnostic` 的阶段、资源、说明和原因码；没有诊断时仅使用 client 从已识别错误 envelope 提取的安全 message，固定英文通用失败句不取代中文回退。原始 `Error.message`、`cause`、HTML 或非 JSON 响应体不会进入 UI。诊断文本按 UTF-8 字节限长并清理控制/双向显示字符，关联 ID 仅接受受限标识；字段错误也有界并在统一文案中可见。完整字段与上限仍以 [OpenAPI](../../../frontend/openapi/management-api-v2.yaml) 为准。
 
-[`client.ts`](../../../frontend/src/shared/api/client.ts) 将非 JSON 或 JSON 解析失败的 HTTP 错误按真实状态分类并保留响应头 request ID；HTTP 成功但内容不合法才归入 `invalid-response`。[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 把终态安全诊断与 operation ID 一起交给表单、组合采用和文件操作；`applied_unpersisted` 仍说明运行态已经生效，不能显示为拒绝。异步已受理后的轮询取消、非法响应或结果未知保留原操作 ID；只继续查询，不自动重放写入。会话刷新与原有 401 重放边界未改变。
+[`client.ts`](../../../frontend/src/shared/api/client.ts) 将非 JSON 或 JSON 解析失败的 HTTP 错误按真实状态分类并保留响应头 request ID；HTTP 成功但内容不合法才归入 `invalid-response`。配置保存是同步请求，`persisted: false` 仍说明运行态已经生效，不能显示为拒绝；超时、网络中断或非法响应只回读状态，不自动重放写入。会话刷新与原有 401 重放边界未改变。
 
 [`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx)、客户端抽屉、[`PageState`](../../../frontend/src/shared/components/PageState.tsx) 与全局配置状态均通过普通 React 文本展示统一文案，不使用 HTML 注入。保留预览错误单独存入 DNS 表单状态，避免被 mutation 外的 catch 吞掉；资源列表展示刷新失败及继续沿用旧内容的语义，辅助引用查询和系统指标刷新错误也不再静默隐藏。
 
@@ -71,7 +73,7 @@
 
 [`auth/api.ts`](../../../frontend/src/modules/auth/api.ts) 消费初始化/登录的 `AuthSession`，access token 仅存于共享 client 的模块内存；返回 AuthProvider/查询缓存前重新投影 `user/expires_at`，不透传 token 或额外 session 字段。业务请求和 `GET auth/session` 只附加 Authorization Bearer、明确省略 Cookie。页面重载后，client 先调用同源 `POST auth/refresh` 恢复访问凭据，不读取 HttpOnly Cookie 或浏览器持久存储。
 
-同一认证代次内所有请求共享一次在途刷新，刷新最多 5 秒且各等待方仍受自己的 10 秒/调用者取消约束。一个请求取消不终止其他等待者；登出/401 增加认证代次并禁止迟到刷新恢复会话，新登录不受旧请求迟到 401 影响。凭据在剩余 2 分钟内、以及保活调用时换发；已发出的请求返回 401 时先换发再重放一次（401 由服务端鉴权在业务处理前返回，写请求另带 `operation_id` 服务端去重），只有刷新凭据也失效才结束登录态，此时不再重放；500 和结果未知一律不重放。重放按尝试各自计算 deadline，因此带重放的请求最坏约两倍超时。未到换发窗口的保活仍会更新服务端会话活跃时间，因此界面空闲不再触发空闲回收。登出仍清空本地状态，失败不等于服务端已撤销，沿用上节的错误边界。
+同一认证代次内所有请求共享一次在途刷新，刷新最多 5 秒且各等待方仍受自己的 10 秒/调用者取消约束。一个请求取消不终止其他等待者；登出/401 增加认证代次并禁止迟到刷新恢复会话，新登录不受旧请求迟到 401 影响。凭据在剩余 2 分钟内、以及保活调用时换发；已发出的请求返回 401 时先换发再重放一次（401 由服务端鉴权在业务处理前返回，重放不会重复执行写操作），只有刷新凭据也失效才结束登录态，此时不再重放；500 和结果未知一律不重放。重放按尝试各自计算 deadline，因此带重放的请求最坏约两倍超时。未到换发窗口的保活仍会更新服务端会话活跃时间，因此界面空闲不再触发空闲回收。登出仍清空本地状态，失败不等于服务端已撤销，沿用上节的错误边界。
 
 mock 的业务 handler 也要求 Bearer，但其 Cookie/Origin 只由测试状态模拟，不充当生产替代。Vite 把 `/api` 透明代理到后端，未硬编码令牌或生产 baseURL；页面、认证与 mock handler 均使用 v2，不提供运行时版本开关。Bearer 测试覆盖并发、取消、迟到结果、写请求 401 换发后重放、500 不重放、刷新凭据失效结束登录态、保活换发、无 token session 投影和登录/登出流程。
 
@@ -87,27 +89,33 @@ P5 Windows 内嵌 release 使用全新本地 v2 配置完成初始化，12 个�
 
 ## P1 配置交互基础（2026-09-08）
 
-[`shared/config/api.ts`](../../../frontend/src/shared/config/api.ts) 直接消费生成的 v2 DTO，提供状态/模块读取、整体验证/应用、operation 回读、外部差异、文件还原和持久化重试入口；单模块入口把 module 同时绑定在 URL 与 typed payload。写请求仍由调用方决定发起次数，client 不做 mutation retry。
+[`shared/config/api.ts`](../../../frontend/src/shared/config/api.ts) 直接消费生成的 v2 DTO，提供 `fetchConfigState`、`fetchConfigModule`、`fetchSystemConfig` 读取以及 `saveConfig`、`reloadConfig`、`persistConfig` 写入；保存与重新加载的请求超时为 40 秒（后端 prepare 截止 30 秒、HTTP 总超时 35 秒），其余沿用默认 10 秒。写请求由调用方决定发起次数，client 不做 mutation retry。2026-11-26 起删除 validate、apply、operation、diff、restore、retry 调用。
 
-[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 要求首次发送前固定 `operation_id`。普通 apply 直接提交业务 changes，无活动版本、候选封套和验证票据；进行中时有界轮询，网络失败或 timeout 后只按同一 ID 查询，不重放 apply，unknown 不能推断从未执行。仅确定的受理前确认错误可经无状态 validate 获取影响、用户确认后补充确认项再提交一次；取消保留草稿，二次冲突不循环重试。结果 ID 不一致按非法响应拒绝，settled 前不把结果未知伪装成失败或成功。
-
-[`query-keys.ts`](../../../frontend/src/shared/config/query-keys.ts) 将模块、活动 revision 和文件 revision 纳入 key；保存后只失效目标模块、确定的引用依赖、状态和概览，不清空全部查询。[`form-values.ts`](../../../frontend/src/shared/config/form-values.ts) 用 BigInt 做字节/duration 精确转换，区分继承与显式值、保留已删除引用占位，并在 variant 提交时只选择白名单字段；IP/CIDR helper 只负责词法检查，冲突和规范化仍以服务端为准。duration 表单换算只提供毫秒/秒/分钟/小时/天，回填按能整除的最大整单位归一化（`5000000000ns` → `5s`、`300000000000ns` → `5 分钟`，非整秒按毫秒精确展开），摘要展示复用同一换算的 `formatDurationText`，提交仍写回紧凑 duration；前端只拦必填字段的空值与零值、非法串和小数位超过后端 9 位上限的组合，TTL 上下限按后端语义允许 `0s`（表示该边界不设限），字段上下界仍由后端权威校验。字节侧对称：`ByteUnit` 只提供 B/KB/MB/GB/TB（1024 进制），`bytesToDisplay` 回填时先只保留数值 ≥ 1 的单位（避免把 64 MiB 写成 `0.0625 GB`），再取其中能精确表示（小数不超过导出的 `BYTE_DISPLAY_MAX_FRACTION_DIGITS`）的最大单位（`67_108_864` → `64 MB`、`1_572_864` → `1.5 MB`、`807_306_368` → `788385.125 KB`），保证用户不动字段时再次保存不改变字节数；`bytesFromForm` 全程 BigInt 并在 1..1 TiB 之外抛错。
+[`query-keys.ts`](../../../frontend/src/shared/config/query-keys.ts) 只保留 `config-v2` 前缀下的状态与模块 key，以及系统运行状态页独立的 `["api", "v2", "config", "system"]`；保存、重新加载、写入磁盘成功后让二者全部失效，不再维护模块依赖表或带 revision 的 key。[`form-values.ts`](../../../frontend/src/shared/config/form-values.ts) 用 BigInt 做字节/duration 精确转换，区分继承与显式值、保留已删除引用占位，并在 variant 提交时只选择白名单字段；IP/CIDR helper 只负责词法检查，冲突和规范化仍以服务端为准。duration 表单换算只提供毫秒/秒/分钟/小时/天，回填按能整除的最大整单位归一化（`5000000000ns` → `5s`、`300000000000ns` → `5 分钟`，非整秒按毫秒精确展开），摘要展示复用同一换算的 `formatDurationText`，提交仍写回紧凑 duration；前端只拦必填字段的空值与零值、非法串和小数位超过后端 9 位上限的组合，TTL 上下限按后端语义允许 `0s`（表示该边界不设限），字段上下界仍由后端权威校验。字节侧对称：`ByteUnit` 只提供 B/KB/MB/GB/TB（1024 进制），`bytesToDisplay` 回填时先只保留数值 ≥ 1 的单位（避免把 64 MiB 写成 `0.0625 GB`），再取其中能精确表示（小数不超过导出的 `BYTE_DISPLAY_MAX_FRACTION_DIGITS`）的最大单位（`67_108_864` → `64 MB`、`1_572_864` → `1.5 MB`、`807_306_368` → `788385.125 KB`），保证用户不动字段时再次保存不改变字节数；`bytesFromForm` 全程 BigInt 并在 1..1 TiB 之外抛错。
 
 [`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx) 统一受限高度、内部滚动、保存防重、脏关闭确认、安全错误与 request ID 展示，并提供字段路径到 Ant Design Form 的定位转换。它是业务表单容器而非 schema 自动表单；P3 各页面按自身领域上下界和类型分支使用该容器。共享 [`DurationInput`](../../../frontend/src/shared/components/DurationInput.tsx) 用“数字 + 单位”编辑 duration 字段，默认单位为秒，只在回填时换算一次（后端回显为紧凑串，历史配置可能残留纳秒串），避免把人类不可感知的 ns/us 量级暴露到界面；它已覆盖 DNS 缓存 TTL／快照周期、Hosts 检查周期、规则集更新周期、客户端与策略 TTL 覆盖和上游组超时，必填字段用 `durationRequiredRules`，可选边界用 `durationOptionalRules`（留空表示不设置，`0s` 表示该边界不设限）。共享 [`ByteSizeInput`](../../../frontend/src/shared/components/ByteSizeInput.tsx) 用同样的“数字 + 单位”形态编辑字节字段（`/dns-settings` 的内存上限与 T 参考大小），无法换算时向表单 emit `undefined`，由必填规则报错，而不是静默保留上一个有效值。
 
-## P1 外部配置变化基础（2026-09-08）
+## 配置保存与磁盘状态（2026-11-26）
 
-[`external-change.ts`](../../../frontend/src/shared/config/external-change.ts) 从权威 `ConfigState` 派生文件变化、缺失、不可读、超限、已应用未同步和阻塞事实。关闭提示只记录当前事实 key，不清除 issue；活动/文件 revision 或文件状态变化后重新提示。采用差异绑定所见文件 revision，不以全局活动版本阻止其他条目编辑；还原成功后等待权威状态确认同步，`FILE_REVISION_CONFLICT` 保留当前差异与脏草稿。
+[`useConfigSave`](../../../frontend/src/shared/config/hooks.ts) 是所有配置页共用的保存入口，`retry: false`、`networkMode: "always"`，请求期间按钮 loading 并禁用；页面只构造 `ConfigChange`。结果处理：
 
-[`ExternalChangeBanner`](../../../frontend/src/shared/components/ExternalChangeBanner.tsx) 和 [`ExternalChangeDrawer`](../../../frontend/src/shared/components/ExternalChangeDrawer.tsx) 提供轻量提示、字段级差异/受保护变化展示、脏关闭确认、文件还原、组合采用及同步重试入口。还原确认明确只覆盖所见文件版本，不回滚运行态。[`operation.ts`](../../../frontend/src/shared/config/operation.ts) 对还原和持久化重试复用单次 mutation + operation 回读，不把“重试文件同步”变成配置重新应用。
+| 结果 | 前端行为 |
+| --- | --- |
+| 200 `persisted: true` | 关闭弹窗，提示“配置已应用并同步到文件”，`config-v2` 前缀与系统运行状态查询失效 |
+| 200 `persisted: false` | 关闭弹窗，警告“已生效但未写入磁盘，重启后会丢失”并附诊断；全局提示条出现“写入磁盘” |
+| 409 `CONFIG_FILE_CHANGED` | 弹出“磁盘配置冲突”：取消 / 覆盖磁盘并保存（二次确认后带 `overwrite_disk: true` 重发）/ 重新加载后继续编辑（调用 reload，保留弹窗与草稿） |
+| 409 `CONFIRMATION_REQUIRED` | 二次确认后带 `confirm_retention_shortening: true` 重发 |
+| 409 `OPERATION_BUSY` | 提示稍后重试，保留草稿 |
+| 422 `VALIDATION_FAILED` / `APPLY_FAILED` | `field_errors` 回填字段，其余错误与诊断显示在弹窗顶部，保留草稿 |
+| 网络错误、超时或非法响应 | 提示“结果未确认”，只重新读取状态与模块数据，不自动重发 |
 
-抽屉在没有可编辑差异、没有受保护变化也没有解析错误时单独说明：文件字节变化可能只来自空格、缩进、换行、注释、命名顺序或等价表达，此时没有可采用的项、「组合采用」不可用，消除提示只能经「还原文件」以活动配置重写文件；纯格式差异不会呈现为可采用的候选。
+[`ConfigFormModal`](../../../frontend/src/shared/components/ConfigFormModal.tsx) 与客户端抽屉共用 `ConfigFormFeedback`：打开时记录全局与模块 `config_digest`，期间摘要变化只显示非阻断提示“配置已更新，保存时将以当前内容替换本条目”。草稿由模块查询一次性初始化，refetch 不覆盖，也不按同步状态禁用编辑。
 
-[`ConfigFileStatus`](../../../frontend/src/shared/components/ConfigFileStatus.tsx) 已挂入受保护的 `AppLayout`，以 `configKeys.state()` 每 30 秒仅在页面可见时轮询正式 `/api/v2/config/state`；刷新失败显示可重试的全局提示，不阻断当前页面。发现 issue 后才读取绑定双 revision 的差异，外改不会自动进入 Runtime；还原固定新 `operation_id` 并显式确认丢弃外改，`applied_unpersisted` 重试严格复用原 ID、只调用文件 retry route。mutation 结束后失效差异并回读权威状态，Banner 不因 HTTP 成功提前消失；被拒绝、补偿失败、结果未知和版本冲突继续展示事实。
+[`DiskStatusBanner`](../../../frontend/src/shared/components/DiskStatusBanner.tsx) 挂在 `AppLayout` 下，读取 `useConfigState`（页面可见时 30 秒轮询，窗口聚焦时立即刷新）：`in_sync` 不显示；`modified` 显示“配置文件已在磁盘上被修改（或上次写入失败），与当前运行配置不一致”，提供“重新加载”和“写入磁盘”；`missing`、`unreadable` 只提供“写入磁盘”。“写入磁盘”先二次确认并说明会丢弃磁盘修改；重新加载失败提示校验/读取错误并说明运行配置未更改。[`ConfigSyncBadge`](../../../frontend/src/shared/components/ConfigStateSummary.tsx) 只区分“已同步”和“磁盘不一致”。
 
-全局协调器把选中的 typed changes 直接交给整体 apply，明确确认未采用和受保护的变化会被活动源覆盖，并从首次提交起绑定差异的文件版本。普通保存和组合采用共用 `applyWithConfirmation`；若仍缺危险影响确认，仅预览并补充一次，不将旧差异的文件基准偷偷换成新版本。取消确认不留下 pending operation，不伪造通用 YAML 或自动合并。
+已删除 `operation.ts`、`pending-operation.ts`、`external-change.ts`、`external-adoption.ts`、`ConfigFileStatus`、`ExternalChangeBanner`、`ExternalChangeDrawer` 及其测试；`ApiError` 不再携带 operation ID，改为解析 `CONFIG_FILE_CHANGED` 附带的 `disk.status`。
 
-当前 production embed WebUI 连接 `_fluxdns/p1-config-runtime-live/` 的 loopback 后端完成真实登录；外改 logs 后，30 秒全局轮询显示 Banner，Drawer 读取 `logs` 差异和双 revision，确认还原后 Banner/Drawer 依据权威状态消失。源/派生文件恢复为 `debug` 与 `./logs/hot.log`，浏览器 warning/error 为 0，Runtime revision 前后保持 1，随后 UDP `localhost A` 仍返回 `127.0.0.1`，SQLite 布局仍为 `statistics-v2|1`。该浏览器证据未覆盖窄屏、刷新失败、二次冲突、持久化 retry 异常态或 P3 组合采用；这些状态保留自动测试或后续阶段验收。
+2026-11-26 Windows 验证（Node 26.8.1、pnpm 11.25.0）：`pnpm run typecheck`、`pnpm run test:contract:v2` 10 项、生产构建通过；无其他负载时默认并发 Vitest 46 文件 326 项通过，与 Cargo 构建并行时曾有 1 项既有 ECS 编辑器用例超过 15 秒 `testTimeout`。真实内嵌 release 浏览器验证系统页需重启提示、DNS 配置页无该提示、外改后提示条与徽标出现、提示条重新加载、策略规则上移后保存遇冲突对话框三项选项、“重新加载后继续编辑”后再次保存同时保留外改与本次编辑。
 
 ## P1 系统运行状态（2026-09-08）
 
@@ -121,7 +129,7 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 `SystemPage` 把原先「五列指标格 + Descriptions」的拼接改为三段式：4 个同构指标格、与格子共用同一条四列栅格的运行信息行、以及「运行环境」「数据面摘要」两张并排卡片。指标格固定为「13px 标签 / 30px 等宽数值 / 12.5px 口径说明」三段加 12px 间距，数值基线不再受内容长度影响；运行信息行放版本、启动时间、采样时间与采样来源，替代原先标签列固定 132px、右侧整行留白的 Descriptions；采样时间不再同时出现在指标格与底部说明行。
 
-运行环境来自 `/api/v2/system/runtime` 新增的 `host` 对象（操作系统、内核或构建版本、架构、逻辑核心、主机名、进程 ID）与 `/api/v2/config/system` 的 `work_path`；数据面摘要来自 `/config/state`（活动版本 + `ConfigSyncBadge`）、`/config/modules/listener`（绑定列表与传输类型）、`/config/modules/dns`（缓存快照状态/代数/文件大小）、`/config/modules/{hosts,rule_set}`（就绪计数）与 `/service/metrics`（在线身份计数，与服务状态页共用同一 query key，命中同一份缓存）。主指标仍由 [`useProcessMetrics`](../../../frontend/src/modules/system/hooks.ts) 按可见性 30 秒轮询；`host` 字段缺失显示「暂不可用」且不附错误码，次级读取失败显示「暂不可用 + 契约错误码」，尚未返回显示占位符。手动「刷新」改为重取本页全部查询。
+运行环境来自 `/api/v2/system/runtime` 新增的 `host` 对象（操作系统、内核或构建版本、架构、逻辑核心、主机名、进程 ID）与 `/api/v2/config/system` 的 `work_path`；数据面摘要来自 `/config/state`（“配置版本”栏显示 `config_digest` 前 12 位 + `ConfigSyncBadge`）、`/config/modules/listener`（绑定列表与传输类型）、`/config/modules/dns`（缓存快照状态/代数/文件大小）、`/config/modules/{hosts,rule_set}`（就绪计数）与 `/service/metrics`（在线身份计数，与服务状态页共用同一 query key，命中同一份缓存）。2026-11-26 起 `/config/system` 的 `restart_required` 非空时，页面顶部显示“以下配置已修改，需重启 FluxDNS 后生效：数据库、WebUI 监听、解析详情记录”中的对应项；该提示只在本页出现。主指标仍由 [`useProcessMetrics`](../../../frontend/src/modules/system/hooks.ts) 按可见性 30 秒轮询；`host` 字段缺失显示「暂不可用」且不附错误码，次级读取失败显示「暂不可用 + 契约错误码」，尚未返回显示占位符。手动「刷新」改为重取本页全部查询。
 
 ## P2 固定契约与只读基础（2026-09-08）
 
@@ -131,9 +139,9 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 ## P3 单模块写入与代理配置（2026-09-08）
 
-[`shared/config/hooks.ts`](../../../frontend/src/shared/config/hooks.ts) 统一消费模块 `ConfigRead` 和单模块 apply，普通保存一次提交，不依赖草稿打开时的全局版本。仅收到 `CONFIRMATION_REQUIRED` 或 `EXTERNAL_CHANGES_REQUIRE_CONFIRMATION` 时读取无状态影响预览并确认；改名和 listener 编辑不再触发通用弹窗。`operation_id` 首次发送前固定，网络结果不明只回读。成功按类型化依赖失效 query；`applied_unpersisted` 保持独立警告并交给文件同步入口。
+[`shared/config/hooks.ts`](../../../frontend/src/shared/config/hooks.ts) 统一消费模块 `ConfigRead` 和同步保存，各页面只负责表单与 payload 转换；保存结果分支见上文[配置保存与磁盘状态](#配置保存与磁盘状态2026-11-26)。
 
-[`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 提供搜索、新建和按旧 name 编辑。表单在 env、file 与内联 URL 三类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；内联 URL 的密码位以占位符 `FLUXDNS_REDACTED_SECRET` 回显，未改动时由后端从当前活动源恢复原密码，不向浏览器泄漏实际秘密。交互测试检查直接单模块 apply、旧名称和 SecretRef payload，无强制预校验请求；真实热应用和文件行为见本轮 [Management 验证](../backend/management.md#单次保存与写接口简化2026-11-06)。
+[`ProxiesPage`](../../../frontend/src/modules/proxies/ProxiesPage.tsx) 提供搜索、新建和按旧 name 编辑。表单在 env、file 与内联 URL 三类 SecretRef 来源间切换并提交当前分支，列表只显示引用位置和类型化引用数；内联 URL 的密码位以占位符 `FLUXDNS_REDACTED_SECRET` 回显，未改动时由后端从当前文档恢复原密码，只改密码时新值写入文件，不向浏览器泄漏实际秘密。交互测试检查同步保存、旧名称和 SecretRef payload；真实热应用和文件行为见 [Management 验证](../backend/management.md#配置保存与磁盘操作2026-11-26)。
 
 [`HostsPage`](../../../frontend/src/modules/hosts/HostsPage.tsx) 已替换 `/hosts` 空态，读取类型化 `const/file` 来源、引用数和 Runtime ready/stale/failed 状态。表单按来源只提交内联正文或文件路径/更新周期，并保留 `json/hosts` 格式；来源切换不会携带隐藏分支字段。文件来源的检查周期用共享 `DurationInput`（默认秒），回填把后端回显（紧凑串或历史纳秒串）归一化成紧凑串。
 
@@ -143,7 +151,7 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`StrategiesPage`](../../../frontend/src/modules/strategies/StrategiesPage.tsx) 已替换 `/strategies` 空态。规则表单保持顺序并区分 Hosts 本地回答和 rule_set+upstream，两类字段互斥；上移、下移和移除均更新整体候选。cache、TTL、ECS 明确区分继承、启用和禁用，不用空值代替继承。启用 TTL 覆盖时最小/最大 TTL 用共享 `DurationInput`，留空表示不设置该边界，`0s` 表示该边界不设限。
 
-[`ListenersPage`](../../../frontend/src/modules/listeners/ListenersPage.tsx) 已替换 `/listeners` 空态。UDP/TCP 编辑地址、端口、策略和可选 Hosts；DoH 编辑有序 route 及多个 endpoint，并按 TLS terminate/external、peer/forwarded_header/proxy_protocol 选择白名单字段。列表从 Runtime 投影显示实际 binding/accepting，保存后的物理冲突、差量重绑和补偿仍由后端 prepare/owner 决定。标题区与 服务状态／解析记录 共用同一套层级（h2 34px、字重 650、字距 -1px、下边距 32px、操作区垂直居中），副标题为同构短句，右上角只保留 `ConfigSyncBadge` 同步胶囊与主操作按钮，不再展示 active/file revision；胶囊读全局 30 秒轮询的配置状态，避免与全局同步提示给出矛盾结论，而编辑禁用仍沿用模块读取的既有判定；列名、搜索、空态与弹窗标题统一为中文。
+[`ListenersPage`](../../../frontend/src/modules/listeners/ListenersPage.tsx) 已替换 `/listeners` 空态。UDP/TCP 编辑地址、端口、策略和可选 Hosts；DoH 编辑有序 route 及多个 endpoint，并按 TLS terminate/external、peer/forwarded_header/proxy_protocol 选择白名单字段。列表从 Runtime 投影显示实际 binding/accepting，保存后的物理冲突、差量重绑和补偿仍由后端 prepare/owner 决定。标题区与 服务状态／解析记录 共用同一套层级（h2 34px、字重 650、字距 -1px、下边距 32px、操作区垂直居中），副标题为同构短句，右上角只保留 `ConfigSyncBadge` 同步胶囊与主操作按钮；胶囊读全局 30 秒轮询的配置状态，与全局提示条结论一致，编辑和保存不受同步状态限制；列名、搜索、空态与弹窗标题统一为中文。
 
 [`ClientsPage`](../../../frontend/src/modules/clients/ClientsPage.tsx) 已替换 `/clients` 空态。页首四张概览卡（客户端数与仅按 ID 匹配数、自定义策略、含覆盖项、IP/CIDR 条目）与列表上方的“全部 / 自定义策略 / 含覆盖”分段筛选共用 [`client-view`](../../../frontend/src/modules/clients/client-view.ts) 的纯函数统计；搜索覆盖名称、`client_id` 与 IP。列表每行展示名称、单行等宽 `client_id` 与复制按钮，IP/CIDR 超过两条折叠为 `+N` 悬停展开、无 IP 时提示“仅按 ID 匹配”，策略区分自定义（实色）与“继承默认”（虚线），覆盖项列只列出未继承的缓存/TTL/ECS（TTL 边界按紧凑单位显示，`0s` 显示为“不限”）。保存成功后对应行短暂高亮。
 
@@ -153,11 +161,11 @@ Windows 真实浏览器使用当前 Vite 页面连接 `_fluxdns/fc14-ui-live-set
 
 [`SystemSettingsPage`](../../../frontend/src/modules/system-settings/SystemSettingsPage.tsx) 的 `work/rules/database/records` 活动源路径表达与 WebUI 监听来自 `SystemConfigRead` 且保持只读，不冒充 Runtime 解析后的绝对路径；日志 `enable/level/path` 单独通过 logs 模块单次保存，后端内部完成候选校验、热应用和持久化，不向启动配置字段提供伪编辑入口。
 
-FC-16 组合采用把外部差异中的同名资源转换为带明确 `original_name` 的 update，仅外部资源转换为 create；仅活动资源保持禁选，不推断删除。客户端 update 剔除 `client_id`，外部 ID 变化不随采用提交，需在客户端页面单独修改并确认。用户可跨模块勾选白名单变化，一次提交全局 Candidate；未选差异与 `work/database/webui/protected_credentials` 受保护变化通过 `discard_external_changes` 确认后按活动配置还原，二次外改继续由 file revision 冲突阻断。
+外部差异 Drawer 与组合采用已于 2026-11-26 下线：磁盘外改改由全局提示条的“重新加载”“写入磁盘”和保存冲突对话框的“重新加载后继续编辑”处理，见上文[配置保存与磁盘状态](#配置保存与磁盘状态2026-11-26)。
 
 ## P3 联合验收（2026-09-08）
 
-Windows 内嵌 WebUI 连接 `_fluxdns/p3-live/` 的真实 ConfigV2 进程。脚本按依赖对十模块逐一执行 Bearer module GET、validate、202 apply、operation poll 与 GET 回显，全部得到 `applied_synced`；真实 UDP/SQLite/保留/历史结果及外部文件组合采用、二次冲突和 restore 见[后端 Management 实现](../backend/management.md#p1-配置事务与文件操作2026-09-08)。
+Windows 内嵌 WebUI 连接 `_fluxdns/p3-live/` 的真实 ConfigV2 进程。脚本按依赖对十模块逐一执行 Bearer module GET、validate、202 apply、operation poll 与 GET 回显，全部得到 `applied_synced`。该批的 validate/apply/operation 与组合采用链路已于 2026-11-26 由同步保存取代，当前写接口见[后端 Management 实现](../backend/management.md#配置保存与磁盘操作2026-11-26)。
 
 浏览器在 1440×900 逐项进入 12 个一级路由，均出现正式标题且无 `PendingModulePage` 或页面级横向溢出。日志表单真实保存发出 Bearer module GET、validate 200、apply 202、operation 200 和回显 200；DNS 保留表单确认 preview 200 严格先于 statistics validate/apply。真实外改后的 Drawer 显示 Hosts 与 logs 字段级差异，2 项全局组合采用经确认成功并自动关闭。390×844 下 DNS/Hosts 无页面级横向溢出，导航使用移动 Drawer，表格仅在自身容器滚动，编辑弹窗完整可操作；Console error/warning 为空。
 
@@ -179,7 +187,7 @@ Windows `_fluxdns/p4-live/` 内嵌 debug binary 的独立真实 socket smoke 覆
 
 [`route-contract.ts`](../../../frontend/src/app/route-contract.ts) 固定 12 个一级路径与配置模块映射，保留 `/dashboard`、`/queries`；上游组仅为 `/upstreams` 页内 tab。App 与导航消费该表，P3 九个配置入口均已挂载领域页面；路径存在仍不能替代其真实读写与浏览器证据。
 
-[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型，草稿不携带写入前置版本；`clientEditValue` 默认剔除 `client_id`，修改请求身份由调用方显式追加。操作结果仍区分同步、仅重试持久化、回读活动值和阻塞，大整数转表单前检查安全范围。全局文件状态由壳层协调器消费 TanStack Query，不另建可变配置权威。
+[`shared/config/contract.ts`](../../../frontend/src/shared/config/contract.ts) 直接消费生成类型，草稿不携带写入前置版本；`clientEditValue` 默认剔除 `client_id`，修改请求身份由调用方显式追加，`decimalToSafeInteger` 在大整数转表单前检查安全范围。全局磁盘状态由壳层提示条消费 TanStack Query，不另建可变配置权威。
 
 FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置 endpoint、operation 单次发送/回读/unknown、query key/失效、单位/duration/IP/继承/variant 及脏关闭确认；与 Rust 共用的 schema 夹具测试见[交付实现](../delivery.md#前端与接口生成)。这些验证使用 MSW/jsdom，不证明后端配置 route、真实文件、浏览器路由离开或内嵌环境已经接线。
 
@@ -189,15 +197,15 @@ FC-02 定向 Vitest 共 27 项，覆盖 v2 Bearer 路径、字段错误、配置
 | 部署后页面恢复 | App 静态认证入口、lazyPage、AppErrorBoundary | bootstrap 与全部懒加载路由 | 2026-11-07：先红后绿回归、全量 Vitest、生产包浏览器 401/分片 404/手动恢复，见[恢复说明](#服务更新后的页面恢复) | 浏览器后端为 fixture；未做真实 binary 升级；旧标签首次需刷新 |
 | 同源请求/取消 | `apiV2Request`、unauthorized listener | 各 module API 共用 client | 并发刷新/取消/迟到结果测试及真实 Bearer 请求头观察 | 普通泛型响应不是完整运行时 schema 校验 |
 | 退出数据清理 | `performLogout` finally、`onUnauthorized` | logout 与 HTTP/WS 认证失效统一回收 | 认证失效清空业务缓存的组件回归、真实登出撤销与重启后登录 | 网络 logout 失败仍不能证明服务端已撤销 |
-| P3 v2 配置页面 | 九个领域页面、generated-v2、module hooks | 受保护路由与十模块正式 API | MSW/完整 Vitest、真实 Bearer/文件/SQLite/UDP/浏览器，见 P3 联合验收 | 跨平台与原生触控边界见联合验收 |
+| P3 v2 配置页面 | 九个领域页面、generated-v2、module hooks | 受保护路由与同步保存 API | MSW/完整 Vitest；2026-11-26 真实 release 浏览器策略规则上移后保存 | 跨平台与原生触控边界见联合验收 |
 | 共享实时连接 | events client、认证代次与订阅 owner | v2 ticket + WS | Vitest；真实 ticket/WS、断线 replay、登出 4401 与 Network/Storage | 外部 HTTPS 与真实网络慢读饱和未验证 |
 | 服务状态 | DashboardPage/hooks/chart | v2 HTTP metrics + WS metrics | 真实 DNS 流量、指标变化、可访问图表、桌面视口 | 真实 OS failure 样本与深色样例未复核 |
 | 系统运行状态布局与主机信息 | system Page/hooks/api、共享 config hooks 与 `ConfigSyncBadge`、[index.css](../../../frontend/src/styles/index.css)、`ProcessMetrics.host` | 4 格指标 + 运行信息行 + 「运行环境」「数据面摘要」卡片 | 2026-09-27：前端 31 文件 164 项 Vitest、`tsc --noEmit`、生产构建与 v2 schema 契约 4 项通过；后端 `cargo fmt --check`、`cargo clippy --all-targets --all-features -- -D warnings`（Windows msvc）通过 | 未做真实浏览器视觉复验；Linux/macOS 主机采集分支未在本机编译；在线客户端与缓存快照复用现有模块读取接口 |
 | 解析记录 | QueriesPage/hooks/realtime/detail | v2 HTTP search/detail + WS queries | Vitest；真实 UDP/HTTP/WS、稳定详情与桌面/移动浏览器 | 原生触控限制与性能测点见联合验收 |
 | mock 隔离 | bootstrap DEV gate、Vite 构建 | 显式开发变量启用 | 本轮静态 | mock 不证明后端集成或安全验收 |
 | 12 路由壳层 | route-contract、App、AppLayout、九个配置页 | 受保护路由与分组导航 | 1440×900 逐路由标题/溢出检查和 390×844 移动导航 | 旧占位/页面/API 已退出，平台边界见联合验收 |
-| 配置交互基础 | config api/operation/query keys/form values、ConfigFormModal | 全局 state/operation 与十模块领域表单 | 91 项完整 Vitest、typecheck/build、真实 Bearer 单模块读写回显 | 运行时响应仍由后端 schema/owner 权威校验 |
-| 外部变化处理 | ConfigFileStatus、external adoption、Banner/Drawer | 轮询、差异、还原/retry、覆盖确认和组合采用 | MSW 二次冲突；真实双模块外改/采用/冲突/restore 与浏览器 Drawer | WS 文件通知未授权，仍以 HTTP 轮询 |
+| 配置交互基础 | config api/hooks/query keys/form values、ConfigFormModal | 全局 state 与十模块领域表单的同步保存 | 2026-11-26：Vitest 覆盖保存各结果分支、冲突对话框三项、提示条四态；真实 release 浏览器保存/冲突/重新加载 | 运行时响应仍由后端 schema/owner 权威校验 |
+| 磁盘状态与冲突处理 | DiskStatusBanner、`useConfigDiskAction`、`useConfigSave` 冲突分支 | `AppLayout` 全局提示条、各配置页同步徽标 | [DiskStatusBanner 测试](../../../frontend/src/shared/components/DiskStatusBanner.test.tsx)、[保存测试](../../../frontend/src/shared/config/save.test.tsx)；2026-11-26 真实浏览器外改提示、重新加载与“重新加载后继续编辑” | 文件变化以 HTTP 轮询/聚焦刷新发现，WS 只推送摘要变化 |
 | 系统运行状态 | system Page/hooks/api、共享 formatters | `/system-runtime` 读取唯一 v2 进程指标及基础信息 | FC-14 测试及 Windows 真实浏览器/后端可用样本；P3 窄屏无溢出 | 真实不可用 OS 样本和 Linux 未做浏览器验收 |
 | 测试定时器收尾清理 | [setup.ts](../../../frontend/src/test/setup.ts) 的 `pendingTimers` 包装与 `afterAll` 清理 | `vitest run` 的每个测试文件 setup 生效；release workflow 的 frontend job 在该 setup 上执行 `pnpm run test` | 2026-09-30：改前用临时观测统计，31 个文件中 10 个在收尾时仍有未清理定时器（延迟 0/10/100ms，单文件最多 191 个）；改后 `pnpm run test` 连续两次 31 文件 176 项通过，`pnpm run typecheck` 与生产构建通过，收尾均为清除后归零 | 只包装 `setTimeout`，未覆盖 `requestAnimationFrame`／`setInterval`；本机未复现 CI 的未处理错误（本地观测到 0 次拆除后触发），修复效果需下一次 Actions 运行确认 |
 

@@ -48,7 +48,7 @@ impl ManagementQueryDependencies {
 }
 
 impl ManagementService {
-    /// 生产 v2 启动传入已冻结活动源的 ConfigStore，确保只读投影与运行态同源。
+    /// 生产 v2 启动传入以启动正文建立的 ConfigStore，确保只读投影与运行态同源。
     pub(crate) async fn bind_with_config_store(
         config: &ResolvedWebUi,
         config_store: Arc<ConfigStore>,
@@ -63,6 +63,7 @@ impl ManagementService {
         let auth = Arc::new(AuthState::new(&config.users).map_err(ManagementBuildError::Auth)?);
         let sessions = Arc::new(SessionStore::new(origin.scheme() == "https"));
         let metrics = Arc::clone(&dependencies.metrics);
+        let coordinator = Arc::clone(&dependencies.coordinator);
         let queries = Arc::new(ManagementQueryService::new(
             dependencies.coordinator,
             dependencies.metrics,
@@ -81,17 +82,16 @@ impl ManagementService {
             AuthServices::new(
                 Arc::clone(&auth),
                 Arc::clone(&sessions),
-                Arc::clone(&config_store),
+                config_store,
                 origin.as_str().trim_end_matches('/').to_owned(),
                 Some(queries),
             )
-            .with_config_control(config_control)
+            .with_config_control(config_control, coordinator)
             .with_events(Arc::clone(&events)),
         );
         let runtime = Arc::new(ManagementRuntime::new(
             auth,
             sessions,
-            config_store,
             Some(Arc::clone(&events)),
         ));
         let address = SocketAddr::new(config.address, config.port);
@@ -171,7 +171,6 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::{ManagementService, build_router};
-    use crate::config::hash::deterministic_hash;
     use crate::config::store::ConfigStore;
     use crate::dns::Cancellation;
     use crate::management::ManagementRuntime;
@@ -182,17 +181,15 @@ mod tests {
 
     #[tokio::test]
     async fn listener_serves_plain_http_and_stops_on_cancellation() {
+        let (source, work_path) = crate::config::test_support::portable_example();
         let root = crate::config::test_support::absolute_path("management-http-listener");
         std::fs::create_dir_all(&root).unwrap();
         let source_path = std::path::Path::new(&root).join("config.yaml");
-        std::fs::write(&source_path, "version: 1\n").unwrap();
+        let source = source.replace(&work_path.to_string_lossy().replace('\\', "/"), &root);
+        std::fs::write(&source_path, source).unwrap();
         let auth = Arc::new(AuthState::new(&[]).unwrap());
         let sessions = Arc::new(SessionStore::new(false));
-        let config_store = Arc::new(ConfigStore::new(
-            source_path.clone(),
-            source_path,
-            deterministic_hash(b"version: 1\n"),
-        ));
+        let config_store = Arc::new(ConfigStore::open_for_test(&source_path));
         let services = Arc::new(AuthServices::new(
             Arc::clone(&auth),
             Arc::clone(&sessions),
@@ -203,7 +200,7 @@ mod tests {
         let service = ManagementService {
             listener: tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap(),
             router: build_router(services),
-            runtime: Arc::new(ManagementRuntime::new(auth, sessions, config_store, None)),
+            runtime: Arc::new(ManagementRuntime::new(auth, sessions, None)),
             events: None,
         };
         let address = service.local_addr().unwrap();

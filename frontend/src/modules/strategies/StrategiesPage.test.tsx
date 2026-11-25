@@ -1,5 +1,6 @@
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { ConfigProvider } from "antd";
 import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
@@ -9,14 +10,14 @@ import { setMockAuthenticated } from "@/mocks/handlers";
 import { strategiesConfigReadFixture } from "@/mocks/fixtures";
 import { server } from "@/mocks/server";
 import { configKeys } from "@/shared/config/query-keys";
-import type { ApplyRequest } from "@/shared/config/api";
-import { pendingOperationKey } from "@/shared/config/pending-operation";
+import type { ConfigRead, SaveRequest } from "@/shared/config/api";
+import { strategyFieldErrors, type Strategy } from "./strategy-form";
 
 function renderStrategies() {
   window.history.replaceState({}, "", "/strategies");
   setMockAuthenticated(true);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  render(<AppProviders queryClient={client}><App /></AppProviders>);
+  render(<ConfigProvider theme={{ token: { motion: false } }}><AppProviders queryClient={client}><App /></AppProviders></ConfigProvider>);
   return client;
 }
 describe("StrategiesPage rule cards", () => {
@@ -38,28 +39,36 @@ describe("StrategiesPage rule cards", () => {
     expect(within(dialog).getAllByLabelText("ECS 覆盖").length).toBeGreaterThan(1);
   });
 
-  it("折叠规则重排后保存 ECS，后台刷新不附带全局版本", async () => {
+  it("上下移规则后提交完整策略，后台刷新不覆盖草稿且保存成功", async () => {
     const user = userEvent.setup();
-    const original = { ...strategiesConfigReadFixture.values[0].value, rules: [
+    const original: Strategy = { ...strategiesConfigReadFixture.values[0].value, rules: [
       { hosts: "local", edns_client_subnet: { mode: "custom", custom_ip: "2001:db8::/48" } },
       { rule_set: "domains", upstream: "default-group", edns_client_subnet: { mode: "disabled" } },
+      { rule_set: "custom", upstream: "default-group" },
     ], cache: { enabled: true, optimistic: { enabled: false, answer_ttl: "10s", max_age: "1h" } }, ttl_override: { min: "0s" } };
-    let response = { ...strategiesConfigReadFixture, values: [{ module: "strategy", value: original }] };
-    let submitted: ApplyRequest | undefined;
+    let response: ConfigRead = { ...strategiesConfigReadFixture, values: [{ module: "strategy", value: original }] };
+    let submitted: SaveRequest | undefined;
     server.use(
       http.get("/api/v2/config/modules/strategy", () => HttpResponse.json(response)),
-      http.post("/api/v2/config/modules/strategy/apply", async ({ request }) => { submitted = await request.json() as ApplyRequest; return HttpResponse.json({ code: "VALIDATION_FAILED", message: "test", request_id: "test", retryable: false, field_errors: [] }, { status: 422 }); }),
+      http.post("/api/v2/config/save", async ({ request }) => {
+        submitted = await request.json() as SaveRequest;
+        return HttpResponse.json({ state: response.state, persisted: true });
+      }),
     );
     const client = renderStrategies();
     await user.click(await screen.findByLabelText("编辑策略 default", {}, { timeout: 10_000 }));
     const dialog = await screen.findByRole("dialog", { name: "编辑策略" });
     await user.click(within(dialog).getByLabelText("下移规则 1"));
-    response = { ...response, state: { ...response.state, active_revision: "new-active" } };
+    await user.click(within(dialog).getByLabelText("上移规则 3"));
+    response = { ...response, state: { ...response.state, config_digest: "b".repeat(64) }, values: [{ module: "strategy", value: { ...original, rules: [original.rules[0]] } }] };
     await act(async () => { await client.invalidateQueries({ queryKey: configKeys.moduleRoot("strategy") }); });
+    expect(await within(dialog).findByText("配置已更新，保存时将以当前内容替换本条目")).toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(submitted).toBeDefined());
-    expect(Object.keys(submitted!).sort()).toEqual(["changes", "operation_id"]);
-    expect(submitted?.changes[0]).toMatchObject({ change: { value: { rules: [original.rules[1], original.rules[0]], cache: original.cache, ttl_override: original.ttl_override } } });
+    expect(await screen.findByText("配置已应用并同步到文件")).toBeInTheDocument();
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "编辑策略" })).not.toBeInTheDocument(), { timeout: 5_000 });
+    expect(submitted).toEqual({ changes: [{ module: "strategy", change: {
+      action: "update", original_name: original.name, value: { ...original, rules: [original.rules[1], original.rules[2], original.rules[0]] },
+    } }] });
   });
 
   it("未展开的新规则也执行校验并在失败后展开", async () => {
@@ -75,13 +84,13 @@ describe("StrategiesPage rule cards", () => {
   it("仅修改名称时保留禁用 TTL 的隐藏边界", async () => {
     const user = userEvent.setup();
     const ttl = { enabled: false, min: "0s", max: "1h" };
-    let submitted: ApplyRequest | undefined;
+    let submitted: SaveRequest | undefined;
     server.use(
       http.get("/api/v2/config/modules/strategy", () => HttpResponse.json({ ...strategiesConfigReadFixture,
         values: [{ module: "strategy", value: { ...strategiesConfigReadFixture.values[0].value, ttl_override: ttl } }],
       })),
-      http.post("/api/v2/config/modules/strategy/apply", async ({ request }) => {
-        submitted = await request.json() as ApplyRequest;
+      http.post("/api/v2/config/save", async ({ request }) => {
+        submitted = await request.json() as SaveRequest;
         return HttpResponse.json({ code: "VALIDATION_FAILED", message: "test", request_id: "test", retryable: false, field_errors: [] }, { status: 422 });
       }),
     );
@@ -93,27 +102,23 @@ describe("StrategiesPage rule cards", () => {
     await waitFor(() => expect(submitted?.changes[0]).toMatchObject({ change: { value: { name: "default-renamed", ttl_override: ttl } } }));
   });
 
-  it("未决操作阻止新保存，继续查询使用原 ID", async () => {
+  it("ECS 解码错误保留规则索引并映射到自定义地址", () => {
+    expect(strategyFieldErrors([{ path: "changes[0].change.value.rules[1].edns_client_subnet.custom_ip", code: "INVALID_ARGUMENT" }]))
+      .toEqual([{ name: ["rules", 1, "ecs_custom_ip"], errors: ["INVALID_ARGUMENT"] }]);
+  });
+
+  it("配置路径字段错误定位到折叠规则并打开草稿", async () => {
     const user = userEvent.setup();
-    let applies = 0;
-    let reads = 0;
-    server.use(
-      http.post("/api/v2/config/modules/strategy/apply", () => { applies += 1; return HttpResponse.error(); }),
-      http.get("/api/v2/config/operations/original-pending", () => {
-        reads += 1;
-        return HttpResponse.json({ operation_id: "original-pending", status: { state: "applied_synced", active_revision: "a2", persisted_revision: "a2" } });
-      }),
-    );
-    const client = renderStrategies();
+    server.use(http.post("/api/v2/config/save", () => HttpResponse.json({
+      code: "VALIDATION_FAILED", message: "validation", request_id: "rule-error", retryable: false,
+      field_errors: [{ path: "strategy[0].rules[1].upstream", code: "INVALID_ARGUMENT" }],
+    }, { status: 422 })));
+    renderStrategies();
     await user.click(await screen.findByLabelText("编辑策略 default", {}, { timeout: 10_000 }));
-    act(() => { client.setQueryData(pendingOperationKey, "original-pending"); });
     const dialog = await screen.findByRole("dialog", { name: "编辑策略" });
     await user.click(within(dialog).getByRole("button", { name: "保存" }));
-    await waitFor(() => expect(within(dialog).getByText(/配置操作结果尚未确认/)).toBeInTheDocument());
-    expect(applies).toBe(0);
-    await user.click(screen.getByRole("button", { name: "继续查询" }));
-    await waitFor(() => expect(client.getQueryData(pendingOperationKey)).toBeNull());
-    expect(reads).toBe(1);
-    expect(applies).toBe(0);
+    expect(await within(dialog).findByText("INVALID_ARGUMENT")).toBeInTheDocument();
+    expect(within(dialog).getByRole("button", { name: /^2\./ })).toHaveAttribute("aria-expanded", "true");
+    expect(within(dialog).getByLabelText("匹配上游")).toHaveAttribute("aria-invalid", "true");
   });
 });

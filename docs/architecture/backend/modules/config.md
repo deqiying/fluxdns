@@ -12,13 +12,15 @@
 >
 > 2026-11-08 局部评审：仅同步 DoH 裸路由隐式 ID 后缀、同形显式模板优先及重叠拒绝契约；其余范围沿原评审记录，实施与验证证据见[DNS 管线](../../../implementation/backend/dns-pipeline.md#能力与证据)。
 >
-> 关联实现：[load.rs](../../../../backend/src/config/load.rs)、[resolve.rs](../../../../backend/src/config/resolve.rs)、[validate.rs](../../../../backend/src/config/validate.rs)、[store.rs](../../../../backend/src/config/store.rs)
+> 2026-11-26 局部评审：配置读写重构，重写 §1–§2 的写入职责、§8 配置快照、§11 快照验证要求和 §12–§14；其余范围沿原评审记录。
+>
+> 关联实现：[load.rs](../../../../backend/src/config/load.rs)、[resolve.rs](../../../../backend/src/config/resolve.rs)、[validate.rs](../../../../backend/src/config/validate.rs)、[store.rs](../../../../backend/src/config/store.rs)、[writer.rs](../../../../backend/src/config/writer.rs)、[disk.rs](../../../../backend/src/config/disk.rs)
 >
 > 关联文档：[配置字段参考](../../../implementation/configuration.md) · [后端架构](../overview.md)
 
 ## 1. 职责
 
-v2 采用“唯一 name 管理键、独立 client_id、活动源优先、应用后持久化、外部文件只提示”。[`contract.rs`](../../../../backend/src/config/contract.rs) 直接接入生产 loader/resolve/快照和 active `ConfigStore`；契约默认值和边界见[配置参考](../../../implementation/configuration.md#v2-契约与生产基线2026-09-08)。普通配置写接口与完整服务控制事务沿[Management 实现](../../../implementation/backend/management.md#p1-配置事务与文件操作2026-09-08)的唯一 owner 链路执行，不保留旧 loader 或迁移入口。
+v2 采用“唯一 name 管理键、独立 client_id、内存文档唯一权威、先应用后写盘、外部文件只提示”。[`contract.rs`](../../../../backend/src/config/contract.rs) 直接接入生产 loader/resolve/快照和 `ConfigStore`；契约默认值和边界见[配置参考](../../../implementation/configuration.md#v2-契约与生产基线2026-09-08)。保存、重新加载、写入磁盘与首用户写入共用 `ConfigStore` 的一把写锁，HTTP 接线见[Management 实现](../../../implementation/backend/management.md#配置保存与磁盘操作2026-11-26)，不保留旧 loader 或迁移入口。
 
 Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 prepare 的 `ResolvedConfig`。资源内容首次 snapshot 与 listener 装配属于 Resource/Runtime/Application，不是 YAML loader 的职责。
 
@@ -29,7 +31,8 @@ Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 pre
 - 路径、URL、CIDR、duration、SecretRef source 和默认值归一化；SecretRef 实际值只通过显式 accessor 读取；
 - 引用、循环、条件字段、继承和 bind 冲突校验；
 - 生成配置摘要并保留产生运行态的源正文；
-- 安全地维护工作目录中的 `config.yaml` 快照。
+- 在类型化配置上应用变更，并只把变化的条目写回源文件；
+- 观测源文件摘要，以单向镜像维护工作目录中的 `config.yaml`。
 
 字段含义和默认值只在[配置参考](../../../implementation/configuration.md)定义，本模块文档说明解析、信任边界和写入不变量。
 
@@ -44,8 +47,12 @@ Config 模块把用户 YAML 转换为不可变、无歧义、可直接用于 pre
 | `hash.rs` | 运行态和资源比较使用的非加密内容指纹 |
 | `resolve.rs` | 默认值、三态、继承和来源信息归一化 |
 | `validate.rs` | 名称、引用图、循环、条件字段和 bind |
-| `store.rs` | 首用户配置事务、fingerprint 冲突、journal 与恢复 |
-| `source_edit.rs` | 保留源 YAML 表达的定向 users 编辑 |
+| `change.rs` | 变更 DTO、`apply_changes`、引用改名与脱敏密码恢复 |
+| `layout.rs` | 按行扫描 YAML 顶层段、段内列表项与子键的字节区间 |
+| `writer.rs` | 条目级差异、块式渲染、文本替换与语义复核；首用户的 `webui.users` 写入 |
+| `document.rs` | `ConfigDocument`（正文、SHA-256 摘要、`ConfigV2`、runtime 代次、需重启项） |
+| `disk.rs` | 有界读取与摘要、同目录原子替换、沿用权限与旧版旁文件检测 |
+| `store.rs` | 当前文档、磁盘观测与写锁；`save`/`reload`/`persist`/`create_initial_user` |
 
 DTO、ValidatedConfig 和 ResolvedConfig 必须是不同类型，不能用布尔字段表示“也许已校验”。
 
@@ -69,7 +76,7 @@ YAML 文件必须是 UTF-8。唯一 v2 loader 以 4 MiB 限制输入，避免在
 
 ## 4. 版本拒绝边界
 
-只有 v2 配置参与加载和候选校验。旧版本、未来版本或缺失版本直接报错；不映射旧字段、不拆分旧客户端、不创建迁移报告，也不修改原文件。测试使用同一正式 loader，不另留兼容入口。新格式自身的快照和 journal 恢复保持独立，不以拒绝旧版本为由省略。
+只有 v2 配置参与加载和候选校验。旧版本、未来版本或缺失版本直接报错；不映射旧字段、不拆分旧客户端、不创建迁移报告，也不修改原文件。测试使用同一正式 loader，不另留兼容入口。工作目录配置快照的读写独立于版本拒绝，见[§8](#8-工作目录与配置快照)；启动不恢复任何写事务，见[§14](#14-磁盘观测写入与启动级配置)。
 
 ## 5. 归一化
 
@@ -119,16 +126,16 @@ YAML 文件必须是 UTF-8。唯一 v2 loader 以 4 MiB 限制输入，避免在
 
 例如启动文件为 `/opt/_fluxdns/config.yaml`、`work.path: ./` 时，`resolved_work_path` 是 `/opt/_fluxdns`；随后 `database.path: ./data/fluxdns.sqlite3` 解析为 `/opt/_fluxdns/data/fluxdns.sqlite3`，而不是相对于进程当前工作目录或再次相对于配置文件路径拼接。
 
-当启动配置本身不等于 `<resolved_work_path>/config.yaml` 时，按契约复制到该固定路径；同目录不同文件名仍必须创建派生快照。快照逻辑只能接收已经解析完成的绝对工作目录，不能再次解释原始 `work.path`。为避免覆盖用户已有配置，采用：
+当启动配置本身不等于 `<resolved_work_path>/config.yaml` 时，按契约复制到该固定路径；同目录不同文件名仍必须创建派生快照。快照逻辑只能接收已经解析完成的绝对工作目录，不能再次解释原始 `work.path`。派生快照是源文件的单向镜像，源文件始终是权威：
 
 1. 创建工作目录和父目录；
-2. 对输入字节计算 hash；
-3. 目标不存在时，在同目录写临时文件、flush/fsync 后原子 no-replace 发布；
-4. 目标存在且 hash 相同时不操作；
-5. 目标存在但内容不同时拒绝启动，并提示显式处理，不自动覆盖；
+2. 目标不存在时，在同目录写临时文件、flush/fsync 后以 hard link no-replace 发布，并发启动只有一个创建者；
+3. 目标存在且字节相同时不操作；
+4. 目标存在但内容不同（含空文件、超限或非 UTF-8）时，用源正文原子替换；
+5. 目标是 symlink 时拒绝，是目录等非普通文件时以冲突拒绝启动；
 6. 不把 SecretRef 解析后的值写回配置快照。
 
-实现使用同目录临时文件、`create_new`、hard-link no-replace 发布、文件和目录同步；目标 symlink/special file 会拒绝，Unix 临时快照使用 owner-only 权限。临时文件、错误消息和日志不得包含 secret。快照只保存输入 YAML 的 SecretRef 占位符，不保存解析后的实际值。
+运行期保存与写入磁盘先写源文件，再用同一原子写覆盖镜像；镜像写入失败只记录 warning 并附在响应诊断中，不影响源文件已写入的结论。磁盘观测与冲突判断从不读取镜像。临时文件、错误消息和日志不得包含 secret；快照只保存输入 YAML 的 SecretRef 占位符，不保存解析后的实际值。
 
 ## 9. 输出模型
 
@@ -169,54 +176,48 @@ SecretRef 的实际值、proxy credential、password hash 全文和证书私钥�
 - IPv4/IPv6 bind 冲突；
 - SecretRef env/file/inline `url`、缺失、空值、非法 scheme 和脱敏；
 - migration golden test、空链幂等和有损 warning 边界；
-- 配置快照创建、相同内容 no-op、不同内容拒绝覆盖、并发 no-replace、symlink 防护、目录同步和临时文件不污染目标。
+- 配置快照创建、相同内容 no-op、不同内容以源覆盖、并发 no-replace、symlink 防护、目录同步和临时文件不污染目标；
+- 条目级写回：缩进/顶格列表、块标量、多行引号、注释与空行归属、CRLF、无末尾换行、文档标记、flow 段降级；规则重排/类型切换/增删与 ECS 增删时未修改条目和条目外注释逐字节不变；改名只改动引用方条目；含锚点条目被拒绝；
+- 修改内联代理密码后新密码写入文件且不含脱敏占位符；
+- 保存冲突、覆盖写入、写盘失败后 `persisted: false` 与补写、reload 成功与校验失败、写锁忙、回执丢失按代次判定、首用户 setup、启动级字段变化与改回；
+- 原子替换、沿用权限（含 Windows DACL）、符号链接写入真实路径、临时文件复用。
 - 路径解析矩阵：配置文件参数为绝对/相对路径，`work.path` 为绝对/`.`/含 `..` 的相对路径，项目路径为绝对/相对路径，以及无来源 bytes/string 加载时的错误边界。
 
 实际加载与支持边界见[配置参考](../../../implementation/configuration.md)；本节是验证要求，不代表本次执行结果。
 
-## 12. 首用户配置写入
+## 12. 配置文档与写锁
 
-`ConfigStore` 只修改 CLI 源 YAML 的 `webui.users`，不序列化 ResolvedConfig；后者已丢失原始路径/SecretRef 表达。源文件之外的 `<work.path>/config.yaml` 是派生 snapshot，写入时必须同步，否则下次启动会被 no-replace 冲突保护拒绝。
+`ConfigStore` 用 `ArcSwap` 持有当前 `ConfigDocument { text, digest, config, runtime_revision, restart_required }`，它是唯一的配置权威，也是当前 Runtime 的来源（启动级字段除外，见 §14）。核心不变量：
 
-写入不变量：
+| 编号 | 不变量 |
+| --- | --- |
+| I1 | 所有读接口都从当前文档投影；`current()` 无锁返回 `Arc<ConfigDocument>`，不读磁盘。 |
+| I2 | 唯一的配置版本是 `config_digest = SHA-256(正文)`。`runtime_revision` 只是 Runtime 内部代次，用于读一致性，不作为写入前置条件。 |
+| I3 | 磁盘状态只比较磁盘正文摘要与 `config_digest`，不比较文件身份、mtime 或权限。 |
+| I4 | save、reload、persist 和首用户 setup 共用一把进程内写锁，取不到立即返回 busy；不加跨进程锁。 |
+| I5 | 磁盘外改永远不会自动生效，只有显式 reload 才会应用。 |
+| I6 | 写回只替换发生变化的条目；结果必须重新严格解析并与目标配置语义相等，否则不写盘。 |
+| I7 | 先应用 Runtime，再写盘；写盘失败不回滚 Runtime，而是表现为磁盘与内存不一致，与外改共用同一提示入口。 |
+| I8 | 源文件渲染和变更比较使用不脱敏的源序列化（`to_source_value`）；只有 API 投影使用脱敏序列化。 |
 
-1. 获取进程内排他锁与跨进程 lock，竞争有界失败，不无限等待。
-2. 重读源配置和 snapshot，比较预期 fingerprint；拒绝覆盖外部编辑，确认 users 仍为空。
-3. 使用 source-preserving YAML adapter 只替换/新增 users；不支持的表达明确失败，不能退回整份 resolved 序列化。
-4. 候选重新走同一严格 parser/validator，验证用户与其他配置语义未被意外改变。
-5. 在目标同目录创建受限临时文件，write/flush/fsync；写入并同步 journal 后再替换两个目标。
-6. 只有文件提交完成才发布认证快照、内部 fingerprint 和新 session。
+保存流程：写锁 → 磁盘摘要与当前文档不一致且未要求覆盖时返回冲突 → `apply_changes` 在类型化配置上替换/追加条目并改写引用 → 条目级写回 → 严格 resolve（保留期缩短需显式确认）→ prepare 与 `ServiceControl` 换代 → 发布新文档 → 复核磁盘摘要后原子写源文件，再写镜像。换代回执丢失时按 coordinator 当前代次判定是否已应用，不暴露“结果未知”。prepare 期间磁盘被外改时不写盘，返回“已生效未写盘”，由用户选择覆盖或重新加载。除这两次摘要比较外没有其他版本比较：同一条目并发编辑时后保存者覆盖，不同条目互不影响。
 
-两个目录的两次 rename 不是整体原子事务。journal 必须记录旧/新 fingerprint、目标与 staged candidate，启动加载前恢复：都已是新内容则清理；只完成一个目标则验证 staged 内容后补完；出现未知内容或损坏 journal 时 fail-closed，不猜测或覆盖外部修改。
+reload 只在磁盘正文可读、摘要不同且严格校验通过时 prepare 并换代；失败时 Runtime 与当前文档都不变。`webui.users` 变化时同步认证并撤销会话。persist 只把当前正文写回源文件与镜像，不触碰 Runtime。首用户 setup 经 writer 只替换 `webui.users`，写盘成功后才发布认证快照，不递增 runtime 代次。
 
-源与 snapshot 是同一文件时去重，不生成虚假的双文件事务。临时文件、journal 和最终文件不得放宽原权限；Unix/Windows 替换、目录同步、权限和 crash point 需要各自的验证证据。
+启动时若发现旧版本遗留的 `.fluxdns-journal`、stage 或 lock 旁文件，只记录 warning 并保留文件，不恢复也不删除；源文件始终是权威。
 
-source-preserving 验收至少覆盖注释、键序、未知字段拒绝、块/流格式、引号、锚点/别名与不支持语法、SecretRef 原样保留、路径表达不变、双路径竞争、journal 损坏和中断恢复。无法安全修改的输入必须显式拒绝。
+## 13. 条目级写回
 
-真实入口、writer 与 loader 大小上限差异及故障验证边界见[管理端实现](../../../implementation/backend/management.md)。
+`layout.rs` 按行扫描源文本，只识别三种结构：第 0 列 `key:` 开始的顶层段；列表模块段内相同缩进 `- ` 开始的列表项（缩进列表与顶格列表均支持）；单例段内相同缩进 `key:` 开始的子键。段尾或项尾的空行与注释归入下一段/项，块标量和多行引号的续行更深缩进，不会被误认为起点。定位必须自证：每个切片单独解析须与 `base` 对应值相等，数量与 `name` 顺序一致，否则该段降级为整段替换（段内注释丢失）。
 
-## 13. v2 活动配置与候选边界
+`writer.rs` 按顶层段比较 `base` 与 `next` 的源序列化值：相等的段、按 `name`（经改名映射）匹配且值相等的列表项原文不动；值不同的项或子键用块式渲染替换其字节区间；新增项追加到段尾，段缺失或为空时整段写成块式；单例段子键可增删改。渲染沿用源文件换行符（LF/CRLF）。替换后的全文必须通过 `ConfigV2::parse` 与路径解析，且源序列化值与 `next` 完全相等，否则以 `CONFIG_SOURCE_LAYOUT_UNSUPPORTED` 拒绝；含 YAML 锚点、别名或 merge key 的被编辑条目同样拒绝。这是写回层唯一的安全检查。
 
-ConfigStore 同时仲裁首用户事务和新版活动配置，不建立第二份 Management 配置权威。活动快照同时保存完整原始 YAML（`Arc<str>`）和完整 `ConfigV2`；Runtime 另持有用于执行的 `Arc<ResolvedConfig>`。外部文件仅进入观测状态，不替换活动配置。普通保存按旧 name 在服务端当前快照上生成独立候选，通过完整引用、语义、路径校验和源文档定向编辑后提交服务控制 owner；不能直接修改正在使用的活动实体。Config 层不依赖 HTTP handler。
+取舍：被编辑条目内部的注释和非规范写法会按规范形式重写；条目外的注释、空行和其他条目逐字节保留。结果确定，不依赖 CST 对任意 YAML 写法的支持。
 
-活动、运行和持久化 revision 各自独立，但普通写请求不需要客户端提供活动版本或验证票据。无状态预览只报告影响，受理时仍以当前快照校验并在内部捕获版本；不同资源的修改相互保留，同资源后一次成功提交覆盖，缺失旧键不转为新增。operation ID 绑定调用者和原始请求摘要，必须在按旧键解析前去重，避免已完成的改名或新增重试失败。未同步、补偿失败及中断结果未知时阻止叠加写入。源编辑保留未变字段的继承、SecretRef 和路径表达，不支持的语法明确拒绝。
+## 14. 磁盘观测、写入与启动级配置
 
-操作结果必须冻结该次状态转移的版本和安全错误类别，不能在查询时借用后来活动配置的 revision。运行应用成功、等待文件提交与实际提交失败是不同状态。进行中结果保持可查询；完成后的保留窗口从完成时起算。对外查询只读状态快照，不同步扫描文件，也不能返回源正文或底层错误。
+磁盘观测只看源文件：`DiskObservation::{Readable{digest}, Missing, Unreadable}`，上限 4 MiB、必须 UTF-8，symlink 与 hard link 按普通文件读取。`disk.status` 在读取时由最近观测与当前摘要计算为 `in_sync`/`modified`/`missing`/`unreadable`，因此不需要识别自写；本进程写盘成功后直接把观测设为所写摘要。watcher 1 秒轮询、连续两次相同才上报；每次观测带代次，store 丢弃写入之后才完成的旧代次结果。
 
-这些是接受的内部边界，不证明正式 loader、Runtime 或 v2 API 已接线。当前实现和证据统一见[配置参考](../../../implementation/configuration.md#p1-活动源与候选内部底座2026-09-07)；后续应用/同步必须以真实 owner 成功为准。
+`write_atomic` 在目标同目录创建固定名的临时文件（已存在则截断），沿用目标权限（Unix mode、Windows DACL），`sync_all` 后原子替换（Unix `rename` 并同步父目录，Windows `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`）；只读目标拒绝写入。源文件是 symlink 时写入其真实路径并保留链接；hard link 在替换后断开。不写 journal：崩溃时目标要么是旧正文，要么是新正文。
 
-差异输入只来自固定受管源，与生成文件观测摘要的字节一致；派生副本仅参与冲突判断。完整语义/词法路径检查后复核双文件及活动版本，不把预览视为候选已可应用，也不凭类型化相等宣称原始文件未变。文件读取必须由有界后台 owner 调度，见[差异输入事实](../../../implementation/configuration.md#p1-外部差异输入内部能力2026-09-08)。
-
-## 14. v2 文件事务与恢复
-
-普通配置不沿用首用户的“文件成功后发布认证”顺序。ConfigStore 在运行应用前建立 PREPARED 候选，只有应用成功回报后才能持久化 COMMIT_DECIDED 并逐个替换受管目标。失败不回滚 DNS，也不释放未同步 gate；重试持久化原活动源，不重复新增、改名或 Runtime 激活。
-
-每个受管目标使用固定角色和 OS 锁；journal 记录父目录/文件身份、内容和权限摘要，不提供任意路径操作。源和派生副本先整体核对，再逐文件核对、替换和复读，不能宣称双文件原子或跨进程 CAS。Windows 受限创建和同目录替换、Unix 目录同步分别实现，平台证据分开。
-
-自写识别逐目标匹配已完成提交或当前 journal 绑定的文件身份及内容摘要；相同内容的新文件身份仍是外部变更。持久化结果与外部文件状态分别投影，不能将提交后读到的任意文件替换为自写基线，也不忽略下一次文件事件。
-
-恢复只在新进程 loader/owner 启动之前执行。PREPARED 不代表旧进程曾完成应用，必须丢弃；COMMIT_DECIDED 仅补齐已知候选，随后仍需正常启动新 Runtime。未知内容/身份、损坏 journal、链接和候选校验失败时保持文件，不做历史自愈。具体实现、Windows crash point 和未接线范围见[持久化事实](../../../implementation/configuration.md#p1-应用后持久化内部底座2026-09-07)。
-
-确认还原是独立文件操作：客户端只绑定所见文件观测版本及 operation ID，内部捕获活动版本复核，数据只来自当前活动原文，不再次激活 DNS。仅受管叶节点缺失时可以重建，权限取自进程捕获的上次受管状态，父目录身份必须不变；不从请求传入 ACL、不用任意目录继承代替权限能力。journal 明确区分旧文件存在和缺失；已确认的缺失状态不允许覆盖后来出现的新目标。状态、失败重试和平台边界见[还原事实](../../../implementation/configuration.md#p1-受管文件还原内部能力2026-09-07)。
-
-未同步期间的新外改必须再次绑定所见文件版本并明确确认，活动版本仅在服务端内部复核。重新确认只重建同一活动源的文件决策，以新 COMMIT_DECIDED 原子替换旧 journal，不能删除旧决策后另起不持久的事务。新决策携带最多 3 个旧旁文件的固定角色和身份，不接收清理路径、不删除身份已变化的文件。普通 I/O 失败与清理未核清、决策结果未知必须分开，后两者保持阻塞，见[外改确认重试](../../../implementation/configuration.md#p1-外改确认重试内部能力2026-09-07)。
+启动级配置以 `process_owned_reload_changes` 为唯一定义：`database`、`webui` 的 `enable`/`address`/`port`/`public_origin` 与 `dns.resolve_log`。save 与 reload 构造 Runtime 候选前把这些字段替换为当前 Runtime 的值，因此换代不会触发需重启错误；文件与内存文档照常采用新值，并把差异记入 `restart_required`。改回原值后列表为空，进程重启后从空开始。该列表只通过 `GET /api/v2/config/system` 暴露。`webui.users` 不属于启动级字段。

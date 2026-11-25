@@ -1,6 +1,8 @@
 import { queryOptions } from "@tanstack/react-query";
 import { apiV2Request } from "@/shared/api/client";
 import type { components } from "@/shared/api/generated-v2";
+import { fetchSystemConfig } from "@/shared/config/api";
+import { configKeys } from "@/shared/config/query-keys";
 
 type Schemas = components["schemas"];
 
@@ -10,7 +12,7 @@ export const processMetricsKey = ["api", "v2", "system", "runtime"] as const;
  * 页面间跳转不会因为口径不同而重复取样。
  */
 export const serviceMetricsKey = ["api", "v2", "service", "metrics"] as const;
-export const systemConfigKey = ["api", "v2", "config", "system"] as const;
+export const systemConfigKey = configKeys.system;
 
 export type ProcessMetrics = Schemas["ProcessMetrics"];
 export type HostEnvironment = Schemas["HostEnvironment"];
@@ -35,7 +37,7 @@ export function getServiceMetrics(signal?: AbortSignal): Promise<ServiceMetrics>
 }
 
 export function getSystemConfig(signal?: AbortSignal): Promise<SystemConfigRead> {
-  return apiV2Request<SystemConfigRead>("/config/system", { signal });
+  return fetchSystemConfig(signal);
 }
 
 export type MemoryAnalysis = Schemas["MemoryAnalysis"];

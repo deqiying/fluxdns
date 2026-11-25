@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { expect, it } from "vitest";
 import { App } from "antd";
 import { ApiError } from "@/shared/api/errors";
-import { ConfigFormModal, formFieldErrors } from "./ConfigFormModal";
+import { ConfigFormModal } from "./ConfigFormModal";
 
 it("脏表单关闭需要显式确认", async () => {
   const user = userEvent.setup();
@@ -28,7 +28,7 @@ it("脏表单关闭需要显式确认", async () => {
   expect(closed).toBe(true);
 });
 
-it("错误展示安全文案和 request ID，并提供字段定位", () => {
+it("顶部错误展示安全诊断和请求 ID", () => {
   const error = new ApiError({
     code: "VALIDATION_FAILED",
     message: "unsafe detail",
@@ -36,7 +36,6 @@ it("错误展示安全文案和 request ID，并提供字段定位", () => {
     requestId: "request-safe",
     fieldErrors: [{ path: "/changes/0/change/path", code: "INVALID_ARGUMENT" }],
     diagnostic: { stage: "validate", code: "INVALID_RESOURCE", message: "<img src=x onerror=alert(1)>", resource: "guard" },
-    operationId: "operation-safe",
   });
   render(
     <App>
@@ -48,10 +47,8 @@ it("错误展示安全文案和 request ID，并提供字段定位", () => {
   const alert = screen.getByRole("alert");
   expect(alert).toHaveTextContent("配置校验失败");
   expect(alert).toHaveTextContent("请求 ID：request-safe");
-  expect(alert).toHaveTextContent("操作 ID：operation-safe");
   expect(alert).toHaveTextContent("字段 /changes/0/change/path：INVALID_ARGUMENT");
   expect(alert).toHaveTextContent("<img src=x onerror=alert(1)>");
   expect(alert.querySelector("img")).toBeNull();
   expect(screen.queryByText("unsafe detail")).not.toBeInTheDocument();
-  expect(formFieldErrors(error)).toEqual([{ name: ["changes", "0", "change", "path"], errors: ["INVALID_ARGUMENT"] }]);
 });

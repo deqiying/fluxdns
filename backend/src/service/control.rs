@@ -49,19 +49,11 @@ pub(crate) enum ControlError {
     InvalidCandidateRevision,
     #[error("configuration application failed: {0}")]
     Apply(#[source] ServiceReloadError),
-    #[error("configuration outcome is unknown; query the owning configuration operation")]
+    #[error("configuration outcome is unknown; compare the current runtime revision")]
     OutcomeUnknown,
 }
 
 impl ServiceControl {
-    /// 仅用于拒绝发生在入队之前的配置测试，不启动服务或绑定 DNS 端口。
-    #[cfg(test)]
-    pub(crate) fn unavailable_for_test() -> Self {
-        let (sender, receiver) = mpsc::channel(1);
-        drop(receiver);
-        Self { sender }
-    }
-
     /// 只接纳已准备的运行时，队列满时不等待、不重试；入队失败不会改变运行状态。
     pub(crate) fn try_apply(
         &self,
@@ -96,7 +88,7 @@ impl ServiceControl {
 }
 
 impl ApplyReceipt {
-    /// 等待仅消费当前回执；超时/断线必须由配置事务查询 operation，不能自动重新入队。
+    /// 等待仅消费当前回执；超时/断线报告结果未知，由调用方按 Runtime 代次判定，不能自动重新入队。
     #[cfg(test)]
     pub(crate) async fn outcome(self) -> Result<RuntimeRevision, ControlError> {
         tokio::time::timeout(self.deadline.remaining(Instant::now()), self.result)
@@ -105,7 +97,7 @@ impl ApplyReceipt {
             .map_err(|_| ControlError::OutcomeUnknown)?
     }
 
-    /// 配置 operation owner 不受单个 HTTP 请求生命周期约束，并等待 service 的最终回执。
+    /// 配置保存在独立任务中等待 service 的最终回执，不受单个 HTTP 请求生命周期约束。
     pub(crate) async fn owner_outcome(self) -> Result<RuntimeRevision, ControlError> {
         self.result
             .await

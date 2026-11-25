@@ -1,5 +1,6 @@
 import { http, HttpResponse, ws } from "msw";
 import type { AuthSession } from "@/shared/api/types";
+import type { SaveRequest } from "@/shared/config/api";
 import {
   hostsConfigReadFixture,
   configStateFixture,
@@ -173,32 +174,21 @@ export const handlers = [
       ? HttpResponse.json(fixture)
       : v2Error(404, "NOT_FOUND", "module fixture not found");
   }),
-  http.post("/api/v2/config/modules/:module/validate", async ({ request, params }) => {
+  http.post("/api/v2/config/save", async ({ request }) => {
     if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
-    const candidate = await request.json() as { changes?: Array<{ module?: string }> };
-    if (candidate.changes?.length !== 1 || candidate.changes[0]?.module !== String(params.module)) {
-      return v2Error(400, "INVALID_ARGUMENT", "module candidate mismatch");
+    const body = await request.json() as Partial<SaveRequest> | null;
+    if (!Array.isArray(body?.changes) || body.changes.length < 1 || body.changes.length > 128) {
+      return v2Error(400, "INVALID_ARGUMENT", "invalid changes length");
     }
-    return HttpResponse.json({
-      observed_file_revision: configStateFixture.observed_file_revision,
-      required_confirmations: [],
-      affected_names: [],
-    });
-  }),
-  http.post("/api/v2/config/modules/:module/apply", async ({ request, params }) => {
-    if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");
-    const body = await request.json() as {
-      operation_id?: string;
-      changes?: Array<{ module?: string }>;
-    };
-    if (body.changes?.length !== 1 || body.changes[0]?.module !== String(params.module)) {
-      return v2Error(400, "INVALID_ARGUMENT", "module apply mismatch");
+    const shortensHistory = body.changes.some(({ module, change }) => module === "statistics"
+      && (change.retention?.days ?? 7) < statisticsConfigReadFixture.values[0].value.retention.days);
+    if (shortensHistory && !body.confirm_retention_shortening) {
+      return HttpResponse.json({ code: "CONFIRMATION_REQUIRED", message: "retention shortening", request_id: "mock-v2-409", retryable: false, field_errors: [] }, { status: 409 });
     }
-    return HttpResponse.json({
-      operation_id: body.operation_id,
-      status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
-    });
+    return HttpResponse.json({ state: configStateFixture, persisted: true });
   }),
+  http.post("/api/v2/config/reload", readOnlyV2({ state: configStateFixture })),
+  http.post("/api/v2/config/persist", readOnlyV2({ state: configStateFixture })),
   http.get("/api/v2/retention", readOnlyV2(retentionStatusFixture)),
   http.post("/api/v2/retention/preview", async ({ request }) => {
     if (!authorized(request)) return v2Error(401, "AUTH_REQUIRED", "session required");

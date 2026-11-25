@@ -5,6 +5,8 @@
 > 适用范围：FluxDNS 数据面、管理面、代码工程与交付边界
 >
 > 最后评审：2026-09-05（既有跨域边界拆分复核）
+>
+> 2026-11-26 局部评审：配置读写重构后，管理面配置链路改为 ConfigStore 经 ServiceControl 应用；其余结论不变。
 
 ## 设计结论
 
@@ -20,7 +22,7 @@ DNS client -> UDP / TCP / DoH adapter -> DNS / Policy -> Cache / Upstream
 Browser -> SPA -> same-origin /api/v2 -> Management adapter
                                         | Runtime / Telemetry snapshot
                                         | DetailShardStore / Retention / Metrics
-                                        | ConfigMutationOwner -> ConfigStore / ServiceControl
+                                        | ConfigStore -> ServiceControl
 ```
 
 箭头表示请求或数据流，不是允许反向依赖具体 adapter 的许可。

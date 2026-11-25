@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { managementRoutes, upstreamTabs } from "@/app/route-contract";
-import { clientEditValue, decimalToSafeInteger, operationDisposition } from "./contract";
+import { clientEditValue, decimalToSafeInteger } from "./contract";
 import type { components } from "@/shared/api/generated-v2";
 
 type Schemas = components["schemas"];
@@ -27,13 +27,6 @@ describe("P0 v2 路由和表单契约", () => {
     // 修改请求身份需要显式追加 client_id。
     const altered: Schemas["ClientEdit"] = {...value, client_id: "desktop-home"};
     expect(altered.client_id).toBe("desktop-home");
-  });
-
-  it("操作状态不把未同步和结果未知误报为成功", () => {
-    expect(operationDisposition({state: "applied_unpersisted", active_revision: "a-2", persisted_revision: "a-1", error: "PERSISTENCE_FAILED"})).toBe("retry_persistence");
-    expect(operationDisposition({state: "unknown"})).toBe("read_active_state");
-    expect(operationDisposition({state: "applied_synced", active_revision: "a-2", persisted_revision: "a-2"})).toBe("synchronized");
-    expect(operationDisposition({state: "compensation_failed", active_revision: null, error: "COMPENSATION_FAILED"})).toBe("blocked");
   });
 
   it("大整数不会经 Number 静默丢失精度", () => {

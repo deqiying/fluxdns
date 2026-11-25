@@ -14,7 +14,7 @@ use crate::runtime::{
     ActiveRuntime, PrepareError, PreparedRuntime, RuntimeCoordinator, SystemSocketFactory,
 };
 use crate::service::{
-    DnsService, ServiceError, ServiceReloadError, ServiceStartError, process_owned_reload_change,
+    DnsService, ServiceError, ServiceReloadError, ServiceStartError, process_owned_reload_changes,
 };
 
 mod config_watcher;
@@ -332,7 +332,10 @@ async fn prepare_reload_candidate(
         .resolved
         .validate_secret_refs(64 * 1024)
         .map_err(ApplicationReloadError::SecretValidation)?;
-    if let Some(component) = process_owned_reload_change(current, &output.resolved) {
+    if let Some(component) = process_owned_reload_changes(current, &output.resolved)
+        .first()
+        .copied()
+    {
         return Err(ApplicationReloadError::RestartRequired { component });
     }
     // 仅 coordinator 的旧入口没有日志 owner，不能发布“字段已变、输出未变”的假成功。
@@ -358,12 +361,6 @@ async fn prepare_reload_candidate(
 }
 
 async fn run_command(options: CliOptions) -> Result<(), AppError> {
-    if options.command == AppCommand::Run {
-        crate::config::store::recover_pending_transaction(&options.config_path)
-            .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
-        crate::config::store::recover_v2_pending_transaction(&options.config_path)
-            .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
-    }
     let load_options = match options.command {
         AppCommand::Run => LoadOptions::default(),
         AppCommand::Validate => LoadOptions::default().without_snapshot(),
@@ -404,16 +401,16 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
             Ok(())
         }
         AppCommand::Run => {
-            let derived = (output.source_path != output.resolved.work.snapshot_path)
-                .then(|| output.resolved.work.snapshot_path.clone());
-            let watched_paths = Some((output.source_path.clone(), derived));
+            // 启动不恢复任何写事务；旧版本遗留的事务旁文件只告警，与 WebUI 是否启用无关。
+            crate::config::disk::warn_legacy_sidecars(&output.source_path);
+            // 配置文档以 loader 实际读取并通过校验的正文建立。
+            let watched_source = output.source_path.clone();
             let management_bootstrap = if output.resolved.webui.enable {
-                let store = crate::config::store::ConfigStore::with_active_source(
-                    output.source_path.clone(),
+                let store = crate::config::store::ConfigStore::open(
+                    &output.source_path,
                     &output.source,
-                    1,
-                )
-                .map_err(|error| AppError::new(AppErrorKind::Prepare, bounded_message(error)))?;
+                    output.config.clone(),
+                );
                 Some((output.resolved.webui.clone(), Arc::new(store)))
             } else {
                 None
@@ -556,31 +553,31 @@ async fn run_command(options: CliOptions) -> Result<(), AppError> {
                 task_count = service.task_count(),
                 "service_ready"
             );
-            let config_watcher = watched_paths.map(|(source, derived)| {
-                Arc::new(tokio::sync::Mutex::new(ConfigFileWatcher::new(
-                    source, derived,
-                )))
-            });
-            let polling_watcher = config_watcher.clone();
+            // watcher 只观测源文件；外改只更新磁盘状态，不会自动生效。
+            let config_watcher = Arc::new(tokio::sync::Mutex::new(ConfigFileWatcher::new(
+                watched_source,
+            )));
+            let polling_watcher = Arc::clone(&config_watcher);
             let polling_store = configuration_store.clone();
             let service_result = service
                 .wait_for_ctrl_c_with_reload(
                     SHUTDOWN_GRACE_PERIOD,
                     CONFIG_OBSERVATION_POLL_INTERVAL,
                     move |_service| {
-                        let watcher = polling_watcher.clone();
+                        let watcher = Arc::clone(&polling_watcher);
                         let store = polling_store.clone();
                         Box::pin(async move {
-                            if let Some(watcher) = watcher {
-                                report_config_files(&watcher, store.as_deref()).await;
-                            }
+                            report_config_files(&watcher, store.as_deref()).await;
                             Ok(())
                         })
                     },
                 )
                 .await;
-            if let Some(watcher) = config_watcher
-                && !watcher.lock().await.finish(SHUTDOWN_GRACE_PERIOD).await
+            if !config_watcher
+                .lock()
+                .await
+                .finish(SHUTDOWN_GRACE_PERIOD)
+                .await
             {
                 tracing::warn!(
                     event = "configuration_observation_shutdown_incomplete",

@@ -1,15 +1,18 @@
 //! Versioned configuration loading, normalization and semantic validation.
 
+pub(crate) mod change;
 pub mod contract;
+pub(crate) mod disk;
+pub(crate) mod document;
 pub(crate) mod doh_route;
-pub(crate) mod edit;
 pub(crate) mod hash;
+pub(crate) mod layout;
 pub mod load;
 pub mod model;
 pub mod resolve;
-pub(crate) mod source_edit;
 pub(crate) mod store;
 pub mod validate;
+pub(crate) mod writer;
 
 pub use load::{ConfigLoadError, ConfigV2LoadOutput, ConfigV2Loader, LoadOptions, SnapshotStatus};
 pub use resolve::{

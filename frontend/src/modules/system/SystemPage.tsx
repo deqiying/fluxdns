@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Badge, Button, Flex, Typography } from "antd";
+import { Alert, Badge, Button, Flex, Typography } from "antd";
 import { RefreshCw } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
 import { ApiError, getSafeErrorMessage } from "@/shared/api/errors";
@@ -26,6 +26,12 @@ type ListenerBinding = Extract<ModuleRuntime, { module: "listener" }>["bindings"
 
 /** 传输类型按协议习惯写法呈现，不直接把枚举小写值渲染到页面。 */
 const transportLabels: Record<Schemas["Transport"], string> = { udp: "UDP", tcp: "TCP", doh: "DoH" };
+
+const restartLabels: Record<Schemas["SystemConfigRead"]["restart_required"][number], string> = {
+  database: "数据库",
+  webui: "WebUI 监听",
+  "dns.resolve_log": "解析详情记录",
+};
 
 const cacheStateLabels: Record<Schemas["CacheSnapshotStatus"]["state"], string> = {
   disabled: "已禁用",
@@ -128,6 +134,7 @@ export function SystemPage() {
     (runtime) => (runtime.module === "dns" ? [runtime.snapshot] : []),
   )[0];
   const state = stateQuery.data;
+  const restartRequired = systemQuery.data?.restart_required ?? [];
   const hostsSummary = readySummary(hostsQuery.data?.runtime);
   const ruleSetSummary = readySummary(ruleSetsQuery.data?.runtime);
 
@@ -147,7 +154,7 @@ export function SystemPage() {
 
   const revisionValue = failureValue(stateQuery.isError, stateQuery.error) ?? (state === undefined ? "—" : (
     <Flex align="center" gap={8} wrap>
-      <Typography.Text code>{state.active_revision}</Typography.Text>
+      <Typography.Text code>{state.config_digest.slice(0, 12)}</Typography.Text>
       <ConfigSyncBadge state={state} />
     </Flex>
   ));
@@ -177,6 +184,9 @@ export function SystemPage() {
         </Flex>
       )}
     >
+      {restartRequired.length > 0 ? (
+        <Alert type="warning" showIcon title={`以下配置已修改，需重启 FluxDNS 后生效：${restartRequired.map((component) => restartLabels[component]).join("、")}`} />
+      ) : null}
       <PageState
         loading={metricsQuery.isLoading}
         error={metricsQuery.error}

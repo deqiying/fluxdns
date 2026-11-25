@@ -45,68 +45,8 @@ select {
   margin-bottom: 20px;
 }
 
-.external-change-banner {
-  border-radius: 0;
-  border-inline: 0;
-}
-
-.global-config-status {
-  width: 100%;
-  max-width: 1480px;
-  margin: 0 auto;
-  padding: 16px 40px 0;
-}
-
-.external-change-drawer .ant-drawer-body {
-  overflow-y: auto;
-}
-
-.external-change-loading {
-  display: grid;
-  min-height: 240px;
-  place-items: center;
-}
-
-.external-change-content {
-  width: 100%;
-}
-
-.external-change-content .ant-typography {
-  margin-top: 0;
-}
-
-.external-change-heading {
-  justify-content: space-between;
-  width: 100%;
-}
-
-.external-change-heading h5.ant-typography {
-  margin-bottom: 0;
-}
-
-.external-change-item-content {
-  display: grid;
-  gap: 10px;
-  min-width: 0;
-  width: 100%;
-}
-
-.external-field-diff {
-  display: grid;
-  gap: 6px;
-  padding-left: 26px;
-}
-
-.external-field-diff-row {
-  display: grid;
-  grid-template-columns: minmax(100px, 0.7fr) minmax(0, 1fr) auto minmax(0, 1fr);
-  gap: 8px;
-  align-items: start;
-}
-
-.external-field-diff-row .ant-typography {
-  min-width: 0;
-  overflow-wrap: anywhere;
+.disk-status-banner {
+  margin: 16px 40px 0;
 }
 
 .app-shell {
@@ -1077,10 +1017,6 @@ select {
   width: 100%;
 }
 
-.config-state-summary .ant-typography {
-  font-size: 12px;
-}
-
 .config-sync-badge {
   display: inline-flex;
   align-items: center;
@@ -1107,11 +1043,6 @@ select {
 .config-sync-badge-pending {
   color: #8b6318;
   background: #fff4db;
-}
-
-.config-sync-badge-blocked {
-  color: #b23b37;
-  background: #fceceb;
 }
 
 .config-module-content > .ant-tabs {
@@ -1817,8 +1748,8 @@ select {
     padding: 20px 16px;
   }
 
-  .global-config-status {
-    padding: 12px 16px 0;
+  .disk-status-banner {
+    margin: 12px 16px 0;
   }
 
   /* 窄屏退回单列：指标格、运行信息行与摘要卡片按同一顺序纵向堆叠。 */

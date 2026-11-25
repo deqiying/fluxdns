@@ -2,7 +2,7 @@
 
 mod assets;
 mod auth;
-mod config_mutation;
+mod config_api;
 mod config_query;
 pub(crate) mod contract;
 mod errors;
@@ -23,17 +23,15 @@ use events::EventHub;
 use session::SessionStore;
 
 use crate::config::resolve::ResolvedWebUiUser;
-use crate::config::store::ConfigStore;
 
 pub(crate) use metrics::MetricsOwner;
 pub(crate) use query::ManagementHistoryDependencies;
 pub(crate) use server::{ManagementBuildError, ManagementQueryDependencies, ManagementService};
 
-/// 由 DNS service 同生命周期持有的认证状态和配置写入协调器。
+/// 由 DNS service 同生命周期持有的认证状态与会话。
 pub(crate) struct ManagementRuntime {
     auth: Arc<AuthState>,
     sessions: Arc<SessionStore>,
-    config_store: Arc<ConfigStore>,
     events: Option<Arc<EventHub>>,
 }
 
@@ -41,22 +39,18 @@ impl ManagementRuntime {
     fn new(
         auth: Arc<AuthState>,
         sessions: Arc<SessionStore>,
-        config_store: Arc<ConfigStore>,
         events: Option<Arc<EventHub>>,
     ) -> Self {
         Self {
             auth,
             sessions,
-            config_store,
             events,
         }
     }
 
-    /// 仅已应用的认证内容变化撤销 session；普通配置变化和单纯文件观测不能回收会话。
-    pub(crate) fn reconcile_users(&self, users: &[ResolvedWebUiUser], source_fingerprint: &str) {
-        let self_written = self.config_store.observe_reload(source_fingerprint);
-        let changed = self.auth.replace(users);
-        if changed && !self_written {
+    /// Runtime 换代后同步认证用户；用户内容变化（只会来自显式 reload）时撤销全部会话。
+    pub(crate) fn reconcile_users(&self, users: &[ResolvedWebUiUser]) {
+        if self.auth.replace(users) {
             self.sessions.revoke_all();
         }
     }

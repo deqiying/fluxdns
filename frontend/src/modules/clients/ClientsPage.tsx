@@ -4,7 +4,7 @@ import { Pencil, Plus, Search } from "lucide-react";
 import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { configStateEditable, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { useConfigModule, useConfigState } from "@/shared/config/hooks";
 import { ClientFormDrawer, type ClientEditorTarget } from "./ClientFormDrawer";
 import { CopyButton } from "./CopyButton";
 import { clientAvatar, clientOverrides, clientRouteTemplates, clientSummary, type Client } from "./client-view";
@@ -84,7 +84,7 @@ export function ClientsPage() {
       actions={(
         <Space size={12}>
           {state.data ? <ConfigSyncBadge state={state.data} /> : null}
-          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加客户端</Button>
+          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data} onClick={() => setEditing("create")}>添加客户端</Button>
         </Space>
       )}
     >
@@ -130,7 +130,8 @@ export function ClientsPage() {
         items={items}
         strategyOptions={strategyOptions}
         routeTemplates={routeTemplates}
-        configState={query.data?.state}
+        configDigest={state.data?.config_digest}
+        moduleDigest={query.data?.state.config_digest}
         onClose={() => setEditing(null)}
         onSaved={handleSaved}
       />

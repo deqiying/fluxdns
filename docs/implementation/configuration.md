@@ -18,7 +18,7 @@
 >
 > 2026-11-05 增量核对：基线 `0b93d3816b9ffe95a89966aefa88d77372ba60df` 加本次工作树，仅核对管理候选对顶格列表后续配置项的兼容编辑；验证范围见下文活动源与候选内部底座
 >
-> 2026-11-06 增量核对：基线 `3d44dd4` 加本次工作树，仅核对配置单次保存、无状态预览与文件确认边界；验证见 [Management 实现](backend/management.md#单次保存与写接口简化2026-11-06)。
+> 2026-11-06 增量核对：基线 `3d44dd4` 加本次工作树，仅核对配置单次保存、无状态预览与文件确认边界；当时验证记录在 Management 实现的“单次保存与写接口简化（2026-11-06）”一节，该节已于 2026-11-26 随实现删除。
 >
 > 2026-11-07 增量核对：基线 `aa0fedf` 加本次工作树，仅核对 DoH 显式裸路径、必填 `{client_id}`、固定段优先及旧配置迁移；验证范围见 [DNS 管线](backend/dns-pipeline.md#能力与证据)。
 >
@@ -33,6 +33,8 @@
 > 2026-11-09 缓存 key/ECS 增量核对：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅静态核对 v3 AnswerKey、成员 ECS、scope、刷新和兼容性；本轮未执行产品测试或构建，运行证据待主代理补充，其余历史结果不变。
 >
 > 2026-11-10 ECS 自定义兜底增量核对：基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树，仅扩展 `client_or_custom`、本级回退值校验与五层 WebUI 配置；验证边界见 [DNS 管线](backend/dns-pipeline.md#请求级-ecs-执行事实)。
+>
+> 2026-11-26 配置读写增量核对：基线 `be19359` 加工作树，重写配置读写、条目级写回、磁盘同步、派生副本与启动级配置各节；其余正文沿用原核对范围。验证见下文[配置读写与磁盘同步](#配置读写与磁盘同步2026-11-26)。上方 2026-11-05 与两条 2026-11-08 写回记录所指的“活动源与候选内部底座”一节已随 CST 修补一并删除。
 >
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
@@ -75,99 +77,59 @@ v2 配置边界只允许单个唯一 `clients[].client_id`，生产 resolver 将
 
 Windows Rust 1.98.0 执行 `cargo test --manifest-path backend/Cargo.toml -- --nocapture`：838 项通过、3 项显式忽略。覆盖 v2 拒绝旧配置、源路径/快照、真实双文件 journal、启动/reload 和认证候选；该次结果不代表 P5 的完整性能或浏览器验收。
 
-### P1 活动源与候选内部底座（2026-09-07）
+### 配置读写与磁盘同步（2026-11-26）
 
-[`ConfigStore`](../../backend/src/config/store.rs) 的 [`active`](../../backend/src/config/store/active.rs) 子模块持有唯一 v2 活动源：`ActiveSnapshot` 同时保存完整 YAML 原文 `Arc<str>`、完整 `Arc<ConfigV2>` 及活动/运行/持久化版本；[`RuntimeSnapshot`](../../backend/src/runtime/snapshot.rs) 另保存执行用的 `Arc<ResolvedConfig>`。生产启动把 loader 实际消费的原文交给 `with_active_source`，并要求受管源和派生快照一致。编辑先构造独立候选，运行时应用成功后才发布新活动原文和实体，再持久化整份编辑后的 YAML；不是把 resolved 实体整份重新序列化。Management 复用该 store；首次用户提交仍在同一 transaction gate 中先完成文件事务，再发布认证快照。
+配置读写以 [`ConfigStore`](../../backend/src/config/store.rs) 为唯一 owner。启动时 `app::run_command` 用 loader 实际读取的正文构造 [`ConfigDocument`](../../backend/src/config/document.rs)（正文、SHA-256 `config_digest`、`ConfigV2`、`runtime_revision = 1`、`restart_required`），以 `ArcSwap` 持有；读接口经 `current()` 无锁投影，不读磁盘。设计不变量见 [Config 设计 §12–§14](../architecture/backend/modules/config.md#12-配置文档与写锁)；HTTP 接线见 [Management 实现](backend/management.md#配置保存与磁盘操作2026-11-26)。
 
-- [`config/edit.rs`](../../backend/src/config/edit.rs) 承接原 Management 的严格变更类型，Management 重用同一类型，无新增 HTTP 契约。旧 name 相对同一活动快照定位，单候选不重复编辑同一目标；交换名称按一次映射处理，不递归串联改名。上游/组共享空间。客户端更新的 `ClientEdit.client_id` 可选：缺省保留原值，显式提供时替换请求身份，格式与唯一性由整份候选的契约校验统一拒绝，因此同一候选内互换两个客户端的 ID 也合法。
-- 候选依次执行变更预算、活动源定向修改、已知 variant 引用更新、完整 `ConfigV2::parse/validate`、两级路径检查、CST 定位编辑及整树等价复核。覆盖 listener/DoH route、bootstrap、组成员/fallback、策略、Hosts、rule-set selector、proxy 和客户端策略；不对正文、路径、SecretRef 做字符串替换。资源首载、物理 owner 路径、socket 和进程 prepare 仍属于后续运行接线，不能把这一步视为可应用运行态。
-- [`source_edit`](../../backend/src/config/source_edit.rs) 只将发生变化的 typed 字段写回原始语法区域，未变 duration/IP 表达、缺失继承、注释和相对路径不展开为默认值。[片段渲染器](../../backend/src/config/source_edit/render.rs) 对块式区域新增字段、追加列表项及必须重写的非空集合使用块式 YAML，嵌套映射与列表递归展开，不再统一写成 JSON 行内对象；缩进优先参考当前映射的子容器，再继承上层，无线索时使用两格。已有非空 flow 容器继续沿用 flow，追加时通过词法 token 识别已有尾逗号，跳过空白与注释，不把字符串内逗号当作分隔符；块式父节点下的空 `{}` / `[]` 首次填充时展开，闭括号后的行尾注释保留在原字段行，容器内部注释按原顺序移到新子块之前。仍为空的集合保留显式 `{}` / `[]`，不写成 null。标量由 serializer 转义，多行新值使用转义字符串保证换行语义；支持 LF/CRLF 和重复编辑。已知 `yaml-edit` 原地删除会破坏相邻嵌套字段，因此使用 CST 字节区间编辑并复读等价校验。整份 CST 无法安全编辑时，[顶层分段兼容路径](../../backend/src/config/source_edit/sections.rs) 按词法 token 定位块映射项，每段必须独立解析为原语义树中的唯一对应项，再局部编辑并复核整树等价；因此 `outbound` 等顶格列表不会阻断后续 `clients` 的新增和编辑，新增顶层模块也使用块式片段。该路径保留原列表缩进及未修改片段，不是整份重序列化回退；分段边界有歧义、顶层删除，以及锚点/别名/merge 等无法安全维护的表达仍明确拒绝。
-- [`observation`](../../backend/src/config/store/observation.rs) 有界读取源与派生文件，各自区分可读/缺失/不可读/超限，组合 token 包含内容指纹和物理文件身份；同内容替换仍产生不同 token。拒绝 hard link、symlink/reparse 路径；读取前后核对身份和元数据。Windows 使用真实 FileId，Unix 代码未在本次执行。此观测不提供 filesystem CAS，正式替换前仍须重新核对；BC-29 的写入身份与旁文件保护见下节。
-- 普通保存直接调用 `begin_apply`，在 transaction gate 内以当前活动源构造候选，不接收客户端活动版本，不需要预校验票据；同条目后提交覆盖，其他条目保留。`validate_edit` 仅提供无状态影响预览。缩短保留策略需明确确认，覆盖外改还必须绑定所见组合文件版本。operation 摘要只绑定调用者和原始请求，在展开脱敏字段或解析旧键前先去重；相同 ID 不同命令拒绝，相同请求返回既有结果，不能重新执行已完成的新增/改名。操作上限 1024、完成后保留 30 分钟，进行中记录不淘汰；未同步、补偿失败或结果未知保持 gate。内部捕获版本仍复核运行切换和文件提交，但不再让页面承担全局版本前置条件。
+保存调用链：`ConfigStore::save` 取写锁（竞争即 `Busy`）→ 读源文件摘要，与当前文档不同且未设 `overwrite_disk` 时返回 `FileChanged` → [`change::apply_changes`](../../backend/src/config/change.rs) 在类型化配置上替换/追加条目、改写引用、恢复未修改的脱敏内联密码 → [`writer::render`](../../backend/src/config/writer.rs) 条目级写回 → `resolve_config_v2`（统计保留期缩短需 `confirm_retention_shortening`）→ SecretRef 检查、启动级字段沿用当前 Runtime 值后 prepare，经 `ServiceControl` 换代 → 发布新文档 → 再读磁盘摘要，仍等于保存前正文或已选择覆盖时 [`disk::write_atomic`](../../backend/src/config/disk.rs) 写源文件，然后写 `<work.path>/config.yaml` 镜像。
 
-BC-02 批次的 Windows 验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 71 项（含摘要加固后的 SHA-256 固定向量）、`management::` 18 项通过，全部 Cargo 测试目标 `--all-targets --no-run` 编译通过；前端 typecheck、schema 3 项、Vitest 7 文件 38 项通过。Node/Vite 子进程在沙盒内被 `spawn EPERM` 阻止后，经批准在沙盒外重跑通过。新测试覆盖候选/引用/源表达和真实双文件观测；文件只在 `_fluxdns/p1-config-tests/` 的随机用例目录创建并清理。该批未执行真实 v2 启动、HTTP、DNS 热更新、journal crash point、文件还原/同步重试、日志切换或浏览器验收；后续批次证据单列。当前 schema 和生成类型没有 wire 变化。
+- 变更 wire 形态不变：单次 1–128 项、请求体 2 MiB；同一目标只能出现一次；`update` 的旧名称必须存在（`CONFIG_ENTRY_NOT_FOUND`）；`ClientEdit.client_id` 缺省沿用原值；改名按既有引用规则一次性改写 listener/DoH route 策略、bootstrap、组成员与 fallback、规则 hosts/upstream/rule_set selector、proxy 和客户端策略，不做链式改名。
+- 源序列化：`SecretRefDto` 的内联 `url` 在源文件渲染与变更比较中使用 [`to_source_value`](../../backend/src/config/model.rs) 不脱敏输出，API 投影仍输出脱敏占位符。只修改内联代理密码时新密码会写入文件，且文件中不出现占位符。
+- 条目级写回：[`layout.rs`](../../backend/src/config/layout.rs) 按行识别顶层段、列表模块（`listener`、`upstreams`、`strategy`、`hosts`、`outbound`、`rule_set`、`clients`）的列表项与单例段（`dns`、`statistics`、`logs`、`webui` 等）的子键；缩进与顶格列表、块标量、多行引号、CRLF、无末尾换行和文档标记均支持。只替换值发生变化的条目，新增项追加到段尾，段缺失或为空时整段写成块式；定位无法自证（如 flow 段、单行多键）时整段替换，该段内注释丢失。被编辑条目内部的注释和非规范写法按块式规范形式重写；条目外注释、空行和其他条目逐字节保留。需要保留的说明应写在条目上方。
+- 语义复核：写回结果必须重新 `ConfigV2::parse`、解析路径并与目标配置的源序列化值完全相等，否则以 `CONFIG_SOURCE_LAYOUT_UNSUPPORTED` 拒绝；含 YAML 锚点、别名或 merge key 的被编辑条目同样拒绝。
+- duration 写回与 API 回显统一经 `format_duration` 输出能整除的最大单位（`d/h/m/s/ms/us/ns`，零值 `0s`），可被 `parse_duration` 无损读回；读取仍接受任意既有写法，未修改的条目沿用原文。
+- 失败语义：写锁忙 `OPERATION_BUSY`；磁盘已修改 `CONFIG_FILE_CHANGED`；变更/布局/字段非法 `VALIDATION_FAILED`；保留期缩短未确认 `CONFIRMATION_REQUIRED`；资源加载、绑定或换代失败 `APPLY_FAILED`，以上 Runtime、内存文档与磁盘均不变。换代后磁盘复核发现外改或写盘 I/O 失败时返回 200 `persisted: false`（分别带 `CONFIG_FILE_CHANGED_DURING_SAVE` 或 `CONFIG_FILE_WRITE_FAILED` 诊断），状态为 `modified`，配置已生效但重启后丢失。换代回执丢失时，coordinator 当前代次等于期望的新代次即视为已应用。
 
-2026-11-05 格式兼容回归：Windows Rust 1.98.0 使用脱敏夹具，修复前两个候选构建测试均复现 `UnsupportedSource`，修复后通过。[候选测试](../../backend/src/config/edit/tests.rs)与[格式边界测试](../../backend/src/config/source_edit/sections_tests.rs)覆盖顶格/缩进列表混排、仅 ID 客户端新增、跨模块组合编辑、重复编辑、引号键、多行字符串与块文本、LF/CRLF、无末尾换行、显式文档结束标记、新增顶层模块，以及语义不一致、重复键、多文档和锚点/别名拒绝。未改动 API 错误映射、依赖版本或部署配置；本地测试不等于线上容器验收。
+磁盘观测与写入：
 
-2026-11-08 写回风格回归（Windows Rust 1.98.0）：[风格测试](../../backend/src/config/source_edit/style_tests.rs)覆盖两格/四格缩进、顶格列表、嵌套字段、列表缩短、空集合填充/清空后重填、flow 保持、行尾及空容器内部注释、尾逗号与注释/字符串内逗号区分、特殊与多行字符串、CRLF、文档结束标记和重复编辑。首轮使用现有编译依赖以隔离入口直接编译实际 `source_edit` 模块，14 项测试通过；同一风格测试对 `96daf34` 的修复前源码有 6 项失败，复现新增对象被写为 flow 的问题。后续两项复核回归在修复前分别复现内部注释丢失和尾逗号追加被拒绝，修复后 9 项风格测试全部通过。[候选测试](../../backend/src/config/edit/tests.rs)另覆盖规则集缺省、空列表、非空列表三种来源的新增与再次编辑。最终正式 `cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 150 项、`management::` 64 项全部通过；生产目标 `cargo check`、本次 Rust 文件格式检查、文档检查及 `git diff --check` 通过。未执行真实浏览器保存或线上容器部署验收。
+- [`ConfigFileWatcher`](../../backend/src/app/config_watcher.rs) 每秒有界读取源文件（4 MiB、UTF-8），连续两次观测相同才上报 `DiskObservation::{Readable{digest}, Missing, Unreadable}`；派生镜像不参与观测，symlink 与 hard link 按普通文件读取。每次观测带代次，store 丢弃写入开始后才完成的旧代次结果。`disk.status` 在读取时由最近观测与当前摘要计算为 `in_sync`/`modified`/`missing`/`unreadable`；只比较内容摘要，编辑器原子保存产生的新文件身份不算外改。
+- `write_atomic` 在目标同目录使用固定临时文件 `.<文件名>.fluxdns-tmp`（残留则截断复用），Unix 沿用目标 mode、Windows 复制 owner/group/DACL，`sync_all` 后原子替换（Unix `rename` 并同步父目录，Windows `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`）；只读目标拒绝写入。源文件是 symlink 时写入真实路径并保留链接；hard link 在替换后断开。不写 journal，崩溃时目标为旧正文或新正文。
+- 镜像：源文件写成功后再写镜像；镜像写失败只记录 warning，并以 `CONFIG_MIRROR_WRITE_FAILED` 诊断附在响应中，仍算已持久化。运行期写入不创建工作目录，工作目录由启动快照创建。
+- 外部变更：外改只更新观测，不会自动生效。`reload` 读取源文件（缺失或不可读返回 `CONFIG_FILE_UNREADABLE`），摘要相同直接返回，严格校验失败返回 `VALIDATION_FAILED`，prepare/换代失败返回 `APPLY_FAILED`，失败时 Runtime 与内存文档不变；成功后 `webui.users` 有变化时更新认证并撤销会话。reload 不写镜像。`persist` 把当前正文原子写入源文件与镜像，不触碰 Runtime，适用于 `modified`（放弃外改）、`missing`、`unreadable` 与 `persisted: false` 后的补写；源文件写失败返回 `PERSISTENCE_FAILED`。
+- 首用户 setup 在写锁内要求仍无用户且磁盘与内存一致，经 writer 只替换 `webui.users`，复核候选只新增该用户后写源文件与镜像；不递增 runtime 代次，写盘失败不发布认证。
+- 启动时若源文件旁存在旧版本遗留的 `.fluxdns-journal`、stage 或 lock 旁文件，只记录 `configuration_legacy_sidecars_found` warning 并保留文件，既不恢复也不删除。若旧版本恰在决定提交后、源文件替换前崩溃，升级后会加载旧配置，需按告警人工核对。
 
-2026-11-08 duration 写回规范化（Windows Rust 1.98.0，基线 `5e8b4e1` 加工作树）：此前 [`serialize_duration`](../../backend/src/config/model.rs) 与 Management 生效值投影各自把 duration 写成 `<纳秒数>ns`，配置 `update_interval: 3d` 经保存变成 `259200000000000ns`。现统一经 `format_duration` 输出能整除的最大单位（`d/h/m/s/ms/us/ns`，零值 `0s`，不输出 `w` 与小数），可被 `parse_duration` 无损读回；覆盖 DNS 缓存/快照、TTL 覆写、上游组超时、Hosts 与规则集更新周期共 13 个字段，Management API 回显使用同一形态。读取仍接受任意既有写法，历史 `ns` 配置继续有效；未被修改的字段沿用原文，不会被批量重写，只有被编辑的字段才改成新写法，已落成纳秒串的字段需重新编辑一次或手工改写。原地替换已有标量时 `source_edit` 统一写成带引号字符串（如 `update_interval: "36h"`），与本次改动无关，未调整。验证：`cargo test --manifest-path backend/Cargo.toml --bin fluxdns config::` 154 项、`management::` 64 项通过；将 `serialize_duration` 临时还原为旧实现时新增或加强的 3 项测试失败，恢复后通过；前端 `pnpm run typecheck` 与 Vitest 44 文件 274 项通过。未执行真实浏览器保存和线上容器验收。
+启动级配置：以下字段由进程启动时创建的组件消费，Runtime 换代不会替换它们。以 [`process_owned_reload_changes`](../../backend/src/service.rs) 为唯一定义：
 
-### P1 应用后持久化内部底座（2026-09-07）
+| 组件 | 字段 | 修改后的行为 |
+| --- | --- | --- |
+| `database` | `database.type`、`database.path`、`database.records_path` | 保存和 reload 照常成功并写入文件，统计库与详情目录继续使用启动值 |
+| `webui` | `webui.enable`、`webui.address`、`webui.port`、`webui.public_origin` | 同上；管理 listener 与浏览器 origin 继续使用启动值 |
+| `dns.resolve_log` | `dns.resolve_log.enable` | 同上；解析详情记录行为保持启动值 |
 
-[`store/persistence.rs`](../../backend/src/config/store/persistence.rs) 与 [`files.rs`](../../backend/src/config/store/persistence/files.rs) 为 v2 普通配置建立独立于旧 setup journal 的分阶段事务。它们已由活动源状态机消费，不建立空存储 layout，不使用 ResolvedConfig 反写：
+save 与 reload 构造 Runtime 候选前把这些字段替换为当前 Runtime 的值，因此不会因需重启而失败；内存文档与文件采用新值，差异记入 `restart_required`，只经 `GET /api/v2/config/system` 暴露并在系统运行状态页提示。改回原值后列表清空，重启进程后新值生效、列表从空开始。`webui.users` 不属于启动级字段，reload 时动态生效。例如在 DNS 设置页切换“记录解析详情”后，页面显示新值，但实际要重启才生效。
 
-- `begin_runtime_apply` 在完整候选和版本核对后准备受限同目录 stage、写入 PREPARED journal，再复核两个文件；没有正式文件替换。应用成功回报只推进 active/runtime，`persist_applied` 才写 COMMIT_DECIDED 决策并分别替换源和派生文件。成功更新 persisted revision、最终观测及操作状态；失败保持新活动源和未同步 gate，重试只执行文件操作。
-- 源与派生目标分别持有 `File::try_lock` 的 OS 锁，冲突有界失败；空锁旁文件保留，进程退出释放锁，不按时间删除“过期锁”。每次替换核对固定角色、父目录身份、旧/新文件身份、SHA-256 和权限摘要；journal 不携带可任意指定的目标路径。源即派生文件时只处理一个目标。
-- 测试内派生子进程的用例（panic 探针、日志 bootstrap、持久化崩溃矩阵）与 `try_lock` 断言共用 [`backend/src/test_support.rs`](../../backend/src/test_support.rs) 的进程内读写窗口：Linux 的 `flock` 锁随 open file description 被 `fork` 复制，子进程在 `exec` 前会让并发用例看到假 `Busy`；该窗口只在 `cfg(test)` 下编译，不改变生产语义。
-- 恢复入口只用于新版启动前：PREPARED 清理已知候选、不 roll-forward；COMMIT_DECIDED 在两个目标均为已知旧/新身份与内容时，重新严格校验候选及派生路径，再补齐同一候选。损坏、超限、未知内容/身份、链接或范围不符都拒绝；不在运行进程中调用恢复自动 reload。journal 读取上限 16 KiB，配置/stage 上限 4 MiB。
-- Windows 创建 stage/journal 时即复制 owner/group/DACL 并保护 DACL，拒绝空 DACL；不是先默认继承再写秘密。替换沿用 `MoveFileExW(REPLACE_EXISTING | WRITE_THROUGH)`，文件先 `sync_all`；实际 DACL 条目、FileId、hard link、junction、ADS 与尾点别名有测试。Unix 使用限制模式、owner 核对和目录 fsync，但未在本批执行；Windows 不声称做了 Unix 目录 fsync 或硬件断电验收。
+| 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
+| --- | --- | --- | --- | --- |
+| 条目级写回 | `layout.rs`、`writer.rs`、`change.rs`、`model.rs::to_source_value` | `ConfigStore::save`、首用户 setup | 2026-11-26 Windows Rust 1.98.0：layout/writer/change 单元测试；运行验收复现规则重排、类型切换、增删与 ECS 修改，逐字节确认只有被编辑条目变化 | 被编辑条目内注释丢失；flow 段整段替换 |
+| 内联代理密码写入 | `to_source_value`、`expand_redacted_changes` | save | 单元回归；运行验收修改内联密码后文件为新密码、无占位符 | — |
+| 同步保存与写盘 | `ConfigStore::save`、`disk::write_atomic` | `POST /api/v2/config/save` | store/disk/config_api 定向测试；运行验收只读文件返回 `persisted: false` 后 persist 补写 | 无跨进程锁；复核与写盘之间的外改仍可能被覆盖 |
+| 磁盘观测与 reload/persist | `ConfigFileWatcher`、`disk::observe`、`ConfigStore::{reload,persist}` | app watcher、`/config/reload`、`/config/persist` | watcher/store 测试；运行验收外改 2.5 秒内显示 `modified`，无效 YAML reload 被拒且运行配置不变 | Unix 权限/目录同步只有代码与 cfg(unix) 测试，未在本机执行 |
+| 启动级配置 | `process_owned_reload_changes`、`apply_runtime` | save/reload、`/config/system` | store 测试；运行验收切换 `dns.resolve_log` 后记录行为不变、提示出现，改回清空，重启后生效 | 只在系统运行状态页提示 |
 
-Windows Rust 1.98.0 本批 `config::` 89 项通过，其中 ConfigStore 28 项。新增子进程以退出码 73 在 PREPARED、COMMIT_DECIDED、源替换后、派生替换后直接退出，验证真实文件与 OS 锁恢复；另有真实 Windows journal/派生文件占用失败、同步重试、同内容换身份、损坏/超限 journal、单文件去重、权限和别名测试。测试数据限定 `_fluxdns/p1-journal-tests/` 与 `_fluxdns/p1-config-tests/`，不读取个人配置。
-
-当前正式 operation owner 已把 Runtime 成功回报接到 `persist_applied`，启动也在 loader 前执行 v2 recovery；文件 I/O 由阻塞 owner 调度，HTTP 断开不取消已受理操作。缺失文件还原及外部新修改后的明确确认/事务重建由固定文件路由消费；未确认新双文件版本时仍不能覆盖未知外改。崩溃在 journal 建立之前或决策旁文件替换之前可能留下未登记的受限旁文件；不扫描删除未知残留，需明确人工处理。非合作编辑器的核对/替换竞态不能被普通 filesystem replace 完全消除。
-
-### P1 受管文件还原内部能力（2026-09-07）
-
-`ConfigStore::restore_files` 绑定调用者、operation ID 和客户端确认过的组合文件版本；HTTP 不再要求 active revision 或额外丢弃标记，明确的 restore 请求本身表达覆盖意图，内部捕获活动版本供事务复核。只从 `active_source` 取原文，同时还原固定源与派生路径，不创建 Runtime、不推进 active/runtime revision，也不触碰 DNS、会话或 Hosts/规则资源文件。重复 operation 在版本检查前返回既有阶段，不能因后来活动或文件变化重放还原；未知 ID、不同调用者和不同请求不共用结果。正常完成更新 persisted 状态与组合文件观测。
-
-还原复用 PREPARED/COMMIT_DECIDED journal：确认还原已生效的活动源后才决定文件提交。准备失败且清理已确定完成时记为 Rejected；存在未核清的 journal/旁文件时保留阻塞。决定提交后发生 I/O 失败则保留活动源和 AppliedUnpersisted，禁止叠加变更；现有内部 `persist_applied` 只继续这次已知文件事务，不重新应用 Runtime。
-
-目标仅叶节点缺失时，journal 的 `old` 明确记录缺失；重新创建必须使用进程在先前受管状态捕获的权限及父目录身份。权限能力不来自 HTTP 或 journal，也不在其中序列化；成功提交后更新进程内能力。Windows 使用不带 REPLACE_EXISTING 的同目录发布，拒绝确认缺失后重新出现的目标；现有目标仍核对身份、内容和权限后替换。目录、hard link、不可读、超限、缺失/被替换的父目录都拒绝，不删除未知文件或自动重建目录。Unix 沿用配置副本的 hard-link no-replace 方式；link/unlink 间中断留下的双链接将被现有防护拒绝，需人工核对，此路径未实机验收。
-
-Windows 本批 ConfigStore 36 项、完整 `config::` 97 项通过。新增还原确认/幂等/双版本冲突、真实文件占用失败和显式重试、单/双文件缺失、目录/硬链接拒绝、父目录替换、DACL 保留以及 no-replace 测试。子进程矩阵从 4 个扩至 8 个 crash point，增加缺失双文件的 PREPARED、COMMIT_DECIDED、源提交后、派生提交后；PREPARED 不补建目标，持久决策才补齐。用例数据仍在 `_fluxdns/p1-config-tests/` 和 `_fluxdns/p1-journal-tests/`，递归清理前核对真实绝对路径归属。
-
-该子项现已接入受 Bearer/Origin 保护的文件还原路由和阻塞 owner；UI 全局接线另见前端实现。新外改后的重新确认/事务重建、配置状态投影见下文；还原仍不改变 Runtime revision，不能把文件成功等同为重新应用 DNS。
-
-### P1 外改确认重试内部能力（2026-09-07）
-
-`retry_persistence` 只继续当前 AppliedUnpersisted operation，核对原调用者、客户端所见文件版本与内部捕获的活动版本；既有操作完成后再次请求只返回既有状态，不覆盖后来出现的外改。journal 已知的逐文件部分提交可以继续；遇到未知目标必须由用户确认后发起绑定该文件版本的 retry 请求。活动源原文、active/runtime revision 和原 operation 保持不变，不接收替代候选，也不重新 prepare 或应用 DNS。
-
-`Persistence::reconfirm` 对同一活动源摘要重新执行完整配置/路径校验，以受限权限准备新 stage，并在提交决策前再次核对组合文件版本、目录及文件身份。新 COMMIT_DECIDED journal 原子替换旧 journal 后才能按新决策覆盖所见外改；决策未成功持久化时保持旧决策，不先删除旧 journal。缺失叶节点继续使用受管权限能力；不放行不可读、超限、链接或被替换的父目录。
-
-新 journal 最多登记 3 个待回收旧旁文件，只包含固定源/派生/决策角色、旧随机标识和完整身份摘要，不包含任意路径。恢复拒绝重复条目、当前候选标识、非法随机标识和无派生目标的派生角色；旧旁文件被外部改写时拒绝清理，不用名称猜测归属。连续重新确认先清理已知旧项，不无限累积清单。新 journal 替换失败且旧 journal 仍可验证时，只清理本次已知新旁文件；结果不能确认时保留现场和 Unknown。未核清旁文件记为 CompensationFailed，二者均禁止普通重试或叠加变更，等待 owner 核对。
-
-Windows Rust 1.98.0 本批 `config::` 104 项通过，其中 ConfigStore 43 项。独立子进程退出矩阵扩至 12 个检查点，新增外改重新确认前、新决策持久化后、源替换后和派生替换后；新决策前保持未知外改，新决策后仅完成已确认候选。另有真实 journal 文件占用、调用者/双版本冲突、重复重试不覆盖后续外改、旁文件篡改与连续确认清单上界测试。`cargo check`、全部测试目标 `--all-targets --no-run` 和 fmt 检查通过；未执行断电、跨平台或正式 v2 HTTP 联合验收。
-
-正式 `/api/v2/config/files/retry` 已只推进原 operation 的文件事务，认证、阻塞 owner 和启动恢复均已接线；HTTP 结果未知仍必须查询 operation，不能自动重放应用或还原。
-
-### P1 配置状态与冻结操作结果（2026-09-07）
-
-ConfigStore 的操作记录保存 `OperationSnapshot`，在每次状态转移时冻结对应 active/persisted revision 和白名单失败类别；后续其他操作、外部文件变化不改写旧结果。应用成功回报进入 `Persisting`，实际文件提交失败才进入 `AppliedUnpersisted`。已确认运行版本的清理失败保留该版本；运行补偿结果不明则不编造 active revision。完成或已完整补偿的拒绝重新起算 30 分钟保留期，未同步/未知记录继续由当前 gate 固定。
-
-`configuration_status`、`operation_snapshot` 与 `active_snapshot` 使用同一 active 锁内的缓存快照，不执行文件 I/O。2026-10-04 起，`read_active` 以 5 ms 间隔尝试获取锁，最多等待 1 秒；超时或锁中毒返回 `Unavailable`，Management 映射为 `SERVICE_UNAVAILABLE`。正式 async 读取通过 `spawn_blocking` 调度，等待任务自身有截止时间；写事务 gate 仍保持非阻塞冲突和原有版本保护。白名单映射与接线见[Management 实现](backend/management.md)。
-
-每个文件的已知状态来自上次持久化身份/摘要，或当前 journal 明确绑定的候选身份/摘要。部分提交只将精确匹配的那一个目标识别为自写，不用“忽略下一次事件”或仅内容相同放行。同步成功后以 journal 候选身份建立基线，随后读到的未知外改仍显示 changed；同内容换 FileId 也要求外改确认。`synchronization: synced` 表示上次受管提交完成，外部变化独立通过 `files` 表示，不等于磁盘当前仍与活动源一致。
-
-本批新增保留期、进行中固定、状态查询不阻塞及冻结结果类别的定向测试；Windows 实际文件投影覆盖部分提交、重试、同内容换身份、缺失、超限和不可读。2026-09-08 又以真实 v2 进程、Bearer HTTP、UDP、SQLite 和双文件验证了 Runtime 应用及文件同步，具体联合证据见下节。
-
-### P1 外部差异输入内部能力（2026-09-08）
-
-[`active/external.rs`](../../backend/src/config/store/active/external.rs) 的 `ConfigStore::external_source` 只读创建 store 时固定的源文件及派生副本。源正文与 FileId/SHA-256 来自同一次 4 MiB 有界读取；随后执行完整 `ConfigV2::parse` 语义/引用校验和无 I/O 的 `resolve_paths`。派生副本仅参与观测，不成为候选来源；不读取资源、证书或 SecretRef 实际值。
-
-返回前再次观测双文件并核对活动 revision，期间内容或身份改变返回 `FileConflict`，活动发布交错返回 `ActiveConflict`；不把旧活动值配上新版本。缺失、不可读、超限、旧版本和无效配置只返回白名单错误类别。预览更新缓存观测，但不创建操作、候选或文件，不应用 Runtime、不改变 active/persisted revision。
-
-该同步入口由阻塞 owner 调度，不直接占用 HTTP executor，也不构成文件系统 CAS。Windows 定向测试覆盖双文件内容/同内容换身份、活动发布交错、事务忙及无副作用；类型化 HTTP DTO 投影与输出预算见[差异投影](backend/management.md#p1-外部配置差异内部投影2026-09-08)。
-
-### P1 配置事务生产接线（2026-09-08）
-
-[`ConfigMutationOwner`](../../backend/src/management/config_mutation.rs) 以同一 `Arc<ConfigStore>` 和 [`ServiceControl`](../../backend/src/service/control.rs) 为权威。校验和 ConfigStore 文件阶段在 `spawn_blocking` 执行；已受理 apply 立即保留可查询 operation，随后独立于 HTTP 请求完成 `resolve_config_v2`、SecretRef 检查、远程资源/Policy prepare、PREPARED 文件阶段、service 应用回执、活动源发布及持久化。回执丢失或任务中断保留 `Unknown`，不会自动重放；只有 `LoggingCompensation` 明确标记补偿失败，其余发布前拒绝清理候选并释放 gate。
-
-正式 app 在构造并挂接日志 owner 后把 `service.control()` 注入 Management，再注册 HTTP task。稳定双文件 watcher 会把已完成的 `ManagedObservation` 写入 ConfigStore；Store 忙时保留该事实供下一轮投递。外改仍不调用 Runtime。启动顺序继续先恢复 setup/v2 journal，再由 loader 建立活动源；PREPARED 只清理，COMMIT_DECIDED 只补齐已知候选。
-
-Windows 真实联合验证使用 `_fluxdns/p1-config-runtime-live/` 的 v2 源文件、派生文件、SQLite 和 loopback UDP/HTTP。日志父目录缺失时 operation 返回 `APPLY_FAILED`，Runtime revision 保持 1、双文件未变；创建目录后相同 logs 候选完成 `applied_synced`，Runtime revision 变为 2，源/派生一致，debug 日志写入新路径，前后 UDP `localhost A` 均返回 `127.0.0.1`，SQLite `fluxdns_layout` 为 `statistics-v2|1`。外改源文件后 watcher 报 `changed` 且 Runtime 不变，差异投影返回 logs，文件还原与已同步重试均不重新应用 Runtime。进程停止并从持久化源重启后继续读取 `debug` 和 `./logs/hot.log`。配置定向测试 115 项通过，包含真实 Windows 子进程 crash matrix；未验证 Unix、磁盘满、OS I/O 强制中断或 P3 模块表单写入。
+2026-11-26 验证（Windows、Rust 1.98.0、Node 26.8.1，基线 `be19359` 加工作树）：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings` 通过，`cargo test --manifest-path backend/Cargo.toml` 944 项通过、5 项忽略；前端 typecheck、Vitest 46 文件 326 项、契约测试 10 项与生产构建通过。运行验收使用内嵌 WebUI 的 release binary 与 `_fluxdns/` 下基于 [webui-local.yaml](../../backend/tests/fixtures/webui-local.yaml) 的独立副本，覆盖上述六类场景、浏览器内冲突对话框“重新加载后继续编辑”与提示条重新加载，以及更新后的 [HTTP 验收脚本](../../script/test-webui-http.mjs) 与 WS 脚本。另以 debug binary 在 WebUI 关闭的副本旁放置 `.config.yaml.fluxdns-journal`，启动日志出现 `configuration_legacy_sidecars_found` 且旁文件保留。未执行 Unix、磁盘满、断电或线上容器验收。
 
 ### 当前生产加载器
 
-正式入口是 [`app::run_command`](../../backend/src/app.rs) -> [`ConfigV2Loader::load_from_path`](../../backend/src/config/load.rs) -> [contract](../../backend/src/config/contract.rs) / [resolve](../../backend/src/config/resolve.rs) / [validate](../../backend/src/config/validate.rs)。loader 限制配置为 4 MiB 并保留产生运行态的原始正文；`run` 在 prepare 前恢复已知 setup/v2 文件事务、创建或核对 `<work.path>/config.yaml`，再校验 SecretRef。`validate` 不写 snapshot，也不做资源、数据库或网络可用性检查。
+正式入口是 [`app::run_command`](../../backend/src/app.rs) -> [`ConfigV2Loader::load_from_path`](../../backend/src/config/load.rs) -> [contract](../../backend/src/config/contract.rs) / [resolve](../../backend/src/config/resolve.rs) / [validate](../../backend/src/config/validate.rs)。loader 限制配置为 4 MiB 并保留产生运行态的原始正文，`run` 加载时创建或以源覆盖 `<work.path>/config.yaml`；随后校验 SecretRef，并在建立 ConfigStore 与 prepare 前对旧版本 journal 旁文件告警（与 WebUI 是否启用无关）。`validate` 不写 snapshot，也不做资源、数据库或网络可用性检查。
 
 | 能力 | 代码实现 | 正式入口接线 | 验证证据 | 已知限制 |
 | --- | --- | --- | --- | --- |
 | 严格配置与路径 | ConfigV2Loader、ConfigV2、ResolvedConfig | run/validate/reload/首用户候选共用 v2 加载 | loader、根模板、路径与旧版本拒绝测试；2026-09-09 全量 Cargo | 无旧版本转换 |
 | 资源与缓存 | async PreparedRuntime、PolicyDnsCore | run 加载后 prepare | 本轮核对生产接线 | 能解析不表示网络/文件/SQLite 已成功打开 |
 | WebUI | webui model + ManagementService | enable 时创建服务 | P3 内嵌 debug binary 的真实 Bearer HTTP 与浏览器 | origin、DB 与 bind 必须可用；默认 binary 可仅提供 API，SPA 需要 embed feature，详见[管理端](backend/management.md) |
-| 首用户写回 | active ConfigStore + source-preserving editor | setup，run 前恢复 journal | v2 active source 双文件提交测试 | HTTP 断连与磁盘故障组合仍需更高层验收 |
-| 热重载 | `ConfigMutationOwner` + `ServiceControl` + `reload_prepared` | 组合及 P3 十模块 apply；watcher 只更新文件事实 | 真实 Bearer HTTP、UDP、SQLite、日志、双文件和组合采用联合验证 | database、webui enable/address/port/public_origin 仍为启动级；跨平台/磁盘满未验证 |
+| 首用户写回 | `ConfigStore::create_initial_user` + `writer::set_webui_users` | setup | store 定向测试；运行验收 setup 后文件写入用户并可登录 | 写锁竞争或磁盘不一致时拒绝 |
+| 热重载 | `ConfigStore::{save,reload}` + `ServiceControl` + `reload_prepared` | 十模块保存、reload；watcher 只更新磁盘观测 | 见[配置读写与磁盘同步](#配置读写与磁盘同步2026-11-26) | 启动级字段只写入文件并提示需重启；跨平台/磁盘满未验证 |
 
 本表原始静态核对未执行 Cargo 或配置 validate，后续 P1 定向验证以上述分批记录为准。协议/策略字段定义不自动意味着所有 adapter 组合已验收，真实入口和未支持项见[后端实现](backend/README.md)，验证专项的已知边界见[验证范围与收口](backend/background-services.md#验证范围与收口)。既定契约与代码冲突时须保留复现证据并明确修复边界，不仅修改字段说明来掩盖实现缺口。
 
@@ -214,9 +176,9 @@ listener
 | `/etc/fluxdns/bootstrap/config.yaml` | `work.path: ../runtime`、`logs.path: ./logs/fluxdns.log` | `logs.path = /etc/fluxdns/runtime/logs/fluxdns.log` |
 | `/etc/fluxdns/config.yaml` | `work.path: /var/lib/fluxdns`、`database.path: /srv/fluxdns.sqlite3` | 两个绝对路径均不与其他基准拼接 |
 
-启动时若配置文件本身不是 `<resolved_work_path>/config.yaml`，程序将其原子复制到该固定路径；仅仅位于同一目录但文件名不同仍会创建快照。该文件是工作目录中的配置快照；启动流程负责创建工作目录和所需父目录。
+启动时若配置文件本身不是 `<resolved_work_path>/config.yaml`，程序将其原子复制到该固定路径；仅仅位于同一目录但文件名不同仍会创建快照。该文件是源文件的单向镜像；启动流程负责创建工作目录和所需父目录。
 
-配置副本按 [Config 模块方案](../architecture/backend/modules/config.md) 原子创建：目标不存在时在同目录写临时文件并以 no-replace 方式发布，内容相同则不操作，目标已存在且内容不同时拒绝自动覆盖。SecretRef 解析值不会写回配置副本。
+镜像按 [Config 设计](../architecture/backend/modules/config.md#8-工作目录与配置快照)维护：目标不存在时在同目录写临时文件并以 no-replace 方式发布，内容相同则不操作，内容不同时直接用源文件覆盖。运行期保存和写入磁盘在源文件写成功后再覆盖镜像，镜像写失败只告警；磁盘状态与冲突判断只看源文件，不读取镜像。SecretRef 解析值不会写回镜像。
 
 ### 2.3 命名与引用
 
@@ -353,7 +315,7 @@ ConfigV2
 | `logs.level` | string | 必填 | 日志级别；v1 接受 `trace`、`debug`、`info`、`warn`、`error`，大小写归一化，未知值拒绝。 |
 | `logs.path` | string | 必填 | 日志文件路径；相对路径以 `work.path` 为基准。 |
 
-正式 app 关闭日志时仍保持 telemetry 指标/health。enable/level/path 经已有 service 日志 owner 显式热切换；路径预开失败不切 Runtime 或旧输出。当前 v2 表单保存和文件持久化联合接线仍待完成，具体边界见[日志热切换](backend/background-services.md#p1-日志热切换2026-09-07)。
+正式 app 关闭日志时仍保持 telemetry 指标/health。enable/level/path 经已有 service 日志 owner 显式热切换；路径预开失败不切 Runtime 或旧输出。v2 表单保存经 ConfigStore 同步应用后写回文件，见[配置读写与磁盘同步](#配置读写与磁盘同步2026-11-26)；热切换边界见[日志热切换](backend/background-services.md#p1-日志热切换2026-09-07)。
 
 日志保持单行 JSON，行首 `time` 使用服务器本地时区的可读日期时间、毫秒和 UTC 偏移；旧 `occurred_at_ms` 日志字段已替换，不影响数据库/API 时间字段。时区规则与完整字段顺序见 [Observability 日志格式](../architecture/backend/modules/observability.md#3-日志格式)，实现与验证边界见[后台服务](backend/background-services.md#observability)。
 

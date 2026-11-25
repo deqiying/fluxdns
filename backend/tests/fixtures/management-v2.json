@@ -1,29 +1,17 @@
 {
-  "candidate": {
+  "save_request": {
     "changes": [
       {"module": "clients", "change": {"action": "update", "original_name": "desktop", "value": {"name": "workstation", "match": {"ips": ["192.0.2.10/32"]}, "cache": {"enabled": false}}}},
       {"module": "hosts", "change": {"action": "create", "value": {"name": "local", "type": "const", "format": "hosts", "hosts": "127.0.0.1 localhost"}}}
-    ]
+    ],
+    "overwrite_disk": false,
+    "confirm_retention_shortening": false
   },
   "state": {
-    "active_revision": "active-8",
-    "runtime_revision": "runtime-12",
-    "persisted_revision": "active-7",
-    "observed_file_revision": "files-10",
-    "files": {"source": "changed", "derived": "unchanged"},
-    "synchronization": "applied_unpersisted",
-    "operation_id": "op-123"
+    "config_digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+    "runtime_revision": "12",
+    "disk": {"status": "modified"}
   },
-  "operations": [
-    {"operation_id": "op-123", "status": {"state": "preparing"}},
-    {"operation_id": "op-123", "status": {"state": "applying"}},
-    {"operation_id": "op-123", "status": {"state": "persisting", "active_revision": "active-8"}},
-    {"operation_id": "op-123", "status": {"state": "applied_synced", "active_revision": "active-8", "persisted_revision": "active-8"}},
-    {"operation_id": "op-123", "status": {"state": "applied_unpersisted", "active_revision": "active-8", "persisted_revision": "active-7", "error": "PERSISTENCE_FAILED"}},
-    {"operation_id": "op-123", "status": {"state": "rejected", "error": "FILE_REVISION_CONFLICT"}},
-    {"operation_id": "op-123", "status": {"state": "compensation_failed", "active_revision": null, "error": "COMPENSATION_FAILED"}},
-    {"operation_id": "op-123", "status": {"state": "unknown"}}
-  ],
   "query": {
     "filter": {"from_ms": 1788739200000, "to_ms": 1788825600000, "client_id": "unknown-id", "transport": "doh"},
     "cursor": null,
@@ -113,22 +101,25 @@
     {"type": "pong", "nonce": "heartbeat-1"}
   ],
   "config_read": {
-    "state": {"active_revision":"active-8","runtime_revision":"runtime-12","persisted_revision":"active-8","observed_file_revision":"files-10","files":{"source":"unchanged","derived":null},"synchronization":"synced","operation_id":null},
+    "state": {"config_digest":"60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752","runtime_revision":"12","disk":{"status":"in_sync"}},
     "values": [{"module":"listener","value":{"name":"dns","type":"udp","addresses":["127.0.0.1"],"port":15353,"strategy":"default"}}],
     "effective": [{"path":"listener[0].cache.enabled","source":"global","value":false}],
     "references": [{"from_module":"listener","from_name":"dns","path":"strategy","to_name":"default"}],
     "runtime": [{"module":"listener","name":"dns","bindings":[{"endpoint_name":null,"address":"127.0.0.1","port":15353,"transport":"udp","accepting":true}]}]
   },
-  "external_diff": {
-    "expected":{"active_revision":"active-8","observed_file_revision":"files-11"},
-    "editable":[{"active":{"module":"logs","value":{"enable":false,"level":"info","path":"./logs/fluxdns.log"}},"external":{"module":"logs","value":{"enable":true,"level":"info","path":"./logs/fluxdns.log"}}}],
-    "protected_changes":["database","protected_credentials"],
-    "parse_error":null
+  "save_result": {
+    "state":{"config_digest":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08","runtime_revision":"13","disk":{"status":"modified"}},
+    "persisted":false,
+    "diagnostic":{"stage":"persistence","code":"CONFIG_FILE_WRITE_FAILED","message":"配置已生效，但写入配置文件失败（I/O 类别：PermissionDenied）。"}
   },
-  "validation": {
-    "observed_file_revision":"files-9",
-    "required_confirmations":["discard_external_changes"],
-    "affected_names":["desktop","workstation"]
+  "reload_result": {
+    "state":{"config_digest":"60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752","runtime_revision":"14","disk":{"status":"in_sync"}}
+  },
+  "system": {
+    "state":{"config_digest":"60303ae22b998861bce3b28f33eec1be758a213c86c93c076dbe9f558c11c752","runtime_revision":"14","disk":{"status":"in_sync"}},
+    "work_path":"/var/lib/fluxdns","rules_path":"/var/lib/fluxdns/rules","database_path":"/var/lib/fluxdns/fluxdns.db","records_path":"/var/lib/fluxdns/records",
+    "webui_enabled":true,"webui_address":"127.0.0.1","webui_port":8080,"public_origin":"http://127.0.0.1:8080",
+    "restart_required":["dns.resolve_log"]
   },
   "snapshot": {
     "state":"idle","owner_revision":"owner-1","generation":"3","file_bytes":"1024","last_success_at_ms":1788739201000,"last_error":null
@@ -156,7 +147,7 @@
     {"type": "ready", "protocol_version": 1, "epoch": "stream-1"},
     {"type": "queries", "subscription_id": "queries-1", "cursor": {"epoch": "stream-1", "sequence": "9007199254740993"}, "directory_revision": "directory-3", "items": []},
     {"type": "resync_required", "subscription_id": "queries-1", "reason": "buffer_overflow"},
-    {"type": "config_changed", "active_revision": "active-8", "observed_file_revision": "files-10"},
+    {"type": "config_changed", "config_digest": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"},
     {"type": "ping", "nonce": "heartbeat-1"},
     {"type": "metrics_delta", "subscription_id": "metrics-1", "data": {"sampled_at_ms": 1758900000000, "qps": {"state": "available", "value": 4.25}, "rpm": {"state": "available", "value": 255.0}, "online_clients": {"state": "available", "value": 2}, "rss_bytes": {"state": "available", "value": "195454566"}, "cpu_percent": {"state": "available", "value": 1.25}, "qps_samples": [{"at_ms": 1758900000000, "value": {"state": "available", "value": 12.0}}], "rpm_samples": []}}
   ]

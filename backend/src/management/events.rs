@@ -930,7 +930,6 @@ mod tests {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
     use super::*;
-    use crate::config::hash::deterministic_hash;
     use crate::config::store::ConfigStore;
     use crate::management::auth::AuthState;
     use crate::management::contract::{ClientMessage, ServerMessage, WebSocketTicket};
@@ -956,7 +955,12 @@ mod tests {
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
             let source = root.join("config.yaml");
-            std::fs::write(&source, "version: 2\n").unwrap();
+            let (text, work_path) = crate::config::test_support::portable_example();
+            let text = text.replace(
+                &work_path.to_string_lossy().replace('\\', "/"),
+                &root.to_string_lossy().replace('\\', "/"),
+            );
+            std::fs::write(&source, text).unwrap();
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let origin = format!("http://{address}");
@@ -973,11 +977,7 @@ mod tests {
                 AuthServices::new(
                     Arc::new(AuthState::new(&[]).unwrap()),
                     Arc::clone(&sessions),
-                    Arc::new(ConfigStore::new(
-                        source.clone(),
-                        source,
-                        deterministic_hash(b"version: 2\n"),
-                    )),
+                    Arc::new(ConfigStore::open_for_test(&source)),
                     origin.clone(),
                     None,
                 )

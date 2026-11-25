@@ -1,12 +1,12 @@
 //! 管理面的安全错误投影；稳定错误码保留兼容性，诊断只来自类型化错误和白名单字段。
 
-use crate::config::edit::EditError;
-use crate::config::store::active::ActiveError;
+use crate::config::change::EditError;
+use crate::config::store::StoreError;
 use crate::config::validate::{ConfigErrorKind, ConfigErrorReport};
 use crate::diagnostics::Diagnostic;
 use crate::service::{ControlError, ServiceReloadError};
 
-use super::contract::{ErrorCode, FieldError};
+use super::contract::{DiskState, ErrorCode, FieldError};
 
 #[derive(Debug)]
 pub(super) struct ManagementError {
@@ -14,6 +14,8 @@ pub(super) struct ManagementError {
     // 诊断仅失败时分配，避免扩大每个 Result 的内联错误分支。
     pub diagnostic: Option<Box<Diagnostic>>,
     pub field_errors: Vec<FieldError>,
+    /// 仅 `CONFIG_FILE_CHANGED` 携带的磁盘状态。
+    pub disk: Option<DiskState>,
 }
 
 impl From<ErrorCode> for ManagementError {
@@ -22,30 +24,82 @@ impl From<ErrorCode> for ManagementError {
             code,
             diagnostic: None,
             field_errors: Vec::new(),
+            disk: None,
         }
     }
 }
 
-impl From<ActiveError> for ManagementError {
-    fn from(error: ActiveError) -> Self {
-        let diagnostic = active_diagnostic(&error);
-        let field_errors = match &error {
-            ActiveError::Candidate(EditError::Validation(report)) => report
-                .errors
-                .iter()
-                .filter_map(|error| safe_config_path(&error.path))
-                .take(16)
-                .map(|path| FieldError {
-                    path,
-                    code: ErrorCode::ValidationFailed,
-                })
-                .collect(),
-            _ => Vec::new(),
-        };
+impl ManagementError {
+    fn with_diagnostic(code: ErrorCode, diagnostic: Diagnostic) -> Self {
         Self {
-            code: super::config_query::error_code(error),
             diagnostic: Some(Box::new(diagnostic)),
-            field_errors,
+            ..Self::from(code)
+        }
+    }
+}
+
+impl From<StoreError> for ManagementError {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::Busy => ErrorCode::OperationBusy.into(),
+            StoreError::FileChanged(status) => Self {
+                disk: Some(super::config_query::disk_state(status)),
+                ..Self::from(ErrorCode::ConfigFileChanged)
+            },
+            StoreError::FileUnreadable(status) => Self::with_diagnostic(
+                ErrorCode::ConfigFileUnreadable,
+                match status {
+                    crate::config::disk::DiskStatus::Missing => Diagnostic::new(
+                        "configuration",
+                        "CONFIG_FILE_MISSING",
+                        "配置文件不存在，运行配置保持不变；可写入磁盘以恢复文件。",
+                    ),
+                    _ => Diagnostic::new(
+                        "configuration",
+                        "CONFIG_FILE_UNREADABLE",
+                        "配置文件无法读取、超过 4 MiB 或不是 UTF-8 文本，运行配置保持不变。",
+                    ),
+                },
+            ),
+            StoreError::Edit(error) => {
+                let field_errors = match &error {
+                    EditError::Validation(report) => report
+                        .errors
+                        .iter()
+                        .filter_map(|error| safe_config_path(&error.path))
+                        .take(16)
+                        .map(|path| FieldError {
+                            path,
+                            code: ErrorCode::ValidationFailed,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Self {
+                    field_errors,
+                    ..Self::with_diagnostic(ErrorCode::ValidationFailed, edit_diagnostic(&error))
+                }
+            }
+            StoreError::ConfirmationRequired => Self::with_diagnostic(
+                ErrorCode::ConfirmationRequired,
+                Diagnostic::new(
+                    "configuration",
+                    "RETENTION_SHORTENING_UNCONFIRMED",
+                    "本次修改会缩短统计保留期，需要明确确认。",
+                ),
+            ),
+            StoreError::Secret(error) => {
+                Self::with_diagnostic(ErrorCode::ApplyFailed, secret_diagnostic(&error))
+            }
+            StoreError::Apply(diagnostic) => {
+                Self::with_diagnostic(ErrorCode::ApplyFailed, diagnostic)
+            }
+            StoreError::Persist(diagnostic) => {
+                Self::with_diagnostic(ErrorCode::PersistenceFailed, diagnostic)
+            }
+            StoreError::AlreadyInitialized => ErrorCode::SetupAlreadyCompleted.into(),
+            StoreError::SetupRejected => ErrorCode::ValidationFailed.into(),
+            StoreError::Internal => ErrorCode::InternalError.into(),
         }
     }
 }
@@ -56,7 +110,7 @@ pub(super) fn default_message(code: &ErrorCode) -> &'static str {
         ErrorCode::HttpVersionNotSupported => "不支持此 HTTP 版本。",
         ErrorCode::UriTooLong => "请求地址超过长度上限。",
         ErrorCode::HeadersTooLarge => "请求头超过大小上限。",
-        ErrorCode::RequestTimeout => "请求超时；写入操作请先查询操作结果，不要直接重复提交。",
+        ErrorCode::RequestTimeout => "请求超时；写入操作请先刷新配置状态确认结果，再决定是否重试。",
         ErrorCode::InternalError => "管理服务内部错误，请凭请求 ID 检查服务日志。",
         ErrorCode::SetupAlreadyCompleted => "服务已经完成初始化，不能重复创建初始管理员。",
         ErrorCode::AuthInvalidCredentials => "用户名或密码不正确。",
@@ -69,22 +123,19 @@ pub(super) fn default_message(code: &ErrorCode) -> &'static str {
         ErrorCode::AuthRequired => "会话已失效或尚未登录，请重新登录。",
         ErrorCode::Forbidden => "当前会话没有执行此操作的权限。",
         ErrorCode::NotFound => "请求的资源不存在。",
-        ErrorCode::ActiveRevisionConflict => "运行配置已改变，请刷新配置后重试。",
-        ErrorCode::FileRevisionConflict => "配置文件已改变，请重新检查外部修改。",
-        ErrorCode::ExternalChangesRequireConfirmation => {
-            "配置文件存在外部修改，需明确确认后才能覆盖。"
+        ErrorCode::ConfigFileChanged => {
+            "配置文件已在磁盘上被修改，与当前运行配置不一致；请选择覆盖磁盘或重新加载。"
         }
-        ErrorCode::OperationIdReused => "此操作 ID 已用于其他请求，请勿复用。",
-        ErrorCode::OperationBusy => "另一个配置操作尚未结束，请先查询其结果。",
+        ErrorCode::ConfigFileUnreadable => "配置文件缺失或无法读取，运行配置保持不变。",
+        ErrorCode::OperationBusy => "另一个配置写操作正在进行，请稍后重试。",
         ErrorCode::ConfirmationRequired => "此操作需要明确确认其影响。",
         ErrorCode::PersistenceFailed => {
-            "运行配置可能已应用，但配置文件未能同步，请查询操作状态后处理。"
+            "配置文件写入失败，请检查文件权限、只读属性和磁盘空间后重试。"
         }
         ErrorCode::ApplyFailed => "配置未能应用，原运行状态保持不变。",
-        ErrorCode::CompensationFailed => "配置回退或清理失败，状态需人工核对，不能直接重试。",
         ErrorCode::CursorExpired => "查询游标已过期，请重新开始查询。",
         ErrorCode::RateLimited => "请求过于频繁，请稍后重试。",
-        ErrorCode::ServiceUnavailable => "管理服务暂不可用，请检查服务状态；写入操作请先核对结果。",
+        ErrorCode::ServiceUnavailable => "管理服务暂不可用，请检查服务状态后重试。",
     }
 }
 
@@ -139,59 +190,38 @@ pub(super) fn secret_diagnostic(
     }
 }
 
-pub(super) fn active_diagnostic(error: &ActiveError) -> Diagnostic {
+/// 变更被拒绝的安全诊断；条目名来自当前配置或本次提交的 name 字段，属于可公开的资源标识。
+pub(super) fn edit_diagnostic(error: &EditError) -> Diagnostic {
     let (code, message) = match error {
-        ActiveError::Persistence(error) => return error.diagnostic(),
-        ActiveError::Candidate(EditError::Validation(report)) => return config_diagnostic(report),
-        ActiveError::Candidate(EditError::Budget) => (
+        EditError::Validation(report) => return config_diagnostic(report),
+        EditError::Budget => (
             "CANDIDATE_BUDGET_EXCEEDED",
-            "候选配置须包含 1–128 项修改且不超过 2 MiB。",
+            "一次保存须包含 1–128 项修改且不超过 2 MiB。",
         ),
-        ActiveError::Candidate(EditError::DuplicateTarget) => (
-            "CANDIDATE_DUPLICATE_TARGET",
-            "同一候选配置重复修改了同一资源，请合并修改。",
+        EditError::DuplicateTarget => (
+            "CONFIG_DUPLICATE_TARGET",
+            "同一次保存重复修改了同一条目，请合并修改。",
         ),
-        ActiveError::Candidate(EditError::NotFound) => (
-            "CANDIDATE_RESOURCE_NOT_FOUND",
-            "待修改的原资源不存在，请刷新后重新编辑。",
+        EditError::NotFound => (
+            "CONFIG_ENTRY_NOT_FOUND",
+            "待修改的条目已不存在，请刷新后重新编辑。",
         ),
-        ActiveError::Candidate(EditError::UnsupportedSource) => (
-            "CANDIDATE_SOURCE_UNSUPPORTED",
-            "当前源配置结构无法由配置编辑器安全修改。",
-        ),
-        ActiveError::Busy => (
-            "CONFIGURATION_BUSY",
-            "配置事务正忙，请先核对正在执行的操作。",
-        ),
-        ActiveError::InvalidToken => (
-            "CONFIGURATION_TOKEN_INVALID",
-            "配置操作标识或版本格式无效。",
-        ),
-        ActiveError::ActiveConflict => (
-            "ACTIVE_REVISION_CONFLICT",
-            "运行配置版本已改变，请刷新后重新操作。",
-        ),
-        ActiveError::FileConflict => (
-            "FILE_REVISION_CONFLICT",
-            "配置文件已被其他进程修改，请重新核对文件差异。",
-        ),
-        ActiveError::ExternalConfirmation => (
-            "EXTERNAL_CONFIRMATION_REQUIRED",
-            "配置文件含有外部修改，尚未确认是否覆盖。",
-        ),
-        ActiveError::OperationIdReused => {
-            ("OPERATION_ID_REUSED", "操作 ID 已绑定不同请求，不能复用。")
+        EditError::Layout { module, name } => {
+            let diagnostic = Diagnostic::new(
+                "configuration",
+                "CONFIG_SOURCE_LAYOUT_UNSUPPORTED",
+                format!(
+                    "配置文件中 {module} 模块的该条目无法安全改写（例如含 YAML 锚点或别名），请手动编辑配置文件后重新加载。"
+                ),
+            );
+            return match name {
+                Some(name) => diagnostic.with_resource(name.as_str()),
+                None => diagnostic,
+            };
         }
-        ActiveError::MissingConfirmation => {
-            ("CONFIRMATION_REQUIRED", "尚未确认本次配置变更的影响。")
-        }
-        ActiveError::Unavailable => (
-            "CONFIGURATION_UNAVAILABLE",
-            "无法读取配置活动快照，请检查服务状态。",
-        ),
-        ActiveError::Entropy => (
-            "CONFIGURATION_ENTROPY_FAILED",
-            "无法生成配置事务标识，请检查系统随机数服务。",
+        EditError::Internal => (
+            "CONFIG_CANDIDATE_INTERNAL",
+            "候选配置无法在类型化值与源配置之间转换，请凭请求 ID 检查服务日志。",
         ),
     };
     Diagnostic::new("configuration", code, message)
@@ -279,7 +309,7 @@ pub(super) fn control_diagnostic(error: &ControlError) -> Diagnostic {
         ),
         ControlError::OutcomeUnknown => (
             "RUNTIME_OUTCOME_UNKNOWN",
-            "配置应用结果未知，请查询原操作，不要重复提交。",
+            "配置应用结果未知，请刷新配置状态确认后再操作。",
         ),
         ControlError::Apply(ServiceReloadError::Logging(_)) => (
             "LOGGING_APPLY_FAILED",
@@ -332,6 +362,21 @@ mod tests {
     }
 
     #[test]
+    fn file_changed_carries_disk_status_only() {
+        let error = ManagementError::from(StoreError::FileChanged(
+            crate::config::disk::DiskStatus::Modified,
+        ));
+        assert!(matches!(error.code, ErrorCode::ConfigFileChanged));
+        assert!(matches!(
+            error.disk,
+            Some(DiskState {
+                status: super::super::contract::DiskStatus::Modified
+            })
+        ));
+        assert!(ManagementError::from(StoreError::Busy).disk.is_none());
+    }
+
+    #[test]
     fn validation_does_not_echo_arbitrary_paths_or_messages() {
         let mut report = ConfigErrorReport::default();
         report.push(ConfigError::new(
@@ -352,11 +397,9 @@ mod tests {
 
     #[test]
     fn persistence_does_not_echo_os_error_payload() {
-        let error = crate::config::store::persistence::PersistenceError::Io(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            "secret-path-token",
-        ));
-        let diagnostic = error.diagnostic();
+        let error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "secret-path-token");
+        let diagnostic =
+            crate::config::disk::io_diagnostic("CONFIG_FILE_WRITE_FAILED", "写入失败", &error);
         assert!(diagnostic.message.contains("PermissionDenied"));
         assert!(!diagnostic.message.contains("secret-path-token"));
     }

@@ -13,9 +13,10 @@ fn changes(json: &str) -> Vec<ConfigChange> {
 
 #[test]
 fn rename_updates_only_typed_references_and_preserves_unrelated_source() {
+    // 条目外注释保留；被改写条目（引用方策略）内部的注释按设计会随条目重写而丢失。
     let source = FIXTURE.replace(
-        "    default_upstream: local",
-        "    default_upstream: local # keep reference comment",
+        "strategy:\n  - name: default",
+        "strategy:\n  # keep reference comment\n  - name: default",
     );
     let candidate = build(&source, &changes(r#"[
       {"module":"upstreams","change":{"action":"update","original_name":"local","value":{"name":"new","type":"hosts","format":"hosts","hosts":"127.0.0.1 localhost"}}}
@@ -24,7 +25,8 @@ fn rename_updates_only_typed_references_and_preserves_unrelated_source() {
     assert_eq!(candidate.config.hosts[0].name(), "local");
     assert_eq!(candidate.config.listener[0].name(), "local");
     assert!(candidate.source.contains("# keep reference comment"));
-    assert!(candidate.source.contains("hosts: \"127.0.0.1 localhost\""));
+    // hosts 段未被引用改名触及，原文逐字保留。
+    assert!(candidate.source.contains("hosts:\n  - name: local\n    type: const\n    format: hosts\n    hosts: \"127.0.0.1 localhost\""));
     assert!(candidate.source.contains("path: ./data/statistics.sqlite3"));
     assert!(
         candidate
@@ -40,12 +42,14 @@ fn client_rename_preserves_id_implicit_defaults_and_comments() {
     ]"#)).unwrap();
     assert_eq!(candidate.config.clients[0].client_id, "Desktop-01");
     assert!(candidate.config.clients[0].cache.is_none());
+    assert!(candidate.source.contains("client_id: Desktop-01"));
+    assert!(!candidate.source.contains("cache:"));
+    // 被编辑的客户端条目按规范形式重写，条目之前的其他模块逐字节不变。
     assert!(
         candidate
             .source
-            .contains("ips: [192.0.2.10, \"2001:db8::/64\"]")
+            .starts_with(FIXTURE.split("clients:").next().unwrap())
     );
-    assert!(!candidate.source.contains("cache:"));
 }
 
 #[test]
@@ -166,17 +170,24 @@ fn missing_and_explicit_disabled_are_distinct() {
 }
 
 #[test]
-fn flow_documents_are_supported_and_aliases_rejected_without_fallback() {
+fn flow_documents_are_supported_and_anchored_entries_rejected() {
     let tree: Value = yaml_serde::from_str(FIXTURE).unwrap();
     let flow = serde_json::to_string(&tree).unwrap();
     let change = changes(
         r#"[{"module":"logs","change":{"enable":true,"level":"warn","path":"./logs/other.log"}}]"#,
     );
     assert!(build(&flow, &change).unwrap().config.logs.enable);
+    // 锚点所在条目以外的修改照常写回，锚点原样保留。
     let anchored = FIXTURE.replace("strategy: default", "strategy: &strategy default");
+    let candidate = build(&anchored, &change).unwrap();
+    assert!(candidate.source.contains("strategy: &strategy default"));
+    // 修改含锚点的条目会丢失锚点或展开别名，必须明确拒绝。
+    let listener = changes(
+        r#"[{"module":"listener","change":{"action":"update","original_name":"local","value":{"name":"local","type":"udp","addresses":["127.0.0.1"],"port":15354,"strategy":"default"}}}]"#,
+    );
     assert!(matches!(
-        build(&anchored, &change),
-        Err(EditError::UnsupportedSource)
+        build(&anchored, &listener),
+        Err(EditError::Layout { module: "listener", name: Some(ref name) }) if name == "local"
     ));
 }
 
@@ -308,7 +319,8 @@ rule_set:
     assert_eq!(tree["clients"][0]["strategy"], "renamed-strategy");
     assert!(candidate.source.contains("timeout: 1s"));
     assert!(candidate.source.contains("fallback_timeout: 2s"));
-    assert!(candidate.source.contains("proxy_url: {env: LOCAL_PROXY}"));
+    // 改名后的代理条目按块式重写，SecretRef 表达（env 来源）保持不变。
+    assert_eq!(tree["outbound"][0]["proxy_url"]["env"], "LOCAL_PROXY");
     assert!(candidate.source.contains("https://rules.example/local.dat"));
 }
 
@@ -501,7 +513,14 @@ fn combined_edits_across_indentless_sequence_keep_following_modules() {
     ]"#)).unwrap();
     assert_eq!(candidate.config.outbound[0].name, "renamed");
     assert_eq!(candidate.config.clients.len(), 2);
-    assert!(candidate.source.contains("proxy_url: {env: TEST_PROXY}"));
+    // 改名条目沿用顶格缩进重写，其余条目和后续模块不受影响。
+    assert!(
+        candidate
+            .source
+            .contains("outbound:\n- name: renamed\n  type: socks5\n  proxy_url:\n    env: TEST_PROXY\n\nclients:\n"),
+        "{}",
+        candidate.source
+    );
     assert!(candidate.source.contains("outbound:\n- name:"));
 }
 
@@ -586,7 +605,7 @@ fn changed_duration_is_written_in_the_largest_exact_unit() {
         created.source
     );
 
-    // 原地替换已有标量时引号风格由 source_edit 统一决定（见 style_tests），这里只比较解析后的值。
+    // 被修改的条目按规范形式整体重写，这里只比较解析后的值。
     for (input, expected) in [
         ("36h", "36h"),
         ("90m", "90m"),
@@ -610,4 +629,84 @@ fn changed_duration_is_written_in_the_largest_exact_unit() {
         );
         assert!(!updated.source.contains("0ns"), "{}", updated.source);
     }
+}
+
+/// 回归：只改内联代理 URL 的密码（scheme、主机、端口、用户名不变）时，新密码必须写入文件。
+/// 旧实现用脱敏序列化比较新旧值，两边都是占位符而判定“无变化”，保存成功但密码未写入。
+#[test]
+fn changing_only_the_inline_proxy_password_writes_the_new_password() {
+    let source = FIXTURE.replace(
+        "clients:\n",
+        "outbound:\n  - name: sg\n    type: socks5\n    proxy_url: socks5://user:old-secret@proxy.example:1080\nclients:\n",
+    );
+    let mut value: OutboundDto = serde_json::from_value(
+        serde_json::to_value(&ConfigV2::parse(source.as_bytes()).unwrap().outbound[0]).unwrap(),
+    )
+    .unwrap();
+    value.proxy_url = SecretRefDto::Inline {
+        url: "socks5://user:new-secret@proxy.example:1080".into(),
+    };
+    let request = [ConfigChange::Outbound(ResourceMutation::Update {
+        original_name: "sg".into(),
+        value,
+    })];
+    let expanded = expand_redacted_changes(&source, &request).unwrap();
+    let candidate = build(&source, &expanded).unwrap();
+    assert!(
+        candidate
+            .source
+            .contains("proxy_url: socks5://user:new-secret@proxy.example:1080"),
+        "{}",
+        candidate.source
+    );
+    assert!(!candidate.source.contains("old-secret"));
+    assert!(!candidate.source.contains(REDACTED_INLINE_PASSWORD));
+    let SecretRefDto::Inline { url } = &candidate.config.outbound[0].proxy_url else {
+        panic!("inline proxy url expected");
+    };
+    assert_eq!(url, "socks5://user:new-secret@proxy.example:1080");
+    // 未修改的其他模块逐字节不变。
+    assert!(
+        candidate
+            .source
+            .starts_with(source.split("outbound:").next().unwrap())
+    );
+}
+
+/// 源序列化只在写回路径生效：Management 读投影仍然脱敏。
+#[test]
+fn source_serialization_does_not_leak_into_api_projection() {
+    let inline = SecretRefDto::Inline {
+        url: "socks5://user:secret@proxy.example:1080".into(),
+    };
+    assert_eq!(
+        to_source_value(&inline).unwrap(),
+        Value::String("socks5://user:secret@proxy.example:1080".into())
+    );
+    let projected = serde_json::to_string(&inline).unwrap();
+    assert!(!projected.contains("secret@"), "{projected}");
+    assert!(projected.contains(REDACTED_INLINE_PASSWORD));
+}
+
+#[test]
+fn missing_original_name_and_duplicate_targets_are_reported_before_writing() {
+    let base = ConfigV2::parse(FIXTURE.as_bytes()).unwrap();
+    let missing = changes(
+        r#"[{"module":"strategy","change":{"action":"update","original_name":"absent","value":{"name":"absent","rules":[],"default_upstream":"local"}}}]"#,
+    );
+    assert!(matches!(
+        apply_changes(&base, &missing),
+        Err(EditError::NotFound)
+    ));
+    // 改名后的新名与另一条目的旧名相同，也算同一目标的重复修改。
+    let duplicate = changes(
+        r#"[
+      {"module":"strategy","change":{"action":"create","value":{"name":"other","rules":[],"default_upstream":"local"}}},
+      {"module":"strategy","change":{"action":"create","value":{"name":"other","rules":[],"default_upstream":"local"}}}
+    ]"#,
+    );
+    assert!(matches!(
+        apply_changes(&base, &duplicate),
+        Err(EditError::DuplicateTarget)
+    ));
 }

@@ -1,23 +1,41 @@
 import { http, HttpResponse } from "msw";
-import { beforeEach, expect, it } from "vitest";
+import { beforeEach, expect, it, vi } from "vitest";
 import { server } from "@/mocks/server";
 import { setMockAuthenticated } from "@/mocks/handlers";
-import { validateCandidate } from "./api";
+import { configStateFixture } from "@/mocks/fixtures";
+import { persistConfig, reloadConfig, saveConfig, type SaveRequest } from "./api";
+
+const body: SaveRequest = { changes: [{ module: "logs", change: { enable: false, level: "warn", path: "logs/fluxdns.log" } }] };
 
 beforeEach(() => setMockAuthenticated(true));
 
-it("可选模块校验只发送 changes，并返回无状态影响预览", async () => {
-  server.use(http.post("/api/v2/config/modules/logs/validate", async ({ request }) => {
-    const body = await request.json();
-    expect(Object.keys(body as object)).toEqual(["changes"]);
-    return HttpResponse.json({
-      observed_file_revision: "file-1",
-      required_confirmations: [],
-      affected_names: [],
-    });
+it("保存以默认开关发送 changes 并同步返回最终状态", async () => {
+  const result = { state: configStateFixture, persisted: true };
+  server.use(http.post("/api/v2/config/save", async ({ request }) => {
+    expect(await request.json()).toEqual(body);
+    return HttpResponse.json(result);
   }));
+  const timeout = vi.spyOn(window, "setTimeout");
+  try {
+    await expect(saveConfig(body)).resolves.toEqual(result);
+    expect(timeout).toHaveBeenCalledWith(expect.any(Function), 40_000);
+  } finally {
+    timeout.mockRestore();
+  }
+});
 
-  await expect(validateCandidate({
-    changes: [{ module: "logs", change: { enable: false, level: "warn", path: "logs/fluxdns.log" } }],
-  }, { module: "logs" })).resolves.toMatchObject({ observed_file_revision: "file-1" });
+it.each([["reload", reloadConfig, 40_000], ["persist", persistConfig, 10_000]] as const)("%s 不发送请求体", async (path, call, timeoutMs) => {
+  const result = { state: configStateFixture };
+  server.use(http.post(`/api/v2/config/${path}`, async ({ request }) => {
+    expect(request.headers.get("Content-Type")).toBeNull();
+    expect(await request.text()).toBe("");
+    return HttpResponse.json(result);
+  }));
+  const timeout = vi.spyOn(window, "setTimeout");
+  try {
+    await expect(call()).resolves.toEqual(result);
+    expect(timeout).toHaveBeenCalledWith(expect.any(Function), timeoutMs);
+  } finally {
+    timeout.mockRestore();
+  }
 });

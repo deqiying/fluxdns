@@ -135,7 +135,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/config/validate": {
+    "/config/save": {
         parameters: {
             query?: never;
             header?: never;
@@ -144,15 +144,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 可选无状态预览，无应用/写文件/操作注册副作用；基于当前活动源一次校验引用图，不返回票据。 */
-        post: operations["validateCandidate"];
+        /** @description 同步保存：在当前内存配置上应用 changes，严格校验后切换 Runtime，再只替换源文件中变化的条目。 磁盘与内存不一致且未设 overwrite_disk 返回 409 CONFIG_FILE_CHANGED；保留期缩短未确认返回 409 CONFIRMATION_REQUIRED；另一写操作进行中返回 409 OPERATION_BUSY；校验或布局不支持返回 422 VALIDATION_FAILED；prepare 或 Runtime 切换失败返回 422 APPLY_FAILED，旧 Runtime 不变。 HTTP 断开不会中断已开始的切换与写盘，结果以重新读取 config/state 为准，不自动重发。 */
+        post: operations["saveConfig"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/config/modules/{module}/validate": {
+    "/config/reload": {
         parameters: {
             query?: never;
             header?: never;
@@ -161,15 +161,15 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 可选单模块无状态校验；候选只能包含一项且 module 必须与 URL 一致，普通表单保存直接 apply。 */
-        post: operations["validateModuleCandidate"];
+        /** @description 从磁盘重新加载源文件并应用；摘要未变化时直接返回。源文件缺失或不可读返回 422 CONFIG_FILE_UNREADABLE； 内容不合法返回 422 VALIDATION_FAILED，运行配置不变。webui.users 变化时撤销全部会话。 */
+        post: operations["reloadConfig"];
         delete?: never;
         options?: never;
         head?: never;
         patch?: never;
         trace?: never;
     };
-    "/config/modules/{module}/apply": {
+    "/config/persist": {
         parameters: {
             query?: never;
             header?: never;
@@ -178,92 +178,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** @description 普通模块单次保存入口，无需 validate；与组合采用共用应用编排，但只接收一个同模块 change。 */
-        post: operations["applyModuleCandidate"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/config/apply": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** @description operation_id 首次发送前固定；受理后同 ID 不同命令摘要拒绝。非终态返回 202。 缺少危险影响确认返回 409 CONFIRMATION_REQUIRED，未确认外改返回 409 EXTERNAL_CHANGES_REQUIRE_CONFIRMATION；二者均为受理前标准错误，不注册 operation，可确认后用同 ID 再提交一次。 同条目后一次成功提交覆盖，不同条目保留，不传 active_revision。已应用但文件未同步也是明确结果；未知网络结果只查询 operation，不重放。 */
-        post: operations["applyCandidate"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/config/operations/{operation_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["getConfigOperation"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/config/files/diff": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** @description 无效外部 YAML 不返回正文；只读/敏感变化仅返回受保护分类。采用提交 ApplyRequest，首次即绑定 expected.observed_file_revision，不回传 active_revision。 */
-        get: operations["getExternalDiff"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/config/files/restore": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** @description 以活动源还原受管文件，不重载 DNS；必须显式确认覆盖所见差异。 */
-        post: operations["restoreConfigFiles"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/config/files/retry": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** @description 只同步当前已应用源，不重新 prepare 或重放创建/改名；复用原 operation_id，显式重试确认覆盖 observed_file_revision 对应文件。 */
-        post: operations["retryConfigPersistence"];
+        /** @description 以当前内存配置原子覆盖源文件和派生镜像，不触碰 Runtime；写盘失败返回 500 PERSISTENCE_FAILED。 */
+        post: operations["persistConfig"];
         delete?: never;
         options?: never;
         head?: never;
@@ -631,7 +547,6 @@ export interface components {
         Name: string;
         ClientId: string;
         Revision: string;
-        OperationId: components["schemas"]["Revision"];
         RecordId: components["schemas"]["Revision"];
         Cursor: string;
         /** @description 十进制 u64，不超过 18446744073709551615，不能先转 Number */
@@ -949,52 +864,47 @@ export interface components {
             auto_update: boolean;
             update_interval?: components["schemas"]["Duration"];
         };
-        /** @description 仅作 ExternalDiff 的只读双版本上下文；写接口不再接收此封套。 */
-        Preconditions: {
-            active_revision: components["schemas"]["Revision"];
-            observed_file_revision: components["schemas"]["Revision"];
+        DiskState: {
+            /**
+             * @description 只比较磁盘正文摘要与 config_digest。modified 表示外部编辑或上次写盘失败； unreadable 包括无法读取、超过 4 MiB 或不是 UTF-8。
+             * @enum {string}
+             */
+            status: "in_sync" | "modified" | "missing" | "unreadable";
         };
         ConfigState: {
-            active_revision: components["schemas"]["Revision"];
-            runtime_revision: components["schemas"]["Revision"];
-            persisted_revision: components["schemas"]["Revision"] | null;
-            observed_file_revision: components["schemas"]["Revision"];
-            files: {
-                source: components["schemas"]["FileCondition"];
-                derived: components["schemas"]["FileCondition"] | null;
-            };
-            /** @enum {string} */
-            synchronization: "synced" | "applying" | "persisting" | "applied_unpersisted" | "blocked";
-            operation_id: components["schemas"]["OperationId"] | null;
+            /** @description 内存配置正文 SHA-256，唯一的配置版本 */
+            config_digest: string;
+            runtime_revision: components["schemas"]["DecimalU64"];
+            disk: components["schemas"]["DiskState"];
         };
-        /** @enum {string} */
-        FileCondition: "unchanged" | "changed" | "missing" | "unreadable" | "oversized";
-        /** @description 可选的无状态校验输入；普通保存直接 apply，无需预校验或票据。 */
-        Candidate: {
+        /** @description 同一目标在一次请求中只能出现一次；update 的 original_name 必须存在于当前内存配置。 */
+        SaveRequest: {
             changes: components["schemas"]["ConfigChange"][];
+            /**
+             * @description 磁盘已被外部修改时，以当前内存配置加本次修改覆盖磁盘
+             * @default false
+             */
+            overwrite_disk: boolean;
+            /**
+             * @description 确认统计保留期缩短
+             * @default false
+             */
+            confirm_retention_shortening: boolean;
         };
-        /** @description 单次提交变更；同条目后一次成功提交覆盖，不同条目保留。仅确认覆盖外部文件时携带 observed_file_revision；外部采用从首次提交绑定已查看的文件版本。确认拒绝发生在受理前，可用同一 operation_id 确认后再提交一次；网络结果不确定时只能查询，不能重放。 */
-        ApplyRequest: {
-            operation_id: components["schemas"]["OperationId"];
-            changes: components["schemas"]["ConfigChange"][];
-            /** @description 省略时默认为空数组 */
-            confirmations?: components["schemas"]["ImpactKind"][];
-            observed_file_revision?: components["schemas"]["Revision"];
+        SaveResult: {
+            state: components["schemas"]["ConfigState"];
+            /** @description false 表示配置已生效但未写入磁盘，重启后会丢失 */
+            persisted: boolean;
+            diagnostic?: components["schemas"]["Diagnostic"];
+        };
+        ReloadResult: {
+            state: components["schemas"]["ConfigState"];
+        };
+        PersistResult: {
+            state: components["schemas"]["ConfigState"];
         };
         /** @enum {string} */
-        ImpactKind: "retention_shortening" | "discard_external_changes";
-        ValidationResult: {
-            observed_file_revision: components["schemas"]["Revision"];
-            required_confirmations: components["schemas"]["ImpactKind"][];
-            affected_names: components["schemas"]["Name"][];
-        };
-        /** @description 明确还原或重试即确认覆盖已查看的文件版本；retry 复用原 operation_id。 */
-        FileSyncRequest: {
-            operation_id: components["schemas"]["OperationId"];
-            observed_file_revision: components["schemas"]["Revision"];
-        };
-        /** @enum {string} */
-        ErrorCode: "HTTP_VERSION_NOT_SUPPORTED" | "URI_TOO_LONG" | "HEADERS_TOO_LARGE" | "REQUEST_TIMEOUT" | "INTERNAL_ERROR" | "SETUP_ALREADY_COMPLETED" | "AUTH_INVALID_CREDENTIALS" | "ORIGIN_REJECTED" | "CONFIG_CONFLICT" | "INVALID_ARGUMENT" | "VALIDATION_FAILED" | "PAYLOAD_TOO_LARGE" | "VERSION_UNSUPPORTED" | "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND" | "ACTIVE_REVISION_CONFLICT" | "FILE_REVISION_CONFLICT" | "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION" | "CONFIRMATION_REQUIRED" | "OPERATION_ID_REUSED" | "OPERATION_BUSY" | "PERSISTENCE_FAILED" | "APPLY_FAILED" | "COMPENSATION_FAILED" | "CURSOR_EXPIRED" | "RATE_LIMITED" | "SERVICE_UNAVAILABLE";
+        ErrorCode: "HTTP_VERSION_NOT_SUPPORTED" | "URI_TOO_LONG" | "HEADERS_TOO_LARGE" | "REQUEST_TIMEOUT" | "INTERNAL_ERROR" | "SETUP_ALREADY_COMPLETED" | "AUTH_INVALID_CREDENTIALS" | "ORIGIN_REJECTED" | "CONFIG_CONFLICT" | "INVALID_ARGUMENT" | "VALIDATION_FAILED" | "PAYLOAD_TOO_LARGE" | "VERSION_UNSUPPORTED" | "AUTH_REQUIRED" | "FORBIDDEN" | "NOT_FOUND" | "CONFIG_FILE_CHANGED" | "CONFIG_FILE_UNREADABLE" | "CONFIRMATION_REQUIRED" | "OPERATION_BUSY" | "PERSISTENCE_FAILED" | "APPLY_FAILED" | "CURSOR_EXPIRED" | "RATE_LIMITED" | "SERVICE_UNAVAILABLE";
         /** @description 服务端投影的安全诊断；不得含凭据、原始配置或底层错误链。长度上限按 UTF-8 字节计，旧响应及非失败状态可省略 diagnostic。 */
         Diagnostic: {
             /** @description 固定服务端安全阶段标识 */
@@ -1012,43 +922,12 @@ export interface components {
             message: string;
             retryable: boolean;
             diagnostic?: components["schemas"]["Diagnostic"];
+            /** @description 仅 CONFIG_FILE_CHANGED 携带保存时观测到的磁盘状态 */
+            disk?: components["schemas"]["DiskState"];
             field_errors: {
                 path: string;
                 code: components["schemas"]["ErrorCode"];
             }[];
-        };
-        OperationResult: {
-            operation_id: components["schemas"]["OperationId"];
-            status: components["schemas"]["OperationStatus"];
-            diagnostic?: components["schemas"]["Diagnostic"];
-        };
-        OperationStatus: {
-            /** @enum {string} */
-            state: "preparing" | "applying" | "unknown";
-        } | {
-            /** @constant */
-            state: "persisting";
-            active_revision: components["schemas"]["Revision"];
-        } | {
-            /** @constant */
-            state: "applied_synced";
-            active_revision: components["schemas"]["Revision"];
-            persisted_revision: components["schemas"]["Revision"];
-        } | {
-            /** @constant */
-            state: "applied_unpersisted";
-            active_revision: components["schemas"]["Revision"];
-            persisted_revision: components["schemas"]["Revision"] | null;
-            error: components["schemas"]["ErrorCode"];
-        } | {
-            /** @constant */
-            state: "rejected";
-            error: components["schemas"]["ErrorCode"];
-        } | {
-            /** @constant */
-            state: "compensation_failed";
-            active_revision: components["schemas"]["Revision"] | null;
-            error: components["schemas"]["ErrorCode"];
         };
         ConfigRead: {
             state: components["schemas"]["ConfigState"];
@@ -1101,16 +980,6 @@ export interface components {
             last_success_at_ms: components["schemas"]["SafeInteger"] | null;
             last_error: components["schemas"]["ErrorCode"] | null;
         };
-        /** @description 最多 128 项且完整 JSON 不超过 2 MiB，超限返回 PAYLOAD_TOO_LARGE，不截断。 按同命名空间 name 配对，不猜测改名；只有 active 的条目不授权删除。 普通资源 URL 的 query 按源配置保留，不伪造替代 URL；管理认证 token 不进入配置差异或 URL。 */
-        ExternalDiff: {
-            expected: components["schemas"]["Preconditions"];
-            editable: {
-                active: components["schemas"]["ModuleSource"] | null;
-                external: components["schemas"]["ModuleSource"] | null;
-            }[];
-            protected_changes: ("work" | "database" | "webui" | "protected_credentials")[];
-            parse_error: components["schemas"]["ErrorCode"] | null;
-        };
         SystemConfigRead: {
             state: components["schemas"]["ConfigState"];
             work_path: components["schemas"]["Path"];
@@ -1121,6 +990,8 @@ export interface components {
             webui_address: string;
             webui_port: number;
             public_origin: string | null;
+            /** @description 已写入配置但需重启 FluxDNS 才生效的启动级组件；只在系统运行状态页提示，改回原值后清空 */
+            restart_required: ("database" | "webui" | "dns.resolve_log")[];
         };
         QueryFilter: {
             from_ms: components["schemas"]["SafeInteger"];
@@ -1525,8 +1396,7 @@ export interface components {
         } | {
             /** @constant */
             type: "config_changed";
-            active_revision: components["schemas"]["Revision"];
-            observed_file_revision: components["schemas"]["Revision"];
+            config_digest: components["schemas"]["Revision"];
         } | {
             /** @constant */
             type: "ping";
@@ -1534,7 +1404,7 @@ export interface components {
         };
     };
     responses: {
-        /** @description 400 形状/参数错误；401 未认证；403 来源/只读字段；404 不存在； 409 revision、operation 或 cursor 冲突；413 超限；422 候选语义不合法； 429 限流；503 owner 不可用。写请求不因 retryable 自动重放。 */
+        /** @description 400 形状/参数错误；401 未认证；403 来源/只读字段；404 不存在； 409 磁盘已修改、写操作忙、需确认或 cursor 冲突；413 超限；422 配置不合法、应用失败或源文件不可读； 429 限流；503 owner 不可用。写请求不因 retryable 自动重放。 */
         Error: {
             headers: {
                 "X-Request-Id"?: string;
@@ -1693,7 +1563,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 当前运行和受管双文件状态，不读取外部文件作为活动配置 */
+            /** @description 内存配置摘要、Runtime 代次和磁盘状态；只读取最近一次磁盘观测，不读文件 */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -1749,7 +1619,7 @@ export interface operations {
             default: components["responses"]["Error"];
         };
     };
-    validateCandidate: {
+    saveConfig: {
         parameters: {
             query?: never;
             header?: never;
@@ -1758,115 +1628,17 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["Candidate"];
+                "application/json": components["schemas"]["SaveRequest"];
             };
         };
         responses: {
-            /** @description 当前影响和最新文件观测版本，不绑定后续提交 */
+            /** @description 已生效；persisted 为 false 表示未写入磁盘（复核发现外改或写盘失败） */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ValidationResult"];
-                };
-            };
-            422: components["responses"]["Error"];
-            default: components["responses"]["Error"];
-        };
-    };
-    validateModuleCandidate: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                module: components["schemas"]["ConfigModule"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["Candidate"];
-            };
-        };
-        responses: {
-            /** @description 单模块预校验及影响 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ValidationResult"];
-                };
-            };
-            default: components["responses"]["Error"];
-        };
-    };
-    applyModuleCandidate: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                module: components["schemas"]["ConfigModule"];
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ApplyRequest"];
-            };
-        };
-        responses: {
-            /** @description 操作终态 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationResult"];
-                };
-            };
-            /** @description 操作进行中 */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationResult"];
-                };
-            };
-            default: components["responses"]["Error"];
-        };
-    };
-    applyCandidate: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ApplyRequest"];
-            };
-        };
-        responses: {
-            /** @description 已确认操作结果，须检查 status 而不是只检查 HTTP 200 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationResult"];
-                };
-            };
-            /** @description 操作仍在执行 */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationResult"];
+                    "application/json": components["schemas"]["SaveResult"];
                 };
             };
             409: components["responses"]["Error"];
@@ -1874,30 +1646,7 @@ export interface operations {
             default: components["responses"]["Error"];
         };
     };
-    getConfigOperation: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                operation_id: components["schemas"]["OperationId"];
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description 记录过期、重启或未命中返回 unknown，不能据此推断未执行 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationResult"];
-                };
-            };
-            default: components["responses"]["Error"];
-        };
-    };
-    getExternalDiff: {
+    reloadConfig: {
         parameters: {
             query?: never;
             header?: never;
@@ -1906,83 +1655,39 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description 与组合文件观测版本绑定的类型化差异 */
+            /** @description 重新加载后的状态 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["ExternalDiff"];
+                    "application/json": components["schemas"]["ReloadResult"];
                 };
             };
+            409: components["responses"]["Error"];
+            422: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };
     };
-    restoreConfigFiles: {
+    persistConfig: {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FileSyncRequest"];
-            };
-        };
+        requestBody?: never;
         responses: {
-            /** @description 还原结果 */
+            /** @description 写入后的状态 */
             200: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["OperationResult"];
+                    "application/json": components["schemas"]["PersistResult"];
                 };
             };
-            /** @description 还原进行中 */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationResult"];
-                };
-            };
-            default: components["responses"]["Error"];
-        };
-    };
-    retryConfigPersistence: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["FileSyncRequest"];
-            };
-        };
-        responses: {
-            /** @description 同步结果 */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationResult"];
-                };
-            };
-            /** @description 同步进行中 */
-            202: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["OperationResult"];
-                };
-            };
+            409: components["responses"]["Error"];
             default: components["responses"]["Error"];
         };
     };

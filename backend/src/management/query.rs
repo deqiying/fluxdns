@@ -96,7 +96,7 @@ impl ManagementQueryService {
         &self,
         store: &Arc<crate::config::store::ConfigStore>,
     ) -> Result<ConfigState, ErrorCode> {
-        config_query::read_async(store, config_query::configuration_state).await
+        config_query::configuration_state(store)
     }
 
     async fn config_module(
@@ -104,36 +104,25 @@ impl ManagementQueryService {
         store: &Arc<crate::config::store::ConfigStore>,
         module: ConfigModule,
     ) -> Result<ConfigRead, ErrorCode> {
-        let coordinator = Arc::clone(&self.coordinator);
-        config_query::read_async(store, move |store| {
-            config_query::configuration_module(store, &coordinator, module)
-        })
-        .await
+        config_query::configuration_module(store, &self.coordinator, module)
     }
 
     async fn system_config(
         &self,
         store: &Arc<crate::config::store::ConfigStore>,
     ) -> Result<SystemConfigRead, ErrorCode> {
-        let coordinator = Arc::clone(&self.coordinator);
-        config_query::read_async(store, move |store| {
-            config_query::system_configuration(store, &coordinator)
-        })
-        .await
+        config_query::system_configuration(store, &self.coordinator)
     }
 
     async fn retention(
         &self,
         store: &Arc<crate::config::store::ConfigStore>,
     ) -> Result<RetentionStatusResponse, ErrorCode> {
-        let active = store
-            .active_snapshot_async()
-            .await
-            .map_err(|_| ErrorCode::ServiceUnavailable)?;
-        if active.runtime_revision != self.coordinator.load().revision().0 {
+        let document = store.current();
+        if document.runtime_revision != self.coordinator.load().revision().0 {
             return Err(ErrorCode::ServiceUnavailable);
         }
-        let policy_source = active.config.statistics.clone();
+        let policy_source = document.config.statistics.clone();
         let policy = RetentionPolicy::new(
             policy_source.retention.days,
             policy_source.retention.grace_days,
@@ -167,11 +156,8 @@ impl ManagementQueryService {
         store: &Arc<crate::config::store::ConfigStore>,
         request: RetentionPreviewRequest,
     ) -> Result<RetentionPreview, ErrorCode> {
-        let active = store
-            .active_snapshot_async()
-            .await
-            .map_err(config_query::error_code)?;
-        if active.runtime_revision != self.coordinator.load().revision().0 {
+        let document = store.current();
+        if document.runtime_revision != self.coordinator.load().revision().0 {
             return Err(ErrorCode::ServiceUnavailable);
         }
         let proposed_policy = RetentionPolicy::new(
@@ -181,9 +167,9 @@ impl ManagementQueryService {
         )
         .map_err(|_| ErrorCode::InvalidArgument)?;
         let current_policy = RetentionPolicy::new(
-            active.config.statistics.retention.days,
-            active.config.statistics.retention.grace_days,
-            active.config.statistics.retention.reference_size_bytes,
+            document.config.statistics.retention.days,
+            document.config.statistics.retention.grace_days,
+            document.config.statistics.retention.reference_size_bytes,
         )
         .map_err(|_| ErrorCode::ServiceUnavailable)?;
         let sampled_at = SystemTime::now();
@@ -416,10 +402,7 @@ pub(crate) mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::config::edit::ConfigChange;
-    use crate::config::model::{LogLevelDto, LogsDto};
     use crate::config::store::ConfigStore;
-    use crate::config::store::active::BeginApply;
     use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::dns::TransportClass;
     use crate::dns::{Cancellation, RuntimeRevision};
@@ -640,9 +623,10 @@ pub(crate) mod tests {
         ));
         let auth = Arc::new(AuthState::new(&[]).unwrap());
         let sessions = Arc::new(SessionStore::new(false));
-        let store = Arc::new(
-            ConfigStore::with_active_source(source_path, source, RuntimeRevision(7).0).unwrap(),
-        );
+        let store = Arc::new(ConfigStore::open_for_test_at(
+            &source_path,
+            RuntimeRevision(7).0,
+        ));
         (
             Arc::new(AuthServices::new(
                 auth,
@@ -807,11 +791,13 @@ pub(crate) mod tests {
             }
             if path == "/api/v2/config/state" {
                 assert_eq!(body["runtime_revision"], "7");
-                assert_eq!(body["synchronization"], "synced");
+                assert_eq!(body["disk"]["status"], "in_sync");
+                assert_eq!(body["config_digest"].as_str().unwrap().len(), 64);
             }
             if path == "/api/v2/config/system" {
                 assert_eq!(body["work_path"], ".");
                 assert_eq!(body["records_path"], "./data/queries");
+                assert_eq!(body["restart_required"], json!([]));
                 assert!(body.get("users").is_none());
                 assert!(body.get("input_hash").is_none());
             }
@@ -1053,8 +1039,9 @@ pub(crate) mod tests {
         assert_eq!(body["field_errors"], json!([]));
 
         for path in [
-            "/api/v2/config/modules/logs/validate",
-            "/api/v2/config/modules/logs/apply",
+            "/api/v2/config/save",
+            "/api/v2/config/reload",
+            "/api/v2/config/persist",
         ] {
             let request = Request::builder()
                 .method("POST")
@@ -1087,7 +1074,7 @@ pub(crate) mod tests {
 
         let rejected_origin = Request::builder()
             .method("POST")
-            .uri("/api/v2/config/validate")
+            .uri("/api/v2/config/save")
             .header(AUTHORIZATION, &authorization)
             .header(ORIGIN, "http://example.invalid")
             .header(CONTENT_TYPE, "application/json")
@@ -1103,7 +1090,7 @@ pub(crate) mod tests {
 
         let unavailable_owner = Request::builder()
             .method("POST")
-            .uri("/api/v2/config/validate")
+            .uri("/api/v2/config/save")
             .header(AUTHORIZATION, &authorization)
             .header(ORIGIN, "http://127.0.0.1:8080")
             .header(CONTENT_TYPE, "application/json")
@@ -1114,7 +1101,7 @@ pub(crate) mod tests {
 
         let oversized = Request::builder()
             .method("POST")
-            .uri("/api/v2/config/validate")
+            .uri("/api/v2/config/save")
             .header(AUTHORIZATION, &authorization)
             .header(ORIGIN, "http://127.0.0.1:8080")
             .header(CONTENT_TYPE, "application/json")
@@ -1132,26 +1119,10 @@ pub(crate) mod tests {
             "PAYLOAD_TOO_LARGE"
         );
 
-        let changes = vec![ConfigChange::Logs(LogsDto {
-            enable: true,
-            level: LogLevelDto::Warn,
-            path: "./logs/changed.log".into(),
-        })];
-        let BeginApply::Accepted(mut permit) = services
+        // Runtime 已切换、文档尚未发布的窗口：模块读取返回可重试的 503。
+        services
             .config_store
-            .begin_apply(
-                "test-actor",
-                "revision-race",
-                &changes,
-                None,
-                &Default::default(),
-            )
-            .unwrap()
-        else {
-            panic!("expected a new operation");
-        };
-        permit.begin_runtime_apply().unwrap();
-        permit.applied(8).unwrap();
+            .set_document_state_for_test(8, Vec::new());
         let mismatched = app
             .oneshot(get("/api/v2/config/modules/logs", Some(&authorization)))
             .await

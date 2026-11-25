@@ -167,27 +167,25 @@ struct DirectorySnapshot {
     names: BTreeMap<String, String>,
 }
 
-/// 当前名称不写回历史；一次请求只消费一个活动目录快照。
+/// 当前名称不写回历史；一次请求只消费一个配置文档，目录版本即配置摘要。
 async fn directory_snapshot(
     service: &ManagementQueryService,
     store: &Arc<ConfigStore>,
 ) -> Result<DirectorySnapshot, ErrorCode> {
-    let active = store
-        .active_snapshot_async()
-        .await
-        .map_err(|_| ErrorCode::ServiceUnavailable)?;
-    if active.runtime_revision != service.coordinator.load().revision().0 {
+    let document = store.current();
+    if document.runtime_revision != service.coordinator.load().revision().0 {
         return Err(ErrorCode::ServiceUnavailable);
     }
-    let names = active
+    let names = document
         .config
         .clients
         .iter()
         .map(|client| (client.client_id.clone(), client.name.clone()))
         .collect();
     Ok(DirectorySnapshot {
-        revision: Revision::try_from(active.revision).map_err(|_| ErrorCode::ServiceUnavailable)?,
-        config: active.config,
+        revision: Revision::try_from(document.digest.clone())
+            .map_err(|_| ErrorCode::ServiceUnavailable)?,
+        config: Arc::clone(&document.config),
         names,
     })
 }

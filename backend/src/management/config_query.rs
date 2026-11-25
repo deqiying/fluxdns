@@ -1,103 +1,71 @@
-//! v2 配置状态的白名单投影；活动正文来自 ConfigStore，effective/runtime 来自同代 Runtime。
+//! v2 配置状态的白名单投影；正文来自内存配置文档，effective/runtime 来自同代 Runtime。
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::contract::{
-    CacheSnapshotStatus, ConfigModule, ConfigRead, ConfigState, DecimalU64, EffectiveField,
-    ErrorCode, FileCondition, FileObservation, ListenerBinding, ModuleRuntime, ModuleSource,
-    OperationId, OperationResult, OperationStatus, ResourceCondition, ResourceReference, Revision,
-    ScalarValue, SnapshotCondition, SyncCondition, SystemConfigRead, Transport, ValueOrigin,
+    CacheSnapshotStatus, ConfigModule, ConfigRead, ConfigState, DecimalU64, DiskState, DiskStatus,
+    EffectiveField, ErrorCode, ListenerBinding, ModuleRuntime, ModuleSource, ResourceCondition,
+    ResourceReference, RestartComponent, Revision, ScalarValue, SnapshotCondition,
+    SystemConfigRead, Transport, ValueOrigin,
 };
 use crate::cache::{CacheSnapshotCondition, CacheSnapshotFailure};
 use crate::config::contract::ConfigV2;
+use crate::config::disk::DiskStatus as StoreDiskStatus;
+use crate::config::document::ConfigDocument;
 use crate::config::model::{HostsResourceDto, RuleSetDto, format_duration};
 use crate::config::resolve::{ResolvedConfig, ResolvedUpstream, ValueSource};
-use crate::config::store::{
-    ConfigStore,
-    active::{ActiveError, ConfigurationStatus, OperationFailure, OperationSnapshot},
-    observation::FileObservation as ObservedFile,
-};
+use crate::config::store::ConfigStore;
 use crate::resource::ResourceStaleStatus;
 use crate::runtime::RuntimeCoordinator;
 
-pub(crate) mod external;
-
-/// 有界同步快照读取在 blocking pool 执行，避免配置事务占用 HTTP/WS executor。
-pub(super) async fn read_async<T: Send + 'static>(
-    store: &std::sync::Arc<ConfigStore>,
-    read: impl FnOnce(&ConfigStore) -> Result<T, ErrorCode> + Send + 'static,
-) -> Result<T, ErrorCode> {
-    let store = std::sync::Arc::clone(store);
-    tokio::task::spawn_blocking(move || read(&store))
-        .await
-        .map_err(|_| ErrorCode::ServiceUnavailable)?
-}
-
-/// 状态查询不做文件 I/O；外部差异与持久化结果独立展示，不把文件变化解释成自动应用。
+/// 当前配置状态；不读盘，磁盘状态来自最近一次观测。
 pub(crate) fn configuration_state(store: &ConfigStore) -> Result<ConfigState, ErrorCode> {
-    let status = store.configuration_status().map_err(error_code)?;
-    configuration_state_from_status(&status)
+    let document = store.current();
+    document_state(store, &document)
 }
 
-/// 从同一次锁内冻结结果投影状态，供模块与系统读取避免二次读取跨代。
-pub(super) fn configuration_state_from_status(
-    status: &ConfigurationStatus,
+/// 以同一份文档投影状态，避免模块与系统读取跨代。
+pub(super) fn document_state(
+    store: &ConfigStore,
+    document: &ConfigDocument,
 ) -> Result<ConfigState, ErrorCode> {
-    let active = &status.active;
-    let synchronization = match &status.operation {
-        Some(OperationSnapshot::Preparing | OperationSnapshot::Applying) => SyncCondition::Applying,
-        Some(OperationSnapshot::Persisting { .. }) => SyncCondition::Persisting,
-        Some(OperationSnapshot::AppliedUnpersisted { .. }) => SyncCondition::AppliedUnpersisted,
-        Some(_) => SyncCondition::Blocked,
-        None if active.operation_id.is_none()
-            && active.persisted_revision.as_ref() == Some(&active.revision) =>
-        {
-            SyncCondition::Synced
-        }
-        None => SyncCondition::Blocked,
-    };
     Ok(ConfigState {
-        active_revision: revision(active.revision.clone())?,
-        // RuntimeRevision 的 u64 只编码为十进制 opaque revision，不输出不安全 JSON number。
-        runtime_revision: revision(active.runtime_revision.to_string())?,
-        persisted_revision: active
-            .persisted_revision
-            .clone()
-            .map(revision)
-            .transpose()?,
-        observed_file_revision: revision(active.observation.revision())?,
-        files: FileObservation {
-            source: file_condition(&active.observation.source, Some(&status.known_files.source)),
-            derived: active
-                .observation
-                .derived
-                .as_ref()
-                .map(|file| file_condition(file, status.known_files.derived.as_ref())),
-        },
-        synchronization,
-        operation_id: active
-            .operation_id
-            .as_ref()
-            .map(|id| OperationId::try_from(id.clone()).map_err(|_| ErrorCode::ServiceUnavailable))
-            .transpose()?,
+        config_digest: Revision::try_from(document.digest.clone())
+            .map_err(|_| ErrorCode::ServiceUnavailable)?,
+        // RuntimeRevision 的 u64 只编码为十进制字符串，不输出不安全 JSON number。
+        runtime_revision: DecimalU64::from(document.runtime_revision),
+        disk: disk_state(store.disk_status(&document.digest)),
     })
 }
 
+pub(super) fn disk_state(status: StoreDiskStatus) -> DiskState {
+    DiskState {
+        status: match status {
+            StoreDiskStatus::InSync => DiskStatus::InSync,
+            StoreDiskStatus::Modified => DiskStatus::Modified,
+            StoreDiskStatus::Missing => DiskStatus::Missing,
+            StoreDiskStatus::Unreadable => DiskStatus::Unreadable,
+        },
+    }
+}
+
 /// 只返回请求模块的源配置、有效值、出站引用及运行态。
+///
+/// 文档与 Runtime 不同代（切换与发布之间的短窗口）时返回可重试的 `SERVICE_UNAVAILABLE`。
 pub(crate) fn configuration_module(
     store: &ConfigStore,
     coordinator: &RuntimeCoordinator,
     module: ConfigModule,
 ) -> Result<ConfigRead, ErrorCode> {
-    let status = store.configuration_status().map_err(error_code)?;
+    let document = store.current();
     let runtime = coordinator.load();
-    if status.active.runtime_revision != runtime.revision().0 {
+    if document.runtime_revision != runtime.revision().0 {
         return Err(ErrorCode::ServiceUnavailable);
     }
-    let source = &status.active.config;
+    let source = &document.config;
     let resolved = runtime.snapshot().config();
     Ok(ConfigRead {
-        state: configuration_state_from_status(&status)?,
+        state: document_state(store, &document)?,
         values: module_values(source, module),
         effective: effective_values(resolved, module),
         references: module_references(source, module),
@@ -105,18 +73,20 @@ pub(crate) fn configuration_module(
     })
 }
 
-/// 系统读取只投影活动源中的启动字段，不输出 users、hash、Secret 或解析后的绝对路径。
+/// 系统读取只投影配置中的启动字段，不输出 users、hash、Secret 或解析后的绝对路径。
+///
+/// `restart_required` 只在这里暴露：已写入配置、但需重启进程才生效的启动级组件。
 pub(crate) fn system_configuration(
     store: &ConfigStore,
     coordinator: &RuntimeCoordinator,
 ) -> Result<SystemConfigRead, ErrorCode> {
-    let status = store.configuration_status().map_err(error_code)?;
-    if status.active.runtime_revision != coordinator.load().revision().0 {
+    let document = store.current();
+    if document.runtime_revision != coordinator.load().revision().0 {
         return Err(ErrorCode::ServiceUnavailable);
     }
-    let config = &status.active.config;
+    let config = &document.config;
     Ok(SystemConfigRead {
-        state: configuration_state_from_status(&status)?,
+        state: document_state(store, &document)?,
         work_path: display_path(&config.work.path),
         rules_path: display_path(&config.work.rules_path),
         database_path: display_path(&config.database.path),
@@ -125,6 +95,11 @@ pub(crate) fn system_configuration(
         webui_address: config.webui.address.to_string(),
         webui_port: config.webui.port,
         public_origin: config.webui.public_origin.as_ref().map(ToString::to_string),
+        restart_required: document
+            .restart_required
+            .iter()
+            .filter_map(|component| RestartComponent::from_component(component))
+            .collect(),
     })
 }
 
@@ -749,99 +724,8 @@ fn unix_millis(value: SystemTime) -> Option<u64> {
         .and_then(|duration| u64::try_from(duration.as_millis()).ok())
 }
 
-/// adapter 仍须先鉴权；此读口按原调用者返回冻结结果，Unknown 不能触发自动重放。
-pub(crate) fn operation_result(
-    store: &ConfigStore,
-    actor: &str,
-    operation_id: &str,
-) -> Result<OperationResult, ErrorCode> {
-    let id =
-        OperationId::try_from(operation_id.to_owned()).map_err(|_| ErrorCode::InvalidArgument)?;
-    let result = store
-        .operation_snapshot(actor, operation_id)
-        .map_err(error_code)?;
-    let diagnostic = result.diagnostic().cloned();
-    let status = match result {
-        OperationSnapshot::Preparing => OperationStatus::Preparing {},
-        OperationSnapshot::Applying => OperationStatus::Applying {},
-        OperationSnapshot::Persisting { active_revision } => OperationStatus::Persisting {
-            active_revision: revision(active_revision)?,
-        },
-        OperationSnapshot::AppliedSynced {
-            active_revision,
-            persisted_revision,
-        } => OperationStatus::AppliedSynced {
-            active_revision: revision(active_revision)?,
-            persisted_revision: revision(persisted_revision)?,
-        },
-        OperationSnapshot::AppliedUnpersisted {
-            active_revision,
-            persisted_revision,
-            error,
-            ..
-        } => OperationStatus::AppliedUnpersisted {
-            active_revision: revision(active_revision)?,
-            persisted_revision: persisted_revision.map(revision).transpose()?,
-            error: failure_code(error),
-        },
-        OperationSnapshot::Rejected { error, .. } => OperationStatus::Rejected {
-            error: failure_code(error),
-        },
-        OperationSnapshot::CompensationFailed {
-            active_revision,
-            error,
-            ..
-        } => OperationStatus::CompensationFailed {
-            active_revision: active_revision.map(revision).transpose()?,
-            error: failure_code(error),
-        },
-        OperationSnapshot::Unknown => OperationStatus::Unknown {},
-    };
-    Ok(OperationResult {
-        operation_id: id,
-        status,
-        diagnostic,
-    })
-}
-
 fn revision(value: String) -> Result<Revision, ErrorCode> {
     Revision::try_from(value).map_err(|_| ErrorCode::ServiceUnavailable)
-}
-
-fn file_condition(current: &ObservedFile, known: Option<&ObservedFile>) -> FileCondition {
-    match current {
-        ObservedFile::Missing => FileCondition::Missing,
-        ObservedFile::Unreadable => FileCondition::Unreadable,
-        ObservedFile::Oversized => FileCondition::Oversized,
-        ObservedFile::Readable { .. } if Some(current) == known => FileCondition::Unchanged,
-        ObservedFile::Readable { .. } => FileCondition::Changed,
-    }
-}
-
-fn failure_code(error: OperationFailure) -> ErrorCode {
-    match error {
-        OperationFailure::ValidationFailed => ErrorCode::ValidationFailed,
-        OperationFailure::ActiveRevisionConflict => ErrorCode::ActiveRevisionConflict,
-        OperationFailure::FileRevisionConflict => ErrorCode::FileRevisionConflict,
-        OperationFailure::ApplyFailed => ErrorCode::ApplyFailed,
-        OperationFailure::PersistenceFailed => ErrorCode::PersistenceFailed,
-        OperationFailure::CompensationFailed => ErrorCode::CompensationFailed,
-    }
-}
-
-pub(super) fn error_code(error: ActiveError) -> ErrorCode {
-    match error {
-        ActiveError::Busy => ErrorCode::OperationBusy,
-        ActiveError::InvalidToken => ErrorCode::InvalidArgument,
-        ActiveError::ActiveConflict => ErrorCode::ActiveRevisionConflict,
-        ActiveError::FileConflict => ErrorCode::FileRevisionConflict,
-        ActiveError::Unavailable | ActiveError::Entropy => ErrorCode::ServiceUnavailable,
-        ActiveError::ExternalConfirmation => ErrorCode::ExternalChangesRequireConfirmation,
-        ActiveError::OperationIdReused => ErrorCode::OperationIdReused,
-        ActiveError::MissingConfirmation => ErrorCode::ConfirmationRequired,
-        ActiveError::Candidate(_) => ErrorCode::ValidationFailed,
-        ActiveError::Persistence(_) => ErrorCode::PersistenceFailed,
-    }
 }
 
 #[cfg(test)]

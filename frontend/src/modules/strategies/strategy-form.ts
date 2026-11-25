@@ -145,16 +145,15 @@ export function ecsSummary(ecs: Ecs | undefined) {
 export function strategyFieldErrors(errors: readonly ApiFieldError[]): Parameters<FormInstance<StrategyFormValues>["setFields"]>[0] {
   const fields: Parameters<FormInstance<StrategyFormValues>["setFields"]>[0] = [];
   for (const error of errors) {
-    const path = error.path.replace(/\[(\d+)\]/g, ".$1").replaceAll("/", ".");
-    const rule = path.match(/(?:^|\.)rules\.(\d+)\.(.+)$/);
+    const path = error.path.replace(/\[(\d+)\]/g, ".$1").replaceAll("/", ".").replace(/^\.+/, "")
+      .replace(/^(?:strategy\.(?:\d+\.)?|changes\.\d+\.change\.(?:value\.)?)/, "");
+    const rule = path.match(/^rules\.(\d+)\.(.+)$/);
     if (rule) {
       const mapping: Record<string, keyof RuleFormValue> = { hosts: "source", rule_set: "source", upstream: "upstream", "edns_client_subnet.mode": "ecs_mode", "edns_client_subnet.custom_ip": "ecs_custom_ip", edns_client_subnet: "ecs_custom_ip" };
-      const key = mapping[rule[2]];
-      if (key) fields.push({ name: ["rules", Number(rule[1]), key], errors: [error.code] });
+      if (Object.hasOwn(mapping, rule[2])) fields.push({ name: ["rules", Number(rule[1]), mapping[rule[2]]], errors: [error.code] });
     } else {
-      const mapping: Record<string, Exclude<keyof StrategyFormValues, "rules">> = { name: "name", default_upstream: "default_upstream", "ttl_override.min": "ttl_min", "ttl_override.max": "ttl_max", "edns_client_subnet.custom_ip": "ecs_custom_ip", "edns_client_subnet.mode": "ecs_mode", "cache.optimistic.answer_ttl": "cache_answer_ttl", "cache.optimistic.max_age": "cache_max_age", "cache.optimistic.negative_max_age": "cache_negative_max_age" };
-      const match = Object.keys(mapping).find((suffix) => path === suffix || path.endsWith(`.${suffix}`));
-      if (match) fields.push({ name: [mapping[match]], errors: [error.code] });
+      const mapping: Record<string, Exclude<keyof StrategyFormValues, "rules">> = { name: "name", default_upstream: "default_upstream", "ttl_override.enabled": "ttl_mode", "ttl_override.min": "ttl_min", "ttl_override.max": "ttl_max", "edns_client_subnet.custom_ip": "ecs_custom_ip", "edns_client_subnet.mode": "ecs_mode", "cache.enabled": "cache_mode", "cache.optimistic.enabled": "cache_optimistic_mode", "cache.optimistic.answer_ttl": "cache_answer_ttl", "cache.optimistic.max_age": "cache_max_age", "cache.optimistic.negative_max_age": "cache_negative_max_age" };
+      if (Object.hasOwn(mapping, path)) fields.push({ name: [mapping[path]], errors: [error.code] });
     }
   }
   return fields;

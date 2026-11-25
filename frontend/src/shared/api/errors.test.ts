@@ -4,11 +4,11 @@ import { ApiError, getSafeErrorMessage, parseDiagnostic, safeText } from "./erro
 const diagnostic = { stage: "prepare", code: "RESOURCE_PARSE_FAILED", message: "规则文件无法解析", resource: "guard" };
 
 describe("统一安全错误文案", () => {
-  it("保留中文运行态语义、细分原因、字段错误及两个关联 ID", () => {
+  it("保留中文运行态语义、细分原因、字段错误及请求 ID", () => {
     const error = new ApiError({ code: "APPLY_FAILED", kind: "http", message: "not for display", diagnostic,
-      requestId: "request-1", operationId: "operation-1", fieldErrors: [{ path: "/changes/0/change/rule", code: "INVALID_ARGUMENT" }] });
+      requestId: "request-1", fieldErrors: [{ path: "/changes/0/change/rule", code: "INVALID_ARGUMENT" }] });
     const text = getSafeErrorMessage(error);
-    for (const value of ["运行状态保持不变", "阶段：prepare", "资源：guard", "规则文件无法解析", "原因码：RESOURCE_PARSE_FAILED", "request-1", "operation-1", "/changes/0/change/rule", "INVALID_ARGUMENT"]) expect(text).toContain(value);
+    for (const value of ["运行状态保持不变", "阶段：prepare", "资源：guard", "规则文件无法解析", "原因码：RESOURCE_PARSE_FAILED", "request-1", "/changes/0/change/rule", "INVALID_ARGUMENT"]) expect(text).toContain(value);
     expect(text).not.toContain("not for display");
   });
 
@@ -34,9 +34,8 @@ describe("统一安全错误文案", () => {
     expect(new TextEncoder().encode(value?.resource).length).toBeLessThanOrEqual(128);
     expect(value?.message).not.toMatch(/[\u0000\u202e]/);
     expect(safeText("😀中", 4)).toBe("😀");
-    const error = new ApiError({ code: "VALIDATION_FAILED", kind: "http", message: "", requestId: "bad\nrequest", operationId: "https://user:secret@example.com", fieldErrors: Array.from({ length: 200 }, () => ({ path: "a".repeat(600), code: "INVALID_ARGUMENT" })) });
+    const error = new ApiError({ code: "VALIDATION_FAILED", kind: "http", message: "", requestId: "bad\nrequest", fieldErrors: Array.from({ length: 200 }, () => ({ path: "a".repeat(600), code: "INVALID_ARGUMENT" })) });
     expect(error.requestId).toBeUndefined();
-    expect(error.operationId).toBeUndefined();
     expect(error.fieldErrors).toHaveLength(128);
     expect(error.fieldErrors[0].path).toHaveLength(512);
   });

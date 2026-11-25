@@ -6,6 +6,8 @@
 >
 > 最后评审：2026-09-05（模块边界与关键契约静态核对，基线见[模块索引](README.md)；不含运行验收）
 >
+> 2026-11-26 局部评审：仅同步 `ServiceControl` 回执丢失的处置方与生产者接线；其余范围沿原评审记录。
+>
 > 关联实现：[snapshot.rs](../../../../backend/src/runtime/snapshot.rs)、[prepared.rs](../../../../backend/src/runtime/prepared.rs)、[coordinator.rs](../../../../backend/src/runtime/coordinator.rs)、[supervisor.rs](../../../../backend/src/runtime/supervisor.rs)、[service.rs](../../../../backend/src/service.rs)
 >
 > 关联文档：[后端架构](../overview.md)
@@ -91,9 +93,9 @@ Config 的 `BindPlan` 是经过校验的 `BindEntry` 列表，记录底层 UDP/T
 
 service 的配置发布先取得 `ServiceActivation`：在 mutation gate 下合并状态，但不替换当前实例。任务先注册、等待共享启动闸门，再执行最终 CAS，成功后无 await 地换代服务集合并放行。准备失败不需要回退已发布 Runtime，因为候选从未发布；不能将此语义扩大为未来所有进程 owner 均可无损补偿。新配置 owner 和活动源回报仍属于 BC-03 剩余工作，证据见[任务预注册实现](../../../implementation/backend/lifecycle.md#p1-任务预注册子项2026-09-07)。
 
-`ServiceControl` 向既有 service 循环提交有界命令，容量为一个排队候选加一个当前执行候选；版本/deadline 在入队与消费边界核对，失败不自动重试。回执断开不等于未执行，配置事务 owner 必须另外维护 operation 并查询收敛。服务消费者已接线，但 v2 ConfigStore/Management 生产者尚未接入，见[服务控制队列实现](../../../implementation/backend/lifecycle.md#p1-服务控制队列子项2026-09-07)。
+`ServiceControl` 向既有 service 循环提交有界命令，容量为一个排队候选加一个当前执行候选；版本/deadline 在入队与消费边界核对，失败不自动重试。回执断开不等于未执行：`ConfigStore` 按 coordinator 当前代次是否等于期望的新代次判定是否已应用，不维护 operation。服务消费者已接线，生产者是 `ConfigStore` 的 save/reload（经 Management `ServiceHost`），见[服务控制队列实现](../../../implementation/backend/lifecycle.md#p1-服务控制队列子项2026-09-07)。
 
-`RuntimeCoordinator` 串行处理配置候选、资源更新和 fatal 状态迁移。Application 的双文件轮询只产生观测提示，不触发 reload；显式配置应用才进入服务控制队列。资源文件仍沿独立自动刷新链运行，可以并行准备，但发布必须满足：
+`RuntimeCoordinator` 串行处理配置候选、资源更新和 fatal 状态迁移。Application 的源文件轮询只产生观测提示，不触发 reload；显式配置应用才进入服务控制队列。资源文件仍沿独立自动刷新链运行，可以并行准备，但发布必须满足：
 
 - 每个资源有独立 epoch；
 - 结果 epoch 小于当前值时丢弃；

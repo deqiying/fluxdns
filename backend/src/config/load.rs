@@ -48,9 +48,19 @@ impl LoadOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SnapshotStatus {
     Skipped,
-    SourceInWorkDirectory { path: PathBuf },
-    Unchanged { path: PathBuf },
-    Created { path: PathBuf },
+    SourceInWorkDirectory {
+        path: PathBuf,
+    },
+    Unchanged {
+        path: PathBuf,
+    },
+    Created {
+        path: PathBuf,
+    },
+    /// 原镜像与源文件不一致，已用源文件正文原子覆盖。
+    Replaced {
+        path: PathBuf,
+    },
 }
 
 /// 正式 v2 启动产物，保留生成运行态的原始配置正文供活动源初始化。
@@ -74,6 +84,7 @@ impl ConfigV2Loader {
     }
 
     /// 在已知源路径下校验候选；只编译运行态，不读写源文件或快照。
+    #[cfg(test)]
     pub(crate) fn load_candidate_bytes(
         &self,
         bytes: &[u8],
@@ -292,13 +303,20 @@ where
             });
         }
     }
-    match read_bounded_file(&target, max_bytes) {
+    // 镜像是源文件的单向副本：内容不同（含超限、非 UTF-8 等无法比较的情况）时直接覆盖。
+    let differs = match read_bounded_file(&target, max_bytes) {
         Ok(existing) if existing == bytes => return Ok(SnapshotStatus::Unchanged { path: target }),
-        Ok(_) => return Err(ConfigLoadError::SnapshotConflict { path: target }),
+        Ok(_)
+        | Err(
+            ConfigLoadError::Empty
+            | ConfigLoadError::TooLarge { .. }
+            | ConfigLoadError::InvalidUtf8 { .. },
+        ) => true,
         Err(ConfigLoadError::ReadIo { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            false
         }
         Err(error) => return Err(error),
-    }
+    };
     let sequence = TEMP_FILE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let temp = work_path.join(format!(
         ".config.yaml.fluxdns-{}-{sequence}.tmp",
@@ -313,30 +331,42 @@ where
         let _ = fs::remove_file(&temp);
         return Err(error);
     }
+    if differs {
+        return replace_snapshot(&temp, target, work_path);
+    }
+    // 目标不存在时用 hard link 发布，保证并发启动只有一个创建者。
     if let Err(source) = fs::hard_link(&temp, &target) {
-        let _ = fs::remove_file(&temp);
         if source.kind() == io::ErrorKind::AlreadyExists {
             return match fs::symlink_metadata(&target) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
+                    let _ = fs::remove_file(&temp);
                     Err(ConfigLoadError::SnapshotSymlink { path: target })
                 }
                 Ok(metadata) if metadata.file_type().is_file() => {
                     match read_bounded_file(&target, max_bytes) {
                         Ok(existing) if existing == bytes => {
+                            let _ = fs::remove_file(&temp);
                             Ok(SnapshotStatus::Unchanged { path: target })
                         }
-                        Ok(_) => Err(ConfigLoadError::SnapshotConflict { path: target }),
-                        Err(error) => Err(error),
+                        // 检查后被写入了不同内容：同样以源覆盖。
+                        _ => replace_snapshot(&temp, target, work_path),
                     }
                 }
-                Ok(_) => Err(ConfigLoadError::SnapshotConflict { path: target }),
-                Err(source) => Err(ConfigLoadError::SnapshotIo {
-                    operation: "inspect concurrently-created snapshot",
-                    path: target,
-                    source,
-                }),
+                Ok(_) => {
+                    let _ = fs::remove_file(&temp);
+                    Err(ConfigLoadError::SnapshotConflict { path: target })
+                }
+                Err(source) => {
+                    let _ = fs::remove_file(&temp);
+                    Err(ConfigLoadError::SnapshotIo {
+                        operation: "inspect concurrently-created snapshot",
+                        path: target,
+                        source,
+                    })
+                }
             };
         }
+        let _ = fs::remove_file(&temp);
         return Err(ConfigLoadError::SnapshotIo {
             operation: "atomically publish snapshot",
             path: target,
@@ -348,6 +378,24 @@ where
     Ok(SnapshotStatus::Created {
         path: work_path.join("config.yaml"),
     })
+}
+
+/// 用已写好的临时文件原子替换与源不一致的镜像。
+fn replace_snapshot(
+    temp: &Path,
+    target: PathBuf,
+    work_path: &Path,
+) -> Result<SnapshotStatus, ConfigLoadError> {
+    if let Err(source) = fs::rename(temp, &target) {
+        let _ = fs::remove_file(temp);
+        return Err(ConfigLoadError::SnapshotIo {
+            operation: "replace snapshot",
+            path: target,
+            source,
+        });
+    }
+    sync_directory(work_path)?;
+    Ok(SnapshotStatus::Replaced { path: target })
 }
 
 /// Reject a symlinked work path or its nearest existing parent before
@@ -510,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_is_idempotent_and_refuses_different_content() {
+    fn snapshot_is_idempotent_and_replaces_different_content() {
         let root = temp_dir();
         let source = root.join("input.yaml");
         let work = root.join("work");
@@ -519,9 +567,25 @@ mod tests {
         assert!(matches!(first, SnapshotStatus::Created { .. }));
         let second = create_snapshot(&work, &source, b"version: 1\n", 128).unwrap();
         assert!(matches!(second, SnapshotStatus::Unchanged { .. }));
-        let error = create_snapshot(&work, &source, b"version: 2\n", 128).unwrap_err();
+        // 镜像是单向副本：与源不同（含无法按 UTF-8 读取的内容）时以源覆盖。
+        let replaced = create_snapshot(&work, &source, b"version: 2\n", 128).unwrap();
+        assert!(matches!(replaced, SnapshotStatus::Replaced { .. }));
+        assert_eq!(fs::read(work.join("config.yaml")).unwrap(), b"version: 2\n");
+        fs::write(work.join("config.yaml"), [0xff, 0xfe]).unwrap();
+        let replaced = create_snapshot(&work, &source, b"version: 2\n", 128).unwrap();
+        assert!(matches!(replaced, SnapshotStatus::Replaced { .. }));
+        assert_eq!(fs::read(work.join("config.yaml")).unwrap(), b"version: 2\n");
+        // 目录占位不是镜像，仍拒绝覆盖。
+        let other = root.join("other");
+        fs::create_dir_all(other.join("config.yaml")).unwrap();
+        let error = create_snapshot(&other, &source, b"version: 2\n", 128).unwrap_err();
         assert!(matches!(error, ConfigLoadError::SnapshotConflict { .. }));
-        assert_eq!(fs::read(work.join("config.yaml")).unwrap(), b"version: 1\n");
+        assert!(other.join("config.yaml").is_dir());
+        let leftovers = fs::read_dir(&work)
+            .unwrap()
+            .filter(|entry| entry.as_ref().unwrap().file_name() != "config.yaml")
+            .count();
+        assert_eq!(leftovers, 0);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -601,18 +665,19 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_does_not_overwrite_target_appearing_after_initial_check() {
+    fn snapshot_replaces_different_target_appearing_after_initial_check() {
         let root = temp_dir();
         let source = root.join("input.yaml");
         let work = root.join("work");
         let target = work.join("config.yaml");
         fs::write(&source, b"version: 1\n").unwrap();
-        let error = create_snapshot_with_hook(&work, &source, b"version: 1\n", 128, || {
+        let status = create_snapshot_with_hook(&work, &source, b"version: 1\n", 128, || {
             fs::write(&target, b"appeared\n").unwrap();
         })
-        .unwrap_err();
-        assert!(matches!(error, ConfigLoadError::SnapshotConflict { path } if path == target));
-        assert_eq!(fs::read(&target).unwrap(), b"appeared\n");
+        .unwrap();
+        assert!(matches!(status, SnapshotStatus::Replaced { path } if path == target));
+        assert_eq!(fs::read(&target).unwrap(), b"version: 1\n");
+        assert_eq!(fs::read_dir(&work).unwrap().count(), 1);
         let _ = fs::remove_dir_all(&root);
     }
 

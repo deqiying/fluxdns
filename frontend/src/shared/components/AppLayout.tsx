@@ -24,7 +24,7 @@ import { Outlet, useLocation, useNavigate } from "react-router-dom";
 import { managementRoutes, type ManagementPath } from "@/app/route-contract";
 import { getSafeErrorMessage } from "@/shared/api/errors";
 import { useAuth } from "@/modules/auth/AuthProvider";
-import { ConfigFileStatus } from "./ConfigFileStatus";
+import { DiskStatusBanner } from "./DiskStatusBanner";
 import brandIcon from "@/assets/fluxdns-icon.svg?no-inline";
 
 const { Header, Content, Sider } = Layout;
@@ -185,7 +185,7 @@ export function AppLayout() {
           </Flex>
         </Header>
         <Content>
-          <ConfigFileStatus />
+          <DiskStatusBanner />
           <div className="content-wrap">
             <Outlet />
           </div>

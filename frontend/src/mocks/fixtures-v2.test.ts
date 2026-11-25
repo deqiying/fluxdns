@@ -55,7 +55,10 @@ it("提供 DNS、统计、保留与系统只读状态且不回显认证秘密", 
     getLogsConfig(),
   ]);
 
-  expect(state).toMatchObject({ synchronization: "applied_unpersisted", files: { source: "changed" } });
+  expect(state).toEqual({ config_digest: expect.stringMatching(/^[0-9a-f]{64}$/), runtime_revision: expect.stringMatching(/^\d+$/), disk: { status: "in_sync" } });
+  expect(dns.state).toEqual(state);
+  expect(system.state).toEqual(state);
+  expect(system.restart_required).toEqual([]);
   expect(dns.values).toHaveLength(1);
   expect(dns.values[0].module).toBe("dns");
   expect(statistics.values[0].module).toBe("statistics");

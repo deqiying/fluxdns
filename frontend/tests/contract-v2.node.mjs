@@ -16,10 +16,9 @@ const validate = (name, value) => {
 };
 
 test("共享 JSON 夹具符合正式 v2 schema", () => {
-  for (const [key, schema] of Object.entries({candidate: "Candidate", state: "ConfigState", query: "QueryRequest", record: "QueryRecord", metrics: "ServiceMetrics", websocket_ticket: "WebSocketTicket", config_read: "ConfigRead", external_diff: "ExternalDiff", validation: "ValidationResult", snapshot: "CacheSnapshotStatus"})) {
+  for (const [key, schema] of Object.entries({save_request: "SaveRequest", state: "ConfigState", query: "QueryRequest", record: "QueryRecord", metrics: "ServiceMetrics", websocket_ticket: "WebSocketTicket", config_read: "ConfigRead", save_result: "SaveResult", reload_result: "ReloadResult", system: "SystemConfigRead", snapshot: "CacheSnapshotStatus"})) {
     validate(schema, fixtures[key]);
   }
-  for (const item of fixtures.operations) validate("OperationResult", item);
   for (const item of fixtures.client_messages) validate("ClientMessage", item);
   for (const item of fixtures.server_messages) validate("ServerMessage", item);
   for (const item of fixtures.module_sources) validate("ModuleSource", item);
@@ -55,7 +54,7 @@ test("内存分析区分 OS 实测、已知载荷和计费权重，未采集不�
 });
 
 test("schema 拒绝只读字段、非法身份、旧字段和类型残留", () => {
-  const candidateValidator = ajv.getSchema("fluxdns-v2#/$defs/Candidate");
+  const saveValidator = ajv.getSchema("fluxdns-v2#/$defs/SaveRequest");
   const invalidChanges = [
     {module: "work", change: {path: "other"}},
     {module: "clients", change: {action: "update", original_name: "desktop", value: {name: "renamed", client_id: "bad id"}}},
@@ -64,10 +63,10 @@ test("schema 拒绝只读字段、非法身份、旧字段和类型残留", () =
     {module: "dns", change: {cache: null}},
   ];
   for (const change of invalidChanges) {
-    assert.equal(candidateValidator({...fixtures.candidate, changes: [change]}), false, JSON.stringify(change));
+    assert.equal(saveValidator({...fixtures.save_request, changes: [change]}), false, JSON.stringify(change));
   }
-  assert.equal(candidateValidator({...fixtures.candidate, changes: []}), false);
-  assert.equal(candidateValidator({...fixtures.candidate, changes: Array(129).fill(fixtures.candidate.changes[0])}), false);
+  assert.equal(saveValidator({...fixtures.save_request, changes: []}), false);
+  assert.equal(saveValidator({...fixtures.save_request, changes: Array(129).fill(fixtures.save_request.changes[0])}), false);
   assert.equal(ajv.getSchema("fluxdns-v2#/$defs/QueryRequest")({...fixtures.query, page_size: 101}), false);
   assert.equal(ajv.getSchema("fluxdns-v2#/$defs/QueryRequest")({...fixtures.query, cursor: "a".repeat(2049)}), false);
   const decimal = ajv.getSchema("fluxdns-v2#/$defs/DecimalU64");
@@ -87,14 +86,9 @@ test("全部 schema 可编译，v2 不声明角色/通用 YAML/顶层删除接�
     "getConfigState",
     "getSystemConfig",
     "getConfigModule",
-    "validateModuleCandidate",
-    "applyModuleCandidate",
-    "validateCandidate",
-    "applyCandidate",
-    "getConfigOperation",
-    "getExternalDiff",
-    "restoreConfigFiles",
-    "retryConfigPersistence",
+    "saveConfig",
+    "reloadConfig",
+    "persistConfig",
     "getRetentionStatus",
     "previewRetention",
     "getServiceMetrics",
@@ -138,46 +132,54 @@ test("v2 业务认证只接受 Bearer，Cookie 仅用于认证刷新且 token �
   assert.equal(openapi.paths["/events"].get["x-websocket-protocol"], "fluxdns.v1");
 });
 
-test("简化写接口只接受 changes 与显式风险确认，保留只读 revision", () => {
+test("同步保存只接受 changes 与两个显式开关，状态只有摘要、代次和磁盘状态", () => {
   const changes = [{module: "logs", change: {enable: true, level: "info", path: "logs/fluxdns.log"}}];
-  const apply = {operation_id: "operation-1", changes};
-  validate("Candidate", {changes});
-  validate("ApplyRequest", apply);
-  validate("ApplyRequest", {...apply, confirmations: ["discard_external_changes"], observed_file_revision: "files-2"});
-  validate("ValidationResult", {observed_file_revision: "files-2", required_confirmations: ["retention_shortening"], affected_names: []});
-  validate("FileSyncRequest", {operation_id: "operation-1", observed_file_revision: "files-2"});
+  validate("SaveRequest", {changes});
+  validate("SaveRequest", {changes, overwrite_disk: true, confirm_retention_shortening: true});
   validate("RetentionPreviewRequest", {policy: {retention: {days: 7}}});
   validate("RetentionPreview", {sampled_at_ms: 1, detail_bytes: "0", proposed_cutoff_utc_date: "2026-11-01", shortens_history: false});
   const rejects = (schema, value) => assert.equal(ajv.getSchema(`fluxdns-v2#/$defs/${schema}`)(value), false, schema);
-  for (const old of [{expected: fixtures.external_diff.expected}, {candidate: {changes}}, {validation_token: "ticket"}, {discard_external_changes: true}]) {
-    rejects("ApplyRequest", {...apply, ...old});
+  for (const old of [{operation_id: "operation-1"}, {confirmations: ["retention_shortening"]}, {observed_file_revision: "files-2"}, {expected: {active_revision: "a", observed_file_revision: "b"}}]) {
+    rejects("SaveRequest", {changes, ...old});
   }
-  rejects("Candidate", {changes, expected: fixtures.external_diff.expected});
-  for (const impact of ["rename_references", "listener_rebind"]) rejects("ApplyRequest", {...apply, confirmations: [impact]});
-  rejects("ValidationResult", {...fixtures.validation, validation_token: "ticket"});
-  rejects("FileSyncRequest", {operation_id: "operation-1", observed_file_revision: "files-2", expected: fixtures.external_diff.expected});
-  rejects("RetentionPreviewRequest", {policy: {}, expected: fixtures.external_diff.expected});
-  rejects("RetentionPreview", {sampled_at_ms: 1, detail_bytes: "0", proposed_cutoff_utc_date: "2026-11-01", shortens_history: false, expected: fixtures.external_diff.expected});
-  for (const code of ["CONFIRMATION_REQUIRED", "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION"]) {
-    validate("ErrorEnvelope", {code, request_id: "confirm-1", message: "confirmation required", retryable: false, field_errors: []});
+  for (const status of ["in_sync", "modified", "missing", "unreadable"]) {
+    validate("ConfigState", {...fixtures.state, disk: {status}});
   }
-  assert.ok(definitions.ConfigState.properties.active_revision);
-  assert.ok(definitions.OperationStatus.oneOf.some((variant) => variant.properties.active_revision));
-  assert.ok(definitions.ExternalDiff.properties.expected);
-  assert.ok(definitions.ErrorCode.enum.includes("CONFIRMATION_REQUIRED"));
-  assert.ok(definitions.ErrorCode.enum.includes("ACTIVE_REVISION_CONFLICT"));
-  assert.ok(!definitions.ErrorCode.enum.includes("VALIDATION_EXPIRED"));
+  rejects("ConfigState", {...fixtures.state, disk: {status: "changed"}});
+  rejects("ConfigState", {...fixtures.state, config_digest: "active-8"});
+  rejects("ConfigState", {...fixtures.state, active_revision: "active-8"});
+  rejects("ConfigState", {...fixtures.state, synchronization: "synced"});
+  validate("ErrorEnvelope", {code: "CONFIG_FILE_CHANGED", request_id: "save-1", message: "file changed", retryable: false, field_errors: [], disk: {status: "modified"}});
+  for (const code of ["CONFIRMATION_REQUIRED", "OPERATION_BUSY", "CONFIG_FILE_UNREADABLE"]) {
+    validate("ErrorEnvelope", {code, request_id: "save-2", message: "rejected", retryable: false, field_errors: []});
+  }
+  for (const removed of ["ACTIVE_REVISION_CONFLICT", "FILE_REVISION_CONFLICT", "EXTERNAL_CHANGES_REQUIRE_CONFIRMATION", "OPERATION_ID_REUSED", "COMPENSATION_FAILED"]) {
+    assert.ok(!definitions.ErrorCode.enum.includes(removed), removed);
+    assert.equal(openapi["x-error-statuses"][removed], undefined, removed);
+  }
+  assert.equal(openapi["x-error-statuses"].APPLY_FAILED, 422);
+  assert.equal(openapi["x-error-statuses"].CONFIG_FILE_CHANGED, 409);
+  assert.equal(openapi["x-error-statuses"].CONFIG_FILE_UNREADABLE, 422);
+  for (const schema of ["Candidate", "ApplyRequest", "ValidationResult", "FileSyncRequest", "OperationResult", "OperationStatus", "ExternalDiff", "Preconditions", "ImpactKind", "OperationId"]) {
+    assert.equal(definitions[schema], undefined, schema);
+  }
+  for (const path of ["/config/validate", "/config/apply", "/config/modules/{module}/validate", "/config/modules/{module}/apply", "/config/operations/{operation_id}", "/config/files/diff", "/config/files/restore", "/config/files/retry"]) {
+    assert.equal(openapi.paths[path], undefined, path);
+  }
+  validate("SystemConfigRead", {...fixtures.system, restart_required: []});
+  rejects("SystemConfigRead", {...fixtures.system, restart_required: ["listener"]});
+  const {restart_required: _missing, ...withoutRestart} = fixtures.system;
+  rejects("SystemConfigRead", withoutRestart);
 });
 
-test("安全 diagnostic 可选且独立于原错误码和 operation 状态", () => {
+test("安全 diagnostic 可选且独立于原错误码与保存结果", () => {
   const diagnostic = {stage: "prepare", code: "RESOURCE_PARSE_FAILED", message: "规则格式不合法", resource: "guard"};
   const envelope = {code: "APPLY_FAILED", request_id: "request-safe", message: "request could not be completed", retryable: false, field_errors: []};
   validate("ErrorEnvelope", envelope);
   validate("ErrorEnvelope", {...envelope, diagnostic});
-  for (const operation of fixtures.operations) {
-    validate("OperationResult", operation);
-    validate("OperationResult", {...operation, diagnostic});
-  }
+  validate("SaveResult", {...fixtures.save_result, diagnostic});
+  const {diagnostic: _omitted, ...persisted} = fixtures.save_result;
+  validate("SaveResult", {...persisted, persisted: true});
   const validator = ajv.getSchema("fluxdns-v2#/$defs/Diagnostic");
   for (const [field, limit] of Object.entries({stage: 64, code: 64, message: 1024, resource: 128})) {
     assert.equal(definitions.Diagnostic.properties[field]["x-max-utf8-bytes"], limit);

@@ -15,6 +15,8 @@
 > 2026-11-12 局部评审：展示时区增加 OpenWrt UCI 来源与内嵌规则兜底，沿用安全原因码；不改变其他管理或 retention 契约。
 >
 > 2026-11-13 局部评审：系统页只读内存分析、OS 历史与手动模块采集分离，以及超时/取消无晚到发布；其余设计沿历史范围。
+>
+> 2026-11-26 局部评审：配置读写重构——同步保存、reload/persist、摘要版本与磁盘状态、首用户写入；外部差异与组合采用下线。其余设计沿历史范围。
 
 ## 设计结论
 
@@ -22,9 +24,9 @@ Management 使用独立 HTTP listener 与 Axum router，不扩展 DoH 的有界 
 
 认证、配置、保留、历史、指标和实时事件统一使用 [v2 OpenAPI](../../frontend/openapi/management-api-v2.yaml)。旧 API 不重定向、不兼容，统一返回 JSON 404；认证与新页面必须成套切换。
 
-v2 配置读写以活动源表达为权威，模块严格白名单，`name` 为管理/引用键，`client_id` 只负责请求身份，普通编辑只有显式提供新值时才修改；历史记录保留写入时的旧 ID，不迁移、不重写，修改后旧记录与当前名称的关联随之断开。配置先运行时应用后持久化，操作结果和文件同步状态分开；外部变化只提示，不自动 reload。正式链路已把 Bearer/Origin、handler、ConfigMutationOwner、typed client 与 SPA fallback 一并接入；不新增角色管理。
+v2 配置读写以 `ConfigStore` 的内存文档为唯一权威，模块严格白名单，`name` 为管理/引用键，`client_id` 只负责请求身份，普通编辑只有显式提供新值时才修改；历史记录保留写入时的旧 ID，不迁移、不重写，修改后旧记录与当前名称的关联随之断开。唯一的配置版本是正文 SHA-256 `config_digest`；配置先运行时应用后写盘，磁盘与内存的关系只投影为 `in_sync`/`modified`/`missing`/`unreadable`。外部变化只提示，只有显式 reload 才应用。正式链路已把 Bearer/Origin、handler、`ConfigStore`、typed client 与 SPA fallback 一并接入；不新增角色管理。
 
-v2 外部差异只投影白名单模块源值；只读字段和认证 hash 仅显示变化类别。沿 D-07 显示源路径及 SecretRef 引用而不读取实际秘密，普通资源 URL query 与管理认证 token 分开。差异按命名空间/name 配对，不猜改名或授予删除能力；完整输出受项数及实际序列化字节预算限制，不通过截断或伪造替代值制造可采用配置。P3 前端把同名项映射为带旧 name 的 update、仅外部项映射为 create，并以一次全局 Candidate 组合采用；未选和受保护变化只能经覆盖确认还原。
+外部差异 Drawer 与组合采用已下线，由“重新加载”“写入磁盘”和保存冲突时的“重新加载后继续编辑”取代：后者依靠条目级写回，在外改基础上只替换本次编辑的条目。
 
 服务指标在所有 transport 的同一 Runtime 接纳边界计数，使用进程级有界窗口和脱敏在线身份，不依赖详情存储。进程 RSS、CPU 和线程由一个受监督采样 owner 定期更新，HTTP 与后续 WS 只能读取同一快照，不能按页面或连接重复启动 OS 采样；暖机、容量截断、读取失败、平台不支持和观测中断必须显式不可用，不能填零伪装。
 
@@ -42,29 +44,29 @@ v2 外部差异只投影白名单模块源值；只读字段和认证 hash 仅�
 
 域名、当前客户端名称、请求 IP 采用 ASCII 忽略大小写的字面文本包含搜索，HTTP 历史、WS 在线和 replay 共用规范化及过滤语义。完整 IP 仍先规范化，地址片段不是 CIDR 查询；`%`、`_`、`*` 不解释为通配符。全部过滤在服务端分页前完成，客户端名称先解析为完整当前目录 ID 集合。包含搜索以时间窗口、页大小和 deadline 限制成本，不引入额外全文索引。
 
-配置快照读取在阻塞线程池中等待短暂 active 锁竞争，等待任务自身受 1 秒截止时间约束；耗尽或锁中毒返回可恢复的 `SERVICE_UNAVAILABLE`，不冒充写事务冲突。活动源、版本和文件观测必须来自同一快照，运行代次仍需一致。写请求不携带 `active_revision` 或验证票据；服务端在 transaction gate 中基于当前活动源构造候选，同条目后提交覆盖，其他条目保留，旧名称缺失和新名称冲突明确拒绝。内部运行版本复核、operation ID 去重和文件外改保护保留，真实事务占用仍可返回 `OPERATION_BUSY`。
+配置读取无锁返回当前文档，不读磁盘；文档自带 runtime 代次，与 coordinator 当前代次不一致时仍返回可重试的 `SERVICE_UNAVAILABLE`。写请求只携带变更和两个显式标志（`overwrite_disk`、`confirm_retention_shortening`），不携带版本、operation ID 或验证票据。保存、重新加载、写入磁盘与首用户 setup 共用一把进程内写锁，竞争时立即返回 `OPERATION_BUSY`。
 
-普通保存直接 apply，不要求先 validate；validate 是无状态影响预览，不签发或缓存票据。只有缩短历史保留范围、丢弃外部文件变化需要显式确认；改名引用更新和 listener 重绑是对应编辑的正常语义。未确认影响在受理前拒绝，不产生进行中操作。采用或覆盖外部文件必须绑定所见文件观测版本；文件恢复/重试同样只要求文件版本，活动版本由后端内部捕获。保留策略 preview 只采样并返回预览，不要求配置版本。旧请求封套严格拒绝，前后端必须成套更新。
+保存同步返回最终结果：磁盘已被修改且未选择覆盖时返回 `CONFIG_FILE_CHANGED`（附 `disk.status`），缩短历史保留范围未确认时返回 `CONFIRMATION_REQUIRED`，变更或布局非法返回 `VALIDATION_FAILED`，prepare 或换代失败返回 `APPLY_FAILED` 且旧 Runtime 不变；成功响应带 `persisted`，`false` 表示已生效但未写入磁盘、重启后丢失，并由全局提示提供写入磁盘。handler 在独立任务中执行保存，HTTP 断开不中断已开始的换代与写盘；换代回执丢失按 runtime 代次判定，不产生“结果未知”。同条目后提交覆盖，其他条目保留，旧名称缺失和新名称冲突明确拒绝。不提供 validate 预览，保留策略 preview 只采样并返回预览，不要求配置版本。旧请求封套与旧路由（apply、validate、operations、files）严格拒绝，前后端必须成套更新。
 
 ## 生命周期与失败
 
 - `webui.enable: false` 时不创建管理服务；启用时必须成功绑定，不能静默退化为仅 DNS 服务。
-- 正常加载前恢复配置事务；配置严格校验、DNS/management endpoint 冲突检查和依赖准备失败均阻止启动。
+- 启动不恢复配置事务，旧版本遗留 journal 旁文件只告警；配置严格校验、DNS/management endpoint 冲突检查和依赖准备失败均阻止启动。
 - 管理 accept loop 与连接纳入 Supervisor。单连接/请求错误局部失败，不可恢复入口错误或重试耗尽触发进程优雅关闭。
 - 停机撤销 session、停止新请求并在统一预算内 drain。management 不能无限延长 DNS/Storage 的关闭时间。
-- listener 与浏览器 origin 属于进程配置，变更需重启；已应用的用户或 password hash 变化撤销既有 session，普通配置和用户排序变化不撤销。内部首次写入用指纹识别，不撤销刚签发的 session；仅观测外部文件不能发布认证或回收会话。
+- listener 与浏览器 origin 属于进程配置，变更需重启：保存和 reload 照常采纳新值，Runtime 保持启动值，系统运行状态页提示需重启。已应用的用户或 password hash 变化撤销既有 session，普通配置和用户排序变化不撤销；首用户 setup 不撤销刚签发的 session；仅观测外部文件不能发布认证或回收会话。
 
 ## 初始化与配置事务
 
 ```text
 users empty -> setup_required
   -> validate credentials -> generate password hash
-  -> ConfigStore commit -> publish auth snapshot -> issue session -> ready
+  -> ConfigStore write (source + mirror) -> publish auth snapshot -> issue session -> ready
 ```
 
-`GET auth/setup` 只返回 required/ready，不泄漏用户名或数量。setup 只允许空用户状态一次性创建首用户；并发竞争、已有用户或外部文件变更必须显式冲突，不能覆盖配置。
+`GET auth/setup` 只返回 required/ready，不泄漏用户名或数量。setup 只允许空用户状态一次性创建首用户；写锁竞争、已有用户或磁盘与内存不一致必须显式冲突，不能覆盖配置。
 
-初始化只写源 YAML 的 `webui.users`，不序列化 `ResolvedConfig`，不解析并落盘 SecretRef 值。源文件和派生 snapshot 的两次替换不具备整体原子性，必须通过 staged candidate、fingerprint、journal 与启动恢复保证可恢复性。完整写入不变量唯一维护于 [Config 设计](backend/modules/config.md)，实际 writer 和限制见[管理端实现](../implementation/backend/management.md)。
+初始化只经 writer 替换源 YAML 的 `webui.users`，不序列化 `ResolvedConfig`，不解析并落盘 SecretRef 值；候选重新严格解析并确认只新增该用户，原子写入源文件后再写镜像，写盘失败时不发布认证。完整写入不变量唯一维护于 [Config 设计](backend/modules/config.md#12-配置文档与写锁)，实际接线和限制见[管理端实现](../implementation/backend/management.md#首次用户写入)。
 
 密码不 trim 或 Unicode 改写。新 hash 使用独立随机 salt 的 Argon2id，兼容验证既有 bcrypt；参数固定于代码并接受平台性能验收，不提供任意调弱的配置。明文、hash、token 不进入 Debug、日志、metrics 或错误正文。
 
@@ -87,7 +89,7 @@ HTTP 直连不提供传输加密，只适用于 loopback/可信隔离管理网�
 
 API 使用统一 request ID、错误 envelope 和有界安全错误；错误正文不返回 SQL、绝对配置路径、SecretRef、hash、token 或 backtrace。仅认证专用成功响应返回 access token，刷新凭据永不进入正文。查询使用只读连接、固定模板、参数绑定、分页和时间窗口上限。
 
-2026-11-08 局部评审：稳定错误码与可选安全诊断分离，HTTP 失败和异步操作共用诊断投影，字段以 [OpenAPI](../../frontend/openapi/management-api-v2.yaml) 为准。诊断只由类型化错误生成受审查文案和安全数字/枚举，可附管理面已有的资源标识；不得直接回显底层错误链。操作终态及诊断必须同时冻结并按调用者隔离，关联 operation ID 不替代 HTTP request ID；前端不能把 `applied_unpersisted`、`unknown` 或轮询失败解释为配置未生效，也不能据此自动重放写入。实现和证据见[安全错误诊断](../implementation/backend/management.md#安全错误诊断与操作关联)。
+2026-11-08 局部评审：稳定错误码与可选安全诊断分离，HTTP 失败与保存结果共用诊断投影，字段以 [OpenAPI](../../frontend/openapi/management-api-v2.yaml) 为准。诊断只由类型化错误生成受审查文案和安全数字/枚举，可附管理面已有的资源标识；不得直接回显底层错误链。2026-11-26 起不再有异步操作或 operation ID；前端不能把 `persisted: false`、超时或网络中断解释为配置未生效，也不能据此自动重放写入。实现和证据见[安全错误诊断](../implementation/backend/management.md#安全错误诊断与操作关联)。
 
 所有 authenticated WebUI 用户可以读取 canonical qname、有效 client IP、真实配置 ID、upstream provenance 与有界 answer。该授权范围不等同普通日志/metrics允许这些内容。不读取旧版脱敏详情；新记录的缺失或截断状态必须据实展示。始终禁止 DNS wire、request digest、route 原文与秘密配置进入 API。
 

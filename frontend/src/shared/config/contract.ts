@@ -1,32 +1,11 @@
 import type { components } from "@/shared/api/generated-v2";
 
 type Schemas = components["schemas"];
-export type ConfigChange = Schemas["ConfigChange"];
-export type ConfigState = Schemas["ConfigState"];
-/** 只选普通编辑字段且不带 ID；修改请求身份必须由调用方显式追加 client_id，避免随改名或外部差异隐式变更。 */
+
+/** 只选普通编辑字段且不带 ID；修改请求身份必须由调用方显式追加 client_id。 */
 export function clientEditValue(source: Schemas["Client"]): Schemas["ClientEdit"] {
   const { name, match, strategy, cache, ttl_override, edns_client_subnet } = source;
   return { name, match, strategy, cache, ttl_override, edns_client_subnet };
-}
-
-/** HTTP 200 不代表文件已同步；unknown 只能触发回读，不能转成可自动重试。 */
-export function operationDisposition(status: Schemas["OperationStatus"]) {
-  switch (status.state) {
-    case "preparing":
-    case "applying":
-    case "persisting":
-      return "poll";
-    case "applied_synced":
-      return "synchronized";
-    case "applied_unpersisted":
-      return "retry_persistence";
-    case "rejected":
-      return "keep_draft";
-    case "compensation_failed":
-      return "blocked";
-    case "unknown":
-      return "read_active_state";
-  }
 }
 
 /** 大整数保留十进制字符串；只在确认目标范围可安全表示时转换给数值表单。 */

@@ -17,7 +17,7 @@ import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { useConfigSave, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type Outbound = Schemas["Outbound"];
@@ -41,9 +41,11 @@ function secretRefOf(proxyUrl: Outbound["proxy_url"]): { kind: SecretKind; value
   return { kind: "url", value: proxyUrl.url };
 }
 
+const proxyFieldAliases = { proxy_url: "secretValue", "proxy_url.env": "secretValue", "proxy_url.file": "secretValue", "proxy_url.url": "secretValue" };
+
 export function ProxiesPage() {
   const query = useConfigModule("outbound");
-  const mutation = useConfigChangeMutation("outbound");
+  const mutation = useConfigSave();
   const state = useConfigState();
   const [form] = Form.useForm<ProxyFormValues>();
   const [editing, setEditing] = useState<Outbound | "create" | null>(null);
@@ -58,6 +60,7 @@ export function ProxiesPage() {
 
   useEffect(() => {
     if (!editing) return;
+    form.resetFields();
     if (editing === "create") {
       form.setFieldsValue({ name: "", secretKind: "env", secretValue: "" });
     } else {
@@ -104,9 +107,8 @@ export function ProxiesPage() {
     },
   ];
 
-  const submit = async () => {
-    if (!query.data || !editing) return;
-    const values = await form.validateFields();
+  const submit = (values: ProxyFormValues) => {
+    if (!editing) return;
     const value: Outbound = {
       name: values.name,
       type: "socks5",
@@ -119,12 +121,7 @@ export function ProxiesPage() {
     const change: Schemas["ConfigChange"] = editing === "create"
       ? { module: "outbound", change: { action: "create", value } }
       : { module: "outbound", change: { action: "update", original_name: editing.name, value } };
-    try {
-      const operation = await mutation.mutateAsync({ change });
-      if (operation) setEditing(null);
-    } catch {
-      // mutation.error 由表单容器呈现，草稿保持不变。
-    }
+    mutation.save(change, () => setEditing(null));
   };
 
   return (
@@ -137,7 +134,7 @@ export function ProxiesPage() {
           <Button
             type="primary"
             icon={<Plus size={17} />}
-            disabled={!query.data || !configStateEditable(query.data.state)}
+            disabled={!query.data}
             onClick={() => setEditing("create")}
           >
             添加代理
@@ -173,10 +170,15 @@ export function ProxiesPage() {
         dirty={dirty}
         busy={mutation.isPending}
         error={mutation.error}
+        form={form}
+        module="outbound"
+        fieldAliases={proxyFieldAliases}
+        configDigest={state.data?.config_digest}
+        moduleDigest={query.data?.state.config_digest}
         onCancel={() => setEditing(null)}
-        onSubmit={() => void submit()}
+        onSubmit={() => form.submit()}
       >
-        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
+        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)} onFinish={submit}>
           <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128 }]}>
             <Input autoComplete="off" />
           </Form.Item>

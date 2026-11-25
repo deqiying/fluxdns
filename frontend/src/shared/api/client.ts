@@ -135,7 +135,7 @@ export async function apiV2Request<T>(path: string, options: ApiRequestOptions =
 
 /**
  * 会话型请求的 401 处置：先用刷新凭据换发访问凭据并重放原请求，刷新凭据也失效才结束登录态。
- * 401 由服务端鉴权在业务处理前返回，重放不会重复执行写操作；配置写操作另带 operation_id 服务端去重。
+ * 401 由服务端鉴权在业务处理前返回，重放不会重复执行写操作。
  */
 async function requestWithPrefix<T>(prefix: string, path: string, options: ApiRequestOptions): Promise<T> {
   const mode = options.auth ?? "required";
@@ -252,6 +252,7 @@ async function sendOnce<T>(prefix: string, path: string, options: ApiRequestOpti
         retryAfterMs: parseRetryAfter(response.headers.get("retry-after")),
         fieldErrors: extractFieldErrors(payload),
         diagnostic: envelope?.diagnostic,
+        disk: envelope?.disk,
         serverMessage: envelope?.message,
       });
 

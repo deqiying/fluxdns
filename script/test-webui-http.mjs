@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import { readFile, writeFile, stat, realpath } from 'node:fs/promises';
 import { resolve, relative, sep, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomUUID } from 'node:crypto';
 import { createSocket } from 'node:dgram';
 import { connect } from 'node:net';
 import { request as httpRequest } from 'node:http';
@@ -45,18 +44,12 @@ const get = async path => (await api(path)).data;
 async function candidate(changes) {
   return { changes };
 }
-async function settle(operation) {
-  for (let attempt = 0; ['preparing', 'applying', 'persisting'].includes(operation.status.state) && attempt < 50; attempt++) {
-    await delay(100);
-    operation = await get(`/config/operations/${operation.operation_id}`);
-  }
-  assert.equal(operation.status.state, 'applied_synced', '配置必须真正应用且持久化');
-  return operation;
-}
+// 保存是同步的：200 即已应用；本验收还要求写盘成功。
 async function apply(value) {
-  return settle((await api('/config/apply', { method: 'POST', status: 202, body: {
-    operation_id: randomUUID(), changes: value.changes,
-  } })).data);
+  const { data } = await api('/config/save', { method: 'POST', body: { changes: value.changes } });
+  assert.equal(data.persisted, true, '配置必须真正应用且持久化');
+  assert.equal(data.state.disk.status, 'in_sync');
+  return data;
 }
 const update = (module, original_name, value) => ({ module, change: { action: 'update', original_name, value } });
 
@@ -128,7 +121,7 @@ try {
   await api('/events/ticket', { method: 'POST', headers: { Origin: 'http://invalid.test' }, status: 403 });
   // 声明超限 Content-Length 后先等响应，避免客户端仍上传时 TCP 关闭表现为 ECONNRESET。
   const oversizedStatus = await new Promise((accept, reject) => {
-    const request = httpRequest(`${origin}/api/v2/config/validate`, { method: 'POST', headers: {
+    const request = httpRequest(`${origin}/api/v2/config/save`, { method: 'POST', headers: {
       Origin: origin, Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Content-Length': 2 * 1024 * 1024 + 1,
     } }, response => { response.resume(); response.once('end', () => accept(response.statusCode)); });
     request.setTimeout(5000, () => request.destroy(new Error('oversize response timeout')));
@@ -136,7 +129,7 @@ try {
   });
   assert.equal(oversizedStatus, 413);
   const injection = await candidate([{ module: 'work', change: { path: '../escape' } }]);
-  await api('/config/validate', { method: 'POST', body: injection, status: 400 });
+  await api('/config/save', { method: 'POST', body: injection, status: 400 });
   for (const path of ['/api/v1/runtime', '/api/v1/auth/login', '/api/v2/unknown']) {
     await api(path, { headers: { Accept: 'text/html' }, status: 404 });
   }
@@ -153,7 +146,7 @@ try {
   await dns('udp', 'sentinel.p5.test', '192.0.2.1');
   await apply(await candidate([update('hosts', 'guard', changedHosts)]));
   const invalid = await candidate([update('hosts', 'guard', { ...hosts, name: '<img src=x onerror=alert(1)>' })]);
-  await api('/config/validate', { method: 'POST', body: invalid, status: 422 });
+  await api('/config/save', { method: 'POST', body: invalid, status: 422 });
   await dns('udp', 'sentinel.p5.test', '192.0.2.2');
   await apply(await candidate([update('hosts', 'guard', hosts)]));
   mark('hot-apply-four-transports-last-success-wins-invalid-candidate');
@@ -193,14 +186,14 @@ try {
   const stateBefore = await get('/config/state');
   await writeFile(sourcePath, `${source}\n# local acceptance external observation\n`);
   let observed;
-  for (let attempt = 0; attempt < 50; attempt++) { observed = await get('/config/state'); if (observed.files.source === 'changed') break; await delay(200); }
-  assert.equal(observed.files.source, 'changed'); assert.equal(observed.runtime_revision, stateBefore.runtime_revision);
-  await get('/config/files/diff');
-  await settle((await api('/config/files/restore', { method: 'POST', body: {
-    operation_id: randomUUID(), observed_file_revision: observed.observed_file_revision,
-  } })).data);
-  assert.equal((await get('/config/state')).runtime_revision, stateBefore.runtime_revision);
-  mark('external-file-observe-restore-without-reload');
+  for (let attempt = 0; attempt < 50; attempt++) { observed = await get('/config/state'); if (observed.disk.status === 'modified') break; await delay(200); }
+  assert.equal(observed.disk.status, 'modified'); assert.equal(observed.runtime_revision, stateBefore.runtime_revision);
+  // persist 用内存配置覆盖磁盘，不触碰 Runtime。
+  const persisted = (await api('/config/persist', { method: 'POST' })).data.state;
+  assert.equal(persisted.disk.status, 'in_sync'); assert.equal(persisted.config_digest, stateBefore.config_digest);
+  assert.equal(persisted.runtime_revision, stateBefore.runtime_revision);
+  assert.equal(await readFile(sourcePath, 'utf8'), source);
+  mark('external-file-observe-persist-without-reload');
   const service = await get('/service/metrics'); const processInfo = await get('/system/runtime');
   assert.equal(service.rss_bytes.state, 'available'); assert.equal(processInfo.rss_bytes.state, 'available');
   assert.equal(service.rss_bytes.value, processInfo.rss_bytes.value);

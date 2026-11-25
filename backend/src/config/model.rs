@@ -951,6 +951,34 @@ pub enum SecretRefDto {
 /// 既能被前端原样回填，也不会与真实密码在往返中产生歧义。
 pub const REDACTED_INLINE_PASSWORD: &str = "FLUXDNS_REDACTED_SECRET";
 
+thread_local! {
+    /// 当前线程是否处于源序列化模式；仅由 [`to_source_value`] 在同步序列化期间临时打开。
+    static SOURCE_SERIALIZATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// 以“源序列化”模式把 DTO 转成 YAML 值：内联凭据保持原文，不做脱敏。
+///
+/// 只用于配置写回（变更合并、条目差异比较和渲染）；Management 读投影必须继续使用默认的
+/// 脱敏 `Serialize`。若写回也走脱敏输出，新旧密码会被序列化成同一占位符而误判为未修改。
+pub(crate) fn to_source_value<T: Serialize + ?Sized>(
+    value: &T,
+) -> Result<yaml_serde::Value, yaml_serde::Error> {
+    struct Restore(bool);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            SOURCE_SERIALIZATION.with(|flag| flag.set(self.0));
+        }
+    }
+    let previous = SOURCE_SERIALIZATION.with(|flag| flag.replace(true));
+    // 序列化 panic 时也要恢复标志，避免同线程后续的 API 投影泄露明文。
+    let _restore = Restore(previous);
+    yaml_serde::to_value(value)
+}
+
+fn source_serialization() -> bool {
+    SOURCE_SERIALIZATION.with(std::cell::Cell::get)
+}
+
 /// 只遮蔽 URL 的密码部分，保留 scheme、用户名、主机和端口，便于在 WebUI 中辨认来源。
 ///
 /// URL 无法解析或本就没有密码时原样返回：无法解析的值同样不会被恢复，避免静默改写内容。
@@ -1095,10 +1123,18 @@ impl Serialize for SecretRefDto {
                 url: None,
             })
             .serialize(serializer),
-            // 脱敏后的内联值仍是普通字符串，前端据此原样回填并可直接再次提交。
+            // 脱敏后的内联值仍是普通字符串，前端据此原样回填并可直接再次提交；
+            // 源序列化模式写回配置文件，必须保留原文。
+            Self::Inline { url } if source_serialization() => {
+                Wire::Inline(url.clone()).serialize(serializer)
+            }
             Self::Inline { url } => Wire::Inline(redact_inline_url(url)).serialize(serializer),
             Self::Parts { env, file, url } => {
-                let redacted = url.as_deref().map(redact_inline_url);
+                let redacted = if source_serialization() {
+                    url.clone()
+                } else {
+                    url.as_deref().map(redact_inline_url)
+                };
                 let reference = Reference {
                     env: env.as_deref(),
                     file: file.as_deref(),

@@ -9,7 +9,7 @@ import { DurationInput, durationRequiredRules } from "@/shared/components/Durati
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { formatDurationText, normalizeDuration } from "@/shared/config/form-values";
-import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { useConfigSave, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type RuleSet = Schemas["RuleSet"];
@@ -26,10 +26,12 @@ interface RuleSetFormValues {
   update_interval?: string;
 }
 
+const ruleSetFieldAliases = { rule: "content" };
+
 export function RuleSetsPage() {
   const query = useConfigModule("rule_set");
   const proxies = useConfigModule("outbound");
-  const mutation = useConfigChangeMutation("rule_set");
+  const mutation = useConfigSave();
   const state = useConfigState();
   const [form] = Form.useForm<RuleSetFormValues>();
   const sourceType = Form.useWatch("type", form);
@@ -44,6 +46,7 @@ export function RuleSetsPage() {
     if (!editing) return;
     mutation.reset();
     setDirty(false);
+    form.resetFields();
     if (editing === "create") {
       form.setFieldsValue({ name: "", type: "const", format: "json", content: "", auto_update: false });
     } else if (editing.type === "const") {
@@ -74,9 +77,8 @@ export function RuleSetsPage() {
     },
   ];
 
-  const submit = async () => {
-    if (!query.data || !editing) return;
-    const values = await form.validateFields();
+  const submit = (values: RuleSetFormValues) => {
+    if (!editing) return;
     const update = values.auto_update ?? false;
     const updateFields = update && values.update_interval ? { auto_update: true, update_interval: values.update_interval } : { auto_update: update };
     const value: RuleSet = values.type === "const"
@@ -87,12 +89,7 @@ export function RuleSetsPage() {
     const change: Schemas["ConfigChange"] = editing === "create"
       ? { module: "rule_set", change: { action: "create", value } }
       : { module: "rule_set", change: { action: "update", original_name: editing.name, value } };
-    try {
-      const operation = await mutation.mutateAsync({ change });
-      if (operation) setEditing(null);
-    } catch {
-      // 保留草稿和字段错误。
-    }
+    mutation.save(change, () => setEditing(null));
   };
 
   return (
@@ -102,7 +99,7 @@ export function RuleSetsPage() {
       actions={(
         <Space size={12}>
           {state.data ? <ConfigSyncBadge state={state.data} /> : null}
-          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加规则集</Button>
+          <Button type="primary" icon={<Plus size={17} />} disabled={!query.data} onClick={() => setEditing("create")}>添加规则集</Button>
         </Space>
       )}
     >
@@ -114,8 +111,8 @@ export function RuleSetsPage() {
           <Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 1050 }} locale={{ emptyText: search ? "没有匹配的规则集" : "尚未配置规则集" }} />
         </div>
       ) : null}
-      <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加规则集" : "编辑规则集"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
-        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
+      <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加规则集" : "编辑规则集"} dirty={dirty} busy={mutation.isPending} error={mutation.error} form={form} module="rule_set" fieldAliases={ruleSetFieldAliases} configDigest={state.data?.config_digest} moduleDigest={query.data?.state.config_digest} onCancel={() => setEditing(null)} onSubmit={() => form.submit()}>
+        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)} onFinish={submit}>
           <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128 }]}><Input autoComplete="off" /></Form.Item>
           <Form.Item name="type" label="来源" rules={[{ required: true }]}><Segmented block options={[{ label: "内联", value: "const" }, { label: "本地文件", value: "file" }, { label: "远程 URL", value: "remote" }]} /></Form.Item>
           <Form.Item name="format" label="格式" rules={[{ required: true }]}><Select options={[{ label: "JSON", value: "json" }, { label: "Clash 行格式", value: "clash" }, { label: "DAT 二进制", value: "dat" }]} /></Form.Item>

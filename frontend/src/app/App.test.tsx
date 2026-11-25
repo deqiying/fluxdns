@@ -1,12 +1,12 @@
 import { QueryClient } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import { http, HttpResponse } from "msw";
 import { setMockAuthenticated, setMockSetupRequired } from "@/mocks/handlers";
-import { outboundConfigReadFixture, processMetricsFixture } from "@/mocks/fixtures";
+import { configStateFixture, outboundConfigReadFixture, processMetricsFixture, systemConfigReadFixture } from "@/mocks/fixtures";
 import { server } from "@/mocks/server";
-import type { ApplyRequest, Candidate, ConfigState, FileSyncRequest } from "@/shared/config/api";
+import type { ConfigState } from "@/shared/config/api";
 import { AppProviders } from "./providers";
 import { App } from "./App";
 import { managementRoutes } from "./route-contract";
@@ -19,6 +19,13 @@ function renderApp(path: string) {
       <App />
     </AppProviders>,
   );
+}
+
+function captureConfigSave(requests: unknown[]) {
+  return http.post("/api/v2/config/save", async ({ request }) => {
+    requests.push(await request.json());
+    return HttpResponse.json({ state: configStateFixture, persisted: true });
+  });
 }
 
 // 全应用用例统一使用 vite.config.ts 的 CI 超时预算，避免局部旧值覆盖全局设置。
@@ -99,238 +106,14 @@ describe("application routes", () => {
     expect(await screen.findByText("当前内存")).toBeInTheDocument();
   });
 
-  it("全局提示读取外部差异并在确认后只还原文件", async () => {
-    const user = userEvent.setup();
+  it("应用布局在磁盘不一致时显示全局写入入口", async () => {
     setMockAuthenticated(true);
-    const changed: ConfigState = {
-      active_revision: "active-1",
-      runtime_revision: "runtime-1",
-      persisted_revision: "active-1",
-      observed_file_revision: "files-2",
-      files: { source: "changed", derived: "unchanged" },
-      synchronization: "synced",
-      operation_id: null,
-    };
-    let current = changed;
-    const restoreRequests: FileSyncRequest[] = [];
-    server.use(
-      http.get("/api/v2/config/state", () => HttpResponse.json(current)),
-      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
-        expected: { active_revision: "active-1", observed_file_revision: "files-2" },
-        editable: [],
-        protected_changes: ["logs"],
-        parse_error: null,
-      })),
-      http.post("/api/v2/config/files/restore", async ({ request }) => {
-        const restored = await request.json() as FileSyncRequest;
-        restoreRequests.push(restored);
-        current = {
-          ...changed,
-          observed_file_revision: "files-3",
-          files: { source: "unchanged", derived: "unchanged" },
-        };
-        return HttpResponse.json({
-          operation_id: restored.operation_id,
-          status: { state: "applied_synced", active_revision: "active-1", persisted_revision: "active-1" },
-        });
-      }),
-    );
-
+    const state: ConfigState = { ...configStateFixture, disk: { status: "modified" } };
+    server.use(http.get("/api/v2/config/state", () => HttpResponse.json(state)));
     renderApp("/dashboard");
-    expect(await screen.findByText("配置文件已在外部修改")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "查看" }));
-    expect(await screen.findByText("logs")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /还原文件/ }));
-    const confirmationButtons = screen.getAllByRole("button", { name: /还原文件/ });
-    await user.click(confirmationButtons[confirmationButtons.length - 1]);
-
-    await waitFor(() => expect(restoreRequests).toHaveLength(1));
-    expect(restoreRequests[0]).toMatchObject({
-      observed_file_revision: "files-2",
-    });
-    expect(restoreRequests[0]?.operation_id).toBeTruthy();
-    await waitFor(() => expect(screen.queryByText("配置文件已在外部修改")).not.toBeInTheDocument());
-  });
-
-  it("未同步提示使用原 operation_id 重试持久化而不重放 apply", async () => {
-    const user = userEvent.setup();
-    setMockAuthenticated(true);
-    const unsynchronized: ConfigState = {
-      active_revision: "active-2",
-      runtime_revision: "runtime-2",
-      persisted_revision: "active-1",
-      observed_file_revision: "files-4",
-      files: { source: "unchanged", derived: "unchanged" },
-      synchronization: "applied_unpersisted",
-      operation_id: "apply-operation-1",
-    };
-    let current = unsynchronized;
-    const retryRequests: FileSyncRequest[] = [];
-    let applyRequests = 0;
-    server.use(
-      http.get("/api/v2/config/state", () => HttpResponse.json(current)),
-      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
-        expected: { active_revision: "active-2", observed_file_revision: "files-4" },
-        editable: [],
-        protected_changes: [],
-        parse_error: null,
-      })),
-      http.post("/api/v2/config/files/retry", async ({ request }) => {
-        const retried = await request.json() as FileSyncRequest;
-        retryRequests.push(retried);
-        current = {
-          ...unsynchronized,
-          persisted_revision: "active-2",
-          observed_file_revision: "files-5",
-          synchronization: "synced",
-          operation_id: null,
-        };
-        return HttpResponse.json({
-          operation_id: "apply-operation-1",
-          status: { state: "applied_synced", active_revision: "active-2", persisted_revision: "active-2" },
-        });
-      }),
-      http.post("/api/v2/config/apply", () => {
-        applyRequests += 1;
-        return HttpResponse.error();
-      }),
-    );
-
-    renderApp("/listeners");
-    expect(await screen.findByText("运行配置已生效，但文件尚未同步")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "查看" }));
-    await screen.findByText("活动版本");
-    await user.click(screen.getByRole("button", { name: "重试文件同步" }));
-
-    await waitFor(() => expect(retryRequests).toHaveLength(1));
-    expect(retryRequests[0]).toEqual({
-      operation_id: "apply-operation-1",
-      observed_file_revision: "files-4",
-    });
-    expect(applyRequests).toBe(0);
-    await waitFor(() => expect(screen.queryByText("运行配置已生效，但文件尚未同步")).not.toBeInTheDocument());
-  });
-
-  it("外部差异可将 Hosts 与日志作为一个候选组合采用", async () => {
-    const user = userEvent.setup();
-    setMockAuthenticated(true);
-    const changed: ConfigState = {
-      active_revision: "active-3",
-      runtime_revision: "runtime-3",
-      persisted_revision: "active-3",
-      observed_file_revision: "files-6",
-      files: { source: "changed", derived: "unchanged" },
-      synchronization: "synced",
-      operation_id: null,
-    };
-    let current = changed;
-    const candidates: Candidate[] = [];
-    const applies: ApplyRequest[] = [];
-    server.use(
-      http.get("/api/v2/config/state", () => HttpResponse.json(current)),
-      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
-        expected: { active_revision: "active-3", observed_file_revision: "files-6" },
-        editable: [
-          {
-            active: { module: "hosts", value: { name: "local", type: "const", format: "hosts", hosts: "127.0.0.1 localhost" } },
-            external: { module: "hosts", value: { name: "local", type: "const", format: "hosts", hosts: "127.0.0.2 localhost" } },
-          },
-          {
-            active: { module: "logs", value: { enable: true, level: "info", path: "old.log" } },
-            external: { module: "logs", value: { enable: true, level: "debug", path: "new.log" } },
-          },
-        ],
-        protected_changes: ["database"],
-        parse_error: null,
-      })),
-      http.post("/api/v2/config/validate", async ({ request }) => {
-        const candidate = await request.json() as Candidate;
-        candidates.push(candidate);
-        return HttpResponse.json({
-          observed_file_revision: "files-6",
-          required_confirmations: ["discard_external_changes"],
-          affected_names: ["local"],
-        });
-      }),
-      http.post("/api/v2/config/apply", async ({ request }) => {
-        const apply = await request.json() as ApplyRequest;
-        applies.push(apply);
-        current = {
-          ...changed,
-          active_revision: "active-4",
-          runtime_revision: "runtime-4",
-          persisted_revision: "active-4",
-          observed_file_revision: "files-7",
-          files: { source: "unchanged", derived: "unchanged" },
-        };
-        return HttpResponse.json({
-          operation_id: apply.operation_id,
-          status: { state: "applied_synced", active_revision: "active-4", persisted_revision: "active-4" },
-        });
-      }),
-    );
-
-    renderApp("/dashboard");
-    expect(await screen.findByText("配置文件已在外部修改")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "查看" }));
-    expect(await screen.findByText("Hosts / local")).toBeInTheDocument();
-    expect(screen.getByText("日志")).toBeInTheDocument();
-    await user.click(await screen.findByRole("button", { name: "组合采用 2 项" }));
-    expect(await screen.findByText(/未采用可编辑差异 0 项，受保护变化 1 类/)).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "确认采用" }));
-
-    await waitFor(() => expect(applies).toHaveLength(1));
-    expect(candidates).toHaveLength(0);
-    expect(applies[0]).toMatchObject({
-      observed_file_revision: "files-6",
-      changes: [
-        { module: "hosts", change: { action: "update", original_name: "local", value: { hosts: "127.0.0.2 localhost" } } },
-        { module: "logs", change: { level: "debug", path: "new.log" } },
-      ],
-    });
-    expect(applies[0]).toMatchObject({ confirmations: ["discard_external_changes"] });
-    await waitFor(() => expect(screen.queryByText("配置文件已在外部修改")).not.toBeInTheDocument());
-  });
-
-  it("组合采用 apply 遇到二次外改时停止并要求重读", async () => {
-    const user = userEvent.setup();
-    setMockAuthenticated(true);
-    const changed: ConfigState = {
-      active_revision: "active-5",
-      runtime_revision: "runtime-5",
-      persisted_revision: "active-5",
-      observed_file_revision: "files-8",
-      files: { source: "changed", derived: "unchanged" },
-      synchronization: "synced",
-      operation_id: null,
-    };
-    let applyRequests = 0;
-    server.use(
-      http.get("/api/v2/config/state", () => HttpResponse.json(changed)),
-      http.get("/api/v2/config/files/diff", () => HttpResponse.json({
-        expected: { active_revision: "active-5", observed_file_revision: "files-8" },
-        editable: [{
-          active: { module: "logs", value: { enable: true, level: "info", path: "old.log" } },
-          external: { module: "logs", value: { enable: true, level: "warn", path: "new.log" } },
-        }],
-        protected_changes: [],
-        parse_error: null,
-      })),
-      http.post("/api/v2/config/apply", () => {
-        applyRequests += 1;
-        return HttpResponse.json({ code: "FILE_REVISION_CONFLICT", message: "configuration file changed again", request_id: "mock-file-conflict", retryable: false, field_errors: [], diagnostic: { stage: "file_guard", code: "SOURCE_CHANGED", message: "所见文件版本已变化", resource: "config" } }, { status: 409 });
-      }),
-    );
-
-    renderApp("/dashboard");
-    expect(await screen.findByText("配置文件已在外部修改")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "查看" }));
-    await user.click(await screen.findByRole("button", { name: "组合采用 1 项" }));
-    await user.click(await screen.findByRole("button", { name: "确认采用" }));
-    const failure = await screen.findByText(/配置文件已再次变化，请重新读取差异。.*SOURCE_CHANGED/);
-    expect(failure).toHaveTextContent("mock-file-conflict");
-    expect(failure).toHaveTextContent("操作 ID：");
-    expect(applyRequests).toBe(1);
+    expect(await screen.findByText(/配置文件已在磁盘上被修改/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "写入磁盘" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "重新加载" })).toBeEnabled();
   });
 
   it.each(
@@ -344,24 +127,11 @@ describe("application routes", () => {
     expect(screen.getByText("当前版本暂不可用。")).toBeInTheDocument();
   });
 
-  it("代理页不预校验，单次 apply 保存 SecretRef 引用", async () => {
+  it("代理页通过单次保存提交 SecretRef 引用", async () => {
     const user = userEvent.setup();
     const requests: unknown[] = [];
     setMockAuthenticated(true);
-    server.use(
-      http.post("/api/v2/config/modules/outbound/validate", () => {
-        requests.push("unexpected validate");
-        return HttpResponse.error();
-      }),
-      http.post("/api/v2/config/modules/outbound/apply", async ({ request }) => {
-        const body = await request.json() as { operation_id: string };
-        requests.push(body);
-        return HttpResponse.json({
-          operation_id: body.operation_id,
-          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
-        });
-      }),
-    );
+    server.use(captureConfigSave(requests));
     renderApp("/proxies");
     expect(await screen.findByRole("heading", { name: "代理配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("proxy-primary")).toBeInTheDocument();
@@ -383,7 +153,7 @@ describe("application routes", () => {
         },
       }],
     });
-    expect(Object.keys(requests[0] as object).sort()).toEqual(["changes", "operation_id"]);
+    expect(Object.keys(requests[0] as object)).toEqual(["changes"]);
   });
 
   it("代理页展示脱敏内联 URL，并在未修改时原样提交引用", async () => {
@@ -410,18 +180,7 @@ describe("application routes", () => {
           runtime: [],
         }),
       ),
-      http.post("/api/v2/config/modules/outbound/validate", () => {
-        requests.push("unexpected validate");
-        return HttpResponse.error();
-      }),
-      http.post("/api/v2/config/modules/outbound/apply", async ({ request }) => {
-        const body = await request.json() as { operation_id: string };
-        requests.push(body);
-        return HttpResponse.json({
-          operation_id: body.operation_id,
-          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
-        });
-      }),
+      captureConfigSave(requests),
     );
     renderApp("/proxies");
     expect(await screen.findByRole("heading", { name: "代理配置", level: 2 })).toBeInTheDocument();
@@ -474,20 +233,7 @@ describe("application routes", () => {
     const user = userEvent.setup();
     const requests: unknown[] = [];
     setMockAuthenticated(true);
-    server.use(
-      http.post("/api/v2/config/modules/strategy/validate", () => {
-        requests.push("unexpected validate");
-        return HttpResponse.error();
-      }),
-      http.post("/api/v2/config/modules/strategy/apply", async ({ request }) => {
-        const body = await request.json() as { operation_id: string };
-        requests.push(body);
-        return HttpResponse.json({
-          operation_id: body.operation_id,
-          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
-        });
-      }),
-    );
+    server.use(captureConfigSave(requests));
     renderApp("/strategies");
     expect(await screen.findByRole("heading", { name: "DNS 分流策略", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("default-group")).toBeInTheDocument();
@@ -543,9 +289,8 @@ describe("application routes", () => {
     setMockAuthenticated(true);
     renderApp("/listeners");
     expect(await screen.findByText("每一处监听，稳定待命。")).toBeInTheDocument();
-    // 胶囊读全局轮询状态：mock 的 /config/state 为 applied_unpersisted，必须落在 pending 色调而非绿色。
-    const badge = await screen.findByRole("status", { name: /^配置同步状态：/ });
-    expect(badge).toHaveClass("config-sync-badge-pending");
+    const badge = await screen.findByRole("status", { name: "配置同步状态：已同步" });
+    expect(badge).toHaveClass("config-sync-badge-synced");
     // 标题区不再暴露 revision，避免与 服务状态／解析记录 的标题区风格分叉。
     expect(screen.queryByText(/活动版本|文件版本/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "添加监听入口" })).toBeInTheDocument();
@@ -562,20 +307,7 @@ describe("application routes", () => {
     const user = userEvent.setup();
     const requests: unknown[] = [];
     setMockAuthenticated(true);
-    server.use(
-      http.post("/api/v2/config/modules/clients/validate", () => {
-        requests.push("unexpected validate");
-        return HttpResponse.error();
-      }),
-      http.post("/api/v2/config/modules/clients/apply", async ({ request }) => {
-        const body = await request.json() as { operation_id: string };
-        requests.push(body);
-        return HttpResponse.json({
-          operation_id: body.operation_id,
-          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
-        });
-      }),
-    );
+    server.use(captureConfigSave(requests));
     renderApp("/clients");
     expect(await screen.findByRole("heading", { name: "客户端配置", level: 2 })).toBeInTheDocument();
     expect(await screen.findByText("Desktop-01")).toBeInTheDocument();
@@ -742,9 +474,24 @@ describe("application routes", () => {
     expect(screen.getByRole("group", { name: "在线客户端" })).toHaveTextContent("2 个");
     expect(screen.getByRole("group", { name: "DNS 缓存快照" })).toHaveTextContent("空闲 · 第 3 代 · 32 KB");
     const revisionRow = screen.getByRole("group", { name: "配置版本" });
-    expect(revisionRow).toHaveTextContent("active-8");
-    expect(revisionRow).toHaveTextContent("文件未同步");
+    expect(revisionRow).toHaveTextContent(configStateFixture.config_digest.slice(0, 12));
+    expect(revisionRow).toHaveTextContent("已同步");
+    expect(screen.queryByText(/需重启 FluxDNS 后生效/)).not.toBeInTheDocument();
     expect(screen.getByRole("group", { name: "资源状态" })).toHaveTextContent("Hosts 1/2 就绪 · 规则集 1/2 就绪");
+  });
+
+  it.each(["/system-runtime", "/system-settings"])("启动级变更只在运行状态页提示：%s", async (path) => {
+    setMockAuthenticated(true);
+    server.use(http.get("/api/v2/config/system", () => HttpResponse.json({
+      ...systemConfigReadFixture, restart_required: ["database", "webui", "dns.resolve_log"],
+    })));
+    renderApp(path);
+    const hint = "以下配置已修改，需重启 FluxDNS 后生效：数据库、WebUI 监听、解析详情记录";
+    if (path === "/system-runtime") expect(await screen.findByText(hint)).toBeInTheDocument();
+    else {
+      await screen.findByText(systemConfigReadFixture.database_path);
+      expect(screen.queryByText(hint)).not.toBeInTheDocument();
+    }
   });
 
   it("系统运行状态保留主机与数据面的降级原因", async () => {
@@ -846,27 +593,11 @@ describe("application routes", () => {
     await waitFor(() => expect(screen.getByRole("tab", { name: "上游" })).toHaveAttribute("aria-selected", "true"));
   });
 
-  it("缺少 randomUUID 时上游组仍可保存，超时按秒回显并以紧凑 duration 提交", async ({ onTestFinished }) => {
-    // 模拟局域网 HTTP：保留真实 getRandomValues，但不提供安全上下文专用的 randomUUID。
-    vi.stubGlobal("crypto", { getRandomValues: crypto.getRandomValues.bind(crypto), randomUUID: undefined });
-    onTestFinished(() => { vi.unstubAllGlobals(); });
+  it("上游组保存时超时按秒回显并以紧凑 duration 提交", async () => {
     const user = userEvent.setup();
     const requests: unknown[] = [];
     setMockAuthenticated(true);
-    server.use(
-      http.post("/api/v2/config/modules/upstreams/validate", () => {
-        requests.push("unexpected validate");
-        return HttpResponse.error();
-      }),
-      http.post("/api/v2/config/modules/upstreams/apply", async ({ request }) => {
-        const body = await request.json() as { operation_id: string };
-        requests.push(body);
-        return HttpResponse.json({
-          operation_id: body.operation_id,
-          status: { state: "applied_synced", active_revision: "active-9", persisted_revision: "active-9" },
-        });
-      }),
-    );
+    server.use(captureConfigSave(requests));
     renderApp("/upstreams?tab=groups");
     expect(await screen.findByText("default-group")).toBeInTheDocument();
     await user.click(screen.getByLabelText("编辑上游 default-group"));
@@ -896,9 +627,7 @@ describe("application routes", () => {
         },
       }],
     });
-    expect(requests[0]).toMatchObject({
-      operation_id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
-    });
+    expect(Object.keys(requests[0] as object)).toEqual(["changes"]);
     expect(await screen.findByText("配置已应用并同步到文件")).toBeInTheDocument();
     expect(requests).toHaveLength(1);
   });

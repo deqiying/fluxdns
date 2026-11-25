@@ -115,12 +115,16 @@ enum ServiceReloadMode {
 /// 根据新旧配置选择 service 热重载路径。
 ///
 /// 由进程启动阶段持有的资源当前不能原位替换；检测到相关配置变化时必须拒绝
-/// 热重载，使调用方保留旧 Runtime 并提示重启进程。
+/// 热重载，使调用方保留旧 Runtime 并提示重启进程。ConfigStore 在构造候选时已沿用
+/// 这些字段的当前值，因此这里只拦截绕过 store 的调用方。
 fn classify_service_reload(
     current: &ResolvedConfig,
     candidate: &ResolvedConfig,
 ) -> Result<ServiceReloadMode, ServiceReloadError> {
-    if let Some(component) = process_owned_reload_change(current, candidate) {
+    if let Some(component) = process_owned_reload_changes(current, candidate)
+        .first()
+        .copied()
+    {
         return Err(ServiceReloadError::RestartRequired { component });
     }
     if current.bind_plan == candidate.bind_plan {
@@ -130,24 +134,29 @@ fn classify_service_reload(
     }
 }
 
-/// 返回阻止当前候选热重载的进程持有配置组件。
-pub(crate) fn process_owned_reload_change(
+/// 返回候选相对当前配置发生变化、且只在进程启动时生效的组件（启动级配置的唯一定义）。
+///
+/// 组件名与 Management 的 `restart_required` 一一对应：`database`、`webui`
+/// （enable/address/port/public_origin）、`dns.resolve_log`。`webui.users` 可动态生效，不在其列。
+pub(crate) fn process_owned_reload_changes(
     current: &ResolvedConfig,
     candidate: &ResolvedConfig,
-) -> Option<&'static str> {
+) -> Vec<&'static str> {
+    let mut changes = Vec::new();
     if current.database != candidate.database {
-        Some("database")
-    } else if current.webui.enable != candidate.webui.enable
+        changes.push("database");
+    }
+    if current.webui.enable != candidate.webui.enable
         || current.webui.address != candidate.webui.address
         || current.webui.port != candidate.webui.port
         || current.webui.public_origin != candidate.webui.public_origin
     {
-        Some("webui")
-    } else if current.dns.resolve_log != candidate.dns.resolve_log {
-        Some("dns.resolve_log")
-    } else {
-        None
+        changes.push("webui");
     }
+    if current.dns.resolve_log != candidate.dns.resolve_log {
+        changes.push("dns.resolve_log");
+    }
+    changes
 }
 
 #[derive(Debug, Error)]
@@ -868,12 +877,11 @@ impl DnsService {
         instrumented_core(core, self.resolution_event_sink.clone())
     }
 
+    /// 认证用户变化时撤销全部会话；只有 reload 能改变 `webui.users`（保存不编辑该段，
+    /// 首用户 setup 由 Management 直接替换认证状态，因此这里看不到变化）。
     fn reconcile_management_users(&self, runtime: &ActiveRuntime) {
         if let Some(management) = &self.management {
-            management.reconcile_users(
-                &runtime.snapshot().config().webui.users,
-                &runtime.snapshot().config().input_hash,
-            );
+            management.reconcile_users(&runtime.snapshot().config().webui.users);
         }
     }
 
@@ -6456,22 +6464,18 @@ clients:
             .unwrap()
             .resolved;
 
-        assert_eq!(
-            super::process_owned_reload_change(&current, &candidate),
-            None
-        );
+        assert!(super::process_owned_reload_changes(&current, &candidate).is_empty());
 
         let mut changed_origin = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_str(&with_user)
             .unwrap()
             .resolved;
-        Arc::get_mut(&mut changed_origin)
-            .unwrap()
-            .webui
-            .public_origin = Some("https://dns.example.com".parse().unwrap());
+        let changed = Arc::get_mut(&mut changed_origin).unwrap();
+        changed.webui.public_origin = Some("https://dns.example.com".parse().unwrap());
+        changed.dns.resolve_log.enable = !changed.dns.resolve_log.enable;
         assert_eq!(
-            super::process_owned_reload_change(&current, &changed_origin),
-            Some("webui")
+            super::process_owned_reload_changes(&current, &changed_origin),
+            vec!["webui", "dns.resolve_log"]
         );
     }
 

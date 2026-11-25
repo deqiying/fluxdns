@@ -29,6 +29,8 @@
 > 2026-11-10 ECS 观测增量核对：基线 `d7c7792f4c8c44961e4d004c74a29b53e225552d` 加工作树，仅补充请求级 ECS 采集、选中 leaf 与缓存匹配事实；不改变以下 DNS/缓存策略。
 >
 > 2026-11-10 ECS 自定义兜底增量核对：基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树，新增 `client_or_custom` 并复用原有查询准备、缓存与观测链路；其余历史范围不重新核对。
+>
+> 2026-11-26 链接修正：仅为 ECS 自定义兜底验证段中已删除的 `store/active/tests.rs` 补注现行测试位置；不重新核对 DNS 管线。
 
 ## 入口与调用链
 
@@ -82,7 +84,7 @@ SystemSocketFactory / typed binding
 
 新增回归由 [`policy_ecs_tests.rs`](../../../backend/src/dns/policy_ecs_tests.rs) 覆盖：合法 IPv4/IPv6 请求 ECS、短前缀与 `/0`、隐私上限/host bits/scope 规范化、缺失及非法 source/scope 的自定义兜底、客户端地址有无不影响兜底、五层配置来源、最终 ECS 缓存隔离与复用、group uniform/members 切换及后台刷新。受控 DoH port 直接断言发出的 DNS wire，并核对实际策略 mode/value_source 与诊断编码往返。
 
-[`config/contract/tests.rs`](../../../backend/src/config/contract/tests.rs) 验证五层本级 `custom_ip` 必填、非法 CIDR 与旧模式禁止残留字段；[`store/active/tests.rs`](../../../backend/src/config/store/active/tests.rs) 验证候选应用、原文件/派生文件持久化和重新解析，Runtime 成功回执沿用测试模拟边界；[`storage/detail_query.rs`](../../../backend/src/storage/detail_query.rs) 验证两种实际来源的 commit 通知和 SQLite 历史读取；Management 的字段错误测试及跨端共享夹具同步覆盖新枚举。
+[`config/contract/tests.rs`](../../../backend/src/config/contract/tests.rs) 验证五层本级 `custom_ip` 必填、非法 CIDR 与旧模式禁止残留字段；当时的 `store/active/tests.rs` 验证候选应用、原文件/派生文件持久化和重新解析，Runtime 成功回执沿用测试模拟边界（该文件已于 2026-11-26 随 ConfigStore 重写删除，当前保存与持久化测试见 [`config/store/tests.rs`](../../../backend/src/config/store/tests.rs)）；[`storage/detail_query.rs`](../../../backend/src/storage/detail_query.rs) 验证两种实际来源的 commit 通知和 SQLite 历史读取；Management 的字段错误测试及跨端共享夹具同步覆盖新枚举。
 
 上述是工程与受控 port 测试，不等同于独立进程的 UDP/TCP/DoH、Management HTTP/WS 联合验收；本轮未做真实浏览器布局、跨平台或生产负载验证。前端工程证据见[页面实现](../frontend/pages.md#策略覆盖编辑)。
 

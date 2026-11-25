@@ -19,7 +19,7 @@ interface ApiErrorOptions {
   diagnostic?: unknown;
   /** 仅可传入已验证 ErrorEnvelope 的安全 message，不能使用任意 Error.message。 */
   serverMessage?: string;
-  operationId?: string;
+  disk?: unknown;
   cause?: unknown;
 }
 
@@ -38,7 +38,7 @@ export class ApiError extends Error {
   readonly fieldErrors: readonly ApiFieldError[];
   readonly diagnostic?: ErrorEnvelope["diagnostic"];
   readonly serverMessage?: string;
-  readonly operationId?: string;
+  readonly disk?: ErrorEnvelope["disk"];
 
   constructor(options: ApiErrorOptions) {
     super(options.message, { cause: options.cause });
@@ -56,7 +56,10 @@ export class ApiError extends Error {
     });
     this.diagnostic = parseDiagnostic(options.diagnostic);
     this.serverMessage = safeText(options.serverMessage, 1024);
-    this.operationId = safeIdentifier(options.operationId);
+    const status = (options.disk as Partial<NonNullable<ErrorEnvelope["disk"]>> | null)?.status;
+    if (status === "in_sync" || status === "modified" || status === "missing" || status === "unreadable") {
+      this.disk = { status };
+    }
   }
 }
 
@@ -84,35 +87,30 @@ const errorMessages: Record<string, string> = {
   PAYLOAD_TOO_LARGE: "请求内容超过大小上限。",
   VERSION_UNSUPPORTED: "不支持此配置或协议版本。",
   NOT_FOUND: "请求的资源不存在。",
-  ACTIVE_REVISION_CONFLICT: "运行配置已改变，请刷新后重新操作。",
-  OPERATION_ID_REUSED: "操作 ID 已绑定其他请求，不能复用。",
   CURSOR_EXPIRED: "查询游标已过期，请重新开始查询。",
   AUTH_INVALID_CREDENTIALS: "用户名或密码不正确。",
   VALIDATION_FAILED: "配置校验失败，请检查字段错误。",
   CONFIG_CONFLICT: "配置存在冲突，请核对后重试。",
-  REQUEST_CANCELLED: "请求已取消；若已提交变更，请先核对操作结果。",
+  REQUEST_CANCELLED: "请求已取消。",
   AUTH_SESSION_EXPIRED: "登录状态已过期，请重新登录。",
   AUTH_REQUIRED: "请先登录后再访问。",
   FORBIDDEN: "当前账号无权读取此内容。",
   INVALID_ARGUMENT: "请求参数或格式无效，请检查输入。",
   RATE_LIMITED: "请求过于频繁，请稍后重试。",
-  REQUEST_TIMEOUT: "请求超时；若已提交变更，请先查询操作结果。",
+  REQUEST_TIMEOUT: "请求超时，请稍后重试。",
   NETWORK_ERROR: "无法连接管理服务，请检查服务是否正在运行。",
   INVALID_RESPONSE: "管理服务返回了无法识别的响应。",
   SERVICE_UNAVAILABLE: "管理服务暂时不可用，请稍后重试。",
-  FILE_REVISION_CONFLICT: "配置文件已再次变化，请重新读取差异。",
-  CONFIRMATION_REQUIRED: "配置影响需要重新确认；当前草稿已保留。",
-  EXTERNAL_CHANGES_REQUIRE_CONFIRMATION: "外部文件变化需要确认覆盖；当前草稿已保留。",
-  OPERATION_BUSY: "已有配置操作正在执行，请等待其完成。",
-  CONFIG_READ_FAILED: "配置读取失败，请刷新成功后再保存；当前草稿已保留。",
-  CONFIG_OPERATION_PENDING: "配置操作结果尚未确认，请在全局提示中继续查询；当前草稿已保留。",
-  PERSISTENCE_FAILED: "运行配置已生效，但配置文件同步失败。",
+  CONFIG_FILE_CHANGED: "磁盘配置与当前运行配置不一致。",
+  CONFIG_FILE_UNREADABLE: "配置文件不存在或无法读取。",
+  CONFIRMATION_REQUIRED: "配置影响需要确认；当前草稿已保留。",
+  OPERATION_BUSY: "已有配置操作正在执行，请稍后重试。",
+  PERSISTENCE_FAILED: "写入磁盘失败。",
   APPLY_FAILED: "配置未能应用，运行状态保持不变。",
-  COMPENSATION_FAILED: "配置补偿失败，请先核对当前运行状态。",
 } satisfies Record<ErrorEnvelope["code"], string> & Record<string, string>;
 
 /** 保留中文语义，再附服务端安全投影和关联 ID；任意 Error/cause 永不进入 UI。 */
-export function getSafeErrorMessage(error: unknown, fallback?: string): string {
+export function getSafeErrorMessage(error: unknown, fallback?: string, fieldErrors?: readonly ApiFieldError[]): string {
   if (!(error instanceof ApiError)) return fallback ?? "请求失败，请稍后重试。";
   const base = fallback ?? errorMessages[error.code] ?? errorMessages[defaultCodeForError(error)] ?? "请求失败，请稍后重试。";
   const parts = [base];
@@ -124,8 +122,7 @@ export function getSafeErrorMessage(error: unknown, fallback?: string): string {
   }
   if (error.status !== undefined) parts.push(`HTTP ${error.status}`);
   if (error.requestId) parts.push(`请求 ID：${error.requestId}`);
-  if (error.operationId) parts.push(`操作 ID：${error.operationId}`);
-  for (const field of error.fieldErrors) parts.push(`字段 ${field.path}：${field.code}`);
+  for (const field of fieldErrors ?? error.fieldErrors) parts.push(`字段 ${field.path}：${field.code}`);
   return parts.join("；");
 }
 

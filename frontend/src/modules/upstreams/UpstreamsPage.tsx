@@ -10,7 +10,7 @@ import { DurationInput, durationRequiredRules } from "@/shared/components/Durati
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
 import { normalizeDuration } from "@/shared/config/form-values";
-import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { useConfigSave, useConfigModule, useConfigState } from "@/shared/config/hooks";
 import { hostsJsonError } from "./hosts-json";
 
 type Schemas = components["schemas"];
@@ -44,17 +44,19 @@ const modeOptions = [
   { label: "故障切换", value: "failover" },
 ];
 
+const upstreamFieldAliases = { "edns_client_subnet.mode": "ecs_mode", "edns_client_subnet.custom_ip": "ecs_custom_ip" };
+
 export function UpstreamsPage() {
   const state = useConfigState();
   const query = useConfigModule("upstreams");
   const proxies = useConfigModule("outbound");
-  const mutation = useConfigChangeMutation("upstreams");
+  const mutation = useConfigSave();
   const [searchParams, setSearchParams] = useSearchParams();
   const [form] = Form.useForm<UpstreamFormValues>();
   const formType = Form.useWatch("type", form);
   const ecsMode = Form.useWatch("ecs_mode", form);
   const fallbackEnabled = Form.useWatch("fallback_enabled", form);
-  const [editing, setEditing] = useState<Upstream | "create" | null>(null);
+  const [editing, setEditing] = useState<Upstream | "create-upstream" | "create-group" | null>(null);
   const [dirty, setDirty] = useState(false);
   const [search, setSearch] = useState("");
   const requestedTab = searchParams.get("tab");
@@ -68,8 +70,9 @@ export function UpstreamsPage() {
     if (!editing) return;
     mutation.reset();
     setDirty(false);
-    if (editing === "create") {
-      form.setFieldsValue(activeTab === "groups"
+    form.resetFields();
+    if (typeof editing === "string") {
+      form.setFieldsValue(editing === "create-group"
         ? { name: "", type: "group", upstreams: [{ name: "", weight: 1 }], upstream_mode: "parallel", timeout: "5s", fallback_enabled: false }
         : { name: "", type: "doh", ecs_mode: "disabled" });
     } else if (editing.type === "hosts") {
@@ -98,7 +101,7 @@ export function UpstreamsPage() {
         fallback_timeout: normalizeDuration(editing.fallback_timeout),
       });
     }
-  }, [activeTab, editing, form]);
+  }, [editing, form]);
 
   const columns: TableColumnsType<Upstream> = [
     { title: "名称", dataIndex: "name", width: 220, render: (value: string) => <Typography.Text strong>{value}</Typography.Text> },
@@ -114,8 +117,8 @@ export function UpstreamsPage() {
   ];
 
   // 仅由 Form 的校验成功回调提交；字段错误在表单内展示，不产生未处理的校验 Promise。
-  const submit = async (values: UpstreamFormValues) => {
-    if (!query.data || !editing) return;
+  const submit = (values: UpstreamFormValues) => {
+    if (!editing) return;
     const value: Upstream = values.type === "hosts"
       ? { name: values.name, type: "hosts", format: values.format ?? "hosts", hosts: values.hosts ?? "" }
       : values.type === "doh"
@@ -140,22 +143,17 @@ export function UpstreamsPage() {
               fallback_timeout: values.fallback_timeout ?? "5s",
             } : {}),
           };
-    const change: Schemas["ConfigChange"] = editing === "create"
+    const change: Schemas["ConfigChange"] = typeof editing === "string"
       ? { module: "upstreams", change: { action: "create", value } }
       : { module: "upstreams", change: { action: "update", original_name: editing.name, value } };
-    try {
-      const operation = await mutation.mutateAsync({ change });
-      if (operation) setEditing(null);
-    } catch {
-      // 保留草稿和后端字段错误。
-    }
+    mutation.save(change, () => setEditing(null));
   };
 
   return (
     <PageFrame
       title="DNS 上游"
       description="每一次转发，稳定可达。"
-      actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}<Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>{activeTab === "groups" ? "添加上游组" : "添加上游"}</Button></Space>}
+      actions={<Space size={12}>{state.data ? <ConfigSyncBadge state={state.data} /> : null}<Button type="primary" icon={<Plus size={17} />} disabled={!query.data} onClick={() => setEditing(activeTab === "groups" ? "create-group" : "create-upstream")}>{activeTab === "groups" ? "添加上游组" : "添加上游"}</Button></Space>}
     >
       <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
       <PageState error={proxies.error} hasData={!!query.data} onRetry={() => void proxies.refetch()} />
@@ -166,8 +164,8 @@ export function UpstreamsPage() {
           <Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 920 }} locale={{ emptyText: search ? "没有匹配的上游" : activeTab === "groups" ? "尚未配置上游组" : "尚未配置上游" }} />
         </div>
       ) : null}
-      <ConfigFormModal open={editing !== null} title={editing === "create" ? (activeTab === "groups" ? "添加上游组" : "添加上游") : "编辑上游"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => form.submit()}>
-        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)} onFinish={(values) => void submit(values)}>
+      <ConfigFormModal open={editing !== null} title={editing === "create-group" ? "添加上游组" : editing === "create-upstream" ? "添加上游" : "编辑上游"} dirty={dirty} busy={mutation.isPending} error={mutation.error} form={form} module="upstreams" fieldAliases={upstreamFieldAliases} configDigest={state.data?.config_digest} moduleDigest={query.data?.state.config_digest} onCancel={() => setEditing(null)} onSubmit={() => form.submit()}>
+        <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)} onFinish={submit}>
           <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128 }]}><Input autoComplete="off" /></Form.Item>
           <Form.Item name="type" label="类型" rules={[{ required: true }]}><Segmented block options={[{ label: "Hosts", value: "hosts" }, { label: "DoH", value: "doh" }, { label: "上游组", value: "group" }]} /></Form.Item>
           {formType === "hosts" ? <HostsFields /> : null}

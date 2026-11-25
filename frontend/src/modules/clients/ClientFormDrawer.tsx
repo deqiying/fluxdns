@@ -3,11 +3,11 @@ import { Alert, App, Button, Drawer, Form, Input, Segmented, Select, Space, Typo
 import type { Rule } from "antd/es/form";
 import { Check, Lock, Pencil, RefreshCw, Save, Undo2 } from "lucide-react";
 import type { components } from "@/shared/api/generated-v2";
-import { getSafeErrorMessage } from "@/shared/api/errors";
+import { ConfigFormFeedback } from "@/shared/components/ConfigFormModal";
 import { DurationInput, durationOptionalRules } from "@/shared/components/DurationInput";
 import { clientEditValue } from "@/shared/config/contract";
 import { normalizeDuration } from "@/shared/config/form-values";
-import { useConfigChangeMutation } from "@/shared/config/hooks";
+import { useConfigSave } from "@/shared/config/hooks";
 import { ClientIdConfirmModal } from "./ClientIdConfirmModal";
 import { CopyButton } from "./CopyButton";
 import { abbreviateId, clientDohPaths, generateClientId, type Client } from "./client-view";
@@ -36,7 +36,8 @@ interface ClientFormDrawerProps {
   strategyOptions: { label: string; value: string }[];
   /** 带 `{client_id}` 占位符的 DoH 路由模板，用于生成新地址提示。 */
   routeTemplates: string[];
-  configState: Schemas["ConfigState"] | undefined;
+  configDigest?: string;
+  moduleDigest?: string;
   onClose: () => void;
   /** 保存成功后回传最终名称，由列表负责关闭抽屉与短暂高亮。 */
   onSaved: (name: string) => void;
@@ -47,6 +48,11 @@ const CLIENT_ID_PATTERN = /^[A-Za-z0-9._~-]{1,128}$/;
 const CACHE_OPTIONS = [{ label: "继承", value: "inherit" }, { label: "启用", value: "enabled" }, { label: "禁用", value: "disabled" }];
 const TTL_OPTIONS = [{ label: "继承", value: "inherit" }, { label: "启用覆盖", value: "enabled" }, { label: "禁用覆盖", value: "disabled" }];
 const ECS_OPTIONS = [{ label: "继承", value: "inherit" }, { label: "禁用", value: "disabled" }, { label: "客户端地址", value: "client" }, { label: "自定义", value: "custom" }, { label: "请求 ECS 优先，自定义兜底", value: "client_or_custom" }];
+
+const clientFieldAliases = {
+  "match.ips": "ips", "ttl_override.enabled": "ttl_mode", "ttl_override.min": "ttl_min", "ttl_override.max": "ttl_max",
+  "cache.enabled": "cache_mode", "edns_client_subnet.mode": "ecs_mode", "edns_client_subnet.custom_ip": "ecs_custom_ip",
+};
 
 interface IdMeta {
   errors: number;
@@ -67,9 +73,9 @@ const requiredMark: FormProps["requiredMark"] = (label, { required }) => (
   </>
 );
 
-export function ClientFormDrawer({ target, items, strategyOptions, routeTemplates, configState, onClose, onSaved }: ClientFormDrawerProps) {
+export function ClientFormDrawer({ target, items, strategyOptions, routeTemplates, configDigest, moduleDigest, onClose, onSaved }: ClientFormDrawerProps) {
   const { modal, message } = App.useApp();
-  const mutation = useConfigChangeMutation("clients");
+  const mutation = useConfigSave();
   const [form] = Form.useForm<ClientFormValues>();
   const ttlMode = Form.useWatch("ttl_mode", form);
   const ecsMode = Form.useWatch("ecs_mode", form);
@@ -107,6 +113,7 @@ export function ClientFormDrawer({ target, items, strategyOptions, routeTemplate
     setIdUnlocked(false);
     setIdMeta({ errors: 0, validating: false });
     setPendingConfirm(null);
+    form.resetFields();
     if (target === "create") {
       form.setFieldsValue({ name: "", client_id: "", ips: [], cache_mode: "inherit", ttl_mode: "inherit", ecs_mode: "inherit" });
     } else {
@@ -174,7 +181,7 @@ export function ClientFormDrawer({ target, items, strategyOptions, routeTemplate
   };
 
   const submit = async () => {
-    if (!configState || !target) return;
+    if (!target || busy) return;
     let values: ClientFormValues;
     try {
       values = await form.validateFields();
@@ -201,15 +208,10 @@ export function ClientFormDrawer({ target, items, strategyOptions, routeTemplate
       const value: Schemas["ClientEdit"] = { ...clientEditValue({ ...common, client_id: target.client_id }), ...(nextId ? { client_id: nextId } : {}) };
       change = { module: "clients", change: { action: "update", original_name: target.name, value } };
     }
-    try {
-      const operation = await mutation.mutateAsync({ change });
-      if (!operation) return;
+    mutation.save(change, () => {
       if (nextId) void message.success(`客户端 ID 已更新为 ${nextId}`);
       onSaved(values.name);
-    } catch (error) {
-      // 冲突与校验失败时保留草稿，错误同时显示在抽屉顶部。
-      void message.error(`保存失败：${getSafeErrorMessage(error)}`);
-    }
+    });
   };
 
   const idExtra: ReactNode = idChanged || (creating && clientId)
@@ -244,19 +246,12 @@ export function ClientFormDrawer({ target, items, strategyOptions, routeTemplate
           <span className={`client-drawer-status${dirty ? " client-drawer-status-dirty" : ""}`}>{footerStatus}</span>
           <Space>
             <Button disabled={busy} onClick={requestClose}>取消</Button>
-            <Button type="primary" icon={<Save size={16} aria-hidden="true" />} loading={busy} onClick={() => void submit()}>保存</Button>
+            <Button type="primary" icon={<Save size={16} aria-hidden="true" />} loading={busy} disabled={busy || !!pendingConfirm} onClick={() => void submit()}>保存</Button>
           </Space>
         </div>
       )}
     >
-      {mutation.error ? (
-        <Alert
-          className="config-form-error"
-          type="error"
-          showIcon
-          title={getSafeErrorMessage(mutation.error)}
-        />
-      ) : null}
+      <ConfigFormFeedback open={target !== null} error={mutation.error} form={form} module="clients" fieldAliases={clientFieldAliases} configDigest={configDigest} moduleDigest={moduleDigest} />
       <Form form={form} layout="vertical" requiredMark={requiredMark} onValuesChange={() => setDirty(true)} onFieldsChange={trackIdMeta}>
         <div className="client-form-section">基本信息</div>
         <Form.Item name="name" label="管理名称" rules={[{ required: true, message: "管理名称不能为空" }, { max: 128, message: "最多 128 个字符" }]} extra="界面展示与策略引用使用的唯一名称，最多 128 字符">

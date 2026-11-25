@@ -11,11 +11,19 @@ fn round_trip<T: DeserializeOwned + Serialize>(value: &Value) {
     assert_eq!(&serde_json::to_value(typed).unwrap(), value);
 }
 
+fn save(value: &Value) -> Result<SaveRequest, MutationDecodeError> {
+    decode_save(&serde_json::to_vec(value).unwrap())
+}
+
 #[test]
 fn shared_http_and_ws_fixtures_round_trip_without_precision_loss() {
     let fixtures = fixtures();
-    round_trip::<Candidate>(&fixtures["candidate"]);
+    round_trip::<SaveRequest>(&fixtures["save_request"]);
     round_trip::<ConfigState>(&fixtures["state"]);
+    round_trip::<SaveResult>(&fixtures["save_result"]);
+    round_trip::<ReloadResult>(&fixtures["reload_result"]);
+    round_trip::<PersistResult>(&fixtures["reload_result"]);
+    round_trip::<SystemConfigRead>(&fixtures["system"]);
     round_trip::<QueryRequest>(&fixtures["query"]);
     round_trip::<QueryRecord>(&fixtures["record"]);
     round_trip::<ServiceMetrics>(&fixtures["metrics"]);
@@ -27,14 +35,9 @@ fn shared_http_and_ws_fixtures_round_trip_without_precision_loss() {
     round_trip::<MemoryAnalysis>(&memory);
     round_trip::<WebSocketTicket>(&fixtures["websocket_ticket"]);
     round_trip::<ConfigRead>(&fixtures["config_read"]);
-    round_trip::<ExternalDiff>(&fixtures["external_diff"]);
-    round_trip::<ValidationResult>(&fixtures["validation"]);
     round_trip::<CacheSnapshotStatus>(&fixtures["snapshot"]);
     for value in fixtures["module_sources"].as_array().unwrap() {
         round_trip::<ModuleSource>(value);
-    }
-    for value in fixtures["operations"].as_array().unwrap() {
-        round_trip::<OperationResult>(value);
     }
     for value in fixtures["client_messages"].as_array().unwrap() {
         round_trip::<ClientMessage>(value);
@@ -42,6 +45,35 @@ fn shared_http_and_ws_fixtures_round_trip_without_precision_loss() {
     for value in fixtures["server_messages"].as_array().unwrap() {
         round_trip::<ServerMessage>(value);
     }
+}
+
+#[test]
+fn config_state_has_only_digest_runtime_revision_and_disk_status() {
+    let state = fixtures()["state"].clone();
+    for (field, value) in [
+        ("active_revision", json!("active-8")),
+        ("persisted_revision", json!("persisted-8")),
+        ("synchronization", json!("synced")),
+        (
+            "files",
+            json!({"source": "unchanged", "derived": "unchanged"}),
+        ),
+    ] {
+        let mut legacy = state.clone();
+        legacy[field] = value;
+        assert!(
+            serde_json::from_value::<ConfigState>(legacy).is_err(),
+            "{field}"
+        );
+    }
+    for status in ["in_sync", "modified", "missing", "unreadable"] {
+        let mut value = state.clone();
+        value["disk"]["status"] = json!(status);
+        round_trip::<ConfigState>(&value);
+    }
+    let mut unknown = state;
+    unknown["disk"]["status"] = json!("oversized");
+    assert!(serde_json::from_value::<ConfigState>(unknown).is_err());
 }
 
 #[test]
@@ -60,7 +92,7 @@ fn runtime_timezone_fields_are_required_and_fallback_is_explicit() {
 
 #[test]
 fn mutation_shape_rejects_readonly_identity_delete_and_variant_residue() {
-    let candidate = fixtures()["candidate"].clone();
+    let request = fixtures()["save_request"].clone();
     for change in [
         json!({"module":"database","change":{"path":"other.db"}}),
         json!({"module":"webui","change":{"users":[]}}),
@@ -70,59 +102,85 @@ fn mutation_shape_rejects_readonly_identity_delete_and_variant_residue() {
         json!({"module":"listener","change":{"action":"create","value":{"type":"udp","name":"dns","addresses":["127.0.0.1"],"port":53,"strategy":"default","enable":true}}}),
         json!({"module":"listener","change":{"action":"create","value":{"type":"udp","name":"dns","addresses":["127.0.0.1"],"port":53,"strategy":"default","routes":[]}}}),
     ] {
-        let mut value = candidate.clone();
+        let mut value = request.clone();
         value["changes"] = json!([change]);
-        assert!(decode_candidate(&serde_json::to_vec(&value).unwrap()).is_err());
+        assert!(save(&value).is_err());
     }
-    let mut value = candidate;
+    let mut value = request;
     value["unexpected"] = json!(true);
-    assert!(decode_candidate(&serde_json::to_vec(&value).unwrap()).is_err());
+    assert!(save(&value).is_err());
     // 客户端更新允许显式提供新的 client_id；格式与唯一性由候选校验负责。
     value.as_object_mut().unwrap().remove("unexpected");
     value["changes"] = json!([{"module":"clients","change":{"action":"update","original_name":"desktop","value":{"name":"desktop","client_id":"altered"}}}]);
-    assert!(decode_candidate(&serde_json::to_vec(&value).unwrap()).is_ok());
+    assert!(save(&value).is_ok());
 }
 
 #[test]
 fn request_budgets_and_tokens_fail_before_handler_work() {
     assert!(matches!(
-        decode_candidate(&vec![b' '; MAX_MUTATION_BYTES + 1])
+        decode_save(&vec![b' '; MAX_MUTATION_BYTES + 1])
             .unwrap_err()
             .code,
         ErrorCode::PayloadTooLarge
     ));
-    let mut value = fixtures()["candidate"].clone();
+    let mut value = fixtures()["save_request"].clone();
     value["changes"] = json!([]);
-    assert!(decode_candidate(&serde_json::to_vec(&value).unwrap()).is_err());
-    let change = fixtures()["candidate"]["changes"][0].clone();
+    assert!(save(&value).is_err());
+    let change = fixtures()["save_request"]["changes"][0].clone();
     value["changes"] = Value::Array(vec![change; MAX_CHANGES + 1]);
-    assert!(decode_candidate(&serde_json::to_vec(&value).unwrap()).is_err());
+    assert!(save(&value).is_err());
     for value in ["", "a/b", "a\n", &"a".repeat(129)] {
         assert!(serde_json::from_value::<Revision>(json!(value)).is_err());
     }
     assert!(serde_json::from_value::<Cursor>(json!("a".repeat(MAX_CURSOR_BYTES + 1))).is_err());
     assert!(decode_client_message(&vec![b' '; MAX_WS_FRAME_BYTES + 1]).is_err());
-    let mut value = fixtures()["candidate"].clone();
+    let mut value = fixtures()["save_request"].clone();
     value["changes"] = json!([value["changes"][0]]);
-    let bytes = serde_json::to_vec(&value).unwrap();
-    assert!(decode_module_candidate(&bytes, ConfigModule::Clients).is_ok());
-    assert!(matches!(
-        decode_module_candidate(&bytes, ConfigModule::Logs)
-            .unwrap_err()
-            .code,
-        ErrorCode::Forbidden
-    ));
+    assert!(save(&value).is_ok());
     value["changes"][0]["change"]["value"]["strategy"] = Value::Null;
-    assert!(decode_candidate(&serde_json::to_vec(&value).unwrap()).is_err());
+    assert!(save(&value).is_err());
     for invalid in ["18446744073709551616", "01", "-1", "1e3", ""] {
         assert!(serde_json::from_value::<DecimalU64>(json!(invalid)).is_err());
     }
 }
 
 #[test]
+fn save_request_has_only_changes_and_two_explicit_flags() {
+    let request = fixtures()["save_request"].clone();
+    let mut minimal = json!({"changes": request["changes"]});
+    let decoded = save(&minimal).unwrap();
+    assert!(!decoded.overwrite_disk);
+    assert!(!decoded.confirm_retention_shortening);
+    minimal["overwrite_disk"] = json!(true);
+    minimal["confirm_retention_shortening"] = json!(true);
+    let decoded = save(&minimal).unwrap();
+    assert!(decoded.overwrite_disk);
+    assert!(decoded.confirm_retention_shortening);
+    // 旧 apply 封套的 operation、确认与文件版本字段一律拒绝。
+    for (field, value) in [
+        ("operation_id", json!("operation-1")),
+        ("confirmations", json!(["retention_shortening"])),
+        ("observed_file_revision", json!("files-1")),
+        ("active_revision", json!("stale")),
+        (
+            "expected",
+            json!({"active_revision": "stale", "observed_file_revision": "stale"}),
+        ),
+        ("validation_token", json!("old-ticket")),
+    ] {
+        let mut legacy = request.clone();
+        legacy[field] = value;
+        assert!(save(&legacy).is_err(), "{field}");
+    }
+    let mut wrong_type = request;
+    wrong_type["overwrite_disk"] = json!("yes");
+    assert!(save(&wrong_type).is_err());
+}
+
+#[test]
 fn invalid_rule_ecs_custom_ip_returns_only_its_dto_path() {
     for mode in ["custom", "client_or_custom"] {
-        let candidate = json!({
+        let request = json!({
             "changes": [{
                 "module": "strategy",
                 "change": {
@@ -139,8 +197,7 @@ fn invalid_rule_ecs_custom_ip_returns_only_its_dto_path() {
                 }
             }]
         });
-        let bytes = serde_json::to_vec(&candidate).unwrap();
-        let error = decode_candidate(&bytes).unwrap_err();
+        let error = save(&request).unwrap_err();
         assert!(matches!(error.code, ErrorCode::InvalidArgument));
         assert_eq!(error.field_errors.len(), 1);
         assert_eq!(
@@ -152,52 +209,11 @@ fn invalid_rule_ecs_custom_ip_returns_only_its_dto_path() {
             ErrorCode::InvalidArgument
         ));
         assert!(!format!("{error:?}").contains("192.0.2.0/99"));
-
-        let apply = json!({
-            "operation_id": "operation-1",
-            "changes": candidate["changes"],
-            "confirmations": []
-        });
-        let error = decode_apply(&serde_json::to_vec(&apply).unwrap(), None).unwrap_err();
-        assert!(matches!(error.code, ErrorCode::InvalidArgument));
-        assert_eq!(
-            error.field_errors[0].path,
-            "changes[0].change.value.rules[1].edns_client_subnet.custom_ip"
-        );
     }
 }
 
 #[test]
-fn apply_envelope_and_ws_filters_use_the_same_ingress_boundaries() {
-    let mut apply = json!({
-        "operation_id": "operation-1",
-        "changes": fixtures()["candidate"]["changes"],
-        "confirmations": []
-    });
-    assert!(decode_apply(&serde_json::to_vec(&apply).unwrap(), None).is_ok());
-    assert!(matches!(
-        decode_apply(
-            &serde_json::to_vec(&apply).unwrap(),
-            Some(ConfigModule::Clients)
-        )
-        .unwrap_err()
-        .code,
-        ErrorCode::Forbidden
-    ));
-    apply["confirmations"] = json!(["discard_external_changes", "discard_external_changes"]);
-    assert!(decode_apply(&serde_json::to_vec(&apply).unwrap(), None).is_err());
-    apply["confirmations"] = json!([]);
-    apply["changes"][0]["change"]["value"]["strategy"] = Value::Null;
-    assert!(decode_apply(&serde_json::to_vec(&apply).unwrap(), None).is_err());
-
-    let mut file_sync = json!({
-        "operation_id": "file-operation-1",
-        "observed_file_revision": "files-1"
-    });
-    assert!(decode_file_sync(&serde_json::to_vec(&file_sync).unwrap()).is_ok());
-    file_sync["path"] = json!("not-accepted.yaml");
-    assert!(decode_file_sync(&serde_json::to_vec(&file_sync).unwrap()).is_err());
-
+fn ws_filters_use_the_same_ingress_boundaries_as_queries() {
     let base = json!({
         "type": "subscribe_queries",
         "subscription_id": "subscription-1",
@@ -230,6 +246,15 @@ fn apply_envelope_and_ws_filters_use_the_same_ingress_boundaries() {
             "{field}"
         );
     }
+    // 配置变化通知只携带配置摘要，不再有 active/observed 两个版本。
+    assert!(
+        serde_json::from_value::<ServerMessage>(json!({
+            "type": "config_changed",
+            "active_revision": "active-8",
+            "observed_file_revision": "files-10"
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -303,15 +328,7 @@ fn shared_source_serialization_preserves_omission_paths_and_duration_shape() {
 }
 
 #[test]
-fn operation_states_cannot_mix_success_and_failure_fields() {
-    for value in [
-        json!({"state":"unknown","active_revision":"active-1"}),
-        json!({"state":"applied_synced","active_revision":"active-1"}),
-        json!({"state":"applying","error":"APPLY_FAILED"}),
-        json!({"state":"saved_pending_restart"}),
-    ] {
-        assert!(serde_json::from_value::<OperationStatus>(value).is_err());
-    }
+fn historical_match_states_cannot_mix_fields() {
     assert!(
         serde_json::from_value::<HistoricalMatch>(
             json!({"source":"none","matched_client_id":"made-up"})
@@ -322,7 +339,7 @@ fn operation_states_cannot_mix_success_and_failure_fields() {
 }
 
 #[test]
-fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_registered() {
+fn openapi_protection_constants_match_rust_and_only_config_write_routes_are_registered() {
     let schema: yaml_serde::Value = yaml_serde::from_str(include_str!(
         "../../../../frontend/openapi/management-api-v2.yaml"
     ))
@@ -371,8 +388,6 @@ fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_register
         ("replay_seconds", REPLAY_SECONDS as usize),
         ("replay_records", REPLAY_RECORDS),
         ("replay_bytes", REPLAY_BYTES),
-        ("operation_entries", MAX_OPERATION_ENTRIES),
-        ("external_diff_bytes", MAX_EXTERNAL_DIFF_BYTES),
         (
             "access_token_ttl_seconds",
             crate::management::session::ACCESS_TOKEN_TTL.as_secs() as usize,
@@ -381,7 +396,6 @@ fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_register
             "access_renew_window_seconds",
             crate::management::session::ACCESS_RENEW_WINDOW.as_secs() as usize,
         ),
-        ("operation_ttl_seconds", OPERATION_TTL_SECONDS as usize),
         ("websocket_protocol_version", WS_PROTOCOL_VERSION as usize),
     ] {
         assert_eq!(
@@ -389,6 +403,13 @@ fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_register
             Some(expected as u64),
             "{key}"
         );
+    }
+    for removed in [
+        "operation_entries",
+        "operation_ttl_seconds",
+        "external_diff_bytes",
+    ] {
+        assert!(schema["x-limits"].get(removed).is_none(), "{removed}");
     }
     for (code, status) in schema["x-error-statuses"].as_mapping().unwrap() {
         let code: ErrorCode = serde_json::from_value(json!(code.as_str().unwrap())).unwrap();
@@ -401,55 +422,31 @@ fn openapi_protection_constants_match_rust_and_only_p1_write_routes_are_register
             .unwrap()
             .len()
     );
-    let routes = include_str!("../config_mutation.rs");
-    assert!(routes.contains("/api/v2/config/apply"));
-    assert!(routes.contains("/api/v2/config/files/restore"));
-    assert!(routes.contains("/api/v2/config/modules/{module}/validate"));
-    assert!(routes.contains("/api/v2/config/modules/{module}/apply"));
+    let paths = schema["paths"].as_mapping().unwrap();
+    for path in ["/config/save", "/config/reload", "/config/persist"] {
+        assert!(paths.contains_key(path), "{path}");
+    }
+    for path in [
+        "/config/validate",
+        "/config/apply",
+        "/config/files/restore",
+        "/config/files/retry",
+        "/config/external",
+        "/config/operations/{operation_id}",
+    ] {
+        assert!(!paths.contains_key(path), "{path}");
+    }
+    let routes = include_str!("../config_api.rs");
+    assert!(routes.contains("\"/api/v2/config/save\""));
+    assert!(routes.contains("\"/api/v2/config/reload\""));
+    assert!(routes.contains("\"/api/v2/config/persist\""));
     let event_routes = include_str!("../events.rs");
     assert!(event_routes.contains("/api/v2/events/ticket"));
     assert!(event_routes.contains("/api/v2/events"));
 }
 
 #[test]
-fn direct_apply_needs_no_revision_or_validation_ticket_and_rejects_legacy_fields() {
-    let request = json!({"operation_id": "direct", "changes": fixtures()["candidate"]["changes"]});
-    let decoded = decode_apply(&serde_json::to_vec(&request).unwrap(), None).unwrap();
-    assert!(decoded.confirmations.is_empty());
-    assert!(decoded.observed_file_revision.is_none());
-    for (field, value) in [
-        ("active_revision", json!("stale")),
-        (
-            "expected",
-            json!({"active_revision": "stale", "observed_file_revision": "stale"}),
-        ),
-        ("validation_token", json!("old-ticket")),
-        ("candidate", fixtures()["candidate"].clone()),
-        ("discard_external_changes", json!(true)),
-    ] {
-        let mut old = request.clone();
-        old[field] = value;
-        assert!(
-            decode_apply(&serde_json::to_vec(&old).unwrap(), None).is_err(),
-            "{field}"
-        );
-    }
-    let mut overwrite = request;
-    overwrite["confirmations"] = json!(["discard_external_changes"]);
-    assert!(decode_apply(&serde_json::to_vec(&overwrite).unwrap(), None).is_err());
-    overwrite["observed_file_revision"] = json!("files-1");
-    assert!(decode_apply(&serde_json::to_vec(&overwrite).unwrap(), None).is_ok());
-    overwrite["confirmations"] = json!(["rename_references"]);
-    assert!(decode_apply(&serde_json::to_vec(&overwrite).unwrap(), None).is_err());
-}
-
-#[test]
-fn file_actions_and_retention_preview_do_not_accept_active_revision() {
-    let file = json!({"operation_id": "restore", "observed_file_revision": "files-1"});
-    assert!(decode_file_sync(&serde_json::to_vec(&file).unwrap()).is_ok());
-    let mut legacy = file;
-    legacy["active_revision"] = json!("active-1");
-    assert!(decode_file_sync(&serde_json::to_vec(&legacy).unwrap()).is_err());
+fn retention_preview_does_not_accept_revision_preconditions() {
     let preview = json!({"policy": {"retention": {"days": 7, "grace_days": 3, "reference_size_bytes": 1073741824}}});
     assert!(serde_json::from_value::<RetentionPreviewRequest>(preview.clone()).is_ok());
     let mut legacy = preview;

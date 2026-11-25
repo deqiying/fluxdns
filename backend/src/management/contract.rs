@@ -5,8 +5,8 @@ use serde::de::{self, DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+pub use crate::config::change::{ConfigChange, ConfigModule};
 use crate::config::contract::{ClientV2, DnsV2, StatisticsV2};
-pub use crate::config::edit::{ConfigChange, ConfigModule};
 use crate::config::model::{
     HostsResourceDto, ListenerDto, LogsDto, OutboundDto, RuleSetDto, StrategyDto, UpstreamDto,
 };
@@ -16,7 +16,6 @@ pub use memory::*;
 
 pub const API_PREFIX: &str = "/api/v2";
 pub const MAX_MUTATION_BYTES: usize = 2 * 1024 * 1024;
-pub const MAX_EXTERNAL_DIFF_BYTES: usize = 2 * 1024 * 1024;
 pub const MAX_CHANGES: usize = 128;
 pub const MAX_CURSOR_BYTES: usize = 2048;
 pub const MAX_QUERY_BYTES: usize = 16 * 1024;
@@ -36,8 +35,6 @@ pub const MAX_ONLINE_IDENTITIES: usize = 4_096;
 pub const REPLAY_SECONDS: u64 = 60;
 pub const REPLAY_RECORDS: usize = 5_000;
 pub const REPLAY_BYTES: usize = 8 * 1024 * 1024;
-pub const MAX_OPERATION_ENTRIES: usize = 1024;
-pub const OPERATION_TTL_SECONDS: u64 = 1800;
 pub const WS_PROTOCOL_VERSION: u16 = 1;
 
 #[derive(Serialize, Deserialize)]
@@ -106,7 +103,6 @@ macro_rules! token {
 }
 
 token!(Revision, 128);
-token!(OperationId, 128);
 token!(Cursor, MAX_CURSOR_BYTES);
 token!(RecordId, 128);
 
@@ -142,92 +138,64 @@ impl<'de> Deserialize<'de> for DecimalU64 {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Preconditions {
-    pub active_revision: Revision,
-    /// 源文件和派生副本的组合观测 token，包含缺失/不可读状态，不能仅绑定源文件。
-    pub observed_file_revision: Revision,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// 磁盘源文件与内存配置的关系；只比较正文摘要，不比较文件身份、mtime 或权限。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum FileCondition {
-    Unchanged,
-    Changed,
+pub enum DiskStatus {
+    InSync,
+    Modified,
     Missing,
     Unreadable,
-    Oversized,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FileObservation {
-    pub source: FileCondition,
-    pub derived: Option<FileCondition>,
+pub struct DiskState {
+    pub status: DiskStatus,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SyncCondition {
-    Synced,
-    Applying,
-    Persisting,
-    AppliedUnpersisted,
-    Blocked,
-}
-
+/// 配置状态只有一个版本：内存正文的 SHA-256；runtime_revision 只用于读一致性。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConfigState {
-    pub active_revision: Revision,
-    pub runtime_revision: Revision,
-    pub persisted_revision: Option<Revision>,
-    pub observed_file_revision: Revision,
-    pub files: FileObservation,
-    pub synchronization: SyncCondition,
-    pub operation_id: Option<OperationId>,
+    pub config_digest: Revision,
+    pub runtime_revision: DecimalU64,
+    pub disk: DiskState,
 }
 
+/// 同步保存：校验、应用 Runtime、写盘在一次请求内完成，不再有 operation 与预校验票据。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Candidate {
+pub struct SaveRequest {
     pub changes: Vec<ConfigChange>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ApplyRequest {
-    pub operation_id: OperationId,
-    pub changes: Vec<ConfigChange>,
-    /// 仅危险影响需要显式确认；普通保存可省略。
+    /// 磁盘已被外部修改时，以当前内存配置加本次修改覆盖磁盘。
     #[serde(default)]
-    pub confirmations: Vec<ImpactKind>,
-    /// 只在采用或覆盖外部文件时绑定所见文件，不限制普通配置编辑。
+    pub overwrite_disk: bool,
+    /// 统计保留期缩短的显式确认。
+    #[serde(default)]
+    pub confirm_retention_shortening: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SaveResult {
+    pub state: ConfigState,
+    /// `false` 表示配置已生效但没有写入磁盘，重启后会丢失。
+    pub persisted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observed_file_revision: Option<Revision>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ImpactKind {
-    RetentionShortening,
-    DiscardExternalChanges,
+    pub diagnostic: Option<crate::diagnostics::Diagnostic>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ValidationResult {
-    pub observed_file_revision: Revision,
-    pub required_confirmations: Vec<ImpactKind>,
-    pub affected_names: Vec<String>,
+pub struct ReloadResult {
+    pub state: ConfigState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct FileSyncRequest {
-    pub operation_id: OperationId,
-    pub observed_file_revision: Revision,
+pub struct PersistResult {
+    pub state: ConfigState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -249,22 +217,18 @@ pub enum ErrorCode {
     AuthRequired,
     Forbidden,
     NotFound,
-    ActiveRevisionConflict,
-    FileRevisionConflict,
-    ExternalChangesRequireConfirmation,
-    OperationIdReused,
+    ConfigFileChanged,
+    ConfigFileUnreadable,
     OperationBusy,
     ConfirmationRequired,
     PersistenceFailed,
     ApplyFailed,
-    CompensationFailed,
     CursorExpired,
     RateLimited,
     ServiceUnavailable,
 }
 
 impl ErrorCode {
-    /// 仅用于 ErrorEnvelope；已受理操作的失败状态仍由 OperationResult 返回。
     pub fn http_status(&self) -> u16 {
         match self {
             Self::HttpVersionNotSupported => 505,
@@ -277,20 +241,18 @@ impl ErrorCode {
             Self::OriginRejected => 400,
             Self::ConfigConflict => 409,
             Self::InvalidArgument => 400,
-            Self::ValidationFailed | Self::VersionUnsupported => 422,
+            Self::ValidationFailed
+            | Self::VersionUnsupported
+            | Self::ApplyFailed
+            | Self::ConfigFileUnreadable => 422,
             Self::PayloadTooLarge => 413,
             Self::AuthRequired => 401,
             Self::Forbidden => 403,
             Self::NotFound => 404,
-            Self::ActiveRevisionConflict
-            | Self::FileRevisionConflict
-            | Self::ExternalChangesRequireConfirmation
-            | Self::OperationIdReused
-            | Self::OperationBusy
-            | Self::ConfirmationRequired => 409,
+            Self::ConfigFileChanged | Self::OperationBusy | Self::ConfirmationRequired => 409,
             Self::CursorExpired => 410,
             Self::RateLimited => 429,
-            Self::PersistenceFailed | Self::ApplyFailed | Self::CompensationFailed => 500,
+            Self::PersistenceFailed => 500,
             Self::ServiceUnavailable => 503,
         }
     }
@@ -314,6 +276,9 @@ pub struct ErrorEnvelope {
     pub field_errors: Vec<FieldError>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub diagnostic: Option<crate::diagnostics::Diagnostic>,
+    /// 仅 `CONFIG_FILE_CHANGED` 携带：保存时观测到的磁盘状态。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk: Option<DiskState>,
 }
 
 /// 候选封套的入站错误只公开固定错误码和经白名单校验的 DTO 路径。
@@ -340,44 +305,6 @@ impl MutationDecodeError {
             }],
         }
     }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum OperationStatus {
-    Preparing {},
-    Applying {},
-    Persisting {
-        active_revision: Revision,
-    },
-    AppliedSynced {
-        active_revision: Revision,
-        persisted_revision: Revision,
-    },
-    AppliedUnpersisted {
-        active_revision: Revision,
-        persisted_revision: Option<Revision>,
-        error: ErrorCode,
-    },
-    Rejected {
-        error: ErrorCode,
-    },
-    CompensationFailed {
-        active_revision: Option<Revision>,
-        error: ErrorCode,
-    },
-    /// 未找到、进程重启或记录过期均不能据此推断命令从未执行。
-    Unknown {},
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperationResult {
-    pub operation_id: OperationId,
-    pub status: OperationStatus,
-    /// 随操作终态冻结的安全诊断；旧记录和非失败状态可缺省。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub diagnostic: Option<crate::diagnostics::Diagnostic>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -511,31 +438,6 @@ pub struct CacheSnapshotStatus {
     pub last_error: Option<ErrorCode>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum StartupSection {
-    Work,
-    Database,
-    Webui,
-    ProtectedCredentials,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExternalResourceDiff {
-    pub active: Option<ModuleSource>,
-    pub external: Option<ModuleSource>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExternalDiff {
-    pub expected: Preconditions,
-    pub editable: Vec<ExternalResourceDiff>,
-    pub protected_changes: Vec<StartupSection>,
-    pub parse_error: Option<ErrorCode>,
-}
-
 /// 系统只读投影不包含 users、hash、私钥或实际 Secret 值。
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -549,6 +451,31 @@ pub struct SystemConfigRead {
     pub webui_address: String,
     pub webui_port: u16,
     pub public_origin: Option<String>,
+    /// 已写入配置、但需重启进程才生效的启动级组件；只在系统运行状态页提示。
+    pub restart_required: Vec<RestartComponent>,
+}
+
+/// 启动级组件只在进程启动时创建，Runtime 换代不会替换它们。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum RestartComponent {
+    #[serde(rename = "database")]
+    Database,
+    #[serde(rename = "webui")]
+    Webui,
+    #[serde(rename = "dns.resolve_log")]
+    DnsResolveLog,
+}
+
+impl RestartComponent {
+    /// 与 `service::process_owned_reload_changes` 返回的组件名一一对应。
+    pub fn from_component(component: &str) -> Option<Self> {
+        match component {
+            "database" => Some(Self::Database),
+            "webui" => Some(Self::Webui),
+            "dns.resolve_log" => Some(Self::DnsResolveLog),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1134,79 +1061,25 @@ pub enum ServerMessage {
         subscription_id: Revision,
         reason: ResyncReason,
     },
+    /// 内存配置版本变化；前端据此重新读取配置状态。
     ConfigChanged {
-        active_revision: Revision,
-        observed_file_revision: Revision,
+        config_digest: Revision,
     },
     Ping {
         nonce: Revision,
     },
 }
 
-/// 供后续 handler 共用的有界 JSON 解码入口；完整候选引用/影响检查由 ConfigStore 执行。
-pub fn decode_candidate(bytes: &[u8]) -> Result<Candidate, MutationDecodeError> {
+/// 保存请求的有界 JSON 解码；完整引用、布局与影响检查由 ConfigStore 执行。
+pub fn decode_save(bytes: &[u8]) -> Result<SaveRequest, MutationDecodeError> {
     let tree: serde_json::Value =
         decode_json(bytes, MAX_MUTATION_BYTES).map_err(MutationDecodeError::new)?;
     if contains_null(&tree) {
         return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }
     let field_error = invalid_rule_ecs_custom_ip_path(&tree, "");
-    let value: Candidate = decode_mutation_value(tree, field_error)?;
-    if value.changes.is_empty() || value.changes.len() > MAX_CHANGES {
-        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
-    }
-    Ok(value)
-}
-
-/// 普通模块表单不能借通用候选封套修改其他模块；组合采用只走专门的整体入口。
-pub fn decode_module_candidate(
-    bytes: &[u8],
-    module: ConfigModule,
-) -> Result<Candidate, MutationDecodeError> {
-    let value = decode_candidate(bytes)?;
-    if value.changes.len() != 1 || value.changes[0].module() != module {
-        return Err(MutationDecodeError::new(ErrorCode::Forbidden));
-    }
-    Ok(value)
-}
-
-/// 应用封套沿用候选预算，不在此执行 prepare、文件覆盖或幂等记录。
-pub fn decode_apply(
-    bytes: &[u8],
-    module: Option<ConfigModule>,
-) -> Result<ApplyRequest, MutationDecodeError> {
-    let tree: serde_json::Value =
-        decode_json(bytes, MAX_MUTATION_BYTES).map_err(MutationDecodeError::new)?;
-    if contains_null(&tree) {
-        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
-    }
-    let field_error = invalid_rule_ecs_custom_ip_path(&tree, "");
-    let request: ApplyRequest = decode_mutation_value(tree, field_error)?;
-    if request.changes.is_empty()
-        || request.changes.len() > MAX_CHANGES
-        || request.confirmations.len() > 2
-    {
-        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
-    }
-    if let Some(module) = module
-        && (request.changes.len() != 1 || request.changes[0].module() != module)
-    {
-        return Err(MutationDecodeError::new(ErrorCode::Forbidden));
-    }
-    if request
-        .confirmations
-        .iter()
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-        != request.confirmations.len()
-    {
-        return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
-    }
-    if request
-        .confirmations
-        .contains(&ImpactKind::DiscardExternalChanges)
-        && request.observed_file_revision.is_none()
-    {
+    let request: SaveRequest = decode_mutation_value(tree, field_error)?;
+    if request.changes.is_empty() || request.changes.len() > MAX_CHANGES {
         return Err(MutationDecodeError::new(ErrorCode::InvalidArgument));
     }
     Ok(request)
@@ -1253,15 +1126,6 @@ fn invalid_rule_ecs_custom_ip_path(value: &serde_json::Value, root: &str) -> Opt
         }
     }
     None
-}
-
-/// 文件动作只接受固定 operation、双版本和覆盖确认，不接收路径或配置正文。
-pub fn decode_file_sync(bytes: &[u8]) -> Result<FileSyncRequest, ErrorCode> {
-    let tree: serde_json::Value = decode_json(bytes, MAX_MUTATION_BYTES)?;
-    if contains_null(&tree) {
-        return Err(ErrorCode::InvalidArgument);
-    }
-    serde_json::from_value(tree).map_err(|_| ErrorCode::InvalidArgument)
 }
 
 fn contains_null(value: &serde_json::Value) -> bool {

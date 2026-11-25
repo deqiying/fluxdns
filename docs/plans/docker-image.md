@@ -7,6 +7,8 @@
 > 计划状态：待验收
 >
 > 代码基线：`e3e21c8`
+>
+> 2026-11-26 增量核对：配置读写重构后，仅同步配置快照（改为单向覆盖、不再因内容不同拒绝启动）与 Management 写入端点名称；容器路径约定不变。
 
 ## 1. 问题与现状依据
 
@@ -15,7 +17,7 @@ FluxDNS 当前只有四平台压缩归档这一种交付形态（见[交付实�
 | 契约 | 事实 | 依据 |
 | --- | --- | --- |
 | 进程入口 | `fluxdns [run\|validate] [--config PATH]`；`--version` 输出 `fluxdns <版本>`；不传 `--config` 时默认读取进程当前目录下的 `config.yaml` | [app.rs](../../backend/src/app.rs) |
-| 配置快照 | 源配置文件不是 `<work.path>/config.yaml` 时，启动会生成该固定路径的副本；目标已存在且内容不同时拒绝启动 | [配置参考](../implementation/configuration.md) |
+| 配置快照 | 源配置文件不是 `<work.path>/config.yaml` 时，启动以源正文创建或覆盖该固定路径的副本（单向镜像，不因内容不同拒绝启动） | [配置参考](../implementation/configuration.md) |
 | 运行期写入 | 配置、日志、SQLite、详情分片、缓存快照、规则文件都落在 `work.path`；`validate` 使用 `without_snapshot()`，不写盘也不校验 SecretRef | app.rs、[配置参考](../implementation/configuration.md) |
 | 编译期需要 migrations | `storage/sqlite.rs` 与 `storage/detail_shards.rs` 在生产路径用 `include_str!` 引用 `backend/migrations/`，构建必须包含该目录，运行期不需要 | [sqlite.rs](../../backend/src/storage/sqlite.rs)、[detail_shards.rs](../../backend/src/storage/detail_shards.rs) |
 | 编译期不需要模板与测试夹具 | `config-example.yaml`、`backend/tests/` 只在 `cfg(test)` 下被引用，release 构建用不到；SPA 由 `webui-embed` 在编译期内嵌 | app.rs、[Cargo.toml](../../backend/Cargo.toml) |
@@ -129,8 +131,8 @@ CMD ["run", "--config", "/etc/fluxdns/config.yaml"]
 | 项 | 决定 | 原因 |
 | --- | --- | --- |
 | `work.path` | `/etc/fluxdns` | 与根模板示例一致，规则、数据、日志、TLS 的相对路径都落在这里 |
-| 配置文件位置 | 必须是 `/etc/fluxdns/config.yaml` | 否则启动会生成第二份快照，且目标内容不同时拒绝启动 |
-| 挂载方式 | 整目录挂载宿主机目录到 `/etc/fluxdns`，不要单独 bind mount `config.yaml` | Management 的配置 apply/还原用同目录原子替换；整文件 bind mount 上的替换会 `EBUSY` |
+| 配置文件位置 | 必须是 `/etc/fluxdns/config.yaml` | 否则启动会生成并持续覆盖第二份快照副本 |
+| 挂载方式 | 整目录挂载宿主机目录到 `/etc/fluxdns`，不要单独 bind mount `config.yaml` | Management 的配置保存/写入磁盘用同目录原子替换；整文件 bind mount 上的替换会 `EBUSY` |
 | 首次准备 | 宿主目录里先放好 `config.yaml`（可从 `config-example.yaml` 复制），需要时再放 `tls/`、`rules/` | 该目录同时是配置、数据与规则根 |
 | 容器命令 | 保持 `CMD ["run", "--config", "/etc/fluxdns/config.yaml"]` | 与工作目录和快照路径一致 |
 | WebUI 可见性 | 需要从容器外访问时 `webui.address: 0.0.0.0`，且 `public_origin` 必须是浏览器实际访问的 origin | 示例中 `webui.address` 为 `127.0.0.1`，容器外不可达 |

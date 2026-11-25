@@ -1,8 +1,12 @@
-//! 活动源上的受限变更及类型化引用维护；不读取外部文件，也不序列化 ResolvedConfig。
+//! 配置变更模型、类型化合并（`apply_changes`）、引用改名及脱敏密码恢复。
+//!
+//! 本模块只在类型化配置上得到完整的目标配置，不负责保留原文写法；原文保留交给
+//! [`super::writer`] 的条目级写回。不读取外部文件，也不序列化 ResolvedConfig。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use yaml_serde::Value;
@@ -11,9 +15,10 @@ use super::contract::{ClientMatchV2, ClientV2, ConfigV2, DnsV2, StatisticsV2};
 use super::model::{
     CacheOverrideDto, EcsDto, HostsResourceDto, ListenerDto, LogsDto, OutboundDto,
     REDACTED_INLINE_PASSWORD, RuleSetDto, SecretRefDto, StrategyDto, TtlOverrideDto, UpstreamDto,
+    to_source_value,
 };
-use super::source_edit::edit_document;
 use super::validate::{ConfigError, ConfigErrorKind, ConfigErrorReport};
+use super::writer::{self, WriteError, is_list_module, source_model};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -124,11 +129,20 @@ impl ConfigChange {
     }
 }
 
-/// 只有严格解析、完整引用校验、路径校验和编辑后等价核对均通过才能构造。
+/// 只有严格解析、完整引用校验、路径校验和写回语义复核均通过才能构造。
 /// 此类型不代表资源、socket 或进程 owner 已经 prepare。
 pub(crate) struct SourceCandidate {
     pub(crate) source: String,
     pub(crate) config: ConfigV2,
+}
+
+/// 本次请求中的改名：`(模块, 旧名) -> 新名`。引用只按这张表做一次映射，不链式改名。
+pub(crate) type Renames = BTreeMap<(ConfigModule, String), String>;
+
+/// `apply_changes` 的结果：已通过完整语义校验的目标配置及本次改名表。
+pub(crate) struct AppliedChanges {
+    pub(crate) config: ConfigV2,
+    pub(crate) renames: Renames,
 }
 
 #[derive(Debug, Error)]
@@ -139,8 +153,15 @@ pub(crate) enum EditError {
     DuplicateTarget,
     #[error("original resource does not exist in the active configuration")]
     NotFound,
-    #[error("candidate cannot be represented by the supported source editor")]
-    UnsupportedSource,
+    /// 写回层无法安全修改源文件中该条目（含锚点/别名，或写回结果未通过语义复核）。
+    #[error("configuration source layout of {module} cannot be edited safely")]
+    Layout {
+        module: &'static str,
+        name: Option<String>,
+    },
+    /// 类型化值无法在 DTO 与 YAML 值之间往返；正常输入不会出现。
+    #[error("candidate cannot be converted between typed and source representation")]
+    Internal,
     #[error("candidate validation failed: {0}")]
     Validation(ConfigErrorReport),
 }
@@ -148,6 +169,15 @@ pub(crate) enum EditError {
 impl From<ConfigErrorReport> for EditError {
     fn from(report: ConfigErrorReport) -> Self {
         Self::Validation(report)
+    }
+}
+
+impl From<WriteError> for EditError {
+    fn from(error: WriteError) -> Self {
+        match error {
+            WriteError::Layout { module, name } => Self::Layout { module, name },
+            WriteError::Serialize => Self::Internal,
+        }
     }
 }
 
@@ -197,56 +227,62 @@ pub(crate) fn expand_redacted_changes(
     Ok(expanded)
 }
 
-/// 所有旧键均相对于同一活动源定位，最后一次性校验整张引用图，允许合法的组合变更。
+/// 保存的候选构造入口：类型化合并后用条目级写回生成源文本，再严格解析并校验路径。
 pub(crate) fn build_candidate(
     source: &str,
     source_path: &Path,
     changes: &[ConfigChange],
 ) -> Result<SourceCandidate, EditError> {
+    let base = ConfigV2::parse(source.as_bytes())?;
+    let applied = apply_changes(&base, changes)?;
+    applied.config.resolve_paths(source_path)?;
+    let text = writer::render(source, &base, &applied.config, &applied.renames)?;
+    let config = ConfigV2::parse(text.as_bytes())?;
+    config.resolve_paths(source_path)?;
+    Ok(SourceCandidate {
+        source: text,
+        config,
+    })
+}
+
+/// 在类型化配置上替换或追加条目、改写引用，得到完整且已通过语义校验的目标配置。
+///
+/// 所有旧名均相对于 `base` 定位，最后一次性校验整张引用图，允许合法的组合变更（例如同一请求
+/// 内新增上游并让策略引用它）。值的比较与合并只使用源序列化，内联凭据不会被脱敏占位符覆盖。
+pub(crate) fn apply_changes(
+    base: &ConfigV2,
+    changes: &[ConfigChange],
+) -> Result<AppliedChanges, EditError> {
     if changes.is_empty()
         || changes.len() > 128
         || serde_json::to_vec(changes)
-            .map_err(|_| EditError::UnsupportedSource)?
+            .map_err(|_| EditError::Internal)?
             .len()
             > 2 * 1024 * 1024
     {
         return Err(EditError::Budget);
     }
-    let original = ConfigV2::parse(source.as_bytes())?;
-    let original_tree: Value =
-        yaml_serde::from_str(source).map_err(|_| EditError::UnsupportedSource)?;
-    let mut tree = original_tree.clone();
+    let model = source_model(base)?;
     let mut touched = BTreeSet::new();
-    let mut renames = BTreeMap::new();
+    let mut renames = Renames::new();
+    let mut tree: BTreeMap<ConfigModule, Value> = model.clone();
     for change in changes {
         let module = change.module();
-        let (old_name, value, canonical_old) = match change {
-            ConfigChange::Listener(change) => {
-                resource(change, &original.listener, ListenerDto::name)?
-            }
+        let (old_name, value) = match change {
+            ConfigChange::Listener(change) => resource(change, &base.listener, ListenerDto::name)?,
             ConfigChange::Upstreams(change) => {
-                resource(change, &original.upstreams, UpstreamDto::name)?
+                resource(change, &base.upstreams, UpstreamDto::name)?
             }
-            ConfigChange::Strategy(change) => {
-                resource(change, &original.strategy, |item| &item.name)?
-            }
-            ConfigChange::Hosts(change) => {
-                resource(change, &original.hosts, HostsResourceDto::name)?
-            }
-            ConfigChange::Outbound(change) => {
-                resource(change, &original.outbound, |item| &item.name)?
-            }
-            ConfigChange::RuleSet(change) => {
-                resource(change, &original.rule_set, RuleSetDto::name)?
-            }
-            ConfigChange::Clients(ClientMutation::Create { value }) => {
-                (None, to_value(value)?, None)
-            }
+            ConfigChange::Strategy(change) => resource(change, &base.strategy, |item| &item.name)?,
+            ConfigChange::Hosts(change) => resource(change, &base.hosts, HostsResourceDto::name)?,
+            ConfigChange::Outbound(change) => resource(change, &base.outbound, |item| &item.name)?,
+            ConfigChange::RuleSet(change) => resource(change, &base.rule_set, RuleSetDto::name)?,
+            ConfigChange::Clients(ClientMutation::Create { value }) => (None, to_value(value)?),
             ConfigChange::Clients(ClientMutation::Update {
                 original_name,
                 value,
             }) => {
-                let old = original
+                let old = base
                     .clients
                     .iter()
                     .find(|item| item.name == *original_name)
@@ -254,39 +290,31 @@ pub(crate) fn build_candidate(
                 let mut next = to_value(value)?;
                 let client_id = value.client_id.as_ref().unwrap_or(&old.client_id);
                 next["client_id"] = Value::String(client_id.clone());
-                (Some(original_name.as_str()), next, Some(to_value(old)?))
+                (Some(original_name.as_str()), next)
             }
-            ConfigChange::Dns(value) => (None, to_value(value)?, Some(to_value(&original.dns)?)),
-            ConfigChange::Statistics(value) => (
-                None,
-                to_value(value)?,
-                Some(to_value(&original.statistics)?),
-            ),
-            ConfigChange::Logs(value) => (None, to_value(value)?, Some(to_value(&original.logs)?)),
+            ConfigChange::Dns(value) => (None, to_value(value)?),
+            ConfigChange::Statistics(value) => (None, to_value(value)?),
+            ConfigChange::Logs(value) => (None, to_value(value)?),
         };
-        let single = matches!(
-            module,
-            ConfigModule::Dns | ConfigModule::Statistics | ConfigModule::Logs
-        );
-        let new_name = if single {
-            ""
+        let list = is_list_module(module);
+        let new_name = if list {
+            value["name"]
+                .as_str()
+                .ok_or(EditError::Internal)?
+                .to_owned()
         } else {
-            value["name"].as_str().ok_or(EditError::UnsupportedSource)?
+            String::new()
         };
-        let key = (module, old_name.unwrap_or(new_name).to_owned());
+        let key = (module, old_name.unwrap_or(&new_name).to_owned());
         if !touched.insert(key) {
             return Err(EditError::DuplicateTarget);
         }
-        if single {
-            let slot = tree
-                .as_mapping_mut()
-                .ok_or(EditError::UnsupportedSource)?
-                .entry(Value::String(module.key().into()))
-                .or_insert_with(|| Value::Mapping(Default::default()));
-            merge_changed(slot, canonical_old.as_ref().unwrap(), &value);
+        let slot = tree.get_mut(&module).ok_or(EditError::Internal)?;
+        if !list {
+            *slot = value;
         } else if let Some(old_name) = old_name {
-            // 索引来自旧树，不按已经改名的中间树查找，因此交换名称不会错误命中。
-            let index = original_tree[module.key()]
+            // 索引来自 base，不按已经改名的中间结果查找，因此互换名称不会错误命中。
+            let index = model[&module]
                 .as_sequence()
                 .and_then(|items| {
                     items
@@ -294,99 +322,64 @@ pub(crate) fn build_candidate(
                         .position(|item| item["name"].as_str() == Some(old_name))
                 })
                 .ok_or(EditError::NotFound)?;
-            merge_changed(
-                &mut tree[module.key()][index],
-                canonical_old.as_ref().unwrap(),
-                &value,
-            );
+            let items = slot.as_sequence_mut().ok_or(EditError::Internal)?;
+            items[index] = value;
             if old_name != new_name {
-                renames.insert((module, old_name.to_owned()), new_name.to_owned());
+                renames.insert((module, old_name.to_owned()), new_name);
             }
         } else {
-            let items = tree
-                .as_mapping_mut()
-                .ok_or(EditError::UnsupportedSource)?
-                .entry(Value::String(module.key().into()))
-                .or_insert_with(|| Value::Sequence(Vec::new()));
-            items
-                .as_sequence_mut()
-                .ok_or(EditError::UnsupportedSource)?
+            slot.as_sequence_mut()
+                .ok_or(EditError::Internal)?
                 .push(value);
         }
     }
     // 引用只做一次旧键 -> 新键映射，不递归替换、不触碰内联正文、路径或 SecretRef。
+    let mut tree: Value = Value::Mapping(
+        tree.into_iter()
+            .map(|(module, value)| (Value::String(module.key().into()), value))
+            .collect(),
+    );
     rewrite_references(&mut tree, &renames)?;
-    let intended = yaml_serde::to_string(&tree).map_err(|_| EditError::UnsupportedSource)?;
-    let config = ConfigV2::parse(intended.as_bytes())?;
-    config.resolve_paths(source_path)?;
-    let edited =
-        edit_document(source, &original_tree, &tree).map_err(|_| EditError::UnsupportedSource)?;
-    let reparsed = ConfigV2::parse(edited.as_bytes())?;
-    reparsed.resolve_paths(source_path)?;
-    Ok(SourceCandidate {
-        source: edited,
-        config,
-    })
+    let mut config = base.clone();
+    config.listener = from_tree(&tree, ConfigModule::Listener)?;
+    config.upstreams = from_tree(&tree, ConfigModule::Upstreams)?;
+    config.strategy = from_tree(&tree, ConfigModule::Strategy)?;
+    config.hosts = from_tree(&tree, ConfigModule::Hosts)?;
+    config.outbound = from_tree(&tree, ConfigModule::Outbound)?;
+    config.rule_set = from_tree(&tree, ConfigModule::RuleSet)?;
+    config.clients = from_tree(&tree, ConfigModule::Clients)?;
+    config.dns = from_tree(&tree, ConfigModule::Dns)?;
+    config.statistics = from_tree(&tree, ConfigModule::Statistics)?;
+    config.logs = from_tree(&tree, ConfigModule::Logs)?;
+    config.validate()?;
+    Ok(AppliedChanges { config, renames })
 }
 
 fn to_value(value: &impl Serialize) -> Result<Value, EditError> {
-    yaml_serde::to_value(value).map_err(|_| EditError::UnsupportedSource)
+    to_source_value(value).map_err(|_| EditError::Internal)
+}
+
+fn from_tree<T: DeserializeOwned>(tree: &Value, module: ConfigModule) -> Result<T, EditError> {
+    yaml_serde::from_value(tree[module.key()].clone()).map_err(|_| EditError::Internal)
 }
 
 fn resource<'a, T: Serialize>(
     change: &'a ResourceMutation<T>,
     original: &[T],
     name: impl Fn(&T) -> &str,
-) -> Result<(Option<&'a str>, Value, Option<Value>), EditError> {
+) -> Result<(Option<&'a str>, Value), EditError> {
     match change {
-        ResourceMutation::Create { value } => Ok((None, to_value(value)?, None)),
+        ResourceMutation::Create { value } => Ok((None, to_value(value)?)),
         ResourceMutation::Update {
             original_name,
             value,
         } => {
-            let old = original
+            original
                 .iter()
                 .find(|item| name(item) == original_name)
                 .ok_or(EditError::NotFound)?;
-            Ok((Some(original_name), to_value(value)?, Some(to_value(old)?)))
+            Ok((Some(original_name), to_value(value)?))
         }
-    }
-}
-
-/// 只写 DTO 中确实改变的字段，保留原文中未变化的缺省、相对路径和 duration/IP 写法。
-fn merge_changed(source: &mut Value, old: &Value, new: &Value) {
-    if old == new {
-        return;
-    }
-    match (source, old, new) {
-        (Value::Mapping(source), Value::Mapping(old), Value::Mapping(new)) => {
-            for key in old.keys().filter(|key| !new.contains_key(*key)) {
-                source.remove(key);
-            }
-            for (key, value) in new {
-                if let Some(previous) = old.get(key) {
-                    if previous != value {
-                        merge_changed(
-                            source
-                                .entry(key.clone())
-                                .or_insert_with(|| previous.clone()),
-                            previous,
-                            value,
-                        );
-                    }
-                } else {
-                    source.insert(key.clone(), value.clone());
-                }
-            }
-        }
-        (Value::Sequence(source), Value::Sequence(old), Value::Sequence(new))
-            if source.len() == old.len() && old.len() == new.len() =>
-        {
-            for ((source, old), new) in source.iter_mut().zip(old).zip(new) {
-                merge_changed(source, old, new);
-            }
-        }
-        (source, _, new) => *source = new.clone(),
     }
 }
 
@@ -435,12 +428,12 @@ fn rewrite_references(
             Some("doh") => {
                 for route in listener["routes"]
                     .as_sequence_mut()
-                    .ok_or(EditError::UnsupportedSource)?
+                    .ok_or(EditError::Internal)?
                 {
                     rename_field(route, "strategy", ConfigModule::Strategy, renames);
                 }
             }
-            _ => return Err(EditError::UnsupportedSource),
+            _ => return Err(EditError::Internal),
         }
     }
     for upstream in items(tree, ConfigModule::Upstreams) {
@@ -463,7 +456,7 @@ fn rewrite_references(
                 }
             }
             Some("hosts") => {}
-            _ => return Err(EditError::UnsupportedSource),
+            _ => return Err(EditError::Internal),
         }
     }
     for strategy in items(tree, ConfigModule::Strategy) {
@@ -475,7 +468,7 @@ fn rewrite_references(
         );
         for rule in strategy["rules"]
             .as_sequence_mut()
-            .ok_or(EditError::UnsupportedSource)?
+            .ok_or(EditError::Internal)?
         {
             rename_field(rule, "hosts", ConfigModule::Hosts, renames);
             rename_field(rule, "upstream", ConfigModule::Upstreams, renames);

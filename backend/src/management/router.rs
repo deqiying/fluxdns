@@ -21,12 +21,12 @@ use sha2::{Digest, Sha256};
 
 use super::assets;
 use super::auth::{AuthError, AuthState, hash_password, validate_setup_credentials};
-use super::config_mutation::ConfigMutationOwner;
+use super::config_api::ServiceHost;
 use super::contract::{ErrorCode, ErrorEnvelope};
 use super::query;
 use super::query::ManagementQueryService;
 use super::session::{SessionStore, SessionView, valid_token};
-use crate::config::store::{ConfigStore, ConfigStoreError};
+use crate::config::store::{ConfigStore, StoreError};
 
 const MAX_JSON_BODY_BYTES: usize = 16 * 1024;
 const MAX_URI_BYTES: usize = 4 * 1024;
@@ -34,6 +34,9 @@ const MAX_HEADER_COUNT: usize = 64;
 const MAX_HEADER_BYTES: usize = 16 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 256;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+/// 保存与重新加载会同步完成 Runtime prepare（远程规则下载最长 30 秒），需要更长的响应窗口；
+/// 超时只结束 HTTP 响应，不中断已在独立任务中执行的写操作。
+const CONFIG_WRITE_TIMEOUT: Duration = Duration::from_secs(35);
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(60);
 const LOGIN_ATTEMPTS_PER_WINDOW: usize = 10;
 const SETUP_ATTEMPTS_PER_WINDOW: usize = 5;
@@ -47,7 +50,7 @@ pub(crate) struct AuthServices {
     pub(crate) auth: Arc<AuthState>,
     pub(crate) sessions: Arc<SessionStore>,
     pub(crate) config_store: Arc<ConfigStore>,
-    pub(crate) config_mutations: Option<Arc<ConfigMutationOwner>>,
+    pub(crate) config_host: Option<Arc<ServiceHost>>,
     pub(crate) queries: Option<Arc<ManagementQueryService>>,
     pub(crate) events: Option<Arc<super::events::EventHub>>,
     pub(crate) public_origin: String,
@@ -66,7 +69,7 @@ impl AuthServices {
             auth,
             sessions,
             config_store,
-            config_mutations: None,
+            config_host: None,
             queries,
             events: None,
             public_origin,
@@ -74,11 +77,12 @@ impl AuthServices {
         }
     }
 
-    pub(crate) fn with_config_control(mut self, control: crate::service::ServiceControl) -> Self {
-        self.config_mutations = Some(Arc::new(ConfigMutationOwner::new(
-            Arc::clone(&self.config_store),
-            control,
-        )));
+    pub(crate) fn with_config_control(
+        mut self,
+        control: crate::service::ServiceControl,
+        coordinator: Arc<crate::runtime::RuntimeCoordinator>,
+    ) -> Self {
+        self.config_host = Some(Arc::new(ServiceHost::new(control, coordinator)));
         self
     }
 
@@ -140,7 +144,7 @@ pub(crate) fn build_router(services: Arc<AuthServices>) -> Router {
     let protected = Router::new()
         .route("/api/v2/auth/session", get(get_session))
         .merge(query::routes())
-        .merge(super::config_mutation::routes())
+        .merge(super::config_api::routes())
         .merge(super::events::protected_routes())
         .route_layer(middleware::from_fn_with_state(
             Arc::clone(&services),
@@ -231,7 +235,12 @@ async fn request_boundary(
         );
     };
     let is_api = request.uri().path().starts_with("/api/");
-    let mut response = match tokio::time::timeout(REQUEST_TIMEOUT, next.run(request)).await {
+    let timeout = if is_config_write(request.uri().path()) {
+        CONFIG_WRITE_TIMEOUT
+    } else {
+        REQUEST_TIMEOUT
+    };
+    let mut response = match tokio::time::timeout(timeout, next.run(request)).await {
         Ok(response) => response,
         Err(_) => error_response(
             StatusCode::REQUEST_TIMEOUT,
@@ -256,17 +265,12 @@ async fn request_boundary(
     with_request_id(response, &request_id)
 }
 
+fn is_config_write(path: &str) -> bool {
+    matches!(path, "/api/v2/config/save" | "/api/v2/config/reload")
+}
+
 fn request_body_limit(path: &str) -> usize {
-    if matches!(
-        path,
-        "/api/v2/config/validate"
-            | "/api/v2/config/apply"
-            | "/api/v2/config/files/restore"
-            | "/api/v2/config/files/retry"
-    ) || path
-        .strip_prefix("/api/v2/config/modules/")
-        .is_some_and(|tail| tail.ends_with("/validate") || tail.ends_with("/apply"))
-    {
+    if path == "/api/v2/config/save" {
         super::contract::MAX_MUTATION_BYTES
     } else {
         MAX_JSON_BODY_BYTES
@@ -372,18 +376,16 @@ async fn post_setup(
         Ok(Ok(hash)) => hash,
         _ => return internal_error(&request_id),
     };
-    let store = Arc::clone(&services.config_store);
-    let store_username = username.clone();
-    let commit = match tokio::task::spawn_blocking(move || {
-        store.create_initial_user(&store_username, &password_hash)
-    })
-    .await
+    let users = match services
+        .config_store
+        .create_initial_user(&username, &password_hash)
+        .await
     {
-        Ok(Ok(commit)) => commit,
-        Ok(Err(error)) => return config_store_error(error, &request_id),
-        Err(_) => return internal_error(&request_id),
+        Ok(users) => users,
+        Err(error) => return config_store_error(error, &request_id),
     };
-    services.auth.replace(&commit.users);
+    // 首用户不切换 Runtime，也不撤销会话：直接替换认证状态。
+    services.auth.replace(&users);
     issue_session(
         &services.sessions,
         username,
@@ -592,16 +594,16 @@ fn issue_session(
     response
 }
 
-fn config_store_error(error: ConfigStoreError, request_id: &RequestId) -> Response {
+fn config_store_error(error: StoreError, request_id: &RequestId) -> Response {
     match error {
-        ConfigStoreError::AlreadyInitialized => error_response(
+        StoreError::AlreadyInitialized => error_response(
             StatusCode::CONFLICT,
             ErrorCode::SetupAlreadyCompleted,
             "WebUI setup has already completed",
             false,
             request_id,
         ),
-        ConfigStoreError::Conflict | ConfigStoreError::Busy => error_response(
+        StoreError::FileChanged(_) | StoreError::Busy => error_response(
             StatusCode::CONFLICT,
             ErrorCode::ConfigConflict,
             "configuration changed while setup was in progress",
@@ -646,15 +648,14 @@ pub(super) fn v2_error_response_with_fields(
 ) -> Response {
     v2_error_response_detailed(
         super::errors::ManagementError {
-            code,
             field_errors,
-            diagnostic: None,
+            ..code.into()
         },
         request_id,
     )
 }
 
-/// HTTP 和 operation 采用同一安全诊断，不将底层 Error/Debug 内容发送给客户端。
+/// 所有 v2 错误共用同一安全诊断投影，不将底层 Error/Debug 内容发送给客户端。
 pub(super) fn v2_error_response_detailed(
     error: super::errors::ManagementError,
     request_id: &RequestId,
@@ -663,6 +664,7 @@ pub(super) fn v2_error_response_detailed(
         code,
         field_errors,
         diagnostic,
+        disk,
     } = error;
     let status =
         StatusCode::from_u16(code.http_status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -682,6 +684,7 @@ pub(super) fn v2_error_response_detailed(
                 retryable,
                 field_errors,
                 diagnostic: diagnostic.map(|detail| *detail),
+                disk,
             }),
         )
             .into_response(),
@@ -720,6 +723,7 @@ fn error_response(
                 retryable,
                 field_errors: Vec::new(),
                 diagnostic: None,
+                disk: None,
             }),
         )
             .into_response(),
@@ -773,7 +777,6 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{AuthServices, build_router};
-    use crate::config::hash::deterministic_hash;
     use crate::config::store::ConfigStore;
     use crate::config::{ConfigV2Loader, LoadOptions};
     use crate::management::ManagementRuntime;
@@ -796,11 +799,7 @@ mod tests {
         std::fs::write(&source_path, source.as_bytes()).unwrap();
         let auth = Arc::new(AuthState::new(&[]).unwrap());
         let sessions = Arc::new(SessionStore::new(false));
-        let config_store = Arc::new(ConfigStore::new(
-            source_path.clone(),
-            source_path.clone(),
-            deterministic_hash(source.as_bytes()),
-        ));
+        let config_store = Arc::new(ConfigStore::open_for_test(&source_path));
         (
             Arc::new(AuthServices::new(
                 auth,
@@ -961,7 +960,6 @@ mod tests {
         let runtime = ManagementRuntime::new(
             Arc::clone(&services.auth),
             Arc::clone(&services.sessions),
-            Arc::clone(&services.config_store),
             None,
         );
         let app = build_router(Arc::clone(&services));
@@ -994,11 +992,17 @@ mod tests {
         let source = std::fs::read_to_string(&source_path).unwrap();
         assert!(source.contains("$argon2id$"));
         assert!(!source.contains("correct horse battery staple"));
+        // 镜像与源文件一致；内存文档同步更新，Runtime 代次不变。
+        let mirror = root.join("config.yaml");
+        assert_eq!(std::fs::read_to_string(mirror).unwrap(), source);
+        assert_eq!(services.config_store.current().text.as_ref(), source);
+        assert_eq!(services.config_store.current().runtime_revision, 1);
 
         let loaded = ConfigV2Loader::new(LoadOptions::default().without_snapshot())
             .load_from_path(&source_path)
             .unwrap();
-        runtime.reconcile_users(&loaded.resolved.webui.users, &loaded.resolved.input_hash);
+        // setup 已直接替换认证状态；同一用户列表随 Runtime 换代同步时不撤销会话。
+        runtime.reconcile_users(&loaded.resolved.webui.users);
         assert!(services.sessions.lookup(&token).unwrap().is_some());
 
         let request = Request::builder()
@@ -1012,7 +1016,7 @@ mod tests {
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(body["user"]["name"], "admin");
 
-        runtime.reconcile_users(&loaded.resolved.webui.users, "external-fingerprint");
+        runtime.reconcile_users(&loaded.resolved.webui.users);
         assert!(services.sessions.lookup(&token).unwrap().is_some());
 
         let mut config = loaded.config;
@@ -1030,11 +1034,11 @@ mod tests {
         .webui
         .users
         .clone();
-        runtime.reconcile_users(&users, "users-added");
+        runtime.reconcile_users(&users);
         assert!(services.sessions.lookup(&token).unwrap().is_none());
         let issued = services.sessions.issue("admin".to_owned()).unwrap();
         let reversed = users.iter().rev().cloned().collect::<Vec<_>>();
-        runtime.reconcile_users(&reversed, "users-reordered");
+        runtime.reconcile_users(&reversed);
         assert!(
             services
                 .sessions
@@ -1054,7 +1058,7 @@ mod tests {
         .webui
         .users
         .clone();
-        runtime.reconcile_users(&users, "password-changed");
+        runtime.reconcile_users(&users);
         assert!(
             services
                 .sessions
@@ -1117,13 +1121,12 @@ mod tests {
     async fn detailed_http_error_preserves_request_id_and_safe_diagnostic() {
         let response = super::v2_error_response_detailed(
             crate::management::errors::ManagementError {
-                code: crate::management::contract::ErrorCode::ValidationFailed,
                 diagnostic: Some(Box::new(crate::diagnostics::Diagnostic::new(
                     "configuration",
                     "CONFIG_REFERENCE_MISSING",
                     "引用的上游不存在。",
                 ))),
-                field_errors: Vec::new(),
+                ..crate::management::contract::ErrorCode::ValidationFailed.into()
             },
             &super::RequestId("diagnostic-request".to_owned()),
         );

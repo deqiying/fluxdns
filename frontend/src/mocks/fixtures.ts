@@ -55,26 +55,14 @@ export const serviceMetricsFixture = {
   ],
 } satisfies V2Schemas["ServiceMetrics"];
 
-export const configStateFixture = {
-  active_revision: "active-8",
-  runtime_revision: "runtime-12",
-  persisted_revision: "active-7",
-  observed_file_revision: "files-10",
-  files: { source: "changed", derived: "unchanged" },
-  synchronization: "applied_unpersisted",
-  operation_id: "op-123",
-} satisfies V2Schemas["ConfigState"];
-
-const synchronizedConfigStateFixture = {
-  ...configStateFixture,
-  persisted_revision: "active-8",
-  files: { source: "unchanged", derived: "unchanged" },
-  synchronization: "synced",
-  operation_id: null,
-} satisfies V2Schemas["ConfigState"];
+export const configStateFixture: V2Schemas["ConfigState"] = {
+  config_digest: "a1b2c3d4e5f6".padEnd(64, "0"),
+  runtime_revision: "12",
+  disk: { status: "in_sync" },
+};
 
 export const dnsConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [{
     module: "dns",
     value: {
@@ -108,7 +96,7 @@ export const dnsConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const statisticsConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [{
     module: "statistics",
     value: { retention: { days: 7, grace_days: 3, reference_size_bytes: 1_073_741_824 } },
@@ -122,7 +110,7 @@ export const statisticsConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const logsConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [{ module: "logs", value: { enable: true, level: "info", path: "./logs/fluxdns.log" } }],
   effective: [],
   references: [],
@@ -130,7 +118,7 @@ export const logsConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const outboundConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [
     { module: "outbound", value: { name: "proxy-primary", type: "socks5", proxy_url: { env: "PROXY_URL" } } },
     { module: "outbound", value: { name: "proxy-backup", type: "socks5", proxy_url: { file: "./secrets/proxy.txt" } } },
@@ -144,7 +132,7 @@ export const outboundConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const hostsConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [
     { module: "hosts", value: { name: "local", type: "const", format: "hosts", hosts: "127.0.0.1 localhost\n192.0.2.20 printer.lan" } },
     { module: "hosts", value: { name: "office", type: "file", format: "json", path: "./rules/office-hosts.json", auto_update: true, update_interval: "300000000000ns" } },
@@ -158,7 +146,7 @@ export const hostsConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const ruleSetsConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [
     { module: "rule_set", value: { name: "domains", type: "remote", format: "json", url: "https://rules.example.test/domains.json", proxy: "proxy-primary", auto_update: true, update_interval: "86400000000000ns" } },
     { module: "rule_set", value: { name: "custom", type: "const", format: "clash", rule: "+.example.test\n+.example.org" } },
@@ -172,7 +160,7 @@ export const ruleSetsConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const upstreamsConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [
     { module: "upstreams", value: { name: "local", type: "hosts", format: "hosts", hosts: "127.0.0.1 localhost" } },
     { module: "upstreams", value: { name: "secure-dns", type: "doh", address: "https://dns.example.test/dns-query", bootstrap: "local", proxy: "proxy-primary", edns_client_subnet: { mode: "disabled" } } },
@@ -184,7 +172,7 @@ export const upstreamsConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const strategiesConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [{
     module: "strategy",
     value: {
@@ -202,7 +190,7 @@ export const strategiesConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const listenersConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [
     { module: "listener", value: { name: "local", type: "udp", addresses: ["127.0.0.1"], port: 15353, strategy: "default", hosts: "local" } },
     { module: "listener", value: { name: "https", type: "doh", routes: [{ path: "/dns-query", strategy: "default" }], endpoints: [{ name: "loopback", addresses: ["127.0.0.1"], port: 18443, tls: { mode: "external" }, client_ip: { source: "forwarded_header", header: "X-Forwarded-For", trusted_proxies: ["127.0.0.1/32"], on_missing: "reject", on_invalid: "reject" } }] } },
@@ -216,7 +204,7 @@ export const listenersConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const clientsConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
   values: [
     { module: "clients", value: { name: "desktop", client_id: "Desktop-01", match: { ips: ["192.0.2.10", "2001:db8::/64"] }, strategy: "default", cache: { enabled: true }, edns_client_subnet: { mode: "disabled" } } },
     { module: "clients", value: { name: "mobile", client_id: "Mobile-01", match: { ips: [] } } },
@@ -227,7 +215,8 @@ export const clientsConfigReadFixture = {
 } satisfies V2Schemas["ConfigRead"];
 
 export const systemConfigReadFixture = {
-  state: synchronizedConfigStateFixture,
+  state: configStateFixture,
+  restart_required: [],
   work_path: "D:/Projects/Rust/fluxdns/_fluxdns",
   rules_path: "D:/Projects/Rust/fluxdns/_fluxdns/rules",
   database_path: "D:/Projects/Rust/fluxdns/_fluxdns/statistics.db",

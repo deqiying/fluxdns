@@ -6,7 +6,7 @@ import { ConfigFormModal } from "@/shared/components/ConfigFormModal";
 import { ConfigSyncBadge } from "@/shared/components/ConfigStateSummary";
 import { PageFrame } from "@/shared/components/PageFrame";
 import { PageState } from "@/shared/components/PageState";
-import { configStateEditable, useConfigChangeMutation, useConfigModule, useConfigState } from "@/shared/config/hooks";
+import { useConfigSave, useConfigModule, useConfigState } from "@/shared/config/hooks";
 
 type Schemas = components["schemas"];
 type Listener = Schemas["Listener"];
@@ -37,12 +37,24 @@ interface ListenerFormValues {
   endpoints?: EndpointFormValue[];
 }
 
+const endpointFieldAliases: Readonly<Record<string, string>> = {
+  "tls.mode": "tls_mode", "tls.certificate_file": "certificate_file", "tls.private_key_file": "private_key_file",
+  "client_ip.source": "client_ip_source", "client_ip.header": "header", "client_ip.trusted_proxies": "trusted_proxies",
+  "client_ip.on_missing": "on_missing", "client_ip.on_invalid": "on_invalid",
+};
+
+function listenerFieldPath(_: unknown, [list, index, ...field]: (string | number)[]) {
+  if (list !== "endpoints" || typeof index !== "number") return undefined;
+  const key = (typeof field.at(-1) === "number" ? field.slice(0, -1) : field).join(".");
+  return Object.hasOwn(endpointFieldAliases, key) ? [list, index, endpointFieldAliases[key]] : undefined;
+}
+
 export function ListenersPage() {
   const query = useConfigModule("listener");
   const state = useConfigState();
   const strategies = useConfigModule("strategy");
   const hosts = useConfigModule("hosts");
-  const mutation = useConfigChangeMutation("listener");
+  const mutation = useConfigSave();
   const [form] = Form.useForm<ListenerFormValues>();
   const formType = Form.useWatch("type", form);
   const [editing, setEditing] = useState<Listener | "create" | null>(null);
@@ -57,6 +69,7 @@ export function ListenersPage() {
     if (!editing) return;
     mutation.reset();
     setDirty(false);
+    form.resetFields();
     if (editing === "create") {
       form.setFieldsValue({ name: "", type: "udp", addresses: ["127.0.0.1"], port: 53, strategy: "" });
     } else if (editing.type === "udp" || editing.type === "tcp") {
@@ -87,21 +100,15 @@ export function ListenersPage() {
     { title: "操作", width: 72, align: "center", render: (_, item) => <Tooltip title="编辑监听入口"><Button type="text" aria-label={`编辑监听入口 ${item.name}`} icon={<Pencil size={17} />} onClick={() => setEditing(item)} /></Tooltip> },
   ];
 
-  const submit = async () => {
-    if (!query.data || !editing) return;
-    const values = await form.validateFields();
+  const submit = (values: ListenerFormValues) => {
+    if (!editing) return;
     const value: Listener = values.type === "doh"
       ? { name: values.name, type: "doh", routes: values.routes ?? [], endpoints: (values.endpoints ?? []).map(endpointFromForm) }
       : { name: values.name, type: values.type, addresses: values.addresses ?? [], port: values.port ?? 53, strategy: values.strategy ?? "", ...(values.hosts ? { hosts: values.hosts } : {}) };
     const change: Schemas["ConfigChange"] = editing === "create"
       ? { module: "listener", change: { action: "create", value } }
       : { module: "listener", change: { action: "update", original_name: editing.name, value } };
-    try {
-      const operation = await mutation.mutateAsync({ change });
-      if (operation) setEditing(null);
-    } catch {
-      // 绑定、文件冲突或应用失败时保留草稿。
-    }
+    mutation.save(change, () => setEditing(null));
   };
 
   return (
@@ -112,15 +119,15 @@ export function ListenersPage() {
         actions={(
           <Space size={12}>
             {state.data ? <ConfigSyncBadge state={state.data} /> : null}
-            <Button type="primary" icon={<Plus size={17} />} disabled={!query.data || !configStateEditable(query.data.state)} onClick={() => setEditing("create")}>添加监听入口</Button>
+            <Button type="primary" icon={<Plus size={17} />} disabled={!query.data} onClick={() => setEditing("create")}>添加监听入口</Button>
           </Space>
         )}
       >
         <PageState loading={query.isLoading} error={query.error} hasData={!!query.data} onRetry={() => void query.refetch()} />
         <PageState error={strategies.error ?? hosts.error} hasData={!!query.data} onRetry={() => { void strategies.refetch(); void hosts.refetch(); }} />
         {query.data ? <div className="config-module-content"><div className="config-table-toolbar"><Input allowClear value={search} prefix={<Search size={16} />} placeholder="搜索监听入口名称" onChange={(event) => setSearch(event.target.value)} /></div><Table rowKey="name" columns={columns} dataSource={visible} pagination={{ pageSize: 20, hideOnSinglePage: true }} scroll={{ x: 900 }} locale={{ emptyText: search ? "没有匹配的监听入口" : "尚未配置监听入口" }} /></div> : null}
-        <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加监听入口" : "编辑监听入口"} dirty={dirty} busy={mutation.isPending} error={mutation.error} onCancel={() => setEditing(null)} onSubmit={() => void submit()}>
-          <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)}>
+        <ConfigFormModal open={editing !== null} title={editing === "create" ? "添加监听入口" : "编辑监听入口"} dirty={dirty} busy={mutation.isPending} error={mutation.error} form={form} module="listener" mapField={listenerFieldPath} configDigest={state.data?.config_digest} moduleDigest={query.data?.state.config_digest} onCancel={() => setEditing(null)} onSubmit={() => form.submit()}>
+          <Form form={form} layout="vertical" requiredMark="optional" onValuesChange={() => setDirty(true)} onFinish={submit}>
             <Form.Item name="name" label="名称" rules={[{ required: true }, { max: 128 }]}><Input /></Form.Item>
             <Form.Item name="type" label="协议" rules={[{ required: true }]}><Segmented block options={[{ label: "UDP", value: "udp" }, { label: "TCP", value: "tcp" }, { label: "DoH", value: "doh" }]} /></Form.Item>
             {formType === "doh" ? <DohFields strategyOptions={strategyOptions} /> : <SocketFields strategyOptions={strategyOptions} hostsOptions={hostsOptions} />}
