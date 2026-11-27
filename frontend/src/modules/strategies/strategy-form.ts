@@ -23,7 +23,7 @@ export interface StrategyFormValues {
   cache_optimistic_mode: "inherit" | "enabled" | "disabled";
   cache_answer_ttl?: string;
   cache_max_age?: string;
-  /** 空应答（NODATA/NXDOMAIN）乐观窗口；`0s` 表示空应答过期即回源。 */
+  /** 短响应（NODATA、REFUSED、空响应）与 NXDOMAIN 的乐观窗口；`0s` 表示过期即回源。 */
   cache_negative_max_age?: string;
   ttl_mode: "inherit" | "enabled" | "disabled";
   ttl_min?: string;

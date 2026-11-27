@@ -864,7 +864,7 @@ impl PolicyDnsCore {
             {
                 if let Some(ttl) = response.short_cache_ttl() {
                     if outcome.source != StatsSource::Cache {
-                        // 缓存命中已按剩余寿命改写，不能在输出阶段重新补满 10s。
+                        // 缓存命中（fresh/stale）已改写短 TTL，不能在输出阶段重新补满 10s。
                         Arc::make_mut(&mut response).rewrite_short_cache_ttl(ttl);
                     }
                 } else {
@@ -990,7 +990,12 @@ impl PolicyDnsCore {
                     .cache_match(matched.observation());
             }
             let mut stale_response = (*record.entry.response).clone();
-            stale_response.set_ttl(answer_ttl);
+            if let Some(short_ttl) = stale_response.short_cache_ttl() {
+                // 短期响应乐观返回同步改写 RR TTL 与 SOA.MINIMUM，且不超过 10s 短寿命。
+                stale_response.rewrite_short_cache_ttl(answer_ttl.min(short_ttl));
+            } else {
+                stale_response.set_ttl(answer_ttl);
+            }
             if refresh.try_consume() {
                 self.schedule_optimistic_refresh(request);
             } else {
@@ -1494,23 +1499,24 @@ fn fresh_cache_response(
     response
 }
 
-/// 仅在当前 pool 对该响应质量允许的 optimistic max-age 内返回其 stale answer TTL。
+/// 仅在当前 pool 对该响应允许的 optimistic max-age 内返回其 stale answer TTL。
 ///
-/// REFUSED/空 Answer 到期即回源；其余应答按质量使用当前池窗口，Failure 永不乐观返回。
-/// 即使条目携带旧的长 stale_until，也不能绕过短期响应规则。
+/// REFUSED/空 Answer 与非空 NXDOMAIN 共用当前池的 `negative_max_age` 窗口，完整正应答使用
+/// `max_age`，非空 Failure 永不乐观返回。即使条目携带旧的长 stale_until，也会按当前池收紧。
 fn stale_answer_ttl(
     decision: &crate::policy::CacheDecision,
     entry: &crate::ports::cache::CacheEntry,
     now: Instant,
 ) -> Option<Duration> {
-    if entry.response.short_cache_ttl().is_some() {
-        return None;
-    }
     let answer_ttl = decision.optimistic_answer_ttl()?;
-    let max_age = match entry.quality {
-        CacheQuality::Complete => decision.optimistic_max_age()?,
-        CacheQuality::Negative => decision.optimistic_negative_max_age()?,
-        CacheQuality::Failure => return None,
+    let max_age = if entry.response.short_cache_ttl().is_some() {
+        decision.optimistic_negative_max_age()?
+    } else {
+        match entry.quality {
+            CacheQuality::Complete => decision.optimistic_max_age()?,
+            CacheQuality::Negative => decision.optimistic_negative_max_age()?,
+            CacheQuality::Failure => return None,
+        }
     };
     if max_age.is_zero() {
         return None;
@@ -3213,35 +3219,81 @@ mod tests {
             )
             .unwrap(),
         );
-        // 乐观窗口按条目质量选择：完整应答 60s、负应答 20s、失败类不乐观返回。
+        // 乐观窗口按响应类别选择：完整正应答 60s、短响应与非空负应答 20s、非空失败类不乐观返回。
         let max_age_now = Instant::now();
-        let entry_with = |quality, class, expired_for: u64| crate::ports::cache::CacheEntry {
-            response: Arc::clone(&response),
-            upstream: cache_upstream_provenance("remote", Some("remote")),
-            inserted_at: max_age_now - Duration::from_secs(expired_for + 10),
-            expires_at: max_age_now - Duration::from_secs(expired_for),
-            // 模拟快照中按旧规则写入的长窗口，验证 lookup 侧按当前池收紧。
-            stale_until: Some(max_age_now + Duration::from_secs(86_400)),
-            response_class: class,
-            producer_revision: RuntimeRevision(1),
-            quality,
-            checksum: 1,
-            format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
+        let entry_with = |resp: &Arc<CanonicalResponse>, quality, class, expired_for: u64| {
+            crate::ports::cache::CacheEntry {
+                response: Arc::clone(resp),
+                upstream: cache_upstream_provenance("remote", Some("remote")),
+                inserted_at: max_age_now - Duration::from_secs(expired_for + 10),
+                expires_at: max_age_now - Duration::from_secs(expired_for),
+                // 模拟快照中按旧规则写入的长窗口，验证 lookup 侧按当前池收紧。
+                stale_until: Some(max_age_now + Duration::from_secs(86_400)),
+                response_class: class,
+                producer_revision: RuntimeRevision(1),
+                quality,
+                checksum: 1,
+                format_version: crate::ports::cache::CACHE_ENTRY_FORMAT_VERSION,
+            }
         };
+        let empty_nodata = Arc::new(
+            CanonicalResponse::empty_response(&request.query, ResponseCode::NoError).unwrap(),
+        );
+        let empty_servfail = Arc::new(
+            CanonicalResponse::empty_response(&request.query, ResponseCode::ServFail).unwrap(),
+        );
+        let empty_refused = Arc::new(
+            CanonicalResponse::empty_response(&request.query, ResponseCode::Refused).unwrap(),
+        );
         use crate::ports::cache::{CacheQuality as Q, CacheResponseClass as C};
         let cases = [
-            (Q::Complete, C::NoError, 59, Some(Duration::from_secs(7))),
-            (Q::Complete, C::NoError, 61, None),
-            (Q::Negative, C::NoData, 19, Some(Duration::from_secs(7))),
-            (Q::Negative, C::NoData, 21, None),
-            (Q::Negative, C::NxDomain, 21, None),
-            (Q::Failure, C::ServFail, 1, None),
+            (
+                &response,
+                Q::Complete,
+                C::NoError,
+                59,
+                Some(Duration::from_secs(7)),
+            ),
+            (&response, Q::Complete, C::NoError, 61, None),
+            (
+                &response,
+                Q::Negative,
+                C::NxDomain,
+                19,
+                Some(Duration::from_secs(7)),
+            ),
+            (&response, Q::Negative, C::NxDomain, 21, None),
+            (&response, Q::Failure, C::ServFail, 1, None),
+            (
+                &empty_nodata,
+                Q::Negative,
+                C::NoData,
+                19,
+                Some(Duration::from_secs(7)),
+            ),
+            (&empty_nodata, Q::Negative, C::NoData, 21, None),
+            (
+                &empty_servfail,
+                Q::Failure,
+                C::ServFail,
+                19,
+                Some(Duration::from_secs(7)),
+            ),
+            (&empty_servfail, Q::Failure, C::ServFail, 21, None),
+            (
+                &empty_refused,
+                Q::Failure,
+                C::Refused,
+                19,
+                Some(Duration::from_secs(7)),
+            ),
+            (&empty_refused, Q::Failure, C::Refused, 21, None),
         ];
-        for (quality, class, expired_for, expected) in cases {
+        for (resp, quality, class, expired_for, expected) in cases {
             assert_eq!(
                 stale_answer_ttl(
                     &plan.cache,
-                    &entry_with(quality, class, expired_for),
+                    &entry_with(resp, quality, class, expired_for),
                     max_age_now
                 ),
                 expected,

@@ -36,6 +36,8 @@
 >
 > 2026-11-26 配置读写增量核对：基线 `be19359` 加工作树，重写配置读写、条目级写回、磁盘同步、派生副本与启动级配置各节；其余正文沿用原核对范围。验证见下文[配置读写与磁盘同步](#配置读写与磁盘同步2026-11-26)。上方 2026-11-05 与两条 2026-11-08 写回记录所指的“活动源与候选内部底座”一节已随 CST 修补一并删除。
 >
+> 2026-11-27 短响应乐观缓存增量核对：基线 `7aef52b` 加工作树，REFUSED 与所有空 Answer 继续保持 10s fresh 与客户端 TTL/SOA.MINIMUM 同步，并按 `optimistic.negative_max_age` 启用乐观缓存与后台刷新；验证见 [DNS 管线](backend/dns-pipeline.md#短响应缓存验证)。
+>
 > 依据：[config-example.yaml](../../config-example.yaml)
 >
 > 关联文档：[后端架构](../architecture/backend/overview.md)
@@ -350,9 +352,9 @@ ConfigV2
 | `dns.cache.failure_ttl` | duration | 非空 Answer 的 `SERVFAIL`、上游截断响应等失败类缓存时间；必须在 `1s..=5m`。REFUSED/空 Answer 固定 `10s`，不受此值影响。 |
 | `dns.cache.negative_ttl_max` | duration | 非空 Answer 的 `NXDOMAIN` 缓存寿命及客户端可见 TTL 上限；可省略，默认 `5m`，必须在 `1s..=1d`。NODATA/空 NXDOMAIN 改用固定 `10s`，不受此上限影响。 |
 | `dns.cache.optimistic.enabled` | boolean | 是否允许返回已过期记录并在后台刷新。 |
-| `dns.cache.optimistic.answer_ttl` | duration | 乐观缓存应答使用的 TTL。 |
+| `dns.cache.optimistic.answer_ttl` | duration | 乐观缓存应答使用的 TTL；REFUSED/空 Answer 的 stale 应答取 `min(answer_ttl, 10s)` 并同步改写 `SOA.MINIMUM`。 |
 | `dns.cache.optimistic.max_age` | duration | 完整正应答过期后仍可乐观返回的最长时间。 |
-| `dns.cache.optimistic.negative_max_age` | duration | 非空 Answer 的 NXDOMAIN 过期后仍可乐观返回的最长时间；可省略，默认 `5m`，`0s` 关闭。解析时取 `min(negative_max_age, max_age)`；REFUSED/空 Answer 到期即回源，不使用该窗口。 |
+| `dns.cache.optimistic.negative_max_age` | duration | 短响应（NODATA、REFUSED、空 NXDOMAIN、空 SERVFAIL/TC 及其他空响应）与非空 Answer 的 NXDOMAIN 过期后仍可乐观返回的最长时间；可省略，默认 `5m`，`0s` 关闭。解析时取 `min(negative_max_age, max_age)`；非空 SERVFAIL/TC 不使用该窗口。 |
 | `dns.cache.persistence.enabled` | boolean | 是否启用进程级 `FDCS` 快照；不等同于全局内存缓存开关。 |
 | `dns.cache.persistence.path` | string | 当前进程级 `FDCS` 快照文件路径；相对路径以 `work.path` 为基准。 |
 | `dns.cache.persistence.snapshot_interval` | duration | 完整快照周期，范围 `1s..=1d`。 |
@@ -397,8 +399,8 @@ cache key 由 v2 升为 v3，旧 v2 key 的快照记录恢复为 `Incompatible`�
 
 - `hosts[]` 产生的本地回答不进入 response cache；它直接读取已编译内存 snapshot，并仍应用 TTL override 和统计。`upstreams[type=hosts]` 不属于此例外。
 - 通过协议校验的 `REFUSED`（无论 Answer 是否为空），以及所有 Answer 为空的上游 DNS 响应，统一缓存 **10s**。覆盖 NODATA、空 NXDOMAIN、空 SERVFAIL、空 TC 与其他合法 RCODE 的空响应；即使没有 SOA、没有 TTL 或原 TTL 为零，也使用该期限。仍遵循当前逻辑池的缓存开关和原有安全 key/质量约束，不强行启用已禁用的缓存。
-- 短响应首答的所有 RR TTL 与 SOA.MINIMUM 改写为 10s，fresh 命中时按条目剩余寿命递减（不足 1s 为 0）。没有记录时不伪造记录，仅设置内部期限。该规则优先于 `failure_ttl`、`negative_ttl_max` 和 TTL override，且不允许 stale；到期后的首查必须回源。缓存中的 origin response、RCODE 和 checksum 保持不变。
-- 普通非空 `NOERROR`（包括仅 CNAME 链）仍按 RR TTL 缓存，保留现有 TTL override 与乐观窗口。非空 NXDOMAIN 沿用 SOA/最小 RR TTL/failure TTL 与 `negative_ttl_max`、负乐观窗口；非空 SERVFAIL/上游 TC 沿用 `failure_ttl`。TC 的 transport 隔离不变，不能把 UDP 截断结果复用于 TCP/DoH。
+- 短响应首答的所有 RR TTL 与 SOA.MINIMUM 改写为 10s，fresh 命中时按条目剩余寿命递减（不足 1s 为 0），stale 命中时取 `min(optimistic.answer_ttl, 10s)` 并同步改写 SOA.MINIMUM。没有记录时不伪造记录，仅设置内部期限。10s fresh 期限优先于 `failure_ttl`、`negative_ttl_max` 和 TTL override；乐观缓存启用且 `optimistic.negative_max_age > 0s` 时，过期后在窗口内允许返回 stale 并触发后台刷新，关闭或超出窗口后按 `expired` 同步回源。缓存中的 origin response、RCODE 和 checksum 保持不变。
+- 普通非空 `NOERROR`（包括仅 CNAME 链）仍按 RR TTL 缓存，保留现有 TTL override 与 `optimistic.max_age`。非空 NXDOMAIN 沿用 SOA/最小 RR TTL/failure TTL 与 `negative_ttl_max`、`optimistic.negative_max_age`；非空 SERVFAIL/上游 TC 沿用 `failure_ttl` 且不乐观返回。TC 的 transport 隔离不变，不能把 UDP 截断结果复用于 TCP/DoH。
 - malformed DNS、问题段不匹配、连接/TLS/HTTP 失败和超时不属于 DNS 响应，不写缓存。
 - 缓存保存不含客户端 DNS ID 和传输 envelope 的 canonical response。若本地 UDP 输出因本次客户端 advertised size 而截断，应保存完整 canonical response，并在每次发送时重新编码；只有上游本身返回的 `TC=1` 才保存截断条目。
 - 写入仍按响应质量做 compare-and-replace：完整 NOERROR 优于 NODATA/NXDOMAIN，后者优于 SERVFAIL/TC/REFUSED/Other；低质量条目不能覆盖仍 fresh 的完整答案。同质量条目不因晚到竞态反复覆盖。新返回的正答案可以替换短期拒绝/空结果。
@@ -675,7 +677,7 @@ WebUI 有序规则卡片支持本级 ECS 的继承、禁用、客户端地址、
 | `optimistic.enabled` | boolean | 是否允许过期记录先返回并异步刷新。 |
 | `optimistic.answer_ttl` | duration | 乐观缓存应答 TTL。 |
 | `optimistic.max_age` | duration | 过期记录可被乐观返回的最长时间。 |
-| `optimistic.negative_max_age` | duration | 可选；NODATA/NXDOMAIN 的乐观窗口，语义与 [`dns.cache.optimistic.negative_max_age`](#81-dnscache) 相同。 |
+| `optimistic.negative_max_age` | duration | 可选；短响应（NODATA、REFUSED、空响应）与非空 NXDOMAIN 的乐观窗口，语义与 [`dns.cache.optimistic.negative_max_age`](#81-dnscache) 相同。 |
 
 整个 `strategy[].cache` 缺失时才允许回退到全局池；对象存在时 `enabled` 必填。策略级 `ttl_override` 使用 [`dns.ttl_override`](#82-dnsttl_override) 的相同字段结构和继承语义。
 

@@ -612,7 +612,7 @@ components:
         enabled: {type: boolean}
         answer_ttl: {$ref: "#/components/schemas/Duration"}
         max_age: {$ref: "#/components/schemas/Duration"}
-        negative_max_age: {allOf: [{$ref: "#/components/schemas/Duration"}], description: NODATA/NXDOMAIN 过期后可乐观返回的最长时间；省略时默认 5m，0s 表示负应答不乐观返回，运行时不超过 max_age}
+        negative_max_age: {allOf: [{$ref: "#/components/schemas/Duration"}], description: NODATA、REFUSED、空响应及 NXDOMAIN 过期后可乐观返回的最长时间；省略时默认 5m，0s 表示不乐观返回，运行时不超过 max_age}
     CacheOverride:
       type: object
       additionalProperties: false
@@ -661,7 +661,7 @@ components:
           required: [max_size_bytes]
           properties: {max_size_bytes: {$ref: "#/components/schemas/Bytes"}}
         failure_ttl: {allOf: [{$ref: "#/components/schemas/Duration"}], description: 1s 至 5m}
-        negative_ttl_max: {allOf: [{$ref: "#/components/schemas/Duration"}], description: NODATA/NXDOMAIN 缓存寿命与客户端可见 TTL 上限；省略时默认 5m，范围 1s 至 1d}
+        negative_ttl_max: {allOf: [{$ref: "#/components/schemas/Duration"}], description: 非空 Answer 的 NXDOMAIN 缓存寿命与客户端可见 TTL 上限；省略时默认 5m，范围 1s 至 1d；REFUSED 与空 Answer 固定缓存 10s，不受此项影响}
         optimistic: {$ref: "#/components/schemas/Optimistic"}
         persistence: {$ref: "#/components/schemas/Snapshot"}
     Dns:

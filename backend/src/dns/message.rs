@@ -336,7 +336,7 @@ impl CanonicalResponse {
     }
 
     /// 同步短期响应的 RR TTL 与 SOA.MINIMUM；无记录时不合成记录或改写 RCODE。
-    /// 命中时传入剩余寿命，零值同样生效，不允许 TTL override 再次延长。
+    /// 首答、fresh 命中（剩余寿命）和 stale 乐观返回均复用该函数；零值同样生效，不允许 TTL override 再次延长。
     pub(crate) fn rewrite_short_cache_ttl(&mut self, ttl: Duration) {
         if self.short_cache_ttl().is_none() {
             return;

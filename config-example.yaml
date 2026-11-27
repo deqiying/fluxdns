@@ -68,7 +68,7 @@ dns:
       # 内存缓存的计费容量上限，单位为字节；不是进程 RSS 的硬上限。
       max_size_bytes: 67108864
     # Answer 非空的 SERVFAIL/上游 TC=1 等失败响应使用该 TTL，范围 1s..=5m。
-    # REFUSED 与通过校验但 Answer 为空的响应统一缓存 10s，且到期不乐观返回。
+    # REFUSED 与通过校验但 Answer 为空的响应统一缓存 10s，过期后按 optimistic.negative_max_age 乐观续用。
     failure_ttl: 5s
     # 非空 Answer 的 NXDOMAIN 缓存寿命与客户端 TTL 上限，范围 1s..=1d，缺省 5m。
     # NODATA/空 NXDOMAIN 固定 10s；短响应的 RR TTL 和 SOA.MINIMUM 同步改写，不受此项影响。
@@ -77,12 +77,13 @@ dns:
     optimistic:
       # 是否允许返回已过期记录并在后台刷新。
       enabled: true
-      # 乐观缓存应答使用的 TTL。
+      # 乐观缓存应答使用的 TTL（短响应上限不超过 10s）。
       answer_ttl: 10s
       # 记录过期后仍可乐观返回的最长时间。
       max_age: 1d
-      # 非空 Answer 的 NXDOMAIN 过期后仍可乐观返回的最长时间；0s 关闭，缺省 5m。
-      # 运行时不超过 max_age。REFUSED/空 Answer 及 SERVFAIL/TC 等失败类不乐观返回。
+      # 短响应（NODATA、REFUSED、空 NXDOMAIN、空 SERVFAIL/TC 及其他空响应）与非空 NXDOMAIN
+      # 过期后仍可乐观返回的最长时间；0s 关闭，缺省 5m，运行时不超过 max_age。
+      # 非空 SERVFAIL/TC 等失败类不乐观返回。
       negative_max_age: 5m
     # 缓存持久化设置；策略级和客户端级 cache 不包含此部分。
     persistence:

@@ -159,11 +159,6 @@ pub(super) fn decode_record(
         encoded,
         format_version: key_format,
     };
-    let stale_until = if response.short_cache_ttl().is_some() {
-        None
-    } else {
-        stale_until
-    };
     let entry = CacheEntry {
         response: Arc::new(response),
         upstream: CacheUpstreamProvenance::new(target_id, used_id),
@@ -383,7 +378,11 @@ mod tests {
     use hickory_proto::op::{Query, ResponseCode};
     use hickory_proto::rr::{Name, RData, Record, RecordType, rdata::A};
 
-    fn record(code: ResponseCode, with_answer: bool) -> (CacheKey, CacheRecord) {
+    fn record_with_policy(
+        code: ResponseCode,
+        with_answer: bool,
+        policy: CacheAdmissionPolicy,
+    ) -> (CacheKey, CacheRecord) {
         let mut message = Message::new(0, MessageType::Query, OpCode::Query);
         message.add_query(Query::query(
             Name::from_ascii("snapshot.example.").unwrap(),
@@ -399,7 +398,7 @@ mod tests {
         });
         let response = CanonicalResponse::response_with_code(&query, code, answers).unwrap();
         let CacheAdmissionOutcome::Accepted(entry) = admit_response(
-            CacheAdmissionPolicy::default(),
+            policy,
             Arc::new(response),
             CacheUpstreamProvenance::direct_from_validated_config_id("remote").unwrap(),
             Instant::now() - Duration::from_secs(4),
@@ -421,8 +420,16 @@ mod tests {
         )
     }
 
+    fn record(code: ResponseCode, with_answer: bool) -> (CacheKey, CacheRecord) {
+        record_with_policy(code, with_answer, CacheAdmissionPolicy::default())
+    }
+
     #[test]
     fn short_response_snapshot_preserves_code_class_and_remaining_lifetime() {
+        let optimistic = CacheAdmissionPolicy::default().with_negative(
+            Some(Duration::from_secs(300)),
+            Some(Duration::from_secs(60)),
+        );
         for code in [
             ResponseCode::NoError,
             ResponseCode::NXDomain,
@@ -431,7 +438,7 @@ mod tests {
             ResponseCode::FormErr,
             ResponseCode::NotImp,
         ] {
-            let (key, record) = record(code, false);
+            let (key, record) = record_with_policy(code, false, optimistic);
             let payload = encode_record(&key, &record, Instant::now()).unwrap();
             let now = Instant::now();
             let (restored_key, restored) = decode_record(&payload, now).unwrap();
@@ -443,10 +450,22 @@ mod tests {
             assert_eq!(restored.entry.response_class, record.entry.response_class);
             assert_eq!(restored.entry.quality, record.entry.quality);
             assert_eq!(restored.entry.checksum, record.entry.checksum);
-            assert_eq!(restored.entry.stale_until, None);
             let remaining = restored.entry.expires_at.saturating_duration_since(now);
             assert!(remaining <= Duration::from_secs(6));
             assert!(remaining > Duration::from_secs(4));
+            let stale_remaining = restored
+                .entry
+                .stale_until
+                .expect("optimistic short response must preserve stale window")
+                .saturating_duration_since(now);
+            assert!(stale_remaining <= Duration::from_secs(66));
+            assert!(stale_remaining > Duration::from_secs(64));
+
+            let (no_stale_key, no_stale_record) =
+                record_with_policy(code, false, CacheAdmissionPolicy::default());
+            let payload = encode_record(&no_stale_key, &no_stale_record, Instant::now()).unwrap();
+            let (_, no_stale_restored) = decode_record(&payload, Instant::now()).unwrap();
+            assert_eq!(no_stale_restored.entry.stale_until, None);
         }
     }
 
@@ -468,16 +487,31 @@ mod tests {
     }
 
     #[test]
-    fn expired_short_snapshot_does_not_regain_fresh_or_stale_time() {
+    fn expired_short_snapshot_does_not_regain_fresh_or_expired_stale_time() {
         let (key, mut record) = record(ResponseCode::Refused, false);
-        let entry = Arc::get_mut(&mut record.entry).unwrap();
-        entry.expires_at = Instant::now() - Duration::from_secs(1);
-        entry.stale_until = Some(Instant::now() + Duration::from_secs(3600));
-        let payload = encode_record(&key, &record, Instant::now()).unwrap();
         let now = Instant::now();
-        let (_, restored) = decode_record(&payload, now).unwrap();
-        assert!(restored.entry.expires_at <= now);
+        let entry = Arc::get_mut(&mut record.entry).unwrap();
+        entry.expires_at = now - Duration::from_secs(10);
+        entry.stale_until = Some(now - Duration::from_secs(1));
+        let payload = encode_record(&key, &record, now).unwrap();
+        let decode_now = Instant::now();
+        let (_, restored) = decode_record(&payload, decode_now).unwrap();
+        assert!(restored.entry.expires_at <= decode_now);
         assert_eq!(restored.entry.stale_until, None);
+
+        // 未过期的乐观窗口在恢复时保留，由 lookup 侧按当前池 `negative_max_age` 再次收紧。
+        let entry = Arc::get_mut(&mut record.entry).unwrap();
+        entry.stale_until = Some(Instant::now() + Duration::from_secs(60));
+        let payload = encode_record(&key, &record, Instant::now()).unwrap();
+        let decode_now = Instant::now();
+        let (_, restored) = decode_record(&payload, decode_now).unwrap();
+        assert!(restored.entry.expires_at <= decode_now);
+        assert!(
+            restored
+                .entry
+                .stale_until
+                .is_some_and(|until| until > decode_now)
+        );
     }
 
     #[test]

@@ -14,9 +14,11 @@
 >
 > 2026-10-04 局部评审：仅核对负缓存 TTL 上限、按条目质量区分的 stale 窗口与刷新结果观测；不代表整篇重审，本地运行验收见[负缓存新鲜度计划](../../../plans/negative-cache-freshness.md)
 >
-> 2026-11-08 局部评审：REFUSED/空 Answer 固定 10s、禁止 stale、客户端 TTL 同步及 entry v3 恢复边界；本次不改变上游响应选择与 fallback。
+> 2026-11-08 局部评审：REFUSED/空 Answer 固定 10s、客户端 TTL 同步及 entry v3 恢复边界；本次不改变上游响应选择与 fallback。
 >
 > 2026-11-09 局部评审：基线 `08a774724e2304f72dd7b8d0a9d0299983f9b0e5` 加工作树，仅核对 v3 AnswerKey、ECS scope、前缀索引及刷新/late-result 契约；未新增测试或运行验收。
+>
+> 2026-11-27 局部评审：基线 `7aef52bba0328288741d0e3eddf1dae102f10767` 加工作树，REFUSED/空 Answer 保持 10s fresh 与客户端 TTL 同步，并启用 `optimistic.negative_max_age` 乐观续用、stale TTL 同步改写与 v3 快照 `stale_until` 恢复。
 >
 > 关联实现：[service.rs](../../../../backend/src/cache/service.rs)、[moka.rs](../../../../backend/src/cache/moka.rs)、[snapshot.rs](../../../../backend/src/cache/snapshot.rs)、[snapshot_owner.rs](../../../../backend/src/cache/snapshot_owner.rs)
 >
@@ -53,7 +55,7 @@ target fingerprint 只覆盖所选子树：group 的模式、权重、成员/fal
 entry 保存 canonical response、inserted/expiry/stale-until、原始 RR TTL、response class、producer revision、quality、checksum/format，以及缓存生产请求的 target/actual upstream provenance。上游 TC 额外受 transport compatibility 限制；producer revision 只用于诊断/CAS，不作为全局失效开关。
 
 - 正常 NOERROR 按可用 RR TTL 决定生命周期，返回时逐 RR 扣减。
-- REFUSED 与所有通过协议校验、Answer 为空的上游响应固定缓存 10s，不依赖 SOA/原 TTL，也不受 failure TTL、negative TTL 上限或 TTL override 改变。客户端首答的 RR TTL 与 SOA.MINIMUM 同步改为 10s，命中时使用剩余寿命；无 RR 时不伪造记录。origin response 与 checksum 保留原文。
+- REFUSED 与所有通过协议校验、Answer 为空的上游响应固定 10s fresh，不依赖 SOA/原 TTL，也不受 failure TTL、negative TTL 上限或 TTL override 改变。客户端首答的 RR TTL 与 SOA.MINIMUM 同步改为 10s，fresh 命中时使用剩余寿命，stale 命中时取 `min(optimistic.answer_ttl, 10s)`；无 RR 时不伪造记录。origin response 与 checksum 保留原文。
 - 非空 NXDOMAIN 仍按 SOA/最小 RR TTL/failure TTL 与负 TTL 上限处理；普通非空 NOERROR（包括仅 CNAME 链）保持原 TTL。非空 SERVFAIL/上游 TC 沿用 failure TTL。非空未知类、正答案零/缺失 TTL、malformed、question mismatch、连接/TLS/HTTP failure 或 timeout 不准入。
 - TTL override 只改变非短响应的 client-visible TTL，不延长 entry expiry；持有 origin response 的候选不得被输出覆写污染。
 - 质量顺序是完整 NOERROR/TC=0、NODATA/NXDOMAIN、SERVFAIL/TC/REFUSED/Other；低质量不得覆盖仍 fresh 的高质量，同质量默认保留先到值到 expiry。
@@ -85,9 +87,9 @@ Facade 区分 Disabled、Miss、Fresh、Stale+一次性 refresh permit、Expired
 
 ## 5. Optimistic 与 late result
 
-只有 optimistic 开启、未超过 stale-until、transport compatible、响应类允许且 refresh admission 有容量时才可先返回 stale。REFUSED/空 Answer 永不 stale，10s 到期即回源，即使条目带有旧的长 stale-until 也不能绕过。其余条目按质量选窗口：完整正应答用 `max_age`，非空 NXDOMAIN 用 `negative_max_age`，失败类不允许 stale。共享 store 按启用池的最大窗口写入，lookup 按当前所选池再次收紧。
+只有 optimistic 开启、未超过 stale-until、transport compatible、响应类允许且 refresh admission 有容量时才可先返回 stale。完整正应答使用 `max_age`；REFUSED、所有空 Answer 短响应与非空 NXDOMAIN 共用 `negative_max_age`（`0s` 关闭）；非空 SERVFAIL/TC 不允许 stale。共享 store 按启用池的最大窗口写入，lookup 按当前所选池再次收紧。
 
-短期拒绝/空结果不能用长 stale 窗口兜底，以免遮蔽新增记录。后台刷新仍可将旧正答案替换为新的短期结果，但该结果本身到期后必须同步回源。刷新与写入活动保留响应类及实际写入 TTL，用于区分空响应与有效记录。
+短期拒绝/空结果保持 10s fresh，过期后在 `negative_max_age` 窗口内优先返回 stale 并通过后台刷新更新，避免高频空响应或临时失败反复阻塞客户端同步回源；超出窗口或显式设为 `0s` 时按 `Expired` 同步回源。后台刷新可将旧正答案替换为新的短期结果，也可在新记录发布后把短期结果刷新为完整正答案。刷新与写入活动保留响应类及实际写入 TTL，用于区分空响应与有效记录。
 
 乐观缓存未启用或乐观窗口已经结束时，lookup 返回 Expired 而不是 Miss；两者都要回源，但必须保留这一区分，否则无法判断某次解析是因为条目过期还是因为从未缓存。过期条目仍占用 key，写回必须按版本 CAS 替换，不能当作不存在写入。
 
@@ -133,7 +135,7 @@ Facade 提供 exact key、namespace、typed predicate 和 all 失效。普通资
 ## 9. 契约验证要求
 
 - namespace 隔离、v3 question/RD/CD/DO 与 EDNS 规范化、target 子树定向变化，以及入口/身份/规则变化不直接切换答案 key。
-- 正/负/failure TTL、REFUSED/空 Answer 的 10s 准入与到期回源、RR/SOA TTL 同步及 override 隔离、质量 CAS、并发乱序与 entry v2/v3 恢复。
+- 正/负/failure TTL、REFUSED/空 Answer 的 10s 准入与 `negative_max_age` 乐观窗口/超窗回源、RR/SOA TTL 同步及 override 隔离、质量 CAS、并发乱序与 entry v2/v3 恢复。
 - 多 waiter 取消、candidate drop、commit 终态、占位上限和关闭后拒绝。
 - uniform/heterogeneous 成员 ECS、scope 矩阵、最长前缀、source 0 exact 与 scope 0 covering、无 ECS 桶隔离、single-flight 精确合并；刷新水位清理、并发更新保护、新条目失效不清理及 late-result AnswerKey 接纳。
 - Moka 全局 weight、前缀计数索引增删/恢复重建、expiry、分批导出、key v2 冷启动及 format/header/checksum/recovery；预算不等于实际文件大小。

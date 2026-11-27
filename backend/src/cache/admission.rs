@@ -11,16 +11,16 @@ use crate::ports::cache::{
 
 /// CacheStore 之外的准入参数；配置校验负责保证 failure TTL 为正数。
 ///
-/// REFUSED 与空 Answer 固定缓存 10s 且不允许 stale，优先于下面的策略参数。
-/// 其余应答按质量选窗口：完整应答使用 `optimistic_max_age`，带 Answer 的 NXDOMAIN 使用
-/// `negative_optimistic_max_age`，SERVFAIL/TC 不设置 stale 窗口；lookup 再按当前池收紧。
+/// REFUSED 与空 Answer 固定 10s fresh，优先于 `failure_ttl`/`negative_ttl_max`；
+/// 启用乐观缓存时与非空 NXDOMAIN 共用 `negative_optimistic_max_age` 窗口，完整应答使用
+/// `optimistic_max_age`，非空 SERVFAIL/TC 不设置 stale 窗口；lookup 再按当前池收紧。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheAdmissionPolicy {
     pub failure_ttl: Duration,
     pub optimistic_max_age: Option<Duration>,
-    /// NODATA/NXDOMAIN fresh 生命周期上限；`None` 表示完全遵循 SOA 负 TTL。
+    /// 非空 NXDOMAIN 的 fresh 生命周期上限；`None` 表示完全遵循 SOA 负 TTL。
     pub negative_ttl_max: Option<Duration>,
-    /// NODATA/NXDOMAIN 过期后的乐观窗口；`None` 或零表示负应答不乐观返回。
+    /// 短响应（REFUSED/空 Answer）与非空 NXDOMAIN 过期后的乐观窗口；`None` 或零表示不乐观返回。
     pub negative_optimistic_max_age: Option<Duration>,
 }
 
@@ -154,8 +154,8 @@ pub fn admit_response(
     };
     let expires_at = now.checked_add(ttl).unwrap_or(now);
     let stale_window = if short_ttl.is_some() {
-        // 短期拒绝/空结果到期即回源，不允许负缓存乐观窗口继续延长。
-        None
+        // 短期拒绝/空结果保持 10s fresh，过期后使用负缓存乐观窗口续用并后台刷新。
+        policy.negative_optimistic_max_age
     } else {
         match quality {
             CacheQuality::Complete => policy.optimistic_max_age,
@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_negative_uses_ten_seconds_without_stale_window() {
+    fn empty_negative_uses_ten_seconds_with_negative_stale_window() {
         let now = Instant::now();
         let policy =
             CacheAdmissionPolicy::new(Duration::from_secs(7), Some(Duration::from_secs(60)))
@@ -323,6 +323,13 @@ mod tests {
         let entry = accepted(policy, response_with_code(ResponseCode::NXDomain), now);
         assert_eq!(entry.response_class, CacheResponseClass::NxDomain);
         assert_eq!(entry.quality, CacheQuality::Negative);
+        assert_eq!(entry.expires_at, now + Duration::from_secs(10));
+        assert_eq!(entry.stale_until, Some(now + Duration::from_secs(30)));
+
+        let zero_window =
+            CacheAdmissionPolicy::new(Duration::from_secs(7), Some(Duration::from_secs(60)))
+                .with_negative(None, Some(Duration::ZERO));
+        let entry = accepted(zero_window, response_with_code(ResponseCode::NXDomain), now);
         assert_eq!(entry.expires_at, now + Duration::from_secs(10));
         assert_eq!(entry.stale_until, None);
     }
@@ -348,7 +355,7 @@ mod tests {
                 let checksum = canonical_checksum(&response).unwrap();
                 let entry = accepted(policy, response, now);
                 assert_eq!(entry.expires_at, now + Duration::from_secs(10));
-                assert_eq!(entry.stale_until, None);
+                assert_eq!(entry.stale_until, Some(now + Duration::from_secs(310)));
                 assert_eq!(entry.response.ttl().negative_ttl, Some(origin_ttl));
                 assert_eq!(entry.checksum, checksum, "缓存保留 origin response");
             }
@@ -370,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn failure_classes_never_get_stale_window_and_positive_keeps_its_window() {
+    fn short_failure_uses_negative_window_while_nonempty_failure_is_never_stale() {
         let now = Instant::now();
         let policy =
             CacheAdmissionPolicy::new(Duration::from_secs(5), Some(Duration::from_secs(60)))
@@ -378,9 +385,26 @@ mod tests {
                     Some(Duration::from_secs(300)),
                     Some(Duration::from_secs(30)),
                 );
-        let servfail = accepted(policy, response_with_code(ResponseCode::ServFail), now);
-        assert_eq!(servfail.quality, CacheQuality::Failure);
-        assert_eq!(servfail.stale_until, None);
+        let empty_servfail = accepted(policy, response_with_code(ResponseCode::ServFail), now);
+        assert_eq!(empty_servfail.quality, CacheQuality::Failure);
+        assert_eq!(empty_servfail.expires_at, now + Duration::from_secs(10));
+        assert_eq!(
+            empty_servfail.stale_until,
+            Some(now + Duration::from_secs(40))
+        );
+
+        let mut nonempty_servfail = positive_response().into_message();
+        nonempty_servfail.metadata.response_code = ResponseCode::ServFail;
+        let nonempty_servfail = accepted(
+            policy,
+            CanonicalResponse::from_message(nonempty_servfail, &query(), DnsMessageId::new(0))
+                .unwrap(),
+            now,
+        );
+        assert_eq!(nonempty_servfail.quality, CacheQuality::Failure);
+        assert_eq!(nonempty_servfail.expires_at, now + Duration::from_secs(5));
+        assert_eq!(nonempty_servfail.stale_until, None);
+
         let positive = accepted(policy, positive_response(), now);
         assert_eq!(positive.stale_until, Some(now + Duration::from_secs(90)));
     }
@@ -410,40 +434,49 @@ mod tests {
     #[test]
     fn admits_empty_response_codes_and_refused_with_answers_for_ten_seconds() {
         let now = Instant::now();
-        let policy =
+        let without_negative_stale =
             CacheAdmissionPolicy::new(Duration::from_secs(100), Some(Duration::from_secs(60)));
-        for code in [
-            ResponseCode::NoError,
-            ResponseCode::NXDomain,
-            ResponseCode::Refused,
-            ResponseCode::ServFail,
-            ResponseCode::FormErr,
-            ResponseCode::NotImp,
-        ] {
-            for truncated in [false, true] {
-                let mut message = response_with_code(code).into_message();
-                message.metadata.truncation = truncated;
-                let response =
-                    CanonicalResponse::from_message(message, &query(), DnsMessageId::new(0))
-                        .unwrap();
-                let entry = accepted(policy, response, now);
-                assert_eq!(entry.expires_at, now + Duration::from_secs(10));
-                assert_eq!(entry.stale_until, None);
-                assert_eq!(entry.response.as_message().metadata.response_code, code);
-                assert_eq!(entry.response.as_message().metadata.truncation, truncated);
-            }
-        }
-        let mut refused = positive_response().into_message();
-        refused.metadata.response_code = ResponseCode::Refused;
-        let entry = accepted(
-            policy,
-            CanonicalResponse::from_message(refused, &query(), DnsMessageId::new(0)).unwrap(),
-            now,
+        let with_negative_stale = without_negative_stale.with_negative(
+            Some(Duration::from_secs(300)),
+            Some(Duration::from_secs(45)),
         );
-        assert_eq!(entry.response_class, CacheResponseClass::Refused);
-        assert_eq!(entry.quality, CacheQuality::Failure);
-        assert_eq!(entry.expires_at, now + Duration::from_secs(10));
-        assert_eq!(entry.stale_until, None);
+        for (policy, expected_stale) in [
+            (without_negative_stale, None),
+            (with_negative_stale, Some(now + Duration::from_secs(55))),
+        ] {
+            for code in [
+                ResponseCode::NoError,
+                ResponseCode::NXDomain,
+                ResponseCode::Refused,
+                ResponseCode::ServFail,
+                ResponseCode::FormErr,
+                ResponseCode::NotImp,
+            ] {
+                for truncated in [false, true] {
+                    let mut message = response_with_code(code).into_message();
+                    message.metadata.truncation = truncated;
+                    let response =
+                        CanonicalResponse::from_message(message, &query(), DnsMessageId::new(0))
+                            .unwrap();
+                    let entry = accepted(policy, response, now);
+                    assert_eq!(entry.expires_at, now + Duration::from_secs(10));
+                    assert_eq!(entry.stale_until, expected_stale);
+                    assert_eq!(entry.response.as_message().metadata.response_code, code);
+                    assert_eq!(entry.response.as_message().metadata.truncation, truncated);
+                }
+            }
+            let mut refused = positive_response().into_message();
+            refused.metadata.response_code = ResponseCode::Refused;
+            let entry = accepted(
+                policy,
+                CanonicalResponse::from_message(refused, &query(), DnsMessageId::new(0)).unwrap(),
+                now,
+            );
+            assert_eq!(entry.response_class, CacheResponseClass::Refused);
+            assert_eq!(entry.quality, CacheQuality::Failure);
+            assert_eq!(entry.expires_at, now + Duration::from_secs(10));
+            assert_eq!(entry.stale_until, expected_stale);
+        }
     }
 
     #[test]

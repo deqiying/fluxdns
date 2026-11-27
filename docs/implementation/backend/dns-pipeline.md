@@ -31,6 +31,8 @@
 > 2026-11-10 ECS 自定义兜底增量核对：基线 `f73514297f7df3925ff0f912840210e4acdd1046` 加工作树，新增 `client_or_custom` 并复用原有查询准备、缓存与观测链路；其余历史范围不重新核对。
 >
 > 2026-11-26 链接修正：仅为 ECS 自定义兜底验证段中已删除的 `store/active/tests.rs` 补注现行测试位置；不重新核对 DNS 管线。
+>
+> 2026-11-27 短响应乐观缓存增量核对：基线 `7aef52bba0328288741d0e3eddf1dae102f10767` 加工作树，仅核对 REFUSED/空 Answer 的 10s fresh、按 `optimistic.negative_max_age` 乐观续用、stale TTL/SOA.MINIMUM 同步改写、超窗/0s 回源及 v3 快照 `stale_until` 恢复；证据见[短响应缓存验证](#短响应缓存验证)。
 
 ## 入口与调用链
 
@@ -97,7 +99,7 @@ SystemSocketFactory / typed binding
 - listener/strategy hosts 本地回答绕过 response cache；upstream hosts 按普通上游响应处理。
 - `UpstreamRuntime::prepare_query` 遍历 primary/fallback/nested 的全部 direct leaves。rule/strategy/client 显式 ECS 统一覆盖成员，否则成员 upstream 覆盖 global、未显式成员继承请求级 ECS。最终 ECS 相同则 uniform；异构时按成员 ID 排序编码最终 ECS/None 的摘要，并把 per-member query 交给 executor，正常参与精确 lookup、single-flight 和 commit。
 - `normalize_client_subnet` 将合法请求 ECS 的 source 截断到 IPv4 /24、IPv6 /56，较短前缀保留，清除 host bits，scope 置 0；`client` 缺失合法 ECS 时由客户端地址推导，`client_or_custom` 则使用本级自定义网段。自定义值保持配置前缀、scope 置 0，完整配置契约见[配置参考](../configuration.md#ecs-优先级)。
-- 缓存候选保留 canonical upstream origin response。`CanonicalResponse::short_cache_ttl` 统一识别 REFUSED（包含非空 Answer）和所有空 Answer 响应，[`admit_response`](../../../backend/src/cache/admission.rs) 固定写入 10s 且不设 stale 窗口。上游输出与 fresh 命中由 `rewrite_short_cache_ttl` 改写 RR TTL/SOA.MINIMUM 为 10s/剩余寿命，无记录时不合成记录；短响应跳过 TTL override。`stale_answer_ttl` 直接拒绝短响应；越过应答窗口的可见条目返回 `Expired`，不混同 `Miss`。
+- 缓存候选保留 canonical upstream origin response。`CanonicalResponse::short_cache_ttl` 统一识别 REFUSED（包含非空 Answer）和所有空 Answer 响应，[`admit_response`](../../../backend/src/cache/admission.rs) 固定写入 10s fresh，并按各启用池最大 `optimistic.negative_max_age` 写入 stale 窗口（关闭或 `0s` 时无 stale）。上游首答、fresh 命中和 stale 命中均由 `rewrite_short_cache_ttl` 同步改写 RR TTL 与 `SOA.MINIMUM`（分别为 10s、剩余寿命、`min(optimistic.answer_ttl, 10s)`），无记录时不合成记录；短响应跳过 TTL override。[`stale_answer_ttl`](../../../backend/src/dns/policy.rs) 按当前池 `optimistic.negative_max_age` 收紧短响应与非空 NXDOMAIN，越过应答窗口的可见条目返回 `Expired`，不混同 `Miss`；非空 SERVFAIL/TC 仍不允许 stale。
 - `probe_answer` 使用 Moka covering 前缀计数索引，经 `AnswerKey::probe_keys` 从长到短探测不超过查询 source 的 covering key，最后 exact；选择当前池允许返回的最长前缀答案，较宽 fresh 不越过可返回的更具体 stale。`load_key` 按查询 ECS 精确合并 single-flight；`storage_key(response.edns_client_subnet())` 在应答后确定实际存储网段。scope/exact、source 0 与无 ECS 桶的完整矩阵见 [Cache 设计](../../architecture/backend/modules/cache.md#4-lookup-与-single-flight)。应答不带 ECS 或应答 ECS 不一致时按查询 source 存储（source 0 仍为 exact /0），不一致应答仍正常返回与缓存；异构摘要不参与 scope 匹配。
 - [`MokaCacheStore`](../../../backend/src/cache/moka.rs) 的 `CoveringIndex` 按 base/前缀计数，每次写入新版本增加，所有移除通知（含替换）减少旧版本计数，覆盖读写之间淘汰的交错；恢复使用插入路径重建，不单独持久化。索引只引导探测，不能替代真实 key/生命周期检查。
 - `schedule_optimistic_refresh` 切到最新 core 重新执行 `prepare_cache_query`，目标 fresh 则跳过。回源前记录 `snapshot_generation()` 水位，响应后写前再次核对 AnswerKey。新 scope key 按 probe 的 Version/Absent CAS；成功 Inserted/Replaced 后调用 `invalidate_covered(key, version, before_refresh)`，在 store 锁内核对新版本仍有效，仅清除被完整覆盖且版本不晚于水位的旧条目，保护刷新期间更新。新条目已失效/替换不清理，失败不延长旧 stale。
@@ -131,6 +133,22 @@ key v3 使旧 key v2 快照记录按 `Incompatible` 冷启动，FDCS 外层与 e
 下列短响应、负缓存和缓存修复章节保留各自日期/基线的历史报告；本轮通过证据以上表为准。历史 Fast/Resolved、异构绕过与 key v2 描述只解释当时证据，当前行为以上文为准。
 
 ### 短响应缓存验证
+
+2026-11-27，Windows x86_64，mise Rust/Cargo 1.98.0、Node 26.8.1、pnpm 11.25.0，基线 `7aef52bba0328288741d0e3eddf1dae102f10767` 加本次工作树，验证 REFUSED 与所有空 Answer 响应在保持 10s fresh 的前提下支持 `optimistic.negative_max_age` 乐观缓存与后台刷新：
+
+| 检查 | 结果 |
+| --- | --- |
+| `cargo fmt --manifest-path backend/Cargo.toml -- --check` | 通过 |
+| `cargo test --offline --locked --manifest-path backend/Cargo.toml -- --test-threads=1` | 945 passed、0 failed、5 ignored |
+| `cargo clippy --offline --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings` | 通过 |
+| `frontend/`: `pnpm run typecheck`、`pnpm run test`、`pnpm run test:contract:v2` | typecheck 通过；Vitest 46 files / 326 passed；v2 契约测试 10 passed |
+
+- [`admission.rs`](../../../backend/src/cache/admission.rs) 覆盖空 NOERROR/NXDOMAIN/REFUSED/SERVFAIL/FORMERR/NOTIMP（含 TC=0/1）及非空 REFUSED 写入 10s fresh 与 `negative_optimistic_max_age` 窗口（未设或 `0s` 时无 stale），以及非空 NXDOMAIN 与非空 SERVFAIL 原策略。
+- [`policy.rs`](../../../backend/src/dns/policy.rs) 与 [`policy_cache_tests.rs`](../../../backend/src/dns/policy_cache_tests.rs) 覆盖 direct/group × A/AAAA × 6 种返回码 × 无 SOA/0s/1800s SOA：首答 10s 且不受 300s `ttl_override` 放大、fresh 命中递减寿命并同步 `SOA.MINIMUM`、窗口内 stale 返回（同步改写 `RR TTL/SOA.MINIMUM` 为 `min(answer_ttl, 10s)`）并触发后台刷新写回新记录（含 `CacheActivity` 观测）、超出池级 `negative_max_age`（含旧 1d `stale_until` 收紧）与 `negative_max_age = 0s` 均按 `Expired` 同步回源，正常正应答不受影响。
+- [`codec.rs`](../../../backend/src/cache/codec.rs) 覆盖 v3 短响应快照往返保留剩余 fresh 寿命与 `stale_until`、过期 stale 不复活、v2 旧短响应仍按 `Incompatible` 冷启动。
+- 这是本地单元/受控 adapter 与前端工程验证，未执行独立进程可控上游运行验收、真实生产上游或跨平台验证；本地运行验收继续由[负缓存新鲜度计划](../../plans/negative-cache-freshness.md)跟踪。
+
+以下为 2026-11-08 历史验证记录（当时短响应不允许 stale，不代表当前行为）：
 
 2026-11-08，Windows Rust/Cargo 1.98.0，基线 `96daf34` 加本次工作树。实际执行 `cargo test --offline --locked --manifest-path backend/Cargo.toml --bin fluxdns cache:: -- --test-threads=1`（62 项通过）及同参数 `dns::policy::`（49 项通过）。这是本地单元/受控 adapter 验证，未部署或测试生产上游。
 

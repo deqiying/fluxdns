@@ -596,7 +596,7 @@ export interface components {
             enabled: boolean;
             answer_ttl: components["schemas"]["Duration"];
             max_age: components["schemas"]["Duration"];
-            /** @description NODATA/NXDOMAIN 过期后可乐观返回的最长时间；省略时默认 5m，0s 表示负应答不乐观返回，运行时不超过 max_age */
+            /** @description NODATA、REFUSED、空响应及 NXDOMAIN 过期后可乐观返回的最长时间；省略时默认 5m，0s 表示不乐观返回，运行时不超过 max_age */
             negative_max_age?: components["schemas"]["Duration"];
         };
         CacheOverride: {
@@ -632,7 +632,7 @@ export interface components {
             };
             /** @description 1s 至 5m */
             failure_ttl: components["schemas"]["Duration"];
-            /** @description NODATA/NXDOMAIN 缓存寿命与客户端可见 TTL 上限；省略时默认 5m，范围 1s 至 1d */
+            /** @description 非空 Answer 的 NXDOMAIN 缓存寿命与客户端可见 TTL 上限；省略时默认 5m，范围 1s 至 1d；REFUSED 与空 Answer 固定缓存 10s，不受此项影响 */
             negative_ttl_max?: components["schemas"]["Duration"];
             optimistic: components["schemas"]["Optimistic"];
             persistence?: components["schemas"]["Snapshot"];

@@ -1265,12 +1265,13 @@ fn soa_ttl(response: &CanonicalResponse) -> u32 {
     response.as_message().authorities[0].ttl
 }
 
-/// 首答、命中与 SOA.MINIMUM 使用同一短 TTL；缓存仍保留上游原文。
+/// 首答、fresh 命中与 stale 乐观返回均同步改写 RR TTL 和 SOA.MINIMUM；缓存仍保留上游原文。
 #[tokio::test]
-async fn nodata_soa_and_client_ttl_use_ten_seconds_without_stale() {
+async fn nodata_soa_and_client_ttl_use_ten_seconds_with_optimistic_stale() {
     let transport = Arc::new(SwitchableDohTransport::new(1800));
     let core = negative_core("policy-cache-negative-short", Arc::clone(&transport), false);
-    let request = request("negative-short.example.", RecordType::AAAA);
+    let _cell = publish_current(&core, 1);
+    let mut request = request("negative-short.example.", RecordType::AAAA);
     let key = cache_key(&core, &plan_for(&core, &request), &request).unwrap();
     let (first, observation) = resolve_committed(&core, &request).await;
     assert_upstream(&observation, CacheStatus::Miss);
@@ -1281,18 +1282,54 @@ async fn nodata_soa_and_client_ttl_use_ten_seconds_without_stale() {
         record.entry.expires_at - record.entry.inserted_at,
         Duration::from_secs(10)
     );
-    assert_eq!(record.entry.stale_until, None);
+    assert_eq!(
+        record.entry.stale_until,
+        Some(record.entry.expires_at + Duration::from_secs(300))
+    );
     assert_eq!(record.entry.response.ttl().negative_ttl, Some(1800));
     let (fresh, observation) = resolve_committed(&core, &request).await;
     assert_fresh(&observation);
     assert!(soa_ttl(&fresh) <= 10);
     assert_eq!(fresh.ttl().negative_ttl, Some(soa_ttl(&fresh)));
     assert_eq!(transport.calls(), 1);
+
+    // 过期但在 negative_max_age 窗口内：立即返回乐观缓存（同步改写 SOA.MINIMUM 为 7s），后台刷新更新缓存。
+    age_entry(&core, &key, Duration::from_secs(60)).await;
+    transport.publish_record();
+    request.context.meta.completion = crate::dns::RequestTrace::new(Instant::now());
+    request
+        .context
+        .meta
+        .completion
+        .finish_response(crate::dns::ResponseDelivery::Sent, Instant::now());
+    let (stale, observation) = resolve_committed(&core, &request).await;
+    assert_eq!(observation.source, StatsSource::Cache);
+    assert_eq!(observation.cache_status, CacheStatus::Stale);
+    assert_eq!(stale.class(), crate::dns::ResponseClass::NoData);
+    assert_eq!(soa_ttl(&stale), 7);
+    assert_eq!(stale.ttl().negative_ttl, Some(7));
+    drain(&core).await;
+    let execution = request.context.meta.completion.settled().await;
+    let activity = execution.cache_activity.unwrap();
+    assert_eq!(activity.kind, crate::dns::CacheActivityKind::Refresh);
+    assert_eq!(activity.outcome, crate::dns::CacheActivityOutcome::Updated);
+    assert_eq!(
+        activity.response_class,
+        Some(crate::dns::CacheActivityResponseClass::Positive)
+    );
+    assert_eq!(activity.ttl_secs, Some(30));
+    assert_eq!(transport.calls(), 2);
+
+    let (refreshed, observation) = resolve_committed(&core, &request).await;
+    assert_fresh(&observation);
+    assert_eq!(refreshed.class(), crate::dns::ResponseClass::Positive);
+    assert_eq!(refreshed.ttl().min_ttl, Some(300));
+    assert_eq!(transport.calls(), 2);
 }
 
-/// direct/group、A/AAAA、无 SOA/零 TTL/长 TTL；10s 边界后同步回源而非乐观返回。
+/// direct/group、A/AAAA、无 SOA/零 TTL/长 TTL：10s 内 fresh、窗口内 stale + 后台刷新、超窗口后同步回源。
 #[tokio::test]
-async fn short_responses_hit_age_and_expire_without_changing_rcode() {
+async fn short_responses_hit_age_stale_and_expire_without_changing_rcode() {
     use hickory_proto::op::ResponseCode;
     for resolved in [false, true] {
         for qtype in [RecordType::A, RecordType::AAAA] {
@@ -1311,6 +1348,7 @@ async fn short_responses_hit_age_and_expire_without_changing_rcode() {
                         Arc::clone(&transport),
                         resolved,
                     );
+                    let _cell = publish_current(&core, 1);
                     let request = request("short-matrix.example.", qtype);
                     let key = cache_key(&core, &plan_for(&core, &request), &request).unwrap();
                     let (first, observation) = resolve_committed(&core, &request).await;
@@ -1323,14 +1361,17 @@ async fn short_responses_hit_age_and_expire_without_changing_rcode() {
                         record.entry.expires_at - record.entry.inserted_at,
                         Duration::from_secs(10)
                     );
-                    assert_eq!(record.entry.stale_until, None);
+                    assert_eq!(
+                        record.entry.stale_until,
+                        Some(record.entry.expires_at + Duration::from_secs(300))
+                    );
                     let now = Instant::now();
                     let aged = crate::ports::cache::CacheEntry {
                         response: Arc::clone(&record.entry.response),
                         upstream: record.entry.upstream.clone(),
                         inserted_at: now - Duration::from_secs(4),
                         expires_at: now + Duration::from_secs(6),
-                        stale_until: None,
+                        stale_until: Some(now + Duration::from_secs(306)),
                         response_class: record.entry.response_class,
                         producer_revision: record.entry.producer_revision,
                         quality: record.entry.quality,
@@ -1364,8 +1405,38 @@ async fn short_responses_hit_age_and_expire_without_changing_rcode() {
                         assert_eq!(fresh.ttl().min_ttl, None);
                     }
                     assert_eq!(transport.calls(), 1);
-                    // 即使手工保留旧的 1 天 stale 窗口，短结果到期也必须同步回源。
-                    age_entry(&core, &key, Duration::ZERO).await;
+
+                    // 过期 10s（仍在 300s 负乐观窗口内）：立即返回 stale 并在后台刷新为最新短响应。
+                    age_entry(&core, &key, Duration::from_secs(10)).await;
+                    let (stale, observation) = resolve_committed(&core, &request).await;
+                    assert_eq!(observation.source, StatsSource::Cache);
+                    assert_eq!(observation.cache_status, CacheStatus::Stale);
+                    assert_eq!(stale.as_message().metadata.response_code, code);
+                    assert!(stale.as_message().answers.is_empty());
+                    if soa.is_some() {
+                        assert_eq!(soa_ttl(&stale), 7);
+                        let RData::SOA(value) = &stale.as_message().authorities[0].data else {
+                            panic!("expected SOA");
+                        };
+                        assert_eq!(value.minimum, 7);
+                    } else {
+                        assert!(stale.as_message().authorities.is_empty());
+                        assert_eq!(stale.ttl().min_ttl, None);
+                    }
+                    drain(&core).await;
+                    assert_eq!(transport.calls(), 2);
+                    let refreshed_short = cache_record(&core, &key).await;
+                    assert_eq!(
+                        refreshed_short.entry.expires_at - refreshed_short.entry.inserted_at,
+                        Duration::from_secs(10)
+                    );
+                    assert_eq!(
+                        refreshed_short.entry.stale_until,
+                        Some(refreshed_short.entry.expires_at + Duration::from_secs(300))
+                    );
+
+                    // 超出当前池 300s negative_max_age 后，即使条目保留旧的 1 天 stale_until 也必须同步回源。
+                    age_entry(&core, &key, Duration::from_secs(301)).await;
                     transport.publish_record();
                     let (answer, observation) = resolve_committed(&core, &request).await;
                     assert_upstream(&observation, CacheStatus::Expired);
@@ -1375,7 +1446,7 @@ async fn short_responses_hit_age_and_expire_without_changing_rcode() {
                         Some(300),
                         "正常答案仍应用 TTL override"
                     );
-                    assert_eq!(transport.calls(), 2);
+                    assert_eq!(transport.calls(), 3);
                     let positive = cache_record(&core, &key).await;
                     assert_eq!(
                         positive.entry.expires_at - positive.entry.inserted_at,
@@ -1385,6 +1456,58 @@ async fn short_responses_hit_age_and_expire_without_changing_rcode() {
                 }
             }
         }
+    }
+}
+
+/// 将 `optimistic.negative_max_age` 设为 0s 时，短响应到期立即同步回源，不走乐观缓存。
+#[tokio::test]
+async fn short_responses_disable_stale_when_negative_max_age_is_zero() {
+    use hickory_proto::op::ResponseCode;
+    for code in [
+        ResponseCode::NoError,
+        ResponseCode::NXDomain,
+        ResponseCode::Refused,
+        ResponseCode::ServFail,
+    ] {
+        let mut config = Arc::try_unwrap(load_fixture(Fixture {
+            name: "policy-cache-short-zero-stale",
+            global_ecs: EcsSpec::Disabled,
+            upstreams: doh("remote", "remote.example.test", EcsSpec::Inherit),
+            default_upstream: "remote",
+            strategy_ecs: EcsSpec::Inherit,
+            rules: String::new(),
+            rule_sets: String::new(),
+            clients: String::new(),
+        }))
+        .unwrap();
+        config.dns.cache.optimistic.negative_max_age = Duration::ZERO;
+        let config = Arc::new(config);
+        let transport = Arc::new(SwitchableDohTransport::empty(code, Some(1800)));
+        let registry = UpstreamRegistry::from_resolved_with_doh_transport(
+            &direct_upstreams(&config),
+            Arc::clone(&transport),
+        )
+        .unwrap();
+        let core =
+            Arc::new(PolicyDnsCore::from_config_with_registry(&config, 42, registry).unwrap());
+        let request = request("zero-stale.example.", RecordType::AAAA);
+        let key = cache_key(&core, &plan_for(&core, &request), &request).unwrap();
+
+        let (_, first) = resolve_committed(&core, &request).await;
+        assert_upstream(&first, CacheStatus::Miss);
+        let record = cache_record(&core, &key).await;
+        assert_eq!(
+            record.entry.expires_at - record.entry.inserted_at,
+            Duration::from_secs(10)
+        );
+        assert_eq!(record.entry.stale_until, None);
+
+        age_entry(&core, &key, Duration::from_secs(1)).await;
+        transport.publish_record();
+        let (answer, second) = resolve_committed(&core, &request).await;
+        assert_upstream(&second, CacheStatus::Expired);
+        assert_eq!(answer.class(), crate::dns::ResponseClass::Positive);
+        assert_eq!(transport.calls(), 2);
     }
 }
 
