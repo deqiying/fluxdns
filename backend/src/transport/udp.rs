@@ -121,11 +121,12 @@ impl InboundAdapter for UdpAdapter {
                     return Ok(None);
                 }
 
-                let received_at = Instant::now();
-                let deadline = Deadline::new(received_at + self.request_timeout);
+                // 空闲等待 datagram 的轮询 deadline 与收包后的请求处理预算相互独立，
+                // 避免包在轮询末尾到达时刚进入分发就被误判超时。
+                let recv_deadline = Deadline::new(Instant::now() + self.request_timeout);
                 let datagram = match self
                     .socket
-                    .recv_from(MAX_DNS_WIRE_BYTES, deadline, cancellation)
+                    .recv_from(MAX_DNS_WIRE_BYTES, recv_deadline, cancellation)
                     .await
                 {
                     Ok(datagram) => datagram,
@@ -135,7 +136,8 @@ impl InboundAdapter for UdpAdapter {
                     Err(error) => return Err(error),
                 };
 
-                let response_received_at = Instant::now();
+                let received_at = Instant::now();
+                let deadline = Deadline::new(received_at + self.request_timeout);
                 let parsed = match decode_query(&datagram.payload, MAX_DNS_WIRE_BYTES) {
                     Ok(parsed) => parsed,
                     Err(error) => {
@@ -158,7 +160,7 @@ impl InboundAdapter for UdpAdapter {
                 let original_dns_id = parsed.id.value();
                 let context = RequestContext {
                     meta: RequestMeta {
-                        completion: crate::dns::RequestTrace::new(response_received_at),
+                        completion: crate::dns::RequestTrace::new(received_at),
                         request_id,
                         trace_id: None,
                         received_at,
@@ -454,6 +456,99 @@ mod tests {
         cancellation.cancel(crate::dns::CancelReason::Shutdown);
 
         assert!(adapter.receive(&cancellation).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn request_deadline_starts_after_idle_recv_from_completes() {
+        struct DelayedUdpSocket {
+            delay: Duration,
+            incoming: Mutex<VecDeque<UdpDatagram>>,
+            arrived_at: Mutex<Vec<std::time::Instant>>,
+            sent_deadlines: Mutex<Vec<crate::dns::Deadline>>,
+        }
+
+        impl UdpSocketHandle for DelayedUdpSocket {
+            fn local_addr(&self) -> Result<SocketAddr, PortError> {
+                Ok(SocketAddr::from(([127, 0, 0, 1], 8353)))
+            }
+
+            fn recv_from<'a>(
+                &'a self,
+                _max_bytes: usize,
+                _deadline: crate::dns::Deadline,
+                _cancellation: &'a Cancellation,
+            ) -> PortFuture<'a, Result<UdpDatagram, PortError>> {
+                Box::pin(async move {
+                    tokio::time::sleep(self.delay).await;
+                    let datagram = self.incoming.lock().unwrap().pop_front().ok_or_else(|| {
+                        PortError::new(
+                            PortErrorClass::Cancelled(crate::dns::CancelReason::Shutdown),
+                            "test.udp.delayed_recv",
+                        )
+                    })?;
+                    self.arrived_at
+                        .lock()
+                        .unwrap()
+                        .push(std::time::Instant::now());
+                    Ok(datagram)
+                })
+            }
+
+            fn send_to<'a>(
+                &'a self,
+                _payload: Vec<u8>,
+                _target: SocketAddr,
+                deadline: crate::dns::Deadline,
+                _cancellation: &'a Cancellation,
+            ) -> PortFuture<'a, Result<(), PortError>> {
+                self.sent_deadlines.lock().unwrap().push(deadline);
+                Box::pin(async { Ok(()) })
+            }
+        }
+
+        let peer = SocketAddr::from(([192, 0, 2, 13], 53003));
+        let mut malformed = vec![0_u8; 12];
+        malformed[..2].copy_from_slice(&0xcafe_u16.to_be_bytes());
+        let timeout = Duration::from_millis(120);
+        let socket = Arc::new(DelayedUdpSocket {
+            delay: Duration::from_millis(80),
+            incoming: Mutex::new(VecDeque::from([
+                UdpDatagram {
+                    payload: malformed,
+                    peer,
+                },
+                UdpDatagram {
+                    payload: wire_query(0x5678),
+                    peer,
+                },
+            ])),
+            arrived_at: Mutex::new(Vec::new()),
+            sent_deadlines: Mutex::new(Vec::new()),
+        });
+        let adapter = UdpAdapter::new(
+            socket.clone(),
+            "dns-udp".into(),
+            RuntimeRevision(3),
+            TransportCapabilities {
+                class: TransportClass::Datagram,
+                cache_compatibility: CacheCompatibilityKey(1),
+            },
+            timeout,
+        )
+        .unwrap();
+
+        let inbound = adapter
+            .receive(&Cancellation::new())
+            .await
+            .unwrap()
+            .unwrap();
+        let arrived = socket.arrived_at.lock().unwrap().clone();
+        let sent_deadlines = socket.sent_deadlines.lock().unwrap().clone();
+        assert_eq!(arrived.len(), 2);
+        assert_eq!(sent_deadlines.len(), 1);
+        assert!(sent_deadlines[0].at() >= arrived[0] + timeout);
+        assert!(inbound.request().context.meta.received_at >= arrived[1]);
+        assert!(inbound.request().context.meta.deadline.at() >= arrived[1] + timeout);
     }
 
     #[test]
