@@ -1635,8 +1635,12 @@ async fn storage_flush_task(
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tokio::select! {
+            biased;
             _ = cancellation.cancelled() => return Ok(()),
             _ = interval.tick() => {
+                if cancellation.is_cancelled() {
+                    return Ok(());
+                }
                 let deadline = Deadline::new(Instant::now() + DEFAULT_STORAGE_OPERATION_TIMEOUT);
                 let mut storage = storage.lock().await;
                 match storage.flush(deadline).await {
@@ -1693,7 +1697,7 @@ fn spawn_storage_task(
     supervisor: &mut Supervisor,
     storage: Arc<tokio::sync::Mutex<StorageRuntime>>,
     telemetry: Option<Arc<TelemetryWriter>>,
-) -> Result<Cancellation, ServiceStartError> {
+) -> Result<(), ServiceStartError> {
     let spec = TaskSpec::new(
         "storage.writer",
         "storage",
@@ -1705,10 +1709,15 @@ fn spawn_storage_task(
         kind: "storage",
         reason: error.to_string(),
     })?;
+    let cancellation = supervisor.cancellation();
+    // 使用协同退出而非 `spawn_scoped` 的外层 select 强行截断，避免停机瞬间 Drop 正在提交的
+    // SQLite 写事务并留下后台异步 ROLLBACK 与 `StorageRuntime::shutdown` 争抢写锁；
+    // 超出停机 deadline 时仍由 `Supervisor::shutdown` 统一 abort。
     supervisor
-        .spawn_scoped(spec, move |cancellation| {
-            Box::pin(storage_flush_task(storage, cancellation, telemetry))
-        })
+        .spawn(
+            spec,
+            Box::pin(storage_flush_task(storage, cancellation, telemetry)),
+        )
         .map_err(ServiceStartError::Task)
 }
 

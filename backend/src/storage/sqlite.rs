@@ -214,7 +214,7 @@ impl SqliteStorageBackend {
             let _guard = self.lock_operation(deadline, operation).await?;
             let mut transaction = self
                 .pool
-                .begin()
+                .begin_with("BEGIN IMMEDIATE")
                 .await
                 .map_err(|error| self.database_error(error, operation))?;
             let changed = sqlx::query(
@@ -593,7 +593,7 @@ impl SqliteStorageBackend {
             let _guard = self.lock_operation(deadline, operation).await?;
             let mut transaction = self
                 .pool
-                .begin()
+                .begin_with("BEGIN IMMEDIATE")
                 .await
                 .map_err(|error| self.database_error(error, operation))?;
             let current = sqlx::query(
@@ -859,9 +859,11 @@ impl SqliteStorageBackend {
         let _guard = self
             .lock_operation(deadline, "sqlite_storage.execute")
             .await?;
+        // 显式使用 BEGIN IMMEDIATE：事务内先 SELECT 校验幂等账本再写入，WAL 模式下若用默认
+        // DEFERRED，在另一连接持锁或刚提交时升级写锁会立刻报 SQLITE_BUSY_SNAPSHOT 而跳过 busy_timeout。
         let mut sql_transaction = self
             .pool
-            .begin()
+            .begin_with("BEGIN IMMEDIATE")
             .await
             .map_err(|error| self.database_error(error, "sqlite_storage.execute"))?;
         #[cfg(test)]
@@ -2343,6 +2345,47 @@ mod tests {
                 .health,
             crate::ports::storage::StorageHealth::Healthy
         );
+
+        backend.shutdown(deadline()).await.unwrap();
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-wal"));
+        let _ = std::fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    /// 另一连接短暂持写锁并提交推进 WAL 时，`execute` 必须经 `BEGIN IMMEDIATE` 等待而非立即 `SQLITE_BUSY_SNAPSHOT`。
+    #[tokio::test]
+    async fn execute_waits_for_short_sqlite_write_lock_via_begin_immediate() {
+        let path = path();
+        let backend = Arc::new(SqliteStorageBackend::connect(&path).await.unwrap());
+        let mut external = backend.pool.acquire().await.unwrap();
+        sqlx::query("BEGIN IMMEDIATE")
+            .execute(&mut *external)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO stats_daily_total (day_utc, total_requests) VALUES (20260901, 1) \
+             ON CONFLICT(day_utc) DO UPDATE SET total_requests = total_requests + 1",
+        )
+        .execute(&mut *external)
+        .await
+        .unwrap();
+
+        let holder = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            sqlx::query("COMMIT").execute(&mut *external).await.unwrap();
+        });
+
+        let batch = StatsBatch {
+            batch_id: 81,
+            max_event_sequence: 81,
+            counter_epoch: 0,
+            events: vec![StatsEvent::new(81, 20_260_902, vec![]).unwrap()],
+        };
+        backend
+            .execute(transaction(batch), deadline())
+            .await
+            .unwrap();
+        holder.await.unwrap();
 
         backend.shutdown(deadline()).await.unwrap();
         let _ = std::fs::remove_file(&path);
